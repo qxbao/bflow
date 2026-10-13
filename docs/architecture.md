@@ -2,9 +2,9 @@
 
 ## Scope
 
-This bootstrap defines the module boundaries and durable public contracts for AI Flow SDLC. The platform owns workflow orchestration, state, result/artifact tracking, recovery, and quality control. Herdr is an external execution mechanism reached only through `AgentTransport`.
+P00 defines module boundaries, validated exchange data, public ports, and pure invariants for AI Flow SDLC. It does not implement scheduling, a Herdr adapter, SQLite persistence, artifact I/O, leases, quality command execution, recovery, CLI behavior, or end-to-end workflows.
 
-This phase does not implement a complete orchestrator, infer undocumented Herdr behavior, select a final SQLite driver, or provide fake adapters.
+The first deployment remains a module-first Node.js process. Herdr is an external execution mechanism reached only through `AgentTransport`; core contracts contain no Herdr wire types.
 
 ## Modules and dependency direction
 
@@ -21,55 +21,76 @@ flowchart TD
   Gates[packages/quality-gates] --> Contracts
 ```
 
-`contracts` is the only shared dependency. Runtime implementations will receive the other modules as ports, allowing local composition without creating a microservice topology or package cycle. In particular, `core` cannot import Herdr.
+`contracts` is the shared dependency. Runtime will compose implementations through ports. Leaf implementation packages do not depend on each other, and `core` does not depend on Herdr.
 
-| Module | Owns | Does not own yet |
+| Module | Future responsibility | Excluded from P00 |
 | --- | --- | --- |
-| `contracts` | Zod exchange schemas, inferred types, public ports | Business logic and infrastructure |
-| `core` | DAG planning, state transitions, scheduling/recovery decisions | Transport, persistence, CLI |
-| `herdr-adapter` | Future verified `AgentTransport` implementation | Workflow policy |
-| `persistence` | Future SQLite run/event/checkpoint storage | Artifact bytes and orchestration |
-| `artifact-store` | Future local artifact bytes and references | Run state |
-| `agent-registry` | Future role/capability resolution | Agent execution |
-| `quality-gates` | Future acceptance evaluators | Task scheduling |
-| `runtime` | Future use-case composition and transaction boundaries | CLI rendering and concrete adapters |
-| `apps/cli` | Future command parsing, output, exit codes | Domain decisions |
+| `contracts` | Zod exchange schemas, ports, pure compatibility/transition/batch validators | I/O and orchestration implementation |
+| `core` | DAG planning, legal transitions, scheduling and recovery decisions | Transport and storage |
+| `herdr-adapter` | Verified mapping from Herdr to `AgentTransport` | Workflow policy and task-success inference |
+| `persistence` | Atomic SQLite event/checkpoint storage and schema evolution | Artifact bytes |
+| `artifact-store` | Validated immutable artifact storage | Run state |
+| `agent-registry` | Role lookup and atomic execution leases | Agent execution |
+| `quality-gates` | Gate evaluators | State mutation |
+| `runtime` | Transaction/use-case ordering across ports | Concrete adapter leakage |
+| `apps/cli` | Command parsing and presentation | Domain decisions |
 
-## Execution model
+## Dispatch, observation, and task outcome
 
-1. `RuntimeService.start` validates a `WorkflowDefinition` and delegates run creation to the engine.
-2. The engine derives runnable tasks from an acyclic dependency graph and emits ordered `DomainEvent` values for durable changes.
-3. Runtime resolves the requested role with `AgentRegistry`, constructs an `AgentRequest`, and dispatches it through `AgentTransport`.
-4. Transport output can be streamed with `read`; terminal reconciliation uses `wait`. A stream ending is not itself a terminal result.
-5. Artifacts are persisted through `ArtifactStore` before their references are committed to run history.
-6. Applicable `QualityGate` implementations evaluate the result and artifacts. Required failures affect task/run state through the engine.
-7. `RunStore` atomically appends events using an expected aggregate version. Snapshots/checkpoints accelerate recovery but the event history is authoritative.
+```mermaid
+sequenceDiagram
+  participant E as WorkflowEngine
+  participant S as RunStore
+  participant T as AgentTransport
+  E->>S: persist task.dispatch_requested
+  E->>T: send(request)
+  alt accepted
+    T-->>E: AgentSubmissionReceipt + durable handle
+    E->>S: persist agent.execution_bound
+    E->>T: wait/read(handle)
+    T-->>E: transport observations
+  else unknown delivery
+    T-->>E: unknown_delivery, resendAllowed=false
+    E->>S: persist delivery uncertainty / block
+    E->>T: reconcile(requestId, attemptId, idempotencyKey, target)
+  end
+```
 
-## State and failure semantics
+`AgentExecutionHandle` stores orchestration execution identity, request/attempt identity, idempotency key, a transport-neutral locator, correlation provenance, and a recovery cursor. A handle is durable only after `agent.execution_bound` is appended. After uncertain delivery, automatic resend is forbidden until reconciliation proves `not_delivered`. If the transport cannot prove either outcome, it returns `unknown_delivery` with manual intervention required; exactly-once delivery is not promised.
 
-Task states are `pending`, `ready`, `running`, `waiting`, `retrying`, `blocked`, `succeeded`, `failed`, `cancelling`, and `cancelled`. Run states are `queued`, `running`, `waiting`, `blocked`, `succeeded`, `failed`, `cancelling`, and `cancelled`.
+Transport state and task outcome are separate domains. `wait` returns `AgentTransportObservation`, never `AgentResult`. `done` means only that the transport observed its terminal-like state. A verified `AgentResult` requires separate outcome evidence correlated to the submission. Uncorrelated output stays `unverified` and cannot be accepted by `RecordAgentResultCommandSchema`.
 
-Only the workflow engine decides legal transitions. Adapters report facts; they do not directly mutate workflow state. `blocked` means progress needs an external condition or decision and includes a structured `Blockage`. It is different from terminal `failed`.
+## Herdr 0.9.1 compatibility boundary
 
-Retry policy is explicit per task/request. A new attempt uses a new request ID but preserves a stable idempotency/fingerprint relationship. Timeouts are observations by the caller: because remote execution may continue, runtime must reconcile a known execution handle before issuing a retry. Cancellation is request/acknowledgement based and progresses through `cancelling`; it is not assumed synchronous.
+P00 inspected the installed CLI and bundled schema read-only:
 
-## Idempotency and consistency
+- protocol `22`, schema version `1`;
+- agent states `idle`, `working`, `blocked`, `done`, and `unknown`;
+- `AgentInfo` exposes workspace/tab/pane/terminal identifiers, revision, state-change sequence, and an optional agent-session locator;
+- `agent start` requires name, kind, and pane;
+- `agent prompt --wait` explicitly does not track turns when the target is already working.
 
-- Commands and events carry idempotency keys.
-- Agent requests include a scope and deterministic fingerprint.
-- `RunStore.appendEvents` uses optimistic `expectedVersion` and ordered sequence numbers.
-- Duplicate commands must return/reconstruct the original outcome without duplicating side effects.
-- Artifact writes carry an idempotency key and content checksum.
-- Implementations must make reservation/write semantics atomic at their own boundary; process-local maps are insufficient for SQLite-backed execution.
+Therefore Herdr `done` is not evidence of task success, and Herdr 0.9.1 does not by itself establish prompt-level idempotency or reliable turn correlation. The adapter phase must map available locator fields, preserve `unknown_delivery`, and report unverified observations where correlation cannot be proven. No live integration claim is made by P00.
 
-## Recovery after interruption
+## State and concurrency model
 
-Recovery loads the latest valid checkpoint, then replays events after its sequence. Without a checkpoint it replays from the beginning. An in-flight agent execution is reconciled through the stored handle/resume cursor according to `staleExecution`: reconcile, retry, or block. A retry is forbidden until reconciliation shows that duplicate execution is safe.
+Workflow definitions represent DAG dependencies, parallel tasks, and bounded workflow concurrency with `maxConcurrency`. `validateTaskTransition` and `validateRunTransition` are mandatory semantic guards; terminal task states cannot restart through a normal transition. Rework is explicitly `succeeded -> ready` with a one-step generation increment. Retry is explicitly `failed -> retrying`.
 
-Checkpoints are optimization data, not an alternate source of truth. Their aggregate version and event sequence must match the event stream prefix. Corrupt or incompatible checkpoints are discarded and replay resumes from an earlier valid point.
+Registry lookup and execution capacity are separate. `resolve` selects configuration; `acquireLease`, `renewLease`, and `releaseLease` define the atomic boundary for capacity. Lease ID, expiry, optimistic version, fencing token, and idempotency key allow a later implementation to reject stale owners. P00 does not implement that atomicity.
 
-## Local deployment
+## Persistence and recovery model
 
-The intended first deployment is a single Node.js process using SQLite, local artifact storage, Git worktrees for task isolation, and one or more Herdr transports. Module boundaries are maintained in-process and can be tested independently; there is no need to introduce network services.
+Events are authoritative. Every event has event schema version, aggregate version, and stream sequence as distinct fields. `validateEventBatch` verifies one run ID, contiguous sequence/version, and unique event/idempotency identities before `RunStore.appendEvents` performs its future transaction.
 
-The SQLite driver, migration tool, artifact directory layout, and Herdr bindings remain implementation decisions for their owning agents. Those decisions must preserve the contracts and be documented before integration.
+Checkpoints are optimizations. They declare checkpoint schema version plus codec name/version. Compatibility helpers upcast the original P00 v0 shape (missing explicit version fields) to v1, reject unsupported versions with typed errors, and validate the resulting current schema. A future recovery engine must load a compatible checkpoint, replay later events, and reconcile every in-flight or uncertain agent submission before retrying.
+
+## Artifact, approval, gate, and cancellation boundaries
+
+- Agent/gate output uses untrusted `ArtifactProposal`; only successful `ArtifactStore.put` returns a trusted `ArtifactReference` with `artifact://` URI and verified checksum.
+- Approval requests and decisions have a required typed target, revision, generation, idempotency key, and evidence/feedback references. Rejection and requested changes require a reason.
+- Workflow tasks bind declared quality gates. Evaluation request/result commands and events carry evaluation identity, expected aggregate version, and idempotency.
+- Cancellation is asynchronous: request, accepted/refused, and confirmed stop are distinct records. Acceptance is not proof of stop. A completion may legally win while state is `cancelling`.
+
+## Contract guarantees versus later enforcement
+
+P00 guarantees schema rejection, typed public result shapes, documented semantics, and pure validators. Later implementations must enforce atomic database transactions, exactly-once idempotency effects, lease fencing, checksum verification while streaming, safe filesystem resolution, transport reconciliation, command authorization, event upcasting during replay, and cancellation races. Types alone do not provide those runtime properties.

@@ -50,6 +50,20 @@ export const RetryPolicySchema = z
         path: ["maxDelayMs"]
       });
     }
+    if (policy.strategy === "exponential" && (policy.multiplier === undefined || policy.multiplier <= 1)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "exponential retry requires multiplier greater than 1",
+        path: ["multiplier"]
+      });
+    }
+    if (policy.strategy !== "exponential" && policy.multiplier !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "multiplier is only valid for exponential retry",
+        path: ["multiplier"]
+      });
+    }
   });
 
 export const TimeoutPolicySchema = z
@@ -116,28 +130,62 @@ export const BlockageSchema = z
 
 export const CancellationRequestSchema = z
   .object({
+    schemaVersion: z.literal(1),
     cancellationId: IdentifierSchema,
     runId: IdentifierSchema,
     taskId: IdentifierSchema.optional(),
     requestedBy: z.string().min(1),
     requestedAt: IsoDateTimeSchema,
+    expectedVersion: z.number().int().nonnegative(),
+    executionId: IdentifierSchema.optional(),
     reason: z.string().min(1).optional(),
     idempotencyKey: IdempotencyKeySchema
   })
   .strict();
 
-export const CancellationResultSchema = z
+export const CancellationResultSchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      schemaVersion: z.literal(1),
+      cancellationId: IdentifierSchema,
+      status: z.literal("accepted"),
+      executionId: IdentifierSchema.optional(),
+      observedAt: IsoDateTimeSchema,
+      details: JsonValueSchema.optional()
+    })
+    .strict(),
+  z
+    .object({
+      schemaVersion: z.literal(1),
+      cancellationId: IdentifierSchema,
+      status: z.enum(["refused", "already_terminal", "not_found"]),
+      reason: z.string().min(1),
+      observedAt: IsoDateTimeSchema,
+      details: JsonValueSchema.optional()
+    })
+    .strict()
+]);
+
+export const CancellationStopConfirmationSchema = z
   .object({
+    schemaVersion: z.literal(1),
     cancellationId: IdentifierSchema,
-    accepted: z.boolean(),
-    status: z.enum(["accepted", "already-terminal", "not-found", "rejected"]),
-    observedAt: IsoDateTimeSchema,
+    executionId: IdentifierSchema.optional(),
+    stoppedAt: IsoDateTimeSchema,
+    terminalStatus: z.enum(["cancelled", "succeeded", "failed"]),
     details: JsonValueSchema.optional()
   })
   .strict();
 
 export const RecoveryCheckpointSchema = z
   .object({
+    checkpointSchemaVersion: z.literal(1),
+    codec: z
+      .object({
+        name: z.literal("ai-flow.workflow-run-snapshot+json"),
+        version: z.literal(1)
+      })
+      .strict(),
     checkpointId: IdentifierSchema,
     runId: IdentifierSchema,
     eventSequence: z.number().int().nonnegative(),
@@ -159,4 +207,5 @@ export type ExecutionError = z.infer<typeof ExecutionErrorSchema>;
 export type Blockage = z.infer<typeof BlockageSchema>;
 export type CancellationRequest = z.infer<typeof CancellationRequestSchema>;
 export type CancellationResult = z.infer<typeof CancellationResultSchema>;
+export type CancellationStopConfirmation = z.infer<typeof CancellationStopConfirmationSchema>;
 export type RecoveryCheckpoint = z.infer<typeof RecoveryCheckpointSchema>;

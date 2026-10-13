@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { AgentResultSchema } from "./agent.js";
-import { ArtifactReferenceSchema } from "./artifact.js";
+import { ArtifactProposalSchema, ArtifactReferenceSchema } from "./artifact.js";
 import { IdentifierSchema, IsoDateTimeSchema, JsonValueSchema, MetadataSchema } from "./common.js";
 import { ExecutionErrorSchema, TimeoutPolicySchema } from "./execution.js";
 
@@ -14,6 +14,14 @@ export const QualityGateDefinitionSchema = z
     timeout: TimeoutPolicySchema,
     configuration: JsonValueSchema.optional(),
     metadata: MetadataSchema.optional()
+  })
+  .strict();
+
+export const QualityGateBindingSchema = z
+  .object({
+    gateId: IdentifierSchema,
+    phase: z.enum(["before_dispatch", "after_result", "before_completion"]),
+    required: z.boolean()
   })
   .strict();
 
@@ -32,6 +40,7 @@ export const QualityGateContextSchema = z
   .object({
     runId: IdentifierSchema,
     taskId: IdentifierSchema.optional(),
+    attemptId: IdentifierSchema.optional(),
     definition: QualityGateDefinitionSchema,
     agentResult: AgentResultSchema.optional(),
     artifacts: z.array(ArtifactReferenceSchema),
@@ -42,16 +51,29 @@ export const QualityGateContextSchema = z
 export const QualityGateResultSchema = z
   .object({
     gateId: IdentifierSchema,
+    runId: IdentifierSchema,
+    taskId: IdentifierSchema.optional(),
+    evaluationId: IdentifierSchema,
     status: z.enum(["passed", "failed", "blocked", "error"]),
     findings: z.array(QualityFindingSchema),
-    producedArtifacts: z.array(ArtifactReferenceSchema),
+    producedArtifacts: z.array(ArtifactProposalSchema),
     error: ExecutionErrorSchema.optional(),
     evaluatedAt: IsoDateTimeSchema,
     metadata: MetadataSchema.optional()
   })
-  .strict();
+  .strict()
+  .superRefine((result, context) => {
+    if (result.status === "error" && result.error === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "error is required when a quality gate errors",
+        path: ["error"]
+      });
+    }
+  });
 
 export type QualityGateDefinition = z.infer<typeof QualityGateDefinitionSchema>;
+export type QualityGateBinding = z.infer<typeof QualityGateBindingSchema>;
 export type QualityFinding = z.infer<typeof QualityFindingSchema>;
 export type QualityGateContext = z.infer<typeof QualityGateContextSchema>;
 export type QualityGateResult = z.infer<typeof QualityGateResultSchema>;
