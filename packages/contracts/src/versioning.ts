@@ -5,6 +5,7 @@ import { RecoveryCheckpointSchema } from "./execution.js";
 import type { OperationResult } from "./errors.js";
 import type { WorkflowRunSnapshot } from "./workflow.js";
 import { WorkflowRunSnapshotSchema } from "./workflow.js";
+import { WorkflowAggregateCheckpointStateSchema, type WorkflowAggregateCheckpointState } from "./recovery.js";
 
 export const CURRENT_CHECKPOINT_SCHEMA_VERSION = 1 as const;
 export const SUPPORTED_DOMAIN_EVENT_SCHEMA_VERSIONS = [0, CURRENT_DOMAIN_EVENT_SCHEMA_VERSION] as const;
@@ -102,4 +103,19 @@ export function decodeWorkflowRunCheckpointState(
             .join("; ")}`
         }
       };
+}
+
+export function decodeWorkflowAggregateCheckpointState(
+  checkpoint: RecoveryCheckpoint
+): OperationResult<WorkflowAggregateCheckpointState> {
+  if (checkpoint.codec.name !== "ai-flow.workflow-aggregate+json" || checkpoint.codec.version !== 1) {
+    return validationFailure("checkpoint codec is not supported by the workflow aggregate decoder");
+  }
+  const parsed = WorkflowAggregateCheckpointStateSchema.safeParse(checkpoint.state);
+  return parsed.success
+    ? { ok: true, value: parsed.data }
+    : { ok: false, error: {
+      code: "corruption", retryable: false,
+      message: `checkpoint aggregate state does not match its codec: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`
+    } };
 }

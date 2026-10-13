@@ -66,6 +66,14 @@ export const RetryPolicySchema = z
     }
   });
 
+/** maxReworks counts transitions to a new generation, excluding generation zero. */
+export const ReworkPolicySchema = z
+  .object({
+    maxReworks: z.number().int().nonnegative(),
+    onExhausted: z.enum(["fail", "require_human"])
+  })
+  .strict();
+
 export const TimeoutPolicySchema = z
   .object({
     executionTimeoutMs: z.number().int().positive(),
@@ -180,12 +188,10 @@ export const CancellationStopConfirmationSchema = z
 export const RecoveryCheckpointSchema = z
   .object({
     checkpointSchemaVersion: z.literal(1),
-    codec: z
-      .object({
-        name: z.literal("ai-flow.workflow-run-snapshot+json"),
-        version: z.literal(1)
-      })
-      .strict(),
+    codec: z.discriminatedUnion("name", [
+      z.object({ name: z.literal("ai-flow.workflow-run-snapshot+json"), version: z.literal(1) }).strict(),
+      z.object({ name: z.literal("ai-flow.workflow-aggregate+json"), version: z.literal(1) }).strict()
+    ]),
     checkpointId: IdentifierSchema,
     runId: IdentifierSchema,
     eventSequence: z.number().int().nonnegative(),
@@ -200,6 +206,7 @@ export const RecoveryCheckpointSchema = z
 export type TaskStatus = z.infer<typeof TaskStatusSchema>;
 export type RunStatus = z.infer<typeof RunStatusSchema>;
 export type RetryPolicy = z.infer<typeof RetryPolicySchema>;
+export type ReworkPolicy = z.infer<typeof ReworkPolicySchema>;
 export type TimeoutPolicy = z.infer<typeof TimeoutPolicySchema>;
 export type IdempotencyPolicy = z.infer<typeof IdempotencyPolicySchema>;
 export type RecoveryPolicy = z.infer<typeof RecoveryPolicySchema>;

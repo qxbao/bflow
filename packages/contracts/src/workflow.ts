@@ -4,6 +4,7 @@ import { IdentifierSchema, IsoDateTimeSchema, JsonValueSchema, MetadataSchema } 
 import {
   BlockageSchema,
   RecoveryPolicySchema,
+  ReworkPolicySchema,
   RetryPolicySchema,
   RunStatusSchema,
   TaskStatusSchema,
@@ -21,6 +22,7 @@ export const TaskDefinitionSchema = z
     acceptanceCriteria: z.array(z.string().min(1)),
     input: JsonValueSchema.optional(),
     retry: RetryPolicySchema,
+    rework: ReworkPolicySchema.optional(),
     timeout: TimeoutPolicySchema,
     requiresApproval: z.boolean(),
     qualityGates: z.array(QualityGateBindingSchema),

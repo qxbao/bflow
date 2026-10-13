@@ -76,6 +76,8 @@ Therefore Herdr `done` is not evidence of task success, and Herdr 0.9.1 does not
 
 Workflow definitions represent DAG dependencies, parallel tasks, and bounded workflow concurrency with `maxConcurrency`. `validateTaskTransition` and `validateRunTransition` are mandatory semantic guards; terminal task states cannot restart through a normal transition. Rework is explicitly `succeeded -> ready` with a one-step generation increment. Retry is explicitly `failed -> retrying`.
 
+Retry attempts are counted within each rework generation; the task attempt identity remains monotonic across the run. `task.retry_scheduled` captures the policy-derived eligibility time. `advance` may make a retry ready only at or after that timestamp. Runtime later supplies wake-up scheduling; Core never starts a timer. Jitter, when enabled, is deterministic from run/task/generation/attempt identity so replay never samples randomness.
+
 Registry lookup and execution capacity are separate. `resolve` selects configuration; `acquireLease`, `renewLease`, and `releaseLease` define the atomic boundary for capacity. Lease ID, expiry, optimistic version, fencing token, and idempotency key allow a later implementation to reject stale owners. P00 does not implement that atomicity.
 
 ## Persistence and recovery model
@@ -83,6 +85,8 @@ Registry lookup and execution capacity are separate. `resolve` selects configura
 Events are authoritative. Every event has event schema version, aggregate version, and stream sequence as distinct fields. `validateEventBatch` verifies one run ID, contiguous sequence/version, and unique event/idempotency identities before `RunStore.appendEvents` performs its future transaction.
 
 Checkpoints are optimizations. They declare checkpoint schema version plus codec name/version. Compatibility helpers upcast the original P00 v0 shape (missing explicit version fields) to v1, reject unsupported versions with typed errors, and validate the resulting current schema. A future recovery engine must load a compatible checkpoint, replay later events, and reconcile every in-flight or uncertain agent submission before retrying.
+
+P01 remediation uses `command.completed` as the durable command receipt in the same event batch as its effects. Full replay reconstructs cached command outcomes. The aggregate checkpoint codec captures all auxiliary state and cached outcomes; a snapshot-only checkpoint cannot support tail-only recovery. Core's `createCheckpoint` exports state without persisting it. P03 must atomically store events and receipts, and P06 must persist before side effects; neither storage nor transport is implemented in P01.
 
 ## Artifact, approval, gate, and cancellation boundaries
 

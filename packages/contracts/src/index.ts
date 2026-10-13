@@ -8,6 +8,7 @@ export * from "./execution.js";
 export * from "./orchestration.js";
 export * from "./ports.js";
 export * from "./quality.js";
+export * from "./recovery.js";
 export * from "./registry.js";
 export * from "./runtime.js";
 export * from "./transitions.js";
