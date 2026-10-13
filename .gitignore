@@ -5,3 +5,5 @@ coverage/
 .DS_Store
 .agy-staff/
 graphify-out/
+.agents/skills/
+.skillforge/
