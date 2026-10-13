@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   AgentExecutionHandleSchema,
@@ -26,6 +27,36 @@ import { QualityGateResultSchema } from "./quality.js";
 import { validateRunTransition, validateTaskTransition } from "./transitions.js";
 
 export const CURRENT_DOMAIN_EVENT_SCHEMA_VERSION = 1 as const;
+
+export const WorkflowCommandOperationSchema = z.enum([
+  "createRun", "advance", "transitionTask", "bindAgentExecution", "recordDeliveryReconciliation",
+  "recordAgentResult", "requestApproval", "applyApproval", "requestQualityGateEvaluation",
+  "recordQualityGateResult", "requestCancellation", "recordCancellationResult", "confirmCancellationStop"
+]);
+
+export const CommandReceiptSchema = z.object({
+  schemaVersion: z.literal(1),
+  commandId: IdentifierSchema,
+  idempotencyKey: IdempotencyKeySchema,
+  operation: WorkflowCommandOperationSchema,
+  fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  firstEventSequence: z.number().int().positive(),
+  runnableTaskIds: z.array(IdentifierSchema)
+}).strict();
+
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+      .map(([key, child]) => [key, canonical(child)]));
+  }
+  return value;
+}
+
+/** A digest of the parsed command, never its raw payload. */
+export function fingerprintWorkflowCommand(operation: z.infer<typeof WorkflowCommandOperationSchema>, command: unknown): string {
+  return createHash("sha256").update(JSON.stringify(canonical({ operation, command }))).digest("hex");
+}
 
 const eventEnvelopeShape = {
   schemaVersion: z.literal(CURRENT_DOMAIN_EVENT_SCHEMA_VERSION),
@@ -87,6 +118,23 @@ export const TaskStatusChangedEventSchema = z
       .strict()
   })
   .strict();
+
+export const TaskRetryScheduledEventSchema = z.object({
+  ...eventEnvelopeShape,
+  type: z.literal("task.retry_scheduled"),
+  payload: z.object({
+    generation: z.number().int().nonnegative(),
+    attempt: z.number().int().positive(),
+    attemptId: IdentifierSchema,
+    eligibleAt: IsoDateTimeSchema
+  }).strict()
+}).strict();
+
+export const CommandCompletedEventSchema = z.object({
+  ...eventEnvelopeShape,
+  type: z.literal("command.completed"),
+  payload: CommandReceiptSchema
+}).strict();
 
 export const TaskDispatchRequestedEventSchema = z
   .object({
@@ -247,6 +295,8 @@ export const DomainEventSchema = z
     RunCreatedEventSchema,
     RunStatusChangedEventSchema,
     TaskStatusChangedEventSchema,
+    TaskRetryScheduledEventSchema,
+    CommandCompletedEventSchema,
     TaskDispatchRequestedEventSchema,
     AgentExecutionBoundEventSchema,
     AgentDeliveryUncertainEventSchema,
@@ -270,7 +320,8 @@ export const DomainEventSchema = z
       "agent.execution_bound",
       "agent.delivery_uncertain",
       "agent.delivery_reconciled",
-      "agent.result_recorded"
+      "agent.result_recorded",
+      "task.retry_scheduled"
     ]);
     if (taskScopedTypes.has(event.type) && event.taskId === undefined) {
       context.addIssue({ code: z.ZodIssueCode.custom, message: "taskId is required for task-scoped events", path: ["taskId"] });
@@ -285,6 +336,9 @@ export const DomainEventSchema = z
       if (!validation.valid) {
         context.addIssue({ code: z.ZodIssueCode.custom, message: validation.reason ?? "invalid task transition" });
       }
+    }
+    if (event.type === "command.completed" && event.payload.firstEventSequence > event.sequence) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "command receipt cannot start after its event" });
     }
     if (event.type === "run.status_changed") {
       const validation = validateRunTransition(event.payload.from, event.payload.to);

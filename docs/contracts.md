@@ -23,7 +23,7 @@ Async streams (`read`, artifact `get`, and runtime `watch`) yield `OperationResu
 | Contract | Guaranteed by schema/pure validator |
 | --- | --- |
 | `WorkflowDefinition` | Unique task/gate IDs, valid gate bindings and dependency endpoints, no duplicate dependency, no DAG cycle, positive bounded concurrency |
-| `TaskDefinition` | Role/instruction, retry/timeout, approval flag, explicit quality-gate bindings |
+| `TaskDefinition` | Role/instruction, retry/rework/timeout, approval flag, explicit quality-gate bindings |
 | `AgentRequest` | Request and attempt identity, target locator, attempt number, timing, retry/timeout, agent-request idempotency |
 | `AgentExecutionHandle` | Durable execution/request/attempt identity, target locator, correlation provenance, optional recovery cursor |
 | `AgentResult` | Business outcome separate from transport state; verified correlation for every conclusive outcome; status-specific error/blockage and timestamp ordering |
@@ -31,7 +31,7 @@ Async streams (`read`, artifact `get`, and runtime `watch`) yield `OperationResu
 | `ArtifactReference` | Trusted stored marker, opaque safe ID, constrained `artifact://store/id` URI, exact SHA-256/SHA-512 encoding |
 | `ApprovalRequest` / `ApprovalDecision` | Required typed target, revision/generation, idempotency, evidence/feedback and audit time/actor |
 | `DomainEvent` | Event schema v1 plus stream/aggregate identities and strict versioned payload |
-| `RecoveryCheckpoint` | Checkpoint schema v1 plus named codec v1, stream/version position and JSON state |
+| `RecoveryCheckpoint` | Checkpoint schema v1 plus named snapshot-v1 or aggregate-v1 codec, stream/version position and JSON state |
 
 `validateTaskTransition` and `validateRunTransition` are the normative transition rules. `validateEventBatch` is the normative precondition for atomic append. Zod command/event schemas invoke the applicable transition or batch validator.
 
@@ -51,6 +51,10 @@ The durable ordering is dispatch intent -> send -> persist `agent.execution_boun
 The engine validates definitions; creates/advances/reconstructs snapshots; validates explicit task transitions; binds execution handles; records delivery reconciliation and verified agent results; requests/applies approvals and quality evaluations; and records cancellation acceptance/confirmation. Every mutating command carries expected aggregate version and/or idempotency identity as appropriate.
 
 The engine owns decisions but not external I/O. The caller persists emitted events atomically before executing derived side effects. `recordAgentResult` rejects `unverified` observations at its Zod boundary.
+
+Every successful mutation ends with a `command.completed` event containing a versioned receipt: command identity, idempotency key, SHA-256 fingerprint of the validated command, the command's first event sequence, and runnable task IDs. The receipt contains no raw command payload. A repeated key with the same fingerprint returns the original result; a different fingerprint conflicts. `task.retry_scheduled` records the deterministic eligibility timestamp. Runtime must persist the entire returned event batch before acting on runnable tasks; Core does not promise distributed exactly-once execution.
+
+`createCheckpoint` is a read-only engine operation with an expected aggregate version. It exports a complete aggregate checkpoint for `RunStore.saveCheckpoint`; a snapshot-only checkpoint is insufficient for tail-only recovery.
 
 ## `RunStore`
 
@@ -78,6 +82,8 @@ Workflow-level gate definitions are bound from tasks by ID and phase. `EvaluateQ
 
 `ApprovalTarget` is exactly one of run, task, or quality gate. `approval.requested` and `approval.decided` are separate durable events. Decisions apply only to the same approval ID, target, revision, and generation; a future engine must reject stale or duplicate decisions idempotently. `changes_requested` drives the explicit rework transition (`succeeded -> ready`, generation +1), never a direct terminal-to-running transition.
 
+`ReworkPolicy.maxReworks` counts transitions from generation N to N+1; generation zero is the original work, not a rework. Retry `maxAttempts` applies separately within each generation, although the public `TaskState.attempt` remains a run-wide monotonic attempt identity. At exhaustion, `fail` makes the run terminal failed while `require_human` blocks the run without incrementing generation; a later, higher-revision approval can resolve the hold. Legacy definitions without `rework` remain schema-valid and are treated by Core as `{ maxReworks: 0, onExhausted: "fail" }`, so old definitions do not gain unlimited rework.
+
 ## Cancellation
 
 Cancellation has three durable stages:
@@ -87,6 +93,8 @@ Cancellation has three durable stages:
 3. `CancellationStopConfirmation` / `cancellation.stop_confirmed` records observed terminal stop.
 
 Acceptance alone leaves state `cancelling`. If success/failure is observed first, the legal transition allows completion to win; late cancellation acknowledgement is retained for audit but must not overwrite the terminal outcome.
+
+A run-wide cancellation may cover several bound executions. Each `cancellation.stop_confirmed` identifies one stopped execution; the aggregate checkpoint retains distinct confirmations for the same cancellation ID. Confirming one execution never proves the others stopped.
 
 ## Event/checkpoint compatibility
 
@@ -98,6 +106,8 @@ Current event and checkpoint schema version is `1`. The original P00 format is d
 4. return `unsupported_version` for unknown numeric versions and `validation` for malformed data.
 
 After envelope parsing, `decodeWorkflowRunCheckpointState` validates checkpoint JSON against the codec's `WorkflowRunSnapshot` schema and returns `corruption` on mismatch. Recovery must not trust the opaque JSON field without this codec dispatch.
+
+P01 adds the `ai-flow.workflow-aggregate+json` codec, decoded by `decodeWorkflowAggregateCheckpointState`. It contains snapshot, approval/gate/cancellation state, successful attempts, retry schedules and attempt baselines, and original command receipts/results. Tail-only replay requires this codec. A legacy snapshot checkpoint may be ignored only when events from `run.created` onward are available for full replay. Event histories predating `command.completed` cannot safely reconstruct exact command idempotency and must be migrated from authoritative command receipts or rejected; no identity is fabricated. Unsupported or corrupt checkpoints fail closed in Core.
 
 No downcasting is supported. A future schema change must add an explicit upcaster and fixtures before producers emit it. Aggregate version and event sequence are never used as schema versions.
 

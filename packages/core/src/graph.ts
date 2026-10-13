@@ -119,8 +119,14 @@ export function dependencyPermanentlyUnsatisfied(
   return (index.prerequisites.get(taskId) ?? []).some((dependency) => {
     if (dependency.condition === "completed") return false;
     const prerequisite = states.get(dependency.dependsOnTaskId);
-    return prerequisite !== undefined && completedStatuses.has(prerequisite.status) &&
-      !taskBusinessSucceeded(definition, prerequisite, context);
+    if (prerequisite === undefined) return false;
+    if (prerequisite.status === "failed" || prerequisite.status === "cancelled") return true;
+    if (prerequisite.status !== "succeeded") return false;
+    const decision = context.approvals.get(approvalKey(prerequisite.taskId, prerequisite.generation))?.decision;
+    if (decision === "rejected") return true;
+    if (decision !== "changes_requested") return false;
+    const policy = definition.tasks.find((task) => task.id === prerequisite.taskId)?.rework;
+    return prerequisite.generation >= (policy?.maxReworks ?? 0) && (policy?.onExhausted ?? "fail") === "fail";
   });
 }
 
@@ -132,10 +138,12 @@ export function selectRunnableTasks(
   const active = snapshot.tasks.filter((task) => capacityStatuses.has(task.status)).length;
   const available = Math.max(0, definition.maxConcurrency - active);
   if (available === 0) return [];
+  const index = buildDependencyIndex(definition);
 
   return definition.tasks
     .map((task) => snapshot.tasks.find((state) => state.taskId === task.id))
     .filter((task): task is TaskState => task !== undefined && task.status === "ready")
+    .filter((task) => dependenciesSatisfied(definition, snapshot, task.taskId, context, index))
     .filter((task) => requiredGatesSatisfied(definition, task, context.gates, ["before_dispatch"]))
     .slice(0, available)
     .map((task) => task.taskId);

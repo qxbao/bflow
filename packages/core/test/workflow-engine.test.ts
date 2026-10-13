@@ -50,6 +50,7 @@ function definition(
         jitter: false
       },
       timeout: { executionTimeoutMs: 10_000, onTimeout: "retry" },
+      ...(options.approvalTask === id ? { rework: { maxReworks: 1, onExhausted: "fail" as const } } : {}),
       requiresApproval: options.approvalTask === id,
       qualityGates: options.gatedTask === id
         ? [{ gateId: "tests", phase: "after_result", required: true }]
@@ -327,7 +328,7 @@ describe("DeterministicWorkflowEngine", () => {
     const engine = new DeterministicWorkflowEngine();
     await create(engine, definition(["A"]));
     const result = await engine.advance({ runId: "run-1", expectedVersion: 0, idempotencyKey: "stale", occurredAt: later });
-    expect(result).toMatchObject({ ok: false, error: { code: "conflict", version: { expected: 0, actual: 1 } } });
+    expect(result).toMatchObject({ ok: false, error: { code: "conflict", version: { expected: 0, actual: 2 } } });
   });
 
   it("replays identical idempotent commands and rejects key collisions", async () => {

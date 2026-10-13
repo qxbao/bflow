@@ -37,6 +37,7 @@ import type {
   WorkflowAdvanceResult
 } from "./orchestration.js";
 import type { QualityGateContext, QualityGateResult } from "./quality.js";
+import type { CreateCheckpointCommand } from "./recovery.js";
 import type {
   AcquireAgentLeaseRequest,
   AgentConfiguration,
@@ -137,6 +138,7 @@ export interface WorkflowEngine {
     options?: OperationOptions
   ): Promise<OperationResult<WorkflowAdvanceResult>>;
   recover(command: RecoverRunCommand, options?: OperationOptions): Promise<OperationResult<WorkflowAdvanceResult>>;
+  createCheckpoint(command: CreateCheckpointCommand, options?: OperationOptions): Promise<OperationResult<RecoveryCheckpoint>>;
   getSnapshot(runId: string, options?: OperationOptions): Promise<OperationResult<WorkflowRunSnapshot | null>>;
 }
 

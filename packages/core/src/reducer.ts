@@ -27,6 +27,10 @@ export function deterministicAttemptId(runId: string, taskId: string, generation
 
 function initialSnapshot(definition: WorkflowDefinition, event: DomainEvent): WorkflowRunSnapshot {
   if (event.type !== "run.created") throw new Error("The first workflow event must be run.created");
+  if (event.sequence !== 1 || event.aggregateVersion !== 1 ||
+      event.payload.workflowId !== definition.id || event.payload.workflowVersion !== definition.version) {
+    throw new Error("run.created position or workflow definition does not match");
+  }
   return WorkflowRunSnapshotSchema.parse({
     runId: event.runId,
     workflowId: event.payload.workflowId,
@@ -82,6 +86,7 @@ export function reduceWorkflowEvent(
   };
 
   if (event.type === "run.status_changed") {
+    if (event.payload.from !== snapshot.status) throw new Error("Run status event source does not match current state");
     next = { ...next, status: event.payload.to };
   } else if (event.type === "task.status_changed") {
     const taskId = event.taskId;
@@ -89,6 +94,12 @@ export function reduceWorkflowEvent(
     next = {
       ...next,
       tasks: updateTask(snapshot, taskId, (task) => {
+        if (task.status !== event.payload.from || task.generation !== event.payload.generationFrom) {
+          throw new Error("Task status event source or generation does not match current state");
+        }
+        const expectedAttempt = task.status === "ready" && event.payload.to === "running"
+          ? task.attempt + 1 : task.attempt;
+        if (event.payload.attempt !== expectedAttempt) throw new Error("Task status event attempt is not contiguous");
         const enteringRun = event.payload.to === "running" && event.payload.from !== "waiting";
         const enteringReady = event.payload.to === "ready";
         const terminal = ["succeeded", "failed", "cancelled"].includes(event.payload.to);
@@ -127,13 +138,15 @@ export function reduceWorkflowEvent(
     if (taskId === undefined) throw new Error("Execution binding event is missing taskId");
     next = {
       ...next,
-      tasks: updateTask(snapshot, taskId, (task) => ({
-        ...task,
-        attempt: event.payload.attempt,
-        attemptId: event.payload.handle.attemptId,
-        agentExecution: event.payload.handle,
-        version: task.version + 1
-      }))
+      tasks: updateTask(snapshot, taskId, (task) => {
+        if (!["running", "waiting", "blocked", "cancelling"].includes(task.status) ||
+            task.attempt !== event.payload.attempt || task.attemptId !== event.payload.handle.attemptId ||
+            event.payload.handle.runId !== snapshot.runId || event.payload.handle.taskId !== taskId ||
+            task.agentExecution !== undefined) {
+          throw new Error("Execution binding does not match the current task attempt");
+        }
+        return { ...task, agentExecution: event.payload.handle, version: task.version + 1 };
+      })
     };
   } else if (event.type === "agent.delivery_reconciled" && event.payload.status === "bound") {
     const taskId = event.taskId;
@@ -141,13 +154,26 @@ export function reduceWorkflowEvent(
     const handle = event.payload.handle;
     next = {
       ...next,
-      tasks: updateTask(snapshot, taskId, (task) => ({
-        ...task,
-        attemptId: handle.attemptId,
-        agentExecution: handle,
-        version: task.version + 1
-      }))
+      tasks: updateTask(snapshot, taskId, (task) => {
+        if (handle.runId !== snapshot.runId || handle.taskId !== taskId || task.attemptId !== handle.attemptId ||
+            task.agentExecution !== undefined) {
+          throw new Error("Reconciled execution conflicts with the current binding");
+        }
+        return { ...task, agentExecution: handle, version: task.version + 1 };
+      })
     };
+  } else if (event.type === "agent.result_recorded") {
+    const task = snapshot.tasks.find((candidate) => candidate.taskId === event.taskId);
+    const bound = task?.agentExecution;
+    const result = event.payload;
+    if (task === undefined || bound === undefined || task.attemptId !== result.attemptId ||
+        bound.executionId !== result.executionId || bound.requestId !== result.requestId ||
+        result.runId !== snapshot.runId || result.taskId !== task.taskId ||
+        result.verification.status !== "verified" || !result.verification.correlation.verified ||
+        !bound.correlation.verified || result.verification.correlation.token !== bound.correlation.token ||
+        result.verification.correlation.provenance !== bound.correlation.provenance) {
+      throw new Error("Agent result is not verified for the bound execution");
+    }
   }
 
   return WorkflowRunSnapshotSchema.parse(next);
