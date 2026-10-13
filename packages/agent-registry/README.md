@@ -1,0 +1,9 @@
+# File-backed Agent Registry
+
+`createAgentRegistry({ stateFile, clock? })` implements `AgentRegistry` with an explicit single-host state file. `AgentConfiguration.settings` preserves provider, kind and execution settings as contract-defined JSON; transport-specific validation belongs to the transport/runtime using them. `resolve` is deterministic configuration lookup only; `null` means no role/capability match, and it does not reserve capacity.
+
+Every operation uses a process-shared exclusive lock file. Mutations write a temporary file, fsync it, atomically rename it and fsync the containing directory. The versioned state retains lease IDs, idempotency receipts and per-agent fencing watermarks across process restarts. Acquisitions respect `maxConcurrentTasks` and reject a second active lease for the same run/task/attempt. Active leases prevent configuration replacement or removal. Renew/release require the current fencing token and version; expiry uses a trusted injected clock, not caller-supplied timestamps. Duplicate keys with different payloads conflict.
+
+Scope: one machine and one local filesystem shared by all registry processes. This is not a network/distributed lease service and does not claim safety on filesystems without reliable exclusive-create and atomic rename. A process crash while holding the `.lock` file can leave a stale lock; operations time out closed, and an operator must establish that the owner is dead before removing that specific lock. The receipt/history file grows until an explicit future migration/compaction policy is designed. Runtime must hold and verify a current lease/fence immediately before dispatch; Herdr working state is not a lease. This does not implement SQLite or the P03 persistence port.
+
+Run tests with `pnpm exec vitest run packages/agent-registry/test/agent-registry.test.ts` from the repository root.

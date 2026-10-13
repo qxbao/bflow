@@ -1,8 +1,4 @@
-/**
- * Herdr-specific behavior is intentionally not implemented until its CLI and
- * Socket API have been verified. Implementations in this package must satisfy
- * this transport boundary without leaking Herdr details into core.
- */
+/** CLI-backed Herdr transport; public workflow data stays on the contracts boundary. */
 export type {
   AgentExecutionHandle,
   AgentMessage,
@@ -16,3 +12,7 @@ export type {
   CancellationResult,
   OperationOptions
 } from "@ai-flow/contracts";
+export { createHerdrAdapter, HerdrCliTransport } from "./adapter.js";
+export type { HerdrAdapterOptions, HerdrStartRequest } from "./adapter.js";
+export { createProcessRunner } from "./runner.js";
+export type { HerdrCommandRunner, CommandInvocation, CommandOutcome } from "./runner.js";
