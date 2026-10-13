@@ -10,3 +10,6 @@ export type {
   WorkflowEngine,
   WorkflowRunSnapshot
 } from "@ai-flow/contracts";
+
+export { DeterministicWorkflowEngine } from "./workflow-engine.js";
+export type { DeterministicWorkflowEngineOptions } from "./workflow-engine.js";
