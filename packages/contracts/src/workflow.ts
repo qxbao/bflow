@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AgentExecutionHandleSchema } from "./agent.js";
 import { IdentifierSchema, IsoDateTimeSchema, JsonValueSchema, MetadataSchema } from "./common.js";
 import {
   BlockageSchema,
@@ -8,6 +9,7 @@ import {
   TaskStatusSchema,
   TimeoutPolicySchema
 } from "./execution.js";
+import { QualityGateBindingSchema, QualityGateDefinitionSchema } from "./quality.js";
 
 export const TaskDefinitionSchema = z
   .object({
@@ -21,6 +23,7 @@ export const TaskDefinitionSchema = z
     retry: RetryPolicySchema,
     timeout: TimeoutPolicySchema,
     requiresApproval: z.boolean(),
+    qualityGates: z.array(QualityGateBindingSchema),
     metadata: MetadataSchema.optional()
   })
   .strict();
@@ -42,6 +45,7 @@ const WorkflowDefinitionBaseSchema = z
     description: z.string().min(1).optional(),
     tasks: z.array(TaskDefinitionSchema).min(1),
     dependencies: z.array(TaskDependencySchema),
+    qualityGates: z.array(QualityGateDefinitionSchema),
     maxConcurrency: z.number().int().min(1),
     failurePolicy: z.enum(["fail-fast", "continue-independent", "block"]),
     recovery: RecoveryPolicySchema,
@@ -65,7 +69,17 @@ export const WorkflowDefinitionSchema = WorkflowDefinitionBaseSchema.superRefine
   const dependencyGraph = new Map<string, string[]>();
   for (const taskId of taskIds) dependencyGraph.set(taskId, []);
 
+  const dependencyKeys = new Set<string>();
   for (const [index, dependency] of workflow.dependencies.entries()) {
+    const dependencyKey = `${dependency.taskId}\u0000${dependency.dependsOnTaskId}\u0000${dependency.condition}`;
+    if (dependencyKeys.has(dependencyKey)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Duplicate task dependency",
+        path: ["dependencies", index]
+      });
+    }
+    dependencyKeys.add(dependencyKey);
     if (!taskIds.has(dependency.taskId)) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -88,6 +102,39 @@ export const WorkflowDefinitionSchema = WorkflowDefinitionBaseSchema.superRefine
       });
     }
     dependencyGraph.get(dependency.taskId)?.push(dependency.dependsOnTaskId);
+  }
+
+  const gateIds = new Set<string>();
+  for (const [index, gate] of workflow.qualityGates.entries()) {
+    if (gateIds.has(gate.id)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Duplicate quality gate id: ${gate.id}`,
+        path: ["qualityGates", index, "id"]
+      });
+    }
+    gateIds.add(gate.id);
+  }
+  for (const [taskIndex, task] of workflow.tasks.entries()) {
+    const bindingIds = new Set<string>();
+    for (const [bindingIndex, binding] of task.qualityGates.entries()) {
+      const bindingKey = `${binding.gateId}\u0000${binding.phase}`;
+      if (!gateIds.has(binding.gateId)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Unknown quality gate: ${binding.gateId}`,
+          path: ["tasks", taskIndex, "qualityGates", bindingIndex, "gateId"]
+        });
+      }
+      if (bindingIds.has(bindingKey)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Duplicate quality gate binding",
+          path: ["tasks", taskIndex, "qualityGates", bindingIndex]
+        });
+      }
+      bindingIds.add(bindingKey);
+    }
   }
 
   const visited = new Set<string>();
@@ -118,7 +165,9 @@ export const TaskStateSchema = z
     taskId: IdentifierSchema,
     status: TaskStatusSchema,
     attempt: z.number().int().nonnegative(),
-    agentExecutionId: IdentifierSchema.optional(),
+    generation: z.number().int().nonnegative(),
+    attemptId: IdentifierSchema.optional(),
+    agentExecution: AgentExecutionHandleSchema.optional(),
     blockage: BlockageSchema.optional(),
     startedAt: IsoDateTimeSchema.optional(),
     completedAt: IsoDateTimeSchema.optional(),

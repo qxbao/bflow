@@ -18,6 +18,7 @@ const graph = new Map(
   manifests.map(({ manifest }) => {
     const dependencyNames = Object.keys({
       ...manifest.dependencies,
+      ...manifest.devDependencies,
       ...manifest.optionalDependencies,
       ...manifest.peerDependencies
     }).filter((name) => workspaceNames.has(name));

@@ -1,87 +1,112 @@
 # Public contracts
 
-All public schemas and interfaces are exported from `@ai-flow/contracts`. Zod schemas are the runtime authority for data entering a module; TypeScript types are inferred from those schemas. JSON exchange objects are strict, so unknown fields are rejected until a versioned contract intentionally adds them.
+All public schemas, inferred types, pure validators, and ports are exported from `@ai-flow/contracts`. Zod schemas are the runtime authority at package ingress. Exchange objects are strict; unknown fields are rejected unless a later schema version explicitly adds them.
 
-## Core data types
+## Failure and async convention
 
-| Type | Purpose and invariants |
+Public Promise operations return `OperationResult<T>`:
+
+```ts
+type OperationResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: ContractError };
+```
+
+`ContractError` is discriminated by `code`. Validation, cancellation, unknown delivery, corruption, unsupported version, and not-found errors are non-retryable as received. Conflict, timeout, and transport-unavailable errors are retryable only after their documented prerequisite (for example, reload after conflict). A `timeout` declares that the operation was not started or was observation-only. A send that might have crossed the transport boundary is instead `unknown_delivery`, always has `retryable: false`, and requires reconciliation/manual handling; callers must not reinterpret it as a generic retryable timeout.
+
+Async streams (`read`, artifact `get`, and runtime `watch`) yield `OperationResult<T>` so item-level failures stay typed. An implementation may still be interrupted by the JavaScript runtime, but must translate expected domain/infrastructure failures to `ContractError`.
+
+`OperationOptions` supplies cooperative `AbortSignal`, relative timeout, and absolute deadline. Cancellation of the local wait does not prove cancellation of a remote execution.
+
+## Core data and invariants
+
+| Contract | Guaranteed by schema/pure validator |
 | --- | --- |
-| `WorkflowDefinition` | Versioned task graph. Task IDs are unique; dependency endpoints exist; self-dependencies and cycles are rejected. |
-| `TaskDefinition` | Role, instruction, acceptance criteria, retry and timeout policy for one task. |
-| `TaskDependency` | Directed edge from `taskId` to prerequisite `dependsOnTaskId`; condition is `succeeded` or any terminal `completed`. |
-| `TaskStatus` | Non-terminal, blocked, cancellation, and terminal task lifecycle values. |
-| `RunStatus` | Aggregate workflow lifecycle values. |
-| `AgentRequest` | A single attempt with request/run/task identity, role, instruction, inputs, retry/timeout policy and idempotency fingerprint. |
-| `AgentResult` | Terminal attempt observation with outcome, artifacts, structured error/blockage, retryability, timestamps and optional resume cursor. |
-| `ArtifactReference` | Stable content reference with owner IDs, URI, media type, checksum, optional size and metadata. |
-| `ApprovalDecision` | Auditable approval, rejection, or requested change with actor and timestamp. |
-| `DomainEvent` | Strict discriminated union with event/run identity, sequence, aggregate version, correlation/causation and idempotency key. |
+| `WorkflowDefinition` | Unique task/gate IDs, valid gate bindings and dependency endpoints, no duplicate dependency, no DAG cycle, positive bounded concurrency |
+| `TaskDefinition` | Role/instruction, retry/timeout, approval flag, explicit quality-gate bindings |
+| `AgentRequest` | Request and attempt identity, target locator, attempt number, timing, retry/timeout, agent-request idempotency |
+| `AgentExecutionHandle` | Durable execution/request/attempt identity, target locator, correlation provenance, optional recovery cursor |
+| `AgentResult` | Business outcome separate from transport state; verified correlation for every conclusive outcome; status-specific error/blockage and timestamp ordering |
+| `ArtifactProposal` | Untrusted metadata with safe logical name and expected checksum/size |
+| `ArtifactReference` | Trusted stored marker, opaque safe ID, constrained `artifact://store/id` URI, exact SHA-256/SHA-512 encoding |
+| `ApprovalRequest` / `ApprovalDecision` | Required typed target, revision/generation, idempotency, evidence/feedback and audit time/actor |
+| `DomainEvent` | Event schema v1 plus stream/aggregate identities and strict versioned payload |
+| `RecoveryCheckpoint` | Checkpoint schema v1 plus named codec v1, stream/version position and JSON state |
 
-Additional policy schemas cover retry/backoff, timeout/deadline, cancellation acknowledgement, recovery/checkpointing, block reasons, quality findings, registry configuration, run queries, and runtime commands.
+`validateTaskTransition` and `validateRunTransition` are the normative transition rules. `validateEventBatch` is the normative precondition for atomic append. Zod command/event schemas invoke the applicable transition or batch validator.
 
 ## `AgentTransport`
 
-- `initialize` establishes one transport instance and returns verified capabilities. Configuration remains opaque JSON at the contract boundary.
-- `send` accepts a validated request and returns a durable execution handle. Repeated requests with the same idempotency identity must not launch duplicate work.
-- `read` streams ordered messages after a sequence/cursor. Reconnection may replay messages, so consumers deduplicate by execution ID and sequence.
-- `wait` reconciles to exactly one terminal `AgentResult`; it remains valid after stream interruption.
-- `cancel` requests cancellation and returns an acknowledgement. Acceptance does not imply the agent is already stopped.
+- `initialize` returns verified transport capabilities, including whether submission correlation is available.
+- `send` returns an `AgentSubmissionReceipt`, not a task result. `accepted` includes a handle; `rejected` proves no accepted submission; `unknown_delivery` forbids resend.
+- `reconcile` uses request ID, attempt ID, idempotency key, and target locator. It returns `bound`, `not_delivered` (the only retry-safe ambiguous outcome), or `unknown_delivery` requiring manual intervention.
+- `read` streams transport messages/proposals by execution handle and cursor.
+- `wait` returns `AgentTransportObservation`. States such as `done` and `blocked` are transport facts and do not imply `succeeded` or failed task outcomes.
+- `cancel` requests remote cancellation and returns acceptance/refusal; it never confirms that execution has stopped.
 
-Herdr mapping is intentionally unspecified until the CLI and Socket API are verified. The adapter must document how each capability, cursor, terminal condition, and cancellation acknowledgement maps to a verified Herdr behavior.
+The durable ordering is dispatch intent -> send -> persist `agent.execution_bound` before relying on the handle. If the process fails between send and binding, recovery uses the persisted request identity/target to reconcile. A transport that cannot correlate a prompt must use an orchestrator token marked unverified and must not manufacture verified task success.
 
 ## `WorkflowEngine`
 
-- `validateDefinition` applies structural and semantic graph validation.
-- `createRun` creates initial state and events idempotently.
-- `advance` derives runnable work from persisted state without performing transport I/O.
-- `transitionTask`, `recordAgentResult`, and `applyApproval` validate expected versions and legal state transitions, returning the new snapshot plus emitted events.
-- `requestCancellation` records intent and moves affected state through cancellation transitions.
-- `recover` reconstructs state from an optional checkpoint plus ordered events.
-- `getSnapshot` returns current aggregate state or `null`.
+The engine validates definitions; creates/advances/reconstructs snapshots; validates explicit task transitions; binds execution handles; records delivery reconciliation and verified agent results; requests/applies approvals and quality evaluations; and records cancellation acceptance/confirmation. Every mutating command carries expected aggregate version and/or idempotency identity as appropriate.
 
-The engine owns decisions but not storage transactions or external side effects. Callers persist returned events atomically before dispatching derived work.
+The engine owns decisions but not external I/O. The caller persists emitted events atomically before executing derived side effects. `recordAgentResult` rejects `unverified` observations at its Zod boundary.
 
 ## `RunStore`
 
-- `create` stores a definition and initial snapshot with an idempotency key.
-- `get` and `find` query durable run history.
-- `appendEvents` atomically verifies `expectedVersion`, appends ordered events, and reports duplicates.
-- `readEvents` pages by a stable cursor.
-- `saveCheckpoint` uses optimistic versioning; `loadLatestCheckpoint` returns only a complete checkpoint.
+- `appendEvents` atomically compares `expectedVersion`, verifies `expectedLastSequence`, and appends the validated batch.
+- Duplicate command handling must reconstruct the original outcome and report duplicate event IDs without new side effects.
+- Event and maintained snapshot/index rows must share one SQLite transaction.
+- `saveCheckpoint` is optimistic and stores only a complete, codec-versioned checkpoint.
+- Compatibility parsing occurs before replay. Unsupported/corrupt checkpoints are discarded in favor of earlier checkpoint/full replay according to future persistence policy.
 
-An implementation must distinguish not-found, duplicate, and version-conflict outcomes with typed errors. SQLite transactions must cover event append and any maintained snapshot/index rows.
+P00 defines these obligations but does not select a SQLite driver or migration framework.
 
 ## `ArtifactStore`
 
-- `put` consumes an async byte stream, verifies/computes the declared checksum, and returns a durable reference idempotently.
-- `get` streams bytes for a known immutable reference.
-- `resolve` and `find` query metadata without reading content.
-- `delete` removes content only when lifecycle policy authorizes it; returning `false` means it was absent.
-
-URIs are opaque outside the store. Callers must never construct local paths from artifact IDs.
+`put` receives bytes plus expected integrity and returns a trusted immutable reference only after checksum/size verification and durable placement. Callers may never turn artifact IDs or logical names into filesystem paths. `get`, `resolve`, `find`, and lifecycle-authorized `delete` operate on trusted references/opaque IDs. URI generation and canonical path containment remain implementation responsibilities.
 
 ## `AgentRegistry`
 
-- `resolve` maps a role and required capabilities to one enabled configuration, or `null` if none is eligible.
-- `list`, `upsert`, and `remove` manage configurations without exposing live transport instances.
-- Resolution must be deterministic for the same registry snapshot and context; load-aware strategies must record their decision inputs.
+`resolve` is configuration lookup only. Capacity is reserved separately through atomic `acquireLease`, `renewLease`, and `releaseLease`. Implementations must enforce `maxConcurrentTasks`, expiry, expected lease version, monotonically increasing fencing tokens, and idempotency in the same durable transaction. A stale fence must never dispatch work.
 
 ## `QualityGate`
 
-Each gate has a stable `id` and an `evaluate` method. The result is `passed`, `failed`, `blocked`, or `error`, with findings and produced artifacts. `blocked` means required evidence or an external dependency is missing. `error` means the evaluator could not make a decision. Only the workflow engine applies gate results to state.
+Workflow-level gate definitions are bound from tasks by ID and phase. `EvaluateQualityGateCommand`/`quality_gate.evaluation_requested` schedule one evaluation identity. `RecordQualityGateResultCommand`/`quality_gate.evaluated` return it to the workflow under expected-version and idempotency protection. Produced output is an untrusted artifact proposal until stored. Only the workflow engine changes task/run state.
+
+## Approval and rework
+
+`ApprovalTarget` is exactly one of run, task, or quality gate. `approval.requested` and `approval.decided` are separate durable events. Decisions apply only to the same approval ID, target, revision, and generation; a future engine must reject stale or duplicate decisions idempotently. `changes_requested` drives the explicit rework transition (`succeeded -> ready`, generation +1), never a direct terminal-to-running transition.
+
+## Cancellation
+
+Cancellation has three durable stages:
+
+1. versioned `CancellationRequest` / `cancellation.requested` records intent;
+2. `CancellationResult` / accepted or refused event records the transport response;
+3. `CancellationStopConfirmation` / `cancellation.stop_confirmed` records observed terminal stop.
+
+Acceptance alone leaves state `cancelling`. If success/failure is observed first, the legal transition allows completion to win; late cancellation acknowledgement is retained for audit but must not overwrite the terminal outcome.
+
+## Event/checkpoint compatibility
+
+Current event and checkpoint schema version is `1`. The original P00 format is designated legacy v0 because it omitted these fields. `parseDomainEventWithCompatibility` and `parseRecoveryCheckpointWithCompatibility`:
+
+1. detect the explicit version, treating a missing version as v0;
+2. upcast the known v0 envelope/codec metadata without changing domain payload;
+3. validate the current strict schema;
+4. return `unsupported_version` for unknown numeric versions and `validation` for malformed data.
+
+After envelope parsing, `decodeWorkflowRunCheckpointState` validates checkpoint JSON against the codec's `WorkflowRunSnapshot` schema and returns `corruption` on mismatch. Recovery must not trust the opaque JSON field without this codec dispatch.
+
+No downcasting is supported. A future schema change must add an explicit upcaster and fixtures before producers emit it. Aggregate version and event sequence are never used as schema versions.
+
+The v0 helper only supplies version/codec metadata where the domain payload is otherwise compatible. Baseline event kinds whose required payload changed (for example execution/result/approval details) deliberately fail current validation instead of inventing identity or trust evidence. If such prototype data exists, the persistence phase must provide an explicit per-event migration or replay from an authoritative source; P00 does not silently fabricate missing facts.
 
 ## `RuntimeService`
 
-This is the high-level boundary consumed by the CLI:
-
-- `start` validates and starts a workflow idempotently.
-- `resume` recovers and continues an interrupted run after reconciliation.
-- `cancel` and `decide` submit explicit user decisions.
-- `getRun` and `findRuns` provide query views.
-- `watch` streams ordered domain events; consumers must tolerate replay after reconnect.
-
-Runtime implementations compose ports and own use-case transaction ordering. CLI code must not reach around this interface to concrete stores or adapters.
+This is the CLI-facing use-case boundary. Its operations and event stream use the same typed failure convention. Runtime will compose stores, engine, transport, registry, gates, and artifacts while preserving the ordering above. CLI code must not reach concrete adapters.
 
 ## Compatibility policy
 
-These interfaces are the integration baseline. Additive optional fields require a contract review and tests. Renames, removals, semantic changes, new required fields, event reinterpretation, or changed idempotency behavior require an explicit integration decision and migration plan. Implementers should first use private types or adapter translation rather than changing shared contracts.
+This hardening release intentionally breaks the original `8d960d0` bootstrap before downstream implementation begins. Migration details are in `docs/adr/0001-p00-contract-hardening.md`. After this branch is accepted as the P00 baseline, required-field, method-signature, event-semantic, or idempotency changes require an integration decision, migration/upcast plan, and affected-owner approval.
