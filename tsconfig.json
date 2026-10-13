@@ -1,0 +1,14 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/contracts" },
+    { "path": "./packages/core" },
+    { "path": "./packages/herdr-adapter" },
+    { "path": "./packages/persistence" },
+    { "path": "./packages/artifact-store" },
+    { "path": "./packages/agent-registry" },
+    { "path": "./packages/quality-gates" },
+    { "path": "./packages/runtime" },
+    { "path": "./apps/cli" }
+  ]
+}
