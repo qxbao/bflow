@@ -44,15 +44,16 @@ describe("Herdr CLI adapter", () => {
     const { adapter, calls } = fake(() => success("agent_started"));
     expect(await adapter.startAgent({ name: "worker", kind: "codex", paneId: "pane-1" })).toMatchObject({ ok: true, value: { paneId: "pane-1", session: { value: "session-1" } } });
     expect(calls[0]?.args).toEqual(["agent", "start", "worker", "--kind", "codex", "--pane", "pane-1"]);
-    expect(await adapter.startAgent({ name: "worker", kind: "codex", paneId: "pane-2" })).toMatchObject({ ok: false, error: { code: "conflict" } });
+    expect(await adapter.startAgent({ name: "worker", kind: "codex", paneId: "pane-2" })).toMatchObject({ ok: false, error: { code: "unknown_delivery", retryable: false } });
   });
 
   it("maps blocked, timeout, malformed and server-unavailable startup", async () => {
     for (const [outcome, code] of [
-      [remoteError("agent_not_ready"), "conflict"],
-      [{ exitCode: null, stdout: "", stderr: "", failure: "timeout" }, "timeout"],
-      [{ exitCode: 0, stdout: "oops", stderr: "" }, "corruption"],
-      [remoteError("server_unavailable"), "transport_unavailable"]
+      // These outcomes do not prove that startup never launched the agent.
+      [remoteError("agent_not_ready"), "unknown_delivery"],
+      [{ exitCode: null, stdout: "", stderr: "", failure: "timeout" }, "unknown_delivery"],
+      [{ exitCode: 0, stdout: "oops", stderr: "" }, "unknown_delivery"],
+      [remoteError("server_unavailable"), "unknown_delivery"]
     ] as const) {
       const { adapter } = fake(() => outcome as CommandOutcome);
       expect(await adapter.startAgent({ name: "worker", kind: "codex", paneId: "pane-1" })).toMatchObject({ ok: false, error: { code } });
@@ -130,7 +131,10 @@ describe("Herdr CLI adapter", () => {
     expect(await adapter.wait(handle)).toMatchObject({ ok: true, value: { state: "done", correlationVerified: false } });
     const messages = [];
     for await (const message of adapter.read(handle)) messages.push(message);
-    expect(messages).toMatchObject([{ ok: true, value: { kind: "stdout", data: "tests passed?" } }]);
+    expect(messages).toMatchObject([{ ok: true, value: { kind: "status", data: {
+      source: "terminal_snapshot", text: "tests passed?", correlationVerified: false,
+      executionOutputVerified: false, turnIdentity: "unresolved"
+    } } }]);
   });
 
   it("wait timeout, abort and invalid target are typed failures", async () => {
