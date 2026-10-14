@@ -34,17 +34,18 @@ export function failure<T>(error: unknown): OperationResult<T> {
 }
 export class Budget {
   readonly end: number;
-  constructor(readonly options: OperationOptions | undefined, readonly clock: () => number) {
+  constructor(readonly options: OperationOptions | undefined, readonly clock: () => number, observing = false) {
     const timeout = options?.timeoutMs;
     const deadline = options?.deadline === undefined ? Infinity : Date.parse(parse(IsoDateTimeSchema, options.deadline));
     if (timeout !== undefined && (!Number.isFinite(timeout) || timeout < 0) || Number.isNaN(deadline)) fail("validation", "Invalid timeout or deadline");
     this.end = Math.min(timeout === undefined ? Infinity : clock() + timeout, deadline);
-    this.check();
+    this.check(observing);
   }
   check(observing = false): void {
     if (this.options?.signal?.aborted) throw new ArtifactFailure({ code: "cancelled", retryable: false, message: "Artifact operation cancelled" });
     if (this.clock() >= this.end) throw new ArtifactFailure({ code: "timeout", retryable: true,
-      retrySafety: observing ? "observation_only" : "not_started", message: "Artifact deadline expired before catalog commit" });
+      retrySafety: observing ? "observation_only" : "not_started",
+      message: observing ? "Artifact observation deadline expired" : "Artifact deadline expired before catalog commit" });
   }
   remaining(maximum: number): number { this.check(); return Math.max(0, Math.min(maximum, Math.floor(this.end - this.clock()))); }
   /** Bound a stalled upstream iterator, using re-armed timers to avoid Node delay overflow. */

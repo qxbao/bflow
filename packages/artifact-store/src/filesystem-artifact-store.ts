@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { writeSync } from "node:fs";
 import { rename, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
@@ -34,13 +35,16 @@ export class FilesystemArtifactStore implements ArtifactStore {
   constructor(private readonly root: SafeRoot, private readonly db: DatabaseSync, private readonly storeId: string,
     private readonly busy: number, private readonly clock: () => number) {}
   close(): void { if (!this.closed) { this.db.close(); this.closed = true; } }
-  private async execute<T>(options: OperationOptions | undefined, work: (budget: Budget) => Promise<T>): Promise<OperationResult<T>> {
+  private async execute<T>(options: OperationOptions | undefined, work: (budget: Budget) => Promise<T>, postObservation = false): Promise<OperationResult<T>> {
     try {
       if (this.closed) fail("validation", "Store is closed");
-      const budget = new Budget(options, this.clock);
+      const budget = new Budget(options, this.clock, postObservation);
       await this.root.check();
-      budget.check();
-      return { ok: true, value: await work(budget) };
+      budget.check(postObservation);
+      const value = await work(budget);
+      // Only observations opt into this check; committed mutations must retain their actual outcome.
+      if (postObservation) budget.check(true);
+      return { ok: true, value };
     } catch (error) { return failure(error); }
   }
   private transaction<T>(budget: Budget, work: () => T): T {
@@ -50,6 +54,21 @@ export class FilesystemArtifactStore implements ArtifactStore {
     catch (error) { budget.check(); throw error; }
     try { budget.check(); const result = work(); budget.check(); this.db.exec("COMMIT"); return result; }
     catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+  private observation<T>(options: OperationOptions | undefined, work: () => T): Promise<OperationResult<T>> {
+    return this.execute(options, async (budget) => {
+      budget.check(true);
+      this.db.exec("BEGIN DEFERRED");
+      let value: T;
+      try {
+        value = work();
+        budget.check(true);
+        this.db.exec("COMMIT");
+      } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+      // Read-only COMMIT has no business mutation; do not apply this post-check to put/delete.
+      budget.check(true);
+      return value;
+    }, true);
   }
   private record(id: string, includeDeleted = false): { reference: ArtifactReference; blob: string; deleted: boolean } | null {
     const row = this.db.prepare("SELECT * FROM artifacts WHERE artifact_id=?").get(id);
@@ -73,7 +92,9 @@ export class FilesystemArtifactStore implements ArtifactStore {
         budget.check();
         const { bytesRead } = await source.read(buffer, 0, buffer.length, null);
         if (bytesRead === 0) break;
-        hash.update(buffer.subarray(0, bytesRead)); size += bytesRead;
+        size += bytesRead;
+        if (reference.sizeBytes === undefined || size > reference.sizeBytes) fail("corruption", "Cached artifact exceeds catalog size");
+        hash.update(buffer.subarray(0, bytesRead));
       }
       if (size !== reference.sizeBytes || hash.digest("hex") !== reference.checksum.value.toLowerCase()) fail("corruption", "Cached artifact failed integrity verification");
     } finally { await source.close(); }
@@ -100,24 +121,35 @@ export class FilesystemArtifactStore implements ArtifactStore {
           const chunk = await budget.wait(Promise.resolve(iterator.next()));
           if (chunk.done) { exhausted = true; break; }
           if (!(chunk.value instanceof Uint8Array)) fail("validation", "Artifact stream yielded non-byte content");
-          // Own the bytes before async I/O; producer mutation cannot change what was hashed.
-          size += chunk.value.byteLength;
-          if (!Number.isSafeInteger(size)) fail("validation", "Artifact size exceeds supported range");
-          if (input.expectedIntegrity.sizeBytes !== undefined && size > input.expectedIntegrity.sizeBytes) fail("corruption", "Artifact exceeds expected size");
-          for (let offset = 0; offset < chunk.value.byteLength; offset += 64 * 1024) {
+          // Consume this view entirely in one JS turn. Retaining it across await permits resize,
+          // detach or reuse by its producer. Synchronous bounded writes avoid a whole-chunk copy
+          // or an unbounded queue of pending async buffers while supporting arbitrary chunk sizes.
+          const length = chunk.value.byteLength;
+          for (let offset = 0; offset < length; offset += 64 * 1024) {
             budget.check();
-            const bytes = Buffer.from(chunk.value.subarray(offset, offset + 64 * 1024));
+            const bytes = Buffer.from(chunk.value.subarray(offset, Math.min(length, offset + 64 * 1024)));
+            size += bytes.byteLength;
+            if (!Number.isSafeInteger(size)) fail("validation", "Artifact size exceeds supported range");
+            if (input.expectedIntegrity.sizeBytes !== undefined && size > input.expectedIntegrity.sizeBytes) fail("corruption", "Artifact exceeds expected size");
+            let written = 0;
+            while (written < bytes.byteLength) {
+              budget.check();
+              const count = writeSync(handle.fd, bytes, written, bytes.byteLength - written, null);
+              if (count <= 0) fail("corruption", "Artifact write made no progress");
+              written += count;
+            }
             hash.update(bytes);
-            await handle.writeFile(bytes);
           }
         }
         if (hash.digest("hex") !== input.expectedIntegrity.checksum.value.toLowerCase() ||
           input.expectedIntegrity.sizeBytes !== undefined && size !== input.expectedIntegrity.sizeBytes) fail("corruption", "Artifact integrity mismatch");
+        await handle.sync();
+        const final = await handle.stat();
+        if (!final.isFile() || final.nlink !== 1 || final.size !== size) fail("corruption", "Staged artifact size or file identity is inconsistent");
         const reference = parse(ArtifactReferenceSchema, { trust: "stored", artifactId: input.artifactId, runId: input.runId,
           ...(input.taskId === undefined ? {} : { taskId: input.taskId }), kind: input.kind, uri: `artifact://${this.storeId}/${input.artifactId}`,
           mediaType: input.mediaType, sizeBytes: size, checksum: { ...input.expectedIntegrity.checksum, value: input.expectedIntegrity.checksum.value.toLowerCase() },
           createdAt: new Date(this.clock()).toISOString(), ...(input.metadata === undefined ? {} : { metadata: input.metadata }) });
-        await handle.sync();
         await handle.close(); handle = undefined;
         await this.root.check();
         budget.check();
@@ -149,12 +181,11 @@ export class FilesystemArtifactStore implements ArtifactStore {
         }
         return result;
       } finally {
-        await handle?.close();
         if (!exhausted && iterator.return !== undefined) {
           // An uncooperative producer cannot delay local cleanup forever.
           try { void Promise.resolve(iterator.return()).catch(() => undefined); } catch { /* local cleanup still required */ }
         }
-        if (staged && !committed) await this.removeFile(published ? blob : stage);
+        await this.cleanup([handle], staged && !committed ? published ? blob : stage : undefined);
       }
     });
   }
@@ -162,6 +193,18 @@ export class FilesystemArtifactStore implements ArtifactStore {
     await this.root.check();
     try { await unlink(this.root.file(name)); }
     catch (error) { if (!(typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")) throw error; }
+  }
+  private async cleanup(handles: readonly (FileHandle | undefined)[], temporary?: string): Promise<void> {
+    // Attempt every release even if an earlier close fails; surface the first cleanup failure.
+    let first: unknown;
+    let failed = false;
+    for (const handle of handles) {
+      try { await handle?.close(); }
+      catch (error) { if (!failed) { first = error; failed = true; } }
+    }
+    try { if (temporary !== undefined) await this.removeFile(temporary); }
+    catch (error) { if (!failed) { first = error; failed = true; } }
+    if (failed) throw first;
   }
   async *get(input: ArtifactReference, options?: OperationOptions): AsyncIterable<OperationResult<Uint8Array>> {
     const temporary = `read-${randomUUID()}`;
@@ -202,15 +245,15 @@ export class FilesystemArtifactStore implements ArtifactStore {
       if (size === 0) { budget.check(true); yield { ok: true, value: new Uint8Array() }; }
     } catch (error) { yield failure(error); }
     finally {
-      try { await source?.close(); await snapshot?.close(); if (created) await this.removeFile(temporary); }
+      try { await this.cleanup([source, snapshot], created ? temporary : undefined); }
       catch (error) { yield failure(error); }
     }
   }
   async resolve(artifactId: string, options?: OperationOptions): Promise<OperationResult<ArtifactReference | null>> {
-    return this.execute(options, async () => this.record(parse(ArtifactIdSchema, artifactId))?.reference ?? null);
+    return this.observation(options, () => this.record(parse(ArtifactIdSchema, artifactId))?.reference ?? null);
   }
   async find(input: ArtifactQuery, options?: OperationOptions): Promise<OperationResult<Page<ArtifactReference>>> {
-    return this.execute(options, async () => {
+    return this.observation(options, () => {
       const query = parse(ArtifactQuerySchema, input);
       const { cursor: requestCursor, limit = 100, ...filters } = query;
       const scope = `artifacts:${this.storeId}:${fingerprint(filters)}`;

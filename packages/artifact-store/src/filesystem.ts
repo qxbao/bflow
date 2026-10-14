@@ -43,10 +43,21 @@ export class SafeRoot {
   }
   async open(name: string, create = false): Promise<FileHandle> {
     await this.check();
-    const handle = await open(this.file(name), create ? constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW : constants.O_RDONLY | constants.O_NOFOLLOW, 0o600);
-    const info = await handle.stat();
-    if (!info.isFile() || info.nlink !== 1) { await handle.close(); fail("corruption", "Artifact object is not a private regular file"); }
-    return handle;
+    const path = this.file(name);
+    // Reject special files before opening them; O_NONBLOCK also closes the FIFO replacement window.
+    const before = create ? undefined : await lstat(path);
+    if (before !== undefined && (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1)) fail("corruption", "Artifact object is not a private regular file");
+    const handle = await open(path, create
+      ? constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW
+      : constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+    try {
+      const info = await handle.stat();
+      const current = await lstat(path);
+      if (!info.isFile() || info.nlink !== 1 || !current.isFile() || current.isSymbolicLink() || current.nlink !== 1 ||
+        current.dev !== info.dev || current.ino !== info.ino ||
+        before !== undefined && (before.dev !== info.dev || before.ino !== info.ino)) fail("corruption", "Artifact file identity changed or is not regular");
+      return handle;
+    } catch (error) { await handle.close(); throw error; }
   }
   async sync(): Promise<void> {
     await this.check();

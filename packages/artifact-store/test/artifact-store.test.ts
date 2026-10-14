@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, readdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, open, readdir, readFile, rm, stat, symlink, unlink, writeFile, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "../src/sqlite.js";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
+import { once } from "node:events";
+import { Worker } from "node:worker_threads";
+import { createServer } from "node:net";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { ArtifactWriteOptionsSchema, type ArtifactReference, type OperationResult } from "@ai-flow/contracts";
 import { openFilesystemArtifactStore, type FilesystemArtifactStore } from "../src/index.js";
 
@@ -290,5 +295,226 @@ describe("Filesystem ArtifactStore", () => {
     const reference = await put(); store.close(); store.close();
     expect(await store.resolve("artifact-1")).toMatchObject({ ok: false, error: { code: "validation" } });
     expect((await results(reference))[0]).toMatchObject({ ok: false, error: { code: "validation" } });
+  });
+
+  function connection(current: FilesystemArtifactStore): InstanceType<typeof DatabaseSync> {
+    const db = Reflect.get(current, "db");
+    if (!(db instanceof DatabaseSync)) throw new Error("Expected a real SQLite connection");
+    return db;
+  }
+  function resizableWrite(initial: number, resized: number, expected: Buffer, withSize = true) {
+    // The workspace TS lib predates RAB typings; use the actual Node constructor, not a test double.
+    const buffer: ArrayBuffer & { resize(length: number): void } = Reflect.construct(ArrayBuffer, [initial, { maxByteLength: Math.max(initial, resized) }]);
+    const view = new Uint8Array(buffer); view.fill(42);
+    let changed!: () => void;
+    const mutation = new Promise<void>((resolve) => { changed = resolve; });
+    const write = input(expected);
+    if (!withSize) delete write.options.expectedIntegrity.sizeBytes;
+    write.content = (async function* () { setImmediate(() => { buffer.resize(resized); changed(); }); yield view; })();
+    return { write, mutation };
+  }
+  it.each(["shrink", "grow"] as const)("A01: rejects %s audit checksum without publishing false success", async (mode) => {
+    const initial = mode === "shrink" ? 128 * 1024 : 64 * 1024;
+    const resized = mode === "shrink" ? 64 * 1024 : 128 * 1024;
+    const expected = mode === "shrink" ? Buffer.alloc(resized, 42) : Buffer.concat([Buffer.alloc(initial, 42), Buffer.alloc(resized - initial)]);
+    const fixture = resizableWrite(initial, resized, expected, false);
+    expect(await store.put(fixture.write)).toMatchObject({ ok: false, error: { code: "corruption" } });
+    await fixture.mutation;
+    expect(value(await store.resolve("artifact-1"))).toBeNull();
+    expect((await readdir(root)).filter((name) => name.startsWith("blob-"))).toEqual([]);
+    expect(connection(store).prepare("SELECT count(*) AS n FROM receipts").get()?.n).toBe(0);
+    await noTemporary();
+    // Failed validation did not reserve the identity or poison a durable receipt.
+    const reference = await put(); expect(await contents(reference)).toEqual(Buffer.from("report"));
+  });
+  it("A01: growing view cannot bypass expectedSize", async () => {
+    const expected = Buffer.concat([Buffer.alloc(64 * 1024, 42), Buffer.alloc(64 * 1024)]);
+    const fixture = resizableWrite(64 * 1024, 128 * 1024, expected);
+    fixture.write.options.expectedIntegrity.sizeBytes = 64 * 1024;
+    expect((await store.put(fixture.write)).ok).toBe(false); await fixture.mutation;
+    expect(value(await store.resolve("artifact-1"))).toBeNull(); await noTemporary();
+    expect(connection(store).prepare("SELECT count(*) AS n FROM receipts").get()?.n).toBe(0);
+  });
+  it.each(["shrink", "grow"] as const)("A01: %s after ingest preserves exact bytes/hash/size and reopen receipt", async (mode) => {
+    const initial = mode === "shrink" ? 128 * 1024 : 64 * 1024;
+    const expected = Buffer.alloc(initial, 42);
+    const fixture = resizableWrite(initial, mode === "shrink" ? 64 * 1024 : 128 * 1024, expected);
+    const reference = value(await store.put(fixture.write)); await fixture.mutation;
+    expect(reference.sizeBytes).toBe(expected.length); expect((await stat(await blob())).size).toBe(expected.length);
+    expect(reference.checksum.value).toBe(createHash("sha256").update(await readFile(await blob())).digest("hex"));
+    expect(await contents(reference)).toEqual(expected);
+    store.close(); store = value(await openFilesystemArtifactStore({ root, storeId: "local" })); stores.push(store);
+    expect(value(await store.resolve("artifact-1"))).toEqual(reference); expect(await contents(reference)).toEqual(expected);
+    expect(value(await store.put(input(expected)))).toEqual(reference); await noTemporary();
+  });
+  it("A01: stable single large chunk stays valid with bounded ingestion buffers", async () => {
+    const expected = Buffer.alloc(8 * 1024 * 1024, 17);
+    const reference = await put(expected);
+    expect(reference.sizeBytes).toBe(expected.length);
+    // Buffer.equals compares every byte natively; recursive object equality on 8M numeric keys
+    // dominates execution time and does not add coverage of the storage behavior.
+    expect((await contents(reference)).equals(expected)).toBe(true);
+    expect((await stat(await blob())).size).toBe(expected.length); await noTemporary();
+  });
+  it.each(["timeout", "abort"] as const)("A02: FIFO %s probe is bounded and never yields verified bytes", async (mode) => {
+    const reference = await put(); const file = await blob(); await unlink(file);
+    await promisify(execFile)("mkfifo", [file]);
+    const module = new URL("../dist/index.js", import.meta.url).href;
+    const script = `import {openFilesystemArtifactStore} from ${JSON.stringify(module)};
+      const opened=await openFilesystemArtifactStore({root:process.argv[1],storeId:'local'});if(!opened.ok)throw Error(JSON.stringify(opened));
+      const signal=new AbortController();const timer=setTimeout(()=>signal.abort(),20);
+      const options=process.argv[3]==='timeout'?{timeoutMs:50}:{signal:signal.signal,timeoutMs:1000};
+      const start=Date.now();const output=[];for await(const result of opened.value.get(JSON.parse(process.argv[2]),options))output.push(result);
+      const duplicate=await opened.value.put({options:JSON.parse(process.argv[4]),content:(async function*(){yield Buffer.from('report')})()},{timeoutMs:1000});
+      clearTimeout(timer);opened.value.close();console.log(JSON.stringify({output,duplicate,elapsed:Date.now()-start}));`;
+    const result = JSON.parse((await promisify(execFile)(process.execPath, ["--input-type=module", "-e", script, root,
+      JSON.stringify(reference), mode, JSON.stringify(input().options)], { timeout: 2000, killSignal: "SIGKILL" })).stdout);
+    expect(result.output).toHaveLength(1); expect(result.output.every((chunk: OperationResult<Uint8Array>) => !chunk.ok)).toBe(true);
+    expect(["corruption", "cancelled", "timeout"]).toContain(result.output[0].error.code);
+    expect(result.duplicate).toMatchObject({ ok: false, error: { code: "corruption" } });
+    expect(result.elapsed).toBeLessThan(1500); await noTemporary();
+  });
+  it("A02: hard-linked blob is rejected without leaking a descriptor", async () => {
+    const reference = await put(); const file = await blob(); const alias = join(directory, "hardlink"); await link(file, alias);
+    expect(await results(reference)).toMatchObject([{ ok: false, error: { code: "corruption" } }]);
+    await unlink(alias); expect(await contents(reference)).toEqual(Buffer.from("report")); await noTemporary();
+  });
+  it("A02: directory cannot be read as a blob", async () => {
+    const reference = await put(); const file = await blob(); await unlink(file); await mkdir(file);
+    expect(await results(reference)).toMatchObject([{ ok: false, error: { code: "corruption" } }]); await noTemporary();
+  });
+  it("A02: Unix socket is rejected before any open/connection", async () => {
+    const reference = await put(); const file = await blob(); await unlink(file);
+    const server = createServer();
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(file, resolve); });
+    try { expect(await results(reference)).toMatchObject([{ ok: false, error: { code: "corruption" } }]); }
+    finally { await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error))); }
+    await noTemporary();
+  });
+  it("A02: a descriptor is closed if fstat fails after the real open", async () => {
+    const reference = await put(); const sample = await open(join(directory, "prototype"), "wx+");
+    const prototype: FileHandle = Object.getPrototypeOf(sample); await sample.close();
+    const original = prototype.stat; let failed: FileHandle | undefined;
+    prototype.stat = async function (this: FileHandle) { failed = this; throw new Error("injected fstat failure"); };
+    try { expect(await results(reference)).toMatchObject([{ ok: false, error: { code: "corruption" } }]); }
+    finally { prototype.stat = original; }
+    expect(failed).toBeDefined(); await expect(failed!.stat()).rejects.toMatchObject({ code: "EBADF" }); await noTemporary();
+  });
+  it("A02: cleanup attempts both descriptors and temp removal after an earlier close error", async () => {
+    const reference = await put(); const original = fsPromises.open; const closed: FileHandle[] = [];
+    // Node installs close as an instance property. Inject on real opened handles, not an unused prototype.
+    fsPromises.open = async (...args) => {
+      const handle = await original(...args);
+      const close = handle.close.bind(handle);
+      handle.close = async () => {
+        await close(); closed.push(handle);
+        if (closed.length === 1) throw new Error("injected close acknowledgement failure");
+      };
+      return handle;
+    };
+    syncBuiltinESMExports();
+    try {
+      const output = await results(reference);
+      expect(output[0]?.ok).toBe(true); expect(output.at(-1)).toMatchObject({ ok: false, error: { code: "corruption" } });
+    } finally { fsPromises.open = original; syncBuiltinESMExports(); }
+    expect(closed).toHaveLength(2);
+    for (const handle of closed) await expect(handle.stat()).rejects.toMatchObject({ code: "EBADF" });
+    await noTemporary();
+  });
+  it("A03: concurrent process deletion during materialization returns the original read snapshot", async () => {
+    const first = await put(Buffer.from("a"), "a"); await put(Buffer.from("b"), "b");
+    const second = value(await openFilesystemArtifactStore({ root, storeId: "local" })); stores.push(second);
+    const barrier = new Int32Array(new SharedArrayBuffer(4));
+    const module = new URL("../dist/index.js", import.meta.url).href;
+    const worker = new Worker(`const {parentPort,workerData}=require('node:worker_threads');
+      (async()=>{const {openFilesystemArtifactStore}=await import(workerData.module);const opened=await openFilesystemArtifactStore({root:workerData.root,storeId:'local'});
+      if(!opened.ok)throw Error(JSON.stringify(opened));parentPort.once('message',async()=>{const result=await opened.value.delete('a');
+      Atomics.store(new Int32Array(workerData.barrier),0,1);Atomics.notify(new Int32Array(workerData.barrier),0);parentPort.postMessage(result);opened.value.close();});parentPort.postMessage('ready');})().catch(e=>{throw e;});`,
+      { eval: true, workerData: { root, module, barrier: barrier.buffer } });
+    const db = connection(store); const prepare = db.prepare.bind(db); let intercepted = false;
+    try {
+      expect((await once(worker, "message"))[0]).toBe("ready");
+      const deletion = once(worker, "message");
+      db.prepare = (sql) => {
+        const statement = prepare(sql);
+        if (sql.startsWith("SELECT artifact_id FROM artifacts") && !intercepted) {
+          const all = statement.all.bind(statement);
+          statement.all = (...args) => {
+            const rows = all(...args); intercepted = true; worker.postMessage("delete");
+            expect(Atomics.wait(barrier, 0, 0, 10_000)).not.toBe("timed-out"); return rows;
+          };
+        }
+        return statement;
+      };
+      const page = value(await store.find({ limit: 1 }));
+      expect(page.items).toEqual([first]); expect(page.nextCursor).toBeDefined();
+      expect((await deletion)[0]).toEqual({ ok: true, value: true });
+      expect(value(await second.resolve("a"))).toBeNull();
+      expect(value(await store.find({ cursor: page.nextCursor })).items.map((item) => item.artifactId)).toEqual(["b"]);
+    } finally { db.prepare = prepare; await worker.terminate(); }
+  });
+  it("A03: two instances find/delete concurrently never return false corruption", async () => {
+    for (const id of ["a", "b", "c"]) await put(Buffer.from(id), id);
+    const other = value(await openFilesystemArtifactStore({ root, storeId: "local" })); stores.push(other);
+    const [found, deleted] = await Promise.all([store.find({}), other.delete("a")]);
+    expect(deleted).toEqual({ ok: true, value: true });
+    const ids = value(found).items.map((item) => item.artifactId);
+    expect([JSON.stringify(["a", "b", "c"]), JSON.stringify(["b", "c"])]).toContain(JSON.stringify(ids));
+  });
+  it.each(["resolve", "find"] as const)("A04: %s returns observation_only timeout if deadline expires after SELECT", async (method) => {
+    await put(); let time = 0;
+    const timed = value(await openFilesystemArtifactStore({ root, storeId: "local", clock: () => time })); stores.push(timed);
+    const db = connection(timed); const prepare = db.prepare.bind(db);
+    db.prepare = (sql) => {
+      const statement = prepare(sql);
+      if (method === "resolve" && sql === "SELECT * FROM artifacts WHERE artifact_id=?") {
+        const get = statement.get.bind(statement); statement.get = (...args) => { const row = get(...args); time = 1000; return row; };
+      } else if (method === "find" && sql.startsWith("SELECT artifact_id FROM artifacts")) {
+        const all = statement.all.bind(statement); statement.all = (...args) => { const rows = all(...args); time = 1000; return rows; };
+      }
+      return statement;
+    };
+    try {
+      const options = { deadline: new Date(500).toISOString() };
+      const result = method === "resolve" ? await timed.resolve("artifact-1", options) : await timed.find({}, options);
+      expect(result).toMatchObject({ ok: false, error: { code: "timeout", retrySafety: "observation_only" } });
+    } finally { db.prepare = prepare; }
+    time = 0; expect(value(await timed.resolve("artifact-1"))).not.toBeNull();
+  });
+  it.each(["resolve", "find"] as const)("A04: %s observes cancellation after SELECT", async (method) => {
+    await put(); const controller = new AbortController(); const db = connection(store); const prepare = db.prepare.bind(db);
+    db.prepare = (sql) => {
+      const statement = prepare(sql);
+      if (sql === "SELECT * FROM artifacts WHERE artifact_id=?") {
+        const get = statement.get.bind(statement); statement.get = (...args) => { const row = get(...args); controller.abort(); return row; };
+      }
+      return statement;
+    };
+    try {
+      const result = method === "resolve" ? await store.resolve("artifact-1", { signal: controller.signal }) : await store.find({}, { signal: controller.signal });
+      expect(result).toMatchObject({ ok: false, error: { code: "cancelled" } });
+    } finally { db.prepare = prepare; }
+    expect(value(await store.resolve("artifact-1"))).not.toBeNull();
+  });
+  it("A04: valid read deadlines succeed and invalid deadlines are typed validation", async () => {
+    const reference = await put();
+    expect(value(await store.resolve("artifact-1", { timeoutMs: 1000 }))).toEqual(reference);
+    expect(value(await store.find({}, { timeoutMs: 1000 })).items).toEqual([reference]);
+    expect(await store.resolve("artifact-1", { deadline: "bad" })).toMatchObject({ ok: false, error: { code: "validation" } });
+    expect(await store.find({}, { deadline: "bad" })).toMatchObject({ ok: false, error: { code: "validation" } });
+    expect(await store.resolve("artifact-1", { timeoutMs: 0 })).toMatchObject({ ok: false, error: { code: "timeout", retrySafety: "observation_only" } });
+    expect(await store.find({}, { deadline: "2020-01-01T00:00:00Z" })).toMatchObject({ ok: false, error: { code: "timeout", retrySafety: "observation_only" } });
+  });
+  it.each(["put", "delete"] as const)("A04: %s returns the committed outcome when its budget expires after COMMIT", async (method) => {
+    let time = 0; const timed = value(await openFilesystemArtifactStore({ root, storeId: "local", clock: () => time })); stores.push(timed);
+    if (method === "delete") await put();
+    const db = connection(timed); const exec = db.exec.bind(db);
+    db.exec = (sql) => { exec(sql); if (sql === "COMMIT") time = 1000; };
+    try {
+      const result = method === "put" ? await timed.put(input(), { timeoutMs: 500 }) : await timed.delete("artifact-1", { timeoutMs: 500 });
+      expect(result.ok).toBe(true);
+    } finally { db.exec = exec; }
+    if (method === "put") expect(value(await store.resolve("artifact-1"))).not.toBeNull();
+    else expect(value(await store.resolve("artifact-1"))).toBeNull();
   });
 });
