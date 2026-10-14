@@ -2,9 +2,9 @@
 
 ## 1. Executive Summary
 
-Milestone 2 (`M2`) delivers an end-to-end, zero-mock integration test suite for `@ai-flow/runtime` covering all 8 comprehensive SDLC workflow scenarios.
+Milestone 2 (`M2`) delivers an end-to-end, zero-mock integration test suite for `@ai-flow/runtime` covering all 8 comprehensive SDLC workflow scenarios, augmented by Tier 5 white-box adversarial stress suites (`challenger-m3-1-stress.test.ts` and `challenger-m3-2-stress.test.ts`).
 
-- **Status**: **READY — 100% PASSING (27/27 Tests across 8 Scenario Suites, 494/494 Tests Workspace-wide)**
+- **Status**: **READY — 100% PASSING (27/27 Tests across 8 Scenario Suites, 528/528 Tests Workspace-wide across 34 Test Files)**
 - **Scope**: `@ai-flow/runtime` integration with `@ai-flow/contracts`, `@ai-flow/core`, `@ai-flow/persistence`, `@ai-flow/artifact-store`, `@ai-flow/agent-registry`, and `@ai-flow/herdr-adapter`.
 - **Integrity Compliance**: Zero fake facades, zero hardcoded test returns, zero test skipping (`.skip`/`.todo`). Every test exercises real `SqliteRunStore` via `node:sqlite`, real `FilesystemArtifactStore`, real `FileAgentRegistry` JSON state on disk, real `DeterministicWorkflowEngine`, and deterministic contract-compliant `FakeAgentTransport`.
 - **Concurrency & Contention Resilience**: Configured with 30s suite timeouts and decoupled capacity lease TTLs, surviving parallel test runner execution without timeout aborts or lease expiration races.
@@ -53,7 +53,7 @@ npx vitest run packages/runtime/test/scenarios/08-dag-concurrency.test.ts
 ```bash
 pnpm check:deps     # Verify zero circular dependencies or illegal cross-package imports (Exit 0)
 pnpm typecheck      # Full TypeScript typecheck across all workspace packages (Exit 0)
-pnpm test           # Complete Vitest suite across all workspace packages (Exit 0, 494 tests passing across 32 test files)
+pnpm test           # Complete Vitest suite across all workspace packages (Exit 0, 528 tests passing across 34 test files)
 git diff --check    # Verify clean formatting and whitespace (Exit 0)
 git status --short  # Verify clean working tree (Empty output)
 ```
@@ -72,7 +72,15 @@ git status --short  # Verify clean working tree (Empty output)
 | **06** | `06-restart-recovery.test.ts` | **3** | • **6.1**: Reconstructs state from SQLite RunStore using aggregate checkpoint (`ai-flow.workflow-aggregate+json` v1 codec) + event tail replay, reconciles in-flight execution, and resumes to completion.<br>• **6.2**: Recovers workflow run from complete event history across restarts when no aggregate checkpoint exists.<br>• **6.3**: Fails closed with typed validation error when checkpoint codec is invalid or incompatible. |
 | **07** | `07-persistence-failure.test.ts` | **4** | • **7.1**: SQLite `appendEvents` write failure surfaces typed conflict/corruption error without corrupting run state; idempotent retry succeeds.<br>• **7.2**: `ArtifactStore.put` failure during proposal ingestion halts execution with ZERO false task success claims.<br>• **7.3**: Checkpoint save failure surfaces conflict error without invalidating domain event history or aggregate state.<br>• **7.4**: Optimistic concurrency conflict on parallel event appends preserves strict linear history. |
 | **08** | `08-dag-concurrency.test.ts` | **4** | • **8.1**: Enforces strict topological dependency ordering in Diamond DAG (join task waits for both siblings).<br>• **8.2**: Workflow `maxConcurrency` limit bounds parallel task dispatch.<br>• **8.3**: Agent registry capacity limit (`maxConcurrentTasks: 1`) and monotonic fencing tokens prevent slot over-subscription.<br>• **8.4**: Upstream sibling failure under fail-fast safely halts dependent DAG join branch. |
-| **Total** | **8 Scenario Files** | **27** | **100% Pass Rate Across All 27 Scenarios (494/494 Workspace-wide across 32 test files)** |
+| **Subtotal** | **8 Scenario Files** | **27** | **100% Pass Rate Across All 27 Scenarios** |
+
+### 3.1 Tier 5 White-Box Adversarial Stress Suites (Challenger M3.1 & M3.2)
+
+| # | Suite File | Test Cases | Verbatim Test Invariants & Capabilities Verified |
+|---|---|:---:|---|
+| **M3.1** | `challenger-m3-1-stress.test.ts` | **21** | • **Suite 1: RuntimeService Ingress & Lifecycle Hardening (8 tests)**: `service.start` validation failure on malformed input; cyclic workflow DAG rejection without RunStore mutation; `service.getRun` empty/whitespace validation and missing run null handling; `service.findRuns` invalid query parameters fail-closed; `service.decide` anti-AI automated actor rejection and human governance enforcement; `service.cancel` task-level overload and not_found error handling; `service.resume` schema validation; `service.init` transport error propagation and clean retry.<br>• **Suite 2: TaskDispatcher Edge Cases & Lease Safety (8 tests)**: Unregistered role not_found failure; transport prompt rejection lease cleanup; transport reconcile error lease release; resend rejected lease release; resend timeout error lease release; fatal unhandled exception lease cleanup in `finally`; `scheduleReadyTasks` not_found error handling; transport cancel failure resilience.<br>• **Suite 3: Domain Event Stream Buffering & Lifecycle (5 tests)**: Terminal run replay and immediate termination; multi-page (>100) events strict monotonic replay; storage read failure error propagation; `afterSequence` filtering; clean listener unsubscription on early consumer break. |
+| **M3.2** | `challenger-m3-2-stress.test.ts` | **13** | • **Suite 1: RunOrchestrator.driveRun Hardening (3 tests)**: Pre-dispatch quality gate failure halts dispatch while keeping task in ready status; pre-aborted `AbortSignal` halts immediately without dispatching ready tasks; dispatcher capacity failure surfaces typed error without infinite spin.<br>• **Suite 2: Artifact Proposal Ingestion (3 tests)**: Missing proposal content fail-closed rejection; payload byte length size mismatch fail-closed rejection; malformed proposal schema validation.<br>• **Suite 3: Anti-AI Governance & Dynamic Approval Correlation (2 tests)**: Rejection of modern AI model names, automated prefixes, and empty strings; dynamic approval correlation resolving synthetic/external approval IDs against RunStore requested approvals.<br>• **Suite 4: recoverWorkflowRun Hardening (5 tests)**: Malformed and illegal runId validation; non-existent runId not_found handling; multi-page event tail replay after baseline aggregate checkpoint; in-flight task in `cancelling` state reconciled on restart; transport reconcile network timeout resilience during recovery. |
+| **Total** | **Workspace Test Suite** | **528** | **100% Pass Rate Across All 34 Test Files (528/528 Tests Passing Workspace-wide, Zero Failures, Zero Skips)** |
 
 ---
 
