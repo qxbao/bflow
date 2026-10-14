@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -105,5 +105,70 @@ describe("file-backed agent registry", () => {
   it("times out closed when the process-shared lock is unavailable", async () => {
     await writeFile(`${stateFile}.lock`, "held");
     expect(await registry.list(undefined, { timeoutMs: 20 })).toMatchObject({ ok: false, error: { code: "timeout", retrySafety: "not_started" } });
+  });
+});
+
+describe("P02 registry reliability regressions", () => {
+  it.each([{ timeoutMs: 0 }, { deadline: "2020-01-01T00:00:00.000Z" }])("F05 rejects expired budget without creating state %j", async options => {
+    expect(await registry.acquireLease(acquire(), options)).toMatchObject({ ok: false, error: { code: "timeout", retrySafety: "not_started" } });
+    await expect(access(stateFile)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(access(`${stateFile}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each([{ timeoutMs: -1 }, { timeoutMs: NaN }, { deadline: "invalid" }])("F05 validates malformed options %j", async options => {
+    expect(await registry.upsert(config(), options)).toMatchObject({ ok: false, error: { code: "validation" } });
+    await expect(access(stateFile)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("F05 rechecks budget after lock acquisition and releases its lock", async () => {
+    await registry.upsert(config());
+    const original = await readFile(stateFile, "utf8");
+    let reads = 0;
+    const base = Date.now();
+    const delayed = new FileAgentRegistry({ stateFile, clock: () => time, operationClock: () => ++reads >= 4 ? base + 100 : base });
+    expect(await delayed.acquireLease(acquire(), { timeoutMs: 100 })).toMatchObject({ ok: false, error: { code: "timeout", retrySafety: "not_started" } });
+    expect(await readFile(stateFile, "utf8")).toBe(original);
+    await expect(access(`${stateFile}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await registry.acquireLease(acquire())).toMatchObject({ ok: true, value: { fencingToken: 1 } });
+  });
+
+  it("F05 expiry before rename leaves durable state and fence unchanged", async () => {
+    await registry.upsert(config());
+    const original = await readFile(stateFile, "utf8");
+    let reads = 0;
+    const base = Date.now();
+    const delayed = new FileAgentRegistry({ stateFile, clock: () => time, operationClock: () => ++reads >= 7 ? base + 100 : base });
+    expect(await delayed.acquireLease(acquire(), { timeoutMs: 100 })).toMatchObject({ ok: false, error: { code: "timeout", retrySafety: "not_started" } });
+    expect(await readFile(stateFile, "utf8")).toBe(original);
+    expect((await readdir(folder)).filter(name => name.endsWith(".tmp") || name.endsWith(".lock"))).toEqual([]);
+    expect(await registry.acquireLease(acquire())).toMatchObject({ ok: true, value: { fencingToken: 1 } });
+  });
+
+  it("F05 abort while waiting lock never mutates state", async () => {
+    await registry.upsert(config());
+    const original = await readFile(stateFile, "utf8");
+    await writeFile(`${stateFile}.lock`, "another owner");
+    const controller = new AbortController();
+    const pending = registry.acquireLease(acquire(), { signal: controller.signal });
+    controller.abort();
+    expect(await pending).toMatchObject({ ok: false, error: { code: "cancelled", retryable: false } });
+    expect(await readFile(stateFile, "utf8")).toBe(original);
+    expect(await readFile(`${stateFile}.lock`, "utf8")).toBe("another owner");
+  });
+
+  it("keeps concurrency, durable receipts and stale fencing safe after reopen", async () => {
+    await registry.upsert(config());
+    const results = await Promise.all(Array.from({ length: 10 }, (_, index) =>
+      new FileAgentRegistry({ stateFile, clock: () => time }).acquireLease(acquire(`lease-${index}`))));
+    expect(results.filter(result => result.ok)).toHaveLength(1);
+    const winnerIndex = results.findIndex(result => result.ok);
+    const winner = results[winnerIndex];
+    if (!winner?.ok) throw new Error("Missing winner");
+    const reopened = new FileAgentRegistry({ stateFile, clock: () => time });
+    expect(await reopened.acquireLease(acquire(`lease-${winnerIndex}`))).toEqual(winner);
+    time = new Date(time.getTime() + 2000);
+    expect(await reopened.acquireLease(acquire("replacement"))).toMatchObject({ ok: true, value: { fencingToken: 2 } });
+    expect(await reopened.releaseLease({ leaseId: winner.value.leaseId, fencingToken: winner.value.fencingToken, expectedVersion: 0, releasedAt: time.toISOString(), idempotencyKey: "stale-release" })).toMatchObject({ ok: false, error: { code: "conflict" } });
+    expect(await reopened.renewLease({ leaseId: "replacement", fencingToken: 1, expectedVersion: 0, ttlMs: 1000, requestedAt: time.toISOString(), idempotencyKey: "stale-renew" })).toMatchObject({ ok: false, error: { code: "conflict" } });
   });
 });

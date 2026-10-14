@@ -11,7 +11,9 @@ export interface CommandOutcome {
   readonly exitCode: number | null;
   readonly stdout: string;
   readonly stderr: string;
-  readonly failure?: "spawn" | "timeout" | "aborted" | "output_limit";
+  readonly failure?: "spawn" | "timeout" | "aborted" | "output_limit" | "invalid_arguments" | "runner";
+  /** false proves the command never launched; omission is conservatively uncertain. */
+  readonly started?: boolean;
   readonly cause?: string;
 }
 
@@ -19,15 +21,31 @@ export interface HerdrCommandRunner {
   run(invocation: CommandInvocation): Promise<CommandOutcome>;
 }
 
+export function validArguments(args: readonly string[]): boolean {
+  return Array.isArray(args) && args.every((arg) => typeof arg === "string" && !arg.includes("\0"));
+}
+
 export function createProcessRunner(binary = "herdr"): HerdrCommandRunner {
   return {
     run({ args, signal, timeoutMs, maxOutputBytes = 1024 * 1024 }) {
       return new Promise<CommandOutcome>((resolve) => {
-        if (signal?.aborted) {
-          resolve({ exitCode: null, stdout: "", stderr: "", failure: "aborted" });
+        if (typeof binary !== "string" || !binary || binary.includes("\0") || !validArguments(args)) {
+          resolve({ exitCode: null, stdout: "", stderr: "", failure: "invalid_arguments", started: false });
           return;
         }
-        const child = spawn(binary, [...args], { shell: false, stdio: ["ignore", "pipe", "pipe"] });
+        if (signal?.aborted) {
+          resolve({ exitCode: null, stdout: "", stderr: "", failure: "aborted", started: false });
+          return;
+        }
+        if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
+          resolve({ exitCode: null, stdout: "", stderr: "", failure: "timeout", started: false });
+          return;
+        }
+        let child: ReturnType<typeof spawn>;
+        try { child = spawn(binary, [...args], { shell: false, stdio: ["ignore", "pipe", "pipe"] }); }
+        catch { resolve({ exitCode: null, stdout: "", stderr: "", failure: "spawn", started: false, cause: "Herdr process could not launch" }); return; }
+        let started = false;
+        child.once("spawn", () => { started = true; });
         let stdout = "";
         let stderr = "";
         let failure: CommandOutcome["failure"];
@@ -52,18 +70,18 @@ export function createProcessRunner(binary = "herdr"): HerdrCommandRunner {
           if (which === "stdout") stdout = next;
           else stderr = next;
         };
-        child.stdout.on("data", (chunk: Buffer) => append("stdout", chunk));
-        child.stderr.on("data", (chunk: Buffer) => append("stderr", chunk));
+        child.stdout?.on("data", (chunk: Buffer) => append("stdout", chunk));
+        child.stderr?.on("data", (chunk: Buffer) => append("stderr", chunk));
         child.on("error", (error: Error) => {
           failure ??= "spawn";
-          cause = error.message;
+          cause = error.name === "Error" ? "Herdr process unavailable" : "Herdr process failed";
         });
         child.on("close", (exitCode) => {
           if (settled) return;
           settled = true;
           if (timer !== undefined) clearTimeout(timer);
           signal?.removeEventListener("abort", onAbort);
-          resolve({ exitCode, stdout, stderr, ...(failure && { failure }), ...(cause && { cause }) });
+          resolve({ exitCode, stdout, stderr, started, ...(failure && { failure }), ...(cause && { cause }) });
         });
       });
     }

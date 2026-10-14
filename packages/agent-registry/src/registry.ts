@@ -6,7 +6,7 @@ import type {
   AcquireAgentLeaseRequest, AgentConfiguration, AgentLease, AgentRegistry, AgentResolutionContext,
   ContractError, OperationOptions, OperationResult, ReleaseAgentLeaseRequest, RenewAgentLeaseRequest
 } from "@ai-flow/contracts";
-import { FileRegistryStore, RegistryLockTimeout } from "./store.js";
+import { FileRegistryStore, RegistryLockTimeout, RegistryOptionsError } from "./store.js";
 import type { RegistryState, StoredReceipt } from "./store.js";
 
 const ok = <T>(value: T): OperationResult<T> => ({ ok: true, value });
@@ -36,20 +36,26 @@ function receipt(state: RegistryState, key: string, fingerprint: string): Operat
   return prior.fingerprint === fingerprint ? ok(prior) : fail(conflict("Idempotency key reused with different registry command"));
 }
 
-export interface FileAgentRegistryOptions { readonly stateFile: string; readonly clock?: () => Date }
+export interface FileAgentRegistryOptions {
+  readonly stateFile: string;
+  readonly clock?: () => Date;
+  /** Deadline clock is independent from the trusted lease clock. */
+  readonly operationClock?: () => number;
+}
 
 export class FileAgentRegistry implements AgentRegistry {
   readonly #store: FileRegistryStore;
   readonly #clock: () => Date;
 
   constructor(options: FileAgentRegistryOptions) {
-    this.#store = new FileRegistryStore(options.stateFile);
+    this.#store = new FileRegistryStore(options.stateFile, options.operationClock);
     this.#clock = options.clock ?? (() => new Date());
   }
 
   async #operate<T>(action: (state: RegistryState) => OperationResult<T>, options?: OperationOptions): Promise<OperationResult<T>> {
     try { return await this.#store.transaction(action, options); }
     catch (error) {
+      if (error instanceof RegistryOptionsError) return fail(validation(error.message));
       if (error instanceof RegistryLockTimeout) return fail({ code: "timeout", retryable: true, retrySafety: "not_started", message: error.message });
       if (error instanceof DOMException && error.name === "AbortError") return fail({ code: "cancelled", retryable: false, message: error.message });
       return fail({ code: "corruption", retryable: false, message: error instanceof Error ? error.message : "Registry state error" });
