@@ -5,6 +5,26 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
-  "dependencies": { "@ai-flow/contracts": "workspace:*" }
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@ai-flow/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@ai-flow/agent-registry": "workspace:*",
+    "@ai-flow/artifact-store": "workspace:*",
+    "@ai-flow/core": "workspace:*",
+    "@ai-flow/herdr-adapter": "workspace:*",
+    "@ai-flow/persistence": "workspace:*",
+    "@ai-flow/quality-gates": "workspace:*"
+  }
 }

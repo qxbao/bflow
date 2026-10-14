@@ -232,6 +232,25 @@ importers:
       '@ai-flow/contracts':
         specifier: workspace:*
         version: link:../contracts
+    devDependencies:
+      '@ai-flow/agent-registry':
+        specifier: workspace:*
+        version: link:../agent-registry
+      '@ai-flow/artifact-store':
+        specifier: workspace:*
+        version: link:../artifact-store
+      '@ai-flow/core':
+        specifier: workspace:*
+        version: link:../core
+      '@ai-flow/herdr-adapter':
+        specifier: workspace:*
+        version: link:../herdr-adapter
+      '@ai-flow/persistence':
+        specifier: workspace:*
+        version: link:../persistence
+      '@ai-flow/quality-gates':
+        specifier: workspace:*
+        version: link:../quality-gates
 
 packages:
 
