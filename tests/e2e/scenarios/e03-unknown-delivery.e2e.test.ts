@@ -27,18 +27,25 @@ describe("Scenario E03 — Unknown Delivery & Transport Reconciliation", () => {
     // Configure transport to simulate unknown delivery before write
     harness.transport.setDeliveryMode("unknown-before-write");
 
-    // Pre-send observation hook: assert task.dispatch_requested or running state is persisted in RunStore BEFORE transport write
-    let dispatchIntentObservedBeforeWrite = false;
+    // Pre-send observation hook: assert EXACT task.dispatch_requested event is persisted in RunStore BEFORE transport write
+    let exactDispatchRequestedEvent: DomainEvent | undefined;
+    let payloadIdentityMatched = false;
     harness.transport.onBeforeSend = async (req) => {
       const eventsRes = await harness.runStore.readEvents(req.runId, { limit: 100 });
       if (eventsRes.ok) {
-        const hasDispatchIntent = eventsRes.value.items.some(
-          (e: DomainEvent) =>
-            (e.type === "task.dispatch_requested" && e.taskId === req.taskId) ||
-            (e.type === "task.status_changed" && e.taskId === req.taskId && e.payload.to === "running")
+        const found = eventsRes.value.items.find(
+          (e: DomainEvent) => e.type === "task.dispatch_requested" && e.taskId === req.taskId
         );
-        if (hasDispatchIntent) {
-          dispatchIntentObservedBeforeWrite = true;
+        if (found) {
+          exactDispatchRequestedEvent = found;
+          const payload = found.payload as any;
+          if (
+            payload.requestId === req.requestId &&
+            payload.taskId === req.taskId &&
+            payload.target?.agentId === req.target.agentId
+          ) {
+            payloadIdentityMatched = true;
+          }
         }
       }
     };
@@ -54,8 +61,11 @@ describe("Scenario E03 — Unknown Delivery & Transport Reconciliation", () => {
     const startErr = expectFailure(startRes);
     expect(startErr.code).toBe("unknown_delivery");
 
-    // ARCHITECTURAL INVARIANT: task.dispatch_requested or running state MUST be persisted in RunStore before transport send
-    expect(dispatchIntentObservedBeforeWrite).toBe(true);
+    // ARCHITECTURAL INVARIANT: EXACT task.dispatch_requested event with correlated payload identity
+    // MUST be persisted in RunStore before transport send. Generic running state is NOT dispatch intent.
+    // (Upstream P06 currently violates this by omitting task.dispatch_requested before transport send)
+    expect(exactDispatchRequestedEvent).toBeDefined();
+    expect(payloadIdentityMatched).toBe(true);
 
     // CRITICAL RELIABILITY INVARIANT:
     // Exactly 1 send attempt occurred. NO BLIND AUTOMATIC RESEND!

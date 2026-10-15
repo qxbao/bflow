@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createE2eHarness, type E2eHarness } from "../helpers/harness.js";
 import {
   createArtifactProposal,
-  createSafeSubprocessGate,
+  createRealNodeUnitTestGate,
   createStandardMvpWorkflow,
   createStrictTapParser,
   expectOk,
@@ -25,22 +25,12 @@ describe("Scenario E01 — Happy Path SDLC Integration", () => {
     const runId = `run-${randomUUID()}`;
     const gateId = "qa-gate";
 
-    // 1. Register real CommandQualityGate running a real Node.js test suite producing valid TAP output
+    // 1. Register real CommandQualityGate running a real Node.js test suite with 15 real unit tests
     // Parsed using strict, fail-closed TAP parser enforcing plan (1..15) and minPassedTestsCount (15)
-    const realGate = createSafeSubprocessGate({
+    const realGate = createRealNodeUnitTestGate({
       gateId,
       workingDirectory: harness.tmpDir,
-      scriptBody: `
-        console.log("TAP version 13");
-        console.log("1..15");
-        for (let i = 1; i <= 15; i++) {
-          console.log("ok " + i + " - SDLC unit test #" + i);
-        }
-        console.log("# tests 15");
-        console.log("# pass 15");
-        console.log("# fail 0");
-        process.exit(0);
-      `,
+      testCount: 15,
       required: true,
       minPassedTestsCount: 15,
       outputParser: createStrictTapParser({ requirePlan: true, minPassedTestsCount: 15 })
@@ -172,15 +162,10 @@ describe("Scenario E01 — Happy Path SDLC Integration", () => {
     snap = expectOk(completeQaRes);
     expect(getTask(snap, "qa").status).toBe("succeeded");
 
-    // Advance to terminal state if needed
-    const finalAdv = await harness.ports.engine.advance({
-      runId,
-      expectedVersion: snap.version,
-      idempotencyKey: `final-adv-${runId}`,
-      occurredAt: new Date().toISOString()
-    });
-    if (finalAdv.ok) {
-      snap = finalAdv.value.snapshot;
+    // Advance to terminal state if needed via public Runtime orchestrator
+    if (snap.status !== "succeeded") {
+      const driveFinal = await harness.service.orchestrator.driveRun(runId);
+      snap = expectOk(driveFinal);
     }
 
     // Workflow reached terminal succeeded state!

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { createE2eHarness, type E2eHarness } from "../helpers/harness.js";
 import {
   createQualityGateContext,
+  createRealNodeUnitTestGate,
   createSafeSubprocessGate,
   createStrictTapParser,
   expectOk
@@ -13,13 +14,31 @@ import {
   evaluateAutomatedVsHumanGovernance,
   CommandQualityGate,
   createDefaultSecurityPolicy,
-  DEFAULT_ALLOWED_COMMANDS
+  DEFAULT_ALLOWED_COMMANDS,
+  type QualityCommandOutcome
 } from "@ai-flow/quality-gates";
 import type {
   ApprovalDecision,
   ApprovalRequest,
   QualityGateResult
 } from "@ai-flow/contracts";
+
+function makeCommandOutcome(stdout: string, exitCode = 0): QualityCommandOutcome {
+  return {
+    executable: process.execPath,
+    args: ["--test", "--test-reporter=tap"],
+    cwd: process.cwd(),
+    exitCode,
+    signal: null,
+    stdout,
+    stderr: "",
+    combinedOutput: stdout,
+    durationMs: 10,
+    timedOut: false,
+    aborted: false,
+    outputTruncated: false
+  };
+}
 
 describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
   let harness: E2eHarness;
@@ -30,19 +49,20 @@ describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
     }
   });
 
-  it("evaluates custom contract smoke QualityGate successfully (PASS) with verified evidence", async () => {
+  it("evaluates protocol output smoke QualityGate successfully with checkKind custom and verified evidence", async () => {
     harness = await createE2eHarness();
     const runId = `run-${randomUUID()}`;
 
     const gate = createSafeSubprocessGate({
       gateId: "review-gate-pass",
       workingDirectory: harness.tmpDir,
+      checkKind: "custom",
       scriptBody: `
-        console.log("Contract smoke check passed: schema and boundaries valid");
+        console.log("Protocol output smoke check: runner execution verified");
         process.exit(0);
       `,
       outputExpectation: {
-        mustContain: ["Contract smoke check passed"],
+        mustContain: ["Protocol output smoke check"],
         requireNonEmptyStdout: true
       }
     });
@@ -156,20 +176,28 @@ describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
     expect(timeoutFinding?.severity).toBe("error");
   });
 
-  it("evaluates real test suite with strict TAP parser: passes when tests meet plan", async () => {
+  it("evaluates real test suite with strict TAP parser: passes when real node:test tests meet plan", async () => {
     harness = await createE2eHarness();
     const runId = `run-${randomUUID()}`;
 
-    const gate = createSafeSubprocessGate({
-      gateId: "tap-pass-gate",
+    const gate = createRealNodeUnitTestGate({
+      gateId: "real-node-pass-gate",
       workingDirectory: harness.tmpDir,
-      scriptBody: `
-        console.log("TAP version 13");
-        console.log("1..3");
-        console.log("ok 1 - auth test");
-        console.log("ok 2 - session test");
-        console.log("ok 3 - token test");
-        process.exit(0);
+      testFileContent: `
+        import test from "node:test";
+        import assert from "node:assert/strict";
+
+        test("real auth logic verification", () => {
+          assert.equal(1 + 1, 2);
+        });
+
+        test("real token format verification", () => {
+          assert.equal(typeof "token-123", "string");
+        });
+
+        test("real session duration verification", () => {
+          assert.equal(Math.max(10, 20), 20);
+        });
       `,
       minPassedTestsCount: 3,
       outputParser: createStrictTapParser({ requirePlan: true, minPassedTestsCount: 3 })
@@ -177,42 +205,149 @@ describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
 
     const context = createQualityGateContext({
       runId,
-      gateId: "tap-pass-gate",
+      gateId: "real-node-pass-gate",
       taskId: "qa"
     });
 
     const evalRes = await gate.evaluate(context);
     const result = expectOk(evalRes);
     expect(result.status).toBe("passed");
+    expect(result.metadata?.exitCode).toBe(0);
+    expect(result.findings.length).toBe(0);
   });
 
-  it("evaluates real test suite with strict TAP parser: fails when test fails or plan is missing", async () => {
+  it("evaluates real test suite with strict TAP parser: genuine node:test assertion failure exits non-zero and fails gate", async () => {
     harness = await createE2eHarness();
     const runId = `run-${randomUUID()}`;
 
-    const gate = createSafeSubprocessGate({
-      gateId: "tap-fail-gate",
+    const gate = createRealNodeUnitTestGate({
+      gateId: "real-node-fail-gate",
       workingDirectory: harness.tmpDir,
-      scriptBody: `
-        console.log("TAP version 13");
-        console.log("1..2");
-        console.log("ok 1 - first test");
-        console.log("not ok 2 - second test failed");
-        process.exit(0);
+      testFileContent: `
+        import test from "node:test";
+        import assert from "node:assert/strict";
+
+        test("passing verification", () => {
+          assert.equal(1, 1);
+        });
+
+        test("failing verification", () => {
+          assert.equal(1, 2, "intentional test failure");
+        });
       `,
       outputParser: createStrictTapParser({ requirePlan: true })
     });
 
     const context = createQualityGateContext({
       runId,
-      gateId: "tap-fail-gate",
+      gateId: "real-node-fail-gate",
       taskId: "qa"
     });
 
     const evalRes = await gate.evaluate(context);
     const result = expectOk(evalRes);
     expect(result.status).toBe("failed");
-    expect(result.findings.some((f) => f.code === "TEST_POINT_FAILED")).toBe(true);
+    expect(result.metadata?.exitCode).toBe(1);
+    expect(result.findings.some((f) => f.code === "NON_ZERO_EXIT_CODE" || f.code === "TEST_POINT_FAILED")).toBe(true);
+  });
+
+  it("evaluates actual ZERO test file with minPassedTestsCount: fails when no tests executed", async () => {
+    harness = await createE2eHarness();
+    const runId = `run-${randomUUID()}`;
+
+    const gate = createRealNodeUnitTestGate({
+      gateId: "real-node-zero-gate",
+      workingDirectory: harness.tmpDir,
+      testFileContent: `
+        // Empty test file with zero test cases
+        import test from "node:test";
+        import assert from "node:assert/strict";
+      `,
+      minPassedTestsCount: 1,
+      outputParser: createStrictTapParser({ requirePlan: true, minPassedTestsCount: 1 })
+    });
+
+    const context = createQualityGateContext({
+      runId,
+      gateId: "real-node-zero-gate",
+      taskId: "qa"
+    });
+
+    const evalRes = await gate.evaluate(context);
+    const result = expectOk(evalRes);
+    expect(result.status).toBe("failed");
+    expect(result.findings.some((f) => f.code === "NO_TAP_TEST_POINTS" || f.code === "INSUFFICIENT_PASSED_TESTS")).toBe(true);
+  });
+
+  it("evaluates malformed report negative fixture: rejects deliberately invalid stdout with parser findings", async () => {
+    harness = await createE2eHarness();
+    const runId = `run-${randomUUID()}`;
+
+    const gate = createSafeSubprocessGate({
+      gateId: "malformed-report-gate",
+      workingDirectory: harness.tmpDir,
+      scriptBody: `
+        console.log("MALFORMED STDOUT: NOT A TAP REPORT AT ALL");
+        console.log("Random error message without TAP version or plan");
+        process.exit(0);
+      `,
+      outputParser: createStrictTapParser({ requirePlan: true, minPassedTestsCount: 1 })
+    });
+
+    const context = createQualityGateContext({
+      runId,
+      gateId: "malformed-report-gate",
+      taskId: "qa"
+    });
+
+    const evalRes = await gate.evaluate(context);
+    const result = expectOk(evalRes);
+    expect(result.status).toBe("failed");
+    expect(result.findings.some((f) => f.severity === "error")).toBe(true);
+  });
+
+  it("strict TAP parser fails closed on malformed streams: missing version, bailout, missing plan, bad plan, duplicate IDs, nested subtests", () => {
+    const parser = createStrictTapParser({ requirePlan: true, minPassedTestsCount: 1 });
+
+    // 1. Missing version header
+    const missingVersion = parser(makeCommandOutcome("1..1\nok 1 - auth\n"));
+    expect(missingVersion.findings.some((f) => f.code === "MISSING_OR_INVALID_TAP_VERSION")).toBe(true);
+
+    // 2. Bail out directive
+    const bailedOut = parser(makeCommandOutcome("TAP version 13\n1..2\nok 1 - test 1\nBail out! Unhandled fatal error\n"));
+    expect(bailedOut.findings.some((f) => f.code === "TAP_BAIL_OUT")).toBe(true);
+
+    // 3. Missing plan when required
+    const missingPlan = parser(makeCommandOutcome("TAP version 13\nok 1 - lone test\n"));
+    expect(missingPlan.findings.some((f) => f.code === "TAP_PLAN_MISSING")).toBe(true);
+
+    // 4. Bad plan (plan count mismatch: specified 3, got 1)
+    const badPlan = parser(makeCommandOutcome("TAP version 13\n1..3\nok 1 - only one\n"));
+    expect(badPlan.findings.some((f) => f.code === "TAP_PLAN_COUNT_MISMATCH")).toBe(true);
+
+    // 5. Duplicate or non-sequential IDs
+    const duplicateIds = parser(makeCommandOutcome("TAP version 13\n1..2\nok 1 - first\nok 1 - duplicate first\n"));
+    expect(duplicateIds.findings.some((f) => f.code === "TAP_INVALID_TEST_ID")).toBe(true);
+
+    // 6. Parent/nested TAP: Indented test points must not be counted as flat top-level points
+    const nestedStream = [
+      "TAP version 13",
+      "# Subtest: parent suite",
+      "    # Subtest: nested 1",
+      "    ok 1 - nested 1",
+      "    # Subtest: nested 2",
+      "    ok 2 - nested 2",
+      "    1..2",
+      "ok 1 - parent suite",
+      "1..1",
+      "# tests 1",
+      "# pass 1",
+      "# fail 0"
+    ].join("\n");
+    const nestedRes = parser(makeCommandOutcome(nestedStream));
+    // Top-level must observe exactly 1 test point ("ok 1 - parent suite"), NOT 3
+    expect(nestedRes.passedTests).toBe(1);
+    expect(nestedRes.findings.length).toBe(0);
   });
 
   it("PROBE PM-01 (P04 DEFECT): Required quality gate must not be downgraded or skipped to passed", async () => {
@@ -421,7 +556,7 @@ describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
     expect(govOutcome.canProceedToDelivery).toBe(false);
   });
 
-  it("PROBE PM-08: CommandQualityGate generates arbitrary uncoordinated evaluationId", async () => {
+  it("OBSERVATION PM-08 (CONTRACT/INTEGRATION DECISION): QualityGateContext does not supply evaluationId; Runtime orchestrator coordinates and overrides it", async () => {
     harness = await createE2eHarness();
     const runId = `run-${randomUUID()}`;
 
@@ -440,8 +575,9 @@ describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
     const evalRes = await gate.evaluate(context);
     const result = expectOk(evalRes);
 
-    // Documents contract observation: evaluator creates random evaluationId
-    // which cannot be correlated with workflow task execution attempts.
+    // Contract observation: QualityGateContext in @ai-flow/contracts does not define an evaluationId.
+    // CommandQualityGate generates a default evaluationId, and Runtime orchestrator coordinates
+    // by overwriting it to the requested execution/evaluation ID before persistence.
     expect(result.evaluationId).toBeDefined();
     expect(typeof result.evaluationId).toBe("string");
   });

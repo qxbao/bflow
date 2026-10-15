@@ -42,7 +42,7 @@ export interface ServerExecutionRecord {
 
 /**
  * Deterministic, offline AgentTransport implementation for E2E integration verification.
- * 
+ *
  * Guarantees:
  * 1. Side effects are strictly counted: sendCallsCount vs externalWriteCount.
  * 2. Distinction between cancellation requested (accepted) vs remote execution stopped (confirmStop).

@@ -17,7 +17,9 @@ describe("Scenario E02 — Crash & Recovery Integration", () => {
     }
   });
 
-  it("recovers workflow run state after process restart before task dispatch", async () => {
+  it("recovers workflow run state on honest running reopen across harness instance", async () => {
+    // NOTE: This tests honest re-open of persisted state for a running run across closed store instances.
+    // True pre-dispatch crash boundary is NOT VERIFIED because service.start immediately schedules and dispatches initial tasks.
     harness = await createE2eHarness();
     const runId = `run-${randomUUID()}`;
     const definition = createStandardMvpWorkflow();
