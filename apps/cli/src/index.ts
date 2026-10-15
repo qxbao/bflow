@@ -1,15 +1,51 @@
-/**
- * The executable command surface will be added with the runtime implementation.
- * Keeping this module type-only prevents the bootstrap from pretending a runtime
- * is available while fixing the CLI's dependency boundary now.
- */
-export type {
-  ApprovalDecision,
-  CancellationRequest,
-  ResumeRunInput,
-  RuntimeService,
-  StartRunInput,
-  WorkflowRunSnapshot
-} from "@ai-flow/contracts";
+export {
+  CLI_EXIT_CODES,
+  type ApproveCommandArgs,
+  type CancelCommandArgs,
+  type CliCommandData,
+  type CliCommandName,
+  type CliContext,
+  type CliExecutionResult,
+  type CliExitCode,
+  type CliIo,
+  type CliJsonEnvelope,
+  type CliJsonErrorEnvelope,
+  type CliJsonSuccessEnvelope,
+  type FlowRepositoryConfig,
+  type GlobalCliFlags,
+  type HelpCommandArgs,
+  type InitCommandArgs,
+  type InitCommandOutput,
+  type ParseCliResult,
+  type ParsedCliCommand,
+  type ResumeCommandArgs,
+  type RunCommandArgs,
+  type StatusCommandArgs,
+  type ApprovalDecision,
+  type CancellationRequest,
+  type ContractError,
+  type OperationOptions,
+  type Page,
+  type ResumeRunInput,
+  type RunStatus,
+  type RuntimeService,
+  type StartRunInput,
+  type WorkflowDefinition,
+  type WorkflowRunSnapshot,
+  type RuntimeServicePort
+} from "./types.js";
 
-export type { RuntimeService as RuntimeServicePort } from "@ai-flow/runtime";
+export { parseCliArgs } from "./parser.js";
+export { getHelpText } from "./help.js";
+export {
+  DEFAULT_CONFIG_RELATIVE_PATH,
+  createDefaultWorkflowDefinition,
+  createDefaultRepositoryConfig,
+  resolveConfigPath,
+  loadRepositoryConfig,
+  loadWorkflowDefinitionFromFile,
+  initRepositoryConfig
+} from "./config.js";
+export { formatCommandSuccess, formatCommandError } from "./formatters.js";
+export { executeCommand, runCli } from "./commands.js";
+export { main } from "./bin.js";
