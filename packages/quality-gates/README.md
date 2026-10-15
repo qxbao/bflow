@@ -101,6 +101,7 @@ The `QualitySecurityPolicy` provides defensive, multi-layered application-level 
 8. **Timeout Budget Validation**:
    - Validates timeout integer bounds (`100ms <= timeoutMs <= 2,147,483,647ms`) preventing 32-bit signed integer overflow.
    - Enforces `maxExecutionTimeoutMs` policy ceiling.
+   - On POSIX, runs commands in a separate process group and signals the group on timeout or abort. After a 250ms termination grace period, sends `SIGKILL`, closes output pipes, and returns even if an escaped descendant retains a pipe. Windows terminates the direct child and uses the same bounded pipe cleanup.
 
 ---
 
@@ -139,7 +140,7 @@ As reported by `getSecurityControlLimitationsReport()` and defined in `APPLICATI
 2. **Untrusted Code Execution within Tools**: Test files, project scripts, compiler plugins, or build scripts executed by an allowlisted runner may contain arbitrary code executed by the underlying runtime.
 3. **Time-of-Check to Time-of-Use (TOCTOU)**: Pre-execution path canonicalization (`fs.realpath`) verifies that paths are within allowed directories prior to launch, but cannot prevent race conditions where a concurrently running process alters symlinks during execution.
 4. **Filesystem vs Environment Scrubbing**: Scrubbing `process.env` prevents API keys from being inherited via environment variables, but does not prevent child processes from reading unencrypted configuration files on the local filesystem if readable by the user.
-5. **Grandchild Process Lifecycle**: If a spawned process detaches and creates grandchild processes without OS process group or cgroup containment, those grandchildren may outlive the parent process after timeout termination.
+5. **Grandchild Process Lifecycle**: POSIX process group termination covers ordinary descendants. Descendants that create a new session or process group can escape termination and outlive the command; Windows termination covers only the direct child. Bounded pipe cleanup prevents those descendants from blocking the runner's completion, but does not provide OS cgroup containment.
 
 **Recommended Defense-in-Depth**:
 In production and untrusted CI environments, this application-layer quality gate package must be layered inside OS-level sandboxes (e.g., non-root unprivileged container, rootless Podman, Linux namespaces, or isolated VMs).

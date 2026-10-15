@@ -176,11 +176,15 @@ export function createQualityCommandRunner(): QualityCommandRunner {
 
       return new Promise<OperationResult<QualityCommandOutcome>>((resolve) => {
         let child: ChildProcess;
+        // Give POSIX commands their own process group so ordinary descendants
+        // receive cancellation too. Never signal the runtime's process group.
+        const ownsProcessGroup = process.platform !== "win32";
         try {
           child = spawn(invocation.executable, [...invocation.args], {
             cwd: invocation.cwd,
             env: { ...invocation.env },
             shell: false,
+            detached: ownsProcessGroup,
             stdio: ["ignore", "pipe", "pipe"]
           });
         } catch (err) {
@@ -209,6 +213,22 @@ export function createQualityCommandRunner(): QualityCommandRunner {
         let timeoutTimer: NodeJS.Timeout | undefined = undefined;
         let killTimer: NodeJS.Timeout | undefined = undefined;
 
+        const terminate = (signal: NodeJS.Signals) => {
+          if (ownsProcessGroup && child.pid !== undefined && child.pid > 0) {
+            try {
+              process.kill(-child.pid, signal);
+              return;
+            } catch {
+              // The group may already have exited; try the direct child too.
+            }
+          }
+          try {
+            child.kill(signal);
+          } catch {
+            // Process might have already exited.
+          }
+        };
+
         const cleanup = () => {
           if (timeoutTimer !== undefined) {
             clearTimeout(timeoutTimer);
@@ -226,11 +246,13 @@ export function createQualityCommandRunner(): QualityCommandRunner {
         const scheduleKillTimer = () => {
           if (killTimer === undefined) {
             killTimer = setTimeout(() => {
-              try {
-                child.kill("SIGKILL");
-              } catch {
-                // Process might have already exited
-              }
+              terminate("SIGKILL");
+              // A descendant can detach and retain the output pipes. Closing
+              // our pipe ends bounds completion even when `close` never arrives.
+              child.stdout?.destroy();
+              child.stderr?.destroy();
+              child.unref();
+              settle(child.exitCode, child.signalCode);
             }, 250);
             killTimer.unref();
           }
@@ -242,11 +264,7 @@ export function createQualityCommandRunner(): QualityCommandRunner {
             clearTimeout(timeoutTimer);
             timeoutTimer = undefined;
           }
-          try {
-            child.kill("SIGTERM");
-          } catch {
-            // Process might have already exited
-          }
+          terminate("SIGTERM");
           scheduleKillTimer();
         };
 
@@ -261,11 +279,7 @@ export function createQualityCommandRunner(): QualityCommandRunner {
 
         timeoutTimer = setTimeout(() => {
           timedOut = true;
-          try {
-            child.kill("SIGTERM");
-          } catch {
-            // Process might have already exited
-          }
+          terminate("SIGTERM");
           scheduleKillTimer();
         }, invocation.timeoutMs);
         timeoutTimer.unref();
@@ -290,6 +304,9 @@ export function createQualityCommandRunner(): QualityCommandRunner {
         ) => {
           if (settled) return;
           settled = true;
+          // `close` may arrive before escalation when a surviving descendant
+          // ignores SIGTERM but does not retain a pipe.
+          if (timedOut || aborted) terminate("SIGKILL");
           cleanup();
 
           const durationMs = Date.now() - startTime;
