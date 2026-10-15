@@ -8,16 +8,22 @@ import { createE2eHarness, type E2eHarness } from "../helpers/harness.js";
 const require = createRequire(import.meta.url);
 const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
 import {
+  createArtifactProposal,
   createByteStream,
   createStandardMvpWorkflow,
+  createVerifiedAgentResult,
   expectOk,
   expectFailure,
   readArtifactBytes
 } from "../helpers/fixtures.js";
+import { buildCompleteFeatureWorkflowExample } from "@ai-flow/agent-registry";
 import type {
+  AgentExecutionHandle,
   ArtifactReference,
+  ArtifactStore,
   ArtifactWrite,
-  DomainEvent
+  DomainEvent,
+  TaskState
 } from "@ai-flow/contracts";
 
 describe("Scenario E10 — Failure Injection, Concurrency & Corrupted State", () => {
@@ -420,5 +426,286 @@ describe("Scenario E10 — Failure Injection, Concurrency & Corrupted State", ()
       expect((err as Error).message).toContain("Simulated filesystem failure");
     }
     expect(simulatedErrorThrown).toBe(true);
+  });
+
+  it("enforces receipt collision semantics: idempotent re-binding succeeds while conflicting handles or uncertain delivery after binding fail with conflict", async () => {
+    const definition = createStandardMvpWorkflow();
+    harness = await createE2eHarness({ definitions: [definition] });
+    const runId = `run-receipt-collision-${randomUUID()}`;
+
+    const snap = expectOk(
+      await harness.service.start({
+        runId,
+        definition,
+        input: { requirement: "Receipt collision verification" },
+        idempotencyKey: `start-${runId}`,
+        requestedAt: new Date().toISOString()
+      })
+    );
+
+    const planTask = snap.tasks.find((t: TaskState) => t.taskId === "plan");
+    expect(planTask?.status).toBe("running");
+    expect(planTask?.agentExecution).toBeDefined();
+    const boundHandle = planTask!.agentExecution!;
+
+    // 1. Idempotent re-binding with identical handle succeeds without emitting a duplicate agent.execution_bound event
+    const idemKey = `bind-idem-${randomUUID()}`;
+    const idemBind = expectOk(
+      await harness.engine.bindAgentExecution({
+        runId,
+        taskId: "plan",
+        expectedVersion: snap.version,
+        attempt: planTask!.attempt,
+        handle: boundHandle,
+        idempotencyKey: idemKey,
+        occurredAt: new Date().toISOString()
+      })
+    );
+    expect(idemBind.emittedEvents.some((e) => e.type === "agent.execution_bound")).toBe(false);
+    const currentVersion = idemBind.snapshot.version;
+
+    // 2. Reusing the same command idempotencyKey with a modified payload fails with Idempotency key collision
+    const collidingHandle: AgentExecutionHandle = {
+      ...boundHandle,
+      executionId: `exec-collision-${randomUUID()}`
+    };
+    const keyCollisionErr = expectFailure(
+      await harness.engine.bindAgentExecution({
+        runId,
+        taskId: "plan",
+        expectedVersion: snap.version,
+        attempt: planTask!.attempt,
+        handle: collidingHandle,
+        idempotencyKey: idemKey,
+        occurredAt: new Date().toISOString()
+      })
+    );
+    expect(keyCollisionErr.code).toBe("conflict");
+    expect(keyCollisionErr.message).toContain("Idempotency key collision");
+
+    // 3. Conflicting handle for the same attempt with a fresh idempotencyKey fails with conflict
+    const conflictingHandle: AgentExecutionHandle = {
+      ...boundHandle,
+      executionId: `exec-conflict-${randomUUID()}`
+    };
+    const conflictBindErr = expectFailure(
+      await harness.engine.bindAgentExecution({
+        runId,
+        taskId: "plan",
+        expectedVersion: currentVersion,
+        attempt: planTask!.attempt,
+        handle: conflictingHandle,
+        idempotencyKey: `bind-conflict-${randomUUID()}`,
+        occurredAt: new Date().toISOString()
+      })
+    );
+    expect(conflictBindErr.code).toBe("conflict");
+    expect(conflictBindErr.message).toContain("already has a different execution");
+
+    // 4. Delivery reconciliation with a conflicting bound handle fails with conflict
+    const conflictReconErr = expectFailure(
+      await harness.engine.recordDeliveryReconciliation({
+        runId,
+        taskId: "plan",
+        expectedVersion: currentVersion,
+        requestId: boundHandle.requestId,
+        result: {
+          status: "bound",
+          handle: conflictingHandle
+        },
+        idempotencyKey: `recon-conflict-${randomUUID()}`,
+        occurredAt: new Date().toISOString()
+      })
+    );
+    expect(conflictReconErr.code).toBe("conflict");
+    expect(conflictReconErr.message).toContain("conflicts with the bound execution");
+
+    // 5. Delivery reconciliation claiming not_delivered after execution is already bound fails with conflict
+    const absentAfterBoundErr = expectFailure(
+      await harness.engine.recordDeliveryReconciliation({
+        runId,
+        taskId: "plan",
+        expectedVersion: currentVersion,
+        requestId: boundHandle.requestId,
+        result: {
+          status: "not_delivered",
+          requestId: boundHandle.requestId,
+          retrySafe: true,
+          observedAt: new Date().toISOString()
+        },
+        idempotencyKey: `recon-absent-conflict-${randomUUID()}`,
+        occurredAt: new Date().toISOString()
+      })
+    );
+    expect(absentAfterBoundErr.code).toBe("conflict");
+    expect(absentAfterBoundErr.message).toContain("cannot be uncertain or absent after execution binding");
+  });
+
+  it("enforces session replacement and stale execution fencing against replaced handles and stale AgentResults", async () => {
+    const definition = createStandardMvpWorkflow();
+    harness = await createE2eHarness({ definitions: [definition] });
+    const runId = `run-session-fencing-${randomUUID()}`;
+
+    const snap = expectOk(
+      await harness.service.start({
+        runId,
+        definition,
+        input: { requirement: "Session replacement fencing" },
+        idempotencyKey: `start-${runId}`,
+        requestedAt: new Date().toISOString()
+      })
+    );
+
+    const planTask = snap.tasks.find((t: TaskState) => t.taskId === "plan")!;
+    const boundHandle = planTask.agentExecution!;
+
+    // 1. Binding with a stale attemptId is rejected with conflict
+    const staleAttemptHandle: AgentExecutionHandle = {
+      ...boundHandle,
+      attemptId: `attempt-stale-${randomUUID()}`
+    };
+    const staleBindErr = expectFailure(
+      await harness.engine.bindAgentExecution({
+        runId,
+        taskId: "plan",
+        expectedVersion: snap.version,
+        attempt: planTask.attempt,
+        handle: staleAttemptHandle,
+        idempotencyKey: `bind-stale-attempt-${randomUUID()}`,
+        occurredAt: new Date().toISOString()
+      })
+    );
+    expect(staleBindErr.code).toBe("conflict");
+    expect(staleBindErr.message).toContain("does not match current attempt");
+
+    // 2. Recording an AgentResult from a replaced/stale executionId is rejected with conflict
+    const replacedSessionResult = createVerifiedAgentResult({
+      handle: {
+        ...boundHandle,
+        executionId: `exec-replaced-session-${randomUUID()}`
+      },
+      status: "succeeded"
+    });
+    const replacedResultErr = expectFailure(
+      await harness.engine.recordAgentResult({
+        runId,
+        taskId: "plan",
+        expectedVersion: snap.version,
+        result: replacedSessionResult,
+        idempotencyKey: `result-replaced-${randomUUID()}`,
+        occurredAt: new Date().toISOString()
+      })
+    );
+    expect(replacedResultErr.code).toBe("conflict");
+    expect(replacedResultErr.message).toContain("does not match the bound execution");
+
+    // 3. Recording an AgentResult with a forged/mismatched correlation token is rejected with validation
+    const forgedTokenResult = createVerifiedAgentResult({
+      handle: boundHandle,
+      status: "succeeded"
+    });
+    const tamperedCorrelationResult = {
+      ...forgedTokenResult,
+      verification: {
+        status: "verified" as const,
+        evidence: "Fixture correlation tampered",
+        correlation: {
+          token: `forged-token-${randomUUID()}`,
+          provenance: boundHandle.correlation.provenance,
+          verified: true
+        }
+      }
+    };
+    const forgedTokenErr = expectFailure(
+      await harness.engine.recordAgentResult({
+        runId,
+        taskId: "plan",
+        expectedVersion: snap.version,
+        result: tamperedCorrelationResult,
+        idempotencyKey: `result-forged-token-${randomUUID()}`,
+        occurredAt: new Date().toISOString()
+      })
+    );
+    expect(forgedTokenErr.code).toBe("validation");
+    expect(forgedTokenErr.message).toContain("correlation is not verified");
+
+    // Verify task remains running with original bound execution
+    const afterSnap = expectOk(await harness.service.getRun(runId))!;
+    const afterPlan = afterSnap.tasks.find((t: TaskState) => t.taskId === "plan")!;
+    expect(afterPlan.status).toBe("running");
+    expect(afterPlan.agentExecution?.executionId).toBe(boundHandle.executionId);
+  });
+
+  it("fails closed when artifact publication fails during completeTaskExecution before recording agent.result_recorded", async () => {
+    const definition = createStandardMvpWorkflow();
+    harness = await createE2eHarness({ definitions: [definition] });
+    const runId = `run-artifact-pub-fail-${randomUUID()}`;
+
+    expectOk(
+      await harness.service.start({
+        runId,
+        definition,
+        input: { requirement: "Failed artifact publication test" },
+        idempotencyKey: `start-${runId}`,
+        requestedAt: new Date().toISOString()
+      })
+    );
+
+    const { proposal } = createArtifactProposal({
+      runId,
+      taskId: "plan",
+      kind: "document",
+      logicalName: "plan.md",
+      content: "Expected authentic plan bytes"
+    });
+
+    // Supply corrupted bytes that do not match the proposal's SHA-256 checksum
+    const corruptedBytes = Buffer.from("Corrupted bytes that fail ArtifactStore integrity check", "utf8");
+
+    const completeRes = await harness.service.orchestrator.completeTaskExecution(runId, "plan", {
+      status: "succeeded",
+      summary: "Attempt completion with failing artifact publication",
+      proposals: [proposal],
+      contentByProposalId: { [proposal.proposalId]: corruptedBytes }
+    });
+    const pubErr = expectFailure(completeRes);
+    expect(["corruption", "validation"]).toContain(pubErr.code);
+
+    // Verify agent.result_recorded was NOT persisted and task remains running
+    const eventsPage = expectOk(await harness.runStore.readEvents(runId, { limit: 100 }));
+    expect(eventsPage.items.some((e) => e.type === "agent.result_recorded")).toBe(false);
+
+    const currentSnap = expectOk(await harness.service.getRun(runId))!;
+    expect(currentSnap.tasks.find((t: TaskState) => t.taskId === "plan")?.status).toBe("running");
+  });
+
+  it("verifies P02 buildCompleteFeatureWorkflowExample requires real ArtifactStore and produces trusted stored references", async () => {
+    harness = await createE2eHarness();
+
+    // 1. Rejects missing ArtifactStore fail-closed with validation error
+    const missingStoreRes = await buildCompleteFeatureWorkflowExample(
+      undefined as unknown as ArtifactStore
+    );
+    const missingErr = expectFailure(missingStoreRes);
+    expect(missingErr.code).toBe("validation");
+    expect(missingErr.message).toContain("ArtifactStore is required");
+
+    // 2. Ingests all stage proposals through real FilesystemArtifactStore into trusted 'stored' references
+    const example = expectOk(await buildCompleteFeatureWorkflowExample(harness.artifactStore));
+    const refs: ArtifactReference[] = [
+      example.stages.planner.storedReference,
+      example.stages.developer.storedPatchReference,
+      example.stages.developer.storedTestReportReference,
+      example.stages.reviewer.storedReviewReportReference,
+      example.stages.qa.storedQaReportReference
+    ];
+
+    for (const ref of refs) {
+      expect(ref.trust).toBe("stored");
+      const bytes = expectOk(await readArtifactBytes(harness.artifactStore, ref));
+      expect(bytes.byteLength).toBe(ref.sizeBytes);
+      const actualHash = createHash("sha256").update(bytes).digest("hex");
+      expect(actualHash).toBe(ref.checksum.value);
+    }
   });
 });

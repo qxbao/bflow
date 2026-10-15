@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -8,7 +8,8 @@ const CLI_BIN = resolve(process.cwd(), "apps/cli/dist/bin.js");
 
 function runCli(
   args: string[],
-  cwd?: string
+  cwd?: string,
+  env?: NodeJS.ProcessEnv
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((res) => {
     execFile(
@@ -16,6 +17,7 @@ function runCli(
       [CLI_BIN, ...args],
       {
         cwd: cwd ?? process.cwd(),
+        env: env ? { ...process.env, ...env } : process.env,
         encoding: "utf8",
         timeout: 10000,
         killSignal: "SIGKILL"
@@ -33,7 +35,7 @@ function runCli(
   });
 }
 
-describe("Scenario E09 — CLI Subprocess Verification & Prerequisite Gate", () => {
+describe("Scenario E09 — CLI Subprocess Verification & End-to-End Execution", () => {
   const tempDirs: string[] = [];
 
   function makeTempDir(): string {
@@ -79,10 +81,8 @@ describe("Scenario E09 — CLI Subprocess Verification & Prerequisite Gate", () 
     expect(stderr).toContain("Unknown command 'unknown-command'");
   });
 
-  it("PROBE PM-13 (P07 DEFECT): CLI --version must return exit code 0 and semver string", async () => {
+  it("PROBE PM-13 (VERIFIED): CLI --version returns exit code 0 and semver string", async () => {
     const { stdout, stderr, exitCode } = await runCli(["--version"]);
-    // INVARIANT: Standard CLI entrypoints must support --version flag returning exit code 0 and valid semver
-    // (Upstream P07 does not implement a --version handler and treats it as an unknown command exiting with 2)
     expect(exitCode).toBe(0);
     expect(stderr).toBe("");
     expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
@@ -112,30 +112,101 @@ describe("Scenario E09 — CLI Subprocess Verification & Prerequisite Gate", () 
     expect(statusRes.exitCode).toBeGreaterThanOrEqual(1);
   });
 
-  it("PREREQUISITE GATE (BLOCKED_BY_P07): business commands fail because bin.ts does not compose RuntimeService", async () => {
+  it("composes RuntimeService in bin.ts: fails closed without config, and executes run, status, and cancel end-to-end after init", async () => {
     const workDir = makeTempDir();
-    // Initialize repository first
-    await runCli(["init"], workDir);
 
-    // Attempt to start a workflow run via CLI binary
-    const runRes = await runCli(["run", "Build authentication feature", "-j"], workDir);
+    // 1. Without .ai-flow/config.json, status -j fails closed with not_found
+    const uninitStatus = await runCli(["status", "-j"], workDir);
+    expect(uninitStatus.exitCode).toBe(1);
+    const parsedUninit = JSON.parse(uninitStatus.stderr);
+    expect(parsedUninit.ok).toBe(false);
+    expect(parsedUninit.error.code).toBe("not_found");
 
-    // Real verification: binary returns exit code 1 with transport_unavailable
-    expect(runRes.exitCode).toBe(1);
+    // 2. Initialize repository configuration
+    const initRes = await runCli(["init"], workDir);
+    expect(initRes.exitCode).toBe(0);
 
-    const parsedJson = JSON.parse(runRes.stderr);
-    expect(parsedJson.ok).toBe(false);
-    expect(parsedJson.error.code).toBe("transport_unavailable");
-    expect(parsedJson.error.message).toContain("RuntimeService is not configured");
+    // 3. Create executable mock-herdr script in workDir for HerdrAdapter CLI verification
+    const mockHerdrPath = join(workDir, "mock-herdr.mjs");
+    const mockHerdrScript = `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "--version") {
+  process.stdout.write("herdr 0.9.1\\n");
+  process.exit(0);
+}
+if (args[0] === "api" && args[1] === "schema") {
+  process.stdout.write("protocol: 22\\nschema_version: 1\\n");
+  process.exit(0);
+}
+const makeAgent = (paneId, status, rev) => {
+  const role = paneId.startsWith("pane-") ? paneId.slice("pane-".length) : paneId;
+  return {
+    agent: "claude-code",
+    name: role + "-default",
+    agent_status: status,
+    workspace_id: "ws-1",
+    tab_id: "tab-1",
+    pane_id: paneId,
+    terminal_id: "term-" + paneId,
+    revision: rev,
+    state_change_seq: rev,
+    agent_session: { source: "herdr", kind: "id", value: "session-" + paneId }
+  };
+};
+if (args[0] === "agent" && args[1] === "get") {
+  const paneId = args[2] ?? "pane-planner";
+  process.stdout.write(JSON.stringify({ id: "cli:agent:get", result: { type: "agent_info", agent: makeAgent(paneId, "idle", 1) } }) + "\\n");
+  process.exit(0);
+}
+if (args[0] === "agent" && args[1] === "prompt") {
+  const paneId = args[2] ?? "pane-planner";
+  process.stdout.write(JSON.stringify({ id: "cli:agent:prompt", result: { type: "agent_prompted", agent: makeAgent(paneId, "working", 2) } }) + "\\n");
+  process.exit(0);
+}
+if (args[0] === "agent" && args[1] === "send-keys") {
+  process.stdout.write(JSON.stringify({ id: "cli:agent:send-keys", result: { type: "ok" } }) + "\\n");
+  process.exit(0);
+}
+if (args[0] === "agent" && args[1] === "wait") {
+  const paneId = args[2] ?? "pane-planner";
+  process.stdout.write(JSON.stringify({ id: "cli:agent:wait", result: { type: "agent_wait", agent: makeAgent(paneId, "working", 2) } }) + "\\n");
+  process.exit(0);
+}
+if (args[0] === "agent" && args[1] === "read") {
+  process.stdout.write("");
+  process.exit(0);
+}
+process.exit(0);
+`;
+    writeFileSync(mockHerdrPath, mockHerdrScript, "utf8");
+    chmodSync(mockHerdrPath, 0o755);
 
-    // Attempt to check status
-    const statusRes = await runCli(["status", "-j"], workDir);
-    expect(statusRes.exitCode).toBe(1);
-    const parsedStatus = JSON.parse(statusRes.stderr);
-    expect(parsedStatus.ok).toBe(false);
-    expect(parsedStatus.error.code).toBe("transport_unavailable");
+    const cliEnv = { AI_FLOW_HERDR_BIN: mockHerdrPath };
 
-    // CONCLUSION: CLI E2E execution is BLOCKED_BY_P07 because CLI entrypoint (apps/cli/src/bin.ts)
-    // lacks runtime container wiring and dependency injection.
+    // 4. Execute flow run "Build authentication feature" -j
+    const runRes = await runCli(["run", "Build authentication feature", "-j"], workDir, cliEnv);
+    expect(runRes.exitCode).toBe(0);
+    const parsedRun = JSON.parse(runRes.stdout);
+    expect(parsedRun.ok).toBe(true);
+    expect(parsedRun.command).toBe("run");
+    expect(parsedRun.data.status).toBe("running");
+    const runId: string = parsedRun.data.runId;
+    expect(typeof runId).toBe("string");
+
+    // 5. Execute flow status <runId> -j
+    const statusRes = await runCli(["status", runId, "-j"], workDir, cliEnv);
+    expect(statusRes.exitCode).toBe(0);
+    const parsedStatus = JSON.parse(statusRes.stdout);
+    expect(parsedStatus.ok).toBe(true);
+    expect(parsedStatus.command).toBe("status");
+    expect(parsedStatus.data.runId).toBe(runId);
+
+    // 6. Execute flow cancel <runId> --reason "Stop test" -j
+    const cancelRes = await runCli(["cancel", runId, "--reason", "Stop test", "-j"], workDir, cliEnv);
+    expect(cancelRes.exitCode).toBe(0);
+    const parsedCancel = JSON.parse(cancelRes.stdout);
+    expect(parsedCancel.ok).toBe(true);
+    expect(parsedCancel.command).toBe("cancel");
+    expect(["cancelling", "cancelled"]).toContain(parsedCancel.data.status);
   });
 });

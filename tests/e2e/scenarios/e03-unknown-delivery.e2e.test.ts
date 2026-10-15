@@ -253,4 +253,167 @@ describe("Scenario E03 — Unknown Delivery & Transport Reconciliation", () => {
     expect(harness.transport.externalWriteCount).toBe(1);
     expect(harness.transport.reconcileCallsCount).toBe(1);
   });
+
+  it("retains unknown_delivery across harness restart: resume does not blind-resend when reconciliation remains uncertain", async () => {
+    harness = await createE2eHarness();
+    const runId = `run-restart-unknown-${randomUUID()}`;
+    const definition = createStandardMvpWorkflow();
+
+    // Pre-restart: transport returns unknown_delivery before write, and initial reconcile also returns unknown_delivery
+    harness.transport.setDeliveryMode("unknown-before-write");
+
+    const startRes = await harness.service.start({
+      runId,
+      definition,
+      input: { requirement: "Unknown delivery across restart - remains uncertain" },
+      idempotencyKey: `start-${runId}`,
+      requestedAt: new Date().toISOString()
+    });
+    const startErr = expectFailure(startRes);
+    expect(startErr.code).toBe("unknown_delivery");
+
+    expect(harness.transport.sendCallsCount).toBe(1);
+    expect(harness.transport.externalWriteCount).toBe(0);
+    expect(harness.transport.reconcileCallsCount).toBe(1);
+
+    const preRestartSnap = expectOk(await harness.service.getRun(runId));
+    expect(preRestartSnap?.tasks.find((t: TaskState) => t.taskId === "plan")?.status).toBe("blocked");
+
+    // Verify task.dispatch_requested is durably persisted in SQLite before restart
+    const preRestartEvents = expectOk(await harness.runStore.readEvents(runId, { limit: 100 }));
+    expect(preRestartEvents.items.some((e: DomainEvent) => isTaskDispatchRequestedEvent(e) && e.taskId === "plan")).toBe(true);
+
+    // Restart harness against the same SQLite database and filesystem
+    const restarted = await harness.restart();
+
+    // Post-restart: reconciliation still returns unknown_delivery (no entry in serverLedger)
+    const resumeRes = await restarted.service.resume(runId);
+    const resumeSnap = expectOk(resumeRes);
+
+    // CRITICAL INVARIANT: No blind automatic resend across restart!
+    expect(harness.transport.sendCallsCount).toBe(1);
+    expect(harness.transport.externalWriteCount).toBe(0);
+    expect(harness.transport.reconcileCallsCount).toBe(2);
+
+    const postRestartPlan = resumeSnap.tasks.find((t: TaskState) => t.taskId === "plan");
+    expect(postRestartPlan?.status).toBe("blocked");
+    expect(postRestartPlan?.agentExecution).toBeUndefined();
+  });
+
+  it("reconciles unknown_delivery as bound across harness restart: resume binds existing remote execution with zero duplicate sends", async () => {
+    harness = await createE2eHarness();
+    const runId = `run-restart-bound-${randomUUID()}`;
+    const definition = createStandardMvpWorkflow();
+
+    // Pre-restart: remote write succeeds (recorded in serverLedger), but response times out
+    harness.transport.setDeliveryMode("unknown-after-write");
+
+    // Initial pre-restart reconciliation also returns unknown_delivery so task becomes "blocked" before restart
+    harness.transport.setCustomReconcileHandler(
+      async (req: AgentReconciliationRequest): Promise<OperationResult<AgentReconciliationResult>> => ({
+        ok: true,
+        value: {
+          status: "unknown_delivery",
+          requestId: req.requestId,
+          retrySafe: false,
+          observedAt: new Date().toISOString(),
+          reason: "Remote ledger temporarily unreachable before restart",
+          manualInterventionRequired: true
+        }
+      })
+    );
+
+    const startRes = await harness.service.start({
+      runId,
+      definition,
+      input: { requirement: "Unknown delivery across restart - reconciled bound" },
+      idempotencyKey: `start-${runId}`,
+      requestedAt: new Date().toISOString()
+    });
+    const startErr = expectFailure(startRes);
+    expect(startErr.code).toBe("unknown_delivery");
+
+    expect(harness.transport.sendCallsCount).toBe(1);
+    expect(harness.transport.externalWriteCount).toBe(1);
+
+    const preRestartSnap = expectOk(await harness.service.getRun(runId));
+    const preRestartPlan = preRestartSnap?.tasks.find((t: TaskState) => t.taskId === "plan");
+    expect(preRestartPlan?.status).toBe("blocked");
+    expect(preRestartPlan?.agentExecution).toBeUndefined();
+
+    // Restart harness; clear custom handler so default reconciliation reads the bound handle from serverLedger
+    harness.transport.setCustomReconcileHandler(undefined);
+    const restarted = await harness.restart();
+
+    const resumeRes = await restarted.service.resume(runId);
+    const resumeSnap = expectOk(resumeRes);
+
+    const postRestartPlan = resumeSnap.tasks.find((t: TaskState) => t.taskId === "plan");
+    expect(postRestartPlan?.status).toBe("running");
+    expect(postRestartPlan?.agentExecution).toBeDefined();
+
+    // CRITICAL INVARIANT: Zero duplicate transport sends or external writes across restart!
+    expect(harness.transport.sendCallsCount).toBe(1);
+    expect(harness.transport.externalWriteCount).toBe(1);
+    expect(harness.transport.reconcileCallsCount).toBe(2);
+  });
+
+  it("reconciles unknown_delivery as not_delivered (retrySafe) across harness restart: resume safely re-dispatches and binds task", async () => {
+    harness = await createE2eHarness();
+    const runId = `run-restart-not-delivered-${randomUUID()}`;
+    const definition = createStandardMvpWorkflow();
+
+    // Pre-restart: send returns unknown_delivery before write, and initial reconcile fails due to transport unavailability
+    harness.transport.setDeliveryMode("unknown-before-write");
+    harness.transport.setCustomReconcileHandler(
+      async (): Promise<OperationResult<AgentReconciliationResult>> => ({
+        ok: false,
+        error: {
+          code: "transport_unavailable",
+          retryable: true,
+          message: "Transport offline during pre-restart reconciliation"
+        }
+      })
+    );
+
+    const startRes = await harness.service.start({
+      runId,
+      definition,
+      input: { requirement: "Unknown delivery across restart - reconciled not_delivered" },
+      idempotencyKey: `start-${runId}`,
+      requestedAt: new Date().toISOString()
+    });
+    const startErr = expectFailure(startRes);
+    expect(startErr.code).toBe("transport_unavailable");
+
+    expect(harness.transport.sendCallsCount).toBe(1);
+    expect(harness.transport.externalWriteCount).toBe(0);
+
+    // Restart harness; after restart, reconciliation proves not_delivered (retrySafe: true) and subsequent send succeeds
+    harness.transport.setDeliveryMode("accepted");
+    harness.transport.setCustomReconcileHandler(
+      async (req: AgentReconciliationRequest): Promise<OperationResult<AgentReconciliationResult>> => ({
+        ok: true,
+        value: {
+          status: "not_delivered",
+          requestId: req.requestId,
+          retrySafe: true,
+          observedAt: new Date().toISOString()
+        }
+      })
+    );
+
+    const restarted = await harness.restart();
+    const resumeRes = await restarted.service.resume(runId);
+    const resumeSnap = expectOk(resumeRes);
+
+    const postRestartPlan = resumeSnap.tasks.find((t: TaskState) => t.taskId === "plan");
+    expect(postRestartPlan?.status).toBe("running");
+    expect(postRestartPlan?.agentExecution).toBeDefined();
+
+    // CRITICAL INVARIANT: Safe re-dispatch after restart proves not_delivered -> 2 total sends, 1 external write
+    expect(harness.transport.sendCallsCount).toBe(2);
+    expect(harness.transport.externalWriteCount).toBe(1);
+    expect(harness.transport.reconcileCallsCount).toBe(2);
+  });
 });
