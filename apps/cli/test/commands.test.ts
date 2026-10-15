@@ -1,4 +1,5 @@
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -132,6 +133,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "bflow-cli-test-"));
+    execFileSync("git", ["init", "--quiet", tempDir]);
   });
 
   afterEach(async () => {
@@ -191,13 +193,13 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
   });
 
   describe("2. bflow init execution & overwrite protection", () => {
-    it("creates .bflow/config.json with valid defaultWorkflow in fresh directory", async () => {
+    it("creates .bflow/config.yaml with valid defaultWorkflow in fresh directory", async () => {
       const result = await runCli(["init"], { cwd: tempDir });
       expect(result.exitCode).toBe(0);
       expect(result.ok).toBe(true);
       expect(result.stdout).toContain("bflow repository configuration");
 
-      const configFilePath = join(tempDir, ".bflow", "config.json");
+      const configFilePath = join(tempDir, ".bflow", "config.yaml");
       const content = await readFile(configFilePath, "utf-8");
       const parsed = JSON.parse(content);
 
@@ -209,78 +211,21 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(wfValidation.success).toBe(true);
     });
 
-    it("prevents overwriting existing configuration without confirmation or force", async () => {
-      const firstRun = await runCli(["init"], { cwd: tempDir });
-      expect(firstRun.exitCode).toBe(0);
-
-      const configFilePath = join(tempDir, ".bflow", "config.json");
-      const originalContent = await readFile(configFilePath, "utf-8");
-
-      // Running a second time WITHOUT --force or confirmOverwrite must fail with conflict
-      const secondRun = await runCli(["init"], { cwd: tempDir });
-      expect(secondRun.exitCode).toBe(CLI_EXIT_CODES.RUNTIME_ERROR);
-      expect(secondRun.ok).toBe(false);
-      expect(secondRun.error?.code).toBe("conflict");
-      expect(secondRun.stderr).toContain("already exists");
-
-      // Verify the original file was preserved untouched
-      const contentAfterRefusal = await readFile(configFilePath, "utf-8");
-      expect(contentAfterRefusal).toBe(originalContent);
-    });
-
-    it("refuses to overwrite when confirmOverwrite returns false", async () => {
-      await runCli(["init"], { cwd: tempDir });
-      const configFilePath = join(tempDir, ".bflow", "config.json");
-      const originalContent = await readFile(configFilePath, "utf-8");
-
-      const confirmOverwrite = vi.fn().mockResolvedValue(false);
-      const result = await runCli(["init"], { cwd: tempDir, confirmOverwrite });
-
-      expect(result.exitCode).toBe(CLI_EXIT_CODES.RUNTIME_ERROR);
-      expect(result.ok).toBe(false);
-      expect(result.error?.code).toBe("conflict");
-      expect(confirmOverwrite).toHaveBeenCalled();
-
-      // Ensure file content was preserved
-      const contentAfter = await readFile(configFilePath, "utf-8");
-      expect(contentAfter).toBe(originalContent);
-    });
-
-    it("overwrites configuration when confirmOverwrite returns true", async () => {
-      await runCli(["init", "--name", "old-project"], { cwd: tempDir });
-
-      const confirmOverwrite = vi.fn().mockResolvedValue(true);
-      const result = await runCli(["init", "--name", "new-project"], {
-        cwd: tempDir,
-        confirmOverwrite
-      });
-
-      expect(result.exitCode).toBe(0);
-      expect(result.ok).toBe(true);
-      expect(confirmOverwrite).toHaveBeenCalled();
-
-      const configFilePath = join(tempDir, ".bflow", "config.json");
-      const content = await readFile(configFilePath, "utf-8");
-      const parsed = JSON.parse(content);
-      expect(parsed.projectName).toBe("new-project");
-    });
-
-    it("overwrites configuration when --force or --yes is specified", async () => {
+    it("preserves existing configuration across repeat init, --force, --yes and overwrite callbacks", async () => {
       await runCli(["init", "--name", "initial-project"], { cwd: tempDir });
-
-      const forceResult = await runCli(["init", "--name", "forced-project", "--force"], {
-        cwd: tempDir
-      });
-      expect(forceResult.exitCode).toBe(0);
-      expect(forceResult.ok).toBe(true);
-
-      const configFilePath = join(tempDir, ".bflow", "config.json");
-      const content = await readFile(configFilePath, "utf-8");
-      const parsed = JSON.parse(content);
-      expect(parsed.projectName).toBe("forced-project");
+      const path = join(tempDir, ".bflow", "config.yaml");
+      const original = await readFile(path, "utf8");
+      const confirmOverwrite = vi.fn().mockResolvedValue(true);
+      for (const flags of [[], ["--force"], ["--yes"]]) {
+        const result = await runCli(["init", "--name", "changed", ...flags], { cwd: tempDir, confirmOverwrite });
+        expect(result.ok).toBe(true);
+        expect(await readFile(path, "utf8")).toBe(original);
+      }
+      expect(confirmOverwrite).not.toHaveBeenCalled();
     });
 
     it("creates configuration in custom subproject directory with custom name", async () => {
+      await mkdir(join(tempDir, "services", "auth"), { recursive: true });
       const result = await runCli(
         ["init", "--dir", "services/auth", "--name", "auth-service"],
         { cwd: tempDir }
@@ -288,7 +233,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(result.exitCode).toBe(0);
       expect(result.ok).toBe(true);
 
-      const subConfigPath = join(tempDir, "services", "auth", ".bflow", "config.json");
+      const subConfigPath = join(tempDir, ".bflow", "config.yaml");
       const content = await readFile(subConfigPath, "utf-8");
       const parsed = JSON.parse(content);
       expect(parsed.projectName).toBe("auth-service");
@@ -305,7 +250,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(envelope.ok).toBe(true);
       expect(envelope.command).toBe("init");
       expect(envelope.data.config.projectName).toBe("json-test");
-      expect(envelope.data.configPath).toContain("config.json");
+      expect(envelope.data.configPath).toContain("config.yaml");
     });
   });
 
@@ -351,9 +296,9 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(result.stdout).toContain("WAITING");
     });
 
-    it("fails closed when .bflow/config.json in cwd contains malformed JSON", async () => {
+    it("fails closed when .bflow/config.yaml in cwd contains malformed JSON", async () => {
       await runCli(["init"], { cwd: tempDir });
-      const configPath = join(tempDir, ".bflow", "config.json");
+      const configPath = join(tempDir, ".bflow", "config.yaml");
       await writeFile(configPath, "{ invalid json content: 123", "utf-8");
 
       const runtime = createMockRuntime();
@@ -366,9 +311,9 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(runtime.start).not.toHaveBeenCalled();
     });
 
-    it("fails closed when .bflow/config.json has unsupported schemaVersion", async () => {
+    it("fails closed when .bflow/config.yaml has unsupported schemaVersion", async () => {
       await runCli(["init"], { cwd: tempDir });
-      const configPath = join(tempDir, ".bflow", "config.json");
+      const configPath = join(tempDir, ".bflow", "config.yaml");
       const original = JSON.parse(await readFile(configPath, "utf-8"));
 
       const corruptVersion = { ...original, schemaVersion: "2" };
@@ -384,9 +329,9 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(runtime.start).not.toHaveBeenCalled();
     });
 
-    it("fails closed when .bflow/config.json is missing required fields", async () => {
+    it("fails closed when .bflow/config.yaml is missing required fields", async () => {
       await runCli(["init"], { cwd: tempDir });
-      const configPath = join(tempDir, ".bflow", "config.json");
+      const configPath = join(tempDir, ".bflow", "config.yaml");
       await writeFile(configPath, JSON.stringify({ schemaVersion: "1" }), "utf-8");
 
       const runtime = createMockRuntime();
@@ -413,7 +358,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
 
     it("supports custom --workflow definition JSON file", async () => {
       await runCli(["init"], { cwd: tempDir });
-      const configPath = join(tempDir, ".bflow", "config.json");
+      const configPath = join(tempDir, ".bflow", "config.yaml");
       const configContent = JSON.parse(await readFile(configPath, "utf-8"));
       const customWf: WorkflowDefinition = {
         ...configContent.defaultWorkflow,
@@ -996,7 +941,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
     it("returns valid transport_unavailable error conforming to ContractErrorSchema with retryable: true", async () => {
       const commandsRequiringRuntime: readonly (readonly string[])[] = [
         ["run", "Build service"],
-        ["status"],
+        ["status", "run-123"],
         ["approve", "qa", "--by", "alice"],
         ["resume", "run-123"],
         ["cancel", "run-123", "--expected-version", "1"]
@@ -1068,7 +1013,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
         expect(stdoutMessages[0]).toContain("Usage: bflow <command>");
       }
 
-      const parsedStatus = parseCliArgs(["status"]);
+      const parsedStatus = parseCliArgs(["status", "run-123"]);
       if (parsedStatus.ok) {
         await executeCommand(parsedStatus.value, { io, runtime: undefined });
         expect(stderrMessages.length).toBeGreaterThan(0);
@@ -1209,18 +1154,18 @@ process.exit(0);
       }
     });
 
-    it("fails closed in main() when .bflow/config.json is missing or malformed", async () => {
+    it("fails closed in main() when .bflow/config.yaml is missing or malformed", async () => {
       const prevExitCode = process.exitCode;
       try {
         const io = { stdout: () => {}, stderr: () => {} };
 
-        const missingRes = await main(["status", "--json"], { cwd: tempDir, io });
+        const missingRes = await main(["status", "run-123", "--json"], { cwd: tempDir, io });
         expect(missingRes.exitCode).toBe(CLI_EXIT_CODES.RUNTIME_ERROR);
         expect(missingRes.ok).toBe(false);
         expect(missingRes.error?.code).toBe("not_found");
 
         await main(["init"], { cwd: tempDir, io });
-        await writeFile(join(tempDir, ".bflow", "config.json"), "{ invalid json", "utf8");
+        await writeFile(join(tempDir, ".bflow", "config.yaml"), "{ invalid json", "utf8");
 
         const malformedRes = await main(["run", "Test malformed config", "--json"], {
           cwd: tempDir,

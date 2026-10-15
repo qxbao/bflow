@@ -56,3 +56,12 @@ export {
   type ComposedCliRuntime
 } from "./runtime.js";
 export { main } from "./bin.js";
+
+export { EnvironmentLifecycle, EnvironmentError } from "./environment.js";
+export type { EnvironmentIntegration, EnvironmentDependencies, EnvironmentCompositionInput, EnvironmentStatus } from "./environment.js";
+export { identifyRepository } from "./repository.js";
+export type { RepositoryIdentity } from "./repository.js";
+export { readEnvironmentConfig, defaultEnvironmentConfig, ENVIRONMENT_CONFIG_PATH } from "./environment-config.js";
+export type { EnvironmentConfig } from "./environment-config.js";
+export { environmentProcessRunner, namedSessionEnvironment } from "./environment-process.js";
+export type { EnvironmentProcessRunner, EnvironmentProcessRequest, EnvironmentProcessResult } from "./environment-process.js";

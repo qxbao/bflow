@@ -130,6 +130,23 @@ export function formatCommandSuccess(
     return formatInitOutput(data);
   }
 
+  if ("checks" in data) {
+    return [`Repository: ${data.workspaceRoot}`, `Session: ${data.sessionId ?? "none"}`,
+      ...data.checks.map((check) => `${check.status.toUpperCase()} ${check.name}: ${check.message}`)].join("\n");
+  }
+  if ("server" in data) {
+    return [`Repository: ${data.workspaceRoot}`, `Session: ${data.sessionName}`,
+      `Server: ${data.server}; configuration: ${data.configuration}`,
+      `Pane/agent observation: ${data.liveObservation ? "live" : "persisted (may be stale)"}`,
+      `Environment: ${data.manifest?.status ?? "not started"}`,
+      ...(data.manifest?.panes.map((pane) => `${pane.role}: ${pane.transportState} (${pane.workspaceId}/${pane.tabId}/${pane.paneId}, agent ${pane.agentId})`) ?? []),
+      ...data.issues].join("\n");
+  }
+  if ("panes" in data) {
+    return [`Repository: ${data.workspaceRoot}`, `Session: ${data.sessionId}; environment: ${data.status}`,
+      ...data.panes.map((pane) => `${pane.role}: ${pane.transportState} (${pane.paneId}, agent ${pane.agentId})`)].join("\n");
+  }
+
   if (isSnapshot(data)) {
     switch (command) {
       case "run":

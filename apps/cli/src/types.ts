@@ -1,3 +1,5 @@
+import type { EnvironmentDependencies, EnvironmentStatus } from "./environment.js";
+import type { EnvironmentDoctorReport, SessionManifest } from "@bflow/contracts";
 import type {
   ApprovalDecision,
   CancellationRequest,
@@ -14,6 +16,10 @@ import type {
 import type { ConcreteRuntimeService } from "@bflow/runtime";
 
 export type CliCommandName =
+  | "up"
+  | "down"
+  | "attach"
+  | "doctor"
   | "init"
   | "run"
   | "status"
@@ -42,6 +48,12 @@ export interface InitCommandArgs extends GlobalCliFlags {
   readonly configPath?: string | undefined;
   readonly projectName?: string | undefined;
   readonly force: boolean;
+}
+
+export interface EnvironmentCommandArgs extends GlobalCliFlags {
+  readonly command: "up" | "down" | "attach" | "doctor";
+  readonly timeoutMs?: number | undefined;
+  readonly yes: boolean;
 }
 
 export interface RunCommandArgs extends GlobalCliFlags {
@@ -101,6 +113,7 @@ export interface VersionCommandArgs extends GlobalCliFlags {
 }
 
 export type ParsedCliCommand =
+  | EnvironmentCommandArgs
   | InitCommandArgs
   | RunCommandArgs
   | StatusCommandArgs
@@ -141,6 +154,9 @@ export interface InitCommandOutput {
 }
 
 export type CliCommandData =
+  | EnvironmentStatus
+  | EnvironmentDoctorReport
+  | SessionManifest
   | InitCommandOutput
   | WorkflowRunSnapshot
   | Page<WorkflowRunSnapshot>
@@ -167,6 +183,7 @@ export interface CliIo {
 }
 
 export interface CliContext {
+  readonly environment?: EnvironmentDependencies | undefined;
   readonly cwd?: string | undefined;
   readonly runtime?: RuntimeService | ConcreteRuntimeService | undefined;
   readonly io?: CliIo | undefined;
