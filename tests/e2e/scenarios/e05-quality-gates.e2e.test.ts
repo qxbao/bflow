@@ -1,22 +1,19 @@
 import { describe, expect, it, afterEach } from "vitest";
 import { randomUUID } from "node:crypto";
-import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { createE2eHarness, type E2eHarness } from "../helpers/harness.js";
 import {
-  createArtifactProposal,
   createQualityGateContext,
   createSafeSubprocessGate,
-  createStandardMvpWorkflow
+  expectOk
 } from "../helpers/fixtures.js";
 import {
+  evaluateAutomatedVsHumanGovernance,
   CommandQualityGate,
-  evaluateAutomatedVsHumanGovernance
+  createDefaultSecurityPolicy,
+  DEFAULT_ALLOWED_COMMANDS
 } from "@ai-flow/quality-gates";
 import type {
-  QualityGateContext,
-  QualityGateResult,
-  TaskState
+  QualityGateResult
 } from "@ai-flow/contracts";
 
 describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
@@ -32,7 +29,7 @@ describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
     harness = await createE2eHarness();
     const runId = `run-${randomUUID()}`;
 
-    const gate = await createSafeSubprocessGate({
+    const gate = createSafeSubprocessGate({
       gateId: "review-gate-pass",
       workingDirectory: harness.tmpDir,
       scriptBody: `
@@ -52,16 +49,14 @@ describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
     });
 
     const evalRes = await gate.evaluate(context);
-    expect(evalRes.error).toBeUndefined();
-    expect(evalRes.ok).toBe(true);
-    const result: QualityGateResult = evalRes.value;
+    const result: QualityGateResult = expectOk(evalRes);
 
     expect(result.status).toBe("passed");
     expect(result.gateId).toBe("review-gate-pass");
     expect(result.runId).toBe(runId);
     expect(result.producedArtifacts.length).toBe(1);
-    expect(result.producedArtifacts[0].expectedIntegrity.checksum.algorithm).toBe("sha256");
-    expect(result.producedArtifacts[0].expectedIntegrity.sizeBytes).toBeGreaterThan(0);
+    expect(result.producedArtifacts[0]!.expectedIntegrity.checksum.algorithm).toBe("sha256");
+    expect(result.producedArtifacts[0]!.expectedIntegrity.sizeBytes).toBeGreaterThan(0);
     expect(result.metadata?.exitCode).toBe(0);
   });
 
@@ -69,7 +64,7 @@ describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
     harness = await createE2eHarness();
     const runId = `run-${randomUUID()}`;
 
-    const gate = await createSafeSubprocessGate({
+    const gate = createSafeSubprocessGate({
       gateId: "qa-gate-fail",
       workingDirectory: harness.tmpDir,
       scriptBody: `
@@ -85,9 +80,7 @@ describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
     });
 
     const evalRes = await gate.evaluate(context);
-    expect(evalRes.error).toBeUndefined();
-    expect(evalRes.ok).toBe(true);
-    const result: QualityGateResult = evalRes.value;
+    const result: QualityGateResult = expectOk(evalRes);
 
     expect(result.status).toBe("failed");
     expect(result.findings.length).toBeGreaterThan(0);
@@ -101,7 +94,7 @@ describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
     harness = await createE2eHarness();
     const runId = `run-${randomUUID()}`;
 
-    const gate = await createSafeSubprocessGate({
+    const gate = createSafeSubprocessGate({
       gateId: "evidence-gate",
       workingDirectory: harness.tmpDir,
       scriptBody: `
@@ -120,9 +113,7 @@ describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
     });
 
     const evalRes = await gate.evaluate(context);
-    expect(evalRes.error).toBeUndefined();
-    expect(evalRes.ok).toBe(true);
-    const result: QualityGateResult = evalRes.value;
+    const result: QualityGateResult = expectOk(evalRes);
 
     expect(result.status).toBe("failed");
     const evidenceFinding = result.findings.find((f) => f.code === "MISSING_EXECUTION_EVIDENCE");
@@ -135,7 +126,7 @@ describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
     const runId = `run-${randomUUID()}`;
 
     // Subprocess with infinite busy loop
-    const gate = await createSafeSubprocessGate({
+    const gate = createSafeSubprocessGate({
       gateId: "timeout-gate",
       workingDirectory: harness.tmpDir,
       scriptBody: `
@@ -153,9 +144,7 @@ describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
     });
 
     const evalRes = await gate.evaluate(context);
-    expect(evalRes.error).toBeUndefined();
-    expect(evalRes.ok).toBe(true);
-    const result: QualityGateResult = evalRes.value;
+    const result: QualityGateResult = expectOk(evalRes);
 
     expect(result.status).toBe("error");
     const timeoutFinding = result.findings.find((f) => f.code === "COMMAND_TIMEOUT");
@@ -165,15 +154,59 @@ describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
   });
 
   // =========================================================================
-  // UPSTREAM DEFECT PROBES (Reproduction tests for findings PM-03, PM-04, PM-08)
+  // UPSTREAM DEFECT PROBES (Reproduction tests asserting safety invariants)
+  // These tests assert TRUE SYSTEM SAFETY. If upstream P04 fails to uphold
+  // the invariant, the test correctly fails (RED) to document the defect.
   // =========================================================================
 
-  it("PROBE PM-03: outputExpectation.minPassedTestsCount is silently ignored without outputParser", async () => {
+  it("PROBE PM-01 (P04 DEFECT): Required quality gate must not be downgraded or skipped to passed", async () => {
+    harness = await createE2eHarness();
+    const runId = `run-${randomUUID()}`;
+
+    // Gate configured with skip: true in spec, but required in workflow definition
+    const policyRes = createDefaultSecurityPolicy({
+      allowedRootDirs: [harness.tmpDir],
+      assignedWorktreePath: harness.tmpDir,
+      maxExecutionTimeoutMs: 30000,
+      allowedCommands: [...DEFAULT_ALLOWED_COMMANDS]
+    });
+    const policy = expectOk(policyRes);
+
+    const gate = new CommandQualityGate({
+      spec: {
+        gateId: "probe-pm01-skip-gate",
+        checkKind: "unit_test",
+        command: { executable: "node", args: ["-e", "process.exit(0);"] },
+        workingDirectory: harness.tmpDir,
+        required: true,
+        skip: true, // Evaluator spec requests skip
+        skipReason: "Local skip requested"
+      },
+      securityPolicy: policy
+    });
+
+    const context = createQualityGateContext({
+      runId,
+      gateId: "probe-pm01-skip-gate",
+      taskId: "qa",
+      required: true // Workflow definition mandates gate is REQUIRED!
+    });
+
+    const evalRes = await gate.evaluate(context);
+    const result = expectOk(evalRes);
+
+    // SAFETY INVARIANT: A required quality gate CANNOT be skipped to "passed" status!
+    // If skipped, it must evaluate to "failed" or "blocked", never "passed".
+    // (Upstream P04 currently violates this by returning status: "passed" with code: "CHECK_SKIPPED")
+    expect(result.status).not.toBe("passed");
+  });
+
+  it("PROBE PM-03 (P04 DEFECT): Missing required quality test count evidence must fail the gate", async () => {
     harness = await createE2eHarness();
     const runId = `run-${randomUUID()}`;
 
     // Gate configured with minPassedTestsCount: 100, but without outputParser
-    const gate = await createSafeSubprocessGate({
+    const gate = createSafeSubprocessGate({
       gateId: "probe-pm03-gate",
       workingDirectory: harness.tmpDir,
       scriptBody: `
@@ -192,17 +225,15 @@ describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
     });
 
     const evalRes = await gate.evaluate(context);
-    expect(evalRes.error).toBeUndefined();
-    expect(evalRes.ok).toBe(true);
-    const result = evalRes.value;
+    const result = expectOk(evalRes);
 
-    // DEFECT REPRODUCTION ASSERTION:
-    // Because minPassedTestsCount check is nested exclusively inside `if (this.spec.outputParser)`,
-    // the gate evaluates to status "passed" despite running 0 out of 100 required tests!
-    expect(result.status).toBe("passed");
+    // SAFETY INVARIANT: When minPassedTestsCount is 100, running 0 tests MUST FAIL!
+    // (Upstream P04 currently violates this by nesting the check only inside `if (this.spec.outputParser)`)
+    expect(result.status).toBe("failed");
+    expect(result.findings.some((f) => f.code === "MISSING_EXECUTION_EVIDENCE")).toBe(true);
   });
 
-  it("PROBE PM-04: evaluateAutomatedVsHumanGovernance accepts foreign run quality gate results", async () => {
+  it("PROBE PM-04 (P04 DEFECT): Governance evaluation must reject foreign run quality gate results", async () => {
     const foreignRunId = `run-foreign-${randomUUID()}`;
     const targetRunId = `run-target-${randomUUID()}`;
 
@@ -217,10 +248,9 @@ describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
     };
 
     const govRes = await evaluateAutomatedVsHumanGovernance({
-      action: "deploy_release",
-      role: "delivery",
       runId: targetRunId,
       automatedGateResults: [foreignPassedGate],
+      requiresHumanApproval: true,
       humanApprovalDecision: {
         schemaVersion: 1,
         approvalId: `appr-${randomUUID()}`,
@@ -231,25 +261,24 @@ describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
         decision: "approved",
         decidedBy: "human_release_manager",
         decidedAt: new Date().toISOString(),
+        feedbackArtifacts: [],
         idempotencyKey: `appr-key-${randomUUID()}`
       }
     });
 
-    // DEFECT REPRODUCTION ASSERTION:
-    // evaluateAutomatedVsHumanGovernance does NOT check that gate.runId === request.runId.
-    // The foreign run's gate result is accepted, returning ok: true!
-    expect(govRes.error).toBeUndefined();
-    expect(govRes.ok).toBe(true);
-    expect(govRes.value?.allAutomatedGatesPassed).toBe(true);
-    expect(govRes.value?.canProceedToDelivery).toBe(true);
+    const govOutcome = expectOk(govRes);
+
+    // SAFETY INVARIANT: A gate result from a foreign workflow run CANNOT satisfy the target run!
+    // (Upstream P04 currently violates this by never checking gate.runId === request.runId)
+    expect(govOutcome.allAutomatedGatesPassed).toBe(false);
+    expect(govOutcome.canProceedToDelivery).toBe(false);
   });
 
-  it("PROBE PM-08: CommandQualityGate generates arbitrary evaluationId divergence", async () => {
+  it("PROBE PM-08: CommandQualityGate generates arbitrary uncoordinated evaluationId", async () => {
     harness = await createE2eHarness();
     const runId = `run-${randomUUID()}`;
-    const requestedEvaluationId = `eval-orchestrator-requested-${randomUUID()}`;
 
-    const gate = await createSafeSubprocessGate({
+    const gate = createSafeSubprocessGate({
       gateId: "probe-pm08-gate",
       workingDirectory: harness.tmpDir,
       scriptBody: `process.exit(0);`
@@ -262,14 +291,9 @@ describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
     });
 
     const evalRes = await gate.evaluate(context);
-    expect(evalRes.ok).toBe(true);
+    const result = expectOk(evalRes);
 
-    // DEFECT REPRODUCTION ASSERTION:
-    // evaluator.ts line 253 generates an uncoordinated random UUID:
-    // const evaluationId = sanitizeIdentifier(`eval-${this.spec.gateId}-${crypto.randomUUID()}`);
-    // This forces orchestrator.ts:826 to forcefully overwrite it:
-    // const effectiveResult: QualityGateResult = { ...gateResult, evaluationId };
-    expect(evalRes.value.evaluationId).toContain("eval-probe-pm08-gate-");
-    expect(evalRes.value.evaluationId).toContain("eval-probe-pm08-gate-");
+    // Documented behavior: evaluator mints its own uncoordinated random UUID evaluationId
+    expect(result.evaluationId).toContain("eval-probe-pm08-gate-");
   });
 });

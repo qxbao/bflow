@@ -4,7 +4,8 @@ import { createE2eHarness, type E2eHarness } from "../helpers/harness.js";
 import {
   createArtifactProposal,
   createSafeSubprocessGate,
-  createStandardMvpWorkflow
+  createStandardMvpWorkflow,
+  expectOk
 } from "../helpers/fixtures.js";
 import type { TaskState, WorkflowRunSnapshot } from "@ai-flow/contracts";
 
@@ -22,12 +23,36 @@ describe("Scenario E01 — Happy Path SDLC Integration", () => {
     const runId = `run-${randomUUID()}`;
     const gateId = "qa-gate";
 
-    // 1. Register real CommandQualityGate running a safe node subprocess
+    // 1. Register real CommandQualityGate running a real Node.js test runner suite (15 actual passing tests)
+    // with strict machine-readable count parser
     const realGate = createSafeSubprocessGate({
       gateId,
       workingDirectory: harness.tmpDir,
-      nodeScript: "console.log('Automated verification: 15 unit tests passed successfully'); process.exit(0);",
-      required: true
+      nodeScript: `
+        import test from "node:test";
+        import assert from "node:assert";
+
+        for (let i = 1; i <= 15; i++) {
+          test("SDLC unit test #" + i, () => {
+            assert.strictEqual(typeof i, "number");
+          });
+        }
+      `,
+      required: true,
+      minPassedTestsCount: 15,
+      outputParser: (outcome) => {
+        const stdout = outcome.stdout;
+        const passMatch = stdout.match(/(?:#|ℹ)\s*pass\s+(\d+)/);
+        const failMatch = stdout.match(/(?:#|ℹ)\s*fail\s+(\d+)/);
+        const passStr = passMatch?.[1];
+        const failStr = failMatch?.[1];
+        const passedTests = passStr !== undefined ? parseInt(passStr, 10) : 0;
+        const failedTests = failStr !== undefined ? parseInt(failStr, 10) : 0;
+        return {
+          passedTests,
+          failedTests
+        };
+      }
     });
     harness.qualityGate.register(gateId, realGate);
 
@@ -40,9 +65,7 @@ describe("Scenario E01 — Happy Path SDLC Integration", () => {
       idempotencyKey: `start-${runId}`,
       requestedAt: new Date().toISOString()
     });
-
-    expect(startRes.ok).toBe(true);
-    if (!startRes.ok) throw new Error(startRes.error.message);
+    expectOk(startRes);
 
     const getTask = (snap: WorkflowRunSnapshot, taskId: string): TaskState => {
       const task = snap.tasks.find((t) => t.taskId === taskId);
@@ -52,9 +75,7 @@ describe("Scenario E01 — Happy Path SDLC Integration", () => {
 
     // Drive initial dispatch
     const execInitRes = await harness.service.orchestrator.driveRun(runId);
-    expect(execInitRes.ok).toBe(true);
-    if (!execInitRes.ok) throw new Error(execInitRes.error.message);
-    let snap = execInitRes.value;
+    let snap = expectOk(execInitRes);
 
     // --- Stage 1: Plan ---
     let planTask = getTask(snap, "plan");
@@ -81,17 +102,13 @@ describe("Scenario E01 — Happy Path SDLC Integration", () => {
         contentByProposalId: { [planProposal.proposalId]: planBytes }
       }
     );
-    expect(completePlanRes.ok).toBe(true);
-    if (!completePlanRes.ok) throw new Error(completePlanRes.error.message);
-    snap = completePlanRes.value;
+    snap = expectOk(completePlanRes);
     expect(getTask(snap, "plan").status).toBe("succeeded");
 
     // --- Stage 2: Implement ---
     // Schedule and dispatch ready task via orchestrator execution loop
     const execImpRes = await harness.service.orchestrator.driveRun(runId);
-    expect(execImpRes.ok).toBe(true);
-    if (!execImpRes.ok) throw new Error(execImpRes.error.message);
-    snap = execImpRes.value;
+    snap = expectOk(execImpRes);
     expect(getTask(snap, "implement").status).toBe("running");
 
     // Create patch proposal
@@ -113,16 +130,12 @@ describe("Scenario E01 — Happy Path SDLC Integration", () => {
         contentByProposalId: { [patchProposal.proposalId]: patchBytes }
       }
     );
-    expect(completeImpRes.ok).toBe(true);
-    if (!completeImpRes.ok) throw new Error(completeImpRes.error.message);
-    snap = completeImpRes.value;
+    snap = expectOk(completeImpRes);
     expect(getTask(snap, "implement").status).toBe("succeeded");
 
     // --- Stage 3: Review (Requires Approval) ---
     const execRevRes = await harness.service.orchestrator.driveRun(runId);
-    expect(execRevRes.ok).toBe(true);
-    if (!execRevRes.ok) throw new Error(execRevRes.error.message);
-    snap = execRevRes.value;
+    snap = expectOk(execRevRes);
     expect(getTask(snap, "review").status).toBe("running");
 
     const completeRevRes = await harness.service.orchestrator.completeTaskExecution(
@@ -133,9 +146,7 @@ describe("Scenario E01 — Happy Path SDLC Integration", () => {
         summary: "Code review completed with no critical findings"
       }
     );
-    expect(completeRevRes.ok).toBe(true);
-    if (!completeRevRes.ok) throw new Error(completeRevRes.error.message);
-    snap = completeRevRes.value;
+    snap = expectOk(completeRevRes);
 
     // Review requires approval: the run is paused in waiting/blocked state awaiting human decision
     expect(["waiting", "blocked", "running"]).toContain(snap.status);
@@ -146,22 +157,15 @@ describe("Scenario E01 — Happy Path SDLC Integration", () => {
       decidedBy: "lead_engineer",
       reason: "All code and security criteria satisfied"
     });
-    expect(approveRes.ok).toBe(true);
-    if (!approveRes.ok) throw new Error(approveRes.error.message);
-    snap = approveRes.value;
+    snap = expectOk(approveRes);
 
     // --- Stage 4: QA (Requires Real Quality Gate) ---
-    // If not auto-dispatched by approval continuation, execute workflow
     const snapBeforeQa = await harness.service.getRun(runId);
-    expect(snapBeforeQa.ok).toBe(true);
-    if (!snapBeforeQa.ok || !snapBeforeQa.value) throw new Error("Missing snapshot before QA");
-    snap = snapBeforeQa.value;
+    snap = expectOk(snapBeforeQa)!;
     let qaTask = getTask(snap, "qa");
     if (qaTask.status !== "running") {
       const execQaRes = await harness.service.orchestrator.driveRun(runId);
-      expect(execQaRes.ok).toBe(true);
-      if (!execQaRes.ok) throw new Error(execQaRes.error.message);
-      snap = execQaRes.value;
+      snap = expectOk(execQaRes);
       qaTask = getTask(snap, "qa");
     }
     expect(qaTask.status).toBe("running");
@@ -175,9 +179,7 @@ describe("Scenario E01 — Happy Path SDLC Integration", () => {
         summary: "Automated test suite execution completed"
       }
     );
-    expect(completeQaRes.ok).toBe(true);
-    if (!completeQaRes.ok) throw new Error(completeQaRes.error.message);
-    snap = completeQaRes.value;
+    snap = expectOk(completeQaRes);
     expect(getTask(snap, "qa").status).toBe("succeeded");
 
     // Advance to terminal state if needed
@@ -198,20 +200,20 @@ describe("Scenario E01 — Happy Path SDLC Integration", () => {
     // --- Persistence & Storage Integrity Assertions ---
     // 1. Re-open SQLite RunStore from disk and verify snapshot
     const finalGet = await harness.service.getRun(runId);
-    expect(finalGet.ok).toBe(true);
-    if (!finalGet.ok || !finalGet.value) throw new Error("Missing final snapshot");
-    expect(finalGet.value.status).toBe("succeeded");
-    expect(finalGet.value.tasks.every((t: TaskState) => t.status === "succeeded")).toBe(true);
+    const finalSnap = expectOk(finalGet);
+    expect(finalSnap).not.toBeNull();
+    expect(finalSnap!.status).toBe("succeeded");
+    expect(finalSnap!.tasks.every((t: TaskState) => t.status === "succeeded")).toBe(true);
 
     // 2. Read artifacts from FilesystemArtifactStore and check checksums
     const planArt = await harness.artifactStore.resolve(planProposal.proposalId);
-    expect(planArt.ok).toBe(true);
-    if (!planArt.ok || !planArt.value) throw new Error("Missing plan artifact");
-    expect(planArt.value.checksum.value).toBe(planProposal.expectedIntegrity.checksum.value);
+    const planRef = expectOk(planArt);
+    expect(planRef).not.toBeNull();
+    expect(planRef!.checksum.value).toBe(planProposal.expectedIntegrity.checksum.value);
 
     const patchArt = await harness.artifactStore.resolve(patchProposal.proposalId);
-    expect(patchArt.ok).toBe(true);
-    if (!patchArt.ok || !patchArt.value) throw new Error("Missing patch artifact");
-    expect(patchArt.value.checksum.value).toBe(patchProposal.expectedIntegrity.checksum.value);
+    const patchRef = expectOk(patchArt);
+    expect(patchRef).not.toBeNull();
+    expect(patchRef!.checksum.value).toBe(patchProposal.expectedIntegrity.checksum.value);
   });
 });

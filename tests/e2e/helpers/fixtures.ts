@@ -18,7 +18,9 @@ import {
   createDefaultSecurityPolicy,
   DEFAULT_ALLOWED_COMMANDS,
   type QualityCheckKind,
-  type QualityCheckOutputExpectation
+  type QualityCheckOutputExpectation,
+  type QualityCommandOutcome,
+  type QualityFinding
 } from "@ai-flow/quality-gates";
 
 /**
@@ -274,13 +276,19 @@ export function createGatedSingleTaskWorkflow(options: {
 export function createSafeSubprocessGate(options: {
   readonly gateId: string;
   readonly workingDirectory: string;
-  readonly nodeScript?: string;
-  readonly scriptBody?: string;
-  readonly checkKind?: QualityCheckKind;
-  readonly required?: boolean;
-  readonly minPassedTestsCount?: number;
-  readonly timeoutMs?: number;
-  readonly outputExpectation?: QualityCheckOutputExpectation;
+  readonly nodeScript?: string | undefined;
+  readonly scriptBody?: string | undefined;
+  readonly checkKind?: QualityCheckKind | undefined;
+  readonly required?: boolean | undefined;
+  readonly minPassedTestsCount?: number | undefined;
+  readonly timeoutMs?: number | undefined;
+  readonly outputExpectation?: QualityCheckOutputExpectation | undefined;
+  readonly outputParser?: ((outcome: QualityCommandOutcome) => {
+    readonly findings?: readonly QualityFinding[];
+    readonly passedTests?: number;
+    readonly failedTests?: number;
+    readonly skippedTests?: number;
+  }) | undefined;
 }): CommandQualityGate {
   const scriptContent = options.nodeScript ?? options.scriptBody ?? "process.exit(0);";
   const scriptFileName = `test-gate-${options.gateId}.mjs`;
@@ -321,7 +329,8 @@ export function createSafeSubprocessGate(options: {
         ? { outputExpectation: options.outputExpectation }
         : options.minPassedTestsCount !== undefined
         ? { outputExpectation: { minPassedTestsCount: options.minPassedTestsCount } }
-        : {})
+        : {}),
+      ...(options.outputParser ? { outputParser: options.outputParser } : {})
     },
     securityPolicy: policyRes.value
   });

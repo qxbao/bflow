@@ -1,8 +1,13 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { randomUUID } from "node:crypto";
 import { createE2eHarness, type E2eHarness } from "../helpers/harness.js";
-import { createStandardMvpWorkflow, createVerifiedAgentResult } from "../helpers/fixtures.js";
-import type { TaskState, OperationResult, CancellationReceipt } from "@ai-flow/contracts";
+import {
+  createStandardMvpWorkflow,
+  createVerifiedAgentResult,
+  expectOk,
+  expectFailure
+} from "../helpers/fixtures.js";
+import type { TaskState, OperationResult, CancellationResult } from "@ai-flow/contracts";
 
 describe("Scenario E07 — Cancellation & Cleanup", () => {
   let harness: E2eHarness;
@@ -26,8 +31,8 @@ describe("Scenario E07 — Cancellation & Cleanup", () => {
       idempotencyKey: `start-${runId}`,
       requestedAt: new Date().toISOString()
     });
-    expect(startRes.ok).toBe(true);
-    const planTask = startRes.value.tasks.find((t: TaskState) => t.taskId === "plan")!;
+    const startSnap = expectOk(startRes);
+    const planTask = startSnap.tasks.find((t: TaskState) => t.taskId === "plan")!;
     expect(planTask.status).toBe("running");
     expect(planTask.agentExecution).toBeDefined();
     const planHandle = planTask.agentExecution!;
@@ -37,9 +42,7 @@ describe("Scenario E07 — Cancellation & Cleanup", () => {
       runId,
       reason: "User cancelled operation before completion"
     });
-    expect(cancelRes.ok).toBe(true);
-
-    const cancelledSnap = cancelRes.value;
+    const cancelledSnap = expectOk(cancelRes);
     expect(cancelledSnap.status).toBe("cancelled");
     const cancelledPlanTask = cancelledSnap.tasks.find((t: TaskState) => t.taskId === "plan")!;
     expect(cancelledPlanTask.status).toBe("cancelled");
@@ -60,12 +63,12 @@ describe("Scenario E07 — Cancellation & Cleanup", () => {
       releasedAt: new Date().toISOString(),
       idempotencyKey: `probe-double-release-${randomUUID()}`
     });
-    expect(doubleRelease.ok).toBe(false);
-    expect(doubleRelease.error?.code).toBe("conflict");
-    expect(doubleRelease.error?.message).toContain("already released");
+    const doubleReleaseErr = expectFailure(doubleRelease);
+    expect(doubleReleaseErr.code).toBe("conflict");
+    expect(doubleReleaseErr.message).toContain("already released");
 
     // 5. Verify late agent result from cancelled execution is rejected
-    const verifiedResult = createVerifiedAgentResult({
+    createVerifiedAgentResult({
       handle: planHandle,
       status: "succeeded"
     });
@@ -79,7 +82,8 @@ describe("Scenario E07 — Cancellation & Cleanup", () => {
       }
     );
     // Once cancelled, task cannot be transitioned to succeeded
-    expect(lateResult.ok).toBe(false);
+    const lateResultErr = expectFailure(lateResult);
+    expect(lateResultErr.code).toBeDefined();
   });
 
   it("handles repeated cancellation requests idempotently and rejects new cancellation on terminal runs", async () => {
@@ -94,7 +98,7 @@ describe("Scenario E07 — Cancellation & Cleanup", () => {
       idempotencyKey: `start-${runId}`,
       requestedAt: new Date().toISOString()
     });
-    const snapshot = startRes.value;
+    const snapshot = expectOk(startRes);
 
     const cancellationId = `cancel-req-${randomUUID()}`;
     const cancellationRequest = {
@@ -110,17 +114,17 @@ describe("Scenario E07 — Cancellation & Cleanup", () => {
 
     // First cancel using explicit CancellationRequest
     const cancel1 = await harness.service.cancel(cancellationRequest);
-    expect(cancel1.ok).toBe(true);
-    expect(cancel1.value.status).toBe("cancelled");
+    const cancel1Snap = expectOk(cancel1);
+    expect(cancel1Snap.status).toBe("cancelled");
 
     // Subsequent cancel with a NEW request on terminal run must be rejected with conflict
     const cancelNewOnTerminal = await harness.service.cancel({
       runId,
       reason: "Second cancel attempt after terminal"
     });
-    expect(cancelNewOnTerminal.ok).toBe(false);
-    expect(cancelNewOnTerminal.error?.code).toBe("conflict");
-    expect(cancelNewOnTerminal.error?.message).toContain("terminal");
+    const cancelErr = expectFailure(cancelNewOnTerminal);
+    expect(cancelErr.code).toBe("conflict");
+    expect(cancelErr.message).toContain("terminal");
   });
 
   it("PROBE PM-11: reveals that runtime unconditionally confirms cancellation stop even if transport.cancel fails", async () => {
@@ -129,11 +133,11 @@ describe("Scenario E07 — Cancellation & Cleanup", () => {
     const runId = `run-probe-pm11-${randomUUID()}`;
 
     // Force transport.cancel to fail / report error
-    harness.transport.cancel = async (): Promise<OperationResult<CancellationReceipt>> => {
+    harness.transport.cancel = async (): Promise<OperationResult<CancellationResult>> => {
       return {
         ok: false,
         error: {
-          code: "unavailable",
+          code: "transport_unavailable",
           retryable: true,
           message: "Remote agent runner unresponsive to cancellation signal"
         }
@@ -156,13 +160,14 @@ describe("Scenario E07 — Cancellation & Cleanup", () => {
       reason: "Cancel with failing transport"
     });
 
-    // Because of the defect in service.ts:399, cancelRes returns ok: true
-    // and marks the task as terminal 'cancelled' even though the remote agent is still running!
-    // We document this behavior:
-    expect(cancelRes.ok).toBe(true);
-    expect(cancelRes.value.tasks.find((t: TaskState) => t.taskId === "plan")?.status).toBe("cancelled");
-
-    // This proves that Runtime currently emits false 'stopped' confirmation
-    // without verifying transport stop evidence.
+    // SAFETY INVARIANT: Cancellation accepted must NOT be confirmed as stopped when transport cancel failed!
+    // When transport.cancel fails, the task must NOT be falsely marked with terminal status "cancelled".
+    // (Upstream P06 service.ts:399 violates this by unconditionally calling confirmCancellationStop even if transport.cancel fails)
+    if (cancelRes.ok) {
+      const planTask = cancelRes.value.tasks.find((t: TaskState) => t.taskId === "plan");
+      expect(planTask?.status).not.toBe("cancelled");
+    } else {
+      expect(cancelRes.error.code).toBe("transport_unavailable");
+    }
   });
 });

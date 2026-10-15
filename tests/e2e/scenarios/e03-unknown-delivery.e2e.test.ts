@@ -1,7 +1,7 @@
 import { describe, expect, it, afterEach } from "vitest";
 import { randomUUID } from "node:crypto";
 import { createE2eHarness, type E2eHarness } from "../helpers/harness.js";
-import { createStandardMvpWorkflow } from "../helpers/fixtures.js";
+import { createStandardMvpWorkflow, expectFailure, expectOk } from "../helpers/fixtures.js";
 import type {
   AgentExecutionHandle,
   AgentReconciliationRequest,
@@ -35,8 +35,8 @@ describe("Scenario E03 — Unknown Delivery & Transport Reconciliation", () => {
       requestedAt: new Date().toISOString()
     });
     // service.start immediately executes the drive loop, which hits unknown_delivery
-    expect(startRes.ok).toBe(false);
-    expect(startRes.error?.code).toBe("unknown_delivery");
+    const startErr = expectFailure(startRes);
+    expect(startErr.code).toBe("unknown_delivery");
 
     // CRITICAL RELIABILITY INVARIANT:
     // Exactly 1 send attempt must have occurred. NO BLIND AUTOMATIC RESEND!
@@ -47,8 +47,8 @@ describe("Scenario E03 — Unknown Delivery & Transport Reconciliation", () => {
 
     // Query snapshot state: task must NOT be running or completed
     const snapRes = await harness.service.getRun(runId);
-    expect(snapRes.ok).toBe(true);
-    const planTask = snapRes.value?.tasks.find((t: TaskState) => t.taskId === "plan");
+    const snap = expectOk(snapRes);
+    const planTask = snap?.tasks.find((t: TaskState) => t.taskId === "plan");
     expect(planTask?.status).toBe("blocked");
   });
 
@@ -98,11 +98,10 @@ describe("Scenario E03 — Unknown Delivery & Transport Reconciliation", () => {
       idempotencyKey: `start-${runId}`,
       requestedAt: new Date().toISOString()
     });
-    expect(startRes.ok).toBe(true);
+    expectOk(startRes);
 
     const driveRes = await harness.service.orchestrator.driveRun(runId);
-    expect(driveRes.ok).toBe(true);
-    const snap = driveRes.value;
+    const snap = expectOk(driveRes);
 
     const planTask = snap.tasks.find((t: TaskState) => t.taskId === "plan");
     expect(planTask?.status).toBe("running");
@@ -133,8 +132,7 @@ describe("Scenario E03 — Unknown Delivery & Transport Reconciliation", () => {
             status: "not_delivered",
             requestId: req.requestId,
             retrySafe: true,
-            observedAt: new Date().toISOString(),
-            reason: "Agent server confirms request was never received"
+            observedAt: new Date().toISOString()
           }
         };
       }
@@ -147,11 +145,10 @@ describe("Scenario E03 — Unknown Delivery & Transport Reconciliation", () => {
       idempotencyKey: `start-${runId}`,
       requestedAt: new Date().toISOString()
     });
-    expect(startRes.ok).toBe(true);
+    expectOk(startRes);
 
     const driveRes = await harness.service.orchestrator.driveRun(runId);
-    expect(driveRes.ok).toBe(true);
-    const snap = driveRes.value;
+    const snap = expectOk(driveRes);
 
     const planTask = snap.tasks.find((t: TaskState) => t.taskId === "plan");
     expect(planTask?.status).toBe("running");

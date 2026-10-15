@@ -3,10 +3,13 @@ import { randomUUID } from "node:crypto";
 import { createE2eHarness, type E2eHarness } from "../helpers/harness.js";
 import {
   createArtifactProposal,
-  createStandardMvpWorkflow
+  createStandardMvpWorkflow,
+  expectFailure,
+  expectOk
 } from "../helpers/fixtures.js";
 import type {
   ApprovalDecision,
+  DomainEvent,
   TaskState,
   WorkflowDefinition
 } from "@ai-flow/contracts";
@@ -52,7 +55,7 @@ describe("Scenario E06 — Human Approval & Bounded Rework", () => {
       idempotencyKey: `start-${runId}`,
       requestedAt: new Date().toISOString()
     });
-    expect(startRes.ok).toBe(true);
+    expectOk(startRes);
 
     // 2. Complete plan task execution
     const { proposal, rawBytes } = createArtifactProposal({
@@ -73,10 +76,10 @@ describe("Scenario E06 — Human Approval & Bounded Rework", () => {
         contentByProposalId: { [proposal.proposalId]: rawBytes }
       }
     );
-    expect(completeRes.ok).toBe(true);
+    expectOk(completeRes);
 
     // Verify approval request was recorded in engine
-    const postCompleteSnap = (await harness.service.getRun(runId)).value!;
+    const postCompleteSnap = expectOk(await harness.service.getRun(runId))!;
     const planTask = postCompleteSnap.tasks.find((t: TaskState) => t.taskId === "plan")!;
     expect(planTask.status).toBe("succeeded");
     expect(planTask.generation).toBe(0);
@@ -86,8 +89,8 @@ describe("Scenario E06 — Human Approval & Bounded Rework", () => {
     expect(implementTask.status).toBe("pending");
 
     // Find the approval request ID from events
-    const events = (await harness.runStore.readEvents(runId, { limit: 100 })).value!;
-    const apprReqEvent = events.items.find((e) => e.type === "approval.requested");
+    const events = expectOk(await harness.runStore.readEvents(runId, { limit: 100 }));
+    const apprReqEvent = events.items.find((e: DomainEvent) => e.type === "approval.requested");
     expect(apprReqEvent).toBeDefined();
     const approvalId = (apprReqEvent?.payload as any).approvalId;
 
@@ -105,10 +108,9 @@ describe("Scenario E06 — Human Approval & Bounded Rework", () => {
       feedbackArtifacts: [],
       idempotencyKey: `decide-${approvalId}`
     });
-    expect(approveRes.ok).toBe(true);
+    const postApproveSnap = expectOk(approveRes);
 
     // 4. Now that approval is satisfied, downstream 'implement' task is dispatched and running
-    const postApproveSnap = approveRes.value;
     const postApproveImplement = postApproveSnap.tasks.find((t: TaskState) => t.taskId === "implement")!;
     expect(postApproveImplement.status).toBe("running");
   });
@@ -119,13 +121,14 @@ describe("Scenario E06 — Human Approval & Bounded Rework", () => {
     const runId = `run-rework-loop-${randomUUID()}`;
 
     // 1. Start run
-    await harness.service.start({
+    const startRes = await harness.service.start({
       runId,
       definition,
       input: { requirement: "Rework generation test" },
       idempotencyKey: `start-${runId}`,
       requestedAt: new Date().toISOString()
     });
+    expectOk(startRes);
 
     // 2. Complete plan generation 0
     const { proposal: p0, rawBytes: b0 } = createArtifactProposal({
@@ -135,7 +138,7 @@ describe("Scenario E06 — Human Approval & Bounded Rework", () => {
       logicalName: "plan-gen0.md",
       content: "Plan gen 0 content"
     });
-    await harness.service.orchestrator.completeTaskExecution(
+    const completeRes0 = await harness.service.orchestrator.completeTaskExecution(
       runId,
       "plan",
       {
@@ -145,10 +148,11 @@ describe("Scenario E06 — Human Approval & Bounded Rework", () => {
         contentByProposalId: { [p0.proposalId]: b0 }
       }
     );
+    expectOk(completeRes0);
 
     // Get approval request id for gen 0
-    const eventsGen0 = (await harness.runStore.readEvents(runId, { limit: 100 })).value!;
-    const reqGen0 = eventsGen0.items.find((e) => e.type === "approval.requested");
+    const eventsGen0 = expectOk(await harness.runStore.readEvents(runId, { limit: 100 }));
+    const reqGen0 = eventsGen0.items.find((e: DomainEvent) => e.type === "approval.requested");
     const approvalIdGen0 = (reqGen0?.payload as any).approvalId;
 
     // 3. Human reviewer requests changes
@@ -166,11 +170,10 @@ describe("Scenario E06 — Human Approval & Bounded Rework", () => {
       feedbackArtifacts: [],
       idempotencyKey: `change-${approvalIdGen0}`
     });
-    expect(changeRes.ok).toBe(true);
+    const postChangeSnap = expectOk(changeRes);
 
     // CRITICAL REWORK INVARIANT:
     // Generation must have incremented to 1
-    const postChangeSnap = changeRes.value;
     const reworkedPlan = postChangeSnap.tasks.find((t: TaskState) => t.taskId === "plan")!;
     expect(reworkedPlan.generation).toBe(1);
     // Task is re-dispatched and running under generation 1
@@ -194,11 +197,11 @@ describe("Scenario E06 — Human Approval & Bounded Rework", () => {
         contentByProposalId: { [p1.proposalId]: b1 }
       }
     );
-    expect(completeGen1.ok).toBe(true);
+    expectOk(completeGen1);
 
     // Get new approval request id for gen 1
-    const eventsGen1 = (await harness.runStore.readEvents(runId, { limit: 100 })).value!;
-    const reqGen1 = eventsGen1.items.filter((e) => e.type === "approval.requested").at(-1);
+    const eventsGen1 = expectOk(await harness.runStore.readEvents(runId, { limit: 100 }));
+    const reqGen1 = eventsGen1.items.filter((e: DomainEvent) => e.type === "approval.requested").at(-1);
     const approvalIdGen1 = (reqGen1?.payload as any).approvalId;
     expect(approvalIdGen1).not.toBe(approvalIdGen0);
 
@@ -216,8 +219,8 @@ describe("Scenario E06 — Human Approval & Bounded Rework", () => {
       feedbackArtifacts: [],
       idempotencyKey: `approve-${approvalIdGen1}`
     });
-    expect(approveGen1.ok).toBe(true);
-    expect(approveGen1.value.tasks.find((t: TaskState) => t.taskId === "implement")?.status).toBe("running");
+    const postApproveGen1 = expectOk(approveGen1);
+    expect(postApproveGen1.tasks.find((t: TaskState) => t.taskId === "implement")?.status).toBe("running");
   });
 
   it("PROBE PM-05: rejects stale approval decision with mismatched revision or generation", async () => {
@@ -225,13 +228,14 @@ describe("Scenario E06 — Human Approval & Bounded Rework", () => {
     harness = await createE2eHarness({ definitions: [definition] });
     const runId = `run-probe-pm05-${randomUUID()}`;
 
-    await harness.service.start({
+    const startRes = await harness.service.start({
       runId,
       definition,
       input: { requirement: "Stale approval probe" },
       idempotencyKey: `start-${runId}`,
       requestedAt: new Date().toISOString()
     });
+    expectOk(startRes);
 
     // Complete gen 0
     const { proposal, rawBytes } = createArtifactProposal({
@@ -241,7 +245,7 @@ describe("Scenario E06 — Human Approval & Bounded Rework", () => {
       logicalName: "plan.md",
       content: "Plan for stale check"
     });
-    await harness.service.orchestrator.completeTaskExecution(
+    const completeRes = await harness.service.orchestrator.completeTaskExecution(
       runId,
       "plan",
       {
@@ -251,9 +255,10 @@ describe("Scenario E06 — Human Approval & Bounded Rework", () => {
         contentByProposalId: { [proposal.proposalId]: rawBytes }
       }
     );
+    expectOk(completeRes);
 
-    const events = (await harness.runStore.readEvents(runId, { limit: 100 })).value!;
-    const req = events.items.find((e) => e.type === "approval.requested");
+    const events = expectOk(await harness.runStore.readEvents(runId, { limit: 100 }));
+    const req = events.items.find((e: DomainEvent) => e.type === "approval.requested");
     const approvalId = (req?.payload as any).approvalId;
 
     // Attempt decision with wrong revision (revision 99 instead of 1)
@@ -273,8 +278,8 @@ describe("Scenario E06 — Human Approval & Bounded Rework", () => {
 
     const staleRes = await harness.service.decide(staleRevisionDecision);
     // Core engine must strictly reject stale revision
-    expect(staleRes.ok).toBe(false);
-    expect(staleRes.error?.code).toBe("conflict");
-    expect(staleRes.error?.message).toContain("stale");
+    const staleErr = expectFailure(staleRes);
+    expect(staleErr.code).toBe("conflict");
+    expect(staleErr.message).toContain("stale");
   });
 });

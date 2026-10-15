@@ -3,7 +3,9 @@ import { randomUUID } from "node:crypto";
 import { createE2eHarness, type E2eHarness } from "../helpers/harness.js";
 import {
   createArtifactProposal,
-  createStandardMvpWorkflow
+  createStandardMvpWorkflow,
+  expectFailure,
+  expectOk
 } from "../helpers/fixtures.js";
 import type { TaskState } from "@ai-flow/contracts";
 
@@ -30,7 +32,7 @@ describe("Scenario E04 — Concurrency, Leases, and Fencing Tokens", () => {
       idempotencyKey: `start-${runA}`,
       requestedAt: new Date().toISOString()
     });
-    expect(startA.ok).toBe(true);
+    expectOk(startA);
 
     // Start Workflow B
     const startB = await harness.service.start({
@@ -40,11 +42,11 @@ describe("Scenario E04 — Concurrency, Leases, and Fencing Tokens", () => {
       idempotencyKey: `start-${runB}`,
       requestedAt: new Date().toISOString()
     });
-    expect(startB.ok).toBe(true);
+    expectOk(startB);
 
     // Both workflows should have dispatched 'plan' task
-    const snapA = (await harness.service.getRun(runA)).value!;
-    const snapB = (await harness.service.getRun(runB)).value!;
+    const snapA = expectOk(await harness.service.getRun(runA))!;
+    const snapB = expectOk(await harness.service.getRun(runB))!;
     expect(snapA.tasks.find((t: TaskState) => t.taskId === "plan")?.status).toBe("running");
     expect(snapB.tasks.find((t: TaskState) => t.taskId === "plan")?.status).toBe("running");
 
@@ -66,7 +68,7 @@ describe("Scenario E04 — Concurrency, Leases, and Fencing Tokens", () => {
         contentByProposalId: { [propA.proposalId]: bytesA }
       }
     );
-    expect(completeA.ok).toBe(true);
+    expectOk(completeA);
 
     // Complete 'plan' in Workflow B with artifact B
     const { proposal: propB, rawBytes: bytesB } = createArtifactProposal({
@@ -86,11 +88,11 @@ describe("Scenario E04 — Concurrency, Leases, and Fencing Tokens", () => {
         contentByProposalId: { [propB.proposalId]: bytesB }
       }
     );
-    expect(completeB.ok).toBe(true);
+    expectOk(completeB);
 
     // Verify Events Isolation in SQLite RunStore
-    const eventsA = (await harness.runStore.readEvents(runA, { limit: 100 })).value!;
-    const eventsB = (await harness.runStore.readEvents(runB, { limit: 100 })).value!;
+    const eventsA = expectOk(await harness.runStore.readEvents(runA, { limit: 100 }));
+    const eventsB = expectOk(await harness.runStore.readEvents(runB, { limit: 100 }));
 
     expect(eventsA.items.length).toBeGreaterThan(0);
     expect(eventsB.items.length).toBeGreaterThan(0);
@@ -103,14 +105,14 @@ describe("Scenario E04 — Concurrency, Leases, and Fencing Tokens", () => {
     }
 
     // Verify ArtifactStore isolation: Artifacts are isolated per runId
-    const artifactsA = (await harness.artifactStore.find({ runId: runA })).value!;
-    const artifactsB = (await harness.artifactStore.find({ runId: runB })).value!;
+    const artifactsA = expectOk(await harness.artifactStore.find({ runId: runA }));
+    const artifactsB = expectOk(await harness.artifactStore.find({ runId: runB }));
 
     expect(artifactsA.items.length).toBe(1);
     expect(artifactsB.items.length).toBe(1);
 
-    const artifactARef = artifactsA.items[0];
-    const artifactBRef = artifactsB.items[0];
+    const artifactARef = artifactsA.items[0]!;
+    const artifactBRef = artifactsB.items[0]!;
 
     expect(artifactARef.runId).toBe(runA);
     expect(artifactBRef.runId).toBe(runB);
@@ -129,7 +131,7 @@ describe("Scenario E04 — Concurrency, Leases, and Fencing Tokens", () => {
     harness = await createE2eHarness();
 
     // Reconfigure 'planner' role with an agent having maxConcurrentTasks: 1
-    await harness.agentRegistry.upsert({
+    const upsertRes = await harness.agentRegistry.upsert({
       agentId: "agent-planner-single",
       role: "planner",
       transport: "herdr",
@@ -144,6 +146,7 @@ describe("Scenario E04 — Concurrency, Leases, and Fencing Tokens", () => {
         allowTaskDelegation: false
       }
     });
+    expectOk(upsertRes);
 
     const run1 = `run-limit-1-${randomUUID()}`;
     const run2 = `run-limit-2-${randomUUID()}`;
@@ -157,8 +160,7 @@ describe("Scenario E04 — Concurrency, Leases, and Fencing Tokens", () => {
       idempotencyKey: `start-${run1}`,
       requestedAt: new Date().toISOString()
     });
-    expect(start1.ok).toBe(true);
-    const snap1 = start1.value;
+    const snap1 = expectOk(start1);
     const plan1 = snap1.tasks.find((t: TaskState) => t.taskId === "plan");
     expect(plan1?.status).toBe("running");
 
@@ -171,9 +173,9 @@ describe("Scenario E04 — Concurrency, Leases, and Fencing Tokens", () => {
       requestedAt: new Date().toISOString()
     });
     // Dispatcher fails with conflict: Agent concurrency limit reached
-    expect(start2.ok).toBe(false);
-    expect(start2.error?.code).toBe("conflict");
-    expect(start2.error?.message).toContain("concurrency limit");
+    const start2Err = expectFailure(start2);
+    expect(start2Err.code).toBe("conflict");
+    expect(start2Err.message).toContain("concurrency limit");
 
     // Complete 'plan' in Run 1: this releases the lease
     const { proposal, rawBytes } = createArtifactProposal({
@@ -193,12 +195,12 @@ describe("Scenario E04 — Concurrency, Leases, and Fencing Tokens", () => {
         contentByProposalId: { [proposal.proposalId]: rawBytes }
       }
     );
-    expect(complete1.ok).toBe(true);
+    expectOk(complete1);
 
     // Now drive Run 2 again: capacity is freed, so dispatch succeeds!
     const drive2 = await harness.service.orchestrator.driveRun(run2);
-    expect(drive2.ok).toBe(true);
-    const plan2 = drive2.value.tasks.find((t: TaskState) => t.taskId === "plan");
+    const snap2 = expectOk(drive2);
+    const plan2 = snap2.tasks.find((t: TaskState) => t.taskId === "plan");
     expect(plan2?.status).toBe("running");
   });
 });

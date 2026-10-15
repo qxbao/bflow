@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { randomUUID, createHash } from "node:crypto";
 import { createE2eHarness, type E2eHarness } from "../helpers/harness.js";
-import { createArtifactProposal } from "../helpers/fixtures.js";
+import { createArtifactProposal, expectOk, expectFailure } from "../helpers/fixtures.js";
 import type { ArtifactReference, ArtifactStore, ArtifactWrite, OperationResult } from "@ai-flow/contracts";
 
 function createByteStream(content: Buffer): AsyncIterable<Uint8Array> {
@@ -72,9 +72,8 @@ describe("Scenario E08 — Artifact Security & Trust Boundary", () => {
     };
 
     const putRes = await harness.artifactStore.put(write);
-    expect(putRes.ok).toBe(true);
+    const ref = expectOk(putRes);
 
-    const ref = putRes.value!;
     // 3. INVARIANT CHECK: Stored artifact has trusted reference attributes
     expect(ref.trust).toBe("stored");
     expect(ref.uri).toMatch(/^artifact:\/\/e2e-artifact-store\/art-/);
@@ -83,14 +82,14 @@ describe("Scenario E08 — Artifact Security & Trust Boundary", () => {
 
     // 4. Verify catalog retrieval via resolve
     const resolveRes = await harness.artifactStore.resolve(ref.artifactId);
-    expect(resolveRes.ok).toBe(true);
-    expect(resolveRes.value).not.toBeNull();
-    expect(resolveRes.value?.checksum.value).toBe(expectedHash);
+    const resolvedRef = expectOk(resolveRes);
+    expect(resolvedRef).not.toBeNull();
+    expect(resolvedRef?.checksum.value).toBe(expectedHash);
 
     // 5. Read stream content and verify byte-for-byte equality
     const readRes = await readArtifactBytes(harness.artifactStore, ref);
-    expect(readRes.ok).toBe(true);
-    expect(readRes.value?.toString("utf8")).toBe(rawContent.toString("utf8"));
+    const readBytes = expectOk(readRes);
+    expect(readBytes.toString("utf8")).toBe(rawContent.toString("utf8"));
   });
 
   it("strictly rejects artifact storage when payload checksum or size does not match expected integrity", async () => {
@@ -121,14 +120,14 @@ describe("Scenario E08 — Artifact Security & Trust Boundary", () => {
     };
 
     const tamperRes = await harness.artifactStore.put(write);
-    expect(tamperRes.ok).toBe(false);
-    expect(tamperRes.error?.code).toBe("corruption");
-    expect(tamperRes.error?.message).toContain("integrity mismatch");
+    const tamperErr = expectFailure(tamperRes);
+    expect(tamperErr.code).toBe("corruption");
+    expect(tamperErr.message).toContain("integrity mismatch");
 
     // Verify nothing was recorded in catalog
     const resolveRes = await harness.artifactStore.resolve(write.options.artifactId);
-    expect(resolveRes.ok).toBe(true);
-    expect(resolveRes.value).toBeNull();
+    const resolveVal = expectOk(resolveRes);
+    expect(resolveVal).toBeNull();
   });
 
   it("strictly rejects path traversal, dot segments, and invalid artifact identifiers", async () => {
@@ -164,8 +163,8 @@ describe("Scenario E08 — Artifact Security & Trust Boundary", () => {
       };
 
       const res = await harness.artifactStore.put(write);
-      expect(res.ok).toBe(false);
-      expect(res.error?.code).toBe("validation");
+      const resErr = expectFailure(res);
+      expect(resErr.code).toBe("validation");
     }
   });
 
@@ -175,8 +174,8 @@ describe("Scenario E08 — Artifact Security & Trust Boundary", () => {
     // 1. Resolve on non-existent artifactId returns null
     const nonExistentId = `art-nonexistent-${randomUUID()}`;
     const resolveRes = await harness.artifactStore.resolve(nonExistentId);
-    expect(resolveRes.ok).toBe(true);
-    expect(resolveRes.value).toBeNull();
+    const resolveVal = expectOk(resolveRes);
+    expect(resolveVal).toBeNull();
 
     // 2. Stream get() on fabricated artifact reference fails with not_found
     const fakeRef: ArtifactReference = {
@@ -195,7 +194,7 @@ describe("Scenario E08 — Artifact Security & Trust Boundary", () => {
     };
 
     const readRes = await readArtifactBytes(harness.artifactStore, fakeRef);
-    expect(readRes.ok).toBe(false);
-    expect(readRes.error?.code).toBe("not_found");
+    const readErr = expectFailure(readRes);
+    expect(readErr.code).toBe("not_found");
   });
 });

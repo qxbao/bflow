@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import { createE2eHarness, type E2eHarness } from "../helpers/harness.js";
 import {
   createArtifactProposal,
-  createStandardMvpWorkflow
+  createStandardMvpWorkflow,
+  expectOk
 } from "../helpers/fixtures.js";
 import type { TaskState } from "@ai-flow/contracts";
 
@@ -28,23 +29,21 @@ describe("Scenario E02 — Crash & Recovery Integration", () => {
       idempotencyKey: `start-${runId}`,
       requestedAt: new Date().toISOString()
     });
-    expect(startRes.ok).toBe(true);
+    expectOk(startRes);
 
     // Simulate process crash and restart with fresh runtime instance
     const restarted = await harness.restart();
 
     // Query run through recovered RuntimeService
     const recoveredGet = await restarted.service.getRun(runId);
-    expect(recoveredGet.ok).toBe(true);
-    expect(recoveredGet.value).toBeDefined();
-    expect(recoveredGet.value?.runId).toBe(runId);
-    expect(recoveredGet.value?.status).toBe("running");
+    const recoveredSnap = expectOk(recoveredGet);
+    expect(recoveredSnap).not.toBeNull();
+    expect(recoveredSnap?.runId).toBe(runId);
+    expect(recoveredSnap?.status).toBe("running");
 
     // Recovered runtime resumes and drives the workflow
     const driveRes = await restarted.service.resume(runId);
-    expect(driveRes.error).toBeUndefined();
-    expect(driveRes.ok).toBe(true);
-    const snap = driveRes.value;
+    const snap = expectOk(driveRes);
     const planTask = snap.tasks.find((t: TaskState) => t.taskId === "plan");
     expect(planTask?.status).toBe("running");
   });
@@ -63,8 +62,7 @@ describe("Scenario E02 — Crash & Recovery Integration", () => {
     });
 
     const initDrive = await harness.service.orchestrator.driveRun(runId);
-    expect(initDrive.ok).toBe(true);
-    const preCrashSnap = initDrive.value;
+    const preCrashSnap = expectOk(initDrive);
     const preCrashPlan = preCrashSnap.tasks.find((t: TaskState) => t.taskId === "plan");
     expect(preCrashPlan?.status).toBe("running");
     expect(preCrashPlan?.agentExecution).toBeDefined();
@@ -77,9 +75,9 @@ describe("Scenario E02 — Crash & Recovery Integration", () => {
 
     // Post-restart: read run snapshot
     const postCrashGet = await restarted.service.getRun(runId);
-    expect(postCrashGet.ok).toBe(true);
-    const postCrashSnap = postCrashGet.value!;
-    const postCrashPlan = postCrashSnap.tasks.find((t: TaskState) => t.taskId === "plan");
+    const postCrashSnap = expectOk(postCrashGet);
+    expect(postCrashSnap).not.toBeNull();
+    const postCrashPlan = postCrashSnap!.tasks.find((t: TaskState) => t.taskId === "plan");
     expect(postCrashPlan?.status).toBe("running");
 
     // Execution handle and attempt identity must be preserved across restart
@@ -87,7 +85,7 @@ describe("Scenario E02 — Crash & Recovery Integration", () => {
 
     // Rehydrate engine state via service.resume
     const resumeRes = await restarted.service.resume(runId);
-    expect(resumeRes.ok).toBe(true);
+    expectOk(resumeRes);
 
     // Complete task execution through the new runtime instance
     const { proposal, rawBytes } = createArtifactProposal({
@@ -108,8 +106,8 @@ describe("Scenario E02 — Crash & Recovery Integration", () => {
         contentByProposalId: { [proposal.proposalId]: rawBytes }
       }
     );
-    expect(completeRes.ok).toBe(true);
-    expect(completeRes.value.tasks.find((t: TaskState) => t.taskId === "plan")?.status).toBe("succeeded");
+    const completeSnap = expectOk(completeRes);
+    expect(completeSnap.tasks.find((t: TaskState) => t.taskId === "plan")?.status).toBe("succeeded");
 
     // Transport prompt submission calls count must not have duplicated for the same task attempt
     expect(harness.transport.sendCallsCount).toBe(preCrashSends);
@@ -130,10 +128,23 @@ describe("Scenario E02 — Crash & Recovery Integration", () => {
 
     await harness.service.orchestrator.driveRun(runId);
 
-    // Save checkpoint at current state
-    const currentSnap = (await harness.service.getRun(runId)).value!;
-    const saveRes = await harness.service.orchestrator.createAndSaveCheckpoint(runId, currentSnap.version);
-    expect(saveRes.ok).toBe(true);
+    // Save checkpoint at current state using public engine and runStore APIs
+    const currentSnapRes = await harness.service.getRun(runId);
+    const currentSnap = expectOk(currentSnapRes)!;
+
+    const checkpointRes = await harness.engine.createCheckpoint({
+      runId,
+      expectedVersion: currentSnap.version,
+      checkpointId: `chk-${randomUUID()}`,
+      createdAt: new Date().toISOString()
+    });
+    const checkpoint = expectOk(checkpointRes);
+
+    const saveRes = await harness.runStore.saveCheckpoint(
+      checkpoint,
+      currentSnap.version
+    );
+    expectOk(saveRes);
 
     // Now complete the plan task, advancing version and appending new events after the checkpoint
     const { proposal, rawBytes } = createArtifactProposal({
@@ -154,23 +165,24 @@ describe("Scenario E02 — Crash & Recovery Integration", () => {
         contentByProposalId: { [proposal.proposalId]: rawBytes }
       }
     );
-    expect(completeRes.ok).toBe(true);
-    const preRestartVersion = completeRes.value.version;
+    const completeSnap = expectOk(completeRes);
+    const preRestartVersion = completeSnap.version;
 
     // Crash and restart
     const restarted = await harness.restart();
 
     // Verify durable stored snapshot immediately after crash recovery
-    const storedSnap = await restarted.service.getRun(runId);
-    expect(storedSnap.ok).toBe(true);
-    expect(storedSnap.value?.version).toBe(preRestartVersion);
-    expect(storedSnap.value?.tasks.find((t: TaskState) => t.taskId === "plan")?.status).toBe("succeeded");
+    const storedSnapRes = await restarted.service.getRun(runId);
+    const storedSnap = expectOk(storedSnapRes);
+    expect(storedSnap).not.toBeNull();
+    expect(storedSnap?.version).toBe(preRestartVersion);
+    expect(storedSnap?.tasks.find((t: TaskState) => t.taskId === "plan")?.status).toBe("succeeded");
 
     // Recover run into engine and resume driving next dependent tasks
     const recoverRes = await restarted.service.resume(runId);
-    expect(recoverRes.ok).toBe(true);
-    expect(recoverRes.value.version).toBeGreaterThanOrEqual(preRestartVersion);
-    expect(recoverRes.value.tasks.find((t: TaskState) => t.taskId === "plan")?.status).toBe("succeeded");
-    expect(recoverRes.value.tasks.find((t: TaskState) => t.taskId === "implement")?.status).toBe("running");
+    const recoverSnap = expectOk(recoverRes);
+    expect(recoverSnap.version).toBeGreaterThanOrEqual(preRestartVersion);
+    expect(recoverSnap.tasks.find((t: TaskState) => t.taskId === "plan")?.status).toBe("succeeded");
+    expect(recoverSnap.tasks.find((t: TaskState) => t.taskId === "implement")?.status).toBe("running");
   });
 });
