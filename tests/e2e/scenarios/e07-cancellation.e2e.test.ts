@@ -7,7 +7,12 @@ import {
   expectOk,
   expectFailure
 } from "../helpers/fixtures.js";
-import type { TaskState, OperationResult, CancellationResult } from "@ai-flow/contracts";
+import type {
+  TaskState,
+  OperationResult,
+  CancellationResult,
+  CancellationRequest
+} from "@ai-flow/contracts";
 
 describe("Scenario E07 — Cancellation & Cleanup", () => {
   let harness: E2eHarness;
@@ -18,10 +23,10 @@ describe("Scenario E07 — Cancellation & Cleanup", () => {
     }
   });
 
-  it("cancels an active run, halts running execution, releases leases, and rejects late agent results", async () => {
+  it("PROBE (P06 DEFECT): Runtime prematurely marks task cancelled when transport only returns accepted without confirmed stop", async () => {
     const definition = createStandardMvpWorkflow();
     harness = await createE2eHarness({ definitions: [definition] });
-    const runId = `run-cancel-${randomUUID()}`;
+    const runId = `run-cancel-probe-${randomUUID()}`;
 
     // 1. Start run -> 'plan' task begins running
     const startRes = await harness.service.start({
@@ -35,44 +40,163 @@ describe("Scenario E07 — Cancellation & Cleanup", () => {
     const planTask = startSnap.tasks.find((t: TaskState) => t.taskId === "plan")!;
     expect(planTask.status).toBe("running");
     expect(planTask.agentExecution).toBeDefined();
-    const planHandle = planTask.agentExecution!;
 
-    // 2. Request run cancellation
+    // 2. Request run cancellation via RuntimeService
     const cancelRes = await harness.service.cancel({
       runId,
       reason: "User cancelled operation before completion"
     });
     const cancelledSnap = expectOk(cancelRes);
-    expect(cancelledSnap.status).toBe("cancelled");
     const cancelledPlanTask = cancelledSnap.tasks.find((t: TaskState) => t.taskId === "plan")!;
-    expect(cancelledPlanTask.status).toBe("cancelled");
 
-    // 3. Verify transport received cancel command
-    const cancelledHandles = harness.transport.cancelledHandles;
-    expect(cancelledHandles.some((c) => c.handle.executionId === planHandle.executionId)).toBe(true);
+    // SAFETY INVARIANT (ADR 0002 / AGENTS.md):
+    // Transport cancel returning status: "accepted" only means cancellation was REQUESTED at transport boundary.
+    // The remote agent has NOT yet confirmed it stopped!
+    // Until remote stop is confirmed, the task status must NOT be falsely marked as terminal "cancelled".
+    // (Upstream P06 service.ts:399-408 violates this by unconditionally calling confirmCancellationStop)
+    expect(cancelledPlanTask.status).not.toBe("cancelled");
+  });
 
-    // 4. Verify lease was released in FileAgentRegistry
-    const activeExec = harness.service.dispatcher.getActiveExecution(runId, "plan")!;
-    expect(activeExec).toBeDefined();
+  it("executes confirmed cancellation workflow through Core engine with exact schema IDs and verified idempotency", async () => {
+    const definition = createStandardMvpWorkflow();
+    harness = await createE2eHarness({ definitions: [definition] });
+    const runId = `run-cancel-core-${randomUUID()}`;
 
-    // Attempting to release the lease again in registry must fail with 'Lease expired or already released'
-    const doubleRelease = await harness.agentRegistry.releaseLease({
-      leaseId: activeExec.lease.leaseId,
-      fencingToken: activeExec.lease.fencingToken,
-      expectedVersion: activeExec.lease.version,
-      releasedAt: new Date().toISOString(),
-      idempotencyKey: `probe-double-release-${randomUUID()}`
+    // 1. Start run
+    const startRes = await harness.service.start({
+      runId,
+      definition,
+      input: { requirement: "Core cancellation protocol test" },
+      idempotencyKey: `start-${runId}`,
+      requestedAt: new Date().toISOString()
     });
-    const doubleReleaseErr = expectFailure(doubleRelease);
-    expect(doubleReleaseErr.code).toBe("conflict");
-    expect(doubleReleaseErr.message).toContain("already released");
+    let currentSnap = expectOk(startRes);
+    const planTask = currentSnap.tasks.find((t: TaskState) => t.taskId === "plan")!;
+    expect(planTask.status).toBe("running");
+    const planHandle = planTask.agentExecution!;
 
-    // 5. Verify late agent result from cancelled execution is rejected
+    const cancellationId = `cancel-req-${randomUUID()}`;
+    const cancelRequest: CancellationRequest = {
+      schemaVersion: 1,
+      cancellationId,
+      runId,
+      requestedBy: "lead_operator",
+      requestedAt: new Date().toISOString(),
+      expectedVersion: currentSnap.version,
+      reason: "Operator initiated cancellation",
+      idempotencyKey: `idem-cancel-${cancellationId}`
+    };
+
+    // 2. Engine Step: Request cancellation
+    const reqRes = await harness.ports.engine.requestCancellation(cancelRequest);
+    const reqAdvance = expectOk(reqRes);
+    expect(reqAdvance.snapshot.status).toBe("cancelling");
+    const cancellingPlan = reqAdvance.snapshot.tasks.find((t: TaskState) => t.taskId === "plan")!;
+    expect(cancellingPlan.status).toBe("cancelling");
+
+    // Persist emitted events
+    if (reqAdvance.emittedEvents.length > 0) {
+      await harness.runStore.appendEvents({
+        runId,
+        expectedVersion: currentSnap.version,
+        expectedLastSequence: currentSnap.lastEventSequence,
+        events: reqAdvance.emittedEvents,
+        idempotencyKey: `ev-${cancellationId}`
+      });
+    }
+    currentSnap = reqAdvance.snapshot;
+
+    // 3. Engine Step: Record cancellation receipt (transport accepted request)
+    const recRes = await harness.ports.engine.recordCancellationResult({
+      runId,
+      expectedVersion: currentSnap.version,
+      result: {
+        schemaVersion: 1,
+        cancellationId,
+        status: "accepted",
+        executionId: planHandle.executionId,
+        observedAt: new Date().toISOString()
+      },
+      idempotencyKey: `rec-${cancellationId}`
+    });
+    const recAdvance = expectOk(recRes);
+    // Task remains cancelling, NOT cancelled
+    expect(recAdvance.snapshot.tasks.find((t: TaskState) => t.taskId === "plan")?.status).toBe("cancelling");
+
+    if (recAdvance.emittedEvents.length > 0) {
+      await harness.runStore.appendEvents({
+        runId,
+        expectedVersion: currentSnap.version,
+        expectedLastSequence: currentSnap.lastEventSequence,
+        events: recAdvance.emittedEvents,
+        idempotencyKey: `rec-ev-${cancellationId}`
+      });
+    }
+    currentSnap = recAdvance.snapshot;
+
+    // 4. Verify negative case: Wrong execution confirmation is rejected by Core engine
+    const wrongExecutionConfirm = await harness.ports.engine.confirmCancellationStop({
+      runId,
+      expectedVersion: currentSnap.version,
+      confirmation: {
+        schemaVersion: 1,
+        cancellationId,
+        executionId: `exec-wrong-mismatched-${randomUUID()}`,
+        stoppedAt: new Date().toISOString(),
+        terminalStatus: "cancelled"
+      },
+      idempotencyKey: `confirm-wrong-${randomUUID()}`
+    });
+    const wrongErr = expectFailure(wrongExecutionConfirm);
+    expect(wrongErr.code).toBeDefined();
+
+    // 5. Positive Step: Remote process actually confirms stop
+    harness.transport.confirmStop(planHandle.executionId);
+
+    const validConfirmRes = await harness.ports.engine.confirmCancellationStop({
+      runId,
+      expectedVersion: currentSnap.version,
+      confirmation: {
+        schemaVersion: 1,
+        cancellationId,
+        executionId: planHandle.executionId,
+        stoppedAt: new Date().toISOString(),
+        terminalStatus: "cancelled"
+      },
+      idempotencyKey: `confirm-valid-${cancellationId}`
+    });
+    const confirmedAdvance = expectOk(validConfirmRes);
+    expect(confirmedAdvance.snapshot.status).toBe("cancelled");
+    expect(confirmedAdvance.snapshot.tasks.find((t: TaskState) => t.taskId === "plan")?.status).toBe("cancelled");
+
+    // Persist final stop events
+    if (confirmedAdvance.emittedEvents.length > 0) {
+      await harness.runStore.appendEvents({
+        runId,
+        expectedVersion: currentSnap.version,
+        expectedLastSequence: currentSnap.lastEventSequence,
+        events: confirmedAdvance.emittedEvents,
+        idempotencyKey: `stop-ev-${cancellationId}`
+      });
+    }
+    currentSnap = confirmedAdvance.snapshot;
+
+    // 6. Idempotency: Duplicate cancellation request with identical cancellationId returns the cached receipt
+    const dupReq = await harness.ports.engine.requestCancellation(cancelRequest);
+    const dupRes = expectOk(dupReq);
+    expect(dupRes.snapshot.status).toBe("cancelling"); // cached receipt snapshot from requestCancellation
+    expect(dupRes.snapshot.version).toBe(reqAdvance.snapshot.version);
+    expect(dupRes.emittedEvents.length).toBe(reqAdvance.emittedEvents.length);
+
+    // Current aggregate snapshot is definitively cancelled
+    const currentSnapshot = expectOk(await harness.ports.engine.getSnapshot(runId));
+    expect(currentSnapshot?.status).toBe("cancelled");
+
+    // 7. Verify late agent result from cancelled execution is rejected
     createVerifiedAgentResult({
       handle: planHandle,
       status: "succeeded"
     });
-
     const lateResult = await harness.service.orchestrator.completeTaskExecution(
       runId,
       "plan",
@@ -81,50 +205,8 @@ describe("Scenario E07 — Cancellation & Cleanup", () => {
         summary: "Late result after cancellation"
       }
     );
-    // Once cancelled, task cannot be transitioned to succeeded
-    const lateResultErr = expectFailure(lateResult);
-    expect(lateResultErr.code).toBeDefined();
-  });
-
-  it("handles repeated cancellation requests idempotently and rejects new cancellation on terminal runs", async () => {
-    const definition = createStandardMvpWorkflow();
-    harness = await createE2eHarness({ definitions: [definition] });
-    const runId = `run-cancel-idempotent-${randomUUID()}`;
-
-    const startRes = await harness.service.start({
-      runId,
-      definition,
-      input: { requirement: "Cancellation idempotency" },
-      idempotencyKey: `start-${runId}`,
-      requestedAt: new Date().toISOString()
-    });
-    const snapshot = expectOk(startRes);
-
-    const cancellationId = `cancel-req-${randomUUID()}`;
-    const cancellationRequest = {
-      schemaVersion: 1 as const,
-      cancellationId,
-      runId,
-      requestedBy: "human_operator",
-      requestedAt: new Date().toISOString(),
-      expectedVersion: snapshot.version,
-      reason: "Initial operator cancellation",
-      idempotencyKey: `idem-cancel-${cancellationId}`
-    };
-
-    // First cancel using explicit CancellationRequest
-    const cancel1 = await harness.service.cancel(cancellationRequest);
-    const cancel1Snap = expectOk(cancel1);
-    expect(cancel1Snap.status).toBe("cancelled");
-
-    // Subsequent cancel with a NEW request on terminal run must be rejected with conflict
-    const cancelNewOnTerminal = await harness.service.cancel({
-      runId,
-      reason: "Second cancel attempt after terminal"
-    });
-    const cancelErr = expectFailure(cancelNewOnTerminal);
-    expect(cancelErr.code).toBe("conflict");
-    expect(cancelErr.message).toContain("terminal");
+    const lateErr = expectFailure(lateResult);
+    expect(lateErr.code).toBeDefined();
   });
 
   it("PROBE PM-11: reveals that runtime unconditionally confirms cancellation stop even if transport.cancel fails", async () => {

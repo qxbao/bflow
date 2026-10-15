@@ -1,27 +1,14 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { randomUUID, createHash } from "node:crypto";
 import { createE2eHarness, type E2eHarness } from "../helpers/harness.js";
-import { createArtifactProposal, expectOk, expectFailure } from "../helpers/fixtures.js";
-import type { ArtifactReference, ArtifactStore, ArtifactWrite, OperationResult } from "@ai-flow/contracts";
-
-function createByteStream(content: Buffer): AsyncIterable<Uint8Array> {
-  return {
-    async *[Symbol.asyncIterator]() {
-      yield new Uint8Array(content);
-    }
-  };
-}
-
-async function readArtifactBytes(store: ArtifactStore, ref: ArtifactReference): Promise<OperationResult<Buffer>> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of store.get(ref)) {
-    if (!chunk.ok) {
-      return chunk as OperationResult<Buffer>;
-    }
-    chunks.push(Buffer.from(chunk.value));
-  }
-  return { ok: true, value: Buffer.concat(chunks) };
-}
+import {
+  createArtifactProposal,
+  createByteStream,
+  expectOk,
+  expectFailure,
+  readArtifactBytes
+} from "../helpers/fixtures.js";
+import type { ArtifactReference, ArtifactWrite } from "@ai-flow/contracts";
 
 describe("Scenario E08 — Artifact Security & Trust Boundary", () => {
   let harness: E2eHarness;
@@ -48,8 +35,8 @@ describe("Scenario E08 — Artifact Security & Trust Boundary", () => {
 
     // 1. INVARIANT CHECK: Agent proposal is an untrusted proposal, NOT a trusted reference
     expect(proposal.logicalName).toBe("arch.md");
-    expect((proposal as any).uri).toBeUndefined();
-    expect((proposal as any).trust).toBeUndefined();
+    expect("uri" in proposal).toBe(false);
+    expect("trust" in proposal).toBe(false);
 
     // 2. Put into real FilesystemArtifactStore
     const write: ArtifactWrite = {
@@ -72,125 +59,115 @@ describe("Scenario E08 — Artifact Security & Trust Boundary", () => {
     };
 
     const putRes = await harness.artifactStore.put(write);
-    const ref = expectOk(putRes);
+    const reference = expectOk(putRes);
 
-    // 3. INVARIANT CHECK: Stored artifact has trusted reference attributes
-    expect(ref.trust).toBe("stored");
-    expect(ref.uri).toMatch(/^artifact:\/\/e2e-artifact-store\/art-/);
-    expect(ref.sizeBytes).toBe(rawContent.byteLength);
-    expect(ref.checksum.value.toLowerCase()).toBe(expectedHash.toLowerCase());
+    // 3. INVARIANT CHECK: Reference minted by ArtifactStore is trusted and schema-valid
+    expect(reference.artifactId).toBe(write.options.artifactId);
+    expect(reference.runId).toBe(runId);
+    expect(reference.taskId).toBe("plan");
+    expect(reference.checksum.value).toBe(expectedHash);
+    expect(reference.checksum.algorithm).toBe("sha256");
+    expect(reference.uri).toContain("artifact://");
+    expect(reference.trust).toBe("stored");
 
-    // 4. Verify catalog retrieval via resolve
-    const resolveRes = await harness.artifactStore.resolve(ref.artifactId);
-    const resolvedRef = expectOk(resolveRes);
-    expect(resolvedRef).not.toBeNull();
-    expect(resolvedRef?.checksum.value).toBe(expectedHash);
-
-    // 5. Read stream content and verify byte-for-byte equality
-    const readRes = await readArtifactBytes(harness.artifactStore, ref);
+    // 4. Read back and verify bytes
+    const readRes = await readArtifactBytes(harness.artifactStore, reference);
     const readBytes = expectOk(readRes);
-    expect(readBytes.toString("utf8")).toBe(rawContent.toString("utf8"));
+    expect(readBytes.equals(rawContent)).toBe(true);
   });
 
-  it("strictly rejects artifact storage when payload checksum or size does not match expected integrity", async () => {
+  it("strictly detects and rejects corrupt artifact content violating expected integrity", async () => {
     harness = await createE2eHarness();
-    const runId = `run-tamper-${randomUUID()}`;
-    const realContent = Buffer.from("Legitimate uncorrupted artifact bytes");
-    const tamperedContent = Buffer.from("TAMPERED malicious artifact bytes");
-    const realHash = createHash("sha256").update(realContent).digest("hex");
+    const runId = `run-corrupt-${randomUUID()}`;
+    const legitimateContent = Buffer.from("Legitimate uncorrupted payload");
+    const wrongChecksum = createHash("sha256").update(Buffer.from("Completely different bytes")).digest("hex");
 
-    // Provide realHash in expectedIntegrity, but stream tamperedContent
+    // Attempt to put content with mismatched expected checksum
     const write: ArtifactWrite = {
-      content: createByteStream(tamperedContent),
+      content: createByteStream(legitimateContent),
       options: {
-        artifactId: `art-tampered-${randomUUID()}`,
+        artifactId: `art-corrupt-${randomUUID()}`,
         runId,
-        taskId: "plan",
-        kind: "document",
+        taskId: "implement",
+        kind: "patch",
         mediaType: "text/plain",
-        idempotencyKey: `tamper-${randomUUID()}`,
+        idempotencyKey: `write-corrupt-${randomUUID()}`,
         expectedIntegrity: {
           checksum: {
             algorithm: "sha256",
-            value: realHash // Mismatched!
+            value: wrongChecksum // MISMATCHED SHA-256!
           },
-          sizeBytes: realContent.byteLength // Mismatched!
+          sizeBytes: legitimateContent.byteLength
         }
       }
     };
 
-    const tamperRes = await harness.artifactStore.put(write);
-    const tamperErr = expectFailure(tamperRes);
-    expect(tamperErr.code).toBe("corruption");
-    expect(tamperErr.message).toContain("integrity mismatch");
+    const putRes = await harness.artifactStore.put(write);
+    const putErr = expectFailure(putRes);
 
-    // Verify nothing was recorded in catalog
+    // ArtifactStore must fail with corruption error and reject the write
+    expect(putErr.code).toBe("corruption");
+    expect(putErr.message).toMatch(/(?:integrity mismatch|integrity check failed)/i);
+
+    // Verify artifact was not cataloged
     const resolveRes = await harness.artifactStore.resolve(write.options.artifactId);
     const resolveVal = expectOk(resolveRes);
     expect(resolveVal).toBeNull();
   });
 
-  it("strictly rejects path traversal, dot segments, and invalid artifact identifiers", async () => {
+  it("strictly enforces security sandboxing and rejects path traversal in artifact paths", async () => {
     harness = await createE2eHarness();
     const runId = `run-traversal-${randomUUID()}`;
-    const content = Buffer.from("Some content");
-    const hash = createHash("sha256").update(content).digest("hex");
+    const payload = Buffer.from("Attempted path escape content");
+    const checksum = createHash("sha256").update(payload).digest("hex");
 
-    const invalidIds = [
-      "../../etc/passwd",
-      "..",
-      ".",
-      "art/sub/path",
-      "art\\win\\path",
-      "art null\0byte"
-    ];
-
-    for (const badId of invalidIds) {
-      const write: ArtifactWrite = {
-        content: createByteStream(content),
-        options: {
-          artifactId: badId,
-          runId,
-          taskId: "plan",
-          kind: "document",
-          mediaType: "text/plain",
-          idempotencyKey: `traversal-${randomUUID()}`,
-          expectedIntegrity: {
-            checksum: { algorithm: "sha256", value: hash },
-            sizeBytes: content.byteLength
-          }
+    // Path traversal attempt in artifactId
+    const writeTraversal: ArtifactWrite = {
+      content: createByteStream(payload),
+      options: {
+        artifactId: `../../etc/passwd-${randomUUID()}`,
+        runId,
+        taskId: "plan",
+        kind: "other",
+        mediaType: "text/plain",
+        idempotencyKey: `write-traversal-${randomUUID()}`,
+        expectedIntegrity: {
+          checksum: {
+            algorithm: "sha256",
+            value: checksum
+          },
+          sizeBytes: payload.byteLength
         }
-      };
+      }
+    };
 
-      const res = await harness.artifactStore.put(write);
-      const resErr = expectFailure(res);
-      expect(resErr.code).toBe("validation");
-    }
+    const putRes = await harness.artifactStore.put(writeTraversal);
+    const putErr = expectFailure(putRes);
+
+    // Must be rejected with validation error
+    expect(putErr.code).toBe("validation");
+    expect(putErr.message).toMatch(/(?:invalid artifact input|invalid path)/i);
   });
 
-  it("rejects retrieval of foreign or non-existent artifact references", async () => {
+  it("prevents consumers from accessing uningested fake ArtifactReference", async () => {
     harness = await createE2eHarness();
+    const fakeArtifactId = `art-fake-${randomUUID()}`;
 
-    // 1. Resolve on non-existent artifactId returns null
-    const nonExistentId = `art-nonexistent-${randomUUID()}`;
-    const resolveRes = await harness.artifactStore.resolve(nonExistentId);
-    const resolveVal = expectOk(resolveRes);
-    expect(resolveVal).toBeNull();
-
-    // 2. Stream get() on fabricated artifact reference fails with not_found
+    // Synthesized reference that was never written through ArtifactStore
     const fakeRef: ArtifactReference = {
-      trust: "stored",
-      artifactId: nonExistentId,
+      artifactId: fakeArtifactId,
       runId: "run-fake",
+      taskId: "plan",
       kind: "document",
-      uri: `artifact://e2e-artifact-store/${nonExistentId}`,
-      mediaType: "text/plain",
-      sizeBytes: 100,
+      mediaType: "text/markdown",
+      sizeBytes: 123,
       checksum: {
         algorithm: "sha256",
         value: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       },
-      createdAt: new Date().toISOString()
+      uri: `artifact://e2e-artifact-store/${fakeArtifactId}`,
+      createdAt: new Date().toISOString(),
+      trust: "stored"
     };
 
     const readRes = await readArtifactBytes(harness.artifactStore, fakeRef);

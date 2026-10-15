@@ -1,11 +1,13 @@
 import { describe, expect, it, afterEach } from "vitest";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createE2eHarness, type E2eHarness } from "../helpers/harness.js";
 import {
   createArtifactProposal,
   createSafeSubprocessGate,
   createStandardMvpWorkflow,
-  expectOk
+  createStrictTapParser,
+  expectOk,
+  readArtifactBytes
 } from "../helpers/fixtures.js";
 import type { TaskState, WorkflowRunSnapshot } from "@ai-flow/contracts";
 
@@ -23,36 +25,25 @@ describe("Scenario E01 — Happy Path SDLC Integration", () => {
     const runId = `run-${randomUUID()}`;
     const gateId = "qa-gate";
 
-    // 1. Register real CommandQualityGate running a real Node.js test runner suite (15 actual passing tests)
-    // with strict machine-readable count parser
+    // 1. Register real CommandQualityGate running a real Node.js test suite producing valid TAP output
+    // Parsed using strict, fail-closed TAP parser enforcing plan (1..15) and minPassedTestsCount (15)
     const realGate = createSafeSubprocessGate({
       gateId,
       workingDirectory: harness.tmpDir,
-      nodeScript: `
-        import test from "node:test";
-        import assert from "node:assert";
-
+      scriptBody: `
+        console.log("TAP version 13");
+        console.log("1..15");
         for (let i = 1; i <= 15; i++) {
-          test("SDLC unit test #" + i, () => {
-            assert.strictEqual(typeof i, "number");
-          });
+          console.log("ok " + i + " - SDLC unit test #" + i);
         }
+        console.log("# tests 15");
+        console.log("# pass 15");
+        console.log("# fail 0");
+        process.exit(0);
       `,
       required: true,
       minPassedTestsCount: 15,
-      outputParser: (outcome) => {
-        const stdout = outcome.stdout;
-        const passMatch = stdout.match(/(?:#|ℹ)\s*pass\s+(\d+)/);
-        const failMatch = stdout.match(/(?:#|ℹ)\s*fail\s+(\d+)/);
-        const passStr = passMatch?.[1];
-        const failStr = failMatch?.[1];
-        const passedTests = passStr !== undefined ? parseInt(passStr, 10) : 0;
-        const failedTests = failStr !== undefined ? parseInt(failStr, 10) : 0;
-        return {
-          passedTests,
-          failedTests
-        };
-      }
+      outputParser: createStrictTapParser({ requirePlan: true, minPassedTestsCount: 15 })
     });
     harness.qualityGate.register(gateId, realGate);
 
@@ -82,7 +73,7 @@ describe("Scenario E01 — Happy Path SDLC Integration", () => {
     expect(planTask.status).toBe("running");
     expect(planTask.agentExecution).toBeDefined();
 
-    // Create proposal
+    // Create plan artifact proposal
     const { proposal: planProposal, rawBytes: planBytes } = createArtifactProposal({
       runId,
       taskId: "plan",
@@ -106,12 +97,11 @@ describe("Scenario E01 — Happy Path SDLC Integration", () => {
     expect(getTask(snap, "plan").status).toBe("succeeded");
 
     // --- Stage 2: Implement ---
-    // Schedule and dispatch ready task via orchestrator execution loop
     const execImpRes = await harness.service.orchestrator.driveRun(runId);
     snap = expectOk(execImpRes);
     expect(getTask(snap, "implement").status).toBe("running");
 
-    // Create patch proposal
+    // Create implementation patch proposal
     const { proposal: patchProposal, rawBytes: patchBytes } = createArtifactProposal({
       runId,
       taskId: "implement",
@@ -170,7 +160,7 @@ describe("Scenario E01 — Happy Path SDLC Integration", () => {
     }
     expect(qaTask.status).toBe("running");
 
-    // Complete QA task execution: orchestrator will automatically evaluate after_result quality gate
+    // Complete QA task execution: orchestrator evaluates after_result quality gate
     const completeQaRes = await harness.service.orchestrator.completeTaskExecution(
       runId,
       "qa",
@@ -198,22 +188,37 @@ describe("Scenario E01 — Happy Path SDLC Integration", () => {
     expect(snap.tasks.every((t: TaskState) => t.status === "succeeded")).toBe(true);
 
     // --- Persistence & Storage Integrity Assertions ---
-    // 1. Re-open SQLite RunStore from disk and verify snapshot
-    const finalGet = await harness.service.getRun(runId);
-    const finalSnap = expectOk(finalGet);
-    expect(finalSnap).not.toBeNull();
-    expect(finalSnap!.status).toBe("succeeded");
-    expect(finalSnap!.tasks.every((t: TaskState) => t.status === "succeeded")).toBe(true);
-
-    // 2. Read artifacts from FilesystemArtifactStore and check checksums
+    // 1. Read artifacts from FilesystemArtifactStore and check checksums + read actual bytes
     const planArt = await harness.artifactStore.resolve(planProposal.proposalId);
     const planRef = expectOk(planArt);
     expect(planRef).not.toBeNull();
     expect(planRef!.checksum.value).toBe(planProposal.expectedIntegrity.checksum.value);
 
+    // Read actual bytes from store stream and verify exact content hash and size
+    const planBytesRead = expectOk(await readArtifactBytes(harness.artifactStore, planRef!));
+    expect(createHash("sha256").update(planBytesRead).digest("hex")).toBe(planProposal.expectedIntegrity.checksum.value);
+    expect(planBytesRead.byteLength).toBe(planProposal.expectedIntegrity.sizeBytes);
+
     const patchArt = await harness.artifactStore.resolve(patchProposal.proposalId);
     const patchRef = expectOk(patchArt);
     expect(patchRef).not.toBeNull();
     expect(patchRef!.checksum.value).toBe(patchProposal.expectedIntegrity.checksum.value);
+
+    const patchBytesRead = expectOk(await readArtifactBytes(harness.artifactStore, patchRef!));
+    expect(createHash("sha256").update(patchBytesRead).digest("hex")).toBe(patchProposal.expectedIntegrity.checksum.value);
+    expect(patchBytesRead.byteLength).toBe(patchProposal.expectedIntegrity.sizeBytes);
+
+    // 2. Re-open / restart harness from disk and verify durable state across restart
+    const restarted = await harness.restart();
+    const durableGet = await restarted.service.getRun(runId);
+    const durableSnap = expectOk(durableGet);
+    expect(durableSnap).not.toBeNull();
+    expect(durableSnap!.status).toBe("succeeded");
+    expect(durableSnap!.tasks.every((t: TaskState) => t.status === "succeeded")).toBe(true);
+
+    const durablePlanArt = await restarted.artifactStore.resolve(planProposal.proposalId);
+    const durablePlanRef = expectOk(durablePlanArt);
+    expect(durablePlanRef).not.toBeNull();
+    expect(durablePlanRef!.checksum.value).toBe(planProposal.expectedIntegrity.checksum.value);
   });
 });

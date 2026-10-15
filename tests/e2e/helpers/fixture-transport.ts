@@ -19,15 +19,24 @@ import type {
   OperationResult
 } from "@ai-flow/contracts";
 
+export type FixtureDeliveryMode =
+  | "accepted"
+  | "unknown-after-write"
+  | "unknown-before-write"
+  | "unknown_delivery"
+  | "error";
+
 export interface FixtureTransportOptions {
   readonly clock?: () => Date;
-  readonly defaultDeliveryMode?: "accepted" | "unknown_delivery" | "error";
+  readonly defaultDeliveryMode?: FixtureDeliveryMode;
   readonly defaultErrorMessage?: string;
 }
 
 export interface ServerExecutionRecord {
   readonly handle: AgentExecutionHandle;
-  status: "bound" | "terminal" | "cancelled";
+  status: "bound" | "cancelling" | "cancelled" | "terminal";
+  cancellationRequested?: boolean;
+  stoppedAt?: string;
   result?: AgentResult;
 }
 
@@ -35,10 +44,11 @@ export interface ServerExecutionRecord {
  * Deterministic, offline AgentTransport implementation for E2E integration verification.
  * 
  * Guarantees:
- * 1. Side effects are strictly counted (send, reconcile, cancel).
- * 2. Default reconcile returns unknown_delivery unless explicitly recorded in server ledger.
- * 3. Never synthesizes bound handles or business success out of thin air.
- * 4. Supports simulating transport failure, ambiguous timeouts, and foreign correlation.
+ * 1. Side effects are strictly counted: sendCallsCount vs externalWriteCount.
+ * 2. Distinction between cancellation requested (accepted) vs remote execution stopped (confirmStop).
+ * 3. Default reconcile returns unknown_delivery unless explicitly recorded in server ledger.
+ * 4. Never synthesizes bound handles or business success out of thin air.
+ * 5. Supports simulating transport failure, ambiguous timeouts, and foreign correlation.
  */
 export class FixtureAgentTransport implements AgentTransport {
   readonly sentRequests: AgentRequest[] = [];
@@ -49,12 +59,16 @@ export class FixtureAgentTransport implements AgentTransport {
   readonly serverLedger = new Map<string, ServerExecutionRecord>();
 
   sendCallsCount = 0;
+  externalWriteCount = 0;
   reconcileCallsCount = 0;
   cancelCallsCount = 0;
 
   private readonly clock: () => Date;
-  public defaultDeliveryMode: "accepted" | "unknown_delivery" | "error";
+  public defaultDeliveryMode: FixtureDeliveryMode;
   public defaultErrorMessage: string;
+
+  /** Pre-send observation hook (e.g. to verify RunStore dispatch_requested before write) */
+  onBeforeSend?: ((request: AgentRequest) => Promise<void> | void) | undefined;
 
   customSendHandler?: ((req: AgentRequest) => Promise<OperationResult<AgentSubmissionReceipt>> | OperationResult<AgentSubmissionReceipt>) | undefined;
   customReconcileHandler?: ((req: AgentReconciliationRequest) => Promise<OperationResult<AgentReconciliationResult>> | OperationResult<AgentReconciliationResult>) | undefined;
@@ -65,8 +79,28 @@ export class FixtureAgentTransport implements AgentTransport {
     this.defaultDeliveryMode = enabled ? "unknown_delivery" : "accepted";
   }
 
+  setDeliveryMode(mode: FixtureDeliveryMode): void {
+    this.defaultDeliveryMode = mode;
+  }
+
   setCustomReconcileHandler(handler?: (req: AgentReconciliationRequest) => Promise<OperationResult<AgentReconciliationResult>> | OperationResult<AgentReconciliationResult>): void {
     this.customReconcileHandler = handler;
+  }
+
+  /**
+   * Explicitly marks an execution as stopped on the remote server ledger.
+   * Required to satisfy the distributed cancellation protocol:
+   * Cancellation "accepted" only acknowledges the signal was received;
+   * execution is only stopped when explicitly confirmed.
+   */
+  confirmStop(executionId: string): void {
+    for (const record of this.serverLedger.values()) {
+      if (record.handle.executionId === executionId) {
+        record.status = "cancelled";
+        record.stoppedAt = this.clock().toISOString();
+        return;
+      }
+    }
   }
 
   constructor(options?: FixtureTransportOptions) {
@@ -99,6 +133,10 @@ export class FixtureAgentTransport implements AgentTransport {
     this.sendCallsCount++;
     this.sentRequests.push(request);
 
+    if (this.onBeforeSend) {
+      await this.onBeforeSend(request);
+    }
+
     if (this.customSendHandler) {
       return this.customSendHandler(request);
     }
@@ -116,7 +154,8 @@ export class FixtureAgentTransport implements AgentTransport {
       };
     }
 
-    if (this.defaultDeliveryMode === "unknown_delivery") {
+    // Mode: unknown-before-write or default unknown_delivery (drop before external write)
+    if (this.defaultDeliveryMode === "unknown-before-write" || this.defaultDeliveryMode === "unknown_delivery") {
       return {
         ok: true,
         value: {
@@ -128,7 +167,7 @@ export class FixtureAgentTransport implements AgentTransport {
           idempotencyKey: request.idempotency.key,
           target: request.target,
           observedAt: now,
-          reason: "Simulated transport timeout before delivery acknowledgement",
+          reason: "Simulated transport timeout before delivery acknowledgement (no write)",
           resendAllowed: false,
           manualInterventionRequired: true
         }
@@ -152,7 +191,33 @@ export class FixtureAgentTransport implements AgentTransport {
       acceptedAt: now
     };
 
-    // Record in server ledger
+    // Mode: unknown-after-write (remote external write occurs, but return network timeout)
+    if (this.defaultDeliveryMode === "unknown-after-write") {
+      this.externalWriteCount++;
+      this.serverLedger.set(request.requestId, {
+        handle,
+        status: "bound"
+      });
+      return {
+        ok: true,
+        value: {
+          status: "unknown_delivery",
+          requestId: request.requestId,
+          attemptId: request.attemptId,
+          runId: request.runId,
+          taskId: request.taskId,
+          idempotencyKey: request.idempotency.key,
+          target: request.target,
+          observedAt: now,
+          reason: "Simulated transport response timeout after external write",
+          resendAllowed: false,
+          manualInterventionRequired: true
+        }
+      };
+    }
+
+    // Mode: accepted
+    this.externalWriteCount++;
     this.serverLedger.set(request.requestId, {
       handle,
       status: "bound"
@@ -225,7 +290,13 @@ export class FixtureAgentTransport implements AgentTransport {
     const now = this.clock().toISOString();
     const record = this.serverLedger.get(handle.requestId);
     if (record) {
-      record.status = "cancelled";
+      // Cancellation receipt records that cancellation was REQUESTED at the transport boundary.
+      // It does NOT mean the remote process has stopped!
+      // Status remains "cancelling" until explicit confirmStop() or observed terminal boundary.
+      record.cancellationRequested = true;
+      if (record.status === "bound") {
+        record.status = "cancelling";
+      }
     }
 
     return {

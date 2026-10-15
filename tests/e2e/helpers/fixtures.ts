@@ -7,6 +7,7 @@ import type {
   AgentResult,
   ArtifactProposal,
   ArtifactReference,
+  ArtifactStore,
   ContractError,
   JsonValue,
   OperationResult,
@@ -43,6 +44,141 @@ export function expectFailure<T>(result: OperationResult<T>, message?: string): 
     throw new Error(`Expected failed result, got ok value: ${JSON.stringify(result.value)}`);
   }
   return result.error;
+}
+
+/**
+ * Creates an AsyncIterable byte stream from a Buffer.
+ */
+export function createByteStream(content: Buffer): AsyncIterable<Uint8Array> {
+  return {
+    async *[Symbol.asyncIterator]() {
+      yield new Uint8Array(content);
+    }
+  };
+}
+
+/**
+ * Safely reads all bytes of an artifact reference from an ArtifactStore.
+ * Avoids type assertions; cleanly preserves typed errors from chunk results.
+ */
+export async function readArtifactBytes(
+  store: ArtifactStore,
+  ref: ArtifactReference
+): Promise<OperationResult<Buffer>> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of store.get(ref)) {
+    if (!chunk.ok) {
+      return { ok: false, error: chunk.error };
+    }
+    chunks.push(Buffer.from(chunk.value));
+  }
+  return { ok: true, value: Buffer.concat(chunks) };
+}
+
+/**
+ * Strict, reusable TAP (Test Anything Protocol) machine output parser.
+ *
+ * Rules:
+ * 1. Fail-closed: Blank or unparseable output produces error findings.
+ * 2. Never treats absence of evidence (0 parsed tests) as silently valid success.
+ * 3. Enforces TAP 12/13 plan specification (`1..N`) and verifies test point count against plan.
+ * 4. Extracts ok/not ok lines, directive skips, and summary counters.
+ */
+export interface StrictTapParserOptions {
+  readonly requirePlan?: boolean;
+  readonly minPassedTestsCount?: number;
+}
+
+export function createStrictTapParser(options?: StrictTapParserOptions) {
+  const requirePlan = options?.requirePlan ?? true;
+  const minPassedTestsCount = options?.minPassedTestsCount;
+
+  return (outcome: QualityCommandOutcome): {
+    readonly findings: readonly QualityFinding[];
+    readonly passedTests: number;
+    readonly failedTests: number;
+    readonly skippedTests: number;
+  } => {
+    const rawOutput = outcome.combinedOutput.trim();
+    const findings: QualityFinding[] = [];
+
+    if (rawOutput.length === 0) {
+      findings.push({
+        code: "EMPTY_TAP_OUTPUT",
+        severity: "error",
+        message: "TAP output stream was completely empty"
+      });
+      return { findings, passedTests: 0, failedTests: 0, skippedTests: 0 };
+    }
+
+    const lines = rawOutput.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+
+    let planTotal: number | undefined;
+    let countedOk = 0;
+    let countedNotOk = 0;
+    let countedSkip = 0;
+    let hasPlanLine = false;
+
+    // Check plan lines (e.g., 1..10)
+    for (const line of lines) {
+      const planMatch = line.match(/^1\.\.(\d+)/);
+      if (planMatch && planMatch[1]) {
+        hasPlanLine = true;
+        planTotal = parseInt(planMatch[1], 10);
+      } else if (line.match(/^not ok\s+(\d+)?/i)) {
+        countedNotOk++;
+        findings.push({
+          code: "TEST_POINT_FAILED",
+          severity: "error",
+          message: `TAP test point failure: ${line}`
+        });
+      } else if (line.match(/^ok\s+(\d+)?.*#\s*(?:SKIP|TODO)/i)) {
+        countedSkip++;
+      } else if (line.match(/^ok\s+(\d+)?/i)) {
+        countedOk++;
+      }
+    }
+
+    if (requirePlan && !hasPlanLine) {
+      findings.push({
+        code: "TAP_PLAN_MISSING",
+        severity: "error",
+        message: "Strict TAP parser requires an explicit test plan (e.g. '1..N')"
+      });
+    }
+
+    const totalObserved = countedOk + countedNotOk + countedSkip;
+    if (totalObserved === 0) {
+      findings.push({
+        code: "NO_TAP_TEST_POINTS",
+        severity: "error",
+        message: "No valid TAP test points ('ok' or 'not ok') found in command output"
+      });
+    }
+
+    if (planTotal !== undefined && totalObserved !== planTotal) {
+      findings.push({
+        code: "TAP_PLAN_COUNT_MISMATCH",
+        severity: "error",
+        message: `TAP plan specified ${planTotal} tests but observed ${totalObserved} test points`
+      });
+    }
+
+    if (minPassedTestsCount !== undefined && countedOk < minPassedTestsCount) {
+      findings.push({
+        code: "INSUFFICIENT_PASSED_TESTS",
+        severity: "error",
+        message: `Counted passed tests (${countedOk}) is less than required minimum of ${minPassedTestsCount}`
+      });
+    }
+
+    return {
+      findings,
+      passedTests: countedOk,
+      failedTests: countedNotOk,
+      skippedTests: countedSkip
+    };
+  };
 }
 
 /**

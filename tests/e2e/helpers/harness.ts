@@ -13,7 +13,8 @@ import { openSqliteRunStore, type SqliteRunStore } from "@ai-flow/persistence";
 import { openFilesystemArtifactStore, type FilesystemArtifactStore } from "@ai-flow/artifact-store";
 import { FileAgentRegistry } from "@ai-flow/agent-registry";
 import { DeterministicWorkflowEngine } from "@ai-flow/core";
-import { createRuntimeService,
+import {
+  createRuntimeService,
   type ConcreteRuntimeService,
   type RuntimePorts
 } from "@ai-flow/runtime";
@@ -55,6 +56,10 @@ export interface E2eHarnessOptions {
   readonly qualityGate?: QualityGate | undefined;
   readonly transport?: FixtureAgentTransport | undefined;
   readonly definitions?: readonly WorkflowDefinition[] | undefined;
+  /** Test-only seam: custom factory to simulate RunStore acquisition failure */
+  readonly openRunStore?: typeof openSqliteRunStore | undefined;
+  /** Test-only seam: custom factory to simulate ArtifactStore acquisition failure */
+  readonly openArtifactStore?: typeof openFilesystemArtifactStore | undefined;
 }
 
 export interface E2eHarness {
@@ -72,9 +77,10 @@ export interface E2eHarness {
   readonly service: ConcreteRuntimeService;
 
   /**
-   * Simulates a full process restart:
-   * Re-opens the exact same SQLite database, artifact storage, and agent registry
-   * with new engine and runtime service instances.
+   * Simulates graceful rehydration / restart by closing old store connections
+   * and opening fresh instances from the same persistent on-disk state.
+   * NOTE: This models process instance shutdown and reopening, NOT an ungraceful
+   * OS process crash / SIGKILL / power loss.
    */
   restart(): Promise<{
     service: ConcreteRuntimeService;
@@ -88,172 +94,266 @@ export interface E2eHarness {
 
 export async function createE2eHarness(options?: E2eHarnessOptions): Promise<E2eHarness> {
   const clock = options?.clock ?? (() => new Date());
-  const tmpDir = await mkdtemp(join(tmpdir(), "ai-flow-p08-e2e-"));
-  const dbPath = join(tmpDir, "run-store.db");
-  const artifactsDir = join(tmpDir, "artifacts");
-  const registryPath = join(tmpDir, "registry.json");
+  const runStoreFactory = options?.openRunStore ?? openSqliteRunStore;
+  const artifactStoreFactory = options?.openArtifactStore ?? openFilesystemArtifactStore;
 
-  // 1. Real SqliteRunStore
-  const runStoreRes = openSqliteRunStore({ filename: dbPath });
-  if (!runStoreRes.ok) throw new Error(`SqliteRunStore open failed: ${runStoreRes.error.message}`);
-  let currentRunStore = runStoreRes.value;
+  let tmpDir: string | undefined;
+  let currentRunStore: SqliteRunStore | undefined;
+  let currentArtifactStore: FilesystemArtifactStore | undefined;
 
-  // 2. Real FilesystemArtifactStore
-  const artifactStoreRes = await openFilesystemArtifactStore({
-    root: artifactsDir,
-    storeId: "e2e-artifact-store"
-  });
-  if (!artifactStoreRes.ok) throw new Error(`FilesystemArtifactStore open failed: ${artifactStoreRes.error.message}`);
-  let currentArtifactStore = artifactStoreRes.value;
-
-  // 3. Real FileAgentRegistry
-  let currentRegistry = new FileAgentRegistry({
-    stateFile: registryPath,
-    clock
-  });
-
-  // Seed default agents for MVP roles
-  const roles = ["planner", "developer", "reviewer", "qa"];
-  for (const role of roles) {
-    await currentRegistry.upsert({
-      agentId: `agent-${role}-1`,
-      role,
-      transport: "herdr",
-      enabled: true,
-      priority: 1,
-      maxConcurrentTasks: 2,
-      capabilities: ["code", "review", "test"],
-      settings: {
-        provider: "mock",
-        kind: "cli",
-        readOnlyWorkspace: false,
-        allowTaskDelegation: false
-      }
-    });
-  }
-
-  // Workflow definition registry for engine rehydration across restarts
-  const definitionRegistry = new Map<string, WorkflowDefinition>();
-  const standardMvp = createStandardMvpWorkflow();
-  definitionRegistry.set(`${standardMvp.id}\u0000${standardMvp.version}`, standardMvp);
-  for (const def of options?.definitions ?? []) {
-    definitionRegistry.set(`${def.id}\u0000${def.version}`, def);
-  }
-  const resolveDefinition = (id: string, version: string) => {
-    return definitionRegistry.get(`${id}\u0000${version}`);
-  };
-
-  // 4. Real DeterministicWorkflowEngine
-  let currentEngine = new DeterministicWorkflowEngine({
-    resolveDefinition,
-    now: () => clock().toISOString()
-  });
-
-  // 5. Test-controlled FixtureAgentTransport
-  const transport = options?.transport ?? new FixtureAgentTransport({ clock });
-
-  // 6. QualityGate router
-  const compositeGate = new CompositeQualityGate();
-  if (options?.qualityGate) {
-    compositeGate.register("default", options.qualityGate);
-  }
-
-  // 7. Compose RuntimePorts
-  let currentPorts: RuntimePorts = {
-    engine: currentEngine,
-    runStore: currentRunStore,
-    artifactStore: currentArtifactStore,
-    agentRegistry: currentRegistry,
-    transport,
-    qualityGate: compositeGate,
-    clock
-  };
-
-  let currentService = createRuntimeService(currentPorts);
-  await currentService.init();
-
-  return {
-    tmpDir,
-    dbPath,
-    artifactsDir,
-    registryPath,
-    get runStore() { return currentRunStore; },
-    get artifactStore() { return currentArtifactStore; },
-    get agentRegistry() { return currentRegistry; },
-    get engine() { return currentEngine; },
-    transport,
-    qualityGate: compositeGate,
-    get ports() { return currentPorts; },
-    get service() { return currentService; },
-
-    async restart() {
-      // Close old store connections before re-opening to prevent file locking and state leaks
-      currentRunStore.close();
-      currentArtifactStore.close();
-
-      // Create new instances from the same persistent state on disk
-      const newRunStoreRes = openSqliteRunStore({ filename: dbPath });
-      if (!newRunStoreRes.ok) throw new Error(`Restart: SqliteRunStore open failed: ${newRunStoreRes.error.message}`);
-      currentRunStore = newRunStoreRes.value;
-
-      const newArtifactStoreRes = await openFilesystemArtifactStore({
-        root: artifactsDir,
-        storeId: "e2e-artifact-store"
-      });
-      if (!newArtifactStoreRes.ok) throw new Error(`Restart: FilesystemArtifactStore open failed: ${newArtifactStoreRes.error.message}`);
-      currentArtifactStore = newArtifactStoreRes.value;
-
-      currentRegistry = new FileAgentRegistry({
-        stateFile: registryPath,
-        clock
-      });
-
-      currentEngine = new DeterministicWorkflowEngine({
-        resolveDefinition,
-        now: () => clock().toISOString()
-      });
-
-      currentPorts = {
-        engine: currentEngine,
-        runStore: currentRunStore,
-        artifactStore: currentArtifactStore,
-        agentRegistry: currentRegistry,
-        transport,
-        qualityGate: compositeGate,
-        clock
-      };
-
-      currentService = createRuntimeService(currentPorts);
-      await currentService.init({ recoveryMode: true });
-
-      return {
-        service: currentService,
-        engine: currentEngine,
-        runStore: currentRunStore,
-        artifactStore: currentArtifactStore
-      };
-    },
-
-    async cleanup() {
-      const errors: unknown[] = [];
-      try {
-        currentRunStore.close();
-      } catch (err) {
-        errors.push(err);
-      }
+  async function releaseAcquiredResources(): Promise<unknown[]> {
+    const cleanupErrors: unknown[] = [];
+    if (currentArtifactStore) {
       try {
         currentArtifactStore.close();
       } catch (err) {
-        errors.push(err);
+        cleanupErrors.push(err);
       }
+      currentArtifactStore = undefined;
+    }
+    if (currentRunStore) {
       try {
-        await rm(tmpDir, { recursive: true, force: true });
+        currentRunStore.close();
       } catch (err) {
-        errors.push(err);
+        cleanupErrors.push(err);
       }
-      if (errors.length > 0) {
-        throw new AggregateError(errors, "Harness cleanup failed");
+      currentRunStore = undefined;
+    }
+    if (tmpDir) {
+      try {
+        const expectedPrefix = tmpdir();
+        if (tmpDir.startsWith(expectedPrefix)) {
+          await rm(tmpDir, { recursive: true, force: true });
+        }
+      } catch (err) {
+        cleanupErrors.push(err);
+      }
+      tmpDir = undefined;
+    }
+    return cleanupErrors;
+  }
+
+  try {
+    tmpDir = await mkdtemp(join(tmpdir(), "ai-flow-p08-e2e-"));
+    const dbPath = join(tmpDir, "run-store.db");
+    const artifactsDir = join(tmpDir, "artifacts");
+    const registryPath = join(tmpDir, "registry.json");
+
+    // 1. SqliteRunStore acquisition
+    const runStoreRes = runStoreFactory({ filename: dbPath });
+    if (!runStoreRes.ok) {
+      throw new Error(`SqliteRunStore open failed: ${runStoreRes.error.message}`);
+    }
+    currentRunStore = runStoreRes.value;
+
+    // 2. FilesystemArtifactStore acquisition
+    const artifactStoreRes = await artifactStoreFactory({
+      root: artifactsDir,
+      storeId: "e2e-artifact-store"
+    });
+    if (!artifactStoreRes.ok) {
+      throw new Error(`FilesystemArtifactStore open failed: ${artifactStoreRes.error.message}`);
+    }
+    currentArtifactStore = artifactStoreRes.value;
+
+    // 3. Real FileAgentRegistry
+    let currentRegistry = new FileAgentRegistry({
+      stateFile: registryPath,
+      clock
+    });
+
+    // Seed default agents for MVP roles, strictly validating each OperationResult
+    const roles = ["planner", "developer", "reviewer", "qa"];
+    for (const role of roles) {
+      const upsertRes = await currentRegistry.upsert({
+        agentId: `agent-${role}-1`,
+        role,
+        transport: "herdr",
+        enabled: true,
+        priority: 1,
+        maxConcurrentTasks: 2,
+        capabilities: ["code", "review", "test"],
+        settings: {
+          provider: "mock",
+          kind: "cli",
+          readOnlyWorkspace: false,
+          allowTaskDelegation: false
+        }
+      });
+      if (!upsertRes.ok) {
+        throw new Error(`Failed to seed agent '${role}': ${upsertRes.error.message}`);
       }
     }
-  };
+
+    // Workflow definition registry for engine rehydration across restarts
+    const definitionRegistry = new Map<string, WorkflowDefinition>();
+    const standardMvp = createStandardMvpWorkflow();
+    definitionRegistry.set(`${standardMvp.id}\u0000${standardMvp.version}`, standardMvp);
+    for (const def of options?.definitions ?? []) {
+      definitionRegistry.set(`${def.id}\u0000${def.version}`, def);
+    }
+    const resolveDefinition = (id: string, version: string) => {
+      return definitionRegistry.get(`${id}\u0000${version}`);
+    };
+
+    // 4. Real DeterministicWorkflowEngine
+    let currentEngine = new DeterministicWorkflowEngine({
+      resolveDefinition,
+      now: () => clock().toISOString()
+    });
+
+    // 5. Test-controlled FixtureAgentTransport
+    const transport = options?.transport ?? new FixtureAgentTransport({ clock });
+
+    // 6. QualityGate router
+    const compositeGate = new CompositeQualityGate();
+    if (options?.qualityGate) {
+      compositeGate.register("default", options.qualityGate);
+    }
+
+    // 7. Compose RuntimePorts
+    let currentPorts: RuntimePorts = {
+      engine: currentEngine,
+      runStore: currentRunStore,
+      artifactStore: currentArtifactStore,
+      agentRegistry: currentRegistry,
+      transport,
+      qualityGate: compositeGate,
+      clock
+    };
+
+    let currentService = createRuntimeService(currentPorts);
+    const initRes = await currentService.init();
+    if (!initRes.ok) {
+      throw new Error(`RuntimeService init failed: ${initRes.error.message}`);
+    }
+
+    let cleanedUp = false;
+
+    return {
+      tmpDir,
+      dbPath,
+      artifactsDir,
+      registryPath,
+      get runStore() {
+        if (!currentRunStore) throw new Error("Harness RunStore has been closed");
+        return currentRunStore;
+      },
+      get artifactStore() {
+        if (!currentArtifactStore) throw new Error("Harness ArtifactStore has been closed");
+        return currentArtifactStore;
+      },
+      get agentRegistry() { return currentRegistry; },
+      get engine() { return currentEngine; },
+      transport,
+      qualityGate: compositeGate,
+      get ports() { return currentPorts; },
+      get service() { return currentService; },
+
+      async restart() {
+        // Close old store instances first to release file locks
+        const oldRunStore = currentRunStore;
+        const oldArtifactStore = currentArtifactStore;
+        currentRunStore = undefined;
+        currentArtifactStore = undefined;
+
+        try {
+          oldRunStore?.close();
+        } finally {
+          oldArtifactStore?.close();
+        }
+
+        let nextRunStore: SqliteRunStore | undefined;
+        let nextArtifactStore: FilesystemArtifactStore | undefined;
+
+        try {
+          // Open new store handles from existing persistent on-disk files
+          const newRunStoreRes = runStoreFactory({ filename: dbPath });
+          if (!newRunStoreRes.ok) {
+            throw new Error(`Restart: SqliteRunStore open failed: ${newRunStoreRes.error.message}`);
+          }
+          nextRunStore = newRunStoreRes.value;
+
+          const newArtifactStoreRes = await artifactStoreFactory({
+            root: artifactsDir,
+            storeId: "e2e-artifact-store"
+          });
+          if (!newArtifactStoreRes.ok) {
+            throw new Error(`Restart: FilesystemArtifactStore open failed: ${newArtifactStoreRes.error.message}`);
+          }
+          nextArtifactStore = newArtifactStoreRes.value;
+
+          currentRegistry = new FileAgentRegistry({
+            stateFile: registryPath,
+            clock
+          });
+
+          currentEngine = new DeterministicWorkflowEngine({
+            resolveDefinition,
+            now: () => clock().toISOString()
+          });
+
+          currentRunStore = nextRunStore;
+          currentArtifactStore = nextArtifactStore;
+
+          currentPorts = {
+            engine: currentEngine,
+            runStore: currentRunStore,
+            artifactStore: currentArtifactStore,
+            agentRegistry: currentRegistry,
+            transport,
+            qualityGate: compositeGate,
+            clock
+          };
+
+          currentService = createRuntimeService(currentPorts);
+          const restartInitRes = await currentService.init({ recoveryMode: true });
+          if (!restartInitRes.ok) {
+            throw new Error(`Restart: Runtime service init failed: ${restartInitRes.error.message}`);
+          }
+
+          return {
+            service: currentService,
+            engine: currentEngine,
+            runStore: currentRunStore,
+            artifactStore: currentArtifactStore
+          };
+        } catch (restartErr) {
+          // Clean up newly acquired handles if restart failed
+          const cleanupErrors: unknown[] = [];
+          if (nextArtifactStore) {
+            try { nextArtifactStore.close(); } catch (err) { cleanupErrors.push(err); }
+          }
+          if (nextRunStore) {
+            try { nextRunStore.close(); } catch (err) { cleanupErrors.push(err); }
+          }
+          if (cleanupErrors.length > 0) {
+            throw new AggregateError(
+              [restartErr, ...cleanupErrors],
+              `Harness restart failed with secondary cleanup errors: ${restartErr instanceof Error ? restartErr.message : String(restartErr)}`
+            );
+          }
+          throw restartErr;
+        }
+      },
+
+      async cleanup() {
+        if (cleanedUp) return;
+        cleanedUp = true;
+        const cleanupErrors = await releaseAcquiredResources();
+        if (cleanupErrors.length > 0) {
+          throw new AggregateError(cleanupErrors, "Harness cleanup encountered errors");
+        }
+      }
+    };
+  } catch (primaryError) {
+    const cleanupErrors = await releaseAcquiredResources();
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        [primaryError, ...cleanupErrors],
+        `Failed to initialize E2E harness and encountered errors during cleanup: ${primaryError instanceof Error ? primaryError.message : String(primaryError)}`
+      );
+    }
+    throw primaryError;
+  }
 }

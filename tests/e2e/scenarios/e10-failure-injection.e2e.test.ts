@@ -8,39 +8,17 @@ import { createE2eHarness, type E2eHarness } from "../helpers/harness.js";
 const require = createRequire(import.meta.url);
 const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
 import {
+  createByteStream,
   createStandardMvpWorkflow,
   expectOk,
-  expectFailure
+  expectFailure,
+  readArtifactBytes
 } from "../helpers/fixtures.js";
 import type {
   ArtifactReference,
-  ArtifactStore,
   ArtifactWrite,
-  DomainEvent,
-  OperationResult
+  DomainEvent
 } from "@ai-flow/contracts";
-
-function createByteStream(content: Buffer): AsyncIterable<Uint8Array> {
-  return {
-    async *[Symbol.asyncIterator]() {
-      yield new Uint8Array(content);
-    }
-  };
-}
-
-async function readArtifactBytes(
-  store: ArtifactStore,
-  ref: ArtifactReference
-): Promise<OperationResult<Buffer>> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of store.get(ref)) {
-    if (!chunk.ok) {
-      return chunk as OperationResult<Buffer>;
-    }
-    chunks.push(Buffer.from(chunk.value));
-  }
-  return { ok: true, value: Buffer.concat(chunks) };
-}
 
 describe("Scenario E10 — Failure Injection, Concurrency & Corrupted State", () => {
   let harness: E2eHarness;
@@ -400,5 +378,47 @@ describe("Scenario E10 — Failure Injection, Concurrency & Corrupted State", ()
     const readForgedId = await readArtifactBytes(harness.artifactStore, forgedIdRef);
     const forgedIdErr = expectFailure(readForgedId);
     expect(forgedIdErr.code).toBe("not_found");
+  });
+
+  it("ensures old store handle rejects queries after restart and new store handle succeeds", async () => {
+    harness = await createE2eHarness();
+    const runId = `run-store-reopen-${randomUUID()}`;
+    const oldStore = harness.runStore;
+
+    const restarted = await harness.restart();
+    const newStore = restarted.runStore;
+
+    // Old store instance must reject operations because it was closed
+    const oldRead = await oldStore.get(runId);
+    const oldErr = expectFailure(oldRead);
+    expect(oldErr.code).toBe("validation");
+    expect(oldErr.message).toContain("closed");
+
+    // New store instance must succeed
+    const newRead = await newStore.get(runId);
+    expectOk(newRead);
+  });
+
+  it("handles acquisition failure safely, releasing already acquired stores without leaks", async () => {
+    let simulatedErrorThrown = false;
+    try {
+      await createE2eHarness({
+        openArtifactStore: async () => {
+          return {
+            ok: false,
+            error: {
+              code: "transport_unavailable",
+              message: "Simulated filesystem failure during artifact store initialization",
+              retryable: true
+            }
+          };
+        }
+      });
+    } catch (err) {
+      simulatedErrorThrown = true;
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain("Simulated filesystem failure");
+    }
+    expect(simulatedErrorThrown).toBe(true);
   });
 });
