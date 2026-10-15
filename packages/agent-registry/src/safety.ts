@@ -37,11 +37,13 @@ interface DangerousPatternDefinition {
   readonly message: string;
 }
 
+export const ZERO_WIDTH_CHARS = /[\u200B-\u200D\uFEFF\u00AD]/g;
+
 const DANGEROUS_PATTERNS: readonly DangerousPatternDefinition[] = Object.freeze([
   // 1. prompt_override
   {
     category: "prompt_override",
-    pattern: /(?:ignore|disregard|forget|bypass|override)\s+(?:all\s+)?(?:previous|prior|system|above|initial|existing)\s+(?:instructions|prompts|rules|directives|constraints)/i,
+    pattern: /(?:ignore|disregard|forget|bypass|override)\s+(?:(?:all|any|the|your|these|those|of)\s+)*(?:(?:previous|prior|system|above|initial|existing|earlier)\s+)+(?:instructions|prompts|rules|directives|constraints|guidelines)/i,
     patternName: "prompt_override_directive",
     message: "Instruction attempts to override or ignore prior system instructions or prompts"
   },
@@ -191,7 +193,7 @@ const DANGEROUS_PATTERNS: readonly DangerousPatternDefinition[] = Object.freeze(
   },
   {
     category: "arbitrary_delegation",
-    pattern: /(?:curl|wget)\s+[^|\n]+\|\s*(?:bash|sh)\b/i,
+    pattern: /(?:curl|wget)\s+[\s\S]{1,250}?\|\s*(?:bash|sh|zsh)\b/i,
     patternName: "curl_pipe_sh",
     message: "Dangerous execution pattern downloading and piping shell script"
   },
@@ -199,7 +201,7 @@ const DANGEROUS_PATTERNS: readonly DangerousPatternDefinition[] = Object.freeze(
   // 5. dangerous_command
   {
     category: "dangerous_command",
-    pattern: /rm\s+-rf\s+[\/~]/i,
+    pattern: /\brm\s+(?:-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*|(?:-[rRfF]|--recursive|--force)\s+(?:-[rRfF]|--recursive|--force)\s*)\s*[\/~]/i,
     patternName: "rm_rf_root",
     message: "Destructive recursive file deletion of root or home directory"
   },
@@ -243,7 +245,7 @@ const DANGEROUS_PATTERNS: readonly DangerousPatternDefinition[] = Object.freeze(
   // 6. secret_exfiltration
   {
     category: "secret_exfiltration",
-    pattern: /(?:curl|wget|nc|netcat|fetch)\s+[^\n]*(?:\$|\b)(?:API_KEY|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|AWS_SECRET)/i,
+    pattern: /(?:curl|wget|nc|netcat|fetch)\b[\s\S]{0,250}?(?:\$\{?[A-Za-z0-9_]*?(?:API_KEY|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|AWS_SECRET)|\b[A-Za-z0-9_]*?(?:API_KEY|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|AWS_SECRET)\b)/i,
     patternName: "exfiltrate_secret_variable",
     message: "Command attempts to exfiltrate secret environment variables via network"
   },
@@ -269,13 +271,13 @@ const DANGEROUS_PATTERNS: readonly DangerousPatternDefinition[] = Object.freeze(
   // 7. delimiter_breakout
   {
     category: "delimiter_breakout",
-    pattern: /<\/UNTRUSTED_REPOSITORY_CONTENT>/i,
+    pattern: /<\s*\/?\s*UNTRUSTED_REPOSITORY_CONTENT\b[^>]*>?/i,
     patternName: "untrusted_content_close_breakout",
     message: "Closing delimiter breakout attempt for UNTRUSTED_REPOSITORY_CONTENT"
   },
   {
     category: "delimiter_breakout",
-    pattern: /<\/?[A-Z0-9_-]+_PROMPT>/i,
+    pattern: /<\s*\/?\s*[A-Z0-9_-]+_PROMPT\b[^>]*>?/i,
     patternName: "prompt_tag_breakout",
     message: "Custom prompt delimiter tag breakout detected"
   },
@@ -293,38 +295,54 @@ const DANGEROUS_PATTERNS: readonly DangerousPatternDefinition[] = Object.freeze(
   },
   {
     category: "delimiter_breakout",
-    pattern: /\[ESCAPED_(?:OPEN|CLOSE)_TAG\]/i,
+    pattern: /\[ESCAPED_(?:OPEN|CLOSE)_TAG\]?/i,
     patternName: "escaped_tag_collision",
     message: "Attempt to forge escaped delimiter marker"
   }
 ]);
 
 export function detectDangerousInstructions(content: string): ContentSafetyReport {
+  const normalized = content
+    .replace(ZERO_WIDTH_CHARS, "")
+    .replace(/\\\r?\n/g, " ");
   const findings: DangerousInstructionFinding[] = [];
 
   for (const def of DANGEROUS_PATTERNS) {
-    const match = def.pattern.exec(content);
+    const match = def.pattern.exec(normalized);
     if (match) {
-      findings.push({
-        category: def.category,
-        pattern: def.patternName,
-        matchedText: match[0],
-        message: def.message
-      });
+      findings.push(
+        Object.freeze({
+          category: def.category,
+          pattern: def.patternName,
+          matchedText: match[0],
+          message: def.message
+        })
+      );
     }
   }
 
-  return {
+  return Object.freeze({
     safe: findings.length === 0,
     findings: Object.freeze(findings)
-  };
+  });
 }
 
 export function wrapUntrustedRepositoryContent(label: string, content: string): string {
-  const sanitized = content
-    .replaceAll(/<\/UNTRUSTED_REPOSITORY_CONTENT>/gi, "[ESCAPED_CLOSE_TAG]")
-    .replaceAll(/<UNTRUSTED_REPOSITORY_CONTENT\b/gi, "[ESCAPED_OPEN_TAG");
-  return `<UNTRUSTED_REPOSITORY_CONTENT label="${label}" trust="untrusted_data_only">\n${sanitized}\n</UNTRUSTED_REPOSITORY_CONTENT>`;
+  const safeLabel =
+    label
+      .replace(ZERO_WIDTH_CHARS, "")
+      .replace(/[\r\n\t\0]/g, " ")
+      .replaceAll("&", "&amp;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .trim() || "untrusted_content";
+
+  const normalizedContent = content.replace(ZERO_WIDTH_CHARS, "");
+  const sanitized = normalizedContent
+    .replaceAll(/<\s*\/\s*UNTRUSTED_REPOSITORY_CONTENT\b[^>]*>?/gi, "[ESCAPED_CLOSE_TAG]")
+    .replaceAll(/<\s*UNTRUSTED_REPOSITORY_CONTENT\b[^>]*>?/gi, "[ESCAPED_OPEN_TAG]");
+  return `<UNTRUSTED_REPOSITORY_CONTENT label="${safeLabel}" trust="untrusted_data_only">\n${sanitized}\n</UNTRUSTED_REPOSITORY_CONTENT>`;
 }
 
 const validation = (message: string): ContractError => ({ code: "validation", retryable: false, message });

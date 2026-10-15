@@ -109,7 +109,7 @@ export function createRoleArtifactHandoff(
     return failure(`Invalid toTaskId in artifact handoff: ${toTaskRes.error.message}`);
   }
 
-  if (request.fromTaskId === request.toTaskId) {
+  if (fromTaskRes.data === toTaskRes.data) {
     return failure("fromTaskId and toTaskId cannot be the same in artifact handoff");
   }
 
@@ -131,6 +131,23 @@ export function createRoleArtifactHandoff(
   if (!Array.isArray(request.artifacts) || request.artifacts.length === 0) {
     return failure("Handoff requires at least one artifact");
   }
+
+  if (request.requiredKinds !== undefined) {
+    if (!Array.isArray(request.requiredKinds) || request.requiredKinds.length === 0) {
+      return failure("requiredKinds must be a non-empty array of artifact kinds if provided");
+    }
+    for (const kind of request.requiredKinds) {
+      if (!rule.allowedKinds.includes(kind)) {
+        return failure(
+          `Artifact kind '${kind}' in requiredKinds is not allowed for handoff ${request.fromRole} -> ${request.toRole}. Allowed kinds: ${rule.allowedKinds.join(", ")}`
+        );
+      }
+    }
+  }
+
+  const requiredKinds = request.requiredKinds !== undefined
+    ? [...new Set([...rule.defaultRequiredKinds, ...request.requiredKinds])]
+    : rule.defaultRequiredKinds;
 
   const references: ArtifactReference[] = [];
   const seenIds = new Set<string>();
@@ -156,9 +173,9 @@ export function createRoleArtifactHandoff(
     }
 
     const ref = refParse.data;
-    if (ref.runId !== request.runId) {
+    if (ref.runId !== runIdRes.data) {
       return failure(
-        `Artifact runId '${ref.runId}' does not match handoff runId '${request.runId}'`
+        `Artifact runId '${ref.runId}' does not match handoff runId '${runIdRes.data}'`
       );
     }
 
@@ -176,7 +193,6 @@ export function createRoleArtifactHandoff(
     references.push(ref);
   }
 
-  const requiredKinds = request.requiredKinds ?? rule.defaultRequiredKinds;
   for (const requiredKind of requiredKinds) {
     if (!references.some((r) => r.kind === requiredKind)) {
       return failure(
@@ -186,15 +202,20 @@ export function createRoleArtifactHandoff(
   }
 
   return success({
-    runId: request.runId,
+    runId: runIdRes.data,
     fromRole: request.fromRole,
     toRole: request.toRole,
-    fromTaskId: request.fromTaskId,
-    toTaskId: request.toTaskId,
+    fromTaskId: fromTaskRes.data,
+    toTaskId: toTaskRes.data,
     references,
     artifactIds: references.map((r) => r.artifactId),
     artifactUris: references.map((r) => r.uri)
   });
+}
+
+interface PrevalidatedProposal {
+  readonly proposal: ArtifactProposal;
+  readonly bytes: Uint8Array;
 }
 
 export async function ingestRoleArtifactProposals(
@@ -206,12 +227,39 @@ export async function ingestRoleArtifactProposals(
     readonly operationOptions?: OperationOptions;
   }
 ): Promise<OperationResult<readonly ArtifactReference[]>> {
-  const references: ArtifactReference[] = [];
+  if (!store || typeof store.put !== "function") {
+    return failure(
+      "ArtifactStore is required to ingest artifact proposals into trusted stored ArtifactReferences"
+    );
+  }
 
-  for (const proposal of proposals) {
-    const parseRes = ArtifactProposalSchema.safeParse(proposal);
+  if (!Array.isArray(proposals) || proposals.length === 0) {
+    return failure("Proposals must be a non-empty array");
+  }
+
+  const prevalidated: PrevalidatedProposal[] = [];
+  const seenProposalIds = new Set<string>();
+  let batchRunId: string | undefined;
+
+  for (let i = 0; i < proposals.length; i++) {
+    const rawProposal = proposals[i];
+    const parseRes = ArtifactProposalSchema.safeParse(rawProposal);
     if (!parseRes.success) {
-      return failure(`Invalid artifact proposal: ${parseRes.error.message}`);
+      return failure(`Invalid artifact proposal at index ${i}: ${parseRes.error.message}`);
+    }
+    const proposal = parseRes.data;
+
+    if (seenProposalIds.has(proposal.proposalId)) {
+      return failure(`Duplicate proposalId in batch: '${proposal.proposalId}'`);
+    }
+    seenProposalIds.add(proposal.proposalId);
+
+    if (batchRunId === undefined) {
+      batchRunId = proposal.runId;
+    } else if (proposal.runId !== batchRunId) {
+      return failure(
+        `Inconsistent runId in artifact proposals batch: expected '${batchRunId}', got '${proposal.runId}'`
+      );
     }
 
     const rawContent = contentByProposalId[proposal.proposalId];
@@ -223,7 +271,7 @@ export async function ingestRoleArtifactProposals(
     if (typeof rawContent === "string") {
       bytes = new TextEncoder().encode(rawContent);
     } else if (rawContent instanceof Uint8Array) {
-      bytes = rawContent;
+      bytes = new Uint8Array(rawContent);
     } else {
       return failure(`Invalid content type for proposal '${proposal.proposalId}'`);
     }
@@ -245,6 +293,13 @@ export async function ingestRoleArtifactProposals(
       );
     }
 
+    prevalidated.push({ proposal, bytes });
+  }
+
+  const writtenReferences: ArtifactReference[] = [];
+
+  for (const item of prevalidated) {
+    const { proposal, bytes } = item;
     const idempotencyKey = `${options?.idempotencyKeyPrefix ?? "ingest"}:${proposal.proposalId}`;
     const write = {
       options: {
@@ -264,11 +319,39 @@ export async function ingestRoleArtifactProposals(
 
     const putRes = await store.put(write, options?.operationOptions);
     if (!putRes.ok) {
+      for (const written of writtenReferences) {
+        try {
+          await store.delete(written.artifactId, options?.operationOptions);
+        } catch {
+          // ignore best-effort deletion failure
+        }
+      }
       return putRes;
     }
 
-    references.push(putRes.value);
+    const refParse = ArtifactReferenceSchema.safeParse(putRes.value);
+    if (
+      !refParse.success ||
+      refParse.data.trust !== "stored" ||
+      refParse.data.artifactId !== proposal.proposalId ||
+      refParse.data.runId !== proposal.runId ||
+      refParse.data.kind !== proposal.kind
+    ) {
+      for (const written of [...writtenReferences, { artifactId: proposal.proposalId }]) {
+        try {
+          await store.delete(written.artifactId, options?.operationOptions);
+        } catch {
+          // ignore best-effort deletion failure
+        }
+      }
+      const detail = !refParse.success
+        ? refParse.error.message
+        : `mismatched reference metadata for '${proposal.proposalId}'`;
+      return failure(`ArtifactStore returned an invalid or untrusted ArtifactReference: ${detail}`);
+    }
+
+    writtenReferences.push(refParse.data);
   }
 
-  return success(references);
+  return success(writtenReferences);
 }

@@ -108,20 +108,34 @@ export function renderRolePrompt<R extends MvpRole>(
   if (!runIdParsed.success) {
     return fail(validation(`Invalid runId '${params.runId}': ${runIdParsed.error.message}`));
   }
+  if (/[\r\n\0"]/.test(runIdParsed.data)) {
+    return fail(validation("Invalid runId: must not contain newlines, control characters, or quotes"));
+  }
 
   const profile = getMvpRoleProfile(role);
 
   // Validate taskId for developer, reviewer, and qa
+  let validatedTaskId: string | undefined;
   if (role !== "planner") {
     const nonPlannerParams = params as DeveloperPromptParams | ReviewerPromptParams | QaPromptParams;
     const taskIdParsed = IdentifierSchema.safeParse(nonPlannerParams.taskId);
     if (!taskIdParsed.success) {
       return fail(validation(`Invalid taskId '${nonPlannerParams.taskId}': ${taskIdParsed.error.message}`));
     }
+    if (/[\r\n\0"]/.test(taskIdParsed.data)) {
+      return fail(validation("Invalid taskId: must not contain newlines, control characters, or quotes"));
+    }
+    validatedTaskId = taskIdParsed.data;
   }
 
   // Role-specific parameter validations
   const textFieldsToScan: { fieldName: string; content: string }[] = [];
+  textFieldsToScan.push({ fieldName: "runId", content: runIdParsed.data });
+  if (validatedTaskId !== undefined) {
+    textFieldsToScan.push({ fieldName: "taskId", content: validatedTaskId });
+  }
+
+  let validatedWorktreePath: string | undefined;
 
   if (role === "planner") {
     const p = params as PlannerPromptParams;
@@ -173,23 +187,45 @@ export function renderRolePrompt<R extends MvpRole>(
     if (typeof d.worktreePath !== "string" || d.worktreePath.trim().length === 0) {
       return fail(validation("Developer 'worktreePath' must be a non-empty string"));
     }
-    const pathSegments = d.worktreePath.split(/[/\\]/);
-    if (pathSegments.includes("..")) {
+    const wt = d.worktreePath.trim();
+    if (wt.split(/[/\\]/).includes("..") || /%2e%2e/i.test(wt)) {
       return fail(validation("Developer 'worktreePath' must not contain '..' path traversal segments"));
     }
-    if (d.branchName !== undefined && (typeof d.branchName !== "string" || d.branchName.trim().length === 0)) {
-      return fail(validation("Developer 'branchName' must be a non-empty string if provided"));
+    if (
+      /[\0\r\n"\\]/.test(wt) ||
+      wt.startsWith("~") ||
+      /^[a-zA-Z]:/.test(wt) ||
+      /%2e/i.test(wt) ||
+      /^\/(etc|proc|root|sys|dev|boot|run|var\/run)(\/|$)/i.test(wt)
+    ) {
+      return fail(validation("Developer 'worktreePath' must be a safe POSIX path without NUL, backslashes, or system root paths"));
     }
-    if (d.repositoryContext !== undefined && typeof d.repositoryContext !== "string") {
-      return fail(validation("Developer 'repositoryContext' must be a string if provided"));
+    const rawSegments = wt.startsWith("/") ? wt.slice(1).split("/") : wt.split("/");
+    if (rawSegments.length === 0 || rawSegments.some((seg) => seg.trim() === "" || seg.trim() === "." || seg.trim() === "..")) {
+      return fail(validation("Developer 'worktreePath' must not contain '..' or '.' path traversal segments"));
     }
-    if (d.reworkFeedback !== undefined && typeof d.reworkFeedback !== "string") {
-      return fail(validation("Developer 'reworkFeedback' must be a string if provided"));
+    validatedWorktreePath = wt;
+
+    if (d.branchName !== undefined) {
+      if (typeof d.branchName !== "string" || d.branchName.trim().length === 0) {
+        return fail(validation("Developer 'branchName' must be a non-empty string if provided"));
+      }
+      if (/[\r\n\0"\\]/.test(d.branchName) || d.branchName.includes("..")) {
+        return fail(validation("Developer 'branchName' must be a safe branch name without control characters, quotes, backslashes, or '..'"));
+      }
+    }
+    if (d.repositoryContext !== undefined && (typeof d.repositoryContext !== "string" || d.repositoryContext.trim().length === 0)) {
+      return fail(validation("Developer 'repositoryContext' must be a non-empty string if provided"));
+    }
+    if (d.reworkFeedback !== undefined && (typeof d.reworkFeedback !== "string" || d.reworkFeedback.trim().length === 0)) {
+      return fail(validation("Developer 'reworkFeedback' must be a non-empty string if provided"));
     }
 
     textFieldsToScan.push({ fieldName: "taskTitle", content: d.taskTitle });
     if (d.taskDescription) textFieldsToScan.push({ fieldName: "taskDescription", content: d.taskDescription });
     textFieldsToScan.push({ fieldName: "instruction", content: d.instruction });
+    textFieldsToScan.push({ fieldName: "worktreePath", content: wt });
+    if (d.branchName !== undefined) textFieldsToScan.push({ fieldName: "branchName", content: d.branchName });
     if (d.repositoryContext) textFieldsToScan.push({ fieldName: "repositoryContext", content: d.repositoryContext });
     if (d.reworkFeedback) textFieldsToScan.push({ fieldName: "reworkFeedback", content: d.reworkFeedback });
   } else if (role === "reviewer") {
@@ -207,8 +243,8 @@ export function renderRolePrompt<R extends MvpRole>(
       }
       textFieldsToScan.push({ fieldName: `acceptanceCriteria[${i}]`, content: ac });
     }
-    if (typeof r.commitSha !== "string" || r.commitSha.trim().length === 0) {
-      return fail(validation("Reviewer 'commitSha' must be a non-empty string"));
+    if (typeof r.commitSha !== "string" || !/^[0-9a-f]{7,40}$/i.test(r.commitSha.trim())) {
+      return fail(validation("Reviewer 'commitSha' must be a 7-to-40 character hexadecimal string"));
     }
     if (!Array.isArray(r.changedFiles) || r.changedFiles.length === 0) {
       return fail(validation("Reviewer 'changedFiles' must contain at least 1 file path"));
@@ -218,15 +254,28 @@ export function renderRolePrompt<R extends MvpRole>(
       if (typeof cf !== "string" || cf.trim().length === 0) {
         return fail(validation(`Reviewer 'changedFiles[${i}]' must be a non-empty string`));
       }
+      const trimmed = cf.trim();
+      if (
+        trimmed.startsWith("/") ||
+        trimmed.startsWith("\\") ||
+        /[\r\n\0"]/.test(trimmed) ||
+        trimmed.split(/[/\\]/).some((seg) => seg === "..")
+      ) {
+        return fail(validation(`Reviewer 'changedFiles[${i}]' must be a clean relative path without leading slashes, '..', or control characters`));
+      }
     }
     if (typeof r.diffSummary !== "string" || r.diffSummary.trim().length === 0) {
       return fail(validation("Reviewer 'diffSummary' must be a non-empty string"));
     }
-    if (r.repositoryContext !== undefined && typeof r.repositoryContext !== "string") {
-      return fail(validation("Reviewer 'repositoryContext' must be a string if provided"));
+    if (r.repositoryContext !== undefined && (typeof r.repositoryContext !== "string" || r.repositoryContext.trim().length === 0)) {
+      return fail(validation("Reviewer 'repositoryContext' must be a non-empty string if provided"));
     }
 
     textFieldsToScan.push({ fieldName: "taskTitle", content: r.taskTitle });
+    textFieldsToScan.push({ fieldName: "commitSha", content: r.commitSha.trim() });
+    for (let i = 0; i < r.changedFiles.length; i++) {
+      textFieldsToScan.push({ fieldName: `changedFiles[${i}]`, content: r.changedFiles[i].trim() });
+    }
     textFieldsToScan.push({ fieldName: "diffSummary", content: r.diffSummary });
     if (r.repositoryContext) textFieldsToScan.push({ fieldName: "repositoryContext", content: r.repositoryContext });
   } else if (role === "qa") {
@@ -247,8 +296,8 @@ export function renderRolePrompt<R extends MvpRole>(
     if (typeof q.testExecutionSummary !== "string" || q.testExecutionSummary.trim().length === 0) {
       return fail(validation("QA 'testExecutionSummary' must be a non-empty string"));
     }
-    if (q.repositoryContext !== undefined && typeof q.repositoryContext !== "string") {
-      return fail(validation("QA 'repositoryContext' must be a string if provided"));
+    if (q.repositoryContext !== undefined && (typeof q.repositoryContext !== "string" || q.repositoryContext.trim().length === 0)) {
+      return fail(validation("QA 'repositoryContext' must be a non-empty string if provided"));
     }
 
     textFieldsToScan.push({ fieldName: "taskTitle", content: q.taskTitle });
@@ -261,23 +310,42 @@ export function renderRolePrompt<R extends MvpRole>(
   if (!Array.isArray(inputArtifacts)) {
     return fail(validation("Input artifacts must be an array"));
   }
+  const seenArtifactIds = new Set<string>();
+  const validatedArtifacts: ArtifactReference[] = [];
   for (const artifact of inputArtifacts) {
+    if (typeof artifact !== "object" || artifact === null) {
+      return fail(validation("Input artifact reference must be a non-null object"));
+    }
+    const rec = artifact as Record<string, unknown>;
+    if ("proposalId" in rec || rec.trust !== "stored") {
+      return fail(
+        validation(
+          `Input artifacts must be stored ArtifactReference values with trust === 'stored'; received ArtifactProposal or unstored artifact '${String(rec.artifactId ?? rec.proposalId ?? "unknown")}'`
+        )
+      );
+    }
     const artifactParsed = ArtifactReferenceSchema.safeParse(artifact);
     if (!artifactParsed.success) {
       return fail(validation(`Invalid input artifact reference: ${artifactParsed.error.message}`));
     }
-    if (artifact.runId !== params.runId) {
+    if (seenArtifactIds.has(artifactParsed.data.artifactId)) {
+      return fail(validation(`Duplicate artifactId '${artifactParsed.data.artifactId}' in inputArtifacts`));
+    }
+    seenArtifactIds.add(artifactParsed.data.artifactId);
+
+    if (artifactParsed.data.runId !== runIdParsed.data) {
       return fail(
-        validation(`Input artifact runId '${artifact.runId}' does not match prompt runId '${params.runId}'`)
+        validation(`Input artifact runId '${artifactParsed.data.runId}' does not match prompt runId '${runIdParsed.data}'`)
       );
     }
-    if (!profile.allowedInputArtifactKinds.includes(artifact.kind)) {
+    if (!profile.allowedInputArtifactKinds.includes(artifactParsed.data.kind)) {
       return fail(
-        validation(`Artifact kind '${artifact.kind}' is not allowed as input for role '${role}'`)
+        validation(`Artifact kind '${artifactParsed.data.kind}' is not allowed as input for role '${role}'`)
       );
     }
+    validatedArtifacts.push(artifactParsed.data);
   }
-  const inputArtifactUris = inputArtifacts.map((a) => a.uri);
+  const inputArtifactUris = Object.freeze(validatedArtifacts.map((a) => a.uri));
 
   // Dangerous instruction detection across all text fields
   const allFindings: DangerousInstructionFinding[] = [];
@@ -323,7 +391,7 @@ export function renderRolePrompt<R extends MvpRole>(
     const wrappedRepo = wrapUntrustedRepositoryContent("repository_context", p.repositoryContext);
 
     promptBody = `## Planner Parameters
-- Run ID: ${p.runId}
+- Run ID: ${runIdParsed.data}
 - Workflow Kind: ${p.workflowKind}
 
 ### Requirement
@@ -376,11 +444,11 @@ Return ONLY a valid JSON object matching this schema:
       : "";
 
     promptBody = `## Developer Task Parameters
-- Run ID: ${d.runId}
-- Task ID: ${d.taskId}
+- Run ID: ${runIdParsed.data}
+- Task ID: ${validatedTaskId}
 - Task Title: ${d.taskTitle}
 - Task Description: ${d.taskDescription ?? "N/A"}
-- Assigned Worktree Path: ${d.worktreePath}
+- Assigned Worktree Path: ${validatedWorktreePath}
 - Target Branch: ${d.branchName ?? "HEAD"}
 
 ### Implementation Instruction
@@ -394,8 +462,8 @@ Return ONLY a valid JSON object matching this schema:
 \`\`\`json
 {
   "role": "developer",
-  "taskId": "${d.taskId}",
-  "worktreePath": "${d.worktreePath}",
+  "taskId": "${validatedTaskId}",
+  "worktreePath": "${validatedWorktreePath}",
   "commit": {
     "sha": "<7-to-40-hex-commit-sha>",
     "message": "<Commit message>",
@@ -429,8 +497,8 @@ Return ONLY a valid JSON object matching this schema:
       : "";
 
     promptBody = `## Reviewer Task Parameters
-- Run ID: ${r.runId}
-- Task ID: ${r.taskId}
+- Run ID: ${runIdParsed.data}
+- Task ID: ${validatedTaskId}
 - Task Title: ${r.taskTitle}
 - Commit SHA: ${r.commitSha}
 
@@ -448,7 +516,7 @@ Return ONLY a valid JSON object matching this schema:
 \`\`\`json
 {
   "role": "reviewer",
-  "taskId": "${r.taskId}",
+  "taskId": "${validatedTaskId}",
   "decision": "approved" | "changes_requested",
   "summary": "<Review findings summary and rationale for decision>",
   "criteriaEvaluation": [
@@ -482,8 +550,8 @@ Return ONLY a valid JSON object matching this schema:
       : "";
 
     promptBody = `## QA Task Parameters
-- Run ID: ${q.runId}
-- Task ID: ${q.taskId}
+- Run ID: ${runIdParsed.data}
+- Task ID: ${validatedTaskId}
 - Task Title: ${q.taskTitle}
 
 ### Acceptance Criteria to Verify
@@ -497,7 +565,7 @@ Return ONLY a valid JSON object matching this schema:
 \`\`\`json
 {
   "role": "qa",
-  "taskId": "${q.taskId}",
+  "taskId": "${validatedTaskId}",
   "verdict": "passed" | "failed",
   "summary": "<Summary of verification results and evaluation of test evidence>",
   "criteriaVerification": [
@@ -528,8 +596,7 @@ Return ONLY a valid JSON object matching this schema:
   if (role === "planner") {
     roleConstraintsText = "- READ-ONLY ROLE: Do NOT modify repository files. Focus solely on workflow DAG decomposition.\n- Task delegation outside workflow scope is strictly prohibited.";
   } else if (role === "developer") {
-    const d = params as DeveloperPromptParams;
-    roleConstraintsText = `- CONFINED WORKSPACE: Modify files ONLY inside assigned worktreePath '${d.worktreePath}'. Modifying files outside this directory is strictly prohibited.\n- Independent test execution evidence is required for all changes.\n- Task delegation outside workflow scope is strictly prohibited.`;
+    roleConstraintsText = `- CONFINED WORKSPACE: Modify files ONLY inside assigned worktreePath '${validatedWorktreePath}'. Modifying files outside this directory is strictly prohibited.\n- Independent test execution evidence is required for all changes.\n- Task delegation outside workflow scope is strictly prohibited.`;
   } else if (role === "reviewer") {
     roleConstraintsText = "- READ-ONLY ROLE: Do NOT modify any source files. Your output 'modifiedFiles' must be strictly [].\n- Evaluate changes strictly against the provided acceptance criteria.\n- Task delegation outside workflow scope is strictly prohibited.";
   } else if (role === "qa") {
@@ -548,7 +615,7 @@ ${roleConstraintsText}
 ${UNTRUSTED_CONTENT_SAFETY_RULES.map((rule, idx) => `${idx + 1}. ${rule}`).join("\n")}
 
 ## Input Artifacts
-${formatArtifactList(inputArtifacts)}
+${formatArtifactList(validatedArtifacts)}
 
 ${promptBody}`;
 

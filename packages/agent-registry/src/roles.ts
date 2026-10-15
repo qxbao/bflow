@@ -14,7 +14,7 @@ import {
 
 export type ArtifactKind = ArtifactReference["kind"];
 
-export const MVP_ROLES = ["planner", "developer", "reviewer", "qa"] as const;
+export const MVP_ROLES = Object.freeze(["planner", "developer", "reviewer", "qa"] as const);
 export type MvpRole = (typeof MVP_ROLES)[number];
 
 export function isMvpRole(value: unknown): value is MvpRole {
@@ -24,7 +24,7 @@ export function isMvpRole(value: unknown): value is MvpRole {
 export const MvpRoleSchema: {
   safeParse(value: unknown): { success: true; data: MvpRole } | { success: false; error: { message: string } };
   parse(value: unknown): MvpRole;
-} = {
+} = Object.freeze({
   safeParse(value: unknown) {
     if (isMvpRole(value)) {
       return { success: true, data: value };
@@ -40,7 +40,18 @@ export const MvpRoleSchema: {
     }
     throw new Error(`Invalid MVP role: ${String(value)}. Expected one of: ${MVP_ROLES.join(", ")}`);
   }
-};
+});
+
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  if (Object.hasOwn(value, "__proto__")) {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
 
 export interface RoleExecutionSettings {
   readonly paneId?: string;
@@ -114,7 +125,7 @@ export const MVP_ROLE_PROFILES: Readonly<Record<MvpRole, MvpRoleProfile>> = Obje
     description: "Verifies test execution evidence and acceptance criteria without trusting agent self-assertions.",
     defaultCapabilities: Object.freeze(["qa-verification", "test-validation", "acceptance-checking"] as const),
     allowedInputArtifactKinds: Object.freeze(["document", "patch", "test-result", "report", "log", "agent-output"] as const),
-    producedArtifactKinds: Object.freeze(["test-result", "report", "agent-output"] as const),
+    producedArtifactKinds: Object.freeze(["test-result", "report", "agent-output", "log"] as const),
     readOnlyWorkspace: true,
     allowTaskDelegation: false as const,
     requiresIndependentTestVerification: true as const
@@ -157,11 +168,15 @@ export function parseRoleAgentSettings(
   settings: unknown,
   expectedRole?: MvpRole
 ): OperationResult<RoleAgentSettings> {
-  if (typeof settings !== "object" || settings === null || Array.isArray(settings)) {
+  if (expectedRole !== undefined && !isMvpRole(expectedRole)) {
+    return fail(validation(`Invalid MVP role: ${String(expectedRole)}. Expected one of: ${MVP_ROLES.join(", ")}`));
+  }
+
+  if (!isPlainObject(settings)) {
     return fail(validation("Role agent settings must be a non-null plain object"));
   }
 
-  const raw = settings as Record<string, unknown>;
+  const raw = settings;
 
   for (const key of Object.keys(raw)) {
     if (!ALLOWED_SETTINGS_KEYS.has(key)) {
@@ -180,7 +195,7 @@ export function parseRoleAgentSettings(
   const kind = raw.kind.trim();
 
   let model: string | undefined;
-  if ("model" in raw && raw.model !== undefined) {
+  if (Object.hasOwn(raw, "model") && raw.model !== undefined) {
     if (typeof raw.model !== "string" || raw.model.trim().length === 0) {
       return fail(validation("Settings 'model' must be a non-empty trimmed string"));
     }
@@ -188,7 +203,7 @@ export function parseRoleAgentSettings(
   }
 
   let temperature: number | undefined;
-  if ("temperature" in raw && raw.temperature !== undefined) {
+  if (Object.hasOwn(raw, "temperature") && raw.temperature !== undefined) {
     if (typeof raw.temperature !== "number" || !Number.isFinite(raw.temperature) || raw.temperature < 0 || raw.temperature > 2) {
       return fail(validation("Settings 'temperature' must be a finite number between 0 and 2"));
     }
@@ -196,7 +211,7 @@ export function parseRoleAgentSettings(
   }
 
   let maxTokens: number | undefined;
-  if ("maxTokens" in raw && raw.maxTokens !== undefined) {
+  if (Object.hasOwn(raw, "maxTokens") && raw.maxTokens !== undefined) {
     if (typeof raw.maxTokens !== "number" || !Number.isInteger(raw.maxTokens) || raw.maxTokens <= 0) {
       return fail(validation("Settings 'maxTokens' must be a positive integer"));
     }
@@ -204,9 +219,12 @@ export function parseRoleAgentSettings(
   }
 
   let readOnlyWorkspace: boolean;
-  if ("readOnlyWorkspace" in raw && raw.readOnlyWorkspace !== undefined) {
+  if (Object.hasOwn(raw, "readOnlyWorkspace") && raw.readOnlyWorkspace !== undefined) {
     if (typeof raw.readOnlyWorkspace !== "boolean") {
       return fail(validation("Settings 'readOnlyWorkspace' must be a boolean"));
+    }
+    if (expectedRole === "developer" && raw.readOnlyWorkspace === true) {
+      return fail(validation("Developer role requires a writable worktree (readOnlyWorkspace: false)"));
     }
     if (expectedRole && (expectedRole === "planner" || expectedRole === "reviewer" || expectedRole === "qa") && raw.readOnlyWorkspace === false) {
       return fail(validation("Reviewer/Planner/QA role must have readOnlyWorkspace: true"));
@@ -216,7 +234,7 @@ export function parseRoleAgentSettings(
     readOnlyWorkspace = expectedRole ? MVP_ROLE_PROFILES[expectedRole].readOnlyWorkspace : true;
   }
 
-  if ("allowTaskDelegation" in raw && raw.allowTaskDelegation !== undefined) {
+  if (Object.hasOwn(raw, "allowTaskDelegation") && raw.allowTaskDelegation !== undefined) {
     if (typeof raw.allowTaskDelegation !== "boolean") {
       return fail(validation("Settings 'allowTaskDelegation' must be a boolean"));
     }
@@ -225,7 +243,7 @@ export function parseRoleAgentSettings(
     }
   }
 
-  if ("requiresIndependentTestVerification" in raw && raw.requiresIndependentTestVerification !== undefined) {
+  if (Object.hasOwn(raw, "requiresIndependentTestVerification") && raw.requiresIndependentTestVerification !== undefined) {
     if (typeof raw.requiresIndependentTestVerification !== "boolean") {
       return fail(validation("Settings 'requiresIndependentTestVerification' must be a boolean"));
     }
@@ -235,11 +253,11 @@ export function parseRoleAgentSettings(
   }
 
   let execution: RoleExecutionSettings | undefined;
-  if ("execution" in raw && raw.execution !== undefined) {
-    if (typeof raw.execution !== "object" || raw.execution === null || Array.isArray(raw.execution)) {
+  if (Object.hasOwn(raw, "execution") && raw.execution !== undefined) {
+    if (!isPlainObject(raw.execution)) {
       return fail(validation("Settings 'execution' must be a non-null plain object"));
     }
-    const rawExec = raw.execution as Record<string, unknown>;
+    const rawExec = raw.execution;
     for (const key of Object.keys(rawExec)) {
       if (!ALLOWED_EXECUTION_KEYS.has(key)) {
         return fail(validation(`Unknown execution setting key: '${key}'`));
@@ -249,7 +267,7 @@ export function parseRoleAgentSettings(
     const execResult: { paneId?: string; workspaceId?: string; tabId?: string; terminalId?: string; args?: readonly string[] } = {};
     const stringFields = ["paneId", "workspaceId", "tabId", "terminalId"] as const;
     for (const field of stringFields) {
-      if (field in rawExec && rawExec[field] !== undefined) {
+      if (Object.hasOwn(rawExec, field) && rawExec[field] !== undefined) {
         const val = rawExec[field];
         if (typeof val !== "string" || val.trim().length === 0) {
           return fail(validation(`Execution '${field}' must be a non-empty string`));
@@ -258,7 +276,7 @@ export function parseRoleAgentSettings(
       }
     }
 
-    if ("args" in rawExec && rawExec.args !== undefined) {
+    if (Object.hasOwn(rawExec, "args") && rawExec.args !== undefined) {
       const rawArgs = rawExec.args;
       if (!Array.isArray(rawArgs)) {
         return fail(validation("Execution 'args' must be an array of strings"));
@@ -273,17 +291,19 @@ export function parseRoleAgentSettings(
     execution = Object.freeze(execResult);
   }
 
-  return ok({
-    provider,
-    kind,
-    ...(model !== undefined ? { model } : {}),
-    ...(temperature !== undefined ? { temperature } : {}),
-    ...(maxTokens !== undefined ? { maxTokens } : {}),
-    readOnlyWorkspace,
-    allowTaskDelegation: false as const,
-    requiresIndependentTestVerification: true as const,
-    ...(execution !== undefined ? { execution } : {})
-  });
+  return ok(
+    Object.freeze({
+      provider,
+      kind,
+      ...(model !== undefined ? { model } : {}),
+      ...(temperature !== undefined ? { temperature } : {}),
+      ...(maxTokens !== undefined ? { maxTokens } : {}),
+      readOnlyWorkspace,
+      allowTaskDelegation: false as const,
+      requiresIndependentTestVerification: true as const,
+      ...(execution !== undefined ? { execution } : {})
+    })
+  );
 }
 
 export interface CreateMvpRoleConfigInput {
@@ -306,6 +326,10 @@ export interface CreateMvpRoleConfigInput {
 export function createMvpRoleConfiguration(
   input: CreateMvpRoleConfigInput
 ): OperationResult<AgentConfiguration> {
+  if (!isPlainObject(input)) {
+    return fail(validation("Configuration input must be a non-null plain object"));
+  }
+
   if (!isMvpRole(input.role)) {
     return fail(validation(`Invalid MVP role: ${String(input.role)}. Expected one of: ${MVP_ROLES.join(", ")}`));
   }
@@ -329,9 +353,24 @@ export function createMvpRoleConfiguration(
     return fail(validation(`Invalid agentId '${agentId}': ${idParsed.error.message}`));
   }
 
-  const capabilities = input.capabilities
-    ? [...new Set([...profile.defaultCapabilities, ...input.capabilities])]
-    : [...profile.defaultCapabilities];
+  if (input.capabilities !== undefined) {
+    if (!Array.isArray(input.capabilities)) {
+      return fail(validation("Configuration 'capabilities' must be an array of strings"));
+    }
+    for (let i = 0; i < input.capabilities.length; i++) {
+      const cap = input.capabilities[i];
+      if (typeof cap !== "string" || cap.trim().length === 0) {
+        return fail(validation(`Configuration 'capabilities[${i}]' must be a non-empty trimmed string`));
+      }
+    }
+  }
+
+  const normalizedCapabilities = input.capabilities
+    ? input.capabilities.map((c) => c.trim())
+    : [];
+  const capabilities = Object.freeze([
+    ...new Set([...profile.defaultCapabilities, ...normalizedCapabilities])
+  ]);
 
   const rawSettings: Record<string, unknown> = {
     provider: input.provider,
@@ -367,7 +406,16 @@ export function createMvpRoleConfiguration(
     return fail(validation(`Agent configuration schema validation failed: ${schemaParsed.error.message}`));
   }
 
-  return ok(schemaParsed.data);
+  const frozenConfig: AgentConfiguration = Object.freeze({
+    ...schemaParsed.data,
+    capabilities: Object.freeze([...schemaParsed.data.capabilities]) as unknown as string[],
+    settings: Object.freeze(schemaParsed.data.settings as Record<string, unknown>) as unknown as JsonValue,
+    ...(schemaParsed.data.metadata !== undefined
+      ? { metadata: Object.freeze({ ...schemaParsed.data.metadata }) }
+      : {})
+  });
+
+  return ok(frozenConfig);
 }
 
 export type MvpRoleOverridesMap = Partial<
@@ -466,15 +514,42 @@ export async function resolveMvpRoleAgent(
     return ok(null);
   }
 
-  const settingsResult = parseRoleAgentSettings(resolveResult.value.settings, role);
+  const configParsed = AgentConfigurationSchema.safeParse(resolveResult.value);
+  if (!configParsed.success) {
+    return fail(validation(`Resolved agent configuration is invalid: ${configParsed.error.message}`));
+  }
+  const config = configParsed.data;
+
+  if (config.role !== role) {
+    return fail(validation(`Resolved agent role '${config.role}' does not match expected role '${role}'`));
+  }
+  if (!config.enabled) {
+    return fail(validation(`Resolved agent '${config.agentId}' is not enabled`));
+  }
+  const missingCaps = contextParsed.data.requiredCapabilities.filter((cap) => !config.capabilities.includes(cap));
+  if (missingCaps.length > 0) {
+    return fail(validation(`Resolved agent '${config.agentId}' lacks required capabilities: ${missingCaps.join(", ")}`));
+  }
+  if (contextParsed.data.preferredAgentId !== undefined && config.agentId !== contextParsed.data.preferredAgentId) {
+    return fail(validation(`Resolved agent '${config.agentId}' does not match preferredAgentId '${contextParsed.data.preferredAgentId}'`));
+  }
+
+  const settingsResult = parseRoleAgentSettings(config.settings, role);
   if (!settingsResult.ok) {
     return settingsResult;
   }
 
   const profile = getMvpRoleProfile(role);
-  return ok({
-    configuration: resolveResult.value,
-    settings: settingsResult.value,
-    profile
-  });
+  return ok(
+    Object.freeze({
+      configuration: Object.freeze({
+        ...config,
+        capabilities: Object.freeze([...config.capabilities]) as unknown as string[],
+        settings: settingsResult.value as unknown as JsonValue,
+        ...(config.metadata !== undefined ? { metadata: Object.freeze({ ...config.metadata }) } : {})
+      }),
+      settings: settingsResult.value,
+      profile
+    })
+  );
 }

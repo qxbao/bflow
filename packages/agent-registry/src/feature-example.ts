@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import {
-  ArtifactReferenceSchema,
   type AgentConfiguration,
   type AgentResult,
   type ApprovalDecision,
@@ -77,59 +76,21 @@ export interface CompleteFeatureWorkflowExample {
   };
 }
 
-async function resolveOrStoreProposals(
-  proposals: readonly ArtifactProposal[],
-  contentByProposalId: Readonly<Record<string, Uint8Array | string>>,
-  store?: ArtifactStore
-): Promise<OperationResult<readonly ArtifactReference[]>> {
-  if (store) {
-    return ingestRoleArtifactProposals(store, proposals, contentByProposalId);
-  }
-  const references: ArtifactReference[] = [];
-  for (const proposal of proposals) {
-    const raw = contentByProposalId[proposal.proposalId];
-    const bytes = typeof raw === "string" ? Buffer.from(raw, "utf8") : raw;
-    if (!bytes) {
-      return {
-        ok: false,
-        error: {
-          code: "validation",
-          retryable: false,
-          message: `Missing content for proposal '${proposal.proposalId}'`
-        }
-      };
-    }
-    const parsed = ArtifactReferenceSchema.safeParse({
-      trust: "stored",
-      artifactId: proposal.proposalId,
-      runId: proposal.runId,
-      ...(proposal.taskId !== undefined ? { taskId: proposal.taskId } : {}),
-      kind: proposal.kind,
-      uri: `artifact://local/${proposal.proposalId}`,
-      mediaType: proposal.mediaType,
-      sizeBytes: bytes.byteLength,
-      checksum: proposal.expectedIntegrity.checksum,
-      createdAt: "2026-01-01T00:00:30.000Z",
-      ...(proposal.metadata !== undefined ? { metadata: proposal.metadata } : {})
-    });
-    if (!parsed.success) {
-      return {
-        ok: false,
-        error: {
-          code: "validation",
-          retryable: false,
-          message: parsed.error.message
-        }
-      };
-    }
-    references.push(parsed.data);
-  }
-  return { ok: true, value: references };
-}
-
 export async function buildCompleteFeatureWorkflowExample(
-  store?: ArtifactStore
+  store: ArtifactStore
 ): Promise<OperationResult<CompleteFeatureWorkflowExample>> {
+  if (!store || typeof store.put !== "function") {
+    return {
+      ok: false,
+      error: {
+        code: "validation",
+        retryable: false,
+        message:
+          "ArtifactStore is required to ingest artifact proposals into trusted stored ArtifactReferences"
+      }
+    };
+  }
+
   const configsRes = createDefaultMvpConfigurations();
   if (!configsRes.ok) {
     return configsRes;
@@ -169,16 +130,6 @@ export async function buildCompleteFeatureWorkflowExample(
       sizeBytes: specBytes.byteLength
     }
   };
-
-  const planIngestRes = await resolveOrStoreProposals(
-    [planProposal],
-    { [planProposal.proposalId]: specBytes },
-    store
-  );
-  if (!planIngestRes.ok) {
-    return planIngestRes;
-  }
-  const storedPlanReference = planIngestRes.value[0]!;
 
   const rawPlannerOutput = {
     role: "planner",
@@ -241,6 +192,16 @@ export async function buildCompleteFeatureWorkflowExample(
     return plannerAgentResultRes;
   }
 
+  const planIngestRes = await ingestRoleArtifactProposals(
+    store,
+    validatedPlannerRes.value.artifactProposals,
+    { [planProposal.proposalId]: specBytes }
+  );
+  if (!planIngestRes.ok) {
+    return planIngestRes;
+  }
+  const storedPlanReference = planIngestRes.value[0]!;
+
   // Stage 2: Developer
   const devHandoffRes = createRoleArtifactHandoff({
     runId,
@@ -302,25 +263,6 @@ export async function buildCompleteFeatureWorkflowExample(
     }
   };
 
-  const devIngestRes = await resolveOrStoreProposals(
-    [patchProposal, devReportProposal],
-    {
-      [patchProposal.proposalId]: patchBytes,
-      [devReportProposal.proposalId]: devReportBytes
-    },
-    store
-  );
-  if (!devIngestRes.ok) {
-    return devIngestRes;
-  }
-  const [storedPatchReference, storedDevReportReference] = devIngestRes.value;
-  if (!storedPatchReference || !storedDevReportReference) {
-    return {
-      ok: false,
-      error: { code: "corruption", retryable: false, message: "Expected 2 stored developer artifacts" }
-    };
-  }
-
   const rawDevOutput = {
     role: "developer",
     taskId: "implement",
@@ -372,6 +314,25 @@ export async function buildCompleteFeatureWorkflowExample(
     return devAgentResultRes;
   }
 
+  const devIngestRes = await ingestRoleArtifactProposals(
+    store,
+    validatedDevRes.value.artifactProposals,
+    {
+      [patchProposal.proposalId]: patchBytes,
+      [devReportProposal.proposalId]: devReportBytes
+    }
+  );
+  if (!devIngestRes.ok) {
+    return devIngestRes;
+  }
+  const [storedPatchReference, storedDevReportReference] = devIngestRes.value;
+  if (!storedPatchReference || !storedDevReportReference) {
+    return {
+      ok: false,
+      error: { code: "corruption", retryable: false, message: "Expected 2 stored developer artifacts" }
+    };
+  }
+
   // Stage 3: Reviewer
   const reviewerHandoffRes = createRoleArtifactHandoff({
     runId,
@@ -415,16 +376,6 @@ export async function buildCompleteFeatureWorkflowExample(
       sizeBytes: reviewReportBytes.byteLength
     }
   };
-
-  const reviewIngestRes = await resolveOrStoreProposals(
-    [reviewReportProposal],
-    { [reviewReportProposal.proposalId]: reviewReportBytes },
-    store
-  );
-  if (!reviewIngestRes.ok) {
-    return reviewIngestRes;
-  }
-  const storedReviewReportReference = reviewIngestRes.value[0]!;
 
   const rawReviewerOutput = {
     role: "reviewer",
@@ -483,6 +434,16 @@ export async function buildCompleteFeatureWorkflowExample(
     return reviewerAgentResultRes;
   }
 
+  const reviewIngestRes = await ingestRoleArtifactProposals(
+    store,
+    validatedReviewerRes.value.artifactProposals,
+    { [reviewReportProposal.proposalId]: reviewReportBytes }
+  );
+  if (!reviewIngestRes.ok) {
+    return reviewIngestRes;
+  }
+  const storedReviewReportReference = reviewIngestRes.value[0]!;
+
   const approvalDecisionRes = toContractApprovalDecision(validatedReviewerRes.value, {
     approvalId: "approval-review-01",
     runId,
@@ -515,10 +476,10 @@ export async function buildCompleteFeatureWorkflowExample(
     }
   };
 
-  const qaTestLogIngestRes = await resolveOrStoreProposals(
+  const qaTestLogIngestRes = await ingestRoleArtifactProposals(
+    store,
     [qaTestLogProposal],
-    { [qaTestLogProposal.proposalId]: qaTestLogBytes },
-    store
+    { [qaTestLogProposal.proposalId]: qaTestLogBytes }
   );
   if (!qaTestLogIngestRes.ok) {
     return qaTestLogIngestRes;
@@ -568,16 +529,6 @@ export async function buildCompleteFeatureWorkflowExample(
       sizeBytes: qaReportBytes.byteLength
     }
   };
-
-  const qaReportIngestRes = await resolveOrStoreProposals(
-    [qaReportProposal],
-    { [qaReportProposal.proposalId]: qaReportBytes },
-    store
-  );
-  if (!qaReportIngestRes.ok) {
-    return qaReportIngestRes;
-  }
-  const storedQaReportReference = qaReportIngestRes.value[0]!;
 
   const rawQaOutput = {
     role: "qa",
@@ -648,6 +599,16 @@ export async function buildCompleteFeatureWorkflowExample(
   if (!qualityGateResultRes.ok) {
     return qualityGateResultRes;
   }
+
+  const qaReportIngestRes = await ingestRoleArtifactProposals(
+    store,
+    validatedQaRes.value.artifactProposals,
+    { [qaReportProposal.proposalId]: qaReportBytes }
+  );
+  if (!qaReportIngestRes.ok) {
+    return qaReportIngestRes;
+  }
+  const storedQaReportReference = qaReportIngestRes.value[0]!;
 
   return {
     ok: true,
