@@ -2,13 +2,34 @@ import { describe, expect, it, afterEach } from "vitest";
 import { randomUUID } from "node:crypto";
 import { createE2eHarness, type E2eHarness } from "../helpers/harness.js";
 import { createStandardMvpWorkflow, expectFailure, expectOk } from "../helpers/fixtures.js";
-import type {
-  AgentReconciliationRequest,
-  AgentReconciliationResult,
-  DomainEvent,
-  OperationResult,
-  TaskState
+import {
+  DomainEventSchema,
+  type AgentReconciliationRequest,
+  type AgentReconciliationResult,
+  type AgentRequest,
+  type DomainEvent,
+  type OperationResult,
+  type TaskState
 } from "@ai-flow/contracts";
+
+type TaskDispatchRequestedEvent = Extract<DomainEvent, { type: "task.dispatch_requested" }>;
+
+function isTaskDispatchRequestedEvent(event: DomainEvent): event is TaskDispatchRequestedEvent {
+  return event.type === "task.dispatch_requested";
+}
+
+function matchesDispatchIntent(event: TaskDispatchRequestedEvent, req: AgentRequest): boolean {
+  return (
+    event.runId === req.runId &&
+    event.taskId === req.taskId &&
+    event.payload.requestId === req.requestId &&
+    event.payload.attemptId === req.attemptId &&
+    event.payload.agentId === req.target.agentId &&
+    event.payload.attempt === req.attempt &&
+    event.payload.target.transport === req.target.transport &&
+    event.payload.target.agentId === req.target.agentId
+  );
+}
 
 describe("Scenario E03 — Unknown Delivery & Transport Reconciliation", () => {
   let harness: E2eHarness;
@@ -16,6 +37,78 @@ describe("Scenario E03 — Unknown Delivery & Transport Reconciliation", () => {
   afterEach(async () => {
     if (harness) {
       await harness.cleanup();
+    }
+  });
+
+  it("helper verification: validates matchesDispatchIntent logic against DomainEventSchema-parsed event and AgentRequest", () => {
+    // Demonstrates that matching event passes and wrong requestId fails, without faking Runtime events in E2E scenarios
+    const validRawEvent = {
+      schemaVersion: 1,
+      eventId: "evt-dispatch-1",
+      runId: "run-test-1",
+      taskId: "plan",
+      sequence: 1,
+      aggregateVersion: 1,
+      occurredAt: new Date().toISOString(),
+      correlationId: "corr-1",
+      idempotencyKey: "idem-1",
+      type: "task.dispatch_requested" as const,
+      payload: {
+        requestId: "req-1",
+        attemptId: "att-1",
+        agentId: "agent-planner",
+        attempt: 1,
+        target: {
+          transport: "herdr",
+          agentId: "agent-planner",
+          paneId: "pane-planner"
+        }
+      }
+    };
+    const parsedEvent = DomainEventSchema.parse(validRawEvent);
+    expect(isTaskDispatchRequestedEvent(parsedEvent)).toBe(true);
+
+    if (isTaskDispatchRequestedEvent(parsedEvent)) {
+      const matchingReq: AgentRequest = {
+        requestId: "req-1",
+        attemptId: "att-1",
+        runId: "run-test-1",
+        taskId: "plan",
+        role: "planner",
+        target: {
+          transport: "herdr",
+          agentId: "agent-planner",
+          paneId: "pane-planner"
+        },
+        instruction: "Create implementation plan",
+        inputs: [],
+        attempt: 1,
+        retry: {
+          maxAttempts: 3,
+          strategy: "fixed",
+          initialDelayMs: 100,
+          maxDelayMs: 1000,
+          jitter: false
+        },
+        timeout: {
+          executionTimeoutMs: 60000,
+          onTimeout: "fail"
+        },
+        idempotency: {
+          key: "idem-req-1",
+          scope: "agent-request",
+          fingerprint: "a".repeat(64)
+        },
+        createdAt: new Date().toISOString()
+      };
+
+      expect(matchesDispatchIntent(parsedEvent, matchingReq)).toBe(true);
+
+      const mismatchedReq: AgentRequest = {
+        ...matchingReq,
+        requestId: "wrong-req-id"
+      };
+      expect(matchesDispatchIntent(parsedEvent, mismatchedReq)).toBe(false);
     }
   });
 
@@ -28,22 +121,17 @@ describe("Scenario E03 — Unknown Delivery & Transport Reconciliation", () => {
     harness.transport.setDeliveryMode("unknown-before-write");
 
     // Pre-send observation hook: assert EXACT task.dispatch_requested event is persisted in RunStore BEFORE transport write
-    let exactDispatchRequestedEvent: DomainEvent | undefined;
+    let exactDispatchRequestedEvent: TaskDispatchRequestedEvent | undefined;
     let payloadIdentityMatched = false;
-    harness.transport.onBeforeSend = async (req) => {
+    harness.transport.onBeforeSend = async (req: AgentRequest) => {
       const eventsRes = await harness.runStore.readEvents(req.runId, { limit: 100 });
       if (eventsRes.ok) {
         const found = eventsRes.value.items.find(
-          (e: DomainEvent) => e.type === "task.dispatch_requested" && e.taskId === req.taskId
+          (e: DomainEvent): e is TaskDispatchRequestedEvent => isTaskDispatchRequestedEvent(e) && e.taskId === req.taskId
         );
         if (found) {
           exactDispatchRequestedEvent = found;
-          const payload = found.payload as any;
-          if (
-            payload.requestId === req.requestId &&
-            payload.taskId === req.taskId &&
-            payload.target?.agentId === req.target.agentId
-          ) {
+          if (matchesDispatchIntent(found, req)) {
             payloadIdentityMatched = true;
           }
         }

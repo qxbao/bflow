@@ -15,7 +15,7 @@ In accordance with project safety guidelines, tests were not modified to assert 
 | **PM-03** | P1 (High) | `packages/quality-gates` | `src/evaluator.ts:689` | When `outputParser` is omitted, `minPassedTestsCount` is ignored. Running 0 tests evaluates to `status: "passed"`. | `e05-quality-gates.e2e.test.ts` (Probe PM-03, **RED**) |
 | **PM-04** | P1 (High) | `packages/quality-gates` | `src/rbac-approval.ts:496-525` | Governance evaluation does not verify that `gateResult.runId` matches `input.runId`. Foreign run results allow delivery progression. | `e05-quality-gates.e2e.test.ts` (Probe PM-04, **RED**) |
 | **PM-05** | P1 (High) | `packages/quality-gates` | `src/rbac-approval.ts:636-646` | Governance evaluation accepts stale approval decisions from prior rework cycles (`revision !== decision.revision` / `generation !== decision.generation`). | `e05-quality-gates.e2e.test.ts` (Probe PM-05, **RED**) |
-| **P06-DispatchIntent** | P1 (High) | `packages/runtime` | `src/service.ts:290-330` | Runtime does not persist durable `task.dispatch_requested` with request ID, target, and fencing token before transport write, emitting only a generic task status transition to `running`. | `e03-unknown-delivery.e2e.test.ts` (Exact dispatch requested probe, **RED**) |
+| **P06-DispatchIntent** | P1 (High) | `packages/runtime` | `src/dispatcher.ts:241` (request `215-238`) | Runtime does not persist durable `task.dispatch_requested` before transport send, emitting only a generic task status transition to `running`. While `AgentRequest.metadata` has lease fencing, approved contract schema defines payload without fencing. | `e03-unknown-delivery.e2e.test.ts` (Exact dispatch requested probe, **RED**) |
 | **P06-PrematureCancel** | P1 (High) | `packages/runtime` | `src/service.ts:399-408` | Runtime prematurely marks task cancelled when transport only returns `accepted` without confirmed stop from remote agent. | `e07-cancellation.e2e.test.ts` (Probe PrematureCancel, **RED**) |
 | **PM-08** | Contract Decision | `packages/quality-gates` / `runtime` | Contracts / `orchestrator.ts:824` | `QualityGateContext` does not provide `evaluationId`. `CommandQualityGate` generates a default ID, and Runtime orchestrator coordinates and overrides it to the requested execution/evaluation ID before persistence. | `e05-quality-gates.e2e.test.ts` (Observation PM-08, **PASS**) |
 | **PM-11** | P1 (High) | `packages/runtime` | `src/service.ts:399-408` | Runtime unconditionally confirms cancellation stop even if `transport.cancel` reports failure, emitting false stopped confirmation. | `e07-cancellation.e2e.test.ts` (Probe PM-11, **RED**) |
@@ -100,29 +100,16 @@ In accordance with project safety guidelines, tests were not modified to assert 
 
 ---
 
-### 6. P06-DispatchIntent: Runtime Emits Generic Running Transition Without Durable `task.dispatch_requested`
+### 6. P06-DispatchIntent: Runtime Dispatches Without Persisting Durable `task.dispatch_requested`
 - **Severity**: P1 (High)
-- **Component**: `packages/runtime/src/service.ts:290-330`
-- **Impact**: Architectural durability violation. In the event of an unknown delivery or pre-transport crash, the runtime cannot prove dispatch intent with request ID, target agent ID, and fencing token because it only emits a generic `task.status_changed` event to `running` instead of persisting `task.dispatch_requested`.
+- **Component**: `packages/runtime/src/dispatcher.ts:241` (request constructed at `src/dispatcher.ts:215-238`)
+- **Impact**: Architectural durability violation. In the event of an unknown delivery or pre-transport crash, the runtime cannot prove dispatch intent because it does not persist `task.dispatch_requested` before sending the prompt to transport (send occurs at `dispatcher.ts:241`). While `AgentRequest.metadata` carries lease ID and fencing token, the approved contract schema (`packages/contracts/src/events.ts:139-153`) defines `task.dispatch_requested` payload strictly as `{ requestId, attemptId, agentId, attempt, target }` without a fencing field. If persisting additional lease fencing identity is required, an explicit contract amendment decision would be necessary.
 - **Verification Evidence**:
   ```
-  FAIL tests/e2e/scenarios/e03-unknown-delivery.e2e.test.ts > Scenario E03 > handles unknown delivery before write
+  FAIL tests/e2e/scenarios/e03-unknown-delivery.e2e.test.ts > Scenario E03 > handles unknown delivery timeout: forbids blind resend and requires reconciliation
   AssertionError: expected undefined to be defined
   ```
-- **Remediation Recommendation**: Runtime must emit and persist `task.dispatch_requested` with exact dispatch payload (including requestId, target, idempotency key) in the RunStore event stream BEFORE executing the transport send.
-
----
-
-### 6. P06-DispatchIntent: Runtime Emits Generic Running Transition Without Durable `task.dispatch_requested`
-- **Severity**: P1 (High)
-- **Component**: `packages/runtime/src/service.ts:290-330`
-- **Impact**: Architectural durability violation. In the event of an unknown delivery or pre-transport crash, the runtime cannot prove dispatch intent with request ID, target agent ID, and fencing token because it only emits a generic `task.status_changed` event to `running` instead of persisting `task.dispatch_requested`.
-- **Verification Evidence**:
-  ```
-  FAIL tests/e2e/scenarios/e03-unknown-delivery.e2e.test.ts > Scenario E03 > handles unknown delivery timeout
-  AssertionError: expected undefined to be defined
-  ```
-- **Remediation Recommendation**: Runtime must emit and persist `task.dispatch_requested` with exact dispatch payload (including requestId, target, idempotency key) in the RunStore event stream BEFORE executing the transport send.
+- **Remediation Recommendation**: Runtime `TaskDispatcher` must emit and persist `task.dispatch_requested` with exact approved payload `{ requestId, attemptId, agentId, attempt, target }` in the RunStore event stream BEFORE executing `this.#transport.send(agentRequest, options)` at line 241.
 
 ---
 

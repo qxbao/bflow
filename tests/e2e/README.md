@@ -22,7 +22,7 @@ The suite verifies multi-package integration across:
 | :--- | :--- | :--- | :--- |
 | **E01** | `scenarios/e01-happy-path.e2e.test.ts` | Complete 4-stage SDLC workflow (`plan` -> `implement` -> `review` -> `qa`), strict TAP parser verification (15 passed tests), real Node.js subprocess unit test suite verified through `CommandQualityGate`, ArtifactStore byte verification with SHA-256 checksums, and durable state re-query across harness restart. | **1 PASS** |
 | **E02** | `scenarios/e02-crash-recovery.e2e.test.ts` | Closed/reopened store instances simulation: resumption from SQLite run state, aggregate checkpoint reconstruction, and tail event replay on honest running reopen. *(Pre-dispatch crash boundary and OS power loss remain `NOT VERIFIED`)*. | **3 PASS** |
-| **E03** | `scenarios/e03-unknown-delivery.e2e.test.ts` | Unknown delivery handling: exactly 1 send attempt without blind resend, 0 external writes on drop-before-write, ledger reconciliation binds active execution, and safe re-dispatch when confirmed `not_delivered`. *(Marked `PARTIAL`: crash/restart unknown boundary remains `NOT VERIFIED`; 1 RED probe on missing durable `task.dispatch_requested`)*. | **2 PASS / 1 FAIL (RED Probe)** |
+| **E03** | `scenarios/e03-unknown-delivery.e2e.test.ts` | Unknown delivery handling: exactly 1 send attempt without blind resend, 0 external writes on drop-before-write, ledger reconciliation binds active execution, safe re-dispatch when confirmed `not_delivered`, and helper dispatch intent verification. *(Marked `PARTIAL`: crash/restart unknown boundary remains `NOT VERIFIED`; 1 RED probe on missing durable `task.dispatch_requested`)*. | **3 PASS / 1 FAIL (RED Probe)** |
 | **E04** | `scenarios/e04-concurrency-leases.e2e.test.ts` | Multi-run isolation, single-slot agent concurrency limit, task queueing, and strictly monotonic fencing tokens across leases. | **2 PASS** |
 | **E05** | `scenarios/e05-quality-gates.e2e.test.ts` | Quality gate execution: real Node.js test runner execution via `createRealNodeUnitTestGate`, passing/failing suites, zero-test failure, strict TAP parser fail-closed malformed streams, protocol output smoke, and 5 authentic RED defect probes (PM-01, PM-02, PM-03, PM-04, PM-05). | **10 PASS / 5 FAIL (RED Probes)** |
 | **E06** | `scenarios/e06-approval-rework.e2e.test.ts` | Human governance approval, bounded rework cycles, generation tracking, rework budget exhaustion (`maxReworks: 1` -> run status `failed`), and type-safe proposal ingestion without casts. | **4 PASS** |
@@ -31,14 +31,14 @@ The suite verifies multi-package integration across:
 | **E09** | `scenarios/e09-cli.e2e.test.ts` | CLI subprocess execution with bounded 10s timeout and SIGKILL: `--help` (exit 0), malformed config JSON handling, `BLOCKED_BY_P07` runtime composition gate, argument validation, and PROBE PM-13 (`--version` exit 0 + semver, RED). | **6 PASS / 1 FAIL (RED Probe)** |
 | **E10** | `scenarios/e10-failure-injection.e2e.test.ts` | OCC version/sequence conflicts, atomic batch rollback (pre-validation rejection), checkpoint conflict, SQLite corruption detection, on-disk blob tampering detection, forged reference rejection, old store query rejection after restart, and safe acquisition failure handling via test seam. *(Note: batch pre-validation rejection does NOT prove mid-transaction rollback inside SQLite engine execution)*. | **8 PASS** |
 
-**Summary: 50 total tests | 41 PASS | 9 FAIL (Authentic Upstream RED Probes)**
+**Summary: 51 total tests | 42 PASS | 9 FAIL (Authentic Upstream RED Probes)**
 
 ---
 
 ## Running the E2E Suite
 
 > [!NOTE]
-> The root repository test runner (`pnpm test` / `pnpm check`) discovers only `packages/**/*.test.ts` and `apps/**/*.test.ts`; it does **NOT** discover E2E tests in `tests/e2e/`. E2E tests must be invoked explicitly using dedicated commands as shown below. A CI integration change request has been submitted to add a dedicated `test:e2e` script to root configuration.
+> The root repository test runner (`pnpm test` / `pnpm check`) discovers only `packages/**/*.test.ts` and `apps/**/*.test.ts`; it does **NOT** discover E2E tests in `tests/e2e/`. E2E tests must be invoked explicitly using dedicated commands as shown below. Proposed integration change: request owner approval for root test:e2e/CI wiring. Not yet applied; E2E not enforced by root checks.
 
 ### 1. Typecheck
 
@@ -59,7 +59,7 @@ pnpm exec vitest run --config tests/e2e/vitest.config.ts
 ```
 
 Expected output:
-- **41 passing tests** across the scenario suites.
+- **42 passing tests** across the scenario suites.
 - **9 failing tests (authentic RED defect probes)** reproducing upstream defects in P04, P06, and P07:
   1. `e03`: `P06-DispatchIntent` — Runtime emits generic running transition without persisting durable `task.dispatch_requested` with request identity and fencing token.
   2. `e05`: `PROBE PM-01 (P04 DEFECT)` — Required quality gate downgraded to passed when `spec.required: false, skip: true`.
