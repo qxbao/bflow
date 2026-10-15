@@ -35,6 +35,14 @@ export type { WorkflowRecoveryResult, RecoveryPorts } from "./recovery.js";
 export { createDomainEventStream, DefaultRunEventHub, AsyncQueue } from "./stream.js";
 export type { RunEventHub, DomainEventStreamOptions } from "./stream.js";
 
+// Workspace Composition
+export { openWorkspaceRuntime } from "./workspace.js";
+export type {
+  WorkspaceStoragePaths,
+  OpenWorkspaceRuntimeOptions,
+  WorkspaceRuntimeHandle
+} from "./workspace.js";
+
 // Public Contract Types Re-exports
 export type {
   AgentConfiguration,

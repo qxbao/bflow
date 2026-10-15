@@ -18,6 +18,7 @@ import {
   type QualityGateResult,
   type RunStore,
   type TaskState,
+  type WorkflowDefinition,
   type WorkflowEngine,
   type WorkflowRunSnapshot
 } from "@ai-flow/contracts";
@@ -155,17 +156,35 @@ export class SdlcWorkflowOrchestrator {
       return { ok: false, error: { code: "not_found", retryable: false, message: `Run ${runId} not found` } };
     }
     const definition = storedRunRes.value.definition;
+    const skippedTaskIdsInDrive = new Set<string>();
 
     // Execution loop
     while (!options?.signal?.aborted) {
       const snapRes = await this.#ports.engine.getSnapshot(runId, options);
       if (!snapRes.ok) return snapRes as OperationResult<WorkflowRunSnapshot>;
-      const snapshot = snapRes.value;
+      let snapshot = snapRes.value;
       if (!snapshot) {
         return { ok: false, error: { code: "not_found", retryable: false, message: `Run ${runId} not found` } };
       }
 
-      // Check if run reached terminal state or approval pause
+      // Check if run reached terminal state
+      if (["succeeded", "failed", "cancelled"].includes(snapshot.status)) {
+        await this.createAndSaveCheckpoint(runId, snapshot.version, options);
+        return { ok: true, value: snapshot };
+      }
+
+      // Recover any open quality gate evaluations or tasks waiting on after_result gates
+      if (
+        this.#ports.qualityGate &&
+        snapshot.tasks.some(
+          (t) => t.status === "waiting" || (t.status === "running" && t.agentExecution === undefined)
+        )
+      ) {
+        const gateRecRes = await this.recoverPendingQualityGates(runId, definition, snapshot, options);
+        if (!gateRecRes.ok) return gateRecRes as OperationResult<WorkflowRunSnapshot>;
+        snapshot = gateRecRes.value;
+      }
+
       if (["succeeded", "failed", "cancelled"].includes(snapshot.status)) {
         await this.createAndSaveCheckpoint(runId, snapshot.version, options);
         return { ok: true, value: snapshot };
@@ -179,7 +198,22 @@ export class SdlcWorkflowOrchestrator {
       // Schedule ready tasks
       const scheduleRes = await this.#dispatcher.scheduleReadyTasks(runId, options);
       if (!scheduleRes.ok) return scheduleRes as OperationResult<WorkflowRunSnapshot>;
-      const runnableTaskIds = scheduleRes.value;
+      const runnableTaskIds = [...scheduleRes.value];
+
+      const postScheduleSnapRes = await this.#ports.engine.getSnapshot(runId, options);
+      if (postScheduleSnapRes.ok && postScheduleSnapRes.value) {
+        for (const t of postScheduleSnapRes.value.tasks) {
+          if (
+            t.status === "running" &&
+            t.agentExecution === undefined &&
+            !this.#dispatcher.getActiveExecution(runId, t.taskId) &&
+            !runnableTaskIds.includes(t.taskId) &&
+            !skippedTaskIdsInDrive.has(t.taskId)
+          ) {
+            runnableTaskIds.push(t.taskId);
+          }
+        }
+      }
 
       if (runnableTaskIds.length === 0) {
         // No new runnable tasks right now
@@ -233,7 +267,7 @@ export class SdlcWorkflowOrchestrator {
 
         const currentSnapshotRes = await this.#ports.engine.getSnapshot(runId, options);
         if (!currentSnapshotRes.ok || !currentSnapshotRes.value) break;
-        const currentSnapshot = currentSnapshotRes.value;
+        let currentSnapshot = currentSnapshotRes.value;
         const taskState = currentSnapshot.tasks.find((t) => t.taskId === taskId);
         const taskDef = definition.tasks.find((t) => t.id === taskId);
         if (!taskState || !taskDef) continue;
@@ -249,8 +283,15 @@ export class SdlcWorkflowOrchestrator {
               gateFailed = true;
               break;
             }
+            const refreshedAfterGate = await this.#ports.engine.getSnapshot(runId, options);
+            if (refreshedAfterGate.ok && refreshedAfterGate.value) {
+              currentSnapshot = refreshedAfterGate.value;
+            }
           }
-          if (gateFailed) continue;
+          if (gateFailed) {
+            skippedTaskIdsInDrive.add(taskId);
+            continue;
+          }
         }
 
         // 2. Dispatch task via TaskDispatcher
@@ -758,6 +799,229 @@ export class SdlcWorkflowOrchestrator {
   }
 
   /**
+   * Completes any open quality_gate.evaluation_requested events or remaining after_result
+   * quality gates after a crash/restart before the run pauses or schedules downstream tasks.
+   */
+  private async recoverPendingQualityGates(
+    runId: string,
+    definition: WorkflowDefinition,
+    snapshot: WorkflowRunSnapshot,
+    options?: OperationOptions
+  ): Promise<OperationResult<WorkflowRunSnapshot>> {
+    if (!this.#ports.qualityGate) {
+      return { ok: true, value: snapshot };
+    }
+
+    let currentSnapshot = snapshot;
+    const initiallyWaitingTaskIds = new Set(
+      currentSnapshot.tasks.filter((t) => t.status === "waiting").map((t) => t.taskId)
+    );
+
+    const allEvents: DomainEvent[] = [];
+    let cursor: string | undefined = undefined;
+    while (true) {
+      const pageRes = await this.#ports.runStore.readEvents(
+        runId,
+        cursor !== undefined ? { cursor, limit: 100 } : { limit: 100 },
+        options
+      );
+      if (!pageRes.ok) {
+        return { ok: true, value: currentSnapshot };
+      }
+      allEvents.push(...pageRes.value.items);
+      if (pageRes.value.nextCursor === undefined || pageRes.value.items.length === 0) break;
+      cursor = pageRes.value.nextCursor;
+    }
+
+    const evaluatedIds = new Set<string>();
+    const passedGateKeys = new Set<string>();
+    const evalIdToAttemptId = new Map<string, string | undefined>();
+
+    for (const e of allEvents) {
+      if (e.type === "quality_gate.evaluation_requested") {
+        evalIdToAttemptId.set(e.payload.evaluationId, e.payload.attemptId);
+      }
+    }
+
+    for (const e of allEvents) {
+      if (e.type === "quality_gate.evaluated") {
+        evaluatedIds.add(e.payload.evaluationId);
+        if (e.payload.status === "passed") {
+          const tId = e.payload.taskId ?? e.taskId ?? "";
+          const aId = evalIdToAttemptId.get(e.payload.evaluationId) ?? "";
+          passedGateKeys.add(`${tId}:${aId}:${e.payload.gateId}`);
+        }
+      }
+    }
+
+    // 1. Complete any open quality_gate.evaluation_requested events without a matching quality_gate.evaluated
+    for (const reqEvent of allEvents) {
+      if (reqEvent.type !== "quality_gate.evaluation_requested") continue;
+      const evaluationId = reqEvent.payload.evaluationId;
+      if (evaluatedIds.has(evaluationId)) continue;
+
+      const gateId = reqEvent.payload.gateId;
+      const taskId = reqEvent.taskId;
+      const attemptId = reqEvent.payload.attemptId;
+      const gateDef = definition.qualityGates.find((g) => g.id === gateId);
+
+      const effectiveDefinition: QualityGateDefinition = gateDef ?? {
+        id: gateId,
+        name: gateId,
+        evaluator: "command",
+        required: true,
+        timeout: { executionTimeoutMs: 30000, onTimeout: "fail" }
+      };
+
+      const gateContext: QualityGateContext = {
+        runId,
+        ...(taskId !== undefined ? { taskId } : {}),
+        ...(attemptId !== undefined ? { attemptId } : {}),
+        definition: effectiveDefinition,
+        artifacts: []
+      };
+
+      const evalRes = await this.#ports.qualityGate.evaluate(gateContext, options);
+      if (!evalRes.ok) return evalRes as OperationResult<WorkflowRunSnapshot>;
+
+      const freshSnap = await this.#ports.engine.getSnapshot(runId, options);
+      if (freshSnap.ok && freshSnap.value) {
+        currentSnapshot = freshSnap.value;
+      }
+
+      const effectiveResult: QualityGateResult = {
+        ...evalRes.value,
+        evaluationId
+      };
+
+      const recordRes = await this.#ports.engine.recordQualityGateResult(
+        {
+          expectedVersion: currentSnapshot.version,
+          idempotencyKey: `gate-rec-recovery:${evaluationId}`,
+          result: effectiveResult
+        },
+        options
+      );
+      if (!recordRes.ok) return recordRes as OperationResult<WorkflowRunSnapshot>;
+
+      const persistRes = await this.persistEvents(
+        runId,
+        currentSnapshot.version,
+        currentSnapshot.lastEventSequence,
+        recordRes.value.emittedEvents,
+        `gate-rec-recovery-events:${evaluationId}`,
+        options
+      );
+      if (!persistRes.ok) return persistRes as OperationResult<WorkflowRunSnapshot>;
+
+      currentSnapshot = recordRes.value.snapshot;
+      evaluatedIds.add(evaluationId);
+      if (effectiveResult.status === "passed") {
+        passedGateKeys.add(`${taskId ?? ""}:${attemptId ?? ""}:${gateId}`);
+      }
+    }
+
+    // 2. Evaluate any remaining after_result / before_completion gates for tasks still in 'waiting'
+    for (const task of currentSnapshot.tasks) {
+      if (task.status !== "waiting") continue;
+      const taskDef = definition.tasks.find((t) => t.id === task.taskId);
+      if (!taskDef?.qualityGates) continue;
+
+      const postGates = taskDef.qualityGates.filter(
+        (g) => g.phase === "after_result" || g.phase === "before_completion"
+      );
+      for (const gateBinding of postGates) {
+        const key = `${task.taskId}:${task.attemptId ?? ""}:${gateBinding.gateId}`;
+        if (passedGateKeys.has(key)) continue;
+
+        const gateDef = definition.qualityGates.find((g) => g.id === gateBinding.gateId);
+        const latestTask = currentSnapshot.tasks.find((t) => t.taskId === task.taskId) ?? task;
+        const gateRes = await this.evaluateQualityGate(
+          runId,
+          currentSnapshot,
+          latestTask,
+          gateBinding.gateId,
+          gateDef,
+          options
+        );
+        if (!gateRes.ok) return gateRes as OperationResult<WorkflowRunSnapshot>;
+
+        const freshSnap = await this.#ports.engine.getSnapshot(runId, options);
+        if (freshSnap.ok && freshSnap.value) {
+          currentSnapshot = freshSnap.value;
+        }
+        if (gateRes.value.status === "passed") {
+          passedGateKeys.add(key);
+        } else {
+          break;
+        }
+      }
+    }
+
+    // 3. For any task that was waiting on gates and transitioned to 'succeeded', request approval if required
+    for (const taskId of initiallyWaitingTaskIds) {
+      const refreshedTask = currentSnapshot.tasks.find((t) => t.taskId === taskId);
+      const taskDef = definition.tasks.find((t) => t.id === taskId);
+      if (
+        refreshedTask?.status === "succeeded" &&
+        taskDef?.requiresApproval &&
+        currentSnapshot.status !== "failed" &&
+        currentSnapshot.status !== "cancelled"
+      ) {
+        const hasExistingApprovalReq = allEvents.some(
+          (e) =>
+            e.type === "approval.requested" &&
+            e.payload.target.type === "task" &&
+            e.payload.target.taskId === taskId &&
+            e.payload.generation === refreshedTask.generation
+        );
+        if (!hasExistingApprovalReq) {
+          const approvalReqId = `approval-req-${taskId}-${randomUUID()}`;
+          const apprReq: ApprovalRequest = {
+            schemaVersion: 1,
+            approvalId: approvalReqId,
+            runId,
+            target: { type: "task", taskId },
+            revision: 1,
+            generation: refreshedTask.generation,
+            requestedBy: "runtime",
+            requestedAt: this.#clock().toISOString(),
+            reason: `Pre-merge human approval required for task ${taskId}`,
+            evidence: [],
+            idempotencyKey: `req-appr:${approvalReqId}`
+          };
+
+          const requestApprovalRes = await this.#ports.engine.requestApproval(
+            {
+              expectedVersion: currentSnapshot.version,
+              idempotencyKey: `cmd-req-appr:${approvalReqId}`,
+              request: apprReq
+            },
+            options
+          );
+
+          if (requestApprovalRes.ok) {
+            await this.persistEvents(
+              runId,
+              currentSnapshot.version,
+              currentSnapshot.lastEventSequence,
+              requestApprovalRes.value.emittedEvents,
+              `req-appr-events:${approvalReqId}`,
+              options
+            );
+            currentSnapshot = requestApprovalRes.value.snapshot;
+          }
+
+          await this.generateAndPersistHandoffReport(runId, options);
+          await this.createAndSaveCheckpoint(runId, currentSnapshot.version, options);
+        }
+      }
+    }
+
+    return { ok: true, value: currentSnapshot };
+  }
+
+  /**
    * Executes an automated Quality Gate and records the result in the engine.
    */
   private async evaluateQualityGate(
@@ -786,7 +1050,35 @@ export class SdlcWorkflowOrchestrator {
       idempotencyKey: `gate-req:${evaluationId}`,
       occurredAt: this.#clock().toISOString()
     }, options);
-    if (!reqRes.ok) return reqRes as OperationResult<QualityGateResult>;
+    if (!reqRes.ok) {
+      if (reqRes.error.code === "conflict") {
+        const eventsPage = await this.#ports.runStore.readEvents(runId, { limit: 100 }, options);
+        if (eventsPage.ok) {
+          const matchingReqIds = new Set(
+            eventsPage.value.items
+              .filter(
+                (e) =>
+                  e.type === "quality_gate.evaluation_requested" &&
+                  e.taskId === task.taskId &&
+                  e.payload.gateId === gateId &&
+                  e.payload.attemptId === task.attemptId
+              )
+              .map((e) => (e.type === "quality_gate.evaluation_requested" ? e.payload.evaluationId : ""))
+          );
+          const existingEval = [...eventsPage.value.items]
+            .reverse()
+            .find(
+              (e) =>
+                e.type === "quality_gate.evaluated" &&
+                matchingReqIds.has(e.payload.evaluationId)
+            );
+          if (existingEval && existingEval.type === "quality_gate.evaluated") {
+            return { ok: true, value: existingEval.payload };
+          }
+        }
+      }
+      return reqRes as OperationResult<QualityGateResult>;
+    }
 
     await this.persistEvents(
       runId,

@@ -1,21 +1,39 @@
 import { createHash, randomUUID } from "node:crypto";
-import type {
-  AgentExecutionHandle,
-  AgentLease,
-  AgentRegistry,
-  AgentRequest,
-  AgentSubmissionReceipt,
-  AgentTargetLocator,
-  AgentTransport,
-  DomainEvent,
-  OperationOptions,
-  OperationResult,
-  RunStore,
-  WorkflowDefinition,
-  WorkflowEngine,
-  WorkflowRunSnapshot
+import {
+  CURRENT_DOMAIN_EVENT_SCHEMA_VERSION,
+  DomainEventSchema,
+  fingerprintWorkflowCommand,
+  type AgentExecutionHandle,
+  type AgentLease,
+  type AgentRegistry,
+  type AgentRequest,
+  type AgentSubmissionReceipt,
+  type AgentTargetLocator,
+  type AgentTransport,
+  type DomainEvent,
+  type OperationOptions,
+  type OperationResult,
+  type RunStore,
+  type WorkflowDefinition,
+  type WorkflowEngine,
+  type WorkflowRunSnapshot
 } from "@ai-flow/contracts";
 import type { RunEventHub } from "./stream.js";
+
+function hash(parts: readonly string[]): string {
+  let value = 14695981039346656037n;
+  const mask = (1n << 64n) - 1n;
+  for (const character of parts.join("\u0000")) {
+    value ^= BigInt(character.charCodeAt(0));
+    value = (value * 1099511628211n) & mask;
+  }
+  return value.toString(36);
+}
+
+function deterministicId(kind: string, ...parts: readonly string[]): string {
+  const prefix = parts.join("-").replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 96);
+  return `${kind}-${prefix}-${hash([kind, ...parts])}`.slice(0, 200);
+}
 
 export interface TaskDispatcherOptions {
   readonly engine: WorkflowEngine;
@@ -80,6 +98,105 @@ export class TaskDispatcher {
     return appendRes;
   }
 
+  private async persistDispatchIntent(
+    snapshot: WorkflowRunSnapshot,
+    agentRequest: AgentRequest,
+    options?: OperationOptions
+  ): Promise<OperationResult<WorkflowRunSnapshot>> {
+    const cpRes = await this.#engine.createCheckpoint(
+      {
+        runId: snapshot.runId,
+        expectedVersion: snapshot.version,
+        checkpointId: `cp-dispatch-${agentRequest.requestId}`,
+        createdAt: agentRequest.createdAt
+      },
+      options
+    );
+    if (!cpRes.ok) {
+      return cpRes;
+    }
+
+    const commandKey = `dispatch:${snapshot.runId}:${agentRequest.taskId}:${agentRequest.requestId}`;
+    const correlationId = deterministicId("correlation", snapshot.runId, commandKey);
+    const seq1 = snapshot.lastEventSequence + 1;
+    const ver1 = snapshot.version + 1;
+    const seq2 = snapshot.lastEventSequence + 2;
+    const ver2 = snapshot.version + 2;
+
+    const dispatchEvent: DomainEvent = DomainEventSchema.parse({
+      schemaVersion: CURRENT_DOMAIN_EVENT_SCHEMA_VERSION,
+      eventId: deterministicId("event", snapshot.runId, String(seq1), "task.dispatch_requested", commandKey),
+      runId: snapshot.runId,
+      taskId: agentRequest.taskId,
+      sequence: seq1,
+      aggregateVersion: ver1,
+      occurredAt: agentRequest.createdAt,
+      correlationId,
+      idempotencyKey: deterministicId("idempotency", snapshot.runId, commandKey, "1"),
+      type: "task.dispatch_requested",
+      payload: {
+        requestId: agentRequest.requestId,
+        attemptId: agentRequest.attemptId,
+        agentId: agentRequest.target.agentId,
+        attempt: agentRequest.attempt,
+        target: agentRequest.target
+      }
+    });
+
+    const commandCompletedEvent: DomainEvent = DomainEventSchema.parse({
+      schemaVersion: CURRENT_DOMAIN_EVENT_SCHEMA_VERSION,
+      eventId: deterministicId("event", snapshot.runId, String(seq2), "command.completed", commandKey),
+      runId: snapshot.runId,
+      sequence: seq2,
+      aggregateVersion: ver2,
+      occurredAt: agentRequest.createdAt,
+      correlationId,
+      idempotencyKey: deterministicId("idempotency", snapshot.runId, commandKey, "2"),
+      type: "command.completed",
+      payload: {
+        schemaVersion: 1,
+        commandId: deterministicId("command", snapshot.runId, commandKey),
+        idempotencyKey: commandKey,
+        operation: "bindAgentExecution",
+        fingerprint: fingerprintWorkflowCommand("bindAgentExecution", {
+          runId: snapshot.runId,
+          taskId: agentRequest.taskId,
+          requestId: agentRequest.requestId,
+          attemptId: agentRequest.attemptId
+        }),
+        firstEventSequence: seq1,
+        runnableTaskIds: []
+      }
+    });
+
+    const appendRes = await this.persistEvents(
+      snapshot.runId,
+      snapshot.version,
+      snapshot.lastEventSequence,
+      [dispatchEvent, commandCompletedEvent],
+      `dispatch-events:${snapshot.runId}:${agentRequest.taskId}:${agentRequest.requestId}`,
+      options
+    );
+    if (!appendRes.ok) {
+      return appendRes as OperationResult<WorkflowRunSnapshot>;
+    }
+
+    const recoverRes = await this.#engine.recover(
+      {
+        runId: snapshot.runId,
+        checkpoint: cpRes.value,
+        events: [dispatchEvent, commandCompletedEvent],
+        expectedVersion: ver2
+      },
+      options
+    );
+    if (!recoverRes.ok) {
+      return recoverRes;
+    }
+
+    return { ok: true, value: recoverRes.value.snapshot };
+  }
+
   /**
    * Evaluates the workflow DAG via engine.advance(), persists emitted events to RunStore,
    * and returns the IDs of newly runnable tasks.
@@ -132,7 +249,7 @@ export class TaskDispatcher {
    * 1. Resolves agent configuration from role.
    * 2. Acquires capacity lease with monotonic fencing token.
    * 3. Verifies lease and fencing token immediately before dispatch.
-   * 4. Constructs AgentRequest with idempotency policy.
+   * 4. Constructs AgentRequest with idempotency policy and persists task.dispatch_requested.
    * 5. Sends prompt via transport.send().
    * 6. On 'accepted': binds execution via engine.bindAgentExecution() and persists.
    * 7. On 'unknown_delivery': initiates delivery reconciliation.
@@ -177,7 +294,7 @@ export class TaskDispatcher {
     const agentConfig = agentConfigRes.value;
 
     // 2. Acquire capacity lease with monotonic fencing token
-    const leaseId = randomUUID();
+    const leaseId = deterministicId("lease", snapshot.runId, taskId, taskState.attemptId);
     const leaseRes = await this.#registry.acquireLease({
       leaseId,
       agentId: agentConfig.agentId,
@@ -185,7 +302,7 @@ export class TaskDispatcher {
       taskId,
       attemptId: taskState.attemptId,
       ttlMs: Math.max(taskDef.timeout.executionTimeoutMs ?? this.#defaultLeaseTtlMs, this.#defaultLeaseTtlMs),
-      requestedAt: this.#clock().toISOString(),
+      requestedAt: taskState.startedAt ?? this.#clock().toISOString(),
       idempotencyKey: `lease:${snapshot.runId}:${taskId}:${taskState.attemptId}`
     }, options);
     if (!leaseRes.ok) return leaseRes;
@@ -237,7 +354,15 @@ export class TaskDispatcher {
         metadata: { leaseId: lease.leaseId, fencingToken: lease.fencingToken }
       };
 
-      // 4. Send prompt to transport
+      // 4. Persist durable dispatch intent before calling transport.send
+      const intentRes = await this.persistDispatchIntent(snapshot, agentRequest, options);
+      if (!intentRes.ok) {
+        await this.releaseLease(lease, options);
+        return intentRes;
+      }
+      const activeSnapshot = intentRes.value;
+
+      // 5. Send prompt to transport
       const submissionRes = await this.#transport.send(agentRequest, options);
       if (!submissionRes.ok) {
         await this.releaseLease(lease, options);
@@ -277,7 +402,7 @@ export class TaskDispatcher {
           const recRes = await this.#engine.recordDeliveryReconciliation({
             runId: agentRequest.runId,
             taskId: agentRequest.taskId,
-            expectedVersion: snapshot.version,
+            expectedVersion: activeSnapshot.version,
             requestId: agentRequest.requestId,
             result: reconResult,
             idempotencyKey: `recon:${snapshot.runId}:${taskId}:${agentRequest.requestId}`,
@@ -290,8 +415,8 @@ export class TaskDispatcher {
           if (recRes.value.emittedEvents.length > 0) {
             await this.persistEvents(
               snapshot.runId,
-              snapshot.version,
-              snapshot.lastEventSequence,
+              activeSnapshot.version,
+              activeSnapshot.lastEventSequence,
               recRes.value.emittedEvents,
               `recon-events:${snapshot.runId}:${taskId}:${agentRequest.requestId}`,
               options
@@ -313,7 +438,7 @@ export class TaskDispatcher {
           const recRes = await this.#engine.recordDeliveryReconciliation({
             runId: agentRequest.runId,
             taskId: agentRequest.taskId,
-            expectedVersion: snapshot.version,
+            expectedVersion: activeSnapshot.version,
             requestId: agentRequest.requestId,
             result: reconResult,
             idempotencyKey: `recon:${snapshot.runId}:${taskId}:${agentRequest.requestId}`,
@@ -322,8 +447,8 @@ export class TaskDispatcher {
           if (recRes.ok && recRes.value.emittedEvents.length > 0) {
             await this.persistEvents(
               snapshot.runId,
-              snapshot.version,
-              snapshot.lastEventSequence,
+              activeSnapshot.version,
+              activeSnapshot.lastEventSequence,
               recRes.value.emittedEvents,
               `recon-events:${snapshot.runId}:${taskId}:${agentRequest.requestId}`,
               options
@@ -340,7 +465,7 @@ export class TaskDispatcher {
             const boundRes = await this.#engine.bindAgentExecution({
               runId: snapshot.runId,
               taskId,
-              expectedVersion: recRes.ok ? recRes.value.snapshot.version : snapshot.version,
+              expectedVersion: recRes.ok ? recRes.value.snapshot.version : activeSnapshot.version,
               attempt: taskState.attempt,
               handle: retryReceipt.handle,
               idempotencyKey: `bind:${snapshot.runId}:${taskId}:${taskState.attemptId}`,
@@ -352,8 +477,8 @@ export class TaskDispatcher {
             }
             await this.persistEvents(
               snapshot.runId,
-              recRes.ok ? recRes.value.snapshot.version : snapshot.version,
-              recRes.ok ? recRes.value.snapshot.lastEventSequence : snapshot.lastEventSequence,
+              recRes.ok ? recRes.value.snapshot.version : activeSnapshot.version,
+              recRes.ok ? recRes.value.snapshot.lastEventSequence : activeSnapshot.lastEventSequence,
               boundRes.value.emittedEvents,
               `bind-events:${snapshot.runId}:${taskId}:${taskState.attemptId}`,
               options
@@ -376,7 +501,7 @@ export class TaskDispatcher {
           const recRes = await this.#engine.recordDeliveryReconciliation({
             runId: agentRequest.runId,
             taskId: agentRequest.taskId,
-            expectedVersion: snapshot.version,
+            expectedVersion: activeSnapshot.version,
             requestId: agentRequest.requestId,
             result: reconResult,
             idempotencyKey: `recon:${snapshot.runId}:${taskId}:${agentRequest.requestId}`,
@@ -385,8 +510,8 @@ export class TaskDispatcher {
           if (recRes.ok && recRes.value.emittedEvents.length > 0) {
             await this.persistEvents(
               snapshot.runId,
-              snapshot.version,
-              snapshot.lastEventSequence,
+              activeSnapshot.version,
+              activeSnapshot.lastEventSequence,
               recRes.value.emittedEvents,
               `recon-events:${snapshot.runId}:${taskId}:${agentRequest.requestId}`,
               options
@@ -405,11 +530,11 @@ export class TaskDispatcher {
         }
       }
 
-      // 5. Accepted: Bind execution in engine and persist agent.execution_bound
+      // 6. Accepted: Bind execution in engine and persist agent.execution_bound
       const boundRes = await this.#engine.bindAgentExecution({
         runId: snapshot.runId,
         taskId,
-        expectedVersion: snapshot.version,
+        expectedVersion: activeSnapshot.version,
         attempt: taskState.attempt,
         handle: receipt.handle,
         idempotencyKey: `bind:${snapshot.runId}:${taskId}:${taskState.attemptId}`,
@@ -422,8 +547,8 @@ export class TaskDispatcher {
 
       const appendBoundRes = await this.persistEvents(
         snapshot.runId,
-        snapshot.version,
-        snapshot.lastEventSequence,
+        activeSnapshot.version,
+        activeSnapshot.lastEventSequence,
         boundRes.value.emittedEvents,
         `bind-events:${snapshot.runId}:${taskId}:${taskState.attemptId}`,
         options
