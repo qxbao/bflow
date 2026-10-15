@@ -2,7 +2,7 @@
 
 AI Flow SDLC is a module-first TypeScript platform for coordinating AI coding agents across a software delivery workflow. Herdr operates the agents; this project owns workflow decisions, durable execution records, artifacts, and integration boundaries.
 
-Contracts and the P01-P03 module implementations are available. Quality-gate evaluators, Runtime composition, and the executable CLI are not implemented yet. You can build and test the modules locally, but there is no runnable end-to-end SDLC application, web server, or `start`/`dev` command.
+Contracts, the P01-P03 modules, quality-gate evaluators and the Runtime library (`createRuntimeService`) are implemented as libraries. The executable CLI is not implemented. There is no web server or `start`/`dev` command, and Runtime has not been verified end-to-end with live Herdr agents. A runnable library demo on a sample repository is in [`examples/`](examples/README.md); the user guide (Vietnamese) is in [`docs/guide`](docs/guide/README.md).
 
 ## Module status
 
@@ -11,11 +11,11 @@ Contracts and the P01-P03 module implementations are available. Quality-gate eva
 | `packages/contracts` | Shared Zod schemas, public ports, transition/batch validators, event/checkpoint compatibility | [Public contracts](docs/contracts.md) |
 | `packages/core` | Deterministic workflow engine: DAG readiness, concurrency decisions, transitions, retry/rework, approvals/gates, event replay and aggregate checkpoints; no agent or storage I/O | [`DeterministicWorkflowEngine`](packages/core/src/index.ts) |
 | `packages/herdr-adapter` | CLI-backed AgentTransport, reconciliation and conservative execution observations | [`createHerdrAdapter`](packages/herdr-adapter/README.md) |
-| `packages/agent-registry` | File-backed role/capability resolution, durable leases, fencing and idempotency | [`createAgentRegistry`](packages/agent-registry/README.md) |
+| `packages/agent-registry` | File-backed role/capability resolution, durable leases, fencing and idempotency; MVP roles, workflow templates, prompts and output validation | [`createAgentRegistry`](packages/agent-registry/README.md) |
 | `packages/persistence` | SQLite RunStore: migrations, atomic event/receipt/projection writes, history and versioned checkpoints | [`openSqliteRunStore`](packages/persistence/README.md) |
 | `packages/artifact-store` | Filesystem ArtifactStore with SQLite catalog, verified streams, safe references, durable receipts and tombstones | [`openFilesystemArtifactStore`](packages/artifact-store/README.md) |
-| `packages/quality-gates` | Type exports only; no evaluators | [Source](packages/quality-gates/src/index.ts) |
-| `packages/runtime` | Type exports only; no RuntimeService composition | [Source](packages/runtime/src/index.ts) |
+| `packages/quality-gates` | Command quality gates (`typecheck`/`lint`/`unit_test`/`build`/`custom`), security policy, RBAC and human-governance checks | [`createPresetQualityGate`](packages/quality-gates/README.md) |
+| `packages/runtime` | RuntimeService composition: dispatch with leases, proposal ingestion, gates, approvals, cancellation, recovery/resume, event watch. Task results are reported by the caller (`orchestrator.completeTaskExecution`) | [`createRuntimeService`](packages/runtime/src/index.ts) |
 | `apps/cli` | Type exports only; no executable commands | [Source](apps/cli/src/index.ts) |
 
 This table describes source availability, not a claim of live Herdr integration or production readiness. Keep it aligned with public entry points when a phase is integrated.
@@ -66,13 +66,17 @@ pnpm exec vitest run packages/herdr-adapter/test packages/agent-registry/test
 
 # P03: SQLite persistence and filesystem artifacts
 pnpm exec vitest run packages/persistence/test/run-store.test.ts packages/artifact-store/test/artifact-store.test.ts
+
+# Quality gates and Runtime
+pnpm exec vitest run packages/quality-gates/test packages/runtime/test
 ```
 
 For watch mode, run `pnpm build` followed by `pnpm test:watch`. No API key or live Herdr server is required for these tests. Passing tests do not establish live integration or full SDLC execution.
 
 ## Reliability boundaries and known follow-ups
 
-- Core emits decisions/events; the caller must persist complete event batches before external side effects. RunStore's query projection is not a complete Core aggregate checkpoint. Runtime will provide this composition.
+- Core emits decisions/events; the caller must persist complete event batches before external side effects. RunStore's query projection is not a complete Core aggregate checkpoint. Runtime provides this composition.
+- Runtime + Herdr is not end-to-end: Core accepts a task result only for a bound handle with verified correlation, and the Herdr adapter's handles are unverified. See [known limitations](docs/guide/09-blocked-timeout-retry-resume.md#giới-hạn-đã-biết).
 - Registry resolution does not reserve capacity. Dispatch requires a current lease/fencing token. Registry durability is single-host/local-filesystem scoped; stale crash locks need operator review.
 - Herdr `done` and terminal snapshots are not verified business success. Unknown delivery forbids blind resend; adapter deduplication is instance-local, not cross-process exactly-once execution.
 - SQLite and artifact chunk ingest use synchronous operations that can block the event loop. A 64 KiB write buffer is not a 64 KiB total-RAM guarantee; native filesystem calls are not instantly cancellable.
@@ -89,6 +93,6 @@ These are OPEN, not FIXED. Consult package READMEs for storage/transport guarant
 
 ## Architecture and contributing
 
-Read [architecture](docs/architecture.md), [public contracts](docs/contracts.md), [accepted ADRs](docs/adr/) and [AGENTS.md](AGENTS.md) before changing a package. Use the latest approved integration baseline and actual exported contracts, not the original P00 bootstrap or an old phase prompt. Leaf modules depend on contracts; Runtime will compose them through ports.
+Read [architecture](docs/architecture.md), [public contracts](docs/contracts.md), [accepted ADRs](docs/adr/) and [AGENTS.md](AGENTS.md) before changing a package. Use the latest approved integration baseline and actual exported contracts, not the original P00 bootstrap or an old phase prompt. Leaf modules depend on contracts; Runtime composes them through ports.
 
 Update this README, relevant package documentation and agent guidance alongside approved implementation changes. Shared documentation and contracts remain review-gated; do not change them silently to bypass an implementation blocker.
