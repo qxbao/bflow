@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import { isAbsolute, resolve } from "node:path";
 import {
   ApprovalDecisionSchema,
@@ -31,6 +32,21 @@ import {
   type CliIo,
   type ParsedCliCommand
 } from "./types.js";
+
+function loadPackageVersion(): string {
+  try {
+    const req = createRequire(import.meta.url);
+    const pkg = req("../package.json") as { version?: unknown };
+    if (typeof pkg.version === "string" && pkg.version.trim().length > 0) {
+      return pkg.version.trim();
+    }
+  } catch {
+    // Fallback to default version
+  }
+  return "0.1.0";
+}
+
+export const CLI_VERSION: string = loadPackageVersion();
 
 function makeResult(
   exitCode: CliExitCode,
@@ -81,6 +97,13 @@ export async function executeCommand(
       ...(parsed.topic !== undefined ? { topic: parsed.topic } : {})
     };
     return makeResult(CLI_EXIT_CODES.SUCCESS, true, "help", data, undefined, parsed.json, io);
+  }
+
+  if (parsed.command === "version") {
+    const data: CliCommandData = {
+      version: CLI_VERSION
+    };
+    return makeResult(CLI_EXIT_CODES.SUCCESS, true, "version", data, undefined, parsed.json, io);
   }
 
   if (parsed.command === "init") {

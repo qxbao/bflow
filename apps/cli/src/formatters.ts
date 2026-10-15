@@ -25,6 +25,10 @@ function isHelpData(data: CliCommandData): data is { readonly helpText: string; 
   return typeof data === "object" && data !== null && "helpText" in data;
 }
 
+function isVersionData(data: CliCommandData): data is { readonly version: string } {
+  return typeof data === "object" && data !== null && "version" in data && !("runId" in data) && !("configPath" in data);
+}
+
 function formatWorkflowRun(snapshot: WorkflowRunSnapshot): string {
   const lines: string[] = [];
   lines.push(`Run ID:   ${snapshot.runId}`);
@@ -116,6 +120,10 @@ export function formatCommandSuccess(
 
   if (isHelpData(data)) {
     return data.helpText;
+  }
+
+  if (isVersionData(data)) {
+    return data.version;
   }
 
   if (isInitOutput(data)) {

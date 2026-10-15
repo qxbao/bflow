@@ -1028,4 +1028,67 @@ describe("CLI Argument Parser - parseCliArgs", () => {
       }
     });
   });
+
+  describe("9. Version flag & command (--version, -v, version)", () => {
+    it("parses --version and -v flags as version command", () => {
+      const longRes = parseCliArgs(["--version"]);
+      expect(longRes.ok).toBe(true);
+      if (longRes.ok) {
+        expect(longRes.value.command).toBe("version");
+        expect(longRes.value.help).toBe(false);
+        expect(longRes.value.json).toBe(false);
+      }
+
+      const shortRes = parseCliArgs(["-v"]);
+      expect(shortRes.ok).toBe(true);
+      if (shortRes.ok) {
+        expect(shortRes.value.command).toBe("version");
+        expect(shortRes.value.help).toBe(false);
+        expect(shortRes.value.json).toBe(false);
+      }
+    });
+
+    it("parses 'version' command and supports --json / -j", () => {
+      const cmdRes = parseCliArgs(["version"]);
+      expect(cmdRes.ok).toBe(true);
+      if (cmdRes.ok) {
+        expect(cmdRes.value.command).toBe("version");
+        expect(cmdRes.value.json).toBe(false);
+      }
+
+      const jsonFlagRes = parseCliArgs(["--version", "--json"]);
+      expect(jsonFlagRes.ok).toBe(true);
+      if (jsonFlagRes.ok) {
+        expect(jsonFlagRes.value.command).toBe("version");
+        expect(jsonFlagRes.value.json).toBe(true);
+      }
+
+      const leadingJsonRes = parseCliArgs(["-j", "-v"]);
+      expect(leadingJsonRes.ok).toBe(true);
+      if (leadingJsonRes.ok) {
+        expect(leadingJsonRes.value.command).toBe("version");
+        expect(leadingJsonRes.value.json).toBe(true);
+      }
+    });
+
+    it("rejects extra positional arguments or values with --version", () => {
+      const extraArgRes = parseCliArgs(["--version", "extra"]);
+      expect(extraArgRes.ok).toBe(false);
+      if (!extraArgRes.ok) {
+        expect(extraArgRes.error.code).toBe("validation");
+      }
+
+      const valueRes = parseCliArgs(["--version=1.0.0"]);
+      expect(valueRes.ok).toBe(false);
+      if (!valueRes.ok) {
+        expect(valueRes.error.code).toBe("validation");
+      }
+
+      const cmdPositionalRes = parseCliArgs(["version", "extra"]);
+      expect(cmdPositionalRes.ok).toBe(false);
+      if (!cmdPositionalRes.ok) {
+        expect(cmdPositionalRes.error.code).toBe("validation");
+      }
+    });
+  });
 });

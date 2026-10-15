@@ -13,7 +13,15 @@ import type {
 } from "@ai-flow/contracts";
 import type { ConcreteRuntimeService } from "@ai-flow/runtime";
 
-export type CliCommandName = "init" | "run" | "status" | "approve" | "resume" | "cancel" | "help";
+export type CliCommandName =
+  | "init"
+  | "run"
+  | "status"
+  | "approve"
+  | "resume"
+  | "cancel"
+  | "help"
+  | "version";
 
 export const CLI_EXIT_CODES = {
   SUCCESS: 0,
@@ -88,6 +96,10 @@ export interface HelpCommandArgs extends GlobalCliFlags {
   readonly topic?: CliCommandName | undefined;
 }
 
+export interface VersionCommandArgs extends GlobalCliFlags {
+  readonly command: "version";
+}
+
 export type ParsedCliCommand =
   | InitCommandArgs
   | RunCommandArgs
@@ -95,7 +107,8 @@ export type ParsedCliCommand =
   | ApproveCommandArgs
   | ResumeCommandArgs
   | CancelCommandArgs
-  | HelpCommandArgs;
+  | HelpCommandArgs
+  | VersionCommandArgs;
 
 export type ParseCliResult =
   | { readonly ok: true; readonly value: ParsedCliCommand }
@@ -129,7 +142,8 @@ export type CliCommandData =
   | InitCommandOutput
   | WorkflowRunSnapshot
   | Page<WorkflowRunSnapshot>
-  | { readonly helpText: string; readonly topic?: string | undefined };
+  | { readonly helpText: string; readonly topic?: string | undefined }
+  | { readonly version: string };
 
 export interface CliJsonSuccessEnvelope<T = CliCommandData> {
   readonly ok: true;

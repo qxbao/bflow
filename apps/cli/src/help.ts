@@ -14,8 +14,9 @@ Commands:
   help       Show help for a command
 
 Global Options:
-  -h, --help  Show help
-  -j, --json  Output response in JSON envelope format
+  -h, --help     Show help
+  -v, --version  Show version
+  -j, --json     Output response in JSON envelope format
 
 Examples:
   flow init
@@ -158,7 +159,8 @@ const HELP_MAP: Record<CliCommandName, string> = {
   approve: APPROVE_HELP,
   resume: RESUME_HELP,
   cancel: CANCEL_HELP,
-  help: GLOBAL_HELP
+  help: GLOBAL_HELP,
+  version: GLOBAL_HELP
 };
 
 export function getHelpText(topic?: CliCommandName): string {
