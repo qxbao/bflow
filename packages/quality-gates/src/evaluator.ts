@@ -2,23 +2,19 @@ import {
   ArtifactProposalSchema,
   IdentifierSchema,
   IsoDateTimeSchema,
-  QualityFindingSchema,
   QualityGateContextSchema,
-  QualityGateDefinitionSchema,
   QualityGateResultSchema,
   type ArtifactProposal,
-  type ContractError,
   type ExecutionError,
-  type JsonValue,
   type OperationOptions,
   type OperationResult,
   type QualityFinding,
   type QualityGate,
   type QualityGateContext,
-  type QualityGateDefinition,
   type QualityGateResult
 } from "@ai-flow/contracts";
 import {
+  detectDangerousCommandOrSecretAccess,
   isQualityCheckKind,
   sanitizeExecutionEnvironment,
   validateCommandAgainstPolicy,
@@ -34,15 +30,8 @@ import {
   type QualityCommandRunner
 } from "./runner.js";
 import * as crypto from "node:crypto";
+import * as path from "node:path";
 import { Buffer } from "node:buffer";
-
-export {
-  QualityFindingSchema,
-  QualityGateDefinitionSchema,
-  type ContractError,
-  type JsonValue,
-  type QualityGateDefinition
-};
 
 export type QualityCheckStatus = "passed" | "failed" | "skipped" | "error";
 
@@ -119,68 +108,199 @@ function resolveIsoTimestamp(nowFn: () => string): string {
   return new Date().toISOString();
 }
 
-function sanitizeIdentifier(input: string): string {
-  const sanitized = input.trim().replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 190);
-  return sanitized.length > 0 ? sanitized : "evidence-artifact";
+function sanitizeIdentifier(input: string, maxLength = 128): string {
+  const cleaned = input.trim().replace(/[^a-zA-Z0-9._-]/g, "-");
+  if (cleaned.length === 0 || cleaned === "." || cleaned === "..") {
+    return "evidence-artifact";
+  }
+  if (cleaned.length > maxLength) {
+    const hashSuffix = crypto
+      .createHash("sha256")
+      .update(input, "utf8")
+      .digest("hex")
+      .slice(0, 16);
+    const prefixLen = Math.max(1, maxLength - 17);
+    return `${cleaned.slice(0, prefixLen)}-${hashSuffix}`;
+  }
+  return cleaned;
 }
 
-function sanitizeLogicalName(input: string): string {
-  const sanitized = input.trim().replace(/[/\\]/g, "-").slice(0, 250);
-  if (sanitized === "." || sanitized === ".." || sanitized.length === 0) {
+function sanitizeLogicalName(input: string, maxLength = 200): string {
+  const cleaned = input.trim().replace(/[/\\]/g, "-");
+  if (cleaned === "." || cleaned === ".." || cleaned.length === 0) {
     return "evidence.json";
   }
-  return sanitized;
+  if (cleaned.length > maxLength) {
+    const hashSuffix = crypto
+      .createHash("sha256")
+      .update(input, "utf8")
+      .digest("hex")
+      .slice(0, 16);
+    const suffix = cleaned.endsWith("-evidence.json")
+      ? "-evidence.json"
+      : cleaned.includes(".")
+      ? path.extname(cleaned)
+      : "";
+    const base = cleaned.slice(0, cleaned.length - suffix.length);
+    const reserved = 1 + 16 + suffix.length;
+    const prefix = base.slice(0, Math.max(1, maxLength - reserved));
+    return `${prefix}-${hashSuffix}${suffix}`;
+  }
+  return cleaned;
 }
 
-function detectUntrustedAgentDirectives(agentResult: QualityGateContext["agentResult"]): boolean {
+export const MAX_DIRECTIVE_INSPECTION_DEPTH = 16;
+
+function validateOperationBudget(
+  options?: OperationOptions
+): OperationResult<{ readonly remainingBudgetMs?: number }> {
+  let remainingBudgetMs: number | undefined;
+
+  if (options?.timeoutMs !== undefined) {
+    if (
+      typeof options.timeoutMs !== "number" ||
+      !Number.isSafeInteger(options.timeoutMs) ||
+      options.timeoutMs < 0
+    ) {
+      return {
+        ok: false,
+        error: {
+          code: "validation",
+          retryable: false,
+          message: `Invalid operation timeoutMs: ${String(options.timeoutMs)}`
+        }
+      };
+    }
+  }
+
+  let remainingDeadlineMs: number | undefined;
+  if (options?.deadline !== undefined) {
+    const parsedDeadline = IsoDateTimeSchema.safeParse(options.deadline);
+    const deadlineMs = Date.parse(options.deadline);
+    if (!parsedDeadline.success || Number.isNaN(deadlineMs)) {
+      return {
+        ok: false,
+        error: {
+          code: "validation",
+          retryable: false,
+          message: `Invalid operation deadline: "${String(options.deadline)}"`
+        }
+      };
+    }
+    remainingDeadlineMs = deadlineMs - Date.now();
+  }
+
+  if (remainingDeadlineMs !== undefined && remainingDeadlineMs <= 0) {
+    return {
+      ok: false,
+      error: {
+        code: "timeout",
+        retryable: true,
+        retrySafety: "not_started",
+        message: "Quality gate execution deadline expired"
+      }
+    };
+  }
+
+  if (options?.timeoutMs === 0) {
+    return {
+      ok: false,
+      error: {
+        code: "timeout",
+        retryable: true,
+        retrySafety: "not_started",
+        message: "Quality gate execution timeout budget is 0ms"
+      }
+    };
+  }
+
+  if (options?.timeoutMs !== undefined && remainingDeadlineMs !== undefined) {
+    remainingBudgetMs = Math.min(options.timeoutMs, remainingDeadlineMs);
+  } else if (options?.timeoutMs !== undefined) {
+    remainingBudgetMs = options.timeoutMs;
+  } else if (remainingDeadlineMs !== undefined) {
+    remainingBudgetMs = remainingDeadlineMs;
+  }
+
+  return {
+    ok: true,
+    value:
+      remainingBudgetMs !== undefined
+        ? { remainingBudgetMs: Math.max(1, Math.floor(remainingBudgetMs)) }
+        : {}
+  };
+}
+
+export function detectUntrustedAgentDirectives(
+  agentResult: unknown
+): boolean {
   if (!agentResult) {
     return false;
   }
 
-  const suspiciousKeys = [
-    "command",
-    "shellCommand",
-    "customCommand",
-    "overrideCommand"
-  ];
-
-  const checkValue = (val: unknown): boolean => {
-    if (!val) {
+  function inspect(val: unknown, parentKey?: string, depth = 0): boolean {
+    if (depth > MAX_DIRECTIVE_INSPECTION_DEPTH) {
+      return true;
+    }
+    if (val === null || val === undefined) {
       return false;
     }
     if (typeof val === "string") {
-      try {
-        const parsed = JSON.parse(val);
-        if (parsed && typeof parsed === "object") {
-          return checkValue(parsed);
+      const trimmed = val.trim();
+      if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          if (parsed !== null && typeof parsed === "object") {
+            return inspect(parsed, parentKey, depth + 1);
+          }
+        } catch {
+          // Not valid JSON
         }
-      } catch {
-        // Not a JSON object string
       }
       return false;
     }
-    if (typeof val === "object" && !Array.isArray(val)) {
+    if (Array.isArray(val)) {
+      for (const item of val) {
+        if (inspect(item, parentKey, depth + 1)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    if (typeof val === "object") {
       const record = val as Record<string, unknown>;
-      if (record["skipQualityGates"] === true || record["skipQualityGates"] === "true") {
+      if (
+        record["skipQualityGates"] === true ||
+        record["skipQualityGates"] === "true"
+      ) {
         return true;
       }
-      for (const key of suspiciousKeys) {
+      for (const key of ["shellCommand", "customCommand", "overrideCommand"]) {
         if (key in record && record[key] !== undefined && record[key] !== null) {
           return true;
         }
       }
+      if ("command" in record && record["command"] !== undefined && record["command"] !== null) {
+        const childVal = record["command"];
+        const isAllowed =
+          (parentKey === "testReport" || parentKey === "testVerification") &&
+          typeof childVal === "string" &&
+          detectDangerousCommandOrSecretAccess(childVal).safe === true;
+        if (!isAllowed) {
+          return true;
+        }
+      }
+      for (const [k, child] of Object.entries(record)) {
+        if (inspect(child, k, depth + 1)) {
+          return true;
+        }
+      }
+      return false;
     }
     return false;
-  };
-
-  if (agentResult.metadata && checkValue(agentResult.metadata)) {
-    return true;
-  }
-  if (agentResult.output && checkValue(agentResult.output)) {
-    return true;
   }
 
-  return false;
+  return inspect(agentResult, undefined, 0);
 }
 
 export class CommandQualityGate implements QualityGate {
@@ -237,7 +357,69 @@ export class CommandQualityGate implements QualityGate {
     }
     const validContext = parsedContext.data;
 
-    // Check cancellation before starting
+    const parsedGateId = IdentifierSchema.safeParse(this.spec.gateId);
+    if (!parsedGateId.success) {
+      return {
+        ok: false,
+        error: {
+          code: "validation",
+          retryable: false,
+          message: `Invalid gateId "${this.spec.gateId}": ${parsedGateId.error.message}`
+        }
+      };
+    }
+
+    if (validContext.definition.id !== this.id) {
+      return {
+        ok: false,
+        error: {
+          code: "validation",
+          retryable: false,
+          message: `Context definition id "${validContext.definition.id}" does not match gate id "${this.id}"`
+        }
+      };
+    }
+
+    if (validContext.agentResult) {
+      if (validContext.agentResult.runId !== validContext.runId) {
+        return {
+          ok: false,
+          error: {
+            code: "validation",
+            retryable: false,
+            message: `AgentResult runId "${validContext.agentResult.runId}" does not match context runId "${validContext.runId}"`
+          }
+        };
+      }
+      if (
+        validContext.taskId !== undefined &&
+        validContext.agentResult.taskId !== validContext.taskId
+      ) {
+        return {
+          ok: false,
+          error: {
+            code: "validation",
+            retryable: false,
+            message: `AgentResult taskId "${validContext.agentResult.taskId}" does not match context taskId "${validContext.taskId}"`
+          }
+        };
+      }
+      if (
+        validContext.attemptId !== undefined &&
+        validContext.agentResult.attemptId !== validContext.attemptId
+      ) {
+        return {
+          ok: false,
+          error: {
+            code: "validation",
+            retryable: false,
+            message: `AgentResult attemptId "${validContext.agentResult.attemptId}" does not match context attemptId "${validContext.attemptId}"`
+          }
+        };
+      }
+    }
+
+    // Check cancellation and timeout/deadline budget before starting
     if (options?.signal?.aborted) {
       return {
         ok: false,
@@ -249,9 +431,16 @@ export class CommandQualityGate implements QualityGate {
       };
     }
 
+    const initialBudgetRes = validateOperationBudget(options);
+    if (!initialBudgetRes.ok) {
+      return { ok: false, error: initialBudgetRes.error };
+    }
+
     const evaluatedAt = resolveIsoTimestamp(this.now);
     const evaluationId = sanitizeIdentifier(`eval-${this.spec.gateId}-${crypto.randomUUID()}`);
-    const isRequired = this.spec.required ?? validContext.definition.required ?? true;
+    const isRequired =
+      validContext.definition.required === true ||
+      (this.spec.required ?? validContext.definition.required ?? true);
 
     // Independence from AI agent claims / directive injection rejection
     if (detectUntrustedAgentDirectives(validContext.agentResult)) {
@@ -295,7 +484,7 @@ export class CommandQualityGate implements QualityGate {
             message: `Failed to construct valid contract result: ${parsedContractResult.error.message}`
           }
         };
-      }
+      };
       const checkResult: QualityCheckResult = {
         gateId: this.spec.gateId,
         runId: validContext.runId,
@@ -317,6 +506,11 @@ export class CommandQualityGate implements QualityGate {
     if (this.spec.skip === true) {
       if (isRequired) {
         const findings: readonly QualityFinding[] = [
+          {
+            code: "MANDATORY_GATE_SKIPPED",
+            severity: "error",
+            message: "Mandatory quality gate cannot be skipped"
+          },
           {
             code: "REQUIRED_CHECK_SKIPPED_OR_MISSING_EVIDENCE",
             severity: "error",
@@ -537,10 +731,42 @@ export class CommandQualityGate implements QualityGate {
     }
 
     // 4. Command Execution & Output/Timeout/ExitCode Inspection
-    const sanitizedEnv = sanitizeExecutionEnvironment(
-      { ...process.env, ...this.spec.command.env },
+    const baseSanitizedEnv = sanitizeExecutionEnvironment(
+      process.env,
       this.securityPolicy.allowedEnvKeys
     );
+    const cmdSanitizedEnv = this.spec.command.env
+      ? sanitizeExecutionEnvironment(
+          this.spec.command.env,
+          this.securityPolicy.allowedEnvKeys
+        )
+      : {};
+    const { PATH: _ignoredPathOverride, ...safeCmdEnv } = cmdSanitizedEnv;
+    const sanitizedEnv: Record<string, string> = {
+      ...baseSanitizedEnv,
+      ...safeCmdEnv
+    };
+
+    if (options?.signal?.aborted) {
+      return {
+        ok: false,
+        error: {
+          code: "cancelled",
+          retryable: false,
+          message: "Quality gate evaluation was aborted before execution"
+        }
+      };
+    }
+
+    const preRunBudgetRes = validateOperationBudget(options);
+    if (!preRunBudgetRes.ok) {
+      return { ok: false, error: preRunBudgetRes.error };
+    }
+
+    const effectiveTimeoutMs =
+      preRunBudgetRes.value.remainingBudgetMs !== undefined
+        ? Math.max(1, Math.min(timeoutRes.value, preRunBudgetRes.value.remainingBudgetMs))
+        : timeoutRes.value;
 
     let outcome: QualityCommandOutcome;
     try {
@@ -549,7 +775,7 @@ export class CommandQualityGate implements QualityGate {
         args: this.spec.command.args,
         cwd: dirRes.value,
         env: sanitizedEnv,
-        timeoutMs: timeoutRes.value,
+        timeoutMs: effectiveTimeoutMs,
         ...(options?.signal !== undefined ? { signal: options.signal } : {})
       });
       if (!runRes.ok) {
@@ -622,7 +848,7 @@ export class CommandQualityGate implements QualityGate {
       };
     } else if (outcome.timedOut) {
       status = "error";
-      const message = `Command timed out after ${timeoutRes.value}ms`;
+      const message = `Command timed out after ${effectiveTimeoutMs}ms`;
       findings.push({
         code: "COMMAND_TIMEOUT",
         severity: "error",
@@ -706,23 +932,30 @@ export class CommandQualityGate implements QualityGate {
             });
           }
           parsedPassedTests = parsed.passedTests;
-          if (
-            this.spec.outputExpectation?.minPassedTestsCount !== undefined &&
-            (parsedPassedTests ?? 0) < this.spec.outputExpectation.minPassedTestsCount
-          ) {
-            status = "failed";
-            findings.push({
-              code: "MISSING_EXECUTION_EVIDENCE",
-              severity: "error",
-              message: `Passed tests count (${parsedPassedTests ?? 0}) is below required minimum of ${this.spec.outputExpectation.minPassedTestsCount}`
-            });
-          }
         } catch (err) {
           status = "failed";
           findings.push({
             code: "OUTPUT_PARSER_ERROR",
             severity: "error",
             message: `Output parser threw an error: ${err instanceof Error ? err.message : String(err)}`
+          });
+        }
+      }
+
+      if (this.spec.outputExpectation?.minPassedTestsCount !== undefined) {
+        let passedCount = parsedPassedTests;
+        if (passedCount === undefined) {
+          const match = outcome.combinedOutput.match(/\b(\d+)\s+passed\b/i);
+          if (match && match[1]) {
+            passedCount = parseInt(match[1], 10);
+          }
+        }
+        if ((passedCount ?? 0) < this.spec.outputExpectation.minPassedTestsCount) {
+          status = "failed";
+          findings.push({
+            code: "MISSING_EXECUTION_EVIDENCE",
+            severity: "error",
+            message: `Passed tests count (${passedCount ?? 0}) is below required minimum of ${this.spec.outputExpectation.minPassedTestsCount}`
           });
         }
       }
@@ -983,6 +1216,12 @@ export interface PresetQualityGateInput {
   readonly skipReason?: string;
   readonly requireEvidence?: boolean;
   readonly outputExpectation?: QualityCheckOutputExpectation;
+  readonly outputParser?: (outcome: QualityCommandOutcome) => {
+    readonly findings?: readonly QualityFinding[];
+    readonly passedTests?: number;
+    readonly failedTests?: number;
+    readonly skippedTests?: number;
+  };
   readonly runner?: QualityCommandRunner;
   readonly now?: () => string;
 }
@@ -1053,7 +1292,8 @@ export function createPresetQualityGate(
     ...(input.skip !== undefined ? { skip: input.skip } : {}),
     ...(input.skipReason !== undefined ? { skipReason: input.skipReason } : {}),
     ...(input.requireEvidence !== undefined ? { requireEvidence: input.requireEvidence } : {}),
-    ...(input.outputExpectation !== undefined ? { outputExpectation: input.outputExpectation } : {})
+    ...(input.outputExpectation !== undefined ? { outputExpectation: input.outputExpectation } : {}),
+    ...(input.outputParser !== undefined ? { outputParser: input.outputParser } : {})
   };
 
   return {
@@ -1097,6 +1337,32 @@ export async function evaluateQualityCheckSuite(
   context: QualityGateContext,
   options?: OperationOptions
 ): Promise<OperationResult<QualityCheckSuiteReport>> {
+  if (!Array.isArray(gates) || gates.length === 0) {
+    return {
+      ok: false,
+      error: {
+        code: "validation",
+        retryable: false,
+        message: "Quality check suite requires at least one quality gate"
+      }
+    };
+  }
+
+  const seenGateIds = new Set<string>();
+  for (const gate of gates) {
+    if (seenGateIds.has(gate.id)) {
+      return {
+        ok: false,
+        error: {
+          code: "validation",
+          retryable: false,
+          message: `Duplicate quality gate id "${gate.id}" in quality check suite`
+        }
+      };
+    }
+    seenGateIds.add(gate.id);
+  }
+
   const parsedContext = QualityGateContextSchema.safeParse(context);
   if (!parsedContext.success) {
     return {
@@ -1114,6 +1380,7 @@ export async function evaluateQualityCheckSuite(
       }
     };
   }
+  const validContext = parsedContext.data;
 
   if (options?.signal?.aborted) {
     return {
@@ -1124,6 +1391,11 @@ export async function evaluateQualityCheckSuite(
         message: "Quality check suite evaluation was aborted before execution"
       }
     };
+  }
+
+  const suiteBudgetRes = validateOperationBudget(options);
+  if (!suiteBudgetRes.ok) {
+    return { ok: false, error: suiteBudgetRes.error };
   }
 
   const results: QualityCheckResult[] = [];
@@ -1148,7 +1420,23 @@ export async function evaluateQualityCheckSuite(
       };
     }
 
-    const evalRes = await gate.evaluateDetailed(context, options);
+    const gateBudgetRes = validateOperationBudget(options);
+    if (!gateBudgetRes.ok) {
+      return { ok: false, error: gateBudgetRes.error };
+    }
+
+    const gateContext: QualityGateContext =
+      validContext.definition.id === gate.id
+        ? validContext
+        : {
+            ...validContext,
+            definition: {
+              ...validContext.definition,
+              id: gate.id
+            }
+          };
+
+    const evalRes = await gate.evaluateDetailed(gateContext, options);
     if (!evalRes.ok) {
       return { ok: false, error: evalRes.error };
     }

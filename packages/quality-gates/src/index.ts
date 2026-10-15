@@ -1,3 +1,9 @@
+export {
+  QualityFindingSchema,
+  QualityGateContextSchema,
+  QualityGateDefinitionSchema,
+  QualityGateResultSchema
+} from "@ai-flow/contracts";
 export type {
   QualityFinding,
   QualityGate,
@@ -61,8 +67,8 @@ export {
   createQualityGate,
   createPresetQualityGate,
   evaluateQualityCheckSuite,
-  QualityFindingSchema,
-  QualityGateDefinitionSchema
+  detectUntrustedAgentDirectives,
+  MAX_DIRECTIVE_INSPECTION_DEPTH
 } from "./evaluator.js";
 export type {
   QualityCheckStatus,

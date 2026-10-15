@@ -121,7 +121,7 @@ export interface RoleAuthorizationDecision {
 }
 
 const AUTOMATED_PREFIX_REGEX =
-  /^(agent|ai|bot|system|auto|llm|planner|developer|reviewer|qa)([:_-]|$)/i;
+  /^(agent|ai|bot|system|auto|llm|planner|developer|reviewer|qa|delivery|herdr|orchestrator|runtime|workflow|ci)([:_-]|$)/i;
 
 export function isHumanApprover(decidedBy: string): boolean {
   if (
@@ -169,6 +169,52 @@ export function authorizeRoleAction(
     };
   }
 
+  if (request.actorId.includes("\0")) {
+    return {
+      ok: false,
+      error: createValidationError("actorId cannot contain NUL bytes")
+    };
+  }
+
+  if (request.targetPath !== undefined && request.targetPath.includes("\0")) {
+    return {
+      ok: false,
+      error: createValidationError("targetPath cannot contain NUL bytes")
+    };
+  }
+
+  if (
+    request.assignedWorktreePath !== undefined &&
+    request.assignedWorktreePath.includes("\0")
+  ) {
+    return {
+      ok: false,
+      error: createValidationError(
+        "assignedWorktreePath cannot contain NUL bytes"
+      )
+    };
+  }
+
+  if (request.environment !== undefined && request.environment.includes("\0")) {
+    return {
+      ok: false,
+      error: createValidationError("environment cannot contain NUL bytes")
+    };
+  }
+
+  if (request.modifiedFiles !== undefined) {
+    for (const file of request.modifiedFiles) {
+      if (typeof file !== "string" || file.includes("\0")) {
+        return {
+          ok: false,
+          error: createValidationError(
+            "modifiedFiles cannot contain non-strings or NUL bytes"
+          )
+        };
+      }
+    }
+  }
+
   const policy = ROLE_AUTHORIZATION_POLICIES[request.role];
   if (!policy.allowedActions.includes(request.action)) {
     return {
@@ -206,6 +252,60 @@ export function authorizeRoleAction(
   // Developer role constraints
   if (request.role === "developer") {
     if (
+      request.action === "read_code" ||
+      request.action === "analyze_code"
+    ) {
+      if (request.modifiedFiles && request.modifiedFiles.length > 0) {
+        return {
+          ok: false,
+          error: createValidationError(
+            "Developer read/analyze action cannot include modifiedFiles"
+          )
+        };
+      }
+
+      if (request.assignedWorktreePath !== undefined) {
+        const worktreeResolved = path.resolve(request.assignedWorktreePath);
+        if (request.targetPath !== undefined) {
+          if (request.targetPath.split(/[\\/]+/).includes("..")) {
+            return {
+              ok: false,
+              error: createValidationError(
+                `Target path "${request.targetPath}" escapes assigned worktree "${request.assignedWorktreePath}"`
+              )
+            };
+          }
+          const targetResolved = path.resolve(worktreeResolved, request.targetPath);
+          const rel = path.relative(worktreeResolved, targetResolved);
+          if (rel.startsWith("..") || path.isAbsolute(rel)) {
+            return {
+              ok: false,
+              error: createValidationError(
+                `Target path "${request.targetPath}" escapes assigned worktree "${request.assignedWorktreePath}"`
+              )
+            };
+          }
+        }
+      }
+
+      return {
+        ok: true,
+        value: {
+          authorized: true,
+          role: "developer",
+          action: request.action,
+          readOnly: true,
+          ...(request.assignedWorktreePath !== undefined
+            ? { verifiedScope: path.resolve(request.assignedWorktreePath) }
+            : {}),
+          requiresHumanApproval: false,
+          humanApprovalVerified: false,
+          reason: `Developer role authorized to perform read-only action "${request.action}"`
+        }
+      };
+    }
+
+    if (
       request.action === "modify_code" ||
       request.action === "run_local_check"
     ) {
@@ -234,7 +334,7 @@ export function authorizeRoleAction(
             )
           };
         }
-        const targetResolved = path.resolve(request.targetPath);
+        const targetResolved = path.resolve(worktreeResolved, request.targetPath);
         const rel = path.relative(worktreeResolved, targetResolved);
         if (rel.startsWith("..") || path.isAbsolute(rel)) {
           return {
@@ -283,22 +383,6 @@ export function authorizeRoleAction(
         }
       };
     }
-
-    return {
-      ok: true,
-      value: {
-        authorized: true,
-        role: "developer",
-        action: request.action,
-        readOnly: true,
-        ...(request.assignedWorktreePath !== undefined
-          ? { verifiedScope: path.resolve(request.assignedWorktreePath) }
-          : {}),
-        requiresHumanApproval: false,
-        humanApprovalVerified: false,
-        reason: `Developer role authorized to perform read-only action "${request.action}"`
-      }
-    };
   }
 
   // QA role constraints
@@ -379,6 +463,29 @@ export function authorizeRoleAction(
 
   // Delivery role constraints
   if (request.role === "delivery") {
+    if (request.action === "read_code") {
+      if (request.modifiedFiles && request.modifiedFiles.length > 0) {
+        return {
+          ok: false,
+          error: createValidationError(
+            "Delivery role is read-only for read_code and cannot modify files"
+          )
+        };
+      }
+      return {
+        ok: true,
+        value: {
+          authorized: true,
+          role: "delivery",
+          action: request.action,
+          readOnly: true,
+          requiresHumanApproval: false,
+          humanApprovalVerified: false,
+          reason: "Delivery role authorized to perform read-only action \"read_code\""
+        }
+      };
+    }
+
     if (
       request.action === "merge_branch" ||
       request.action === "deploy_release"
@@ -396,6 +503,8 @@ export function authorizeRoleAction(
         };
       }
 
+      const expectedRunId = request.automatedGateResults[0]?.runId;
+
       for (const gate of request.automatedGateResults) {
         const parsed = QualityGateResultSchema.safeParse(gate);
         if (!parsed.success) {
@@ -403,6 +512,14 @@ export function authorizeRoleAction(
             ok: false,
             error: createValidationError(
               `Invalid quality gate result for "${gate?.gateId}": ${parsed.error.message}`
+            )
+          };
+        }
+        if (gate.runId !== expectedRunId) {
+          return {
+            ok: false,
+            error: createValidationError(
+              `Automated quality gate "${gate.gateId}" runId "${gate.runId}" does not match expected runId "${expectedRunId}"`
             )
           };
         }
@@ -438,6 +555,43 @@ export function authorizeRoleAction(
       }
 
       const decision = request.humanApprovalDecision;
+      if (decision.runId !== expectedRunId) {
+        return {
+          ok: false,
+          error: createValidationError(
+            `Human approval decision runId "${decision.runId}" does not match automated gate results runId "${expectedRunId}"`
+          )
+        };
+      }
+
+      const target = decision.target;
+      if (target.type === "task") {
+        for (const gate of request.automatedGateResults) {
+          if (gate.taskId !== undefined && gate.taskId !== target.taskId) {
+            return {
+              ok: false,
+              error: createValidationError(
+                `Quality gate result taskId "${gate.taskId}" does not match approval decision taskId "${target.taskId}"`
+              )
+            };
+          }
+        }
+      } else if (target.type === "quality_gate") {
+        const matchingGate = request.automatedGateResults.find(
+          (g) =>
+            g.gateId === target.gateId &&
+            (target.taskId === undefined || g.taskId === target.taskId)
+        );
+        if (!matchingGate) {
+          return {
+            ok: false,
+            error: createValidationError(
+              `Approval decision target quality gate "${target.gateId}" was not found in automated gate results or taskId mismatch`
+            )
+          };
+        }
+      }
+
       if (decision.decision !== "approved") {
         return {
           ok: false,
@@ -564,6 +718,63 @@ export function evaluateAutomatedVsHumanGovernance(
         )
       };
     }
+    if (gate.runId !== input.runId) {
+      return {
+        ok: false,
+        error: createValidationError(
+          `Automated quality gate "${gate.gateId}" runId "${gate.runId}" does not match governance runId "${input.runId}"`
+        )
+      };
+    }
+    if (
+      input.taskId !== undefined &&
+      gate.taskId !== undefined &&
+      gate.taskId !== input.taskId
+    ) {
+      return {
+        ok: false,
+        error: createValidationError(
+          `Automated quality gate "${gate.gateId}" taskId "${gate.taskId}" does not match governance taskId "${input.taskId}"`
+        )
+      };
+    }
+  }
+
+  // Validate approvalRequest independently if present
+  let validatedReq: ApprovalRequest | undefined = undefined;
+  if (input.approvalRequest !== undefined) {
+    const reqParsed = ApprovalRequestSchema.safeParse(input.approvalRequest);
+    if (!reqParsed.success) {
+      return {
+        ok: false,
+        error: createValidationError(
+          `Invalid approval request: ${reqParsed.error.message}`
+        )
+      };
+    }
+    const req = input.approvalRequest;
+    if (req.runId !== input.runId) {
+      return {
+        ok: false,
+        error: createValidationError(
+          `Approval request runId "${req.runId}" does not match governance runId "${input.runId}"`
+        )
+      };
+    }
+    if (
+      input.taskId !== undefined &&
+      (req.target.type === "task" ||
+        (req.target.type === "quality_gate" && req.target.taskId !== undefined)) &&
+      req.target.taskId !== input.taskId
+    ) {
+      return {
+        ok: false,
+        error: createValidationError(
+          `Approval request target taskId "${req.target.taskId}" does not match governance taskId "${input.taskId}"`
+        )
+      };
+    }
+    validatedReq = req;
   }
 
   const statuses = input.automatedGateResults.map(g => g.status);
@@ -582,6 +793,7 @@ export function evaluateAutomatedVsHumanGovernance(
 
   let humanApprovalStatus: "not_required" | "pending" | "approved" | "rejected";
   let humanApproverId: string | undefined = undefined;
+  let staleApprovalReason: string | undefined = undefined;
 
   if (!input.requiresHumanApproval) {
     humanApprovalStatus = "not_required";
@@ -623,21 +835,34 @@ export function evaluateAutomatedVsHumanGovernance(
       };
     }
 
-    if (input.approvalRequest !== undefined) {
-      const reqParsed = ApprovalRequestSchema.safeParse(input.approvalRequest);
-      if (!reqParsed.success) {
+    if (
+      input.taskId !== undefined &&
+      dec.target.type === "quality_gate" &&
+      dec.target.taskId !== undefined &&
+      dec.target.taskId !== input.taskId
+    ) {
+      return {
+        ok: false,
+        error: createValidationError(
+          `Approval decision target taskId "${dec.target.taskId}" does not match governance taskId "${input.taskId}"`
+        )
+      };
+    }
+
+    if (validatedReq !== undefined) {
+      if (dec.approvalId !== validatedReq.approvalId) {
         return {
           ok: false,
           error: createValidationError(
-            `Invalid approval request: ${reqParsed.error.message}`
+            `Approval decision approvalId "${dec.approvalId}" does not match request approvalId "${validatedReq.approvalId}"`
           )
         };
       }
-      if (dec.approvalId !== input.approvalRequest.approvalId) {
+      if (JSON.stringify(dec.target) !== JSON.stringify(validatedReq.target)) {
         return {
           ok: false,
           error: createValidationError(
-            `Approval decision approvalId "${dec.approvalId}" does not match request approvalId "${input.approvalRequest.approvalId}"`
+            "Approval decision target does not match request target"
           )
         };
       }
@@ -655,15 +880,35 @@ export function evaluateAutomatedVsHumanGovernance(
       };
     }
 
-    humanApproverId = dec.decidedBy;
-    humanApprovalStatus = dec.decision === "approved" ? "approved" : "rejected";
+    if (
+      validatedReq !== undefined &&
+      (dec.revision !== validatedReq.revision ||
+        dec.generation !== validatedReq.generation)
+    ) {
+      humanApprovalStatus = "pending";
+      const mismatchDetails: string[] = [];
+      if (dec.revision !== validatedReq.revision) {
+        mismatchDetails.push(
+          `Approval decision revision ${dec.revision} is stale and does not match request revision ${validatedReq.revision}`
+        );
+      }
+      if (dec.generation !== validatedReq.generation) {
+        mismatchDetails.push(
+          `Approval decision generation ${dec.generation} is stale and does not match request generation ${validatedReq.generation}`
+        );
+      }
+      staleApprovalReason = mismatchDetails.join("; ");
+    } else {
+      humanApproverId = dec.decidedBy;
+      humanApprovalStatus = dec.decision === "approved" ? "approved" : "rejected";
+    }
   }
 
   const canProceedToDelivery =
     allAutomatedGatesPassed &&
     (!input.requiresHumanApproval || humanApprovalStatus === "approved");
 
-  const summary = `Governance evaluation completed: automated gates [${automatedChecksStatus}] (${input.automatedGateResults.length} gates), human approval [${humanApprovalStatus}]. Proceed to delivery: ${canProceedToDelivery ? "ALLOWED" : "DISALLOWED"}. Automated quality checks and human approvals are separate, independent governance controls.`;
+  const summary = `Governance evaluation completed: automated gates [${automatedChecksStatus}] (${input.automatedGateResults.length} gates), human approval [${humanApprovalStatus}]${staleApprovalReason ? ` (${staleApprovalReason})` : ""}. Proceed to delivery: ${canProceedToDelivery ? "ALLOWED" : "DISALLOWED"}. Automated quality checks and human approvals are separate, independent governance controls.`;
 
   return {
     ok: true,
