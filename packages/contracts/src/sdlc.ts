@@ -23,6 +23,12 @@ export type SdlcWorkStatus = z.infer<typeof SdlcWorkStatusSchema>;
 export const SddPolicyLevelSchema = z.enum(["lightweight", "full"]);
 export type SddPolicyLevel = z.infer<typeof SddPolicyLevelSchema>;
 
+export const ChangeComplexitySchema = z.enum(["trivial", "standard", "complex"]);
+export type ChangeComplexity = z.infer<typeof ChangeComplexitySchema>;
+
+export const RiskLevelSchema = z.enum(["low", "medium", "high", "critical"]);
+export type RiskLevel = z.infer<typeof RiskLevelSchema>;
+
 export const AcceptanceCriterionSchema = z
   .object({
     id: IdentifierSchema,
@@ -198,6 +204,10 @@ export const SpecificationSchema = z
     dataModelChanges: z.string().trim().min(1).optional(),
     securityConsiderations: z.string().trim().min(1).optional(),
     rollbackPlan: z.string().trim().min(1).optional(),
+    complexity: ChangeComplexitySchema.optional(),
+    riskLevel: RiskLevelSchema.optional(),
+    version: z.number().int().positive().optional(),
+    traceabilityTaskIds: z.array(IdentifierSchema).optional(),
     testStrategy: TestStrategySchema.optional(),
     tddDecision: TddDecisionSchema.optional(),
     status: z.enum(["draft", "review_pending", "approved", "superseded", "rejected"]),
@@ -345,7 +355,10 @@ export const GitChangeSetSchema = z
   });
 export type GitChangeSet = z.infer<typeof GitChangeSetSchema>;
 
-export const VerificationResultStatusSchema = z.enum(["passed", "failed", "blocked", "escalated"]);
+export const VerificationScopeSchema = z.enum(["task", "workflow"]);
+export type VerificationScope = z.infer<typeof VerificationScopeSchema>;
+
+export const VerificationResultStatusSchema = z.enum(["passed", "failed", "inconclusive", "blocked", "escalated"]);
 export type VerificationResultStatus = z.infer<typeof VerificationResultStatusSchema>;
 
 export const VerificationResultSchema = z
@@ -357,6 +370,7 @@ export const VerificationResultSchema = z
     cycleNumber: z.number().int().positive(),
     attemptId: IdentifierSchema,
     status: VerificationResultStatusSchema,
+    verificationScope: VerificationScopeSchema.optional(),
     independentExecution: z.literal(true),
     evaluatedCriteria: z
       .array(
@@ -468,8 +482,9 @@ export const VerificationCycleSchema = z
     runId: IdentifierSchema,
     taskId: IdentifierSchema,
     specId: IdentifierSchema,
+    verificationScope: VerificationScopeSchema.optional(),
     currentIteration: z.number().int().positive(),
-    maxIterations: z.number().int().min(1).max(10),
+    maxIterations: z.number().int().min(1).max(10).default(3),
     status: VerificationCycleStatusSchema,
     tddDecision: TddDecisionSchema,
     history: z.array(VerificationResultSchema),
@@ -506,9 +521,10 @@ export const VerificationCycleSchema = z
       });
     }
 
+    const lastResultStatus = cycle.history[cycle.history.length - 1]?.status;
     if (
       cycle.currentIteration === cycle.maxIterations &&
-      cycle.history[cycle.history.length - 1]?.status === "failed" &&
+      (lastResultStatus === "failed" || lastResultStatus === "inconclusive") &&
       cycle.status === "rework_required"
     ) {
       context.addIssue({

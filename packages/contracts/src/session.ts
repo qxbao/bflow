@@ -122,12 +122,16 @@ export const AgentRoleProfileSchema = z
   });
 export type AgentRoleProfile = z.infer<typeof AgentRoleProfileSchema>;
 
+export const PaneGroupSchema = z.enum(["conversation", "coordination", "verification", "developer_worktree"]);
+export type PaneGroup = z.infer<typeof PaneGroupSchema>;
+
 export const PaneBindingSchema = z
   .object({
     schemaVersion: z.literal(2),
     bindingId: IdentifierSchema,
     sessionId: IdentifierSchema,
     role: AgentRoleSchema,
+    paneGroup: PaneGroupSchema.optional(),
     agentId: IdentifierSchema,
     workspaceId: IdentifierSchema,
     tabId: IdentifierSchema,
@@ -141,6 +145,7 @@ export const PaneBindingSchema = z
     worktreePath: z.string().min(1).optional(),
     isolationMode: z.literal("dedicated_pane"),
     readOnlyWorkspace: z.boolean(),
+    permanent: z.boolean().optional(),
     transportState: AgentTransportStateSchema,
     boundAt: IsoDateTimeSchema,
     lastHeartbeatAt: IsoDateTimeSchema.optional(),
@@ -559,3 +564,37 @@ export const RoleMessageSchema = z
 export const InterRoleMessageSchema = RoleMessageSchema;
 export type RoleMessage = z.infer<typeof RoleMessageSchema>;
 export type InterRoleMessage = z.infer<typeof InterRoleMessageSchema>;
+
+export const EnvironmentDoctorCheckSchema = z
+  .object({
+    checkId: IdentifierSchema,
+    name: z.string().trim().min(1),
+    status: z.enum(["passed", "warn", "failed"]),
+    message: z.string().trim().min(1),
+    remediation: z.string().trim().min(1).optional()
+  })
+  .strict();
+export type EnvironmentDoctorCheck = z.infer<typeof EnvironmentDoctorCheckSchema>;
+
+export const EnvironmentDoctorReportSchema = z
+  .object({
+    schemaVersion: z.literal(2),
+    workspaceRoot: z.string().trim().min(1),
+    sessionId: IdentifierSchema.optional(),
+    healthy: z.boolean(),
+    checks: z.array(EnvironmentDoctorCheckSchema).min(1),
+    checkedAt: IsoDateTimeSchema,
+    metadata: MetadataSchema.optional()
+  })
+  .strict()
+  .superRefine((report, ctx) => {
+    const hasFailed = report.checks.some((check) => check.status === "failed");
+    if (report.healthy && hasFailed) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["healthy"],
+        message: "doctor report cannot be healthy when any check has status failed"
+      });
+    }
+  });
+export type EnvironmentDoctorReport = z.infer<typeof EnvironmentDoctorReportSchema>;

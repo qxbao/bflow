@@ -1,6 +1,6 @@
 # Kiến Trúc Hệ Thống bflow v2: Agentic SDLC Multi-Agent Framework
 
-Tài liệu này xác lập đặc tả kiến trúc kỹ thuật chuẩn mực và có thẩm quyền (authoritative architectural specification) cho phiên bản nâng cấp v2 của nền tảng **bflow**. Kiến trúc này nâng tầm bflow từ một workflow engine đơn lẻ (P00–P10) thành một khung điều phối đa tác tử thông minh (Agentic SDLC Multi-Agent Framework, P11–P18), tích hợp chặt chẽ với Herdr để quản lý môi trường multi-pane, tương tác đàm thoại tự nhiên với người dùng (Conversation Agent), phân rã bài toán và điều phối chiến lược (Coordinator Agent), phát triển hướng đặc tả (Spec-Driven Development), TDD có điều kiện (Conditional TDD), và vòng lặp kiểm chuẩn có chặn (Bounded Verification Loop).
+Tài liệu này xác lập đặc tả kiến trúc kỹ thuật chuẩn mực và có thẩm quyền (authoritative architectural specification) cho phiên bản nâng cấp v2 của nền tảng **bflow**. Kiến trúc này nâng tầm bflow từ một workflow engine đơn lẻ (P00–P10) thành một khung điều phối đa tác tử thông minh (Agentic SDLC Multi-Agent Framework, P11–P19), tích hợp chặt chẽ với Herdr để quản lý môi trường multi-pane, tương tác đàm thoại tự nhiên với người dùng (Conversation Agent), phân rã bài toán và điều phối chiến lược (Coordinator Agent), phát triển hướng đặc tả (Spec-Driven Development), TDD có điều kiện (Conditional TDD), và vòng lặp kiểm chuẩn có chặn (Bounded Verification Loop).
 
 ---
 
@@ -22,10 +22,12 @@ Tài liệu này xác lập đặc tả kiến trúc kỹ thuật chuẩn mực 
 4. [Section 4: Quản lý phiên đa Pane và CLI `bflow init/up/down/attach`](#section-4-quản-lý-phiên-đa-pane-và-cli-bflow-initupdownattach)
    - 4.1. Cấu trúc `SessionManifest` và `PaneBinding`
    - 4.2. Vòng đời phiên đa Pane và các lệnh CLI tương tác
-5. [Section 5: Quyền sở hữu đường dẫn cho P12–P18 (Path Ownership & Wave Plan)](#section-5-quyền-sở-hữu-đường-dẫn-cho-p12p18-path-ownership--wave-plan)
-   - 5.1. Bảng phân định quyền sở hữu đường dẫn cho P12–P18
-   - 5.2. Các quy tắc ranh giới bất biến khi triển khai song song
-   - 5.3. Tiêu chí nghiệm thu tích hợp từng pha
+   - 4.3. Độc lập phiên và cách ly theo dự án (Project-Specific Session & Cross-Repo Isolation)
+5. [Section 5: Kế hoạch phân đợt và Quyền sở hữu đường dẫn P11–P19 (Execution Waves & Path Ownership)](#section-5-kế-hoạch-phân-đợt-và-quyền-sở-hữu-đường-dẫn-p11p19-execution-waves--path-ownership)
+   - 5.1. Kiến trúc phân đợt thực thi (Three-Wave Execution Architecture)
+   - 5.2. Bảng phân định quyền sở hữu đường dẫn cho P11–P19
+   - 5.3. Các quy tắc ranh giới bất biến khi triển khai song song
+   - 5.4. Tiêu chí nghiệm thu tích hợp từng pha
 
 ---
 
@@ -133,46 +135,64 @@ Mặc dù nền tảng v1 rất vững chắc về khả năng chịu lỗi và 
 
 ```mermaid
 flowchart TD
-  subgraph Reused_As_Is["Tái sử dụng nguyên vẹn (Reuse As-Is)"]
-    Core["@bflow/core<br/>• Deterministic DAG Engine<br/>• Retry/Rework Generations<br/>• Aggregate Checkpoints Codec"]
+  subgraph Reused_Foundation["Nền tảng Tái sử dụng (Reused P00–P10 Foundation)"]
     Persistence["@bflow/persistence<br/>• SQLite Transactional RunStore<br/>• Append-only Events & Receipts<br/>• Checkpoint Storage"]
     ArtifactStore["@bflow/artifact-store<br/>• SHA-256 / SHA-512 Streaming Hash<br/>• Immutable Storage & Jail Containment<br/>• artifact://store/{id} URIs"]
+    HerdrBase["@bflow/herdr-adapter<br/>• Herdr CLI/Socket IPC Client<br/>• Protocol 22 Transport"]
+    RegistryBase["@bflow/agent-registry<br/>• File-backed Registry<br/>• Leases & Fencing Tokens"]
+    GatesBase["@bflow/quality-gates<br/>• Base Evaluators & Findings"]
   end
 
-  subgraph Extended_With_Compatibility["Mở rộng có kiểm soát (Extended Modules)"]
-    Contracts["@bflow/contracts (P11)<br/>• Thêm 17 contracts v2 & RoleMessage<br/>• Mở rộng ApprovalTarget & Checkpoint"]
-    Registry["@bflow/agent-registry (P13)<br/>• Mở rộng 10 vai trò AgentRole<br/>• Thêm AgentCapability & AgentRoleProfile (canDelegateToSpecialist)"]
-    HerdrAdapter["@bflow/herdr-adapter (P12)<br/>• Quản lý Multi-Pane Herdr Session<br/>• Ánh xạ SessionManifest & PaneBinding"]
-    Gates["@bflow/quality-gates (P15)<br/>• Verification Loop Evaluator<br/>• GitChangeSet Diff Validator"]
-    Runtime["@bflow/runtime (P16)<br/>• ConversationSessionManager<br/>• Delegation & Bounded Loop Orchestration"]
-    CLI["apps/cli (P17)<br/>• Bổ sung bflow up / down / attach<br/>• Tích hợp tương tác Conversation Agent"]
+  subgraph WaveA["Đợt A: Hợp đồng & Kiến trúc v2 (Wave A: P11)"]
+    Contracts["@bflow/contracts (P11)<br/>• 17 contracts v2 & RoleMessage<br/>• Mở rộng ApprovalTarget & Checkpoint<br/>• Đóng băng Shared Contracts"]
   end
 
-  Reused_As_Is -. Cung cấp nền tảng bất biến .-> Extended_With_Compatibility
+  subgraph WaveB["Đợt B: 7 Module Song song trên Git Worktrees (Wave B: P12–P18)"]
+    CLI["apps/cli (P12)<br/>• Lifecycle & CLI (init, up, down, attach, status, doctor)"]
+    PaneMgr["packages/pane-manager (P13)<br/>• Multi-Pane & Agent Process Manager"]
+    Conv["packages/conversation & agents/chat (P14)<br/>• Conversation Agent & Delegation Gateway"]
+    Spec["packages/specification & agents/analyst,architect (P15)<br/>• Spec-Driven Development Engine"]
+    TestStrat["packages/test-strategy (P16)<br/>• Conditional TDD Policy Engine"]
+    Verify["packages/verification & agents/verifier (P17)<br/>• Verification Loop Engine"]
+    GitOrch["packages/git-orchestrator (P18)<br/>• Git Integration & Parallel Worktrees"]
+  end
+
+  subgraph WaveC["Đợt C: Hậu đồng bộ Tích hợp (Wave C: P19)"]
+    CoordRuntime["packages/runtime, packages/core & agents/coordinator (P19)<br/>• Coordinator Agent & Workflow Runtime Integration"]
+  end
+
+  Reused_Foundation -. Nền tảng cốt lõi .-> WaveA
+  WaveA ==> WaveB
+  WaveB ==> WaveC
 ```
 
 #### Phân tích chi tiết:
 
-1. **Các mô-đun tái sử dụng nguyên vẹn (Reuse As-Is)**:
-   - **`@bflow/core`**: Giữ nguyên toàn bộ logic xử lý DAG, chuyển đổi trạng thái hợp lệ, tính toán jitter tiền định, và quản lý thế hệ rework (`generation`). Các quy trình nghiệp vụ mới (như bước tạo Spec, quyết định TDD, vòng lặp Verification) sẽ được Coordinator mô hình hóa thành các `TaskDefinition` chuẩn trong `WorkflowDefinition`. Engine không cần sửa đổi lõi chuyển trạng thái.
-   - **`@bflow/artifact-store`**: Giữ nguyên thiết kế lưu trữ nhị phân bất biến. Các tài liệu sinh ra trong v2 (bản đặc tả markdown, tệp patch git diff, log kiểm thử) đều được lưu trữ dưới dạng artifact thông thường với mã định danh URI `artifact://store/{id}`.
-   - **`@bflow/persistence`**: Giữ nguyên bảng lưu trữ SQLite và cơ chế append-only event log. Các sự kiện mới của v2 tuân thủ `DomainEventSchema` mở rộng.
+1. **Các gói nền tảng P00–P10 được tái sử dụng (Reused P00–P10 Foundation Packages)**:
+   - **`@bflow/persistence`**: Giữ nguyên bảng lưu trữ SQLite và cơ chế append-only event log. Lưu trữ sự kiện và snapshot/checkpoint giao dịch của v2.
+   - **`@bflow/artifact-store`**: Giữ nguyên thiết kế lưu trữ nhị phân bất biến. Toàn bộ tài liệu đặc tả markdown, git patch, và kết quả kiểm thử được lưu trữ dưới dạng artifact với mã định danh URI `artifact://store/{id}`.
+   - **`@bflow/herdr-adapter`**: Giữ nguyên kết nối Herdr CLI/Socket IPC giao thức 22, cung cấp cổng giao vận cơ sở cho việc quản lý tiến trình.
+   - **`@bflow/agent-registry`**: Giữ nguyên cơ chế lease và fencing token trong tệp cấu hình registry file-backed, ngăn chặn xung đột tài nguyên.
+   - **`@bflow/quality-gates`**: Giữ nguyên khung đánh giá rào chắn chất lượng và cấu trúc findings chuẩn.
 
-2. **Các mô-đun mở rộng có kiểm soát và kế hoạch tương thích (Compatibility/Migration Plan)**:
-   - **`@bflow/contracts`**:
+2. **Đợt A: Hợp đồng và Kiến trúc v2 (Wave A: P11)**:
+   - **`@bflow/contracts` (`packages/contracts/**`)**:
      - Bổ sung 17 hợp đồng v2 mà không làm thay đổi các schema v1 hiện hữu.
-     - `ApprovalTargetSchema`: Mở rộng từ 3 loại (`run`, `task`, `quality_gate`) thành hợp nhất phân biệt (discriminated union) hỗ trợ thêm `specification`, `tdd_decision`, `verification_escalation`, `git_changeset`, và `delegation`. Các bản ghi approval v1 cũ vẫn hoàn toàn hợp lệ mà không cần migration.
-     - `WorkflowAggregateCheckpointStateSchema`: Bổ sung trường ngữ cảnh phục hồi `sdlcContext?: SdlcRecoveryContext` (chứa `conversationSession`, `sessionManifest`, `specifications`, `activeAssignments`, `verificationCycles`, `gitChangeSets`). Bộ giải mã (codec) v1 vẫn đọc được các checkpoint v2 mà không bị lỗi xác thực (`strip` hoặc bỏ qua an toàn).
-   - **`@bflow/agent-registry` (P13)**:
-     - Mở rộng danh sách vai trò: Nâng cấp từ hằng số 4 `MVP_ROLES` (`["planner", "developer", "reviewer", "qa"]`) thành 10 vai trò chuẩn `AgentRole` (`conversation`, `coordinator`, `planner`, `architect`, `specifier`, `developer`, `tester`, `reviewer`, `qa`, `security`).
-     - *Kế hoạch tương thích*: Mã hiện tại kiểm tra `isMvpRole` sẽ được mở rộng bằng hàm `isAgentRole` tương thích ngược. Mọi vai trò cũ trong các tệp cấu hình `.bflow.json` vẫn tiếp tục hoạt động.
-     - *Ràng buộc ủy quyền*: Bổ sung `AgentRoleProfile` với trường `canDelegateToSpecialist`. Quy tắc an toàn bắt buộc: Chỉ duy nhất vai trò `coordinator` được phép thiết lập `canDelegateToSpecialist: true`. Các vai trò khác (kể cả `conversation` và `developer`) nếu có cờ này sẽ bị Registry từ chối lúc khởi tạo (`validation error`).
-   - **`@bflow/herdr-adapter` (P12)**:
-     - Giữ nguyên cổng `AgentTransport` cho từng pane đơn lẻ.
-     - Mở rộng thêm `MultiPaneSessionManager` quản lý một mảng các `PaneBinding` bên trong `SessionManifest`. Mỗi pane được gắn với một terminal Herdr độc lập.
-   - **`@bflow/runtime` & `apps/cli` (P16, P17)**:
-     - Runtime tích hợp thêm bộ điều phối đàm thoại (`ConversationSessionManager`).
-     - CLI bổ sung các lệnh tương tác `up`, `down`, `attach` mà không ảnh hưởng đến các lệnh chạy batch truyền thống (`run`, `status`, `approve`).
+     - `ApprovalTargetSchema`: Mở rộng từ 3 loại (`run`, `task`, `quality_gate`) thành hợp nhất phân biệt (discriminated union) hỗ trợ thêm `specification`, `tdd_decision`, `verification_escalation`, `git_changeset`, và `delegation`.
+     - `WorkflowAggregateCheckpointStateSchema`: Bổ sung trường ngữ cảnh phục hồi `sdlcContext?: SdlcRecoveryContext`.
+     - Xuất bản phong bì liên tác tử `RoleMessage` / `InterRoleMessage` và đóng băng hợp đồng (contract freeze) làm tiền đề vững chắc cho Đợt B.
+
+3. **Đợt B: 7 Mô-đun song song trên 7 Git Worktree độc lập (Wave B: P12–P18)**:
+   - **`apps/cli/**` (`P12`)**: Hiện thực hóa CLI tương tác và vòng đời môi trường (`bflow init`, `bflow up`, `bflow down`, `bflow attach`, `bflow status`, `bflow doctor`), quản lý phiên theo dự án và cách ly cross-repo.
+   - **`packages/pane-manager/**` (`P13`)**: Quản lý đa pane Herdr, phân nhóm Conversation/Coordination/Verification, quản lý vai trò thường trực và vòng đời Developer worktree pane động.
+   - **`packages/conversation/**` & `agents/chat/**` (`P14`)**: Giao diện người dùng duy nhất, đàm thoại làm rõ, nhận diện ý định, đóng gói `DelegationRequest` và bàn giao với Coordinator.
+   - **`packages/specification/**` & `agents/analyst/**`, `agents/architect/**` (`P15`)**: Động cơ SDD thích ứng, phân loại độ phức tạp thay đổi (`trivial`, `standard`, `complex`), truy vết đặc tả đến task (`traceabilityTaskIds`), và cổng phê duyệt thiết kế.
+   - **`packages/test-strategy/**` (`P16`)**: Động cơ chính sách TDD có điều kiện, bộ phân loại chiến lược `TestStrategyResolver` (`required`, `recommended`, `not_applicable`).
+   - **`packages/verification/**` & `agents/verifier/**` (`P17`)**: Động cơ vòng lặp kiểm chuẩn có chặn (mặc định tối đa 3 lần lặp), phân loại 5 phán quyết (`passed`, `failed`, `inconclusive`, `blocked`, `escalated`), kiểm chứng mức task và mức workflow.
+   - **`packages/git-orchestrator/**` (`P18`)**: Quản lý Git branch, commit, worktree riêng biệt cho từng Developer, kiểm tra phạm vi tệp thay đổi, tóm tắt diff, và tích hợp nhánh theo thứ tự phụ thuộc.
+
+4. **Đợt C: Hậu đồng bộ Tích hợp (Wave C: P19)**:
+   - **`packages/runtime/**`, `packages/core/**`, `agents/coordinator/**` (`P19`)**: Triển khai tuần tự sau khi điểm đồng bộ P12–P18 hoàn tất. Hiện thực hóa logic Tech Lead của Coordinator Agent, hợp thành toàn bộ các port từ P12 đến P18 vào Workflow Runtime, bảo đảm việc điều phối tự trị an toàn và tuân thủ tuyệt đối các chính sách SDLC.
 
 ---
 
@@ -520,6 +540,8 @@ interface PaneBinding {
   readonly paneId: string;
   readonly terminalId?: string;
   readonly session?: AgentSessionLocator;
+  readonly paneGroup?: "conversation" | "coordination" | "verification" | "developer_worktree";
+  readonly permanent?: boolean;
   readonly provider: string;
   readonly agentKind: string;
   readonly model?: string;
@@ -566,12 +588,14 @@ Mỗi vai trò tham gia vào dự án sẽ được cấp phát một pane vật
 
 ### 4.2. Vòng đời phiên đa Pane và các lệnh CLI tương tác
 
-Quy trình sử dụng bflow v2 xoay quanh 4 lệnh tương tác chủ đạo:
+Quy trình vận hành bflow v2 xoay quanh 6 lệnh tương tác chủ đạo:
 
 ```mermaid
-flowchart LR
-  Init["bflow init<br/>Khởi tạo .bflow/ & config"] --> Up["bflow up<br/>Khởi tạo SessionManifest & mở Multi-Pane"]
+flowchart TD
+  Doctor["bflow doctor<br/>Chẩn đoán môi trường, dependencies & daemon"] --> Init["bflow init<br/>Khởi tạo .bflow/ & cấu hình dự án"]
+  Init --> Up["bflow up<br/>Khởi tạo SessionManifest & mở Multi-Pane"]
   Up --> Attach["bflow attach<br/>Kết nối terminal người dùng vào Conversation Agent"]
+  Up --> Status["bflow status<br/>Giám sát tiến độ DAG & sức khỏe pane"]
   Attach --> Down["bflow down<br/>Dừng an toàn, lưu checkpoint & đóng pane"]
 ```
 
@@ -603,7 +627,26 @@ flowchart LR
   - Quan sát thanh tiến trình tổng quan của các task trong DAG đang chạy ở các pane ngầm.
   - Người dùng có thể nhấn phím thoát an toàn (`Ctrl+C` hoặc `detach`) để rời khỏi terminal đàm thoại mà không làm gián đoạn các workflow đang chạy nền.
 
-#### 4. Lệnh `bflow down`
+#### 4. Lệnh `bflow status`
+- **Mục đích**: Quan sát và giám sát trạng thái toàn cảnh của phiên làm việc và các agent.
+- **Hành vi**:
+  - Truy vấn `SessionManifest` để kiểm tra trạng thái tổng thể (`status: "initializing" | "up" | "degraded" | "stopping" | "down"`).
+  - Báo cáo chi tiết từng pane (`PaneBinding`): vai trò `role`, trạng thái giao vận `transportState`, thời điểm heartbeat cuối cùng `lastHeartbeatAt`, và worktree path liên kết.
+  - Hiển thị tiến trình thực thi của các `activeRunIds` trong Workflow DAG, bao gồm số task hoàn thành, đang chạy, chờ duyệt, và thế hệ rework hiện tại.
+  - Xuất dữ liệu dưới dạng bảng terminal trực quan hoặc định dạng JSON có cấu trúc (`--json`) phục vụ tự động hóa và tích hợp CI.
+
+#### 5. Lệnh `bflow doctor`
+- **Mục đích**: Chẩn đoán toàn diện tính hợp lệ của môi trường hệ thống, phụ thuộc và phiên bản trước khi vận hành.
+- **Hành vi**:
+  - Thực thi bộ kiểm tra `EnvironmentDoctorCheck` và tổng hợp thành `EnvironmentDoctorReport` thông qua `SessionLifecycleManager.doctorSession`.
+  - Thẩm định phiên bản Node.js runtime (yêu cầu Node >= 22.13 cho unflagged `node:sqlite`).
+  - Kiểm tra tính sẵn sàng của công cụ quản lý gói `pnpm` và binary `git`.
+  - Kiểm tra trạng thái hoạt động và kết nối socket IPC tới Herdr daemon (giao thức 22).
+  - Xác thực quyền truy cập đọc/ghi trên thư mục làm việc và kho lưu trữ cục bộ `.bflow/`.
+  - Đánh giá tính toàn vẹn của tệp cấu hình `bflow.config.json` và cơ sở dữ liệu SQLite `bflow.db`.
+  - Đưa ra cảnh báo sớm và hướng dẫn khắc phục cụ thể nếu phát hiện thiếu sót cấu hình hoặc lỗi phân quyền.
+
+#### 6. Lệnh `bflow down`
 - **Mục đích**: Tắt và dọn dẹp toàn bộ môi trường làm việc một cách an toàn (graceful shutdown).
 - **Hành vi**:
   - Gửi tín hiệu thông báo hủy/dừng có trật tự tới tất cả các tiến trình agent đang chạy.
@@ -614,30 +657,88 @@ flowchart LR
 
 ---
 
-## Section 5: Quyền sở hữu đường dẫn cho P12–P18 (Path Ownership & Wave Plan)
+### 4.3. Độc lập phiên và cách ly theo dự án (Project-Specific Session & Cross-Repo Isolation)
 
-Nhằm đảm bảo quá trình phát triển song song của 5 subagent không gây ra xung đột mã nguồn (merge conflict) hoặc xâm lấn phạm vi trách nhiệm, hệ thống phân định quyền sở hữu đường dẫn tuyệt đối cho các giai đoạn từ P11 đến P18:
-
-### 5.1. Bảng phân định quyền sở hữu đường dẫn cho P12–P18
-
-| Pha | Nhiệm vụ trọng tâm | Gói sở hữu (Owned Paths) | Trách nhiệm chính của Agent đảm nhiệm |
-| --- | --- | --- | --- |
-| **P11** | Public Contracts v2 | `packages/contracts/**` | Xuất bản đầy đủ 17 Zod schema v2, `RoleMessage` envelope, và pure transition validators. |
-| **P12** | Herdr Multi-Pane Session | `packages/herdr-adapter/**` | Triển khai `MultiPaneSessionManager`, ánh xạ `SessionManifest`, `PaneBinding`, quản lý lifecycle đa terminal trên Herdr 0.9.1. |
-| **P13** | Agent Registry v2 & Capabilities | `packages/agent-registry/**` | Mở rộng 10 vai trò `AgentRole`, `AgentCapability` & `AgentRoleProfile`, bảo vệ ràng buộc `canDelegateToSpecialist` (chỉ cho Coordinator), quản lý lease & fencing token. |
-| **P14** | Core SDD, TDD & Loop Rules | `packages/core/**` | Bổ sung các rule nghiệm thu đặc tả (`Specification`), đánh giá quyết định TDD (`TddDecision`), tính toán số vòng lặp tối đa `maxIterations` của `VerificationCycle`. |
-| **P15** | Quality Gates & Verification | `packages/quality-gates/**` | Triển khai `VerificationCycleEvaluator`, bộ thẩm định `GitChangeSet` diff, phân tích phát hiện kiểm chuẩn (`GateFinding`), bảo đảm an toàn thực thi subprocess. |
-| **P16** | Runtime & Persistence Orchestration | `packages/runtime/**`, `packages/persistence/**` | Điều phối `ConversationSessionManager`, `DelegationRequest`, kết nối Coordinator với WorkflowRuntime, mở rộng codec checkpoint tổng hợp trong SQLite. |
-| **P17** | CLI Multi-Pane Commands | `apps/cli/**` | Mở rộng bộ phân tích lệnh và bộ xử lý cho `bflow init`, `bflow up`, `bflow down`, `bflow attach`, tích hợp I/O tương tác người dùng. |
-| **P18** | E2E Agentic SDLC Verification | `tests/e2e/**` | Xây dựng kịch bản kiểm thử tích hợp toàn diện: Đàm thoại làm rõ -> Đặc tả SDD -> TDD Red-Green-Refactor -> Verification Loop -> Nghiệm thu hoàn tất. |
+Bflow v2 bảo đảm tính độc lập tuyệt đối giữa các phiên làm việc và các kho mã nguồn:
+- **Khóa định danh theo không gian làm việc (`workspaceRoot`)**: Mỗi dự án xác định một thư mục gốc làm việc riêng biệt. Định danh phiên (`sessionId`) và workspace Herdr (`herdrWorkspaceId`) được tính toán hoặc gắn kết duy nhất với dự án đó.
+- **Cách ly giữa các kho lưu trữ (Cross-Repo Isolation)**: Người dùng có thể khởi chạy đồng thời nhiều phiên Bflow trên các repository khác nhau trên cùng một máy phát triển mà không bị xung đột tiến trình, đè cổng socket IPC, hay tranh chấp tài nguyên SQLite/ArtifactStore.
+- **Tính lũy thừa (Idempotency) và Khôi phục phiên**: Các thao tác `bflow up` khi phiên đang chạy sẽ nhận diện phiên hiện hữu một cách an toàn mà không sinh trùng lặp pane. Khởi động lại sau sự cố bất ngờ (`crash recovery`) khôi phục trạng thái từ SQLite RunStore và đồng bộ lại với các pane còn sống sót.
 
 ---
 
-### 5.2. Các quy tắc ranh giới bất biến khi triển khai song song
+## Section 5: Kế hoạch phân đợt và Quyền sở hữu đường dẫn P11–P19 (Execution Waves & Path Ownership)
+
+Nhằm đảm bảo quá trình phát triển song song của các subagent không gây ra xung đột mã nguồn (merge conflict) hoặc xâm lấn phạm vi trách nhiệm, hệ thống phân định kế hoạch thực thi 3 đợt nghiêm ngặt (**Đợt A → Đợt B → Điểm đồng bộ → Đợt C**) cùng quyền sở hữu đường dẫn tuyệt đối cho các giai đoạn từ P11 đến P19:
+
+### 5.1. Kiến trúc phân đợt thực thi (Three-Wave Execution Architecture)
+
+```mermaid
+flowchart TD
+  subgraph WaveA["Đợt A: Tiền đề tuần tự (Sequential Prerequisite)"]
+    P11["P11: Architecture v2 & Contract Migration<br/>• 17 v2 Contracts & RoleMessage Protocol<br/>• Đóng băng Shared Contracts (Freeze)"]
+  end
+
+  subgraph WaveB["Đợt B: Thực thi song song trên 7 Git Worktrees độc lập (Baseline: P11)"]
+    P12["P12: Bflow CLI & Environment<br/>apps/cli/**"]
+    P13["P13: Herdr Role & Pane Manager<br/>packages/pane-manager/**"]
+    P14["P14: Conversation & Delegation<br/>packages/conversation/**, agents/chat/**"]
+    P15["P15: Spec-Driven Dev Engine<br/>packages/specification/**, agents/analyst/**, agents/architect/**"]
+    P16["P16: Conditional TDD Policy<br/>packages/test-strategy/**"]
+    P17["P17: Verification Loop Engine<br/>packages/verification/**, agents/verifier/**"]
+    P18["P18: Git Integration & Worktrees<br/>packages/git-orchestrator/**"]
+  end
+
+  subgraph SyncGate["Điểm Đồng Bộ Tích Hợp (Integration Gate)"]
+    Sync["Hợp nhất tuần tự P12–P18 & Kiểm chứng Monorepo<br/>• pnpm check:deps<br/>• pnpm typecheck<br/>• pnpm test (100% pass)<br/>• git diff --check"]
+  end
+
+  subgraph WaveC["Đợt C: Hậu đồng bộ tuần tự (Post-Integration Sequential)"]
+    P19["P19: Coordinator Agent & Runtime Integration<br/>packages/runtime/**, packages/core/**, agents/coordinator/**"]
+  end
+
+  P11 ==> P12 & P13 & P14 & P15 & P16 & P17 & P18
+  P12 & P13 & P14 & P15 & P16 & P17 & P18 ==> Sync
+  Sync ==> P19
+```
+
+#### Quy tắc điều phối các đợt thực thi:
+
+1. **Đợt A (Sequential Prerequisite)**:
+   - **`P11`** — *Architecture v2 & Contract Migration* (`packages/contracts/**`, `AGENTS.md`, `docs/**`): Thực thi tuần tự trước tiên. Kiểm tra audit P00–P10, thiết lập kiến trúc v2, xuất bản 17 Zod schemas v2, phong bì `RoleMessage`, và đóng băng hợp đồng công khai (Contract Freeze). Đây là nền tảng bất biến bắt buộc phải hoàn thành trước khi triển khai Đợt B.
+2. **Đợt B (Parallel Execution on 7 Independent Git Worktrees from P11 Baseline)**:
+   - **`P12`, `P13`, `P14`, `P15`, `P16`, `P17`, `P18`**: Triển khai song song trên 7 Git worktree riêng biệt rẽ nhánh từ commit baseline đã được phê duyệt của P11.
+   - Các agent chỉ thực thi trong phạm vi đường dẫn được sở hữu (owned paths).
+   - Tuyệt đối không được phép chỉnh sửa hợp đồng dùng chung (`packages/contracts/**`).
+3. **Điểm đồng bộ tích hợp (Synchronization Point / Integration Gate)**:
+   - Thực hiện hợp nhất tuần tự các nhánh tính năng P12–P18 vào nhánh chính.
+   - Chạy toàn bộ các bài kiểm tra chất lượng monorepo: `pnpm check:deps`, `pnpm typecheck`, `pnpm test`, `git diff --check`.
+   - Xác minh tính tương thích giao diện giữa các gói và bảo đảm không có hồi quy đối với các bộ test P00–P10.
+4. **Đợt C (Post-Integration Sequential)**:
+   - **`P19`** — *Coordinator Agent & Runtime Integration* (`packages/runtime/**`, `packages/core/**`, `agents/coordinator/**`): Triển khai tuần tự sau khi điểm đồng bộ hoàn tất.
+   - Hiện thực hóa logic điều phối cấp cao của Coordinator Agent, hợp thành toàn bộ năng lực từ P12 đến P18 vào Workflow Runtime, kết nối các port đa pane, SDD, TDD, Verification và Git Orchestrator.
+   - **CẤM TUYỆT ĐỐI** triển khai P19 trước khi Đợt B hoàn tất việc tích hợp tại điểm đồng bộ.
+
+### 5.2. Bảng phân định quyền sở hữu đường dẫn cho P11–P19
+
+| Phase | Wave | Name | Owned paths | Responsibility |
+| --- | --- | --- | --- | --- |
+| P11 | Wave A | Architecture v2 & Contract Migration | `packages/contracts/**`, `AGENTS.md`, `docs/**` | P00–P10 audit, v2 architecture, 17 v2 contracts, Herdr `RoleMessage` protocol, contract freeze |
+| P12 | Wave B | Bflow CLI & Environment Lifecycle | `apps/cli/**` | `bflow init`, `bflow up`, `bflow down`, `bflow attach`, `bflow status`, `bflow doctor`; project-specific session, idempotency, error handling, cross-repo isolation |
+| P13 | Wave B | Herdr Role & Pane Manager | `packages/pane-manager/**` | Herdr workspace/tab/pane/agent management, role-to-pane mapping, Conversation/Coordination/Verification tabs, permanent roles, dynamic Developer spawn with Git worktree + pane, lifecycle/resource limits, restart recovery, attach focus (no CLI or Workflow Engine here) |
+| P14 | Wave B | Conversation Agent & Delegation Gateway | `packages/conversation/**`, `agents/chat/**` | Sole user interface, dialogue/clarification/status/approval handling, intent recognition & `DelegationRequest` creation, Herdr handoff to/from Coordinator, correlation ID management (no direct Developer dispatch, no code edits, no Coordinator logic here) |
+| P15 | Wave B | Spec-Driven Development Engine | `packages/specification/**`, `agents/analyst/**`, `agents/architect/**` | Adaptive SDD based on specification & acceptance criteria, change classification (`trivial`, `standard`, `complex`), risk-proportional detail, versioning/approval, spec-to-task traceability, requirement change impact detection, design approval gates |
+| P16 | Wave B | Conditional TDD Policy Engine | `packages/test-strategy/**` | `TestStrategyResolver`, `required` / `recommended` / `not_applicable` classification, Red-Green-Refactor evidence when `required`, mandatory alternative verification when `not_applicable` (strategy resolution only, not Verification Loop) |
+| P17 | Wave B | Verification Loop Engine | `packages/verification/**`, `agents/verifier/**` | Task-level & post-Git workflow-level verification against spec/criteria/evidence, deterministic checks + Reviewer + QA, bounded rework loop (default max 3 iterations), `passed` / `failed` / `inconclusive` / `blocked` classification, escalation (not Git Integration Engine) |
+| P18 | Wave B | Git Integration & Parallel Worktrees | `packages/git-orchestrator/**` | Git repo/branch/commit/worktree management, per-Developer task worktrees, changed-file scope checks, diff & change summary, dependency-ordered branch integration, controlled conflict handling, PR support, safe cleanup, post-integration workflow-level verification trigger |
+| P19 | Wave C | Coordinator Agent & Runtime Integration | `packages/runtime/**`, `packages/core/**`, `agents/coordinator/**` | Coordinator Agent logic & full Workflow Runtime integration across P12–P18 (executed strictly after P12–P18 synchronization point) |
+
+---
+
+### 5.3. Các quy tắc ranh giới bất biến khi triển khai song song
 
 1. **Ranh giới bất biến của Shared Contracts**:
    - Gói `packages/contracts/**` do Pha P11 thiết lập là chuẩn giao tiếp bất biến.
-   - Các agent triển khai P12–P18 **TUYỆT ĐỐI KHÔNG** được tự ý chỉnh sửa tệp trong `packages/contracts/**` để phục vụ sự tiện lợi cục bộ.
+   - Các agent triển khai P12–P18 (và P19) **TUYỆT ĐỐI KHÔNG** được tự ý chỉnh sửa tệp trong `packages/contracts/**` để phục vụ sự tiện lợi cục bộ.
    - Nếu phát hiện điểm bất hợp lý, agent phải báo cáo đề xuất sửa đổi và cung cấp fixture lỗi để xem xét tích hợp.
 
 2. **Cách ly hoàn toàn giữa các Leaf Packages**:
@@ -655,7 +756,7 @@ Nhằm đảm bảo quá trình phát triển song song của 5 subagent không 
 
 ---
 
-### 5.3. Tiêu chí nghiệm thu tích hợp từng pha
+### 5.4. Tiêu chí nghiệm thu tích hợp từng pha
 
 - **Mỗi pha phải vượt qua 100% các bài kiểm tra chất lượng**:
   ```bash

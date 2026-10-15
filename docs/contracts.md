@@ -123,7 +123,7 @@ This hardening release intentionally breaks the original `8d960d0` bootstrap bef
 
 ## Contracts v2 (P11 Agentic SDLC Upgrade)
 
-Contracts v2 expands `@bflow/contracts` to support the multi-agent agentic SDLC architecture (P11–P18). It adds 17 authoritative Zod schemas, the standardized inter-agent `RoleMessage` envelope, and strict boundary separation between four distinct state domains. All schemas enforce strict input parsing (`.strict()`) and typed error handling via `OperationResult<T>`.
+Contracts v2 expands `@bflow/contracts` to support the multi-agent agentic SDLC architecture (P11–P19). It adds 17 authoritative Zod schemas, the standardized inter-agent `RoleMessage` envelope, and strict boundary separation between four distinct state domains. All schemas enforce strict input parsing (`.strict()`) and typed error handling via `OperationResult<T>`.
 
 ### Four Separated State Domains
 
@@ -248,7 +248,7 @@ Formal handoff contract between conversation and coordination layers:
   - `role`: `AgentRole`.
   - `title`: `string`, `description`: `string`.
   - `defaultCapabilities`: `Identifier[]` (min 1).
-  - `allowedRecipients`: `(AgentRole | "user" | "runtime")[]` (min 1; only `"conversation"` may include `"user"`; `"conversation"` cannot include `"developer"`).
+  - `allowedRecipients`: `(AgentRole | "user" | "runtime")[]` (min 1; `"conversation"` may only include `"user" | "coordinator" | "runtime"`, and specialist roles may only include `"coordinator" | "runtime"`).
   - `canDelegateToSpecialist`: `boolean` — **System Invariant**: Must be `true` ONLY for `"coordinator"`; all other roles must be `false`.
   - `userFacing`: `boolean` — **System Invariant**: Must be `true` ONLY for `"conversation"`; all other roles must be `false`.
   - `readOnlyWorkspace`: `boolean`.
@@ -292,6 +292,8 @@ Describes the physical allocation of a terminal pane within a multi-pane Herdr s
 - `workspaceId`: `Identifier`, `tabId`: `Identifier`, `paneId`: `Identifier`.
 - `terminalId`: `Identifier` (optional) — Associated Herdr terminal handle.
 - `session`: `AgentSessionLocator` (optional).
+- `paneGroup`: `"conversation" | "coordination" | "verification" | "developer_worktree"` (optional) — Categorizes terminal tab/pane grouping.
+- `permanent`: `boolean` (optional) — Declares whether the pane role is permanent (e.g. Conversation, Coordinator) or dynamically spawned/destroyed (e.g. Developer worktrees).
 - `provider`: `string`, `agentKind`: `string`, `model`: `string` (optional).
 - `cwd`: `string`, `worktreePath`: `string` (optional).
 - `isolationMode`: `"dedicated_pane"` (literal).
@@ -323,9 +325,13 @@ Structured requirements artifact produced under Spec-Driven Development (SDD):
 - `runId`: `Identifier` (optional).
 - `sessionId`: `Identifier` — Originating conversation session ID.
 - `level`: `SddPolicyLevel` (`"lightweight" | "full"`).
+- `complexity`: `"trivial" | "standard" | "complex"` (optional; `ChangeComplexitySchema`) — Adaptive change complexity classification guiding requirement and testing depth.
+- `riskLevel`: `"low" | "medium" | "high" | "critical"` (optional; `RiskLevelSchema`) — Risk assessment governing review and approval criteria.
+- `version`: `number` (optional, positive integer) — Monotonic revision counter for specification evolution.
 - `title`: `string` (trimmed, min 1), `summary`: `string` (trimmed, min 1), `problemStatement`: `string` (trimmed, min 1).
 - `scope`: `{ inScope: string[]; outOfScope: string[] }` (`inScope` min 1 entry).
 - `acceptanceCriteria`: `AcceptanceCriterion[]` (min 1 entry; duplicate `id` rejected).
+- `traceabilityTaskIds`: `Identifier[]` (optional) — Bidirectional traceability linking criteria to task DAG nodes.
 - `affectedPaths`: `string[]` (min 1 entry).
 - `architectureNotes`: `string` (optional; **required** when `level` is `"full"`).
 - `dataModelChanges`: `string` (optional).
@@ -384,7 +390,8 @@ Comprehensive verification outcome produced by independent evaluators:
 - `schemaVersion`: `2` — Numeric literal version 2.
 - `verificationId`: `Identifier` — Verification outcome ID.
 - `runId`: `Identifier`, `taskId`: `Identifier`, `cycleNumber`: `number` (positive integer), `attemptId`: `Identifier`.
-- `status`: `"passed" | "failed" | "blocked" | "escalated"`.
+- `status`: `VerificationResultStatus` (`"passed" | "failed" | "inconclusive" | "blocked" | "escalated"`) — Comprehensive verdict classification. `"inconclusive"` indicates ambiguous test signals or unverified findings requiring re-run.
+- `verificationScope`: `"task" | "workflow"` (optional) — Distinguishes task-level verification from post-integration workflow-level verification.
 - `independentExecution`: `true` (literal `true`).
 - `evaluatedCriteria`: Array of `{ criterionId: Identifier; passed: boolean; command?: string; exitCode?: number; evidenceArtifactId: ArtifactId; summary: string }` (min 1 entry; every `evidenceArtifactId` must exist in `evidenceArtifacts`; when `status` is `"passed"`, all criteria must have `passed: true`).
 - `qualityGateResults`: `QualityGateResult[]` — Invariant: When `status` is `"passed"`, all quality gate results must have `status: "passed"`.
@@ -399,9 +406,10 @@ Comprehensive verification outcome produced by independent evaluators:
 State of an iterative verification loop bounded by `maxIterations`:
 - `schemaVersion`: `2` — Numeric literal version 2.
 - `cycleId`: `Identifier`, `runId`: `Identifier`, `taskId`: `Identifier`, `specId`: `Identifier`.
+- `verificationScope`: `"task" | "workflow"` (optional) — Task-level vs. workflow-level scope.
 - `currentIteration`: `number` (positive integer; cannot exceed `maxIterations`).
-- `maxIterations`: `number` (integer between 1 and 10).
-- `status`: `"in_progress" | "passed" | "rework_required" | "escalated" | "aborted"` — Invariants: `"passed"` status requires non-empty `history` with the last result having status `"passed"`; when `currentIteration === maxIterations` and the last result is `"failed"`, cycle cannot be `"rework_required"` and must escalate or abort.
+- `maxIterations`: `number` (integer between 1 and 10; default: `3`).
+- `status`: `"in_progress" | "passed" | "rework_required" | "escalated" | "aborted"` — Invariants: `"passed"` status requires non-empty `history` with the last result having status `"passed"`; when `currentIteration === maxIterations` and the last result is `"failed"` or `"inconclusive"`, cycle cannot be `"rework_required"` and must escalate or abort.
 - `tddDecision`: `TddDecision`.
 - `history`: `VerificationResult[]`.
 - `escalation`: `VerificationEscalation` (optional; **required** when `status` is `"escalated"`):
@@ -485,3 +493,21 @@ Standardized peer-to-peer and hierarchical envelope over Herdr transport:
 - `occurred_at`: `IsoDateTime` (optional).
 - `idempotency_key`: `IdempotencyKey` (optional).
 - `metadata`: `Metadata` (optional).
+
+#### 19. Environment Doctor Contracts (`EnvironmentDoctorCheck`, `EnvironmentDoctorReport`)
+Used by `bflow doctor` (P12) and `SessionLifecycleManager.doctorSession` to inspect environment prerequisites:
+- `EnvironmentDoctorCheck` (`EnvironmentDoctorCheckSchema`): Individual system check outcome:
+  - `checkId`: `Identifier` — Unique check identifier.
+  - `name`: `string` (trimmed, min 1).
+  - `status`: `"passed" | "warn" | "failed"`.
+  - `message`: `string` (trimmed, min 1).
+  - `remediation`: `string` (optional, trimmed, min 1).
+- `EnvironmentDoctorReport` (`EnvironmentDoctorReportSchema`): Aggregated doctor report:
+  - `schemaVersion`: `2` (literal 2).
+  - `workspaceRoot`: `string` (trimmed, min 1).
+  - `sessionId`: `Identifier` (optional).
+  - `healthy`: `boolean` — Invariant: Cannot be `true` when any check in `checks` has `status === "failed"`.
+  - `checks`: `EnvironmentDoctorCheck[]` (min 1 check).
+  - `checkedAt`: `IsoDateTime`.
+  - `metadata`: `Metadata` (optional).
+- `SessionLifecycleManager.doctorSession(options: { workspaceRoot: string }): Promise<EnvironmentDoctorReport>`: Port interface executing the doctor suite against the environment.

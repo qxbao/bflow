@@ -26,22 +26,30 @@ All exchanged data must be parsed at an ingress boundary with the exported Zod s
 | 4 — quality | `packages/quality-gates/**` | Quality-gate evaluators, findings, acceptance decisions |
 | 5 — runtime and CLI | `packages/runtime/**`, `apps/cli/**` | Port composition, high-level use cases, command-line UX |
 
-### Wave 2 (P12–P18) Path Ownership
+### Bflow Agentic SDLC v2 (P11–P19) Execution Waves & Path Ownership
 
-| Phase | Focus | Owned paths | Responsibility |
-| --- | --- | --- | --- |
-| P11 | Public Contracts v2 | `packages/contracts/**` | 17 v2 Zod schemas, `RoleMessage` envelope, validation |
-| P12 | Herdr multi-pane session | `packages/herdr-adapter/**` | `MultiPaneSessionManager`, `SessionManifest`, `PaneBinding`, Herdr 0.9.1 multi-pane |
-| P13 | Agent Registry v2 & capabilities | `packages/agent-registry/**` | 10 `AgentRole` enum, `AgentCapability` & `AgentRoleProfile`, `canDelegateToSpecialist` constraint, leases & fencing |
-| P14 | Core SDD, TDD & loop rules | `packages/core/**` | `Specification` acceptance, `TddDecision` evaluation, `VerificationCycle` `maxIterations` |
-| P15 | Quality gates & verification | `packages/quality-gates/**` | `VerificationCycleEvaluator`, `GitChangeSet` validator, subprocess safety |
-| P16 | Runtime & persistence orchestration | `packages/runtime/**`, `packages/persistence/**` | `ConversationSessionManager`, `DelegationRequest`, Coordinator-Runtime execution, SQLite checkpoint codec |
-| P17 | CLI multi-pane commands | `apps/cli/**` | `bflow init`, `bflow up`, `bflow down`, `bflow attach`, interactive UX |
-| P18 | E2E Agentic SDLC verification | `tests/e2e/**` | End-to-end integration: conversation clarification -> spec -> TDD -> verification loop -> approval |
+The v2 implementation execution order is strictly staged across three waves with a mandatory integration synchronization gate:
+
+- **Wave A (Sequential Prerequisite)**: `P11` — Architecture v2 & Contract Migration (`packages/contracts/**`, `AGENTS.md`, `docs/**`). Must complete, pass full validation, and freeze contracts before P12–P18 begin.
+- **Wave B (Parallel Execution on 7 Independent Git Worktrees from P11 Baseline)**: `P12`, `P13`, `P14`, `P15`, `P16`, `P17`, `P18` run in parallel on separate worktrees branching from the P11 commit. No agent may modify shared contracts (`packages/contracts/**`).
+- **Synchronization Point (Integration Gate)**: Sequential merge of `P12–P18`, running `pnpm check:deps`, `pnpm typecheck`, `pnpm test`, and monorepo compatibility verification.
+- **Wave C (Post-Integration Sequential)**: `P19` — Coordinator Agent & Runtime Integration. Must NOT be implemented before P12–P18 are integrated and verified.
+
+| Phase | Wave | Name | Owned paths | Responsibility |
+| --- | --- | --- | --- | --- |
+| P11 | Wave A | Architecture v2 & Contract Migration | `packages/contracts/**`, `AGENTS.md`, `docs/**` | P00–P10 audit, v2 architecture, 17 v2 contracts, Herdr `RoleMessage` protocol, contract freeze |
+| P12 | Wave B | Bflow CLI & Environment Lifecycle | `apps/cli/**` | `bflow init`, `bflow up`, `bflow down`, `bflow attach`, `bflow status`, `bflow doctor`; project-specific session, idempotency, error handling, cross-repo isolation |
+| P13 | Wave B | Herdr Role & Pane Manager | `packages/pane-manager/**` | Herdr workspace/tab/pane/agent management, role-to-pane mapping, Conversation/Coordination/Verification tabs, permanent roles, dynamic Developer spawn with Git worktree + pane, lifecycle/resource limits, restart recovery, attach focus (no CLI or Workflow Engine here) |
+| P14 | Wave B | Conversation Agent & Delegation Gateway | `packages/conversation/**`, `agents/chat/**` | Sole user interface, dialogue/clarification/status/approval handling, intent recognition & `DelegationRequest` creation, Herdr handoff to/from Coordinator, correlation ID management (no direct Developer dispatch, no code edits, no Coordinator logic here) |
+| P15 | Wave B | Spec-Driven Development Engine | `packages/specification/**`, `agents/analyst/**`, `agents/architect/**` | Adaptive SDD based on specification & acceptance criteria, change classification (`trivial`, `standard`, `complex`), risk-proportional detail, versioning/approval, spec-to-task traceability, requirement change impact detection, design approval gates |
+| P16 | Wave B | Conditional TDD Policy Engine | `packages/test-strategy/**` | `TestStrategyResolver`, `required` / `recommended` / `not_applicable` classification, Red-Green-Refactor evidence when `required`, mandatory alternative verification when `not_applicable` (strategy resolution only, not Verification Loop) |
+| P17 | Wave B | Verification Loop Engine | `packages/verification/**`, `agents/verifier/**` | Task-level & post-Git workflow-level verification against spec/criteria/evidence, deterministic checks + Reviewer + QA, bounded rework loop (default max 3 iterations), `passed` / `failed` / `inconclusive` / `blocked` classification, escalation (not Git Integration Engine) |
+| P18 | Wave B | Git Integration & Parallel Worktrees | `packages/git-orchestrator/**` | Git repo/branch/commit/worktree management, per-Developer task worktrees, changed-file scope checks, diff & change summary, dependency-ordered branch integration, controlled conflict handling, PR support, safe cleanup, post-integration workflow-level verification trigger |
+| P19 | Wave C | Coordinator Agent & Runtime Integration | `packages/runtime/**`, `packages/core/**`, `agents/coordinator/**` | Coordinator Agent logic & full Workflow Runtime integration across P12–P18 (executed strictly after P12–P18 synchronization point) |
 
 Agents must edit only owned paths. Cross-owner changes are proposed to the owning agent or handled during integration. Generated `dist/**`, coverage, local databases, artifacts, and agent logs are never committed.
 
-## Architecture v2 & P11–P18 Upgrade Rules
+## Architecture v2 & P11–P19 Upgrade Rules
 
 The v2 architectural specification is formally documented in [docs/architecture-v2.md](docs/architecture-v2.md), with protocol details in [docs/communication-protocol.md](docs/communication-protocol.md) and development policies in [docs/sdlc-policies.md](docs/sdlc-policies.md). All implementation agents must adhere to the following architectural rules:
 

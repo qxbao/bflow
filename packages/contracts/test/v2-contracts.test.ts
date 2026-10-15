@@ -10,15 +10,20 @@ import {
   ApprovalStatusSchema,
   ApprovalTargetSchema,
   ChangeClassificationSchema,
+  ChangeComplexitySchema,
   ConversationMessageSchema,
   ConversationSessionSchema,
   ConversationSessionStatusSchema,
   DelegationRequestSchema,
+  EnvironmentDoctorCheckSchema,
+  EnvironmentDoctorReportSchema,
   GitChangeSetSchema,
   GitChangedFileSchema,
   InterRoleMessageSchema,
   PaneBindingSchema,
+  PaneGroupSchema,
   RecoveryCheckpointSchema,
+  RiskLevelSchema,
   RoleMessageSchema,
   SddPolicyLevelSchema,
   SdlcRecoveryContextSchema,
@@ -33,6 +38,8 @@ import {
   VerificationCycleStatusSchema,
   VerificationEscalationSchema,
   VerificationResultSchema,
+  VerificationResultStatusSchema,
+  VerificationScopeSchema,
   WorkflowAggregateCheckpointStateSchema
 } from "../src/index.js";
 import { artifactReference, later, now } from "./fixtures.js";
@@ -361,6 +368,49 @@ describe("SpecificationSchema: Lightweight vs Full SDD", () => {
       }).success
     ).toBe(true);
   });
+
+  it("supports complexity, riskLevel, version, and traceabilityTaskIds", () => {
+    const specWithExtensions = {
+      ...baseSpec,
+      level: "lightweight" as const,
+      complexity: "complex" as const,
+      riskLevel: "high" as const,
+      version: 2,
+      traceabilityTaskIds: ["task-1", "task-2"]
+    };
+    const parsed = SpecificationSchema.parse(specWithExtensions);
+    expect(parsed.complexity).toBe("complex");
+    expect(parsed.riskLevel).toBe("high");
+    expect(parsed.version).toBe(2);
+    expect(parsed.traceabilityTaskIds).toEqual(["task-1", "task-2"]);
+
+    // validates all ChangeComplexitySchema values
+    ["trivial", "standard", "complex"].forEach((c) => {
+      expect(ChangeComplexitySchema.parse(c)).toBe(c);
+    });
+    expect(ChangeComplexitySchema.safeParse("unknown").success).toBe(false);
+
+    // validates all RiskLevelSchema values
+    ["low", "medium", "high", "critical"].forEach((r) => {
+      expect(RiskLevelSchema.parse(r)).toBe(r);
+    });
+    expect(RiskLevelSchema.safeParse("unknown").success).toBe(false);
+
+    // rejects non-positive or non-integer version
+    expect(
+      SpecificationSchema.safeParse({
+        ...specWithExtensions,
+        version: 0
+      }).success
+    ).toBe(false);
+
+    expect(
+      SpecificationSchema.safeParse({
+        ...specWithExtensions,
+        version: 1.5
+      }).success
+    ).toBe(false);
+  });
 });
 
 describe("GitChangeSetSchema", () => {
@@ -583,6 +633,89 @@ describe("VerificationResult & VerificationCycle", () => {
     expect(VerificationEscalationSchema.parse(escalation)).toEqual(escalation);
     expect(VerificationEscalationSchema.safeParse({ ...escalation, evidenceArtifacts: [] }).success).toBe(false);
   });
+
+  it("validates VerificationScopeSchema and VerificationResultStatusSchema values", () => {
+    ["task", "workflow"].forEach((scope) => {
+      expect(VerificationScopeSchema.parse(scope)).toBe(scope);
+    });
+    expect(VerificationScopeSchema.safeParse("unknown").success).toBe(false);
+
+    ["passed", "failed", "inconclusive", "blocked", "escalated"].forEach((st) => {
+      expect(VerificationResultStatusSchema.parse(st)).toBe(st);
+    });
+    expect(VerificationResultStatusSchema.safeParse("unknown").success).toBe(false);
+  });
+
+  it("supports VerificationResult with inconclusive status and workflow scope", () => {
+    const inconclusiveResult = {
+      ...validVerificationResult,
+      status: "inconclusive" as const,
+      verificationScope: "workflow" as const
+    };
+    const parsed = VerificationResultSchema.parse(inconclusiveResult);
+    expect(parsed.status).toBe("inconclusive");
+    expect(parsed.verificationScope).toBe("workflow");
+  });
+
+  it("defaults maxIterations to 3 in VerificationCycleSchema when omitted", () => {
+    const cycleWithoutMax = {
+      schemaVersion: 2 as const,
+      cycleId: "cycle-default-max",
+      runId,
+      taskId,
+      specId,
+      verificationScope: "task" as const,
+      currentIteration: 1,
+      status: "in_progress" as const,
+      tddDecision: validTddDecision,
+      history: [],
+      startedAt: now,
+      updatedAt: now
+    };
+    const parsed = VerificationCycleSchema.parse(cycleWithoutMax);
+    expect(parsed.maxIterations).toBe(3);
+    expect(parsed.verificationScope).toBe("task");
+  });
+
+  it("rejects rework_required when loop limit is reached and last attempt was inconclusive", () => {
+    const cycle = {
+      schemaVersion: 2 as const,
+      cycleId: "cycle-inconclusive-max",
+      runId,
+      taskId,
+      specId,
+      currentIteration: 3,
+      maxIterations: 3,
+      status: "rework_required" as const,
+      tddDecision: validTddDecision,
+      history: [{ ...validVerificationResult, status: "inconclusive" as const }],
+      startedAt: now,
+      updatedAt: later
+    };
+
+    expect(VerificationCycleSchema.safeParse(cycle).success).toBe(false);
+
+    // must escalate or abort instead
+    expect(
+      VerificationCycleSchema.safeParse({
+        ...cycle,
+        status: "escalated",
+        escalation: {
+          escalatedAt: later,
+          reason: "Max iteration reached with inconclusive verification result",
+          target: "coordinator",
+          evidenceArtifacts: [evidenceArtifact]
+        }
+      }).success
+    ).toBe(true);
+
+    expect(
+      VerificationCycleSchema.safeParse({
+        ...cycle,
+        status: "aborted"
+      }).success
+    ).toBe(true);
+  });
 });
 
 describe("SessionManifest & PaneBinding", () => {
@@ -702,6 +835,31 @@ describe("SessionManifest & PaneBinding", () => {
         updatedAt: now
       }).success
     ).toBe(false);
+  });
+
+  it("validates PaneGroupSchema and PaneBinding with paneGroup and permanent", () => {
+    ["conversation", "coordination", "verification", "developer_worktree"].forEach((pg) => {
+      expect(PaneGroupSchema.parse(pg)).toBe(pg);
+    });
+    expect(PaneGroupSchema.safeParse("unknown").success).toBe(false);
+
+    const paneWithGroup = {
+      ...conversationPane,
+      paneGroup: "conversation" as const,
+      permanent: true
+    };
+    const parsed = PaneBindingSchema.parse(paneWithGroup);
+    expect(parsed.paneGroup).toBe("conversation");
+    expect(parsed.permanent).toBe(true);
+
+    const coordWithGroup = {
+      ...coordinatorPane,
+      paneGroup: "coordination" as const,
+      permanent: false
+    };
+    const parsedCoord = PaneBindingSchema.parse(coordWithGroup);
+    expect(parsedCoord.paneGroup).toBe("coordination");
+    expect(parsedCoord.permanent).toBe(false);
   });
 });
 
@@ -1191,5 +1349,90 @@ describe("Recovery Checkpoint & SdlcRecoveryContext", () => {
       gitChangeSets: []
     });
     expect(context.specifications).toEqual([]);
+  });
+});
+
+describe("EnvironmentDoctorReportSchema & EnvironmentDoctorCheckSchema", () => {
+  const passingCheck = {
+    checkId: "chk-node-ver",
+    name: "Node.js Version Check",
+    status: "passed" as const,
+    message: "Node.js v22.13+ detected"
+  };
+
+  const warningCheck = {
+    checkId: "chk-git-clean",
+    name: "Git Working Tree Status",
+    status: "warn" as const,
+    message: "Working tree has uncommitted modifications",
+    remediation: "Stash or commit changes before proceeding"
+  };
+
+  const failingCheck = {
+    checkId: "chk-herdr-conn",
+    name: "Herdr Socket Connection",
+    status: "failed" as const,
+    message: "Connection to Herdr daemon socket timed out",
+    remediation: "Run `herdr start` to launch the daemon"
+  };
+
+  it("validates EnvironmentDoctorCheckSchema with all status values", () => {
+    expect(EnvironmentDoctorCheckSchema.parse(passingCheck)).toEqual(passingCheck);
+    expect(EnvironmentDoctorCheckSchema.parse(warningCheck)).toEqual(warningCheck);
+    expect(EnvironmentDoctorCheckSchema.parse(failingCheck)).toEqual(failingCheck);
+    expect(
+      EnvironmentDoctorCheckSchema.safeParse({
+        ...passingCheck,
+        status: "unknown"
+      }).success
+    ).toBe(false);
+  });
+
+  it("accepts valid doctor report when healthy: true and all checks passed or warned", () => {
+    const report = {
+      schemaVersion: 2 as const,
+      workspaceRoot: "/workspace",
+      sessionId: "session-1",
+      healthy: true,
+      checks: [passingCheck, warningCheck],
+      checkedAt: now
+    };
+    expect(EnvironmentDoctorReportSchema.parse(report)).toEqual(report);
+  });
+
+  it("accepts valid doctor report when healthy: false and checks include failed", () => {
+    const report = {
+      schemaVersion: 2 as const,
+      workspaceRoot: "/workspace",
+      sessionId: "session-1",
+      healthy: false,
+      checks: [passingCheck, failingCheck],
+      checkedAt: now
+    };
+    expect(EnvironmentDoctorReportSchema.parse(report)).toEqual(report);
+  });
+
+  it("rejects doctor report when healthy: true but a check has status failed", () => {
+    const invalidReport = {
+      schemaVersion: 2 as const,
+      workspaceRoot: "/workspace",
+      sessionId: "session-1",
+      healthy: true,
+      checks: [passingCheck, failingCheck],
+      checkedAt: now
+    };
+    expect(EnvironmentDoctorReportSchema.safeParse(invalidReport).success).toBe(false);
+  });
+
+  it("rejects doctor report with empty checks array", () => {
+    const invalidReport = {
+      schemaVersion: 2 as const,
+      workspaceRoot: "/workspace",
+      sessionId: "session-1",
+      healthy: true,
+      checks: [],
+      checkedAt: now
+    };
+    expect(EnvironmentDoctorReportSchema.safeParse(invalidReport).success).toBe(false);
   });
 });

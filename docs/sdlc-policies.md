@@ -99,7 +99,34 @@ Hệ thống quy chuẩn hai cấp độ đặc tả (`SddPolicyLevel`):
   4. `testStrategy`: Chiến lược kiểm thử nhiều tầng tuân thủ `TestStrategySchema`.
   5. `tddDecision`: Quyết định áp dụng TDD chính thức tuân thủ `TddDecisionSchema`.
 
-### 3.3. Đặc tả Tiêu chí Chấp nhận (`AcceptanceCriterionSchema`)
+### 3.3. Phân loại độ phức tạp thay đổi thích ứng (Adaptive Change Complexity)
+
+Bên cạnh hai cấp độ đặc tả (`lightweight` vs `full`), hệ thống phân loại độ phức tạp thay đổi (`ChangeComplexitySchema`) nhằm điều chỉnh độ sâu phân tích và mức độ kiểm chứng tương ứng:
+
+- **`trivial` (Cực nhỏ / Tầm thường)**:
+  - Các chỉnh sửa cục bộ, không ảnh hưởng logic điều khiển (sửa typo tài liệu, comment, formatting, hằng số tĩnh không bảo mật).
+  - Yêu cầu đặc tả rút gọn mức tối thiểu, 1 tiêu chí nghiệm thu đơn giản (lint / typecheck), không cần phân tích rủi ro hay rollback phức tạp.
+- **`standard` (Tiêu chuẩn)**:
+  - Các thay đổi tính năng thông thường, mở rộng hàm, sửa bug cục bộ trong một mô-đun hoặc bổ sung API endpoint mới không phá vỡ hợp đồng.
+  - Yêu cầu tiêu chí nghiệm thu rõ ràng cho từng luồng dữ liệu, test cases xác thực độc lập, và đánh giá rủi ro ở mức trung bình (`riskLevel: "medium"`).
+- **`complex` (Phức tạp)**:
+  - Các thay đổi quy mô lớn, tác động đa gói monorepo, thay đổi schema cơ sở dữ liệu (migration), sửa đổi giao thức truyền thông hoặc ảnh hưởng các cơ chế bảo mật / recovery.
+  - Bắt buộc áp dụng cấp độ đặc tả `full`, phân tích kiến trúc (`architectureNotes`), kế hoạch hoàn nguyên (`rollbackPlan`), đánh giá rủi ro cao/nghiêm trọng (`riskLevel: "high" | "critical"`), và phân rã chi tiết thành các subtask có thể kiểm chứng.
+
+---
+
+### 3.4. Khả năng truy vết từ Đặc tả đến Nhiệm vụ (Spec-to-Task Traceability)
+
+Hệ thống v2 thiết lập liên kết hai chiều chặt chẽ giữa đặc tả kỹ thuật và đồ thị công việc (Task DAG) thông qua trường `traceabilityTaskIds: Identifier[]`:
+- **Đơn nguồn chân lý**: Mỗi `AcceptanceCriterion` trong Spec phải được ánh xạ trực tiếp tới một hoặc nhiều task thực thi trong DAG.
+- **Chống sót việc và dư thừa**: Coordinator Agent và Verification Gate tự động kiểm tra ma trận truy vết:
+  - Không cho phép tồn tại tiêu chí nghiệm thu bị "bỏ rơi" (không có task nào phụ trách).
+  - Không cho phép task tự ý sinh ra mã nguồn ngoài phạm vi các tiêu chí đã duyệt (scope creep prevention).
+- **Phân tích tác động khi thay đổi (Impact Analysis)**: Khi một bản đặc tả được cập nhật hoặc nâng phiên bản (`version`), hệ thống dựa vào `traceabilityTaskIds` để xác định chính xác các task cần được chạy lại, hủy bỏ, hoặc sinh thế hệ rework mới (`generation + 1`).
+
+---
+
+### 3.5. Đặc tả Tiêu chí Chấp nhận (`AcceptanceCriterionSchema`)
 
 Mỗi tiêu chí nghiệm thu được quy định chặt chẽ:
 ```typescript
@@ -137,7 +164,7 @@ export const AcceptanceCriterionSchema = z
 > - Tiêu chí có `status: "satisfied"` bắt buộc phải có ít nhất **1** `evidenceArtifactIds` (trừ trường hợp duy nhất là `verificationMethod: "manual_review"`).
 > - Tiêu chí có `status: "waived"` (miễn trừ) bắt buộc phải có `waiverReason` giải trình lý do rõ ràng.
 
-### 3.4. Đặc tả Toàn bộ Specification (`SpecificationSchema`)
+### 3.6. Đặc tả Toàn bộ Specification (`SpecificationSchema`)
 
 ```typescript
 export const SpecificationSchema = z
@@ -147,6 +174,9 @@ export const SpecificationSchema = z
     runId: IdentifierSchema.optional(),
     sessionId: IdentifierSchema,
     level: z.enum(["lightweight", "full"]),
+    complexity: z.enum(["trivial", "standard", "complex"]).optional(),
+    riskLevel: z.enum(["low", "medium", "high", "critical"]).optional(),
+    version: z.number().int().positive().optional(),
     title: z.string().trim().min(1),
     summary: z.string().trim().min(1),
     problemStatement: z.string().trim().min(1),
@@ -157,6 +187,7 @@ export const SpecificationSchema = z
       })
       .strict(),
     acceptanceCriteria: z.array(AcceptanceCriterionSchema).min(1),
+    traceabilityTaskIds: z.array(IdentifierSchema).optional(),
     affectedPaths: z.array(z.string().trim().min(1)).min(1),
     architectureNotes: z.string().trim().min(1).optional(),
     dataModelChanges: z.string().trim().min(1).optional(),
@@ -175,10 +206,11 @@ export const SpecificationSchema = z
   .strict();
 ```
 
-### 3.5. Quy tắc chọn mức SDD và Cổng kiểm soát (Spec Gate)
+### 3.7. Quy tắc chọn mức SDD và Cổng kiểm soát (Spec Gate)
 
 | Tiêu chí phân loại | Bắt buộc chọn `full` | Được phép chọn `lightweight` |
 | :--- | :--- | :--- |
+| **Độ phức tạp thích ứng** | `complex` | `trivial`, `standard` (phạm vi hẹp) |
 | **Phân loại thay đổi** | `feature`, `architecture`, `security` | `bugfix`, `documentation`, `configuration` |
 | **Tác động Contracts** | Có thay đổi trong `packages/contracts/**` | Tuyệt đối không đổi `packages/contracts/**` |
 | **Số lượng file đổi** | Tác động $\ge 5$ files | Dưới 5 files và trong cùng một package |
@@ -308,7 +340,35 @@ Do đó, Bflow v2 thiết lập chu trình **Verification Loop** khép kín, ho�
 3. **Bằng chứng tạo phẩm bắt buộc (`evidenceArtifacts`)**: Mọi kết quả kiểm thử, log máy đo (coverage), kết quả phân tích tĩnh phải được đóng gói vào `ArtifactStore` với mã băm SHA-256/SHA-512 và trạng thái `trust: "stored"`.
 4. **Không có lỗi nghiêm trọng**: Mọi `findings` không được chứa lỗi có `severity: "error"`. Tất cả Quality Gate bắt buộc phải có trạng thái `passed`.
 
-### 5.2. Giới hạn vòng lặp (`maxIterations`) và Ngăn ngừa Vòng lặp Vô tận
+### 5.2. Hai phạm vi kiểm chứng: Task-Level vs Workflow-Level (`verificationScope`)
+
+Nhằm bảo đảm chất lượng toàn diện từ bước viết mã của từng Developer đến khi tích hợp toàn hệ thống, Bflow v2 quy định hai phạm vi kiểm chứng độc lập:
+
+1. **`task` (Kiểm chứng mức nhiệm vụ - Task-Level Verification)**:
+   - Kích hoạt ngay khi Developer hoàn thành lập trình và nộp `GitChangeSet` cùng patch trong worktree riêng.
+   - Kiểm chứng độc lập các bài test unit, test integration cục bộ, typecheck và lint liên quan trực tiếp đến các tiêu chí nghiệm thu (`evaluatedCriteria`) gắn với task đó.
+   - Đảm bảo mã nguồn mới tuân thủ đúng yêu cầu của Spec và chính sách TDD trước khi cho phép hợp nhất vào nhánh chính.
+2. **`workflow` (Kiểm chứng mức toàn luồng sau tích hợp - Workflow-Level Verification)**:
+   - Kích hoạt bởi `packages/verification/**` và `packages/git-orchestrator/**` sau khi nhánh của task được merge tuần tự vào nhánh tích hợp chung của workflow.
+   - Thực thi toàn bộ regression test suite, E2E workflow test và các cổng kiểm chuẩn monorepo để bảo đảm việc tích hợp mã không gây ra xung đột chéo, đứt gãy dependency hoặc suy giảm chất lượng toàn dự án.
+
+---
+
+### 5.3. Phân loại 5 phán quyết nghiệm thu (`VerificationResultStatusSchema`)
+
+Mỗi chu kỳ kiểm chứng độc lập trả về một trong 5 phán quyết chính thức:
+
+| Phán quyết (`status`) | Ý nghĩa nghiệp vụ | Hành vi tiếp theo của hệ thống |
+| :--- | :--- | :--- |
+| **`passed`** | Tất cả `evaluatedCriteria` đạt `passed: true`, exitCode = 0, toàn bộ Quality Gates đạt, không có finding lỗi (`severity: "error"`). | Cho phép chuyển bước: sẵn sàng cho Review và Merge. |
+| **`failed`** | Tối thiểu một tiêu chí bị trượt hoặc exitCode $\ne 0$. | Kích hoạt chu kỳ sửa lại (`rework_required`) nếu chưa vượt quá `maxIterations`. |
+| **`inconclusive`** | Tín hiệu kiểm thử không rõ ràng, nghi ngờ test chập chờn (flaky test), môi trường ngoại vi chập chờn, hoặc thiếu bằng chứng xác thực. | Yêu cầu chạy lại bài test trong môi trường làm sạch hoặc cách ly (isolate test) mà không trừ hạn ngạch rework của Developer. |
+| **`blocked`** | Quá trình kiểm chuẩn bị phong tỏa do nguyên nhân ngoại cảnh (lỗi hạ tầng, thiếu phụ thuộc OS, disk full, lỗi kết nối transport). | Tạm dừng kiểm chuẩn; yêu cầu khắc phục môi trường trước khi tiếp tục. |
+| **`escalated`** | Đã chạm ngưỡng lặp tối đa (`currentIteration === maxIterations`) hoặc phát hiện xung đột kiến trúc/hợp đồng không thể tự sửa. | Dừng tự động ngay lập tức; chuyển hồ sơ leo thang lên Coordinator và người vận hành (Human Operator). |
+
+---
+
+### 5.4. Giới hạn vòng lặp (`maxIterations`) và Ngăn ngừa Vòng lặp Vô tận
 Mỗi tác vụ khi nộp mã sẽ bước vào một chu trình nghiệm thu (`VerificationCycle`).
 - Trường `maxIterations`: Quy định số lần tối đa Developer được phép sửa mã và nộp lại (mặc định: **3**, tối đa cho phép: **10**).
 - Trường `currentIteration`: Đếm số lần kiểm chứng hiện tại (bắt đầu từ 1, tăng dần 1 đơn vị sau mỗi chu kỳ rework).
@@ -329,6 +389,7 @@ stateDiagram-v2
 
   in_progress --> passed: Tất cả Criteria = passed & Gate = passed
   in_progress --> rework_required: Tối thiểu 1 Criterion thất bại & currentIteration < maxIterations
+  in_progress --> in_progress: inconclusive -> Thử lại độc lập không trừ lượt
   
   rework_required --> in_progress: Developer nộp bản vá mới (currentIteration = currentIteration + 1)
 
@@ -339,11 +400,11 @@ stateDiagram-v2
   escalated --> [*]: Dừng tự động -> Đợi người vận hành can thiệp
 ```
 
-### 5.3. Cơ chế Escalation (Leo thang can thiệp)
+### 5.5. Cơ chế Escalation (Leo thang can thiệp)
 
 > [!CAUTION]
 > Khi xảy ra một trong hai điều kiện sau:
-> 1. `currentIteration === maxIterations` mà kết quả nghiệm thu lần cuối vẫn là `failed`.
+> 1. `currentIteration === maxIterations` mà kết quả nghiệm thu lần cuối có `status === "failed" || status === "inconclusive"`.
 > 2. Phát hiện lỗi hệ thống nghiêm trọng thuộc dạng `blocked` (ví dụ: lỗi hạ tầng, xung đột hợp đồng dữ liệu, vi phạm an ninh nghiêm trọng).
 
 **Hành vi bắt buộc của hệ thống**:
@@ -357,7 +418,7 @@ stateDiagram-v2
 - Gửi thông điệp `verification.escalation` tới **Coordinator Agent** và chuyển tiếp tới **Conversation Agent** để thông báo cho người vận hành (Human Operator).
 - Workflow run bị đưa vào trạng thái tạm dừng (`blocked`), không tiêu tốn tài nguyên cho đến khi có chỉ thị giải quyết của con người.
 
-### 5.4. Đặc tả Schemas cho GitChangeSet và Verification
+### 5.6. Đặc tả Schemas cho GitChangeSet và Verification
 
 ```typescript
 export const GitChangedFileSchema = z
@@ -397,7 +458,8 @@ export const VerificationResultSchema = z
     taskId: IdentifierSchema,
     cycleNumber: z.number().int().positive(),
     attemptId: IdentifierSchema,
-    status: z.enum(["passed", "failed", "blocked", "escalated"]),
+    status: z.enum(["passed", "failed", "inconclusive", "blocked", "escalated"]),
+    verificationScope: z.enum(["task", "workflow"]).optional(),
     independentExecution: z.literal(true),
     evaluatedCriteria: z
       .array(
@@ -431,8 +493,9 @@ export const VerificationCycleSchema = z
     runId: IdentifierSchema,
     taskId: IdentifierSchema,
     specId: IdentifierSchema,
+    verificationScope: z.enum(["task", "workflow"]).optional(),
     currentIteration: z.number().int().positive(),
-    maxIterations: z.number().int().min(1).max(10),
+    maxIterations: z.number().int().min(1).max(10).default(3),
     status: z.enum(["in_progress", "passed", "rework_required", "escalated", "aborted"]),
     tddDecision: TddDecisionSchema,
     history: z.array(VerificationResultSchema),

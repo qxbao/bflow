@@ -19,6 +19,7 @@ import type { CancellationRequest, CancellationResult, RecoveryCheckpoint } from
 import type {
   ConversationMessage,
   DelegationRequest,
+  EnvironmentDoctorReport,
   PaneBinding,
   SessionManifest
 } from "./session.js";
@@ -229,6 +230,7 @@ export interface SessionLifecycleManager {
   down(sessionId: string, options?: OperationOptions): Promise<OperationResult<SessionManifest>>;
   attach(sessionId: string, options?: OperationOptions): Promise<OperationResult<PaneBinding>>;
   getManifest(sessionId: string, options?: OperationOptions): Promise<OperationResult<SessionManifest | null>>;
+  doctorSession(options: { workspaceRoot: string }): Promise<EnvironmentDoctorReport>;
 }
 
 export interface ConversationCoordinatorPort {
