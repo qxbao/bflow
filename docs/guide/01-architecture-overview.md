@@ -1,6 +1,6 @@
 # 1. Tổng quan kiến trúc
 
-AI Flow SDLC là một nền tảng TypeScript theo module để điều phối các AI coding agent qua quy trình phát triển phần mềm. **Herdr vận hành agent**; dự án này sở hữu quyết định workflow, bản ghi thực thi bền vững, artifact và các ranh giới tích hợp.
+bflow là một nền tảng TypeScript theo module để điều phối các AI coding agent qua quy trình phát triển phần mềm. **Herdr vận hành agent**; dự án này sở hữu quyết định workflow, bản ghi thực thi bền vững, artifact và các ranh giới tích hợp.
 
 Hiện tại sản phẩm là **tập thư viện** trong một pnpm workspace. Không có tiến trình server, CLI thực thi hay lệnh `start`. Ứng dụng nhúng các package và tự ghép chúng qua `createRuntimeService` — xem ví dụ [runtime-demo](../../examples/runtime-demo/README.md).
 
@@ -8,7 +8,7 @@ Hiện tại sản phẩm là **tập thư viện** trong một pnpm workspace. 
 
 ```mermaid
 flowchart TD
-  CLI["apps/cli (chỉ type)"] --> Runtime[packages/runtime]
+  CLI["apps/cli (bflow CLI)"] --> Runtime[packages/runtime]
   Runtime --> Contracts[packages/contracts]
   Core[packages/core] --> Contracts
   Herdr[packages/herdr-adapter] --> Contracts
@@ -20,15 +20,15 @@ flowchart TD
 
 | Package | Entry point chính | Vai trò |
 | --- | --- | --- |
-| `@ai-flow/contracts` | Zod schema, port, validator | Dữ liệu trao đổi; mọi dữ liệu qua ranh giới package được parse bằng schema |
-| `@ai-flow/core` | `DeterministicWorkflowEngine` | DAG, chuyển trạng thái hợp lệ, retry/rework, approval, gate, cancellation, replay, aggregate checkpoint. Không I/O |
-| `@ai-flow/persistence` | `openSqliteRunStore` | Event, receipt, projection, checkpoint trong SQLite (`node:sqlite`) |
-| `@ai-flow/artifact-store` | `openFilesystemArtifactStore` | Lưu artifact bất biến, kiểm tra checksum, trả về `ArtifactReference` tin cậy |
-| `@ai-flow/agent-registry` | `createAgentRegistry`, `seedMvpAgentRegistry`, `loadWorkflowDefinition` | Cấu hình role → agent, lease/fencing, MVP roles, workflow template, prompt, kiểm tra output |
-| `@ai-flow/herdr-adapter` | `createHerdrAdapter` | `AgentTransport` gọi Herdr CLI 0.9.1 |
-| `@ai-flow/quality-gates` | `createPresetQualityGate`, `createDefaultSecurityPolicy` | Chạy lệnh kiểm tra độc lập, security policy, RBAC/human governance |
-| `@ai-flow/runtime` | `createRuntimeService` | Ghép các port: dispatch, ingest artifact, gate, approval, cancel, recovery, event stream |
-| `@ai-flow/cli` | — | Chỉ export type; chưa có lệnh |
+| `@bflow/contracts` | Zod schema, port, validator | Dữ liệu trao đổi; mọi dữ liệu qua ranh giới package được parse bằng schema |
+| `@bflow/core` | `DeterministicWorkflowEngine` | DAG, chuyển trạng thái hợp lệ, retry/rework, approval, gate, cancellation, replay, aggregate checkpoint. Không I/O |
+| `@bflow/persistence` | `openSqliteRunStore` | Event, receipt, projection, checkpoint trong SQLite (`node:sqlite`) |
+| `@bflow/artifact-store` | `openFilesystemArtifactStore` | Lưu artifact bất biến, kiểm tra checksum, trả về `ArtifactReference` tin cậy |
+| `@bflow/agent-registry` | `createAgentRegistry`, `seedMvpAgentRegistry`, `loadWorkflowDefinition` | Cấu hình role → agent, lease/fencing, MVP roles, workflow template, prompt, kiểm tra output |
+| `@bflow/herdr-adapter` | `createHerdrAdapter` | `AgentTransport` gọi Herdr CLI 0.9.1 |
+| `@bflow/quality-gates` | `createPresetQualityGate`, `createDefaultSecurityPolicy` | Chạy lệnh kiểm tra độc lập, security policy, RBAC/human governance |
+| `@bflow/runtime` | `createRuntimeService` | Ghép các port: dispatch, ingest artifact, gate, approval, cancel, recovery, event stream |
+| `@bflow/cli` | `runCli`, binary `bflow` | Giao diện dòng lệnh (`init`, `run`, `status`, `approve`, `resume`, `cancel`) |
 
 Package lá chỉ phụ thuộc `contracts`. `runtime` khai báo các package khác là `devDependencies` (cho test); ứng dụng tự tạo instance cụ thể rồi truyền vào `createRuntimeService(ports)`.
 
@@ -64,7 +64,7 @@ sequenceDiagram
 
 Điểm quan trọng:
 
-- **Event là nguồn sự thật.** Mỗi lệnh thay đổi trạng thái tạo một lô event được ghi nguyên tử vào SQLite trước khi Runtime thực hiện side effect tiếp theo. Checkpoint aggregate (`ai-flow.workflow-aggregate+json` v1) chỉ là tối ưu cho recovery.
+- **Event là nguồn sự thật.** Mỗi lệnh thay đổi trạng thái tạo một lô event được ghi nguyên tử vào SQLite trước khi Runtime thực hiện side effect tiếp theo. Checkpoint aggregate (`bflow.workflow-aggregate+json` v1) chỉ là tối ưu cho recovery.
 - **Kết quả agent là đầu vào từ người gọi.** Runtime không tự gọi `transport.wait`/`read` để lấy kết quả. Người gọi phải gọi `service.orchestrator.completeTaskExecution(runId, taskId, result)`.
 - **Herdr `done` không phải thành công.** Core chỉ chấp nhận `AgentResult` khi handle đã bind có correlation `verified: true`.
 - **Agent output là `ArtifactProposal` không tin cậy.** Chỉ `ArtifactStore.put` thành công mới sinh `ArtifactReference` (`artifact://<storeId>/<artifactId>`).

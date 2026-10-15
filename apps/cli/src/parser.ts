@@ -4,8 +4,8 @@ import {
   RunStatusSchema,
   type ContractError,
   type RunStatus
-} from "@ai-flow/contracts";
-import { isHumanApprover } from "@ai-flow/runtime";
+} from "@bflow/contracts";
+import { isHumanApprover } from "@bflow/runtime";
 import type {
   ApproveCommandArgs,
   CancelCommandArgs,
@@ -229,7 +229,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
             return { ok: true, value };
           }
           return makeValidationError(
-            `Unknown help topic '${topic}'. Run 'flow --help' for usage.`,
+            `Unknown help topic '${topic}'. Run 'bflow --help' for usage.`,
             effectiveJson,
             "help"
           );
@@ -253,13 +253,13 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
 
     if (!isFlag(firstRemaining)) {
       return makeValidationError(
-        `Unknown help topic '${firstRemaining}'. Run 'flow --help' for usage.`,
+        `Unknown help topic '${firstRemaining}'. Run 'bflow --help' for usage.`,
         effectiveJson,
         "help"
       );
     }
     return makeValidationError(
-      `Unknown command '${firstRemaining}'. Run 'flow --help' for usage.`,
+      `Unknown command '${firstRemaining}'. Run 'bflow --help' for usage.`,
       effectiveJson
     );
   }
@@ -270,7 +270,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
       return parseCliArgs([firstRemaining, ...remaining.slice(1), "--json"]);
     }
     return makeValidationError(
-      `Unknown command '${firstRemaining}'. Run 'flow --help' for usage.`,
+      `Unknown command '${firstRemaining}'. Run 'bflow --help' for usage.`,
       true
     );
   }
@@ -290,7 +290,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         };
         return { ok: true, value };
       }
-      return makeValidationError(`Unknown help topic '${topic}'. Run 'flow --help' for usage.`, json, "help");
+      return makeValidationError(`Unknown help topic '${topic}'. Run 'bflow --help' for usage.`, json, "help");
     }
     const value: HelpCommandArgs = {
       command: "help",
@@ -301,7 +301,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
   }
 
   if (!VALID_COMMANDS.has(first as CliCommandName)) {
-    return makeValidationError(`Unknown command '${first}'. Run 'flow --help' for usage.`, json);
+    return makeValidationError(`Unknown command '${first}'. Run 'bflow --help' for usage.`, json);
   }
 
   const command = first as Exclude<CliCommandName, "help">;
@@ -327,7 +327,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
       if (!optRes.ok) return optRes.result;
       if (optRes.value.positional.length > 0) {
         return makeValidationError(
-          `Unexpected positional argument '${optRes.value.positional[0]}' for 'flow version'.`,
+          `Unexpected positional argument '${optRes.value.positional[0]}' for 'bflow version'.`,
           json,
           "version"
         );
@@ -361,7 +361,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
 
       if (optRes.value.positional.length > 0) {
         return makeValidationError(
-          `Unexpected positional argument '${optRes.value.positional[0]}' for 'flow init'.`,
+          `Unexpected positional argument '${optRes.value.positional[0]}' for 'bflow init'.`,
           json,
           "init"
         );
@@ -421,17 +421,17 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
       if (!optRes.ok) return optRes.result;
 
       if (optRes.value.positional.length === 0) {
-        return makeValidationError("Missing required <requirement> argument for 'flow run'.", json, "run");
+        return makeValidationError("Missing required <requirement> argument for 'bflow run'.", json, "run");
       }
 
       const requirement = optRes.value.positional[0]!.trim();
       if (requirement.length === 0) {
-        return makeValidationError("Missing required <requirement> argument for 'flow run'.", json, "run");
+        return makeValidationError("Missing required <requirement> argument for 'bflow run'.", json, "run");
       }
 
       if (optRes.value.positional.length > 1) {
         return makeValidationError(
-          `Unexpected positional argument '${optRes.value.positional[1]}' for 'flow run'.`,
+          `Unexpected positional argument '${optRes.value.positional[1]}' for 'bflow run'.`,
           json,
           "run"
         );
@@ -504,7 +504,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
 
       if (optRes.value.positional.length > 1) {
         return makeValidationError(
-          `Unexpected positional argument '${optRes.value.positional[1]}' for 'flow status'.`,
+          `Unexpected positional argument '${optRes.value.positional[1]}' for 'bflow status'.`,
           json,
           "status"
         );
@@ -614,7 +614,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
       if (!optRes.ok) return optRes.result;
 
       if (optRes.value.positional.length === 0) {
-        return makeValidationError("Missing required <task-id> argument for 'flow approve'.", json, "approve");
+        return makeValidationError("Missing required <task-id> argument for 'bflow approve'.", json, "approve");
       }
 
       const taskId = optRes.value.positional[0]!.trim();
@@ -624,7 +624,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
 
       if (optRes.value.positional.length > 1) {
         return makeValidationError(
-          `Unexpected positional argument '${optRes.value.positional[1]}' for 'flow approve'.`,
+          `Unexpected positional argument '${optRes.value.positional[1]}' for 'bflow approve'.`,
           json,
           "approve"
         );
@@ -750,7 +750,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
       if (!optRes.ok) return optRes.result;
 
       if (optRes.value.positional.length === 0) {
-        return makeValidationError("Missing required <run-id> argument for 'flow resume'.", json, "resume");
+        return makeValidationError("Missing required <run-id> argument for 'bflow resume'.", json, "resume");
       }
 
       const runId = optRes.value.positional[0]!.trim();
@@ -760,7 +760,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
 
       if (optRes.value.positional.length > 1) {
         return makeValidationError(
-          `Unexpected positional argument '${optRes.value.positional[1]}' for 'flow resume'.`,
+          `Unexpected positional argument '${optRes.value.positional[1]}' for 'bflow resume'.`,
           json,
           "resume"
         );
@@ -804,7 +804,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
       if (!optRes.ok) return optRes.result;
 
       if (optRes.value.positional.length === 0) {
-        return makeValidationError("Missing required <run-id> argument for 'flow cancel'.", json, "cancel");
+        return makeValidationError("Missing required <run-id> argument for 'bflow cancel'.", json, "cancel");
       }
 
       const runId = optRes.value.positional[0]!.trim();
@@ -814,7 +814,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
 
       if (optRes.value.positional.length > 1) {
         return makeValidationError(
-          `Unexpected positional argument '${optRes.value.positional[1]}' for 'flow cancel'.`,
+          `Unexpected positional argument '${optRes.value.positional[1]}' for 'bflow cancel'.`,
           json,
           "cancel"
         );

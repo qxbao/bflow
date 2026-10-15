@@ -17,7 +17,7 @@ import {
   type WorkflowDefinition,
   type WorkflowEngine,
   type WorkflowRunSnapshot
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import type { RunEventHub } from "./stream.js";
 
 function hash(parts: readonly string[]): string {

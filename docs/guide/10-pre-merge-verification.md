@@ -1,6 +1,6 @@
 # 10. Kiểm tra kết quả trước khi hợp nhất mã
 
-AI Flow SDLC **không tự merge hay deploy**. Run `succeeded` chỉ có nghĩa là workflow đã đi hết các bước với bằng chứng được ghi lại; người duyệt vẫn quyết định merge. Không coi Herdr `done`, ảnh chụp terminal, hay việc một artifact đã được lưu là bằng chứng task thành công.
+bflow **không tự merge hay deploy**. Run `succeeded` chỉ có nghĩa là workflow đã đi hết các bước với bằng chứng được ghi lại; người duyệt vẫn quyết định merge. Không coi Herdr `done`, ảnh chụp terminal, hay việc một artifact đã được lưu là bằng chứng task thành công.
 
 ## Danh sách kiểm tra
 
@@ -13,7 +13,7 @@ AI Flow SDLC **không tự merge hay deploy**. Run `succeeded` chỉ có nghĩa 
 
 ## Công cụ
 
-`examples/runtime-demo/inspect-run.mjs` in phần *Pre-merge governance* bằng `evaluateAutomatedVsHumanGovernance` (`@ai-flow/quality-gates`) trên event đã lưu:
+`examples/runtime-demo/inspect-run.mjs` in phần *Pre-merge governance* bằng `evaluateAutomatedVsHumanGovernance` (`@bflow/quality-gates`) trên event đã lưu:
 
 ```text
 Pre-merge governance:
@@ -29,7 +29,7 @@ Lưu ý: trong template `feature`/`bugfix`, approval của con người được
 
 ## Kiểm tra lại trong repository này
 
-Khi thay đổi chính repository AI Flow SDLC, chạy từ thư mục gốc (theo [AGENTS.md](../../AGENTS.md)):
+Khi thay đổi chính repository bflow, chạy từ thư mục gốc (theo [AGENTS.md](../../AGENTS.md)):
 
 ```bash
 pnpm check:deps

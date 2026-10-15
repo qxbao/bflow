@@ -16,11 +16,11 @@ import type {
   OperationOptions,
   OperationResult,
   WorkflowDefinition
-} from "@ai-flow/contracts";
-import { openSqliteRunStore, type SqliteRunStore } from "@ai-flow/persistence";
-import { openFilesystemArtifactStore, type FilesystemArtifactStore } from "@ai-flow/artifact-store";
-import { FileAgentRegistry } from "@ai-flow/agent-registry";
-import { DeterministicWorkflowEngine } from "@ai-flow/core";
+} from "@bflow/contracts";
+import { openSqliteRunStore, type SqliteRunStore } from "@bflow/persistence";
+import { openFilesystemArtifactStore, type FilesystemArtifactStore } from "@bflow/artifact-store";
+import { FileAgentRegistry } from "@bflow/agent-registry";
+import { DeterministicWorkflowEngine } from "@bflow/core";
 import type { RuntimePorts } from "../../src/index.js";
 
 export class FakeAgentTransport implements AgentTransport {
@@ -156,7 +156,7 @@ export interface TestHarness {
 }
 
 export async function createTestHarness(clock?: () => Date): Promise<TestHarness> {
-  const tmpDir = await mkdtemp(join(tmpdir(), "ai-flow-runtime-test-"));
+  const tmpDir = await mkdtemp(join(tmpdir(), "bflow-runtime-test-"));
   const dbPath = join(tmpDir, "run-store.db");
   const artifactsPath = join(tmpDir, "artifacts");
   const registryPath = join(tmpDir, "registry.json");

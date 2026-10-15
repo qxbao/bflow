@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { eventTailCursor, recoverWorkflowRun } from "../../src/recovery.js";
-import { DeterministicWorkflowEngine } from "@ai-flow/core";
+import { DeterministicWorkflowEngine } from "@bflow/core";
 import {
   createSampleWorkflowDefinition,
   createTestHarness

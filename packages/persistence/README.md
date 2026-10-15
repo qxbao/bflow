@@ -3,7 +3,7 @@
 `openSqliteRunStore({ filename, busyTimeoutMs?, clock? })` returns an `OperationResult<SqliteRunStore>` implementing every approved `RunStore` method. Call `close()` at shutdown. The parent directory is operator-configured and must already exist. There is no singleton or in-memory fallback.
 
 ```ts
-import { openSqliteRunStore } from "@ai-flow/persistence";
+import { openSqliteRunStore } from "@bflow/persistence";
 const opened = openSqliteRunStore({ filename: "/configured/data/runs.sqlite" });
 if (!opened.ok) throw new Error(opened.error.message);
 const store = opened.value;

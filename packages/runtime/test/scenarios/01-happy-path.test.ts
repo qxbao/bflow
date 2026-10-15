@@ -4,7 +4,7 @@ import type {
   ArtifactProposal,
   DomainEvent,
   WorkflowRunSnapshot
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import {
   createSdlcWorkflowDefinition,
   createTestHarness
@@ -249,7 +249,7 @@ describe("Integration Scenario 1: 11-Step SDLC Happy Path (01-happy-path.test.ts
           contentStr += Buffer.from(chunkRes.value).toString("utf8");
         }
       }
-        expect(contentStr).toContain(`# AI Flow SDLC — Structured Handoff Report`);
+        expect(contentStr).toContain(`# bflow — Structured Handoff Report`);
         expect(contentStr).toContain(`**Run ID**: \`${runId}\``);
         expect(contentStr).toContain(`| plan | succeeded |`);
         expect(contentStr).toContain(`| implement | succeeded |`);

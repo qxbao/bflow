@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AgentRequestSchema, AgentExecutionHandleSchema } from "@ai-flow/contracts";
+import { AgentRequestSchema, AgentExecutionHandleSchema } from "@bflow/contracts";
 import { HerdrCliTransport, createProcessRunner } from "../src/index.js";
 import type { CommandInvocation, CommandOutcome, HerdrCommandRunner } from "../src/index.js";
 

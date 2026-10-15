@@ -8,7 +8,7 @@ import {
   expectFailure,
   readArtifactBytes
 } from "../helpers/fixtures.js";
-import type { ArtifactReference, ArtifactWrite } from "@ai-flow/contracts";
+import type { ArtifactReference, ArtifactWrite } from "@bflow/contracts";
 
 describe("Scenario E08 — Artifact Security & Trust Boundary", () => {
   let harness: E2eHarness;

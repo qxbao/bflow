@@ -9,7 +9,7 @@ import {
   expectOk,
   readArtifactBytes
 } from "../helpers/fixtures.js";
-import type { TaskState, WorkflowRunSnapshot } from "@ai-flow/contracts";
+import type { TaskState, WorkflowRunSnapshot } from "@bflow/contracts";
 
 describe("Scenario E01 — Happy Path SDLC Integration", () => {
   let harness: E2eHarness;

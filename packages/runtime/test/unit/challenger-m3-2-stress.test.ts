@@ -10,8 +10,8 @@ import type {
   OperationResult,
   WorkflowDefinition,
   WorkflowRunSnapshot
-} from "@ai-flow/contracts";
-import { DeterministicWorkflowEngine } from "@ai-flow/core";
+} from "@bflow/contracts";
+import { DeterministicWorkflowEngine } from "@bflow/core";
 import { createRuntimeService } from "../../src/service.js";
 import { TaskDispatcher } from "../../src/dispatcher.js";
 import { SdlcWorkflowOrchestrator, ingestArtifactProposals, isHumanApprover } from "../../src/orchestrator.js";

@@ -16,7 +16,7 @@ import {
   type QualityGateResult,
   type SubmissionCorrelation,
   type TaskDependency
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import { getMvpRoleProfile, isMvpRole, type MvpRole } from "./roles.js";
 
 export interface PlannedTaskItem {

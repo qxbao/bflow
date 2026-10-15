@@ -1,12 +1,12 @@
 {
-  "name": "@ai-flow/cli",
+  "name": "@bflow/cli",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "flow": "./dist/bin.js"
+    "bflow": "./dist/bin.js"
   },
   "exports": {
     ".": {
@@ -21,7 +21,7 @@
     "test": "vitest run --root ../.. apps/cli/test"
   },
   "dependencies": {
-    "@ai-flow/contracts": "workspace:*",
-    "@ai-flow/runtime": "workspace:*"
+    "@bflow/contracts": "workspace:*",
+    "@bflow/runtime": "workspace:*"
   }
 }

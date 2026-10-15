@@ -12,7 +12,7 @@ import type {
   OperationResult,
   CancellationResult,
   CancellationRequest
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 
 describe("Scenario E07 — Cancellation & Cleanup", () => {
   let harness: E2eHarness;

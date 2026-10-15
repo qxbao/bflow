@@ -21,7 +21,7 @@ import {
   type WorkflowDefinition,
   type WorkflowEngine,
   type WorkflowRunSnapshot
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import type { TaskDispatcher } from "./dispatcher.js";
 import type { RunEventHub } from "./stream.js";
 
@@ -1154,7 +1154,7 @@ export class SdlcWorkflowOrchestrator {
       `| ${t.taskId} | ${t.status} | ${t.attempt} | ${t.generation} | ${t.version} |`
     ).join("\n");
 
-    const markdownContent = `# AI Flow SDLC — Structured Handoff Report
+    const markdownContent = `# bflow — Structured Handoff Report
 
 - **Run ID**: \`${runId}\`
 - **Workflow ID**: \`${snapshot.workflowId}\` (v${snapshot.workflowVersion})

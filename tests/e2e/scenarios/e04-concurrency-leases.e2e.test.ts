@@ -7,7 +7,7 @@ import {
   expectFailure,
   expectOk
 } from "../helpers/fixtures.js";
-import type { TaskState } from "@ai-flow/contracts";
+import type { TaskState } from "@bflow/contracts";
 
 describe("Scenario E04 — Concurrency, Leases, and Fencing Tokens", () => {
   let harness: E2eHarness;

@@ -16,7 +16,7 @@ import type {
   CancellationResult,
   OperationOptions,
   OperationResult
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 
 /**
  * Deterministic fake in-memory implementation of AgentTransport for integration testing.

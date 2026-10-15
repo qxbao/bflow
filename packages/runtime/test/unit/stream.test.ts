@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { getEventListeners } from "node:events";
-import type { DomainEvent } from "@ai-flow/contracts";
+import type { DomainEvent } from "@bflow/contracts";
 import {
   AsyncQueue,
   createDomainEventStream,

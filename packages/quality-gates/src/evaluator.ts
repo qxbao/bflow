@@ -12,7 +12,7 @@ import {
   type QualityGate,
   type QualityGateContext,
   type QualityGateResult
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import {
   detectDangerousCommandOrSecretAccess,
   isQualityCheckKind,

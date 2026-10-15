@@ -84,9 +84,9 @@ Each role must respond with a strictly formatted JSON payload conforming to its 
 ### Validation & Mapping Functions
 
 - `validateRoleOutput(role, rawOutput, context?)`: Validates and parses raw output (string or object), rejecting unauthorized delegation fields (`delegatedTasks`, `subagents`) and role mismatches.
-- `toContractAgentResult(output, envelope)`: Maps validated output to an `@ai-flow/contracts` `AgentResult`. QA failed verdicts are mapped to `status: "failed"` with code `qa_verification_failed`.
-- `toContractApprovalDecision(output, envelope)`: Maps `ReviewerOutput` to an `@ai-flow/contracts` `ApprovalDecision`.
-- `toContractQualityGateResult(output, envelope)`: Maps `QaOutput` to an `@ai-flow/contracts` `QualityGateResult` with structured quality findings.
+- `toContractAgentResult(output, envelope)`: Maps validated output to an `@bflow/contracts` `AgentResult`. QA failed verdicts are mapped to `status: "failed"` with code `qa_verification_failed`.
+- `toContractApprovalDecision(output, envelope)`: Maps `ReviewerOutput` to an `@bflow/contracts` `ApprovalDecision`.
+- `toContractQualityGateResult(output, envelope)`: Maps `QaOutput` to an `@bflow/contracts` `QualityGateResult` with structured quality findings.
 
 ## Trusted Artifact Reference Handoff
 

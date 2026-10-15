@@ -1,6 +1,6 @@
 # 5. Cấu hình vai trò và mô hình AI
 
-Vai trò và cấu hình agent nằm trong `@ai-flow/agent-registry`. Registry lưu `AgentConfiguration` vào một file JSON trên máy cục bộ (`createAgentRegistry({ stateFile })`).
+Vai trò và cấu hình agent nằm trong `@bflow/agent-registry`. Registry lưu `AgentConfiguration` vào một file JSON trên máy cục bộ (`createAgentRegistry({ stateFile })`).
 
 ## Bốn vai trò MVP
 
@@ -29,9 +29,9 @@ Giá trị mặc định khác: `transport: "herdr"`, `enabled: true`, `priority
 Ghi đè theo role:
 
 ```ts
-import { createAgentRegistry, seedMvpAgentRegistry } from "@ai-flow/agent-registry";
+import { createAgentRegistry, seedMvpAgentRegistry } from "@bflow/agent-registry";
 
-const registry = createAgentRegistry({ stateFile: "/srv/ai-flow/registry.json" });
+const registry = createAgentRegistry({ stateFile: "/srv/bflow/registry.json" });
 const seeded = await seedMvpAgentRegistry(registry, {
   developer: { provider: "anthropic", kind: "claude-code", model: "claude-sonnet-5-5", maxConcurrentTasks: 2 },
   reviewer: { model: "claude-opus-5-5", temperature: 0 },
@@ -43,7 +43,7 @@ if (!seeded.ok) throw new Error(seeded.error.message);
 Thêm một agent riêng (ví dụ agent developer thứ hai, ưu tiên cao hơn):
 
 ```ts
-import { createMvpRoleConfiguration } from "@ai-flow/agent-registry";
+import { createMvpRoleConfiguration } from "@bflow/agent-registry";
 
 const config = createMvpRoleConfiguration({
   agentId: "developer-codex",
@@ -73,7 +73,7 @@ Các trường này là **dữ liệu cấu hình**, được lưu và validate.
 Kiểm tra workflow có đủ agent trước khi chạy:
 
 ```ts
-import { verifyWorkflowRolesRegistered } from "@ai-flow/agent-registry";
+import { verifyWorkflowRolesRegistered } from "@bflow/agent-registry";
 const check = await verifyWorkflowRolesRegistered(definition, registry, "run-123");
 // check.ok === false với code "not_found" nếu thiếu role
 ```

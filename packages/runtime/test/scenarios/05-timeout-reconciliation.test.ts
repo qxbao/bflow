@@ -4,7 +4,7 @@ import type {
   AgentExecutionHandle,
   AgentRequest,
   WorkflowDefinition
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import { TaskDispatcher } from "../../src/dispatcher.js";
 import { SdlcWorkflowOrchestrator } from "../../src/orchestrator.js";
 import { createRuntimeService, type ConcreteRuntimeService } from "../../src/service.js";

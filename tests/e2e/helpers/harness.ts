@@ -8,16 +8,16 @@ import type {
   QualityGateContext,
   QualityGateResult,
   WorkflowDefinition
-} from "@ai-flow/contracts";
-import { openSqliteRunStore, type SqliteRunStore } from "@ai-flow/persistence";
-import { openFilesystemArtifactStore, type FilesystemArtifactStore } from "@ai-flow/artifact-store";
-import { FileAgentRegistry } from "@ai-flow/agent-registry";
-import { DeterministicWorkflowEngine } from "@ai-flow/core";
+} from "@bflow/contracts";
+import { openSqliteRunStore, type SqliteRunStore } from "@bflow/persistence";
+import { openFilesystemArtifactStore, type FilesystemArtifactStore } from "@bflow/artifact-store";
+import { FileAgentRegistry } from "@bflow/agent-registry";
+import { DeterministicWorkflowEngine } from "@bflow/core";
 import {
   createRuntimeService,
   type ConcreteRuntimeService,
   type RuntimePorts
-} from "@ai-flow/runtime";
+} from "@bflow/runtime";
 import { FixtureAgentTransport } from "./fixture-transport.js";
 import { createStandardMvpWorkflow } from "./fixtures.js";
 
@@ -134,7 +134,7 @@ export async function createE2eHarness(options?: E2eHarnessOptions): Promise<E2e
   }
 
   try {
-    tmpDir = await mkdtemp(join(tmpdir(), "ai-flow-p08-e2e-"));
+    tmpDir = await mkdtemp(join(tmpdir(), "bflow-p08-e2e-"));
     const dbPath = join(tmpDir, "run-store.db");
     const artifactsDir = join(tmpDir, "artifacts");
     const registryPath = join(tmpDir, "registry.json");

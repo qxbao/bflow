@@ -39,7 +39,7 @@ describe("Scenario E09 — CLI Subprocess Verification & End-to-End Execution", 
   const tempDirs: string[] = [];
 
   function makeTempDir(): string {
-    const dir = mkdtempSync(join(tmpdir(), "ai-flow-cli-e2e-"));
+    const dir = mkdtempSync(join(tmpdir(), "bflow-cli-e2e-"));
     tempDirs.push(dir);
     return dir;
   }
@@ -94,17 +94,17 @@ describe("Scenario E09 — CLI Subprocess Verification & End-to-End Execution", 
     expect(stderr).toContain("Missing required <requirement> argument");
   });
 
-  it("executes 'flow init' successfully in empty directory, creating config file", async () => {
+  it("executes 'bflow init' successfully in empty directory, creating config file", async () => {
     const workDir = makeTempDir();
     const { stdout, exitCode } = await runCli(["init"], workDir);
     expect(exitCode).toBe(0);
-    expect(stdout).toContain("Initialized AI Flow repository configuration");
-    expect(existsSync(join(workDir, ".ai-flow", "config.json"))).toBe(true);
+    expect(stdout).toContain("Initialized bflow repository configuration");
+    expect(existsSync(join(workDir, ".bflow", "config.json"))).toBe(true);
   });
 
-  it("fails gracefully when .ai-flow/config.json contains malformed JSON", async () => {
+  it("fails gracefully when .bflow/config.json contains malformed JSON", async () => {
     const workDir = makeTempDir();
-    const configDir = join(workDir, ".ai-flow");
+    const configDir = join(workDir, ".bflow");
     mkdirSync(configDir, { recursive: true });
     writeFileSync(join(configDir, "config.json"), "{ invalid JSON content !!!", "utf8");
 
@@ -115,7 +115,7 @@ describe("Scenario E09 — CLI Subprocess Verification & End-to-End Execution", 
   it("composes RuntimeService in bin.ts: fails closed without config, and executes run, status, and cancel end-to-end after init", async () => {
     const workDir = makeTempDir();
 
-    // 1. Without .ai-flow/config.json, status -j fails closed with not_found
+    // 1. Without .bflow/config.json, status -j fails closed with not_found
     const uninitStatus = await runCli(["status", "-j"], workDir);
     expect(uninitStatus.exitCode).toBe(1);
     const parsedUninit = JSON.parse(uninitStatus.stderr);
@@ -181,9 +181,9 @@ process.exit(0);
     writeFileSync(mockHerdrPath, mockHerdrScript, "utf8");
     chmodSync(mockHerdrPath, 0o755);
 
-    const cliEnv = { AI_FLOW_HERDR_BIN: mockHerdrPath };
+    const cliEnv = { BFLOW_HERDR_BIN: mockHerdrPath };
 
-    // 4. Execute flow run "Build authentication feature" -j
+    // 4. Execute bflow run "Build authentication feature" -j
     const runRes = await runCli(["run", "Build authentication feature", "-j"], workDir, cliEnv);
     expect(runRes.exitCode).toBe(0);
     const parsedRun = JSON.parse(runRes.stdout);
@@ -193,7 +193,7 @@ process.exit(0);
     const runId: string = parsedRun.data.runId;
     expect(typeof runId).toBe("string");
 
-    // 5. Execute flow status <runId> -j
+    // 5. Execute bflow status <runId> -j
     const statusRes = await runCli(["status", runId, "-j"], workDir, cliEnv);
     expect(statusRes.exitCode).toBe(0);
     const parsedStatus = JSON.parse(statusRes.stdout);
@@ -201,7 +201,7 @@ process.exit(0);
     expect(parsedStatus.command).toBe("status");
     expect(parsedStatus.data.runId).toBe(runId);
 
-    // 6. Execute flow cancel <runId> --reason "Stop test" -j
+    // 6. Execute bflow cancel <runId> --reason "Stop test" -j
     const cancelRes = await runCli(["cancel", runId, "--reason", "Stop test", "-j"], workDir, cliEnv);
     expect(cancelRes.exitCode).toBe(0);
     const parsedCancel = JSON.parse(cancelRes.stdout);

@@ -1,17 +1,17 @@
-# P08 — AI Flow SDLC End-to-End Integration & System Verification
+# P08 — bflow End-to-End Integration & System Verification
 
 ## Overview
 
-This directory contains the P08 End-to-End (E2E) integration test harness and verification suites for the AI Flow SDLC system.
+This directory contains the P08 End-to-End (E2E) integration test harness and verification suites for the bflow system.
 
 The suite verifies multi-package integration across:
-- `@ai-flow/contracts` (public contract schemas, types, and invariant validators)
-- `@ai-flow/core` (deterministic workflow engine, DAG evaluation, transition logic)
-- `@ai-flow/agent-registry` (`FileAgentRegistry`, monotonic fencing tokens, lease enforcement, role handoffs)
-- `@ai-flow/persistence` (`SqliteRunStore`, WAL mode, OCC concurrency, atomic batch commits)
-- `@ai-flow/artifact-store` (`FilesystemArtifactStore`, SHA-256 verification, private verified snapshots)
-- `@ai-flow/quality-gates` (`CommandQualityGate`, subprocess execution, governance & RBAC evaluation)
-- `@ai-flow/runtime` (`RuntimeService`, `WorkflowOrchestrator`, `TaskDispatcher`, crash recovery & reconciliation)
+- `@bflow/contracts` (public contract schemas, types, and invariant validators)
+- `@bflow/core` (deterministic workflow engine, DAG evaluation, transition logic)
+- `@bflow/agent-registry` (`FileAgentRegistry`, monotonic fencing tokens, lease enforcement, role handoffs)
+- `@bflow/persistence` (`SqliteRunStore`, WAL mode, OCC concurrency, atomic batch commits)
+- `@bflow/artifact-store` (`FilesystemArtifactStore`, SHA-256 verification, private verified snapshots)
+- `@bflow/quality-gates` (`CommandQualityGate`, subprocess execution, governance & RBAC evaluation)
+- `@bflow/runtime` (`RuntimeService`, `WorkflowOrchestrator`, `TaskDispatcher`, crash recovery & reconciliation)
 - `apps/cli` (CLI command parsing, formatting, runtime composition in `bin.ts`, and subprocess execution)
 
 ---
@@ -27,8 +27,8 @@ The suite verifies multi-package integration across:
 | **E05** | `scenarios/e05-quality-gates.e2e.test.ts` | Quality gate execution: real Node.js test runner execution via `createRealNodeUnitTestGate`, passing/failing suites, zero-test failure, strict TAP parser fail-closed malformed streams, protocol output smoke, and 5 verified regression probes (PM-01 mandatory gate skip rejection, PM-02 deadline enforcement, PM-03 missing test count evidence rejection, PM-04 foreign run result rejection, PM-05 stale approval revision/generation rejection). | **15 PASS** |
 | **E06** | `scenarios/e06-approval-rework.e2e.test.ts` | Human governance approval, bounded rework cycles, generation tracking, rework budget exhaustion (`maxReworks: 1` -> run status `failed`), and type-safe proposal ingestion without casts. | **4 PASS** |
 | **E07** | `scenarios/e07-cancellation.e2e.test.ts` | Cancellation invariants: positive Core cancellation workflow with exact schema IDs and verified idempotency, two-phase cancellation keeping task in `"cancelling"` until remote stop is confirmed (`PrematureCancel`), and transport failure handling during cancellation (`PM-11`). | **3 PASS** |
-| **E08** | `scenarios/e08-artifact-security.e2e.test.ts` | Artifact security boundary: proposal ingestion, SHA-256 checksum verification, path traversal rejection, on-disk blob tampering detection, and untrusted proposal rejection with strict contract alignment (`trust: "stored"`). *(Raw symlink and special device rejection are verified in P03 `@ai-flow/artifact-store` tests)*. | **4 PASS** |
-| **E09** | `scenarios/e09-cli.e2e.test.ts` | CLI subprocess execution with bounded timeout: `--help` (exit 0), `--version` semver output (`PM-13`), unknown command and argument validation, `flow init`, malformed config JSON handling, fail-closed `status -j` without config, and end-to-end `init` -> `run` -> `status` -> `cancel` execution using `AI_FLOW_HERDR_BIN`. | **7 PASS** |
+| **E08** | `scenarios/e08-artifact-security.e2e.test.ts` | Artifact security boundary: proposal ingestion, SHA-256 checksum verification, path traversal rejection, on-disk blob tampering detection, and untrusted proposal rejection with strict contract alignment (`trust: "stored"`). *(Raw symlink and special device rejection are verified in P03 `@bflow/artifact-store` tests)*. | **4 PASS** |
+| **E09** | `scenarios/e09-cli.e2e.test.ts` | CLI subprocess execution with bounded timeout: `--help` (exit 0), `--version` semver output (`PM-13`), unknown command and argument validation, `bflow init`, malformed config JSON handling, fail-closed `status -j` without config, and end-to-end `init` -> `run` -> `status` -> `cancel` execution using `BFLOW_HERDR_BIN`. | **7 PASS** |
 | **E10** | `scenarios/e10-failure-injection.e2e.test.ts` | OCC version/sequence conflicts, pre-validation batch rejection, checkpoint conflict, SQLite corruption detection, on-disk blob tampering detection, forged reference rejection, closed store handle rejection after restart, safe acquisition failure cleanup, receipt collision (`bindAgentExecution` / `recordDeliveryReconciliation`), session replacement / stale execution fencing, fail-closed artifact publication during `completeTaskExecution`, and P02 `buildCompleteFeatureWorkflowExample` verification with real `ArtifactStore`. | **12 PASS** |
 
 **Summary: 63 total tests | 63 PASS | 0 FAIL**
@@ -42,7 +42,7 @@ The suite verifies multi-package integration across:
 
 ### 1. Typecheck
 
-Verify that all test suites strictly compile against exported `@ai-flow/contracts` and public package APIs without diagnostics:
+Verify that all test suites strictly compile against exported `@bflow/contracts` and public package APIs without diagnostics:
 
 ```bash
 pnpm exec tsc -p tests/e2e/tsconfig.json --noEmit

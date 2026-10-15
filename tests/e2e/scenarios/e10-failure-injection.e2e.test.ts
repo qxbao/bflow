@@ -16,7 +16,7 @@ import {
   expectFailure,
   readArtifactBytes
 } from "../helpers/fixtures.js";
-import { buildCompleteFeatureWorkflowExample } from "@ai-flow/agent-registry";
+import { buildCompleteFeatureWorkflowExample } from "@bflow/agent-registry";
 import type {
   AgentExecutionHandle,
   ArtifactReference,
@@ -24,7 +24,7 @@ import type {
   ArtifactWrite,
   DomainEvent,
   TaskState
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 
 describe("Scenario E10 — Failure Injection, Concurrency & Corrupted State", () => {
   let harness: E2eHarness;

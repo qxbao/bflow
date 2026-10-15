@@ -13,7 +13,7 @@ import type {
   WorkflowDefinition,
   DomainEvent,
   OperationResult
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 
 async function setupRun(harness: any, runId: string, def: WorkflowDefinition = createSampleWorkflowDefinition()) {
   await harness.engine.validateDefinition(def);

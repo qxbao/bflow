@@ -11,7 +11,7 @@ import type {
   DomainEvent,
   TaskState,
   WorkflowDefinition
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 
 /**
  * Creates a workflow definition where the first task explicitly requires approval and allows rework.

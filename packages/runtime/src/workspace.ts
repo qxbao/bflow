@@ -16,7 +16,7 @@ import type {
   WorkflowDefinition,
   WorkflowEngine,
   WorkflowRunSnapshot
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import { recoverWorkflowRun } from "./recovery.js";
 import {
   createRuntimeService,
@@ -216,7 +216,7 @@ export async function openWorkspaceRuntime(
     runStore = runStoreRes.value;
 
     const sanitizedStoreId =
-      options.runtimeId.replace(/[^A-Za-z0-9._-]/g, "-") || "ai-flow-artifact-store";
+      options.runtimeId.replace(/[^A-Za-z0-9._-]/g, "-") || "bflow-artifact-store";
     const artifactStoreRes = await artifactStoreMod.openFilesystemArtifactStore({
       root: artifactStoreRoot,
       storeId: sanitizedStoreId
@@ -270,7 +270,7 @@ export async function openWorkspaceRuntime(
     });
 
     const herdrBinary =
-      (options.herdrBinary ?? process.env["AI_FLOW_HERDR_BIN"] ?? process.env["HERDR_BIN"] ?? "herdr").trim() ||
+      (options.herdrBinary ?? process.env["BFLOW_HERDR_BIN"] ?? process.env["HERDR_BIN"] ?? "herdr").trim() ||
       "herdr";
     const transport = herdrAdapterMod.createHerdrAdapter({
       binary: herdrBinary,

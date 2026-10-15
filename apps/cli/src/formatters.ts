@@ -2,7 +2,7 @@ import type {
   ContractError,
   Page,
   WorkflowRunSnapshot
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import type {
   CliCommandData,
   CliCommandName,
@@ -54,9 +54,9 @@ function formatWorkflowRun(snapshot: WorkflowRunSnapshot): string {
     lines.push(`Notice: Run is ${snapshot.status} on ${taskNames}.`);
     if (blockingTasks.some((t) => t.blockage?.code === "awaiting_approval" || t.status === "waiting")) {
       const waitTask = blockingTasks.find((t) => t.status === "waiting") ?? blockingTasks[0];
-      lines.push(`  To record human approval: flow approve ${waitTask?.taskId ?? "<task-id>"} --run ${snapshot.runId}`);
+      lines.push(`  To record human approval: bflow approve ${waitTask?.taskId ?? "<task-id>"} --run ${snapshot.runId}`);
     }
-    lines.push(`  To resume the run: flow resume ${snapshot.runId}`);
+    lines.push(`  To resume the run: bflow resume ${snapshot.runId}`);
   }
 
   return lines.join("\n");
@@ -86,9 +86,9 @@ function formatRunPage(page: Page<WorkflowRunSnapshot>): string {
 function formatInitOutput(output: InitCommandOutput): string {
   const lines: string[] = [];
   if (output.overwritten) {
-    lines.push(`Initialized AI Flow repository configuration (overwritten) at:`);
+    lines.push(`Initialized bflow repository configuration (overwritten) at:`);
   } else {
-    lines.push(`Initialized AI Flow repository configuration at:`);
+    lines.push(`Initialized bflow repository configuration at:`);
   }
   lines.push(`  ${output.configPath}`);
   lines.push("");

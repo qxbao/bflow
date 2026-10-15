@@ -13,7 +13,7 @@ import type {
   OperationResult,
   QualityGateContext,
   WorkflowDefinition
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import {
   CommandQualityGate,
   createDefaultSecurityPolicy,
@@ -22,7 +22,7 @@ import {
   type QualityCheckOutputExpectation,
   type QualityCommandOutcome,
   type QualityFinding
-} from "@ai-flow/quality-gates";
+} from "@bflow/quality-gates";
 
 /**
  * Asserts that an OperationResult is successful and narrows its type to T.
@@ -320,7 +320,7 @@ export function createStrictTapParser(options?: StrictTapParserOptions) {
 /**
  * Creates a schema-compliant verified AgentResult for an accepted execution handle.
  *
- * NOTE: This fixture represents test-controlled correlation under @ai-flow/contracts
+ * NOTE: This fixture represents test-controlled correlation under @bflow/contracts
  * and must not be claimed as evidence of live Herdr correlation capability.
  */
 export function createVerifiedAgentResult(options: {

@@ -11,6 +11,7 @@ export {
   type CliJsonEnvelope,
   type CliJsonErrorEnvelope,
   type CliJsonSuccessEnvelope,
+  type BflowRepositoryConfig,
   type FlowRepositoryConfig,
   type GlobalCliFlags,
   type HelpCommandArgs,

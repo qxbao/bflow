@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import type { ArtifactProposal } from "@ai-flow/contracts";
+import type { ArtifactProposal } from "@bflow/contracts";
 import { TaskDispatcher } from "../../src/dispatcher.js";
 import {
   ingestArtifactProposals,

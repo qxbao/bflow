@@ -9,7 +9,7 @@ import {
   type OperationResult,
   type QualityGateResult,
   type WorkflowDefinition
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import { createDefaultMvpConfigurations } from "./roles.js";
 import { renderRolePrompt, type RenderedRolePrompt } from "./prompts.js";
 import {

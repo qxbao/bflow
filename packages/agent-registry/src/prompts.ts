@@ -4,7 +4,7 @@ import {
   type ArtifactReference,
   type ContractError,
   type OperationResult
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import { getMvpRoleProfile, isMvpRole, type MvpRole } from "./roles.js";
 import {
   UNTRUSTED_CONTENT_SAFETY_RULES,

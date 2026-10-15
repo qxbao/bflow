@@ -1,6 +1,6 @@
-# Sample repository: `ai-flow-sample-shop`
+# Sample repository: `bflow-sample-shop`
 
-Repository TypeScript rất nhỏ dùng để thử workflow **feature** và **bugfix** của AI Flow SDLC. Repository này không thuộc pnpm workspace và không có dependency: test chạy bằng `node:test` với type stripping của Node (`--experimental-strip-types`, Node >= 22.13).
+Repository TypeScript rất nhỏ dùng để thử workflow **feature** và **bugfix** của bflow. Repository này không thuộc pnpm workspace và không có dependency: test chạy bằng `node:test` với type stripping của Node (`--experimental-strip-types`, Node >= 22.13).
 
 | Đường dẫn | Nội dung |
 | --- | --- |

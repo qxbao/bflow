@@ -20,7 +20,7 @@ import type {
   EventBatch,
   OperationOptions,
   OperationResult
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import { createRuntimeService } from "../../src/service.js";
 import {
   createSampleWorkflowDefinition,

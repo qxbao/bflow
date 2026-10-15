@@ -178,22 +178,22 @@ importers:
 
   apps/cli:
     dependencies:
-      '@ai-flow/contracts':
+      '@bflow/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
-      '@ai-flow/runtime':
+      '@bflow/runtime':
         specifier: workspace:*
         version: link:../../packages/runtime
 
   packages/agent-registry:
     dependencies:
-      '@ai-flow/contracts':
+      '@bflow/contracts':
         specifier: workspace:*
         version: link:../contracts
 
   packages/artifact-store:
     dependencies:
-      '@ai-flow/contracts':
+      '@bflow/contracts':
         specifier: workspace:*
         version: link:../contracts
 
@@ -205,50 +205,50 @@ importers:
 
   packages/core:
     dependencies:
-      '@ai-flow/contracts':
+      '@bflow/contracts':
         specifier: workspace:*
         version: link:../contracts
 
   packages/herdr-adapter:
     dependencies:
-      '@ai-flow/contracts':
+      '@bflow/contracts':
         specifier: workspace:*
         version: link:../contracts
 
   packages/persistence:
     dependencies:
-      '@ai-flow/contracts':
+      '@bflow/contracts':
         specifier: workspace:*
         version: link:../contracts
 
   packages/quality-gates:
     dependencies:
-      '@ai-flow/contracts':
+      '@bflow/contracts':
         specifier: workspace:*
         version: link:../contracts
 
   packages/runtime:
     dependencies:
-      '@ai-flow/contracts':
+      '@bflow/contracts':
         specifier: workspace:*
         version: link:../contracts
     devDependencies:
-      '@ai-flow/agent-registry':
+      '@bflow/agent-registry':
         specifier: workspace:*
         version: link:../agent-registry
-      '@ai-flow/artifact-store':
+      '@bflow/artifact-store':
         specifier: workspace:*
         version: link:../artifact-store
-      '@ai-flow/core':
+      '@bflow/core':
         specifier: workspace:*
         version: link:../core
-      '@ai-flow/herdr-adapter':
+      '@bflow/herdr-adapter':
         specifier: workspace:*
         version: link:../herdr-adapter
-      '@ai-flow/persistence':
+      '@bflow/persistence':
         specifier: workspace:*
         version: link:../persistence
-      '@ai-flow/quality-gates':
+      '@bflow/quality-gates':
         specifier: workspace:*
         version: link:../quality-gates
 

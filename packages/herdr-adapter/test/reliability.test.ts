@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { AgentExecutionHandleSchema, AgentMessageSchema, AgentRequestSchema } from "@ai-flow/contracts";
+import { AgentExecutionHandleSchema, AgentMessageSchema, AgentRequestSchema } from "@bflow/contracts";
 import { HerdrCliTransport, createProcessRunner } from "../src/index.js";
 import type { CommandInvocation, CommandOutcome } from "../src/index.js";
 
@@ -279,7 +279,7 @@ describe("P02 reliability regressions", () => {
     failSpawn = false;
     expect(await adapter.send(request())).toMatchObject({ ok: true, value: { status: "accepted" } });
     expect(count("prompt")).toBe(2);
-    expect(await createProcessRunner("/nonexistent/ai-flow-p02-cli").run({ args: [], timeoutMs: 1000 })).toMatchObject({ failure: "spawn", started: false });
+    expect(await createProcessRunner("/nonexistent/bflow-p02-cli").run({ args: [], timeoutMs: 1000 })).toMatchObject({ failure: "spawn", started: false });
   });
 
   it("F08 isolates receipt correlation and locator from caller mutation", async () => {

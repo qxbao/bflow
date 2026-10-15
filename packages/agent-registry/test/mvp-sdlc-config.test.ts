@@ -10,7 +10,7 @@ import type {
   ArtifactWrite,
   OperationOptions,
   OperationResult
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import {
   FileAgentRegistry,
   MVP_ROLES,
@@ -130,7 +130,7 @@ describe("MVP SDLC Configuration, Roles, Workflows, Safety, and Handoff", () => 
   let registry: FileAgentRegistry;
 
   beforeEach(async () => {
-    folder = await mkdtemp(join(tmpdir(), "ai-flow-mvp-test-"));
+    folder = await mkdtemp(join(tmpdir(), "bflow-mvp-test-"));
     stateFile = join(folder, "registry.json");
     registry = new FileAgentRegistry({ stateFile });
   });
@@ -1485,7 +1485,7 @@ describe("MVP SDLC Configuration, Roles, Workflows, Safety, and Handoff", () => 
       ).toMatchObject({ ok: false, error: { message: /QA failed verdict requires at least one failed criterion or failing test/ } });
     });
 
-    it("maps validated outputs to @ai-flow/contracts AgentResult, ApprovalDecision, and QualityGateResult", () => {
+    it("maps validated outputs to @bflow/contracts AgentResult, ApprovalDecision, and QualityGateResult", () => {
       // 1. AgentResult mapping
       const devOutput = {
         role: "developer" as const,

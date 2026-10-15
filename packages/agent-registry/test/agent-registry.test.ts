@@ -17,7 +17,7 @@ const context = { runId: "run-1", taskId: "task-1", requiredCapabilities: ["type
 const acquire = (leaseId = "lease-1", key = leaseId) => ({ leaseId, agentId: "agent-1", runId: "run-1", taskId: leaseId, attemptId: `${leaseId}-attempt`, ttlMs: 1_000, requestedAt: time.toISOString(), idempotencyKey: key });
 
 beforeEach(async () => {
-  folder = await mkdtemp(join(tmpdir(), "ai-flow-registry-"));
+  folder = await mkdtemp(join(tmpdir(), "bflow-registry-"));
   stateFile = join(folder, "registry.json");
   time = new Date("2026-01-01T00:00:00.000Z");
   registry = new FileAgentRegistry({ stateFile, clock: () => time });

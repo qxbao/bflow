@@ -1,5 +1,5 @@
 {
-  "name": "@ai-flow/runtime",
+  "name": "@bflow/runtime",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -17,14 +17,14 @@
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
-    "@ai-flow/contracts": "workspace:*"
+    "@bflow/contracts": "workspace:*"
   },
   "devDependencies": {
-    "@ai-flow/agent-registry": "workspace:*",
-    "@ai-flow/artifact-store": "workspace:*",
-    "@ai-flow/core": "workspace:*",
-    "@ai-flow/herdr-adapter": "workspace:*",
-    "@ai-flow/persistence": "workspace:*",
-    "@ai-flow/quality-gates": "workspace:*"
+    "@bflow/agent-registry": "workspace:*",
+    "@bflow/artifact-store": "workspace:*",
+    "@bflow/core": "workspace:*",
+    "@bflow/herdr-adapter": "workspace:*",
+    "@bflow/persistence": "workspace:*",
+    "@bflow/quality-gates": "workspace:*"
   }
 }

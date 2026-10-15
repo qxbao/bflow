@@ -1,4 +1,4 @@
-import { StoredRunSchema, type DomainEvent, type StoredRun, type TaskState } from "@ai-flow/contracts";
+import { StoredRunSchema, type DomainEvent, type StoredRun, type TaskState } from "@bflow/contracts";
 import { fail, parse } from "./support.js";
 
 /** A storage/index projection, not Core replay. Never derives business outcomes or invents attempt IDs. */

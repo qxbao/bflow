@@ -191,7 +191,7 @@ describe("CLI Argument Parser - parseCliArgs", () => {
   describe("getHelpText documentation", () => {
     it("returns non-empty global usage documenting all 6 commands", () => {
       const globalHelp = getHelpText();
-      expect(globalHelp).toContain("Usage: flow <command>");
+      expect(globalHelp).toContain("Usage: bflow <command>");
       expect(globalHelp).toContain("init");
       expect(globalHelp).toContain("run");
       expect(globalHelp).toContain("status");
@@ -205,7 +205,7 @@ describe("CLI Argument Parser - parseCliArgs", () => {
 
     it("returns dedicated help text for init command", () => {
       const text = getHelpText("init");
-      expect(text).toContain("Usage: flow init");
+      expect(text).toContain("Usage: bflow init");
       expect(text).toContain("--dir");
       expect(text).toContain("--config");
       expect(text).toContain("--name");
@@ -214,7 +214,7 @@ describe("CLI Argument Parser - parseCliArgs", () => {
 
     it("returns dedicated help text for run command", () => {
       const text = getHelpText("run");
-      expect(text).toContain("Usage: flow run");
+      expect(text).toContain("Usage: bflow run");
       expect(text).toContain("<requirement>");
       expect(text).toContain("--run-id");
       expect(text).toContain("--workflow");
@@ -222,7 +222,7 @@ describe("CLI Argument Parser - parseCliArgs", () => {
 
     it("returns dedicated help text for status command", () => {
       const text = getHelpText("status");
-      expect(text).toContain("Usage: flow status");
+      expect(text).toContain("Usage: bflow status");
       expect(text).toContain("[run-id]");
       expect(text).toContain("--status");
       expect(text).toContain("--workflow-id");
@@ -232,7 +232,7 @@ describe("CLI Argument Parser - parseCliArgs", () => {
 
     it("returns dedicated help text for approve command", () => {
       const text = getHelpText("approve");
-      expect(text).toContain("Usage: flow approve");
+      expect(text).toContain("Usage: bflow approve");
       expect(text).toContain("<task-id>");
       expect(text).toContain("--run");
       expect(text).toContain("--by");
@@ -242,14 +242,14 @@ describe("CLI Argument Parser - parseCliArgs", () => {
 
     it("returns dedicated help text for resume command", () => {
       const text = getHelpText("resume");
-      expect(text).toContain("Usage: flow resume");
+      expect(text).toContain("Usage: bflow resume");
       expect(text).toContain("<run-id>");
       expect(text).toContain("--idempotency-key");
     });
 
     it("returns dedicated help text for cancel command", () => {
       const text = getHelpText("cancel");
-      expect(text).toContain("Usage: flow cancel");
+      expect(text).toContain("Usage: bflow cancel");
       expect(text).toContain("<run-id>");
       expect(text).toContain("--reason");
       expect(text).toContain("--by");
@@ -258,8 +258,8 @@ describe("CLI Argument Parser - parseCliArgs", () => {
     });
   });
 
-  describe("2. flow init argument parsing", () => {
-    it("parses default 'flow init' with force: false, json: false", () => {
+  describe("2. bflow init argument parsing", () => {
+    it("parses default 'bflow init' with force: false, json: false", () => {
       const res = parseCliArgs(["init"]);
       expect(res.ok).toBe(true);
       if (res.ok) {
@@ -327,14 +327,14 @@ describe("CLI Argument Parser - parseCliArgs", () => {
       const res = parseCliArgs([
         "init",
         "--dir=./my-dir",
-        "--config=flow.config.json",
+        "--config=bflow.config.json",
         "--name=service-a"
       ]);
       expect(res.ok).toBe(true);
       if (res.ok) {
         const args = res.value as InitCommandArgs;
         expect(args.dir).toBe("./my-dir");
-        expect(args.configPath).toBe("flow.config.json");
+        expect(args.configPath).toBe("bflow.config.json");
         expect(args.projectName).toBe("service-a");
       }
     });
@@ -412,7 +412,7 @@ describe("CLI Argument Parser - parseCliArgs", () => {
     });
   });
 
-  describe("3. flow run argument parsing", () => {
+  describe("3. bflow run argument parsing", () => {
     it("parses natural language requirement positional argument", () => {
       const res = parseCliArgs(["run", "Build authentication service"]);
       expect(res.ok).toBe(true);
@@ -548,8 +548,8 @@ describe("CLI Argument Parser - parseCliArgs", () => {
     });
   });
 
-  describe("4. flow status argument parsing", () => {
-    it("parses 'flow status' without run-id as listing runs", () => {
+  describe("4. bflow status argument parsing", () => {
+    it("parses 'bflow status' without run-id as listing runs", () => {
       const res = parseCliArgs(["status"]);
       expect(res.ok).toBe(true);
       if (res.ok) {
@@ -560,7 +560,7 @@ describe("CLI Argument Parser - parseCliArgs", () => {
       }
     });
 
-    it("parses 'flow status <run-id>' for inspecting a specific run", () => {
+    it("parses 'bflow status <run-id>' for inspecting a specific run", () => {
       const res = parseCliArgs(["status", "run-123"]);
       expect(res.ok).toBe(true);
       if (res.ok) {
@@ -681,8 +681,8 @@ describe("CLI Argument Parser - parseCliArgs", () => {
     });
   });
 
-  describe("5. flow approve argument parsing", () => {
-    it("parses default 'flow approve <task-id>' with decision: 'approved'", () => {
+  describe("5. bflow approve argument parsing", () => {
+    it("parses default 'bflow approve <task-id>' with decision: 'approved'", () => {
       const res = parseCliArgs(["approve", "qa"]);
       expect(res.ok).toBe(true);
       if (res.ok) {
@@ -858,8 +858,8 @@ describe("CLI Argument Parser - parseCliArgs", () => {
     });
   });
 
-  describe("6. flow resume argument parsing", () => {
-    it("parses 'flow resume <run-id>' with optional flags", () => {
+  describe("6. bflow resume argument parsing", () => {
+    it("parses 'bflow resume <run-id>' with optional flags", () => {
       const res = parseCliArgs(["resume", "run-123", "--idempotency-key", "idem-uuid-1", "--json"]);
       expect(res.ok).toBe(true);
       if (res.ok) {
@@ -898,8 +898,8 @@ describe("CLI Argument Parser - parseCliArgs", () => {
     });
   });
 
-  describe("7. flow cancel argument parsing", () => {
-    it("parses 'flow cancel <run-id>' with all flags", () => {
+  describe("7. bflow cancel argument parsing", () => {
+    it("parses 'bflow cancel <run-id>' with all flags", () => {
       const res = parseCliArgs([
         "cancel",
         "run-123",

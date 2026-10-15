@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { WorkflowDefinition } from "@ai-flow/contracts";
+import type { WorkflowDefinition } from "@bflow/contracts";
 import { TaskDispatcher } from "../../src/dispatcher.js";
 import { SdlcWorkflowOrchestrator } from "../../src/orchestrator.js";
 import {

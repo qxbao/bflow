@@ -1,4 +1,4 @@
-# Quality Gates & Security Enforcement (`@ai-flow/quality-gates`)
+# Quality Gates & Security Enforcement (`@bflow/quality-gates`)
 
 Independent quality control, command evaluation, and application-layer security enforcement that never trusts subjective AI agent claims.
 
@@ -21,7 +21,7 @@ In an automated AI software development lifecycle (SDLC), autonomous agents gene
 
 ## 2. Quality Gate Evaluator
 
-The evaluation engine executes checks and translates runtime outcomes into `@ai-flow/contracts` `QualityGateResult` structures.
+The evaluation engine executes checks and translates runtime outcomes into `@bflow/contracts` `QualityGateResult` structures.
 
 ### Supported Check Kinds
 
@@ -35,14 +35,14 @@ The evaluation engine executes checks and translates runtime outcomes into `@ai-
 
 ### Key Evaluator Components
 
-- **`CommandQualityGate`**: Implementation of `@ai-flow/contracts` `QualityGate`. Evaluates a `QualityCheckSpec` against an injected `QualitySecurityPolicy` and `QualityCommandRunner`.
+- **`CommandQualityGate`**: Implementation of `@bflow/contracts` `QualityGate`. Evaluates a `QualityCheckSpec` against an injected `QualitySecurityPolicy` and `QualityCommandRunner`.
 - **`createQualityGate(options)`**: Instantiates a `CommandQualityGate` with custom specifications, security policy, and runner.
 - **`createPresetQualityGate(input)`**: Convenience factory for the 5 standard check kinds with preset commands, path validation, and security policies.
 - **`evaluateQualityCheckSuite(gates, context, options?)`**: Sequentially executes an array of quality gates for a workflow run/task, producing a consolidated `QualityCheckSuiteReport`.
 
 ### Outcome Status & Contract Mapping
 
-Each quality check produces an internal `QualityCheckStatus` mapped to `@ai-flow/contracts` `QualityGateResult`:
+Each quality check produces an internal `QualityCheckStatus` mapped to `@bflow/contracts` `QualityGateResult`:
 
 | Internal Status | Contract Status | Criteria |
 | --- | --- | --- |

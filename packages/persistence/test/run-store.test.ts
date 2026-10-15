@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "../src/sqlite.js";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { AppendEventsRequestSchema, DomainEventSchema, RecoveryCheckpointSchema, StoredRunSchema, type OperationResult } from "@ai-flow/contracts";
+import { AppendEventsRequestSchema, DomainEventSchema, RecoveryCheckpointSchema, StoredRunSchema, type OperationResult } from "@bflow/contracts";
 import { now, workflow, runCreatedEvent } from "../../contracts/test/fixtures.js";
 import { eventTailCursor, openSqliteRunStore, type SqliteRunStore } from "../src/index.js";
 
@@ -35,7 +35,7 @@ describe("SQLite RunStore", () => {
   let store: SqliteRunStore;
   const stores: SqliteRunStore[] = [];
   beforeEach(async () => {
-    directory = await mkdtemp(join(tmpdir(), "ai-flow-p03-runs-"));
+    directory = await mkdtemp(join(tmpdir(), "bflow-p03-runs-"));
     filename = join(directory, "runs.sqlite");
     store = value(openSqliteRunStore({ filename })); stores.push(store);
   });
@@ -43,7 +43,7 @@ describe("SQLite RunStore", () => {
   async function create() { value(await store.create(seed(), "create-1")); }
   async function initial() { await create(); value(await store.appendEvents(batch())); }
   function checkpoint() {
-    return RecoveryCheckpointSchema.parse({ checkpointSchemaVersion: 1, codec: { name: "ai-flow.workflow-run-snapshot+json", version: 1 },
+    return RecoveryCheckpointSchema.parse({ checkpointSchemaVersion: 1, codec: { name: "bflow.workflow-run-snapshot+json", version: 1 },
       checkpointId: "cp-1", runId: "run-1", version: 0, eventSequence: 0, state: seed().snapshot, createdAt: now });
   }
   function raw() { return new DatabaseSync(filename); }
@@ -211,14 +211,14 @@ describe("SQLite RunStore", () => {
     value(await store.saveCheckpoint(checkpoint(), 0));
   });
   it("round-trips the complete aggregate checkpoint without reconstructing auxiliary state", async () => {
-    await create(); const aggregate = checkpoint(); aggregate.codec = { name: "ai-flow.workflow-aggregate+json", version: 1 };
+    await create(); const aggregate = checkpoint(); aggregate.codec = { name: "bflow.workflow-aggregate+json", version: 1 };
     aggregate.state = { schemaVersion: 1, snapshot: seed().snapshot, approvals: [], gateRequests: [], gateOutcomes: [],
       successfulAttempts: [], cancellations: [], retrySchedules: [], attemptBaselines: [], commands: [] };
     value(await store.saveCheckpoint(aggregate, 0));
     expect(value(await store.loadLatestCheckpoint("run-1"))).toEqual(aggregate);
   });
   it("retains approval, gate, retry and original command outcome data in aggregate checkpoints", async () => {
-    await create(); const aggregate = checkpoint(); aggregate.codec = { name: "ai-flow.workflow-aggregate+json", version: 1 };
+    await create(); const aggregate = checkpoint(); aggregate.codec = { name: "bflow.workflow-aggregate+json", version: 1 };
     aggregate.state = { schemaVersion: 1, snapshot: seed().snapshot,
       approvals: [{ request: { schemaVersion: 1, approvalId: "approval-1", runId: "run-1", target: { type: "run" }, revision: 1,
         generation: 0, requestedBy: "reviewer", requestedAt: now, reason: "review", evidence: [], idempotencyKey: "approval-request" },

@@ -101,7 +101,7 @@ async function listFiles(dir) {
 // ArtifactStore rejects roots below symlinked ancestors (e.g. macOS /var -> /private/var).
 const stateDir = args["state-dir"]
   ? await realpath(await mkdir(args["state-dir"], { recursive: true }).then(() => args["state-dir"]))
-  : await mkdtemp(join(await realpath(tmpdir()), "ai-flow-demo-"));
+  : await mkdtemp(join(await realpath(tmpdir()), "bflow-demo-"));
 const workspace = join(stateDir, "workspace");
 await cp(join(here, "..", "sample-repo"), workspace, { recursive: true, errorOnExist: true, force: false });
 console.log(`State directory: ${stateDir}`);

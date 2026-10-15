@@ -1,98 +1,136 @@
-# AI Flow SDLC
+# bflow
 
-AI Flow SDLC is a module-first TypeScript platform for coordinating AI coding agents across a software delivery workflow. Herdr operates the agents; this project owns workflow decisions, durable execution records, artifacts, and integration boundaries.
+**bflow** is a modular TypeScript platform and CLI for orchestrating AI coding agents across software delivery (SDLC) workflows. It coordinates multi-step engineering tasks (`plan` → `implement` → `qa` → `review`) with deterministic state transitions, durable SQLite execution records, content-addressed artifacts, automated quality gates, and human approval checkpoints.
 
-Contracts, the P01-P03 modules, quality-gate evaluators and the Runtime library (`createRuntimeService`) are implemented as libraries. The executable CLI is not implemented. There is no web server or `start`/`dev` command, and Runtime has not been verified end-to-end with live Herdr agents. A runnable library demo on a sample repository is in [`examples/`](examples/README.md); the user guide (Vietnamese) is in [`docs/guide`](docs/guide/README.md).
+---
 
-## Module status
+## Features
 
-| Package | Current implementation | Entry point / details |
-| --- | --- | --- |
-| `packages/contracts` | Shared Zod schemas, public ports, transition/batch validators, event/checkpoint compatibility | [Public contracts](docs/contracts.md) |
-| `packages/core` | Deterministic workflow engine: DAG readiness, concurrency decisions, transitions, retry/rework, approvals/gates, event replay and aggregate checkpoints; no agent or storage I/O | [`DeterministicWorkflowEngine`](packages/core/src/index.ts) |
-| `packages/herdr-adapter` | CLI-backed AgentTransport, reconciliation and conservative execution observations | [`createHerdrAdapter`](packages/herdr-adapter/README.md) |
-| `packages/agent-registry` | File-backed role/capability resolution, durable leases, fencing and idempotency; MVP roles, workflow templates, prompts and output validation | [`createAgentRegistry`](packages/agent-registry/README.md) |
-| `packages/persistence` | SQLite RunStore: migrations, atomic event/receipt/projection writes, history and versioned checkpoints | [`openSqliteRunStore`](packages/persistence/README.md) |
-| `packages/artifact-store` | Filesystem ArtifactStore with SQLite catalog, verified streams, safe references, durable receipts and tombstones | [`openFilesystemArtifactStore`](packages/artifact-store/README.md) |
-| `packages/quality-gates` | Command quality gates (`typecheck`/`lint`/`unit_test`/`build`/`custom`), security policy, RBAC and human-governance checks | [`createPresetQualityGate`](packages/quality-gates/README.md) |
-| `packages/runtime` | RuntimeService composition: dispatch with leases, proposal ingestion, gates, approvals, cancellation, recovery/resume, event watch. Task results are reported by the caller (`orchestrator.completeTaskExecution`) | [`createRuntimeService`](packages/runtime/src/index.ts) |
-| `apps/cli` | Type exports only; no executable commands | [Source](apps/cli/src/index.ts) |
+- **Deterministic Workflow Engine (`@bflow/core`)** — Evaluates task DAGs, enforces state transitions, manages bounded retry and rework loops, and supports full recovery from event logs and aggregate checkpoints.
+- **Durable Local Persistence (`@bflow/persistence` & `@bflow/artifact-store`)** — Stores workflow events, execution receipts, and run projections in SQLite (`node:sqlite`) alongside checksum-verified immutable artifacts on disk.
+- **Role & Lease Registry (`@bflow/agent-registry`)** — Resolves SDLC roles (`pm`, `architect`, `coder`, `qa`, `reviewer`) to configured agents with lease acquisition, fencing tokens, and structured output validation.
+- **Independent Quality Gates (`@bflow/quality-gates`)** — Runs verification commands (`typecheck`, `lint`, `unit_test`, `build`, or custom checks) in the target workspace independently of agent self-reports.
+- **Human-in-the-Loop Governance** — Enforces human actor verification on approval gates (`approved`, `changes_requested`, `rejected`) before advancing gated tasks.
+- **CLI & Programmatic Runtime (`@bflow/cli` & `@bflow/runtime`)** — Manage workflows from the terminal via `bflow` (human-readable or `--json` output) or embed `createRuntimeService` directly in Node.js applications.
 
-This table describes source availability, not a claim of live Herdr integration or production readiness. Keep it aligned with public entry points when a phase is integrated.
+---
 
 ## Requirements
 
-- Node.js **22.13+** for P03's unflagged built-in `node:sqlite`; verified on **22.23.2**. The root `engines` currently declares `>=22`, which is broader than this storage requirement. SQLite is experimental on the verified Node 22 runtime.
-- pnpm **12.5.1**, as pinned in `package.json`.
-- The verified test environment is Linux/local filesystem. Storage/security tests include POSIX fixtures such as `mkfifo`, Unix sockets, symlinks and hardlinks; other platforms are not verified.
-- Herdr is not needed for the standard test suite. Real transport use requires the supported CLI/server and an existing pane/session; the adapter checks CLI **0.9.1**, protocol **22**, schema **1**. Do not control real sessions without explicit authorization.
+- **Node.js `>= 22.13`** (required for unflagged built-in `node:sqlite`)
+- **pnpm `12.5.1`** (pinned via `packageManager` in `package.json`)
 
-## Quick start
+---
 
-From the repository root:
+## Installation & Quick Start
 
 ```bash
-node --version
-pnpm --version
+git clone https://github.com/qxbao/bflow.git
+cd bflow
 pnpm install --frozen-lockfile
-pnpm check
+pnpm build
 ```
 
-`pnpm check` verifies the dependency graph, typechecks, builds and runs all tests. Tests use temporary storage and injected Herdr runners, not live agent execution. Read actual pass/fail counts from the current run rather than treating a historical count as a release guarantee.
+Verify the workspace build and run the demo workflow:
 
-## Commands
+```bash
+node examples/runtime-demo/run-demo.mjs
+```
 
-| Command | Purpose |
+---
+
+## CLI Usage
+
+After running `pnpm build`, invoke the CLI via `node apps/cli/dist/bin.js` (or link it globally via `pnpm --filter @bflow/cli link --global` to use `bflow` directly):
+
+```bash
+# 1. Initialize bflow configuration (.bflow/config.json) in a repository
+bflow init --name my-project
+
+# 2. Start a workflow run with a requirement
+bflow run "Add user authentication and session management"
+
+# 3. Inspect active runs or a specific run
+bflow status
+bflow status <run-id>
+
+# 4. Record a human approval decision (approved | changes_requested | rejected)
+bflow approve qa --run <run-id> --decision approved --by alice
+bflow approve review --run <run-id> --decision changes_requested --reason "Add edge-case tests"
+
+# 5. Resume a waiting or recovered workflow run
+bflow resume <run-id>
+
+# 6. Cancel an active workflow run or task
+bflow cancel <run-id> --reason "Scope updated"
+```
+
+All commands support `-j, --json` for structured JSON output and `-h, --help` for detailed command options.
+
+---
+
+## Workspace Packages
+
+| Package | Description |
 | --- | --- |
-| `pnpm build` | Compile workspace packages to ignored `dist/` output |
-| `pnpm typecheck` | Run the configured TypeScript project build/check (`tsc -b`) |
-| `pnpm test` | Build, then run all Vitest tests |
-| `pnpm test:watch` | Start Vitest watch mode |
-| `pnpm check:deps` | Check workspace dependency boundaries and cycles |
-| `pnpm check` | Run dependency checks, typecheck and the full test suite |
+| [`@bflow/cli`](apps/cli) | Command-line interface (`bflow`) for initializing configs and managing workflow runs |
+| [`@bflow/runtime`](packages/runtime) | High-level orchestration service composing engine, storage, registry, transport, and gates |
+| [`@bflow/core`](packages/core) | Pure deterministic workflow engine (DAG scheduling, transitions, retry/rework, replay) |
+| [`@bflow/contracts`](packages/contracts) | Shared Zod schemas, public port interfaces, and transition/event validators |
+| [`@bflow/agent-registry`](packages/agent-registry) | File-backed role-to-agent registry, leases, fencing tokens, and workflow templates |
+| [`@bflow/herdr-adapter`](packages/herdr-adapter) | CLI-backed `AgentTransport` adapter for Herdr agent sessions |
+| [`@bflow/persistence`](packages/persistence) | SQLite `RunStore` for atomic event batches, execution receipts, and checkpoints |
+| [`@bflow/artifact-store`](packages/artifact-store) | Filesystem `ArtifactStore` with SQLite catalog and SHA-256 stream verification |
+| [`@bflow/quality-gates`](packages/quality-gates) | Preset command evaluators, workspace security policies, and RBAC governance |
 
-### Targeted tests
+---
 
-Build first: subprocess/worker tests load compiled modules from `dist/`. Rebuild after source changes before rerunning those tests, including during watch-mode development.
+## Development & Testing
+
+| Command | Description |
+| --- | --- |
+| `pnpm build` | Compile all workspace packages and CLI (`tsc -b`) |
+| `pnpm lint` | Validate dependency boundaries (`check:deps`) and TypeScript types across workspace & E2E suites |
+| `pnpm test` | Build packages and run all unit & integration tests (Vitest) |
+| `pnpm test:e2e` | Build packages and run end-to-end scenario tests (`tests/e2e`) |
+| `pnpm check` | Run dependency checks, typecheck, and the test suite |
+
+### Running Sharded or Targeted Tests
+
+Subprocess and worker tests load compiled modules from `dist/`, so run `pnpm build` before invoking `vitest` directly:
 
 ```bash
 pnpm build
 
-# P01: workflow engine
-pnpm exec vitest run packages/core/test
+# Run unit tests in shards (e.g. shard 1 of 4)
+pnpm exec vitest run --shard=1/4
 
-# P02: Herdr adapter and agent registry
-pnpm exec vitest run packages/herdr-adapter/test packages/agent-registry/test
+# Run E2E tests in shards (e.g. shard 1 of 2)
+pnpm exec vitest run --config tests/e2e/vitest.config.ts --shard=1/2
 
-# P03: SQLite persistence and filesystem artifacts
-pnpm exec vitest run packages/persistence/test/run-store.test.ts packages/artifact-store/test/artifact-store.test.ts
-
-# Quality gates and Runtime
-pnpm exec vitest run packages/quality-gates/test packages/runtime/test
+# Run tests for a single package
+pnpm exec vitest run packages/runtime/test
 ```
 
-For watch mode, run `pnpm build` followed by `pnpm test:watch`. No API key or live Herdr server is required for these tests. Passing tests do not establish live integration or full SDLC execution.
+---
 
-## Reliability boundaries and known follow-ups
+## CI/CD Pipeline
 
-- Core emits decisions/events; the caller must persist complete event batches before external side effects. RunStore's query projection is not a complete Core aggregate checkpoint. Runtime provides this composition.
-- Runtime + Herdr is not end-to-end: Core accepts a task result only for a bound handle with verified correlation, and the Herdr adapter's handles are unverified. See [known limitations](docs/guide/09-blocked-timeout-retry-resume.md#giới-hạn-đã-biết).
-- Registry resolution does not reserve capacity. Dispatch requires a current lease/fencing token. Registry durability is single-host/local-filesystem scoped; stale crash locks need operator review.
-- Herdr `done` and terminal snapshots are not verified business success. Unknown delivery forbids blind resend; adapter deduplication is instance-local, not cross-process exactly-once execution.
-- SQLite and artifact chunk ingest use synchronous operations that can block the event loop. A 64 KiB write buffer is not a 64 KiB total-RAM guarantee; native filesystem calls are not instantly cancellable.
-- SQLite, artifact publication and Herdr do not share an atomic transaction. Tombstones and orphan blobs require coordinated retention/cleanup. Power-loss, network filesystems, multi-host storage and hostile same-user continuous path swapping are **NOT VERIFIED**.
+GitHub Actions workflows are configured under [`.github/workflows/`](.github/workflows):
 
-Known open non-blocking P2 follow-ups from accepted audits:
+- **CI ([`ci.yml`](.github/workflows/ci.yml))** — Runs on every push and pull request:
+  1. **Lint & Build**: Validates package dependency boundaries (`pnpm lint`), compiles all packages (`pnpm build`), and uploads compiled `dist/` artifacts.
+  2. **Sharded Unit & Package Tests**: Runs the unit/package test suite in parallel across **4 shards** (`--shard=1/4` .. `4/4`).
+  3. **Sharded E2E Scenarios**: Runs the end-to-end test suite in parallel across **2 shards** (`--shard=1/2` .. `2/2`).
+- **CD ([`cd.yml`](.github/workflows/cd.yml))** — Triggers on version tags (`v*`) or manual dispatch:
+  - Runs lint and build verification, packs all `@bflow/*` workspace packages (`.tgz`), bundles the compiled distribution archive (`bflow-<tag>-dist.tar.gz`) with `SHA256SUMS.txt`, and publishes them to **GitHub Releases**.
 
-| ID | Owner / source | Remaining behavior |
-| --- | --- | --- |
-| P02-RA01 | Herdr adapter — [`runner.ts`](packages/herdr-adapter/src/runner.ts) | Native timer delays above 2,147,483,647 ms can overflow and time out too early; add chunked timers or explicit limit validation. |
-| P03-RA01 | ArtifactStore — [`filesystem-artifact-store.ts`](packages/artifact-store/src/filesystem-artifact-store.ts) | `get()` checks budget before awaited snapshot read, not immediately before yield; deadline/abort can lag one final output chunk (at most 64 KiB). Add a post-read check and boundary tests. |
+---
 
-These are OPEN, not FIXED. Consult package READMEs for storage/transport guarantees and limitations.
+## Documentation
 
-## Architecture and contributing
-
-Read [architecture](docs/architecture.md), [public contracts](docs/contracts.md), [accepted ADRs](docs/adr/) and [AGENTS.md](AGENTS.md) before changing a package. Use the latest approved integration baseline and actual exported contracts, not the original P00 bootstrap or an old phase prompt. Leaf modules depend on contracts; Runtime composes them through ports.
-
-Update this README, relevant package documentation and agent guidance alongside approved implementation changes. Shared documentation and contracts remain review-gated; do not change them silently to bypass an implementation blocker.
+- [User Guide (Vietnamese)](docs/guide/README.md)
+- [Architecture Overview](docs/architecture.md)
+- [Public Contracts](docs/contracts.md)
+- [Architecture Decision Records (ADRs)](docs/adr)
+- [Examples & Runtime Demo](examples/README.md)

@@ -11,7 +11,7 @@ import { Worker } from "node:worker_threads";
 import { createServer } from "node:net";
 import fsPromises from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
-import { ArtifactWriteOptionsSchema, type ArtifactReference, type OperationResult } from "@ai-flow/contracts";
+import { ArtifactWriteOptionsSchema, type ArtifactReference, type OperationResult } from "@bflow/contracts";
 import { openFilesystemArtifactStore, type FilesystemArtifactStore } from "../src/index.js";
 
 function value<T>(result: OperationResult<T>): T {
@@ -31,7 +31,7 @@ describe("Filesystem ArtifactStore", () => {
   let store: FilesystemArtifactStore;
   const stores: FilesystemArtifactStore[] = [];
   beforeEach(async () => {
-    directory = await mkdtemp(join(tmpdir(), "ai-flow-p03-artifacts-")); root = join(directory, "store");
+    directory = await mkdtemp(join(tmpdir(), "bflow-p03-artifacts-")); root = join(directory, "store");
     store = value(await openFilesystemArtifactStore({ root, storeId: "local" })); stores.push(store);
   });
   afterEach(async () => { for (const item of stores.splice(0)) item.close(); await rm(directory, { recursive: true, force: true }); });

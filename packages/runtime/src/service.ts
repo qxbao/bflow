@@ -27,7 +27,7 @@ import {
   type WorkflowDefinition,
   type WorkflowEngine,
   type WorkflowRunSnapshot
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import { TaskDispatcher } from "./dispatcher.js";
 import { SdlcWorkflowOrchestrator } from "./orchestrator.js";
 import { recoverWorkflowRun } from "./recovery.js";

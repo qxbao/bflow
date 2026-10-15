@@ -3,7 +3,7 @@
 `await openFilesystemArtifactStore({ root, storeId, busyTimeoutMs?, clock? })` returns an `OperationResult<FilesystemArtifactStore>` implementing all approved `ArtifactStore` methods. Call `close()` after active streams finish. The root is configured by the operator, never supplied by an agent/URI. New roots are private directories; existing roots must be canonical, without symlink ancestors, and not writable by other users.
 
 ```ts
-import { openFilesystemArtifactStore } from "@ai-flow/artifact-store";
+import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 const opened = await openFilesystemArtifactStore({ root: "/configured/artifacts", storeId: "local" });
 if (!opened.ok) throw new Error(opened.error.message);
 const store = opened.value;

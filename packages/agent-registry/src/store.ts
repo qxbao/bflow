@@ -1,8 +1,8 @@
 import { open, readFile, rename, unlink, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
-import { AgentConfigurationSchema, AgentLeaseSchema } from "@ai-flow/contracts";
-import type { AgentConfiguration, AgentLease, OperationOptions } from "@ai-flow/contracts";
+import { AgentConfigurationSchema, AgentLeaseSchema } from "@bflow/contracts";
+import type { AgentConfiguration, AgentLease, OperationOptions } from "@bflow/contracts";
 
 export interface StoredLease { lease: AgentLease; active: boolean }
 export interface StoredReceipt { fingerprint: string; kind: "lease" | "void"; lease?: AgentLease }

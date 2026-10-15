@@ -17,7 +17,7 @@ import type {
   CancellationResult,
   OperationOptions,
   OperationResult
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 
 export type FixtureDeliveryMode =
   | "accepted"

@@ -7,7 +7,7 @@ import type {
   DomainEvent,
   StartRunInput,
   WorkflowDefinition
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import { TaskDispatcher } from "../../src/dispatcher.js";
 import { createRuntimeService } from "../../src/service.js";
 import { createDomainEventStream, DefaultRunEventHub } from "../../src/stream.js";

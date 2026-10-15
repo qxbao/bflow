@@ -1,11 +1,11 @@
 import type { CliCommandName } from "./types.js";
 
-const GLOBAL_HELP = `Usage: flow <command> [options]
+const GLOBAL_HELP = `Usage: bflow <command> [options]
 
 Autonomous SDLC workflow orchestration CLI.
 
 Commands:
-  init       Initialize AI Flow repository configuration and default workflow
+  init       Initialize bflow repository configuration and default workflow
   run        Start a new workflow run with a requirement
   status     Query workflow run status or list runs
   approve    Record human approval, rejection, or rework request for a task
@@ -19,34 +19,34 @@ Global Options:
   -j, --json     Output response in JSON envelope format
 
 Examples:
-  flow init
-  flow run "Add user authentication feature"
-  flow status
-  flow status run-123
-  flow approve qa --decision approved
-  flow resume run-123
-  flow cancel run-123 --reason "Requirements changed"
+  bflow init
+  bflow run "Add user authentication feature"
+  bflow status
+  bflow status run-123
+  bflow approve qa --decision approved
+  bflow resume run-123
+  bflow cancel run-123 --reason "Requirements changed"
 
-Run 'flow help <command>' or 'flow <command> --help' for command-specific options.`;
+Run 'bflow help <command>' or 'bflow <command> --help' for command-specific options.`;
 
-const INIT_HELP = `Usage: flow init [options]
+const INIT_HELP = `Usage: bflow init [options]
 
-Initialize AI Flow repository configuration and default workflow.
+Initialize bflow repository configuration and default workflow.
 
 Options:
   --dir <path>          Target directory for initialization (default: current directory)
-  --config <path>       Custom configuration file path (default: .ai-flow/config.json)
+  --config <path>       Custom configuration file path (default: .bflow/config.json)
   --name <name>         Project name
   -f, --force, -y, --yes  Overwrite existing configuration if present
   -j, --json            Output response in JSON envelope format
   -h, --help            Show help for init command
 
 Examples:
-  flow init
-  flow init --name my-project
-  flow init --dir ./subproject --force`;
+  bflow init
+  bflow init --name my-project
+  bflow init --dir ./subproject --force`;
 
-const RUN_HELP = `Usage: flow run <requirement> [options]
+const RUN_HELP = `Usage: bflow run <requirement> [options]
 
 Start a new workflow run with a requirement.
 
@@ -56,17 +56,17 @@ Arguments:
 Options:
   --run-id <id>         Explicit run identifier
   -w, --workflow <path> Path to custom workflow definition JSON file
-  --config <path>       Path to configuration file (default: .ai-flow/config.json)
+  --config <path>       Path to configuration file (default: .bflow/config.json)
   --idempotency-key <key> Idempotency key for run creation
   -j, --json            Output response in JSON envelope format
   -h, --help            Show help for run command
 
 Examples:
-  flow run "Implement password reset flow"
-  flow run "Add billing webhook" --run-id run-42
-  flow run "Add caching" --workflow ./custom-workflow.json`;
+  bflow run "Implement password reset flow"
+  bflow run "Add billing webhook" --run-id run-42
+  bflow run "Add caching" --workflow ./custom-workflow.json`;
 
-const STATUS_HELP = `Usage: flow status [run-id] [options]
+const STATUS_HELP = `Usage: bflow status [run-id] [options]
 
 Query workflow run status or list runs.
 
@@ -82,12 +82,12 @@ Options:
   -h, --help            Show help for status command
 
 Examples:
-  flow status
-  flow status run-123
-  flow status --status waiting,blocked
-  flow status --limit 10`;
+  bflow status
+  bflow status run-123
+  bflow status --status waiting,blocked
+  bflow status --limit 10`;
 
-const APPROVE_HELP = `Usage: flow approve <task-id> [options]
+const APPROVE_HELP = `Usage: bflow approve <task-id> [options]
 
 Record human approval, rejection, or rework request for a task.
 
@@ -108,12 +108,12 @@ Options:
   -h, --help            Show help for approve command
 
 Examples:
-  flow approve qa
-  flow approve qa --run run-123 --decision approved
-  flow approve review --decision changes_requested --reason "Fix lint issues"
-  flow approve implement --decision rejected --reason "Feature cancelled"`;
+  bflow approve qa
+  bflow approve qa --run run-123 --decision approved
+  bflow approve review --decision changes_requested --reason "Fix lint issues"
+  bflow approve implement --decision rejected --reason "Feature cancelled"`;
 
-const RESUME_HELP = `Usage: flow resume <run-id> [options]
+const RESUME_HELP = `Usage: bflow resume <run-id> [options]
 
 Resume an active or waiting workflow run.
 
@@ -126,10 +126,10 @@ Options:
   -h, --help            Show help for resume command
 
 Examples:
-  flow resume run-123
-  flow resume run-123 --idempotency-key resume-key-1`;
+  bflow resume run-123
+  bflow resume run-123 --idempotency-key resume-key-1`;
 
-const CANCEL_HELP = `Usage: flow cancel <run-id> [options]
+const CANCEL_HELP = `Usage: bflow cancel <run-id> [options]
 
 Cancel an active workflow run or task.
 
@@ -148,9 +148,9 @@ Options:
   -h, --help            Show help for cancel command
 
 Examples:
-  flow cancel run-123
-  flow cancel run-123 --reason "Requirements changed"
-  flow cancel run-123 --task implement`;
+  bflow cancel run-123
+  bflow cancel run-123 --reason "Requirements changed"
+  bflow cancel run-123 --task implement`;
 
 const HELP_MAP: Record<CliCommandName, string> = {
   init: INIT_HELP,

@@ -4,7 +4,7 @@ import {
   type DomainEvent,
   type OperationResult,
   type RunStore
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 
 export interface RunEventHub {
   publish(runId: string, events: readonly DomainEvent[]): void;

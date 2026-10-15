@@ -9,7 +9,7 @@ export type {
   WorkflowDefinition,
   WorkflowEngine,
   WorkflowRunSnapshot
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 
 export { DeterministicWorkflowEngine } from "./workflow-engine.js";
 export type { DeterministicWorkflowEngineOptions } from "./workflow-engine.js";

@@ -19,7 +19,7 @@ import type {
   AgentLease,
   OperationResult,
   WorkflowDefinition
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import { createRuntimeService } from "../../src/service.js";
 import { createTestHarness } from "../unit/fixtures.js";
 

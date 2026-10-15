@@ -5,7 +5,7 @@ import type {
   TaskState,
   WorkflowDefinition,
   WorkflowRunSnapshot
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 
 export interface GateOutcome {
   readonly taskId?: string;

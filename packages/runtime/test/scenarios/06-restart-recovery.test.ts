@@ -3,7 +3,7 @@
  *
  * Verifies that:
  * 1. A new RuntimeService instance reconstructs state from SQLite RunStore using
- *    an aggregate checkpoint (`ai-flow.workflow-aggregate+json` codec) + event tail replay
+ *    an aggregate checkpoint (`bflow.workflow-aggregate+json` codec) + event tail replay
  *    from `eventTailCursor`.
  * 2. In-flight bound executions are reconciled with AgentTransport and active execution
  *    maps are re-established.
@@ -14,14 +14,14 @@
 
 import { describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
-import { DeterministicWorkflowEngine } from "@ai-flow/core";
+import { DeterministicWorkflowEngine } from "@bflow/core";
 import type {
   AgentExecutionHandle,
   AgentReconciliationRequest,
   AgentReconciliationResult,
   OperationResult,
   WorkflowDefinition
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import { createRuntimeService } from "../../src/service.js";
 import { eventTailCursor, recoverWorkflowRun } from "../../src/recovery.js";
 import {
@@ -296,7 +296,7 @@ describe("Scenario 6: Restart Recovery & Aggregate Replay", { timeout: 30000 }, 
         state: startSnap,
         createdAt: new Date().toISOString(),
         codec: {
-          name: "ai-flow.workflow-run-snapshot+json" as const,
+          name: "bflow.workflow-run-snapshot+json" as const,
           version: 1 as const
         }
       };

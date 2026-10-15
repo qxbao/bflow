@@ -11,7 +11,7 @@ export type {
   CancellationRequest,
   CancellationResult,
   OperationOptions
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 export { createHerdrAdapter, HerdrCliTransport } from "./adapter.js";
 export type { HerdrAdapterOptions, HerdrStartRequest } from "./adapter.js";
 export { createProcessRunner } from "./runner.js";

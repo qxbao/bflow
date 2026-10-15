@@ -23,7 +23,7 @@ const aggregate = {
   successfulAttempts: [], cancellations: [], retrySchedules: [], attemptBaselines: [], commands: []
 };
 const checkpoint = {
-  checkpointSchemaVersion: 1, codec: { name: "ai-flow.workflow-aggregate+json", version: 1 },
+  checkpointSchemaVersion: 1, codec: { name: "bflow.workflow-aggregate+json", version: 1 },
   checkpointId: "checkpoint-1", runId: "run-1", eventSequence: 2, version: 2,
   state: aggregate, createdAt: now
 };
@@ -63,7 +63,7 @@ describe("P01 remediation contracts", () => {
     expect(parseRecoveryCheckpointWithCompatibility({ ...checkpoint, checkpointSchemaVersion: 9 }))
       .toMatchObject({ ok: false, error: { code: "unsupported_version" } });
     expect(decodeWorkflowAggregateCheckpointState(RecoveryCheckpointSchema.parse({
-      ...checkpoint, codec: { name: "ai-flow.workflow-run-snapshot+json", version: 1 }
+      ...checkpoint, codec: { name: "bflow.workflow-run-snapshot+json", version: 1 }
     }))).toMatchObject({ ok: false, error: { code: "validation" } });
   });
 

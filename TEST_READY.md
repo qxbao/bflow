@@ -2,10 +2,10 @@
 
 ## 1. Executive Summary
 
-Milestone 2 (`M2`) delivers an end-to-end, zero-mock integration test suite for `@ai-flow/runtime` covering all 8 comprehensive SDLC workflow scenarios, augmented by Tier 5 white-box adversarial stress suites (`challenger-m3-1-stress.test.ts` and `challenger-m3-2-stress.test.ts`).
+Milestone 2 (`M2`) delivers an end-to-end, zero-mock integration test suite for `@bflow/runtime` covering all 8 comprehensive SDLC workflow scenarios, augmented by Tier 5 white-box adversarial stress suites (`challenger-m3-1-stress.test.ts` and `challenger-m3-2-stress.test.ts`).
 
 - **Status**: **READY — 100% PASSING (27/27 Tests across 8 Scenario Suites, 528/528 Tests Workspace-wide across 34 Test Files)**
-- **Scope**: `@ai-flow/runtime` integration with `@ai-flow/contracts`, `@ai-flow/core`, `@ai-flow/persistence`, `@ai-flow/artifact-store`, `@ai-flow/agent-registry`, and `@ai-flow/herdr-adapter`.
+- **Scope**: `@bflow/runtime` integration with `@bflow/contracts`, `@bflow/core`, `@bflow/persistence`, `@bflow/artifact-store`, `@bflow/agent-registry`, and `@bflow/herdr-adapter`.
 - **Integrity Compliance**: Zero fake facades, zero hardcoded test returns, zero test skipping (`.skip`/`.todo`). Every test exercises real `SqliteRunStore` via `node:sqlite`, real `FilesystemArtifactStore`, real `FileAgentRegistry` JSON state on disk, real `DeterministicWorkflowEngine`, and deterministic contract-compliant `FakeAgentTransport`.
 - **Concurrency & Contention Resilience**: Configured with 30s suite timeouts and decoupled capacity lease TTLs, surviving parallel test runner execution without timeout aborts or lease expiration races.
 
@@ -19,7 +19,7 @@ npx vitest run packages/runtime/test/scenarios
 ```
 Or via pnpm workspace filter:
 ```bash
-pnpm --filter @ai-flow/runtime test test/scenarios/
+pnpm --filter @bflow/runtime test test/scenarios/
 ```
 
 ### 2.2 Run Individual Scenarios
@@ -69,7 +69,7 @@ git status --short  # Verify clean working tree (Empty output)
 | **03** | `03-qa-failure.test.ts` | **4** | • **3.1 & 3.2**: QA fails on Attempt 1, ingests findings into ArtifactStore, schedules retry and increments attempt to 2.<br>• **3.3**: Retry Attempt 2 succeeds, transitions to `succeeded` and reaches pre-merge approval hold.<br>• **3.4**: Retry exhaustion under `fail-fast` transitions run to `failed` with persisted evidence and released leases.<br>• **3.5**: Retry exhaustion under `block` failure policy transitions run to `blocked` for operator diagnosis. |
 | **04** | `04-blocked-agent.test.ts` | **3** | • **4.1**: Agent reports blockage (`external_dependency`), task transitions to `blocked` without consuming retries, run transitions to `blocked`.<br>• **4.2**: Calling unblock and resume resumes execution to completion.<br>• **4.3**: Operator can cancel a blocked run cleanly. |
 | **05** | `05-timeout-reconciliation.test.ts` | **4** | • **5.1 & 5.2**: On `unknown_delivery`, reconcile proves `not_delivered`; lease is preserved, prompt re-sent safely and bound.<br>• **5.3**: On `unknown_delivery`, reconcile proves `delivered` (bound handle); zero duplicate send, execution bound.<br>• **5.4**: On `unknown_delivery`, reconcile also returns `unknown_delivery` -> transitions task to `blocked` for operator intervention.<br>• **5.5**: Task execution timeout with `onTimeout: 'block'` transitions task and run to `blocked` with decoupled capacity lease TTL. |
-| **06** | `06-restart-recovery.test.ts` | **3** | • **6.1**: Reconstructs state from SQLite RunStore using aggregate checkpoint (`ai-flow.workflow-aggregate+json` v1 codec) + event tail replay, reconciles in-flight execution, and resumes to completion.<br>• **6.2**: Recovers workflow run from complete event history across restarts when no aggregate checkpoint exists.<br>• **6.3**: Fails closed with typed validation error when checkpoint codec is invalid or incompatible. |
+| **06** | `06-restart-recovery.test.ts` | **3** | • **6.1**: Reconstructs state from SQLite RunStore using aggregate checkpoint (`bflow.workflow-aggregate+json` v1 codec) + event tail replay, reconciles in-flight execution, and resumes to completion.<br>• **6.2**: Recovers workflow run from complete event history across restarts when no aggregate checkpoint exists.<br>• **6.3**: Fails closed with typed validation error when checkpoint codec is invalid or incompatible. |
 | **07** | `07-persistence-failure.test.ts` | **4** | • **7.1**: SQLite `appendEvents` write failure surfaces typed conflict/corruption error without corrupting run state; idempotent retry succeeds.<br>• **7.2**: `ArtifactStore.put` failure during proposal ingestion halts execution with ZERO false task success claims.<br>• **7.3**: Checkpoint save failure surfaces conflict error without invalidating domain event history or aggregate state.<br>• **7.4**: Optimistic concurrency conflict on parallel event appends preserves strict linear history. |
 | **08** | `08-dag-concurrency.test.ts` | **4** | • **8.1**: Enforces strict topological dependency ordering in Diamond DAG (join task waits for both siblings).<br>• **8.2**: Workflow `maxConcurrency` limit bounds parallel task dispatch.<br>• **8.3**: Agent registry capacity limit (`maxConcurrentTasks: 1`) and monotonic fencing tokens prevent slot over-subscription.<br>• **8.4**: Upstream sibling failure under fail-fast safely halts dependent DAG join branch. |
 | **Subtotal** | **8 Scenario Files** | **27** | **100% Pass Rate Across All 27 Scenarios** |

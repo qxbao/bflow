@@ -10,7 +10,7 @@ import {
   type DomainEvent,
   type OperationResult,
   type TaskState
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 
 type TaskDispatchRequestedEvent = Extract<DomainEvent, { type: "task.dispatch_requested" }>;
 

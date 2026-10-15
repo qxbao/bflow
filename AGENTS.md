@@ -4,7 +4,7 @@ This repository is designed for five implementation agents working in isolated G
 
 ## Current implementation context
 
-Contracts, the deterministic Core workflow engine, Herdr CLI adapter, file-backed Agent Registry, SQLite RunStore and filesystem ArtifactStore are implemented. Quality-gates, Runtime and CLI currently expose types only; there are no quality evaluators, RuntimeService composition or executable application commands yet. Do not replace implemented modules with bootstrap scaffolds or claim an end-to-end workflow is available. See [README.md](README.md) for module status and runnable commands, and package READMEs for guarantees and limitations.
+Contracts, the deterministic Core workflow engine, Herdr CLI adapter, file-backed Agent Registry, SQLite RunStore, filesystem ArtifactStore, Quality-gates, RuntimeService and CLI (`bflow`) are implemented. Do not replace implemented modules with bootstrap scaffolds or claim live Herdr end-to-end verification without evidence. See [README.md](README.md) for package status and runnable commands, and package READMEs for guarantees and limitations.
 
 ## Stable boundary
 
@@ -12,7 +12,7 @@ Contracts, the deterministic Core workflow engine, Herdr CLI adapter, file-backe
 
 The accepted hardening contracts and [ADR 0001](docs/adr/0001-p00-contract-hardening.md) supersede the original bootstrap at `8d960d0`. [ADR 0002](docs/adr/0002-p01-recovery-rework.md) adds the approved recovery receipts, aggregate checkpoint codec and bounded rework semantics. New branches must start from the latest approved integration baseline containing the required predecessor implementations and accepted contract amendments, not merely the old hardening commit. Actual exported contracts are authoritative; no implementation owner may silently restore older method signatures or event shapes.
 
-All exchanged data must be parsed at an ingress boundary with the exported Zod schema. Type assertions do not replace runtime validation. Implementations may define private internal models, but data that crosses a package boundary must use `@ai-flow/contracts`.
+All exchanged data must be parsed at an ingress boundary with the exported Zod schema. Type assertions do not replace runtime validation. Implementations may define private internal models, but data that crosses a package boundary must use `@bflow/contracts`.
 
 ## Ownership for parallel implementation
 

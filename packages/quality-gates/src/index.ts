@@ -3,14 +3,14 @@ export {
   QualityGateContextSchema,
   QualityGateDefinitionSchema,
   QualityGateResultSchema
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 export type {
   QualityFinding,
   QualityGate,
   QualityGateContext,
   QualityGateDefinition,
   QualityGateResult
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 
 export {
   QUALITY_CHECK_KINDS,

@@ -87,7 +87,7 @@ const resumed = await service.resume("feat-001");
 `resume` làm như sau khi engine chưa có run trong bộ nhớ:
 
 1. Đọc run và definition từ RunStore.
-2. Nạp checkpoint mới nhất. Chỉ chấp nhận codec `ai-flow.workflow-aggregate+json` v1; codec khác → `validation` (fail closed). Không có checkpoint → phát lại toàn bộ event từ `run.created`.
+2. Nạp checkpoint mới nhất. Chỉ chấp nhận codec `bflow.workflow-aggregate+json` v1; codec khác → `validation` (fail closed). Không có checkpoint → phát lại toàn bộ event từ `run.created`.
 3. Phát lại event sau checkpoint qua `engine.recover`.
 4. Với mỗi task `running`/`cancelling` đã bind, gọi `transport.reconcile` và ghi kết quả `bound`.
 5. Gọi `driveRun`.

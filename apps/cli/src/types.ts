@@ -10,8 +10,8 @@ import type {
   StartRunInput,
   WorkflowDefinition,
   WorkflowRunSnapshot
-} from "@ai-flow/contracts";
-import type { ConcreteRuntimeService } from "@ai-flow/runtime";
+} from "@bflow/contracts";
+import type { ConcreteRuntimeService } from "@bflow/runtime";
 
 export type CliCommandName =
   | "init"
@@ -119,7 +119,7 @@ export type ParseCliResult =
       readonly json: boolean;
     };
 
-export interface FlowRepositoryConfig {
+export interface BflowRepositoryConfig {
   readonly schemaVersion: "1";
   readonly projectName: string;
   readonly runtimeId: string;
@@ -132,9 +132,11 @@ export interface FlowRepositoryConfig {
   readonly defaultWorkflow: WorkflowDefinition;
 }
 
+export type FlowRepositoryConfig = BflowRepositoryConfig;
+
 export interface InitCommandOutput {
   readonly configPath: string;
-  readonly config: FlowRepositoryConfig;
+  readonly config: BflowRepositoryConfig;
   readonly overwritten: boolean;
 }
 

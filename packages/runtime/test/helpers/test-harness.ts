@@ -9,11 +9,11 @@ import type {
   QualityGateContext,
   QualityGateResult,
   WorkflowDefinition
-} from "@ai-flow/contracts";
-import { openSqliteRunStore, type SqliteRunStore } from "@ai-flow/persistence";
-import { openFilesystemArtifactStore, type FilesystemArtifactStore } from "@ai-flow/artifact-store";
-import { FileAgentRegistry } from "@ai-flow/agent-registry";
-import { DeterministicWorkflowEngine } from "@ai-flow/core";
+} from "@bflow/contracts";
+import { openSqliteRunStore, type SqliteRunStore } from "@bflow/persistence";
+import { openFilesystemArtifactStore, type FilesystemArtifactStore } from "@bflow/artifact-store";
+import { FileAgentRegistry } from "@bflow/agent-registry";
+import { DeterministicWorkflowEngine } from "@bflow/core";
 import {
   createRuntimeService,
   type ConcreteRuntimeService,
@@ -89,7 +89,7 @@ export interface TestHarness {
  */
 export async function createTestHarness(options?: TestHarnessOptions): Promise<TestHarness> {
   const clock = options?.clock;
-  const tmpDir = await mkdtemp(join(tmpdir(), "ai-flow-runtime-scenario-"));
+  const tmpDir = await mkdtemp(join(tmpdir(), "bflow-runtime-scenario-"));
   const dbPath = join(tmpDir, "run-store.db");
   const artifactsPath = join(tmpDir, "artifacts");
   const registryPath = join(tmpDir, "registry.json");

@@ -6,7 +6,7 @@ import {
 } from "./fixtures.js";
 import { TaskDispatcher } from "../../src/dispatcher.js";
 import { SdlcWorkflowOrchestrator, isHumanApprover } from "../../src/orchestrator.js";
-import type { WorkflowDefinition, WorkflowRunSnapshot } from "@ai-flow/contracts";
+import type { WorkflowDefinition, WorkflowRunSnapshot } from "@bflow/contracts";
 
 async function setupWorkflowRun(
   harness: any,

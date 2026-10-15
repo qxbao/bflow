@@ -48,7 +48,7 @@ Agent làm việc ngoài Runtime. Khi có kết quả đã được xác minh, b
 
 ```ts
 import { createHash } from "node:crypto";
-import type { ArtifactProposal } from "@ai-flow/contracts";
+import type { ArtifactProposal } from "@bflow/contracts";
 
 const content = "# Plan\n...";
 const bytes = Buffer.from(content, "utf8");

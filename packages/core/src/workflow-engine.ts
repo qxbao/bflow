@@ -46,7 +46,7 @@ import {
   type WorkflowDefinition,
   type WorkflowEngine,
   type WorkflowRunSnapshot
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import {
   approvalKey,
   buildDependencyIndex,
@@ -994,7 +994,7 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
     let snapshot: WorkflowRunSnapshot | undefined;
     let checkpointState: WorkflowAggregateCheckpointState | undefined;
     if (data.checkpoint !== undefined) {
-      if (data.checkpoint.codec.name === "ai-flow.workflow-aggregate+json") {
+      if (data.checkpoint.codec.name === "bflow.workflow-aggregate+json") {
         const decoded = decodeWorkflowAggregateCheckpointState(data.checkpoint);
         if (!decoded.ok) return failure(decoded.error);
         checkpointState = decoded.value;
@@ -1147,7 +1147,7 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
     const state = this.#checkpointState(aggregate);
     const checkpoint = RecoveryCheckpointSchema.safeParse({
       checkpointSchemaVersion: 1,
-      codec: { name: "ai-flow.workflow-aggregate+json", version: 1 },
+      codec: { name: "bflow.workflow-aggregate+json", version: 1 },
       checkpointId: parsed.data.checkpointId,
       runId: parsed.data.runId,
       eventSequence: aggregate.snapshot.lastEventSequence,

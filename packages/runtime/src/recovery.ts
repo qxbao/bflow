@@ -11,7 +11,7 @@ import {
   type RunStore,
   type WorkflowEngine,
   type WorkflowRunSnapshot
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 
 export interface WorkflowRecoveryResult {
   readonly snapshot: WorkflowRunSnapshot;
@@ -82,7 +82,7 @@ export async function recoverWorkflowRun(
     if (!parsedCp.ok) return parsedCp as OperationResult<WorkflowRecoveryResult>;
 
     // Reject non-aggregate codec for tail recovery
-    if (checkpoint.codec.name !== "ai-flow.workflow-aggregate+json" || checkpoint.codec.version !== 1) {
+    if (checkpoint.codec.name !== "bflow.workflow-aggregate+json" || checkpoint.codec.version !== 1) {
       return {
         ok: false,
         error: {

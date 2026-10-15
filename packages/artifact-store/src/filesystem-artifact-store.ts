@@ -7,7 +7,7 @@ import {
   ArtifactIdSchema, ArtifactQuerySchema, ArtifactReferenceSchema, ArtifactWriteOptionsSchema,
   type ArtifactQuery, type ArtifactReference, type ArtifactStore, type ArtifactWrite,
   type OperationOptions, type OperationResult, type Page
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import { openCatalog } from "./catalog.js";
 import { SafeRoot } from "./filesystem.js";
 import { Budget, afterCursor, conflict, cursor, digest, fail, failure, fingerprint, parse, storedJson } from "./support.js";

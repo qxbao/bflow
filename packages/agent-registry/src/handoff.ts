@@ -9,7 +9,7 @@ import {
   type JsonValue,
   type OperationOptions,
   type OperationResult
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import { isMvpRole, type MvpRole } from "./roles.js";
 
 export type ArtifactKind = ArtifactReference["kind"];

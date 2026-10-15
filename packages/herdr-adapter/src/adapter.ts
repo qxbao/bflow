@@ -12,13 +12,13 @@ import {
   AgentTransportObservationSchema,
   CancellationRequestSchema,
   CancellationResultSchema
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import type {
   AgentExecutionHandle, AgentMessage, AgentReadOptions, AgentReconciliationRequest, AgentReconciliationResult,
   AgentRequest, AgentSubmissionReceipt, AgentTargetLocator, AgentTransport, AgentTransportCapabilities,
   AgentTransportInitialization, AgentTransportObservation, AgentWaitOptions, CancellationRequest,
   CancellationResult, ContractError, OperationOptions, OperationResult
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import { HerdrProtocolError, parseAgentResult, parseCliError, parseHerdrResponse } from "./protocol.js";
 import type { HerdrAgentInfo } from "./protocol.js";
 import { createProcessRunner, validArguments } from "./runner.js";

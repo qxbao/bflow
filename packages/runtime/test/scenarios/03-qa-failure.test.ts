@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { JsonValueSchema, type ArtifactProposal, type WorkflowDefinition } from "@ai-flow/contracts";
+import { JsonValueSchema, type ArtifactProposal, type WorkflowDefinition } from "@bflow/contracts";
 import { TaskDispatcher } from "../../src/dispatcher.js";
 import { SdlcWorkflowOrchestrator } from "../../src/orchestrator.js";
 import { createSampleWorkflowDefinition, createTestHarness } from "../unit/fixtures.js";

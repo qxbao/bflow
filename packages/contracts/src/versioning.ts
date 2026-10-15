@@ -75,7 +75,7 @@ export function parseRecoveryCheckpointWithCompatibility(input: unknown): Operat
       ? {
           ...record,
           checkpointSchemaVersion: CURRENT_CHECKPOINT_SCHEMA_VERSION,
-          codec: { name: "ai-flow.workflow-run-snapshot+json", version: 1 }
+          codec: { name: "bflow.workflow-run-snapshot+json", version: 1 }
         }
       : record;
   const parsed = RecoveryCheckpointSchema.safeParse(candidate);
@@ -87,7 +87,7 @@ export function parseRecoveryCheckpointWithCompatibility(input: unknown): Operat
 export function decodeWorkflowRunCheckpointState(
   checkpoint: RecoveryCheckpoint
 ): OperationResult<WorkflowRunSnapshot> {
-  if (checkpoint.codec.name !== "ai-flow.workflow-run-snapshot+json" || checkpoint.codec.version !== 1) {
+  if (checkpoint.codec.name !== "bflow.workflow-run-snapshot+json" || checkpoint.codec.version !== 1) {
     return validationFailure("checkpoint codec is not supported by the workflow snapshot decoder");
   }
   const parsed = WorkflowRunSnapshotSchema.safeParse(checkpoint.state);
@@ -108,7 +108,7 @@ export function decodeWorkflowRunCheckpointState(
 export function decodeWorkflowAggregateCheckpointState(
   checkpoint: RecoveryCheckpoint
 ): OperationResult<WorkflowAggregateCheckpointState> {
-  if (checkpoint.codec.name !== "ai-flow.workflow-aggregate+json" || checkpoint.codec.version !== 1) {
+  if (checkpoint.codec.name !== "bflow.workflow-aggregate+json" || checkpoint.codec.version !== 1) {
     return validationFailure("checkpoint codec is not supported by the workflow aggregate decoder");
   }
   const parsed = WorkflowAggregateCheckpointStateSchema.safeParse(checkpoint.state);

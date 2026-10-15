@@ -1,11 +1,11 @@
 import {
   AcquireAgentLeaseRequestSchema, AgentConfigurationSchema, AgentLeaseSchema,
   AgentResolutionContextSchema, IdentifierSchema, ReleaseAgentLeaseRequestSchema, RenewAgentLeaseRequestSchema
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import type {
   AcquireAgentLeaseRequest, AgentConfiguration, AgentLease, AgentRegistry, AgentResolutionContext,
   ContractError, OperationOptions, OperationResult, ReleaseAgentLeaseRequest, RenewAgentLeaseRequest
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import { FileRegistryStore, RegistryLockTimeout, RegistryOptionsError } from "./store.js";
 import type { RegistryState, StoredReceipt } from "./store.js";
 

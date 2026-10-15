@@ -8,7 +8,7 @@ import {
   type ContractError,
   type OperationResult,
   type QualityGateResult
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import * as path from "node:path";
 
 function createValidationError(message: string): ContractError {

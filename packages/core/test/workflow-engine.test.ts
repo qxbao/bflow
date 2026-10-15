@@ -7,7 +7,7 @@ import type {
   TaskDependency,
   WorkflowAdvanceResult,
   WorkflowDefinition
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import { DeterministicWorkflowEngine } from "../src/index.js";
 
 const time = "2026-10-13T00:00:00.000Z";
@@ -276,7 +276,7 @@ describe("DeterministicWorkflowEngine", () => {
       runId: "run-1",
       checkpoint: {
         checkpointSchemaVersion: 1,
-        codec: { name: "ai-flow.workflow-run-snapshot+json", version: 1 },
+        codec: { name: "bflow.workflow-run-snapshot+json", version: 1 },
         checkpointId: "checkpoint-1",
         runId: "run-1",
         eventSequence: checkpointState.lastEventSequence,

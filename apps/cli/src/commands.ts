@@ -10,8 +10,8 @@ import {
   type ContractError,
   type WorkflowDefinition,
   type WorkflowRunSnapshot
-} from "@ai-flow/contracts";
-import { isHumanApprover } from "@ai-flow/runtime";
+} from "@bflow/contracts";
+import { isHumanApprover } from "@bflow/runtime";
 import {
   createDefaultWorkflowDefinition,
   initRepositoryConfig,

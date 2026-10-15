@@ -17,7 +17,7 @@ During the design, implementation, and execution of the P08 End-to-End Integrati
 | **P06-PrematureCancel** | P1 (High) | `packages/runtime` | `src/service.ts` | Runtime keeps bound tasks in `"cancelling"` when `transport.cancel` returns `accepted` without confirmed remote stop, transitioning to `"cancelled"` only after stop is confirmed. | `e07-cancellation.e2e.test.ts` (Probe PrematureCancel, **REMEDIATED / PASS**) |
 | **PM-08** | Contract Decision | `packages/quality-gates` / `runtime` | Contracts / `orchestrator.ts` | `QualityGateContext` does not carry `evaluationId`; `WorkflowOrchestrator` coordinates and overrides the returned result's `evaluationId` to match `quality_gate.evaluation_requested` before persistence. | `e05-quality-gates.e2e.test.ts` (Observation PM-08, **PASS**) |
 | **PM-11** | P1 (High) | `packages/runtime` | `src/service.ts` | Runtime checks `transport.cancel` outcome and propagates transport failure without falsely confirming cancellation stop. | `e07-cancellation.e2e.test.ts` (Probe PM-11, **REMEDIATED / PASS**) |
-| **PM-12** | P1 (High) | `apps/cli` | `src/bin.ts` | CLI entrypoint composes `RuntimeService` from `.ai-flow/config.json` (falling back to fail-closed unconfigured context when no config exists) and executes `init`, `run`, `status`, and `cancel` end-to-end. | `e09-cli.e2e.test.ts` (**REMEDIATED / PASS**) |
+| **PM-12** | P1 (High) | `apps/cli` | `src/bin.ts` | CLI entrypoint composes `RuntimeService` from `.bflow/config.json` (falling back to fail-closed unconfigured context when no config exists) and executes `init`, `run`, `status`, and `cancel` end-to-end. | `e09-cli.e2e.test.ts` (**REMEDIATED / PASS**) |
 | **PM-13** | P3 (Low) | `apps/cli` | `src/parser.ts` / `src/commands.ts` | CLI handles `--version` / `-V` and exits with code 0 and a valid semver string. | `e09-cli.e2e.test.ts` (Probe PM-13, **REMEDIATED / PASS**) |
 | **P02-SyntheticRef** | P2 (Medium) | `packages/agent-registry` | `src/feature-example.ts` | `buildCompleteFeatureWorkflowExample` requires a real `ArtifactStore` (failing closed with `validation` when omitted) and ingests all stage proposals into genuine `trust: "stored"` references. | `e10-failure-injection.e2e.test.ts` (**REMEDIATED / PASS**) |
 
@@ -62,7 +62,7 @@ During the design, implementation, and execution of the P08 End-to-End Integrati
 
 ### 8. PM-12 & PM-13: CLI Runtime Composition and `--version` Support — REMEDIATED
 - **Component**: `apps/cli/src/bin.ts`, `apps/cli/src/parser.ts`, `apps/cli/src/commands.ts`
-- **Resolution**: `apps/cli` supports `--version` / `-V` (exiting 0 with semver output) and composes `RuntimeService` in `bin.ts` when `.ai-flow/config.json` is present while failing closed when unconfigured.
+- **Resolution**: `apps/cli` supports `--version` / `-V` (exiting 0 with semver output) and composes `RuntimeService` in `bin.ts` when `.bflow/config.json` is present while failing closed when unconfigured.
 - **Verification**: `e09-cli.e2e.test.ts` (7/7 **PASS**).
 
 ### 9. P02-SyntheticRef: Registry Feature Example Requires Real ArtifactStore — REMEDIATED
@@ -79,12 +79,12 @@ During the design, implementation, and execution of the P08 End-to-End Integrati
    - Sudden OS kernel panics, unbuffered physical power loss before SQLite WAL `fsync`, network filesystem split-brain semantics, and multi-host execution remain **`NOT VERIFIED`** without physical or virtualization fault injection.
 
 2. **Live Herdr Daemon Boundary**:
-   - The P08 E2E suite runs deterministically offline using `FixtureAgentTransport` (in E01–E08, E10) and an executable mock-herdr CLI script via `AI_FLOW_HERDR_BIN` (in E09).
+   - The P08 E2E suite runs deterministically offline using `FixtureAgentTransport` (in E01–E08, E10) and an executable mock-herdr CLI script via `BFLOW_HERDR_BIN` (in E09).
    - Live Herdr daemon connectivity, Socket.IO streaming, and external terminal multiplexer session lifecycle against a running Herdr server remain **`NOT VERIFIED`** in this offline suite.
 
 3. **Artifact Proposal Trust Boundary & E08 Symlink/Special Device Coverage**:
    - Agent proposals and quality gate outputs are strictly `ArtifactProposal` values; trusted `ArtifactReference` instances (`trust: "stored"`) originate only from `ArtifactStore`.
-   - E08 verifies path traversal rejection, SHA-256 integrity checks, proposal trust boundaries, and on-disk blob tampering detection. Rejection of raw symlinks and special character/block devices is verified at the storage layer in `@ai-flow/artifact-store` (P03).
+   - E08 verifies path traversal rejection, SHA-256 integrity checks, proposal trust boundaries, and on-disk blob tampering detection. Rejection of raw symlinks and special character/block devices is verified at the storage layer in `@bflow/artifact-store` (P03).
 
 4. **Cross-Port Distributed Atomicity**:
    - E10 verifies OCC version/sequence conflict detection, pre-validation batch rejection, checkpoint immutability/corruption detection, receipt collision (`bindAgentExecution` / `recordDeliveryReconciliation`), session replacement / stale execution fencing, and fail-closed artifact publication before `agent.result_recorded` is committed.

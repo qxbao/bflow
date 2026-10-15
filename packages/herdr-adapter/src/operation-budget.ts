@@ -1,4 +1,4 @@
-import type { OperationOptions, OperationResult } from "@ai-flow/contracts";
+import type { OperationOptions, OperationResult } from "@bflow/contracts";
 
 /** Normalize a relative timeout once, so every substep shares one deadline. */
 export function operationBudget<T extends OperationOptions>(

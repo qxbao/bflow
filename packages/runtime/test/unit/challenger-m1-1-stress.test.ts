@@ -9,7 +9,7 @@ import { TaskDispatcher } from "../../src/dispatcher.js";
 import { SdlcWorkflowOrchestrator, isHumanApprover } from "../../src/orchestrator.js";
 import { recoverWorkflowRun } from "../../src/recovery.js";
 import { AsyncQueue, createDomainEventStream, DefaultRunEventHub } from "../../src/stream.js";
-import type { ArtifactProposal, WorkflowRunSnapshot, WorkflowDefinition } from "@ai-flow/contracts";
+import type { ArtifactProposal, WorkflowRunSnapshot, WorkflowDefinition } from "@bflow/contracts";
 
 async function setupRun(harness: any, runId: string, def: WorkflowDefinition = createSampleWorkflowDefinition()) {
   await harness.engine.validateDefinition(def);
@@ -565,7 +565,7 @@ describe("Challenger M1.1 Empirical Adversarial Stress Suite", { timeout: 30000 
             runId: runId2,
             eventSequence: snapshot.lastEventSequence,
             version: snapshot.version,
-            codec: { name: "ai-flow.workflow-run-snapshot+json", version: 1 },
+            codec: { name: "bflow.workflow-run-snapshot+json", version: 1 },
             state: snapshot as any,
             createdAt: new Date().toISOString()
           },

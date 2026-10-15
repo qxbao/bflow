@@ -10,7 +10,7 @@ import {
   type RetryPolicy,
   type TimeoutPolicy,
   type WorkflowDefinition
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import { isMvpRole, parseRoleAgentSettings, type MvpRole } from "./roles.js";
 
 export const WORKFLOW_KINDS = ["feature", "bugfix", "refactor"] as const;

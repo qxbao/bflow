@@ -1,10 +1,10 @@
-import type { OperationOptions, OperationResult } from "@ai-flow/contracts";
+import type { OperationOptions, OperationResult } from "@bflow/contracts";
 import {
   openWorkspaceRuntime,
   type ConcreteRuntimeService
-} from "@ai-flow/runtime";
+} from "@bflow/runtime";
 import { loadRepositoryConfig, resolveConfigPath } from "./config.js";
-import type { FlowRepositoryConfig } from "./types.js";
+import type { BflowRepositoryConfig } from "./types.js";
 
 export interface ComposeCliRuntimeOptions {
   readonly cwd?: string | undefined;
@@ -16,7 +16,7 @@ export interface ComposeCliRuntimeOptions {
 
 export interface ComposedCliRuntime {
   readonly runtime: ConcreteRuntimeService;
-  readonly config: FlowRepositoryConfig;
+  readonly config: BflowRepositoryConfig;
   readonly configPath: string;
   close(): Promise<void>;
 }

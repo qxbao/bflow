@@ -2,7 +2,7 @@
 
 ## Scope
 
-P00 defines module boundaries, validated exchange data, public ports, and pure invariants for AI Flow SDLC. It does not implement scheduling, a Herdr adapter, SQLite persistence, artifact I/O, leases, quality command execution, recovery, CLI behavior, or end-to-end workflows.
+P00 defines module boundaries, validated exchange data, public ports, and pure invariants for bflow. It does not implement scheduling, a Herdr adapter, SQLite persistence, artifact I/O, leases, quality command execution, recovery, CLI behavior, or end-to-end workflows.
 
 The first deployment remains a module-first Node.js process. Herdr is an external execution mechanism reached only through `AgentTransport`; core contracts contain no Herdr wire types.
 

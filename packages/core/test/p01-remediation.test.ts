@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type {
   AgentExecutionHandle, AgentResult, DomainEvent, OperationResult, WorkflowAdvanceResult,
   WorkflowDefinition
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import { DeterministicWorkflowEngine } from "../src/index.js";
 
 const t0 = "2026-10-13T00:00:00.000Z";
@@ -161,7 +161,7 @@ describe("P01 remediation invariants", () => {
     (damaged.state as { commands: unknown[] }).commands = [];
     expect(await recovered.recover({ runId: "run-audit", checkpoint: damaged, events: [],
       expectedVersion: created.snapshot.version })).toMatchObject({ ok: false, error: { code: "corruption" } });
-    const legacy = { ...checkpoint, codec: { name: "ai-flow.workflow-run-snapshot+json" as const, version: 1 as const },
+    const legacy = { ...checkpoint, codec: { name: "bflow.workflow-run-snapshot+json" as const, version: 1 as const },
       state: created.snapshot };
     expect(await recovered.recover({ runId: "run-audit", checkpoint: legacy, events: [],
       expectedVersion: created.snapshot.version })).toMatchObject({ ok: false });

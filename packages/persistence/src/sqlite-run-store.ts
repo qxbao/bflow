@@ -7,7 +7,7 @@ import {
   validateEventBatch, type AppendEventsRequest, type AppendEventsResult, type DomainEvent,
   type OperationOptions, type OperationResult, type Page, type PageRequest, type RecoveryCheckpoint,
   type RunQuery, type RunStore, type StoredRun
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import { migrate } from "./migrations.js";
 import { project } from "./projection.js";
 import { Budget, StoreFailure, conflict, cursor, digest, fail, failure, fingerprint, parse, position, storedJson, unwrap } from "./support.js";
@@ -218,7 +218,7 @@ export class SqliteRunStore implements RunStore {
     const parsed = parseRecoveryCheckpointWithCompatibility(input);
     if (!parsed.ok) throw new StoreFailure(stored && parsed.error.code === "validation" ? { ...parsed.error, code: "corruption" } : parsed.error);
     const checkpoint = parsed.value;
-    const state = checkpoint.codec.name === "ai-flow.workflow-aggregate+json"
+    const state = checkpoint.codec.name === "bflow.workflow-aggregate+json"
       ? unwrap(decodeWorkflowAggregateCheckpointState(checkpoint)).snapshot : unwrap(decodeWorkflowRunCheckpointState(checkpoint));
     if (state.runId !== checkpoint.runId || state.version !== checkpoint.version || state.lastEventSequence !== checkpoint.eventSequence) fail("corruption", "Checkpoint envelope and state positions disagree");
     return checkpoint;
@@ -231,7 +231,7 @@ export class SqliteRunStore implements RunStore {
         const run = this.run(checkpoint.runId) ?? fail("not_found", "Run does not exist");
         if (run.snapshot.version !== expectedVersion) conflict("Checkpoint expectedVersion mismatch", expectedVersion, run.snapshot.version);
         if (checkpoint.version !== expectedVersion || checkpoint.eventSequence !== run.snapshot.lastEventSequence) fail("validation", "Checkpoint is not at the current aggregate position");
-        const decoded = checkpoint.codec.name === "ai-flow.workflow-aggregate+json"
+        const decoded = checkpoint.codec.name === "bflow.workflow-aggregate+json"
           ? unwrap(decodeWorkflowAggregateCheckpointState(checkpoint)).snapshot : unwrap(decodeWorkflowRunCheckpointState(checkpoint));
         if (decoded.workflowId !== run.definition.id || decoded.workflowVersion !== run.definition.version ||
           decoded.tasks.length !== run.definition.tasks.length || new Set(decoded.tasks.map((task) => task.taskId)).size !== decoded.tasks.length ||
@@ -258,7 +258,7 @@ export class SqliteRunStore implements RunStore {
         checkpoint.checkpointId !== row.checkpoint_id) fail("corruption", "Checkpoint index mismatch");
       const run = this.run(id) ?? fail("corruption", "Checkpoint run disappeared");
       if (checkpoint.version > run.snapshot.version || checkpoint.eventSequence > run.snapshot.lastEventSequence) fail("corruption", "Checkpoint is ahead of committed history");
-      const decoded = checkpoint.codec.name === "ai-flow.workflow-aggregate+json"
+      const decoded = checkpoint.codec.name === "bflow.workflow-aggregate+json"
         ? unwrap(decodeWorkflowAggregateCheckpointState(checkpoint)).snapshot : unwrap(decodeWorkflowRunCheckpointState(checkpoint));
       if (decoded.workflowId !== run.definition.id || decoded.workflowVersion !== run.definition.version ||
         decoded.tasks.length !== run.definition.tasks.length || new Set(decoded.tasks.map((task) => task.taskId)).size !== decoded.tasks.length ||

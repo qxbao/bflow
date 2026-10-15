@@ -16,12 +16,12 @@ import {
   createDefaultSecurityPolicy,
   DEFAULT_ALLOWED_COMMANDS,
   type QualityCommandOutcome
-} from "@ai-flow/quality-gates";
+} from "@bflow/quality-gates";
 import type {
   ApprovalDecision,
   ApprovalRequest,
   QualityGateResult
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 
 function makeCommandOutcome(stdout: string, exitCode = 0): QualityCommandOutcome {
   return {
@@ -575,7 +575,7 @@ describe("Scenario E05 — Quality Gates & Policy Enforcement", () => {
     const evalRes = await gate.evaluate(context);
     const result = expectOk(evalRes);
 
-    // Contract observation: QualityGateContext in @ai-flow/contracts does not define an evaluationId.
+    // Contract observation: QualityGateContext in @bflow/contracts does not define an evaluationId.
     // CommandQualityGate generates a default evaluationId, and Runtime orchestrator coordinates
     // by overwriting it to the requested execution/evaluation ID before persistence.
     expect(result.evaluationId).toBeDefined();

@@ -1,7 +1,7 @@
 /**
- * @ai-flow/runtime - Production-grade workflow runtime service for AI Flow SDLC.
+ * @bflow/runtime - Production-grade workflow runtime service for bflow.
  * Composes WorkflowEngine, RunStore, ArtifactStore, AgentRegistry, AgentTransport,
- * and QualityGate through @ai-flow/contracts ports.
+ * and QualityGate through @bflow/contracts ports.
  */
 
 // Service and Factory
@@ -81,4 +81,4 @@ export type {
   WorkflowDefinition,
   WorkflowEngine,
   WorkflowRunSnapshot
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";

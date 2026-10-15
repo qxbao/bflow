@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { ContractErrorSchema, IsoDateTimeSchema, type ContractError, type OperationOptions, type OperationResult } from "@ai-flow/contracts";
+import { ContractErrorSchema, IsoDateTimeSchema, type ContractError, type OperationOptions, type OperationResult } from "@bflow/contracts";
 
 export class ArtifactFailure extends Error {
   constructor(readonly error: ContractError) { super(error.message); }

@@ -6,7 +6,7 @@ import type {
   DomainEvent,
   OperationResult,
   WorkflowDefinition
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import { DefaultRunEventHub, createDomainEventStream } from "../../src/stream.js";
 import { createSampleWorkflowDefinition, createTestHarness } from "./fixtures.js";
 import { createRuntimeService } from "../../src/service.js";

@@ -1,9 +1,9 @@
 {
-  "name": "ai-flow-sdlc",
+  "name": "bflow",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Module-first orchestration contracts and package boundaries for AI Flow SDLC.",
+  "description": "Autonomous SDLC workflow orchestration platform and CLI (bflow).",
   "packageManager": "pnpm@12.5.1",
   "engines": {
     "node": ">=22"
@@ -12,7 +12,9 @@
     "build": "tsc -b",
     "clean": "tsc -b --clean",
     "typecheck": "tsc -b --pretty false",
+    "lint": "pnpm run check:deps && pnpm run typecheck && pnpm exec tsc -p tests/e2e/tsconfig.json --noEmit",
     "test": "pnpm run build && vitest run",
+    "test:e2e": "pnpm run build && vitest run --config tests/e2e/vitest.config.ts",
     "test:watch": "vitest",
     "check:deps": "node scripts/check-dependency-graph.mjs",
     "check": "pnpm run check:deps && pnpm run typecheck && pnpm run test"

@@ -1,0 +1,89 @@
+name: CD — Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag name (e.g. v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint & Build
+        run: |
+          pnpm run lint
+          pnpm run build
+
+      - name: Package release artifacts
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          mkdir -p "${GITHUB_WORKSPACE}/release-assets"
+
+          # Pack each @bflow/* workspace package and CLI into tarball assets
+          pnpm --filter "./packages/*" --filter "./apps/*" exec pnpm pack --pack-destination "${GITHUB_WORKSPACE}/release-assets"
+
+          # Create full compiled distribution archive
+          tar -czf "${GITHUB_WORKSPACE}/release-assets/bflow-${RELEASE_TAG}-dist.tar.gz" \
+            package.json \
+            pnpm-lock.yaml \
+            pnpm-workspace.yaml \
+            README.md \
+            apps/cli/package.json \
+            apps/cli/dist \
+            packages/contracts/package.json \
+            packages/contracts/dist \
+            packages/core/package.json \
+            packages/core/dist \
+            packages/herdr-adapter/package.json \
+            packages/herdr-adapter/dist \
+            packages/agent-registry/package.json \
+            packages/agent-registry/dist \
+            packages/persistence/package.json \
+            packages/persistence/dist \
+            packages/artifact-store/package.json \
+            packages/artifact-store/dist \
+            packages/quality-gates/package.json \
+            packages/quality-gates/dist \
+            packages/runtime/package.json \
+            packages/runtime/dist
+
+          # Generate SHA-256 checksums for all release assets
+          cd "${GITHUB_WORKSPACE}/release-assets"
+          sha256sum * > SHA256SUMS.txt
+          ls -lh "${GITHUB_WORKSPACE}/release-assets"
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: "bflow ${{ github.event.inputs.tag || github.ref_name }}"
+          generate_release_notes: true
+          files: release-assets/*

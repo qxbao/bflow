@@ -2,7 +2,7 @@
 
 ## 1. Overview & Mission
 
-`@ai-flow/runtime` is the composition engine of the AI Flow SDLC architecture, integrating `@ai-flow/contracts`, `@ai-flow/core`, `@ai-flow/persistence`, `@ai-flow/artifact-store`, `@ai-flow/agent-registry`, `@ai-flow/herdr-adapter`, and `@ai-flow/quality-gates`.
+`@bflow/runtime` is the composition engine of the bflow architecture, integrating `@bflow/contracts`, `@bflow/core`, `@bflow/persistence`, `@bflow/artifact-store`, `@bflow/agent-registry`, `@bflow/herdr-adapter`, and `@bflow/quality-gates`.
 
 This document establishes the comprehensive test architecture, philosophy, tier-based coverage mapping, execution procedures, and scenario catalog for Milestone 2 (`M2`).
 
@@ -17,7 +17,7 @@ This document establishes the comprehensive test architecture, philosophy, tier-
 - **Deterministic Workflow Engine (`DeterministicWorkflowEngine`)**: State transitions, DAG dependency validation, bounded rework generation tracking, and recovery codecs are executed by the real Core engine.
 
 ### 2.2 Deterministic Transport Simulation (`FakeAgentTransport`)
-- External network/subprocess transports are simulated via a deterministic, in-memory `FakeAgentTransport` implementing `@ai-flow/contracts` `AgentTransport`.
+- External network/subprocess transports are simulated via a deterministic, in-memory `FakeAgentTransport` implementing `@bflow/contracts` `AgentTransport`.
 - Supports configurable handlers for:
   - Immediate prompt acceptance (`status: "accepted"`) with unique `AgentExecutionHandle` values.
   - Ambiguous transport delivery (`status: "unknown_delivery"`).
@@ -31,7 +31,7 @@ This document establishes the comprehensive test architecture, philosophy, tier-
 - Zero tolerance for untyped exceptions or silent failures.
 
 ### 2.4 Resource Isolation & Deterministic Cleanup
-- Each test runs within an isolated temporary directory created via `mkdtemp(join(tmpdir(), "ai-flow-runtime-test-"))`.
+- Each test runs within an isolated temporary directory created via `mkdtemp(join(tmpdir(), "bflow-runtime-test-"))`.
 - Complete teardown in `finally` blocks: SQLite databases closed, artifact streams closed, temporary directories recursively purged.
 
 ---
@@ -40,8 +40,8 @@ This document establishes the comprehensive test architecture, philosophy, tier-
 
 | Tier | Name | Target Scope | Key Invariants Verified |
 |---|---|---|---|
-| **Tier 1** | **Ingress Safety & Schemas** | `@ai-flow/contracts` | Zod validation of all inputs, commands, event batches, options, and error shapes at ingress. |
-| **Tier 2** | **Unit & Engine Invariants** | `@ai-flow/core`, `service.ts`, `dispatcher.ts`, `recovery.ts` | Deterministic DAG transitions, legal status progression, retry delays, lease ttl, optimistic versions. |
+| **Tier 1** | **Ingress Safety & Schemas** | `@bflow/contracts` | Zod validation of all inputs, commands, event batches, options, and error shapes at ingress. |
+| **Tier 2** | **Unit & Engine Invariants** | `@bflow/core`, `service.ts`, `dispatcher.ts`, `recovery.ts` | Deterministic DAG transitions, legal status progression, retry delays, lease ttl, optimistic versions. |
 | **Tier 3** | **Port Composition & Storage** | `test/unit/`, `test/helpers/test-harness.ts` | Inter-module contracts: SQLite event append atomicity, filesystem artifact hashing, lease fencing tokens. |
 | **Tier 4** | **End-to-End SDLC Scenarios** | `test/scenarios/01` to `08` | Full lifecycle workflows, rework loops, failure recovery, transport reconciliation, diamond DAG concurrency. |
 | *(Tier 5)* | *(Adversarial Hardening)* | *Milestone 3 (Challengers)* | *Chaos injection, hostile agent payloads, race conditions, edge timeouts.* |
@@ -59,7 +59,7 @@ The Tier 4 test suite comprises 8 core end-to-end integration scenarios located 
 | **3** | `03-qa-failure.test.ts` | QA Failure & Retry Policy | QA task execution failure (exitCode 1, failure summary). Verifies retry policy up to `maxAttempts: 2`. Under `fail-fast`, transitions run to `failed` with persisted failure evidence; under `block`, transitions to `blocked` for operator diagnosis. |
 | **4** | `04-blocked-agent.test.ts` | Blocked Agent Observation | Agent reports `status: "blocked"` via transport observation (`missing_dependency` or `manual_intervention`). Task and run transition to `blocked` without consuming retry attempts. Operator `resume()` unblocks execution to completion. |
 | **5** | `05-timeout-reconciliation.test.ts` | Timeout & Ambiguous Delivery | Transport returns `unknown_delivery` or times out. Invariant: NEVER blindly resend prompt. Calls `transport.reconcile`: if `not_delivered`, retries safely; if `delivered`, binds handle and awaits observation without duplicate tasks. |
-| **6** | `06-restart-recovery.test.ts` | Restart Recovery & Aggregate Replay | Process crash simulation. A brand new `RuntimeService` instance reconstructs state from SQLite `RunStore` using aggregate checkpoint (`ai-flow.workflow-aggregate+json` codec) + event tail replay from `eventTailCursor`. Reconciles bound executions and resumes to completion. |
+| **6** | `06-restart-recovery.test.ts` | Restart Recovery & Aggregate Replay | Process crash simulation. A brand new `RuntimeService` instance reconstructs state from SQLite `RunStore` using aggregate checkpoint (`bflow.workflow-aggregate+json` codec) + event tail replay from `eventTailCursor`. Reconciles bound executions and resumes to completion. |
 | **7** | `07-persistence-failure.test.ts` | Persistence Failure & Invariant Safety | Simulated persistence write failures during event append, checkpoint save, or artifact put. Verifies failures surface as typed `ContractError` (`conflict` or `corruption`). Invariants: Zero run state corruption, zero false task success claims. |
 | **8** | `08-dag-concurrency.test.ts` | DAG Topological Ordering & Concurrency | Diamond DAG with concurrent siblings (`implement_frontend` and `implement_backend`) joining into `integrate`. Verifies topological ordering, workflow `maxConcurrency` limits, and registry capacity constraints with monotonic fencing tokens. |
 
@@ -75,7 +75,7 @@ The Tier 4 test suite comprises 8 core end-to-end integration scenarios located 
   2. ports.engine.validateDefinition(storedRun.definition)
   3. ports.runStore.loadLatestCheckpoint(runId)
      ├── If Checkpoint Exists:
-     │   ├── Validate codec: name === "ai-flow.workflow-aggregate+json" && version === 1
+     │   ├── Validate codec: name === "bflow.workflow-aggregate+json" && version === 1
      │   ├── Decode aggregate state
      │   ├── Read event tail: sequence > checkpoint.eventSequence via eventTailCursor()
      │   └── engine.recover({ runId, checkpoint, events: tailEvents, expectedVersion })
@@ -143,19 +143,19 @@ The Tier 4 test suite comprises 8 core end-to-end integration scenarios located 
 ### 6.2 Running Integration Tests
 To execute all scenario integration tests:
 ```bash
-pnpm --filter @ai-flow/runtime test test/scenarios/
+pnpm --filter @bflow/runtime test test/scenarios/
 ```
 
 To run individual scenario test files:
 ```bash
 # Scenario 6: Restart Recovery
-pnpm --filter @ai-flow/runtime test test/scenarios/06-restart-recovery.test.ts
+pnpm --filter @bflow/runtime test test/scenarios/06-restart-recovery.test.ts
 
 # Scenario 7: Persistence Failure
-pnpm --filter @ai-flow/runtime test test/scenarios/07-persistence-failure.test.ts
+pnpm --filter @bflow/runtime test test/scenarios/07-persistence-failure.test.ts
 
 # Scenario 8: DAG Concurrency
-pnpm --filter @ai-flow/runtime test test/scenarios/08-dag-concurrency.test.ts
+pnpm --filter @bflow/runtime test test/scenarios/08-dag-concurrency.test.ts
 ```
 
 ### 6.3 Full Workspace Verification

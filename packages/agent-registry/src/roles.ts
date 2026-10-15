@@ -10,7 +10,7 @@ import {
   type JsonValue,
   type OperationOptions,
   type OperationResult
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 
 export type ArtifactKind = ArtifactReference["kind"];
 

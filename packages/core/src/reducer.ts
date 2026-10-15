@@ -4,7 +4,7 @@ import {
   type TaskState,
   type WorkflowDefinition,
   type WorkflowRunSnapshot
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 
 function hash(parts: readonly string[]): string {
   let value = 14695981039346656037n;

@@ -1,9 +1,9 @@
 {
-  "name": "ai-flow-sample-shop",
+  "name": "bflow-sample-shop",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Tiny TypeScript repository used to try AI Flow SDLC feature and bugfix workflows.",
+  "description": "Tiny TypeScript repository used to try bflow feature and bugfix workflows.",
   "engines": {
     "node": ">=22.13"
   },

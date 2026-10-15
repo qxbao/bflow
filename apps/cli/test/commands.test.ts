@@ -12,7 +12,7 @@ import {
   type StartRunInput,
   type WorkflowDefinition,
   type WorkflowRunSnapshot
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import {
   executeCommand,
   main,
@@ -131,7 +131,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
   let tempDir: string;
 
   beforeEach(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), "ai-flow-cli-test-"));
+    tempDir = await mkdtemp(join(tmpdir(), "bflow-cli-test-"));
   });
 
   afterEach(async () => {
@@ -142,12 +142,12 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
     }
   });
 
-  describe("1. flow --help and <cmd> --help execution", () => {
+  describe("1. bflow --help and <cmd> --help execution", () => {
     it("executes global --help returning exitCode 0 and usage text in stdout", async () => {
       const result = await runCli(["--help"]);
       expect(result.exitCode).toBe(CLI_EXIT_CODES.SUCCESS);
       expect(result.ok).toBe(true);
-      expect(result.stdout).toContain("Usage: flow <command>");
+      expect(result.stdout).toContain("Usage: bflow <command>");
       expect(result.stderr).toBe("");
     });
 
@@ -155,17 +155,17 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       const resH = await runCli(["-h"]);
       expect(resH.exitCode).toBe(0);
       expect(resH.ok).toBe(true);
-      expect(resH.stdout).toContain("Usage: flow <command>");
+      expect(resH.stdout).toContain("Usage: bflow <command>");
 
       const resEmpty = await runCli([]);
       expect(resEmpty.exitCode).toBe(0);
       expect(resEmpty.ok).toBe(true);
-      expect(resEmpty.stdout).toContain("Usage: flow <command>");
+      expect(resEmpty.stdout).toContain("Usage: bflow <command>");
 
       const resHelp = await runCli(["help"]);
       expect(resHelp.exitCode).toBe(0);
       expect(resHelp.ok).toBe(true);
-      expect(resHelp.stdout).toContain("Usage: flow <command>");
+      expect(resHelp.stdout).toContain("Usage: bflow <command>");
     });
 
     it("executes command-specific help for all 6 core commands", async () => {
@@ -175,7 +175,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
         const res = await runCli([cmd, "--help"]);
         expect(res.exitCode).toBe(0);
         expect(res.ok).toBe(true);
-        expect(res.stdout).toContain(`Usage: flow ${cmd}`);
+        expect(res.stdout).toContain(`Usage: bflow ${cmd}`);
       }
     });
 
@@ -186,18 +186,18 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       const parsed = JSON.parse(res.stdout);
       expect(parsed.ok).toBe(true);
       expect(parsed.command).toBe("help");
-      expect(parsed.data.helpText).toContain("Usage: flow <command>");
+      expect(parsed.data.helpText).toContain("Usage: bflow <command>");
     });
   });
 
-  describe("2. flow init execution & overwrite protection", () => {
-    it("creates .ai-flow/config.json with valid defaultWorkflow in fresh directory", async () => {
+  describe("2. bflow init execution & overwrite protection", () => {
+    it("creates .bflow/config.json with valid defaultWorkflow in fresh directory", async () => {
       const result = await runCli(["init"], { cwd: tempDir });
       expect(result.exitCode).toBe(0);
       expect(result.ok).toBe(true);
-      expect(result.stdout).toContain("AI Flow repository configuration");
+      expect(result.stdout).toContain("bflow repository configuration");
 
-      const configFilePath = join(tempDir, ".ai-flow", "config.json");
+      const configFilePath = join(tempDir, ".bflow", "config.json");
       const content = await readFile(configFilePath, "utf-8");
       const parsed = JSON.parse(content);
 
@@ -213,7 +213,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       const firstRun = await runCli(["init"], { cwd: tempDir });
       expect(firstRun.exitCode).toBe(0);
 
-      const configFilePath = join(tempDir, ".ai-flow", "config.json");
+      const configFilePath = join(tempDir, ".bflow", "config.json");
       const originalContent = await readFile(configFilePath, "utf-8");
 
       // Running a second time WITHOUT --force or confirmOverwrite must fail with conflict
@@ -230,7 +230,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
 
     it("refuses to overwrite when confirmOverwrite returns false", async () => {
       await runCli(["init"], { cwd: tempDir });
-      const configFilePath = join(tempDir, ".ai-flow", "config.json");
+      const configFilePath = join(tempDir, ".bflow", "config.json");
       const originalContent = await readFile(configFilePath, "utf-8");
 
       const confirmOverwrite = vi.fn().mockResolvedValue(false);
@@ -259,7 +259,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(result.ok).toBe(true);
       expect(confirmOverwrite).toHaveBeenCalled();
 
-      const configFilePath = join(tempDir, ".ai-flow", "config.json");
+      const configFilePath = join(tempDir, ".bflow", "config.json");
       const content = await readFile(configFilePath, "utf-8");
       const parsed = JSON.parse(content);
       expect(parsed.projectName).toBe("new-project");
@@ -274,7 +274,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(forceResult.exitCode).toBe(0);
       expect(forceResult.ok).toBe(true);
 
-      const configFilePath = join(tempDir, ".ai-flow", "config.json");
+      const configFilePath = join(tempDir, ".bflow", "config.json");
       const content = await readFile(configFilePath, "utf-8");
       const parsed = JSON.parse(content);
       expect(parsed.projectName).toBe("forced-project");
@@ -288,13 +288,13 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(result.exitCode).toBe(0);
       expect(result.ok).toBe(true);
 
-      const subConfigPath = join(tempDir, "services", "auth", ".ai-flow", "config.json");
+      const subConfigPath = join(tempDir, "services", "auth", ".bflow", "config.json");
       const content = await readFile(subConfigPath, "utf-8");
       const parsed = JSON.parse(content);
       expect(parsed.projectName).toBe("auth-service");
     });
 
-    it("supports --json output for flow init", async () => {
+    it("supports --json output for bflow init", async () => {
       const result = await runCli(["init", "--name", "json-test", "--json"], {
         cwd: tempDir
       });
@@ -309,7 +309,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
     });
   });
 
-  describe("3. flow run execution & config validation", () => {
+  describe("3. bflow run execution & config validation", () => {
     it("calls runtime.start with natural language requirement and valid workflow", async () => {
       const runtime = createMockRuntime();
       const result = await runCli(["run", "Build user authentication service"], {
@@ -347,13 +347,13 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(runtime.decide).not.toHaveBeenCalled();
 
       // Output should inform the user how to record human approval
-      expect(result.stdout).toContain("flow approve qa");
+      expect(result.stdout).toContain("bflow approve qa");
       expect(result.stdout).toContain("WAITING");
     });
 
-    it("fails closed when .ai-flow/config.json in cwd contains malformed JSON", async () => {
+    it("fails closed when .bflow/config.json in cwd contains malformed JSON", async () => {
       await runCli(["init"], { cwd: tempDir });
-      const configPath = join(tempDir, ".ai-flow", "config.json");
+      const configPath = join(tempDir, ".bflow", "config.json");
       await writeFile(configPath, "{ invalid json content: 123", "utf-8");
 
       const runtime = createMockRuntime();
@@ -366,9 +366,9 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(runtime.start).not.toHaveBeenCalled();
     });
 
-    it("fails closed when .ai-flow/config.json has unsupported schemaVersion", async () => {
+    it("fails closed when .bflow/config.json has unsupported schemaVersion", async () => {
       await runCli(["init"], { cwd: tempDir });
-      const configPath = join(tempDir, ".ai-flow", "config.json");
+      const configPath = join(tempDir, ".bflow", "config.json");
       const original = JSON.parse(await readFile(configPath, "utf-8"));
 
       const corruptVersion = { ...original, schemaVersion: "2" };
@@ -384,9 +384,9 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(runtime.start).not.toHaveBeenCalled();
     });
 
-    it("fails closed when .ai-flow/config.json is missing required fields", async () => {
+    it("fails closed when .bflow/config.json is missing required fields", async () => {
       await runCli(["init"], { cwd: tempDir });
-      const configPath = join(tempDir, ".ai-flow", "config.json");
+      const configPath = join(tempDir, ".bflow", "config.json");
       await writeFile(configPath, JSON.stringify({ schemaVersion: "1" }), "utf-8");
 
       const runtime = createMockRuntime();
@@ -413,7 +413,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
 
     it("supports custom --workflow definition JSON file", async () => {
       await runCli(["init"], { cwd: tempDir });
-      const configPath = join(tempDir, ".ai-flow", "config.json");
+      const configPath = join(tempDir, ".bflow", "config.json");
       const configContent = JSON.parse(await readFile(configPath, "utf-8"));
       const customWf: WorkflowDefinition = {
         ...configContent.defaultWorkflow,
@@ -494,7 +494,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
     });
   });
 
-  describe("4. flow status and flow status <run-id>", () => {
+  describe("4. bflow status and bflow status <run-id>", () => {
     it("calls runtime.findRuns when no runId is provided", async () => {
       const runtime = createMockRuntime({
         findRuns: vi.fn(async () => ({
@@ -603,7 +603,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
     });
   });
 
-  describe("5. flow approve <task-id> execution & disambiguation", () => {
+  describe("5. bflow approve <task-id> execution & disambiguation", () => {
     it("approves task with explicit --run flag", async () => {
       const runtime = createMockRuntime({
         getRun: vi.fn(async () => ({ ok: true as const, value: sampleWaitingSnapshot })),
@@ -848,7 +848,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
     });
   });
 
-  describe("6. flow resume <run-id> execution", () => {
+  describe("6. bflow resume <run-id> execution", () => {
     it("calls runtime.resume with valid ResumeRunInput", async () => {
       const runtime = createMockRuntime();
       const result = await runCli(
@@ -911,7 +911,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
     });
   });
 
-  describe("7. flow cancel <run-id> execution", () => {
+  describe("7. bflow cancel <run-id> execution", () => {
     it("calls runtime.cancel with explicit --expected-version", async () => {
       const runtime = createMockRuntime();
       const result = await runCli(
@@ -1031,7 +1031,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
         expect(result.exitCode).toBe(0);
         expect(result.ok).toBe(true);
         expect(process.exitCode).toBe(0);
-        expect(stdoutMessages.some((m) => m.includes("Usage: flow <command>"))).toBe(true);
+        expect(stdoutMessages.some((m) => m.includes("Usage: bflow <command>"))).toBe(true);
 
         const errorResult = await main(["--unknown-command-xyz"], { io });
         expect(errorResult.exitCode).toBe(CLI_EXIT_CODES.USAGE_ERROR);
@@ -1065,7 +1065,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       if (parsedHelp.ok) {
         await executeCommand(parsedHelp.value, { io });
         expect(stdoutMessages.length).toBeGreaterThan(0);
-        expect(stdoutMessages[0]).toContain("Usage: flow <command>");
+        expect(stdoutMessages[0]).toContain("Usage: bflow <command>");
       }
 
       const parsedStatus = parseCliArgs(["status"]);
@@ -1103,9 +1103,9 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       }
     });
 
-    it("composes RuntimeService in main() for business commands after flow init and closes stores cleanly", async () => {
+    it("composes RuntimeService in main() for business commands after bflow init and closes stores cleanly", async () => {
       const prevExitCode = process.exitCode;
-      const prevHerdrBin = process.env["AI_FLOW_HERDR_BIN"];
+      const prevHerdrBin = process.env["BFLOW_HERDR_BIN"];
       try {
         const fakeHerdrPath = join(tempDir, "fake-herdr.mjs");
         const fakeHerdrScript = `#!/usr/bin/env node
@@ -1160,7 +1160,7 @@ process.exit(0);
 `;
         await writeFile(fakeHerdrPath, fakeHerdrScript, "utf8");
         await chmod(fakeHerdrPath, 0o755);
-        process.env["AI_FLOW_HERDR_BIN"] = fakeHerdrPath;
+        process.env["BFLOW_HERDR_BIN"] = fakeHerdrPath;
 
         const io = { stdout: () => {}, stderr: () => {} };
 
@@ -1201,15 +1201,15 @@ process.exit(0);
         expect(["cancelling", "cancelled"]).toContain(cancelEnvelope.data.status);
       } finally {
         if (prevHerdrBin === undefined) {
-          delete process.env["AI_FLOW_HERDR_BIN"];
+          delete process.env["BFLOW_HERDR_BIN"];
         } else {
-          process.env["AI_FLOW_HERDR_BIN"] = prevHerdrBin;
+          process.env["BFLOW_HERDR_BIN"] = prevHerdrBin;
         }
         process.exitCode = prevExitCode;
       }
     });
 
-    it("fails closed in main() when .ai-flow/config.json is missing or malformed", async () => {
+    it("fails closed in main() when .bflow/config.json is missing or malformed", async () => {
       const prevExitCode = process.exitCode;
       try {
         const io = { stdout: () => {}, stderr: () => {} };
@@ -1220,7 +1220,7 @@ process.exit(0);
         expect(missingRes.error?.code).toBe("not_found");
 
         await main(["init"], { cwd: tempDir, io });
-        await writeFile(join(tempDir, ".ai-flow", "config.json"), "{ invalid json", "utf8");
+        await writeFile(join(tempDir, ".bflow", "config.json"), "{ invalid json", "utf8");
 
         const malformedRes = await main(["run", "Test malformed config", "--json"], {
           cwd: tempDir,

@@ -1,4 +1,4 @@
-import type { ContractError, OperationResult } from "@ai-flow/contracts";
+import type { ContractError, OperationResult } from "@bflow/contracts";
 import { spawn, type ChildProcess } from "node:child_process";
 
 function createValidationError(message: string): ContractError {

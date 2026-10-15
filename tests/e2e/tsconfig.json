@@ -5,14 +5,14 @@
     "rootDir": "../..",
     "types": ["node", "vitest/globals"],
     "paths": {
-      "@ai-flow/contracts": ["../../packages/contracts/src/index.ts"],
-      "@ai-flow/core": ["../../packages/core/src/index.ts"],
-      "@ai-flow/persistence": ["../../packages/persistence/src/index.ts"],
-      "@ai-flow/artifact-store": ["../../packages/artifact-store/src/index.ts"],
-      "@ai-flow/agent-registry": ["../../packages/agent-registry/src/index.ts"],
-      "@ai-flow/quality-gates": ["../../packages/quality-gates/src/index.ts"],
-      "@ai-flow/runtime": ["../../packages/runtime/src/index.ts"],
-      "@ai-flow/cli": ["../../apps/cli/src/index.ts"]
+      "@bflow/contracts": ["../../packages/contracts/src/index.ts"],
+      "@bflow/core": ["../../packages/core/src/index.ts"],
+      "@bflow/persistence": ["../../packages/persistence/src/index.ts"],
+      "@bflow/artifact-store": ["../../packages/artifact-store/src/index.ts"],
+      "@bflow/agent-registry": ["../../packages/agent-registry/src/index.ts"],
+      "@bflow/quality-gates": ["../../packages/quality-gates/src/index.ts"],
+      "@bflow/runtime": ["../../packages/runtime/src/index.ts"],
+      "@bflow/cli": ["../../apps/cli/src/index.ts"]
     }
   },
   "include": [

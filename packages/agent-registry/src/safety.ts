@@ -1,4 +1,4 @@
-import type { ContractError, OperationResult } from "@ai-flow/contracts";
+import type { ContractError, OperationResult } from "@bflow/contracts";
 
 export type DangerousInstructionCategory =
   | "prompt_override"

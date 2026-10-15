@@ -1,6 +1,6 @@
 # Public contracts
 
-All public schemas, inferred types, pure validators, and ports are exported from `@ai-flow/contracts`. Zod schemas are the runtime authority at package ingress. Exchange objects are strict; unknown fields are rejected unless a later schema version explicitly adds them.
+All public schemas, inferred types, pure validators, and ports are exported from `@bflow/contracts`. Zod schemas are the runtime authority at package ingress. Exchange objects are strict; unknown fields are rejected unless a later schema version explicitly adds them.
 
 ## Failure and async convention
 
@@ -107,7 +107,7 @@ Current event and checkpoint schema version is `1`. The original P00 format is d
 
 After envelope parsing, `decodeWorkflowRunCheckpointState` validates checkpoint JSON against the codec's `WorkflowRunSnapshot` schema and returns `corruption` on mismatch. Recovery must not trust the opaque JSON field without this codec dispatch.
 
-P01 adds the `ai-flow.workflow-aggregate+json` codec, decoded by `decodeWorkflowAggregateCheckpointState`. It contains snapshot, approval/gate/cancellation state, successful attempts, retry schedules and attempt baselines, and original command receipts/results. Tail-only replay requires this codec. A legacy snapshot checkpoint may be ignored only when events from `run.created` onward are available for full replay. Event histories predating `command.completed` cannot safely reconstruct exact command idempotency and must be migrated from authoritative command receipts or rejected; no identity is fabricated. Unsupported or corrupt checkpoints fail closed in Core.
+P01 adds the `bflow.workflow-aggregate+json` codec, decoded by `decodeWorkflowAggregateCheckpointState`. It contains snapshot, approval/gate/cancellation state, successful attempts, retry schedules and attempt baselines, and original command receipts/results. Tail-only replay requires this codec. A legacy snapshot checkpoint may be ignored only when events from `run.created` onward are available for full replay. Event histories predating `command.completed` cannot safely reconstruct exact command idempotency and must be migrated from authoritative command receipts or rejected; no identity is fabricated. Unsupported or corrupt checkpoints fail closed in Core.
 
 No downcasting is supported. A future schema change must add an explicit upcaster and fixtures before producers emit it. Aggregate version and event sequence are never used as schema versions.
 

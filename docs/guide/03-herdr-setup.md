@@ -1,6 +1,6 @@
 # 3. Cài đặt và cấu hình Herdr
 
-> **Trạng thái:** `@ai-flow/herdr-adapter` có mã nguồn và unit test với runner giả lập. Nó **chưa được kiểm chứng với Herdr thật**, và Runtime hiện **chưa thể** hoàn tất một task được dispatch qua Herdr (xem [Giới hạn khi ghép với Runtime](#giới-hạn-khi-ghép-với-runtime)). Không điều khiển session Herdr thật khi chưa được cho phép rõ ràng.
+> **Trạng thái:** `@bflow/herdr-adapter` có mã nguồn và unit test với runner giả lập. Nó **chưa được kiểm chứng với Herdr thật**, và Runtime hiện **chưa thể** hoàn tất một task được dispatch qua Herdr (xem [Giới hạn khi ghép với Runtime](#giới-hạn-khi-ghép-với-runtime)). Không điều khiển session Herdr thật khi chưa được cho phép rõ ràng.
 
 ## Cài đặt Herdr
 
@@ -37,7 +37,7 @@ Pane phải **tồn tại sẵn**; adapter không tạo workspace/tab/pane. Targ
 ## Tạo transport
 
 ```ts
-import { createHerdrAdapter } from "@ai-flow/herdr-adapter";
+import { createHerdrAdapter } from "@bflow/herdr-adapter";
 
 const transport = createHerdrAdapter({
   binary: "herdr",          // mặc định "herdr"

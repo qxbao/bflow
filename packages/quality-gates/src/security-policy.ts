@@ -2,7 +2,7 @@ import {
   TimeoutPolicySchema,
   type ContractError,
   type OperationResult
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 

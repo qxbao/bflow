@@ -4,6 +4,6 @@ export type {
   ArtifactStore,
   ArtifactWrite,
   ArtifactWriteOptions
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 export { FilesystemArtifactStore, openFilesystemArtifactStore } from "./filesystem-artifact-store.js";
 export type { FilesystemArtifactStoreOptions } from "./filesystem-artifact-store.js";

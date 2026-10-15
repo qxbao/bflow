@@ -5,10 +5,10 @@ import {
   WorkflowDefinitionSchema,
   type OperationResult,
   type WorkflowDefinition
-} from "@ai-flow/contracts";
-import type { FlowRepositoryConfig, InitCommandOutput } from "./types.js";
+} from "@bflow/contracts";
+import type { BflowRepositoryConfig, InitCommandOutput } from "./types.js";
 
-export const DEFAULT_CONFIG_RELATIVE_PATH = ".ai-flow/config.json";
+export const DEFAULT_CONFIG_RELATIVE_PATH = ".bflow/config.json";
 
 export function createDefaultWorkflowDefinition(): WorkflowDefinition {
   const definition: WorkflowDefinition = {
@@ -121,16 +121,16 @@ export function createDefaultRepositoryConfig(options?: {
   readonly projectName?: string | undefined;
   readonly runtimeId?: string | undefined;
   readonly createdAt?: string | undefined;
-}): FlowRepositoryConfig {
+}): BflowRepositoryConfig {
   return {
     schemaVersion: "1",
-    projectName: options?.projectName ?? "ai-flow-project",
+    projectName: options?.projectName ?? "bflow-project",
     runtimeId: options?.runtimeId ?? `runtime-${randomUUID()}`,
     createdAt: options?.createdAt ?? new Date().toISOString(),
     storage: {
-      runStorePath: ".ai-flow/data/runs.db",
-      artifactStoreRoot: ".ai-flow/artifacts",
-      registryStateFile: ".ai-flow/registry/state.json"
+      runStorePath: ".bflow/data/runs.db",
+      artifactStoreRoot: ".bflow/artifacts",
+      registryStateFile: ".bflow/registry/state.json"
     },
     defaultWorkflow: createDefaultWorkflowDefinition()
   };
@@ -150,7 +150,7 @@ export function resolveConfigPath(cwd: string, configPath?: string, dir?: string
 
 export async function loadRepositoryConfig(
   configPath: string
-): Promise<OperationResult<FlowRepositoryConfig>> {
+): Promise<OperationResult<BflowRepositoryConfig>> {
   let content: string;
   try {
     content = await readFile(configPath, "utf-8");
@@ -287,7 +287,7 @@ export async function loadRepositoryConfig(
     };
   }
 
-  const config: FlowRepositoryConfig = {
+  const config: BflowRepositoryConfig = {
     schemaVersion: "1",
     projectName: obj["projectName"],
     runtimeId: obj["runtimeId"],

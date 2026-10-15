@@ -1,10 +1,10 @@
-# 4. Cài đặt và khởi tạo AI Flow SDLC
+# 4. Cài đặt và khởi tạo bflow
 
 ## Cài đặt và kiểm tra repository
 
 ```bash
-git clone https://github.com/Leekiri1234/AI-flow-SDLC.git
-cd AI-flow-SDLC
+git clone https://github.com/qxbao/bflow.git
+cd bflow
 pnpm install --frozen-lockfile
 pnpm check        # check:deps + typecheck + build + toàn bộ test
 ```
@@ -21,17 +21,17 @@ Test dùng storage tạm và transport giả; không cần Herdr hay API key. Tr
 
 ## Khởi tạo một Runtime
 
-Không có lệnh `init`. "Khởi tạo" nghĩa là ứng dụng tạo các port cụ thể, ghép chúng bằng `createRuntimeService` rồi gọi `service.init()`. Các package `@ai-flow/*` là private (không phát hành lên npm); đoạn dưới dùng được trong một package của workspace có khai báo các dependency này. Phiên bản chạy được ngay (import qua `packages/*/dist`) là [`examples/runtime-demo/run-demo.mjs`](../../examples/runtime-demo/run-demo.mjs).
+Không có lệnh `init`. "Khởi tạo" nghĩa là ứng dụng tạo các port cụ thể, ghép chúng bằng `createRuntimeService` rồi gọi `service.init()`. Các package `@bflow/*` là private (không phát hành lên npm); đoạn dưới dùng được trong một package của workspace có khai báo các dependency này. Phiên bản chạy được ngay (import qua `packages/*/dist`) là [`examples/runtime-demo/run-demo.mjs`](../../examples/runtime-demo/run-demo.mjs).
 
 ```ts
-import { DeterministicWorkflowEngine } from "@ai-flow/core";
-import { openSqliteRunStore } from "@ai-flow/persistence";
-import { openFilesystemArtifactStore } from "@ai-flow/artifact-store";
-import { createAgentRegistry, loadWorkflowDefinition, seedMvpAgentRegistry } from "@ai-flow/agent-registry";
-import { createDefaultSecurityPolicy, createPresetQualityGate } from "@ai-flow/quality-gates";
-import { createRuntimeService } from "@ai-flow/runtime";
+import { DeterministicWorkflowEngine } from "@bflow/core";
+import { openSqliteRunStore } from "@bflow/persistence";
+import { openFilesystemArtifactStore } from "@bflow/artifact-store";
+import { createAgentRegistry, loadWorkflowDefinition, seedMvpAgentRegistry } from "@bflow/agent-registry";
+import { createDefaultSecurityPolicy, createPresetQualityGate } from "@bflow/quality-gates";
+import { createRuntimeService } from "@bflow/runtime";
 
-const stateDir = "/srv/ai-flow";          // thư mục do người vận hành cấu hình, đường dẫn canonical
+const stateDir = "/srv/bflow";          // thư mục do người vận hành cấu hình, đường dẫn canonical
 const workspace = "/srv/repos/my-app";     // repository mà gate sẽ kiểm tra
 
 const definition = loadWorkflowDefinition("feature");

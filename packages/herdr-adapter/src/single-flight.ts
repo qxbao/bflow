@@ -1,4 +1,4 @@
-import type { ContractError, OperationOptions, OperationResult } from "@ai-flow/contracts";
+import type { ContractError, OperationOptions, OperationResult } from "@bflow/contracts";
 
 /** Instance-local reservation. No external work starts until the key is installed. */
 export class SingleFlight<T> {

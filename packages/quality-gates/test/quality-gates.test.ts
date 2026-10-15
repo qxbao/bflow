@@ -11,7 +11,7 @@ import {
   type ApprovalRequest,
   type QualityGateContext,
   type QualityGateResult
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 import {
   APPLICATION_SECURITY_LIMITATIONS,
   DEFAULT_ALLOWED_COMMANDS,
@@ -1899,7 +1899,7 @@ describe("Quality Gates Test Suite", () => {
       }
       expect(detectUntrustedAgentDirectives(deepObj)).toBe(true);
 
-      // 5. Valid @ai-flow/agent-registry testReport command is ALLOWED
+      // 5. Valid @bflow/agent-registry testReport command is ALLOWED
       const resValid = await gate.evaluateDetailed(
         makeContext("qg-nested-injection", {
           agentResult: makeAgentResult({

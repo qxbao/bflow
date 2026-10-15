@@ -2,12 +2,12 @@
 
 Script Node chạy workflow `feature` hoặc `bugfix` trên **bản sao** của [`../sample-repo`](../sample-repo/README.md) bằng các package đã triển khai:
 
-- `DeterministicWorkflowEngine` (`@ai-flow/core`)
-- SQLite `RunStore` (`@ai-flow/persistence`)
-- Filesystem `ArtifactStore` (`@ai-flow/artifact-store`)
-- File-backed `AgentRegistry`, MVP roles và workflow templates (`@ai-flow/agent-registry`)
-- `CommandQualityGate` chạy `pnpm test` thật (`@ai-flow/quality-gates`)
-- `createRuntimeService` (`@ai-flow/runtime`)
+- `DeterministicWorkflowEngine` (`@bflow/core`)
+- SQLite `RunStore` (`@bflow/persistence`)
+- Filesystem `ArtifactStore` (`@bflow/artifact-store`)
+- File-backed `AgentRegistry`, MVP roles và workflow templates (`@bflow/agent-registry`)
+- `CommandQualityGate` chạy `pnpm test` thật (`@bflow/quality-gates`)
+- `createRuntimeService` (`@bflow/runtime`)
 
 > **Không có AI agent nào chạy trong demo này và không dùng Herdr.** `OutboxTransport` (`outbox-transport.mjs`) chỉ ghi mỗi `AgentRequest` ra file `outbox/<requestId>.json`. Script đóng vai người vận hành: chép file có sẵn trong `solutions/` vào workspace và báo kết quả task cho Runtime. Chỉ quality gate của QA là thực thi lệnh thật. Xem lý do transport này đánh dấu correlation là `verified` trong chú thích đầu file `outbox-transport.mjs`.
 
@@ -28,7 +28,7 @@ node examples/runtime-demo/run-demo.mjs --workflow bugfix --skip-fix --cancel-if
 | Tùy chọn | Ý nghĩa |
 | --- | --- |
 | `--workflow bugfix\|feature` | Template từ `loadWorkflowDefinition` (mặc định `bugfix`) |
-| `--state-dir DIR` | Thư mục trạng thái; phải mới/trống. Mặc định: thư mục tạm `ai-flow-demo-*` |
+| `--state-dir DIR` | Thư mục trạng thái; phải mới/trống. Mặc định: thư mục tạm `bflow-demo-*` |
 | `--skip-fix` | Bước developer chỉ thêm test mới, không sửa `src/` — mô phỏng agent báo thành công sai |
 | `--cancel-if-blocked` | Nếu run kết thúc ở `blocked`, gọi `service.cancel(...)` |
 

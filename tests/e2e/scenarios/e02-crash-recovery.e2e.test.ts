@@ -17,7 +17,7 @@ import type {
   QualityGate,
   TaskState,
   WorkflowDefinition
-} from "@ai-flow/contracts";
+} from "@bflow/contracts";
 
 import { pathToFileURL } from "node:url";
 
