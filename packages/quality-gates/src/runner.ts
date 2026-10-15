@@ -47,15 +47,75 @@ export function createQualityCommandRunner(): QualityCommandRunner {
       invocation: QualityCommandInvocation
     ): Promise<OperationResult<QualityCommandOutcome>> {
       if (
+        !invocation ||
+        typeof invocation.executable !== "string" ||
+        invocation.executable.trim().length === 0 ||
+        invocation.executable.includes("\0")
+      ) {
+        return {
+          ok: false,
+          error: createValidationError(
+            `Invalid executable: "${invocation?.executable}". Must be a non-empty string without NUL bytes.`
+          )
+        };
+      }
+
+      if (
+        typeof invocation.cwd !== "string" ||
+        invocation.cwd.trim().length === 0 ||
+        invocation.cwd.includes("\0")
+      ) {
+        return {
+          ok: false,
+          error: createValidationError(
+            `Invalid cwd: "${invocation.cwd}". Must be a non-empty string without NUL bytes.`
+          )
+        };
+      }
+
+      if (!Array.isArray(invocation.args)) {
+        return {
+          ok: false,
+          error: createValidationError("Invalid args: must be an array of strings.")
+        };
+      }
+
+      for (const arg of invocation.args) {
+        if (typeof arg !== "string" || arg.includes("\0")) {
+          return {
+            ok: false,
+            error: createValidationError(
+              "Invalid argument: must be a string without NUL bytes."
+            )
+          };
+        }
+      }
+
+      if (invocation.maxOutputBytes !== undefined) {
+        if (
+          typeof invocation.maxOutputBytes !== "number" ||
+          !Number.isSafeInteger(invocation.maxOutputBytes) ||
+          invocation.maxOutputBytes <= 0
+        ) {
+          return {
+            ok: false,
+            error: createValidationError(
+              `Invalid maxOutputBytes: ${invocation.maxOutputBytes}. Must be a positive safe integer.`
+            )
+          };
+        }
+      }
+
+      if (
         typeof invocation.timeoutMs !== "number" ||
         !Number.isInteger(invocation.timeoutMs) ||
-        invocation.timeoutMs < 100 ||
+        invocation.timeoutMs < 1 ||
         invocation.timeoutMs > 2_147_483_647
       ) {
         return {
           ok: false,
           error: createValidationError(
-            `Invalid timeoutMs: ${invocation.timeoutMs}. Must be an integer between 100 and 2147483647.`
+            `Invalid timeoutMs: ${invocation.timeoutMs}. Must be an integer between 1 and 2147483647.`
           )
         };
       }
@@ -92,12 +152,14 @@ export function createQualityCommandRunner(): QualityCommandRunner {
       let timedOut = false;
       let aborted = false;
       let spawnError: string | undefined = undefined;
+      let settled = false;
 
       function appendToBuffer(
         chunk: Buffer,
         target: Buffer[],
         currentLength: number
       ): number {
+        if (settled) return currentLength;
         if (currentLength >= maxBytes) {
           outputTruncated = true;
           return currentLength;
@@ -161,13 +223,7 @@ export function createQualityCommandRunner(): QualityCommandRunner {
           }
         };
 
-        const abortListener = () => {
-          aborted = true;
-          try {
-            child.kill("SIGTERM");
-          } catch {
-            // Process might have already exited
-          }
+        const scheduleKillTimer = () => {
           if (killTimer === undefined) {
             killTimer = setTimeout(() => {
               try {
@@ -176,13 +232,31 @@ export function createQualityCommandRunner(): QualityCommandRunner {
                 // Process might have already exited
               }
             }, 250);
+            killTimer.unref();
           }
+        };
+
+        const abortListener = () => {
+          aborted = true;
+          if (timeoutTimer !== undefined) {
+            clearTimeout(timeoutTimer);
+            timeoutTimer = undefined;
+          }
+          try {
+            child.kill("SIGTERM");
+          } catch {
+            // Process might have already exited
+          }
+          scheduleKillTimer();
         };
 
         if (invocation.signal) {
           invocation.signal.addEventListener("abort", abortListener, {
             once: true
           });
+          if (invocation.signal.aborted) {
+            abortListener();
+          }
         }
 
         timeoutTimer = setTimeout(() => {
@@ -192,14 +266,9 @@ export function createQualityCommandRunner(): QualityCommandRunner {
           } catch {
             // Process might have already exited
           }
-          killTimer = setTimeout(() => {
-            try {
-              child.kill("SIGKILL");
-            } catch {
-              // Process might have already exited
-            }
-          }, 250);
+          scheduleKillTimer();
         }, invocation.timeoutMs);
+        timeoutTimer.unref();
 
         if (child.stdout) {
           child.stdout.on("data", (chunk: Buffer) => {
@@ -215,7 +284,6 @@ export function createQualityCommandRunner(): QualityCommandRunner {
           });
         }
 
-        let settled = false;
         const settle = (
           exitCode: number | null,
           signal: NodeJS.Signals | null
@@ -251,6 +319,7 @@ export function createQualityCommandRunner(): QualityCommandRunner {
 
         child.on("error", (err) => {
           spawnError = err.message;
+          settle(null, null);
         });
 
         child.on("close", (code, signal) => {

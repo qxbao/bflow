@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -1073,6 +1073,164 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
         await executeCommand(parsedStatus.value, { io, runtime: undefined });
         expect(stderrMessages.length).toBeGreaterThan(0);
         expect(stderrMessages[0]).toContain("RuntimeService is not configured");
+      }
+    });
+
+    it("outputs semver version on --version and -v with exit code 0 and empty stderr", async () => {
+      const prevExitCode = process.exitCode;
+      try {
+        const io = { stdout: () => {}, stderr: () => {} };
+        const longRes = await main(["--version"], { io });
+        expect(longRes.exitCode).toBe(0);
+        expect(longRes.ok).toBe(true);
+        expect(longRes.stderr).toBe("");
+        expect(longRes.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
+
+        const shortRes = await main(["-v"], { io });
+        expect(shortRes.exitCode).toBe(0);
+        expect(shortRes.ok).toBe(true);
+        expect(shortRes.stderr).toBe("");
+        expect(shortRes.stdout.trim()).toBe(longRes.stdout.trim());
+
+        const jsonRes = await main(["--version", "--json"], { io });
+        expect(jsonRes.exitCode).toBe(0);
+        const parsed = JSON.parse(jsonRes.stdout);
+        expect(parsed.ok).toBe(true);
+        expect(parsed.command).toBe("version");
+        expect(parsed.data.version).toMatch(/^\d+\.\d+\.\d+/);
+      } finally {
+        process.exitCode = prevExitCode;
+      }
+    });
+
+    it("composes RuntimeService in main() for business commands after flow init and closes stores cleanly", async () => {
+      const prevExitCode = process.exitCode;
+      const prevHerdrBin = process.env["AI_FLOW_HERDR_BIN"];
+      try {
+        const fakeHerdrPath = join(tempDir, "fake-herdr.mjs");
+        const fakeHerdrScript = `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "--version") {
+  process.stdout.write("herdr 0.9.1\\n");
+  process.exit(0);
+}
+if (args[0] === "api" && args[1] === "schema") {
+  process.stdout.write("protocol: 22\\nschema_version: 1\\n");
+  process.exit(0);
+}
+const makeAgent = (paneId, status, rev) => {
+  const role = paneId.startsWith("pane-") ? paneId.slice("pane-".length) : paneId;
+  return {
+    agent: "claude-code",
+    name: role + "-default",
+    agent_status: status,
+    workspace_id: "ws-1",
+    tab_id: "tab-1",
+    pane_id: paneId,
+    terminal_id: "term-" + paneId,
+    revision: rev,
+    state_change_seq: rev,
+    agent_session: { source: "herdr", kind: "id", value: "session-" + paneId }
+  };
+};
+if (args[0] === "agent" && args[1] === "get") {
+  const paneId = args[2] ?? "pane-planner";
+  process.stdout.write(JSON.stringify({ id: "cli:agent:get", result: { type: "agent_info", agent: makeAgent(paneId, "idle", 1) } }) + "\\n");
+  process.exit(0);
+}
+if (args[0] === "agent" && args[1] === "prompt") {
+  const paneId = args[2] ?? "pane-planner";
+  process.stdout.write(JSON.stringify({ id: "cli:agent:prompt", result: { type: "agent_prompted", agent: makeAgent(paneId, "working", 2) } }) + "\\n");
+  process.exit(0);
+}
+if (args[0] === "agent" && args[1] === "send-keys") {
+  process.stdout.write(JSON.stringify({ id: "cli:agent:send-keys", result: { type: "ok" } }) + "\\n");
+  process.exit(0);
+}
+if (args[0] === "agent" && args[1] === "wait") {
+  const paneId = args[2] ?? "pane-planner";
+  process.stdout.write(JSON.stringify({ id: "cli:agent:wait", result: { type: "agent_wait", agent: makeAgent(paneId, "working", 2) } }) + "\\n");
+  process.exit(0);
+}
+if (args[0] === "agent" && args[1] === "read") {
+  process.stdout.write("");
+  process.exit(0);
+}
+process.exit(0);
+`;
+        await writeFile(fakeHerdrPath, fakeHerdrScript, "utf8");
+        await chmod(fakeHerdrPath, 0o755);
+        process.env["AI_FLOW_HERDR_BIN"] = fakeHerdrPath;
+
+        const io = { stdout: () => {}, stderr: () => {} };
+
+        const initRes = await main(["init", "--json"], { cwd: tempDir, io });
+        expect(initRes.exitCode).toBe(0);
+        expect(initRes.ok).toBe(true);
+
+        const runRes = await main(
+          ["run", "Implement authentication flow", "--run-id", "run-composed-1", "--json"],
+          { cwd: tempDir, io }
+        );
+        expect(runRes.exitCode).toBe(0);
+        expect(runRes.ok).toBe(true);
+        const runEnvelope = JSON.parse(runRes.stdout);
+        expect(runEnvelope.ok).toBe(true);
+        expect(runEnvelope.command).toBe("run");
+        expect(runEnvelope.data.runId).toBe("run-composed-1");
+
+        const statusRes = await main(["status", "run-composed-1", "--json"], { cwd: tempDir, io });
+        expect(statusRes.exitCode).toBe(0);
+        expect(statusRes.ok).toBe(true);
+        const statusEnvelope = JSON.parse(statusRes.stdout);
+        expect(statusEnvelope.ok).toBe(true);
+        expect(statusEnvelope.data.runId).toBe("run-composed-1");
+
+        const resumeRes = await main(["resume", "run-composed-1", "--json"], { cwd: tempDir, io });
+        expect(resumeRes.exitCode).toBe(0);
+        expect(resumeRes.ok).toBe(true);
+
+        const cancelRes = await main(
+          ["cancel", "run-composed-1", "--reason", "Operator cancelled", "--json"],
+          { cwd: tempDir, io }
+        );
+        expect(cancelRes.exitCode).toBe(0);
+        expect(cancelRes.ok).toBe(true);
+        const cancelEnvelope = JSON.parse(cancelRes.stdout);
+        expect(cancelEnvelope.ok).toBe(true);
+        expect(["cancelling", "cancelled"]).toContain(cancelEnvelope.data.status);
+      } finally {
+        if (prevHerdrBin === undefined) {
+          delete process.env["AI_FLOW_HERDR_BIN"];
+        } else {
+          process.env["AI_FLOW_HERDR_BIN"] = prevHerdrBin;
+        }
+        process.exitCode = prevExitCode;
+      }
+    });
+
+    it("fails closed in main() when .ai-flow/config.json is missing or malformed", async () => {
+      const prevExitCode = process.exitCode;
+      try {
+        const io = { stdout: () => {}, stderr: () => {} };
+
+        const missingRes = await main(["status", "--json"], { cwd: tempDir, io });
+        expect(missingRes.exitCode).toBe(CLI_EXIT_CODES.RUNTIME_ERROR);
+        expect(missingRes.ok).toBe(false);
+        expect(missingRes.error?.code).toBe("not_found");
+
+        await main(["init"], { cwd: tempDir, io });
+        await writeFile(join(tempDir, ".ai-flow", "config.json"), "{ invalid json", "utf8");
+
+        const malformedRes = await main(["run", "Test malformed config", "--json"], {
+          cwd: tempDir,
+          io
+        });
+        expect(malformedRes.exitCode).toBe(CLI_EXIT_CODES.RUNTIME_ERROR);
+        expect(malformedRes.ok).toBe(false);
+        expect(malformedRes.error?.code).toBe("corruption");
+      } finally {
+        process.exitCode = prevExitCode;
       }
     });
   });

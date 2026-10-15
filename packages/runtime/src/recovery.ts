@@ -74,6 +74,7 @@ export async function recoverWorkflowRun(
   const checkpoint = checkpointRes.value;
 
   let recoverCommand: RecoverRunCommand;
+  let cachedAllEvents: DomainEvent[] | undefined = undefined;
 
   if (checkpoint !== null) {
     // Validate checkpoint envelope
@@ -141,6 +142,7 @@ export async function recoverWorkflowRun(
       };
     }
 
+    cachedAllEvents = allEvents;
     recoverCommand = {
       runId,
       events: allEvents,
@@ -153,9 +155,30 @@ export async function recoverWorkflowRun(
   if (!recoverRes.ok) return recoverRes;
   let currentSnapshot = recoverRes.value.snapshot;
 
-  // 6. Reconcile in-flight bound executions against AgentTransport
+  // 6. Reconcile in-flight bound executions and unbound dispatch intents against AgentTransport
   const reconciledTasks: string[] = [];
   const clock = ports.clock ?? (() => new Date());
+
+  const loadAllRunEvents = async (): Promise<OperationResult<DomainEvent[]>> => {
+    if (cachedAllEvents !== undefined) {
+      return { ok: true, value: cachedAllEvents };
+    }
+    const events: DomainEvent[] = [];
+    let cursor: string | undefined = undefined;
+    while (true) {
+      const pageRes = await ports.runStore.readEvents(
+        runId,
+        cursor !== undefined ? { cursor, limit: 100 } : { limit: 100 },
+        options
+      );
+      if (!pageRes.ok) return pageRes;
+      events.push(...pageRes.value.items);
+      if (pageRes.value.nextCursor === undefined) break;
+      cursor = pageRes.value.nextCursor;
+    }
+    cachedAllEvents = events;
+    return { ok: true, value: events };
+  };
 
   for (const task of currentSnapshot.tasks) {
     if (["running", "cancelling"].includes(task.status) && task.agentExecution !== undefined) {
@@ -195,6 +218,116 @@ export async function recoverWorkflowRun(
               idempotencyKey: `recon-events-restart:${handle.requestId}`
             }, options);
             currentSnapshot = recordRes.value.snapshot;
+          }
+        }
+      }
+    } else if (
+      ["running", "waiting", "blocked", "cancelling"].includes(task.status) &&
+      task.agentExecution === undefined &&
+      task.attemptId !== undefined
+    ) {
+      const eventsRes = await loadAllRunEvents();
+      if (!eventsRes.ok) return eventsRes;
+
+      const dispatchEvent = [...eventsRes.value]
+        .reverse()
+        .find(
+          (e) =>
+            e.type === "task.dispatch_requested" &&
+            (e.taskId === task.taskId || (e.payload as { taskId?: string }).taskId === task.taskId) &&
+            e.payload.attemptId === task.attemptId
+        );
+
+      if (dispatchEvent && dispatchEvent.type === "task.dispatch_requested") {
+        const dispatchPayload = dispatchEvent.payload;
+        const reconRes = await ports.transport.reconcile(
+          {
+            requestId: dispatchPayload.requestId,
+            attemptId: dispatchPayload.attemptId,
+            runId,
+            taskId: task.taskId,
+            idempotencyKey: `recon-restart:${dispatchPayload.requestId}`,
+            target: dispatchPayload.target,
+            requestedAt: clock().toISOString()
+          },
+          options
+        );
+
+        if (reconRes.ok) {
+          reconciledTasks.push(task.taskId);
+          const recordRes = await ports.engine.recordDeliveryReconciliation(
+            {
+              runId,
+              taskId: task.taskId,
+              expectedVersion: currentSnapshot.version,
+              requestId: dispatchPayload.requestId,
+              result: reconRes.value,
+              idempotencyKey: `recon-rec-restart:${dispatchPayload.requestId}:${currentSnapshot.version}`,
+              occurredAt: clock().toISOString()
+            },
+            options
+          );
+
+          if (recordRes.ok) {
+            if (recordRes.value.emittedEvents.length > 0) {
+              const appendRes = await ports.runStore.appendEvents(
+                {
+                  runId,
+                  expectedVersion: currentSnapshot.version,
+                  expectedLastSequence: currentSnapshot.lastEventSequence,
+                  events: recordRes.value.emittedEvents,
+                  idempotencyKey: `recon-events-restart:${dispatchPayload.requestId}:${currentSnapshot.version}`
+                },
+                options
+              );
+              if (!appendRes.ok) return appendRes;
+            }
+            currentSnapshot = recordRes.value.snapshot;
+          }
+
+          const refreshedTask = currentSnapshot.tasks.find((t) => t.taskId === task.taskId);
+          if (refreshedTask && refreshedTask.status === "blocked") {
+            if (
+              reconRes.value.status === "bound" ||
+              (reconRes.value.status === "not_delivered" && reconRes.value.retrySafe)
+            ) {
+              const unblockRes = await ports.engine.transitionTask(
+                {
+                  runId,
+                  taskId: task.taskId,
+                  expectedVersion: currentSnapshot.version,
+                  from: "blocked",
+                  to: "running",
+                  intent: "normal",
+                  generationFrom: refreshedTask.generation,
+                  generationTo: refreshedTask.generation,
+                  reason:
+                    reconRes.value.status === "bound"
+                      ? "Reconciled as bound on recovery"
+                      : "Reconciled as not_delivered (retrySafe) on recovery",
+                  idempotencyKey: `recon-unblock-bound:${dispatchPayload.requestId}:${currentSnapshot.version}`,
+                  occurredAt: clock().toISOString()
+                },
+                options
+              );
+
+              if (unblockRes.ok) {
+                if (unblockRes.value.emittedEvents.length > 0) {
+                  const appendUnblock = await ports.runStore.appendEvents(
+                    {
+                      runId,
+                      expectedVersion: currentSnapshot.version,
+                      expectedLastSequence: currentSnapshot.lastEventSequence,
+                      events: unblockRes.value.emittedEvents,
+                      idempotencyKey: `recon-unblock-events:${dispatchPayload.requestId}:${currentSnapshot.version}`
+                    },
+                    options
+                  );
+                  if (!appendUnblock.ok) return appendUnblock;
+                }
+                currentSnapshot = unblockRes.value.snapshot;
+              }
+            }
           }
         }
       }

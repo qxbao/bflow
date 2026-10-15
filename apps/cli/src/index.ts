@@ -21,6 +21,7 @@ export {
   type ResumeCommandArgs,
   type RunCommandArgs,
   type StatusCommandArgs,
+  type VersionCommandArgs,
   type ApprovalDecision,
   type CancellationRequest,
   type ContractError,
@@ -47,5 +48,10 @@ export {
   initRepositoryConfig
 } from "./config.js";
 export { formatCommandSuccess, formatCommandError } from "./formatters.js";
-export { executeCommand, runCli } from "./commands.js";
+export { CLI_VERSION, executeCommand, runCli } from "./commands.js";
+export {
+  composeCliRuntime,
+  type ComposeCliRuntimeOptions,
+  type ComposedCliRuntime
+} from "./runtime.js";
 export { main } from "./bin.js";

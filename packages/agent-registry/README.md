@@ -103,7 +103,7 @@ Direct sharing of unverified `ArtifactProposal` values across roles is strictly 
 
 ## End-to-End Feature Workflow Example
 
-- `buildCompleteFeatureWorkflowExample(store?)`: Demonstrates the complete 4-stage SDLC execution lifecycle:
+- `buildCompleteFeatureWorkflowExample(store)`: Demonstrates the complete 4-stage SDLC execution lifecycle using a required `ArtifactStore` (trusted `ArtifactReference` records with `trust: "stored"` can only originate from `ArtifactStore` ingestion; omitting `store` returns a validation error):
   1. **Planner**: Renders prompt, produces specification artifact proposal, ingests into store, generates planned DAG, and produces contract `AgentResult`.
   2. **Developer**: Receives stored specification reference via handoff, renders prompt with isolated worktree path, produces patch and unit test proposals, stores them, and produces contract `AgentResult`.
   3. **Reviewer**: Receives patch and test references via handoff, renders review prompt with diff, generates review report proposal, validates `approved` decision, and produces contract `AgentResult` and `ApprovalDecision`.

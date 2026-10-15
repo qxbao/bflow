@@ -11,7 +11,7 @@ import {
   type TimeoutPolicy,
   type WorkflowDefinition
 } from "@ai-flow/contracts";
-import { isMvpRole, parseRoleAgentSettings } from "./roles.js";
+import { isMvpRole, parseRoleAgentSettings, type MvpRole } from "./roles.js";
 
 export const WORKFLOW_KINDS = ["feature", "bugfix", "refactor"] as const;
 export type WorkflowKind = (typeof WORKFLOW_KINDS)[number];
@@ -70,6 +70,13 @@ function success<T>(value: T): OperationResult<T> {
   return { ok: true, value };
 }
 
+const ROLE_STAGE_ORDER: Readonly<Record<MvpRole, number>> = Object.freeze({
+  planner: 0,
+  developer: 1,
+  reviewer: 2,
+  qa: 3
+});
+
 export function validateMvpWorkflowConventions(
   workflow: WorkflowDefinition
 ): OperationResult<WorkflowDefinition> {
@@ -78,12 +85,18 @@ export function validateMvpWorkflowConventions(
     return failure(`Invalid workflow definition: ${parseRes.error.message}`);
   }
 
+  const taskRoleById = new Map<string, MvpRole>();
+  const adj = new Map<string, string[]>();
+
   for (const task of workflow.tasks) {
     if (!isMvpRole(task.role)) {
       return failure(
         `Task '${task.id}' has invalid/out-of-scope role '${task.role}'. Only MVP roles are permitted.`
       );
     }
+    taskRoleById.set(task.id, task.role);
+    adj.set(task.id, []);
+
     if (!Array.isArray(task.acceptanceCriteria) || task.acceptanceCriteria.length === 0) {
       return failure(`Task '${task.id}' must have at least one acceptance criterion.`);
     }
@@ -94,6 +107,67 @@ export function validateMvpWorkflowConventions(
     }
     if (task.role === "qa" && (!Array.isArray(task.qualityGates) || !task.qualityGates.some((g) => g.required))) {
       return failure(`QA task '${task.id}' must have at least one required quality gate binding.`);
+    }
+  }
+
+  for (const d of workflow.dependencies) {
+    const childRole = taskRoleById.get(d.taskId);
+    const parentRole = taskRoleById.get(d.dependsOnTaskId);
+    if (childRole && parentRole) {
+      const childStage = ROLE_STAGE_ORDER[childRole];
+      const parentStage = ROLE_STAGE_ORDER[parentRole];
+      if (childStage !== undefined && parentStage !== undefined && childStage < parentStage) {
+        return failure(
+          `Invalid role dependency order in workflow: '${d.taskId}' (${childRole}) cannot depend on later stage '${d.dependsOnTaskId}' (${parentRole})`
+        );
+      }
+      if (childRole !== parentRole && d.condition !== "succeeded") {
+        return failure(
+          `Cross-role dependency edge '${d.taskId}' -> '${d.dependsOnTaskId}' must have condition 'succeeded', got '${d.condition}'`
+        );
+      }
+    }
+    adj.get(d.taskId)?.push(d.dependsOnTaskId);
+  }
+
+  function canReachRole(startTaskId: string, targetRole: MvpRole): boolean {
+    const queue = [startTaskId];
+    const seen = new Set<string>([startTaskId]);
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      for (const prereq of adj.get(current) ?? []) {
+        const prereqRole = taskRoleById.get(prereq);
+        if (prereqRole === targetRole) {
+          return true;
+        }
+        if (!seen.has(prereq)) {
+          seen.add(prereq);
+          queue.push(prereq);
+        }
+      }
+    }
+    return false;
+  }
+
+  const hasPlannerTask = workflow.tasks.some((t) => t.role === "planner");
+  const hasReviewerTask = workflow.tasks.some((t) => t.role === "reviewer");
+
+  for (const task of workflow.tasks) {
+    if (task.role === "developer") {
+      if (hasPlannerTask && !canReachRole(task.id, "planner")) {
+        return failure(`Developer task '${task.id}' must depend on a planner task`);
+      }
+    } else if (task.role === "reviewer") {
+      if (!canReachRole(task.id, "developer")) {
+        return failure(`Reviewer task '${task.id}' must depend on a developer task`);
+      }
+    } else if (task.role === "qa") {
+      if (hasReviewerTask && !canReachRole(task.id, "reviewer")) {
+        return failure(`QA task '${task.id}' must depend on a reviewer task`);
+      }
+      if (!canReachRole(task.id, "developer")) {
+        return failure(`QA task '${task.id}' must depend on a developer task`);
+      }
     }
   }
 
@@ -440,7 +514,7 @@ export async function verifyWorkflowRolesRegistered(
     const resolveRes = await registry.resolve(
       role,
       {
-        runId,
+        runId: runIdRes.data,
         taskId: task.id,
         requiredCapabilities: []
       },
@@ -460,6 +534,18 @@ export async function verifyWorkflowRolesRegistered(
           message: `No agent registered for workflow role '${role}' (required by task '${task.id}')`
         }
       };
+    }
+
+    if (resolveRes.value.role !== role) {
+      return failure(
+        `Resolved agent '${resolveRes.value.agentId}' role mismatch: expected '${role}', got '${resolveRes.value.role}'`
+      );
+    }
+
+    if (resolveRes.value.enabled !== true) {
+      return failure(
+        `Agent '${resolveRes.value.agentId}' for workflow role '${role}' is disabled`
+      );
     }
 
     const settingsRes = parseRoleAgentSettings(

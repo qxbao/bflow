@@ -289,7 +289,30 @@ export class RuntimeServiceImpl implements ConcreteRuntimeService {
     return createDomainEventStream(this.ports, this.eventHub, runId, options);
   }
 
+  private async ensureRunRecovered(runId: string, options?: OperationOptions): Promise<OperationResult<void>> {
+    const parsed = IdentifierSchema.safeParse(runId);
+    if (!parsed.success) {
+      return { ok: true, value: undefined };
+    }
+    const engineSnap = await this.ports.engine.getSnapshot(runId, options);
+    if (engineSnap.ok && engineSnap.value !== null) {
+      return { ok: true, value: undefined };
+    }
+    const stored = await this.ports.runStore.get(runId, options);
+    if (!stored.ok) return stored as OperationResult<void>;
+    if (stored.value === null) {
+      return { ok: true, value: undefined };
+    }
+    const recoverResult = await recoverWorkflowRun(runId, this.ports, options);
+    if (!recoverResult.ok) return recoverResult as OperationResult<void>;
+    return { ok: true, value: undefined };
+  }
+
   async decide(decision: ApprovalDecision, options?: OperationOptions): Promise<OperationResult<WorkflowRunSnapshot>> {
+    if (decision && typeof decision === "object" && typeof decision.runId === "string") {
+      const recRes = await this.ensureRunRecovered(decision.runId, options);
+      if (!recRes.ok) return recRes as OperationResult<WorkflowRunSnapshot>;
+    }
     return this.orchestrator.applyApprovalDecision(decision, options);
   }
 
@@ -320,6 +343,16 @@ export class RuntimeServiceImpl implements ConcreteRuntimeService {
     requestOrOptions: CancellationRequest | CancelRunOptions,
     options?: OperationOptions
   ): Promise<OperationResult<WorkflowRunSnapshot>> {
+    if (
+      requestOrOptions &&
+      typeof requestOrOptions === "object" &&
+      "runId" in requestOrOptions &&
+      typeof requestOrOptions.runId === "string"
+    ) {
+      const recRes = await this.ensureRunRecovered(requestOrOptions.runId, options);
+      if (!recRes.ok) return recRes as OperationResult<WorkflowRunSnapshot>;
+    }
+
     let cancelRequest: CancellationRequest;
 
     if ("runId" in requestOrOptions && !("cancellationId" in requestOrOptions)) {
@@ -393,10 +426,69 @@ export class RuntimeServiceImpl implements ConcreteRuntimeService {
       (task) => task.status === "cancelling" && task.agentExecution !== undefined
     );
 
+    let cancellationResultRecorded = false;
+
     for (const boundTask of boundTasks) {
       const handle = boundTask.agentExecution!;
       // 1. Send transport cancel
-      await this.ports.transport.cancel(handle, cancelRequest, options);
+      const cancelOutcome = await this.ports.transport.cancel(handle, cancelRequest, options);
+      if (!cancelOutcome.ok) {
+        return cancelOutcome;
+      }
+
+      if (!cancellationResultRecorded) {
+        const cancelResRecord = await this.ports.engine.recordCancellationResult(
+          {
+            runId: cancelRequest.runId,
+            expectedVersion: currentSnapshot.version,
+            result: {
+              ...cancelOutcome.value,
+              schemaVersion: cancelOutcome.value.schemaVersion ?? 1
+            },
+            idempotencyKey: `cancel-result-${cancelRequest.cancellationId}:${boundTask.taskId}:${handle.executionId}`
+          },
+          options
+        );
+        if (cancelResRecord.ok && cancelResRecord.value.emittedEvents.length > 0) {
+          const appendRecordRes = await this.ports.runStore.appendEvents(
+            {
+              runId: cancelRequest.runId,
+              expectedVersion: currentSnapshot.version,
+              expectedLastSequence: currentSnapshot.lastEventSequence,
+              events: cancelResRecord.value.emittedEvents,
+              idempotencyKey: `cancel-result-events-${cancelRequest.cancellationId}:${boundTask.taskId}:${handle.executionId}`
+            },
+            options
+          );
+          if (!appendRecordRes.ok) {
+            return appendRecordRes as OperationResult<WorkflowRunSnapshot>;
+          }
+          this.eventHub.publish(cancelRequest.runId, cancelResRecord.value.emittedEvents);
+          currentSnapshot = cancelResRecord.value.snapshot;
+        }
+        cancellationResultRecorded = true;
+      }
+
+      // Check whether remote stop is confirmed before transitioning task to cancelled
+      let stopConfirmed = false;
+      if (cancelOutcome.value.status === "already_terminal") {
+        stopConfirmed = true;
+      } else if (cancelOutcome.value.status === "accepted") {
+        const waitRes = await this.ports.transport.wait(handle, {
+          ...options,
+          timeoutMs: 0
+        });
+        if (
+          waitRes.ok &&
+          (waitRes.value.state === "cancelled" || waitRes.value.state === "done")
+        ) {
+          stopConfirmed = true;
+        }
+      }
+
+      if (!stopConfirmed) {
+        continue;
+      }
 
       // 2. Release lease if active
       const active = this.dispatcher.getActiveExecution(cancelRequest.runId, boundTask.taskId);
@@ -438,11 +530,14 @@ export class RuntimeServiceImpl implements ConcreteRuntimeService {
       }
     }
 
-    // Now confirm cancellation stop for any unbound tasks
+    // Now confirm cancellation stop for any unbound tasks only when no bound tasks remain in 'cancelling'
+    const hasBoundCancelling = currentSnapshot.tasks.some(
+      (task) => task.status === "cancelling" && task.agentExecution !== undefined
+    );
     const hasUnboundCancelling = currentSnapshot.tasks.some(
       (task) => task.status === "cancelling" && task.agentExecution === undefined
     );
-    if (hasUnboundCancelling || currentSnapshot.status === "cancelling") {
+    if (!hasBoundCancelling && (hasUnboundCancelling || currentSnapshot.status === "cancelling")) {
       const confirmUnboundRes = await this.ports.engine.confirmCancellationStop(
         {
           runId: cancelRequest.runId,

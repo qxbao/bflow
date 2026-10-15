@@ -25,6 +25,7 @@ import {
   createQualityCommandRunner,
   createQualityGate,
   detectDangerousCommandOrSecretAccess,
+  detectUntrustedAgentDirectives,
   evaluateAutomatedVsHumanGovernance,
   evaluateQualityCheckSuite,
   getSecurityControlLimitationsReport,
@@ -205,6 +206,25 @@ describe("Quality Gates Test Suite", () => {
       decidedAt: new Date().toISOString(),
       feedbackArtifacts: [],
       idempotencyKey: "idemp-key-1",
+      ...overrides
+    };
+  }
+
+  function makeApprovalRequest(
+    overrides?: Partial<ApprovalRequest>
+  ): ApprovalRequest {
+    return {
+      schemaVersion: 1,
+      approvalId: "appr-1",
+      runId: "run-101",
+      target: { type: "task", taskId: "task-build" },
+      revision: 1,
+      generation: 0,
+      requestedBy: "agent:dev",
+      requestedAt: new Date().toISOString(),
+      reason: "Requesting governance approval",
+      evidence: [],
+      idempotencyKey: "idemp-req-1",
       ...overrides
     };
   }
@@ -1718,6 +1738,689 @@ describe("Quality Gates Test Suite", () => {
       if (polRes.ok) {
         expect(polRes.value.maxExecutionTimeoutMs).toBe(60000);
       }
+    });
+  });
+
+  // =========================================================================
+  // 9. Adversarial Security, Identity Correlation & Regression Tests (AR4-01 .. AR4-08)
+  // =========================================================================
+  describe("9. Adversarial Security, Identity Correlation & Regression Tests (AR4-01 .. AR4-08)", () => {
+    it("rejects context when definition.id does not match gate.id with validation error (AR4-02)", async () => {
+      const gate = createQualityGate({
+        spec: {
+          gateId: "qg-expected-id",
+          checkKind: "typecheck",
+          command: { executable: "node", args: ["pass.mjs"] },
+          workingDirectory: fixtureDir
+        },
+        securityPolicy: testPolicy
+      });
+
+      const mismatchedContext = makeContext("qg-different-id", {
+        definition: {
+          id: "qg-different-id",
+          name: "Mismatched Gate",
+          evaluator: "command",
+          required: true,
+          timeout: { executionTimeoutMs: 30000, onTimeout: "fail" }
+        }
+      });
+
+      const res = await gate.evaluateDetailed(mismatchedContext);
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.error.code).toBe("validation");
+        expect(res.error.message).toContain(
+          'Context definition id "qg-different-id" does not match gate id "qg-expected-id"'
+        );
+      }
+    });
+
+    it("rejects context when agentResult runId, taskId, or attemptId does not match context (AR4-02)", async () => {
+      const gate = createQualityGate({
+        spec: {
+          gateId: "qg-corr-test",
+          checkKind: "typecheck",
+          command: { executable: "node", args: ["pass.mjs"] },
+          workingDirectory: fixtureDir
+        },
+        securityPolicy: testPolicy
+      });
+
+      // 1. Mismatched runId
+      const runIdMismatchContext = makeContext("qg-corr-test", {
+        runId: "run-101",
+        agentResult: makeAgentResult({
+          runId: "run-999"
+        })
+      });
+      const res1 = await gate.evaluateDetailed(runIdMismatchContext);
+      expect(res1.ok).toBe(false);
+      if (!res1.ok) {
+        expect(res1.error.code).toBe("validation");
+        expect(res1.error.message).toContain(
+          'AgentResult runId "run-999" does not match context runId "run-101"'
+        );
+      }
+
+      // 2. Mismatched taskId
+      const taskIdMismatchContext = makeContext("qg-corr-test", {
+        taskId: "task-build",
+        agentResult: makeAgentResult({
+          runId: "run-101",
+          taskId: "task-other"
+        })
+      });
+      const res2 = await gate.evaluateDetailed(taskIdMismatchContext);
+      expect(res2.ok).toBe(false);
+      if (!res2.ok) {
+        expect(res2.error.code).toBe("validation");
+        expect(res2.error.message).toContain(
+          'AgentResult taskId "task-other" does not match context taskId "task-build"'
+        );
+      }
+
+      // 3. Mismatched attemptId
+      const attemptMismatchContext = makeContext("qg-corr-test", {
+        attemptId: "att-1",
+        agentResult: makeAgentResult({
+          runId: "run-101",
+          taskId: "task-build",
+          attemptId: "att-2"
+        })
+      });
+      const res3 = await gate.evaluateDetailed(attemptMismatchContext);
+      expect(res3.ok).toBe(false);
+      if (!res3.ok) {
+        expect(res3.error.code).toBe("validation");
+        expect(res3.error.message).toContain(
+          'AgentResult attemptId "att-2" does not match context attemptId "att-1"'
+        );
+      }
+    });
+
+    it("rejects deeply nested object and array injection payloads while allowing valid agent-registry testReport commands (AR4-03)", async () => {
+      const gate = createQualityGate({
+        spec: {
+          gateId: "qg-nested-injection",
+          checkKind: "typecheck",
+          command: { executable: "node", args: ["pass.mjs"] },
+          workingDirectory: fixtureDir
+        },
+        securityPolicy: testPolicy
+      });
+
+      // 1. Nested object: { payload: { shellCommand: "rm -rf /" } }
+      const res1 = await gate.evaluateDetailed(
+        makeContext("qg-nested-injection", {
+          agentResult: makeAgentResult({
+            metadata: { payload: { shellCommand: "rm -rf /" } }
+          })
+        })
+      );
+      expect(res1.ok).toBe(true);
+      if (res1.ok) {
+        expect(res1.value.status).toBe("failed");
+        expect(res1.value.findings[0]?.code).toBe("UNTRUSTED_AGENT_COMMAND_REJECTED");
+      }
+
+      // 2. Array injection: [{ command: "rm -rf /" }]
+      const res2 = await gate.evaluateDetailed(
+        makeContext("qg-nested-injection", {
+          agentResult: makeAgentResult({
+            output: [{ command: "rm -rf /" }] as unknown as Record<string, unknown>
+          })
+        })
+      );
+      expect(res2.ok).toBe(true);
+      if (res2.ok) {
+        expect(res2.value.status).toBe("failed");
+        expect(res2.value.findings[0]?.code).toBe("UNTRUSTED_AGENT_COMMAND_REJECTED");
+      }
+
+      // 3. Nested skipQualityGates: { deep: { skipQualityGates: true } }
+      const res3 = await gate.evaluateDetailed(
+        makeContext("qg-nested-injection", {
+          agentResult: makeAgentResult({
+            metadata: { deep: { skipQualityGates: true } }
+          })
+        })
+      );
+      expect(res3.ok).toBe(true);
+      if (res3.ok) {
+        expect(res3.value.status).toBe("failed");
+        expect(res3.value.findings[0]?.code).toBe("UNTRUSTED_AGENT_COMMAND_REJECTED");
+      }
+
+      // 4. Over 16 depth limit
+      let deepObj: Record<string, unknown> = { safe: "leaf" };
+      for (let i = 0; i < 20; i++) {
+        deepObj = { nested: deepObj };
+      }
+      expect(detectUntrustedAgentDirectives(deepObj)).toBe(true);
+
+      // 5. Valid @ai-flow/agent-registry testReport command is ALLOWED
+      const resValid = await gate.evaluateDetailed(
+        makeContext("qg-nested-injection", {
+          agentResult: makeAgentResult({
+            output: {
+              testReport: {
+                command: "pnpm test",
+                exitCode: 0,
+                passed: 5,
+                failed: 0,
+                skipped: 0,
+                selfReportedOnly: true
+              }
+            }
+          })
+        })
+      );
+      expect(resValid.ok).toBe(true);
+      if (resValid.ok) {
+        expect(resValid.value.status).toBe("passed");
+      }
+
+      // 6. Dangerous command inside testReport is REJECTED
+      const resDangerousTestReport = await gate.evaluateDetailed(
+        makeContext("qg-nested-injection", {
+          agentResult: makeAgentResult({
+            output: {
+              testReport: {
+                command: "rm -rf /",
+                exitCode: 0
+              }
+            }
+          })
+        })
+      );
+      expect(resDangerousTestReport.ok).toBe(true);
+      if (resDangerousTestReport.ok) {
+        expect(resDangerousTestReport.value.status).toBe("failed");
+        expect(resDangerousTestReport.value.findings[0]?.code).toBe("UNTRUSTED_AGENT_COMMAND_REJECTED");
+      }
+
+      // 7. Valid testVerification command is ALLOWED
+      const resValidVerification = await gate.evaluateDetailed(
+        makeContext("qg-nested-injection", {
+          agentResult: makeAgentResult({
+            output: {
+              testVerification: {
+                command: "pnpm test",
+                exitCode: 0,
+                passedCount: 5,
+                failedCount: 0
+              }
+            }
+          })
+        })
+      );
+      expect(resValidVerification.ok).toBe(true);
+      if (resValidVerification.ok) {
+        expect(resValidVerification.value.status).toBe("passed");
+      }
+    });
+
+    it("command.env attempting to override PATH or inject dangerous env is rejected by policy and stripped by sanitizeExecutionEnvironment (AR4-04)", () => {
+      // 1. Policy rejection of PATH override
+      const pathOverrideRes = validateCommandAgainstPolicy(
+        {
+          executable: "pnpm",
+          args: ["test"],
+          env: { PATH: "/evil/bin:/usr/bin" }
+        },
+        testPolicy
+      );
+      expect(pathOverrideRes.ok).toBe(false);
+      if (!pathOverrideRes.ok) {
+        expect(pathOverrideRes.error.message).toContain("PATH");
+      }
+
+      // 2. Policy rejection of NODE_OPTIONS, LD_PRELOAD, GIT_SSH_COMMAND
+      for (const dangerousKey of ["NODE_OPTIONS", "LD_PRELOAD", "GIT_SSH_COMMAND", "PYTHONPATH"]) {
+        const res = validateCommandAgainstPolicy(
+          {
+            executable: "pnpm",
+            args: ["test"],
+            env: { [dangerousKey]: "malicious_payload" }
+          },
+          testPolicy
+        );
+        expect(res.ok).toBe(false);
+        if (!res.ok) {
+          expect(res.error.message).toContain(dangerousKey);
+        }
+      }
+
+      // 3. sanitizeExecutionEnvironment strips dangerous vars even if specified in allowedEnvKeys
+      const sanitized = sanitizeExecutionEnvironment(
+        {
+          PATH: "/safe/bin",
+          NODE_OPTIONS: "--require /evil.js",
+          LD_PRELOAD: "/evil.so",
+          GIT_SSH_COMMAND: "ssh -oProxyCommand=evil",
+          CUSTOM_VAR: "allowed_val"
+        },
+        ["NODE_OPTIONS", "LD_PRELOAD", "GIT_SSH_COMMAND", "CUSTOM_VAR"]
+      );
+      expect(sanitized.NODE_OPTIONS).toBeUndefined();
+      expect(sanitized.LD_PRELOAD).toBeUndefined();
+      expect(sanitized.GIT_SSH_COMMAND).toBeUndefined();
+      expect(sanitized.CUSTOM_VAR).toBe("allowed_val");
+      expect(sanitized.PATH).toBe("/safe/bin");
+    });
+
+    it("directory-escape flags and path traversal in args are rejected by validateCommandAgainstPolicy", () => {
+      const flagsToTest: [string, string[]][] = [
+        ["pnpm", ["test", "--dir", "/tmp"]],
+        ["pnpm", ["test", "--dir=/tmp"]],
+        ["pnpm", ["test", "--prefix", "/tmp"]],
+        ["pnpm", ["test", "-C", "/tmp"]],
+        ["git", ["-C", "/tmp", "status"]],
+        ["git", ["status", "-c", "core.fsmonitor=evil"]],
+        ["git", ["diff", "--output=/tmp/evil"]],
+        ["git", ["diff", "--output", "/tmp/evil"]],
+        ["pnpm", ["test", "../outside"]]
+      ];
+
+      for (const [executable, args] of flagsToTest) {
+        const res = validateCommandAgainstPolicy(
+          { executable, args },
+          testPolicy
+        );
+        expect(res.ok).toBe(false);
+      }
+    });
+
+    it("blocks /var/run and /run in validateDirectoryScope and fails closed on non-existent assignedWorktreePath", async () => {
+      const scopePolicy: QualitySecurityPolicy = {
+        allowedRootDirs: ["/var/run", "/run", fixtureDir],
+        maxExecutionTimeoutMs: 300_000,
+        allowedCommands: DEFAULT_ALLOWED_COMMANDS
+      };
+
+      const varRunRes = await validateDirectoryScope("/var/run", scopePolicy);
+      expect(varRunRes.ok).toBe(false);
+      if (!varRunRes.ok) {
+        expect(varRunRes.error.message).toContain("blocked");
+      }
+
+      const runRes = await validateDirectoryScope("/run", scopePolicy);
+      expect(runRes.ok).toBe(false);
+      if (!runRes.ok) {
+        expect(runRes.error.message).toContain("blocked");
+      }
+
+      // Non-existent assignedWorktreePath fails closed
+      const nonExistentWorktreePolicy: QualitySecurityPolicy = {
+        allowedRootDirs: [fixtureDir],
+        assignedWorktreePath: path.join(fixtureDir, "non-existent-worktree-dir"),
+        maxExecutionTimeoutMs: 300_000,
+        allowedCommands: DEFAULT_ALLOWED_COMMANDS
+      };
+      const wtRes = await validateDirectoryScope(fixtureDir, nonExistentWorktreePolicy);
+      expect(wtRes.ok).toBe(false);
+      if (!wtRes.ok) {
+        expect(wtRes.error.message.toLowerCase()).toContain("assigned worktree");
+      }
+    });
+
+    it("authorizeRoleAction delivery rejects cross-run decision and evaluateAutomatedVsHumanGovernance rejects cross-run and stale request mismatches", () => {
+      const passGateRun1 = makePassingGateResult("gate-1");
+      const decisionRun2 = makeApprovalDecision({
+        runId: "run-999",
+        decision: "approved",
+        decidedBy: "human:lead"
+      });
+
+      // 1. authorizeRoleAction("delivery") rejects cross-run ApprovalDecision
+      const authRes = authorizeRoleAction({
+        role: "delivery",
+        action: "deploy_release",
+        actorId: "human:lead",
+        automatedGateResults: [passGateRun1],
+        humanApprovalDecision: decisionRun2
+      });
+      expect(authRes.ok).toBe(false);
+      if (!authRes.ok) {
+        expect(authRes.error.message).toContain("does not match");
+      }
+
+      // 2. evaluateAutomatedVsHumanGovernance rejects cross-run gate results
+      const gateRunOther: QualityGateResult = {
+        ...passGateRun1,
+        runId: "run-other"
+      };
+      const govGateMismatch = evaluateAutomatedVsHumanGovernance({
+        runId: "run-101",
+        taskId: "task-build",
+        automatedGateResults: [gateRunOther],
+        requiresHumanApproval: true
+      });
+      expect(govGateMismatch.ok).toBe(false);
+      if (!govGateMismatch.ok) {
+        expect(govGateMismatch.error.message).toContain("does not match governance runId");
+      }
+
+      // 3. evaluateAutomatedVsHumanGovernance rejects stale revision / generation / target mismatch
+      const baseReq = makeApprovalRequest({
+        approvalId: "app-1",
+        runId: "run-101",
+        target: { type: "task", taskId: "task-build" },
+        requestedBy: "agent:dev",
+        revision: 2,
+        generation: 1
+      });
+
+      // Stale revision
+      const staleRevDecision = makeApprovalDecision({
+        approvalId: "app-1",
+        runId: "run-101",
+        revision: 1, // Stale! Request is 2
+        generation: 1,
+        target: { type: "task", taskId: "task-build" },
+        decision: "approved",
+        decidedBy: "human:lead"
+      });
+      const govStaleRev = evaluateAutomatedVsHumanGovernance({
+        runId: "run-101",
+        taskId: "task-build",
+        automatedGateResults: [passGateRun1],
+        requiresHumanApproval: true,
+        approvalRequest: baseReq,
+        humanApprovalDecision: staleRevDecision
+      });
+      expect(govStaleRev.ok).toBe(true);
+      if (govStaleRev.ok) {
+        expect(govStaleRev.value.canProceedToDelivery).toBe(false);
+        expect(govStaleRev.value.humanApprovalStatus).toBe("pending");
+        expect(govStaleRev.value.summary).toContain("revision");
+      }
+
+      // Stale generation
+      const staleGenDecision = makeApprovalDecision({
+        approvalId: "app-1",
+        runId: "run-101",
+        revision: 2,
+        generation: 0, // Stale! Request is 1
+        target: { type: "task", taskId: "task-build" },
+        decision: "approved",
+        decidedBy: "human:lead"
+      });
+      const govStaleGen = evaluateAutomatedVsHumanGovernance({
+        runId: "run-101",
+        taskId: "task-build",
+        automatedGateResults: [passGateRun1],
+        requiresHumanApproval: true,
+        approvalRequest: baseReq,
+        humanApprovalDecision: staleGenDecision
+      });
+      expect(govStaleGen.ok).toBe(true);
+      if (govStaleGen.ok) {
+        expect(govStaleGen.value.canProceedToDelivery).toBe(false);
+        expect(govStaleGen.value.humanApprovalStatus).toBe("pending");
+        expect(govStaleGen.value.summary).toContain("generation");
+      }
+
+      // Target mismatch
+      const targetMismatchDecision = makeApprovalDecision({
+        approvalId: "app-1",
+        runId: "run-101",
+        revision: 2,
+        generation: 1,
+        target: { type: "quality_gate", gateId: "gate-diff" },
+        decision: "approved",
+        decidedBy: "human:lead"
+      });
+      const govTargetMismatch = evaluateAutomatedVsHumanGovernance({
+        runId: "run-101",
+        taskId: "task-build",
+        automatedGateResults: [passGateRun1],
+        requiresHumanApproval: true,
+        approvalRequest: baseReq,
+        humanApprovalDecision: targetMismatchDecision
+      });
+      expect(govTargetMismatch.ok).toBe(false);
+      if (!govTargetMismatch.ok) {
+        expect(govTargetMismatch.error.message).toContain("target does not match");
+      }
+    });
+
+    it("long gateId and taskId (120 chars each) produce valid non-colliding proposalIds <= 128 chars (AR4-05)", async () => {
+      const longGateId = "gate-" + "a".repeat(115); // 120 chars
+      const longTaskId1 = "task-" + "b".repeat(115); // 120 chars
+      const longTaskId2 = "task-" + "c".repeat(115); // 120 chars
+
+      const gate = createQualityGate({
+        spec: {
+          gateId: longGateId,
+          checkKind: "typecheck",
+          command: { executable: "node", args: ["pass.mjs"] },
+          workingDirectory: fixtureDir
+        },
+        securityPolicy: testPolicy
+      });
+
+      const context1 = makeContext(longGateId, {
+        taskId: longTaskId1,
+        definition: {
+          id: longGateId,
+          name: "Long Gate Def",
+          evaluator: "command",
+          required: true,
+          timeout: { executionTimeoutMs: 30000, onTimeout: "fail" }
+        }
+      });
+      const context2 = makeContext(longGateId, {
+        taskId: longTaskId2,
+        definition: {
+          id: longGateId,
+          name: "Long Gate Def",
+          evaluator: "command",
+          required: true,
+          timeout: { executionTimeoutMs: 30000, onTimeout: "fail" }
+        }
+      });
+
+      const res1 = await gate.evaluateDetailed(context1);
+      const res2 = await gate.evaluateDetailed(context2);
+
+      expect(res1.ok).toBe(true);
+      expect(res2.ok).toBe(true);
+      if (res1.ok && res2.ok) {
+        const prop1 = res1.value.evidence?.artifactProposal;
+        const prop2 = res2.value.evidence?.artifactProposal;
+        expect(prop1).toBeDefined();
+        expect(prop2).toBeDefined();
+        if (prop1 && prop2) {
+          expect(prop1.proposalId.length).toBeLessThanOrEqual(128);
+          expect(prop2.proposalId.length).toBeLessThanOrEqual(128);
+          // ArtifactProposalSchema validation must pass
+          expect(ArtifactProposalSchema.safeParse(prop1).success).toBe(true);
+          expect(ArtifactProposalSchema.safeParse(prop2).success).toBe(true);
+          // Non-colliding
+          expect(prop1.proposalId).not.toBe(prop2.proposalId);
+          // Logical name is bounded <= 200 and preserves -evidence.json
+          expect(prop1.logicalName.length).toBeLessThanOrEqual(200);
+          expect(prop1.logicalName.endsWith("-evidence.json")).toBe(true);
+        }
+      }
+    });
+
+    it("evaluateQualityCheckSuite rejects empty gates array and duplicate gate ids with validation error (AR4-06)", async () => {
+      const context = makeContext("suite-gate");
+
+      // 1. Empty gates array
+      const emptyRes = await evaluateQualityCheckSuite([], context);
+      expect(emptyRes.ok).toBe(false);
+      if (!emptyRes.ok) {
+        expect(emptyRes.error.code).toBe("validation");
+        expect(emptyRes.error.message).toContain("Quality check suite requires at least one quality gate");
+      }
+
+      // 2. Duplicate gate ids
+      const gateA1 = createQualityGate({
+        spec: {
+          gateId: "dup-gate",
+          checkKind: "typecheck",
+          command: { executable: "node", args: ["pass.mjs"] },
+          workingDirectory: fixtureDir
+        },
+        securityPolicy: testPolicy
+      });
+      const gateA2 = createQualityGate({
+        spec: {
+          gateId: "dup-gate",
+          checkKind: "lint",
+          command: { executable: "node", args: ["pass.mjs"] },
+          workingDirectory: fixtureDir
+        },
+        securityPolicy: testPolicy
+      });
+
+      const dupRes = await evaluateQualityCheckSuite([gateA1, gateA2], context);
+      expect(dupRes.ok).toBe(false);
+      if (!dupRes.ok) {
+        expect(dupRes.error.code).toBe("validation");
+        expect(dupRes.error.message).toContain('Duplicate quality gate id "dup-gate"');
+      }
+    });
+
+    it("enforces outputExpectation.minPassedTestsCount even without a custom outputParser (AR4-07)", async () => {
+      // pass.mjs outputs: "All checks passed. 10 passed, 0 failed."
+      // Test requiring minPassedTestsCount: 15 should fail
+      const gateFail = createQualityGate({
+        spec: {
+          gateId: "qg-min-pass-fail",
+          checkKind: "unit_test",
+          command: { executable: "node", args: ["pass.mjs"] },
+          workingDirectory: fixtureDir,
+          outputExpectation: {
+            minPassedTestsCount: 15
+          }
+        },
+        securityPolicy: testPolicy
+      });
+
+      const resFail = await gateFail.evaluateDetailed(makeContext("qg-min-pass-fail"));
+      expect(resFail.ok).toBe(true);
+      if (resFail.ok) {
+        expect(resFail.value.status).toBe("failed");
+        expect(
+          resFail.value.findings.some(
+            (f) =>
+              f.code === "MISSING_EXECUTION_EVIDENCE" &&
+              f.message.includes("is below required minimum of 15")
+          )
+        ).toBe(true);
+      }
+
+      // Test requiring minPassedTestsCount: 5 should pass
+      const gatePass = createQualityGate({
+        spec: {
+          gateId: "qg-min-pass-ok",
+          checkKind: "unit_test",
+          command: { executable: "node", args: ["pass.mjs"] },
+          workingDirectory: fixtureDir,
+          outputExpectation: {
+            minPassedTestsCount: 5
+          }
+        },
+        securityPolicy: testPolicy
+      });
+
+      const resPass = await gatePass.evaluateDetailed(makeContext("qg-min-pass-ok"));
+      expect(resPass.ok).toBe(true);
+      if (resPass.ok) {
+        expect(resPass.value.status).toBe("passed");
+      }
+    });
+
+    it("prevents local spec.required=false from downgrading a required workflow gate to skipped/passed (PM-01)", async () => {
+      const gate = createQualityGate({
+        spec: {
+          gateId: "qg-pm01-no-downgrade",
+          checkKind: "unit_test",
+          command: { executable: "node", args: ["pass.mjs"] },
+          workingDirectory: fixtureDir,
+          required: false,
+          skip: true,
+          skipReason: "Local bypass attempt"
+        },
+        securityPolicy: testPolicy
+      });
+
+      const context = makeContext("qg-pm01-no-downgrade", {
+        definition: {
+          id: "qg-pm01-no-downgrade",
+          name: "Mandatory Workflow Gate",
+          evaluator: "command",
+          required: true,
+          timeout: { executionTimeoutMs: 30000, onTimeout: "fail" }
+        }
+      });
+
+      const res = await gate.evaluateDetailed(context);
+      expect(res.ok).toBe(true);
+      if (res.ok) {
+        expect(res.value.status).toBe("failed");
+        expect(res.value.contractResult.status).toBe("failed");
+        expect(res.value.findings.some((f) => f.code === "MANDATORY_GATE_SKIPPED")).toBe(true);
+      }
+    });
+
+    it("enforces OperationOptions deadline and timeoutMs before spawning subprocesses (PM-02)", async () => {
+      let runnerInvoked = false;
+      const gate = createQualityGate({
+        spec: {
+          gateId: "qg-pm02-budget",
+          checkKind: "unit_test",
+          command: { executable: "node", args: ["pass.mjs"] },
+          workingDirectory: fixtureDir
+        },
+        securityPolicy: testPolicy,
+        runner: {
+          async run() {
+            runnerInvoked = true;
+            throw new Error("Runner must not be invoked when budget is expired");
+          }
+        }
+      });
+
+      const context = makeContext("qg-pm02-budget");
+
+      // 1. Expired deadline
+      const expiredDeadline = new Date(Date.now() - 10_000).toISOString();
+      const resDeadline = await gate.evaluate(context, { deadline: expiredDeadline });
+      expect(resDeadline.ok).toBe(false);
+      if (!resDeadline.ok) {
+        expect(resDeadline.error.code).toBe("timeout");
+      }
+      expect(runnerInvoked).toBe(false);
+
+      // 2. timeoutMs: 0
+      const resZeroTimeout = await gate.evaluate(context, { timeoutMs: 0 });
+      expect(resZeroTimeout.ok).toBe(false);
+      if (!resZeroTimeout.ok) {
+        expect(resZeroTimeout.error.code).toBe("timeout");
+      }
+      expect(runnerInvoked).toBe(false);
+
+      // 3. Invalid negative timeoutMs
+      const resNegTimeout = await gate.evaluate(context, { timeoutMs: -5 });
+      expect(resNegTimeout.ok).toBe(false);
+      if (!resNegTimeout.ok) {
+        expect(resNegTimeout.error.code).toBe("validation");
+      }
+      expect(runnerInvoked).toBe(false);
+
+      // 4. Invalid deadline string
+      const resInvalidDeadline = await gate.evaluate(context, { deadline: "not-a-date" });
+      expect(resInvalidDeadline.ok).toBe(false);
+      if (!resInvalidDeadline.ok) {
+        expect(resInvalidDeadline.error.code).toBe("validation");
+      }
+      expect(runnerInvoked).toBe(false);
     });
   });
 });

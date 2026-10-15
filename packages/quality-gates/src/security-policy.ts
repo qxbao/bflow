@@ -176,6 +176,9 @@ export function getSecurityControlLimitationsReport(): {
   };
 }
 
+export const DANGEROUS_EXEC_ENV_REGEX =
+  /^(LD_PRELOAD|LD_LIBRARY_PATH|LD_AUDIT|DYLD_.*|NODE_OPTIONS|NODE_REPL_EXTERNAL_MODULE|BASH_ENV|ENV|ZDOTDIR|SHELLOPTS|BASHOPTS|IFS|CDPATH|PROMPT_COMMAND|GIT_SSH_COMMAND|GIT_SSH|GIT_EXEC_PATH|GIT_TEMPLATE_DIR|GIT_ASKPASS|SSH_ASKPASS|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|NPM_CONFIG_SCRIPT_SHELL|PYTHONSTARTUP|PYTHONPATH|RUBYOPT|RUBYLIB|PERL5OPT|PERL5LIB)$/i;
+
 export function createDefaultSecurityPolicy(options: {
   readonly allowedRootDirs: readonly string[];
   readonly assignedWorktreePath?: string;
@@ -197,10 +200,15 @@ export function createDefaultSecurityPolicy(options: {
   }
 
   for (const dir of options.allowedRootDirs) {
-    if (typeof dir !== "string" || dir.trim().length === 0 || dir.includes("\0")) {
+    if (
+      typeof dir !== "string" ||
+      dir.trim().length === 0 ||
+      dir.includes("\0") ||
+      dir.split(/[\\/]+/).includes("..")
+    ) {
       return {
         ok: false,
-        error: createValidationError(`Invalid root directory path "${dir}"`)
+        error: createValidationError(`Invalid root directory path "${dir}": path traversal or invalid characters`)
       };
     }
   }
@@ -454,6 +462,70 @@ export function detectDangerousCommandOrSecretAccess(
     }
   }
 
+  // Directory or config override flags across args
+  for (const arg of args) {
+    if (
+      arg === "-C" ||
+      arg.startsWith("-C=") ||
+      (arg.startsWith("-C") && !arg.startsWith("--")) ||
+      arg === "--dir" ||
+      arg.startsWith("--dir=") ||
+      arg === "--prefix" ||
+      arg.startsWith("--prefix=") ||
+      arg === "--cwd" ||
+      arg.startsWith("--cwd=") ||
+      arg === "--work-tree" ||
+      arg.startsWith("--work-tree=") ||
+      arg === "--git-dir" ||
+      arg.startsWith("--git-dir=") ||
+      arg === "--script-shell" ||
+      arg.startsWith("--script-shell=")
+    ) {
+      findings.push({
+        category: "directory_escape",
+        rule: "disallow_directory_override_flag",
+        matchedText: arg,
+        message: `Directory or configuration override flag "${arg}" is forbidden.`
+      });
+    }
+  }
+
+  // Dangerous git flags
+  if (baseExec === "git") {
+    for (const arg of args) {
+      if (
+        arg === "-c" ||
+        arg.startsWith("-c=") ||
+        (arg.startsWith("-c") && !arg.startsWith("--")) ||
+        arg === "--config-env" ||
+        arg.startsWith("--config-env=") ||
+        arg === "--exec-path" ||
+        arg.startsWith("--exec-path=") ||
+        arg === "--ext-diff" ||
+        arg.startsWith("--ext-diff=") ||
+        arg === "--upload-pack" ||
+        arg.startsWith("--upload-pack=") ||
+        arg === "--receive-pack" ||
+        arg.startsWith("--receive-pack=")
+      ) {
+        findings.push({
+          category: "shell_injection",
+          rule: "disallow_git_dangerous_flag",
+          matchedText: arg,
+          message: `Dangerous git execution flag "${arg}" is forbidden.`
+        });
+      }
+      if (arg === "--output" || arg.startsWith("--output=")) {
+        findings.push({
+          category: "destructive_command",
+          rule: "disallow_git_output_flag",
+          matchedText: arg,
+          message: `Git output redirection flag "${arg}" is blocked.`
+        });
+      }
+    }
+  }
+
   // 2. Destructive command detection
   if (DESTRUCTIVE_COMMAND_SET.has(baseExec) || baseExec.startsWith("mkfs")) {
     findings.push({
@@ -464,10 +536,10 @@ export function detectDangerousCommandOrSecretAccess(
     });
   }
 
-  // Destructive git operations
+  // Destructive git operations (scan ALL tokens in args)
   if (baseExec === "git") {
-    const subCmd = args[0]?.toLowerCase();
-    if (subCmd === "reset" && args.some(a => a.toLowerCase().startsWith("--hard"))) {
+    const lowerArgs = args.map((a) => a.toLowerCase());
+    if (lowerArgs.includes("reset") && args.some((a) => a.toLowerCase().startsWith("--hard"))) {
       findings.push({
         category: "destructive_command",
         rule: "disallow_git_reset_hard",
@@ -475,7 +547,7 @@ export function detectDangerousCommandOrSecretAccess(
         message: "Destructive git operation \"git reset --hard\" is blocked."
       });
     }
-    if (subCmd === "clean") {
+    if (lowerArgs.includes("clean")) {
       findings.push({
         category: "destructive_command",
         rule: "disallow_git_clean",
@@ -483,20 +555,17 @@ export function detectDangerousCommandOrSecretAccess(
         message: "Destructive git operation \"git clean\" is blocked."
       });
     }
-    if (
-      subCmd === "push" &&
-      args.some(a => a === "--force" || a === "-f" || /^-[a-zA-Z]*f/.test(a))
-    ) {
+    if (lowerArgs.includes("push")) {
       findings.push({
         category: "destructive_command",
-        rule: "disallow_git_force_push",
-        matchedText: "git push --force",
-        message: "Destructive git operation \"git push --force\" is blocked."
+        rule: "disallow_git_push",
+        matchedText: "git push",
+        message: "Destructive git operation \"git push\" is blocked."
       });
     }
     if (
-      subCmd === "branch" &&
-      args.some(a => a === "-D" || a === "-d" || a === "--delete")
+      lowerArgs.includes("branch") &&
+      args.some((a) => a === "-D" || a === "-d" || a === "--delete")
     ) {
       findings.push({
         category: "destructive_command",
@@ -505,12 +574,31 @@ export function detectDangerousCommandOrSecretAccess(
         message: "Destructive git operation \"git branch -D\" is blocked."
       });
     }
-    if (subCmd === "checkout" && args.includes("--")) {
+    if (
+      lowerArgs.includes("checkout") &&
+      (args.includes("--") || args.some((a) => a === "-f" || a === "--force"))
+    ) {
       findings.push({
         category: "destructive_command",
         rule: "disallow_git_checkout_discard",
         matchedText: "git checkout --",
         message: "Destructive git operation \"git checkout --\" is blocked."
+      });
+    }
+    if (lowerArgs.includes("restore")) {
+      findings.push({
+        category: "destructive_command",
+        rule: "disallow_git_restore",
+        matchedText: "git restore",
+        message: "Destructive git operation \"git restore\" is blocked."
+      });
+    }
+    if (lowerArgs.includes("switch")) {
+      findings.push({
+        category: "destructive_command",
+        rule: "disallow_git_switch",
+        matchedText: "git switch",
+        message: "Destructive git operation \"git switch\" is blocked."
       });
     }
   }
@@ -582,7 +670,16 @@ export function detectDangerousCommandOrSecretAccess(
 
   // Environment variables inspection
   if (env) {
-    for (const [key] of Object.entries(env)) {
+    for (const [key, value] of Object.entries(env)) {
+      if (key.toUpperCase() === "PATH" || DANGEROUS_EXEC_ENV_REGEX.test(key)) {
+        findings.push({
+          category: "shell_injection",
+          rule: "disallow_dangerous_env_override",
+          matchedText: key,
+          message: `Command environment attempts to override protected execution variable "${key}"`
+        });
+      }
+
       if (SENSITIVE_KEY_REGEX.test(key)) {
         findings.push({
           category: "secret_access",
@@ -590,6 +687,28 @@ export function detectDangerousCommandOrSecretAccess(
           matchedText: key,
           message: `Environment variable "${key}" contains sensitive secret pattern.`
         });
+      }
+
+      if (typeof value === "string") {
+        if (value.includes("\0") || SHELL_METACHAR_PATTERN.test(value)) {
+          const match = value.match(SHELL_METACHAR_PATTERN);
+          const matchedText = match ? match[0] : (value.includes("\0") ? "\\0" : value);
+          findings.push({
+            category: "shell_injection",
+            rule: "disallow_shell_metacharacters",
+            matchedText,
+            message: `Shell metacharacter "${matchedText}" in environment variable "${key}" is forbidden.`
+          });
+        }
+        const secretInVal = matchSecretPattern(value);
+        if (secretInVal) {
+          findings.push({
+            category: "secret_access",
+            rule: "disallow_secret_file_reference",
+            matchedText: secretInVal,
+            message: `Secret or credential file reference "${secretInVal}" in environment variable "${key}" is blocked.`
+          });
+        }
       }
     }
   }
@@ -616,7 +735,7 @@ export function detectDangerousCommandOrSecretAccess(
     });
   }
 
-  if (baseExec === "git" && args.includes("push")) {
+  if (baseExec === "git" && args.some((a) => a.toLowerCase() === "push")) {
     findings.push({
       category: "production_deployment",
       rule: "disallow_git_push",
@@ -772,6 +891,14 @@ export function validateCommandAgainstPolicy(
         error: createValidationError("Command args cannot contain non-strings or NUL bytes")
       };
     }
+    if (arg.split(/[\\/]+/).includes("..") || /%2e%2e/i.test(arg)) {
+      return {
+        ok: false,
+        error: createValidationError(
+          `Command argument "${arg}" contains disallowed '..' path traversal`
+        )
+      };
+    }
   }
 
   const report = detectDangerousCommandOrSecretAccess(command);
@@ -838,7 +965,14 @@ const BLOCKED_SYSTEM_DIRS = [
   "/sys",
   "/dev",
   "/boot",
-  "/var/run"
+  "/run",
+  "/var/run",
+  "/bin",
+  "/sbin",
+  "/usr",
+  "/lib",
+  "/lib64",
+  "/opt"
 ];
 
 export async function validateDirectoryScope(
@@ -870,6 +1004,21 @@ export async function validateDirectoryScope(
   }
 
   const resolvedTarget = path.resolve(targetDir);
+
+  for (const blocked of BLOCKED_SYSTEM_DIRS) {
+    if (
+      resolvedTarget === blocked ||
+      resolvedTarget.startsWith(blocked + path.sep)
+    ) {
+      return {
+        ok: false,
+        error: createValidationError(
+          `Directory scope access to system path "${resolvedTarget}" is blocked`
+        )
+      };
+    }
+  }
+
   let realTarget: string;
   try {
     realTarget = await fs.realpath(resolvedTarget);
@@ -909,12 +1058,13 @@ export async function validateDirectoryScope(
     try {
       realRoot = await fs.realpath(path.resolve(root));
     } catch {
-      realRoot = path.resolve(root);
+      continue;
     }
-    if (
-      realTarget === realRoot ||
-      realTarget.startsWith(realRoot + path.sep)
-    ) {
+    const isInside =
+      realRoot === path.sep
+        ? realTarget.startsWith(path.sep)
+        : realTarget === realRoot || realTarget.startsWith(realRoot + path.sep);
+    if (isInside) {
       insideAllowedRoot = true;
       break;
     }
@@ -932,12 +1082,18 @@ export async function validateDirectoryScope(
     try {
       realWorktree = await fs.realpath(path.resolve(policy.assignedWorktreePath));
     } catch {
-      realWorktree = path.resolve(policy.assignedWorktreePath);
+      return {
+        ok: false,
+        error: createValidationError(
+          `Assigned worktree "${policy.assignedWorktreePath}" could not be resolved or does not exist`
+        )
+      };
     }
-    if (
-      realTarget !== realWorktree &&
-      !realTarget.startsWith(realWorktree + path.sep)
-    ) {
+    const isInsideWorktree =
+      realWorktree === path.sep
+        ? realTarget.startsWith(path.sep)
+        : realTarget === realWorktree || realTarget.startsWith(realWorktree + path.sep);
+    if (!isInsideWorktree) {
       return {
         ok: false,
         error: createValidationError(
@@ -1038,6 +1194,7 @@ export function sanitizeExecutionEnvironment(
   for (const [key, value] of Object.entries(env)) {
     if (
       allowedSet.has(key) &&
+      !DANGEROUS_EXEC_ENV_REGEX.test(key) &&
       !SENSITIVE_KEY_REGEX.test(key) &&
       typeof value === "string"
     ) {

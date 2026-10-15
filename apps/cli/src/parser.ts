@@ -15,7 +15,8 @@ import type {
   ParseCliResult,
   ResumeCommandArgs,
   RunCommandArgs,
-  StatusCommandArgs
+  StatusCommandArgs,
+  VersionCommandArgs
 } from "./types.js";
 
 const VALID_COMMANDS: ReadonlySet<CliCommandName> = new Set([
@@ -25,14 +26,17 @@ const VALID_COMMANDS: ReadonlySet<CliCommandName> = new Set([
   "approve",
   "resume",
   "cancel",
-  "help"
+  "help",
+  "version"
 ]);
 
 const GLOBAL_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "--json",
   "-j",
   "--help",
-  "-h"
+  "-h",
+  "--version",
+  "-v"
 ]);
 
 function isFlag(arg: string): boolean {
@@ -161,6 +165,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
 
   let leadingJson = false;
   let leadingHelp = false;
+  let leadingVersion = false;
   let idx = 0;
 
   while (idx < argv.length) {
@@ -171,6 +176,9 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
     } else if (token === "--help" || token === "-h") {
       leadingHelp = true;
       idx++;
+    } else if (token === "--version" || token === "-v") {
+      leadingVersion = true;
+      idx++;
     } else {
       break;
     }
@@ -178,6 +186,22 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
 
   const effectiveJson = leadingJson || json;
   const remaining = argv.slice(idx);
+
+  if (leadingVersion && !leadingHelp) {
+    if (remaining.length > 0) {
+      return makeValidationError(
+        `Unexpected argument '${remaining[0]}' with '--version'.`,
+        effectiveJson,
+        "version"
+      );
+    }
+    const value: VersionCommandArgs = {
+      command: "version",
+      help: false,
+      json: effectiveJson
+    };
+    return { ok: true, value };
+  }
 
   if (remaining.length === 0) {
     const value: HelpCommandArgs = {
@@ -296,6 +320,26 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
   const commandArgs = argv.slice(1);
 
   switch (command) {
+    case "version": {
+      const booleanFlags = new Set(["--json", "-j", "--help", "-h", "--version", "-v"]);
+      const allowedFlags = new Set(["--json", "-j", "--help", "-h", "--version", "-v"]);
+      const optRes = extractOptionsAndPositional(commandArgs, booleanFlags, allowedFlags, "version", json);
+      if (!optRes.ok) return optRes.result;
+      if (optRes.value.positional.length > 0) {
+        return makeValidationError(
+          `Unexpected positional argument '${optRes.value.positional[0]}' for 'flow version'.`,
+          json,
+          "version"
+        );
+      }
+      const value: VersionCommandArgs = {
+        command: "version",
+        help: false,
+        json
+      };
+      return { ok: true, value };
+    }
+
     case "init": {
       const booleanFlags = new Set(["--force", "-f", "--yes", "-y", "--json", "-j", "--help", "-h"]);
       const allowedFlags = new Set([

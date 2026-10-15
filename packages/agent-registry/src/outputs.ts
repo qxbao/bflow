@@ -17,7 +17,7 @@ import {
   type SubmissionCorrelation,
   type TaskDependency
 } from "@ai-flow/contracts";
-import { isMvpRole, type MvpRole } from "./roles.js";
+import { getMvpRoleProfile, isMvpRole, type MvpRole } from "./roles.js";
 
 export interface PlannedTaskItem {
   readonly id: string;
@@ -199,6 +199,7 @@ function validateConsumedArtifacts(
     return failure("consumedArtifactIds must be an array of artifact IDs");
   }
   const result: string[] = [];
+  const seenIds = new Set<string>();
   const availableSet = availableArtifacts ? new Set(availableArtifacts.map((a) => a.artifactId)) : null;
 
   for (let i = 0; i < rawIds.length; i++) {
@@ -210,6 +211,10 @@ function validateConsumedArtifacts(
     if (!parseRes.success) {
       return failure(`consumedArtifactIds[${i}] is not a valid artifact ID: ${parseRes.error.message}`);
     }
+    if (seenIds.has(parseRes.data)) {
+      return failure(`Duplicate artifactId in consumedArtifactIds: '${parseRes.data}'`);
+    }
+    seenIds.add(parseRes.data);
     if (availableSet && !availableSet.has(id)) {
       return failure(`Consumed artifact '${id}' is not available in input artifacts`);
     }
@@ -220,7 +225,8 @@ function validateConsumedArtifacts(
 
 function validateArtifactProposals(
   rawProposals: unknown,
-  expectedRunId?: string
+  role: MvpRole,
+  context?: RoleOutputValidationContext
 ): OperationResult<readonly ArtifactProposal[]> {
   if (rawProposals === undefined) {
     return success([]);
@@ -229,18 +235,41 @@ function validateArtifactProposals(
     return failure("artifactProposals must be an array");
   }
   const result: ArtifactProposal[] = [];
+  const seenProposalIds = new Set<string>();
+  const profile = getMvpRoleProfile(role);
+
   for (let i = 0; i < rawProposals.length; i++) {
     const p = rawProposals[i];
     const parseRes = ArtifactProposalSchema.safeParse(p);
     if (!parseRes.success) {
       return failure(`artifactProposals[${i}] is invalid: ${parseRes.error.message}`);
     }
-    if (expectedRunId !== undefined && parseRes.data.runId !== expectedRunId) {
+    const proposal = parseRes.data;
+    if (seenProposalIds.has(proposal.proposalId)) {
+      return failure(`Duplicate proposalId in artifactProposals: '${proposal.proposalId}'`);
+    }
+    seenProposalIds.add(proposal.proposalId);
+
+    if (context?.runId !== undefined && proposal.runId !== context.runId) {
       return failure(
-        `Artifact proposal runId '${parseRes.data.runId}' does not match context runId '${expectedRunId}'`
+        `Artifact proposal runId '${proposal.runId}' does not match context runId '${context.runId}'`
       );
     }
-    result.push(parseRes.data);
+    if (
+      context?.expectedTaskId !== undefined &&
+      proposal.taskId !== undefined &&
+      proposal.taskId !== context.expectedTaskId
+    ) {
+      return failure(
+        `Artifact proposal taskId '${proposal.taskId}' does not match expected taskId '${context.expectedTaskId}'`
+      );
+    }
+    if (!profile.producedArtifactKinds.includes(proposal.kind)) {
+      return failure(
+        `Artifact proposal kind '${proposal.kind}' is not produced by role '${role}'. Allowed kinds: ${profile.producedArtifactKinds.join(", ")}`
+      );
+    }
+    result.push(proposal);
   }
   return success(result);
 }
@@ -320,6 +349,16 @@ function validatePlannerOutput(
       return failure(`Planner task[${i}] requiresApproval must be a boolean if provided`);
     }
 
+    let requiresApproval = item.requiresApproval;
+    if (item.role === "reviewer") {
+      if (item.requiresApproval === false) {
+        return failure(`Planner reviewer task '${idRes.data}' must have requiresApproval: true`);
+      }
+      if (item.requiresApproval === undefined) {
+        requiresApproval = true;
+      }
+    }
+
     tasks.push({
       id: idRes.data,
       title: item.title,
@@ -327,8 +366,12 @@ function validatePlannerOutput(
       role: item.role,
       instruction: item.instruction,
       acceptanceCriteria: item.acceptanceCriteria,
-      ...(item.requiresApproval !== undefined ? { requiresApproval: item.requiresApproval } : {})
+      ...(requiresApproval !== undefined ? { requiresApproval } : {})
     });
+  }
+
+  if (!tasks.some((t) => t.role === "developer")) {
+    return failure("Planner output must include at least one 'developer' task");
   }
 
   const rawDeps = raw.dependencies ?? [];
@@ -391,7 +434,59 @@ function validatePlannerOutput(
   for (const taskId of taskIds) {
     if (!visited.has(taskId)) {
       if (hasCycle(taskId)) {
-        return failure("Cycle detected in planned task dependencies");
+        return failure("Cycle detected in planner task dependencies");
+      }
+    }
+  }
+
+  const ROLE_STAGE_ORDER: Readonly<Record<MvpRole, number>> = {
+    planner: 0,
+    developer: 1,
+    reviewer: 2,
+    qa: 3
+  };
+  const taskRoleById = new Map<string, MvpRole>();
+  for (const t of tasks) {
+    taskRoleById.set(t.id, t.role);
+  }
+
+  for (const d of dependencies) {
+    const childRole = taskRoleById.get(d.taskId)!;
+    const parentRole = taskRoleById.get(d.dependsOnTaskId)!;
+    if (ROLE_STAGE_ORDER[childRole] < ROLE_STAGE_ORDER[parentRole]) {
+      return failure(
+        `Invalid role dependency order: '${d.taskId}' (${childRole}) cannot depend on later stage '${d.dependsOnTaskId}' (${parentRole})`
+      );
+    }
+  }
+
+  function canReachRole(startTaskId: string, targetRoles: readonly MvpRole[]): boolean {
+    const queue = [startTaskId];
+    const seen = new Set<string>([startTaskId]);
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      for (const prereq of adj.get(current) ?? []) {
+        const prereqRole = taskRoleById.get(prereq);
+        if (prereqRole && targetRoles.includes(prereqRole)) {
+          return true;
+        }
+        if (!seen.has(prereq)) {
+          seen.add(prereq);
+          queue.push(prereq);
+        }
+      }
+    }
+    return false;
+  }
+
+  for (const t of tasks) {
+    if (t.role === "reviewer") {
+      if (!canReachRole(t.id, ["developer"])) {
+        return failure(`Reviewer task '${t.id}' must depend on at least one 'developer' task`);
+      }
+    } else if (t.role === "qa") {
+      if (!canReachRole(t.id, ["reviewer", "developer"])) {
+        return failure(`QA task '${t.id}' must depend on at least one 'reviewer' or 'developer' task`);
       }
     }
   }
@@ -399,7 +494,7 @@ function validatePlannerOutput(
   const consumedRes = validateConsumedArtifacts(raw.consumedArtifactIds, context?.availableInputArtifacts);
   if (!consumedRes.ok) return consumedRes;
 
-  const proposalsRes = validateArtifactProposals(raw.artifactProposals, context?.runId);
+  const proposalsRes = validateArtifactProposals(raw.artifactProposals, "planner", context);
   if (!proposalsRes.ok) return proposalsRes;
 
   return success({
@@ -440,6 +535,9 @@ function validateDeveloperOutput(
   if (typeof raw.worktreePath !== "string" || raw.worktreePath.trim().length === 0) {
     return failure("Developer worktreePath must be a non-empty string");
   }
+  if (raw.worktreePath.includes("\0") || raw.worktreePath !== raw.worktreePath.trim()) {
+    return failure("Developer worktreePath must be trimmed and not contain NUL characters");
+  }
   if (raw.worktreePath.split("/").includes("..") || raw.worktreePath.split("\\").includes("..")) {
     return failure("Developer worktreePath must not contain '..' path segments");
   }
@@ -469,6 +567,7 @@ function validateDeveloperOutput(
     return failure("Developer changedFiles must be a non-empty array");
   }
   const changedFiles: DeveloperChangedFile[] = [];
+  const seenPaths = new Set<string>();
   const validChangeTypes = ["added", "modified", "deleted", "renamed"] as const;
   for (let i = 0; i < raw.changedFiles.length; i++) {
     const file = raw.changedFiles[i];
@@ -480,16 +579,22 @@ function validateDeveloperOutput(
 
     if (
       typeof file.path !== "string" ||
+      file.path.trim().length === 0 ||
+      file.path !== file.path.trim() ||
+      file.path.includes("\0") ||
       file.path.startsWith("/") ||
       file.path.startsWith("\\") ||
-      file.path.split("/").includes("..") ||
-      file.path.split("\\").includes("..") ||
-      file.path.trim().length === 0
+      /^[a-zA-Z]:/.test(file.path) ||
+      file.path.split(/[\\/]/).some((seg) => seg === "" || seg === "." || seg === "..")
     ) {
       return failure(
         `Developer changedFiles[${i}] path must be a non-empty relative path without '..' segments`
       );
     }
+    if (seenPaths.has(file.path)) {
+      return failure(`Duplicate path in developer changedFiles: '${file.path}'`);
+    }
+    seenPaths.add(file.path);
     if (typeof file.changeType !== "string" || !validChangeTypes.includes(file.changeType as DeveloperChangedFile["changeType"])) {
       return failure(`Developer changedFiles[${i}] changeType must be one of: ${validChangeTypes.join(", ")}`);
     }
@@ -513,27 +618,42 @@ function validateDeveloperOutput(
   if (typeof report.command !== "string" || report.command.trim().length === 0) {
     return failure("Developer testReport command must be a non-empty string");
   }
-  if (typeof report.exitCode !== "number" || !Number.isInteger(report.exitCode)) {
+  if (typeof report.exitCode !== "number" || !Number.isSafeInteger(report.exitCode)) {
     return failure("Developer testReport exitCode must be an integer");
   }
-  if (typeof report.passed !== "number" || !Number.isInteger(report.passed) || report.passed < 0) {
+  if (typeof report.passed !== "number" || !Number.isSafeInteger(report.passed) || report.passed < 0) {
     return failure("Developer testReport passed must be a non-negative integer");
   }
-  if (typeof report.failed !== "number" || !Number.isInteger(report.failed) || report.failed < 0) {
+  if (typeof report.failed !== "number" || !Number.isSafeInteger(report.failed) || report.failed < 0) {
     return failure("Developer testReport failed must be a non-negative integer");
   }
-  if (typeof report.skipped !== "number" || !Number.isInteger(report.skipped) || report.skipped < 0) {
+  if (typeof report.skipped !== "number" || !Number.isSafeInteger(report.skipped) || report.skipped < 0) {
     return failure("Developer testReport skipped must be a non-negative integer");
   }
-  if (report.selfReportedOnly !== undefined && report.selfReportedOnly !== true) {
+  if (report.selfReportedOnly !== true) {
     return failure(
       "Developer testReport selfReportedOnly must be true (developer self-report is never treated as verified test success)"
     );
   }
-  if (report.evidenceArtifactName !== undefined && typeof report.evidenceArtifactName !== "string") {
-    return failure("Developer testReport evidenceArtifactName must be a string if provided");
+  if (report.evidenceArtifactName !== undefined) {
+    if (
+      typeof report.evidenceArtifactName !== "string" ||
+      report.evidenceArtifactName.trim().length === 0 ||
+      report.evidenceArtifactName !== report.evidenceArtifactName.trim() ||
+      report.evidenceArtifactName.includes("/") ||
+      report.evidenceArtifactName.includes("\\") ||
+      report.evidenceArtifactName.includes("..") ||
+      report.evidenceArtifactName.includes("\0")
+    ) {
+      return failure(
+        "Developer testReport evidenceArtifactName must be a trimmed non-empty filename without path separators, '..', or NUL characters"
+      );
+    }
   }
 
+  if (report.exitCode === 0 && report.passed === 0) {
+    return failure("Developer testReport with exitCode 0 must have passed > 0");
+  }
   if (report.exitCode === 0 && report.failed !== 0) {
     return failure("Developer testReport with exitCode 0 cannot have failed > 0");
   }
@@ -544,7 +664,7 @@ function validateDeveloperOutput(
   const consumedRes = validateConsumedArtifacts(raw.consumedArtifactIds, context?.availableInputArtifacts);
   if (!consumedRes.ok) return consumedRes;
 
-  const proposalsRes = validateArtifactProposals(raw.artifactProposals, context?.runId);
+  const proposalsRes = validateArtifactProposals(raw.artifactProposals, "developer", context);
   if (!proposalsRes.ok) return proposalsRes;
 
   return success({
@@ -625,6 +745,9 @@ function validateReviewerOutput(
     if (typeof item.criterion !== "string" || item.criterion.trim().length === 0) {
       return failure(`Reviewer criteriaEvaluation[${i}] criterion must be a non-empty string`);
     }
+    if (evaluatedCriteria.has(item.criterion)) {
+      return failure(`Duplicate criterion '${item.criterion}'`);
+    }
     if (typeof item.met !== "boolean") {
       return failure(`Reviewer criteriaEvaluation[${i}] met must be a boolean`);
     }
@@ -640,9 +763,15 @@ function validateReviewerOutput(
   }
 
   if (context?.expectedAcceptanceCriteria) {
+    const expectedSet = new Set(context.expectedAcceptanceCriteria);
     for (const expected of context.expectedAcceptanceCriteria) {
       if (!evaluatedCriteria.has(expected)) {
         return failure(`Missing reviewer criteria evaluation for expected criterion: '${expected}'`);
+      }
+    }
+    for (const evaluated of evaluatedCriteria) {
+      if (!expectedSet.has(evaluated)) {
+        return failure(`Unexpected criterion in reviewer criteria evaluation: '${evaluated}'`);
       }
     }
   }
@@ -719,7 +848,7 @@ function validateReviewerOutput(
   const consumedRes = validateConsumedArtifacts(raw.consumedArtifactIds, context?.availableInputArtifacts);
   if (!consumedRes.ok) return consumedRes;
 
-  const proposalsRes = validateArtifactProposals(raw.artifactProposals, context?.runId);
+  const proposalsRes = validateArtifactProposals(raw.artifactProposals, "reviewer", context);
   if (!proposalsRes.ok) return proposalsRes;
 
   return success({
@@ -784,6 +913,9 @@ function validateQaOutput(
     if (typeof item.criterion !== "string" || item.criterion.trim().length === 0) {
       return failure(`QA criteriaVerification[${i}] criterion must be a non-empty string`);
     }
+    if (verifiedCriteria.has(item.criterion)) {
+      return failure(`Duplicate criterion '${item.criterion}'`);
+    }
     if (typeof item.passed !== "boolean") {
       return failure(`QA criteriaVerification[${i}] passed must be a boolean`);
     }
@@ -799,9 +931,15 @@ function validateQaOutput(
   }
 
   if (context?.expectedAcceptanceCriteria) {
+    const expectedSet = new Set(context.expectedAcceptanceCriteria);
     for (const expected of context.expectedAcceptanceCriteria) {
       if (!verifiedCriteria.has(expected)) {
         return failure(`Missing QA verification for expected criterion: '${expected}'`);
+      }
+    }
+    for (const verified of verifiedCriteria) {
+      if (!expectedSet.has(verified)) {
+        return failure(`Unexpected criterion in QA criteria verification: '${verified}'`);
       }
     }
   }
@@ -832,18 +970,18 @@ function validateQaOutput(
   if (typeof tv.command !== "string" || tv.command.trim().length === 0) {
     return failure("QA testVerification command must be a non-empty string");
   }
-  if (typeof tv.exitCode !== "number" || !Number.isInteger(tv.exitCode)) {
+  if (typeof tv.exitCode !== "number" || !Number.isSafeInteger(tv.exitCode)) {
     return failure("QA testVerification exitCode must be an integer");
   }
-  if (typeof tv.passedCount !== "number" || !Number.isInteger(tv.passedCount) || tv.passedCount < 0) {
+  if (typeof tv.passedCount !== "number" || !Number.isSafeInteger(tv.passedCount) || tv.passedCount < 0) {
     return failure("QA testVerification passedCount must be a non-negative integer");
   }
-  if (typeof tv.failedCount !== "number" || !Number.isInteger(tv.failedCount) || tv.failedCount < 0) {
+  if (typeof tv.failedCount !== "number" || !Number.isSafeInteger(tv.failedCount) || tv.failedCount < 0) {
     return failure("QA testVerification failedCount must be a non-negative integer");
   }
   if (
     tv.skippedCount !== undefined &&
-    (typeof tv.skippedCount !== "number" || !Number.isInteger(tv.skippedCount) || tv.skippedCount < 0)
+    (typeof tv.skippedCount !== "number" || !Number.isSafeInteger(tv.skippedCount) || tv.skippedCount < 0)
   ) {
     return failure("QA testVerification skippedCount must be a non-negative integer if provided");
   }
@@ -855,6 +993,7 @@ function validateQaOutput(
     return failure("QA testVerification evidenceArtifactIds must be an array of artifact IDs");
   }
   const evidenceArtifactIds: string[] = [];
+  const seenEvidenceIds = new Set<string>();
   const availableSet = context?.availableInputArtifacts
     ? new Set(context.availableInputArtifacts.map((a) => a.artifactId))
     : null;
@@ -868,12 +1007,22 @@ function validateQaOutput(
     if (!parseRes.success) {
       return failure(`QA testVerification evidenceArtifactIds[${i}] is invalid: ${parseRes.error.message}`);
     }
+    if (seenEvidenceIds.has(parseRes.data)) {
+      return failure(
+        `Duplicate artifactId in QA testVerification evidenceArtifactIds: '${parseRes.data}'`
+      );
+    }
+    seenEvidenceIds.add(parseRes.data);
     if (availableSet && !availableSet.has(id)) {
       return failure(
         `QA testVerification evidence artifact '${id}' is not available in input artifacts`
       );
     }
     evidenceArtifactIds.push(parseRes.data);
+  }
+
+  if (tv.exitCode === 0 && tv.failedCount > 0) {
+    return failure("QA testVerification with exitCode 0 cannot have failedCount > 0");
   }
 
   if (raw.verdict === "passed") {
@@ -901,9 +1050,11 @@ function validateQaOutput(
     }
   } else {
     // verdict === "failed"
-    const hasUnpassedCrit = criteriaVerification.some((c) => !c.passed);
+    const hasFailedCriterion = criteriaVerification.some((c) => !c.passed);
     const hasTestFailure = tv.exitCode !== 0 || tv.failedCount > 0;
-    if (!hasUnpassedCrit && !hasTestFailure) {
+    const isVerificationInvalid =
+      !tv.independentRunVerified || tv.passedCount === 0 || evidenceArtifactIds.length === 0;
+    if (!hasFailedCriterion && !hasTestFailure && !isVerificationInvalid) {
       return failure(
         "QA failed verdict requires at least one failed criterion or failing test"
       );
@@ -913,7 +1064,7 @@ function validateQaOutput(
   const consumedRes = validateConsumedArtifacts(raw.consumedArtifactIds, context?.availableInputArtifacts);
   if (!consumedRes.ok) return consumedRes;
 
-  const proposalsRes = validateArtifactProposals(raw.artifactProposals, context?.runId);
+  const proposalsRes = validateArtifactProposals(raw.artifactProposals, "qa", context);
   if (!proposalsRes.ok) return proposalsRes;
 
   return success({
@@ -995,6 +1146,10 @@ export function toContractAgentResult(
     readonly metadata?: Record<string, JsonValue>;
   }
 ): OperationResult<AgentResult> {
+  if (output.role !== "planner" && output.taskId !== envelope.taskId) {
+    return failure(`AgentResult taskId mismatch: output has '${output.taskId}', envelope has '${envelope.taskId}'`);
+  }
+
   const isQaFailed = output.role === "qa" && output.verdict === "failed";
   const candidate = {
     requestId: envelope.requestId,
@@ -1048,6 +1203,40 @@ export function toContractApprovalDecision(
     readonly metadata?: Record<string, JsonValue>;
   }
 ): OperationResult<ApprovalDecision> {
+  if (output.taskId !== envelope.taskId) {
+    return failure(`ApprovalDecision taskId mismatch: output has '${output.taskId}', envelope has '${envelope.taskId}'`);
+  }
+
+  const unmetCriteria = output.criteriaEvaluation.filter((c) => !c.met);
+  const findings = output.findings;
+
+  let reason = output.summary;
+  let metadata: Record<string, JsonValue> = { ...(envelope.metadata ?? {}) };
+
+  if (output.decision === "changes_requested") {
+    const feedbackParts: string[] = [output.summary];
+    if (unmetCriteria.length > 0) {
+      feedbackParts.push(`Unmet criteria: ${unmetCriteria.map((c) => c.criterion).join("; ")}`);
+    }
+    if (findings.length > 0) {
+      feedbackParts.push(`Findings: ${findings.map((f) => `[${f.severity}] ${f.message}`).join("; ")}`);
+    }
+    reason = feedbackParts.join(" | ");
+
+    metadata = {
+      ...metadata,
+      unmetCriteria: unmetCriteria.map((c) => ({ criterion: c.criterion, evidence: c.evidence })),
+      findings: findings.map((f) => ({
+        category: f.category,
+        severity: f.severity,
+        message: f.message,
+        ...(f.file !== undefined ? { file: f.file } : {}),
+        ...(f.line !== undefined ? { line: f.line } : {}),
+        evidence: f.evidence
+      }))
+    };
+  }
+
   const candidate = {
     schemaVersion: 1 as const,
     approvalId: envelope.approvalId,
@@ -1061,10 +1250,10 @@ export function toContractApprovalDecision(
     decision: output.decision,
     decidedBy: envelope.decidedBy,
     decidedAt: envelope.decidedAt,
-    reason: output.summary,
+    reason,
     feedbackArtifacts: envelope.feedbackArtifacts ? [...envelope.feedbackArtifacts] : [],
     idempotencyKey: envelope.idempotencyKey,
-    ...(envelope.metadata !== undefined ? { metadata: envelope.metadata } : {})
+    metadata
   };
 
   const parseRes = ApprovalDecisionSchema.safeParse(candidate);
@@ -1085,6 +1274,10 @@ export function toContractQualityGateResult(
     readonly metadata?: Record<string, JsonValue>;
   }
 ): OperationResult<QualityGateResult> {
+  if (envelope.taskId !== undefined && output.taskId !== envelope.taskId) {
+    return failure(`QualityGateResult taskId mismatch: output has '${output.taskId}', envelope has '${envelope.taskId}'`);
+  }
+
   const findings: QualityFinding[] = [];
 
   if (output.verdict === "failed") {
@@ -1109,6 +1302,22 @@ export function toContractQualityGateResult(
           failed: output.testVerification.failedCount,
           evidence: output.testVerification.evidence
         }
+      });
+    }
+    if (!output.testVerification.independentRunVerified) {
+      findings.push({
+        code: "INDEPENDENT_RUN_UNVERIFIED",
+        severity: "error",
+        message: "Test run was not independently verified",
+        details: { evidence: output.testVerification.evidence }
+      });
+    }
+    if (output.testVerification.passedCount === 0) {
+      findings.push({
+        code: "NO_TESTS_PASSED",
+        severity: "error",
+        message: "Zero tests passed during verification",
+        details: { command: output.testVerification.command }
       });
     }
   }
