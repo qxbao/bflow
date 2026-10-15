@@ -2,6 +2,17 @@ import { z } from "zod";
 import { ArtifactReferenceSchema } from "./artifact.js";
 import { IdempotencyKeySchema, IdentifierSchema, IsoDateTimeSchema, MetadataSchema } from "./common.js";
 
+export const ApprovalStatusSchema = z.enum([
+  "pending",
+  "approved",
+  "changes_requested",
+  "rejected",
+  "expired",
+  "cancelled",
+  "superseded"
+]);
+export type ApprovalStatus = z.infer<typeof ApprovalStatusSchema>;
+
 export const ApprovalTargetSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("run") }).strict(),
   z.object({ type: z.literal("task"), taskId: IdentifierSchema }).strict(),
@@ -11,14 +22,22 @@ export const ApprovalTargetSchema = z.discriminatedUnion("type", [
       taskId: IdentifierSchema.optional(),
       gateId: IdentifierSchema
     })
-    .strict()
+    .strict(),
+  z.object({ type: z.literal("specification"), specId: IdentifierSchema }).strict(),
+  z.object({ type: z.literal("tdd_decision"), decisionId: IdentifierSchema, taskId: IdentifierSchema.optional() }).strict(),
+  z.object({ type: z.literal("verification_escalation"), cycleId: IdentifierSchema, taskId: IdentifierSchema }).strict(),
+  z.object({ type: z.literal("git_changeset"), changeSetId: IdentifierSchema, taskId: IdentifierSchema }).strict(),
+  z.object({ type: z.literal("delegation"), delegationId: IdentifierSchema }).strict()
 ]);
 
 export const ApprovalRequestSchema = z
   .object({
-    schemaVersion: z.literal(1),
+    schemaVersion: z.union([z.literal(1), z.literal(2)]),
     approvalId: IdentifierSchema,
     runId: IdentifierSchema,
+    sessionId: IdentifierSchema.optional(),
+    status: ApprovalStatusSchema.optional(),
+    expiresAt: IsoDateTimeSchema.optional(),
     target: ApprovalTargetSchema,
     revision: z.number().int().positive(),
     generation: z.number().int().nonnegative(),
@@ -33,9 +52,10 @@ export const ApprovalRequestSchema = z
 
 export const ApprovalDecisionSchema = z
   .object({
-    schemaVersion: z.literal(1),
+    schemaVersion: z.union([z.literal(1), z.literal(2)]),
     approvalId: IdentifierSchema,
     runId: IdentifierSchema,
+    sessionId: IdentifierSchema.optional(),
     target: ApprovalTargetSchema,
     revision: z.number().int().positive(),
     generation: z.number().int().nonnegative(),

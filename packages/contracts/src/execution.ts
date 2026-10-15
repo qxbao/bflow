@@ -194,6 +194,8 @@ export const RecoveryCheckpointSchema = z
     ]),
     checkpointId: IdentifierSchema,
     runId: IdentifierSchema,
+    sessionId: IdentifierSchema.optional(),
+    conversationSessionId: IdentifierSchema.optional(),
     eventSequence: z.number().int().nonnegative(),
     version: z.number().int().nonnegative(),
     state: JsonValueSchema,

@@ -11,6 +11,8 @@ export * from "./quality.js";
 export * from "./recovery.js";
 export * from "./registry.js";
 export * from "./runtime.js";
+export * from "./sdlc.js";
+export * from "./session.js";
 export * from "./transitions.js";
 export * from "./versioning.js";
 export * from "./workflow.js";

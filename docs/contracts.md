@@ -120,3 +120,368 @@ This is the CLI-facing use-case boundary. Its operations and event stream use th
 ## Compatibility policy
 
 This hardening release intentionally breaks the original `8d960d0` bootstrap before downstream implementation begins. Migration details are in `docs/adr/0001-p00-contract-hardening.md`. After this branch is accepted as the P00 baseline, required-field, method-signature, event-semantic, or idempotency changes require an integration decision, migration/upcast plan, and affected-owner approval.
+
+## Contracts v2 (P11 Agentic SDLC Upgrade)
+
+Contracts v2 expands `@bflow/contracts` to support the multi-agent agentic SDLC architecture (P11–P18). It adds 17 authoritative Zod schemas, the standardized inter-agent `RoleMessage` envelope, and strict boundary separation between four distinct state domains. All schemas enforce strict input parsing (`.strict()`) and typed error handling via `OperationResult<T>`.
+
+### Four Separated State Domains
+
+To prevent dangerous coupling between transport observation and business outcomes, the system strictly separates four orthogonal state domains:
+
+| State Domain | Enum Type | Valid Values | Authority | Invariant Guarantee |
+| --- | --- | --- | --- | --- |
+| **Agent Transport State** | `AgentTransportState` | `starting`, `accepted`, `idle`, `working`, `blocked`, `done`, `unknown`, `disconnected`, `cancelled` | Herdr `AgentTransport` | Transport observation only. Herdr `done` **never** proves task completion or success. |
+| **SDLC Work Status** | `SdlcWorkStatus` (`TaskStatus`, `RunStatus`) | `intake`, `clarifying`, `specifying`, `planning`, `tdd_deciding`, `implementing`, `verifying`, `reviewing`, `awaiting_approval`, `completed`, `escalated`, `failed`, `cancelled` | `WorkflowEngine` & Quality Gates | Conclusive task success requires correlated `AgentResult` and verified objective artifacts. |
+| **Conversation Session Status** | `ConversationSessionStatus` | `active`, `awaiting_user_clarification`, `delegated_to_coordinator`, `reporting_progress`, `awaiting_user_approval`, `completed`, `paused`, `closed`, `archived` | `ConversationSessionManager` | Tracks user-facing dialogue lifecycle and human interaction turn management. |
+| **Approval Status** | `ApprovalStatus` | `pending`, `approved`, `changes_requested`, `rejected`, `expired`, `cancelled`, `superseded` | Governance Gates & Human Approvers | Gate decisions control execution transitions; `changes_requested` drives rework generation N -> N+1. |
+
+### Inter-Role Communication Envelope (`RoleMessage`)
+
+All peer-to-peer and hierarchical communications transmitted over Herdr transport must be wrapped in the strict `RoleMessageSchema` (aliased as `InterRoleMessageSchema`) envelope:
+
+```ts
+export const RoleMessageSchema = z.object({
+  schema_version: z.literal(2),
+  message_id: IdentifierSchema,
+  correlation_id: IdentifierSchema,
+  causation_id: IdentifierSchema.optional(),
+  run_id: IdentifierSchema.optional(),
+  sender: z.object({
+    role: z.union([AgentRoleSchema, z.literal("user"), z.literal("runtime")]),
+    agent_id: IdentifierSchema.optional(),
+    pane_id: IdentifierSchema.optional()
+  }).strict(),
+  recipient: z.object({
+    role: z.union([AgentRoleSchema, z.literal("user"), z.literal("runtime")]),
+    agent_id: IdentifierSchema.optional(),
+    pane_id: IdentifierSchema.optional()
+  }).strict(),
+  type: z.enum([
+    "conversation.intake",
+    "conversation.clarification",
+    "conversation.progress",
+    "delegation.request",
+    "delegation.accepted",
+    "spec.draft",
+    "spec.approved",
+    "tdd.decision",
+    "task.assignment",
+    "task.status",
+    "implementation.submitted",
+    "verification.requested",
+    "verification.result",
+    "verification.escalation",
+    "review.verdict",
+    "approval.request",
+    "approval.decision"
+  ]),
+  payload: JsonValueSchema,
+  artifact_references: z.array(ArtifactReferenceSchema),
+  occurred_at: IsoDateTimeSchema.optional(),
+  idempotency_key: IdempotencyKeySchema.optional(),
+  metadata: MetadataSchema.optional()
+}).strict();
+```
+
+### The 17 Contracts v2
+
+#### 1. `ConversationSession` (`ConversationSessionSchema`)
+Represents the durable lifecycle and state of a user-facing dialogue session:
+- `schemaVersion`: `2` — Numeric literal version 2.
+- `sessionId`: `Identifier` — Unique conversation session ID.
+- `herdrSessionId`: `Identifier` — Associated Herdr multi-pane session ID.
+- `conversationAgentId`: `Identifier` — Bound Conversation Agent identity.
+- `paneId`: `Identifier` — Terminal pane locator hosting the Conversation Agent.
+- `status`: `ConversationSessionStatus` — `"active" | "awaiting_user_clarification" | "delegated_to_coordinator" | "reporting_progress" | "awaiting_user_approval" | "completed" | "paused" | "closed" | "archived"`.
+- `activeRunId`: `Identifier` (optional) — Associated workflow run ID; required when `status` is `delegated_to_coordinator` unless `specificationId` is provided.
+- `specificationId`: `Identifier` (optional) — Associated specification ID.
+- `activeApprovalIds`: `Identifier[]` — Unresolved human approval IDs pending in this session.
+- `turnCount`: `number` (non-negative integer) — Number of dialogue turns completed.
+- `unresolvedQuestions`: `string[]` — Clarification questions awaiting user response (min length 1 when `status` is `awaiting_user_clarification`).
+- `createdAt`, `updatedAt`: `IsoDateTime` — ISO timestamps for auditing.
+- `closedAt`: `IsoDateTime` (optional) — Session termination timestamp.
+- `metadata`: `Metadata` (optional) — Extensible session context.
+
+#### 2. `ConversationMessage` (`ConversationMessageSchema`)
+Represents an individual dialogue exchange turn between user, agents, and runtime:
+- `schemaVersion`: `2` — Numeric literal version 2.
+- `messageId`: `Identifier` — Unique message identity.
+- `sessionId`: `Identifier` — Associated conversation session ID.
+- `correlationId`: `Identifier` — Turn correlation token.
+- `runId`: `Identifier` (optional) — Bound workflow run ID.
+- `turnSequence`: `number` (non-negative integer) — Strictly increasing sequence counter within the session.
+- `sender`: `"user" | "conversation" | "coordinator" | "runtime"`.
+- `recipient`: `"user" | "conversation" | "coordinator"` — Invariant: `sender` cannot equal `recipient`; `"user"` sender can only send to `"conversation"`, and `"user"` recipient can only receive from `"conversation"`.
+- `intent`: `"user_request" | "clarification_question" | "clarification_answer" | "spec_draft_review" | "delegation_handoff" | "progress_update" | "approval_prompt" | "approval_response" | "final_summary" | "error_report"`.
+- `content`: `string` (min 1 character) — Human-readable text message.
+- `artifactReferences`: `ArtifactReference[]` — Stored references linked to the turn.
+- `createdAt`: `IsoDateTime`.
+- `metadata`: `Metadata` (optional).
+
+#### 3. `DelegationRequest` (`DelegationRequestSchema`)
+Formal handoff contract between conversation and coordination layers:
+- `schemaVersion`: `2` — Numeric literal version 2.
+- `delegationId`: `Identifier` — Unique delegation request ID.
+- `messageId`: `Identifier` — Originating message identity.
+- `correlationId`: `Identifier` — Traceability token.
+- `sessionId`: `Identifier` — Originating conversation session ID.
+- `runId`: `Identifier` (optional; required when `requestedBy` is `"coordinator"`).
+- `requestedBy`: `"conversation" | "coordinator"` — Invariant: `"conversation"` can only delegate to `"coordinator"`; `"coordinator"` cannot delegate to `"conversation"` or `"coordinator"`.
+- `targetRole`: `AgentRole` — Target specialist role.
+- `title`: `string` (min 1 character) — Short descriptive title.
+- `objective`: `string` (min 1 character) — Detailed delegation objective.
+- `specificationId`: `Identifier` — Bound specification artifact ID.
+- `sddLevel`: `SddPolicyLevel` (`"lightweight" | "full"`).
+- `acceptanceCriteria`: `AcceptanceCriterion[]` (min 1 criteria).
+- `tddDecision`: `TddDecision` (optional).
+- `inputArtifacts`: `ArtifactReference[]` — Supporting input context references.
+- `priority`: `"low" | "normal" | "high" | "critical"`.
+- `requestedAt`: `IsoDateTime`.
+- `idempotencyKey`: `IdempotencyKey` — Deduplication guard.
+- `metadata`: `Metadata` (optional).
+
+#### 4. `AgentRole` & `AgentRoleProfile` (`AgentRoleSchema`, `AgentRoleProfileSchema`)
+10 canonical roles replacing the 4 MVP roles:
+- Enum values: `"conversation" | "coordinator" | "planner" | "architect" | "specifier" | "developer" | "tester" | "reviewer" | "qa" | "security"`.
+- `AgentRoleProfile` defines role governance:
+  - `role`: `AgentRole`.
+  - `title`: `string`, `description`: `string`.
+  - `defaultCapabilities`: `Identifier[]` (min 1).
+  - `allowedRecipients`: `(AgentRole | "user" | "runtime")[]` (min 1; only `"conversation"` may include `"user"`; `"conversation"` cannot include `"developer"`).
+  - `canDelegateToSpecialist`: `boolean` — **System Invariant**: Must be `true` ONLY for `"coordinator"`; all other roles must be `false`.
+  - `userFacing`: `boolean` — **System Invariant**: Must be `true` ONLY for `"conversation"`; all other roles must be `false`.
+  - `readOnlyWorkspace`: `boolean`.
+  - `requiresDedicatedPane`: `true` (literal `true`).
+  - `requiresIndependentVerification`: `boolean`.
+
+#### 5. `AgentCapability` (`AgentCapabilitySchema`)
+Defines operational capability bounds, category, and tool assignments:
+- `id`: `Identifier` — Unique capability identifier.
+- `name`: `string`, `description`: `string`.
+- `category`: `AgentCapabilityCategory` (`"conversation" | "coordination" | "specification" | "architecture" | "implementation" | "testing" | "verification" | "review" | "security"`).
+- `readOnly`: `boolean` — Whether the capability operates without workspace mutation.
+- `requiredTools`: `string[]` (optional) — Whitelist of executable CLI or shell tools.
+- `metadata`: `Metadata` (optional).
+
+#### 6. `AgentAssignment` (`AgentAssignmentSchema`)
+Durable record binding a task execution to a specific agent instance, role, and physical pane:
+- `schemaVersion`: `2` — Numeric literal version 2.
+- `assignmentId`: `Identifier` — Unique assignment ID.
+- `runId`: `Identifier`, `taskId`: `Identifier`, `delegationId`: `Identifier`.
+- `role`: `AgentRole` — Invariant: `role` cannot be `"conversation"`.
+- `agentId`: `Identifier` — Target agent instance identifier.
+- `paneId`: `Identifier` — Herdr terminal pane locator.
+- `leaseId`: `Identifier` — Associated registry lease.
+- `fencingToken`: `number` (positive integer) — Monotonic fencing token protecting transport dispatch.
+- `requiredCapabilities`: `Identifier[]` — Validated capabilities for the task.
+- `assignedBy`: `"coordinator"` (literal).
+- `assignedAt`: `IsoDateTime`.
+- `status`: `"assigned" | "active" | "released" | "revoked" | "completed" | "failed"`.
+- `worktreePath`: `string` (optional) — Path to isolated git worktree.
+- `idempotencyKey`: `IdempotencyKey`.
+- `metadata`: `Metadata` (optional).
+
+#### 7. `PaneBinding` (`PaneBindingSchema`)
+Describes the physical allocation of a terminal pane within a multi-pane Herdr session:
+- `schemaVersion`: `2` — Numeric literal version 2.
+- `bindingId`: `Identifier` — Unique pane binding ID.
+- `sessionId`: `Identifier` — Parent session manifest ID.
+- `role`: `AgentRole` — Bound agent role.
+- `agentId`: `Identifier` — Bound agent instance.
+- `workspaceId`: `Identifier`, `tabId`: `Identifier`, `paneId`: `Identifier`.
+- `terminalId`: `Identifier` (optional) — Associated Herdr terminal handle.
+- `session`: `AgentSessionLocator` (optional).
+- `provider`: `string`, `agentKind`: `string`, `model`: `string` (optional).
+- `cwd`: `string`, `worktreePath`: `string` (optional).
+- `isolationMode`: `"dedicated_pane"` (literal).
+- `readOnlyWorkspace`: `boolean`.
+- `transportState`: `AgentTransportState` (`"starting" | "accepted" | "idle" | "working" | "blocked" | "done" | "unknown" | "disconnected" | "cancelled"`).
+- `boundAt`: `IsoDateTime`.
+- `lastHeartbeatAt`: `IsoDateTime` (optional).
+- `metadata`: `Metadata` (optional).
+
+#### 8. `SessionManifest` (`SessionManifestSchema`)
+Manifest defining the topology, layout, and active state of a multi-pane Herdr session:
+- `schemaVersion`: `2` — Numeric literal version 2.
+- `sessionId`: `Identifier` — Session manifest ID.
+- `projectName`: `string`, `workspaceRoot`: `string`.
+- `herdrWorkspaceId`: `Identifier`, `herdrTabId`: `Identifier`.
+- `status`: `"initializing" | "up" | "degraded" | "stopping" | "down"`.
+- `conversationSessionId`: `Identifier` — Bound conversation session identity.
+- `activeRunIds`: `Identifier[]` — Concurrent active workflow run IDs.
+- `panes`: `PaneBinding[]` (min 1 pane; invariant: unique `paneId` across all panes; every pane's `sessionId` must match; when `status` is `"up"`, must include both `"conversation"` and `"coordinator"` panes).
+- `attachTarget`: `{ role: "conversation", paneId: Identifier, terminalId?: Identifier }` — **Invariant**: `attachTarget.paneId` must equal the conversation pane's `paneId`.
+- `createdAt`, `updatedAt`: `IsoDateTime`.
+- `stoppedAt`: `IsoDateTime` (optional).
+- `metadata`: `Metadata` (optional).
+
+#### 9. `Specification` (`SpecificationSchema`)
+Structured requirements artifact produced under Spec-Driven Development (SDD):
+- `schemaVersion`: `2` — Numeric literal version 2.
+- `specId`: `Identifier` — Unique specification ID.
+- `runId`: `Identifier` (optional).
+- `sessionId`: `Identifier` — Originating conversation session ID.
+- `level`: `SddPolicyLevel` (`"lightweight" | "full"`).
+- `title`: `string` (trimmed, min 1), `summary`: `string` (trimmed, min 1), `problemStatement`: `string` (trimmed, min 1).
+- `scope`: `{ inScope: string[]; outOfScope: string[] }` (`inScope` min 1 entry).
+- `acceptanceCriteria`: `AcceptanceCriterion[]` (min 1 entry; duplicate `id` rejected).
+- `affectedPaths`: `string[]` (min 1 entry).
+- `architectureNotes`: `string` (optional; **required** when `level` is `"full"`).
+- `dataModelChanges`: `string` (optional).
+- `securityConsiderations`: `string` (optional; **required** when `level` is `"full"`).
+- `rollbackPlan`: `string` (optional; **required** when `level` is `"full"`).
+- `testStrategy`: `TestStrategy` (optional; **required** when `level` is `"full"`).
+- `tddDecision`: `TddDecision` (optional; **required** when `level` is `"full"`).
+- `status`: `"draft" | "review_pending" | "approved" | "superseded" | "rejected"`.
+- `artifactRef`: `ArtifactReference` (optional; **required** when `status` is `"approved"`).
+- `createdBy`: `string`, `approvedBy`: `string` (optional; **required** when `status` is `"approved"`).
+- `createdAt`, `updatedAt`: `IsoDateTime`.
+- `metadata`: `Metadata` (optional).
+
+#### 10. `AcceptanceCriterion` (`AcceptanceCriterionSchema`)
+Formal acceptance criterion linked to automated or gate verification:
+- `id`: `Identifier` — Unique criterion identifier.
+- `description`: `string` (trimmed, min 1 character).
+- `category`: `"functional" | "non_functional" | "security" | "performance" | "edge_case" | "regression"`.
+- `verificationMethod`: `"unit_test" | "integration_test" | "e2e_test" | "typecheck" | "lint" | "static_analysis" | "manual_review"`.
+- `required`: `boolean`.
+- `status`: `"pending" | "satisfied" | "failed" | "waived"`.
+- `evidenceArtifactIds`: `ArtifactId[]` — Invariant: Min 1 evidence artifact required when `status` is `"satisfied"`, unless `verificationMethod` is `"manual_review"`.
+- `waiverReason`: `string` (optional; **required** when `status` is `"waived"`).
+
+#### 11. `TestStrategy` (`TestStrategySchema`)
+Testing policy guiding task verification and criterion coverage:
+- `schemaVersion`: `2` — Numeric literal version 2.
+- `strategyId`: `Identifier` — Strategy identifier.
+- `specId`: `Identifier` — Bound specification identifier.
+- `tddDecision`: `TddDecision` — Invariant: `tddDecision.specId` must match `specId`.
+- `requiredTestLevels`: `("unit" | "integration" | "e2e" | "property" | "regression" | "smoke")[]` — Invariant: Min 1 level required when TDD mode is `"required"`.
+- `targetCommands`: `string[]` — Invariant: Min 1 target test command required when TDD mode is `"required"`.
+- `coverageThresholdPercent`: `number` (optional, 0–100 range).
+- `independentVerificationRequired`: `true` (literal `true`).
+- `criterionMappings`: Array of `{ criterionId: Identifier; testNames: string[] }`.
+- `createdAt`: `IsoDateTime`.
+- `metadata`: `Metadata` (optional).
+
+#### 12. `TddDecision` (`TddDecisionSchema`)
+Conditional TDD decision evaluated by Coordinator:
+- `schemaVersion`: `2` — Numeric literal version 2.
+- `decisionId`: `Identifier` — Decision identifier.
+- `runId`: `Identifier`, `taskId`: `Identifier` (optional), `specId`: `Identifier`.
+- `mode`: `TddMode` (`"required" | "recommended" | "not_applicable"`).
+- `rationale`: `string` (trimmed, min 10 characters).
+- `verifiableConditions`: `string[]` (min 1 non-empty condition string).
+- `changeClassification`: `ChangeClassification` (`"domain_logic" | "bugfix" | "api_contract" | "refactoring" | "ui_layout" | "documentation" | "configuration" | "exploratory_spike"`).
+- `requiresFailingTestFirst`: `boolean` — Invariant: Must be `true` when `mode` is `"required"`; must be `false` when `mode` is `"not_applicable"`; `"domain_logic"` and `"bugfix"` cannot be marked `"not_applicable"` without explicit `metadata.humanOverrideApproved === true`.
+- `decidedBy`: `"coordinator" | "planner" | "architect" | "human_operator"`.
+- `decidedAt`: `IsoDateTime`.
+- `verifiedByGateId`: `Identifier` (optional).
+- `metadata`: `Metadata` (optional).
+
+#### 13. `VerificationResult` (`VerificationResultSchema`)
+Comprehensive verification outcome produced by independent evaluators:
+- `schemaVersion`: `2` — Numeric literal version 2.
+- `verificationId`: `Identifier` — Verification outcome ID.
+- `runId`: `Identifier`, `taskId`: `Identifier`, `cycleNumber`: `number` (positive integer), `attemptId`: `Identifier`.
+- `status`: `"passed" | "failed" | "blocked" | "escalated"`.
+- `independentExecution`: `true` (literal `true`).
+- `evaluatedCriteria`: Array of `{ criterionId: Identifier; passed: boolean; command?: string; exitCode?: number; evidenceArtifactId: ArtifactId; summary: string }` (min 1 entry; every `evidenceArtifactId` must exist in `evidenceArtifacts`; when `status` is `"passed"`, all criteria must have `passed: true`).
+- `qualityGateResults`: `QualityGateResult[]` — Invariant: When `status` is `"passed"`, all quality gate results must have `status: "passed"`.
+- `evidenceArtifacts`: `ArtifactReference[]` (min 1 entry; all must match `runId`).
+- `findings`: `QualityFinding[]` — Invariant: When `status` is `"passed"`, findings cannot contain severity `"error"`.
+- `changeSet`: `GitChangeSet` (optional).
+- `verifiedBy`: `"quality_gate" | "qa" | "reviewer" | "tester"`.
+- `startedAt`, `completedAt`: `IsoDateTime` (invariant: `completedAt >= startedAt`).
+- `metadata`: `Metadata` (optional).
+
+#### 14. `VerificationCycle` & `VerificationEscalation` (`VerificationCycleSchema`)
+State of an iterative verification loop bounded by `maxIterations`:
+- `schemaVersion`: `2` — Numeric literal version 2.
+- `cycleId`: `Identifier`, `runId`: `Identifier`, `taskId`: `Identifier`, `specId`: `Identifier`.
+- `currentIteration`: `number` (positive integer; cannot exceed `maxIterations`).
+- `maxIterations`: `number` (integer between 1 and 10).
+- `status`: `"in_progress" | "passed" | "rework_required" | "escalated" | "aborted"` — Invariants: `"passed"` status requires non-empty `history` with the last result having status `"passed"`; when `currentIteration === maxIterations` and the last result is `"failed"`, cycle cannot be `"rework_required"` and must escalate or abort.
+- `tddDecision`: `TddDecision`.
+- `history`: `VerificationResult[]`.
+- `escalation`: `VerificationEscalation` (optional; **required** when `status` is `"escalated"`):
+  - `escalatedAt`: `IsoDateTime`.
+  - `reason`: `string` (min 1 character).
+  - `target`: `"coordinator" | "human_operator"`.
+  - `approvalRequestId`: `Identifier` (optional).
+  - `evidenceArtifacts`: `ArtifactReference[]` (min 1 entry).
+- `startedAt`, `updatedAt`: `IsoDateTime`.
+- `metadata`: `Metadata` (optional).
+
+#### 15. `GitChangeSet` (`GitChangeSetSchema`)
+Git workspace modification state captured as a trusted artifact:
+- `schemaVersion`: `2` — Numeric literal version 2.
+- `changeSetId`: `Identifier`, `runId`: `Identifier`, `taskId`: `Identifier`, `attemptId`: `Identifier`.
+- `worktreePath`: `string`, `branchName`: `string`.
+- `baseCommitHash`: `string` (7–40 hex characters).
+- `headCommitHash`: `string` (7–40 hex characters).
+- `dirtyWorkingTree`: `boolean`.
+- `filesChanged`: `GitChangedFile[]` (min 1 entry; `{ path: string; changeType: "added" | "modified" | "deleted" | "renamed"; previousPath?: string; additions: number; deletions: number }`; paths must be repo-relative safe paths without directory traversal).
+- `patchArtifact`: `ArtifactReference` — Invariants: `kind` must be `"patch"`; `runId` must match changeSet `runId`.
+- `createdAt`: `IsoDateTime`.
+- `metadata`: `Metadata` (optional).
+
+#### 16. Extended `ApprovalRequest` & `ApprovalDecision` (`approval.ts`)
+Backward-compatible discriminated union expansion supporting 8 target types:
+- `schemaVersion`: `1 | 2` (supports both v1 and v2 records).
+- `approvalId`: `Identifier`, `runId`: `Identifier`, `sessionId`: `Identifier` (optional).
+- `status`: `ApprovalStatus` (optional; `"pending" | "approved" | "changes_requested" | "rejected" | "expired" | "cancelled" | "superseded"`).
+- `expiresAt`: `IsoDateTime` (optional).
+- `target`: `ApprovalTarget` discriminated union supporting:
+  - `{ type: "run" }`
+  - `{ type: "task", taskId: Identifier }`
+  - `{ type: "quality_gate", taskId?: Identifier, gateId: Identifier }`
+  - `{ type: "specification", specId: Identifier }`
+  - `{ type: "tdd_decision", decisionId: Identifier, taskId?: Identifier }`
+  - `{ type: "verification_escalation", cycleId: Identifier, taskId: Identifier }`
+  - `{ type: "git_changeset", changeSetId: Identifier, taskId: Identifier }`
+  - `{ type: "delegation", delegationId: Identifier }`
+- `revision`: `number` (positive integer), `generation`: `number` (non-negative integer).
+- `requestedBy`: `string`, `requestedAt`: `IsoDateTime`, `reason`: `string`.
+- `evidence`: `ArtifactReference[]`.
+- `idempotencyKey`: `IdempotencyKey`.
+- `metadata`: `Metadata` (optional).
+- `ApprovalDecisionSchema`: `schemaVersion: 1 | 2`, `approvalId`, `runId`, `sessionId?`, `target`, `revision`, `generation`, `decision: "approved" | "rejected" | "changes_requested"`, `decidedBy`, `decidedAt`, `reason?` (required for rejection/changes_requested), `feedbackArtifacts`, `idempotencyKey`, `metadata?`.
+
+#### 17. Extended `RecoveryCheckpoint` (`execution.ts`, `recovery.ts`)
+Backward-compatible extension of checkpoint envelope and aggregate state:
+- **Envelope (`RecoveryCheckpointSchema`)**:
+  - `checkpointSchemaVersion`: `1` (backward-compatible literal `1`).
+  - `codec`: Discriminated union `{ name: "bflow.workflow-run-snapshot+json", version: 1 }` | `{ name: "bflow.workflow-aggregate+json", version: 1 }`.
+  - `checkpointId`: `Identifier`, `runId`: `Identifier`.
+  - `sessionId`: `Identifier` (optional).
+  - `conversationSessionId`: `Identifier` (optional).
+  - `eventSequence`: `number`, `version`: `number`.
+  - `state`: `JsonValue`, `resumeCursor`: `string` (optional).
+  - `createdAt`: `IsoDateTime`, `metadata`: `Metadata` (optional).
+- **State (`WorkflowAggregateCheckpointStateSchema`)**:
+  - `schemaVersion`: `1`.
+  - `snapshot`: `WorkflowRunSnapshot`.
+  - `sdlcContext`: `SdlcRecoveryContext` (optional) containing:
+    - `conversationSession`: `ConversationSession` (optional).
+    - `sessionManifest`: `SessionManifest` (optional).
+    - `specifications`: `Specification[]` (optional).
+    - `activeAssignments`: `AgentAssignment[]` (optional).
+    - `verificationCycles`: `VerificationCycle[]` (optional).
+    - `gitChangeSets`: `GitChangeSet[]` (optional).
+  - `approvals`, `gateRequests`, `gateOutcomes`, `successfulAttempts`, `cancellations`, `retrySchedules`, `attemptBaselines`, `commands`.
+
+#### 18. `RoleMessage` / `InterRoleMessage` (`session.ts`)
+Standardized peer-to-peer and hierarchical envelope over Herdr transport:
+- `schema_version`: `2` (literal 2).
+- `message_id`: `Identifier`, `correlation_id`: `Identifier`.
+- `causation_id`: `Identifier` (optional).
+- `run_id`: `Identifier` (optional; **required** for all types except `"conversation.intake"` and `"conversation.clarification"`).
+- `sender`: `{ role: AgentRole | "user" | "runtime", agent_id?: Identifier, pane_id?: Identifier }`.
+- `recipient`: `{ role: AgentRole | "user" | "runtime", agent_id?: Identifier, pane_id?: Identifier }`.
+- `type`: `RoleMessageType` (17 distinct wire types: `"conversation.intake" | "conversation.clarification" | "conversation.progress" | "delegation.request" | "delegation.accepted" | "spec.draft" | "spec.approved" | "tdd.decision" | "task.assignment" | "task.status" | "implementation.submitted" | "verification.requested" | "verification.result" | "verification.escalation" | "review.verdict" | "approval.request" | "approval.decision"`).
+- `payload`: `JsonValue`.
+- `artifact_references`: `ArtifactReference[]` (all must match `run_id` when present).
+- `occurred_at`: `IsoDateTime` (optional).
+- `idempotency_key`: `IdempotencyKey` (optional).
+- `metadata`: `Metadata` (optional).

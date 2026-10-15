@@ -16,6 +16,8 @@ All exchanged data must be parsed at an ingress boundary with the exported Zod s
 
 ## Ownership for parallel implementation
 
+### Wave 1 (P00–P10) Path Ownership
+
 | Agent | Owned paths | Responsibility |
 | --- | --- | --- |
 | 1 — workflow core | `packages/core/**` | Task DAG evaluation, legal state transitions, scheduling decisions, recovery logic |
@@ -24,7 +26,50 @@ All exchanged data must be parsed at an ingress boundary with the exported Zod s
 | 4 — quality | `packages/quality-gates/**` | Quality-gate evaluators, findings, acceptance decisions |
 | 5 — runtime and CLI | `packages/runtime/**`, `apps/cli/**` | Port composition, high-level use cases, command-line UX |
 
+### Wave 2 (P12–P18) Path Ownership
+
+| Phase | Focus | Owned paths | Responsibility |
+| --- | --- | --- | --- |
+| P11 | Public Contracts v2 | `packages/contracts/**` | 17 v2 Zod schemas, `RoleMessage` envelope, validation |
+| P12 | Herdr multi-pane session | `packages/herdr-adapter/**` | `MultiPaneSessionManager`, `SessionManifest`, `PaneBinding`, Herdr 0.9.1 multi-pane |
+| P13 | Agent Registry v2 & capabilities | `packages/agent-registry/**` | 10 `AgentRole` enum, `AgentCapability` & `AgentRoleProfile`, `canDelegateToSpecialist` constraint, leases & fencing |
+| P14 | Core SDD, TDD & loop rules | `packages/core/**` | `Specification` acceptance, `TddDecision` evaluation, `VerificationCycle` `maxIterations` |
+| P15 | Quality gates & verification | `packages/quality-gates/**` | `VerificationCycleEvaluator`, `GitChangeSet` validator, subprocess safety |
+| P16 | Runtime & persistence orchestration | `packages/runtime/**`, `packages/persistence/**` | `ConversationSessionManager`, `DelegationRequest`, Coordinator-Runtime execution, SQLite checkpoint codec |
+| P17 | CLI multi-pane commands | `apps/cli/**` | `bflow init`, `bflow up`, `bflow down`, `bflow attach`, interactive UX |
+| P18 | E2E Agentic SDLC verification | `tests/e2e/**` | End-to-end integration: conversation clarification -> spec -> TDD -> verification loop -> approval |
+
 Agents must edit only owned paths. Cross-owner changes are proposed to the owning agent or handled during integration. Generated `dist/**`, coverage, local databases, artifacts, and agent logs are never committed.
+
+## Architecture v2 & P11–P18 Upgrade Rules
+
+The v2 architectural specification is formally documented in [docs/architecture-v2.md](docs/architecture-v2.md), with protocol details in [docs/communication-protocol.md](docs/communication-protocol.md) and development policies in [docs/sdlc-policies.md](docs/sdlc-policies.md). All implementation agents must adhere to the following architectural rules:
+
+### 1. Five-Component Responsibility Boundary
+
+- **Conversation Agent**: Sole interface with the user (`bflow attach` attaches only to the Conversation Agent pane). Receives and interprets user intent, conducts clarification dialogues, and reports progress. Delegates to the Coordinator Agent via `DelegationRequest`. **NEVER** directly coordinates or dispatches to Developer or specialist roles, and **NEVER** mutates source code directly.
+- **Coordinator Agent**: Acts as the technical lead. Analyzes requirements, determines the SDD level (`lightweight` vs. `full`), evaluates `TddDecision`, decomposes tasks into a DAG, and issues specialist assignments (`AgentAssignment`). Executes workflows **EXCLUSIVELY through Workflow Runtime**. **NEVER** bypasses system policies, quality gates, leases, loop limits, or human approvals.
+- **Workflow Runtime**: The central execution arbiter. Manages task DAG dependencies, enforces concurrency limits (`maxConcurrency`), validates legal state transitions (`validateTaskTransition`), enforces lease validity and monotonic fencing tokens prior to transport dispatch, bounds retry/rework/verification loops (`maxIterations`), and calls independent acceptance gates.
+- **Herdr**: The physical process and multi-pane orchestration platform. Operates dedicated terminal panes (`PaneBinding` inside `SessionManifest`) per active role, manages agent OS processes, and transports inter-agent interactions over protocol 22.
+- **Artifact Store**: Content-addressable trusted store. Persists immutable documents (`Specification`), objective verification evidence (`patch`, `test-result`, logs) addressed via `artifact://` URIs and verified SHA-256/SHA-512 checksums. **NEVER** used as an ad-hoc polling/communication channel replacing Herdr.
+
+### 2. Four Distinct State Domains
+
+Agents and runtime components must strictly distinguish the four orthogonal state domains and never conflate them:
+1. **`AgentTransportState`** (`starting | accepted | idle | working | blocked | done | unknown | disconnected | cancelled`): Physical Herdr transport observation. Herdr `done` only signifies turn completion and **NEVER proves task completion or success**.
+2. **`SdlcWorkStatus`** (`intake | clarifying | specifying | planning | tdd_deciding | implementing | verifying | reviewing | awaiting_approval | completed | escalated | failed | cancelled`): Tracks high-level SDLC business phase governed by Workflow Engine and verified by Quality Gates, operating alongside Core task/run execution statuses (`TaskStatus` / `RunStatus`).
+3. **`ConversationSessionStatus`** (`active | awaiting_user_clarification | delegated_to_coordinator | reporting_progress | awaiting_user_approval | completed | paused | closed | archived`): Lifecycle of user interaction with the Conversation Agent.
+4. **`ApprovalStatus`** (`pending | approved | changes_requested | rejected | expired | cancelled | superseded`): Governance gates and human decision lifecycle.
+
+### 3. Inter-Role Message Envelope
+
+All cross-role communication across Herdr transport must use the standardized `RoleMessage` envelope specifying `message_id`, `correlation_id`, `causation_id?`, `run_id?`, `sender`, `recipient`, `type`, `payload`, `artifact_references`, and `schema_version`. See [docs/communication-protocol.md](docs/communication-protocol.md).
+
+### 4. SDD, Conditional TDD, and Bounded Verification Loop
+
+- **Spec-Driven Development (SDD)**: All feature development requires an accepted `Specification` (`lightweight` or `full`) containing explicit `AcceptanceCriterion` records before implementation begins.
+- **Conditional TDD**: The Coordinator evaluates `TddDecision` and `TestStrategy`. When `TddDecision.mode` is `"required"` (`requiresFailingTestFirst: true`), the Developer agent must follow the Red-Green-Refactor sequence.
+- **Bounded Verification Loop**: Automated verification cycles (`VerificationCycle`) are bounded by `maxIterations`. Each cycle produces `VerificationResult` and `GitChangeSet`. Exhausted iterations escalate to human intervention instead of looping indefinitely. See [docs/sdlc-policies.md](docs/sdlc-policies.md).
 
 ## Worktree and branch protocol
 

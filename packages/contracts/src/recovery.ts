@@ -7,6 +7,12 @@ import {
 } from "./execution.js";
 import { WorkflowAdvanceResultSchema } from "./orchestration.js";
 import { QualityGateBindingSchema } from "./quality.js";
+import { GitChangeSetSchema, SpecificationSchema, VerificationCycleSchema } from "./sdlc.js";
+import {
+  AgentAssignmentSchema,
+  ConversationSessionSchema,
+  SessionManifestSchema
+} from "./session.js";
 import { WorkflowRunSnapshotSchema } from "./workflow.js";
 
 export const CreateCheckpointCommandSchema = z.object({
@@ -16,9 +22,21 @@ export const CreateCheckpointCommandSchema = z.object({
   createdAt: IsoDateTimeSchema
 }).strict();
 
+export const SdlcRecoveryContextSchema = z
+  .object({
+    conversationSession: ConversationSessionSchema.optional(),
+    sessionManifest: SessionManifestSchema.optional(),
+    specifications: z.array(SpecificationSchema).optional(),
+    activeAssignments: z.array(AgentAssignmentSchema).optional(),
+    verificationCycles: z.array(VerificationCycleSchema).optional(),
+    gitChangeSets: z.array(GitChangeSetSchema).optional()
+  })
+  .strict();
+
 export const WorkflowAggregateCheckpointStateSchema = z.object({
   schemaVersion: z.literal(1),
   snapshot: WorkflowRunSnapshotSchema,
+  sdlcContext: SdlcRecoveryContextSchema.optional(),
   approvals: z.array(z.object({ request: ApprovalRequestSchema, decision: ApprovalDecisionSchema.optional() }).strict()),
   gateRequests: z.array(z.object({
     evaluationId: IdentifierSchema,
@@ -94,4 +112,5 @@ export const WorkflowAggregateCheckpointStateSchema = z.object({
 });
 
 export type CreateCheckpointCommand = z.infer<typeof CreateCheckpointCommandSchema>;
+export type SdlcRecoveryContext = z.infer<typeof SdlcRecoveryContextSchema>;
 export type WorkflowAggregateCheckpointState = z.infer<typeof WorkflowAggregateCheckpointStateSchema>;

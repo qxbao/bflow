@@ -10,12 +10,18 @@ import type {
   AgentTransportObservation,
   AgentTransportState
 } from "./agent.js";
-import type { ApprovalDecision } from "./approval.js";
+import type { ApprovalDecision, ApprovalRequest } from "./approval.js";
 import type { ArtifactQuery, ArtifactReference, ArtifactWriteOptions } from "./artifact.js";
 import type { Page, PageRequest } from "./common.js";
 import type { DomainEvent } from "./events.js";
 import type { OperationResult } from "./errors.js";
 import type { CancellationRequest, CancellationResult, RecoveryCheckpoint } from "./execution.js";
+import type {
+  ConversationMessage,
+  DelegationRequest,
+  PaneBinding,
+  SessionManifest
+} from "./session.js";
 import type {
   AdvanceRunCommand,
   AppendEventsRequest,
@@ -215,4 +221,19 @@ export interface RuntimeService {
   getRun(runId: string, options?: OperationOptions): Promise<OperationResult<WorkflowRunSnapshot | null>>;
   findRuns(query: RunQuery, options?: OperationOptions): Promise<OperationResult<Page<WorkflowRunSnapshot>>>;
   watch(runId: string, options?: AgentReadOptions): AsyncIterable<OperationResult<DomainEvent>>;
+}
+
+export interface SessionLifecycleManager {
+  init(manifest: SessionManifest, options?: OperationOptions): Promise<OperationResult<SessionManifest>>;
+  up(sessionId: string, options?: OperationOptions): Promise<OperationResult<SessionManifest>>;
+  down(sessionId: string, options?: OperationOptions): Promise<OperationResult<SessionManifest>>;
+  attach(sessionId: string, options?: OperationOptions): Promise<OperationResult<PaneBinding>>;
+  getManifest(sessionId: string, options?: OperationOptions): Promise<OperationResult<SessionManifest | null>>;
+}
+
+export interface ConversationCoordinatorPort {
+  handOffToCoordinator(request: DelegationRequest, options?: OperationOptions): Promise<OperationResult<void>>;
+  reportProgressToConversation(message: ConversationMessage, options?: OperationOptions): Promise<OperationResult<void>>;
+  promptApproval(request: ApprovalRequest, options?: OperationOptions): Promise<OperationResult<void>>;
+  receiveApprovalDecision(decision: ApprovalDecision, options?: OperationOptions): Promise<OperationResult<void>>;
 }
