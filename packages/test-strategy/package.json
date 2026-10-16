@@ -1,0 +1,16 @@
+{
+  "name": "@bflow/test-strategy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist", "prompts"],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "pnpm run build && vitest run --root ../.. packages/test-strategy/test"
+  },
+  "dependencies": { "@bflow/contracts": "workspace:*", "zod": "^3.24.2" }
+}
