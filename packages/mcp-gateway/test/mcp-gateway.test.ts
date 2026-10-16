@@ -1834,7 +1834,23 @@ rl.on('line', (line) => {
 
       try {
         const realNodeExec = fs.realpathSync(process.execPath);
-        const nodeBytes = fs.readFileSync(realNodeExec);
+        let targetExec = realNodeExec;
+
+        try {
+          fs.chmodSync(realNodeExec, 0o755);
+        } catch {
+          // ignore if read-only or not owner
+        }
+
+        const initialStat = fs.statSync(realNodeExec);
+        if ((initialStat.mode & 0o022) !== 0) {
+          const safeNodeExec = path.join(tmpDir, "node");
+          fs.copyFileSync(realNodeExec, safeNodeExec);
+          fs.chmodSync(safeNodeExec, 0o755);
+          targetExec = safeNodeExec;
+        }
+
+        const nodeBytes = fs.readFileSync(targetExec);
         const nodeDigest = createHash("sha256").update(nodeBytes).digest("hex");
 
         const secretStore = new GatewaySecretStore();
@@ -1848,7 +1864,7 @@ rl.on('line', (line) => {
           healthTimeoutMs: 30_000,
           connection: {
             kind: "stdio_mcp",
-            executable: realNodeExec,
+            executable: targetExec,
             argv: [scriptPath],
             environmentBindings: {},
             executableDigest: nodeDigest,
