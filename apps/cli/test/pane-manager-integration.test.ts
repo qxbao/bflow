@@ -74,7 +74,7 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     runner.blockedAgent = "coordinator";
     await expect(lifecycle().up()).rejects.toThrow("readiness");
     const count = starts(runner).length;
-    await expect(lifecycle().up()).rejects.toThrow("refusing duplicate");
+    await expect(lifecycle().up()).rejects.toThrow("not ready: blocked");
     expect(starts(runner)).toHaveLength(count);
     const report = await lifecycle().doctor();
     expect(report.healthy).toBe(false);
