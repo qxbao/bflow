@@ -1,7 +1,7 @@
 // Validates documentation assets against the built implementation in disposable repositories.
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtemp, mkdir, readFile, writeFile, rm, cp, symlink, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,13 +49,14 @@ console.log('PASS eight role configurations and RoleMessage ingress/invalid-vers
 
 const temporary = await mkdtemp(join(tmpdir(), 'bflow-dx-'));
 const cli = join(root, 'apps/cli/dist/bin.js');
-const call = (cwd, args) => JSON.parse(execFileSync(process.execPath, [cli, ...args, '--json'], { cwd, encoding: 'utf8' }));
+const childEnvironment = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
+const call = (cwd, args) => JSON.parse(execFileSync(process.execPath, [cli, ...args, '--json'], { cwd, env: childEnvironment, encoding: 'utf8' }));
 try {
   const a = join(temporary, 'a', 'shop');
   const b = join(temporary, 'b', 'shop');
   for (const cwd of [a, b]) {
     await mkdir(cwd, { recursive: true });
-    execFileSync('git', ['init', '-q', cwd]);
+    execFileSync('git', ['init', '-q', cwd], { env: childEnvironment });
     call(cwd, ['init', '--name', 'portable-node']);
   }
   const identityA = await identifyRepository(a), identityB = await identifyRepository(b);
@@ -66,7 +67,10 @@ try {
   const nested = join(a, 'src'); await mkdir(nested);
   call(nested, ['init', '--name', 'ignored-on-repeat']);
   assert.equal(await readFile(path, 'utf8'), original);
-  execFileSync(process.execPath, [join(directory, 'apply.mjs'), a, 'bugfix']);
+  for (const kind of ['feature', 'refactor', 'docs', 'bugfix']) {
+    execFileSync(process.execPath, [join(directory, 'apply.mjs'), a, kind], { env: childEnvironment });
+    assert.equal((await readEnvironmentConfig(identityA)).defaultWorkflow.id, `portable-${kind}`);
+  }
   const applied = await readEnvironmentConfig(identityA);
   for (const field of ['repositoryId', 'workspaceRoot', 'sessionName']) assert.equal(applied.environment[field], configA.environment[field]);
   assert.deepEqual(applied.storage, configA.storage);
@@ -79,11 +83,38 @@ try {
   await writeFile(bPath, 'environment:\n  herdrBinary: herdr\n');
   await assert.rejects(readEnvironmentConfig(identityB), /invalid JSON/);
   await writeFile(bPath, bOriginal);
+  // Exercise altered local templates without changing the real checkout assets.
+  const toolsRoot = join(temporary, 'tools');
+  const alteredDirectory = join(toolsRoot, 'templates/node-typescript');
+  await cp(directory, alteredDirectory, { recursive: true });
+  for (const path of ['apps', 'packages']) await symlink(join(root, path), join(toolsRoot, path), 'dir');
+  const beforeRejection = await readFile(path, 'utf8');
+  const backupNames = await readdir(join(a, '.bflow/data'));
+  const rejectedFragments = [
+    [{ ...fragment, environment: { ...fragment.environment, verification: { maxIterations: 0, onExhausted: 'require_human' } } }, /Invalid SDLC policies/],
+    [{ ...fragment, environment: { ...fragment.environment, roles: [...fragment.environment.roles, fragment.environment.roles[0]] } }, /Unique roles/],
+    [{ ...fragment, environment: { ...fragment.environment, workspaceRoot: b } }, /must not set checkout identity/]
+  ];
+  for (const [invalid, message] of rejectedFragments) {
+    await writeFile(join(alteredDirectory, 'config.fragment.json'), JSON.stringify(invalid));
+    const result = spawnSync(process.execPath, [join(alteredDirectory, 'apply.mjs'), a, 'bugfix'], { env: childEnvironment, encoding: 'utf8' });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, message);
+    assert.equal(await readFile(path, 'utf8'), beforeRejection);
+    assert.deepEqual(await readdir(join(a, '.bflow/data')), backupNames);
+  }
+  // A dangling state symlink is still evidence of existing lifecycle state.
+  const statePath = join(b, '.bflow/state');
+  await symlink(join(temporary, 'absent-state'), statePath, 'dir');
+  assert.throws(() => execFileSync(process.execPath, [join(directory, 'apply.mjs'), b], { stdio: 'pipe', env: childEnvironment }));
+  assert.equal(await readFile(bPath, 'utf8'), bOriginal);
+  await rm(statePath);
+  console.log('PASS invalid policy/duplicate roles/identity override leave config and backups unchanged; dangling state guard');
   // Regression probe for a mismatch between current help text and actual CLI behavior.
   call(a, ['init', '--force', '--name', 'force-replaces-config']);
   assert.equal((await readEnvironmentConfig(identityA)).projectName, 'force-replaces-config');
   await mkdir(join(b, '.bflow/state'));
-  assert.throws(() => execFileSync(process.execPath, [join(directory, 'apply.mjs'), b], { stdio: 'pipe' }));
+  assert.throws(() => execFileSync(process.execPath, [join(directory, 'apply.mjs'), b], { stdio: 'pipe', env: childEnvironment }));
   assert.equal(await readFile(bPath, 'utf8'), bOriginal);
   console.log('PASS CLI init/repeat/subdirectory, template application, identity isolation, moved config/YAML rejection, --force overwrite and existing-state guard');
 } finally {

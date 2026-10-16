@@ -22,8 +22,35 @@
   "acceptanceCriteria": [
     {
       "id": "feature-1",
-      "description": "Multiplication returns the product of two safe integers.",
+      "description": "Multiplication returns the exact product for safe results, including multiply(2, 3) = 6 and multiply(-2, 3) = -6.",
       "category": "functional",
+      "verificationMethod": "unit_test",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    },
+    {
+      "id": "feature-2",
+      "description": "Multiplication raises RangeError for fractional, non-finite or unsafe integer inputs.",
+      "category": "edge_case",
+      "verificationMethod": "unit_test",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    },
+    {
+      "id": "feature-3",
+      "description": "Multiplication raises RangeError when the result is not a safe integer.",
+      "category": "edge_case",
+      "verificationMethod": "unit_test",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    },
+    {
+      "id": "feature-4",
+      "description": "Existing sum behavior and its unchanged baseline test suite are preserved.",
+      "category": "regression",
       "verificationMethod": "unit_test",
       "required": true,
       "status": "pending",
@@ -98,7 +125,10 @@
         "unresolvedQuestions": []
       },
       "functionalRequirements": [
-        "Multiplication returns the product of two safe integers."
+        "Multiplication returns the exact product for safe results, including multiply(2, 3) = 6 and multiply(-2, 3) = -6.",
+        "Multiplication raises RangeError for fractional, non-finite or unsafe integer inputs.",
+        "Multiplication raises RangeError when the result is not a safe integer.",
+        "Existing sum behavior and its unchanged baseline test suite are preserved."
       ],
       "proposedTestStrategy": "Run independent pnpm test against the pinned change revision.",
       "technicalConstraints": [],
@@ -107,6 +137,24 @@
       "traceability": [
         {
           "criterionId": "feature-1",
+          "taskIds": [
+            "feature-change"
+          ]
+        },
+        {
+          "criterionId": "feature-2",
+          "taskIds": [
+            "feature-change"
+          ]
+        },
+        {
+          "criterionId": "feature-3",
+          "taskIds": [
+            "feature-change"
+          ]
+        },
+        {
+          "criterionId": "feature-4",
           "taskIds": [
             "feature-change"
           ]
@@ -119,20 +167,23 @@
   "rollbackPlan": "Revert the isolated feature commit after checking dependent changes.",
   "testStrategy": {
     "schemaVersion": 2,
-    "strategyId": "strategy-e7dcf6f8f4fce53a9856a702705ddb0e9564c47e5037e50f7e09a7211d7d31ef",
+    "strategyId": "strategy-bd712a58f616a79f456c878e652529797c2b9d0a2f948549a9b5ff52945aeea5",
     "specId": "feature-spec",
     "tddDecision": {
       "schemaVersion": 2,
-      "decisionId": "tdd-e7dcf6f8f4fce53a9856a702705ddb0e9564c47e5037e50f7e09a7211d7d31ef",
+      "decisionId": "tdd-bd712a58f616a79f456c878e652529797c2b9d0a2f948549a9b5ff52945aeea5",
       "runId": "example-feature",
       "taskId": "feature-change",
       "specId": "feature-spec",
       "mode": "required",
       "rationale": "A repeatable behavioral check is feasible and spec behavior, regression risk, or project convention requires test-first evidence. Testability: Pure integer arithmetic is deterministic and covered by the Node test runner. Effective risk: medium.",
       "verifiableConditions": [
-        "feature-1: Multiplication returns the product of two safe integers.; verify using unit_test."
+        "feature-1: Multiplication returns the exact product for safe results, including multiply(2, 3) = 6 and multiply(-2, 3) = -6.; verify using unit_test.",
+        "feature-2: Multiplication raises RangeError for fractional, non-finite or unsafe integer inputs.; verify using unit_test.",
+        "feature-3: Multiplication raises RangeError when the result is not a safe integer.; verify using unit_test.",
+        "feature-4: Existing sum behavior and its unchanged baseline test suite are preserved.; verify using unit_test."
       ],
-      "changeClassification": "domain_logic",
+      "changeClassification": "bugfix",
       "requiresFailingTestFirst": true,
       "decidedBy": "coordinator",
       "decidedAt": "2026-10-16T00:00:00.000Z"
@@ -148,7 +199,25 @@
       {
         "criterionId": "feature-1",
         "testNames": [
-          "feature-1: Multiplication returns the product of two safe integers."
+          "feature-1: Multiplication returns the exact product for safe results, including multiply(2, 3) = 6 and multiply(-2, 3) = -6."
+        ]
+      },
+      {
+        "criterionId": "feature-2",
+        "testNames": [
+          "feature-2: Multiplication raises RangeError for fractional, non-finite or unsafe integer inputs."
+        ]
+      },
+      {
+        "criterionId": "feature-3",
+        "testNames": [
+          "feature-3: Multiplication raises RangeError when the result is not a safe integer."
+        ]
+      },
+      {
+        "criterionId": "feature-4",
+        "testNames": [
+          "feature-4: Existing sum behavior and its unchanged baseline test suite are preserved."
         ]
       }
     ],
@@ -197,8 +266,35 @@
         "acceptanceCriteria": [
           {
             "id": "feature-1",
-            "description": "Multiplication returns the product of two safe integers.",
+            "description": "Multiplication returns the exact product for safe results, including multiply(2, 3) = 6 and multiply(-2, 3) = -6.",
             "category": "functional",
+            "verificationMethod": "unit_test",
+            "required": true,
+            "status": "pending",
+            "evidenceArtifactIds": []
+          },
+          {
+            "id": "feature-2",
+            "description": "Multiplication raises RangeError for fractional, non-finite or unsafe integer inputs.",
+            "category": "edge_case",
+            "verificationMethod": "unit_test",
+            "required": true,
+            "status": "pending",
+            "evidenceArtifactIds": []
+          },
+          {
+            "id": "feature-3",
+            "description": "Multiplication raises RangeError when the result is not a safe integer.",
+            "category": "edge_case",
+            "verificationMethod": "unit_test",
+            "required": true,
+            "status": "pending",
+            "evidenceArtifactIds": []
+          },
+          {
+            "id": "feature-4",
+            "description": "Existing sum behavior and its unchanged baseline test suite are preserved.",
+            "category": "regression",
             "verificationMethod": "unit_test",
             "required": true,
             "status": "pending",
@@ -214,7 +310,8 @@
           "unit_test"
         ],
         "suggestedTestLevels": [
-          "unit"
+          "unit",
+          "regression"
         ],
         "evidenceRequirements": [
           "Red: spec-derived tests fail with a nonzero exit code because target behavior is absent; retain trusted logs and the unchanged test revision.",
@@ -227,16 +324,19 @@
   },
   "tddDecision": {
     "schemaVersion": 2,
-    "decisionId": "tdd-e7dcf6f8f4fce53a9856a702705ddb0e9564c47e5037e50f7e09a7211d7d31ef",
+    "decisionId": "tdd-bd712a58f616a79f456c878e652529797c2b9d0a2f948549a9b5ff52945aeea5",
     "runId": "example-feature",
     "taskId": "feature-change",
     "specId": "feature-spec",
     "mode": "required",
     "rationale": "A repeatable behavioral check is feasible and spec behavior, regression risk, or project convention requires test-first evidence. Testability: Pure integer arithmetic is deterministic and covered by the Node test runner. Effective risk: medium.",
     "verifiableConditions": [
-      "feature-1: Multiplication returns the product of two safe integers.; verify using unit_test."
+      "feature-1: Multiplication returns the exact product for safe results, including multiply(2, 3) = 6 and multiply(-2, 3) = -6.; verify using unit_test.",
+      "feature-2: Multiplication raises RangeError for fractional, non-finite or unsafe integer inputs.; verify using unit_test.",
+      "feature-3: Multiplication raises RangeError when the result is not a safe integer.; verify using unit_test.",
+      "feature-4: Existing sum behavior and its unchanged baseline test suite are preserved.; verify using unit_test."
     ],
-    "changeClassification": "domain_logic",
+    "changeClassification": "bugfix",
     "requiresFailingTestFirst": true,
     "decidedBy": "coordinator",
     "decidedAt": "2026-10-16T00:00:00.000Z"

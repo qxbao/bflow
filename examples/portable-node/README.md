@@ -47,7 +47,7 @@ cần; không trộn thay đổi khác scope:
 
 | Request | Mục tiêu | Policy mẫu |
 | --- | --- | --- |
-| [feature](requests/feature.md) | Thêm multiply, bổ sung criteria cho validation/overflow | full SDD / required TDD |
+| [feature](requests/feature.md) | Thêm multiply với criteria cho validation/overflow và giữ nguyên sum | full SDD / required TDD |
 | [bugfix](requests/bugfix.md) | Bắt output overflow của sum bằng regression test trước | lightweight / required |
 | [refactor](requests/refactor.md) | Tách input validation, giữ behavior | lightweight / recommended |
 | [docs](requests/docs.md) | Giải thích giới hạn và kiểm tra ví dụ | lightweight / not_applicable + manual evidence |

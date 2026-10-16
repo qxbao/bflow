@@ -32,5 +32,7 @@ node "$BFLOW_HOME/templates/node-typescript/apply.mjs" . feature
 ```
 
 Helper giữ runtime/storage/identity từ init, thay defaultWorkflow và các policy
-trong fragment, lưu backup dưới `.bflow/data/`. Nó từ chối nếu đã có `.bflow/state`.
+trong fragment, validate candidate bằng loader thật trước khi thay file và lưu
+backup dưới `.bflow/data/`. Fragment không được đặt identity của checkout.
+Nó từ chối nếu đã có `.bflow/state`, kể cả dangling symlink.
 Đây là helper template được chạy tường minh; CLI không tự nạp template hay policy file.

@@ -9,9 +9,12 @@
       "id": "feature-change",
       "title": "Add multiplication",
       "role": "developer",
-      "instruction": "Add multiplication. Work only within owned paths and satisfy feature-1. Follow the accepted specification and resolved TestStrategy.",
+      "instruction": "Add multiplication with safe integer input/result validation. Preserve existing sum behavior. Work only within owned paths and satisfy feature-1 through feature-4. Follow the accepted specification and resolved TestStrategy.",
       "acceptanceCriteria": [
-        "feature-1"
+        "feature-1",
+        "feature-2",
+        "feature-3",
+        "feature-4"
       ],
       "retry": {
         "maxAttempts": 2,

@@ -11,7 +11,8 @@ Sau [Installation](installation.md), đặt đường dẫn tuyệt đối tới
 
 ```sh
 export BFLOW_HOME=/absolute/path/to/bflow
-cp -R "$BFLOW_HOME/examples/portable-node" /tmp/my-bflow-calculator
+mkdir /tmp/my-bflow-calculator
+git -C "$BFLOW_HOME" archive HEAD:examples/portable-node | tar -x -C /tmp/my-bflow-calculator
 cd /tmp/my-bflow-calculator
 git init
 pnpm install --frozen-lockfile
@@ -26,8 +27,8 @@ node "$BFLOW_HOME/apps/cli/dist/bin.js" status --json
 ```
 
 Dùng một thư mục đích chưa tồn tại. Git cần user identity đã cấu hình để commit.
-Chỉ sao chép file được track; nếu checkout ví dụ đã được build, bỏ `node_modules/`
-và `dist/` khỏi bản sao trước khi install để kiểm tra độc lập. Lệnh doctor có thể
+Lệnh archive chỉ export example đã commit, không mang theo `node_modules/`,
+`dist/` hoặc `.bflow` cục bộ trong source checkout. Lệnh doctor có thể
 trả exit 1 khi thiếu Herdr/agent CLI hoặc môi trường chưa sẵn sàng; đọc từng check.
 
 Nếu Herdr và agent CLI đã được cài, đăng nhập và hỗ trợ wire contract:
