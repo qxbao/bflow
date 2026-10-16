@@ -83,6 +83,7 @@ All commands support `-j, --json` for structured JSON output and `-h, --help` fo
 | [`@bflow/artifact-store`](packages/artifact-store) | Filesystem `ArtifactStore` with SQLite catalog and SHA-256 stream verification |
 | [`@bflow/conversation`](packages/conversation) | Conversation Agent (`chat`) gateway, intent classification, structured `DelegationRequest` builder, and Herdr Coordinator bridge (P14); Runtime composition is scheduled for P19 |
 | [`@bflow/specification`](packages/specification) | Adaptive specification classification, validation, versioning, traceability and approval policy (P15); Runtime composition is scheduled for P19 |
+| [`@bflow/test-strategy`](packages/test-strategy) | Conditional TDD policy, required verification methods, criterion mappings and Red/Green/refactor evidence checks (P16); Runtime enforcement is scheduled for P19 |
 | [`@bflow/quality-gates`](packages/quality-gates) | Preset command evaluators, workspace security policies, and RBAC governance |
 
 ---
@@ -118,6 +119,9 @@ pnpm --filter @bflow/conversation test
 
 # Run Specification Engine tests
 pnpm --filter @bflow/specification test
+
+# Run Conditional TDD Policy Engine tests
+pnpm --filter @bflow/test-strategy test
 ```
 
 ---

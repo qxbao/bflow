@@ -1,5 +1,9 @@
 # P16 implementation handoff — 2026-10-16
 
+Historical implementation handoff. Subsequent review fixes and package registration
+are recorded in [REVIEW.md](REVIEW.md); the integration proposals below describe
+the original pre-integration state.
+
 Conditional TDD Policy Engine is implemented locally on
 `agent/test-strategy/p16-conditional-tdd`, in `/tmp/bflow-p16-test-strategy`.
 The tested implementation commit is

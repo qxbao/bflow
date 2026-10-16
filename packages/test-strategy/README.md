@@ -167,6 +167,7 @@ git diff --check
 git status --short
 ```
 
-Build precedes package tests. Root TypeScript references and the lockfile importer
-need owning/integration registration; they are proposed in [HANDOFF.md](HANDOFF.md).
-Package commands explicitly build/typecheck P16 until that registration is integrated.
+Build precedes package tests. The package is registered in root TypeScript references
+and the workspace lockfile, so root build/typecheck commands include P16. See
+[REVIEW.md](REVIEW.md) for review fixes and integration evidence;
+[HANDOFF.md](HANDOFF.md) preserves the original implementation handoff.
