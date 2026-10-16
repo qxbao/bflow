@@ -37,8 +37,14 @@ interface ParsedFile {
   dangling: number[];
 }
 
-const POSIX_BODY_LINE = /^(case ":\$PATH:" in \*":'.*':"\*\) ;; \*\) PATH='.*':"\$PATH" ;; esac|export PATH)$/;
-const FISH_BODY_LINE = /^contains -- '.*' \$PATH; or set -gx PATH '.*' \$PATH$/;
+const POSIX_DIR_LINE = /^case ":\$\{PATH\}:" in \*:'([^']*)':\*\) ;; \*\) PATH='([^']*)':"\$PATH" ;; esac$/;
+const FISH_DIR_LINE = /^contains -- '([^']*)' \$PATH; or set -gx PATH '([^']*)' \$PATH$/;
+const POSIX_BODY_LINE = (l: string): boolean => POSIX_DIR_LINE.test(l) || l === "export PATH";
+const FISH_BODY_LINE = (l: string): boolean => FISH_DIR_LINE.test(l);
+const dirOf = (re: RegExp, l: string): string | null => {
+  const m = re.exec(l);
+  return m && m[1] === m[2] ? m[1]! : null;
+};
 
 export class PathComponent implements SetupComponent {
   readonly componentId = "path";
@@ -48,7 +54,9 @@ export class PathComponent implements SetupComponent {
   private readonly platform: PlatformProfile;
   private readonly store: SetupStateStore;
   private readonly env: Record<string, string | undefined>;
-  private readonly dirs: string[];
+  private dirs: string[];
+  private readonly managed: string;
+  private readonly fresh: string[];
 
   constructor(options: PathComponentOptions) {
     this.platform = options.platform;
@@ -66,11 +74,40 @@ export class PathComponent implements SetupComponent {
       if (d !== null && d !== managed && !onPath.has(d)) add(d);
     }
     this.dirs = out;
+    this.managed = managed;
+    this.fresh = out.slice(1);
   }
 
   /** Desired directories in block order. */
-  desiredDirs(): string[] {
+  async desiredDirs(): Promise<string[]> {
+    await this.refresh();
     return [...this.dirs];
+  }
+
+  /** managedBin + dirs of the existing well-formed block (kept, in order) + new dirs; deduplicated. */
+  private async refresh(): Promise<void> {
+    const out = [this.managed];
+    const file = this.targetFile();
+    if (file !== null) {
+      const parsed = await this.parse(file);
+      if (!("error" in parsed) && parsed.blocks.length === 1 && parsed.dangling.length === 0) {
+        const re = this.isFish() ? FISH_DIR_LINE : POSIX_DIR_LINE;
+        const b = parsed.blocks[0]!;
+        for (const l of parsed.lines.slice(b.start + 1, b.end)) {
+          const d = dirOf(re, l);
+          if (d !== null && this.dirError(d) === null && !out.includes(d)) out.push(d);
+        }
+      }
+    }
+    for (const d of this.fresh) if (!out.includes(d)) out.push(d);
+    this.dirs = out;
+  }
+
+  private dirError(d: string): string | null {
+    if (!path.posix.isAbsolute(d)) return `PATH directory is not absolute: ${JSON.stringify(d)}`;
+    if (/['\n\r\0:]/.test(d) || (this.isFish() && d.includes("\\")))
+      return `PATH directory contains a forbidden character: ${JSON.stringify(d)}`;
+    return null;
   }
 
   private unsupported(): boolean {
@@ -104,8 +141,8 @@ export class PathComponent implements SetupComponent {
   private validationErrors(): string[] {
     const errs: string[] = [];
     for (const d of this.dirs) {
-      if (!path.posix.isAbsolute(d)) errs.push(`PATH directory is not absolute: ${JSON.stringify(d)}`);
-      else if (/['\n\r\0]/.test(d)) errs.push(`PATH directory contains a forbidden character: ${JSON.stringify(d)}`);
+      const e = this.dirError(d);
+      if (e !== null) errs.push(e);
     }
     return errs;
   }
@@ -114,7 +151,7 @@ export class PathComponent implements SetupComponent {
     if (this.isFish()) {
       return this.dirs.map((d) => `contains -- '${d}' $PATH; or set -gx PATH '${d}' $PATH`);
     }
-    const lines = this.dirs.map((d) => `case ":$PATH:" in *":'${d}':"*) ;; *) PATH='${d}':"$PATH" ;; esac`);
+    const lines = this.dirs.map((d) => `case ":\${PATH}:" in *:'${d}':*) ;; *) PATH='${d}':"$PATH" ;; esac`);
     lines.push("export PATH");
     return lines;
   }
@@ -171,6 +208,7 @@ export class PathComponent implements SetupComponent {
   }
 
   async observe(_ctx: SetupContext): Promise<ComponentObservation> {
+    await this.refresh();
     if (this.unsupported()) {
       return { stateDigest: null, valid: true, diagnostics: ["windows support not verified"] };
     }
@@ -189,6 +227,7 @@ export class PathComponent implements SetupComponent {
   }
 
   async desired(_ctx: SetupContext): Promise<ComponentDesiredState> {
+    await this.refresh();
     if (this.unsupported()) {
       return {
         digest: digest("windows-unsupported"),
@@ -212,6 +251,7 @@ export class PathComponent implements SetupComponent {
 
   async apply(ctx: SetupContext): Promise<{ ownedPaths: string[]; diagnostics: string[] }> {
     if (this.unsupported()) return { ownedPaths: [], diagnostics: ["windows support not verified"] };
+    await this.refresh();
     if (ctx.mode === "check" || ctx.mode === "dry_run") {
       return { ownedPaths: [], diagnostics: [`PATH apply skipped in ${ctx.mode} mode; nothing written`] };
     }
@@ -273,7 +313,7 @@ export class PathComponent implements SetupComponent {
       remove.add(i);
       if (p.lines[i] === PATH_BLOCK_START) {
         // Also drop the orphaned generated body that follows an unterminated start marker.
-        for (let j = i + 1; j < p.lines.length && bodyRe.test(p.lines[j]!); j++) remove.add(j);
+        for (let j = i + 1; j < p.lines.length && bodyRe(p.lines[j]!); j++) remove.add(j);
       }
     }
     const first = Math.min(...remove);

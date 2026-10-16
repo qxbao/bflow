@@ -1,4 +1,5 @@
 import { chmod, mkdtemp, mkdir, readdir, realpath, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { execFileSync, spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -59,7 +60,7 @@ describe("PathComponent", () => {
     const text = await readFile(file, "utf8");
     const d = path.join(home, ".local/bin");
     expect(text).toBe(
-      `${PATH_BLOCK_START}\ncase ":$PATH:" in *":'${d}':"*) ;; *) PATH='${d}':"$PATH" ;; esac\nexport PATH\n${PATH_BLOCK_END}\n`
+      `${PATH_BLOCK_START}\ncase ":\${PATH}:" in *:'${d}':*) ;; *) PATH='${d}':"$PATH" ;; esac\nexport PATH\n${PATH_BLOCK_END}\n`
     );
   });
 
@@ -71,10 +72,10 @@ describe("PathComponent", () => {
     expect(comp({ XDG_CONFIG_HOME: "/x" }, [], profile({ shell: "fish" })).targetFile()).toBe("/x/fish/conf.d/bflow.fish");
   });
 
-  it("dedupes dirs, drops those already on PATH, keeps managedBin", () => {
+  it("dedupes dirs, drops those already on PATH, keeps managedBin", async () => {
     const p = profile({ pathEntries: ["/opt/a", path.join(home, ".local/bin")] });
     const c = comp({}, ["/opt/a", "/opt/b", "/opt/b", null], p);
-    expect(c.desiredDirs()).toEqual([path.join(home, ".local/bin"), "/opt/b"]);
+    expect(await c.desiredDirs()).toEqual([path.join(home, ".local/bin"), "/opt/b"]);
   });
 
   it("preserves user content byte for byte and appends with one leading newline", async () => {
@@ -147,7 +148,7 @@ describe("PathComponent", () => {
     const d = path.join(home, ".local/bin");
     await writeFile(
       file,
-      `a\n${PATH_BLOCK_START}\ncase ":$PATH:" in *":'${d}':"*) ;; *) PATH='${d}':"$PATH" ;; esac\nexport PATH\nuser line\n`
+      `a\n${PATH_BLOCK_START}\ncase ":\${PATH}:" in *:'${d}':*) ;; *) PATH='${d}':"$PATH" ;; esac\nexport PATH\nuser line\n`
     );
     const c = comp();
     expect((await c.observe(ctx())).valid).toBe(false);
@@ -185,7 +186,7 @@ describe("PathComponent", () => {
   });
 
   it("rejects dirs with quote, newline, NUL or relative", async () => {
-    for (const bad of ["/opt/it's", "/opt/a\nb", "/opt/a\0b", "rel/dir"]) {
+    for (const bad of ["/opt/it's", "/opt/a\nb", "/opt/a\0b", "rel/dir", "/opt/a:b"]) {
       const c = comp({}, [bad]);
       const res = await c.apply(ctx());
       expect(res.ownedPaths).toEqual([]);
@@ -193,6 +194,55 @@ describe("PathComponent", () => {
       expect((await c.observe(ctx())).valid).toBe(false);
     }
     await expect(stat(path.join(home, ".bashrc"))).rejects.toThrow();
+  });
+
+  it("fish rejects backslash; posix allows it", async () => {
+    const f = comp({}, ["/opt/a\\b"], profile({ shell: "fish" }));
+    expect((await f.apply(ctx())).ownedPaths).toEqual([]);
+    expect((await comp({}, ["/opt/a\\b"]).observe(ctx())).valid).toBe(true);
+  });
+
+  it("keeps block dirs stable once they appear on PATH (no flapping)", async () => {
+    await comp({}, ["/opt/new"]).apply(ctx());
+    const file = path.join(home, ".bashrc");
+    const before = await stat(file);
+    const bytes = await readFile(file);
+    const p2 = profile({ pathEntries: ["/usr/bin", "/opt/new"] });
+    const c2 = comp({}, [null], p2);
+    expect(await c2.desiredDirs()).toEqual([path.join(home, ".local/bin"), "/opt/new"]);
+    const obs = await c2.observe(ctx());
+    expect(obs.stateDigest).toBe((await c2.desired(ctx())).digest);
+    await new Promise((r) => setTimeout(r, 20));
+    await c2.apply(ctx());
+    expect((await stat(file)).mtimeMs).toBe(before.mtimeMs);
+    expect(await readFile(file)).toEqual(bytes);
+  });
+
+  describe("generated block executes", () => {
+    const run = (sh: string, script: string, pathEnv: string): string =>
+      execFileSync(sh, ["-c", script], { env: { PATH: pathEnv }, encoding: "utf8" });
+    const hasFish = spawnSync("fish", ["--version"]).status === 0;
+
+    it("sh: dir appears once after sourcing twice; unchanged if already present", async () => {
+      const dir = path.join(home, "my bin");
+      const c = comp({}, [], profile({ paths: { ...platform.paths, managedBin: dir } }));
+      await c.apply(ctx());
+      const rc = path.join(home, ".bashrc");
+      const base = "/usr/bin:/bin";
+      const out = run("/bin/sh", `. '${rc}'; . '${rc}'; echo "$PATH"`, base).trim();
+      expect(out).toBe(`${dir}:${base}`);
+      const present = `/x:${dir}:/y`;
+      expect(run("/bin/sh", `. '${rc}'; echo "$PATH"`, present).trim()).toBe(present);
+    });
+
+    it.skipIf(!hasFish)("fish: dir appears once", async () => {
+      const dir = path.join(home, "fbin");
+      const p = profile({ shell: "fish", paths: { ...platform.paths, managedBin: dir } });
+      await comp({ XDG_CONFIG_HOME: path.join(root, "x") }, [], p).apply(ctx());
+      const f = path.join(root, "x/fish/conf.d/bflow.fish");
+      const out = run("fish", `source '${f}'; source '${f}'; string join : $PATH`, "/usr/bin:/bin").trim();
+      expect(out.split(":").filter((e) => e === dir)).toHaveLength(1);
+    });
   });
 
   it("check and dry_run never write", async () => {
