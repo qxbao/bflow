@@ -1,5 +1,11 @@
 # bflow
 
+[![CI](https://github.com/qxbao/bflow/actions/workflows/ci.yml/badge.svg)](https://github.com/qxbao/bflow/actions/workflows/ci.yml)
+[![CD — Build & Release](https://github.com/qxbao/bflow/actions/workflows/cd.yml/badge.svg)](https://github.com/qxbao/bflow/actions/workflows/cd.yml)
+[![Node.js >= 22.13](https://img.shields.io/badge/node-%3E%3D22.13-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![pnpm 12.5.1](https://img.shields.io/badge/pnpm-12.5.1-F69220?logo=pnpm&logoColor=white)](https://pnpm.io/)
+[![TypeScript 5.7](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+
 **bflow** is a modular TypeScript platform and CLI for orchestrating AI coding agents across software delivery (SDLC) workflows. It coordinates multi-step engineering tasks (`plan` → `implement` → `qa` → `review`) with deterministic state transitions, durable SQLite execution records, content-addressed artifacts, automated quality gates, and human approval checkpoints.
 
 ---
