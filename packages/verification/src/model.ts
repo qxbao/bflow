@@ -84,7 +84,7 @@ export function digest(value: unknown): string {
   return createHash("sha256").update(canonical(value)).digest("hex");
 }
 export function safePath(path: string): boolean {
-  return !path.startsWith("/") && !path.includes("\\") && !path.includes(":") &&
+  return !path.startsWith("/") && !path.includes("\\") && !path.includes(":") && !/[*?]/.test(path) &&
     path.split("/").every(part => part.length > 0 && part !== "." && part !== "..");
 }
 export function covers(prefix: string, path: string): boolean {

@@ -30,6 +30,26 @@ describe("coverage policy and proposal evidence", () => {
       expect(outcome.result.status).toBe(expected);
     });
 
+  it("reruns a below-threshold measurement even if its runner reported passed and paths appear unaffected", async () => {
+    const f = await coverageFixture();
+    const checks = f.plan.checks.map(check => check.id === "test-check" ? { ...check,
+      configuration: { ...CheckConfigurationSchema.parse(check.configuration), dependsOnPaths: ["packages/example/coverage"] }
+    } : check);
+    const plan = createVerificationPlan({ ...f.input, specification: f.plan.specification, strategy: f.plan.strategy, checks });
+    f.runners[0]!.rewriteObservation = observation => ({ ...observation, coveragePercent: 65 });
+    const engine = new VerificationEngine(f.ports);
+    const original = await f.change();
+    const first = await engine.verify(plan, engine.start(plan, "coverage-cycle"), original);
+    expect(first.result.status).toBe("failed");
+    f.runners[0]!.rewriteObservation = observation => ({ ...observation, coveragePercent: 90 });
+    const change = { ...await f.change(2), baseCommitHash: original.headCommitHash };
+    const second = await engine.verify(plan, first.cycle, change, { repair: {
+      taskId: "task-1", role: "developer", changeSetId: change.changeSetId, summary: "Corrected missing aggregate coverage evidence"
+    } });
+    expect(second.result.status).toBe("passed");
+    expect(f.runners[0]!.calls).toHaveLength(2);
+  });
+
   it("rejects a strategy coverage threshold with no measuring capability", async () => {
     const f = await fixture();
     const strategy = { ...f.input.strategy, coverageThresholdPercent: 80 };

@@ -25,9 +25,13 @@ export interface VerificationPorts {
 const RepairSchema = z.object({
   taskId: z.string().min(1), role: z.literal("developer"), changeSetId: z.string().min(1), summary: z.string().trim().min(1)
 }).strict();
+const IntegrationSchema = z.object({ headCommitHash: z.string().regex(/^[a-f0-9]{7,40}$/i),
+  integratedTaskIds: z.array(z.string().trim().min(1)).min(1) }).strict().superRefine((value, context) => {
+    if (new Set(value.integratedTaskIds).size !== value.integratedTaskIds.length)
+      context.addIssue({ code: "custom", message: "Integrated task IDs must be unique" });
+  });
 const OptionsSchema = z.object({
-  integration: z.object({ headCommitHash: z.string().regex(/^[a-f0-9]{7,40}$/i),
-    integratedTaskIds: z.array(z.string().min(1)).min(1) }).strict().optional(),
+  integration: IntegrationSchema.optional(),
   repair: RepairSchema.optional()
 }).strict();
 const ReceiptSchema = z.object({
@@ -151,7 +155,14 @@ export class VerificationEngine {
       throw new Error("Aggregate coverage measurement is missing");
     return obs;
   }
-  private async evaluate(plan: VerificationPlan, change: GitChangeSet, definition: VerificationPlan["checks"][number]): Promise<QualityGateResult> {
+  private checkPassed(plan: VerificationPlan, config: CheckConfiguration, receipt: CheckReceipt): boolean {
+    return receipt.gate.status === "passed" && receipt.observation.criteria.every(c => c.passed) &&
+      (receipt.observation.exitCode === undefined ? config.kind === "review" : receipt.observation.exitCode === 0) &&
+      !receipt.gate.findings.some(f => f.severity === "error") &&
+      (!config.measuresCoverage || plan.strategy.coverageThresholdPercent === undefined ||
+        (receipt.observation.coveragePercent ?? -1) >= plan.strategy.coverageThresholdPercent);
+  }
+  private async evaluate(plan: VerificationPlan, change: GitChangeSet, definition: VerificationPlan["checks"][number], integration?: z.infer<typeof IntegrationSchema>): Promise<QualityGateResult> {
     const gate = this.gates.get(definition.id);
     if (!gate) throw new VerificationUnavailable(`Missing runner for ${definition.id}`);
     const context = QualityGateContextSchema.parse({
@@ -161,8 +172,9 @@ export class VerificationEngine {
         sourceRevision: change.headCommitHash, baseRevision: change.baseCommitHash,
         sourceWorktreePath: change.worktreePath, branchName: change.branchName,
         scope: plan.scope, changeSetId: change.changeSetId,
-        implementerIds: plan.implementerIds }
+        implementerIds: plan.implementerIds, ...(integration ? { integration } : {}) }
     });
+    const dispatchedAt = this.now();
     const controller = new AbortController();
     // Timer overflow must never turn a long configured timeout into 1 ms.
     const remaining = definition.timeout.deadline ? Date.parse(definition.timeout.deadline) - Date.parse(this.now()) : Infinity;
@@ -178,6 +190,8 @@ export class VerificationEngine {
       const response = OperationResultSchema(QualityGateResultSchema).parse(await Promise.race([operation, timeout]));
       if (!response.ok) throw new VerificationUnavailable(response.error.message);
       const result = response.value;
+      if (Date.parse(result.evaluatedAt) < Date.parse(dispatchedAt) || Date.parse(result.evaluatedAt) > Date.parse(this.now()))
+        throw new Error("Gate evidence was evaluated outside the current execution window");
       if (result.gateId !== definition.id || result.runId !== plan.runId || result.taskId !== plan.taskId)
         throw new Error("Gate result correlation mismatch");
       return result;
@@ -214,8 +228,9 @@ export class VerificationEngine {
           previous.status !== "failed" || cycle.status !== "rework_required") throw new Error("Invalid cycle history");
       if (!options.repair || options.repair.taskId !== plan.taskId || options.repair.changeSetId !== change.changeSetId)
         throw new Error("Rework needs a correlated repair record");
-      if (change.attemptId === previous.attemptId || change.changeSetId === previous.changeSet?.changeSetId ||
-          change.headCommitHash === previous.changeSet?.headCommitHash) throw new Error("Rework needs a new attempt and Git change");
+      if (cycle.history.some(result => change.attemptId === result.attemptId ||
+          change.changeSetId === result.changeSet?.changeSetId || change.headCommitHash === result.changeSet?.headCommitHash))
+        throw new Error("Rework needs a new attempt and Git change not used anywhere in this cycle");
       iteration = cycle.currentIteration + 1;
     } else if (cycle.currentIteration !== 1 || cycle.status !== "in_progress") throw new Error("Invalid initial cycle");
     if (iteration > cycle.maxIterations) throw new Error("Verification iteration limit reached");
@@ -244,8 +259,9 @@ export class VerificationEngine {
       if (paths.some(path => !safePath(path) || !plan.specification.affectedPaths.some(prefix => covers(prefix, path)))) {
         conflict = true; findings.push(this.finding(plan, "out_of_scope", "Change outside accepted scope; create a new task and obtain approval", "coordinator"));
       }
-      if (plan.scope === "workflow" && (!options.integration || options.integration.headCommitHash !== change.headCommitHash)) {
-        blocked = true; findings.push(this.finding(plan, "integration_required", "Workflow verification requires the integrated Git revision and task list", "coordinator"));
+      if (plan.scope === "workflow" && (!options.integration || options.integration.headCommitHash !== change.headCommitHash ||
+          plan.specification.traceabilityTaskIds?.some(id => !options.integration!.integratedTaskIds.includes(id)))) {
+        blocked = true; findings.push(this.finding(plan, "integration_required", "Workflow verification requires the integrated Git revision and every specification-traced task", "coordinator"));
       }
     } catch (error) {
       blocked = true; findings.push(this.finding(plan, "evidence_unavailable", String(error), "qa"));
@@ -260,8 +276,7 @@ export class VerificationEngine {
             const changed = change.filesChanged.flatMap(f => f.previousPath ? [f.path, f.previousPath] : [f.path]);
             if (!changed.some(path => config.dependsOnPaths!.some(prefix => covers(prefix, path)))) {
               const prior = z.array(ReceiptSchema).parse(previous.metadata?.checks).find(r => r.gate.gateId === definition.id);
-              if (prior?.gate.status === "passed" && prior.observation.criteria.every(c => c.passed) &&
-                  (config.kind === "review" || prior.observation.exitCode === 0) && !prior.gate.findings.some(f => f.severity === "error")) {
+              if (prior && this.checkPassed(plan, config, prior)) {
                 for (const artifact of prior.outputArtifacts) await this.read(artifact);
                 const verified = JSON.parse((await this.read(prior.evidence)).toString("utf8")) as unknown;
                 const stored = z.object({ gate: QualityGateResultSchema, observation: ObservationSchema }).strict().parse(verified);
@@ -271,7 +286,7 @@ export class VerificationEngine {
             }
           }
           if (!receipt) {
-            const gate = await this.evaluate(plan, change, definition);
+            const gate = await this.evaluate(plan, change, definition, options.integration);
             // Store raw gate output before validating its observation, including malformed evidence.
             await this.store(plan, `${key}:${definition.id}:raw`, gate, "log");
             const observation = this.validateObservation(plan, change, config, gate);
@@ -293,7 +308,17 @@ export class VerificationEngine {
             findings.push(this.finding(plan, "environment_blocked", `${definition.id}: ${receipt.gate.error?.message ?? "Independent check blocked"}`, "coordinator"));
           }
           if (receipt.gate.status === "failed" || receipt.observation.exitCode !== undefined && receipt.observation.exitCode !== 0 ||
-              receipt.observation.criteria.some(c => !c.passed) || receipt.gate.findings.some(f => f.severity === "error")) failed = true;
+              receipt.observation.criteria.some(c => !c.passed) || receipt.gate.findings.some(f => f.severity === "error")) {
+            failed = true;
+            const failedCriteria = receipt.observation.criteria.filter(c => !c.passed);
+            const targets = failedCriteria.length ? failedCriteria : [{ criterionId: undefined, summary: receipt.observation.summary }];
+            for (const target of targets) findings.push({
+              ...this.finding(plan, "check_failed", `${definition.id}: ${target.summary}`),
+              artifactId: receipt.evidence.artifactId,
+              details: { taskId: plan.taskId, responsibleRole: "developer", checkId: definition.id,
+                ...(target.criterionId ? { criterionId: target.criterionId } : {}), requiresNewTaskIfOutsideScope: true }
+            });
+          }
         } catch (error) {
           if (error instanceof VerificationUnavailable) blocked = true; else inconclusive = true;
           findings.push(this.finding(plan, error instanceof VerificationUnavailable ? "runner_unavailable" : "invalid_or_missing_evidence", `${definition.id}: ${String(error)}`, config.kind === "review" ? config.role : "qa"));
@@ -311,14 +336,18 @@ export class VerificationEngine {
       const relevant = receipts.filter(r => r.observation.criteria.some(c => c.criterionId === criterion.id));
       const primary = relevant.find(r => r.observation.method === criterion.verificationMethod);
       const observation = primary?.observation.criteria.find(c => c.criterionId === criterion.id);
-      const passed = Boolean(primary && relevant.every(r => r.gate.status === "passed" &&
-        (r.observation.exitCode === undefined || r.observation.exitCode === 0) &&
-        r.observation.criteria.filter(c => c.criterionId === criterion.id).every(c => c.passed)));
-      return { criterionId: criterion.id, passed: status === "passed" || (!conflict && !blocked && passed),
+      const expectedChecks = plan.checks.filter(check => CheckConfigurationSchema.parse(check.configuration).criterionIds.includes(criterion.id));
+      const missing = expectedChecks.filter(check => !relevant.some(r => r.gate.gateId === check.id));
+      const passed = Boolean(primary && missing.length === 0 && relevant.every(receipt => {
+        const definition = expectedChecks.find(check => check.id === receipt.gate.gateId)!;
+        return this.checkPassed(plan, CheckConfigurationSchema.parse(definition.configuration), receipt);
+      }));
+      return { criterionId: criterion.id, passed: !conflict && !blocked && passed,
         ...(primary?.observation.command !== undefined ? { command: primary.observation.command } : {}),
         ...(primary?.observation.exitCode !== undefined ? { exitCode: primary.observation.exitCode } : {}),
         evidenceArtifactId: primary?.evidence.artifactId ?? audit.artifactId,
-        summary: observation?.summary ?? "No valid independent evidence; see verification audit" };
+        summary: missing.length ? `Missing valid evidence from ${missing.map(check => check.id).join(", ")}; see verification audit` :
+          observation?.summary ?? "No valid independent evidence; see verification audit" };
     });
     const evidenceArtifacts = [intent, audit, change.patchArtifact, ...receipts.flatMap(r => [r.evidence, ...r.outputArtifacts])]
       .filter((ref, index, all) => all.findIndex(r => r.artifactId === ref.artifactId) === index);
