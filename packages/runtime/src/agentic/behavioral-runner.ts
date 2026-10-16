@@ -68,11 +68,11 @@ export function parseNodeTap(outcome: QualityCommandOutcome, expectedNames: read
   if (failures.length !== failed || results.filter(result => result[1] === "ok").length !== passed || (failed === 0 ? outcome.exitCode !== 0 : outcome.exitCode !== 1)) throw new Error("TAP result contradicts process exit code");
   const targetFailure = failed > 0 && failures.every(result => /^\s+failureType: 'testCodeFailure'$/m.test(result[4]!) && /^\s+code: 'ERR_ASSERTION'$/m.test(result[4]!));
   if (failed && !targetFailure) throw new Error("Behavioral failure is infrastructure or unrelated, not an assertion regression");
-  return { testNames: names, tests, passed, failed, targetFailure };
+  return { testNames: names, testResults: results.map(result => ({ name: result[3]!, passed: result[1] === "ok" })), tests, passed, failed, targetFailure };
 }
 export interface BehavioralMeasurement {
   sourceRevision: string; command: string; commandId: string; method: BehavioralCommand["method"];
-  testBlobs: Record<string, string>; testNames: string[]; tests: number; passed: number; failed: number; targetFailure: boolean;
+  testBlobs: Record<string, string>; testNames: string[]; testResults: { name: string; passed: boolean }[]; tests: number; passed: number; failed: number; targetFailure: boolean;
   outcome: QualityCommandOutcome;
 }
 /** Runs only committed bytes in a new detached worktree; it has no host credentials or inherited Node/Git overrides. */

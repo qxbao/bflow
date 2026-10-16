@@ -37,7 +37,7 @@ async function fixture(taskType = "bugfix") {
   const runtime = { inspect: async (runId?: string) => runId ? { baseRevision: base, tasks: [{ taskId: "task-1", spec: { specification, strategy } }] } : { outbound: [{ taskId: "task-1", message: assignment, handle: { target: { agentId: "developer", paneId: "developer-pane", worktreePath: cwd } } }] }, ports: { policies: { recordEvidence } } } as unknown as AgenticWorkflowRuntime;
   const receiptsPath = join(root, "host-receipts");
   const host = new HostVerification(() => runtime, () => opened.value, new HostReceiptJournal(receiptsPath, cwd, "session-1"), [command]);
-  return { cwd, git, commit, command, specification, redRevision, base, binding, host, restart() { return new HostVerification(() => runtime, () => opened.value, new HostReceiptJournal(receiptsPath, cwd, "session-1"), [command]); }, get strategy() { return strategy; }, accept(result: unknown) { strategy = recordEvidence(strategy, result); } };
+  return { cwd, git, commit, command, specification, redRevision, base, binding, host, restart(commands = [command]) { return new HostVerification(() => runtime, () => opened.value, new HostReceiptJournal(receiptsPath, cwd, "session-1"), commands); }, get strategy() { return strategy; }, accept(result: unknown) { strategy = recordEvidence(strategy, result); } };
 }
 describe("independent behavioral command measurements", () => {
   it("observes Red before authorization, then Green/Refactor with immutable tests and trusted artifacts", async () => {
@@ -91,6 +91,14 @@ describe("independent behavioral command measurements", () => {
   ])("blocks %s instead of minting Red", async (_label, source) => {
     const f = await fixture(); await writeFile(join(f.cwd, "test/behavior.test.cjs"), source); f.commit("broken infrastructure");
     await expect(f.host.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "red" })).rejects.toThrow();
+    expect(() => assertReadyToImplement(f.strategy)).toThrow(/Red/);
+  });
+  it("rejects an unrelated assertion failure when the mapped target test passes", async () => {
+    const f = await fixture();
+    await writeFile(join(f.cwd, "source.cjs"), "module.exports=x=>x*2;\n");
+    await writeFile(join(f.cwd, "test/behavior.test.cjs"), testSource + "test('unrelated health check',()=>assert.equal(false,true));\n"); f.commit("unrelated regression");
+    const host = f.restart([{ ...f.command, testNames: [testName, "unrelated health check"] }]);
+    await expect(host.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "red" })).rejects.toThrow("unrelated test");
     expect(() => assertReadyToImplement(f.strategy)).toThrow(/Red/);
   });
   it("blocks spawn/deadline/output failures, dirty sources and zero-exit commands without tests", async () => {

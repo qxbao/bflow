@@ -172,6 +172,10 @@ export class HostVerification {
       if (redDetails?.sourceRevision === revision) throw new Error("Green/Refactor require the implementation revision after Red");
     }
     if (phase === "red" ? !measured.some(item => item.targetFailure) : measured.some(item => item.failed)) throw new Error(phase === "red" ? "Red requires an independently observed assertion failure" : "Behavioral acceptance failed; request repairs");
+    if (phase === "red") {
+      const targetNames = new Set(strategy.criterionMappings.filter(mapping => criteria.some(criterion => criterion.id === mapping.criterionId)).flatMap(mapping => mapping.testNames));
+      if (measured.some(item => item.testResults.some(test => !test.passed && !targetNames.has(test.name)))) throw new Error("Red failure belongs to an unrelated test rather than an accepted target criterion");
+    }
     const artifact = await this.artifact(runId, taskId, { phase, observation, measurements: measured, verifiedBy: binding.agentId });
     const observations = measured.flatMap(item => criteria.filter(criterion => criterion.verificationMethod === item.method &&
       strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id)?.testNames.every(name => item.testNames.includes(name)))
