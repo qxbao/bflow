@@ -57,3 +57,46 @@ versions, Core rework limits, leases, cancellation/recovery and message delivery
 The engine cannot authenticate processes or distinguish replay of an older authentic
 cycle snapshot from the latest cycle by itself. No contract amendment is requested.
 P02-RA01 and P03-RA01 remain outside this package's ownership and are unchanged.
+
+## Reviewed integration closure
+
+Tested integration commit: `8e7778a4b134d9b85edf5a5989d1da33b36a54cf`.
+Reviewed source fixes: `46a6eac` and `26b1950`.
+Shared build/lockfile/documentation registration: `13e9013`.
+Integration worktree: `/tmp/bflow-p17-integration` on `integration/p17-closure`.
+Local main predecessor: `d8c6d18120c7a01a4bf8aad13f14660d20e0cdf6`.
+Authorization: user's explicit request to review, fix and merge main.
+
+| Command | Exit | Result |
+| --- | --- | --- |
+| `pnpm install --frozen-lockfile --ignore-scripts --offline` | 0 | Clean integration worktree installation; pinned dependency versions retained |
+| `pnpm check:deps` | 0 | 14 workspace packages, 20 edges; acyclic |
+| `pnpm typecheck` | 0 | Root references now include P17 |
+| `pnpm --filter @bflow/verification test` | 0 | 4 files, 66 passed, 0 failed, 0 skipped |
+| `pnpm exec tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --strict --exactOptionalPropertyTypes --noUncheckedIndexedAccess --skipLibCheck packages/verification/test/*.ts` | 0 | Strict test/helper typecheck |
+| `pnpm lint` | 0 | Dependency checks, root typecheck and E2E suite type compatibility |
+| `TMPDIR=/tmp pnpm test` | 0 | 46 files, 1020 passed, 0 failed, 0 skipped |
+| `git diff --check` | 0 | Clean |
+| `git status --short` | 0 | Clean tested integration tree |
+
+The review first reproduced eight adversarial failures, then closed them with
+regression tests. A further failing compatibility test reproduced rejection of
+P16's appended TDD receipt metadata. Final tests also cover global submission
+identity uniqueness, missing supplemental criterion checks, timestamp freshness,
+failed review/coverage reuse, literal path declarations, task-complete integration
+provenance, per-check repair routing and immutable approved TDD receipt prefixes.
+See [REVIEW.md](REVIEW.md) for the findings and remediation.
+
+The integration diff adds only the P17 package/Verifier prompt plus authorized
+root `README.md`, `tsconfig.json` and the new workspace importer in
+`pnpm-lock.yaml`. No existing dependency version, public contract, migration,
+Runtime/Core implementation or generated build output changes. Original source
+implementation and subsequent fixes remain in the merge ancestry. The earlier
+standalone lockfile/build limitation above is resolved by this integration.
+
+All review findings identified in this pass are fixed. This closes local P17
+source/build integration; it does not implement P19 or verify live Herdr/Git
+execution. Runtime latest-cycle/version/lease/recovery enforcement and trusted host
+capabilities remain explicit integration boundaries. No push, remote merge or PR
+is part of this closure. The evidence commit changes documentation only after the
+tested integration commit.
