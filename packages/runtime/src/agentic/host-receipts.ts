@@ -3,7 +3,7 @@ import { link, lstat, mkdir, open, readdir, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import {
-  ApprovalDecisionSchema, JsonValueSchema, PaneBindingSchema, QualityGateContextSchema,
+  AgentBindingReceiptSchema, ApprovalDecisionSchema, JsonValueSchema, PaneBindingSchema, QualityGateContextSchema,
   QualityGateResultSchema, RoleMessageSchema, VerificationResultSchema,
   type ApprovalDecision, type JsonValue, type PaneBinding, type QualityGateResult, type RoleMessage, type VerificationResult
 } from "@bflow/contracts";
@@ -136,7 +136,12 @@ export class HostReceiptJournal {
   async nativeDelivery(operationId: string): Promise<{ message: RoleMessage; status: "unknown_delivery" | "acknowledged" } | undefined> {
     const value = await this.read("native-intent", operationId); if (value === undefined) return undefined;
     const message = RoleMessageSchema.parse(value), acknowledgement = await this.read("native-ack", message.message_id);
-    if (acknowledgement !== undefined && digest(acknowledgement) !== digest(message)) throw new Error("Native acknowledgement conflicts with delivery intent");
+    // The native plugin replaces only the placeholder binding-receipt signature after
+    // checking the physical occupant. The signed ingress envelope is otherwise exact.
+    const comparable = (value: RoleMessage) => value.type === "execution.receipt"
+      ? { ...value, payload: { ...AgentBindingReceiptSchema.parse(value.payload), signature: undefined } } : value;
+    if (acknowledgement !== undefined && digest(comparable(RoleMessageSchema.parse(acknowledgement))) !== digest(comparable(message)))
+      throw new Error("Native acknowledgement conflicts with delivery intent");
     return { message, status: acknowledgement === undefined ? "unknown_delivery" : "acknowledged" };
   }
   async authenticateEvidence(input: VerificationResult): Promise<boolean> { const result = VerificationResultSchema.parse(input); return digest(await this.read("evidence", result.verificationId)) === digest(result); }

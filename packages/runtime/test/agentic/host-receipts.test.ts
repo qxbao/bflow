@@ -8,6 +8,7 @@ import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 import { HostReceiptJournal, type HumanHookProvenance } from "../../src/agentic/host-receipts.js";
 import { digest, json } from "../../src/agentic/journal.js";
 import { startHerdrReceiptIngress, authenticateNativeHerdrMessage } from "../../src/agentic/herdr-ingress.js";
+import { createSignedBindingReceipt } from "../../src/agentic/receipt-host.js";
 
 const cleanup: string[] = [];
 afterEach(async () => { for (const path of cleanup.splice(0)) await rm(path, { recursive: true, force: true }); });
@@ -106,9 +107,9 @@ describe("private durable host authentication receipts", () => {
         if (!await authenticateNativeHerdrMessage(received)) throw new Error("Untrusted ingress");
         await f.reopen().recordNativeAcknowledgement(received); accepted += 1;
       } });
-    const send = (signature: string) => new Promise<any>((accept, reject) => {
+    const send = (signature: string, envelope = message) => new Promise<any>((accept, reject) => {
       const socket = connect(socketPath); let response = "";
-      socket.once("error", reject); socket.once("connect", () => socket.write(JSON.stringify({ issuerId: "host", signature, message }) + "\n"));
+      socket.once("error", reject); socket.once("connect", () => socket.write(JSON.stringify({ issuerId: "host", signature, message: envelope }) + "\n"));
       socket.on("data", chunk => response += String(chunk)); socket.once("end", () => { try { accept(JSON.parse(response)); } catch (error) { reject(error); } });
     });
     try {
@@ -120,6 +121,16 @@ describe("private durable host authentication receipts", () => {
       expect(accepted).toBe(1);
       expect(await f.reopen().nativeDelivery("review:operation")).toEqual({ message, status: "acknowledged" });
       await expect(f.journal.recordNativeIntent("review:operation", { ...message, payload: { status: "failed" } })).rejects.toThrow("immutable");
+      const bindingReceipt = createSignedBindingReceipt({ receiptId: "binding-receipt", issuerId: "host", observedAt: f.at,
+        privateKey: pair.privateKey.export({ type: "pkcs8", format: "pem" }).toString(), correlation: { token: "assignment", provenance: "transport", verified: true },
+        handle: { executionId: "execution", requestId: "request", attemptId: "attempt", runId: "run", taskId: "task", idempotencyKey: "assignment",
+          target: { transport: "herdr", agentId: "developer", paneId: "developer-pane" }, correlation: { token: "assignment", provenance: "transport", verified: true }, acceptedAt: f.at } });
+      const bindingMessage = RoleMessageSchema.parse({ ...message, type: "execution.receipt", message_id: "binding-envelope", causation_id: "assignment",
+        payload: { ...bindingReceipt, signature: { algorithm: "ed25519", value: Buffer.alloc(64).toString("base64") } } });
+      await f.journal.recordNativeIntent("binding:operation", bindingMessage);
+      const attested = RoleMessageSchema.parse({ ...bindingMessage, payload: bindingReceipt });
+      expect((await send(sign(null, Buffer.from(canonicalReceiptJson(attested)), pair.privateKey).toString("base64"), attested)).ok).toBe(true);
+      expect((await f.reopen().nativeDelivery("binding:operation"))?.status).toBe("acknowledged");
     } finally { await ingress.close(); }
   });
 });
