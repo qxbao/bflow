@@ -67,9 +67,10 @@ file; explicit `--force`/`--yes` overwrites it. Track portable templates rather 
 
 `up` now starts a persistent P19 host, registers scoped Claude MCP tools and
 launch-local native session/user-input hooks, then requires host activation before
-reporting readiness. The default host currently supports Claude with documentation
-and independent manual-review evidence; behavioral feature/bugfix runners require
-separate host configuration. Codex launch helpers remain available, but the default
+reporting readiness. The default host supports Claude documentation/manual review
+and owner-configured Node TAP or Vitest 2.1 behavioral verification, including
+independent Red–Green–Refactor. Configure [.bflow/verification.json](docs/verification-runners.md)
+before startup; automated checks require the Linux Bubblewrap sandbox. Codex launch helpers remain available, but the default
 host refuses unverified provider hooks. Use `init --provider claude` for this path.
 SDD/conditional-TDD/verification/concurrency policies are forwarded to the host.
 `down` drains the host, persists authoritative checkpoints and closes only the

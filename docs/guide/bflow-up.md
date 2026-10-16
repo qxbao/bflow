@@ -27,7 +27,9 @@ system prompts cho role, rồi đòi activation acknowledgement trước khi ghi
 Default host hiện yêu cầu Claude; dùng `bflow init --provider claude`. Native
 session và provider login được kiểm tra riêng với transport idle.
 
-Phạm vi default verification hiện là documentation/manual-review criteria với
-Reviewer và QA độc lập; feature/bugfix behavioral runners cần host được cấu hình.
+Default verification hỗ trợ documentation/manual review và Node TAP/Vitest 2.1
+được owner cấu hình trước startup; behavioral runner dùng sandbox Linux Bubblewrap.
+Xem [cấu hình verification](../verification-runners.md) cho schema, dependencies
+và các giới hạn hiện tại.
 Up thành công không chứng minh một workflow đã hoàn tất. Smoke thực đã kiểm tra
 lifecycle up/down/restart; xem [release-readiness](../release-readiness.md).

@@ -1,50 +1,40 @@
 # Known limitations sau P22
 
-Phân loại hiện tại là **Not ready cho Agentic SDLC MVP v2**. Bảng dưới
-đây phân biệt giới hạn còn mở và lỗi đã sửa bằng follow-up; xem
-[release-readiness](release-readiness.md) để biết baseline và bằng chứng.
+Phân loại toàn sản phẩm: **Not ready cho Agentic SDLC MVP v2**, do chưa có full
+multi-model SDLC acceptance thực. [Release readiness](release-readiness.md) phân
+biệt source đã sửa, kiểm thử local, provider smoke và điều kiện phát hành.
 
-| ID / ưu tiên | Giới hạn | Ảnh hưởng, owner và điều kiện đóng |
+| ID / ưu tiên | Trạng thái và giới hạn | Owner / điều kiện đóng |
 | --- | --- | --- |
-| RR-01 / bootstrap FIXED; functional scope P1 | Default CLI đã boot persistent host, role MCP/hooks, scheduler và authenticated native ingress cho Claude | Live idle lifecycle đạt. Default host chỉ nhận documentation/manual-review specs; feature/bugfix behavioral runners vẫn cần triển khai/cấu hình, không có fallback success |
-| RR-02 / idle lifecycle FIXED (QA-01) | Default down đã compose quiesce/checkpoint/P13 shutdown và host shutdown | Live up/down/up/down exit 0. Chưa live crash/drain workflow AI đang hoạt động hoặc pending human approval; local Core/host tests không thay bằng chứng đó |
-| RR-12 / policy decision | Chủ dự án cho phép tự accept spec rủi ro thấp trong phản hồi sau audit ngày 2026-10-16 | Không còn là blocker theo tiêu chí đã điều chỉnh. Human-required complex/project/task/delivery approvals vẫn phải xác thực human và giữ revision/generation/evidence binding; không mở rộng quyền autoaccept sang delivery |
-| RR-13 / isolation scope | Claude Conversation/Coordinator native tools bị tắt, specialist read tools và role MCP được giới hạn; Developer vẫn có tools cần để sửa/commit | Đây là provider tool policy, không phải OS sandbox chống hostile process cùng UID. Không chứng nhận network/credential separation hoặc arbitrary native shell |
-| RR-14 / FIXED auth diagnostic (QA-03) | CLI kiểm provider login riêng trước up; activation đòi exact native launch receipt | Idle không còn là bằng chứng auth duy nhất; up/down smoke dùng Claude đã login. Provider khác cần native hook integration đã verify |
-| RR-15 / FIXED partial startup (QA-04) | P13 persist startup intent/partial manifest trước launch; CLI reconcile pane cũ sau trust prompt | Live probe: lần đầu blocked, giải trust chỉ repo disposable, retry up thành công. Không auto-adopt session không ownership, không resend unknown delivery |
-| RR-16 / residual observability P2 | Background stdout/stderr qua detached redaction relay; host diagnostics scrub trước log. Context/logger/metrics helpers chưa compose đầy đủ toàn tuyến | Không hứa mọi unlabeled/encoded secret được che hoặc telemetry operational hoàn chỉnh. Provider prompt/args vẫn cần giữ sạch credentials |
-| RR-17 / FIXED local | Documentation/role prompt/ADR/file analysis và drift reads đã dùng chung confined regular-file reader | Commit 648efe7 chặn cached file/parent symlink escape; 38/38 context tests PASS. Không mở rộng thành hostile same-user race guarantee hoặc trạng thái đã compose host |
-| RR-18 / FIXED output budget | maxTotalBytes được enforce trên toàn formatted prompt, gồm role instructions/spec/ADR/task details | Commit ab91e37 fail-closed khi prompt quá budget, không cắt governance/criteria âm thầm; 39/39 context tests PASS. Analysis/read memory bound vẫn chưa chứng nhận |
-| RR-19 / P2 | Registry/lifecycle/journal lock sau crash có thể cần operator reconcile; host-issued review/evidence/human-decision ledgers hiện ở memory | Không hứa seamless recovery mọi crash. Sau host restart, pending authenticated decisions/evidence có thể cần reconciliation trước khi nhận lại; chưa live fault-inject workflow AI đang chờ approval. Không reset DB hoặc fabricate receipts |
-| RR-20 / release gate | GitHub Actions mới chỉ kiểm tra YAML/bash/local archive; GitHub environment approval, protected-branch settings và hosted PR chưa được xác minh | Release owner phải xác minh repo settings và thử draft release từ tag approved. Archive smoke local dùng dependency cache, không phải fresh network install |
-| RR-21 / evidence gate | E2E scenario suite dùng fake transport; P19 fixture inject auth/gate callbacks; native smoke không model | Chưa có live accepted spec, required TDD, independent review/QA, bounded repair, workflow verification và human delivery approval trong một run |
-| P02-RA01 / P2 | Herdr Adapter large runner timeout overflow | Vẫn OPEN, owner Herdr Adapter; không đóng bằng sửa timeout helper Runtime |
-| P03-RA01 / P2 | ArtifactStore late final get chunk sau deadline/abort | Vẫn OPEN, owner ArtifactStore; không chuyển sang Runtime hoặc đóng bằng kết quả test khác |
+| RR-01 / code FIXED, evidence P1 | CLI boot host, Node TAP/Vitest runner, RGR và QA-resume task notice đã nối; không còn docs-only implementation. Chưa full AI feature/bugfix completion | Runtime + QA: một run thật từ Chat đến approved delivery, giữ correlated receipts/artifacts |
+| RR-02 / idle FIXED, active P1 | up/down/up/down thật đạt; chưa live drain/crash/restart workflow AI đang chạy với dirty/ignored files và pending approval | Lifecycle + QA: active fault campaign, không duplicate hoặc mất worktree/approval |
+| RR-12 / owner decision | Owner cho phép autoaccept spec rủi ro thấp; human-required/project/design/task/delivery vẫn bắt buộc | Giữ phạm vi ngoại lệ; không mở rộng sang delivery hoặc tự approve protected action |
+| RR-13 / security scope | Behavioral commands có Bubblewrap filesystem/PID/network sandbox. Các provider role vẫn cùng UID; native hooks/tool policies chưa là sandbox cho toàn bộ provider process | Host/Security: threat model và OS principal/container separation nếu cần chống compromised same-user process |
+| RR-14/15 / FIXED local+idle live | Login/native launch receipts, partial startup recovery và exact session/socket realm đã sửa | Không suy ra mọi provider/version đều được hỗ trợ; default host hiện chỉ Claude |
+| RR-16 / P2 observability | Background relay/host diagnostics có scrub; structured context/logger/metrics services chưa compose toàn tuyến. Raw evidence/provider logs có thể chứa dữ liệu nhạy cảm | Runtime/operations: operational sink + canary campaign; redaction không bảo đảm encoded/unlabeled/binary secrets |
+| RR-17/18 / FIXED local | Confined regular-file reads và total context budget đã enforce | Không hostile same-user path-swap hoặc mọi memory-allocation bound |
+| RR-19 / local FIXED, live pending | Human/review/evidence/native ledgers đã durable. Exact lease renew/release và failed-phase outcome phục hồi qua crash | QA: active model run fault injection; uncertainty cần reconcile, không reset journal để phục hồi |
+| RR-20 / release gate | Local compiled archive đã smoke; hosted GitHub environment approvals/branch protections/PR publication chưa thử | Release owner xác minh settings và tag/source/publication riêng; chưa deploy/merge/publish |
+| RR-21 / evidence P1 | Local E2E dùng fake transport; native actor và Claude hook tests không chứng minh full AI SDLC | QA/integration: feature, required TDD, docs alternative, repair/exhaustion, parallel/conflict và human delivery evidence |
+| RR-22 / runner scope | Linux + /usr/bin/bwrap + namespaces; Node flat TAP, Vitest 2.1 JSON với trusted companion. Dependency roots chỉ canonical node_modules; không install/build tự động | Runtime: framework/dependency preparation được owner cấu hình và review; không chạy fallback bỏ sandbox |
+| RR-23 / runner scope | Mixed manual/automated criteria, coverage threshold, workspace links ra ngoài mounts, build-generated dist/snapshots chưa hỗ trợ | Mixed criteria/coverage bị reject trước workflow; missing dependency/build inputs bị chặn khi đo. Mở rộng bằng evidence/protocol cụ thể |
+| RR-24 / resource scope | Wall timeout/output/loop bounds có; sandbox dùng chung kernel và không có cgroup quota CPU/memory/disk | Security/operations: resource controls trước multi-tenant hoặc untrusted workload use |
+| RR-25 / environment | Host socket tự fallback đường dẫn ngắn; một số Herdr/POSIX socket paths vẫn phụ thuộc môi trường. Nghiệm thu dùng TMPDIR=/tmp và XDG realm ngắn, riêng session | Linux operator: dùng short temp/socket realm; không nhận diện EINVAL là provider auth hay protocol incompatibility |
+| RR-26 / verified target environment | Checkout gốc /mnt/... trên fuseblk: chmod 0700/0600 vẫn ra 0777, owner root trong khi caller UID 1000. Không đáp ứng private host-file permissions; lifecycle nghiệm thu chạy trên POSIX /tmp | Operator: dùng worktree/repository trên POSIX filesystem, hoặc review external-state migration riêng; không bỏ permission checks. Bằng chứng target-filesystem-permissions.json, probe đã xóa |
+| P02-RA01 / P2 OPEN | Herdr Adapter large runner timeout overflow | Owner Herdr Adapter; không đóng bằng timeout fix Runtime |
+| P03-RA01 / P2 OPEN | ArtifactStore late final get chunk sau deadline/abort | Owner ArtifactStore; không đóng bằng test khác |
 
-Runtime bảo vệ human-required gates bằng callback `authorizeHuman` của trusted
-host; callback luôn trả true trong test không phải xác thực human thật. Tương tự,
-khác executor ID không chứng minh khác principal/credential; host phải loại alias.
-Red evidence được kiểm tra trước `authorize_implementation`, nhưng permission OS
-để ngăn viết source trước Red không tự xuất hiện từ policy đó.
+Human trust dựa vào trusted physical input hook và immutable receipt. Một process
+compromised cùng UID đọc được role tokens/inject terminal vẫn nằm ngoài guarantee.
+Reviewer phải xem exact diff/commit và criteria; command PASS không tự chứng minh
+một test có ý nghĩa hoặc chống người viết test gian lận. Independent review gates
+vẫn bắt buộc cho behavioral work.
 
-Legacy `run/status <run-id>/approve/resume/cancel` dùng workspace Runtime cũ,
-không tự mở P19. Vì vậy Conversation-only hiện là boundary của gateway/tool
-flow; không phải mọi user operation trong binary đều buộc đi qua Conversation.
-Không dùng legacy resume để khẳng định phục hồi run ở storage P19 khác.
+Legacy `run/status <id>/approve/resume/cancel` dùng Runtime cũ và storage riêng;
+không tự mở P19. Conversation-only được enforce trên Agentic path, chưa là độc
+quyền mọi API trong binary. Không dùng legacy resume để chứng minh P19 recovery.
 
-Đợt này sửa false-clean inspection, shutdown false-success, parallel approval,
-repair Developer self-review, timeout contract, structured log redaction, context
-selection và release packaging/source gates. Đợt follow-up đã lấp CLI bootstrap/shutdown và Claude tool wiring; các giới
-hạn behavioral runners và full AI workflow evidence ở bảng trên vẫn còn. CLI README và guide đã được cập nhật cho provider selection, host bootstrap
-và shutdown; không lấy help text làm bằng chứng dữ liệu được giữ.
-
-Phạm vi đã thử là Linux với Git/SQLite/filesystem cục bộ; default host cần Unix
-sockets và `flock`. Chưa xác minh default host trên macOS/Windows. Không chứng nhận
-power-loss/kernel crash, NFS, multi-host/distributed leases, hostile same-user
-continuous path swaps, sandbox isolation, hosted provider publication hay deploy.
-Heuristic redaction không che mọi unlabeled/encoded/binary secret. SHA trong
-selected-file metadata là checksum file đầy đủ thực đọc; content có thể bị cắt
-theo budget và được đánh dấu truncated, nên checksum không mô tả riêng snippet.
-
-Raw logs/artifacts dưới `/tmp` cần được bảo toàn riêng trước cleanup/reboot.
-Không xem việc log/archive còn tồn tại là bằng chứng một task đã thành công.
+Không chứng nhận macOS/Windows behavioral runner, NFS/network filesystems,
+multi-host/distributed leases, power-loss/kernel crash, hostile kernel/root,
+provider credential separation hoặc hosted branch protection. `/tmp` evidence
+phải được lưu riêng trước reboot; artifact tồn tại không chứng minh task success.

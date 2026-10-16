@@ -35,7 +35,7 @@ exit codes, baseline và phạm vi live Herdr thật.
 | Up/attach/status/doctor qua P12 + P13 | Có implementation; môi trường agent/provider phải cài và đăng nhập riêng |
 | Down của default CLI adapter | Đã compose host quiesce/checkpoint + P13 shutdown; live lifecycle smoke đạt; --yes không bypass barrier |
 | P14–P19 SDLC composition | Có API `openAgenticWorkspace`, cần trusted host/provider tool registration/check/auth |
-| Conditional TDD/SDD/verification | Environment policies được truyền vào host; default evidence hiện hỗ trợ documentation/manual review |
+| Conditional TDD/SDD/verification | Environment policies được truyền vào host; evidence hỗ trợ manual review và owner-configured Node TAP/Vitest trên Linux |
 | CLI tự boot/shutdown host P19 | Đã triển khai cho native Claude hooks/MCP; live up/down/restart smoke đạt |
 | Signed Herdr native message transport | Có smoke kiểm chứng thật; không thay AI delivery hoặc independent measurement evidence |
 | Live model thực hiện SDLC end-to-end | **Chưa kiểm chứng trong đợt này** |

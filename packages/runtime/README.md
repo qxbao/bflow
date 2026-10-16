@@ -364,3 +364,20 @@ pnpm exec vitest run packages/runtime/test/unit/resilience-observability.test.ts
 pnpm exec vitest run packages/runtime/test/unit/project-context-service.test.ts
 pnpm exec vitest run packages/runtime/test/scenarios/09-session-recovery-reliability.test.ts
 ```
+
+## Configured host verification and durable authentication
+
+The default Claude host now supports owner-configured Node TAP and Vitest 2.1
+commands, independent conditional-TDD phases, frozen Red test files, constrained
+Developer commits and bounded phase repairs. Behavioral commands run in mandatory
+Linux Bubblewrap namespaces with explicit read-only dependencies; there is no
+unsandboxed fallback. See [runner configuration](../../docs/verification-runners.md).
+
+Private fsynced receipts preserve human-hook provenance, independent review
+observations, gate/evidence authentication and native send intent/acknowledgement.
+Restart restores trusted approvals and receipts without treating cached dialogue
+or transport completion as authority. Lease renew/release arguments and failed
+phase outcomes are written before side effects, with exact idempotent recovery.
+Task notices borrow the active assignment lease and cannot reserve/release a
+second Developer slot. These are local process-crash guarantees under the stated
+Linux/filesystem trust model, not live AI fault-campaign or power-loss evidence.

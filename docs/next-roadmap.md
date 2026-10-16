@@ -1,37 +1,33 @@
 # Next roadmap sau P22
 
-Follow-up đã tích hợp default Claude host/MCP/native hooks và idle lifecycle
-shutdown/restart; không cần làm lại bootstrap từ đầu. Smoke model mới tốn
-provider-reported 0.0085535 USD với hard cap 0.10 USD, trong giới hạn 1 USD của user.
-Low-risk spec autoaccept được owner cho phép. Phần còn lại ưu tiên independent
-behavioral runners (feature/required-TDD bugfix), active-workflow approval/crash
-recovery và chiến dịch live AI E2E khi có ngân sách riêng. Không dùng bảng công việc
-ban đầu bên dưới để khẳng định bootstrap vẫn chưa triển khai.
+Đã có default Claude host/lifecycle, owner-configured Node TAP/Vitest runner,
+independent RGR, sandbox, durable approval/native/evidence receipts và exact
+lease/phase-outcome crash recovery. Không làm lại các phần đó từ scaffolding.
+Readiness hiện tại và source kiểm thử ở [release-readiness](release-readiness.md).
 
-Mục tiêu kế tiếp là **Limited pilot có bằng chứng AI SDLC thực**, không phải gắn
-nhãn production-ready. Điểm xuất phát, implementation đã test và kết luận hiện
-tại ở [release-readiness](release-readiness.md); rủi ro ở
-[security-review](security-review.md).
+Mục tiêu kế tiếp là **Limited pilot có full AI acceptance evidence**; không tự
+đổi thành production-ready.
 
-| Thứ tự | Owner đề xuất / công việc | Điều kiện nghiệm thu |
+| Ưu tiên | Owner / công việc còn lại | Bằng chứng đóng |
 | --- | --- | --- |
-| 1 — Integration decision | Project owner + Architecture/Security: áp dụng quyết định owner cho phép low-risk spec autoaccept và chốt tool/OS trust model | Tài liệu quyết định rõ scope tự động accept, người phê duyệt độc lập, affected owners và compatibility/migration nếu contract đổi; không tự đổi schema để vượt audit |
-| 2 — Real host composition | Runtime + CLI + provider host: boot P19 cùng session P13, đăng ký Conversation/Coordinator tools, prompts, authenticated native ingress/result/evidence, real human channel, deterministic runners và scheduler | `bflow up` rồi chỉ `attach` Chat: user request tạo DelegationRequest/run/spec/assignment thật; Chat không gọi Developer trực tiếp; config SDD/TDD/concurrency/maxIterations đi vào Runtime thật |
-| 3 — Lifecycle closure | Runtime + CLI + Pane Manager: wire quiesce/checkpoint/shutdown receipts, startup reconciliation và auth diagnostics | Có active workflow, dirty/ignored worktree: down không mất dữ liệu; timeout/partial close không báo down giả; restart giữ approval/unknown_delivery; hai repo đồng thời và attach chọn đúng session |
-| 4 — Security completion | Provider/host + Runtime/Context: enforce read-only/tool principals, credentials, independent verifier identities; confined reads cho documentation, total prompt budget, operational redacted sinks | Adversarial probes Chat direct dispatch, Coordinator selfapprove, Developer spec rewrite, repair self-review, symlink/FIFO/log secret canaries đều fail-closed; không chỉ test schema booleans |
-| 5 — Live acceptance campaign | QA + integration owner: chạy feature, required-TDD bugfix, docs-only alternative verification, parallel tasks, reject/repair/exhaustion/conflict/missing artifact | Một run giữ accepted spec/artifact checksums, Red-Green-Refactor thực, Reviewer/QA độc lập, Git exact revision, post-integration verification, human delivery decision và correlated AgentResult. Herdr done không tính success |
-| 6 — Fault campaign | Reliability + storage/transport owners: SIGKILL host/agent ở intent/send/binding/verification/approval, restart Herdr, retry/cancel, delayed responses | Không duplicate prompt/worktree/PR; reconcile uncertainty trước resend; monotonic fencing; checkpoint+tail replay và durable human rejection; không giả power-loss bằng process kill |
-| 7 — Release engineering | Release owner: kiểm protected branches/tags, credentials và human release governance; chạy workflow sửa trên tag approved và archive trong môi trường sạch | Tag/source/checksum đồng nhất; mọi gate PASS; dependency install + CLI smoke ngoài source tree; draft release được review trước publish; không dùng test giả làm live SDLC evidence |
-| 8 — Follow-ups P2 | Herdr Adapter P02-RA01; ArtifactStore P03-RA01; CLI QA-05 docs; test stability | Owner cung cấp reproducer/fix đúng module và targeted evidence; full checks lại, không đóng từ báo cáo hoặc chuyển trách nhiệm sang Runtime |
+| P1 — local platform | Operator: dùng POSIX worktree/repository; checkout gốc fuseblk không giữ private file permissions | stat/chmod 0700/0600 đúng owner, host activation/receipts được test ở vị trí đó; external-state migration cần design riêng nếu giữ source trên mount gốc |
+| P1 — live happy path | QA + Runtime: disposable repository, Claude đã login, owner command config có exact tests; một feature/required-TDD bugfix và một docs alternative workflow | Chat-only user request tạo spec/task thật; model Developer commits; independent Red/Green/Refactor, Reviewer và QA exact-revision gates; Git integration; human delivery approval. Giữ run/session/native IDs, receipts, artifacts và provider cost |
+| P1 — active recovery | Lifecycle/QA: down khi task dirty/ignored, SIGKILL host quanh approval/send/phase/release, restart đúng session | Không mất data/approval, không duplicate prompt/worktree, unknown delivery reconcile trước resend; compare HEAD/sentinels/checkpoints/receipts |
+| P1 — adversarial live flow | Security + QA: Chat direct-dispatch, Coordinator selfapprove, Developer spec/test rewrite, repair self-review, rejection và exhaustion | Actual tools/hooks fail-closed; không chỉ schema assertions. Sandbox file/socket/network canaries giữ nguyên, scope/approval không bị vượt |
+| P2 — broader runner support | Runtime: reproducible dependency preparation, workspace symlinks/build inputs, mixed methods/coverage/reporters có explicit authority | Exact prepared inputs/hash/protocol; generated artifacts và isolation được review. Không mở arbitrary model-selected shell hoặc fallback unsandboxed |
+| P2 — provider/process separation | Security/platform: principal/container isolation cho toàn provider, resource quotas, credential boundaries | Test same-user compromise và CPU/memory/disk/network limits; giữ trust exclusions rõ ràng đến khi có bằng chứng |
+| P2 — operational composition | Runtime: context/logger/metrics sinks xuyên tuyến, backup/restore và log canaries | Redacted operational evidence, provider-reported costs, bounded context, actual restore drill; không chỉ exported helper PASS |
+| Release gate | Release owner: protected branch/tag/environment settings, verified tag-source archive, controlled draft release review | Hosted settings và Actions evidence thật trước publish; không push/deploy/merge tự động từ audit này |
+| Existing follow-ups | Herdr Adapter P02-RA01, ArtifactStore P03-RA01 | Reproducer/fix/evidence đúng owner, full validation lại; không đóng bằng documentation |
 
-Pilot gate chỉ mở khi bước 1–7 có bằng chứng hoặc owner chấp nhận giới hạn cụ
-thể bằng văn bản mà không mâu thuẫn tiêu chí MVP. Bắt đầu với repository
-disposable không remote/protected permissions, rồi mới dùng provider sandbox.
-Giữ command/exit/time/commit/session/pane/run/approval IDs, artifact checksums và
-redacted logs; công bố FAIL/BLOCKED/SKIP riêng.
+Pilot gate đòi ít nhất live happy-path + active recovery và explicit residual-risk
+acceptance phù hợp phạm vi. Ready for personal use chỉ được xác nhận khi onboarding,
+auth, attach, complete workflow, human approval, down và restart dùng đường mặc
+định đạt. Production cần review riêng về threat model, availability, restore và
+operations; không tự suy ra từ local test count.
 
-Chỉ xét **Ready for personal use** sau khi onboarding, auth, attach, complete
-workflow, graceful down và restart có đường mặc định chạy được mà không cần tự
-viết host. Chỉ xét production ở một review riêng với threat model, availability,
-backup/restore, security isolation và operational evidence phù hợp. Không đặt
-lịch hay hứa ngày hoàn thành khi các integration decisions còn mở.
+Các model smoke sau giới hạn ngân sách hiện có mức dự phòng 0.1225011 USD theo cap (gồm một
+lần response bị mất được tính nguyên cap), dưới 1 USD. User cho phép vượt nhẹ khi
+cần; vẫn nên dùng cap từng print smoke và giới hạn tổng campaign/time/roles rõ ràng.
+Không chạy workflow AI dài không theo dõi chi phí. Không hứa ngày đóng khi chưa có
+full live evidence và hosted governance access.

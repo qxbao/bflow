@@ -1,106 +1,121 @@
 # Security review sau P22
 
-**Kết luận: chưa đủ bảo đảm để nghiệm thu Agentic SDLC MVP v2.** Có các policy
-fail-closed và durable boundaries đã kiểm thử, nhưng behavioral runners, OS isolation và live workflow evidence còn thiếu.
-Host/lifecycle Claude đã được sửa và smoke thực trong follow-up bên dưới. Review này không
-là pentest toàn diện hoặc chứng nhận production. Baseline, tested revision và
-các lệnh nằm ở [release-readiness](release-readiness.md).
+**Kết luận: các lỗi đã xác nhận trong phạm vi sửa local đã được xử lý; chưa đủ
+bằng chứng để nghiệm thu toàn Agentic SDLC MVP v2.** Review không phải pentest
+hoặc chứng nhận production. Baseline, source HEAD và kết quả validation cuối ở
+[release-readiness](release-readiness.md).
 
-## Follow-up implementation
+## Trust model
 
-Đã đóng gap CLI host bootstrap và idle-session shutdown: persistent daemon,
-role-filtered MCP, actual Claude SessionStart hook, native signed ingress và
-independent scheduler được nối vào default CLI. `up` chỉ ready sau activation;
-old panes thiếu launch receipt bị từ chối. `down` thực sự gọi quiesce/checkpoint,
-P13 shutdown rồi stop đúng session/host. Live hai vòng lifecycle thành công, không
-model/workflow turns; active AI workflow crash/approval recovery vẫn chưa nghiệm thu.
+Runtime/host, issuer keys, operator, installed system/toolchain và local filesystem
+là trusted computing base. Model không được cung cấp principal, executable/argv,
+approval, measurement hoặc xác thực result bằng các boolean do nó tự khai báo.
+Herdr done chỉ kết thúc turn. Task success cần correlated authenticated AgentResult,
+trusted ArtifactStore bytes, independent task/workflow verification và approval.
 
-Các boundary bổ sung: Chat/Coordinator native tools bị tắt, MCP principal pin
-pane/name/native session; message loại nhạy cảm chỉ qua dedicated host methods;
-role cap không gọi lifecycle/human approval methods. Signed plugin routing so
-actual session/socket realm, không dựa chỉ vào pane IDs trùng giữa server.
-Native Conversation failures không được ACK accepted. Host sockets bound size/
-timeout và reject close-before-ACK; quiesce fence dispatch. Startup/state directory
-symlinks bị từ chối. Confined documentation reads và total prompt output budget đã
-được sửa; background process logs và host diagnostics có redaction.
+All role traffic dùng RoleMessage qua native Herdr/plugin. Private MCP/control
+socket là API của host, không là mailbox thay ArtifactStore. Ingress parse exported
+schemas và native Ed25519 evidence; session/socket realm, pane/agent/workspace và
+native session phải khớp. Dispatch ghi intent trước send, kiểm lease/fencing hiện
+tại, giữ unknown_delivery đến khi reconcile được proven not_delivered.
 
-Giới hạn security còn giữ: cùng UID là trusted host boundary; hook không chứng
-minh người gõ phím trước một process cùng UID có thể inject terminal/đọc tokens.
-Developer vẫn có native tools cần cho sửa code; provider policy không phải Linux
-sandbox hoàn chỉnh. Host-issued manual review receipts dựa vào exact diff/commit
-capture và principal độc lập, không chỉ Developer explanation. Default host từ chối
-behavioral specs khi chưa có independent behavioral runner, không sinh test PASS.
-Human receipt/gate ledgers của host chưa được live fault-inject trên workflow thật;
-không kết luận crash recovery cho approval đang bay giữa các process.
+Conversation/Coordinator native tools bị tắt. Developer dùng scoped Edit/Write qua
+PreToolUse và structured host Git operations; không có Bash/push/reset/clean/merge.
+Provider role process vẫn chung UID: hook/tool policy không bảo vệ trước process
+cùng UID bị compromise đọc token, inject terminal hoặc sửa host files ngoài API.
+Không nâng giới hạn này thành OS separation toàn hệ thống.
 
-Owner đã chấp nhận low-risk specification autoaccept; human-required và delivery
-approval vẫn bắt buộc. Ngân sách smoke mới được enforce bằng print-mode hard cap
-0.10 USD; provider-reported cost 0.0085535 USD, không chạy thêm model campaign.
-Xem kết quả mới ở [release-readiness](release-readiness.md); các findings audit gốc
-bên dưới là lịch sử trước follow-up.
+## Behavioral runner isolation
 
-## Trust model và ingress
+Review tái hiện được test code ghi ra ngoài detached checkout dù `isolated:true`.
+Đã thay bằng mandatory Linux Bubblewrap namespace: empty root, read-only `/usr`,
+Node executable, `/etc/hosts`, explicit canonical `node_modules` và trusted reporter;
+chỉ bind writable measurement checkout, private `/tmp`, PID/network namespaces.
+Host home/.bflow/Git metadata/sockets không được mount; không fallback chạy trực tiếp
+khi sandbox lỗi. Runner không truyền credentials hoặc inherited Node/Git overrides.
 
-Runtime, host authentication callbacks, configured issuer keys, filesystem và
-operator cùng UID hiện là trusted computing base. Model-supplied `verified`,
-`independentExecution`, executor ID hoặc transport `done` không tự tạo trust.
-Herdr protocol/schema compatibility khác với authenticated task-result evidence.
-Native receipt ingress kiểm Ed25519 trên canonical RoleMessage, plugin đối chiếu
-pane/agent/role/workspace trong manifest và native session của execution receipt;
-Core giữ nguyên raw handle, kiểm signed binding rồi mới ghi binding_verified.
+Owner config pin exact command labels/argv/test identities/dependencies trước startup.
+Runtime đo committed revision, reject checkout mutation/generated files, timeout,
+truncation, missing reporter completion, zero/skip/todo và runtime errors. Required
+Red phải là mapped target assertion; exact test blobs giữ nguyên qua Green/Refactor.
+Developer feedback không được mint independent acceptance. Reviewer/QA còn phải xem
+spec và exact diff, vì TAP/JSON PASS không chứng minh test intent đúng.
 
-`packages/runtime/src/agentic/runtime.ts` parse RoleMessage/Specification/workflow/
-decision/result ở ingress; `outbox.ts` ghi request trước send và kiểm lease/fencing.
-`herdr-ingress.ts` có private socket, signature check và per-invocation auth context.
-`tools.ts` nhận principal do host inject, không cho model chọn vai trò trong args.
-`packages/specification/src/engine.ts` bind approved identity/bytes/request digest;
-Verification Engine kiểm current spec fingerprint, exact revision/attempt/method/
-criterion và objective artifacts. Đây là các boundary đã đọc và test, không có
-khẳng định rằng mọi file/callback tùy chỉnh của external host đã được audit.
+Sandbox không là cgroup/resource hoặc kernel-exploit containment. Dependencies/system
+binaries do owner cài vẫn là trusted inputs. Read-only dependency mount không cho
+truy cập symlink target ngoài namespace. Supported platform/scope ở
+[verification runners](verification-runners.md).
 
-## Lỗi đã sửa trong đợt này
+## Findings đã sửa
 
-| ID / mức | Lỗi xác nhận và tác động | Sửa, bằng chứng và giới hạn |
+| ID / mức | Lỗi hoặc gap xác nhận | Sửa và bằng chứng |
 | --- | --- | --- |
-| RR-03 / P1 | Hai verification song song ghi đè slot approval; approval đầu mồ côi. Late result có thể đổi business phase sau rejection | Commits `5d3130a`/`58a70a0`: persist/defer outcome sau active task approval; giữ terminal decision kể cả verifier đồng thời ném exception. Regression restart, duyệt từng task, human rejection; Core schema không đổi |
-| RR-04 / P1 | Frozen P17 plan thiếu Developer ID mới ở repair; evidence từ chính repair implementer có thể được nhận làm Reviewer | `5d3130a`: Runtime kiểm executor của gate outcome với mọi task.assignment handle thực trước acceptance. Regression FAIL trước/PASS sau. Host vẫn phải xác thực principal và aliases |
-| RR-05 / P1 | P13 inspector coi sạch khi edit bị assume-unchanged/skip-worktree, ignored files hoặc GIT_* trỏ repo khác | `05a54aa`: bỏ inherited overrides, tắt fsmonitor, kiểm index flags, NUL-safe status gồm ignored/untracked. Test Git thật giữ nguyên bytes/flags, không auto-clear hoặc delete |
-| RR-06 / P1 | shutdownTopology bỏ qua pane-close failure/timeout rồi lưu down/cancelled | `05a54aa`: bắt command failure và parse response trước persist final shutdown; tests failure/timeout không lưu success. Partial close cần reconciliation, không rollback giả |
-| RR-07 / P2 | Timeout helper cast retrySafety=after_reconciliation ngoài exported enum, trả retryable error cho operation có thể vẫn chạy | `5b57f88`: trả contract-valid unknown_delivery/nonretryable/manualInterventionRequired; deprecated onTimeoutCode giữ source signature nhưng không hạ uncertainty. Schema và nested retry test xác nhận đúng một invocation |
-| RR-08 / P2 | StructuredLogger chỉ redact message/details; envelope event/component/IDs raw. Spaced CLI flags và JSON escapes có khoảng trống | `5b57f88`: scrub trước buffer/sink và sửa textual matcher; tests dùng synthetic secrets. Không biến raw Herdr stdout/stderr hay prompt argv thành sanitized logging |
-| RR-09 / P2 | Cached file selection đọc symlink replacement ngoài root/special file; hash cũ không mô tả bytes mới | `5b57f88`: canonical containment cả parent links, no-follow/nonblocking descriptor, regular-file/dev/inode checks, hash/size từ bytes đọc. Regression file/parent symlink, FIFO trong bounded child, normal edit. Các documentation readers khác còn RR-17 |
-| RR-10 / P1 release | Compiled archive thiếu package v2; CLI --help lỗi thiếu pane-manager dù install exit 0 | `6bb17e7`: thêm manifests/dist của mọi package v2 và prompts/templates/docs; real archive extract/install/CLI smoke đổi từ exit 1 sang 0 |
-| RR-11 / P1 release integrity | Manual tag input không chọn source checkout; release job chỉ lint/build trước publish | `6bb17e7`: checkout requested ref, validate tag/HEAD identity, unit/integration/E2E gates và compiled distribution smoke. YAML/bash đã check, chưa chứng minh GitHub environment approval |
+| RR-01/02 / P1 | Default CLI không boot P19; down chưa compose Runtime drain | Persistent host/MCP/hooks/scheduler, activation fence, real checkpoint/down; hai vòng Claude idle lifecycle thực |
+| RR-03 / P1 | Parallel task approval ghi đè slot; late verification revive rejection | Durable deferred outcomes, sequential independent approvals; restart/parallel rejection regression |
+| RR-04 / P1 | Repair implementer chưa nằm trong frozen plan, có thể self-review | So gate executor với mọi actual task.assignment; regression chống Developer mới đóng vai Reviewer |
+| RR-05 / P1 | Git false-clean với hidden index flags/ignored files/GIT_* | Scrub overrides, index/ignored/untracked check; giữ bytes/flags, không auto-clear/delete |
+| RR-06 / P1 | P13 close timeout/error vẫn persist down | Parse close result, fail-closed và preserve partial state; targeted failure fixtures |
+| RR-07 / P2 | Runtime timeout trả retrySafety ngoài contract và tự retry uncertain work | Contract-valid unknown_delivery/nonretryable/manual intervention; one-invocation regression |
+| RR-08 / P2 | Structured envelope/chunked logs có thể lộ secret | Scrub envelope/buffer/sink, detached background relay, host diagnostics; synthetic secret tests |
+| RR-09/17 / P2 | Cached selection/document reads theo symlink/special file; stale checksum | Confined no-follow/nonblocking regular descriptor, containment/inode/byte recheck; symlink/FIFO regressions |
+| RR-10/11 / P1 release | Archive thiếu packages; manual tag không pin source và thiếu gates | Full package/assets distribution smoke; checkout ref/tag identity + unit/E2E gates. Hosted approval chưa chứng minh |
+| RR-14/15 / P1 | Idle bị coi là auth; partial startup không recover được | Provider login riêng, exact launch receipt, persisted intent và reconciliation không duplicate panes |
+| RR-18 / P2 | Total context budget không bao hết governance/spec | Bound complete formatted prompt; fail-closed thay vì cắt criteria |
+| RR-19 / P1/P2 | Authentication ledgers chỉ memory, native retry thiếu durable intent | Private immutable fsynced observations/human/gate/evidence/native receipts; restart và ACK-loss/conflicting receipt tests |
+| RGR-01 / P1 | Required-TDD không có đường runner/Developer-resume thực | Node/Vitest host measurement, scoped tools, borrowed-lease notices; real connected local pipeline |
+| RGR-02 / P2 | Registry renew/release commit trước journal save làm retry sai args | Persist exact renew/release requests trước side effect; reopen+clock-advance crash tests |
+| RGR-03 / P2 | Crash sau phase lease release làm mất failure outcome, task không thể tiếp tục | Persist failure trước release, automatic recovery + single deterministic repair notice; idempotent replay regression |
+| RGR-04 / P1 | Test subprocess có quyền ghi/read host ngoài checkout | Mandatory Bubblewrap namespace và adversarial host file/socket/network probes; không dựa vào env scrubbing để gọi là sandbox |
+| HOST-01 / P2 | Long profile TMPDIR làm Unix socket EINVAL | Byte-bound short private socket directory; long-TMPDIR host regression |
 
-Source implementation được commit theo ownership; không thay contracts, root
-manifest/lockfile, schema migration hoặc upcaster. Test/build artifacts không
-được đưa vào Git. CI workflow thay đổi là integration/release remediation được
-chủ dự án cho phép; không kích hoạt workflow, tag hay external write trong audit.
+Không sửa public contract/schema/migration để vượt policy hoặc hợp thức hóa result.
+Compatibility của private owner config và journal giữ trường optional mới; config
+cũ không behavioralCommands vẫn normalize thành empty list. Host authority thay đổi
+không được silently adopt. Old signed handles không được rewrite để fake correlation.
 
-## Các kiểm tra đặc biệt bắt buộc
+## Các kiểm tra đặc biệt
 
-| Kiểm tra | Kết quả trung thực |
+| Yêu cầu | Kết quả và giới hạn |
 | --- | --- |
-| Conversation không vượt quyền Coordinator | Gateway chỉ tạo delegation, tools reject Conversation orchestration. PARTIAL: default live host chưa đăng ký; native process có shell/quyền filesystem cùng UID |
-| Coordinator không tự approve | Human-required decisions phải được host authenticate và match revision/target. Chủ dự án đã cho phép low-risk design autoaccept trong phản hồi sau audit 2026-10-16; không được dùng ngoại lệ này cho human-required gates hoặc delivery |
-| Developer không đổi spec để hợp thức hóa | LOCAL PASS immutable stored approved bytes, criteria anti-weakening, fingerprint recheck và Git commit scope. PARTIAL ở OS: cùng UID không bị ngăn sửa mọi path ngoài API |
-| Reviewer không chỉ tin Developer giải thích | LOCAL PASS exact gate observations, trusted artifact bytes, current revision và executor checks; repair identity gap đã sửa. Chưa có independent Reviewer/QA AI live; host identity/runner phải được bảo đảm |
-| Verification không chạy vô hạn | LOCAL PASS maxIterations/default 3, refuse extra cycle và exhaustion escalation. Infrastructure uncertainty không được repair loop vô hạn |
-| Retry không tạo việc trùng | LOCAL PASS write-ahead request/lease, durable unknown_delivery, chỉ resend request gốc sau proven not_delivered; SIGKILL/restart fixture coverage. Native smoke vẫn uncertain; chưa khẳng định exactly-once cho arbitrary remote side effects |
-| down không mất dữ liệu | CLI LIVE PASS safety refusal giữ sentinels/HEAD; P13 close-error regression. BLOCKED cho graceful default shutdown của active workflow |
-| attach đúng session | LOCAL PASS canonical repository identity, named env, live probe, manifest và Conversation target checks; PTY live evidence kế thừa từ QA trước, chưa chạy lại PTY trong audit này |
-| Git không phá hủy mặc định | LOCAL PASS real repositories: scope từng commit, giữ conflict/dirty/ignored data, không reset/clean/force cleanup mặc định, chỉ push integration ref đã verify. Không chứng nhận chống external same-user process |
-| Không deploy/merge protected branch thiếu approval | Không có tool deploy/protected-merge trong Coordinator Runtime; integration tạo branch riêng, delivery cần human. Chưa kiểm hosted branch settings/provider credentials; CD tag publish không có environment approval gate được khai báo trong YAML, nên chưa chứng nhận governance bên ngoài |
+| Conversation không vượt Coordinator | Role-filtered tools và Gateway chỉ delegate; native source/shell disabled. Local/native wiring PASS |
+| Coordinator không tự approve việc của mình | Dedicated human hook + exact target/revision/generation/time + durable provenance. Low-risk spec autoaccept là ngoại lệ owner cho phép; delivery/human-required không thuộc ngoại lệ |
+| Developer không đổi accepted spec để hợp thức hóa | Immutable stored bytes/fingerprint/anti-weakening, scoped commit/edit, Red-test freeze; test sandbox không thấy host state. Không claim chống compromised provider process cùng UID |
+| Reviewer không chỉ tin explanation | inspect captures exact committed diff/dossier trước verdict; observations/evidence immutable, actual principal independent, sửa repair self-review |
+| Verification không vô hạn | Default max 3, bounded phase repair, reject failed same revision, infrastructure escalation; no extra Developer dispatch sau exhaustion |
+| Retry không tạo trùng | Stable message/idempotency, durable send intent/ACK, exact renew/release replay, unknown delivery không blind resend; phase notice dùng lease cũ, không reserve task thứ hai |
+| down giữ dữ liệu | Quiesce/checkpoint barrier, safe dirty/ignored preservation, close failure không báo down giả. Idle live PASS; active-model drain/crash còn cần live test |
+| attach đúng session | Canonical repo identity, named session/socket realm, manifest/Conversation target và native occupant validation. Không auto-adopt foreign pane |
+| Git không phá hủy mặc định | Structured scoped commits, independent integration branch, conflict giữ lại; không reset/clean/force push. Force-remove chỉ disposable measurement checkout riêng |
+| Không deploy/protected merge thiếu approval | Coordinator host không có action tool deploy/protected merge; human delivery gate bắt buộc. Không chứng nhận hosted protections/settings chưa kiểm |
 
-## Rủi ro còn mở và phát hành
+## Recovery và approval
 
-Các RR-01/02/12/13 ngăn full acceptance. RR-14–21, P02-RA01 và P03-RA01 còn mở
-với owner/điều kiện đóng trong [known-limitations](known-limitations.md).
-Đặc biệt, OS read-only isolation không được tạo bởi `readOnlyWorkspace: true`,
-và Conversation-only là gateway behavior chứ chưa là độc quyền của mọi CLI/API.
+Human decision phải có trusted UserPromptSubmit provenance và matching request;
+Conversation cache không tự tạo approval. Recovered decisions chỉ restore sau durable
+host authentication. Thay đổi binding/session hoặc immutable judgment bị từ chối.
+Native uncertain send không được replay chỉ vì MCP timeout; signed late ACK có thể
+resolve intent gốc. Phase assertion failures và transport uncertainty là hai domain
+khác nhau. Failed phase diagnostics được lưu artifact, không được coi là P16 success.
 
-Release packaging mới không thay cho phê duyệt phát hành. GitHub environment
-reviewers, token scope, protected branches/tags và repository rules phải được
-owner kiểm tra trước external closure. Không tự deploy hoặc merge protected
-branch để chứng minh test. Thử nghiệm tiếp theo cần repo/session riêng, least
-privilege credentials, immutable evidence và người phê duyệt độc lập.
+Các regression xác nhận process-crash windows trên local Linux. Chưa chạy fault
+campaign xuyên suốt live AI workflow hoặc chứng minh SQLite/filesystem/transport là
+một transaction. Không chứng nhận power-loss, NFS/distributed leases hay exactly-once
+arbitrary remote side effects.
+
+## Target filesystem probe
+
+Checkout gốc trên fuseblk không giữ chmod 0700/0600: mode thực là 0777, owner
+UID 0 trong khi caller UID 1000. Probe chỉ dùng synthetic bytes và đã xóa.
+Private host-file checks không được hạ xuống để chạy trên mount này. Lifecycle
+và security receipts được nghiệm thu ở POSIX /tmp, không phải runtime state trên
+mount gốc. Dùng POSIX repository/worktree hoặc thực hiện external-state design/
+migration riêng trước khi chạy host ở đó. Raw evidence:
+`/tmp/bflow-fix-evidence/target-filesystem-permissions.json`.
+
+## Residual release risks
+
+Full AI SDLC evidence, active-run drain/recovery, global provider OS separation,
+operational redaction/metrics và hosted release protections còn mở. P02-RA01 thuộc
+Herdr Adapter và P03-RA01 thuộc ArtifactStore vẫn OPEN. Chi tiết owner/điều kiện đóng
+ở [known limitations](known-limitations.md). Không tự deploy hoặc merge protected
+branch để lấy bằng chứng; không quảng bá production-ready.

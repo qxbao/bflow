@@ -157,3 +157,8 @@ Herdr 0.9.0 was observed to support `HERDR_SESSION`, `herdr server`,
 Long XDG/profile paths can exceed Linux Unix-socket path limits. Bflow surfaces
 the Herdr error; operators can select a shorter `XDG_CONFIG_HOME` consistently
 for their environment. Bflow does not guess or redirect socket paths.
+
+Before the first Agentic `up`, owners can add `.bflow/verification.json` for
+Node TAP or Vitest 2.1 behavioral checks. The host pins this authority; Coordinator
+cannot choose arbitrary shell commands. Automated checks require Linux Bubblewrap
+and explicitly available dependencies. See [configuration and limits](../../docs/verification-runners.md).

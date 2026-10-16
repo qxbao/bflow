@@ -43,8 +43,9 @@ journal/reconciliation giữ trạng thái uncertain thay vì resend mù.
 
 Đã có source implementation cho engine, storage, lifecycle, P14–P19 và native
 receipt host/plugin. CLI đã boot/shutdown persistent host với scoped Claude tools
-và launch-local hooks. Default verification còn giới hạn documentation/manual
-review; live model-generated SDLC E2E vẫn cần kiểm chứng riêng.
+và launch-local hooks. Verification có manual review và owner-configured
+Node TAP/Vitest 2.1 trong sandbox Linux, với independent Red–Green–Refactor;
+live model-generated SDLC E2E vẫn cần kiểm chứng riêng.
 Không diễn giải passing fake transport tests hoặc native transport smoke là
 delivery bằng AI đã hoàn thành. Tham chiếu
 [architecture v2](../architecture-v2.md), [ADR 0003](../adr/0003-authenticated-herdr-receipts.md)
