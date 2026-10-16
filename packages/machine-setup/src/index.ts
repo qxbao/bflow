@@ -12,3 +12,5 @@ export * from "./mcp-registry.js";
 export * from "./service-manager.js";
 export * from "./skills.js";
 export * from "./doctor.js";
+export * from "./plan.js";
+export * from "./approval.js";
