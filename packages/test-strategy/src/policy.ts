@@ -17,8 +17,12 @@ export function evaluatePolicy(a: Assessment, criteria: AcceptanceCriterion[], p
   const requiredCriteria = criteria.filter(c => c.required);
   if (!requiredCriteria.length) throw new Error("Policy requires at least one required acceptance criterion");
   const executableCriterion = requiredCriteria.some(c => behavioralMethods.includes(c.verificationMethod));
+  // Existing tests may verify an unchanged invariant (for example formatting).
+  // Their presence alone does not create missing behavior for a meaningful Red.
+  const executableTarget = executableCriterion && (a.changeImpact.behaviorChanged ||
+    a.changeImpact.deterministic || a.changeImpact.regressionReproducible);
   const mislabeledDocs = a.taskType === "documentation" && paths.some(path => !/\.(md|mdx|txt|rst|adoc)$/i.test(path));
-  const behavior = a.changeImpact.behaviorChanged || logic || api || executableCriterion || mislabeledDocs;
+  const behavior = a.changeImpact.behaviorChanged || logic || api || executableTarget || mislabeledDocs;
   const elevated = a.changeImpact.securitySensitive || a.changeImpact.dataMigration || criteria.some(c => c.category === "security");
   const risk = riskOrder[Math.max(riskOrder.indexOf(specRisk), riskOrder.indexOf(a.riskClassification), elevated ? 2 : 0)]!;
   const highRisk = risk === "high" || risk === "critical";
@@ -37,7 +41,9 @@ export function evaluatePolicy(a: Assessment, criteria: AcceptanceCriterion[], p
     methods.push("static_analysis", "manual_review");
     if (behavior) methods.push("integration_test");
   }
-  const hasRunnableTest = a.infrastructure.commands.some(c => behavioralMethods.includes(c.method) && methods.includes(c.method));
+  const behavioralChecks = methods.filter(method => behavioralMethods.includes(method));
+  const hasRunnableTest = behavioralChecks.length > 0 && behavioralChecks.every(method =>
+    a.infrastructure.commands.some(c => c.method === method));
   const feasible = a.testability.level === "automated" && a.infrastructure.readiness === "ready" && hasRunnableTest;
   const suitable = behavior && ((logic && a.changeImpact.deterministic) ||
     (regression && a.changeImpact.regressionReproducible) || api ||

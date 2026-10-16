@@ -148,4 +148,47 @@ describe("objective TDD evidence", () => {
     }
     expect(() => assertEvidenceComplete(recordEvidence(s, r))).not.toThrow();
   });
+  it("allows passing existing criteria beside the new failing behavior in Red", () => {
+    const input = spec();
+    input.acceptanceCriteria.push({ ...input.acceptanceCriteria[0]!, id: "ac-existing", description: "Existing behavior is preserved" });
+    const s = resolver.resolve(input);
+    let recorded = s;
+    for (const phase of ["red", "green", "refactor"]) {
+      const r = result(s, phase);
+      r.evaluatedCriteria.push({ ...r.evaluatedCriteria[0]!, criterionId: "ac-existing", passed: true, exitCode: 0 });
+      r.metadata.conditionalTdd.observations.push({ method: "unit_test", criterionId: "ac-existing",
+        evidenceArtifactId: `evidence-${phase}`, summary: "Existing behavior passes", command: "pnpm test:unit", exitCode: 0 });
+      r.metadata.conditionalTdd.testNames.push("ac-existing: Existing behavior is preserved");
+      recorded = recordEvidence(recorded, r);
+    }
+    expect(() => assertEvidenceComplete(recorded)).not.toThrow();
+  });
+  it("rejects a Red result whose behavioral observations all passed", () => {
+    const s = strategy(); const r = result(s, "red");
+    r.evaluatedCriteria[0]!.passed = true; r.evaluatedCriteria[0]!.exitCode = 0;
+    r.metadata.conditionalTdd.observations[0]!.exitCode = 0;
+    expect(() => recordEvidence(s, r)).toThrow();
+  });
+  it("does not mix phase receipts from different verification cycles", () => {
+    const s = strategy(); const red = recordEvidence(s, result(s, "red"));
+    expect(() => recordEvidence(red, result(s, "green", { cycleNumber: 2 }))).toThrow();
+  });
+  it("rejects a manual observation with a contradictory failing exit code", () => {
+    const s = resolver.resolve(spec(nonBehavior("documentation"), "manual_review"));
+    const r = result(s, "verification"); r.metadata.conditionalTdd.observations[0]!.exitCode = 1;
+    expect(() => recordEvidence(s, r)).toThrow();
+  });
+  it("requires every target command even when several commands use the same method", () => {
+    const a = assessment(); a.infrastructure.commands.push({ method: "unit_test", command: "pnpm test:secondary" });
+    const s = resolver.resolve(spec(a)); const red = recordEvidence(s, result(s, "red"));
+    expect(() => recordEvidence(red, result(s, "green"))).toThrow();
+    let recorded = red;
+    for (const phase of ["green", "refactor"]) {
+      const r = result(s, phase); delete r.evaluatedCriteria[0]!.command;
+      r.metadata.conditionalTdd.observations.push({ method: "unit_test", criterionId: "ac-1",
+        evidenceArtifactId: `evidence-${phase}`, summary: "Secondary suite passes", command: "pnpm test:secondary", exitCode: 0 });
+      recorded = recordEvidence(recorded, r);
+    }
+    expect(() => assertEvidenceComplete(recorded)).not.toThrow();
+  });
 });

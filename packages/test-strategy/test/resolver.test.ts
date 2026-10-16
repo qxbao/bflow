@@ -152,4 +152,17 @@ describe("risk-based conditional TDD", () => {
     const a = nonBehavior("documentation"); a.conventions.tdd = "preferred";
     expect(resolver.resolve(spec(a, "manual_review")).tddDecision.mode).toBe("not_applicable");
   });
+  it("formatting with existing regression tests does not need an artificial Red", () => {
+    const a = nonBehavior("formatting"); a.testability.level = "automated";
+    const strategy = resolver.resolve(spec(a));
+    expect(strategy.tddDecision.mode).toBe("not_applicable");
+    expect(strategy.targetCommands).toContain("pnpm test:unit");
+  });
+  it("does not require Red when a behavioral criterion lacks its test command", () => {
+    const s = spec();
+    s.acceptanceCriteria.push({ ...s.acceptanceCriteria[0]!, id: "ac-browser", verificationMethod: "e2e_test" });
+    const strategy = resolver.resolve(s);
+    expect(strategy.tddDecision.mode).toBe("recommended");
+    expect(strategy.tddDecision.verifiableConditions.join(" ")).toMatch(/Provision a runnable e2e_test/);
+  });
 });

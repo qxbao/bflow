@@ -73,6 +73,9 @@ The return value is the existing contract `TestStrategy`, embedding a contract
 
 These are contextual defaults. Mixed behavior can require TDD regardless of label.
 Incomplete infrastructure prevents pretending that a runnable Red phase exists.
+Every selected behavioral method must have a configured command before TDD can be
+required. Existing regression checks for a behaviorless formatting/documentation
+change remain mandatory without manufacturing a failing-test-first target.
 Domain logic and bug fixes never resolve to `not_applicable`; this resolver does
 not manufacture or honor an unverified human-override boolean. High risk adds
 static analysis and review, and integration checks for behavioral work. Missing
@@ -127,12 +130,16 @@ revision/names/commands on an implementation revision. Refactor may retain Green
 source revision when no cleanup is needed. Timestamps must follow the decision and
 preceding phase; attempts and stored artifacts must be distinct. Every required
 behavioral criterion must have Red evidence. Successful phases must cover every
-required criterion with its declared method and every required method globally.
+required criterion with its declared method, every required method globally, and
+every configured target command, including multiple suites at the same test level.
 
 Observations reference the evaluated criterion's stored artifact. When multiple
 checks share one criterion, its evaluation can omit the aggregate `command` and
 `exitCode`; each automated observation still needs its own command and exit code.
-Red evaluations always need a nonzero exit code. Manual/visual observations require
+Red must include a failed behavioral observation and its nonzero evaluation exit
+code. Existing behavioral criteria and other checks may already pass in the Red
+suite; forcing those checks to fail is not TDD. Phase receipts must stay in the
+same verification cycle. Manual/visual observations require
 concrete summaries and stored artifacts. Infrastructure or unrelated failures cannot
 establish Red. All referenced artifacts must match the run/task and be ingested
 after the observation starts.

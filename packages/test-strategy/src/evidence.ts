@@ -32,6 +32,9 @@ function validateSequence(strategy: TestStrategy, records: VerificationResult[])
         details.specId !== strategy.specId || details.decisionId !== strategy.tddDecision.decisionId) {
       throw new Error("Evidence must match run, task, specification and decision");
     }
+    if (previous && record.cycleNumber !== previous.cycleNumber) {
+      throw new Error("Evidence phases must belong to the same verification cycle");
+    }
     if (Date.parse(record.startedAt) < Date.parse(strategy.createdAt) ||
         (previous && Date.parse(record.startedAt) < Date.parse(previous.completedAt))) {
       throw new Error("Evidence phase times must follow the decision and previous phase");
@@ -57,20 +60,27 @@ function validateSequence(strategy: TestStrategy, records: VerificationResult[])
       const manual = observation.method === "manual_review" || observation.method === "visual_review";
       if (!manual) {
         if (!observation.command || !policy.assessment.infrastructure.commands.some(c => c.method === observation.method && c.command === observation.command) ||
-            observation.exitCode === undefined || (isRed ? observation.exitCode === 0 : observation.exitCode !== 0)) {
+            observation.exitCode === undefined || (!isRed && observation.exitCode !== 0) ||
+            (isRed && observation.exitCode !== 0 && !behavioralMethods.includes(observation.method))) {
           throw new Error("Automated evidence requires the configured method command and appropriate exit code");
         }
         if ((evaluated.command !== undefined && evaluated.command !== observation.command) ||
             (evaluated.exitCode !== undefined && evaluated.exitCode !== observation.exitCode) ||
-            (isRed && evaluated.exitCode === undefined) || evaluated.passed === isRed) {
+            (isRed && observation.exitCode !== 0 && evaluated.exitCode === undefined) ||
+            evaluated.passed !== (observation.exitCode === 0)) {
           throw new Error("Observation must agree with the evaluated criterion command and exit code");
         }
-      } else if (isRed || !evaluated.passed) throw new Error("Manual review cannot establish a Red phase");
+      } else if (!evaluated.passed || (observation.exitCode !== undefined && observation.exitCode !== 0) ||
+          (evaluated.exitCode !== undefined && evaluated.exitCode !== 0)) {
+        throw new Error("Manual review must not contradict a successful observation");
+      }
       observedMethods.add(observation.method);
       observedCriteria.add(observation.criterionId);
     }
     if (isRed) {
-      if (!details.observations.some(o => behavioralMethods.includes(o.method))) throw new Error("Red requires a behavioral test");
+      if (!details.observations.some(o => behavioralMethods.includes(o.method) && o.exitCode !== undefined && o.exitCode !== 0)) {
+        throw new Error("Red requires a failing behavioral test");
+      }
       const behavioralCriteria = criteria.filter(c => behavioralMethods.includes(c.verificationMethod));
       if (!details.observations.some(o => criteria.some(c => c.id === o.criterionId)) ||
           behavioralCriteria.some(c => !details.observations.some(o => o.criterionId === c.id && o.method === c.verificationMethod))) {
@@ -81,8 +91,9 @@ function validateSequence(strategy: TestStrategy, records: VerificationResult[])
       redDetails = details;
     } else {
       if (criteria.some(c => !observedCriteria.has(c.id) || !details.observations.some(o => o.criterionId === c.id && o.method === c.verificationMethod)) ||
-          policy.requiredVerificationMethods.some(m => !observedMethods.has(m))) {
-        throw new Error("Successful evidence must cover every required criterion and verification method");
+          policy.requiredVerificationMethods.some(m => !observedMethods.has(m)) ||
+          strategy.targetCommands.some(command => !details.observations.some(o => o.command === command))) {
+        throw new Error("Successful evidence must cover every required criterion, verification method and target command");
       }
       if (redDetails) {
         if (details.testRevision !== redDetails.testRevision || canonical([...details.testNames].sort()) !== canonical([...redDetails.testNames].sort()) ||
