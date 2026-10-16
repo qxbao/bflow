@@ -1,6 +1,6 @@
 import { mkdir, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
-import { SessionManifestSchema, type ApprovalDecision, type QualityGate, type RoleMessage } from "@bflow/contracts";
+import { ApprovalDecisionSchema, SessionManifestSchema, type ApprovalDecision, type QualityGate, type RoleMessage } from "@bflow/contracts";
 import { AgenticWorkflowRuntime } from "./runtime.js";
 import { loadAgenticPolicies, type AgenticRuntimePorts, type PanePolicy } from "./ports.js";
 import { createAgenticConversationHost, type AgenticConversationHost } from "./conversation.js";
@@ -26,6 +26,7 @@ export interface OpenAgenticWorkspaceOptions {
   authorizeHuman: AgenticRuntimePorts["authorizeHuman"];
   projectApprovalRequired?: AgenticRuntimePorts["projectApprovalRequired"];
   onHumanDecision?: (decision: ApprovalDecision) => Promise<void>;
+  recoveredHumanDecisions?: readonly ApprovalDecision[];
   onNativeDelivery?: (message: RoleMessage) => Promise<void>;
   /** Provider launch configuration used for dynamic Developer panes. */
   roleLaunch?: Record<string, { systemPrompt: string; mcpConfigFile: string; hooksSettingsFile: string }>;
@@ -76,6 +77,11 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
     artifactStore = unwrap(await artifactsModule.openFilesystemArtifactStore({ root: resolve(directory, "artifacts"), storeId: options.sessionId }));
     let runtime: AgenticWorkflowRuntime;
     const approvedBundles = new Map<string, ApprovalDecision>();
+    for (const decision of options.recoveredHumanDecisions ?? []) {
+      const parsed = ApprovalDecisionSchema.parse(decision);
+      if (!await options.authorizeHuman(parsed)) throw new Error("Recovered human decision is not authenticated");
+      approvedBundles.set(parsed.approvalId, parsed);
+    }
     const checks = [...options.taskChecks, ...options.workflowChecks];
     const reviewIds = [...new Set(checks.filter(check => record(check.configuration).kind === "review").map(check => check.id))];
     const gates = [...options.deterministicGates.filter(gate => !reviewIds.includes(gate.id)), ...reviewIds.map(id => ({ id,
@@ -99,7 +105,9 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       ...(options.projectApprovalRequired ? { projectApprovalRequired: options.projectApprovalRequired } : {})
     }, { journalDirectory: resolve(directory, "journal"), repositoryPath: repository });
     await runtime.initialize();
-    const conversation = await createAgenticConversationHost({ runtime, manifest, contextDirectory: resolve(directory, "conversation"), ...(options.onHumanDecision ? { onHumanDecision: options.onHumanDecision } : {}) });
+    const conversation = await createAgenticConversationHost({ runtime, manifest, contextDirectory: resolve(directory, "conversation"),
+      ...(options.onHumanDecision ? { onHumanDecision: options.onHumanDecision } : {}),
+      ...(options.recoveredHumanDecisions ? { recoveredHumanDecisions: options.recoveredHumanDecisions } : {}) });
     const tools = new CoordinatorTools(runtime);
     const ingress = options.nativeIngressSocket ? await startHerdrReceiptIngress({ socketPath: options.nativeIngressSocket,
       publicKeys: options.bindingReceiptKeys ?? {}, receive: async message => {

@@ -14,6 +14,7 @@ import { CoordinatorTools } from "../../src/agentic/tools.js";
 import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import { loadAgenticPolicies, type PanePolicy } from "../../src/agentic/ports.js";
 import { createAgenticConversationHost } from "../../src/agentic/conversation.js";
+import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
 import { FakeAgentTransport } from "../helpers/fake-transport.js";
 import { draft, workflow } from "../../../specification/test/fixtures.js";
 
@@ -44,14 +45,14 @@ class Panes implements PanePolicy {
   async releaseDeveloper() { return { ok: true as const, value: undefined }; }
 }
 
-async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean } = {}) {
+async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean; humanApproval?: boolean } = {}) {
   const root = await mkdtemp("/tmp/bflow-p19-");
   const repository = join(root, "repo"); await mkdir(repository); git(repository, "init", "-b", "main");
   git(repository, "config", "user.name", "Test"); git(repository, "config", "user.email", "test@example.test");
   await writeFile(join(repository, "guide.md"), "initial\n");
   await writeFile(join(repository, "other.md"), "initial\n");
   git(repository, "add", "."); git(repository, "commit", "-m", "baseline");
-  const store = unwrap(openSqliteRunStore({ filename: join(root, "runs.db") }));
+  let store = unwrap(openSqliteRunStore({ filename: join(root, "runs.db") }));
   const artifacts = unwrap(await openFilesystemArtifactStore({ root: join(root, "artifacts"), storeId: "p19" }));
   cleanups.push(async () => { store.close(); artifacts.close(); await rm(root, { recursive: true, force: true }); });
   const transport = new FakeAgentTransport(); const panes = new Panes();
@@ -92,7 +93,8 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
     roleCapabilities: { developer: ["implementation"], coordinator: ["coordination"], conversation: ["conversation"], specifier: ["specification"], architect: ["architecture"], planner: ["planning"], reviewer: ["review"], qa: ["verification"], tester: ["testing"] },
     taskChecks: checks, workflowChecks: checks,
     authenticateMessage: async () => true, authenticateResult: async () => true, authenticateEvidence: async () => true,
-    authenticateGateResult: async () => true, authorizeHuman: async (decision: any) => decision.decidedBy === "human-1" };
+    authenticateGateResult: async () => true, authorizeHuman: async (decision: any) => decision.decidedBy === "human-1",
+    projectApprovalRequired: () => options.humanApproval === true };
   const runtimeOptions = { journalDirectory: join(root, "journal"), repositoryPath: repository };
   runtime = new AgenticWorkflowRuntime(ports, runtimeOptions);
   const spec: Specification = draft(options.complex ? "api" : "documentation");
@@ -161,6 +163,7 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
   return { root, repository, runtime, ports, privateKey, publicKey, runtimeOptions, panes, transport, spec, def, envelope, inspect, dossier, evidence, submit, approve,
     calls, localReview: (context: QualityGateContext) => gates.find(gate => gate.id === "review")!.evaluate(context), setFailReview: (value: boolean) => { failReview = value; },
     setReviewerExecutor: (value: string) => { reviewerExecutorId = value; },
+    reopenStorage: () => { store.close(); store = unwrap(openSqliteRunStore({ filename: join(root, "runs.db") })); ports.runStore = store; },
     restart: () => { runtime = new AgenticWorkflowRuntime({ ...ports, engine: new DeterministicWorkflowEngine({ bindingReceiptKeys }) }, runtimeOptions); return runtime; } };
 }
 
@@ -247,6 +250,72 @@ describe("P19 integrated Agentic SDLC", () => {
     await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick(); const count = f.transport.sentRequests.length;
     await f.restart().tick(); expect(f.transport.sentRequests).toHaveLength(count);
     expect((await f.runtime.inspect() as any).outbound.some((out: any) => out.status === "unknown_delivery")).toBe(true);
+  });
+  it("restores an exact trusted Gateway approval after reopen without resending uncertain delivery", async () => {
+    const f = await fixture({ humanApproval: true });
+    const receiptDirectory = join(f.root, "host-receipts");
+    let receipts = new HostReceiptJournal(receiptDirectory, f.repository, "session-1");
+    f.ports.authorizeHuman = decision => receipts.authenticateHuman(decision);
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    const manifest = unwrap(await f.panes.getManifest()), binding = f.panes.bindings.find(pane => pane.role === "conversation")!;
+    const contextDirectory = join(f.root, "conversation");
+    const chat = await createAgenticConversationHost({ runtime: f.runtime, manifest, contextDirectory,
+      onHumanDecision: decision => receipts.recordHuman(decision, { origin: "UserPromptSubmit", binding, nativeSessionId: binding.session!.value,
+        conversationSessionId: "session-1", userId: "human-1", messageId: "physical-user-turn", promptDigest: createHash("sha256").update("approve").digest("hex") }) });
+    const approval = (await f.runtime.inspect() as any).outbound.find((out: any) => out.message.type === "approval.request").message;
+    await chat.receiveHerdr({ ...approval, sender: { role: "coordinator", agent_id: "coordinator" }, recipient: { role: "conversation" } });
+    const response = await chat.handleUserTurn({ sessionId: "session-1", messageId: "physical-user-turn", content: "approve",
+      provenance: { origin: "user", authenticatedUser: true, userId: "human-1", paneId: binding.paneId, channel: "herdr_attach" } }) as any;
+    expect(response.ok).toBe(true); expect(response.value.approvalDecision).toBeDefined();
+    const decision = response.value.approvalDecision;
+    f.transport.customSendHandler = () => ({ ok: false, error: { code: "timeout", retryable: true, message: "lost ACK" } });
+    await f.runtime.flushOutbound();
+    const count = f.transport.sentRequests.length;
+    const original = (await f.runtime.inspect() as any).outbound.find((out: any) => out.message.type === "approval.decision");
+    expect(original.status).toBe("unknown_delivery");
+    receipts = new HostReceiptJournal(receiptDirectory, f.repository, "session-1");
+    f.reopenStorage(); const restarted = f.restart();
+    const recovered = await receipts.humanDecisions(); expect(recovered).toEqual([decision]);
+    await createAgenticConversationHost({ runtime: restarted, manifest, contextDirectory, recoveredHumanDecisions: recovered });
+    await restarted.flushOutbound();
+    expect(f.transport.sentRequests).toHaveLength(count);
+    const pending = (await restarted.inspect() as any).outbound.filter((out: any) => out.message.type === "approval.decision");
+    expect(pending).toHaveLength(1); expect(pending[0]).toEqual(original);
+    await expect(restarted.receiveHerdr(f.envelope("approval.decision", { ...decision, revision: decision.revision + 1 }))).rejects.toThrow("mismatched");
+    await expect(restarted.receiveHerdr(f.envelope("approval.decision", { ...decision, reason: "model replaced user feedback" }))).rejects.toThrow("not authenticated");
+    await restarted.receiveHerdr(original.message);
+    expect((await restarted.inspect("run-1") as any).status).toBe("implementing");
+  });
+  it("recovers a trusted approval when the host dies before outbox and Gateway context writes", async () => {
+    const f = await fixture({ humanApproval: true });
+    let receipts = new HostReceiptJournal(join(f.root, "host-receipts"), f.repository, "session-1");
+    f.ports.authorizeHuman = decision => receipts.authenticateHuman(decision);
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    const manifest = unwrap(await f.panes.getManifest()), binding = f.panes.bindings.find(pane => pane.role === "conversation")!;
+    const contextDirectory = join(f.root, "conversation");
+    const chat = await createAgenticConversationHost({ runtime: f.runtime, manifest, contextDirectory, onHumanDecision: async decision => {
+      await receipts.recordHuman(decision, { origin: "UserPromptSubmit", binding, nativeSessionId: binding.session!.value,
+        conversationSessionId: "session-1", userId: "human-1", messageId: "user-before-crash", promptDigest: createHash("sha256").update("approve").digest("hex") });
+      throw new Error("Simulated crash after receipt fsync");
+    } });
+    const approval = (await f.runtime.inspect() as any).outbound.find((out: any) => out.message.type === "approval.request").message;
+    await chat.receiveHerdr({ ...approval, sender: { role: "coordinator", agent_id: "coordinator" }, recipient: { role: "conversation" } });
+    await expect(chat.handleUserTurn({ sessionId: "session-1", messageId: "user-before-crash", content: "approve",
+      provenance: { origin: "user", authenticatedUser: true, userId: "human-1", paneId: binding.paneId, channel: "herdr_attach" } })).rejects.toThrow("Simulated crash");
+    expect((await f.runtime.inspect() as any).outbound.filter((out: any) => out.message.type === "approval.decision")).toHaveLength(0);
+    receipts = new HostReceiptJournal(join(f.root, "host-receipts"), f.repository, "session-1");
+    f.reopenStorage(); const restarted = f.restart();
+    const decisions = await receipts.humanDecisions(); expect(decisions).toHaveLength(1);
+    await createAgenticConversationHost({ runtime: restarted, manifest, contextDirectory, recoveredHumanDecisions: decisions });
+    const module = await import("../../../conversation/dist/index.js");
+    const context = unwrap(await new module.FileConversationContextStore(contextDirectory).load("session-1"))!;
+    expect(context.approvalDecisions[decisions[0]!.approvalId]).toEqual(decisions[0]);
+    expect(context.pendingApprovals[decisions[0]!.approvalId]).toBeUndefined();
+    expect(context.session.activeApprovalIds).toHaveLength(0);
+    const pending = (await restarted.inspect() as any).outbound.filter((out: any) => out.message.type === "approval.decision");
+    expect(pending).toHaveLength(1); expect(pending[0].message.payload).toEqual(decisions[0]);
+    await restarted.receiveHerdr(pending[0].message);
+    expect((await restarted.inspect("run-1") as any).status).toBe("implementing");
   });
   it("cancellation stops dispatch and preserves uncertain stop/worktree state", async () => {
     const f = await fixture(); await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();

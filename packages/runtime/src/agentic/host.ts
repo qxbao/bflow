@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import {
   AgentBindingReceiptSchema, AgentExecutionHandleSchema, AgentResultSchema, AgentRoleSchema, ApprovalDecisionSchema,
   JsonValueSchema, RoleMessageSchema, RunQuerySchema, SessionManifestSchema,
-  type AgentRole, type ApprovalDecision, type RoleMessage, type SessionManifest, type RunStore
+  type AgentRole, type RoleMessage, type SessionManifest, type RunStore
 } from "@bflow/contracts";
 import { authenticateNativeHerdrMessage } from "./herdr-ingress.js";
 import { callHost } from "./host-protocol.js";
@@ -19,6 +19,7 @@ import { COORDINATOR_TOOLS } from "./tools.js";
 import { openAgenticWorkspace, type AgenticWorkspaceHandle } from "./workspace.js";
 import { unwrap } from "./outbox.js";
 import { HostVerification, DEFAULT_HOST_CHECKS } from "./host-verification.js";
+import { HostReceiptJournal, type HumanHookProvenance } from "./host-receipts.js";
 import { redactString } from "../resilience/redaction.js";
 
 const execute = promisify(execFile);
@@ -49,7 +50,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   let manifest: SessionManifest | undefined;
   let quiesced = false, quiesceCompleted = false, closing = false;
   let scheduler: Promise<unknown> | undefined, schedulerError: string | undefined;
-  const humanDecisions = new Map<string, ApprovalDecision>();
+  const receipts = new HostReceiptJournal(join(configuration.directory, "authentication-receipts"), configuration.repositoryPath, configuration.sessionId);
   const roleTokens = new Map<string, AgentRole>();
   const launch: Record<string, RoleLaunchDescriptor> = {};
   const executable = fileURLToPath(import.meta.url);
@@ -124,7 +125,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
     throw new Error("Native delivery acknowledgement is uncertain; inspect/reconcile before replay");
   };
-  const verification = new HostVerification(() => requireWorkspace().runtime, () => requireWorkspace().runtime.ports.artifactStore);
+  const verification = new HostVerification(() => requireWorkspace().runtime, () => requireWorkspace().runtime.ports.artifactStore, receipts);
   const nativeSessions = new Map<string, {role: AgentRole; sessionId: string}>();
   try { for (const [pane, value] of Object.entries(record(JSON.parse(await readFile(join(configuration.directory, "native-sessions.json"), "utf8"))))) {
     const session = record(value); nativeSessions.set(pane, { role: AgentRoleSchema.parse(session.role), sessionId: textField(session.sessionId) });
@@ -176,15 +177,17 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       authenticateEvidence: async (result, message) => await authenticateNativeHerdrMessage(message) && verification.authenticateEvidence(result),
       authenticateGateResult: async (result, message) => await authenticateNativeHerdrMessage(message) && verification.authenticateGate(result),
       projectApprovalRequired: () => configuration.policy?.sdd.approvalRequired === true,
-      authorizeHuman: async decision => digest(humanDecisions.get(decision.approvalId)) === digest(decision),
+      authorizeHuman: decision => receipts.authenticateHuman(decision),
+      recoveredHumanDecisions: await receipts.humanDecisions(),
       onNativeDelivery: async message => { deliveredMessageIds.add(message.message_id); },
-      onHumanDecision: async decision => { if (!humanHookActive) throw new Error("Human approval requires physical user input hook"); humanDecisions.set(decision.approvalId, ApprovalDecisionSchema.parse(decision)); }
+      onHumanDecision: async decision => { if (!humanHookProvenance) throw new Error("Human approval requires physical user input hook");
+        await receipts.recordHuman(ApprovalDecisionSchema.parse(decision), humanHookProvenance); }
     });
     manifest = accepted;
     return null;
   };
   const deliveredMessageIds = new Set<string>();
-  let humanHookActive = false;
+  let humanHookProvenance: HumanHookProvenance | undefined;
   let userQueue: Promise<unknown> = Promise.resolve();
   const roleCall = async (role: AgentRole, input: unknown) => {
     const args = record(input); const name = textField(args.name); const parameters = record(JsonValueSchema.parse(args.arguments ?? {}));
@@ -290,17 +293,22 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       }
       if (method === "user_prompt") {
         if (role !== "conversation" || quiesced) throw new Error("Only active Conversation accepts user input");
-        const input = record(params); await principal(role, textField(input.paneId));
+        const input = record(params); const binding = await principal(role, textField(input.paneId));
         const hook = record(input.hook); if (hook.hook_event_name !== "UserPromptSubmit") throw new Error("Physical user input hook required");
-        const prompt = textField(hook.prompt); textField(hook.session_id);
+        const prompt = textField(hook.prompt), nativeSessionId = textField(hook.session_id);
+        if (!binding.session || binding.session.value !== nativeSessionId) throw new Error("Physical user input native session mismatch");
         try { const candidate = JSON.parse(prompt); if (candidate && typeof candidate === "object" && ("schema_version" in candidate || "sender" in candidate || "type" in candidate)) throw new Error("Role envelopes cannot become authenticated human input"); }
         catch (error) { if (!(error instanceof SyntaxError)) throw error; }
         const work = userQueue.catch(() => undefined).then(async () => {
-          humanHookActive = true;
-          try { return requireWorkspace().conversation.handleUserTurn({ sessionId: manifest!.conversationSessionId,
-            messageId: `user-${digest([hook.session_id, hook.prompt, hook.transcript_path, randomUUID()])}`, content: prompt,
-            provenance: { origin: "user", authenticatedUser: true, userId: `local-user-${process.getuid?.() ?? "local"}`, paneId: input.paneId, channel: "herdr_attach" } }); }
-          finally { humanHookActive = false; }
+          if (digest(await principal(role, textField(input.paneId))) !== digest(binding)) throw new Error("Physical user input pane changed while queued");
+          const messageId = `user-${digest([hook.session_id, hook.prompt, hook.transcript_path, randomUUID()])}`;
+          const userId = `local-user-${process.getuid?.() ?? "local"}`;
+          humanHookProvenance = { origin: "UserPromptSubmit", binding, nativeSessionId, userId, messageId,
+            conversationSessionId: manifest!.conversationSessionId, promptDigest: digest(prompt) };
+          try { return await requireWorkspace().conversation.handleUserTurn({ sessionId: manifest!.conversationSessionId,
+            messageId, content: prompt,
+            provenance: { origin: "user", authenticatedUser: true, userId, paneId: input.paneId, channel: "herdr_attach" } }); }
+          finally { humanHookProvenance = undefined; }
         }); userQueue = work; return work;
       }
       throw new Error("Role cannot call host lifecycle methods");
