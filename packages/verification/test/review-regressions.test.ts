@@ -110,3 +110,45 @@ describe("P17 review regressions", () => {
       finding.details.criterionId === "ac-review" && finding.details.responsibleRole === "developer")).toBe(true);
   });
 });
+
+describe("P16 contract strategy compatibility", () => {
+  it("allows append-only TDD receipt metadata without requiring changes to the approved policy", async () => {
+    const f = await fixture();
+    const engine = new VerificationEngine(f.ports);
+    const outcome = await engine.verify(f.plan, engine.start(f.plan, "dossier-cycle"), await f.change());
+    const strategy = { ...f.input.strategy, metadata: { ...f.input.strategy.metadata, tddEvidence: [outcome.result] } };
+    const plan = createVerificationPlan({ ...f.input, strategy });
+    expect(plan.strategy.metadata?.tddEvidence).toHaveLength(1);
+    expect(plan.specification).toEqual(f.specification);
+    expect(() => createVerificationPlan({ ...f.input, strategy: { ...strategy, targetCommands: [] } })).toThrow(/conflicting/i);
+  });
+
+  it.each(["drop", "alter"])("rejects %s of receipts already attached to the approved specification", async kind => {
+    const f = await fixture();
+    const engine = new VerificationEngine(f.ports);
+    const outcome = await engine.verify(f.plan, engine.start(f.plan, "dossier-cycle"), await f.change());
+    const strategy = { ...f.input.strategy, metadata: { tddEvidence: [outcome.result] } };
+    const document = { ...f.specification, testStrategy: strategy };
+    const artifactRef = await f.store.seed("approved-dossier-spec", "document", document);
+    const specification = { ...document, artifactRef };
+    expect(() => createVerificationPlan({ ...f.input, specification, strategy })).not.toThrow();
+    const tddEvidence = kind === "drop" ? [] : [{ ...outcome.result, verificationId: "altered-receipt" }];
+    expect(() => createVerificationPlan({ ...f.input, specification,
+      strategy: { ...strategy, metadata: { tddEvidence } } })).toThrow(/prefix/i);
+  });
+
+  it("rejects receipts belonging to another task", async () => {
+    const f = await fixture();
+    const engine = new VerificationEngine(f.ports);
+    const outcome = await engine.verify(f.plan, engine.start(f.plan, "dossier-cycle"), await f.change());
+    const strategy = { ...f.input.strategy, metadata: { tddEvidence: [{ ...outcome.result, taskId: "other-task" }] } };
+    expect(() => createVerificationPlan({ ...f.input, strategy })).toThrow(/run.task/i);
+  });
+
+  it("rejects invalid receipt shapes even though receipts are not part of immutable policy comparison", async () => {
+    const f = await fixture();
+    expect(() => createVerificationPlan({ ...f.input, strategy: {
+      ...f.input.strategy, metadata: { tddEvidence: [{ status: "passed" }] }
+    } })).toThrow();
+  });
+});
