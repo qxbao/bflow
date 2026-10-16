@@ -38,6 +38,8 @@ export interface ToolObservation {
   realPath: string | null;
   version: string | null;
   binaryDigest: string | null;
+  /** Directory the tool was found in when it is not on PATH, regardless of final status. */
+  pathMissingDir: string | null;
   required: boolean;
   diagnostics: string[];
 }
@@ -201,6 +203,7 @@ async function probeOne(
     realPath: null,
     version: null,
     binaryDigest: null,
+    pathMissingDir: null,
     required,
     diagnostics: []
   };
@@ -225,6 +228,7 @@ async function probeOne(
     return obs;
   }
   obs.resolvedPath = found;
+  if (!onPath) obs.pathMissingDir = path.dirname(found);
   try {
     obs.realPath = await realpath(found);
     obs.binaryDigest = await sha256File(obs.realPath);

@@ -11,7 +11,7 @@ import { z } from "zod";
 import { unsupportedVersion, validationError } from "./errors.js";
 import { ToolInstallDescriptorSchema } from "./installer-registry.js";
 
-const CREDENTIAL_VALUE = /(sk-|ghp_|xox[bp]-|AKIA)[A-Za-z0-9]/;
+const CREDENTIAL_VALUE = /(?:^|[^A-Za-z0-9])(?:sk-|ghp_|xox[bp]-|AKIA)[A-Za-z0-9]/;
 const CREDENTIAL_KEY = /(token|secret|password|api[_-]?key)/i;
 
 const EnvValueSchema = z.string().refine((v) => !CREDENTIAL_VALUE.test(v), "credential-looking value");

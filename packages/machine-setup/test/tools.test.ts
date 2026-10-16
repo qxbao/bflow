@@ -142,6 +142,20 @@ describe("probeTools", () => {
     expect(path.dirname(c.resolvedPath!)).toBe(dir);
     expect(c.resolvedPath).toBe(f);
     expect(c.version).toBe("2.0.1");
+    expect(c.pathMissingDir).toBe(dir);
+  });
+
+  it("keeps pathMissingDir when a later check overrides the status", async () => {
+    const dir = path.join(home, ".local", "bin");
+    await exe(dir, "node");
+    await exe(binDir, "git");
+    const obs = await probeTools(platform, runnerFor({ node: { stdout: "v20.0.0" }, git: { stdout: "git version 2.40.0" } }), {
+      required: REQ,
+      knownInstallDirs: KNOWN
+    });
+    expect(byId(obs, "node").status).toBe("version_mismatch");
+    expect(byId(obs, "node").pathMissingDir).toBe(dir);
+    expect(byId(obs, "git").pathMissingDir).toBeNull();
   });
 
   it("unparseable version", async () => {
@@ -230,6 +244,20 @@ describe("ToolInstallerRegistry", () => {
     expect(r.resolve("pnpm", "linux", ds)?.descriptor.method).toBe("npm");
     expect(r.resolve("pnpm", "win32", ds)).toBeNull();
     expect(r.resolve("git", "linux", ds)).toBeNull();
+  });
+
+  it("never picks a method that is not valid for the platform", () => {
+    const r = new ToolInstallerRegistry();
+    for (const id of ["npm-i", "win-i", "brew-i"]) r.register(new FakeInstaller(id));
+    const win = desc({ installerId: "win-i", method: "winget", platforms: ["linux", "darwin", "win32"] });
+    const brew = desc({ installerId: "brew-i", method: "homebrew", platforms: ["linux", "darwin", "win32"] });
+    const npm = desc({ installerId: "npm-i", method: "npm", platforms: ["linux", "darwin", "win32"] });
+    expect(r.resolve("pnpm", "linux", [win, npm])?.descriptor.method).toBe("npm");
+    expect(r.resolve("pnpm", "darwin", [win, npm])?.descriptor.method).toBe("npm");
+    expect(r.resolve("pnpm", "win32", [brew, npm])?.descriptor.method).toBe("npm");
+    expect(r.resolve("pnpm", "linux", [win])).toBeNull();
+    expect(r.resolve("pnpm", "darwin", [win])).toBeNull();
+    expect(r.resolve("pnpm", "win32", [brew])).toBeNull();
   });
 
   it("rejects unpinned and non-https descriptors", () => {
@@ -341,6 +369,15 @@ describe("loadMachineConfig", () => {
       const r = await loadMachineConfig(await write(l));
       expect(r.status).toBe("invalid");
       expect(r.error?.code).toBe("validation");
+    }
+  });
+
+  it("credential check does not flag token-internal prefixes", async () => {
+    const ok = { ...base(), services: [{ ...svcDef({}), serviceId: "task-runner", program: "/opt/disk-agent" }] };
+    expect((await loadMachineConfig(await write(ok))).status).toBe("valid");
+    for (const v of ["sk-abc123", "--key=ghp_abc"]) {
+      const bad = { ...base(), services: [{ ...svcDef({}), args: [v] }] };
+      expect((await loadMachineConfig(await write(bad))).status).toBe("invalid");
     }
   });
 

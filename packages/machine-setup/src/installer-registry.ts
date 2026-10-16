@@ -65,7 +65,9 @@ export class ToolInstallerRegistry {
       if (d.toolId !== toolId || !d.platforms.includes(platform)) return;
       const installer = this.installers.get(d.installerId);
       if (!installer) return;
-      candidates.push({ descriptor: d, installer, rank: prefs.indexOf(d.method), idx });
+      const rank = prefs.indexOf(d.method);
+      if (rank < 0) return;
+      candidates.push({ descriptor: d, installer, rank, idx });
     });
     candidates.sort((a, b) => a.rank - b.rank || a.idx - b.idx);
     const first = candidates[0];
