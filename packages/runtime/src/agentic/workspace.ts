@@ -58,8 +58,10 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
   unwrap(await transport.initialize({ runtimeId: `p19-${options.sessionId}`, configuration: {}, recoveryMode: true, initializedAt: new Date().toISOString() }));
   const roleConfigs: Record<string, unknown> = {};
   for (const [role, launch] of Object.entries(options.roleLaunch ?? {})) {
+    const topology = paneModule.getRoleTopologySpec(role);
+    if (!topology || topology.contractRole !== role) continue;
     const args = await paneModule.buildProviderRoleLaunchFromFiles({ ...launch, agentKind: manifest.panes.find(p => p.role === "coordinator")!.agentKind, role });
-    roleConfigs[role] = { args };
+    roleConfigs[topology.topologyRole] = { args };
   }
   const panes: PanePolicy = new paneModule.RolePaneManager({ config: { sessionId: options.sessionId,
     projectName: manifest.projectName, workspaceRoot: repository, conversationSessionId: manifest.conversationSessionId,
