@@ -5,7 +5,8 @@ import {
   PaneBindingSchema, QualityGateContextSchema, QualityGateResultSchema, RoleMessageSchema, SessionManifestSchema,
   SpecificationSchema, TestStrategySchema, VerificationCycleSchema, VerificationResultSchema,
   WorkflowDefinitionSchema, type AgentExecutionHandle, type ApprovalDecision,
-  type ArtifactReference, type JsonValue, type RoleMessage, type QualityGate, type QualityGateResult, type Specification
+  type ArtifactReference, type JsonValue, type RoleMessage, type QualityGate, type QualityGateResult, type Specification,
+  type PaneBinding, type TaskDefinition
 } from "@bflow/contracts";
 import { AgenticJournal, digest, json, record, strings, textField, type JournalState,
   type Outbound, type RunRecord, type SpecRecord, type TaskRecord } from "./journal.js";
@@ -222,9 +223,21 @@ export class AgenticWorkflowRuntime {
             throw new Error("Invalid conditional TDD evidence sender/scope");
           const task = run.tasks.find(item => item.taskId === result.taskId);
           if (!task) throw new Error("Evidence task missing");
+          const request = state.outbound.find(item => item.message.message_id === message.causation_id &&
+            item.message.type === "verification.requested" && record(item.message.payload).kind === "conditional_evidence");
+          if (request) {
+            if (!request.handle || request.handle.target.agentId !== message.sender.agent_id ||
+                request.handle.target.paneId !== message.sender.pane_id || request.message.recipient.role !== message.sender.role ||
+                record(request.message.payload).taskId !== result.taskId ||
+                record(request.message.payload).phase !== undefined && record(request.message.payload).phase !== record(result.metadata?.conditionalTdd).phase)
+              throw new Error("Policy evidence is not correlated to its assigned verifier");
+            if (request.status === "accepted") await outbox.renew(request);
+            else if (request.status !== "released") throw new Error("Policy evidence delivery is unresolved");
+          }
           if (!await this.ports.authenticateEvidence(result, message)) throw new Error("Untrusted independent TDD evidence");
           await this.verifyReferences(result.evidenceArtifacts, run.runId);
           task.spec.strategy = TestStrategySchema.parse(this.ports.policies.recordEvidence(task.spec.strategy, result));
+          if (request?.status === "accepted") await outbox.release(request);
         } else if (message.type === "review.verdict") {
           const result = QualityGateResultSchema.parse(message.payload);
           const outbound = state.outbound.find(out => out.message.message_id === message.causation_id);
@@ -550,6 +563,65 @@ export class AgenticWorkflowRuntime {
       if (!task || task.spec.specification.status !== "approved") throw new Error("No accepted task specification");
       this.ports.policies.assertReadyToImplement(task.spec.strategy);
       return json({ authorized: true, decisionId: task.spec.strategy.tddDecision.decisionId });
+    });
+  }
+  /** Trusted local tool guard. Keep current ownership and lease checks adjacent
+   * to file/commit operations; model arguments never supply the authority. */
+  async withDeveloperWorkspace<T>(bindingInput: PaneBinding, runId: string, taskId: string,
+    use: (task: TaskRecord, definition: TaskDefinition) => Promise<T>): Promise<T> {
+    const binding = PaneBindingSchema.parse(bindingInput);
+    return this.transaction(async (state, _save, core, outbox) => {
+      if (this.quiesced || binding.role !== "developer") throw new Error("Developer writes are quiesced or unauthorized");
+      const run = this.run(state, runId); this.live(run);
+      const task = run.tasks.find(item => item.taskId === taskId), definition = run.definition?.tasks.find(item => item.id === taskId);
+      const current = (await core.snapshot(runId)).tasks.find(item => item.taskId === taskId);
+      const out = state.outbound.find(item => item.handle?.requestId === current?.agentExecution?.requestId);
+      if (!task || !definition || task.spec.specification.status !== "approved" || current?.status !== "running" ||
+          !out?.handle || out.status !== "accepted" || out.handle.target.agentId !== binding.agentId || out.handle.target.paneId !== binding.paneId ||
+          out.handle.target.worktreePath !== binding.worktreePath || digest(out.handle.target.session) !== digest(binding.session) ||
+          task.worktrees.at(-1)?.worktreePath !== binding.worktreePath)
+        throw new Error("No current Developer assignment owns this task workspace");
+      await outbox.renew(out);
+      return use(task, definition);
+    });
+  }
+  /** A Developer requests a policy measurement, never a direct specialist dispatch. */
+  async requestPhaseVerification(binding: PaneBinding, runId: string, taskId: string, phase: string, sourceRevision: string): Promise<JsonValue> {
+    binding = PaneBindingSchema.parse(binding);
+    if (!/^[a-f0-9]{40}$/.test(sourceRevision)) throw new Error("Verification needs a committed source revision");
+    return this.transaction(async (state, save, core, outbox) => {
+      if (this.quiesced || binding.role !== "developer") throw new Error("Verification intake is quiesced or unauthorized");
+      const run = this.run(state, runId); this.live(run);
+      const task = run.tasks.find(item => item.taskId === taskId), current = (await core.snapshot(runId)).tasks.find(item => item.taskId === taskId);
+      const assignment = state.outbound.find(item => item.handle?.requestId === current?.agentExecution?.requestId);
+      if (!task || current?.status !== "running" || assignment?.status !== "accepted" || assignment.handle?.target.agentId !== binding.agentId ||
+          assignment.handle.target.paneId !== binding.paneId || assignment.handle.target.worktreePath !== binding.worktreePath ||
+          digest(assignment.handle.target.session) !== digest(binding.session))
+        throw new Error("Verification request does not own the current Developer assignment");
+      await outbox.renew(assignment);
+      const rawReceipts = task.spec.strategy.metadata?.tddEvidence ?? [];
+      if (!Array.isArray(rawReceipts)) throw new Error("Corrupt policy measurement history");
+      const receipts = rawReceipts.map(item => VerificationResultSchema.parse(item));
+      const recorded = receipts.find(item => record(item.metadata?.conditionalTdd).phase === phase);
+      if (recorded) return json({ alreadyRecorded: true, verificationId: recorded.verificationId });
+      const expected = task.spec.strategy.tddDecision.mode === "required" ? ["red", "green", "refactor"][receipts.length] : "verification";
+      if (phase !== expected) throw new Error(`Policy requires ${expected ?? "no additional"} measurement, not ${phase}`);
+      const previous = state.outbound.find(item => item.message.type === "verification.requested" && item.message.run_id === runId &&
+        record(item.message.payload).kind === "conditional_evidence" && record(item.message.payload).taskId === taskId &&
+        record(item.message.payload).phase === phase && record(item.message.payload).implementationAttemptId === current.attemptId);
+      if (previous) {
+        if (record(previous.message.payload).sourceRevision !== sourceRevision) throw new Error("Prior phase measurement is unresolved on another revision; reconcile it before retrying");
+        return json({ queued: true, messageId: previous.message.message_id, deliveryStatus: previous.status });
+      }
+      const id = `phase-${digest([runId, taskId, current.attemptId, phase, sourceRevision])}`;
+      outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: run.delegation.correlationId,
+        causation_id: assignment.message.message_id, run_id: runId, sender: { role: "coordinator" }, recipient: { role: "qa" },
+        type: "verification.requested", artifact_references: [], occurred_at: this.now(), idempotency_key: id,
+        payload: json({ kind: "conditional_evidence", phase, runId, taskId, sourceRevision, implementationAttemptId: current.attemptId,
+          specification: task.spec.specification, strategy: task.spec.strategy,
+          instruction: "Run record_behavioral_verification for this exact phase and revision using the owner-configured independent runner. Never supply measured output yourself." })
+      }), "qa", `phase-${taskId}-${phase}`, `phase-${current.attemptId}-${phase}`, ["testing"]);
+      await save(); return json({ queued: true, messageId: id });
     });
   }
   private verificationPlan(run: RunRecord, task?: TaskRecord): VerificationPlan {
