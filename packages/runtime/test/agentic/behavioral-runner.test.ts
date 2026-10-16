@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 import { afterEach, describe, expect, it } from "vitest";
 import { PaneBindingSchema, QualityGateContextSchema, SpecificationSchema } from "@bflow/contracts";
 import { openFilesystemArtifactStore } from "@bflow/artifact-store";
@@ -9,20 +10,23 @@ import { TestStrategyResolver, assertEvidenceComplete, assertReadyToImplement, r
 import { assessment, spec } from "../../../test-strategy/test/fixtures.js";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
 import { HostVerification } from "../../src/agentic/host-verification.js";
+import { parseVitestJson } from "../../src/agentic/vitest-json.js";
 import { measureBehavior, parseBehavioralCommands } from "../../src/agentic/behavioral-runner.js";
 import type { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 const testName = "ac-1: Target behavior matches expected output";
 const testSource = `const {test}=require('node:test'); const assert=require('node:assert/strict'); const value=require('../source.cjs'); test(${JSON.stringify(testName)},()=>assert.equal(value(2),4));\n`;
-async function fixture(taskType = "bugfix") {
+const vitestCli = createRequire(import.meta.url).resolve("vitest/vitest.mjs");
+const vitestSource = `const value=require('../source.cjs'); it(${JSON.stringify(testName)},()=>expect(value(2)).toBe(4));\n`;
+async function fixture(taskType = "bugfix", reporter: "node_tap" | "vitest_json" = "node_tap") {
   const root = await mkdtemp("/tmp/bflow-measurement-test-"), cwd = join(root, "repo"); await mkdir(cwd); await mkdir(join(cwd, "test"));
   const git = (...args: string[]) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", ...args], { cwd, encoding: "utf8" }).trim();
   git("init", "-b", "main"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.test");
   await writeFile(join(cwd, "source.cjs"), "module.exports=x=>x+1;\n"); git("add", "."); git("commit", "-m", "baseline"); const base = git("rev-parse", "HEAD");
   const commit = (message: string) => { git("add", "."); git("commit", "-m", message); return git("rev-parse", "HEAD"); };
-  await writeFile(join(cwd, "test/behavior.test.cjs"), testSource); const redRevision = commit("failing acceptance test");
-  const command = parseBehavioralCommands([{ id: "node-unit", command: "owner:test-unit", executable: process.execPath, args: ["--test", "--test-reporter=tap", "test/behavior.test.cjs"], method: "unit_test", levels: ["unit", "regression"], testNames: [testName], testPaths: ["test/behavior.test.cjs"], timeoutMs: 3000 }])[0]!;
+  await writeFile(join(cwd, "test/behavior.test.cjs"), reporter === "vitest_json" ? vitestSource : testSource); const redRevision = commit("failing acceptance test");
+  const command = parseBehavioralCommands([{ id: "node-unit", command: "owner:test-unit", executable: process.execPath, args: reporter === "vitest_json" ? [vitestCli, "run", "--globals", "--reporter=json", "--no-cache", "--maxWorkers=1", "--minWorkers=1", "test/behavior.test.cjs"] : ["--test", "--test-reporter=tap", "test/behavior.test.cjs"], ...(reporter === "vitest_json" ? { reporter } : {}), method: "unit_test", levels: ["unit", "regression"], testNames: [testName], testPaths: ["test/behavior.test.cjs"], timeoutMs: 3000 }])[0]!;
   const policyAssessment = assessment(taskType);
   const draft = SpecificationSchema.parse({ ...spec(assessment(taskType, { ...(taskType === "documentation" ? { changeImpact: { ...policyAssessment.changeImpact, behaviorChanged: false, deterministic: false, regressionReproducible: false } } : {}), infrastructure: { readiness: "ready", commands: [{ method: "unit_test", command: command.command, level: "unit" }] } })), affectedPaths: taskType === "documentation" ? ["guide.md"] : ["source.cjs", "test/behavior.test.cjs"] });
   let strategy = new TestStrategyResolver().resolve(draft);
@@ -40,8 +44,8 @@ async function fixture(taskType = "bugfix") {
   return { cwd, git, commit, command, specification, redRevision, base, binding, host, restart(commands = [command]) { return new HostVerification(() => runtime, () => opened.value, new HostReceiptJournal(receiptsPath, cwd, "session-1"), commands); }, get strategy() { return strategy; }, accept(result: unknown) { strategy = recordEvidence(strategy, result); } };
 }
 describe("independent behavioral command measurements", () => {
-  it("observes Red before authorization, then Green/Refactor with immutable tests and trusted artifacts", async () => {
-    const f = await fixture();
+  it.each(["node_tap", "vitest_json"] as const)("%s observes Red before authorization, then Green/Refactor with immutable tests and trusted artifacts", async reporter => {
+    const f = await fixture("bugfix", reporter);
     expect(() => assertReadyToImplement(f.strategy)).toThrow(/Red/);
     const red = await f.host.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "red" });
     expect(red.result.status).toBe("failed"); expect(await f.host.authenticateEvidence(red.result)).toBe(true);
@@ -60,8 +64,8 @@ describe("independent behavioral command measurements", () => {
     expect(await f.host.authenticateEvidence({ ...green.result, status: "failed" })).toBe(false);
     expect(f.git("worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1);
   });
-  it("replays an identical durable phase after host restart and rejects a changed verifier binding", async () => {
-    const f = await fixture();
+  it.each(["node_tap", "vitest_json"] as const)("%s replays an identical durable phase after host restart and rejects a changed verifier binding", async reporter => {
+    const f = await fixture("bugfix", reporter);
     const first = await f.host.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "red" });
     const restored = f.restart();
     expect(await restored.authenticateEvidence(first.result)).toBe(true);
@@ -110,16 +114,16 @@ describe("independent behavioral command measurements", () => {
     await writeFile(join(f.cwd, "uncommitted.txt"), "dirty\n");
     await expect(measureBehavior(f.command, f.cwd, f.redRevision)).rejects.toThrow("clean worktree");
   });
-  it.each(["refactoring", "documentation"])("requires real passing verification when policy mode for %s is not required", async taskType => {
-    const f = await fixture(taskType); expect(f.strategy.tddDecision.mode).not.toBe("required");
+  it.each([["refactoring", "node_tap"], ["documentation", "node_tap"], ["refactoring", "vitest_json"], ["documentation", "vitest_json"]] as const)("requires real passing verification for %s with %s", async (taskType, reporter) => {
+    const f = await fixture(taskType, reporter); expect(f.strategy.tddDecision.mode).not.toBe("required");
     expect(() => assertEvidenceComplete(f.strategy)).toThrow();
     await expect(f.host.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "verification" })).rejects.toThrow("Behavioral acceptance failed");
     await writeFile(join(f.cwd, "source.cjs"), "module.exports=x=>x*2;\n"); f.commit("working behavior");
     const result = await f.host.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "verification" }); f.accept(result.result);
     expect(() => assertEvidenceComplete(f.strategy)).not.toThrow();
   });
-  it("measures both task and workflow gates at the supplied exact committed revision and blocks regressions", async () => {
-    const f = await fixture();
+  it.each(["node_tap", "vitest_json"] as const)("%s measures task and workflow gates at the exact committed revision and blocks regressions", async reporter => {
+    const f = await fixture("bugfix", reporter);
     const definition = f.host.behavioralChecks()[0]!;
     const evaluate = (scope: string, revision: string) => f.host.behavioralGates()[0]!.evaluate(QualityGateContextSchema.parse({ runId: "run-1", taskId: scope === "task" ? "task-1" : "workflow-finalization", attemptId: `attempt-${scope}`, definition: { ...definition, configuration: { ...definition.configuration, criterionIds: ["ac-1"] } }, artifacts: [], input: { sourceRevision: revision, sourceWorktreePath: f.cwd, specFingerprint: "a".repeat(64), scope } }));
     const failed = await evaluate("task", f.redRevision); expect(failed.ok && failed.value.status).toBe("failed");
@@ -132,11 +136,65 @@ describe("independent behavioral command measurements", () => {
     await writeFile(join(f.cwd, "test/behavior.test.cjs"), "throw new Error('infrastructure failure');\n"); const broken = f.commit("break tests");
     expect((await evaluate("workflow", broken)).ok).toBe(false);
   });
+  it.each([
+    ["zero tests", "// no tests\n"],
+    ["skipped tests", `it.skip(${JSON.stringify(testName)},()=>{});\n`],
+    ["todo tests", `it.todo(${JSON.stringify(testName)});\n`],
+    ["file runtime error", "throw new Error('runtime unavailable');\n"],
+    ["ordinary test exception", `it(${JSON.stringify(testName)},()=>{throw new Error('unrelated infrastructure')});\n`],
+    ["unhandled rejection beside an assertion failure", `it(${JSON.stringify(testName)},async()=>{Promise.reject(new Error('hidden runtime failure'));await new Promise(r=>setTimeout(r,20));expect(1).toBe(2)});\n`],
+    ["hook failure beside an assertion", `afterAll(()=>{throw new Error('cleanup failed')}); ${vitestSource}`]
+  ])("Vitest blocks %s before minting evidence", async (_label, source) => {
+    const f = await fixture("bugfix", "vitest_json"); await writeFile(join(f.cwd, "test/behavior.test.cjs"), source); f.commit("invalid Vitest evidence");
+    await expect(f.host.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "red" })).rejects.toThrow();
+    expect(() => assertReadyToImplement(f.strategy)).toThrow(/Red/);
+  });
+  it("Vitest preserves Red test blobs and rejects unrelated assertion failures", async () => {
+    const f = await fixture("bugfix", "vitest_json");
+    const red = await f.host.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "red" }); f.accept(red.result);
+    await writeFile(join(f.cwd, "source.cjs"), "module.exports=x=>x*2;\n");
+    await writeFile(join(f.cwd, "test/behavior.test.cjs"), vitestSource + "// changed test identity\n"); f.commit("replace Red test");
+    await expect(f.host.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "green" })).rejects.toThrow("exact committed Red test files");
+    const other = await fixture("bugfix", "vitest_json");
+    await writeFile(join(other.cwd, "source.cjs"), "module.exports=x=>x*2;\n");
+    await writeFile(join(other.cwd, "test/behavior.test.cjs"), vitestSource + "it('unrelated health check',()=>expect(false).toBe(true));\n"); other.commit("unrelated assertion");
+    const host = other.restart([{ ...other.command, testNames: [testName, "unrelated health check"] }]);
+    await expect(host.behavioralEvidence(other.binding, { runId: "run-1", taskId: "task-1", phase: "red" })).rejects.toThrow("unrelated test");
+  });
+  it("validates real Vitest JSON aggregate/leaf counters, full names, statuses, failures and completion", async () => {
+    const f = await fixture("bugfix", "vitest_json");
+    await writeFile(join(f.cwd, "test/behavior.test.cjs"), `const value=require('../source.cjs');describe('nested',()=>{describe('math',()=>{it(${JSON.stringify(testName)},()=>expect(value(2)).toBe(4))})});\n`);
+    const revision = f.commit("nested accepted tests"), names = [`nested math ${testName}`];
+    const measured = await measureBehavior({ ...f.command, testNames: names }, f.cwd, revision);
+    expect(parseVitestJson(measured.outcome, names)).toMatchObject({ tests: 1, passed: 0, failed: 1, targetFailure: true });
+    const report = JSON.parse(measured.outcome.stdout);
+    for (const mutate of [
+      (value: any) => value.numTotalTests++, (value: any) => value.numPassedTests++, (value: any) => value.numFailedTests++,
+      (value: any) => value.numTotalTestSuites++, (value: any) => value.numPassedTestSuites++, (value: any) => value.numFailedTestSuites++,
+      (value: any) => value.numPendingTestSuites++, (value: any) => value.numPendingTests++, (value: any) => value.numTodoTests++,
+      (value: any) => value.success = true, (value: any) => value.testResults[0].status = "passed",
+      (value: any) => value.testResults[0].message = "runtime unavailable", (value: any) => value.testResults[0].assertionResults[0].status = "skipped",
+      (value: any) => value.testResults[0].assertionResults[0].fullName = "renamed", (value: any) => value.testResults[0].assertionResults[0].failureMessages = [],
+      (value: any) => value.testResults[0].assertionResults[0].failureMessages = ["Error: database unavailable"],
+      (value: any) => value.testResults[0].assertionResults.push(value.testResults[0].assertionResults[0])
+    ]) {
+      const changed = structuredClone(report); mutate(changed);
+      expect(() => parseVitestJson({ ...measured.outcome, stdout: JSON.stringify(changed) }, names)).toThrow();
+    }
+    expect(() => parseVitestJson({ ...measured.outcome, stderr: "" }, names)).toThrow("runtime errors");
+    expect(() => parseVitestJson({ ...measured.outcome, stdout: measured.outcome.stdout.slice(0, -4) }, names)).toThrow("complete Vitest JSON");
+    expect(() => parseVitestJson({ ...measured.outcome, exitCode: 0 }, names)).toThrow("exit code");
+    expect(() => parseVitestJson({ ...measured.outcome, timedOut: true }, names)).toThrow("infrastructure");
+    expect(() => parseVitestJson(measured.outcome, ["different identity"])).toThrow("identities");
+  });
   it("rejects unsupported owner configuration and unmapped automated specification methods", async () => {
     const f = await fixture();
     expect(() => parseBehavioralCommands([{ ...f.command, executable: "node" }])).toThrow("absolute");
     expect(() => parseBehavioralCommands([{ ...f.command, testPaths: ["../test.cjs"] }])).toThrow("safe");
     expect(() => parseBehavioralCommands([{ ...f.command, success: true }])).toThrow("Unknown");
+    expect(() => parseBehavioralCommands([{ ...f.command, reporter: "unknown" }])).toThrow("reporter");
+    expect(parseBehavioralCommands([{ ...f.command, reporter: "node_tap" }])[0]?.reporter).toBe("node_tap");
+    expect(f.command.reporter).toBeUndefined();
     expect(() => f.host.assertSupported({ ...f.specification, acceptanceCriteria: [{ ...f.specification.acceptanceCriteria[0], verificationMethod: "static_analysis" }] })).toThrow("No owner-configured");
   });
 });

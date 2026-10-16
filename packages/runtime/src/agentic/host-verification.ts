@@ -106,7 +106,7 @@ export class HostVerification {
         if (!mapping?.testNames.length || !this.commands.some(command => command.method === criterion.verificationMethod && mapping.testNames.every(name => command.testNames.includes(name)))) throw new Error(`No complete owner-configured test mapping for ${criterion.id}`);
       }
       for (const command of strategy.targetCommands) if (!this.commands.some(config => config.command === command)) throw new Error(`No owner-configured argv for ${command}`);
-      if (strategy.coverageThresholdPercent !== undefined) throw new Error("Configured TAP runner does not measure aggregate coverage");
+      if (strategy.coverageThresholdPercent !== undefined) throw new Error("Configured behavioral reporters do not measure aggregate coverage");
     }
   }
   behavioralGates(): QualityGate[] {

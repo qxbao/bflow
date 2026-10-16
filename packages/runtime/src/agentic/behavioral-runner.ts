@@ -3,15 +3,17 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import { QualityGateDefinitionSchema, type QualityGateDefinition } from "@bflow/contracts";
 import type { QualityCommandOutcome } from "@bflow/quality-gates";
 import { digest, record, textField } from "./journal.js";
+import { parseVitestJson } from "./vitest-json.js";
 
 export interface BehavioralCommand {
   id: string; command: string; executable: string; args: string[];
   method: "unit_test" | "integration_test" | "e2e_test";
   levels: ("unit" | "integration" | "e2e" | "property" | "regression" | "smoke")[];
-  testNames: string[]; testPaths: string[]; timeoutMs: number; maxOutputBytes?: number;
+  testNames: string[]; testPaths: string[]; reporter?: "node_tap" | "vitest_json"; timeoutMs: number; maxOutputBytes?: number;
 }
 const permittedLevels: Record<BehavioralCommand["method"], readonly string[]> = {
   unit_test: ["unit", "property", "regression"], integration_test: ["integration", "regression", "smoke"], e2e_test: ["e2e", "regression", "smoke"]
@@ -26,16 +28,17 @@ export function parseBehavioralCommands(input: unknown): BehavioralCommand[] {
   if (!Array.isArray(input)) throw new Error("behavioralCommands must be an array");
   const commands = input.map(raw => {
     const value = record(raw);
-    if (Object.keys(value).some(key => !["id", "command", "executable", "args", "method", "levels", "testNames", "testPaths", "timeoutMs", "maxOutputBytes"].includes(key))) throw new Error("Unknown behavioral command configuration field");
+    if (Object.keys(value).some(key => !["id", "command", "executable", "args", "method", "levels", "testNames", "testPaths", "timeoutMs", "maxOutputBytes", "reporter"].includes(key))) throw new Error("Unknown behavioral command configuration field");
     const id = textField(value.id), command = textField(value.command), executable = textField(value.executable);
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) || executable.includes("\0") || !isAbsolute(executable)) throw new Error("Behavioral executable must be an absolute owner-configured path and id must be safe");
     if (!["unit_test", "integration_test", "e2e_test"].includes(String(value.method))) throw new Error("Unsupported behavioral method");
     const method = value.method as BehavioralCommand["method"], levels = strings(value.levels, "levels") as BehavioralCommand["levels"];
     if (levels.some(level => !permittedLevels[method].includes(level))) throw new Error("Behavioral test levels do not match method");
+    if (value.reporter !== undefined && value.reporter !== "node_tap" && value.reporter !== "vitest_json") throw new Error("Unsupported behavioral reporter");
     const args = strings(value.args, "argv", false), testNames = strings(value.testNames, "test names"), testPaths = strings(value.testPaths, "test paths");
     if (new Set(testNames).size !== testNames.length || new Set(testPaths).size !== testPaths.length || testPaths.some(path => path.startsWith("/") || path.includes("\\") || path.includes(":") || path.split("/").some(part => !part || part === "." || part === ".."))) throw new Error("Behavioral test identities/paths must be unique and safe");
     if (!Number.isSafeInteger(value.timeoutMs) || Number(value.timeoutMs) < 1 || Number(value.timeoutMs) > 2_147_423_647 || value.maxOutputBytes !== undefined && (!Number.isSafeInteger(value.maxOutputBytes) || Number(value.maxOutputBytes) < 1)) throw new Error("Invalid behavioral execution bounds");
-    return { id, command, executable, args, method, levels, testNames, testPaths, timeoutMs: Number(value.timeoutMs), ...(value.maxOutputBytes === undefined ? {} : { maxOutputBytes: Number(value.maxOutputBytes) }) };
+    return { id, command, executable, args, method, levels, testNames, testPaths, ...(value.reporter === undefined ? {} : { reporter: value.reporter as NonNullable<BehavioralCommand["reporter"]> }), timeoutMs: Number(value.timeoutMs), ...(value.maxOutputBytes === undefined ? {} : { maxOutputBytes: Number(value.maxOutputBytes) }) };
   });
   if (new Set(commands.map(value => value.id)).size !== commands.length || new Set(commands.map(value => value.command)).size !== commands.length) throw new Error("Duplicate behavioral command identity");
   return commands;
@@ -91,13 +94,15 @@ export async function measureBehavior(command: BehavioralCommand, cwd: string, r
     await verificationGit(cwd, ["worktree", "add", "--detach", checkout, revision]); added = true;
     const module = await import(new URL("../../../quality-gates/dist/index.js", import.meta.url).href);
     const env: Record<string, string> = { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", HOME: temporary, TMPDIR: temporary };
-    const result = await module.createQualityCommandRunner().run({ executable: command.executable, args: command.args, cwd: checkout, env, timeoutMs: command.timeoutMs, maxOutputBytes: command.maxOutputBytes ?? 1_048_576 });
+    // The official JSON reporter omits runtime errors. A fixed host companion attests its onFinished errors argument.
+    const args = command.reporter === "vitest_json" ? [...command.args, `--reporter=${fileURLToPath(new URL("../../dist/agentic/vitest-runtime-reporter.js", import.meta.url))}`] : command.args;
+    const result = await module.createQualityCommandRunner().run({ executable: command.executable, args, cwd: checkout, env, timeoutMs: command.timeoutMs, maxOutputBytes: command.maxOutputBytes ?? 1_048_576 });
     if (!result.ok) throw new Error(`Behavioral command invocation failed: ${result.error.message}`);
     const outcome = result.value as QualityCommandOutcome;
     await assertPinnedRevision(checkout, revision);
     if (await verificationGit(checkout, ["status", "--porcelain=v1", "--ignored=matching", "--untracked-files=all", "-z"])) throw new Error("Behavioral execution generated files outside the committed revision");
     await assertPinnedRevision(cwd, revision);
-    return { sourceRevision: revision, command: command.command, commandId: command.id, method: command.method, testBlobs, ...parseNodeTap(outcome, command.testNames), outcome };
+    return { sourceRevision: revision, command: command.command, commandId: command.id, method: command.method, testBlobs, ...(command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames) : parseNodeTap(outcome, command.testNames)), outcome };
   } finally {
     if (added) await verificationGit(cwd, ["worktree", "remove", "--force", checkout]);
     await rm(temporary, { recursive: true, force: true });
