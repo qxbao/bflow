@@ -104,6 +104,7 @@ and integration limits. Start with [Getting Started](docs/guide/getting-started.
 | [`@bflow/test-strategy`](packages/test-strategy) | Conditional TDD policy, criterion mappings and Red/Green/refactor evidence checks (P16); enforced by the implemented P19 host composition |
 | [`@bflow/verification`](packages/verification) | Independent task/workflow verification, criterion evidence, Reviewer/QA checks, bounded rework and escalation (P17); composed by P19 with trusted host gates and authenticated evidence |
 | [`@bflow/git-orchestrator`](packages/git-orchestrator) | Parallel task worktrees, ownership checks, stored patches, recoverable dependency-ordered integration, conflict handoff, workflow verification and provider PR support (P18); composed by P19; requires Linux/local Git |
+| [`@bflow/mcp-gateway`](packages/mcp-gateway) | Shared MCP service registry, loopback Streamable HTTP server, stdio-to-HTTP bridge, sharing/isolation policy enforcement, exclusive resource leases with fencing tokens, and process/memory/latency metrics (P27); P30 Runtime composition pending |
 | [`@bflow/quality-gates`](packages/quality-gates) | Preset command evaluators, workspace security policies, and RBAC governance |
 
 ---
@@ -148,6 +149,9 @@ pnpm --filter @bflow/test-strategy test
 
 # Run Git Integration Engine tests (real temporary repositories and SIGKILL recovery)
 pnpm --filter @bflow/git-orchestrator test
+
+# Run Shared MCP Gateway tests
+pnpm --filter @bflow/mcp-gateway test
 ```
 
 ---
