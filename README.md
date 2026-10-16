@@ -85,6 +85,7 @@ All commands support `-j, --json` for structured JSON output and `-h, --help` fo
 | [`@bflow/specification`](packages/specification) | Adaptive specification classification, validation, versioning, traceability and approval policy (P15); Runtime composition is scheduled for P19 |
 | [`@bflow/test-strategy`](packages/test-strategy) | Conditional TDD policy, required verification methods, criterion mappings and Red/Green/refactor evidence checks (P16); Runtime enforcement is scheduled for P19 |
 | [`@bflow/verification`](packages/verification) | Independent task/workflow verification, criterion evidence, Reviewer/QA checks, bounded rework and escalation (P17); requires trusted host gates and P19 Runtime composition |
+| [`@bflow/git-orchestrator`](packages/git-orchestrator) | Parallel task worktrees, ownership checks, stored patches, recoverable dependency-ordered integration, conflict handoff, workflow verification and provider PR support (P18); requires Linux/local Git and P19 Runtime composition |
 | [`@bflow/quality-gates`](packages/quality-gates) | Preset command evaluators, workspace security policies, and RBAC governance |
 
 ---
@@ -126,6 +127,9 @@ pnpm --filter @bflow/specification test
 
 # Run Conditional TDD Policy Engine tests
 pnpm --filter @bflow/test-strategy test
+
+# Run Git Integration Engine tests (real temporary repositories and SIGKILL recovery)
+pnpm --filter @bflow/git-orchestrator test
 ```
 
 ---

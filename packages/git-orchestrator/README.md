@@ -174,5 +174,5 @@ local validated configuration/journal APIs while all exchanged SDLC evidence,
 artifact operations, verification results and role messages use contracts.
 Integration owner must review any future shared Git port with its compatibility
 plan; this implementation does not amend contracts or scheduler APIs. Root
-TypeScript references and lockfile importer wiring also remain integration-owner
-changes; run this package's build explicitly until those shared changes are accepted.
+TypeScript references and the lockfile importer include this package, so the root
+build and test commands also cover P18. Runtime composition remains P19 work.
