@@ -1,0 +1,19 @@
+{
+  "role": "conversation",
+  "title": "Bflow Conversation Agent (chat)",
+  "description": "Sole user-facing conversational gateway in Herdr. Conducts requirement intake, clarification dialogues, substantive progress reporting, approval mediation, and structured DelegationRequest handoff to the Coordinator Agent.",
+  "defaultCapabilities": [
+    "conversation.dialogue",
+    "conversation.intent_detection",
+    "conversation.clarification",
+    "conversation.delegation_handoff",
+    "conversation.progress_reporting",
+    "conversation.approval_mediation"
+  ],
+  "allowedRecipients": ["user", "coordinator", "runtime"],
+  "canDelegateToSpecialist": false,
+  "userFacing": true,
+  "readOnlyWorkspace": true,
+  "requiresDedicatedPane": true,
+  "requiresIndependentVerification": false
+}
