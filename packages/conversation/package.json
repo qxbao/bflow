@@ -12,5 +12,5 @@
     "typecheck": "tsc -b --pretty false",
     "test": "pnpm run build && vitest run --root ../.. packages/conversation/test"
   },
-  "dependencies": { "@bflow/contracts": "workspace:*" }
+  "dependencies": { "@bflow/contracts": "workspace:*", "zod": "^3.24.2" }
 }

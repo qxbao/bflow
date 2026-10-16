@@ -63,9 +63,15 @@ async function findTsFiles(dir) {
 
 const importRegex = /(?:import|export)\s+.*?from\s+["']([^"']+)["']|import\s*\(\s*["']([^"']+)["']\s*\)/g;
 
-for (const { root, entryName } of manifests) {
+for (const { root, entryName, manifest } of manifests) {
   const pkgRoot = resolve(root, entryName);
   const srcDir = join(pkgRoot, "src");
+  const declaredDeps = new Set([
+    ...Object.keys(manifest.dependencies ?? {}),
+    ...Object.keys(manifest.devDependencies ?? {}),
+    ...Object.keys(manifest.peerDependencies ?? {}),
+    ...Object.keys(manifest.optionalDependencies ?? {})
+  ]);
   let tsFiles = [];
   try {
     tsFiles = await findTsFiles(srcDir);
@@ -77,13 +83,24 @@ for (const { root, entryName } of manifests) {
     const content = await readFile(file, "utf8");
     for (const match of content.matchAll(importRegex)) {
       const specifier = match[1] || match[2];
-      if (!specifier || !specifier.startsWith(".")) continue;
-      const target = resolve(dirname(file), specifier);
-      const rel = relative(pkgRoot, target);
-      if (rel.startsWith("..") || isAbsolute(rel) || specifier.startsWith("../..") || specifier.includes("/../..")) {
-        throw new Error(
-          `Escaping relative import violation in ${file}: "${specifier}" escapes package root ${pkgRoot}`
-        );
+      if (!specifier) continue;
+      if (specifier.startsWith(".")) {
+        const target = resolve(dirname(file), specifier);
+        const rel = relative(pkgRoot, target);
+        if (rel.startsWith("..") || isAbsolute(rel) || specifier.startsWith("../..") || specifier.includes("/../..")) {
+          throw new Error(
+            `Escaping relative import violation in ${file}: "${specifier}" escapes package root ${pkgRoot}`
+          );
+        }
+      } else if (!specifier.startsWith("node:")) {
+        const pkgName = specifier.startsWith("@")
+          ? specifier.split("/").slice(0, 2).join("/")
+          : specifier.split("/")[0];
+        if (!declaredDeps.has(pkgName)) {
+          throw new Error(
+            `Undeclared dependency in ${file}: "${pkgName}" is imported in src/ but not declared in ${root}/${entryName}/package.json`
+          );
+        }
       }
     }
   }
