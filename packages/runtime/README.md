@@ -291,12 +291,33 @@ custom native host process (not an AI model), and stops only its own test sessio
 
 ## Session recovery, context management, observability and resilience
 
-`@bflow/runtime` also exports production reliability services for real repositories:
+`@bflow/runtime` also exports optional local reliability services for real repositories:
 
 - **Session Recovery (`SessionRecoveryService`)**: Distinguishes `graceful_shutdown`, `crash`, and `transient_disconnect` across `bflow down` / `bflow up`; flushes and deduplicates `AgenticJournal` and SQLite `RunStore` state; restores incomplete runs from aggregate checkpoints plus event tails; reconciles SQLite with Herdr panes/roles to detect `agent_lost`, `agent_replaced`, and `orphan_agent` discrepancies; revokes stale leases; inspects Git worktrees/commits without destructive commands; forbids blind prompt resends when prior execution is uncertain (`unknown_delivery` or worktree modified); and never marks a task succeeded without a correlated, verified `AgentResult` and passing gates.
 - **Context Management (`ProjectContextService`)**: Analyzes repository structure and workspace packages without a vector database, reads project documentation and role instructions, stores and queries architectural decision records (ADRs), deterministically selects task-relevant files within strict byte/file budgets, tracks `Specification` and `ArtifactReference` versions, prepares role-specific bounded context bundles with secret scrubbing, and detects context/spec drift across restarts.
 - **Observability (`ObservabilityTracker`)**: Tracks run duration, per-task and per-attempt duration, agent assignments, verification cycles, retry/rework counts, blocked time episodes, test pass/fail rates, context bundle sizes, and verified model token/cost metrics strictly when `source: "provider_reported"` (never estimating tokens or costs when provider telemetry is absent).
 - **Resilience (`BoundedConcurrencyLimiter`, `StructuredLogger`, `redactSecrets`, `executeWithRetry`, `withOperationTimeout`)**: Provides bounded concurrency with `quiesce()` drain barriers, structured JSONL logging with automatic secret redaction (preserving domain identifiers like `fencingToken` and token counters), and backoff/timeout helpers that block automatic retry on `unknown_delivery` until reconciliation completes.
+
+These services are exported building blocks; `openAgenticWorkspace` and the CLI do
+not automatically compose the context service, structured logger or observability
+tracker. CLI background Herdr stdout/stderr are written directly to its private
+log file, outside structured redaction. Redaction recognizes configured patterns
+and textual credential forms; it cannot guarantee removal of arbitrary unlabeled,
+encoded or binary secrets. Keep secrets out of requirements and prompts, which
+the Herdr CLI receives through process arguments.
+
+`withOperationTimeout` returns the contract-defined `unknown_delivery` with
+`retryable: false` and `manualInterventionRequired: true` when its local timeout
+expires: aborting the wait does not prove a started operation stopped. The
+deprecated `onTimeoutCode` option remains accepted for source compatibility but
+cannot override that uncertainty. `executeWithRetry` will not resend it.
+
+File selection rechecks resolved-path containment, including parent symlinks,
+rejects special files using nonblocking/no-follow descriptor opens, and computes
+size/checksum from the bytes read rather than cached analysis. This does not
+claim protection from a hostile same-user process continuously replacing paths.
+Selection byte/file limits cover repository file content; added role instructions,
+specification text and ADR summaries do not currently share a global prompt budget.
 
 Targeted verification commands:
 

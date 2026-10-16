@@ -151,7 +151,7 @@ export function redactString(input: string, options?: RedactionOptions): string 
 
   // JSON key assignments: "password": "..."
   result = result.replace(
-    /"([a-zA-Z0-9_-]+)"\s*:\s*("(?:\\"|[^"])*"|[^\s,{}]+)/g,
+    /"([a-zA-Z0-9_-]+)"\s*:\s*("(?:\\.|[^"\\])*"|[^\s,{}]+)/g,
     (fullMatch, keyMatch: string, valMatch: string) => {
       if (isWhitelistedKey(keyMatch)) {
         return fullMatch;
@@ -162,6 +162,16 @@ export function redactString(input: string, options?: RedactionOptions): string 
         return `"${keyMatch}": ${quotedPlaceholder}`;
       }
       return fullMatch;
+    }
+  );
+
+  // CLI arguments can also use whitespace rather than '=' between key and value.
+  result = result.replace(
+    /(--[a-zA-Z0-9_-]+)(\s+)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?!-)[^\s&"'>]+)/g,
+    (fullMatch, flag: string, spacing: string, value: string) => {
+      if (!isSensitiveKey(flag.slice(2), options?.additionalKeyPatterns)) return fullMatch;
+      const quote = value[0] === '"' || value[0] === "'" ? value[0] : "";
+      return `${flag}${spacing}${quote}${placeholder}${quote}`;
     }
   );
 

@@ -1429,17 +1429,36 @@ export class ProjectContextService {
     const includedFiles: SelectedFileContent[] = [];
     const excludedMatchingFiles: string[] = [];
     let totalBytes = 0;
+    const rootReal = await fs.promises.realpath(this.repositoryRoot);
 
     for (const candidate of candidates) {
       const fullPath = path.join(this.repositoryRoot, candidate.entry.relativePath);
-      let content = "";
+      let buffer: Buffer;
       try {
-        content = await fs.promises.readFile(fullPath, "utf8");
+        // Cached analysis is a ranking hint, not authority to read a changed path.
+        // realpath also resolves parent-directory symlinks before containment checks.
+        const realPath = await fs.promises.realpath(fullPath);
+        const relative = path.relative(rootReal, realPath);
+        if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
+        const file = await fs.promises.open(realPath,
+          fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+        try {
+          const opened = await file.stat();
+          if (!opened.isFile()) continue;
+          const currentPath = await fs.promises.realpath(fullPath);
+          const current = await fs.promises.stat(currentPath);
+          if (currentPath !== realPath || current.dev !== opened.dev || current.ino !== opened.ino) continue;
+          buffer = await file.readFile();
+        } finally {
+          await file.close();
+        }
       } catch {
         continue;
       }
 
-      const sizeBytes = candidate.entry.sizeBytes;
+      const content = buffer.toString("utf8");
+      const sizeBytes = buffer.byteLength;
+      const sha256 = crypto.createHash("sha256").update(buffer).digest("hex");
       let truncated = false;
       let finalContent = content;
 
@@ -1463,7 +1482,7 @@ export class ProjectContextService {
           relativePath: candidate.entry.relativePath,
           content: finalContent,
           sizeBytes,
-          sha256: candidate.entry.sha256,
+          sha256,
           truncated,
           score: candidate.score,
           scoreTier: candidate.scoreTier

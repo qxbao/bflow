@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DomainEvent, RetryPolicy, WorkflowRunSnapshot } from "@bflow/contracts";
+import { ContractErrorSchema } from "@bflow/contracts";
 import {
   DEFAULT_REDACTED_PLACEHOLDER,
   isSensitiveKey,
@@ -102,6 +103,18 @@ describe("Resilience & Observability Module", () => {
       expect(customPatternResult).toBe("Custom identifier: [REDACTED]");
     });
 
+    it("redacts spaced CLI credentials and keeps escaped JSON strings well formed", () => {
+      expect(redactString('cmd --token cli-secret --api-key "api secret" --maxTokens 2048')).toBe(
+        'cmd --token [REDACTED] --api-key "[REDACTED]" --maxTokens 2048'
+      );
+      for (const password of ['trailing\\', 'embedded"quote', 'escaped\\"quote']) {
+        const serialized = JSON.stringify({ password, safe: "visible", token: "second-secret" });
+        expect(JSON.parse(redactString(serialized))).toEqual({
+          password: "[REDACTED]", safe: "visible", token: "[REDACTED]"
+        });
+      }
+    });
+
     it("deeply redacts nested objects, arrays, Maps, Sets, and Errors while handling circular references", () => {
       const payload: Record<string, unknown> = {
         runId: "run-001",
@@ -149,6 +162,29 @@ describe("Resilience & Observability Module", () => {
   });
 
   describe("B. Structured Logger", () => {
+    it("redacts every textual envelope field before buffering and sending to a sink", () => {
+      const sink = vi.fn();
+      const logger = new StructuredLogger({
+        component: "token=component-secret",
+        sink,
+        redaction: { customSecrets: ["custom-correlation-secret"] },
+        baseContext: {
+          runId: "token=run-secret", taskId: "token=task-secret",
+          attemptId: "token=attempt-secret", correlationId: "custom-correlation-secret"
+        }
+      });
+      logger.info("token=event-secret", "ok");
+      const entry = logger.getEntries()[0]!;
+      expect(entry.event).toBe("token=[REDACTED]");
+      expect(entry.component).toBe("token=[REDACTED]");
+      expect(entry.runId).toBe("token=[REDACTED]");
+      expect(entry.taskId).toBe("token=[REDACTED]");
+      expect(entry.attemptId).toBe("token=[REDACTED]");
+      expect(entry.correlationId).toBe("[REDACTED]");
+      expect(sink).toHaveBeenCalledWith(entry);
+      expect(logger.toJsonLines()).not.toContain("secret");
+    });
+
     it("respects log levels, redacts secrets, extracts durationMs, and emits to sink", () => {
       const sinkEntries: any[] = [];
       const fixedDate = new Date("2026-10-16T12:00:00.000Z");
@@ -332,7 +368,7 @@ describe("Resilience & Observability Module", () => {
       ).toBe(false);
     });
 
-    it("enforces operation timeout and returns retrySafety after_reconciliation without leaking timers", async () => {
+    it("returns a contract-valid uncertain timeout that cannot automatically resend the operation", async () => {
       const slowOp = vi.fn(
         () =>
           new Promise<{ ok: true; value: string }>((resolve) => {
@@ -340,13 +376,22 @@ describe("Resilience & Observability Module", () => {
           })
       );
 
-      const result = await withOperationTimeout(slowOp, 50);
+      const result = await withOperationTimeout(slowOp, 50, { onTimeoutCode: "timeout" });
       expect(result.ok).toBe(false);
       if (!result.ok) {
-        expect(result.error.code).toBe("timeout");
-        expect(result.error.retryable).toBe(true);
-        expect((result.error as any).retrySafety).toBe("after_reconciliation");
+        expect(ContractErrorSchema.safeParse(result.error).success).toBe(true);
+        expect(result.error).toMatchObject({
+          code: "unknown_delivery", retryable: false, manualInterventionRequired: true
+        });
       }
+
+      const operation = vi.fn(() => new Promise<{ ok: true; value: string }>(() => {}));
+      const timedRetry = await executeWithRetry(() => withOperationTimeout(operation, 1), {
+        policy: { maxAttempts: 3, strategy: "fixed", initialDelayMs: 0, maxDelayMs: 0, jitter: false }
+      });
+      expect(timedRetry.ok).toBe(false);
+      expect(timedRetry.attempts).toBe(1);
+      expect(operation).toHaveBeenCalledTimes(1);
 
       // Fast operation should succeed
       const fastOp = vi.fn(async () => ({ ok: true as const, value: 42 }));

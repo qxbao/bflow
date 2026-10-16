@@ -99,6 +99,7 @@ export async function withOperationTimeout<T>(
   operation: (options: OperationOptions) => Promise<OperationResult<T>>,
   timeoutMs: number,
   options?: OperationOptions & {
+    /** @deprecated Accepted for source compatibility; timeout always returns unknown_delivery. */
     readonly onTimeoutCode?: ContractError["code"] | undefined;
     readonly timeoutMessage?: string | undefined;
   }
@@ -128,15 +129,14 @@ export async function withOperationTimeout<T>(
     timeoutId = setTimeout(() => {
       didTimeout = true;
       controller.abort();
-      const code = options?.onTimeoutCode ?? "timeout";
       const message = options?.timeoutMessage ?? `Operation timed out after ${timeoutMs}ms`;
-      // Construct typed ContractError. Cast retrySafety to satisfy ContractError while retaining "after_reconciliation" at runtime.
+      // Aborting the local wait does not prove the operation stopped or was not delivered.
       const error: ContractError = {
-        code,
-        retryable: true,
-        retrySafety: "after_reconciliation" as unknown as "observation_only",
+        code: "unknown_delivery",
+        retryable: false,
+        manualInterventionRequired: true,
         message
-      } as ContractError;
+      };
       resolve({ ok: false, error });
     }, timeoutMs);
   });

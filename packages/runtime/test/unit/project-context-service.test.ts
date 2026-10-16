@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 import * as crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 import {
   ProjectContextService,
   ArchitecturalDecisionStore,
@@ -360,6 +361,69 @@ export class RuntimeService {
         "packages/persistence/src/store.ts",
         `export class UnrelatedStore {}`
       );
+    });
+
+    it("fingerprints current bytes when a regular file changes after cached analysis", async () => {
+      const relativePath = "packages/runtime/src/service.ts";
+      await service.analyzeRepositoryStructure();
+      const updated = "export const changedAfterAnalysis = true;";
+      await writeFile(relativePath, updated);
+      const selected = await service.selectFilesForTask({
+        taskId: "current-bytes", title: "service", description: "service",
+        ownedPaths: [relativePath], affectedPaths: []
+      });
+      expect(selected.includedFiles.find(f => f.relativePath === relativePath)).toMatchObject({
+        content: updated,
+        sizeBytes: Buffer.byteLength(updated),
+        sha256: crypto.createHash("sha256").update(updated).digest("hex")
+      });
+    });
+
+    it("rejects file and parent symlinks escaping the repository after cached analysis", async () => {
+      const outside = await fs.mkdtemp(path.join(os.tmpdir(), "bflow-context-external-"));
+      const relativePath = "packages/runtime/src/service.ts";
+      const nested = "mutable/source.ts";
+      try {
+        await writeFile(nested, "original");
+        await fs.writeFile(path.join(outside, "source.ts"), "external-synthetic-secret");
+        await service.analyzeRepositoryStructure();
+        await fs.unlink(path.join(tmpRepoRoot, relativePath));
+        await fs.symlink(path.join(outside, "source.ts"), path.join(tmpRepoRoot, relativePath));
+        await fs.rm(path.join(tmpRepoRoot, "mutable"), { recursive: true });
+        await fs.symlink(outside, path.join(tmpRepoRoot, "mutable"), "dir");
+        const selected = await service.selectFilesForTask({
+          taskId: "escaped-context", title: "service", description: "source",
+          ownedPaths: [relativePath, nested], affectedPaths: []
+        });
+        expect(selected.includedFiles.some(f => f.relativePath === relativePath || f.relativePath === nested)).toBe(false);
+        expect(JSON.stringify(selected)).not.toContain("external-synthetic-secret");
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects a FIFO replacing a cached file without blocking on open", () => {
+      // A subprocess deadline makes this a bounded regression even if a blocking read returns.
+      const moduleUrl = new URL("../../dist/context/project-context-service.js", import.meta.url).href;
+      const child = spawnSync(process.execPath, ["--input-type=module", "-e", `
+        import { ProjectContextService } from ${JSON.stringify(moduleUrl)};
+        import { writeFile, unlink } from "node:fs/promises";
+        import { execFileSync } from "node:child_process";
+        import { join } from "node:path";
+        const root = process.argv[1];
+        const source = join(root, "fifo.ts");
+        await writeFile(source, "original");
+        const service = new ProjectContextService(root);
+        await service.analyzeRepositoryStructure();
+        await unlink(source);
+        execFileSync("mkfifo", [source]);
+        const selected = await service.selectFilesForTask({
+          taskId: "fifo", title: "fifo", description: "fifo", ownedPaths: ["fifo.ts"], affectedPaths: []
+        });
+        if (selected.includedFiles.some(f => f.relativePath === "fifo.ts")) process.exitCode = 1;
+      `, tmpRepoRoot], { timeout: 5000, encoding: "utf8" });
+      expect(child.error).toBeUndefined();
+      expect(child.status, child.stderr).toBe(0);
     });
 
     it("ranks files by 6 deterministic tiers and excludes unrelated files (score === 0)", async () => {
