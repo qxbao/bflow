@@ -8,12 +8,14 @@ import { QualityGateDefinitionSchema, type QualityGateDefinition } from "@bflow/
 import type { QualityCommandOutcome } from "@bflow/quality-gates";
 import { digest, record, textField } from "./journal.js";
 import { parseVitestJson } from "./vitest-json.js";
+import { sandboxBehavior } from "./behavioral-sandbox.js";
 
 export interface BehavioralCommand {
   id: string; command: string; executable: string; args: string[];
   method: "unit_test" | "integration_test" | "e2e_test";
   levels: ("unit" | "integration" | "e2e" | "property" | "regression" | "smoke")[];
   testNames: string[]; testPaths: string[]; reporter?: "node_tap" | "vitest_json"; timeoutMs: number; maxOutputBytes?: number;
+  dependencyRoots?: string[];
 }
 const permittedLevels: Record<BehavioralCommand["method"], readonly string[]> = {
   unit_test: ["unit", "property", "regression"], integration_test: ["integration", "regression", "smoke"], e2e_test: ["e2e", "regression", "smoke"]
@@ -28,7 +30,7 @@ export function parseBehavioralCommands(input: unknown): BehavioralCommand[] {
   if (!Array.isArray(input)) throw new Error("behavioralCommands must be an array");
   const commands = input.map(raw => {
     const value = record(raw);
-    if (Object.keys(value).some(key => !["id", "command", "executable", "args", "method", "levels", "testNames", "testPaths", "timeoutMs", "maxOutputBytes", "reporter"].includes(key))) throw new Error("Unknown behavioral command configuration field");
+    if (Object.keys(value).some(key => !["id", "command", "executable", "args", "method", "levels", "testNames", "testPaths", "timeoutMs", "maxOutputBytes", "reporter", "dependencyRoots"].includes(key))) throw new Error("Unknown behavioral command configuration field");
     const id = textField(value.id), command = textField(value.command), executable = textField(value.executable);
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) || executable.includes("\0") || !isAbsolute(executable)) throw new Error("Behavioral executable must be an absolute owner-configured path and id must be safe");
     if (!["unit_test", "integration_test", "e2e_test"].includes(String(value.method))) throw new Error("Unsupported behavioral method");
@@ -36,9 +38,11 @@ export function parseBehavioralCommands(input: unknown): BehavioralCommand[] {
     if (levels.some(level => !permittedLevels[method].includes(level))) throw new Error("Behavioral test levels do not match method");
     if (value.reporter !== undefined && value.reporter !== "node_tap" && value.reporter !== "vitest_json") throw new Error("Unsupported behavioral reporter");
     const args = strings(value.args, "argv", false), testNames = strings(value.testNames, "test names"), testPaths = strings(value.testPaths, "test paths");
+    const dependencyRoots = value.dependencyRoots === undefined ? undefined : strings(value.dependencyRoots, "dependency roots", false);
+    if (dependencyRoots?.some(path => !isAbsolute(path) || path.split("/").some(part => part === ".." || part === ".") || !path.endsWith("/node_modules"))) throw new Error("Behavioral dependency roots must be absolute node_modules directories");
     if (new Set(testNames).size !== testNames.length || new Set(testPaths).size !== testPaths.length || testPaths.some(path => path.startsWith("/") || path.includes("\\") || path.includes(":") || path.split("/").some(part => !part || part === "." || part === ".."))) throw new Error("Behavioral test identities/paths must be unique and safe");
     if (!Number.isSafeInteger(value.timeoutMs) || Number(value.timeoutMs) < 1 || Number(value.timeoutMs) > 300_000 || value.maxOutputBytes !== undefined && (!Number.isSafeInteger(value.maxOutputBytes) || Number(value.maxOutputBytes) < 1 || Number(value.maxOutputBytes) > 4_194_304)) throw new Error("Invalid behavioral execution bounds");
-    return { id, command, executable, args, method, levels, testNames, testPaths, ...(value.reporter === undefined ? {} : { reporter: value.reporter as NonNullable<BehavioralCommand["reporter"]> }), timeoutMs: Number(value.timeoutMs), ...(value.maxOutputBytes === undefined ? {} : { maxOutputBytes: Number(value.maxOutputBytes) }) };
+    return { id, command, executable, args, method, levels, testNames, testPaths, ...(dependencyRoots === undefined ? {} : { dependencyRoots }), ...(value.reporter === undefined ? {} : { reporter: value.reporter as NonNullable<BehavioralCommand["reporter"]> }), timeoutMs: Number(value.timeoutMs), ...(value.maxOutputBytes === undefined ? {} : { maxOutputBytes: Number(value.maxOutputBytes) }) };
   });
   if (new Set(commands.map(value => value.id)).size !== commands.length || new Set(commands.map(value => value.command)).size !== commands.length) throw new Error("Duplicate behavioral command identity");
   // One measured MCP request must finish inside its ten-minute transport deadline,
@@ -98,10 +102,13 @@ export async function measureBehavior(command: BehavioralCommand, cwd: string, r
     const module = await import(new URL("../../../quality-gates/dist/index.js", import.meta.url).href);
     const env: Record<string, string> = { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", HOME: temporary, TMPDIR: temporary };
     // The official JSON reporter omits runtime errors. A fixed host companion attests its onFinished errors argument.
-    const args = command.reporter === "vitest_json" ? [...command.args, `--reporter=${fileURLToPath(new URL("../../dist/agentic/vitest-runtime-reporter.js", import.meta.url))}`] : command.args;
-    const result = await module.createQualityCommandRunner().run({ executable: command.executable, args, cwd: checkout, env, timeoutMs: command.timeoutMs, maxOutputBytes: command.maxOutputBytes ?? 1_048_576 });
+    const reporter = command.reporter === "vitest_json" ? fileURLToPath(new URL("../../dist/agentic/vitest-runtime-reporter.js", import.meta.url)) : undefined;
+    const args = reporter ? [...command.args, `--reporter=${reporter}`] : command.args;
+    const sandbox = await sandboxBehavior(command, checkout, args, reporter);
+    const result = await module.createQualityCommandRunner().run({ ...sandbox, cwd: checkout, env, timeoutMs: command.timeoutMs, maxOutputBytes: command.maxOutputBytes ?? 1_048_576 });
     if (!result.ok) throw new Error(`Behavioral command invocation failed: ${result.error.message}`);
     const outcome = result.value as QualityCommandOutcome;
+    if (outcome.stderr.startsWith("bwrap:")) throw new Error(`Behavioral sandbox failed: ${outcome.stderr.trim()}`);
     await assertPinnedRevision(checkout, revision);
     if (await verificationGit(checkout, ["status", "--porcelain=v1", "--ignored=matching", "--untracked-files=all", "-z"])) throw new Error("Behavioral execution generated files outside the committed revision");
     await assertPinnedRevision(cwd, revision);
