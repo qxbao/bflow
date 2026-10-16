@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -40,6 +40,7 @@ describe("Scenario E09 — CLI Subprocess Verification & End-to-End Execution", 
 
   function makeTempDir(): string {
     const dir = mkdtempSync(join(tmpdir(), "bflow-cli-e2e-"));
+    execFileSync("git", ["init", "--quiet", dir]);
     tempDirs.push(dir);
     return dir;
   }
@@ -99,7 +100,7 @@ describe("Scenario E09 — CLI Subprocess Verification & End-to-End Execution", 
     const { stdout, exitCode } = await runCli(["init"], workDir);
     expect(exitCode).toBe(0);
     expect(stdout).toContain("Initialized bflow repository configuration");
-    expect(existsSync(join(workDir, ".bflow", "config.json"))).toBe(true);
+    expect(existsSync(join(workDir, ".bflow", "config.yaml"))).toBe(true);
   });
 
   it("fails gracefully when .bflow/config.json contains malformed JSON", async () => {
@@ -115,8 +116,8 @@ describe("Scenario E09 — CLI Subprocess Verification & End-to-End Execution", 
   it("composes RuntimeService in bin.ts: fails closed without config, and executes run, status, and cancel end-to-end after init", async () => {
     const workDir = makeTempDir();
 
-    // 1. Without .bflow/config.json, status -j fails closed with not_found
-    const uninitStatus = await runCli(["status", "-j"], workDir);
+    // 1. Without .bflow/config.yaml, runtime status <runId> -j fails closed with not_found
+    const uninitStatus = await runCli(["status", "run-123", "-j"], workDir);
     expect(uninitStatus.exitCode).toBe(1);
     const parsedUninit = JSON.parse(uninitStatus.stderr);
     expect(parsedUninit.ok).toBe(false);
