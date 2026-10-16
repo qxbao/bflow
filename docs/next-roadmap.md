@@ -1,5 +1,13 @@
 # Next roadmap sau P22
 
+Follow-up đã tích hợp default Claude host/MCP/native hooks và idle lifecycle
+shutdown/restart; không cần làm lại bootstrap từ đầu. Smoke model mới tốn
+provider-reported 0.0085535 USD với hard cap 0.10 USD, trong giới hạn 1 USD của user.
+Low-risk spec autoaccept được owner cho phép. Phần còn lại ưu tiên independent
+behavioral runners (feature/required-TDD bugfix), active-workflow approval/crash
+recovery và chiến dịch live AI E2E khi có ngân sách riêng. Không dùng bảng công việc
+ban đầu bên dưới để khẳng định bootstrap vẫn chưa triển khai.
+
 Mục tiêu kế tiếp là **Limited pilot có bằng chứng AI SDLC thực**, không phải gắn
 nhãn production-ready. Điểm xuất phát, implementation đã test và kết luận hiện
 tại ở [release-readiness](release-readiness.md); rủi ro ở

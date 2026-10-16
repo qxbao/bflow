@@ -16,9 +16,9 @@ Doctor có thể trả envelope `ok: true` nhưng exit 1 và `data.healthy: fals
 | Startup timeout / unresolved intent | Timeout không chứng minh chưa có side effect; reconcile server/manager trước |
 | Named session exists without ownership evidence | Không adopt/xóa session đó; kiểm tra đúng checkout và manifest |
 | Lifecycle lock tồn tại | Chứng minh owner process đã exit trước khi xử lý stale lock |
-| Down thiếu shutdown barrier | Default composition còn giới hạn; `--yes` không bypass được |
-| Up pass nhưng không nhận workflow qua chat | Chưa có provider/host P19 bootstrap/tool/ingress; up chỉ quản lý môi trường |
-| Đổi SDD/TDD/maxIterations trong config không đổi workflow | P12 chưa tự wire các policy đó vào P19; host phải truyền đúng API |
+| Down thiếu shutdown barrier | Kiểm tra custom host/module; default Claude host có barrier thật, --yes không bypass drain/checkpoint |
+| Up pass nhưng không nhận workflow qua chat | Kiểm tra host log, native session, MCP/hooks, manifest đúng phiên bản; default host hiện giới hạn documentation criteria |
+| Đổi policy sau khi host tồn tại | Host từ chối đổi policy âm thầm; down/quiesce và reconcile persistent host config trước thay đổi |
 | Role `done` nhưng run chưa thành công | Đợi correlated authenticated result, verification và approval; done chỉ là turn end |
 | Test command fail trước Red | Cài dependencies/kiểm tra command tồn tại; infrastructure failure không phải target-behavior Red |
 | ArtifactStore Unix socket test lỗi path dài | Trên Linux dùng `TMPDIR=/tmp` cho fixture/test; không đổi contract hoặc bỏ kiểm tra |

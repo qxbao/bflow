@@ -25,6 +25,7 @@
 
 - **Node.js `>= 22.13`** (required for unflagged built-in `node:sqlite`)
 - **pnpm `12.5.1`** (pinned via `packageManager` in `package.json`)
+- Default persistent Claude host: Linux/local filesystems, Unix sockets and `flock`; other platforms have not been verified.
 
 ---
 
@@ -51,7 +52,7 @@ Build from source, set `BFLOW_HOME` to this checkout's absolute path, then run
 from the target Git repository (including a different Node.js/TypeScript project):
 
 ```bash
-node "$BFLOW_HOME/apps/cli/dist/bin.js" init --name my-project
+node "$BFLOW_HOME/apps/cli/dist/bin.js" init --name my-project --provider claude
 node "$BFLOW_HOME/templates/node-typescript/apply.mjs" . bugfix
 node "$BFLOW_HOME/apps/cli/dist/bin.js" doctor --json
 node "$BFLOW_HOME/apps/cli/dist/bin.js" status --json
@@ -62,16 +63,19 @@ node "$BFLOW_HOME/apps/cli/dist/bin.js" attach
 
 Init writes **JSON-formatted `.bflow/config.yaml`** with checkout-specific identity;
 run it separately in each repository/worktree. Plain repeated init preserves the
-file; the current `--force`/`--yes` implementation overwrites it despite the older
-help text. Track portable templates rather than copying a bound config across clones.
+file; explicit `--force`/`--yes` overwrites it. Track portable templates rather than copying a bound config across clones.
 
-`up` manages P12/P13 panes; it does not automatically boot the P19 host or register
-model tools. P19's implemented `openAgenticWorkspace` API requires trusted host
-checks, authenticated messages/results/evidence and human approvals. Environment
-SDD/TDD/verification policy fields are validated by P12 but are not automatically
-wired into that host. `down` is available but default live-session shutdown remains
-guarded until real Runtime quiesce/checkpoint and lifecycle shutdown are composed;
-`--yes` cannot bypass this requirement.
+`up` now starts a persistent P19 host, registers scoped Claude MCP tools and
+launch-local native session/user-input hooks, then requires host activation before
+reporting readiness. The default host currently supports Claude with documentation
+and independent manual-review evidence; behavioral feature/bugfix runners require
+separate host configuration. Codex launch helpers remain available, but the default
+host refuses unverified provider hooks. Use `init --provider claude` for this path.
+SDD/conditional-TDD/verification/concurrency policies are forwarded to the host.
+`down` drains the host, persists authoritative checkpoints and closes only the
+repository's panes/server; `--yes` never bypasses the barrier. Live smoke has
+verified `up → down → up → down` without workflow/model turns. Full AI SDLC
+acceptance remains unverified; see [release readiness](docs/release-readiness.md).
 
 Legacy workflow commands (`run`, `status <run-id>`, `approve`, `resume`, `cancel`)
 remain available through the older workspace Runtime. They do not launch P19.

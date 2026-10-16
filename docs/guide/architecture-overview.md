@@ -42,8 +42,9 @@ approval. SQLite, filesystem và Herdr không nằm trong một atomic transacti
 journal/reconciliation giữ trạng thái uncertain thay vì resend mù.
 
 Đã có source implementation cho engine, storage, lifecycle, P14–P19 và native
-receipt host/plugin. Tự động host boot/shutdown từ CLI, provider-specific tool
-registration và live model-generated SDLC E2E vẫn cần tích hợp/kiểm chứng cụ thể.
+receipt host/plugin. CLI đã boot/shutdown persistent host với scoped Claude tools
+và launch-local hooks. Default verification còn giới hạn documentation/manual
+review; live model-generated SDLC E2E vẫn cần kiểm chứng riêng.
 Không diễn giải passing fake transport tests hoặc native transport smoke là
 delivery bằng AI đã hoàn thành. Tham chiếu
 [architecture v2](../architecture-v2.md), [ADR 0003](../adr/0003-authenticated-herdr-receipts.md)

@@ -44,7 +44,9 @@ P13 is composed automatically through `PaneManagerLifecycleAdapter`. It adapts
 schema-validated manifest reads to `getManifest` / `doctorSession`.
 Before P13 starts roles, the default integration prepares the persistent Runtime
 host and obtains trusted role prompts, MCP configuration and provider lifecycle
-hooks. P13's Claude/Codex launch policy builds the provider arguments. The host
+hooks. P13 exposes Claude/Codex launch helpers; the default host currently requires
+verified Claude native hooks (use `init --provider claude`). It fails closed for
+other providers unless an operator supplies a verified host. The host
 survives CLI process exit and owns scheduling, authenticated message ingress, run
 queries and shutdown checkpoints. `doctor` and environment `status` inspect
 topology without starting a daemon. `up` checks `codex login status` or Claude's

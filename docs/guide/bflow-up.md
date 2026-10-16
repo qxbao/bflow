@@ -22,8 +22,12 @@ một named session đang sống mà không có bằng chứng ownership của r
 startup/timeout, đọc status/doctor và [Session Recovery](session-recovery.md);
 đừng xóa state để ép tạo thêm agent.
 
-Thành công của up chỉ xác nhận topology/readiness. Nó chưa cài tool cho model,
-khởi chạy P19 daemon, nạp system prompt/profile từ `agents/`, hoặc nối user turn
-tới Runtime tự động. Cần host tích hợp `openAgenticWorkspace`, xác thực ingress,
-độc lập chạy checks, đăng ký Coordinator tools và scheduler. Đây là API đã có;
-automatic CLI host bootstrap vẫn **planned/chưa triển khai**.
+`up` chuẩn bị persistent P19 host trước startup, cấp launch-local MCP/hooks và
+system prompts cho role, rồi đòi activation acknowledgement trước khi ghi ready.
+Default host hiện yêu cầu Claude; dùng `bflow init --provider claude`. Native
+session và provider login được kiểm tra riêng với transport idle.
+
+Phạm vi default verification hiện là documentation/manual-review criteria với
+Reviewer và QA độc lập; feature/bugfix behavioral runners cần host được cấu hình.
+Up thành công không chứng minh một workflow đã hoàn tất. Smoke thực đã kiểm tra
+lifecycle up/down/restart; xem [release-readiness](../release-readiness.md).

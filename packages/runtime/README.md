@@ -283,7 +283,8 @@ Only Conversation's launch-local UserPromptSubmit hook feeds authenticated user
 turns to the Gateway; exact Runtime RoleMessage deliveries are handled as
 transport, and role envelopes cannot be promoted into human approval text. No
 MCP tool approves on behalf of a user. Private host keys/configuration and Unix
-sockets have owner-only permissions. These are local host trust controls, not
+sockets have owner-only permissions. Activation requires an exact native Bflow
+launch receipt; older panes without host hooks are not silently adopted. These are local host trust controls, not
 hostile same-user OS isolation. Live provider launch, native-session binding,
 role-message receipt, task implementation and final delivery are distinct pieces
 of evidence; local host tests alone do not prove a full live SDLC run.
@@ -334,8 +335,8 @@ custom native host process (not an AI model), and stops only its own test sessio
 
 These services are exported building blocks; `openAgenticWorkspace` and the CLI do
 not automatically compose the context service, structured logger or observability
-tracker. CLI background Herdr stdout/stderr are written directly to its private
-log file, outside structured redaction. Redaction recognizes configured patterns
+tracker. CLI background Herdr stdout/stderr now pass through a detached, bounded
+line-redaction relay; host diagnostics also scrub known secret forms. Redaction recognizes configured patterns
 and textual credential forms; it cannot guarantee removal of arbitrary unlabeled,
 encoded or binary secrets. Keep secrets out of requirements and prompts, which
 the Herdr CLI receives through process arguments.

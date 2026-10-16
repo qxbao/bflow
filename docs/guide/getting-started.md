@@ -38,9 +38,8 @@ node "$BFLOW_HOME/apps/cli/dist/bin.js" up --timeout 60000
 node "$BFLOW_HOME/apps/cli/dist/bin.js" attach
 ```
 
-`attach` cần terminal tương tác. Các role mặc định dùng `codex`; đổi
-`environment.roles[].cli` trước lần `up` đầu nếu dùng agent kind khác được P13 hỗ
-trợ. Herdr quản lý provider/model; Bflow CLI chưa có trường model trong role config.
+`attach` cần terminal tương tác. Dùng `init --provider claude` cho default persistent host hiện đã kiểm chứng;
+init không truyền provider vẫn giữ default Codex legacy. Herdr quản lý provider/model; Bflow CLI chưa có trường model trong role config.
 Đọc [up](bflow-up.md), [attach](bflow-attach.md) và [down](bflow-down.md), đặc biệt
 giới hạn shutdown trước khi tạo môi trường lâu dài.
 

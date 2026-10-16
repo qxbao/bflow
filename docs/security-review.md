@@ -1,10 +1,43 @@
 # Security review sau P22
 
 **Kết luận: chưa đủ bảo đảm để nghiệm thu Agentic SDLC MVP v2.** Có các policy
-fail-closed và durable boundaries đã kiểm thử, nhưng host composition, separation
-of duties, OS isolation và live workflow evidence còn thiếu. Review này không
+fail-closed và durable boundaries đã kiểm thử, nhưng behavioral runners, OS isolation và live workflow evidence còn thiếu.
+Host/lifecycle Claude đã được sửa và smoke thực trong follow-up bên dưới. Review này không
 là pentest toàn diện hoặc chứng nhận production. Baseline, tested revision và
 các lệnh nằm ở [release-readiness](release-readiness.md).
+
+## Follow-up implementation
+
+Đã đóng gap CLI host bootstrap và idle-session shutdown: persistent daemon,
+role-filtered MCP, actual Claude SessionStart hook, native signed ingress và
+independent scheduler được nối vào default CLI. `up` chỉ ready sau activation;
+old panes thiếu launch receipt bị từ chối. `down` thực sự gọi quiesce/checkpoint,
+P13 shutdown rồi stop đúng session/host. Live hai vòng lifecycle thành công, không
+model/workflow turns; active AI workflow crash/approval recovery vẫn chưa nghiệm thu.
+
+Các boundary bổ sung: Chat/Coordinator native tools bị tắt, MCP principal pin
+pane/name/native session; message loại nhạy cảm chỉ qua dedicated host methods;
+role cap không gọi lifecycle/human approval methods. Signed plugin routing so
+actual session/socket realm, không dựa chỉ vào pane IDs trùng giữa server.
+Native Conversation failures không được ACK accepted. Host sockets bound size/
+timeout và reject close-before-ACK; quiesce fence dispatch. Startup/state directory
+symlinks bị từ chối. Confined documentation reads và total prompt output budget đã
+được sửa; background process logs và host diagnostics có redaction.
+
+Giới hạn security còn giữ: cùng UID là trusted host boundary; hook không chứng
+minh người gõ phím trước một process cùng UID có thể inject terminal/đọc tokens.
+Developer vẫn có native tools cần cho sửa code; provider policy không phải Linux
+sandbox hoàn chỉnh. Host-issued manual review receipts dựa vào exact diff/commit
+capture và principal độc lập, không chỉ Developer explanation. Default host từ chối
+behavioral specs khi chưa có independent behavioral runner, không sinh test PASS.
+Human receipt/gate ledgers của host chưa được live fault-inject trên workflow thật;
+không kết luận crash recovery cho approval đang bay giữa các process.
+
+Owner đã chấp nhận low-risk specification autoaccept; human-required và delivery
+approval vẫn bắt buộc. Ngân sách smoke mới được enforce bằng print-mode hard cap
+0.10 USD; provider-reported cost 0.0085535 USD, không chạy thêm model campaign.
+Xem kết quả mới ở [release-readiness](release-readiness.md); các findings audit gốc
+bên dưới là lịch sử trước follow-up.
 
 ## Trust model và ingress
 
