@@ -98,3 +98,34 @@ it("checks ownership when recovering a merge committed before its receipt was pe
   expect(await readFile(join(integration.worktreePath, "README.md"), "utf8")).toBe("unauthorized resolution\n");
   expect(await git(repository, "rev-parse", "main")).toBe(base);
 });
+
+for (const flag of ["--assume-unchanged", "--skip-worktree"]) {
+  it(`preserves tracked local edits hidden by ${flag} during cleanup`, async () => {
+    const record = await task();
+    await git(record.worktreePath, "update-index", flag, "src/initial.txt");
+    await writeFile(join(record.worktreePath, "src", "initial.txt"), "hidden uncommitted work\n");
+    expect(await git(record.worktreePath, "status", "--porcelain")).toBe("");
+    await engine.cancelTask(record.key);
+    await expect(engine.cleanupTask(record.key)).rejects.toThrow(/index|hidden|unchanged|skip-worktree/i);
+    expect(await readFile(join(record.worktreePath, "src", "initial.txt"), "utf8")).toBe("hidden uncommitted work\n");
+    expect((await engine.getTask(record.key)).status).toBe("cancelled");
+  });
+
+  it(`refuses a clean submission which hides edits through ${flag}`, async () => {
+    const { task: record } = await submitted();
+    await git(record.worktreePath, "update-index", flag, "src/initial.txt");
+    await writeFile(join(record.worktreePath, "src", "initial.txt"), "unsubmitted local change\n");
+    expect(await git(record.worktreePath, "status", "--porcelain")).toBe("");
+    await expect(engine.collectTask(record.key)).rejects.toThrow(/index|hidden|unchanged|skip-worktree/i);
+    expect(await readFile(join(record.worktreePath, "src", "initial.txt"), "utf8")).toBe("unsubmitted local change\n");
+  });
+}
+
+it("rejects inherited object keys as unknown task and integration identities", async () => {
+  for (const key of ["__proto__", "constructor", "toString"]) {
+    await expect(engine.getTask(key)).rejects.toThrow(/unknown task/i);
+    await expect(engine.getIntegration(key)).rejects.toThrow(/unknown integration/i);
+    await expect(engine.cancelTask(key)).rejects.toThrow(/unknown task/i);
+    await expect(engine.cancelIntegration(key)).rejects.toThrow(/unknown integration/i);
+  }
+});

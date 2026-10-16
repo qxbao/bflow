@@ -84,11 +84,11 @@ export class GitIntegrationEngine {
   private save(state: State): Promise<void> { return writeState(this.stateDirectory, state); }
   private task(state: State, key: string): TaskRecord {
     z.string().min(1).parse(key);
-    const task = state.tasks[key]; requireCondition(task, "unknown_task", `Unknown task ${key}`); return task;
+    const task = Object.hasOwn(state.tasks, key) ? state.tasks[key] : undefined; requireCondition(task, "unknown_task", `Unknown task ${key}`); return task;
   }
   private integration(state: State, key: string): IntegrationRecord {
     z.string().min(1).parse(key);
-    const record = state.integrations[key]; requireCondition(record, "unknown_integration", `Unknown integration ${key}`); return record;
+    const record = Object.hasOwn(state.integrations, key) ? state.integrations[key] : undefined; requireCondition(record, "unknown_integration", `Unknown integration ${key}`); return record;
   }
   private integrationBranch(request: IntegrationRequest): string {
     return `integration/bflow/${segment(request.runId)}/${segment(request.integrationId)}`;
@@ -462,7 +462,7 @@ export class GitIntegrationEngine {
       if (record.pullRequest?.state === "created" && record.pullRequest.url) return { url: record.pullRequest.url };
       record.pullRequest = { state: "pending", requestKey }; await this.save(state);
       // Explicit PR request authorizes publication of this integration branch only. Never force or merge main.
-      await git(this.repositoryPath, ["push", "--", remoteUrl, `${record.expectedHead}:refs/heads/${record.branchName}`]);
+      await git(this.repositoryPath, ["push", "--no-follow-tags", "--recurse-submodules=no", "--", remoteUrl, `${record.expectedHead}:refs/heads/${record.branchName}`]);
       const pr = PullRequestSchema.parse(await this.provider.create(providerRequest));
       record.pullRequest = { state: "created", requestKey, ...pr }; await this.save(state); return pr;
     });

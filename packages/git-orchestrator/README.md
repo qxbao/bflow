@@ -54,7 +54,7 @@ force-pushes, or merges a protected/main branch. Branch integration uses a dedic
 | `cancelIntegration(key)` | Mark cancelled; retain any pending merge, conflict markers and edits. Cancellation never aborts Git. |
 | `cleanupTask(key)` | Remove only a clean, released task worktree after cancellation or verified integration; reject pending integrations, untracked/ignored files and in-progress Git operations. Retain its branch and journal. |
 | `cleanupIntegration(key)` | Remove only a clean verified/cancelled integration worktree. Retain its branch and receipts. Repeating cleanup, including after process death, is safe. |
-| `requestPullRequest(key, {remote, baseBranch, title, body})` | Explicit publication request. Require configured provider, existing remote/base, provider permission, passing workflow verification and readable evidence. Push **pinned verified SHA** to the dedicated integration branch with ordinary non-force push, then create/reconcile PR. Never merge the PR. |
+| `requestPullRequest(key, {remote, baseBranch, title, body})` | Explicit publication request. Require configured provider, existing remote/base, provider permission, passing workflow verification and readable evidence. Push **pinned verified SHA** to the dedicated integration branch with ordinary non-force push, disabling automatic tag and submodule publication, then create/reconcile PR. Never merge the PR. |
 
 `ownedPaths`/`forbiddenPaths` are literal repo-relative files or directory prefixes,
 without glob syntax, trailing slash, `.` or `..`. Prefix matching respects directory
@@ -111,7 +111,12 @@ one atomic transaction.
 
 Cleanup checks Git status, ignored files, branch/repository bindings and pending
 operations, then unlocks/removes the worktree without `--force`. Interrupted cleanup
-can be repeated. Branch deletion is a separate owner decision and is deliberately
+can be repeated. Index flags `assume-unchanged` and `skip-worktree` can hide
+tracked local edits from Git status and Git worktree removal. Operations requiring
+a clean tree reject these flags with `unsupported_index_flags`; inspect the files
+and clear the flags explicitly before retrying. Sparse checkouts using
+`skip-worktree` are currently unsupported. The engine never clears these flags
+or discards the hidden edits automatically. Branch deletion is a separate owner decision and is deliberately
 absent from this API. Cancellation does not imply cleanup eligibility when data
 or a pending Git operation remains.
 

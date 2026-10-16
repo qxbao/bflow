@@ -3,6 +3,7 @@ import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { GitChangedFileSchema, type GitChangedFile } from "@bflow/contracts";
 import { repositoryLock } from "./lock-context.js";
+import { GitOrchestrationError } from "./model.js";
 
 export class GitError extends Error {
   constructor(
@@ -114,6 +115,13 @@ export async function inspectRepository(cwd: string): Promise<{
 export async function assertClean(cwd: string): Promise<void> {
   const repository = await inspectRepository(cwd);
   if (repository.dirty) throw new Error("Git working tree has uncommitted changes");
+  // Porcelain and Git worktree remove both trust these index flags and can silently
+  // ignore modified tracked bytes. Do not clear flags or discard the hidden edits.
+  const indexEntries = (await git(repository.root, ["ls-files", "-v", "-z"])).split("\0");
+  if (indexEntries.some(entry => /^[a-zS] /.test(entry))) {
+    throw new GitOrchestrationError("unsupported_index_flags",
+      "Git index contains assume-unchanged or skip-worktree flags; inspect hidden changes and clear those flags explicitly before proceeding");
+  }
   for (const marker of ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer"]) {
     const markerPath = (await git(repository.root, ["rev-parse", "--git-path", marker])).replace(/\n$/, "");
     try {

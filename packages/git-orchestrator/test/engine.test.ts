@@ -360,6 +360,21 @@ describe("GitIntegrationEngine using real isolated repositories", () => {
     expect(provider.create).toHaveBeenCalledOnce();
   });
 
+  it("publishes only the verified integration ref when push.followTags is enabled", async () => {
+    const provider: GitProvider = { checkAccess: vi.fn(async () => true), find: vi.fn(async () => null),
+      create: vi.fn(async () => ({ url: "https://provider.example/pull/1" })) };
+    engine = await GitIntegrationEngine.open({ repositoryPath: repository, artifactStore: store, provider });
+    const result = await verifiedIntegration();
+    const remotePath = await remote();
+    await git(repository, "config", "push.followTags", "true");
+    await git(repository, "tag", "-a", "private-release", result.expectedHead, "-m", "Unpublished release tag");
+    await engine.requestPullRequest(result.key, prRequest);
+    expect(await git(remotePath, "for-each-ref", "--format=%(refname)")).toBe(
+      [`refs/heads/${result.branchName}`, "refs/heads/main"].sort().join("\n")
+    );
+    expect(await git(repository, "tag", "--list", "private-release")).toBe("private-release");
+  });
+
   it("publishes the pinned verified commit when the branch advances during provider access checking", async () => {
     let integrationPath = "";
     const provider: GitProvider = { checkAccess: vi.fn(async () => {
