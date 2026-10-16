@@ -118,8 +118,10 @@ nativeSessionHookCommand? })` is an explicit opt-in helper for `claude` and
 `codex`. Pass its returned argv through `roleConfigs[role].args`; arbitrary other
 supported providers retain their existing launch configuration. Claude uses
 restricted mode, explicit built-in tool lists, `dontAsk`, isolated MCP config and
-launch-local settings; read-only roles receive Read/Glob/Grep rather than shell
-or write tools. Codex uses read-only or workspace-write sandbox, never approvals,
+launch-local settings; Conversation/Coordinator receive no native tools, while
+other read-only roles receive Read/Glob/Grep rather than shell or write tools.
+Native file tools deny `.bflow`, `.git` and common credential directories. Codex
+uses read-only or workspace-write sandbox, never approvals,
 and per-launch MCP/instructions/hooks overrides. Configured MCP servers remain
 trusted capabilities and must enforce their own role policy. Developer shell
 tools still require the host's implementation/command policy; a write sandbox
@@ -134,6 +136,23 @@ authenticated session identity, TDD evidence or task success. The host must
 validate those separately. Installed CLI parse checks used Herdr 0.9.5 protocol
 22, Claude 2.1.299 and Codex 0.162.0; release labels are diagnostics, not allowlists.
 Codex hook format follows the [official hooks documentation](https://learn.chatgpt.com/docs/hooks).
+
+`await buildProviderRoleLaunchFromFiles({ agentKind, role, systemPrompt,
+mcpConfigFile, hooksSettingsFile, model? })` consumes the launch descriptor from
+the trusted Runtime host and preserves every configured native lifecycle hook.
+Claude receives the launch-local file paths; Codex receives equivalent inline
+TOML overrides. Hook files are trusted executable configuration, not model input.
+
+An optional real-provider probe runs in an isolated named Herdr session and a
+private disposable Claude profile cloned from the existing login. It answers the
+trust question only for its generated workspace, reports the actual native
+SessionStart identity via `pane.report_agent_session`, and requests one real
+model reply. It does not install global hooks or modify the original profile.
+This is provider/transport evidence, not a complete Agentic SDLC workflow:
+
+```sh
+BFLOW_LIVE_CLAUDE=1 TMPDIR=/tmp pnpm exec vitest run packages/pane-manager/test/provider-live.test.ts --maxWorkers=1 --minWorkers=1
+```
 
 ---
 
