@@ -1,0 +1,1397 @@
+import { constants } from "node:fs";
+import { open, stat } from "node:fs/promises";
+import { join } from "node:path";
+import {
+  type AgentEnvironment,
+  AgentEnvironmentSchema,
+  type AgentHealthCheck,
+  type AgentHealthRequest,
+  AgentHealthRequestSchema,
+  type AgentHealthResult,
+  AgentHealthResultSchema,
+  type AgentLaunchProfile,
+  AgentLaunchProfileSchema,
+  type AgentProviderAdapter,
+  type AgentProviderDescriptor,
+  MCPClientRegistrationSchema,
+  MCPServiceObservationSchema,
+  type OperationOptions,
+  type OperationResult,
+  PlatformSchemaVersionSchema,
+  SkillManifestSchema
+} from "@bflow/contracts";
+import {
+  computeFileSha256,
+  computeLaunchFingerprint,
+  resolveAndVerifyExecutable,
+  verifyLaunchAttestation
+} from "./attestation.js";
+import { createHealthCheck } from "./diagnostics.js";
+import { validateProviderEnvironment } from "./environment.js";
+import { compileProviderPermissions } from "./permissions.js";
+import { createProviderProcessRunner } from "./runner.js";
+import type {
+  DetectedProviderCapabilities,
+  ProviderAdapterOptions,
+  ProviderCommandRunner
+} from "./types.js";
+
+const DEFAULT_MIN_VERSIONS: Record<"claude" | "codex" | "agy", string> = {
+  claude: "2.0.0",
+  codex: "0.150.0",
+  agy: "1.0.0"
+};
+
+const DEFAULT_ROLE_PROMPTS: Record<string, string> = {
+  conversation:
+    "You are the Bflow Conversation Agent. You serve as the sole user interface, handling clarification dialogues and delegation to the Coordinator.",
+  coordinator:
+    "You are the Bflow Coordinator Agent. You analyze requirements, decompose tasks into a DAG, and orchestrate workflow execution via Workflow Runtime.",
+  developer:
+    "You are the Bflow Developer Agent. You implement tasks following Spec-Driven Development and Conditional TDD policies.",
+  reviewer:
+    "You are the Bflow Reviewer Agent. You review code changes and verification evidence against specifications and acceptance criteria.",
+  qa:
+    "You are the Bflow QA Verifier Agent. You run automated verification suites, evaluate test results, and produce verification evidence.",
+  architect:
+    "You are the Bflow Architect Agent. You design system architecture and technical specifications.",
+  specifier:
+    "You are the Bflow Analyst/Specifier Agent. You elicit requirements and formalize specifications.",
+  planner:
+    "You are the Bflow Planner Agent. You create milestone plans and track task breakdown."
+};
+
+export function parseSemver(raw: string): { major: number; minor: number; patch: number } | null {
+  const match = raw.match(/(\d+)\.(\d+)\.(\d+)/);
+  if (!match || !match[1] || !match[2] || !match[3]) return null;
+  return {
+    major: parseInt(match[1], 10),
+    minor: parseInt(match[2], 10),
+    patch: parseInt(match[3], 10)
+  };
+}
+
+export function compareSemver(a: string, b: string): number {
+  const pa = parseSemver(a);
+  const pb = parseSemver(b);
+  if (!pa || !pb) return 0;
+  if (pa.major !== pb.major) return pa.major - pb.major;
+  if (pa.minor !== pb.minor) return pa.minor - pb.minor;
+  return pa.patch - pb.patch;
+}
+
+export abstract class BaseProviderAdapter implements AgentProviderAdapter {
+  abstract readonly descriptor: AgentProviderDescriptor;
+
+  protected readonly options: ProviderAdapterOptions;
+  protected readonly runner: ProviderCommandRunner;
+
+  constructor(options?: ProviderAdapterOptions) {
+    this.options = options ?? {};
+    this.runner = options?.runner ?? createProviderProcessRunner();
+  }
+
+  protected getExecutablePath(): string {
+    return this.options.executablePath ?? this.descriptor.executableName;
+  }
+
+  protected abstract getAuthCommand(): readonly string[];
+  protected abstract getProbeCommand(environment: AgentEnvironment): readonly string[];
+  protected abstract compileArgv(
+    environment: AgentEnvironment,
+    configFiles: { promptFile: string; mcpConfigFile: string; settingsFile: string },
+    capabilities: DetectedProviderCapabilities
+  ): Promise<{ readonly argv: readonly string[]; readonly unsupportedCode?: string; readonly unsupportedMessage?: string }>;
+
+  public async detectCapabilities(): Promise<DetectedProviderCapabilities> {
+    const executable = this.getExecutablePath();
+    const versionOutcome = await this.runner.run({
+      executable,
+      args: ["--version"],
+      env: { BFLOW_PROVIDER: this.descriptor.provider }
+    });
+
+    const rawVersion = versionOutcome.stdout.trim() || versionOutcome.stderr.trim();
+    const parsed = parseSemver(rawVersion);
+    const version = parsed ? `${parsed.major}.${parsed.minor}.${parsed.patch}` : "0.0.0";
+
+    const helpOutcome = await this.runner.run({
+      executable,
+      args: ["--help"],
+      env: { BFLOW_PROVIDER: this.descriptor.provider }
+    });
+    const helpText = `${helpOutcome.stdout}\n${helpOutcome.stderr}`;
+
+    const supportedFlags = new Set<string>();
+    const flagMatches = helpText.matchAll(/--[A-Za-z0-9_-]+/g);
+    for (const match of flagMatches) {
+      if (match[0]) supportedFlags.add(match[0]);
+    }
+
+    const supportedSubcommands = new Set<string>();
+    const subMatches = helpText.matchAll(/^[ \t]+([a-z][a-z0-9_-]+)[ \t]+/gm);
+    for (const match of subMatches) {
+      if (match[1]) supportedSubcommands.add(match[1]);
+    }
+
+    const providerId = this.descriptor.provider;
+    const supportsMcpStdio = this.descriptor.mcpTransports.includes("stdio");
+    const supportsMcpHttp = this.descriptor.mcpTransports.includes("streamable_http");
+    const supportsSkills = true;
+    const supportsWorkspaceTrust = supportedFlags.has("--restricted") || supportedFlags.has("--sandbox");
+    const supportsDangerouslySkipPermissions = supportedFlags.has("--dangerously-skip-permissions");
+    const supportsSandboxFlag = supportedFlags.has("--sandbox");
+    const supportsApprovalPolicyFlag = supportedFlags.has("--ask-for-approval");
+    const supportsAddDirFlag = supportedFlags.has("--add-dir");
+    const supportsNativeHooks = providerId !== "agy";
+    const supportsUnattendedMode = providerId !== "agy";
+
+    return {
+      version,
+      rawVersionOutput: rawVersion,
+      supportedFlags,
+      supportedSubcommands,
+      supportsMcpStdio,
+      supportsMcpHttp,
+      supportsSkills,
+      supportsWorkspaceTrust,
+      supportsDangerouslySkipPermissions,
+      supportsSandboxFlag,
+      supportsApprovalPolicyFlag,
+      supportsAddDirFlag,
+      supportsNativeHooks,
+      supportsUnattendedMode
+    };
+  }
+
+  async checkHealth(
+    request: AgentHealthRequest,
+    options?: OperationOptions
+  ): Promise<OperationResult<AgentHealthResult>> {
+    // 1. Ingress schema version check
+    const rawVersion = (request as unknown as { schemaVersion?: unknown }).schemaVersion;
+    if (rawVersion !== 3) {
+      return {
+        ok: false,
+        error: {
+          code: "unsupported_version",
+          retryable: false,
+          supportedVersions: [3],
+          receivedVersion: typeof rawVersion === "number" ? rawVersion : 0,
+          message: `Unsupported schema version: ${String(rawVersion)}`
+        }
+      };
+    }
+
+    // 2. Validate request with Zod
+    const parsedRequest = AgentHealthRequestSchema.safeParse(request);
+    if (!parsedRequest.success) {
+      return {
+        ok: false,
+        error: {
+          code: "validation",
+          retryable: false,
+          message: `Health request failed schema validation: ${parsedRequest.error.message}`
+        }
+      };
+    }
+
+    // 3. Check AbortSignal and deadline
+    if (options?.signal?.aborted) {
+      return {
+        ok: false,
+        error: {
+          code: "cancelled",
+          retryable: false,
+          message: "Operation cancelled by AbortSignal"
+        }
+      };
+    }
+
+    if (options?.deadline !== undefined && Date.parse(options.deadline) <= Date.now()) {
+      return {
+        ok: false,
+        error: {
+          code: "timeout",
+          retryable: true,
+          retrySafety: "observation_only",
+          message: "Operation deadline expired before execution"
+        }
+      };
+    }
+
+    const environment = request.environment;
+    const checks: AgentHealthCheck[] = [];
+    let hasUnsupported = false;
+    let hasFailed = false;
+
+    // A. Check: binary
+    const executable = this.getExecutablePath();
+    let binaryPassed = false;
+    let actualBinaryDigest = "0".repeat(64);
+
+    try {
+      const resolvedExec = await resolveAndVerifyExecutable(executable, {
+        ...(this.options.allowTestFilesystemOwnership !== undefined
+          ? { allowTestFilesystemOwnership: this.options.allowTestFilesystemOwnership }
+          : {})
+      });
+      actualBinaryDigest = resolvedExec.digest;
+      if (this.options.pinnedExecutableDigest !== undefined) {
+        if (actualBinaryDigest !== this.options.pinnedExecutableDigest) {
+          checks.push(
+            createHealthCheck(
+              "binary",
+              "failed",
+              "binary_digest_mismatch",
+              `Executable digest mismatch: expected ${this.options.pinnedExecutableDigest}, got ${actualBinaryDigest}`,
+              "Reinstall or verify the trusted binary distribution."
+            )
+          );
+        } else {
+          binaryPassed = true;
+          checks.push(
+            createHealthCheck(
+              "binary",
+              "passed",
+              "binary_ok",
+              `Binary verified at '${resolvedExec.canonicalPath}' with matching digest.`
+            )
+          );
+        }
+      } else {
+        binaryPassed = true;
+        checks.push(
+          createHealthCheck(
+            "binary",
+            "passed",
+            "binary_ok",
+            `Binary verified at '${resolvedExec.canonicalPath}'.`
+          )
+        );
+      }
+    } catch (err) {
+      checks.push(
+        createHealthCheck(
+          "binary",
+          "failed",
+          "binary_missing",
+          `Binary missing or inaccessible at '${executable}': ${err instanceof Error ? err.message : String(err)}`,
+          `Install '${this.descriptor.executableName}' or verify PATH configuration.`
+        )
+      );
+    }
+
+    if (!binaryPassed) hasFailed = true;
+
+    // B. Check: version & capabilities
+    let capabilities: DetectedProviderCapabilities;
+    let versionPassed = false;
+    try {
+      capabilities = await this.detectCapabilities();
+      const minVersion =
+        this.options.minimumVersion ?? DEFAULT_MIN_VERSIONS[this.descriptor.provider];
+      if (capabilities.version === "0.0.0" || compareSemver(capabilities.version, minVersion) < 0) {
+        checks.push(
+          createHealthCheck(
+            "version",
+            "failed",
+            "outdated_version",
+            `Detected version '${capabilities.version}' is below minimum required version '${minVersion}'`,
+            `Upgrade '${this.descriptor.executableName}' to at least ${minVersion}.`
+          )
+        );
+      } else {
+        versionPassed = true;
+        checks.push(
+          createHealthCheck(
+            "version",
+            "passed",
+            "version_ok",
+            `Version '${capabilities.version}' verified (minimum '${minVersion}').`
+          )
+        );
+      }
+    } catch (err) {
+      capabilities = {
+        version: "0.0.0",
+        rawVersionOutput: "",
+        supportedFlags: new Set(),
+        supportedSubcommands: new Set(),
+        supportsMcpStdio: false,
+        supportsMcpHttp: false,
+        supportsSkills: false,
+        supportsWorkspaceTrust: false,
+        supportsDangerouslySkipPermissions: false,
+        supportsSandboxFlag: false,
+        supportsApprovalPolicyFlag: false,
+        supportsAddDirFlag: false,
+        supportsNativeHooks: false,
+        supportsUnattendedMode: false
+      };
+      checks.push(
+        createHealthCheck(
+          "version",
+          "failed",
+          "version_check_failed",
+          `Failed to determine provider version: ${err instanceof Error ? err.message : String(err)}`,
+          `Verify '${this.descriptor.executableName}' is executable and responds to --version.`
+        )
+      );
+    }
+
+    if (!versionPassed) hasFailed = true;
+
+    // C. Check: authentication & execution probe
+    let authPassed = false;
+    try {
+      const authArgs = this.getAuthCommand();
+      const authOutcome = await this.runner.run({
+        executable,
+        args: authArgs,
+        env: { BFLOW_PROVIDER: this.descriptor.provider },
+        timeoutMs: 15_000
+      });
+
+      const combinedAuthOutput = `${authOutcome.stdout}\n${authOutcome.stderr}`;
+      const isExpired =
+        combinedAuthOutput.toLowerCase().includes("expired") ||
+        (authOutcome.stdout.includes('"status":"expired"') || authOutcome.stdout.includes('"status": "expired"'));
+
+      if (authOutcome.exitCode !== 0 || isExpired) {
+        const code = isExpired ? "auth_expired" : "auth_missing";
+        checks.push(
+          createHealthCheck(
+            "authentication",
+            "failed",
+            code,
+            `Authentication check failed: ${combinedAuthOutput}`,
+            `Authenticate '${this.descriptor.executableName}' using your provider login or credentials.`
+          )
+        );
+      } else {
+        // Run minimal non-interactive execution probe
+        const probeArgs = this.getProbeCommand(environment);
+        const probeOutcome = await this.runner.run({
+          executable,
+          args: probeArgs,
+          cwd: environment.cwd,
+          env: { BFLOW_PROVIDER: this.descriptor.provider },
+          timeoutMs: 15_000
+        });
+
+        const combinedProbe = `${probeOutcome.stdout}\n${probeOutcome.stderr}`;
+        if (probeOutcome.exitCode !== 0) {
+          const lower = combinedProbe.toLowerCase();
+          let probeCode = "probe_failed";
+          let probeRemediation = "Verify account quotas, network connectivity, and provider permissions.";
+
+          if (lower.includes("permission") || lower.includes("untrusted")) {
+            probeCode = "permission_denied";
+            probeRemediation = "Grant workspace trust or adjust permission profile.";
+          } else if (lower.includes("model")) {
+            probeCode = "incompatible_model";
+            probeRemediation = "Select a model supported by your provider account tier.";
+          } else if (lower.includes("blocked") || lower.includes("approval") || lower.includes("dialog")) {
+            probeCode = "agent_blocked";
+            probeRemediation = "Complete interactive approvals outside automated flow.";
+          } else if (lower.includes("auth") || lower.includes("expired") || lower.includes("token")) {
+            probeCode = "auth_expired";
+            probeRemediation = "Re-authenticate provider credentials.";
+          }
+
+          checks.push(
+            createHealthCheck(
+              "authentication",
+              "failed",
+              probeCode,
+              `Readiness probe failed: ${combinedProbe}`,
+              probeRemediation
+            )
+          );
+        } else {
+          authPassed = true;
+          checks.push(
+            createHealthCheck(
+              "authentication",
+              "passed",
+              "auth_ok",
+              "Authentication and execution probe verified."
+            )
+          );
+        }
+      }
+    } catch (err) {
+      checks.push(
+        createHealthCheck(
+          "authentication",
+          "failed",
+          "auth_check_error",
+          `Authentication check encountered an error: ${err instanceof Error ? err.message : String(err)}`,
+          "Verify provider CLI installation and credentials."
+        )
+      );
+    }
+
+    if (!authPassed) hasFailed = true;
+
+    // D. Check: environment
+    const envValidation = await validateProviderEnvironment(environment, {
+      ...(this.options.allowTestFilesystemOwnership !== undefined
+        ? { allowTestFilesystemOwnership: this.options.allowTestFilesystemOwnership }
+        : {})
+    });
+
+    if (!envValidation.valid) {
+      hasFailed = true;
+      checks.push(
+        createHealthCheck(
+          "environment",
+          "failed",
+          envValidation.code ?? "environment_invalid",
+          envValidation.message ?? "Environment validation failed",
+          "Ensure cwd and stateDirectory exist with private 0o700 permissions and valid scope."
+        )
+      );
+    } else {
+      checks.push(
+        createHealthCheck(
+          "environment",
+          "passed",
+          "environment_ok",
+          "Environment directory structure, permissions, and variables verified."
+        )
+      );
+    }
+
+    // E. Check: mcp
+    const nowDate = this.options.now ? this.options.now() : new Date();
+    const registrations = this.options.mcpRegistrations ?? [];
+    const observations = this.options.mcpObservations ?? [];
+    let mcpCheckHandled = false;
+
+    for (const reg of registrations) {
+      const parsedReg = MCPClientRegistrationSchema.safeParse(reg);
+      if (!parsedReg.success) {
+        hasFailed = true;
+        mcpCheckHandled = true;
+        checks.push(
+          createHealthCheck(
+            "mcp",
+            "failed",
+            "mcp_invalid_registration",
+            `Invalid MCPClientRegistration '${reg.registrationId}': ${parsedReg.error.message}`,
+            "Ensure all MCP client registrations conform to MCPClientRegistrationSchema."
+          )
+        );
+        break;
+      }
+      if (reg.provider !== environment.provider || reg.role !== environment.role) {
+        hasFailed = true;
+        mcpCheckHandled = true;
+        checks.push(
+          createHealthCheck(
+            "mcp",
+            "failed",
+            "mcp_registration_scope_mismatch",
+            `MCP registration '${reg.registrationId}' targets ${reg.provider}/${reg.role} instead of ${environment.provider}/${environment.role}`,
+            "Bind MCP client registration to the exact provider and role."
+          )
+        );
+        break;
+      }
+      if (reg.scope.kind === "session" && reg.scope.sessionId !== environment.scope.sessionId) {
+        hasFailed = true;
+        mcpCheckHandled = true;
+        checks.push(
+          createHealthCheck(
+            "mcp",
+            "failed",
+            "mcp_registration_scope_mismatch",
+            `MCP registration '${reg.registrationId}' session '${reg.scope.sessionId}' does not match environment session '${environment.scope.sessionId}'`,
+            "Re-issue session-scoped MCP registration for the active session."
+          )
+        );
+        break;
+      }
+      if (Date.parse(reg.expiresAt) <= nowDate.getTime()) {
+        hasFailed = true;
+        mcpCheckHandled = true;
+        checks.push(
+          createHealthCheck(
+            "mcp",
+            "failed",
+            "mcp_registration_expired",
+            `MCP registration '${reg.registrationId}' expired at ${reg.expiresAt}`,
+            "Refresh MCP client registration before launching the agent."
+          )
+        );
+        break;
+      }
+      if (!this.descriptor.mcpTransports.includes(reg.connection.transport)) {
+        hasUnsupported = true;
+        mcpCheckHandled = true;
+        checks.push(
+          createHealthCheck(
+            "mcp",
+            "failed",
+            "mcp_transport_unsupported",
+            `Provider '${this.descriptor.provider}' does not support MCP transport '${reg.connection.transport}'`,
+            "Configure a stdio bridge or supported MCP transport."
+          )
+        );
+        break;
+      }
+    }
+
+    if (!mcpCheckHandled) {
+      for (const obs of observations) {
+        const parsedObs = MCPServiceObservationSchema.safeParse(obs);
+        if (!parsedObs.success) {
+          hasFailed = true;
+          mcpCheckHandled = true;
+          checks.push(
+            createHealthCheck(
+              "mcp",
+              "failed",
+              "mcp_invalid_observation",
+              `Invalid MCPServiceObservation for '${obs.serviceId}': ${parsedObs.error.message}`,
+              "Ensure MCP service observations conform to MCPServiceObservationSchema."
+            )
+          );
+          break;
+        }
+        if (
+          environment.requiredMcpServiceIds.includes(obs.serviceId) &&
+          (obs.status !== "ready" || !obs.protocolVersion)
+        ) {
+          hasFailed = true;
+          mcpCheckHandled = true;
+          checks.push(
+            createHealthCheck(
+              "mcp",
+              "failed",
+              "mcp_service_unhealthy",
+              `Required MCP service '${obs.serviceId}' is in status '${obs.status}'`,
+              "Wait for SharedMCPGateway service readiness or inspect MCP server logs."
+            )
+          );
+          break;
+        }
+      }
+    }
+
+    if (!mcpCheckHandled) {
+      if (environment.requiredMcpServiceIds.length > 0) {
+        const regServiceIds = new Set(registrations.flatMap((r) => r.serviceIds));
+        const obsServiceIds = new Set(observations.map((o) => o.serviceId));
+        const missingServices = environment.requiredMcpServiceIds.filter(
+          (id) => !regServiceIds.has(id) && !obsServiceIds.has(id)
+        );
+
+        if (missingServices.length > 0) {
+          hasFailed = true;
+          checks.push(
+            createHealthCheck(
+              "mcp",
+              "failed",
+              "mcp_missing_service",
+              `Required MCP services are not registered or observed: ${missingServices.join(", ")}`,
+              "Register required MCP services via SharedMCPGateway before agent launch."
+            )
+          );
+        } else {
+          checks.push(
+            createHealthCheck(
+              "mcp",
+              "passed",
+              "mcp_ok",
+              `All ${environment.requiredMcpServiceIds.length} required MCP service(s) verified.`
+            )
+          );
+        }
+      } else {
+        checks.push(
+          createHealthCheck(
+            "mcp",
+            "passed",
+            "mcp_ok",
+            "No MCP services required."
+          )
+        );
+      }
+    }
+
+    // F. Check: launch_arguments & permissions
+    const permResult = await compileProviderPermissions(
+      this.descriptor.provider,
+      environment.permissionProfile,
+      environment.role,
+      capabilities,
+      {
+        cwd: environment.cwd,
+        mcpServerNames: registrations.map((r) => r.registrationId),
+        ...(this.options.osSandboxPath !== undefined ? { osSandboxPath: this.options.osSandboxPath } : {})
+      }
+    );
+
+    const modelIncompatible =
+      this.options.model !== undefined &&
+      this.options.supportedModels !== undefined &&
+      !this.options.supportedModels.includes(this.options.model);
+    const modelFlagMissing =
+      this.options.model !== undefined && !capabilities.supportedFlags.has("--model");
+
+    if (!permResult.supported) {
+      if (
+        permResult.code === "unattended_isolation_unsupported" ||
+        permResult.code === "agy_unattended_unsupported"
+      ) {
+        hasUnsupported = true;
+      } else {
+        hasFailed = true;
+      }
+      checks.push(
+        createHealthCheck(
+          "permissions",
+          "failed",
+          permResult.code,
+          permResult.message,
+          permResult.remediation ?? "Adjust permission profile or configure supported isolation."
+        )
+      );
+      checks.push(
+        createHealthCheck(
+          "launch_arguments",
+          "failed",
+          permResult.code === "invalid_flag" ? "invalid_flag" : "launch_arguments_invalid",
+          `Cannot compile launch arguments: ${permResult.message}`,
+          permResult.remediation ?? "Review permission configuration."
+        )
+      );
+    } else if (modelIncompatible) {
+      hasFailed = true;
+      checks.push(
+        createHealthCheck(
+          "permissions",
+          "passed",
+          "permissions_ok",
+          "Permission profile and sandbox boundaries verified."
+        )
+      );
+      checks.push(
+        createHealthCheck(
+          "launch_arguments",
+          "failed",
+          "incompatible_model",
+          `Model '${this.options.model}' is not in supportedModels (${this.options.supportedModels?.join(", ")})`,
+          "Configure a model supported by the provider and account tier."
+        )
+      );
+    } else if (modelFlagMissing) {
+      hasFailed = true;
+      checks.push(
+        createHealthCheck(
+          "permissions",
+          "passed",
+          "permissions_ok",
+          "Permission profile and sandbox boundaries verified."
+        )
+      );
+      checks.push(
+        createHealthCheck(
+          "launch_arguments",
+          "failed",
+          "invalid_flag",
+          `Provider '${this.descriptor.provider}' does not support the --model flag`,
+          "Remove model override or upgrade the provider CLI."
+        )
+      );
+    } else {
+      checks.push(
+        createHealthCheck(
+          "permissions",
+          "passed",
+          "permissions_ok",
+          "Permission profile and sandbox boundaries verified."
+        )
+      );
+      checks.push(
+        createHealthCheck(
+          "launch_arguments",
+          "passed",
+          "launch_arguments_ok",
+          "Launch argument template compiled and validated."
+        )
+      );
+    }
+
+    // G. Check: skills
+    if (this.options.skillManifest !== undefined) {
+      const parsedManifest = SkillManifestSchema.safeParse(this.options.skillManifest);
+      if (!parsedManifest.success) {
+        hasFailed = true;
+        checks.push(
+          createHealthCheck(
+            "skills",
+            "failed",
+            "skill_manifest_invalid",
+            `SkillManifest failed schema validation: ${parsedManifest.error.message}`,
+            "Re-resolve the role skill manifest with schemaVersion 3."
+          )
+        );
+      } else if (this.options.skillManifest.role !== environment.role) {
+        hasFailed = true;
+        checks.push(
+          createHealthCheck(
+            "skills",
+            "failed",
+            "skill_manifest_role_mismatch",
+            `Skill manifest role '${this.options.skillManifest.role}' does not match environment role '${environment.role}'`,
+            "Resolve the skill manifest for the target role."
+          )
+        );
+      } else if (this.options.skillManifest.digest !== environment.skillManifestDigest) {
+        hasFailed = true;
+        checks.push(
+          createHealthCheck(
+            "skills",
+            "failed",
+            "skill_manifest_mismatch",
+            `Skill manifest digest '${this.options.skillManifest.digest}' does not match environment '${environment.skillManifestDigest}'`,
+            "Ensure resolved skill manifest corresponds to the environment definition."
+          )
+        );
+      } else {
+        checks.push(
+          createHealthCheck(
+            "skills",
+            "passed",
+            "skills_ok",
+            `Skill manifest verified with ${this.options.skillManifest.skills.length} skill(s).`
+          )
+        );
+      }
+    } else if (
+      environment.skillManifestDigest &&
+      environment.skillManifestDigest !== "0".repeat(64) &&
+      environment.skillManifestDigest !== "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ) {
+      hasFailed = true;
+      checks.push(
+        createHealthCheck(
+          "skills",
+          "failed",
+          "skill_manifest_mismatch",
+          "Skill manifest digest specified in environment but no skill manifest was provided",
+          "Provide skill manifest matching the environment digest."
+        )
+      );
+    } else {
+      checks.push(
+        createHealthCheck(
+          "skills",
+          "passed",
+          "skills_ok",
+          "No custom skill manifest required."
+        )
+      );
+    }
+
+    // H. Check: native_binding (activated stage only)
+    if (request.stage === "activated") {
+      if (!this.descriptor.supportsNativeBinding) {
+        hasUnsupported = true;
+        checks.push(
+          createHealthCheck(
+            "native_binding",
+            "failed",
+            "native_binding_unsupported",
+            `Provider '${this.descriptor.provider}' does not support authenticated native binding receipts`,
+            "Native startup attestation is not certified for this provider."
+          )
+        );
+      } else if (!request.launchProfile || !request.launchAttestation) {
+        hasFailed = true;
+        checks.push(
+          createHealthCheck(
+            "native_binding",
+            "failed",
+            "native_binding_missing",
+            "Activated stage requires launch profile and signed launch attestation",
+            "Attach valid launch profile and attestation to activated health request."
+          )
+        );
+      } else {
+        let bindingOk = true;
+
+        // 0. Check launchProfile expiration and environment match
+        if (Date.parse(request.launchProfile.expiresAt) <= nowDate.getTime()) {
+          bindingOk = false;
+          hasFailed = true;
+          checks.push(
+            createHealthCheck(
+              "native_binding",
+              "failed",
+              "native_binding_profile_expired",
+              `Launch profile '${request.launchProfile.launchId}' expired at ${request.launchProfile.expiresAt}`,
+              "Prepare a fresh launch profile and restart the agent."
+            )
+          );
+        } else if (
+          request.launchProfile.environment.environmentId !== environment.environmentId ||
+          request.launchProfile.environment.configFingerprint !== environment.configFingerprint
+        ) {
+          bindingOk = false;
+          hasFailed = true;
+          checks.push(
+            createHealthCheck(
+              "native_binding",
+              "failed",
+              "native_binding_environment_mismatch",
+              "Launch profile environmentId or configFingerprint does not match health request environment",
+              "Ensure activated check uses the exact launch profile for this environment."
+            )
+          );
+        }
+
+        // 1. Verify attestation signature
+        if (bindingOk) {
+          const attestationVerification = verifyLaunchAttestation(
+            request.launchAttestation,
+            this.options.trustedIssuerKeys ?? {},
+            {
+              launchProfile: request.launchProfile,
+              sessionId: environment.scope.sessionId,
+              provider: environment.provider,
+              now: nowDate
+            }
+          );
+
+          if (!attestationVerification.valid) {
+            bindingOk = false;
+            hasFailed = true;
+            checks.push(
+              createHealthCheck(
+                "native_binding",
+                "failed",
+                attestationVerification.code,
+                attestationVerification.message,
+                "Ensure attestation was signed by a configured trusted host key."
+              )
+            );
+          }
+        }
+
+        // 2. Verify executable digest on disk still matches
+        if (bindingOk && actualBinaryDigest !== request.launchProfile.executableDigest) {
+          bindingOk = false;
+          hasFailed = true;
+          checks.push(
+            createHealthCheck(
+              "native_binding",
+              "failed",
+              "native_binding_executable_mismatch",
+              `Executable digest changed after launch: expected ${request.launchProfile.executableDigest}, current ${actualBinaryDigest}`,
+              "Restart session with updated launch profile."
+            )
+          );
+        }
+
+        // 3. Verify config files on disk still match and retain private 0o600 permissions
+        if (bindingOk) {
+          for (const cf of request.launchProfile.configFiles) {
+            try {
+              const cfStat = await stat(cf.path);
+              if ((cfStat.mode & 0o077) !== 0) {
+                bindingOk = false;
+                hasFailed = true;
+                checks.push(
+                  createHealthCheck(
+                    "native_binding",
+                    "failed",
+                    "native_binding_config_permissions",
+                    `Config file '${cf.path}' has group/world permissions (${(cfStat.mode & 0o777).toString(8)})`,
+                    "Restrict launch config files to 0o600."
+                  )
+                );
+                break;
+              }
+              const currentDigest = await computeFileSha256(cf.path);
+              if (currentDigest !== cf.digest) {
+                bindingOk = false;
+                hasFailed = true;
+                checks.push(
+                  createHealthCheck(
+                    "native_binding",
+                    "failed",
+                    "native_binding_config_mismatch",
+                    `Config file '${cf.path}' digest changed after launch`,
+                    "Do not mutate launch config files after launch."
+                  )
+                );
+                break;
+              }
+            } catch (err) {
+              bindingOk = false;
+              hasFailed = true;
+              checks.push(
+                createHealthCheck(
+                  "native_binding",
+                  "failed",
+                  "native_binding_config_missing",
+                  `Config file '${cf.path}' missing: ${err instanceof Error ? err.message : String(err)}`,
+                  "Ensure launch config files are preserved."
+                )
+              );
+              break;
+            }
+          }
+        }
+
+        // 4. Verify live observation if provided
+        if (bindingOk && this.options.liveObservation !== undefined) {
+          const obs = this.options.liveObservation;
+          if (obs.paneId !== request.launchAttestation.paneId) {
+            bindingOk = false;
+            hasFailed = true;
+            checks.push(
+              createHealthCheck(
+                "native_binding",
+                "failed",
+                "native_binding_pane_mismatch",
+                `Live observation pane '${obs.paneId}' does not match attestation pane '${request.launchAttestation.paneId}'`,
+                "Verify pane binding in SessionManifest."
+              )
+            );
+          } else if (
+            obs.nativeSession !== undefined &&
+            (obs.nativeSession.value !== request.launchAttestation.nativeSession.value ||
+              obs.nativeSession.kind !== request.launchAttestation.nativeSession.kind)
+          ) {
+            bindingOk = false;
+            hasFailed = true;
+            checks.push(
+              createHealthCheck(
+                "native_binding",
+                "failed",
+                "native_binding_session_mismatch",
+                "Live observation nativeSession does not match launch attestation nativeSession",
+                "Re-verify native session hook receipt."
+              )
+            );
+          } else if (obs.permissionDenied === true) {
+            bindingOk = false;
+            hasFailed = true;
+            checks.push(
+              createHealthCheck(
+                "native_binding",
+                "failed",
+                "permission_denied",
+                "Live observation reported permission denial in agent pane",
+                "Review pane logs and adjust permission profile."
+              )
+            );
+          } else if (obs.launchPending === true) {
+            bindingOk = false;
+            hasFailed = true;
+            checks.push(
+              createHealthCheck(
+                "native_binding",
+                "failed",
+                "native_binding_launch_pending",
+                "Agent launch is still pending in Herdr pane",
+                "Wait for agent startup to finish before declaring activated readiness."
+              )
+            );
+          } else if (!obs.interactiveReady) {
+            bindingOk = false;
+            hasFailed = true;
+            checks.push(
+              createHealthCheck(
+                "native_binding",
+                "failed",
+                "native_binding_not_interactive_ready",
+                "Agent process has not reached interactive ready state",
+                "Wait for interactive prompt readiness."
+              )
+            );
+          } else if (
+            ["starting", "blocked", "unknown", "disconnected", "cancelled"].includes(
+              obs.transportState
+            )
+          ) {
+            bindingOk = false;
+            hasFailed = true;
+            checks.push(
+              createHealthCheck(
+                "native_binding",
+                "failed",
+                "native_binding_transport_blocked",
+                `Agent transport state is '${obs.transportState}'`,
+                "Wait for agent transport to reach idle or working."
+              )
+            );
+          }
+        }
+
+        if (bindingOk) {
+          checks.push(
+            createHealthCheck(
+              "native_binding",
+              "passed",
+              "native_binding_ok",
+              "Native session binding, startup attestation, and live pane observation verified."
+            )
+          );
+        }
+      }
+    }
+
+    // Determine final status
+    let finalStatus: AgentHealthResult["status"];
+    if (!hasFailed && !hasUnsupported) {
+      finalStatus = "ready";
+    } else if (hasUnsupported && !hasFailed) {
+      finalStatus = "unsupported";
+    } else {
+      finalStatus = "blocked";
+    }
+
+    const checkedAtIso = nowDate.toISOString();
+    const ttlMs = Math.min(Math.max(this.options.healthTtlMs ?? 300_000, 1), 300_000);
+    const validUntilIso = new Date(nowDate.getTime() + ttlMs).toISOString();
+
+    const healthResult: AgentHealthResult = {
+      schemaVersion: PlatformSchemaVersionSchema.parse(3),
+      environmentId: environment.environmentId,
+      provider: environment.provider,
+      role: environment.role,
+      configFingerprint: environment.configFingerprint,
+      stage: request.stage,
+      status: finalStatus,
+      checkedAt: checkedAtIso,
+      validUntil: validUntilIso,
+      checks,
+      ...(finalStatus === "ready" && request.stage === "activated" && request.launchAttestation !== undefined
+        ? { launchAttestation: request.launchAttestation }
+        : {})
+    };
+
+    const parsedResult = AgentHealthResultSchema.safeParse(healthResult);
+    if (!parsedResult.success) {
+      return {
+        ok: false,
+        error: {
+          code: "validation",
+          retryable: false,
+          message: `Health result failed schema validation: ${parsedResult.error.message}`
+        }
+      };
+    }
+
+    return {
+      ok: true,
+      value: parsedResult.data
+    };
+  }
+
+  async prepareLaunch(
+    environment: AgentEnvironment,
+    options?: OperationOptions
+  ): Promise<OperationResult<AgentLaunchProfile>> {
+    // 1. Ingress schema version check
+    const rawVersion = (environment as unknown as { schemaVersion?: unknown }).schemaVersion;
+    if (rawVersion !== 3) {
+      return {
+        ok: false,
+        error: {
+          code: "unsupported_version",
+          retryable: false,
+          supportedVersions: [3],
+          receivedVersion: typeof rawVersion === "number" ? rawVersion : 0,
+          message: `Unsupported schema version: ${String(rawVersion)}`
+        }
+      };
+    }
+
+    // 2. Validate environment with Zod
+    const parsedEnv = AgentEnvironmentSchema.safeParse(environment);
+    if (!parsedEnv.success) {
+      return {
+        ok: false,
+        error: {
+          code: "validation",
+          retryable: false,
+          message: `AgentEnvironment validation failed: ${parsedEnv.error.message}`
+        }
+      };
+    }
+
+    // 3. Check AbortSignal and deadline
+    if (options?.signal?.aborted) {
+      return {
+        ok: false,
+        error: {
+          code: "cancelled",
+          retryable: false,
+          message: "Operation cancelled by AbortSignal"
+        }
+      };
+    }
+
+    if (options?.deadline !== undefined && Date.parse(options.deadline) <= Date.now()) {
+      return {
+        ok: false,
+        error: {
+          code: "timeout",
+          retryable: true,
+          retrySafety: "observation_only",
+          message: "Operation deadline expired before execution"
+        }
+      };
+    }
+
+    // 4. Validate environment structure & directories
+    const envValidation = await validateProviderEnvironment(environment, {
+      ...(this.options.allowTestFilesystemOwnership !== undefined
+        ? { allowTestFilesystemOwnership: this.options.allowTestFilesystemOwnership }
+        : {})
+    });
+    if (!envValidation.valid) {
+      return {
+        ok: false,
+        error: {
+          code: "validation",
+          retryable: false,
+          message: envValidation.message ?? "Environment validation failed"
+        }
+      };
+    }
+
+    const executable = this.getExecutablePath();
+    let canonicalExecutable: string;
+    let executableDigest: string;
+    try {
+      const resolvedExec = await resolveAndVerifyExecutable(executable, {
+        ...(this.options.allowTestFilesystemOwnership !== undefined
+          ? { allowTestFilesystemOwnership: this.options.allowTestFilesystemOwnership }
+          : {})
+      });
+      canonicalExecutable = resolvedExec.canonicalPath;
+      executableDigest = resolvedExec.digest;
+    } catch (err) {
+      return {
+        ok: false,
+        error: {
+          code: "not_found",
+          retryable: false,
+          message: `Executable at '${executable}' not found or inaccessible: ${err instanceof Error ? err.message : String(err)}`
+        }
+      };
+    }
+
+    const capabilities = await this.detectCapabilities();
+    const minVersion =
+      this.options.minimumVersion ?? DEFAULT_MIN_VERSIONS[this.descriptor.provider];
+    if (capabilities.version === "0.0.0" || compareSemver(capabilities.version, minVersion) < 0) {
+      return {
+        ok: false,
+        error: {
+          code: "validation",
+          retryable: false,
+          message: `Provider '${this.descriptor.provider}' version '${capabilities.version}' is below minimum '${minVersion}'`
+        }
+      };
+    }
+
+    const permResult = await compileProviderPermissions(
+      this.descriptor.provider,
+      environment.permissionProfile,
+      environment.role,
+      capabilities,
+      {
+        cwd: environment.cwd,
+        mcpServerNames: (this.options.mcpRegistrations ?? []).map((r) => r.registrationId),
+        ...(this.options.osSandboxPath !== undefined ? { osSandboxPath: this.options.osSandboxPath } : {})
+      }
+    );
+
+    if (!permResult.supported) {
+      return {
+        ok: false,
+        error: {
+          code: "validation",
+          retryable: false,
+          message: permResult.message
+        }
+      };
+    }
+
+    // 5. Build system prompt & private config files in stateDirectory
+    const rolePrompt =
+      this.options.rolePrompt ??
+      DEFAULT_ROLE_PROMPTS[environment.role] ??
+      `You are the Bflow ${environment.role} Agent.`;
+
+    const fullPrompt = this.options.renderedSkillsContent
+      ? `${rolePrompt}\n\n# Active Skills\n${this.options.renderedSkillsContent}`
+      : rolePrompt;
+
+    const promptPath = join(environment.stateDirectory, `${environment.role}.system-prompt.txt`);
+    const mcpConfigPath = join(environment.stateDirectory, `${environment.role}.mcp-config.json`);
+    const settingsPath = join(environment.stateDirectory, `${environment.role}.settings.json`);
+
+    // Write system prompt file
+    const promptFile = await open(
+      promptPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+      0o600
+    );
+    try {
+      await promptFile.writeFile(fullPrompt, "utf8");
+    } finally {
+      await promptFile.close();
+    }
+
+    // Write MCP config file
+    const mcpServersMap: Record<string, unknown> = {};
+    for (const reg of this.options.mcpRegistrations ?? []) {
+      if (reg.connection.transport === "stdio") {
+        mcpServersMap[reg.registrationId] = {
+          command: reg.connection.executable,
+          args: reg.connection.argv
+        };
+      }
+    }
+    const mcpFile = await open(
+      mcpConfigPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+      0o600
+    );
+    try {
+      await mcpFile.writeFile(JSON.stringify({ mcpServers: mcpServersMap }, null, 2), "utf8");
+    } finally {
+      await mcpFile.close();
+    }
+
+    // Write settings file (with native session hooks and provider-specific permissions/trust)
+    const hookCommand = this.options.nativeSessionHookCommand;
+    const settingsObj: Record<string, unknown> = {};
+    if (hookCommand && capabilities.supportsNativeHooks) {
+      settingsObj["hooks"] = {
+        SessionStart: [{ hooks: [{ type: "command", command: hookCommand, timeout: 10 }] }]
+      };
+    }
+    if (this.descriptor.provider === "agy") {
+      settingsObj["permissions"] = {
+        allow: permResult.settingsPermissionsAllow ?? [],
+        deny: permResult.settingsPermissionsDeny ?? []
+      };
+      settingsObj["workspaceTrust"] = {
+        enabled: true,
+        trustedFolders: Array.from(
+          new Set([
+            environment.cwd,
+            ...environment.permissionProfile.readableRoots,
+            ...environment.permissionProfile.writableRoots
+          ])
+        )
+      };
+      settingsObj["systemPromptFile"] = promptPath;
+      settingsObj["mcpConfigFile"] = mcpConfigPath;
+    } else if (this.descriptor.provider === "claude") {
+      settingsObj["permissions"] = {
+        allow: permResult.allowedTools ?? [],
+        deny: permResult.disallowedTools ?? []
+      };
+    }
+
+    const settingsFile = await open(
+      settingsPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+      0o600
+    );
+    try {
+      await settingsFile.writeFile(JSON.stringify(settingsObj, null, 2), "utf8");
+    } finally {
+      await settingsFile.close();
+    }
+
+    // Compute digests of written files
+    const promptDigest = await computeFileSha256(promptPath);
+    const mcpDigest = await computeFileSha256(mcpConfigPath);
+    const settingsDigest = await computeFileSha256(settingsPath);
+
+    const configFiles = [
+      { path: promptPath, digest: promptDigest },
+      { path: mcpConfigPath, digest: mcpDigest },
+      { path: settingsPath, digest: settingsDigest }
+    ];
+
+    // Compile provider argv
+    const compiled = await this.compileArgv(
+      environment,
+      { promptFile: promptPath, mcpConfigFile: mcpConfigPath, settingsFile: settingsPath },
+      capabilities
+    );
+
+    if (compiled.unsupportedCode) {
+      return {
+        ok: false,
+        error: {
+          code: "validation",
+          retryable: false,
+          message: compiled.unsupportedMessage ?? "Unsupported launch configuration"
+        }
+      };
+    }
+
+    const interaction: "conversation" | "no_direct_user_input" =
+      environment.role === "conversation" ? "conversation" : "no_direct_user_input";
+
+    const launchFingerprint = computeLaunchFingerprint({
+      environment,
+      executableDigest,
+      providerVersion: capabilities.version,
+      argv: compiled.argv,
+      configFiles,
+      interaction
+    });
+
+    const launchId = `launch-${environment.provider}-${environment.role}-${launchFingerprint.slice(0, 12)}`;
+    const nowDate = this.options.now ? this.options.now() : new Date();
+    const expiresAt = new Date(nowDate.getTime() + 3_600_000).toISOString();
+
+    const profile: AgentLaunchProfile = {
+      schemaVersion: PlatformSchemaVersionSchema.parse(3),
+      launchId,
+      environment,
+      providerVersion: capabilities.version,
+      executable: canonicalExecutable,
+      executableDigest,
+      argv: [...compiled.argv],
+      configFiles,
+      launchFingerprint,
+      interaction,
+      expiresAt
+    };
+
+    const parsedProfile = AgentLaunchProfileSchema.safeParse(profile);
+    if (!parsedProfile.success) {
+      return {
+        ok: false,
+        error: {
+          code: "validation",
+          retryable: false,
+          message: `Launch profile validation failed: ${parsedProfile.error.message}`
+        }
+      };
+    }
+
+    return {
+      ok: true,
+      value: parsedProfile.data
+    };
+  }
+}
