@@ -241,7 +241,13 @@ export class RolePaneManager {
         return notFoundError(`Session manifest not found for session '${this.#config.sessionId}'`);
       }
 
+      // A prior down may have closed a prefix before losing an acknowledgement.
+      // Only a successful current listing proves those exact panes are absent.
+      const listed = await this.#runHerdr(["pane", "list", "--workspace", manifest.herdrWorkspaceId], options);
+      if (listed.exitCode !== 0 || listed.failure) return toCommandError(listed, "Cannot reconcile panes before shutdown");
+      const livePaneIds = new Set(parsePaneListResult(listed).map(pane => pane.paneId));
       for (const pane of manifest.panes) {
+        if (!livePaneIds.has(pane.paneId)) continue;
         const outcome = await this.#runHerdr(["pane", "close", pane.paneId], options);
         if (outcome.exitCode !== 0 || outcome.failure) {
           return toCommandError(outcome, `Shutdown did not confirm closure of pane '${pane.paneId}'`);
@@ -285,7 +291,8 @@ export class RolePaneManager {
     options?: OperationOptions
   ): Promise<OperationResult<SessionManifest>> {
     const loadResult = await this.#store.load(this.#config.sessionId, options);
-    const savedManifest = loadResult.ok ? loadResult.value : null;
+    if (!loadResult.ok) return loadResult;
+    const savedManifest = loadResult.value;
 
     // Step 1: Workspace
     const wsListOutcome = await this.#runHerdr(["workspace", "list"], options);
@@ -425,6 +432,22 @@ export class RolePaneManager {
 
     const assignedPaneIds = new Set<string>();
     const manifestPanes: PaneBinding[] = [];
+    const persistProgress = async (binding: PaneBinding): Promise<OperationResult<SessionManifest>> => {
+      const panes = [...manifestPanes.filter(p => p.paneId !== binding.paneId), binding];
+      for (const previous of savedManifest?.panes ?? []) {
+        if (!panes.some(p => p.paneId === previous.paneId || p.role === previous.role && p.permanent !== false)) panes.push(previous);
+      }
+      const conversation = panes.find(p => p.role === "conversation");
+      return this.#store.save(SessionManifestSchema.parse({
+        schemaVersion: 2, sessionId: this.#config.sessionId, projectName: this.#config.projectName,
+        workspaceRoot: this.#config.workspaceRoot, herdrWorkspaceId, herdrTabId: finalConversationTabId,
+        status: "initializing", conversationSessionId: this.#config.conversationSessionId ?? savedManifest?.conversationSessionId ?? `conv-${this.#config.sessionId}`,
+        activeRunIds: savedManifest?.activeRunIds ?? [], panes,
+        attachTarget: { role: "conversation", paneId: conversation?.paneId ?? binding.paneId },
+        createdAt: savedManifest?.createdAt ?? this.#clock().toISOString(), updatedAt: this.#clock().toISOString(),
+        metadata: { ...savedManifest?.metadata, startupPending: true }
+      }), options);
+    };
 
     for (const role of configuredPermanentRoles) {
       const spec = ROLE_TOPOLOGY_SPECS[role];
@@ -506,12 +529,17 @@ export class RolePaneManager {
         });
         if (!bindingResult.ok) return bindingResult;
         manifestPanes.push(bindingResult.value);
+        const progress = await persistProgress(bindingResult.value);
+        if (!progress.ok) return progress;
         continue;
       }
 
       // Otherwise, obtain an available shell pane in targetTabId
       let candidatePane: HerdrPaneInfo | null = null;
-      if (initialConversationRootPaneId && targetTabId === finalConversationTabId && !assignedPaneIds.has(initialConversationRootPaneId)) {
+      // A recorded launch intent owns its pane even if startup is blocked or its
+      // acknowledgement was lost. Inspect it in place; never split a duplicate.
+      if (savedBinding) candidatePane = livePanes.find(p => p.paneId === savedBinding.paneId && p.tabId === targetTabId) ?? null;
+      if (!candidatePane && initialConversationRootPaneId && targetTabId === finalConversationTabId && !assignedPaneIds.has(initialConversationRootPaneId)) {
         const p = livePanes.find((item) => item.paneId === initialConversationRootPaneId);
         if (p && p.agent === null) {
           candidatePane = p;
@@ -552,6 +580,16 @@ export class RolePaneManager {
 
       assignedPaneIds.add(selectedPaneId);
 
+      const pending = this.#buildAndValidateBinding({ spec, agentName, agentKind,
+        agentInfo: { name: agentName, agent: agentKind, paneId: selectedPaneId,
+          terminalId: livePanes.find(p => p.paneId === selectedPaneId)!.terminalId,
+          workspaceId: herdrWorkspaceId, tabId: targetTabId, focused: false, agentStatus: "unknown", revision: 0 },
+        request: { role, paneId: selectedPaneId, workspaceId: herdrWorkspaceId, tabId: targetTabId,
+          cwd: this.#config.workspaceRoot, permanent: true, metadata: { launchIntent: true } } });
+      if (!pending.ok) return pending;
+      const intentSaved = await persistProgress(pending.value);
+      if (!intentSaved.ok) return intentSaved;
+
       const startResult = await this.startAgentInPane(
         {
           role,
@@ -569,6 +607,8 @@ export class RolePaneManager {
         return startResult;
       }
       manifestPanes.push(startResult.value);
+      const progress = await persistProgress(startResult.value);
+      if (!progress.ok) return progress;
     }
 
     // Preserve any existing active/released developer panes
@@ -636,7 +676,7 @@ export class RolePaneManager {
       },
       createdAt: savedManifest?.createdAt ?? this.#clock().toISOString(),
       updatedAt: this.#clock().toISOString(),
-      ...(savedManifest?.metadata !== undefined ? { metadata: savedManifest.metadata } : {})
+      metadata: { ...savedManifest?.metadata, startupPending: false }
     };
 
     const parsedManifest = SessionManifestSchema.safeParse(manifest);

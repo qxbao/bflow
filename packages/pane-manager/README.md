@@ -93,17 +93,47 @@ using these flags are unsupported. Ignored files also make the tree dirty, so
 preserve or remove generated files explicitly before releasing a worktree. The
 inspector never clears flags, deletes files or discards edits.
 
-`shutdownTopology` records `down` only after every pane-close response confirms
-success. A failed or timed-out close returns an error and retains the previous
-manifest; earlier panes may already have closed, so reconcile physical state
-before another shutdown attempt. Runtime quiesce and durable checkpoints remain
-the caller's responsibility.
+`shutdownTopology` first obtains a successful live pane listing and closes only
+the recorded panes still present. It records `down` after each required close
+confirms success. Failed/timed-out closes retain the previous manifest; retry
+uses another successful listing to reconcile panes already closed. Runtime
+quiesce and durable checkpoints remain the caller's responsibility.
+
+Permanent-role startup persists an `initializing` manifest and `launchIntent`
+binding before each `agent start`, then persists each successful binding. A
+blocked startup or lost acknowledgement therefore retains the exact pane for
+reconciliation. A pending/blocked occupant is inspected in place; reconciliation
+does not start a duplicate or split another pane for that launch. Manifest load
+errors and failed intent writes stop startup. Workspace/tab creation before the
+first role intent remains reconciled from live Herdr topology.
 
 `readOnlyWorkspace` describes a role's policy in the manifest. Agent startup does
 not install an OS sandbox or filesystem access controls. Dedicated panes and Git
 worktrees isolate routing and ordinary edits, but processes under the same user
 can access other worktrees and repository state. Do not treat this metadata as a
-security boundary against a malicious or misconfigured agent.
+security boundary against a malicious agent.
+
+`buildProviderRoleLaunch({ agentKind, role, systemPrompt, model?, mcpServers?,
+nativeSessionHookCommand? })` is an explicit opt-in helper for `claude` and
+`codex`. Pass its returned argv through `roleConfigs[role].args`; arbitrary other
+supported providers retain their existing launch configuration. Claude uses
+restricted mode, explicit built-in tool lists, `dontAsk`, isolated MCP config and
+launch-local settings; read-only roles receive Read/Glob/Grep rather than shell
+or write tools. Codex uses read-only or workspace-write sandbox, never approvals,
+and per-launch MCP/instructions/hooks overrides. Configured MCP servers remain
+trusted capabilities and must enforce their own role policy. Developer shell
+tools still require the host's implementation/command policy; a write sandbox
+alone cannot enforce Git approvals or protect secrets within its readable paths.
+
+The optional native SessionStart hook command is operator-owned and applies only
+to this launch; it installs no user/global hook and changes no credentials.
+Codex's invocation-local hook-trust bypass is emitted only for that explicit
+vetted hook. This is separate from approval/sandbox bypass, which is never used.
+Herdr interactive readiness proves transport readiness, not provider login,
+authenticated session identity, TDD evidence or task success. The host must
+validate those separately. Installed CLI parse checks used Herdr 0.9.5 protocol
+22, Claude 2.1.299 and Codex 0.162.0; release labels are diagnostics, not allowlists.
+Codex hook format follows the [official hooks documentation](https://learn.chatgpt.com/docs/hooks).
 
 ---
 

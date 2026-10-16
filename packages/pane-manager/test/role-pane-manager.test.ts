@@ -854,6 +854,42 @@ describe("RolePaneManager Verification Suite", () => {
 
   // Scenario 1: Khởi tạo topology (Initialize full topology)
   describe("Scenario 1: Initialize full topology", () => {
+    it("persists launch intent before startup and reconciles blocked partial startup in its original pane", async () => {
+      const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+      let failedPane = "";
+      runner.onCommand = invocation => {
+        if (invocation.args[0] !== "agent" || invocation.args[1] !== "start" || invocation.args[2] !== "coordinator") return;
+        failedPane = invocation.args[invocation.args.indexOf("--pane") + 1]!;
+        const pane = runner.panes.get(failedPane)!;
+        pane.agent = "codex";
+        runner.agents.set("coordinator", { name: "coordinator", agent: "codex", paneId: failedPane,
+          terminalId: pane.terminalId, workspaceId: pane.workspaceId, tabId: pane.tabId,
+          focused: false, agentStatus: "blocked", revision: 1, interactiveReady: false, launchPending: true });
+        return { exitCode: 1, stdout: "", stderr: "agent_blocked" };
+      };
+      expect((await manager.initializeTopology()).ok).toBe(false);
+      const pending = await store.load(config.sessionId);
+      expect(pending.ok && pending.value?.status).toBe("initializing");
+      expect(pending.ok && pending.value?.panes.find(p => p.role === "coordinator")?.paneId).toBe(failedPane);
+      runner.onCommand = undefined;
+      const before = runner.calls.length;
+      expect((await manager.reconcileTopology()).ok).toBe(false);
+      expect(runner.calls.slice(before).filter(c => c.args[0] === "pane" && c.args[1] === "split")).toHaveLength(0);
+      expect(runner.calls.slice(before).filter(c => c.args[0] === "agent" && c.args[1] === "start")).toHaveLength(0);
+      const occupant = runner.agents.get("coordinator")!;
+      runner.agents.set("coordinator", { ...occupant, agentStatus: "idle", interactiveReady: true, launchPending: false });
+      expect((await manager.reconcileTopology()).ok).toBe(true);
+      expect(runner.calls.filter(c => c.args[0] === "agent" && c.args[1] === "start" && c.args[2] === "coordinator")).toHaveLength(1);
+    });
+
+    it("does not start an agent when launch intent cannot be preserved", async () => {
+      const failingStore: SessionManifestStore = { load: (...args) => store.load(...args),
+        save: async () => ({ ok: false, error: { code: "corruption", retryable: false, message: "write denied" } }) };
+      const manager = createRolePaneManager({ config, runner, store: failingStore, worktreeInspector: inspector });
+      expect((await manager.initializeTopology()).ok).toBe(false);
+      expect(runner.calls.filter(c => c.args[0] === "agent" && c.args[1] === "start")).toHaveLength(0);
+    });
+
     it("creates Conversation workspace, Conversation tab, Coordination tab, Verification tab, and all permanent roles", async () => {
       const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
       const initResult = await manager.initializeTopology();
@@ -1559,6 +1595,25 @@ describe("RolePaneManager Verification Suite", () => {
       expect(persisted.ok).toBe(true);
       if (persisted.ok && initialized.ok) expect(persisted.value).toEqual(initialized.value);
       expect(runner.panes.size).toBeGreaterThan(0);
+    });
+
+    it("retries partial shutdown only for panes confirmed present by a fresh successful listing", async () => {
+      const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+      const initial = await manager.initializeTopology();
+      if (!initial.ok) throw new Error("initialize failed");
+      const firstPane = initial.value.panes[0]!.paneId;
+      let count = 0;
+      runner.onCommand = invocation => {
+        if (invocation.args[0] === "pane" && invocation.args[1] === "close" && ++count === 2)
+          return { exitCode: null, stdout: "", stderr: "", failure: "timeout", started: true };
+      };
+      expect((await manager.shutdownTopology()).ok).toBe(false);
+      expect(runner.panes.has(firstPane)).toBe(false);
+      runner.onCommand = undefined;
+      const before = runner.calls.length;
+      const result = await manager.shutdownTopology();
+      expect(result.ok && result.value.status).toBe("down");
+      expect(runner.calls.slice(before).some(c => c.args[0] === "pane" && c.args[1] === "close" && c.args[2] === firstPane)).toBe(false);
     });
 
     it("propagates store.save error in inspectTopologyHealth, focusConversationPane, and allocateDeveloper", async () => {
