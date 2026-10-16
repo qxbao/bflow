@@ -235,6 +235,43 @@ describe("journal, receipts, approvals, changes", () => {
   });
 });
 
+describe("symlinked state dir", () => {
+  it("is rejected by every state operation and writeFileAtomic", async () => {
+    const real = path.join(root, "real-state");
+    await mkdir(real);
+    await symlink(real, paths.state);
+    const s = store();
+    const f = path.join(root, "orig.txt");
+    await writeFile(f, "x");
+    const results = [
+      await s.writeJournal({ schemaVersion: 3, planId: "p", planDigest: digest("p"), revision: 1, steps: {} }),
+      await s.appendReceipt(receipt() as never),
+      await s.appendChange({ at: NOW.toISOString(), planId: "p", stepId: "s", kind: "k", target: "t", machineWide: false }),
+      await s.writeApproval({
+        schemaVersion: 3, receiptId: "a", planId: "p", planDigest: digest("p"), machineId: "m",
+        stepIds: [], approvedBy: "operator", approvedAt: NOW.toISOString()
+      }),
+      await s.backupFile(f),
+      await s.writeFileAtomic(path.join(paths.state, "x", "y"), "z"),
+      await s.acquireLock()
+    ];
+    for (const r of results) {
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.code).toBe("validation");
+    }
+    expect(await readdir(real)).toEqual([]);
+  });
+  it("writeFileAtomic rejects a symlinked owned subdirectory", async () => {
+    const real = path.join(root, "elsewhere");
+    await mkdir(real);
+    await mkdir(paths.config, { recursive: true });
+    await symlink(real, path.join(paths.config, "sub"));
+    const r = await store().writeFileAtomic(path.join(paths.config, "sub", "f"), "z");
+    expect(r.ok).toBe(false);
+    expect(await readdir(real)).toEqual([]);
+  });
+});
+
 describe("readOnly", () => {
   it("every mutating method returns a validation error and writes nothing", async () => {
     const s = store({ readOnly: true });

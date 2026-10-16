@@ -124,7 +124,35 @@ export class SetupStateStore {
     return this.ensureDirInternal(dir);
   }
 
+  /** Validates every bflow-owned level from the owned root down to `dir`. */
   private async ensureDirInternal(dir: string): Promise<Result<void>> {
+    const resolved = path.resolve(dir);
+    for (const root of [this.paths.state, this.paths.config, this.paths.data]) {
+      const r = path.resolve(root);
+      const rel = path.relative(r, resolved);
+      if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) {
+        let cur = r;
+        const first = await this.ensureOneDir(cur);
+        if (!first.ok) return first;
+        for (const part of rel === "" ? [] : rel.split(path.sep)) {
+          cur = path.join(cur, part);
+          const res = await this.ensureOneDir(cur);
+          if (!res.ok) return res;
+        }
+        return okr(undefined);
+      }
+    }
+    return this.ensureOneDir(resolved);
+  }
+
+  private isOwnedPath(p: string): boolean {
+    return [this.paths.state, this.paths.config, this.paths.data].some((root) => {
+      const rel = path.relative(path.resolve(root), path.resolve(p));
+      return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+    });
+  }
+
+  private async ensureOneDir(dir: string): Promise<Result<void>> {
     try {
       await mkdir(dir, { recursive: true, mode: 0o700 });
       const st = await lstat(dir);
@@ -142,6 +170,18 @@ export class SetupStateStore {
   async writeFileAtomic(file: string, data: string | Uint8Array, mode = 0o600): Promise<Result<void>> {
     const d = this.denied<void>();
     if (d) return d;
+    const parent = path.dirname(file);
+    if (this.isOwnedPath(parent)) {
+      const dirRes = await this.ensureDirInternal(parent);
+      if (!dirRes.ok) return dirRes;
+    } else {
+      try {
+        const st = await stat(parent);
+        if (!st.isDirectory()) return fail(validationError(`not a directory: ${parent}`));
+      } catch (e) {
+        return fail(validationError(`cannot write into ${parent}: ${errMsg(e)}`));
+      }
+    }
     return this.writeAtomicInternal(file, data, mode);
   }
 
