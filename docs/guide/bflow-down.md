@@ -24,3 +24,9 @@ phép bỏ checkpoint, force-stop, xóa source/worktree/DB/artifact hay deploy.
 Nếu custom composition báo thiếu barrier hoặc drain chưa xong, giữ session/state để operator của host
 xử lý. Hướng dẫn này không đưa lệnh stop Herdr toàn cục vì có thể ảnh hưởng session
 khác. [Session Recovery](session-recovery.md) mô tả cách giữ bằng chứng sau gián đoạn.
+
+Sau Ctrl+C/timeout trong down, có thể chạy lại `bflow down --yes`: checkpoint/barrier
+vẫn bắt buộc, manager quan sát pane còn tồn tại trước khi tiếp tục close. Nếu Herdr
+đã dừng, Bflow vẫn drain/checkpoint host còn giữ lại trước khi đóng host đó. Startup
+bị ngắt trước manifest chỉ được stop khi có ownership intent và runtime xác nhận
+không có active workflow; không tạo manifest/pane giả để báo success.

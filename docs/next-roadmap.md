@@ -1,5 +1,9 @@
 # Next roadmap sau P22
 
+Follow-up lỗi Ctrl+C/readiness/layout/original prompts đã được sửa; kết quả và
+giới hạn riêng ở [lifecycle startup UX](acceptance/2026-10-16-lifecycle-startup-ux.md).
+Các số liệu/baseline bên dưới giữ đúng phạm vi nghiệm thu P22 trước follow-up.
+
 Đã có default Claude host/lifecycle, owner-configured Node TAP/Vitest runner,
 independent RGR, sandbox, durable approval/native/evidence receipts và exact
 lease/phase-outcome crash recovery. Không làm lại các phần đó từ scaffolding.

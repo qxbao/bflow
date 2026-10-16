@@ -1,5 +1,9 @@
 # Nghiệm thu Bflow sau P22 — 2026-10-16
 
+Follow-up lỗi Ctrl+C/readiness/layout/original prompts đã được sửa; kết quả và
+giới hạn riêng ở [lifecycle startup UX](acceptance/2026-10-16-lifecycle-startup-ux.md).
+Các số liệu/baseline bên dưới giữ đúng phạm vi nghiệm thu P22 trước follow-up.
+
 **Phân loại: Not ready cho Agentic SDLC MVP v2.** Các blocker code được mô tả ở
 bản bàn giao trước đã được sửa và có kiểm thử thực của Git, storage, runner và
 provider hook. Chưa có một feature/bugfix do các model thật hoàn tất xuyên suốt

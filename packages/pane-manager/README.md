@@ -198,3 +198,25 @@ pnpm check:deps
 pnpm typecheck
 pnpm test
 ```
+
+## Startup presentation and original role prompts
+
+New Coordination topology uses balanced right/down splits to form a 2x2 grid.
+Conversation remains a full pane and Verification has two panes. Every role pane
+is named; an adopted initial tab is renamed to conversation. Reconciliation
+resizes existing owned splits by leaf count, preserving pane IDs and shell/agent
+processes. Tabs containing operator-added panes are left alone. Native
+`layout.apply` creates replacement terminals in the installed Herdr, so reflow
+deliberately uses only `pane resize`.
+
+Chat and Coordinator load complete installed `agents/*/system-prompt.md` assets
+before launch. Native file flags avoid terminal line limits; host-generated files
+must contain the original role instructions. Missing, symlink or oversized assets
+fail before agent launch. Existing healthy panes are not reset to inject prompts.
+Late native session identity is captured only for recorded pending launches; an
+already-bound session cannot be silently replaced during reconciliation.
+
+Blocked startup classifies update, repository trust, sign-in and unknown dialogs
+and returns role/provider/pane/session plus exact manual commands. It never
+presses an update, trust or permission confirmation, and never exposes raw screen
+contents in the error. `pane read` remains an explicit operator action.

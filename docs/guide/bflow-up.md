@@ -33,3 +33,12 @@ Xem [cấu hình verification](../verification-runners.md) cho schema, dependenc
 và các giới hạn hiện tại.
 Up thành công không chứng minh một workflow đã hoàn tất. Smoke thực đã kiểm tra
 lifecycle up/down/restart; xem [release-readiness](../release-readiness.md).
+
+Ctrl+C hủy việc đợi/startup của lệnh, giữ server, partial manifest và launch receipts.
+Lock lifecycle do kernel giữ nên tự nhả khi process chết, kể cả SIGKILL. Chạy lại
+`bflow up` sẽ inspect/reuse các pane cũ, không tự resend agent assignment. Với lock
+thư mục từ phiên bản cũ: dừng lệnh cũ rồi `bflow recover --yes`; không xóa .bflow.
+Nếu UI provider bị chặn, lỗi chỉ rõ pane/session và lệnh mở đúng session để xử lý.
+
+Chat/Coordinator nạp prompt gốc ngay từ startup. Pane được đặt tên theo role;
+Coordination mới dùng lưới 2x2. Pane cũ được resize tại chỗ, không reset process.

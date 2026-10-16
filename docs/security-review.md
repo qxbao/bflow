@@ -1,5 +1,9 @@
 # Security review sau P22
 
+Follow-up lỗi Ctrl+C/readiness/layout/original prompts đã được sửa; kết quả và
+giới hạn riêng ở [lifecycle startup UX](acceptance/2026-10-16-lifecycle-startup-ux.md).
+Các số liệu/baseline bên dưới giữ đúng phạm vi nghiệm thu P22 trước follow-up.
+
 **Kết luận: các lỗi đã xác nhận trong phạm vi sửa local đã được xử lý; chưa đủ
 bằng chứng để nghiệm thu toàn Agentic SDLC MVP v2.** Review không phải pentest
 hoặc chứng nhận production. Baseline, source HEAD và kết quả validation cuối ở

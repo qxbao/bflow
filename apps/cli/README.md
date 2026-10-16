@@ -3,6 +3,7 @@
 Build from the repository root with `pnpm build`, then run
 `node apps/cli/dist/bin.js <command>` (or the installed `bflow` executable).
 Node >=22.13 and the root's pinned pnpm are required for the existing storage runtime.
+Lifecycle locking requires Linux `flock` from util-linux on PATH.
 
 | Command | Behavior |
 | --- | --- |
@@ -11,6 +12,7 @@ Node >=22.13 and the root's pinned pnpm are required for the existing storage ru
 | `bflow attach` | Requires an existing manifest and a running matching session. Calls P13 to focus/validate Conversation, then runs `herdr session attach <name>` with inherited terminal I/O. |
 | `bflow down [--yes] [--timeout <ms>]` | Inspects active runs and dirty files. Refuses unsafe shutdown without confirmation. Quiesces Runtime intake/dispatch, recollects runs, requires durable aggregate checkpoints, calls P13 graceful shutdown, then stops only the named session. Deletes no worktree, database, artifact, commit or source file. |
 | `bflow status` | Reports configuration, named server, panes/agents and missing executables. Labels persisted observations as potentially stale. Does not open the legacy workflow Runtime. |
+| `bflow recover --yes` | After stopping old CLI commands, migrates only an empty legacy lifecycle lock. Preserves state, panes, source and worktrees. |
 | `bflow doctor` | Reports Node/Git/pnpm/Herdr/agent dependencies, configuration/identity, permissions, lifecycle lock and P13 doctor findings. Returns exit 1 when checks fail. |
 
 All commands support `--json`. Timeouts are milliseconds, 1–600000. `doctor` returns
@@ -111,9 +113,11 @@ Runtime state is under `.bflow/state/`, with atomically replaced `session.json`
 and `operation.json`. P13's authoritative manifest is
 `.bflow/state/panes/<session>.manifest.json`; the CLI's `session.json` is its last
 validated observation. An active session's manifest is refreshed through P13
-health inspection before status/readiness decisions. A repository operation lock serializes up/down. Concurrent
-operations are refused. After an interrupted CLI leaves `lifecycle.lock`, verify
-the owning process has exited before removing that lock. Unresolved role/server
+health inspection before status/readiness decisions. A persistent kernel `flock`
+on `lifecycle.guard` serializes up/down/recover and releases on Ctrl+C, SIGKILL or
+crash. Never delete this guard inode. A legacy empty `lifecycle.lock` directory
+requires explicit `bflow recover --yes` after stopping old CLI commands; unrelated
+contents are never recursively removed. Unresolved role/server
 startup or shutdown delivery is retained. A pending startup can resume through
 P13 only when its validated physical topology receipt exists; missing receipts
 continue to forbid resend. A partial first startup can be shut down using that
@@ -162,3 +166,11 @@ Before the first Agentic `up`, owners can add `.bflow/verification.json` for
 Node TAP or Vitest 2.1 behavioral checks. The host pins this authority; Coordinator
 cannot choose arbitrary shell commands. Automated checks require Linux Bubblewrap
 and explicitly available dependencies. See [configuration and limits](../../docs/verification-runners.md).
+
+Chat/Coordinator load their complete installed original prompts before the first
+turn. Claude uses a launch-local prompt file; Codex file launches use native
+`model_instructions_file`. Missing or unsafe assets fail clearly. Existing panes
+are preserved until an explicit checked restart; no silent conversation reset.
+Native startup waits for authenticated SessionStart receipts within the command
+deadline. A blocked provider reports the role, provider, exact pane/session and
+manual remediation without returning raw terminal output or accepting dialogs.

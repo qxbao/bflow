@@ -11,6 +11,7 @@ là **planned/chưa triển khai**. Public contracts và ADR vẫn là nguồn a
 | [bflow init](bflow-init.md) | JSON config.yaml, Git identity, idempotency và cờ overwrite |
 | [bflow up](bflow-up.md) | Named session, permanent roles, readiness, giới hạn host boot |
 | [bflow attach](bflow-attach.md) | Chỉ attach Conversation |
+| [Recovery sau Ctrl+C](troubleshooting.md) | Kernel lock, recover --yes, native startup dialogs và pane labels |
 | [bflow down](bflow-down.md) | Barrier/checkpoint và giới hạn shutdown mặc định |
 | [Configuration Reference](configuration-reference.md) | Fields thực tế, config CLI/host/Herdr |
 | [Agent Roles](agent-roles.md) | Đủ tám role và ánh xạ contract names |

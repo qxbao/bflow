@@ -1,5 +1,9 @@
 # Known limitations sau P22
 
+Follow-up lỗi Ctrl+C/readiness/layout/original prompts đã được sửa; kết quả và
+giới hạn riêng ở [lifecycle startup UX](acceptance/2026-10-16-lifecycle-startup-ux.md).
+Các số liệu/baseline bên dưới giữ đúng phạm vi nghiệm thu P22 trước follow-up.
+
 Phân loại toàn sản phẩm: **Not ready cho Agentic SDLC MVP v2**, do chưa có full
 multi-model SDLC acceptance thực. [Release readiness](release-readiness.md) phân
 biệt source đã sửa, kiểm thử local, provider smoke và điều kiện phát hành.
