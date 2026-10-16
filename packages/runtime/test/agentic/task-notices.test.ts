@@ -178,3 +178,62 @@ describe("task notices borrowing active assignment authority", () => {
     }
   });
 });
+
+describe("durable lease release recovery", () => {
+  it("replays the exact release after Registry commit before journal save and a delayed clock", async () => {
+    const f = await fixture(), release = vi.spyOn(f.registry, "releaseLease");
+    await f.open().exclusive(async (state, save) => {
+      let writes = 0;
+      const outbox = new HerdrOutbox(f.ports, state, async () => {
+        if (++writes === 2) throw new Error("simulated process death");
+        await save();
+      });
+      await expect(outbox.release(f.parent(state))).rejects.toThrow("simulated process death");
+    });
+    const first = release.mock.calls[0]![0];
+    f.clock(600_000);
+    await f.call(async (outbox, state) => {
+      expect(f.parent(state).status).toBe("accepted");
+      expect(f.parent(state).leaseRelease).toEqual(first);
+      await expect(outbox.renew(f.parent(state))).rejects.toThrow("release is pending");
+      await outbox.release(f.parent(state));
+      expect(f.parent(state).status).toBe("released");
+      expect(f.parent(state).leaseRelease).toBeUndefined();
+      await outbox.release(f.parent(state));
+    });
+    expect(release).toHaveBeenCalledTimes(2);
+    expect(release.mock.calls[1]![0]).toEqual(first);
+    expect(Object.values((await f.registryState()).leases).every((entry: any) => !entry.active)).toBe(true);
+  });
+  it("flush finishes pending release before renewing or delivering a borrowed notice", async () => {
+    const f = await fixture(); await f.notice();
+    await f.open().exclusive(async (state, save) => {
+      let writes = 0;
+      const outbox = new HerdrOutbox(f.ports, state, async () => { await save(); if (++writes === 1) throw new Error("crash before Registry release"); });
+      await expect(outbox.release(f.parent(state))).rejects.toThrow("crash");
+    });
+    const renew = vi.spyOn(f.registry, "renewLease");
+    await f.call(async (outbox, state) => {
+      expect(() => outbox.enqueueTaskNotice(f.message("another"), f.parent(state))).toThrow("active parent");
+      await outbox.flush(f.onBound);
+      expect(f.parent(state).status).toBe("released");
+      expect(state.outbound.at(-1)!.status).toBe("cancelled");
+    });
+    expect(renew).not.toHaveBeenCalled();
+    expect(f.transport.sentRequests).toHaveLength(1);
+  });
+  it("rejects persisted release requests with altered lease identity, version or fencing", async () => {
+    const f = await fixture();
+    await f.open().exclusive(async (state, save) => {
+      const outbox = new HerdrOutbox(f.ports, state, async () => { await save(); throw new Error("crash after intent"); });
+      await expect(outbox.release(f.parent(state))).rejects.toThrow("crash");
+    });
+    const path = join(f.journalDirectory, "state.json"), original = await readFile(path, "utf8");
+    for (const field of ["leaseId", "expectedVersion", "fencingToken"]) {
+      const value = JSON.parse(original);
+      value.outbound[0].leaseRelease[field] = field === "leaseId" ? "foreign" : value.outbound[0].leaseRelease[field] + 1;
+      await writeFile(path, JSON.stringify(value));
+      await expect(f.call(async () => undefined)).rejects.toThrow("Invalid pending outbound lease release");
+    }
+  });
+});

@@ -5,13 +5,13 @@ import { join, resolve } from "node:path";
 import {
   AgentAssignmentSchema, AgentExecutionHandleSchema, AgentLeaseSchema, AgentRequestSchema,
   AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
-  DelegationRequestSchema, GitChangeSetSchema, JsonValueSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema,
+  DelegationRequestSchema, GitChangeSetSchema, JsonValueSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema, ReleaseAgentLeaseRequestSchema,
   SdlcWorkStatusSchema, SpecificationSchema, TestStrategySchema, VerificationCycleSchema,
   VerificationResultSchema, WorkflowDefinitionSchema, type AgentAssignment, type AgentExecutionHandle, type AgentLease,
   type AgentRequest, type AgentResult, type AppendEventsRequest, type ApprovalDecision,
   type ApprovalRequest, type DelegationRequest, type GitChangeSet, type JsonValue, type ArtifactReference,
   type RoleMessage, type SdlcWorkStatus, type Specification, type TestStrategy,
-  type VerificationCycle, type WorkflowDefinition, type RenewAgentLeaseRequest
+  type VerificationCycle, type WorkflowDefinition, type RenewAgentLeaseRequest, type ReleaseAgentLeaseRequest
 } from "@bflow/contracts";
 import type { TaskWorktree, VerificationPlan } from "./ports.js";
 
@@ -60,6 +60,7 @@ export interface Outbound {
   /** A control notice borrows its task assignment's lease; it never owns capacity. */
   parentAssignmentId?: string;
   leaseRenewal?: RenewAgentLeaseRequest;
+  leaseRelease?: ReleaseAgentLeaseRequest;
 }
 export interface JournalState {
   version: 1; repository: string; runs: RunRecord[]; outbound: Outbound[];
@@ -115,6 +116,12 @@ function parseState(input: unknown, repository: string): JournalState {
       if (out.parentAssignmentId || !out.lease || out.leaseRenewal.leaseId !== out.lease.leaseId ||
           out.leaseRenewal.fencingToken !== out.lease.fencingToken || out.leaseRenewal.expectedVersion !== out.lease.version)
         throw new Error("Invalid pending outbound lease renewal");
+    }
+    if (out.leaseRelease) {
+      out.leaseRelease = ReleaseAgentLeaseRequestSchema.parse(out.leaseRelease);
+      if (out.parentAssignmentId || out.leaseRenewal || out.status === "released" || !out.lease ||
+          out.leaseRelease.leaseId !== out.lease.leaseId || out.leaseRelease.fencingToken !== out.lease.fencingToken ||
+          out.leaseRelease.expectedVersion !== out.lease.version) throw new Error("Invalid pending outbound lease release");
     }
     if (["sending", "unknown_delivery", "accepted"].includes(out.status) && !out.request) throw new Error("Missing outbound dispatch intent");
     if (out.status === "accepted" && (!out.handle || !out.lease)) throw new Error("Missing outbound binding/lease");

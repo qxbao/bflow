@@ -1,6 +1,6 @@
 import {
   AgentAssignmentSchema, AgentConfigurationSchema, AgentLeaseSchema, AgentReconciliationResultSchema,
-  AgentRequestSchema, AgentSubmissionReceiptSchema, PaneBindingSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema, WorkflowRunSnapshotSchema,
+  AgentRequestSchema, AgentSubmissionReceiptSchema, PaneBindingSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema, ReleaseAgentLeaseRequestSchema, WorkflowRunSnapshotSchema,
   type AgentExecutionHandle, type OperationResult, type RoleMessage, type PaneBinding
 } from "@bflow/contracts";
 import type { AgenticRuntimePorts } from "./ports.js";
@@ -30,7 +30,7 @@ export class HerdrOutbox {
   private noticeParent(out: Outbound): Outbound {
     const parent = this.state.outbound.find(item => item.message.message_id === out.parentAssignmentId);
     if (!parent || parent.parentAssignmentId || parent.message.type !== "task.assignment" || parent.status !== "accepted" ||
-        parent.cancelRequested || !parent.assignment || !parent.handle || !parent.request || !parent.lease)
+        parent.cancelRequested || parent.leaseRelease || !parent.assignment || !parent.handle || !parent.request || !parent.lease)
       throw new Error("Task notice requires an active parent assignment");
     if (parent.lease.agentId !== parent.handle.target.agentId || parent.lease.runId !== parent.message.run_id ||
         parent.lease.taskId !== parent.taskId || parent.lease.attemptId !== parent.attemptId ||
@@ -76,6 +76,7 @@ export class HerdrOutbox {
   }
   async renew(out: Outbound): Promise<void> {
     const owner = out.parentAssignmentId ? this.noticeParent(out) : out;
+    if (owner.leaseRelease) throw new Error("Assignment lease release is pending");
     if (!owner.lease) throw new Error("Assignment has no current lease");
     const recovering = owner.leaseRenewal !== undefined;
     owner.leaseRenewal ??= RenewAgentLeaseRequestSchema.parse({ leaseId: owner.lease.leaseId,
@@ -93,16 +94,23 @@ export class HerdrOutbox {
   }
   async release(out: Outbound): Promise<void> {
     if (out.status === "released") return;
-    if (out.lease && !out.parentAssignmentId) unwrap(await this.ports.registry.releaseLease({
-      leaseId: out.lease.leaseId, fencingToken: out.lease.fencingToken, expectedVersion: out.lease.version,
-      releasedAt: this.now(), idempotencyKey: `release:${out.lease.leaseId}:${out.lease.version}`
-    }));
+    if (out.lease && !out.parentAssignmentId) {
+      if (out.leaseRenewal) await this.renew(out);
+      out.leaseRelease ??= ReleaseAgentLeaseRequestSchema.parse({
+        leaseId: out.lease.leaseId, fencingToken: out.lease.fencingToken, expectedVersion: out.lease.version,
+        releasedAt: this.now(), idempotencyKey: `release:${out.lease.leaseId}:${out.lease.version}`
+      });
+      await this.save();
+      unwrap(await this.ports.registry.releaseLease(out.leaseRelease));
+      delete out.leaseRelease;
+    }
     out.status = "released";
     await this.save();
   }
   async flush(onBound: (out: Outbound, handle: AgentExecutionHandle) => Promise<void>): Promise<void> {
     // One bounded pass. No waits for turns or reciprocal ACKs while holding a mailbox/runtime lock.
     for (const out of this.state.outbound) {
+      if (out.leaseRelease) { await this.release(out); continue; }
       if (out.status === "sending") { out.status = "unknown_delivery"; await this.save(); }
       if (out.status === "accepted" && out.handle) {
         if (!out.parentAssignmentId) await onBound(out, out.handle);
