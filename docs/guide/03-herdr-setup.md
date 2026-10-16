@@ -1,5 +1,9 @@
 # 3. Cài đặt và cấu hình Herdr
 
+> **Phạm vi legacy P00–P10.** Trang này giữ API/demo và đánh giá integration ở thời điểm trước P19.
+> Dùng [hướng dẫn hiện tại](README.md) cho onboarding, lifecycle/config.yaml và P19.
+> Không áp dụng các nhận định integration cũ hoặc thao tác Core trực tiếp để bypass policy P19.
+
 > **Trạng thái:** `@bflow/herdr-adapter` có mã nguồn và unit test với runner giả lập. Nó **chưa được kiểm chứng với Herdr thật**, và Runtime hiện **chưa thể** hoàn tất một task được dispatch qua Herdr (xem [Giới hạn khi ghép với Runtime](#giới-hạn-khi-ghép-với-runtime)). Không điều khiển session Herdr thật khi chưa được cho phép rõ ràng.
 
 ## Cài đặt Herdr

@@ -1,0 +1,58 @@
+{
+  "schemaVersion": "1",
+  "id": "portable-bugfix",
+  "name": "Portable Node bugfix",
+  "version": "1.0.0",
+  "description": "P19 Developer DAG seed: Reject unsafe sums. Host supplies independent checks and approval authentication.",
+  "tasks": [
+    {
+      "id": "bugfix-change",
+      "title": "Reject unsafe sums",
+      "role": "developer",
+      "instruction": "Reject unsafe sums. Work only within owned paths and satisfy bugfix-1. Follow the accepted specification and resolved TestStrategy.",
+      "acceptanceCriteria": [
+        "bugfix-1"
+      ],
+      "retry": {
+        "maxAttempts": 2,
+        "strategy": "fixed",
+        "initialDelayMs": 1000,
+        "maxDelayMs": 1000,
+        "jitter": false
+      },
+      "rework": {
+        "maxReworks": 2,
+        "onExhausted": "require_human"
+      },
+      "timeout": {
+        "executionTimeoutMs": 300000,
+        "onTimeout": "fail"
+      },
+      "requiresApproval": true,
+      "qualityGates": [],
+      "metadata": {
+        "ownedPaths": [
+          "src",
+          "test"
+        ],
+        "forbiddenPaths": [
+          ".bflow",
+          "node_modules",
+          ".git"
+        ],
+        "requiredCapabilities": [
+          "implementation"
+        ]
+      }
+    }
+  ],
+  "dependencies": [],
+  "qualityGates": [],
+  "maxConcurrency": 2,
+  "failurePolicy": "fail-fast",
+  "recovery": {
+    "checkpoint": "task-boundary",
+    "resumeStrategy": "checkpoint-then-replay",
+    "staleExecution": "reconcile"
+  }
+}

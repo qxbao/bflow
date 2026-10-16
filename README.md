@@ -14,7 +14,7 @@
 
 - **Deterministic Workflow Engine (`@bflow/core`)** — Evaluates task DAGs, enforces state transitions, manages bounded retry and rework loops, and supports full recovery from event logs and aggregate checkpoints.
 - **Durable Local Persistence (`@bflow/persistence` & `@bflow/artifact-store`)** — Stores workflow events, execution receipts, and run projections in SQLite (`node:sqlite`) alongside checksum-verified immutable artifacts on disk.
-- **Role & Lease Registry (`@bflow/agent-registry`)** — Resolves SDLC roles (`pm`, `architect`, `coder`, `qa`, `reviewer`) to configured agents with lease acquisition, fencing tokens, and structured output validation.
+- **Role & Lease Registry (`@bflow/agent-registry`)** — Resolves configured SDLC roles to agents with lease acquisition, fencing tokens, and structured output validation.
 - **Independent Quality Gates (`@bflow/quality-gates`)** — Runs verification commands (`typecheck`, `lint`, `unit_test`, `build`, or custom checks) in the target workspace independently of agent self-reports.
 - **Human-in-the-Loop Governance** — Enforces human actor verification on approval gates (`approved`, `changes_requested`, `rejected`) before advancing gated tasks.
 - **CLI & Programmatic Runtime (`@bflow/cli` & `@bflow/runtime`)** — Manage workflows from the terminal via `bflow` (human-readable or `--json` output) or embed `createRuntimeService` directly in Node.js applications.
@@ -47,31 +47,38 @@ node examples/runtime-demo/run-demo.mjs
 
 ## CLI Usage
 
-After running `pnpm build`, invoke the CLI via `node apps/cli/dist/bin.js` (or link it globally via `pnpm --filter @bflow/cli link --global` to use `bflow` directly):
+Build from source, set `BFLOW_HOME` to this checkout's absolute path, then run
+from the target Git repository (including a different Node.js/TypeScript project):
 
 ```bash
-# 1. Initialize bflow configuration (.bflow/config.json) in a repository
-bflow init --name my-project
-
-# 2. Start a workflow run with a requirement
-bflow run "Add user authentication and session management"
-
-# 3. Inspect active runs or a specific run
-bflow status
-bflow status <run-id>
-
-# 4. Record a human approval decision (approved | changes_requested | rejected)
-bflow approve qa --run <run-id> --decision approved --by alice
-bflow approve review --run <run-id> --decision changes_requested --reason "Add edge-case tests"
-
-# 5. Resume a waiting or recovered workflow run
-bflow resume <run-id>
-
-# 6. Cancel an active workflow run or task
-bflow cancel <run-id> --reason "Scope updated"
+node "$BFLOW_HOME/apps/cli/dist/bin.js" init --name my-project
+node "$BFLOW_HOME/templates/node-typescript/apply.mjs" . bugfix
+node "$BFLOW_HOME/apps/cli/dist/bin.js" doctor --json
+node "$BFLOW_HOME/apps/cli/dist/bin.js" status --json
+# Requires installed/authenticated Herdr agent integrations:
+node "$BFLOW_HOME/apps/cli/dist/bin.js" up --timeout 60000
+node "$BFLOW_HOME/apps/cli/dist/bin.js" attach
 ```
 
-All commands support `-j, --json` for structured JSON output and `-h, --help` for detailed command options.
+Init writes **JSON-formatted `.bflow/config.yaml`** with checkout-specific identity;
+run it separately in each repository/worktree. Plain repeated init preserves the
+file; the current `--force`/`--yes` implementation overwrites it despite the older
+help text. Track portable templates rather than copying a bound config across clones.
+
+`up` manages P12/P13 panes; it does not automatically boot the P19 host or register
+model tools. P19's implemented `openAgenticWorkspace` API requires trusted host
+checks, authenticated messages/results/evidence and human approvals. Environment
+SDD/TDD/verification policy fields are validated by P12 but are not automatically
+wired into that host. `down` is available but default live-session shutdown remains
+guarded until real Runtime quiesce/checkpoint and lifecycle shutdown are composed;
+`--yes` cannot bypass this requirement.
+
+Legacy workflow commands (`run`, `status <run-id>`, `approve`, `resume`, `cancel`)
+remain available through the older workspace Runtime. They do not launch P19.
+Use `--help` for syntax, and the [current guide](docs/guide/README.md) for behavior
+and integration limits. Start with [Getting Started](docs/guide/getting-started.md),
+[portable templates](templates/node-typescript/README.md) and the
+[standalone TypeScript example](examples/portable-node/README.md).
 
 ---
 
@@ -89,9 +96,9 @@ All commands support `-j, --json` for structured JSON output and `-h, --help` fo
 | [`@bflow/artifact-store`](packages/artifact-store) | Filesystem `ArtifactStore` with SQLite catalog and SHA-256 stream verification |
 | [`@bflow/conversation`](packages/conversation) | Conversation Agent (`chat`) gateway, intent classification, structured `DelegationRequest` builder, and Herdr Coordinator bridge (P14); P19 host composition and authenticated native-message ingress are available through `@bflow/runtime`; live AI delivery requires separate verification |
 | [`@bflow/specification`](packages/specification) | Adaptive specification classification, validation, versioning, traceability and approval policy (P15); P19 host composition and authenticated native-message ingress are available through `@bflow/runtime`; live AI delivery requires separate verification |
-| [`@bflow/test-strategy`](packages/test-strategy) | Conditional TDD policy, required verification methods, criterion mappings and Red/Green/refactor evidence checks (P16); Runtime enforcement is scheduled for P19 |
-| [`@bflow/verification`](packages/verification) | Independent task/workflow verification, criterion evidence, Reviewer/QA checks, bounded rework and escalation (P17); requires trusted host gates and P19 Runtime composition |
-| [`@bflow/git-orchestrator`](packages/git-orchestrator) | Parallel task worktrees, ownership checks, stored patches, recoverable dependency-ordered integration, conflict handoff, workflow verification and provider PR support (P18); requires Linux/local Git and P19 Runtime composition |
+| [`@bflow/test-strategy`](packages/test-strategy) | Conditional TDD policy, criterion mappings and Red/Green/refactor evidence checks (P16); enforced by the implemented P19 host composition |
+| [`@bflow/verification`](packages/verification) | Independent task/workflow verification, criterion evidence, Reviewer/QA checks, bounded rework and escalation (P17); composed by P19 with trusted host gates and authenticated evidence |
+| [`@bflow/git-orchestrator`](packages/git-orchestrator) | Parallel task worktrees, ownership checks, stored patches, recoverable dependency-ordered integration, conflict handoff, workflow verification and provider PR support (P18); composed by P19; requires Linux/local Git |
 | [`@bflow/quality-gates`](packages/quality-gates) | Preset command evaluators, workspace security policies, and RBAC governance |
 
 ---

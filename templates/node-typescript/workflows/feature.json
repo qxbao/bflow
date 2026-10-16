@@ -1,0 +1,58 @@
+{
+  "schemaVersion": "1",
+  "id": "portable-feature",
+  "name": "Portable Node feature",
+  "version": "1.0.0",
+  "description": "P19 Developer DAG seed: Add multiplication. Host supplies independent checks and approval authentication.",
+  "tasks": [
+    {
+      "id": "feature-change",
+      "title": "Add multiplication",
+      "role": "developer",
+      "instruction": "Add multiplication. Work only within owned paths and satisfy feature-1. Follow the accepted specification and resolved TestStrategy.",
+      "acceptanceCriteria": [
+        "feature-1"
+      ],
+      "retry": {
+        "maxAttempts": 2,
+        "strategy": "fixed",
+        "initialDelayMs": 1000,
+        "maxDelayMs": 1000,
+        "jitter": false
+      },
+      "rework": {
+        "maxReworks": 2,
+        "onExhausted": "require_human"
+      },
+      "timeout": {
+        "executionTimeoutMs": 300000,
+        "onTimeout": "fail"
+      },
+      "requiresApproval": true,
+      "qualityGates": [],
+      "metadata": {
+        "ownedPaths": [
+          "src",
+          "test"
+        ],
+        "forbiddenPaths": [
+          ".bflow",
+          "node_modules",
+          ".git"
+        ],
+        "requiredCapabilities": [
+          "implementation"
+        ]
+      }
+    }
+  ],
+  "dependencies": [],
+  "qualityGates": [],
+  "maxConcurrency": 2,
+  "failurePolicy": "fail-fast",
+  "recovery": {
+    "checkpoint": "task-boundary",
+    "resumeStrategy": "checkpoint-then-replay",
+    "staleExecution": "reconcile"
+  }
+}

@@ -1,0 +1,242 @@
+{
+  "schemaVersion": 2,
+  "specId": "bugfix-spec",
+  "runId": "example-bugfix",
+  "sessionId": "example-session",
+  "level": "lightweight",
+  "complexity": "standard",
+  "riskLevel": "medium",
+  "title": "Reject unsafe sums",
+  "summary": "Adding MAX_SAFE_INTEGER and 1 raises RangeError.",
+  "problemStatement": "The example project needs this change: Reject unsafe sums.",
+  "scope": {
+    "inScope": [
+      "Reject unsafe sums"
+    ],
+    "outOfScope": [
+      "Network services",
+      "Deployment",
+      "Other source changes"
+    ]
+  },
+  "acceptanceCriteria": [
+    {
+      "id": "bugfix-1",
+      "description": "Adding MAX_SAFE_INTEGER and 1 raises RangeError.",
+      "category": "functional",
+      "verificationMethod": "unit_test",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    }
+  ],
+  "affectedPaths": [
+    "src",
+    "test"
+  ],
+  "version": 1,
+  "traceabilityTaskIds": [
+    "bugfix-change"
+  ],
+  "status": "draft",
+  "createdBy": "coordinator",
+  "createdAt": "2026-10-16T00:00:00.000Z",
+  "updatedAt": "2026-10-16T00:00:00.000Z",
+  "metadata": {
+    "conditionalTdd": {
+      "policyVersion": 1,
+      "taskId": "bugfix-change",
+      "taskType": "bugfix",
+      "changeImpact": {
+        "surfaces": [
+          "bugfix"
+        ],
+        "behaviorChanged": true,
+        "deterministic": true,
+        "regressionReproducible": true,
+        "securitySensitive": false,
+        "dataMigration": false,
+        "scope": "local"
+      },
+      "infrastructure": {
+        "readiness": "ready",
+        "commands": [
+          {
+            "method": "unit_test",
+            "command": "pnpm test",
+            "level": "unit"
+          }
+        ]
+      },
+      "testability": {
+        "level": "automated",
+        "rationale": "Pure integer arithmetic is deterministic and covered by the Node test runner."
+      },
+      "riskClassification": "medium",
+      "conventions": {
+        "tdd": "contextual",
+        "requiredMethods": [],
+        "suggestedLevels": [
+          "unit"
+        ]
+      }
+    },
+    "sdd": {
+      "policyVersion": 1,
+      "assessment": {
+        "kind": "bugfix",
+        "behaviorChange": true,
+        "modules": [
+          "calculator"
+        ],
+        "securityImpact": false,
+        "publicApiImpact": false,
+        "dataSchemaImpact": false,
+        "architectureImpact": false,
+        "migrationRequired": false,
+        "risk": "medium",
+        "unresolvedQuestions": []
+      },
+      "functionalRequirements": [
+        "Adding MAX_SAFE_INTEGER and 1 raises RangeError."
+      ],
+      "proposedTestStrategy": "Run independent pnpm test against the pinned change revision.",
+      "technicalConstraints": [],
+      "apiDataContracts": [],
+      "risksAndTradeoffs": [],
+      "traceability": [
+        {
+          "criterionId": "bugfix-1",
+          "taskIds": [
+            "bugfix-change"
+          ]
+        }
+      ]
+    }
+  },
+  "testStrategy": {
+    "schemaVersion": 2,
+    "strategyId": "strategy-8b923bd68c65a0854a534cdd511a0212dc93e86a0aa26ff3131428f4f85217fd",
+    "specId": "bugfix-spec",
+    "tddDecision": {
+      "schemaVersion": 2,
+      "decisionId": "tdd-8b923bd68c65a0854a534cdd511a0212dc93e86a0aa26ff3131428f4f85217fd",
+      "runId": "example-bugfix",
+      "taskId": "bugfix-change",
+      "specId": "bugfix-spec",
+      "mode": "required",
+      "rationale": "A repeatable behavioral check is feasible and spec behavior, regression risk, or project convention requires test-first evidence. Testability: Pure integer arithmetic is deterministic and covered by the Node test runner. Effective risk: medium.",
+      "verifiableConditions": [
+        "bugfix-1: Adding MAX_SAFE_INTEGER and 1 raises RangeError.; verify using unit_test."
+      ],
+      "changeClassification": "bugfix",
+      "requiresFailingTestFirst": true,
+      "decidedBy": "coordinator",
+      "decidedAt": "2026-10-16T00:00:00.000Z"
+    },
+    "requiredTestLevels": [
+      "unit"
+    ],
+    "targetCommands": [
+      "pnpm test"
+    ],
+    "independentVerificationRequired": true,
+    "criterionMappings": [
+      {
+        "criterionId": "bugfix-1",
+        "testNames": [
+          "bugfix-1: Adding MAX_SAFE_INTEGER and 1 raises RangeError."
+        ]
+      }
+    ],
+    "createdAt": "2026-10-16T00:00:00.000Z",
+    "metadata": {
+      "conditionalTdd": {
+        "policyVersion": 1,
+        "assessment": {
+          "policyVersion": 1,
+          "taskId": "bugfix-change",
+          "taskType": "bugfix",
+          "changeImpact": {
+            "surfaces": [
+              "bugfix"
+            ],
+            "behaviorChanged": true,
+            "deterministic": true,
+            "regressionReproducible": true,
+            "securitySensitive": false,
+            "dataMigration": false,
+            "scope": "local"
+          },
+          "infrastructure": {
+            "readiness": "ready",
+            "commands": [
+              {
+                "method": "unit_test",
+                "command": "pnpm test",
+                "level": "unit"
+              }
+            ]
+          },
+          "testability": {
+            "level": "automated",
+            "rationale": "Pure integer arithmetic is deterministic and covered by the Node test runner."
+          },
+          "riskClassification": "medium",
+          "conventions": {
+            "tdd": "contextual",
+            "requiredMethods": [],
+            "suggestedLevels": [
+              "unit"
+            ]
+          }
+        },
+        "acceptanceCriteria": [
+          {
+            "id": "bugfix-1",
+            "description": "Adding MAX_SAFE_INTEGER and 1 raises RangeError.",
+            "category": "functional",
+            "verificationMethod": "unit_test",
+            "required": true,
+            "status": "pending",
+            "evidenceArtifactIds": []
+          }
+        ],
+        "affectedPaths": [
+          "src",
+          "test"
+        ],
+        "riskLevel": "medium",
+        "requiredVerificationMethods": [
+          "unit_test"
+        ],
+        "suggestedTestLevels": [
+          "unit",
+          "regression"
+        ],
+        "evidenceRequirements": [
+          "Red: spec-derived tests fail with a nonzero exit code because target behavior is absent; retain trusted logs and the unchanged test revision.",
+          "Green: implement minimally, then run the same tests successfully on the implementation revision; retain trusted logs.",
+          "Refactor: review/refactor the implementation and rerun the same tests successfully; retain trusted logs even when no cleanup is needed.",
+          "Cover every required method and acceptance criterion; independent VerificationResult evidence is mandatory."
+        ]
+      }
+    }
+  },
+  "tddDecision": {
+    "schemaVersion": 2,
+    "decisionId": "tdd-8b923bd68c65a0854a534cdd511a0212dc93e86a0aa26ff3131428f4f85217fd",
+    "runId": "example-bugfix",
+    "taskId": "bugfix-change",
+    "specId": "bugfix-spec",
+    "mode": "required",
+    "rationale": "A repeatable behavioral check is feasible and spec behavior, regression risk, or project convention requires test-first evidence. Testability: Pure integer arithmetic is deterministic and covered by the Node test runner. Effective risk: medium.",
+    "verifiableConditions": [
+      "bugfix-1: Adding MAX_SAFE_INTEGER and 1 raises RangeError.; verify using unit_test."
+    ],
+    "changeClassification": "bugfix",
+    "requiresFailingTestFirst": true,
+    "decidedBy": "coordinator",
+    "decidedAt": "2026-10-16T00:00:00.000Z"
+  }
+}

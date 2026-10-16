@@ -1,0 +1,14 @@
+{
+  "kind": "documentation",
+  "behaviorChange": false,
+  "modules": [
+    "calculator"
+  ],
+  "securityImpact": false,
+  "publicApiImpact": false,
+  "dataSchemaImpact": false,
+  "architectureImpact": false,
+  "migrationRequired": false,
+  "risk": "low",
+  "unresolvedQuestions": []
+}

@@ -1,0 +1,212 @@
+{
+  "schemaVersion": 2,
+  "specId": "docs-spec",
+  "runId": "example-docs",
+  "sessionId": "example-session",
+  "level": "lightweight",
+  "complexity": "trivial",
+  "riskLevel": "low",
+  "title": "Document safe integer limits",
+  "summary": "README describes safe integer inputs and demonstrates sum(2, 3) = 5.",
+  "problemStatement": "The example project needs this change: Document safe integer limits.",
+  "scope": {
+    "inScope": [
+      "Document safe integer limits"
+    ],
+    "outOfScope": [
+      "Network services",
+      "Deployment",
+      "Other source changes"
+    ]
+  },
+  "acceptanceCriteria": [
+    {
+      "id": "docs-1",
+      "description": "README describes safe integer inputs and demonstrates sum(2, 3) = 5.",
+      "category": "non_functional",
+      "verificationMethod": "manual_review",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    }
+  ],
+  "affectedPaths": [
+    "README.md"
+  ],
+  "version": 1,
+  "traceabilityTaskIds": [
+    "docs-change"
+  ],
+  "status": "draft",
+  "createdBy": "coordinator",
+  "createdAt": "2026-10-16T00:00:00.000Z",
+  "updatedAt": "2026-10-16T00:00:00.000Z",
+  "metadata": {
+    "conditionalTdd": {
+      "policyVersion": 1,
+      "taskId": "docs-change",
+      "taskType": "documentation",
+      "changeImpact": {
+        "surfaces": [
+          "documentation"
+        ],
+        "behaviorChanged": false,
+        "deterministic": false,
+        "regressionReproducible": false,
+        "securitySensitive": false,
+        "dataMigration": false,
+        "scope": "local"
+      },
+      "infrastructure": {
+        "readiness": "ready",
+        "commands": []
+      },
+      "testability": {
+        "level": "none",
+        "rationale": "Documentation accuracy requires independent reading and execution of examples."
+      },
+      "riskClassification": "low",
+      "conventions": {
+        "tdd": "contextual",
+        "requiredMethods": [],
+        "suggestedLevels": []
+      }
+    },
+    "sdd": {
+      "policyVersion": 1,
+      "assessment": {
+        "kind": "documentation",
+        "behaviorChange": false,
+        "modules": [
+          "calculator"
+        ],
+        "securityImpact": false,
+        "publicApiImpact": false,
+        "dataSchemaImpact": false,
+        "architectureImpact": false,
+        "migrationRequired": false,
+        "risk": "low",
+        "unresolvedQuestions": []
+      },
+      "functionalRequirements": [],
+      "technicalConstraints": [],
+      "apiDataContracts": [],
+      "risksAndTradeoffs": [],
+      "traceability": [
+        {
+          "criterionId": "docs-1",
+          "taskIds": [
+            "docs-change"
+          ]
+        }
+      ]
+    }
+  },
+  "testStrategy": {
+    "schemaVersion": 2,
+    "strategyId": "strategy-f2eb9a8705b796217deacba38348b2c1e19a95b390ca7afd19be0a0a626dc499",
+    "specId": "docs-spec",
+    "tddDecision": {
+      "schemaVersion": 2,
+      "decisionId": "tdd-f2eb9a8705b796217deacba38348b2c1e19a95b390ca7afd19be0a0a626dc499",
+      "runId": "example-docs",
+      "taskId": "docs-change",
+      "specId": "docs-spec",
+      "mode": "not_applicable",
+      "rationale": "The assessed change has no executable behavioral target for a meaningful Red phase; objective alternative verification remains mandatory. Testability: Documentation accuracy requires independent reading and execution of examples. Effective risk: low.",
+      "verifiableConditions": [
+        "docs-1: README describes safe integer inputs and demonstrates sum(2, 3) = 5.; verify using manual_review."
+      ],
+      "changeClassification": "documentation",
+      "requiresFailingTestFirst": false,
+      "decidedBy": "coordinator",
+      "decidedAt": "2026-10-16T00:00:00.000Z"
+    },
+    "requiredTestLevels": [],
+    "targetCommands": [],
+    "independentVerificationRequired": true,
+    "criterionMappings": [
+      {
+        "criterionId": "docs-1",
+        "testNames": [
+          "docs-1: README describes safe integer inputs and demonstrates sum(2, 3) = 5."
+        ]
+      }
+    ],
+    "createdAt": "2026-10-16T00:00:00.000Z",
+    "metadata": {
+      "conditionalTdd": {
+        "policyVersion": 1,
+        "assessment": {
+          "policyVersion": 1,
+          "taskId": "docs-change",
+          "taskType": "documentation",
+          "changeImpact": {
+            "surfaces": [
+              "documentation"
+            ],
+            "behaviorChanged": false,
+            "deterministic": false,
+            "regressionReproducible": false,
+            "securitySensitive": false,
+            "dataMigration": false,
+            "scope": "local"
+          },
+          "infrastructure": {
+            "readiness": "ready",
+            "commands": []
+          },
+          "testability": {
+            "level": "none",
+            "rationale": "Documentation accuracy requires independent reading and execution of examples."
+          },
+          "riskClassification": "low",
+          "conventions": {
+            "tdd": "contextual",
+            "requiredMethods": [],
+            "suggestedLevels": []
+          }
+        },
+        "acceptanceCriteria": [
+          {
+            "id": "docs-1",
+            "description": "README describes safe integer inputs and demonstrates sum(2, 3) = 5.",
+            "category": "non_functional",
+            "verificationMethod": "manual_review",
+            "required": true,
+            "status": "pending",
+            "evidenceArtifactIds": []
+          }
+        ],
+        "affectedPaths": [
+          "README.md"
+        ],
+        "riskLevel": "low",
+        "requiredVerificationMethods": [
+          "manual_review"
+        ],
+        "suggestedTestLevels": [],
+        "evidenceRequirements": [
+          "Record successful alternative verification with criterion mappings, method observations and trusted artifacts; not_applicable does not waive verification.",
+          "Cover every required method and acceptance criterion; independent VerificationResult evidence is mandatory."
+        ]
+      }
+    }
+  },
+  "tddDecision": {
+    "schemaVersion": 2,
+    "decisionId": "tdd-f2eb9a8705b796217deacba38348b2c1e19a95b390ca7afd19be0a0a626dc499",
+    "runId": "example-docs",
+    "taskId": "docs-change",
+    "specId": "docs-spec",
+    "mode": "not_applicable",
+    "rationale": "The assessed change has no executable behavioral target for a meaningful Red phase; objective alternative verification remains mandatory. Testability: Documentation accuracy requires independent reading and execution of examples. Effective risk: low.",
+    "verifiableConditions": [
+      "docs-1: README describes safe integer inputs and demonstrates sum(2, 3) = 5.; verify using manual_review."
+    ],
+    "changeClassification": "documentation",
+    "requiresFailingTestFirst": false,
+    "decidedBy": "coordinator",
+    "decidedAt": "2026-10-16T00:00:00.000Z"
+  }
+}

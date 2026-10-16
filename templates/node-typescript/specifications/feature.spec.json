@@ -1,0 +1,244 @@
+{
+  "schemaVersion": 2,
+  "specId": "feature-spec",
+  "runId": "example-feature",
+  "sessionId": "example-session",
+  "level": "full",
+  "complexity": "standard",
+  "riskLevel": "medium",
+  "title": "Add multiplication",
+  "summary": "Multiplication returns the product of two safe integers.",
+  "problemStatement": "The example project needs this change: Add multiplication.",
+  "scope": {
+    "inScope": [
+      "Add multiplication"
+    ],
+    "outOfScope": [
+      "Network services",
+      "Deployment",
+      "Other source changes"
+    ]
+  },
+  "acceptanceCriteria": [
+    {
+      "id": "feature-1",
+      "description": "Multiplication returns the product of two safe integers.",
+      "category": "functional",
+      "verificationMethod": "unit_test",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    }
+  ],
+  "affectedPaths": [
+    "src",
+    "test"
+  ],
+  "version": 1,
+  "traceabilityTaskIds": [
+    "feature-change"
+  ],
+  "status": "draft",
+  "createdBy": "coordinator",
+  "createdAt": "2026-10-16T00:00:00.000Z",
+  "updatedAt": "2026-10-16T00:00:00.000Z",
+  "metadata": {
+    "conditionalTdd": {
+      "policyVersion": 1,
+      "taskId": "feature-change",
+      "taskType": "domain_logic",
+      "changeImpact": {
+        "surfaces": [
+          "domain_logic"
+        ],
+        "behaviorChanged": true,
+        "deterministic": true,
+        "regressionReproducible": true,
+        "securitySensitive": false,
+        "dataMigration": false,
+        "scope": "local"
+      },
+      "infrastructure": {
+        "readiness": "ready",
+        "commands": [
+          {
+            "method": "unit_test",
+            "command": "pnpm test",
+            "level": "unit"
+          }
+        ]
+      },
+      "testability": {
+        "level": "automated",
+        "rationale": "Pure integer arithmetic is deterministic and covered by the Node test runner."
+      },
+      "riskClassification": "medium",
+      "conventions": {
+        "tdd": "contextual",
+        "requiredMethods": [],
+        "suggestedLevels": [
+          "unit"
+        ]
+      }
+    },
+    "sdd": {
+      "policyVersion": 1,
+      "assessment": {
+        "kind": "feature",
+        "behaviorChange": true,
+        "modules": [
+          "calculator"
+        ],
+        "securityImpact": false,
+        "publicApiImpact": false,
+        "dataSchemaImpact": false,
+        "architectureImpact": false,
+        "migrationRequired": false,
+        "risk": "medium",
+        "unresolvedQuestions": []
+      },
+      "functionalRequirements": [
+        "Multiplication returns the product of two safe integers."
+      ],
+      "proposedTestStrategy": "Run independent pnpm test against the pinned change revision.",
+      "technicalConstraints": [],
+      "apiDataContracts": [],
+      "risksAndTradeoffs": [],
+      "traceability": [
+        {
+          "criterionId": "feature-1",
+          "taskIds": [
+            "feature-change"
+          ]
+        }
+      ]
+    }
+  },
+  "architectureNotes": "Add a pure function in the existing arithmetic module; no new service boundary.",
+  "securityConsiderations": "Validate numeric inputs; do not read environment secrets or invoke external programs.",
+  "rollbackPlan": "Revert the isolated feature commit after checking dependent changes.",
+  "testStrategy": {
+    "schemaVersion": 2,
+    "strategyId": "strategy-e7dcf6f8f4fce53a9856a702705ddb0e9564c47e5037e50f7e09a7211d7d31ef",
+    "specId": "feature-spec",
+    "tddDecision": {
+      "schemaVersion": 2,
+      "decisionId": "tdd-e7dcf6f8f4fce53a9856a702705ddb0e9564c47e5037e50f7e09a7211d7d31ef",
+      "runId": "example-feature",
+      "taskId": "feature-change",
+      "specId": "feature-spec",
+      "mode": "required",
+      "rationale": "A repeatable behavioral check is feasible and spec behavior, regression risk, or project convention requires test-first evidence. Testability: Pure integer arithmetic is deterministic and covered by the Node test runner. Effective risk: medium.",
+      "verifiableConditions": [
+        "feature-1: Multiplication returns the product of two safe integers.; verify using unit_test."
+      ],
+      "changeClassification": "domain_logic",
+      "requiresFailingTestFirst": true,
+      "decidedBy": "coordinator",
+      "decidedAt": "2026-10-16T00:00:00.000Z"
+    },
+    "requiredTestLevels": [
+      "unit"
+    ],
+    "targetCommands": [
+      "pnpm test"
+    ],
+    "independentVerificationRequired": true,
+    "criterionMappings": [
+      {
+        "criterionId": "feature-1",
+        "testNames": [
+          "feature-1: Multiplication returns the product of two safe integers."
+        ]
+      }
+    ],
+    "createdAt": "2026-10-16T00:00:00.000Z",
+    "metadata": {
+      "conditionalTdd": {
+        "policyVersion": 1,
+        "assessment": {
+          "policyVersion": 1,
+          "taskId": "feature-change",
+          "taskType": "domain_logic",
+          "changeImpact": {
+            "surfaces": [
+              "domain_logic"
+            ],
+            "behaviorChanged": true,
+            "deterministic": true,
+            "regressionReproducible": true,
+            "securitySensitive": false,
+            "dataMigration": false,
+            "scope": "local"
+          },
+          "infrastructure": {
+            "readiness": "ready",
+            "commands": [
+              {
+                "method": "unit_test",
+                "command": "pnpm test",
+                "level": "unit"
+              }
+            ]
+          },
+          "testability": {
+            "level": "automated",
+            "rationale": "Pure integer arithmetic is deterministic and covered by the Node test runner."
+          },
+          "riskClassification": "medium",
+          "conventions": {
+            "tdd": "contextual",
+            "requiredMethods": [],
+            "suggestedLevels": [
+              "unit"
+            ]
+          }
+        },
+        "acceptanceCriteria": [
+          {
+            "id": "feature-1",
+            "description": "Multiplication returns the product of two safe integers.",
+            "category": "functional",
+            "verificationMethod": "unit_test",
+            "required": true,
+            "status": "pending",
+            "evidenceArtifactIds": []
+          }
+        ],
+        "affectedPaths": [
+          "src",
+          "test"
+        ],
+        "riskLevel": "medium",
+        "requiredVerificationMethods": [
+          "unit_test"
+        ],
+        "suggestedTestLevels": [
+          "unit"
+        ],
+        "evidenceRequirements": [
+          "Red: spec-derived tests fail with a nonzero exit code because target behavior is absent; retain trusted logs and the unchanged test revision.",
+          "Green: implement minimally, then run the same tests successfully on the implementation revision; retain trusted logs.",
+          "Refactor: review/refactor the implementation and rerun the same tests successfully; retain trusted logs even when no cleanup is needed.",
+          "Cover every required method and acceptance criterion; independent VerificationResult evidence is mandatory."
+        ]
+      }
+    }
+  },
+  "tddDecision": {
+    "schemaVersion": 2,
+    "decisionId": "tdd-e7dcf6f8f4fce53a9856a702705ddb0e9564c47e5037e50f7e09a7211d7d31ef",
+    "runId": "example-feature",
+    "taskId": "feature-change",
+    "specId": "feature-spec",
+    "mode": "required",
+    "rationale": "A repeatable behavioral check is feasible and spec behavior, regression risk, or project convention requires test-first evidence. Testability: Pure integer arithmetic is deterministic and covered by the Node test runner. Effective risk: medium.",
+    "verifiableConditions": [
+      "feature-1: Multiplication returns the product of two safe integers.; verify using unit_test."
+    ],
+    "changeClassification": "domain_logic",
+    "requiresFailingTestFirst": true,
+    "decidedBy": "coordinator",
+    "decidedAt": "2026-10-16T00:00:00.000Z"
+  }
+}

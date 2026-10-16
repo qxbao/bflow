@@ -1,0 +1,54 @@
+{
+  "permanentRoles": [
+    "chat",
+    "coordinator",
+    "analyst",
+    "architect",
+    "planner",
+    "reviewer",
+    "qa-verifier"
+  ],
+  "roleConfigs": {
+    "chat": {
+      "agentKind": "codex",
+      "agentName": "chat",
+      "startupTimeoutMs": 60000
+    },
+    "coordinator": {
+      "agentKind": "codex",
+      "agentName": "coordinator",
+      "startupTimeoutMs": 60000
+    },
+    "analyst": {
+      "agentKind": "codex",
+      "agentName": "analyst",
+      "startupTimeoutMs": 60000
+    },
+    "architect": {
+      "agentKind": "codex",
+      "agentName": "architect",
+      "startupTimeoutMs": 60000
+    },
+    "planner": {
+      "agentKind": "codex",
+      "agentName": "planner",
+      "startupTimeoutMs": 60000
+    },
+    "developer": {
+      "agentKind": "codex",
+      "agentName": "developer",
+      "startupTimeoutMs": 60000
+    },
+    "reviewer": {
+      "agentKind": "codex",
+      "agentName": "reviewer",
+      "startupTimeoutMs": 60000
+    },
+    "qa-verifier": {
+      "agentKind": "codex",
+      "agentName": "qa-verifier",
+      "startupTimeoutMs": 60000
+    }
+  },
+  "maxDeveloperCapacity": 2
+}
