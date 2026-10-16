@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { ToolCapabilitySchema, type ToolCapability } from "@bflow/contracts";
@@ -6,48 +6,79 @@ import { z } from "zod";
 import { createToolCapability, systemToolHost, type ProcessResult, type ToolHost } from "./installer.js";
 
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
+const gitNexusFreshnessSchema = z.object({
+  schemaVersion: z.literal(1),
+  repository: z.string().min(1),
+  status: z.enum(["up-to-date", "stale"])
+}).passthrough();
+const gitNexusUnindexedSchema = z.object({
+  schemaVersion: z.literal(1), repository: z.string().min(1),
+  error: z.enum(["not-indexed", "stale-kuzu-index"])
+}).passthrough();
+const gitNexusStatusSchema = z.union([gitNexusFreshnessSchema, gitNexusUnindexedSchema]);
+
+function parseGitNexusStatus(result: { exitCode: number; stdout: string }): z.infer<typeof gitNexusStatusSchema> | null {
+  if (result.exitCode !== 0) return null;
+  const parsed = gitNexusStatusSchema.safeParse(JSON.parse(result.stdout));
+  return parsed.success ? parsed.data : null;
+}
 
 /** Runtime should persist this inventory through MachineSetup. No capability is registered from install alone. */
 export class ToolCapabilityRegistry {
-  readonly #items = new Map<string, ToolCapability>();
+  readonly #items = new Map<string, { scopeKey: string; capability: ToolCapability }>();
   register(raw: unknown, evidence: { verified: boolean; version: string; scopeKey: string }): ToolCapability {
     const capability = ToolCapabilitySchema.parse(raw);
     if (!evidence.verified || !evidence.scopeKey || capability.version !== evidence.version)
       throw new Error("Current functional verification is required to register a capability");
-    const key = `${evidence.scopeKey}:${capability.toolId}`;
-    this.#items.set(key, capability);
+    const key = JSON.stringify([evidence.scopeKey, capability.toolId]);
+    this.#items.set(key, { scopeKey: evidence.scopeKey, capability });
     return capability;
   }
-  get(scopeKey: string, toolId: string): ToolCapability | null { return this.#items.get(`${scopeKey}:${toolId}`) ?? null; }
+  get(scopeKey: string, toolId: string): ToolCapability | null { return this.#items.get(JSON.stringify([scopeKey, toolId]))?.capability ?? null; }
   list(scopeKey: string): ToolCapability[] {
-    return [...this.#items.entries()].filter(([key]) => key.startsWith(`${scopeKey}:`)).map(([, value]) => value);
+    return [...this.#items.values()].filter(item => item.scopeKey === scopeKey).map(item => item.capability);
   }
-  revoke(scopeKey: string, toolId: string): void { this.#items.delete(`${scopeKey}:${toolId}`); }
+  revoke(scopeKey: string, toolId: string): void { this.#items.delete(JSON.stringify([scopeKey, toolId])); }
 }
 
 const registryFileSchema = z.object({ schemaVersion: z.literal(3), entries: z.array(z.object({
   scopeKey: z.string().min(1), capability: ToolCapabilitySchema
-}).strict()) }).strict();
+}).strict()) }).strict().superRefine((state, ctx) => {
+  const keys = state.entries.map(entry => JSON.stringify([entry.scopeKey, entry.capability.toolId]));
+  if (new Set(keys).size !== keys.length) ctx.addIssue({ code: "custom", message: "Duplicate capability registration" });
+});
 
 /** Durable inventory; lock is shared by processes and never stolen automatically. */
 export class FileToolCapabilityRegistry {
   readonly #file: string;
   constructor(file: string) { if (!isAbsolute(file)) throw new Error("Registry file must be absolute"); this.#file = file; }
   async #read() {
-    try { return registryFileSchema.parse(JSON.parse(await readFile(this.#file, "utf8"))); }
+    try {
+      if ((await lstat(this.#file)).isSymbolicLink()) throw new Error("Capability registry must not be a symlink");
+      return registryFileSchema.parse(JSON.parse(await readFile(this.#file, "utf8")));
+    }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return { schemaVersion: 3 as const, entries: [] };
       throw error;
     }
   }
   async #write(entries: z.infer<typeof registryFileSchema>["entries"]): Promise<void> {
-    const temporary = `${this.#file}.tmp-${process.pid}`;
-    await writeFile(temporary, JSON.stringify({ schemaVersion: 3, entries }), { flag: "wx", mode: 0o600 });
-    try { await rename(temporary, this.#file); }
+    const temporary = `${this.#file}.tmp-${randomUUID()}`;
+    const payload = JSON.stringify(registryFileSchema.parse({ schemaVersion: 3, entries }));
+    const handle = await open(temporary, "wx", 0o600);
+    try { await handle.writeFile(payload); await handle.sync(); }
+    finally { await handle.close(); }
+    try {
+      await rename(temporary, this.#file);
+      const directory = await open(dirname(this.#file), "r");
+      try { await directory.sync(); } finally { await directory.close(); }
+    }
     catch (error) { await rm(temporary, { force: true }); throw error; }
   }
   async #locked<T>(action: (entries: z.infer<typeof registryFileSchema>["entries"]) => Promise<T>): Promise<T> {
     await mkdir(dirname(this.#file), { recursive: true, mode: 0o700 });
+    const directory = await lstat(dirname(this.#file));
+    if (!directory.isDirectory() || directory.isSymbolicLink()) throw new Error("Capability registry directory is not a real directory");
     const lockPath = `${this.#file}.lock`;
     const lock = await open(lockPath, "wx", 0o600);
     try { return await action((await this.#read()).entries); }
@@ -78,6 +109,8 @@ export async function writeOwnedToolConfig(path: string, content: string, expect
   const desired = sha(content);
   const markerPath = `${path}.bflow-owner`;
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const parent = await lstat(dirname(path));
+  if (!parent.isDirectory() || parent.isSymbolicLink()) return { status: "blocked", digest: desired, rollbackPath: null };
   const lockPath = `${path}.lock`;
   let lock;
   try { lock = await open(lockPath, "wx", 0o600); }
@@ -92,22 +125,30 @@ export async function writeOwnedToolConfig(path: string, content: string, expect
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     if (old !== null) {
       const marker = await readFile(markerPath, "utf8").catch(() => "");
-      if (marker.trim() !== sha(old) || (expectedDigest !== null && expectedDigest !== sha(old)))
+      if (marker.trim() !== sha(old) || expectedDigest !== sha(old))
         return { status: "blocked", digest: desired, rollbackPath: null };
       if (old === content) return { status: "already_satisfied", digest: desired, rollbackPath: null };
-    } else if (expectedDigest !== null) return { status: "blocked", digest: desired, rollbackPath: null };
-    const rollbackPath = old === null ? null : `${path}.previous-${Date.now()}`;
-    const staging = `${path}.staging-${process.pid}`;
+    } else {
+      if (expectedDigest !== null) return { status: "blocked", digest: desired, rollbackPath: null };
+      try { await lstat(markerPath); return { status: "blocked", digest: desired, rollbackPath: null }; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
+    const nonce = randomUUID();
+    const rollbackPath = old === null ? null : `${path}.previous-${nonce}`;
+    const staging = `${path}.staging-${nonce}`;
+    const markerStaging = `${markerPath}.staging-${nonce}`;
     try {
       await writeFile(staging, content, { flag: "wx", mode: 0o600 });
+      await writeFile(markerStaging, desired, { flag: "wx", mode: 0o600 });
       if (rollbackPath) await rename(path, rollbackPath);
       await rename(staging, path);
-      await writeFile(markerPath, desired, { mode: 0o600 });
+      await rename(markerStaging, markerPath);
       return { status: "applied", digest: desired, rollbackPath };
     } catch (error) {
       if (rollbackPath) await rename(rollbackPath, path).catch(() => {});
+      else await rm(path, { force: true }).catch(() => {});
       throw error;
-    } finally { await rm(staging, { force: true }); }
+    } finally { await rm(staging, { force: true }); await rm(markerStaging, { force: true }); }
   } finally { await lock.close(); await rm(lockPath, { force: true }); }
 }
 
@@ -175,6 +216,8 @@ export async function observeClaudeMemWorker(input: {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const body = await response.text();
     if (!body || body.length > 64_000) throw new Error("Invalid health response");
+    const health = z.object({ status: z.literal("ok"), version: z.string().min(1) }).passthrough().parse(JSON.parse(body));
+    if (health.version !== input.version) throw new Error(`Worker version ${health.version} differs from ${input.version}`);
     return { status: "ready", endpoint, projectRoot,
       diagnostic: "Worker health verified; project-filtering adapter and Gateway authorization still required",
       capability: null };
@@ -273,16 +316,22 @@ export async function ensureGitNexusIndex(input: {
   catch { return { status: "busy", repositoryRoot: root, fingerprint, diagnostic: "GitNexus writer already active" }; }
   const receiptPath = join(input.stateRoot, `gitnexus-${sha(root)}.json`);
   try {
-    const status = await host.run(input.executable, ["status"], { cwd: root, timeoutMs: input.timeoutMs ?? 30_000 });
-    let previous: { fingerprint?: string } = {};
-    try { previous = JSON.parse(await readFile(receiptPath, "utf8")) as { fingerprint?: string }; } catch { /* first run */ }
-    if (status.exitCode === 0 && previous.fingerprint === fingerprint && !/stale|out.of.date|not.indexed/i.test(status.stdout + status.stderr))
-      return { status: "fresh", repositoryRoot: root, fingerprint, diagnostic: "Index status and repository fingerprint match" };
+    const statusResult = await host.run(input.executable, ["status", "--json"], { cwd: root, timeoutMs: input.timeoutMs ?? 30_000 });
+    let status: z.infer<typeof gitNexusStatusSchema> | null = null;
+    try { status = parseGitNexusStatus(statusResult); } catch { /* unsupported/malformed status */ }
+    const statusRepo = status ? await realpath(status.repository).catch(() => null) : null;
+    if (!status || statusResult.exitCode !== 0 || statusRepo !== root)
+      return { status: "failed", repositoryRoot: root, fingerprint, diagnostic: "GitNexus status JSON is unsupported, invalid or identifies another repository" };
+    if ("status" in status && status.status === "up-to-date")
+      return { status: "fresh", repositoryRoot: root, fingerprint, diagnostic: "GitNexus status --json confirms a current index" };
     const analyzed = await host.run(input.executable, ["analyze", root], { cwd: root, timeoutMs: input.timeoutMs ?? 300_000 });
     if (analyzed.exitCode !== 0)
       return { status: "failed", repositoryRoot: root, fingerprint, diagnostic: `gitnexus analyze exited ${analyzed.exitCode}: ${analyzed.stderr.slice(0, 400)}` };
-    const after = await host.run(input.executable, ["status"], { cwd: root, timeoutMs: input.timeoutMs ?? 30_000 });
-    if (after.exitCode !== 0 || /stale|out.of.date|not.indexed/i.test(after.stdout + after.stderr))
+    const afterResult = await host.run(input.executable, ["status", "--json"], { cwd: root, timeoutMs: input.timeoutMs ?? 30_000 });
+    let after: z.infer<typeof gitNexusStatusSchema> | null = null;
+    try { after = parseGitNexusStatus(afterResult); } catch { /* fail closed */ }
+    const afterRepo = after ? await realpath(after.repository).catch(() => null) : null;
+    if (afterRepo !== root || !after || !("status" in after) || after.status !== "up-to-date")
       return { status: "stale", repositoryRoot: root, fingerprint, diagnostic: "Post-index status did not verify freshness" };
     await writeFile(receiptPath, JSON.stringify({ repositoryRoot: root, fingerprint, indexedAt: new Date().toISOString() }), { mode: 0o600 });
     return { status: "indexed", repositoryRoot: root, fingerprint, diagnostic: "Index refreshed and status verified" };
@@ -303,11 +352,16 @@ export async function planChromeSession(input: {
   managedRoot: string; repositoryId: string; taskId: string; browserExecutable: string;
   serverExecutable: string; host?: ToolHost;
 }): Promise<BrowserSessionPlan> {
-  if (!isAbsolute(input.managedRoot) || !/^[A-Za-z0-9._-]+$/.test(input.repositoryId) || !/^[A-Za-z0-9._-]+$/.test(input.taskId))
+  if (!isAbsolute(input.managedRoot) || !/^[A-Za-z0-9._-]+$/.test(input.repositoryId) || !/^[A-Za-z0-9._-]+$/.test(input.taskId) ||
+    [input.repositoryId, input.taskId].includes(".") || [input.repositoryId, input.taskId].includes(".."))
     throw new Error("Invalid managed browser scope");
   const host = input.host ?? systemToolHost;
-  const profileDir = resolve(input.managedRoot, "chrome", input.repositoryId, input.taskId);
-  if (!profileDir.startsWith(`${resolve(input.managedRoot)}${sep}`)) throw new Error("Profile escaped managed root");
+  await mkdir(input.managedRoot, { recursive: true, mode: 0o700 });
+  const rootInfo = await lstat(input.managedRoot);
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("Managed browser root is not a real directory");
+  const canonicalRoot = await realpath(input.managedRoot);
+  const profileDir = resolve(canonicalRoot, "chrome", input.repositoryId, input.taskId);
+  if (!profileDir.startsWith(`${canonicalRoot}${sep}`)) throw new Error("Profile escaped managed root");
   const result = await host.run(input.browserExecutable, ["--version"], { timeoutMs: 15_000 });
   const base = { profileDir, resourceKey: `chrome-${sha(profileDir).slice(0, 24)}`, executable: input.serverExecutable,
     argv: ["--userDataDir", profileDir, "--executablePath", input.browserExecutable] };
@@ -316,7 +370,11 @@ export async function planChromeSession(input: {
   const server = await host.run(input.serverExecutable, ["--version"], { timeoutMs: 15_000 });
   if (server.exitCode !== 0 || !(server.stdout + server.stderr).trim())
     return { ...base, status: "browser_missing", diagnostic: "Chrome DevTools MCP executable did not pass version probe" };
-  await mkdir(profileDir, { recursive: true, mode: 0o700 });
+  for (const directory of [join(canonicalRoot, "chrome"), join(canonicalRoot, "chrome", input.repositoryId), profileDir]) {
+    await mkdir(directory, { mode: 0o700 }).catch(error => { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; });
+    const info = await lstat(directory);
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Browser profile path traverses a link or non-directory");
+  }
   for (const name of ["SingletonLock", ".bflow-profile.lock"]) {
     try { await lstat(join(profileDir, name)); return { ...base, status: "profile_locked", diagnostic: `${name} exists; do not reuse this profile` }; }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }

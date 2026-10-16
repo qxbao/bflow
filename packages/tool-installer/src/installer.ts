@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createWriteStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -14,15 +14,25 @@ import {
 } from "@bflow/contracts";
 
 const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+async function digestFile(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+  return hash.digest("hex");
+}
 const ok = <T>(value: T): OperationResult<T> => ({ ok: true, value });
 const fail = <T>(message: string, code: "validation" | "conflict" | "not_found" | "corruption" = "validation"): OperationResult<T> =>
   ({ ok: false, error: { code, retryable: code === "conflict", message } as ContractError });
 const versionError = <T>(value: unknown): OperationResult<T> | null => {
-  if (typeof value !== "object" || value === null || !("schemaVersion" in value)) return null;
-  const received = value.schemaVersion;
-  return typeof received === "number" && Number.isInteger(received) && received >= 0 && received !== CURRENT_PLATFORM_SCHEMA_VERSION
-    ? { ok: false, error: { code: "unsupported_version", retryable: false, supportedVersions: [3], receivedVersion: received, message: "Unsupported platform schema version" } }
-    : null;
+  const inspect = (candidate: unknown): number | null => {
+    if (typeof candidate !== "object" || candidate === null || !("schemaVersion" in candidate)) return null;
+    const received = candidate.schemaVersion;
+    return typeof received === "number" && Number.isInteger(received) && received >= 0 && received !== CURRENT_PLATFORM_SCHEMA_VERSION
+      ? received : null;
+  };
+  const root = value && typeof value === "object" ? value as { step?: { toolInstall?: unknown } } : null;
+  const received = inspect(value) ?? inspect(root?.step) ?? inspect(root?.step?.toolInstall);
+  return received === null ? null : { ok: false, error: { code: "unsupported_version", retryable: false,
+    supportedVersions: [3], receivedVersion: received, message: "Unsupported platform schema version" } };
 };
 const parse = <T>(schema: z.ZodType<T>, value: unknown): OperationResult<T> => {
   const wrongVersion = versionError<T>(value);
@@ -94,8 +104,9 @@ export interface ManagedToolInstallerOptions {
   readonly clock?: () => Date;
 }
 
-interface OwnedMarker { toolId: string; version: string; integrity: string; source: string; executable: string; }
-const markerSchema = z.object({ toolId: z.string(), version: z.string(), integrity: z.string(), source: z.string(), executable: z.string() }).strict();
+interface OwnedMarker { toolId: string; installerId: string; version: string; integrity: string; source: string; executable: string; license: string; recipeDigest: string; }
+const markerSchema = z.object({ toolId: z.string(), installerId: z.string(), version: z.string(), integrity: z.string(), source: z.string(),
+  executable: z.string(), license: z.string(), recipeDigest: z.string().regex(/^[0-9a-f]{64}$/) }).strict();
 
 export class ManagedToolInstaller implements ToolInstaller {
   readonly installerId: string;
@@ -119,7 +130,6 @@ export class ManagedToolInstaller implements ToolInstaller {
       if (pin.toolId === "gitnexus" && (pin.recipe.kind !== "npm" || pin.recipe.packageName !== "gitnexus")) throw new Error("GitNexus must use its official npm package");
       if (pin.toolId === "chrome-devtools-mcp" && (pin.recipe.kind !== "npm" || pin.recipe.packageName !== "chrome-devtools-mcp")) throw new Error("Chrome DevTools MCP must use its official npm package");
       if (pin.toolId === "superpowers" && pin.recipe.kind !== "provider_plugin") throw new Error("Superpowers must use a provider plugin route");
-      if (pin.toolId === "gitnexus" && pin.license !== "PolyForm-Noncommercial-1.0.0") throw new Error("GitNexus license must be reviewed for the pinned version");
       this.#pins.set(pin.toolId, pin);
     }
     this.installerId = options.pins[0]?.installerId ?? "bflow-managed-tools";
@@ -162,13 +172,19 @@ export class ManagedToolInstaller implements ToolInstaller {
     if (pin.recipe.kind === "provider_plugin") return fail("Native plugin installation needs a provider-specific verified installer; use the documented manual route", "not_found");
     return ok(SetupStepSchema.parse({ schemaVersion: 3, stepId: `install-${request.toolId}`, action: "install_tool",
       componentId: request.toolId, level: request.scope.kind, scope: request.scope, dependsOn: [],
-      desiredStateDigest: digest(JSON.stringify({ toolId: request.toolId, version: request.version, source: request.source, integrity: request.integrity, destination: resolve(request.destination) })),
+      desiredStateDigest: digest(JSON.stringify({ toolId: request.toolId, version: request.version, source: request.source,
+        integrity: request.integrity, destination: resolve(request.destination), recipe: pin.recipe, license: pin.license })),
       expectedStateDigest: null, requiresApproval: request.scope.kind === "machine", rollback: "remove_owned_install",
       toolInstall: request, idempotencyKey: request.idempotencyKey }));
   }
 
   async #marker(path: string): Promise<OwnedMarker | null> {
-    try { return markerSchema.parse(JSON.parse(await readFile(join(path, ".bflow-tool.json"), "utf8"))); }
+    try {
+      if (!(await lstat(path)).isDirectory()) return null;
+      const markerPath = join(path, ".bflow-tool.json");
+      if (!(await lstat(markerPath)).isFile()) return null;
+      return markerSchema.parse(JSON.parse(await readFile(markerPath, "utf8")));
+    }
     catch { return null; }
   }
 
@@ -204,7 +220,8 @@ export class ManagedToolInstaller implements ToolInstaller {
       try { await lstat(destination); return ok(await this.#receipt(request, "blocked", ["Destination exists without a valid Bflow ownership marker"])); }
       catch { return ok(await this.#receipt(request, "blocked", ["Tool is not installed"])); }
     }
-    if (marker.toolId !== pin.toolId || marker.version !== pin.version || marker.integrity !== pin.integrity || marker.source !== pin.source)
+    if (marker.toolId !== pin.toolId || marker.installerId !== pin.installerId || marker.version !== pin.version || marker.integrity !== pin.integrity ||
+      marker.source !== pin.source || marker.license !== pin.license || marker.recipeDigest !== digest(JSON.stringify(pin.recipe)))
       return ok(await this.#receipt(request, "blocked", ["Installed tool differs from approved pin"], [destination]));
     const probe = await this.#probe(destination, pin);
     return ok(await this.#receipt(request, probe ? "already_satisfied" : "blocked", [probe ? "Pinned tool verified" : "Executable verification failed"], [destination]));
@@ -218,7 +235,12 @@ export class ManagedToolInstaller implements ToolInstaller {
       const canonicalDestination = await realpath(destination);
       if (!path.startsWith(`${canonicalDestination}${sep}`)) return false;
       const version = await this.#host.run(executable, ["--version"], { timeoutMs: 15_000 });
-      if (version.exitCode !== 0 || !version.stdout.includes(pin.version) && !version.stderr.includes(pin.version)) return false;
+      const escapedVersion = pin.version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      if (version.exitCode !== 0 || !new RegExp(`(^|[^0-9])${escapedVersion}(?![0-9.])`).test(version.stdout + version.stderr)) return false;
+      if (pin.recipe.kind === "npm") {
+        z.object({ name: z.literal(pin.recipe.packageName), version: z.literal(pin.version),
+          license: z.literal(pin.license) }).passthrough().parse(JSON.parse(await readFile(join(destination, "node_modules", pin.recipe.packageName, "package.json"), "utf8")));
+      }
       if (pin.toolId === "rtk") {
         const gain = await this.#host.run(executable, ["gain"], { timeoutMs: 15_000 });
         return gain.exitCode === 0 && (gain.stdout + gain.stderr).trim().length > 0;
@@ -234,6 +256,7 @@ export class ManagedToolInstaller implements ToolInstaller {
     const destination = resolve(request.step.toolInstall!.destination);
     if (options?.signal?.aborted) return ok(await this.#receipt(request, "blocked", ["Operation cancelled before install"]));
     await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+    if (!(await this.#destination(destination))) return fail("Destination changed to an unsafe path before installation");
     const lockPath = `${destination}.lock`;
     let lock;
     try { lock = await open(lockPath, "wx", 0o600); }
@@ -243,12 +266,17 @@ export class ManagedToolInstaller implements ToolInstaller {
     try {
       const current = await this.reconcile(request);
       if (current.ok && current.value.status === "already_satisfied") return current;
-      try { await lstat(destination); if (!(await this.#marker(destination))) return ok(await this.#receipt(request, "blocked", ["Unowned destination cannot be replaced"])); }
+      try {
+        await lstat(destination);
+        const marker = await this.#marker(destination);
+        if (!marker || marker.toolId !== pin.toolId || marker.installerId !== pin.installerId)
+          return ok(await this.#receipt(request, "blocked", ["Destination belongs to another tool or installer"]));
+      }
       catch { /* absent */ }
       await mkdir(stage, { mode: 0o700 });
       const artifact = join(stage, "artifact");
       await this.#host.download(pin.source, artifact, options?.signal);
-      if (digest(await readFile(artifact)) !== pin.integrity) return ok(await this.#receipt(request, "failed", ["Downloaded artifact SHA-256 mismatch"]));
+      if (await digestFile(artifact) !== pin.integrity) return ok(await this.#receipt(request, "failed", ["Downloaded artifact SHA-256 mismatch"]));
       if (pin.recipe.kind === "npm") {
         const result = await this.#host.run("npm", ["install", "--prefix", stage, "--no-save", "--package-lock=false",
           ...(pin.recipe.allowBuildScripts ? [] : ["--ignore-scripts"]), artifact], { timeoutMs: options?.timeoutMs ?? 180_000,
@@ -268,7 +296,9 @@ export class ManagedToolInstaller implements ToolInstaller {
         await chmod(join(stage, "rtk"), 0o700);
       } else return ok(await this.#receipt(request, "blocked", ["Provider plugin installation is not automated"]));
       const executable = pin.recipe.kind === "rtk_archive" ? "rtk" : join("node_modules", ".bin", pin.recipe.executable);
-      await writeFile(join(stage, ".bflow-tool.json"), JSON.stringify({ toolId: pin.toolId, version: pin.version, integrity: pin.integrity, source: pin.source, executable }), { mode: 0o600 });
+      await writeFile(join(stage, ".bflow-tool.json"), JSON.stringify({ toolId: pin.toolId, installerId: pin.installerId, version: pin.version,
+        integrity: pin.integrity, source: pin.source, executable, license: pin.license,
+        recipeDigest: digest(JSON.stringify(pin.recipe)) }), { mode: 0o600 });
       // Verify in stage before replacing a known-good installation.
       if (!(await this.#probe(stage, pin))) return ok(await this.#receipt(request, "failed", ["Installed executable did not pass version/function probe"]));
       try { await stat(destination); backup = `${destination}.previous-${randomUUID()}`; await rename(destination, backup); }
