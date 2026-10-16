@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 2,
+  "specId": "spec-1",
+  "runId": "run-1",
+  "sessionId": "session-1",
+  "level": "lightweight",
+  "complexity": "trivial",
+  "riskLevel": "low",
+  "version": 1,
+  "title": "Correct the status command example",
+  "summary": "Replace the mistaken bflow stats example with bflow status.",
+  "problemStatement": "guide.md currently tells users to run the unsupported bflow stats command.",
+  "scope": {
+    "inScope": [
+      "Correct the command spelling in guide.md"
+    ],
+    "outOfScope": [
+      "CLI parsing and Runtime behavior"
+    ]
+  },
+  "acceptanceCriteria": [
+    {
+      "id": "ac-1",
+      "description": "guide.md shows bflow status and contains no bflow stats command example.",
+      "category": "functional",
+      "verificationMethod": "manual_review",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    }
+  ],
+  "affectedPaths": [
+    "guide.md"
+  ],
+  "traceabilityTaskIds": [
+    "implement"
+  ],
+  "status": "draft",
+  "createdBy": "analyst",
+  "createdAt": "2026-10-16T00:00:00.000Z",
+  "updatedAt": "2026-10-16T00:00:00.000Z",
+  "metadata": {
+    "sdd": {
+      "policyVersion": 1,
+      "assessment": {
+        "kind": "documentation",
+        "behaviorChange": false,
+        "modules": [
+          "example"
+        ],
+        "securityImpact": false,
+        "publicApiImpact": false,
+        "dataSchemaImpact": false,
+        "architectureImpact": false,
+        "migrationRequired": false,
+        "risk": "low",
+        "unresolvedQuestions": []
+      },
+      "functionalRequirements": [],
+      "technicalConstraints": [],
+      "apiDataContracts": [],
+      "risksAndTradeoffs": [],
+      "traceability": [
+        {
+          "criterionId": "ac-1",
+          "taskIds": [
+            "implement"
+          ]
+        }
+      ]
+    }
+  }
+}
