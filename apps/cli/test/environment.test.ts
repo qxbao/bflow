@@ -122,9 +122,9 @@ describe("P12 repository environment lifecycle", () => {
     const saved = SessionManifestSchema.parse(JSON.parse(await readFile(join(dir, ".bflow/state/session.json"), "utf8")));
     expect(saved.metadata?.["repositoryId"]).toBe(repository.id); expect(saved.panes).toHaveLength(roles.length);
   });
-  it("does not start a server when P13 composition is missing", async () => {
-    await expect(new EnvironmentLifecycle(dir, { runner }).up()).rejects.toThrow("P13");
-    expect(runner.requests.filter((r) => r.mode === "background")).toHaveLength(0);
+  it("does not fabricate success when the default P13 receives malformed topology responses", async () => {
+    await expect(new EnvironmentLifecycle(dir, { runner }).up()).rejects.toThrow();
+    expect(runner.requests.some((r) => r.args[0] === "workspace" && r.args[1] === "list")).toBe(true);
   });
   it("rejects attach before up without starting any session", async () => {
     await expect(lifecycle.attach()).rejects.toThrow("Run bflow up");

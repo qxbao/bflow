@@ -65,3 +65,4 @@ export { readEnvironmentConfig, defaultEnvironmentConfig, ENVIRONMENT_CONFIG_PAT
 export type { EnvironmentConfig } from "./environment-config.js";
 export { environmentProcessRunner, namedSessionEnvironment } from "./environment-process.js";
 export type { EnvironmentProcessRunner, EnvironmentProcessRequest, EnvironmentProcessResult } from "./environment-process.js";
+export { PaneManagerLifecycleAdapter, createNamedPaneRunner, openPaneManagerEnvironment } from "./pane-manager-integration.js";

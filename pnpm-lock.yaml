@@ -181,6 +181,9 @@ importers:
       '@bflow/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@bflow/pane-manager':
+        specifier: workspace:*
+        version: link:../../packages/pane-manager
       '@bflow/runtime':
         specifier: workspace:*
         version: link:../../packages/runtime
@@ -210,6 +213,12 @@ importers:
         version: link:../contracts
 
   packages/herdr-adapter:
+    dependencies:
+      '@bflow/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+
+  packages/pane-manager:
     dependencies:
       '@bflow/contracts':
         specifier: workspace:*

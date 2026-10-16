@@ -13,6 +13,7 @@ import {
 import { defaultEnvironmentConfig, readEnvironmentConfig, type EnvironmentConfig } from "./environment-config.js";
 import { environmentProcessRunner, namedSessionEnvironment, type EnvironmentProcessRunner } from "./environment-process.js";
 import { identifyRepository, type RepositoryIdentity } from "./repository.js";
+import { openPaneManagerEnvironment } from "./pane-manager-integration.js";
 
 /** CLI composition seam. The provider owns P13 bootstrap/reconciliation and Runtime checkpoint persistence. */
 export interface EnvironmentIntegration {
@@ -152,7 +153,7 @@ export class EnvironmentLifecycle {
     if (this.dependencies.openIntegration) return this.dependencies.openIntegration(input);
     // Explicit operator-selected composition module; never execute a module named in repository data.
     const path = process.env["BFLOW_ENVIRONMENT_MODULE"];
-    if (!path) return undefined;
+    if (!path) return openPaneManagerEnvironment(input, this.runner);
     const module: unknown = await import(pathToFileURL(resolve(path)).href);
     const factory = object(module)["openBflowEnvironment"];
     if (typeof factory !== "function") fail("BFLOW_ENVIRONMENT_MODULE must export openBflowEnvironment(input)");
@@ -345,6 +346,11 @@ export class EnvironmentLifecycle {
     let server: EnvironmentStatus["server"] = "unknown";
     let liveObservation = false;
     try { manifest = await this.savedManifest(repository); } catch (error) { issues.push(String(error)); }
+    try {
+      const intent = await this.intent(repository);
+      if (intent && ["server_starting", "manager_pending", "stopping"].includes(intent.phase))
+        issues.push(`Environment operation '${intent.phase}' is unresolved; inspect the existing session before retrying.`);
+    } catch (error) { issues.push(String(error)); }
     try { server = await this.probe(repository, config) ? "running" : "stopped"; } catch (error) { issues.push(String(error)); }
     for (const executable of new Set([config.environment.herdrBinary, ...config.environment.roles.map((r) => r.cli)])) {
       try { await this.command(repository, executable, ["--version"]); }
@@ -384,6 +390,12 @@ export class EnvironmentLifecycle {
       await check("lifecycle-lock", async () => {
         try { await access(this.statePath(repository, "lifecycle.lock")); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return "No lifecycle operation lock"; throw error; }
         fail("Lifecycle lock exists; check its owner before stale-lock recovery");
+      });
+      await check("operation-recovery", async () => {
+        const intent = await this.intent(repository);
+        if (intent && ["server_starting", "manager_pending", "stopping"].includes(intent.phase))
+          fail(`Environment operation '${intent.phase}' is unresolved. Inspect/reconcile the existing session; automatic resend is disabled.`);
+        return "No unresolved lifecycle delivery";
       });
       await check("role-manager", async () => {
         const integration = await new Deadline(5000).call(() => this.integration(repository, validConfig));

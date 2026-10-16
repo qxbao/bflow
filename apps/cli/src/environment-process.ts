@@ -10,6 +10,7 @@ export interface EnvironmentProcessRequest {
   readonly timeoutMs?: number;
   readonly mode?: "capture" | "background" | "interactive";
   readonly logPath?: string;
+  readonly signal?: AbortSignal;
 }
 export interface EnvironmentProcessResult {
   readonly exitCode: number | null;
@@ -24,6 +25,7 @@ export interface EnvironmentProcessRunner {
 /** Every command is argv based. Background servers own their lifetime after spawn. */
 export const environmentProcessRunner: EnvironmentProcessRunner = {
   async run(request) {
+    if (request.signal?.aborted) throw new Error("Process aborted before spawn");
     const background = request.mode === "background";
     const interactive = request.mode === "interactive";
     const log = background && request.logPath !== undefined
@@ -45,6 +47,7 @@ export const environmentProcessRunner: EnvironmentProcessRunner = {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
+          request.signal?.removeEventListener("abort", abort);
           if (error) reject(error);
           else resolve({ exitCode, stdout, stderr, ...(child.pid === undefined ? {} : { pid: child.pid }) });
         };
@@ -54,6 +57,9 @@ export const environmentProcessRunner: EnvironmentProcessRunner = {
             else child.kill("SIGKILL");
           } catch { /* Already exited. */ }
         };
+        const abort = () => { terminate(); finish(new Error("Process aborted during execution")); };
+        request.signal?.addEventListener("abort", abort, { once: true });
+        if (request.signal?.aborted) abort();
         const receive = (chunk: Buffer, target: "stdout" | "stderr") => {
           if (target === "stdout") stdout += chunk.toString("utf8");
           else stderr += chunk.toString("utf8");

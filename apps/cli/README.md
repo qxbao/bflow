@@ -7,7 +7,7 @@ Node >=22.13 and the root's pinned pnpm are required for the existing storage ru
 | Command | Behavior |
 | --- | --- |
 | `bflow init` | Resolves the canonical Git checkout root; creates `.bflow/config.yaml` and `.bflow/.gitignore`. Safe to repeat, including with legacy `--force`/`--yes`: existing configuration is preserved. Does not invoke Herdr. |
-| `bflow up [--timeout <ms>]` | Checks executables and Herdr protocol; starts a headless named server, calls the composed P13 manager and waits for **every configured required role** to be idle/done. Persists validated pane/agent bindings. Reuses live roles. |
+| `bflow up [--timeout <ms>]` | Checks executables and Herdr protocol; starts a headless named server, calls the default P13 manager and waits for **every configured required role** to be idle/done. Persists validated pane/agent bindings. Reuses live roles. |
 | `bflow attach` | Requires an existing manifest and a running matching session. Calls P13 to focus/validate Conversation, then runs `herdr session attach <name>` with inherited terminal I/O. |
 | `bflow down [--yes] [--timeout <ms>]` | Inspects active runs and dirty files. Refuses unsafe shutdown without confirmation. Quiesces Runtime intake/dispatch, recollects runs, requires durable aggregate checkpoints, calls P13 graceful shutdown, then stops only the named session. Deletes no worktree, database, artifact, commit or source file. |
 | `bflow status` | Reports configuration, named server, panes/agents and missing executables. Labels persisted observations as potentially stale. Does not open the legacy workflow Runtime. |
@@ -38,20 +38,29 @@ managed by Bflow. Explicit `HERDR_CONFIG_PATH` is retained.
 
 ## Composition boundary and current integration limits
 
-The P11 baseline has the `SessionLifecycleManager` interface but no P13
-implementation. Its `init(manifest)` requires real physical pane IDs, so CLI
-cannot synthesize a valid initial manifest without implementing P13. The provider
-must bootstrap/reconcile its manager with repository/config context before the
-CLI calls `getManifest`/`up`. CLI never fabricates pane IDs or invokes `agent start`,
-workspace creation or pane splitting.
+P13 is composed automatically through `PaneManagerLifecycleAdapter`. It adapts
+`initializeTopology` / `reconcileTopology` to lifecycle `up`,
+`focusConversationPane` to `attach`, and `inspectTopologyHealth` followed by
+schema-validated manifest reads to `getManifest` / `doctorSession`.
+P13 receives an argv runner that explicitly selects this repository's named
+session. No global process environment is changed. Role CLI names must be supported
+Herdr agent kinds on PATH; custom executable paths and dynamic Developer roles
+cannot be configured as permanent roles.
+
+The adapter uses `FileSessionManifestStore` under `.bflow/state/panes/` rather
+than P13's default in-memory store. It validates repository identity on both reads
+and writes. P13 owns all workspace/tab/pane creation, agent startup and recovery
+logic. CLI never fabricates physical IDs. Both CLI and P13 are built through the
+CLI's TypeScript project reference; no manual composition module is needed for
+`up`, `attach`, `status` or `doctor`.
 
 The baseline `RuntimeService` has no public quiesce/checkpoint API. P12 exposes a
 local composition seam using the existing `CreateCheckpointCommand` and
 `RecoveryCheckpoint` contracts, without modifying those contracts or Runtime.
-Before release, P13/P19 integration must provide these real operations.
+Before graceful shutdown is enabled, P19 integration must provide these real operations. P13 currently has no graceful shutdown entry point either; the default adapter returns an explicit error for lifecycle `down`.
 
 Embedders pass `CliContext.environment.integration` or `openIntegration(input)`.
-For the executable, the operator can set `BFLOW_ENVIRONMENT_MODULE` to an absolute
+To override the default P13 composition in the executable, the operator can set `BFLOW_ENVIRONMENT_MODULE` to an absolute
 ESM module exporting:
 
 ```ts
@@ -74,16 +83,22 @@ an unpersisted snapshot is not sufficient. Schema/identity/version/sequence
 checks run at ingress. The factory is selected only through the operator's
 environment, never through repository configuration.
 
-Without P13 composition, `up` fails explicitly before starting a server and
-`doctor` reports the missing integration. `attach` cannot fabricate a target.
-Without a Runtime shutdown barrier/checkpoint, `down` refuses unsafe stopping;
-`--yes` cannot override missing recovery guarantees. This branch does **not**
-claim live agent startup or full SDLC end-to-end verification.
+The default composition starts and observes real P13 roles. `doctor` reports a
+warning that Runtime shutdown coordination is still unavailable. `down` refuses
+stopping when that safety integration is missing, including with `--yes`.
+It does not construct a success-only barrier or fabricate an aggregate checkpoint.
+A custom provider can supply the full lifecycle plus Runtime operations shown
+above. Live agent startup depends on the installed CLI being authenticated and
+ready; P13 blocked/startup failures remain errors. No full SDLC end-to-end claim
+is made.
 
 ## Recovery and verification
 
 Runtime state is under `.bflow/state/`, with atomically replaced `session.json`
-and `operation.json`. A repository operation lock serializes up/down. Concurrent
+and `operation.json`. P13's authoritative manifest is
+`.bflow/state/panes/<session>.manifest.json`; the CLI's `session.json` is its last
+validated observation. An active session's manifest is refreshed through P13
+health inspection before status/readiness decisions. A repository operation lock serializes up/down. Concurrent
 operations are refused. After an interrupted CLI leaves `lifecycle.lock`, verify
 the owning process has exited before removing that lock. Unresolved role/server
 startup or shutdown delivery is retained and automatic resend is refused until
@@ -108,7 +123,11 @@ git status --short
 Fake-runner tests cover equal repository names, canonical/symlink identity,
 repeat init/up, attach-before-up, blocked/missing roles, launch failure, timeout
 delivery ambiguity, lock contention, foreign manifests/attach targets,
-confirmation/checkpoint/graceful shutdown, and selective stop. The opt-in live
+confirmation/checkpoint/graceful shutdown, and selective stop. Additional tests
+exercise the actual P13 class and file store through a stateful fake Herdr process
+runner: seven-role topology, persistence across CLI invocations, duplicate prevention,
+live health changes, Conversation focus, foreign manifests, scoped session env,
+blocked startup, unresolved-delivery diagnostics, cancellation, and missing Runtime shutdown APIs. The opt-in live
 test creates two isolated named headless sessions with a short temporary XDG
 configuration root, verifies protocol 22, stops one while the other stays running,
 and stops both before deleting test data. It never starts agents or opens TUI.
