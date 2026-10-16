@@ -70,7 +70,9 @@ export async function createAgenticConversationHost(options: {
     async receiveHerdr(input) {
       const message = RoleMessageSchema.parse(input);
       if (!await runtime.ports.authenticateMessage(message) || message.recipient.role !== "conversation") throw new Error("Unauthenticated Conversation delivery");
-      return gateway.handleCoordinatorRoleMessage(message);
+      const result = await gateway.handleCoordinatorRoleMessage(message);
+      if (!result.ok) throw new Error(result.error.message);
+      return result;
     },
     setBusy: busy => gateway.setAgentBusyState(busy),
     flush: () => gateway.flushPendingInboundQueue()

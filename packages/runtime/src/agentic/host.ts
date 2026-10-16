@@ -85,6 +85,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       catch { systemPrompt += "Inspect the durable inbox, assess the spec, propose a schema-valid workflow. Runtime controls all dispatch and quality/approval gates. Never edit source or approve human-required gates."; }
     } else if (role === "developer") systemPrompt += "Read assignment_context for your exact accepted specification and worktree. Never change approved criteria/specification. Call authorize_implementation before production edits. Commit only assigned paths in your task worktree. Call submit_implementation after committing, then end your turn. You cannot grant yourself evidence or approvals.";
     else systemPrompt += "Read incoming RoleMessage. Inspect the exact assigned revision and criteria independently. Use host verification tools for evidence; never invent command output. Send replies through send_role_message with original correlation and causation. End your turn after sending.";
+    if (role === "coordinator") systemPrompt += " Use planning_reference to read the shipped specification example, policy metadata schema and workflow contract before proposing a workflow. Specialist requests can gather project details; repository files are never a mailbox.";
     launch[role] = { systemPrompt, mcpConfigFile, hooksSettingsFile };
   }
   const requireWorkspace = () => { if (!workspace) throw new Error("Bflow host awaits an up SessionManifest; retry only after bflow up completes"); return workspace; };
@@ -94,7 +95,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const binding = current.panes.find(pane => pane.role === role && pane.paneId === paneId);
     if (!binding) throw new Error("MCP role/pane is outside the current session manifest");
     const agent = record(record(record(JSON.parse(await herdr(["agent", "get", paneId]))).result).agent);
-    if ((agent.name ?? agent.agent) !== binding.agentId || agent.pane_id !== binding.paneId || agent.workspace_id !== binding.workspaceId) throw new Error("MCP pane occupant changed");
+    const native = agent.agent_session ? record(agent.agent_session) : undefined;
+    if ((agent.name ?? agent.agent) !== binding.agentId || agent.pane_id !== binding.paneId || agent.workspace_id !== binding.workspaceId ||
+        !binding.session || !native || native.source !== binding.session.source || native.kind !== binding.session.kind || native.value !== binding.session.value)
+      throw new Error("MCP pane occupant/native session changed");
     return binding;
   };
   const nativeDeliver = async (message: RoleMessage) => {
@@ -176,6 +180,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const binding = await principal(role, textField(args.paneId));
     const host = requireWorkspace();
     if (quiesced && !["host_status", "assignment_context", "inspect_review", "complete_review", "inspect_alternative_verification", "record_alternative_verification", "submit_implementation"].includes(name)) throw new Error("Host is quiesced; new work is disabled while existing receipts can drain");
+    if (name === "planning_reference") {
+      if (role !== "coordinator") throw new Error("Only Coordinator reads host planning guidance");
+      const section = textField(parameters.section);
+      const references: Record<string, string[]> = { specification:["../../../specification/examples/trivial.json","../../../specification/src/schema.ts","../../../specification/src/classification.ts"],
+        test_strategy:["../../../test-strategy/src/schema.ts","../../../test-strategy/examples/domain-logic.spec.json"], workflow:["../../../contracts/src/workflow.ts"] };
+      const selected = references[section]; if (!selected) throw new Error("Unknown planning section: choose specification, test_strategy, workflow");
+      return json(await Promise.all(selected.map(async path => ({source:path,content:await readFile(new URL(path,import.meta.url),"utf8")}))));
+    }
     if (name === "host_status") return json({ active: !!workspace, quiesced, schedulerRunning: !!scheduler, schedulerError: schedulerError ?? null });
     if (name === "send_role_message") {
       const message = RoleMessageSchema.parse(parameters.message);
@@ -369,13 +381,29 @@ function availableTools(role: AgentRole) {
   const tools = [{ name: "host_status", description: "Read the durable host scheduler status" },
     { name: "assignment_context", description: "Read assignments addressed to this authenticated pane and the accepted specification" },
     { name: "send_role_message", description: "Send a schema-valid RoleMessage through the signed native Herdr plugin; parameters: {message: RoleMessage}" }];
-  if (role === "coordinator") tools.push(...COORDINATOR_TOOLS);
+  if (role === "coordinator") tools.push(...COORDINATOR_TOOLS, {name:"planning_reference",description:"Read canonical shipped examples and exact metadata/contract definitions; section: specification, test_strategy, workflow"});
   if (role === "developer") tools.push({ name: "authorize_implementation", description: "Verify accepted spec and Red evidence; parameters: runId, taskId" }, { name: "submit_implementation", description: "Submit committed implementation under your exact native assignment binding; parameters: runId, taskId" });
   if (["reviewer", "qa", "tester"].includes(role)) tools.push(
     { name: "inspect_review", description: "Independently capture exact assigned diff before review; parameters: messageId" },
     { name: "complete_review", description: "Return a verdict after inspect_review; parameters: reviewId, messageId, summary, criteria:[{criterionId,passed,summary}]" });
   if (["qa", "tester"].includes(role)) tools.push({ name: "inspect_alternative_verification", description: "Capture exact committed diff and accepted dossier before evaluating criteria; parameters: runId,taskId" }, { name: "record_alternative_verification", description: "Capture actual committed documentation diff and independent manual acceptance evidence; parameters: observationId,runId,taskId,criteria:[{criterionId,passed,summary}]" });
-  return tools.map(tool => ({ ...tool, inputSchema: { type: "object", additionalProperties: true } }));
+  const string = { type:"string", minLength:1 }, array = {type:"array",items:string}, object = {type:"object"};
+  const argumentsByName: Record<string, {properties: Record<string, unknown>; required: string[]}> = {
+    planning_reference:{properties:{section:{type:"string",enum:["specification","test_strategy","workflow"]}},required:["section"]},
+    inspect:{properties:{runId:string},required:[]}, report_progress:{properties:{runId:string,headline:string,questions:array},required:["runId","headline"]},
+    assess:{properties:{specification:object},required:["specification"]},
+    request_specialist:{properties:{runId:string,role:string,objective:string,requiredCapabilities:array},required:["runId","role","objective","requiredCapabilities"]},
+    propose_workflow:{properties:{runId:string,specification:object,definition:object,maxIterations:{type:"integer",minimum:1,maximum:10}},required:["runId","specification","definition"]},
+    reconcile_delivery:{properties:{messageId:string},required:["messageId"]}, authorize_implementation:{properties:{runId:string,taskId:string},required:["runId","taskId"]},
+    accept_conflict_resolution:{properties:{runId:string,taskKey:string,resolutionCommitHash:string},required:["runId","taskKey","resolutionCommitHash"]},
+    cancel:{properties:{runId:string,reason:string},required:["runId","reason"]},
+    send_role_message:{properties:{message:object},required:["message"]}, submit_implementation:{properties:{runId:string,taskId:string},required:["runId","taskId"]},
+    inspect_review:{properties:{messageId:string},required:["messageId"]},
+    complete_review:{properties:{reviewId:string,messageId:string,summary:string,criteria:{type:"array",items:{type:"object",properties:{criterionId:string,passed:{type:"boolean"},summary:string},required:["criterionId","passed","summary"],additionalProperties:false}}},required:["reviewId","messageId","summary","criteria"]},
+    inspect_alternative_verification:{properties:{runId:string,taskId:string},required:["runId","taskId"]},
+    record_alternative_verification:{properties:{observationId:string,runId:string,taskId:string,criteria:{type:"array",items:{type:"object",properties:{criterionId:string,passed:{type:"boolean"},summary:string},required:["criterionId","passed","summary"],additionalProperties:false}}},required:["observationId","runId","taskId","criteria"]}
+  };
+  return tools.map(tool => ({ ...tool, inputSchema: { type: "object", ...(argumentsByName[tool.name] ?? {properties:{},required:[]}), additionalProperties:false } }));
 }
 export async function runRoleMcp(configuration: RoleConfiguration): Promise<void> {
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
