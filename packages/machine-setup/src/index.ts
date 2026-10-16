@@ -8,3 +8,7 @@ export * from "./tools.js";
 export * from "./installer-registry.js";
 export * from "./machine-config.js";
 export * from "./path-manager.js";
+export * from "./mcp-registry.js";
+export * from "./service-manager.js";
+export * from "./skills.js";
+export * from "./doctor.js";
