@@ -20,6 +20,9 @@ export interface LifecycleHost {
 export type LifecycleHostFactory = (input: EnvironmentCompositionInput) => Promise<LifecycleHost>;
 
 export const openLifecycleHost: LifecycleHostFactory = async input => {
+  if (input.config.environment.roles.some(role => role.cli !== "claude")) {
+    throw new Error("The default Agentic host currently requires Claude native hooks. Initialize with --provider claude or supply a verified provider host through BFLOW_ENVIRONMENT_MODULE.");
+  }
   // Use the installed sibling package entrypoint, as the existing Runtime's
   // concrete workspace composition does. No repository module is executed.
   const runtime = await import(new URL("../../../packages/runtime/dist/index.js", import.meta.url).href);

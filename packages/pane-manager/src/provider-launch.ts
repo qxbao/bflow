@@ -56,7 +56,8 @@ export function buildProviderRoleLaunch(options: ProviderRoleLaunchOptions): rea
     return ["--restricted", "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands",
       "--permission-mode", "dontAsk", "--tools", tools,
       "--allowedTools", [tools, ...Object.keys(servers).map(name => `mcp__${name}__*`)].filter(Boolean).join(","),
-      "--disallowedTools", ["Read", "Edit", "Write", "Glob", "Grep"].flatMap(tool =>
+      // Claude applies Read(path) to all read tools and Edit(path) to all file writes.
+      "--disallowedTools", ["Read", "Edit"].flatMap(tool =>
         ["./.bflow/**", "./.git/**", "~/.claude/**", "~/.codex/**", "~/.ssh/**", "~/.aws/**", "~/.config/**"].map(pattern => `${tool}(${pattern})`)).join(","),
       "--settings", JSON.stringify(settings), "--mcp-config", JSON.stringify({ mcpServers: servers }),
       "--append-system-prompt", options.systemPrompt,
