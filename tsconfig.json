@@ -7,6 +7,7 @@
     { "path": "./packages/persistence" },
     { "path": "./packages/artifact-store" },
     { "path": "./packages/agent-registry" },
+    { "path": "./packages/pane-manager" },
     { "path": "./packages/quality-gates" },
     { "path": "./packages/runtime" },
     { "path": "./apps/cli" }
