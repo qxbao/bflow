@@ -3,6 +3,7 @@ import { dirname, join, sep } from "node:path";
 import { z } from "zod";
 import type { OperationOptions } from "@bflow/contracts";
 import { systemToolHost, type ManagedToolPin, type ProviderPluginAdapter, type ToolHost } from "./installer.js";
+import { NativePluginRuntime, type NativeRuntimeOptions } from "./native-runtime.js";
 
 type Provider = "claude" | "codex" | "agy";
 type NativePin = ManagedToolPin & { recipe: { kind: "provider_plugin"; provider: Provider } };
@@ -32,12 +33,13 @@ function pluginIdentity(pin: NativePin): string {
 
 export interface OfficialProviderPluginAdapterOptions {
   readonly host?: ToolHost;
+  readonly configuration?: NativeRuntimeOptions;
   /** Must inspect the provider's active skill inventory, not merely source files. */
-  readonly discoverSkills: (provider: Provider) => Promise<readonly string[]>;
+  readonly discoverSkills?: (provider: Provider) => Promise<readonly string[]>;
   /** Binds the active provider marketplace snapshot to the reviewed source/pin. */
-  readonly verifyProvenance: (pin: ManagedToolPin) => Promise<boolean>;
+  readonly verifyProvenance?: (pin: ManagedToolPin) => Promise<boolean>;
   /** Must test the configured shared worker and a provider-specific hook or adapter. */
-  readonly probeMemory: (provider: Provider) => Promise<boolean>;
+  readonly probeMemory?: (provider: Provider) => Promise<boolean>;
   readonly bflowSkillIds?: readonly string[];
 }
 
@@ -48,6 +50,7 @@ export class OfficialProviderPluginAdapter implements ProviderPluginAdapter {
   readonly #verifyProvenance: OfficialProviderPluginAdapterOptions["verifyProvenance"];
   readonly #probeMemory: OfficialProviderPluginAdapterOptions["probeMemory"];
   readonly #bflowSkillIds: readonly string[];
+  readonly #runtime: NativePluginRuntime | undefined;
 
   constructor(options: OfficialProviderPluginAdapterOptions) {
     this.#host = options.host ?? systemToolHost;
@@ -55,6 +58,7 @@ export class OfficialProviderPluginAdapter implements ProviderPluginAdapter {
     this.#verifyProvenance = options.verifyProvenance;
     this.#probeMemory = options.probeMemory;
     this.#bflowSkillIds = options.bflowSkillIds ?? [];
+    this.#runtime = options.configuration ? new NativePluginRuntime(options.configuration, this.#host) : undefined;
   }
 
   async #installed(pin: NativePin): Promise<boolean> {
@@ -70,13 +74,14 @@ export class OfficialProviderPluginAdapter implements ProviderPluginAdapter {
   }
 
   async verify(raw: ManagedToolPin, destination: string): Promise<{ ready: boolean; diagnostic: string }> {
+    if (this.#runtime) return this.#runtime.verify(raw, destination);
     const pin = nativePin(raw);
     try {
       if (pin.toolId === "superpowers") {
         if (!(await this.#installed(pin))) return { ready: false, diagnostic: "Provider plugin inventory lacks the exact enabled version" };
-        if (!(await this.#verifyProvenance(pin)))
+        if (!(await this.#verifyProvenance?.(pin)))
           return { ready: false, diagnostic: "Provider marketplace provenance does not match the approved pin" };
-        const skills = await this.#discoverSkills(pin.recipe.provider);
+        const skills = await this.#discoverSkills?.(pin.recipe.provider) ?? [];
         if (!skills.includes("using-superpowers") || skills.some(id => this.#bflowSkillIds.includes(`superpowers:${id}`)))
           return { ready: false, diagnostic: "Superpowers skill is unavailable or collides with a Bflow skill" };
         return { ready: true, diagnostic: "Exact provider plugin version and active skill verified" };
@@ -91,7 +96,7 @@ export class OfficialProviderPluginAdapter implements ProviderPluginAdapter {
       if (!(await realpath(executable)).startsWith(`${await realpath(destination)}${sep}`))
         return { ready: false, diagnostic: "Claude-Mem doctor executable escaped the owned install" };
       const doctor = await this.#host.run(executable, ["doctor"], { timeoutMs: 30_000 });
-      if (doctor.exitCode !== 0 || !(await this.#probeMemory(pin.recipe.provider)))
+      if (doctor.exitCode !== 0 || !(await this.#probeMemory?.(pin.recipe.provider)))
         return { ready: false, diagnostic: "Claude-Mem doctor, shared worker, or provider adapter failed" };
       return { ready: true, diagnostic: "Claude-Mem plugin, dependencies, shared worker and provider adapter verified" };
     } catch (error) { return { ready: false, diagnostic: `Provider plugin verification failed: ${String(error)}` }; }
@@ -99,6 +104,7 @@ export class OfficialProviderPluginAdapter implements ProviderPluginAdapter {
 
   async activate(raw: ManagedToolPin, artifact: string, _action: "install" | "update" | "repair", options?: OperationOptions):
     Promise<{ success: boolean; diagnostic: string }> {
+    if (this.#runtime) return this.#runtime.activate(raw, artifact, _action, options);
     const pin = nativePin(raw);
     if (pin.toolId === "claude-mem") {
       const stage = dirname(artifact);

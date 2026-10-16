@@ -3,7 +3,10 @@ import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from "n
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { ToolCapabilitySchema, type ToolCapability } from "@bflow/contracts";
 import { z } from "zod";
+import { spawn } from "node:child_process";
+import { constants as osConstants } from "node:os";
 import { createToolCapability, systemToolHost, type ProcessResult, type ToolHost } from "./installer.js";
+import { privateDirectory, readRegular } from "./files.js";
 
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 const gitNexusFreshnessSchema = z.object({
@@ -54,8 +57,7 @@ export class FileToolCapabilityRegistry {
   constructor(file: string) { if (!isAbsolute(file)) throw new Error("Registry file must be absolute"); this.#file = file; }
   async #read() {
     try {
-      if ((await lstat(this.#file)).isSymbolicLink()) throw new Error("Capability registry must not be a symlink");
-      return registryFileSchema.parse(JSON.parse(await readFile(this.#file, "utf8")));
+      return registryFileSchema.parse(JSON.parse(await readRegular(this.#file)));
     }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return { schemaVersion: 3 as const, entries: [] };
@@ -154,7 +156,8 @@ export async function writeOwnedToolConfig(path: string, content: string, expect
 
 export async function verifyRtk(executable: string, expectedVersion: string, host: ToolHost = systemToolHost): Promise<boolean> {
   const version = await host.run(executable, ["--version"], { timeoutMs: 15_000 });
-  if (version.exitCode !== 0 || !(version.stdout + version.stderr).includes(expectedVersion)) return false;
+  const escaped = expectedVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (version.exitCode !== 0 || !new RegExp(`(^|[^0-9])${escaped}(?![0-9.])`).test(version.stdout + version.stderr)) return false;
   const gain = await host.run(executable, ["gain"], { timeoutMs: 15_000 });
   return gain.exitCode === 0 && (gain.stdout + gain.stderr).trim().length > 0;
 }
@@ -164,6 +167,18 @@ export async function runWithRtk(executable: string, command: readonly string[],
   host: ToolHost = systemToolHost): Promise<ProcessResult> {
   if (command.length === 0 || command.some(arg => arg.includes("\0"))) throw new Error("Invalid RTK command");
   return host.run(executable, [...(fullOutput ? ["proxy"] : []), ...command]);
+}
+
+/** Streaming execution for real commands: stdout/stderr remain attached and no capture limit changes their exit status. */
+export async function executeWithRtk(executable: string, command: readonly string[], fullOutput = false): Promise<{
+  exitCode: number; signal: NodeJS.Signals | null;
+}> {
+  if (!command.length || command.some(value => value.includes("\0"))) throw new Error("Invalid RTK command");
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, [...(fullOutput ? ["proxy"] : []), ...command], { stdio: "inherit", shell: false });
+    child.on("error", reject);
+    child.on("close", (code, signal) => resolve({ exitCode: code ?? (signal ? 128 + (osConstants.signals[signal] ?? 0) : 1), signal }));
+  });
 }
 
 export interface RtkProviderIntegration {
@@ -197,27 +212,53 @@ export interface MemoryWorkerObservation {
   capability: ToolCapability | null;
 }
 
+export async function readClaudeMemWorkerIdentity(dataDir: string): Promise<{ pid: number; port?: number } | null> {
+  try {
+    const identity = z.object({ pid: z.number().int().positive(), port: z.number().int().min(1).max(65535).optional() }).passthrough()
+      .parse(JSON.parse(await readRegular(join(dataDir, "worker.pid"), 4096)));
+    return { pid: identity.pid, ...(identity.port === undefined ? {} : { port: identity.port }) };
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  try {
+    const pid = Number((await readRegular(join(dataDir, ".worker.pid"), 32)).trim());
+    return { pid: z.number().int().positive().parse(pid) };
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  return null;
+}
+
 /** Adopts the existing loopback worker only. Its HTTP API is never registered as raw MCP. */
 export async function observeClaudeMemWorker(input: {
-  dataDir: string; projectRoot: string; port?: number; version: string; timeoutMs?: number;
+  dataDir: string; projectRoot: string; port?: number; address?: string; version: string; timeoutMs?: number;
   fetcher?: typeof fetch;
 }): Promise<MemoryWorkerObservation> {
   const projectRoot = await realpath(input.projectRoot);
-  let port = input.port;
+  let identity;
+  try { identity = await readClaudeMemWorkerIdentity(input.dataDir); }
+  catch { return { status: "blocked", endpoint: null, projectRoot, diagnostic: "Invalid Claude-Mem worker identity file", capability: null }; }
+  let settings: Record<string, unknown> = {};
+  try { settings = z.record(z.unknown()).parse(JSON.parse(await readRegular(join(input.dataDir, "settings.json")))); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+    return { status: "blocked", endpoint: null, projectRoot, diagnostic: "Invalid Claude-Mem settings", capability: null }; }
+  const address = input.address ?? String(settings.CLAUDE_MEM_WORKER_HOST ?? "127.0.0.1");
+  if (!["127.0.0.1", "localhost", "::1"].includes(address))
+    return { status: "blocked", endpoint: null, projectRoot, diagnostic: "Claude-Mem worker must use a loopback address", capability: null };
+  let port = input.port ?? (settings.CLAUDE_MEM_WORKER_PORT === undefined ? identity?.port : Number(settings.CLAUDE_MEM_WORKER_PORT));
+  if (identity?.port !== undefined && port !== undefined && identity.port !== port)
+    return { status: "blocked", endpoint: null, projectRoot, diagnostic: "Configured port differs from worker identity", capability: null };
   if (port === undefined) {
-    try { port = Number((await readFile(join(input.dataDir, ".worker.port"), "utf8")).trim()); }
+    try { port = Number((await readRegular(join(input.dataDir, ".worker.port"), 16)).trim()); }
     catch { return { status: "missing", endpoint: null, projectRoot, diagnostic: "Claude-Mem worker port file absent", capability: null }; }
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     return { status: "blocked", endpoint: null, projectRoot, diagnostic: "Invalid Claude-Mem worker port", capability: null };
-  const endpoint = `http://127.0.0.1:${port}`;
+  const endpoint = `http://${address === "::1" ? "[::1]" : address}:${port}`;
   try {
     const response = await (input.fetcher ?? fetch)(`${endpoint}/api/health`, { signal: AbortSignal.timeout(input.timeoutMs ?? 3000), redirect: "error" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const body = await response.text();
-    if (!body || body.length > 64_000) throw new Error("Invalid health response");
-    const health = z.object({ status: z.literal("ok"), version: z.string().min(1) }).passthrough().parse(JSON.parse(body));
+    const health = z.object({ status: z.literal("ok"), version: z.string().min(1), initialized: z.boolean().optional(), pid: z.number().int().positive().optional() })
+      .passthrough().parse(await boundedResponseJson(response, 64_000));
     if (health.version !== input.version) throw new Error(`Worker version ${health.version} differs from ${input.version}`);
+    if (health.initialized === false) throw new Error("Worker has not completed initialization");
+    if (identity && health.pid !== identity.pid) throw new Error("Health response belongs to another worker process");
     return { status: "ready", endpoint, projectRoot,
       diagnostic: "Worker health verified; project-filtering adapter and Gateway authorization still required",
       capability: null };
@@ -227,6 +268,23 @@ export async function observeClaudeMemWorker(input: {
 }
 
 const memoryObservationSchema = z.object({ id: z.number().int().positive(), project: z.string().min(1) }).passthrough();
+
+export async function boundedResponseJson(response: Response, limit: number): Promise<unknown> {
+  if (!response.body) throw new Error("Empty HTTP response");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      bytes += next.value.byteLength;
+      if (bytes > limit) throw new Error("HTTP response exceeds limit");
+      chunks.push(next.value);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+  } finally { await reader.cancel().catch(() => {}); }
+}
 
 /** Narrow read-only adapter. Only the batch endpoint is reachable and every returned row is checked again. */
 export class ClaudeMemProjectReader {
@@ -250,11 +308,34 @@ export class ClaudeMemProjectReader {
       signal: AbortSignal.timeout(5000), redirect: "error"
     });
     if (!response.ok) throw new Error(`Claude-Mem batch HTTP ${response.status}`);
-    const content = await response.text();
-    if (content.length > 1_000_000) throw new Error("Memory response too large");
-    const observations = z.array(memoryObservationSchema).max(50).parse(JSON.parse(content));
+    const observations = z.array(memoryObservationSchema).max(50).parse(await boundedResponseJson(response, 1_000_000));
     if (observations.some(row => row.project !== this.#project || !ids.includes(row.id))) throw new Error("Cross-project memory response rejected");
     return observations;
+  }
+
+  async recent(limit = 20): Promise<readonly z.infer<typeof memoryObservationSchema>[]> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid memory result limit");
+    const url = new URL(`${this.#endpoint}/api/observations`);
+    url.searchParams.set("project", this.#project);
+    url.searchParams.set("limit", String(limit));
+    url.searchParams.set("offset", "0");
+    const response = await this.#fetcher(url, { signal: AbortSignal.timeout(5000), redirect: "error" });
+    if (!response.ok) throw new Error(`Claude-Mem observations HTTP ${response.status}`);
+    const page = z.object({ items: z.array(memoryObservationSchema).max(limit) }).passthrough()
+      .parse(await boundedResponseJson(response, 1_000_000));
+    if (page.items.some(row => row.project !== this.#project)) throw new Error("Cross-project memory response rejected");
+    return page.items;
+  }
+
+  /** Bounded text search in the project's latest 100 observations. Never searches global memory. */
+  async search(query: string, limit = 20): Promise<readonly z.infer<typeof memoryObservationSchema>[]> {
+    if (!query.trim() || query.length > 500 || !Number.isInteger(limit) || limit < 1 || limit > 50)
+      throw new Error("Invalid memory search");
+    const terms = query.toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    return (await this.recent(100)).filter(row => {
+      const text = JSON.stringify(row).toLocaleLowerCase();
+      return terms.every(term => text.includes(term));
+    }).slice(0, limit);
   }
 }
 
@@ -263,15 +344,15 @@ export async function observeClaudeMemGrowth(input: {
   dataDir: string; host?: ToolHost; intervalMs: number; maxGrowthBytes: number;
 }): Promise<{ status: "within_limit" | "growing" | "unavailable"; firstBytes: number | null; lastBytes: number | null }> {
   let pid: number;
-  try { pid = Number((await readFile(join(input.dataDir, ".worker.pid"), "utf8")).trim()); }
+  try { const identity = await readClaudeMemWorkerIdentity(input.dataDir); if (!identity) throw new Error("Missing worker identity"); pid = identity.pid; }
   catch { return { status: "unavailable", firstBytes: null, lastBytes: null }; }
   if (!Number.isInteger(pid) || pid < 1 || !Number.isInteger(input.maxGrowthBytes) || input.maxGrowthBytes < 0 || input.intervalMs < 0)
     throw new Error("Invalid worker memory observation input");
   const host = input.host ?? systemToolHost;
   const sample = async () => {
     const result = await host.run("ps", ["-o", "rss=", "-p", String(pid)], { timeoutMs: 5_000 });
-    const kb = Number(result.stdout.trim());
-    return result.exitCode === 0 && Number.isFinite(kb) && kb >= 0 ? kb * 1024 : null;
+    const value = result.stdout.trim(), kb = Number(value);
+    return result.exitCode === 0 && value !== "" && Number.isFinite(kb) && kb >= 0 ? kb * 1024 : null;
   };
   const firstBytes = await sample();
   if (input.intervalMs) await new Promise(done => setTimeout(done, input.intervalMs));
@@ -309,14 +390,23 @@ export async function ensureGitNexusIndex(input: {
   const dirty = await host.run("git", ["status", "--porcelain"], { cwd: root, timeoutMs: 15_000 });
   if (head.exitCode !== 0 || dirty.exitCode !== 0) throw new Error("Repository fingerprint unavailable");
   const fingerprint = sha(head.stdout.trim() + "\n" + dirty.stdout);
-  await mkdir(input.stateRoot, { recursive: true, mode: 0o700 });
+  await privateDirectory(input.stateRoot);
+  const home = await privateDirectory(join(input.stateRoot, "gitnexus-home"));
+  const environment = { GITNEXUS_HOME: home, GITNEXUS_SHARED_STORE: "off" };
+  const storageLockPath = join(input.stateRoot, `gitnexus-storage-${sha(root)}.lock`);
+  let storageLock;
+  try { storageLock = await open(storageLockPath, "wx", 0o600); }
+  catch { return { status: "busy", repositoryRoot: root, fingerprint, diagnostic: "GitNexus storage is in use by a reader or writer" }; }
   const lockPath = join(input.stateRoot, "gitnexus-writer.lock");
   let lock;
   try { lock = await open(lockPath, "wx", 0o600); }
-  catch { return { status: "busy", repositoryRoot: root, fingerprint, diagnostic: "GitNexus writer already active" }; }
+  catch {
+    await storageLock.close(); await rm(storageLockPath, { force: true });
+    return { status: "busy", repositoryRoot: root, fingerprint, diagnostic: "GitNexus writer already active" };
+  }
   const receiptPath = join(input.stateRoot, `gitnexus-${sha(root)}.json`);
   try {
-    const statusResult = await host.run(input.executable, ["status", "--json"], { cwd: root, timeoutMs: input.timeoutMs ?? 30_000 });
+    const statusResult = await host.run(input.executable, ["status", "--json"], { cwd: root, timeoutMs: input.timeoutMs ?? 30_000, environment });
     let status: z.infer<typeof gitNexusStatusSchema> | null = null;
     try { status = parseGitNexusStatus(statusResult); } catch { /* unsupported/malformed status */ }
     const statusRepo = status ? await realpath(status.repository).catch(() => null) : null;
@@ -324,10 +414,10 @@ export async function ensureGitNexusIndex(input: {
       return { status: "failed", repositoryRoot: root, fingerprint, diagnostic: "GitNexus status JSON is unsupported, invalid or identifies another repository" };
     if ("status" in status && status.status === "up-to-date")
       return { status: "fresh", repositoryRoot: root, fingerprint, diagnostic: "GitNexus status --json confirms a current index" };
-    const analyzed = await host.run(input.executable, ["analyze", root, "--index-only"], { cwd: root, timeoutMs: input.timeoutMs ?? 300_000 });
+    const analyzed = await host.run(input.executable, ["analyze", root, "--index-only"], { cwd: root, timeoutMs: input.timeoutMs ?? 300_000, environment });
     if (analyzed.exitCode !== 0)
       return { status: "failed", repositoryRoot: root, fingerprint, diagnostic: `gitnexus analyze exited ${analyzed.exitCode}: ${analyzed.stderr.slice(0, 400)}` };
-    const afterResult = await host.run(input.executable, ["status", "--json"], { cwd: root, timeoutMs: input.timeoutMs ?? 30_000 });
+    const afterResult = await host.run(input.executable, ["status", "--json"], { cwd: root, timeoutMs: input.timeoutMs ?? 30_000, environment });
     let after: z.infer<typeof gitNexusStatusSchema> | null = null;
     try { after = parseGitNexusStatus(afterResult); } catch { /* fail closed */ }
     const afterRepo = after ? await realpath(after.repository).catch(() => null) : null;
@@ -335,7 +425,10 @@ export async function ensureGitNexusIndex(input: {
       return { status: "stale", repositoryRoot: root, fingerprint, diagnostic: "Post-index status did not verify freshness" };
     await writeFile(receiptPath, JSON.stringify({ repositoryRoot: root, fingerprint, indexedAt: new Date().toISOString() }), { mode: 0o600 });
     return { status: "indexed", repositoryRoot: root, fingerprint, diagnostic: "Index refreshed and status verified" };
-  } finally { await lock.close(); await rm(lockPath, { force: true }); }
+  } finally {
+    await lock.close(); await rm(lockPath, { force: true });
+    await storageLock.close(); await rm(storageLockPath, { force: true });
+  }
 }
 
 export interface BrowserSessionPlan {

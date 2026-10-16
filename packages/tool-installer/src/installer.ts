@@ -5,7 +5,10 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Readable, Transform } from "node:stream";
 import { spawn } from "node:child_process";
+import { constants as osConstants } from "node:os";
 import { z } from "zod";
+import { OfficialProviderPluginAdapter } from "./provider-plugins.js";
+import { readRegular } from "./files.js";
 import {
   CURRENT_PLATFORM_SCHEMA_VERSION, SetupApplyRequestSchema, SetupReceiptSchema, SetupStepSchema,
   ToolCapabilitySchema, ToolInstallRequestSchema,
@@ -55,22 +58,48 @@ export const ManagedToolPinSchema = z.object({
 }).strict();
 export type ManagedToolPin = z.infer<typeof ManagedToolPinSchema>;
 
-export interface ProcessResult { readonly exitCode: number; readonly stdout: string; readonly stderr: string }
+export interface ProcessResult { readonly exitCode: number; readonly stdout: string; readonly stderr: string; readonly signal?: string }
+export interface ToolRunOptions {
+  cwd?: string; timeoutMs?: number; signal?: AbortSignal;
+  environment?: Readonly<Record<string, string>>;
+  input?: string;
+}
 export interface ToolHost {
-  run(executable: string, args: readonly string[], options?: { cwd?: string; timeoutMs?: number; signal?: AbortSignal }): Promise<ProcessResult>;
+  run(executable: string, args: readonly string[], options?: ToolRunOptions): Promise<ProcessResult>;
   download(source: string, target: string, signal?: AbortSignal): Promise<void>;
 }
 
 export const systemToolHost: ToolHost = {
   run(executable, args, options) {
     return new Promise((done, reject) => {
-      const child = spawn(executable, [...args], { cwd: options?.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"], signal: options?.signal });
-      let stdout = "", stderr = "";
-      const timer = options?.timeoutMs === undefined ? undefined : setTimeout(() => child.kill("SIGTERM"), options.timeoutMs);
-      child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); if (stdout.length > 2_000_000) child.kill("SIGTERM"); });
-      child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); if (stderr.length > 2_000_000) child.kill("SIGTERM"); });
-      child.on("error", error => { if (timer) clearTimeout(timer); reject(error); });
-      child.on("close", code => { if (timer) clearTimeout(timer); done({ exitCode: code ?? 1, stdout, stderr }); });
+      if (options?.signal?.aborted) { reject(new Error("Command cancelled before start")); return; }
+      if (options?.timeoutMs !== undefined && (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 2_147_483_647))
+        { reject(new Error("Invalid command timeout")); return; }
+      const child = spawn(executable, [...args], { cwd: options?.cwd, shell: false,
+        env: { ...process.env, ...options?.environment }, stdio: ["pipe", "pipe", "pipe"] });
+      let stdout = "", stderr = "", bytes = 0;
+      let failure: Error | undefined;
+      const stop = (message: string) => { failure ??= new Error(message); child.kill("SIGKILL"); };
+      const timer = options?.timeoutMs === undefined ? undefined : setTimeout(() => stop("Command timed out"), options.timeoutMs);
+      const abort = () => stop("Command cancelled");
+      options?.signal?.addEventListener("abort", abort, { once: true });
+      const collect = (chunk: Buffer, output: "stdout" | "stderr") => {
+        bytes += chunk.length;
+        if (bytes > 2_000_000) { stop("Command output exceeded 2 MB"); return; }
+        if (output === "stdout") stdout += chunk.toString(); else stderr += chunk.toString();
+      };
+      child.stdout.on("data", (chunk: Buffer) => collect(chunk, "stdout"));
+      child.stderr.on("data", (chunk: Buffer) => collect(chunk, "stderr"));
+      child.stdin.on("error", () => { /* process may close stdin before consuming the probe */ });
+      child.stdin.end(options?.input);
+      child.on("error", error => { failure = error; });
+      child.on("close", (code, signal) => {
+        if (timer) clearTimeout(timer);
+        options?.signal?.removeEventListener("abort", abort);
+        if (failure) { reject(failure); return; }
+        done({ exitCode: code ?? (signal ? 128 + (osConstants.signals[signal] ?? 0) : 1), stdout, stderr,
+          ...(signal ? { signal } : {}) });
+      });
     });
   },
   async download(source, target, signal) {
@@ -115,6 +144,8 @@ export interface ProviderPluginAdapter {
 interface OwnedMarker { toolId: string; installerId: string; version: string; integrity: string; source: string; executable: string; license: string; recipeDigest: string; }
 const markerSchema = z.object({ toolId: z.string(), installerId: z.string(), version: z.string(), integrity: z.string(), source: z.string(),
   executable: z.string(), license: z.string(), recipeDigest: z.string().regex(/^[0-9a-f]{64}$/) }).strict();
+const activationIntentSchema = z.object({ schemaVersion: z.literal(3), desiredStateDigest: z.string(), stage: z.string(),
+  toolId: z.string(), installerId: z.string() }).strict();
 
 export class ManagedToolInstaller implements ToolInstaller {
   readonly installerId: string;
@@ -137,6 +168,8 @@ export class ManagedToolInstaller implements ToolInstaller {
         !/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(pin.version)) throw new Error("Package/plugin version must be exact");
       if (pin.toolId === "claude-mem" && pin.recipe.kind === "npm") throw new Error("Claude-Mem npm SDK is not a plugin installation; use provider-specific installation");
       if (pin.toolId === "rtk" && pin.recipe.kind !== "rtk_archive") throw new Error("RTK must use the rtk-ai release binary archive");
+      if (pin.toolId === "rtk" && (url.hostname !== "github.com" || !url.pathname.startsWith("/rtk-ai/rtk/releases/download/")))
+        throw new Error("RTK source must be an official rtk-ai/rtk release asset");
       if (pin.toolId === "gitnexus" && (pin.recipe.kind !== "npm" || pin.recipe.packageName !== "gitnexus")) throw new Error("GitNexus must use its official npm package");
       if (pin.toolId === "chrome-devtools-mcp" && (pin.recipe.kind !== "npm" || pin.recipe.packageName !== "chrome-devtools-mcp")) throw new Error("Chrome DevTools MCP must use its official npm package");
       if (pin.toolId === "superpowers" && pin.recipe.kind !== "provider_plugin") throw new Error("Superpowers must use a provider plugin route");
@@ -146,7 +179,8 @@ export class ManagedToolInstaller implements ToolInstaller {
     if ([...this.#pins.values()].some(pin => pin.installerId !== this.installerId)) throw new Error("Mixed installer IDs");
     this.#host = options.host ?? systemToolHost;
     this.#clock = options.clock ?? (() => new Date());
-    this.#providerPlugin = options.providerPlugin;
+    this.#providerPlugin = options.providerPlugin ?? new OfficialProviderPluginAdapter({ host: this.#host,
+      configuration: { managedRoot: join(this.#root, ".native") } });
   }
 
   #pin(request: ToolInstallRequest): ManagedToolPin | null {
@@ -231,6 +265,23 @@ export class ManagedToolInstaller implements ToolInstaller {
     if (!validated.ok) return validated;
     const { request, pin } = validated.value;
     const destination = request.step.toolInstall!.destination;
+    if (pin.recipe.kind === "provider_plugin") {
+      try {
+        const pendingPath = `${destination}.native-pending.json`;
+        const intent = activationIntentSchema.parse(JSON.parse(await readRegular(pendingPath)));
+        if (intent.desiredStateDigest !== request.step.desiredStateDigest || intent.toolId !== pin.toolId ||
+          intent.installerId !== pin.installerId || !intent.stage.startsWith(`${resolve(destination)}.staging-`))
+          return ok(await this.#receipt(request, "unknown", ["Another unresolved native activation owns this destination"], [pendingPath]));
+        let observationPath = intent.stage;
+        try { await lstat(observationPath); } catch { observationPath = destination; }
+        const observation = await this.#providerPlugin!.verify(pin, observationPath);
+        return ok(await this.#receipt(request, observation.ready ? "already_satisfied" : "unknown",
+          [observation.diagnostic, "Native activation intent retained; no automatic replay"], [observationPath, pendingPath]));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+          return ok(await this.#receipt(request, "unknown", ["Native activation intent could not be reconciled"]));
+      }
+    }
     const marker = await this.#marker(destination);
     if (!marker) {
       if (pin.recipe.kind === "provider_plugin" && this.#providerPlugin) {
@@ -291,10 +342,13 @@ export class ManagedToolInstaller implements ToolInstaller {
     try { lock = await open(lockPath, "wx", 0o600); }
     catch { return ok(await this.#receipt(request, "blocked", ["Another install or repair owns the destination lock"])); }
     const stage = `${destination}.staging-${randomUUID()}`;
+    const pendingPath = `${destination}.native-pending.json`;
+    let preserveStage = false;
     let backup: string | null = null;
     try {
       const current = await this.reconcile(request);
       if (current.ok && current.value.status === "already_satisfied") return current;
+      if (current.ok && current.value.status === "unknown") return current;
       try {
         await lstat(destination);
         const marker = await this.#marker(destination);
@@ -326,12 +380,18 @@ export class ManagedToolInstaller implements ToolInstaller {
       } else {
         const marker = await this.#marker(destination);
         const action = !marker ? "install" : marker.version !== pin.version ? "update" : "repair";
+        const intentFile = await open(pendingPath, "wx", 0o600);
+        try { await intentFile.writeFile(JSON.stringify({ schemaVersion: 3, desiredStateDigest: request.step.desiredStateDigest,
+          stage, toolId: pin.toolId, installerId: pin.installerId })); await intentFile.sync(); }
+        finally { await intentFile.close(); }
+        preserveStage = true;
         let activation;
         try { activation = await this.#providerPlugin!.activate(pin, artifact, action, options); }
-        catch (error) { return ok(await this.#receipt(request, "unknown", [`Provider plugin activation interrupted: ${String(error)}`])); }
-        if (!activation.success) return ok(await this.#receipt(request, "unknown", [activation.diagnostic]));
-        if (!(await this.#probe(stage, pin)))
-          return ok(await this.#receipt(request, "unknown", ["Provider plugin action returned success, but activation was not verified"]));
+        catch (error) { return ok(await this.#receipt(request, "unknown", [`Provider plugin activation interrupted: ${String(error)}`], [stage, pendingPath])); }
+        if (!activation.success) return ok(await this.#receipt(request, "unknown", [activation.diagnostic], [stage, pendingPath]));
+        const observation = await this.#providerPlugin!.verify(pin, stage);
+        if (!observation.ready)
+          return ok(await this.#receipt(request, "unknown", [observation.diagnostic], [stage, pendingPath]));
       }
       const executable = pin.recipe.kind === "rtk_archive" ? "rtk" : pin.recipe.kind === "provider_plugin" ?
         `native:${pin.recipe.provider}` : join("node_modules", ".bin", pin.recipe.executable);
@@ -344,14 +404,43 @@ export class ManagedToolInstaller implements ToolInstaller {
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       try { await rename(stage, destination); }
       catch (error) { if (backup) await rename(backup, destination); throw error; }
+      if (pin.recipe.kind === "provider_plugin") await rm(pendingPath, { force: true });
+      preserveStage = false;
       return ok(await this.#receipt(request, "applied", [backup ? `Previous owned install retained at ${backup}` : "Installed and verified"], [destination, ...(backup ? [backup] : [])]));
     } catch (error) {
-      return ok(await this.#receipt(request, "unknown", [`Install interrupted or failed: ${String(error)}`], backup ? [backup] : []));
+      return ok(await this.#receipt(request, "unknown", [`Install interrupted or failed: ${String(error)}`],
+        [...(backup ? [backup] : []), ...(preserveStage ? [stage, pendingPath] : [])]));
     } finally {
-      await rm(stage, { recursive: true, force: true });
+      if (!preserveStage) await rm(stage, { recursive: true, force: true });
       await lock.close();
       await rm(lockPath, { force: true });
     }
+  }
+
+  /** Explicit operator recovery after inspecting an uncertain native mutation; never called by apply/reconcile. */
+  async retryNativeAfterReview(raw: SetupApplyRequest, expectedIntentDigest: string, options?: OperationOptions): Promise<OperationResult<SetupReceipt>> {
+    const validated = await this.#validated(raw);
+    if (!validated.ok) return validated;
+    const { request, pin } = validated.value;
+    if (pin.recipe.kind !== "provider_plugin" || !/^[a-f0-9]{64}$/.test(expectedIntentDigest)) return fail("Invalid native recovery request");
+    const destination = resolve(request.step.toolInstall!.destination);
+    const pendingPath = `${destination}.native-pending.json`;
+    const lock = await open(`${destination}.lock`, "wx", 0o600).catch(() => null);
+    if (!lock) return fail("Another setup operation owns this destination", "conflict");
+    const reviewed = `${pendingPath}.reviewed-${randomUUID()}`;
+    let oldStage = "";
+    try {
+      const content = await readRegular(pendingPath);
+      const intent = activationIntentSchema.parse(JSON.parse(content));
+      if (digest(content) !== expectedIntentDigest || intent.desiredStateDigest !== request.step.desiredStateDigest ||
+        !intent.stage.startsWith(`${destination}.staging-`)) return fail("Native activation intent changed after operator review", "conflict");
+      oldStage = intent.stage;
+      await rename(pendingPath, reviewed);
+    } finally { await lock.close(); await rm(`${destination}.lock`, { force: true }); }
+    const result = await this.apply(request, options);
+    if (!result.ok) return result;
+    return ok(SetupReceiptSchema.parse({ ...result.value, ownedPaths: [...result.value.ownedPaths, reviewed, oldStage],
+      diagnostics: [...result.value.diagnostics, "Prior native mutation was explicitly reviewed before this retry"] }));
   }
 }
 

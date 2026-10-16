@@ -11,5 +11,5 @@
     "typecheck": "tsc -b --pretty false",
     "test": "pnpm run build && vitest run --root ../.. packages/tool-installer/test"
   },
-  "dependencies": { "@bflow/contracts": "workspace:*", "zod": "^3.24.2" }
+  "dependencies": { "@bflow/contracts": "workspace:*", "zod": "^3.24.2", "tar": "7.5.22" }
 }
