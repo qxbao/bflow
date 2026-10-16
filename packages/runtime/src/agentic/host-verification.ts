@@ -3,11 +3,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import {
   ArtifactReferenceSchema, ArtifactWriteOptionsSchema, QualityGateContextSchema, QualityGateDefinitionSchema,
-  QualityGateResultSchema, SpecificationSchema, TestStrategySchema, VerificationResultSchema,
-  type ArtifactStore, type PaneBinding, type QualityGate, type QualityGateResult, type VerificationResult
+  PaneBindingSchema, QualityGateResultSchema, SpecificationSchema, TestStrategySchema, VerificationResultSchema,
+  type ArtifactStore, type JsonValue, type PaneBinding, type QualityGate, type QualityGateResult, type VerificationResult
 } from "@bflow/contracts";
 import { digest, json, record, textField } from "./journal.js";
 import { unwrap } from "./outbox.js";
+import { behavioralChecks, measureBehavior, parseBehavioralCommands, type BehavioralCommand } from "./behavioral-runner.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
 const execute = promisify(execFile);
 const whitespaceCommand = "git diff --check";
@@ -20,12 +21,29 @@ export const DEFAULT_HOST_CHECKS = [
     timeout: { executionTimeoutMs: 30_000, onTimeout: "block" },
     configuration: { kind: "deterministic", method: "integration_test", command: whitespaceCommand, criterionIds: [], testNames: [], role: "quality_gate", levels: ["integration"] } })
 ];
+export interface HostVerificationReceipts {
+  recordGate(result: QualityGateResult): Promise<unknown>;
+  recordEvidence(result: VerificationResult): Promise<unknown>;
+  getEvidence(verificationId: string): Promise<VerificationResult | undefined>;
+  getGate(evaluationId: string): Promise<QualityGateResult | undefined>;
+  authenticateGate(result: QualityGateResult): Promise<boolean>;
+  authenticateEvidence(result: VerificationResult): Promise<boolean>;
+  putObservation(kind: "review" | "alternative", id: string, value: { binding: PaneBinding; observation: JsonValue; context?: unknown; runId?: string; taskId?: string }): Promise<unknown>;
+  getObservation(kind: "review" | "alternative", id: string): Promise<{ binding: PaneBinding; observation: JsonValue; context?: unknown; runId?: string; taskId?: string } | undefined>;
+}
 export class HostVerification {
   private readonly gateReceipts = new Map<string, string>();
+  private readonly gateRecords = new Map<string, QualityGateResult>();
   private readonly evidenceReceipts = new Map<string, string>();
-  constructor(private readonly runtime: () => AgenticWorkflowRuntime, private readonly store: () => ArtifactStore) {}
-  authenticateGate(result: QualityGateResult): boolean { return this.gateReceipts.get(result.evaluationId) === digest(result); }
-  authenticateEvidence(result: VerificationResult): boolean { return this.evidenceReceipts.get(result.verificationId) === digest(result); }
+  private readonly evidenceRecords = new Map<string, VerificationResult>();
+  private readonly commands: BehavioralCommand[];
+  constructor(private readonly runtime: () => AgenticWorkflowRuntime, private readonly store: () => ArtifactStore,
+    private readonly receipts?: HostVerificationReceipts, commands: readonly BehavioralCommand[] = []) { this.commands = parseBehavioralCommands(commands); }
+  async authenticateGate(result: QualityGateResult): Promise<boolean> { return this.receipts ? this.receipts.authenticateGate(result) : this.gateReceipts.get(result.evaluationId) === digest(result); }
+  async authenticateEvidence(result: VerificationResult): Promise<boolean> { return this.receipts ? this.receipts.authenticateEvidence(result) : this.evidenceReceipts.get(result.verificationId) === digest(result); }
+  private async trustGate(result: QualityGateResult) { await this.receipts?.recordGate(result); this.gateReceipts.set(result.evaluationId, digest(result)); this.gateRecords.set(result.evaluationId, result); }
+  private async trustEvidence(result: VerificationResult) { await this.receipts?.recordEvidence(result); this.evidenceReceipts.set(result.verificationId, digest(result)); this.evidenceRecords.set(result.verificationId, result); }
+  private bindingIdentity(binding: PaneBinding) { const { transportState: _transportState, ...identity } = binding; return identity; }
   private async git(cwd: string, args: string[]): Promise<string> {
     const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")));
     return (await execute("git", ["-c", "core.hooksPath=/dev/null", "-c", "diff.external=", ...args], { cwd, env, timeout: 30_000, maxBuffer: 2 * 1024 * 1024 })).stdout;
@@ -40,6 +58,12 @@ export class HostVerification {
       exitCode = failure.code; output = (failure.stdout ?? "") + (failure.stderr ?? ""); }
     if ((await this.git(cwd, ["rev-parse", "HEAD"])).trim() !== revision || await this.git(cwd, ["status", "--porcelain=v1", "-z"])) throw new Error("Verification revision changed during capture");
     return { cwd, base, revision, command: whitespaceCommand, exitCode, output, diff };
+  }
+  private parseCapture(input: unknown) {
+    const value = record(input);
+    if (typeof value.output !== "string" || typeof value.diff !== "string" || !Number.isInteger(value.exitCode) || value.command !== whitespaceCommand) throw new Error("Invalid stored host observation");
+    return { cwd: textField(value.cwd), base: textField(value.base), revision: textField(value.revision), command: whitespaceCommand,
+      exitCode: Number(value.exitCode), output: value.output, diff: value.diff };
   }
   private async artifact(runId: string, taskId: string, body: unknown) {
     const bytes = Buffer.from(JSON.stringify(body)); const id = `host-observation-${randomUUID()}`;
@@ -63,6 +87,111 @@ export class HostVerification {
       } catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
     } };
   }
+  behavioralChecks() { return behavioralChecks(this.commands); }
+  /** Fail closed at proposal ingress; unsupported verification methods require another trusted runner. */
+  assertSupported(input: unknown, strategyInput?: unknown) {
+    const spec = SpecificationSchema.parse(input);
+    const active = spec.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived");
+    const automated = active.filter(criterion => criterion.verificationMethod !== "manual_review");
+    if (!automated.length) {
+      if (spec.affectedPaths.some(path => !/\.(md|txt|rst)$/i.test(path))) throw new Error("Behavioral development requires configured independent behavioral acceptance checks");
+      return;
+    }
+    if (active.some(criterion => criterion.verificationMethod === "manual_review")) throw new Error("Mixed manual and behavioral TDD criteria require separate tasks with complete independent evidence");
+    for (const criterion of automated) if (!this.commands.some(command => command.method === criterion.verificationMethod)) throw new Error(`No owner-configured behavioral runner for ${criterion.verificationMethod}`);
+    if (strategyInput !== undefined) {
+      const strategy = TestStrategySchema.parse(strategyInput);
+      for (const criterion of automated) {
+        const mapping = strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id);
+        if (!mapping?.testNames.length || !this.commands.some(command => command.method === criterion.verificationMethod && mapping.testNames.every(name => command.testNames.includes(name)))) throw new Error(`No complete owner-configured test mapping for ${criterion.id}`);
+      }
+      for (const command of strategy.targetCommands) if (!this.commands.some(config => config.command === command)) throw new Error(`No owner-configured argv for ${command}`);
+      if (strategy.coverageThresholdPercent !== undefined) throw new Error("Configured TAP runner does not measure aggregate coverage");
+    }
+  }
+  behavioralGates(): QualityGate[] {
+    return this.commands.map(command => ({ id: `host-behavioral-${command.id}`, evaluate: async raw => {
+      try {
+        const context = QualityGateContextSchema.parse(raw), config = record(context.definition.configuration), input = record(context.input);
+        if (context.definition.id !== `host-behavioral-${command.id}` || config.command !== command.command || config.method !== command.method ||
+            !Array.isArray(config.testNames) || config.testNames.some(name => !command.testNames.includes(String(name)))) throw new Error("Behavioral check does not match owner configuration");
+        const measured = await measureBehavior(command, textField(input.sourceWorktreePath), textField(input.sourceRevision));
+        const result = QualityGateResultSchema.parse({ gateId: context.definition.id, runId: context.runId, taskId: context.taskId, evaluationId: randomUUID(),
+          status: measured.failed ? "failed" : "passed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString(),
+          metadata: { verification: { schemaVersion: 2, checkId: context.definition.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
+            sourceRevision: measured.sourceRevision, specFingerprint: input.specFingerprint, scope: input.scope, independentExecution: true, isolated: true,
+            executorId: "bflow-host-behavioral-check", role: "quality_gate", method: command.method, command: command.command, exitCode: measured.outcome.exitCode,
+            testNames: measured.testNames, criteria: (config.criterionIds as string[]).map(criterionId => ({ criterionId, passed: measured.failed === 0, summary: `${measured.passed}/${measured.tests} observed tests passed` })),
+            summary: `${measured.passed}/${measured.tests} observed tests passed at ${measured.sourceRevision}` }, hostExecution: json(measured) } });
+        await this.trustGate(result);
+        return { ok: true, value: result };
+      } catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
+    } }));
+  }
+  /** Execute an independent phase; no test command, revision or verdict is accepted from the agent. */
+  async behavioralEvidence(binding: PaneBinding, input: unknown) {
+    if (!["tester", "qa"].includes(binding.role)) throw new Error("Independent Tester or QA required");
+    const args = record(input), runId = textField(args.runId), taskId = textField(args.taskId), phase = textField(args.phase);
+    if (Object.keys(args).some(key => !["runId", "taskId", "phase"].includes(key))) throw new Error("Behavioral tools accept only runId, taskId and phase; measurements are host owned");
+    const run = record(await this.runtime().inspect(runId)), task = (run.tasks as Record<string, unknown>[]).find(task => task.taskId === taskId);
+    if (!task) throw new Error("Unknown task");
+    const dossier = record(task.spec), spec = SpecificationSchema.parse(dossier.specification), strategy = TestStrategySchema.parse(dossier.strategy);
+    this.assertSupported(spec, strategy);
+    if (spec.status !== "approved" || strategy.tddDecision.runId !== runId || strategy.tddDecision.taskId !== taskId) throw new Error("Behavioral measurement requires an accepted matching task specification");
+    const prior = Array.isArray(strategy.metadata?.tddEvidence) ? strategy.metadata.tddEvidence.map(value => VerificationResultSchema.parse(value)) : [];
+    for (const receipt of prior) if (!await this.authenticateEvidence(receipt)) throw new Error("Prior behavioral phase lacks a trusted host receipt");
+    const expected = strategy.tddDecision.mode === "required" ? ["red", "green", "refactor"][prior.length] : prior.length === 0 ? "verification" : undefined;
+    const state = record(await this.runtime().inspect());
+    const assignment = [...state.outbound as Record<string, unknown>[]].reverse().find(item => item.taskId === taskId && record(item.message).run_id === runId && record(item.message).type === "task.assignment" && item.handle);
+    if (!assignment) throw new Error("Implementation assignment unavailable");
+    const target = record(record(assignment.handle).target);
+    if (target.agentId === binding.agentId || target.paneId === binding.paneId) throw new Error("Implementer cannot verify its own change");
+    const cwd = textField(target.worktreePath), revision = (await this.git(cwd, ["rev-parse", "HEAD"])).trim(), startedAt = new Date().toISOString();
+    const criteria = spec.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived");
+    const commands = this.commands.filter(command => strategy.targetCommands.includes(command.command) || criteria.some(criterion => criterion.verificationMethod === command.method &&
+      strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id)?.testNames.every(name => command.testNames.includes(name))));
+    if (!commands.length || criteria.some(criterion => criterion.verificationMethod === "manual_review")) throw new Error("This strategy requires independent alternative evidence");
+    const verificationId = `host-behavioral-${digest([runId, taskId, strategy.tddDecision.decisionId, phase, revision, commands])}`;
+    const replay = this.receipts ? await this.receipts.getEvidence(verificationId) : this.evidenceRecords.get(verificationId);
+    if (replay) {
+      const parsed = VerificationResultSchema.parse(replay);
+      if (digest(this.bindingIdentity(PaneBindingSchema.parse(parsed.metadata?.hostVerifierBinding))) !== digest(this.bindingIdentity(binding)) || !await this.authenticateEvidence(parsed)) throw new Error("Behavioral phase receipt belongs to another verifier binding");
+      await this.capture(cwd, textField(run.baseRevision), revision);
+      return { result: parsed, assignment: assignment.message };
+    }
+    if (phase !== expected) throw new Error(`Expected ${expected ?? "no further"} behavioral phase`);
+    const measured = [];
+    for (const command of commands) measured.push(await measureBehavior(command, cwd, revision));
+    const observation = await this.capture(cwd, textField(run.baseRevision), revision);
+    if (observation.exitCode !== 0) throw new Error("Committed diff integrity check failed");
+    const red = prior[0], redDetails = red ? record(red.metadata?.conditionalTdd) : undefined;
+    if (red) {
+      const redMeasurements = red.metadata?.hostBehavioralMeasurements;
+      if (!Array.isArray(redMeasurements) || digest(redMeasurements.map(value => { const item = record(value); return { commandId: item.commandId, testNames: item.testNames, testBlobs: item.testBlobs }; })) !==
+        digest(measured.map(item => ({ commandId: item.commandId, testNames: item.testNames, testBlobs: item.testBlobs })))) throw new Error("Green/Refactor must preserve the exact committed Red test files and observed identities");
+      if (redDetails?.sourceRevision === revision) throw new Error("Green/Refactor require the implementation revision after Red");
+    }
+    if (phase === "red" ? !measured.some(item => item.targetFailure) : measured.some(item => item.failed)) throw new Error(phase === "red" ? "Red requires an independently observed assertion failure" : "Behavioral acceptance failed; request repairs");
+    const artifact = await this.artifact(runId, taskId, { phase, observation, measurements: measured, verifiedBy: binding.agentId });
+    const observations = measured.flatMap(item => criteria.filter(criterion => criterion.verificationMethod === item.method &&
+      strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id)?.testNames.every(name => item.testNames.includes(name)))
+      .map(criterion => ({ method: item.method, criterionId: criterion.id, evidenceArtifactId: artifact.artifactId, command: item.command, exitCode: item.outcome.exitCode!, summary: `${item.passed}/${item.tests} observed tests passed` })));
+    // Commands without a primary criterion still produce evidence for the strategy's required methods/commands.
+    for (const item of measured) if (!observations.some(observation => observation.command === item.command)) observations.push({ method: item.method, criterionId: criteria[0]!.id,
+      evidenceArtifactId: artifact.artifactId, command: item.command, exitCode: item.outcome.exitCode!, summary: `${item.passed}/${item.tests} observed tests passed` });
+    const result = VerificationResultSchema.parse({ schemaVersion: 2, verificationId, runId, taskId, cycleNumber: prior[0]?.cycleNumber ?? 1, attemptId: randomUUID(),
+      status: phase === "red" ? "failed" : "passed", independentExecution: true, evaluatedCriteria: criteria.map(criterion => {
+        const matching = observations.find(observation => observation.criterionId === criterion.id && observation.method === criterion.verificationMethod);
+        if (!matching) throw new Error(`No measured evidence for ${criterion.id}`);
+        return { criterionId: criterion.id, passed: matching.exitCode === 0, evidenceArtifactId: artifact.artifactId, command: matching.command, exitCode: matching.exitCode, summary: matching.summary };
+      }), qualityGateResults: [], evidenceArtifacts: [artifact], findings: [], verifiedBy: binding.role, startedAt, completedAt: new Date().toISOString(),
+      metadata: { conditionalTdd: { phase, decisionId: strategy.tddDecision.decisionId, specId: strategy.specId, sourceRevision: revision, testRevision: redDetails?.testRevision ?? revision,
+        testNames: [...new Set(measured.flatMap(item => item.testNames))], ...(phase === "red" ? { failureKind: "target_behavior" } : {}), observations }, hostBehavioralMeasurements: json(measured), hostVerifierBinding: json(binding) } });
+    // Apply the same P16 validator before minting a host receipt; the Runtime will apply it again at ingress.
+    this.runtime().ports.policies.recordEvidence(strategy, result);
+    await this.trustEvidence(result);
+    return { result, assignment: assignment.message };
+  }
   private judgments(input: unknown, ids: string[]) {
     if (!Array.isArray(input)) throw new Error("Independent criterion judgments are required");
     const values = input.map(value => { const item = record(value); if (typeof item.passed !== "boolean") throw new Error("Criterion verdict must be boolean");
@@ -71,7 +200,7 @@ export class HostVerification {
     return values;
   }
   /** Capture objective revision/diff before the model evaluates it; the returned ID pins later judgment. */
-  private readonly reviews = new Map<string, { bindingId: string; context: unknown; observation: Awaited<ReturnType<HostVerification["capture"]>> }>();
+  private readonly reviews = new Map<string, { binding: PaneBinding; context: unknown; observation: Awaited<ReturnType<HostVerification["capture"]>> }>();
   async inspectReview(binding: PaneBinding, input: unknown) {
     if (!["reviewer", "qa", "tester"].includes(binding.role)) throw new Error("Independent verification role required");
     const args = record(input), state = record(await this.runtime().inspect());
@@ -80,28 +209,37 @@ export class HostVerification {
     if (!out) throw new Error("No verification request assigned to this pane");
     const context = QualityGateContextSchema.parse(record(out.message).payload), details = record(context.input);
     const observation = await this.capture(textField(details.sourceWorktreePath), textField(details.baseRevision), textField(details.sourceRevision));
-    const reviewId = randomUUID(); this.reviews.set(reviewId, { bindingId: binding.bindingId, context, observation });
+    const reviewId = randomUUID(); await this.receipts?.putObservation("review", reviewId, { binding, context, observation: json(observation) });
+    this.reviews.set(reviewId, { binding, context, observation });
     return json({ reviewId, context, observation });
   }
   async completeReview(binding: PaneBinding, input: unknown) {
-    const args = record(input), id = textField(args.reviewId), pending = this.reviews.get(id);
-    if (!pending || pending.bindingId !== binding.bindingId) throw new Error("Review observation belongs to another pane or is missing");
+    const args = record(input), id = textField(args.reviewId), stored = await this.receipts?.getObservation("review", id);
+    const pending = stored ? { binding: stored.binding, context: stored.context, observation: this.parseCapture(stored.observation) } : this.reviews.get(id);
+    if (!pending || digest(this.bindingIdentity(pending.binding)) !== digest(this.bindingIdentity(binding))) throw new Error("Review observation belongs to another pane or is missing");
     const context = QualityGateContextSchema.parse(pending.context), configuration = record(context.definition.configuration), details = record(context.input);
     if (configuration.kind !== "review" || configuration.role !== binding.role) throw new Error("Review role mismatch");
     const criteria = this.judgments(args.criteria, configuration.criterionIds as string[]);
     const observed = await this.capture(pending.observation.cwd, pending.observation.base, pending.observation.revision);
     if (digest(observed) !== digest(pending.observation)) throw new Error("Review source changed");
+    const evaluationId = `host-review-${digest([id, this.bindingIdentity(binding), context])}`;
+    const submission = digest({ criteria, summary: textField(args.summary) });
+    const replay = this.receipts ? await this.receipts.getGate(evaluationId) : this.gateRecords.get(evaluationId);
+    if (replay) {
+      if (replay.metadata?.hostReviewSubmission !== submission || !await this.authenticateGate(replay)) throw new Error("Conflicting completion for an immutable review observation");
+      return { result: replay, artifact: ArtifactReferenceSchema.parse(replay.metadata?.evidence) };
+    }
     const evidence = await this.artifact(context.runId, context.taskId!, { observation: observed, criteria, reviewedBy: binding.agentId });
-    const result = QualityGateResultSchema.parse({ gateId: context.definition.id, runId: context.runId, taskId: context.taskId, evaluationId: randomUUID(),
+    const result = QualityGateResultSchema.parse({ gateId: context.definition.id, runId: context.runId, taskId: context.taskId, evaluationId,
       status: criteria.every(criterion => criterion.passed) && observed.exitCode === 0 ? "passed" : "failed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString(),
       metadata: { verification: { schemaVersion: 2, checkId: context.definition.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
         sourceRevision: observed.revision, specFingerprint: details.specFingerprint, scope: details.scope, independentExecution: true, isolated: true, executorId: binding.agentId,
-        role: binding.role, method: "manual_review", testNames: configuration.testNames, criteria, summary: textField(args.summary) }, evidence: json(evidence) } });
-    this.gateReceipts.set(result.evaluationId, digest(result));
+        role: binding.role, method: "manual_review", testNames: configuration.testNames, criteria, summary: textField(args.summary) }, evidence: json(evidence), hostReviewSubmission: submission } });
+    await this.trustGate(result);
     return { result, artifact: evidence };
   }
   /** Alternative evidence is supported only for accepted manual-review documentation criteria. */
-  private readonly alternatives = new Map<string, { bindingId: string; runId: string; taskId: string; observation: Awaited<ReturnType<HostVerification["capture"]>> }>();
+  private readonly alternatives = new Map<string, { binding: PaneBinding; runId: string; taskId: string; observation: Awaited<ReturnType<HostVerification["capture"]>> }>();
   async inspectAlternative(binding: PaneBinding, input: unknown) {
     if (!["tester", "qa"].includes(binding.role)) throw new Error("Independent Tester or QA required");
     const args = record(input), runId = textField(args.runId), taskId = textField(args.taskId), state = record(await this.runtime().inspect());
@@ -111,7 +249,8 @@ export class HostVerification {
     const target = record(record(assignment.handle).target); if (target.agentId === binding.agentId) throw new Error("Implementer cannot verify its own change");
     const cwd = textField(target.worktreePath), revision = (await this.git(cwd, ["rev-parse", "HEAD"])).trim();
     const observation = await this.capture(cwd, textField(run.baseRevision), revision), observationId = randomUUID();
-    this.alternatives.set(observationId, { bindingId: binding.bindingId, runId, taskId, observation });
+    await this.receipts?.putObservation("alternative", observationId, { binding, runId, taskId, observation: json(observation) });
+    this.alternatives.set(observationId, { binding, runId, taskId, observation });
     const task = (run.tasks as Record<string, unknown>[]).find(item => item.taskId === taskId); if (!task) throw new Error("Unknown task");
     return json({ observationId, observation, dossier: task.spec });
   }
@@ -128,19 +267,26 @@ export class HostVerification {
     const target = record(record(assignment.handle).target);
     if (target.agentId === binding.agentId) throw new Error("Implementer cannot verify its own change");
     const cwd = textField(target.worktreePath), revision = (await this.git(cwd, ["rev-parse", "HEAD"])).trim();
-    const pending = this.alternatives.get(textField(args.observationId));
-    if (!pending || pending.bindingId !== binding.bindingId || pending.runId !== runId || pending.taskId !== taskId) throw new Error("Inspect the assigned alternative evidence before submitting a judgment");
+    const observationId = textField(args.observationId), stored = await this.receipts?.getObservation("alternative", observationId);
+    const pending = stored ? { binding: stored.binding, runId: stored.runId, taskId: stored.taskId, observation: this.parseCapture(stored.observation) } : this.alternatives.get(observationId);
+    if (!pending || digest(this.bindingIdentity(pending.binding)) !== digest(this.bindingIdentity(binding)) || pending.runId !== runId || pending.taskId !== taskId) throw new Error("Inspect the assigned alternative evidence before submitting a judgment");
     const startedAt = new Date().toISOString(), observed = await this.capture(cwd, textField(run.baseRevision), revision);
     if (digest(observed) !== digest(pending.observation)) throw new Error("Alternative evidence source changed after inspection");
     const criteria = this.judgments(args.criteria, specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived").map(criterion => criterion.id));
     if (!criteria.every(criterion => criterion.passed) || observed.exitCode !== 0) throw new Error("Alternative acceptance evidence failed; request repairs instead");
+    const verificationId = `host-alternative-${digest([observationId, runId, taskId, this.bindingIdentity(binding)])}`, submission = digest(criteria);
+    const replay = this.receipts ? await this.receipts.getEvidence(verificationId) : this.evidenceRecords.get(verificationId);
+    if (replay) {
+      if (replay.metadata?.hostAlternativeSubmission !== submission || !await this.authenticateEvidence(replay)) throw new Error("Conflicting completion for an immutable alternative observation");
+      return { result: replay, assignment: assignment.message };
+    }
     const artifact = await this.artifact(runId, taskId, { observation: observed, criteria, verifiedBy: binding.agentId });
-    const result = VerificationResultSchema.parse({ schemaVersion: 2, verificationId: randomUUID(), runId, taskId, cycleNumber: 1, attemptId: randomUUID(), status: "passed", independentExecution: true,
+    const result = VerificationResultSchema.parse({ schemaVersion: 2, verificationId, runId, taskId, cycleNumber: 1, attemptId: randomUUID(), status: "passed", independentExecution: true,
       evaluatedCriteria: criteria.map(criterion => ({ ...criterion, evidenceArtifactId: artifact.artifactId })), qualityGateResults: [], evidenceArtifacts: [artifact], findings: [],
       verifiedBy: binding.role, startedAt, completedAt: new Date().toISOString(), metadata: { conditionalTdd: { phase: "verification", decisionId: strategy.tddDecision.decisionId, specId: strategy.specId,
         sourceRevision: revision, testRevision: revision, testNames: strategy.criterionMappings.flatMap(mapping => mapping.testNames),
-        observations: criteria.map(criterion => ({ method: "manual_review", criterionId: criterion.criterionId, evidenceArtifactId: artifact.artifactId, summary: criterion.summary })) } } });
-    this.evidenceReceipts.set(result.verificationId, digest(result));
+        observations: criteria.map(criterion => ({ method: "manual_review", criterionId: criterion.criterionId, evidenceArtifactId: artifact.artifactId, summary: criterion.summary })) }, hostAlternativeSubmission: submission } });
+    await this.trustEvidence(result);
     return { result, assignment: assignment.message };
   }
 }

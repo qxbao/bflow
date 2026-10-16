@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { PaneBindingSchema, QualityGateContextSchema } from "@bflow/contracts";
 import { openFilesystemArtifactStore } from "@bflow/artifact-store";
+import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
 import { HostVerification, DEFAULT_HOST_CHECKS } from "../../src/agentic/host-verification.js";
 import type { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 const cleanups:(()=>Promise<unknown>)[]=[];
@@ -20,7 +21,8 @@ async function fixture() {
   const definition={...DEFAULT_HOST_CHECKS[0]!,configuration:{kind:"review",method:"manual_review",criterionIds:["ac-1"],testNames:["criterion"],role:"reviewer",levels:[]}};
   const context=QualityGateContextSchema.parse({runId:"run",taskId:"task",attemptId:"attempt",definition,artifacts:[],input:{sourceRevision:head,baseRevision:base,sourceWorktreePath:repository,specFingerprint:"a".repeat(64),scope:"task"}});
   const runtime={inspect:async()=>({outbound:[{message:{message_id:"request",type:"verification.requested",payload:context},handle:{target:{paneId:binding.paneId}}}]})} as unknown as AgenticWorkflowRuntime;
-  return {repository,head,base,git,binding,context,host:new HostVerification(()=>runtime,()=>opened.value)};
+  const restore=()=>new HostVerification(()=>runtime,()=>opened.value,new HostReceiptJournal(join(root,"receipts"),repository,"session"));
+  return {repository,head,base,git,binding,context,restore,host:restore()};
 }
 describe("trusted host observations",()=>{
   it("captures the actual pinned diff before accepting an independent verdict and rejects altered receipts",async()=>{
@@ -28,8 +30,12 @@ describe("trusted host observations",()=>{
     const observation=await f.host.inspectReview(f.binding,{messageId:"request"}) as {reviewId:string;observation:{diff:string}};
     expect(observation.observation.diff).toContain("+after");
     const completed=await f.host.completeReview(f.binding,{reviewId:observation.reviewId,criteria:[{criterionId:"ac-1",passed:true,summary:"The exact documentation change satisfies the criterion"}],summary:"Reviewed committed diff"});
-    expect(f.host.authenticateGate(completed.result)).toBe(true);
-    expect(f.host.authenticateGate({...completed.result,status:"failed"})).toBe(false);
+    expect(await f.host.authenticateGate(completed.result)).toBe(true);
+    expect(await f.host.authenticateGate({...completed.result,status:"failed"})).toBe(false);
+    const restored=f.restore();
+    const replay=await restored.completeReview({...f.binding,transportState:"done"},{reviewId:observation.reviewId,criteria:[{criterionId:"ac-1",passed:true,summary:"The exact documentation change satisfies the criterion"}],summary:"Reviewed committed diff"});
+    expect(replay.result).toEqual(completed.result); expect(replay.artifact).toEqual(completed.artifact);
+    await expect(restored.completeReview(f.binding,{reviewId:observation.reviewId,criteria:[{criterionId:"ac-1",passed:false,summary:"conflicting verdict"}],summary:"changed"})).rejects.toThrow("Conflicting completion");
     await expect(f.host.completeReview({...f.binding,bindingId:"other-pane"},{reviewId:observation.reviewId,criteria:[],summary:"forged"})).rejects.toThrow("another pane");
   });
   it("rejects changed source after observation and independently fails whitespace in the exact committed revision",async()=>{
