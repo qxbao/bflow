@@ -9,6 +9,7 @@ import { ensureAgenticHost } from "../../dist/agentic/host-controller.js";
 import { callHost } from "../../src/agentic/host-protocol.js";
 import { openSqliteRunStore } from "@bflow/persistence";
 import { workflow } from "../../../specification/test/fixtures.js";
+import { SessionManifestSchema } from "@bflow/contracts";
 const execute = promisify(execFile);
 const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const action of cleanup.splice(0).reverse()) await action(); });
@@ -22,6 +23,39 @@ async function fixture() {
   return {root, controller, options};
 }
 describe("default durable host lifecycle and role MCP", () => {
+  it("refuses to activate existing native panes which never loaded Bflow's launch-local hook", async () => {
+    const f = await fixture(), at = new Date().toISOString();
+    const manifest = SessionManifestSchema.parse({ schemaVersion: 2, sessionId: f.options.sessionId,
+      workspaceRoot: f.root, projectName: "old-panes", herdrWorkspaceId: "w1", herdrTabId: "t1", status: "up",
+      conversationSessionId: "chat-session", activeRunIds: [], attachTarget: { role: "conversation", paneId: "p1" },
+      panes: ["conversation", "coordinator"].map((role, index) => ({ schemaVersion: 2, bindingId: `b${index}`,
+        sessionId: f.options.sessionId, role, agentId: `agent${index}`, paneId: `p${index + 1}`, workspaceId: "w1", tabId: "t1",
+        provider: "claude", agentKind: "claude", cwd: f.root, readOnlyWorkspace: true, permanent: true,
+        session: { source: "herdr:claude", kind: "id", value: `old-native-${index}` }, isolationMode: "dedicated_pane", transportState: "idle", boundAt: at })),
+      createdAt: at, updatedAt: at });
+    const result = await f.controller.activate(manifest);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.message).toContain("launch-receipts");
+  });
+
+  it("recovers an owned host killed before activation without replacing role credentials", async () => {
+    const f = await fixture();
+    const launch = await f.controller.prepare();
+    const directory = join(f.root, ".bflow/state/host", f.options.sessionId);
+    const owner = JSON.parse(await readFile(join(directory, "owner.json"), "utf8"));
+    const command = await readFile(`/proc/${owner.pid}/cmdline`, "utf8");
+    expect(command).toContain(join(directory, "host.json"));
+    process.kill(owner.pid, "SIGKILL");
+    await expect.poll(() => {
+      try { process.kill(owner.pid, 0); return false; }
+      catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+    }, { timeout: 5000, interval: 20 }).toBe(true);
+    const recovered = await ensureAgenticHost(f.options);
+    expect(await recovered.prepare()).toEqual(launch);
+    expect(JSON.parse(await readFile(join(directory, "owner.json"), "utf8")).pid).not.toBe(owner.pid);
+    expect((await recovered.runtime.findRuns({ limit: 100 })).ok).toBe(true);
+  });
+
   it("survives client disconnect, prepares private launch config before activation, and queries real SQLite", async () => {
     const f = await fixture();
     const first = await f.controller.prepare();

@@ -19,6 +19,7 @@ import { COORDINATOR_TOOLS } from "./tools.js";
 import { openAgenticWorkspace, type AgenticWorkspaceHandle } from "./workspace.js";
 import { unwrap } from "./outbox.js";
 import { HostVerification, DEFAULT_HOST_CHECKS } from "./host-verification.js";
+import { redactString } from "../resilience/redaction.js";
 
 const execute = promisify(execFile);
 const roles = ["conversation", "coordinator", "specifier", "architect", "planner", "developer", "tester", "reviewer", "qa", "security"] as const;
@@ -140,6 +141,15 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const accepted = SessionManifestSchema.parse(input);
     if (accepted.sessionId !== configuration.sessionId || accepted.workspaceRoot !== configuration.repositoryPath || accepted.status !== "up") throw new Error("Foreign or unready session manifest");
     if (workspace) { if (quiesced) throw new Error("Host is quiesced; reconcile and restart after shutdown"); return null; }
+    // An older pane may have a valid Herdr session but no Bflow tools/hooks.
+    // Require the launch-local hook receipt for this exact native session.
+    for (const pane of accepted.panes) {
+      if (!pane.permanent || pane.role === "developer") continue;
+      const receipt = record(JSON.parse(await readFile(join(configuration.directory, "launch-receipts", digest([pane.role, pane.paneId]) + ".json"), "utf8")));
+      if (!pane.session || receipt.role !== pane.role || receipt.paneId !== pane.paneId || receipt.nativeSessionId !== pane.session.value) {
+        throw new Error(`Pane '${pane.paneId}' has no matching native Bflow launch receipt; preserve it and reconcile provider startup`);
+      }
+    }
     for (const pane of accepted.panes) {
       const receipt = nativeSessions.get(pane.paneId);
       const actual = record(record(record(JSON.parse(await herdr(["agent", "get", pane.paneId]))).result).agent);
@@ -258,6 +268,13 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const dispatch = async (token: string, method: string, params: unknown): Promise<unknown> => {
     if (token !== configuration.token) {
       const role = roleTokens.get(token); if (!role) throw new Error("Host authentication failed");
+      if (method === "provider_started") {
+        const receipt = record(params), paneId = textField(receipt.paneId), nativeSessionId = textField(receipt.nativeSessionId);
+        const directory = join(configuration.directory, "launch-receipts");
+        await mkdir(directory, { recursive: true, mode: 0o700 });
+        await privateFile(join(directory, digest([role, paneId]) + ".json"), JSON.stringify({ role, paneId, nativeSessionId }));
+        return { recorded: true };
+      }
       if (method === "role_call") return roleCall(role, params);
       if (method === "native_session") {
         const input = record(params); nativeSessions.set(textField(input.paneId), {role, sessionId:textField(input.sessionId)});
@@ -360,12 +377,12 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (["coordinator", "runtime", "conversation"].includes(message.recipient.role))
           await nativeDeliver(RoleMessageSchema.parse({ ...message, sender: { ...message.sender, pane_id: sender.paneId, agent_id: sender.agentId } }));
       }
-    })().catch(error => { schedulerError = String(error); process.stderr.write(`Bflow inbound: ${String(error)}\n`); }).finally(() => { pumping = false; });
+    })().catch(error => { schedulerError = redactString(String(error)); process.stderr.write(`Bflow inbound: ${schedulerError}\n`); }).finally(() => { pumping = false; });
   }, 100);
   const timer = setInterval(() => {
     if (!workspace || quiesced || closing || scheduler) return;
     const task = workspace.runtime.tick(); scheduler = task;
-    void task.then(() => { schedulerError = undefined; }, error => { schedulerError = String(error); process.stderr.write(`Bflow scheduler: ${String(error)}\n`); }).finally(() => { if (scheduler === task) scheduler = undefined; });
+    void task.then(() => { schedulerError = undefined; }, error => { schedulerError = redactString(String(error)); process.stderr.write(`Bflow scheduler: ${schedulerError}\n`); }).finally(() => { if (scheduler === task) scheduler = undefined; });
   }, 500);
   const close = async () => {
     closing = true; clearInterval(timer); clearInterval(pump); if (workspace) { await workspace.runtime.quiesce(); await scheduler; await workspace.close(); }
@@ -444,6 +461,7 @@ export async function runProviderHook(configuration: RoleConfiguration, event: s
       socket.on("data", chunk => { response += String(chunk); if (!response.includes("\n")) return; socket.end();
         try { record(JSON.parse(response.split("\n")[0]!)).error ? reject(new Error("Herdr rejected native provider session")) : accept(); } catch (error) { reject(error); } });
     });
+    if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "provider_started", { paneId, nativeSessionId: session });
     if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "native_session", {paneId, sessionId:session});
   }
   if (event === "UserPromptSubmit") {
@@ -463,5 +481,5 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const mode = process.argv[2], path = process.argv[3];
   const task = !path ? Promise.reject(new Error("Host configuration path required")) : mode === "daemon" ? readHostConfiguration(path).then(runAgenticHost)
     : readRoleConfiguration(path).then(configuration => mode === "mcp" ? runRoleMcp(configuration) : mode === "hook" ? runProviderHook(configuration, textField(process.argv[4])) : Promise.reject(new Error("Unknown host mode")));
-  task.catch(error => { process.stderr.write(String(error) + "\n"); process.exitCode = 1; });
+  task.catch(error => { process.stderr.write(redactString(String(error)) + "\n"); process.exitCode = 1; });
 }
