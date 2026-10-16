@@ -49,7 +49,7 @@ chủ dự án cho phép; không kích hoạt workflow, tag hay external write t
 | Kiểm tra | Kết quả trung thực |
 | --- | --- |
 | Conversation không vượt quyền Coordinator | Gateway chỉ tạo delegation, tools reject Conversation orchestration. PARTIAL: default live host chưa đăng ký; native process có shell/quyền filesystem cùng UID |
-| Coordinator không tự approve | Human-required decisions phải được host authenticate và match revision/target. **FAIL với yêu cầu tuyệt đối**: low-risk design tự accept tại runtime.ts proposeWorkflow và workspace authorizeApprover; policy hiện hữu cần owner quyết định |
+| Coordinator không tự approve | Human-required decisions phải được host authenticate và match revision/target. Chủ dự án đã cho phép low-risk design autoaccept trong phản hồi sau audit 2026-10-16; không được dùng ngoại lệ này cho human-required gates hoặc delivery |
 | Developer không đổi spec để hợp thức hóa | LOCAL PASS immutable stored approved bytes, criteria anti-weakening, fingerprint recheck và Git commit scope. PARTIAL ở OS: cùng UID không bị ngăn sửa mọi path ngoài API |
 | Reviewer không chỉ tin Developer giải thích | LOCAL PASS exact gate observations, trusted artifact bytes, current revision và executor checks; repair identity gap đã sửa. Chưa có independent Reviewer/QA AI live; host identity/runner phải được bảo đảm |
 | Verification không chạy vô hạn | LOCAL PASS maxIterations/default 3, refuse extra cycle và exhaustion escalation. Infrastructure uncertainty không được repair loop vô hạn |

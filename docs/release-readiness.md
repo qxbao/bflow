@@ -48,7 +48,7 @@ hoặc một test bị skip. Bằng chứng model Claude từ QA trước đư�
 | 5. Coordinator delegation | LOCAL PASS host-injected principal, DAG/gate/role validation, không tool deploy hoặc source edit | Chat/Coordinator thật chưa được đăng ký host tools; prompt không phải sandbox |
 | 6. Role-to-pane isolation | LOCAL PASS leased panes/worktrees riêng; CLI LIVE tạo Chat và Coordinator khác pane | `readOnlyWorkspace` là metadata; cùng UID vẫn có quyền ghi ngoài vai trò |
 | 7. Session lifecycle | HERDR PASS hai session và selective stop; CLI LIVE repeat init/status; sửa close-pane fail-closed | `down` default vẫn exit 1 an toàn; startup blocked chưa có CLI recovery hoàn chỉnh |
-| 8. SDD | LOCAL PASS accepted immutable spec, criteria mapping, anti-weakening và checksum/fingerprint | Low-risk design được Coordinator tự accept; chưa thỏa tiêu chí tách người phê duyệt tuyệt đối |
+| 8. SDD | LOCAL PASS accepted immutable spec, criteria mapping, anti-weakening và checksum/fingerprint | Low-risk design autoaccept được chủ dự án cho phép sau audit 2026-10-16; human-required gates vẫn phải độc lập |
 | 9. Conditional TDD | LOCAL PASS required Red trước authorize, Green/Refactor đủ evidence, not_applicable cần alternative evidence | Host phải xác thực evidence và kiểm soát quyền ghi trước Red; local probe Red/Green là QA sửa fixture |
 | 10. Verification termination | LOCAL PASS default 3 vòng, reject vòng tiếp, inconclusive/blocked escalate; không gửi Developer tiếp sau exhaustion | Không có vòng AI live hoàn tất; host runners vẫn cần deadline thực |
 | 11. Git worktree isolation | LOCAL PASS Git thật, scope từng commit, conflict giữ lại, safe cleanup; sửa P13 false-clean RR-05 | Cùng UID không phải security sandbox; filesystem/network guarantees không mở rộng |
@@ -153,8 +153,8 @@ Ownership diff tích hợp: 5 file `packages/pane-manager/**`, 9 file
 `packages/runtime/**`, `.github/workflows/cd.yml` và bốn report được yêu cầu trong
 `docs/**` (19 file tổng). Không thay `packages/contracts/**`, root package/config,
 lockfile, README hoặc AGENTS. Các implementation commits: `05a54aa`, `5d3130a`,
-`5b57f88`, `6bb17e7`, `58a70a0`. Contract decision còn yêu cầu: RR-12 về
-separation of duties; chưa sửa public contract hoặc policy để tự giải quyết nó.
+`5b57f88`, `6bb17e7`, `58a70a0`. Policy decision RR-12 đã được chủ dự án chấp nhận sau audit: cho phép low-risk
+spec autoaccept, giữ human-required gates. Không thay public contract.
 
 Bằng chứng được giữ ở `/tmp/bflow-p22-evidence/` và archive
 `/tmp/bflow-p22-evidence.tar.gz`; `SHA256SUMS` ghi checksum từng file. ArtifactStore
