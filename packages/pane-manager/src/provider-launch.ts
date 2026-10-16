@@ -1,5 +1,6 @@
 import { getRoleTopologySpec, type RoleSelector } from "./types.js";
-import { readFile } from "node:fs/promises";
+import { readFile, open } from "node:fs/promises";
+import { constants } from "node:fs";
 
 export interface RoleMcpServer {
   readonly command: string;
@@ -82,6 +83,14 @@ export async function buildProviderRoleLaunchFromFiles(options: ProviderRoleLaun
   if (options.agentKind === "claude") {
     args[args.indexOf("--mcp-config") + 1] = options.mcpConfigFile;
     args[args.indexOf("--settings") + 1] = options.hooksSettingsFile;
+    // Herdr rejects multiline shell arguments. Claude's native file option also
+    // keeps long role instructions out of the shell command line.
+    const promptFile = options.mcpConfigFile + ".system-prompt.txt";
+    const file = await open(promptFile, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
+    try { await file.writeFile(options.systemPrompt); } finally { await file.close(); }
+    const promptFlag = args.indexOf("--append-system-prompt");
+    args[promptFlag] = "--append-system-prompt-file";
+    args[promptFlag + 1] = promptFile;
   } else {
     args.push("--enable", "hooks", "--dangerously-bypass-hook-trust", "-c", `hooks=${toml(settings.hooks)}`);
   }

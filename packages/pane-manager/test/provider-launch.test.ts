@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildProviderRoleLaunch } from "../src/provider-launch.js";
 import { buildProviderRoleLaunchFromFiles } from "../src/provider-launch.js";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -50,10 +50,12 @@ describe("explicit provider role launch policy", () => {
         SessionStart: [{ hooks: [{ type: "command", command: "/trusted/host hook SessionStart" }] }],
         UserPromptSubmit: [{ hooks: [{ type: "command", command: "/trusted/host hook UserPromptSubmit" }] }]
       } }));
-      const options = { role: "conversation" as const, systemPrompt: "Conversation only", mcpConfigFile, hooksSettingsFile };
+      const options = { role: "conversation" as const, systemPrompt: "Conversation only\nNever edit source", mcpConfigFile, hooksSettingsFile };
       const claude = await buildProviderRoleLaunchFromFiles({ ...options, agentKind: "claude" });
       expect(claude[claude.indexOf("--settings") + 1]).toBe(hooksSettingsFile);
       expect(claude[claude.indexOf("--mcp-config") + 1]).toBe(mcpConfigFile);
+      expect(claude.some(argument => argument.includes("\n"))).toBe(false);
+      expect(await readFile(claude[claude.indexOf("--append-system-prompt-file") + 1]!, "utf8")).toBe(options.systemPrompt);
       const codex = await buildProviderRoleLaunchFromFiles({ ...options, agentKind: "codex" });
       expect(codex.find(arg => arg.startsWith("hooks="))).toContain("UserPromptSubmit");
     } finally { await rm(directory, { recursive: true, force: true }); }
