@@ -37,9 +37,12 @@ function profile(over: Partial<PlatformProfile> = {}): PlatformProfile {
 }
 class FakeRunner implements CommandRunner {
   calls: string[][] = [];
+  active = true;
   fail: (argv: readonly string[]) => CommandResult | null = () => null;
   async run(argv: readonly string[]): Promise<CommandResult> {
     this.calls.push([...argv]);
+    if (argv.includes("is-active") && this.fail(argv) === null)
+      return { exitCode: 0, stdout: this.active ? "active\n" : "inactive\n", stderr: "", timedOut: false };
     return this.fail(argv) ?? { exitCode: 0, stdout: "", stderr: "", timedOut: false };
   }
 }
@@ -63,6 +66,7 @@ beforeEach(async () => {
   await mkdir(home, { recursive: true });
   runner.calls = [];
   runner.fail = () => null;
+  runner.active = true;
 });
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
@@ -204,7 +208,7 @@ describe("service managers", () => {
     await new Promise((r) => setTimeout(r, 20));
     const res = await comp.apply(ctxFor(p));
     expect(res.diagnostics).toEqual([]);
-    expect(runner.calls).toEqual([]);
+    expect(runner.calls).toEqual([["systemctl", "--user", "is-active", "bflow-gw.service"]]);
     expect((await stat(unit())).mtimeMs).toBe(m);
     const o = await comp.observe(ctxFor(p));
     expect(o.stateDigest).toBe((await comp.desired(ctxFor(p))).digest);
@@ -228,6 +232,48 @@ describe("service managers", () => {
     expect(res.diagnostics.join()).toContain("boom failure");
     expect(res.ownedPaths).toEqual([unit()]);
     await expect(stat(unit())).resolves.toBeTruthy();
+  });
+
+  it("failed activation is retried on rerun without rewriting; observe==desired after", async () => {
+    const { p, comp } = systemd();
+    runner.active = false;
+    runner.fail = (argv) => (argv.includes("enable") ? { exitCode: 1, stdout: "", stderr: "nope", timedOut: false } : null);
+    expect((await comp.apply(ctxFor(p))).diagnostics.join()).toContain("nope");
+    expect((await comp.observe(ctxFor(p))).stateDigest).not.toBe((await comp.desired(ctxFor(p))).digest);
+    runner.fail = () => null;
+    runner.calls = [];
+    const m = (await stat(unit())).mtimeMs;
+    expect((await comp.apply(ctxFor(p))).diagnostics).toEqual([]);
+    expect(runner.calls.filter((c) => !c.includes("is-active"))).toEqual([
+      ["systemctl", "--user", "daemon-reload"],
+      ["systemctl", "--user", "enable", "--now", "bflow-gw.service"]
+    ]);
+    expect((await stat(unit())).mtimeMs).toBe(m);
+    runner.active = true;
+    expect((await comp.observe(ctxFor(p))).stateDigest).toBe((await comp.desired(ctxFor(p))).digest);
+  });
+
+  it("try-restart only when an existing unit changed", async () => {
+    const { p, comp } = systemd();
+    await comp.apply(ctxFor(p));
+    expect(runner.calls.flat()).not.toContain("try-restart");
+    runner.calls = [];
+    const p2 = p;
+    const changed = new ServicesComponent({ platform: p2, store: storeFor(p2), manager: new SystemdUserServiceManager(p2, runner, storeFor(p2)), services: [{ ...svc, args: ["--x"] }] });
+    await changed.apply(ctxFor(p2));
+    expect(runner.calls.filter((c) => !c.includes("is-active"))).toEqual([
+      ["systemctl", "--user", "daemon-reload"],
+      ["systemctl", "--user", "enable", "--now", "bflow-gw.service"],
+      ["systemctl", "--user", "try-restart", "bflow-gw.service"]
+    ]);
+  });
+
+  it("empty desired set compares equal for services and mcp", async () => {
+    const p = profile();
+    const sc = new ServicesComponent({ platform: p, store: storeFor(p), manager: new SystemdUserServiceManager(p, runner, storeFor(p)), services: [] });
+    expect((await sc.observe(ctxFor(p))).stateDigest).toBe((await sc.desired(ctxFor(p))).digest);
+    const mc = new McpConfigComponent({ platform: p, store: storeFor(p), services: [] });
+    expect((await mc.observe(ctxFor(p))).stateDigest).toBe((await mc.desired(ctxFor(p))).digest);
   });
 
   it("check/dry_run never write or mutate; observe may inspect read-only", async () => {
@@ -255,7 +301,7 @@ describe("service managers", () => {
     runner.calls = [];
     runner.fail = () => null;
     await comp.apply(ctxFor(p));
-    expect(runner.calls).toEqual([]);
+    expect(runner.calls).toEqual([["launchctl", "print", `gui/${uid}/dev.bflow.gw`]]);
   });
 
   it("inspect uses is-active / launchctl print", async () => {
@@ -321,6 +367,16 @@ describe("skills", () => {
     const r = createSkillsComponent(undefined);
     expect(r.component).toBeNull();
     expect(r.diagnostics).toEqual(["skills synchronizer not configured"]);
+  });
+  it("invalid synchronizer output never throws", async () => {
+    const bad = { observe: async () => ({ x: 1 }), desired: async () => ({ y: 2 }), sync: async () => ({ z: 3 }) } as never;
+    const comp = new SkillsComponent(bad);
+    const p = profile();
+    expect((await comp.observe(ctxFor(p))).valid).toBe(false);
+    const d = await comp.desired(ctxFor(p));
+    expect(d.repairNeeded).toBe(false);
+    expect(d.summary).toContain("invalid");
+    expect((await comp.apply(ctxFor(p))).diagnostics.length).toBeGreaterThan(0);
   });
   it("adapter delegates to the synchronizer and never mutates in check", async () => {
     let synced = 0;

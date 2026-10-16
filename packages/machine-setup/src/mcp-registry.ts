@@ -132,7 +132,9 @@ export class McpConfigComponent implements SetupComponent {
       return { stateDigest: null, valid: false, diagnostics: [...diagnostics, loaded.reason] };
     }
     const valid = diagnostics.length === 0;
-    if (loaded.state === "absent") return { stateDigest: null, valid, diagnostics };
+    if (loaded.state === "absent") {
+      return { stateDigest: this.services.length === 0 ? digest({}) : null, valid, diagnostics };
+    }
     const owned: Record<string, MCPServiceDefinition> = {};
     for (const id of loaded.file.managedIds) {
       const s = loaded.file.services[id];

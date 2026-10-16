@@ -89,7 +89,7 @@ abstract class FileServiceManager implements ServiceManager {
   abstract unitPath(serviceId: string): string;
   abstract render(def: ServiceDefinition): string;
   protected abstract isActive(serviceId: string): Promise<boolean>;
-  protected abstract activate(def: ServiceDefinition, unit: string): Promise<string[]>;
+  protected abstract activate(def: ServiceDefinition, unit: string, replaced: boolean): Promise<string[]>;
   protected abstract deactivate(serviceId: string, unit: string): Promise<string[]>;
 
   constructor(
@@ -130,7 +130,11 @@ abstract class FileServiceManager implements ServiceManager {
     const unit = this.unitPath(def.serviceId);
     const content = this.render(def);
     const existing = await this.read(unit);
-    if (existing === content) return { ownedPaths: [unit], diagnostics: [], changed: false };
+    if (existing === content) {
+      // Identical bytes: do not rewrite, but retry activation if the unit is not running.
+      if (await this.isActive(def.serviceId)) return { ownedPaths: [unit], diagnostics: [], changed: false };
+      return { ownedPaths: [unit], diagnostics: await this.activate(def, unit, false), changed: false };
+    }
     try {
       await mkdir(this.dir, { recursive: true });
     } catch (e) {
@@ -142,7 +146,7 @@ abstract class FileServiceManager implements ServiceManager {
     }
     const w = await this.store.writeFileAtomic(unit, content, 0o644);
     if (!w.ok) return { ownedPaths: [], diagnostics: [`unit write failed: ${w.error.message}`], changed: false };
-    const diagnostics = await this.activate(def, unit);
+    const diagnostics = await this.activate(def, unit, existing !== null);
     return { ownedPaths: [unit], diagnostics, changed: true };
   }
 
@@ -237,11 +241,13 @@ export class SystemdUserServiceManager extends FileServiceManager {
     }
   }
 
-  protected async activate(def: ServiceDefinition): Promise<string[]> {
-    for (const argv of [
+  protected async activate(def: ServiceDefinition, _unit: string, replaced: boolean): Promise<string[]> {
+    const argvs = [
       ["systemctl", "--user", "daemon-reload"],
       ["systemctl", "--user", "enable", "--now", `bflow-${def.serviceId}.service`]
-    ]) {
+    ];
+    if (replaced) argvs.push(["systemctl", "--user", "try-restart", `bflow-${def.serviceId}.service`]);
+    for (const argv of argvs) {
       const d = await this.exec(argv);
       if (d !== null) return [d];
     }
@@ -426,18 +432,18 @@ export class ServicesComponent implements SetupComponent {
       return { stateDigest: null, valid: true, diagnostics: [WINDOWS_UNVERIFIED] };
     }
     const diagnostics = this.inputErrors();
-    const installed: Record<string, string> = {};
+    const installed: Record<string, { content: string; active: boolean }> = {};
     for (const s of this.valid()) {
       const i = await this.manager.inspect(s.serviceId);
       if (!i.installed || i.digest === null) continue;
-      installed[s.serviceId] = i.digest;
+      installed[s.serviceId] = { content: i.digest, active: i.active };
       if (!i.active) diagnostics.push(`service ${s.serviceId} is installed but not active`);
     }
     for (const id of await this.stale()) {
       diagnostics.push(`stale bflow unit not in desired set: ${this.manager.unitPath(id)} (reported, not removed)`);
     }
     return {
-      stateDigest: Object.keys(installed).length === 0 ? null : digest(installed),
+      stateDigest: digest(installed),
       valid: this.inputErrors().length === 0,
       diagnostics
     };
@@ -453,8 +459,8 @@ export class ServicesComponent implements SetupComponent {
         repairNeeded: false
       };
     }
-    const rendered: Record<string, string> = {};
-    for (const s of this.valid()) rendered[s.serviceId] = digest(this.manager.render(s));
+    const rendered: Record<string, { content: string; active: boolean }> = {};
+    for (const s of this.valid()) rendered[s.serviceId] = { content: digest(this.manager.render(s)), active: true };
     const errs = this.inputErrors();
     return {
       digest: digest(rendered),
