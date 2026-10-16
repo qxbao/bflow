@@ -1,0 +1,305 @@
+{
+  "schemaVersion": 2,
+  "verificationId": "verify-20e26122909e05b2d813a79ac7ce11902483a1450cdde1047d839b02ef318310",
+  "runId": "run-1",
+  "taskId": "task-1",
+  "cycleNumber": 1,
+  "attemptId": "attempt-1",
+  "status": "failed",
+  "verificationScope": "workflow",
+  "independentExecution": true,
+  "evaluatedCriteria": [
+    {
+      "criterionId": "ac-1",
+      "passed": false,
+      "command": "pnpm test:integration",
+      "exitCode": 1,
+      "evidenceArtifactId": "verification-c6d158a2998771ae520c5aef5a07e3db79fec8e461ebc2273d9f4c3e557736c1",
+      "summary": "Expected behavior absent"
+    },
+    {
+      "criterionId": "ac-types",
+      "passed": true,
+      "command": "pnpm typecheck",
+      "exitCode": 0,
+      "evidenceArtifactId": "verification-079afae2f3d27c9942040e31b79ad0202a4a026d4290f6a926468ec7f01c3ba8",
+      "summary": "Expected behavior independently observed"
+    },
+    {
+      "criterionId": "ac-review",
+      "passed": true,
+      "evidenceArtifactId": "verification-1b9e85a846fa1f95b1d98dac476695584d568141521c186ebfbd6400d4ec46af",
+      "summary": "Expected behavior independently observed"
+    }
+  ],
+  "qualityGateResults": [
+    {
+      "gateId": "test-check",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "evaluationId": "test-check-attempt-1-1",
+      "status": "failed",
+      "findings": [
+        {
+          "code": "TARGET_BEHAVIOR",
+          "severity": "error",
+          "message": "Target assertion failed"
+        }
+      ],
+      "producedArtifacts": [],
+      "evaluatedAt": "2026-10-16T01:00:00Z",
+      "metadata": {
+        "verification": {
+          "schemaVersion": 2,
+          "checkId": "test-check",
+          "runId": "run-1",
+          "taskId": "task-1",
+          "attemptId": "attempt-1",
+          "sourceRevision": "1111111111111111111111111111111111111111",
+          "specFingerprint": "27e6d439ae36e7099ec81c8a4428c5d65806202f2d0536baccfcbb25c44ca3cf",
+          "scope": "workflow",
+          "independentExecution": true,
+          "isolated": true,
+          "executorId": "independent-verifier",
+          "role": "tester",
+          "method": "integration_test",
+          "command": "pnpm test:integration",
+          "exitCode": 1,
+          "testNames": [
+            "target-behavior"
+          ],
+          "criteria": [
+            {
+              "criterionId": "ac-1",
+              "passed": false,
+              "summary": "Expected behavior absent"
+            }
+          ],
+          "summary": "Independent check failed"
+        }
+      }
+    },
+    {
+      "gateId": "type-check",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "evaluationId": "type-check-attempt-1-1",
+      "status": "passed",
+      "findings": [],
+      "producedArtifacts": [],
+      "evaluatedAt": "2026-10-16T01:00:00Z",
+      "metadata": {
+        "verification": {
+          "schemaVersion": 2,
+          "checkId": "type-check",
+          "runId": "run-1",
+          "taskId": "task-1",
+          "attemptId": "attempt-1",
+          "sourceRevision": "1111111111111111111111111111111111111111",
+          "specFingerprint": "27e6d439ae36e7099ec81c8a4428c5d65806202f2d0536baccfcbb25c44ca3cf",
+          "scope": "workflow",
+          "independentExecution": true,
+          "isolated": true,
+          "executorId": "independent-verifier",
+          "role": "quality_gate",
+          "method": "typecheck",
+          "command": "pnpm typecheck",
+          "exitCode": 0,
+          "testNames": [
+            "types-valid"
+          ],
+          "criteria": [
+            {
+              "criterionId": "ac-types",
+              "passed": true,
+              "summary": "Expected behavior independently observed"
+            }
+          ],
+          "summary": "Independent check passed"
+        }
+      }
+    },
+    {
+      "gateId": "review-check",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "evaluationId": "review-check-attempt-1-1",
+      "status": "passed",
+      "findings": [],
+      "producedArtifacts": [],
+      "evaluatedAt": "2026-10-16T01:00:00Z",
+      "metadata": {
+        "verification": {
+          "schemaVersion": 2,
+          "checkId": "review-check",
+          "runId": "run-1",
+          "taskId": "task-1",
+          "attemptId": "attempt-1",
+          "sourceRevision": "1111111111111111111111111111111111111111",
+          "specFingerprint": "27e6d439ae36e7099ec81c8a4428c5d65806202f2d0536baccfcbb25c44ca3cf",
+          "scope": "workflow",
+          "independentExecution": true,
+          "isolated": true,
+          "executorId": "independent-verifier",
+          "role": "reviewer",
+          "method": "manual_review",
+          "testNames": [
+            "review-scope"
+          ],
+          "criteria": [
+            {
+              "criterionId": "ac-review",
+              "passed": true,
+              "summary": "Expected behavior independently observed"
+            }
+          ],
+          "summary": "Independent check passed"
+        }
+      }
+    }
+  ],
+  "evidenceArtifacts": [
+    {
+      "trust": "stored",
+      "artifactId": "verification-247d81e8ee09c9e69b5a6edada1b9463dd37a0679a0c10d6edb686002a11ac55",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "kind": "log",
+      "uri": "artifact://test/verification-247d81e8ee09c9e69b5a6edada1b9463dd37a0679a0c10d6edb686002a11ac55",
+      "mediaType": "application/json",
+      "sizeBytes": 5718,
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "fe0f1159c8a7169ef023e59420cc6d6cc1c4537c862e62e5e7d1966484c9c0be"
+      },
+      "createdAt": "2026-10-16T01:00:00Z"
+    },
+    {
+      "trust": "stored",
+      "artifactId": "verification-f3d89eeba2700e8d98abdbaa6d656185eca140019062070ab02de7f5302bf475",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "kind": "report",
+      "uri": "artifact://test/verification-f3d89eeba2700e8d98abdbaa6d656185eca140019062070ab02de7f5302bf475",
+      "mediaType": "application/json",
+      "sizeBytes": 7678,
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "954bd91d7cf5f2ce3aa2b095700d1dec192b7f4229934709c1c873d3ff81254e"
+      },
+      "createdAt": "2026-10-16T01:00:00Z"
+    },
+    {
+      "trust": "stored",
+      "artifactId": "patch-1",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "kind": "patch",
+      "uri": "artifact://test/patch-1",
+      "mediaType": "application/json",
+      "sizeBytes": 85,
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "3ccca22ae703536b9f172ab34667d45bc2f1e420f9bca4c91d0eb2598a384129"
+      },
+      "createdAt": "2026-10-16T01:00:00Z"
+    },
+    {
+      "trust": "stored",
+      "artifactId": "verification-c6d158a2998771ae520c5aef5a07e3db79fec8e461ebc2273d9f4c3e557736c1",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "kind": "test-result",
+      "uri": "artifact://test/verification-c6d158a2998771ae520c5aef5a07e3db79fec8e461ebc2273d9f4c3e557736c1",
+      "mediaType": "application/json",
+      "sizeBytes": 1507,
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "ba1ce6bcd47083ed335d173f04117545f50c5f3db5aaa6bd5eb22520c801a852"
+      },
+      "createdAt": "2026-10-16T01:00:00Z"
+    },
+    {
+      "trust": "stored",
+      "artifactId": "verification-079afae2f3d27c9942040e31b79ad0202a4a026d4290f6a926468ec7f01c3ba8",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "kind": "test-result",
+      "uri": "artifact://test/verification-079afae2f3d27c9942040e31b79ad0202a4a026d4290f6a926468ec7f01c3ba8",
+      "mediaType": "application/json",
+      "sizeBytes": 1440,
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "0f67f181bcf64fb3da9dc5f3f56be7cb2d5ae36f5a0d505cb74891d8d464d5b9"
+      },
+      "createdAt": "2026-10-16T01:00:00Z"
+    },
+    {
+      "trust": "stored",
+      "artifactId": "verification-1b9e85a846fa1f95b1d98dac476695584d568141521c186ebfbd6400d4ec46af",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "kind": "report",
+      "uri": "artifact://test/verification-1b9e85a846fa1f95b1d98dac476695584d568141521c186ebfbd6400d4ec46af",
+      "mediaType": "application/json",
+      "sizeBytes": 1372,
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "6632041598f811f4b64f97e1a291862c44909bfccd8e302ceeea53f4fcad7e51"
+      },
+      "createdAt": "2026-10-16T01:00:00Z"
+    }
+  ],
+  "findings": [
+    {
+      "code": "TARGET_BEHAVIOR",
+      "severity": "error",
+      "message": "Target assertion failed",
+      "details": {
+        "original": null,
+        "taskId": "task-1",
+        "responsibleRole": "developer",
+        "requiresNewTaskIfOutsideScope": true
+      }
+    }
+  ],
+  "changeSet": {
+    "schemaVersion": 2,
+    "changeSetId": "change-1",
+    "runId": "run-1",
+    "taskId": "task-1",
+    "attemptId": "attempt-1",
+    "worktreePath": "/tmp/example-task",
+    "branchName": "agent/example/task",
+    "baseCommitHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "headCommitHash": "1111111111111111111111111111111111111111",
+    "dirtyWorkingTree": false,
+    "filesChanged": [
+      {
+        "path": "packages/example/src/logic.ts",
+        "changeType": "modified",
+        "additions": 1,
+        "deletions": 1
+      }
+    ],
+    "patchArtifact": {
+      "trust": "stored",
+      "artifactId": "patch-1",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "kind": "patch",
+      "uri": "artifact://test/patch-1",
+      "mediaType": "application/json",
+      "sizeBytes": 85,
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "3ccca22ae703536b9f172ab34667d45bc2f1e420f9bca4c91d0eb2598a384129"
+      },
+      "createdAt": "2026-10-16T01:00:00Z"
+    },
+    "createdAt": "2026-10-16T01:00:00Z"
+  },
+  "verifiedBy": "quality_gate",
+  "startedAt": "2026-10-16T01:00:00Z",
+  "completedAt": "2026-10-16T01:00:00Z"
+}
