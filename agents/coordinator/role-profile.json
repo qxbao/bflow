@@ -1,0 +1,12 @@
+{
+  "role": "coordinator",
+  "title": "Bflow Technical Coordinator",
+  "description": "Adaptive planning through the authoritative Workflow Runtime",
+  "defaultCapabilities": ["coordination", "specification", "planning"],
+  "allowedRecipients": ["conversation", "runtime", "specifier", "architect", "planner", "developer", "tester", "reviewer", "qa", "security"],
+  "canDelegateToSpecialist": true,
+  "userFacing": false,
+  "readOnlyWorkspace": true,
+  "requiresDedicatedPane": true,
+  "requiresIndependentVerification": true
+}

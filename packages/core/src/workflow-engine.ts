@@ -106,6 +106,20 @@ interface WorkflowAggregate {
   readonly pendingCommandEvents: DomainEvent[];
 }
 
+/** An opt-in failed independent completion gate is a separate retry cause from AgentResult. */
+function verificationRetryCause(aggregate: WorkflowAggregate, task: TaskState) {
+  return aggregate.pendingCommandEvents.find((event): event is Extract<DomainEvent, { type: "quality_gate.evaluated" }> => {
+    if (event.type !== "quality_gate.evaluated" || event.taskId !== task.taskId || event.payload.status !== "failed" ||
+        event.payload.metadata?.["independentVerification"] !== true || !taskHasSuccessfulResult(aggregate, task)) return false;
+    const request = aggregate.gateRequests.get(event.payload.evaluationId);
+    return request?.taskId === task.taskId && request.attemptId === task.attemptId && request.generation === task.generation &&
+      request.phase === "before_completion" && aggregate.definition.tasks.find(definition => definition.id === task.taskId)?.qualityGates.some(binding =>
+        binding.gateId === request.gateId && binding.phase === "before_completion" && binding.required) === true &&
+      aggregate.definition.qualityGates.some(gate =>
+        gate.id === request.gateId && gate.metadata?.["boundedVerificationRetry"] === true);
+  });
+}
+
 export interface DeterministicWorkflowEngineOptions {
   readonly definitions?: readonly WorkflowDefinition[];
   readonly resolveDefinition?: (workflowId: string, workflowVersion: string) => WorkflowDefinition | undefined;
@@ -792,7 +806,29 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
             const recomputed = this.#recomputeRunStatus(aggregate, emitted, data.result.evaluatedAt, data.idempotencyKey);
             return recomputed.ok ? success([]) : recomputed;
           }
-          if (binding.required && data.result.status !== "passed" && ["running", "waiting"].includes(task.status)) {
+          const verificationRetry = request.phase === "before_completion" && taskHasSuccessfulResult(aggregate, task) &&
+            data.result.status === "failed" && binding.required &&
+            aggregate.definition.qualityGates.some(gate => gate.id === request.gateId &&
+              gate.metadata?.["boundedVerificationRetry"] === true) &&
+            data.result.metadata?.["independentVerification"] === true &&
+            generationAttempts(aggregate, task) < definition.retry.maxAttempts;
+          if (verificationRetry && ["running", "waiting"].includes(task.status)) {
+            const failed = this.#transitionTask(aggregate, emitted, task.taskId, "failed", "normal",
+              data.result.evaluatedAt, data.idempotencyKey, "independent verification requires repair");
+            if (!failed.ok) return failed;
+            const retry = this.#transitionTask(aggregate, emitted, task.taskId, "retrying", "retry",
+              data.result.evaluatedAt, data.idempotencyKey, "bounded verification repair");
+            if (!retry.ok) return retry;
+            const delay = retryDelayMs(definition.retry, generationAttempts(aggregate, task), {
+              runId: data.result.runId, taskId: task.taskId, generation: task.generation, attempt: task.attempt
+            });
+            const scheduled = this.#emit(aggregate, emitted, {
+              type: "task.retry_scheduled", taskId: task.taskId, occurredAt: data.result.evaluatedAt,
+              commandKey: data.idempotencyKey, payload: { generation: task.generation, attempt: task.attempt,
+                attemptId: task.attemptId!, eligibleAt: new Date(Date.parse(data.result.evaluatedAt) + delay).toISOString() }
+            });
+            if (!scheduled.ok) return scheduled;
+          } else if (binding.required && data.result.status !== "passed" && ["running", "waiting"].includes(task.status)) {
             const blocked = this.#transitionTask(aggregate, emitted, task.taskId, "blocked", "normal", data.result.evaluatedAt,
               data.idempotencyKey, `required quality gate ${request.gateId} ${data.result.status}`, undefined, {
                 code: "quality_gate", message: `Quality gate ${request.gateId} ${data.result.status}`,
@@ -1253,11 +1289,12 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
         prior.type === "agent.result_recorded" && prior.taskId === task.taskId &&
         (prior.payload.status === "failed" || prior.payload.status === "timed_out") &&
         prior.payload.attemptId === task.attemptId);
-      if (definition === undefined || failedResult?.type !== "agent.result_recorded" ||
-          !failedResult.payload.retryable || generationAttempts(aggregate, task) >= definition.retry.maxAttempts ||
-          definition.retry.retryableErrorCodes !== undefined &&
-            !definition.retry.retryableErrorCodes.includes(failedResult.payload.error?.code ?? "") ||
-          failedResult.payload.status === "timed_out" && definition.timeout.onTimeout !== "retry") {
+      const verificationFailure = verificationRetryCause(aggregate, task);
+      if (definition === undefined || generationAttempts(aggregate, task) >= definition.retry.maxAttempts ||
+          !verificationFailure && (failedResult?.type !== "agent.result_recorded" ||
+            !failedResult.payload.retryable || definition.retry.retryableErrorCodes !== undefined &&
+              !definition.retry.retryableErrorCodes.includes(failedResult.payload.error?.code ?? "") ||
+            failedResult.payload.status === "timed_out" && definition.timeout.onTimeout !== "retry")) {
         throw new Error("Retry event lacks an eligible failed result under policy");
       }
     }
@@ -1492,10 +1529,11 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
         prior.type === "agent.result_recorded" && prior.taskId === event.taskId &&
         (prior.payload.status === "failed" || prior.payload.status === "timed_out") &&
         prior.payload.attemptId === event.payload.attemptId);
+      const retryCause = failedResult ?? (task ? verificationRetryCause(aggregate, task) : undefined);
       if (task?.status !== "retrying" || task.attemptId !== event.payload.attemptId ||
           task.attempt !== event.payload.attempt || task.generation !== event.payload.generation ||
-          definition === undefined || failedResult?.type !== "agent.result_recorded" ||
-          event.payload.eligibleAt !== new Date(Date.parse(failedResult.occurredAt) +
+          definition === undefined || retryCause === undefined ||
+          event.payload.eligibleAt !== new Date(Date.parse(retryCause.occurredAt) +
             retryDelayMs(definition.retry, generationAttempts(aggregate, task), {
               runId: event.runId, taskId: task.taskId, generation: task.generation, attempt: task.attempt
             })).toISOString()) {

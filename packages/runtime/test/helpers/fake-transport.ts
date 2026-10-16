@@ -44,7 +44,8 @@ export class FakeAgentTransport implements AgentTransport {
         protocolVersion: "1.0",
         supportsStreaming: true,
         supportsCancellation: true,
-        supportsReconciliation: true
+        supportsResume: true,
+        supportsSubmissionCorrelation: true
       }
     };
   }
