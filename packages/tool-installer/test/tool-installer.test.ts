@@ -172,7 +172,7 @@ describe("tool integrations", () => {
       calls.push(`${executable} ${args[0]}`);
       if (args[0] === "rev-parse") return { exitCode: 0, stdout: "abc\n", stderr: "" };
       if (args[0] === "status" && executable === "git") return { exitCode: 0, stdout: "", stderr: "" };
-      if (args[0] === "analyze") { indexed = true; forcedStale = false; return { exitCode: 0, stdout: "analyzed", stderr: "" }; }
+      if (args[0] === "analyze") { expect(args).toContain("--index-only"); indexed = true; forcedStale = false; return { exitCode: 0, stdout: "analyzed", stderr: "" }; }
       return { exitCode: 0, stdout: JSON.stringify(indexed ? { schemaVersion: 1, repository: root, status: forcedStale ? "stale" : "up-to-date" } :
         { schemaVersion: 1, repository: root, error: "not-indexed" }), stderr: "" };
     } };

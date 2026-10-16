@@ -324,7 +324,7 @@ export async function ensureGitNexusIndex(input: {
       return { status: "failed", repositoryRoot: root, fingerprint, diagnostic: "GitNexus status JSON is unsupported, invalid or identifies another repository" };
     if ("status" in status && status.status === "up-to-date")
       return { status: "fresh", repositoryRoot: root, fingerprint, diagnostic: "GitNexus status --json confirms a current index" };
-    const analyzed = await host.run(input.executable, ["analyze", root], { cwd: root, timeoutMs: input.timeoutMs ?? 300_000 });
+    const analyzed = await host.run(input.executable, ["analyze", root, "--index-only"], { cwd: root, timeoutMs: input.timeoutMs ?? 300_000 });
     if (analyzed.exitCode !== 0)
       return { status: "failed", repositoryRoot: root, fingerprint, diagnostic: `gitnexus analyze exited ${analyzed.exitCode}: ${analyzed.stderr.slice(0, 400)}` };
     const afterResult = await host.run(input.executable, ["status", "--json"], { cwd: root, timeoutMs: input.timeoutMs ?? 30_000 });
