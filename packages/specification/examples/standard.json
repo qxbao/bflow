@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 2,
+  "specId": "spec-1",
+  "runId": "run-1",
+  "sessionId": "session-1",
+  "level": "lightweight",
+  "complexity": "standard",
+  "riskLevel": "medium",
+  "version": 1,
+  "title": "Handle empty input in average calculation",
+  "summary": "Return zero for an empty list and preserve averages for nonempty lists.",
+  "problemStatement": "average([]) divides zero by zero and returns NaN to callers.",
+  "scope": {
+    "inScope": [
+      "Define the empty-list result",
+      "Preserve the arithmetic mean for nonempty lists"
+    ],
+    "outOfScope": [
+      "Rounding changes",
+      "New numeric types"
+    ]
+  },
+  "acceptanceCriteria": [
+    {
+      "id": "ac-1",
+      "description": "average([]) returns 0 rather than NaN.",
+      "category": "regression",
+      "verificationMethod": "unit_test",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    },
+    {
+      "id": "ac-2",
+      "description": "average([2, 4]) returns 3 and average([-2, 2]) returns 0.",
+      "category": "regression",
+      "verificationMethod": "unit_test",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    }
+  ],
+  "affectedPaths": [
+    "src/math/average.ts"
+  ],
+  "traceabilityTaskIds": [
+    "implement"
+  ],
+  "status": "draft",
+  "createdBy": "analyst",
+  "createdAt": "2026-10-16T00:00:00.000Z",
+  "updatedAt": "2026-10-16T00:00:00.000Z",
+  "metadata": {
+    "sdd": {
+      "policyVersion": 1,
+      "assessment": {
+        "kind": "bugfix",
+        "behaviorChange": true,
+        "modules": [
+          "math"
+        ],
+        "securityImpact": false,
+        "publicApiImpact": false,
+        "dataSchemaImpact": false,
+        "architectureImpact": false,
+        "migrationRequired": false,
+        "risk": "low",
+        "unresolvedQuestions": []
+      },
+      "functionalRequirements": [
+        "Return 0 when the input length is zero.",
+        "For nonempty input, return the sum divided by item count."
+      ],
+      "proposedTestStrategy": "Write a failing empty-input regression test first; then verify empty, singleton, positive and negative input using unit tests.",
+      "technicalConstraints": [],
+      "apiDataContracts": [],
+      "risksAndTradeoffs": [],
+      "traceability": [
+        {
+          "criterionId": "ac-1",
+          "taskIds": [
+            "implement"
+          ]
+        },
+        {
+          "criterionId": "ac-2",
+          "taskIds": [
+            "implement"
+          ]
+        }
+      ]
+    }
+  }
+}

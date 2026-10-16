@@ -1,0 +1,170 @@
+{
+  "schemaVersion": 2,
+  "specId": "spec-1",
+  "runId": "run-1",
+  "sessionId": "session-1",
+  "level": "full",
+  "complexity": "complex",
+  "riskLevel": "high",
+  "version": 1,
+  "title": "Migrate stored runs to include archived_at",
+  "summary": "Add a nullable timestamp to the local SQLite runs table without changing existing query behavior.",
+  "problemStatement": "Run records cannot retain an archive timestamp; existing rows and queries must remain compatible after the schema upgrade.",
+  "scope": {
+    "inScope": [
+      "Versioned SQLite migration",
+      "Nullable archived_at storage",
+      "Compatibility and rollback checks"
+    ],
+    "outOfScope": [
+      "Archive UI",
+      "Automatic deletion",
+      "Multi-host storage"
+    ]
+  },
+  "acceptanceCriteria": [
+    {
+      "id": "ac-1",
+      "description": "An old-schema fixture retains all run IDs and query results, with archived_at NULL, after migration and reopening.",
+      "category": "functional",
+      "verificationMethod": "integration_test",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    },
+    {
+      "id": "ac-2",
+      "description": "Repeated opening does not reapply the migration; a valid timestamp round-trips without modifying other fields.",
+      "category": "functional",
+      "verificationMethod": "integration_test",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    }
+  ],
+  "affectedPaths": [
+    "src/storage/migrations/add-archived-at.sql",
+    "src/storage/run-record.ts"
+  ],
+  "traceabilityTaskIds": [
+    "implement"
+  ],
+  "architectureNotes": "Keep the local SQLite store boundary and introduce one explicitly versioned migration; retain existing read defaults.",
+  "securityConsiderations": "Validate timestamp values and use bound SQL parameters. Migration must not broaden database file permissions or expose stored run contents.",
+  "rollbackPlan": "Stop writers, restore the pre-upgrade database backup, and reopen with the previous supported binary after verifying integrity.",
+  "tddDecision": {
+    "schemaVersion": 2,
+    "decisionId": "tdd-1",
+    "runId": "run-1",
+    "specId": "spec-1",
+    "mode": "required",
+    "rationale": "Behavior change requires regression evidence first",
+    "verifiableConditions": [
+      "Regression test fails before implementation"
+    ],
+    "changeClassification": "domain_logic",
+    "requiresFailingTestFirst": true,
+    "decidedBy": "coordinator",
+    "decidedAt": "2026-10-16T00:00:00.000Z"
+  },
+  "testStrategy": {
+    "schemaVersion": 2,
+    "strategyId": "strategy-1",
+    "specId": "spec-1",
+    "tddDecision": {
+      "schemaVersion": 2,
+      "decisionId": "tdd-1",
+      "runId": "run-1",
+      "specId": "spec-1",
+      "mode": "required",
+      "rationale": "Behavior change requires regression evidence first",
+      "verifiableConditions": [
+        "Regression test fails before implementation"
+      ],
+      "changeClassification": "domain_logic",
+      "requiresFailingTestFirst": true,
+      "decidedBy": "coordinator",
+      "decidedAt": "2026-10-16T00:00:00.000Z"
+    },
+    "requiredTestLevels": [
+      "unit",
+      "integration"
+    ],
+    "targetCommands": [
+      "pnpm test -- storage-migrations"
+    ],
+    "independentVerificationRequired": true,
+    "criterionMappings": [
+      {
+        "criterionId": "ac-1",
+        "testNames": [
+          "old schema migration preserves rows and query behavior"
+        ]
+      },
+      {
+        "criterionId": "ac-2",
+        "testNames": [
+          "migration is idempotent and timestamp round-trips"
+        ]
+      }
+    ],
+    "createdAt": "2026-10-16T00:00:00.000Z"
+  },
+  "dataModelChanges": "Add runs.archived_at TEXT NULL. Existing rows remain NULL; new values must be valid ISO-8601 timestamps.",
+  "status": "draft",
+  "createdBy": "analyst",
+  "createdAt": "2026-10-16T00:00:00.000Z",
+  "updatedAt": "2026-10-16T00:00:00.000Z",
+  "metadata": {
+    "sdd": {
+      "policyVersion": 1,
+      "assessment": {
+        "kind": "feature",
+        "behaviorChange": true,
+        "modules": [
+          "storage"
+        ],
+        "securityImpact": false,
+        "publicApiImpact": false,
+        "dataSchemaImpact": true,
+        "architectureImpact": false,
+        "migrationRequired": true,
+        "risk": "low",
+        "unresolvedQuestions": []
+      },
+      "functionalRequirements": [
+        "Persist an optional archive timestamp.",
+        "Preserve existing rows and existing query results after migration."
+      ],
+      "proposedTestStrategy": "Use real temporary SQLite fixtures: old schema migration, repeat opening, timestamp round trip, and rollback backup verification.",
+      "designProposal": "Apply the approved schema-version migration transaction before opening the new projection. Add a nullable column without rewriting existing rows.",
+      "technicalConstraints": [
+        "Linux local filesystem and the supported SQLite runtime.",
+        "Do not mutate application contracts or silently accept a future schema version."
+      ],
+      "apiDataContracts": [
+        "runs.archived_at: TEXT NULL; accepted values are ISO-8601 timestamps.",
+        "Existing query defaults and run identifiers remain unchanged."
+      ],
+      "risksAndTradeoffs": [
+        "An additive nullable column preserves readers but requires an explicit compatibility check for old writers.",
+        "Restoring a backup loses writes after the backup; stop writers for rollback."
+      ],
+      "migrationStrategy": "Back up and verify the database; apply the additive migration atomically once; retain NULL for old rows; validate row counts and queries before enabling writers. On failure restore the verified backup.",
+      "traceability": [
+        {
+          "criterionId": "ac-1",
+          "taskIds": [
+            "implement"
+          ]
+        },
+        {
+          "criterionId": "ac-2",
+          "taskIds": [
+            "implement"
+          ]
+        }
+      ]
+    }
+  }
+}
