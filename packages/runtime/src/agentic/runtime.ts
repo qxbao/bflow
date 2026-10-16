@@ -642,11 +642,29 @@ export class AgenticWorkflowRuntime {
         cycle.cycleId !== job.cycle.cycleId || result.changeSet?.changeSetId !== job.change.changeSetId) throw new Error("Verification outcome mismatch");
     await this.transaction(async (state, save, core, outbox) => {
       const run = this.run(state, job.runId);
+      // A frozen P17 plan predates identities allocated for later repairs.
+      // Enforce independence against every actual implementation assignment as well.
+      const implementerIds = new Set(state.outbound.filter(out => out.message.run_id === run.runId &&
+        out.message.type === "task.assignment").map(out => out.handle?.target.agentId).filter(Boolean));
+      if (result.qualityGateResults.some(gate => {
+        const observation = gate.metadata?.verification;
+        return observation !== null && typeof observation === "object" && !Array.isArray(observation) &&
+          typeof observation.executorId === "string" && implementerIds.has(observation.executorId);
+      })) throw new Error("Verification evidence executor is a workflow implementer");
       const pendingId = result.verificationId;
       const existingPending = state.pendingVerifications.find(item => record(record(item.outcome).result).verificationId === pendingId);
       if (!existingPending) { state.pendingVerifications.push({ job: json(job), outcome: json(outcome) }); await save(); }
       const clearPending = () => { state.pendingVerifications = state.pendingVerifications.filter(item => record(record(item.outcome).result).verificationId !== pendingId); };
-      if (run.cancelled) { clearPending(); await save(); return; } // late evidence cannot revive cancellation
+      if (run.cancelled || ["failed", "completed"].includes(run.status) ||
+          run.status === "escalated" && !run.error?.startsWith("Verification delivery/storage requires reconciliation:")) {
+        clearPending(); await save(); return; // late evidence cannot revive a terminal decision
+      }
+      // Other parallel checks may finish while a human is deciding this task.
+      // Retain their durable outcomes without replacing the active approval or phase.
+      if (run.status === "awaiting_approval" && run.approvalKind === "task" &&
+          (run.approval?.target.type !== "task" || run.approval.target.taskId !== job.taskId)) {
+        await save(); return;
+      }
       const task = run.tasks.find(item => item.taskId === job.taskId);
       const currentCycle = task?.cycle ?? run.workflowCycle;
       if (digest(currentCycle) !== digest(job.cycle) && digest(currentCycle) !== digest(cycle)) throw new Error("Verification cycle changed while executing");

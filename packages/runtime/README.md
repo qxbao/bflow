@@ -88,6 +88,10 @@ acceptance is autonomous only when P15 and project policy permit it. Complex des
 and project-mandated implementation approvals return to Conversation. One approval
 binds the complete dossier bundle; internal spec decisions retain that bundle ID.
 
+Parallel task verification outcomes wait durably behind the active human task
+approval. They resume after that decision, including across restart; a later
+outcome cannot replace the active approval or revive a rejected run.
+
 All Developer tasks name `metadata.ownedPaths` (literal repository prefixes), with
 optional `forbiddenPaths` and `requiredCapabilities`. Agent-controlled gate definitions
 are rejected: trusted project checks are configured through `taskChecks` and
@@ -118,8 +122,10 @@ P13's clean-worktree checks, then collects the actual P18 change set. P17 verifi
 outside the Runtime journal lock, allowing Reviewer replies and cancellation to
 arrive. Known check/review failures can trigger scoped Developer repair attempts;
 max iterations, inconclusive/blocked outcomes and exhausted implementation attempts
-escalate. The verification plan stays frozen across repairs; the trusted host must
-also exclude every subsequent implementer identity/alias from reviewer authority.
+escalate. The verification plan stays frozen across repairs. Runtime also rejects
+gate evidence naming any actual workflow implementer, including Developers
+allocated after the plan was frozen. The trusted host must authenticate these
+identities and exclude implementer aliases from reviewer authority.
 
 Core's optional gate metadata `boundedVerificationRetry: true` enables retries only
 for a failed required independent `before_completion` gate over a previously verified

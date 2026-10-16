@@ -62,6 +62,7 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
   const engine = new DeterministicWorkflowEngine({ bindingReceiptKeys });
   const registry = new FileAgentRegistry({ stateFile: join(root, "registry.json") });
   let failReview = options.failReview ?? false;
+  let reviewerExecutorId = "independent-test-host";
   const calls: QualityGateContext[] = [];
   const checks = [
     { id: "review", name: "review", evaluator: "review", required: true, timeout: { executionTimeoutMs: 3000, onTimeout: "block" },
@@ -78,7 +79,7 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
       evaluationId: randomUUID(), status: passed ? "passed" : "failed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString(),
       metadata: { verification: { schemaVersion: 2, checkId: check.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
         sourceRevision: input.sourceRevision, specFingerprint: input.specFingerprint, scope: input.scope,
-        independentExecution: true, isolated: true, executorId: "independent-test-host", role: config.role, method: config.method,
+        independentExecution: true, isolated: true, executorId: config.role === "reviewer" ? reviewerExecutorId : "independent-test-host", role: config.role, method: config.method,
         ...(config.command ? { command: config.command, exitCode: passed ? 0 : 1 } : {}), testNames: config.testNames,
         criteria: config.criterionIds.map((criterionId: string) => ({ criterionId, passed, summary: "Host independently checked the criterion" })), summary: "Independent check" } } } };
   } }));
@@ -158,7 +159,9 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
       decision, ...(decision !== "approved" ? { reason: "User refused" } : {}), decidedBy: "human-1", decidedAt: new Date().toISOString(), feedbackArtifacts: [], idempotencyKey: randomUUID() })));
   }
   return { root, repository, runtime, ports, privateKey, publicKey, runtimeOptions, panes, transport, spec, def, envelope, inspect, dossier, evidence, submit, approve,
-    calls, localReview: (context: QualityGateContext) => gates.find(gate => gate.id === "review")!.evaluate(context), setFailReview: (value: boolean) => { failReview = value; }, restart: () => { runtime = new AgenticWorkflowRuntime({ ...ports, engine: new DeterministicWorkflowEngine({ bindingReceiptKeys }) }, runtimeOptions); return runtime; } };
+    calls, localReview: (context: QualityGateContext) => gates.find(gate => gate.id === "review")!.evaluate(context), setFailReview: (value: boolean) => { failReview = value; },
+    setReviewerExecutor: (value: string) => { reviewerExecutorId = value; },
+    restart: () => { runtime = new AgenticWorkflowRuntime({ ...ports, engine: new DeterministicWorkflowEngine({ bindingReceiptKeys }) }, runtimeOptions); return runtime; } };
 }
 
 describe("P19 integrated Agentic SDLC", () => {
@@ -210,6 +213,20 @@ describe("P19 integrated Agentic SDLC", () => {
     f.setFailReview(false); await f.runtime.tick(); await f.submit("implement", "repaired\n"); await f.runtime.tick();
     expect((await f.inspect()).error).toBeUndefined();
     expect((await f.inspect()).tasks[0].cycle.history.map((r: any) => r.status)).toEqual(["failed", "passed"]);
+  });
+  it("rejects a repair Developer as Reviewer even when the original plan predates that identity", async () => {
+    const f = await fixture({ failReview: true }); await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    await f.evidence("implement"); await f.submit(); await f.runtime.tick();
+    expect((await f.inspect()).tasks[0].cycle.status).toBe("rework_required");
+    f.setFailReview(false); await f.runtime.tick();
+    const state = await f.runtime.inspect() as any;
+    const repaired = [...state.outbound].reverse().find((out: any) => out.message.type === "task.assignment");
+    f.setReviewerExecutor(repaired.handle.target.agentId);
+    await f.submit("implement", "repaired\n"); await f.runtime.tick();
+    const run = await f.inspect();
+    expect(run.status).toBe("escalated");
+    expect(run.tasks[0].cycle.status).toBe("rework_required");
+    expect(run.error).toContain("implementer");
   });
   it("escalates at verification limit and never sends another Developer assignment", async () => {
     const f = await fixture({ failReview: true }); await f.runtime.proposeWorkflow("run-1", f.spec, f.def, 1); await f.runtime.tick();
@@ -313,6 +330,32 @@ describe("P19 integrated Agentic SDLC", () => {
     await f.approve("rejected"); await f.runtime.tick();
     expect((await f.inspect()).status).toBe("failed");
     expect(f.transport.sentRequests.filter(req => req.role === "developer")).toHaveLength(1);
+  });
+  it("preserves each parallel task approval across restart before workflow delivery", async () => {
+    const f = await fixture({ parallel: true });
+    f.def.tasks.forEach(task => { task.requiresApproval = true; });
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    await f.evidence("implement"); await f.evidence("other"); await f.submit(); await f.submit("other", "second file\n");
+    await f.runtime.tick();
+    expect((await f.inspect()).approval.target).toEqual({ type: "task", taskId: "implement" });
+    await f.restart().tick();
+    expect((await f.inspect()).approval.target).toEqual({ type: "task", taskId: "implement" });
+    await f.approve(); await f.runtime.tick();
+    expect((await f.inspect()).status).toBe("awaiting_approval");
+    expect((await f.inspect()).approval.target).toEqual({ type: "task", taskId: "other" });
+    await f.approve(); await f.runtime.tick();
+    expect((await f.inspect()).approvalKind).toBe("delivery");
+    await f.approve(); expect((await f.inspect()).status).toBe("completed");
+  });
+  it("does not revive human rejection with a parallel verification outcome", async () => {
+    const f = await fixture({ parallel: true });
+    f.def.tasks[0]!.requiresApproval = true;
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    await f.evidence("implement"); await f.evidence("other"); await f.submit(); await f.submit("other", "second file\n");
+    await f.runtime.tick(); expect((await f.inspect()).status).toBe("awaiting_approval");
+    await f.approve("rejected"); await f.restart().tick();
+    expect((await f.inspect()).status).toBe("failed");
+    expect((await f.inspect()).integrationKey).toBeUndefined();
   });
   it("rejects forged results and conflicting inbox messages before advancing task state", async () => {
     const f = await fixture(); await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
