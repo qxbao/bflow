@@ -49,6 +49,71 @@ The v2 implementation execution order is strictly staged across three waves with
 
 Agents must edit only owned paths. Cross-owner changes are proposed to the owning agent or handled during integration. Generated `dist/**`, coverage, local databases, artifacts, and agent logs are never committed.
 
+## P24 platform v3 baseline and P25–P31 ownership
+
+The project owner explicitly authorized P24's additive public contracts, shared architecture
+documents, this ownership update and local baseline commit. The contract decision and
+compatibility plan are D24-01 in [runtime architecture v3](docs/runtime-architecture-v3.md).
+Also read [provider contracts](docs/provider-contracts.md), [shared MCP architecture](docs/shared-mcp-architecture.md)
+and [skills architecture](docs/skills-architecture.md) before implementation.
+
+Every implementation after P24 MUST branch from the exact P24 baseline commit reported in
+its handoff, or a verified integration descendant retaining that commit. Do not use the old
+P11 baseline or rebuild implemented P00–P23 functionality. Phase-number labels are not
+evidence of implementation or acceptance; use the source audit and existing release reports.
+P24 adds contracts/design only; P25–P31 modules are not implemented by this baseline.
+
+| Phase | Owned paths | Responsibility |
+| --- | --- | --- |
+| P25 | `packages/agent-providers/**` | Claude Code, Codex, Agy discovery/auth/version/capability/permission probes, launch profiles and startup attestations; Herdr retains process ownership |
+| P26 | `packages/machine-setup/**`, `packages/tool-installer/**` | Machine/repository/session setup plans, pinned tools, owned config and recoverable receipts |
+| P27 | `packages/mcp-gateway/**`, `packages/mcp-services/**` | Shared tool connections, stdio bridges/client shims, scoped registration and exclusive resource leases |
+| P28 | `packages/skills/**`, `skills/**` | Approved skill catalog, exact pins/dependencies, role manifests and provider-neutral rendering |
+| P29 | `apps/cli/**` | Unified command UX using existing lifecycle and Runtime facade; no independent workflow engine/gates |
+| P30 | `packages/runtime/**`, `packages/pane-manager/**`, `packages/conversation/**`, `agents/**` | Post-prerequisite integration of readiness, provider launch, skills, Gateway and Conversation decision routing into existing host |
+| P31 | `tests/platform-v3/**`, `tests/acceptance/platform-v3/**` | Cross-provider conformance, security/fault/live acceptance evidence; findings return to production owners |
+
+Execution gates: freeze P24 first; P25–P28 may implement in separate parallel worktrees
+from P24. Integrator sequentially merges and runs dependency/type/full-test checks before
+P30 wiring. P29 command UX may use frozen contracts concurrently, but cannot close before
+the P30 Runtime facade is integrated and compatibility verified. P31 acceptance follows
+P29/P30 integration. Shared paths/root build configuration/lockfile remain integration-owned;
+leaf agents propose wiring rather than modifying another owner's package. Package READMEs
+and package-local tests follow package ownership. P31 owns its new test config; wiring it
+into root CI/test discovery is an integration change, not implicit permission to edit root config.
+
+V3 invariants:
+
+- Keep existing `AgentCapability`, RoleMessage v2, SessionManifest v2, event/checkpoint
+  codecs, RuntimeService and QualityGate signatures compatible. New platform documents use
+  strict version-3 schemas; nested value objects inherit the envelope version. Reject
+  unknown versions, never cast old config/receipts into new proof.
+- Provider adapters validate binary/version/auth/environment/MCP/launch arguments/permissions/
+  skills and actual readiness. Herdr idle/done, installed CLI or a provider release label
+  cannot establish readiness/task success. Require preflight before launch side effects and
+  authenticated activated health before `up` success; preserve interrupted-startup receipts.
+- Permission modes are `restricted`, `workspace_auto`, `unattended_isolated`. No machine-scope
+  agent permission or global bypass. Unattended requires verified full-provider OS sandbox/
+  container and session scope; worktrees/native hooks alone do not satisfy it. Report
+  unsupported when the provider cannot enforce policy; never silently widen privileges.
+- Machine setup, repo desired config and session/runtime state have distinct ownership and
+  lifetimes. `up` verifies prerequisites; installation/global configuration requires an
+  explicit setup plan/apply. Do not mutate user-global provider settings to avoid a task prompt.
+- Gateway manages tool connections only; all inter-role messages still use Runtime/Herdr.
+  Distinguish CLI-only tools, adopted workers, remote MCP, bridged stdio MCP and exclusive
+  resources. Never stop an external worker during repo down or replay an uncertain mutation.
+- Every role except Conversation must route user decisions through Runtime → Herdr →
+  Conversation. Disable native direct questions/elicitation, retain exact human approval
+  authority and waiting state. Unattended does not waive mandatory human gates.
+- Skills are pinned instructions, not permission grants or executable install hooks. Preserve
+  original role prompts and existing SDD/TDD/verification/lease/fence/human approval checks.
+- New commands reuse existing Runtime and independent Quality Gates. Keep legacy Runtime
+  storage/commands explicit; command acceptance is not workflow acceptance.
+
+P24 does not close P22/live acceptance gaps, same-UID provider isolation, hosted governance,
+P02-RA01 or P03-RA01. Keep source implementation, local tests, live transport/provider probes
+and full SDLC acceptance as distinct evidence levels.
+
 ## Architecture v2 & P11–P19 Upgrade Rules
 
 The v2 architectural specification is formally documented in [docs/architecture-v2.md](docs/architecture-v2.md), with protocol details in [docs/communication-protocol.md](docs/communication-protocol.md) and development policies in [docs/sdlc-policies.md](docs/sdlc-policies.md). All implementation agents must adhere to the following architectural rules:

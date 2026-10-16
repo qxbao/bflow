@@ -18,3 +18,9 @@ export * from "./versioning.js";
 export * from "./workflow.js";
 
 export * from "./receipts.js";
+export * from "./platform.js";
+export * from "./provider.js";
+export * from "./setup.js";
+export * from "./mcp.js";
+export * from "./skills.js";
+export * from "./commands.js";
