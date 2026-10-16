@@ -170,6 +170,27 @@ describe("P12 repository environment lifecycle", () => {
     execFileSync("git", ["check-ignore", ".bflow/state/run", ".bflow/logs/log", ".bflow/secrets/token"], { cwd: dir });
     expect(runner.requests).toHaveLength(0);
   });
+  it("initializes Claude roles explicitly and preserves existing provider selection on repeat init", async () => {
+    const other = await mkdtemp("/tmp/bflow-provider-init-");
+    try {
+      execFileSync("git", ["init", "--quiet", other]);
+      expect((await runCli(["init", "--provider", "claude"], { cwd: other })).ok).toBe(true);
+      const path = join(other, ".bflow/config.yaml");
+      const before = await readFile(path, "utf8");
+      expect(JSON.parse(before).environment.roles.every((role: { cli: string }) => role.cli === "claude")).toBe(true);
+      expect((await runCli(["init", "--provider", "codex"], { cwd: other })).ok).toBe(true);
+      expect(await readFile(path, "utf8")).toBe(before);
+    } finally { await rm(other, { recursive: true, force: true }); }
+  });
+  it("rejects an unsupported provider before writing any configuration", async () => {
+    const other = await mkdtemp("/tmp/bflow-provider-invalid-");
+    try {
+      execFileSync("git", ["init", "--quiet", other]);
+      expect(parseCliArgs(["init", "--provider", "arbitrary-command"]).ok).toBe(false);
+      expect((await runCli(["init", "--provider", "arbitrary-command"], { cwd: other })).ok).toBe(false);
+      await expect(readFile(join(other, ".bflow/config.yaml"))).rejects.toThrow();
+    } finally { await rm(other, { recursive: true, force: true }); }
+  });
   it("starts a headless server and reuses ready roles without duplicate startup", async () => {
     const first = await lifecycle.up(); const second = await lifecycle.up();
     expect(first.sessionId).toBe(second.sessionId); expect(fixture.manager.up).toHaveBeenCalledTimes(1);

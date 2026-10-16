@@ -135,6 +135,7 @@ export async function executeCommand(
       ...(parsed.dir !== undefined ? { dir: parsed.dir } : {}),
       ...(parsed.configPath !== undefined ? { configPath: parsed.configPath } : {}),
       ...(parsed.projectName !== undefined ? { projectName: parsed.projectName } : {}),
+      ...(parsed.provider !== undefined ? { provider: parsed.provider } : {}),
       force: parsed.force,
       ...(context?.clock !== undefined ? { clock: context.clock } : {}),
       ...(context?.confirmOverwrite !== undefined ? { confirmOverwrite: context.confirmOverwrite } : {})

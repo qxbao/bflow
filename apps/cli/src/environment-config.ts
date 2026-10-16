@@ -23,13 +23,14 @@ export interface EnvironmentConfig extends BflowRepositoryConfig {
 }
 export const ENVIRONMENT_CONFIG_PATH = ".bflow/config.yaml";
 
-export function defaultEnvironmentConfig(repository: RepositoryIdentity, name?: string, now = new Date()): EnvironmentConfig {
+export function defaultEnvironmentConfig(repository: RepositoryIdentity, name?: string, now = new Date(), provider: "claude" | "codex" = "codex"): EnvironmentConfig {
+  if (provider !== "claude" && provider !== "codex") throw new Error("Provider must be claude or codex");
   return {
     ...createDefaultRepositoryConfig({ projectName: name ?? basename(repository.root), runtimeId: `runtime-${repository.id.slice(0, 20)}`, createdAt: now.toISOString() }),
     environment: {
       repositoryId: repository.id, workspaceRoot: repository.root, sessionName: repository.sessionName,
       herdrBinary: "herdr",
-      roles: ["conversation", "coordinator", "planner", "architect", "specifier", "reviewer", "qa"].map((role) => ({ role: AgentRoleSchema.parse(role), cli: "codex", required: true })),
+      roles: ["conversation", "coordinator", "planner", "architect", "specifier", "reviewer", "qa"].map((role) => ({ role: AgentRoleSchema.parse(role), cli: provider, required: true })),
       sdd: { minimumLevel: "lightweight", approvalRequired: true }, tdd: { policy: "conditional" },
       verification: { maxIterations: 3, onExhausted: "require_human" }, concurrency: { maxConcurrency: 2 },
       startupTimeoutMs: 60_000, shutdownTimeoutMs: 30_000
@@ -82,6 +83,7 @@ export async function readEnvironmentConfig(repository: RepositoryIdentity): Pro
 export async function initializeEnvironmentConfig(options: {
   readonly cwd: string; readonly dir?: string | undefined; readonly configPath?: string | undefined;
   readonly projectName?: string | undefined; readonly force?: boolean | undefined; readonly clock?: (() => Date) | undefined;
+  readonly provider?: "claude" | "codex" | undefined;
 }): Promise<InitCommandOutput> {
   const repository = await identifyRepository(resolve(options.cwd, options.dir ?? "."));
   const configPath = resolve(repository.root, ENVIRONMENT_CONFIG_PATH);
@@ -97,7 +99,7 @@ export async function initializeEnvironmentConfig(options: {
     const ignore = await open(ignorePath, "a", 0o600);
     try { await ignore.writeFile(`${existing && !existing.endsWith("\n") ? "\n" : ""}${missing.join("\n")}\n`); } finally { await ignore.close(); }
   }
-  const config = defaultEnvironmentConfig(repository, options.projectName, options.clock?.());
+  const config = defaultEnvironmentConfig(repository, options.projectName, options.clock?.(), options.provider);
   if (options.force) {
     const existed = existsSync(configPath);
     const file = await open(configPath, "w", 0o600);
@@ -123,6 +125,7 @@ export async function ensureEnvironmentInitialized(
     readonly dir?: string | undefined;
     readonly configPath?: string | undefined;
     readonly projectName?: string | undefined;
+    readonly provider?: "claude" | "codex" | undefined;
     readonly clock?: (() => Date) | undefined;
   }
 ): Promise<InitCommandOutput> {
@@ -131,6 +134,7 @@ export async function ensureEnvironmentInitialized(
     dir: options?.dir,
     configPath: options?.configPath,
     projectName: options?.projectName,
+    provider: options?.provider,
     force: options?.force,
     clock: options?.clock
   });

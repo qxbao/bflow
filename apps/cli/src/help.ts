@@ -41,13 +41,15 @@ Options:
   --dir <path>          Target directory for initialization (default: current directory)
   --config <path>       Custom configuration file path (default: .bflow/config.yaml)
   --name <name>         Project name
-  -f, --force, -y, --yes  Accepted for compatibility; existing configuration is always preserved
+  --provider <kind>     Role provider: claude or codex (default: codex)
+  -f, --force, -y, --yes  Explicitly replace existing configuration
   -j, --json            Output response in JSON envelope format
   -h, --help            Show help for init command
 
 Examples:
   bflow init
   bflow init --name my-project
+  bflow init --provider claude
   bflow init --dir ./subproject --force`;
 
 const RUN_HELP = `Usage: bflow run <requirement> [options]

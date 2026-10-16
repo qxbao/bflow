@@ -368,6 +368,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         "--dir",
         "--config",
         "--name",
+        "--provider",
         "--force",
         "-f",
         "--yes",
@@ -406,6 +407,9 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         return makeValidationError("Option '--name' cannot be empty.", json, "init");
       }
       const projectName = rawName?.trim();
+      const provider = optRes.value.flags.get("--provider");
+      if (provider !== undefined && provider !== "claude" && provider !== "codex")
+        return makeValidationError("--provider must be 'claude' or 'codex'.", json, "init");
 
       const force =
         optRes.value.flags.has("--force") ||
@@ -418,6 +422,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         dir,
         configPath,
         projectName,
+        provider,
         force,
         json,
         help: false

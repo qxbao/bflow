@@ -47,6 +47,7 @@ export interface InitCommandArgs extends GlobalCliFlags {
   readonly dir?: string | undefined;
   readonly configPath?: string | undefined;
   readonly projectName?: string | undefined;
+  readonly provider?: "claude" | "codex" | undefined;
   readonly force: boolean;
 }
 
