@@ -116,6 +116,18 @@ describe("P12 repository environment lifecycle", () => {
     expect(fixture.manager.up).toHaveBeenCalledTimes(2);
     expect(runner.requests.filter(request => request.args[0] === "server")).toHaveLength(1);
   });
+  it("can shut down a failed first startup using the manager's durable topology receipt", async () => {
+    vi.mocked(fixture.manager.up).mockImplementation(async () => {
+      fixture.set({ ...fixture.create(), status: "degraded" });
+      throw new Error("role blocked after receipt persisted");
+    });
+    await expect(lifecycle.up()).rejects.toThrow("role blocked");
+    await expect(readFile(join(dir, ".bflow/state/session.json"))).rejects.toThrow();
+    const stopped = await lifecycle.down(true);
+    expect(stopped.status).toBe("down");
+    expect(fixture.manager.down).toHaveBeenCalledTimes(1);
+    expect(runner.running.has(repository.sessionName)).toBe(false);
+  });
   it("requires an authenticated Claude status payload rather than accepting exit zero alone", async () => {
     const path = join(dir, ".bflow/config.yaml");
     const config = JSON.parse(await readFile(path, "utf8"));

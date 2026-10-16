@@ -292,9 +292,21 @@ export class EnvironmentLifecycle {
     const repository = await identifyRepository(this.cwd, this.runner);
     const config = await readEnvironmentConfig(repository);
     return this.locked(repository, async () => {
-      const saved = await this.savedManifest(repository);
-      if (!saved) fail("No repository manifest. Run bflow up first; no session was stopped.");
       const deadline = new Deadline(timeoutMs ?? config.environment.shutdownTimeoutMs);
+      let saved = await this.savedManifest(repository);
+      if (!saved) {
+        // A blocked first role may leave only P13's durable startup receipt.
+        // Recover ownership from that validated receipt, never from session name alone.
+        const prior = await this.intent(repository);
+        if (prior?.phase !== "manager_pending") fail("No repository manifest. Run bflow up first; no session was stopped.");
+        const recovery = await deadline.call(() => this.integration(repository, config));
+        if (!recovery) fail("No role manager can reconcile the partial startup; no session was stopped.");
+        try {
+          const observed = unwrap(await deadline.call(opts => recovery.manager.getManifest(repository.sessionName, opts)));
+          if (observed) saved = this.validateManifest(observed, repository);
+        } finally { await recovery.close?.(); }
+        if (!saved) fail("Role startup has no recoverable manifest; no session was stopped.");
+      }
       const running = await this.probe(repository, config, deadline);
       if (!running) {
         await this.writeIntent(repository, "down");
