@@ -110,7 +110,9 @@ export async function measureBehavior(command: BehavioralCommand, cwd: string, r
       await writeFile(reporter, source.replace(/^\/\/# sourceMappingURL=.*$/gm, ""), { mode: 0o600 });
     }
     const args = reporter ? [...command.args, `--reporter=${reporter}`] : command.args;
-    const sandbox = await sandboxBehavior(command, checkout, args, reporter);
+    const sandbox = await sandboxBehavior(command, checkout, args, reporter).catch(error => {
+      throw new Error(`Behavioral runner infrastructure failure (sandbox preparation): ${String(error)}`, { cause: error });
+    });
     const result = await module.createQualityCommandRunner().run({ ...sandbox, cwd: checkout, env, timeoutMs: command.timeoutMs, maxOutputBytes: command.maxOutputBytes ?? 1_048_576 });
     if (!result.ok) throw new Error(`Behavioral command invocation failed: ${result.error.message}`);
     const outcome = result.value as QualityCommandOutcome;
