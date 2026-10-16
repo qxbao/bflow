@@ -240,7 +240,7 @@ export class EnvironmentLifecycle {
           if (started.exitCode !== 0) fail(`Herdr headless server failed to start: ${started.stderr}`);
           while (!await this.probe(repository, config, deadline)) await deadline.pause();
         }
-        if (!running || manifest === null || manifest.status === "down" || manifest.status === "degraded") {
+        if (!running || manifest === null || manifest.status === "down" || manifest.status === "degraded" || previous?.phase === "manager_pending") {
           if (previous?.phase === "manager_pending" && manifest === null) fail("Earlier role startup is unresolved and manager has no recoverable manifest; refusing duplicate agents");
           await this.writeIntent(repository, "manager_pending");
           manifest = this.validateManifest(unwrap(await deadline.call((opts) => integration.manager.up(repository.sessionName, opts))), repository);

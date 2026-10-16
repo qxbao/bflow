@@ -110,7 +110,9 @@ describe("P12 repository environment lifecycle", () => {
   });
   it("reconciles manager_pending only with an existing validated physical manifest", async () => {
     await lifecycle.up();
-    fixture.set({ ...fixture.get(), status: "degraded" });
+    // Health can mark an incomplete but idle topology up; the pending receipt
+    // still requires P13 reconciliation to create the remaining role panes.
+    fixture.set({ ...fixture.get(), status: "up" });
     await writeFile(join(dir, ".bflow/state/operation.json"), JSON.stringify({ repositoryId: repository.id, sessionName: repository.sessionName, phase: "manager_pending" }));
     const recovered = await lifecycle.up();
     expect(recovered.status).toBe("up");
@@ -224,7 +226,7 @@ describe("P12 repository environment lifecycle", () => {
     const manifest = fixture.create(); manifest.panes[1]!.transportState = "blocked";
     vi.mocked(fixture.manager.up).mockImplementation(async () => { fixture.set(manifest); return { ok: true, value: manifest }; });
     await expect(lifecycle.up()).rejects.toThrow("coordinator' is blocked");
-    await expect(lifecycle.up()).rejects.toThrow("blocked"); expect(fixture.manager.up).toHaveBeenCalledTimes(1);
+    await expect(lifecycle.up()).rejects.toThrow("blocked"); expect(fixture.manager.up).toHaveBeenCalledTimes(2);
     const saved = JSON.parse(await readFile(join(dir, ".bflow/state/session.json"), "utf8")); expect(saved.status).toBe("degraded");
   });
   it("does not report success when a required role is missing", async () => {
