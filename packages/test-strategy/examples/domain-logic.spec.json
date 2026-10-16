@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 2,
+  "specId": "price-rounding",
+  "runId": "run-pricing",
+  "sessionId": "session-pricing",
+  "level": "lightweight",
+  "title": "Round monetary totals",
+  "summary": "Round totals to two decimal places",
+  "problemStatement": "Totals currently expose fractional cents",
+  "scope": { "inScope": ["Pure total rounding"], "outOfScope": ["Payment gateway"] },
+  "acceptanceCriteria": [{
+    "id": "round-1",
+    "description": "A total of 10.125 becomes 10.13",
+    "category": "functional",
+    "verificationMethod": "unit_test",
+    "required": true,
+    "status": "pending",
+    "evidenceArtifactIds": []
+  }],
+  "affectedPaths": ["src/pricing.ts"],
+  "riskLevel": "medium",
+  "version": 1,
+  "status": "draft",
+  "createdBy": "architect",
+  "createdAt": "2026-10-16T01:00:00Z",
+  "updatedAt": "2026-10-16T01:00:00Z",
+  "metadata": {
+    "conditionalTdd": {
+      "policyVersion": 1,
+      "taskId": "rounding-task",
+      "taskType": "domain_logic",
+      "changeImpact": {
+        "surfaces": ["domain_logic", "transformation"],
+        "behaviorChanged": true,
+        "deterministic": true,
+        "regressionReproducible": true,
+        "securitySensitive": false,
+        "dataMigration": false,
+        "scope": "local"
+      },
+      "infrastructure": {
+        "readiness": "ready",
+        "commands": [{ "method": "unit_test", "command": "pnpm test:pricing", "level": "unit" }]
+      },
+      "testability": { "level": "automated", "rationale": "Pure rounding accepts numeric inputs and produces deterministic outputs." },
+      "riskClassification": "medium",
+      "conventions": { "tdd": "contextual", "requiredMethods": [], "suggestedLevels": ["property"] }
+    }
+  }
+}
