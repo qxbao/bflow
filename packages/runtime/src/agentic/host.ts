@@ -183,8 +183,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     if (name === "planning_reference") {
       if (role !== "coordinator") throw new Error("Only Coordinator reads host planning guidance");
       const section = textField(parameters.section);
-      const references: Record<string, string[]> = { specification:["../../../specification/examples/trivial.json","../../../specification/src/schema.ts","../../../specification/src/classification.ts"],
-        test_strategy:["../../../test-strategy/src/schema.ts","../../../test-strategy/examples/domain-logic.spec.json"], workflow:["../../../contracts/src/workflow.ts"] };
+      const references: Record<string, string[]> = { specification:["../../../../templates/node-typescript/specifications/docs.spec.json","../../../specification/dist/schema.js","../../../specification/dist/classification.js"],
+        test_strategy:["../../../test-strategy/dist/schema.js","../../../../templates/node-typescript/specifications/bugfix.spec.json"], workflow:["../../../contracts/dist/workflow.js"] };
       const selected = references[section]; if (!selected) throw new Error("Unknown planning section: choose specification, test_strategy, workflow");
       return json(await Promise.all(selected.map(async path => ({source:path,content:await readFile(new URL(path,import.meta.url),"utf8")}))));
     }
