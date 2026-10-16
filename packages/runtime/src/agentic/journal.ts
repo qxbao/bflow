@@ -4,12 +4,12 @@ import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   AgentAssignmentSchema, AgentExecutionHandleSchema, AgentLeaseSchema, AgentRequestSchema,
-  AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema,
+  AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
   DelegationRequestSchema, GitChangeSetSchema, JsonValueSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema,
   SdlcWorkStatusSchema, SpecificationSchema, TestStrategySchema, VerificationCycleSchema,
   VerificationResultSchema, WorkflowDefinitionSchema, type AgentAssignment, type AgentExecutionHandle, type AgentLease,
   type AgentRequest, type AgentResult, type AppendEventsRequest, type ApprovalDecision,
-  type ApprovalRequest, type DelegationRequest, type GitChangeSet, type JsonValue,
+  type ApprovalRequest, type DelegationRequest, type GitChangeSet, type JsonValue, type ArtifactReference,
   type RoleMessage, type SdlcWorkStatus, type Specification, type TestStrategy,
   type VerificationCycle, type WorkflowDefinition, type RenewAgentLeaseRequest
 } from "@bflow/contracts";
@@ -55,6 +55,7 @@ export interface Outbound {
   selector: string; taskId: string; attemptId: string; capabilities: string[];
   assignment?: AgentAssignment; lease?: AgentLease; request?: AgentRequest; handle?: AgentExecutionHandle;
   error?: string; cancelRequested?: boolean;
+  phaseFailureEvidence?: ArtifactReference;
   /** A control notice borrows its task assignment's lease; it never owns capacity. */
   parentAssignmentId?: string;
   leaseRenewal?: RenewAgentLeaseRequest;
@@ -101,6 +102,7 @@ function parseState(input: unknown, repository: string): JournalState {
     if (out.request) out.request = AgentRequestSchema.parse(out.request);
     if (out.lease) out.lease = AgentLeaseSchema.parse(out.lease);
     if (out.handle) out.handle = AgentExecutionHandleSchema.parse(out.handle);
+    if (out.phaseFailureEvidence) out.phaseFailureEvidence = ArtifactReferenceSchema.parse(out.phaseFailureEvidence);
     if (out.leaseRenewal) {
       out.leaseRenewal = RenewAgentLeaseRequestSchema.parse(out.leaseRenewal);
       if (out.parentAssignmentId || !out.lease || out.leaseRenewal.leaseId !== out.lease.leaseId ||

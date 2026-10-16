@@ -238,6 +238,9 @@ export class AgenticWorkflowRuntime {
           await this.verifyReferences(result.evidenceArtifacts, run.runId);
           task.spec.strategy = TestStrategySchema.parse(this.ports.policies.recordEvidence(task.spec.strategy, result));
           if (request?.status === "accepted") await outbox.release(request);
+          if (request && typeof record(request.message.payload).phase === "string")
+            this.phaseNotice(state, outbox, run, task, textField(record(request.message.payload).phase), "passed",
+              "Independent policy phase recorded. Continue the accepted TDD sequence; do not modify frozen Red tests.", result.verificationId);
         } else if (message.type === "review.verdict") {
           const result = QualityGateResultSchema.parse(message.payload);
           const outbound = state.outbound.find(out => out.message.message_id === message.causation_id);
@@ -598,6 +601,7 @@ export class AgenticWorkflowRuntime {
           assignment.handle.target.paneId !== binding.paneId || assignment.handle.target.worktreePath !== binding.worktreePath ||
           digest(assignment.handle.target.session) !== digest(binding.session))
         throw new Error("Verification request does not own the current Developer assignment");
+      if (!task.spec.strategy.targetCommands.length) throw new Error("This task uses independent manual evidence after submission, not automated phase requests");
       await outbox.renew(assignment);
       const rawReceipts = task.spec.strategy.metadata?.tddEvidence ?? [];
       if (!Array.isArray(rawReceipts)) throw new Error("Corrupt policy measurement history");
@@ -608,11 +612,16 @@ export class AgenticWorkflowRuntime {
       if (phase !== expected) throw new Error(`Policy requires ${expected ?? "no additional"} measurement, not ${phase}`);
       const previous = state.outbound.find(item => item.message.type === "verification.requested" && item.message.run_id === runId &&
         record(item.message.payload).kind === "conditional_evidence" && record(item.message.payload).taskId === taskId &&
-        record(item.message.payload).phase === phase && record(item.message.payload).implementationAttemptId === current.attemptId);
+        record(item.message.payload).phase === phase && record(item.message.payload).implementationAttemptId === current.attemptId &&
+        !item.error?.startsWith("policy_phase_failed:"));
       if (previous) {
         if (record(previous.message.payload).sourceRevision !== sourceRevision) throw new Error("Prior phase measurement is unresolved on another revision; reconcile it before retrying");
         return json({ queued: true, messageId: previous.message.message_id, deliveryStatus: previous.status });
       }
+      if (state.outbound.some(item => item.message.run_id === runId && item.error?.startsWith("policy_phase_failed:") &&
+          record(item.message.payload).taskId === taskId && record(item.message.payload).phase === phase &&
+          record(item.message.payload).implementationAttemptId === current.attemptId && record(item.message.payload).sourceRevision === sourceRevision))
+        throw new Error("This revision already failed the phase; commit a repair before requesting another measurement");
       const id = `phase-${digest([runId, taskId, current.attemptId, phase, sourceRevision])}`;
       outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: run.delegation.correlationId,
         causation_id: assignment.message.message_id, run_id: runId, sender: { role: "coordinator" }, recipient: { role: "qa" },
@@ -624,6 +633,44 @@ export class AgenticWorkflowRuntime {
       await save(); return json({ queued: true, messageId: id });
     });
   }
+  private phaseNotice(state: JournalState, outbox: HerdrOutbox, run: RunRecord, task: TaskRecord,
+    phase: string, status: string, summary: string, outcomeId: string): void {
+    const parent = [...state.outbound].reverse().find(item => item.message.type === "task.assignment" &&
+      item.message.run_id === run.runId && item.taskId === task.taskId && item.status === "accepted" && item.handle);
+    if (!parent?.handle) throw new Error("Policy phase has no active Developer assignment for its outcome");
+    const id = `phase-notice-${digest([run.runId, task.taskId, phase, outcomeId])}`;
+    outbox.enqueueTaskNotice(RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: run.delegation.correlationId,
+      causation_id: parent.message.message_id, run_id: run.runId, sender: { role: "coordinator" },
+      recipient: { role: "developer", agent_id: parent.handle.target.agentId, pane_id: parent.handle.target.paneId }, type: "task.status",
+      payload: json({ kind: "policy_phase_outcome", runId: run.runId, taskId: task.taskId, phase, status, summary, outcomeId }),
+      artifact_references: [], occurred_at: this.now(), idempotency_key: id }), parent);
+  }
+  /** Actual host measurements can fail without becoming successful P16 evidence.
+   * Preserve the request outcome, bound repairs, and resume only its owning task. */
+  async recordPhaseFailure(bindingInput: PaneBinding, requestId: string, summary: string, repairable: boolean, evidence?: ArtifactReference): Promise<JsonValue> {
+    const binding = PaneBindingSchema.parse(bindingInput);
+    return this.transaction(async (state, save, _core, outbox) => {
+      const request = state.outbound.find(item => item.message.message_id === requestId);
+      if (!request?.handle || request.message.type !== "verification.requested" || request.status !== "accepted" ||
+          request.handle.target.paneId !== binding.paneId || request.handle.target.agentId !== binding.agentId ||
+          digest(request.handle.target.session) !== digest(binding.session) || record(request.message.payload).kind !== "conditional_evidence")
+        throw new Error("Phase failure does not belong to this independent verifier");
+      const run = this.run(state, request.message.run_id!); this.live(run);
+      const payload = record(request.message.payload), task = run.tasks.find(item => item.taskId === payload.taskId);
+      if (!task) throw new Error("Policy failure task is missing");
+      if (evidence) { await this.verifyReferences([evidence], run.runId); request.phaseFailureEvidence = ArtifactReferenceSchema.parse(evidence); }
+      await outbox.renew(request); await outbox.release(request);
+      request.error = `policy_phase_failed:${summary}`;
+      const failures = state.outbound.filter(item => item.message.run_id === run.runId && item.error?.startsWith("policy_phase_failed:") &&
+        record(item.message.payload).taskId === task.taskId && record(item.message.payload).phase === payload.phase &&
+        record(item.message.payload).implementationAttemptId === payload.implementationAttemptId).length;
+      if (!repairable || failures >= run.maxIterations) {
+        run.status = "escalated"; run.error = !repairable ? `Policy measurement blocked: ${summary}` : `Policy phase repair limit exhausted: ${summary}`;
+        this.progress(state, outbox, run, run.error);
+      } else this.phaseNotice(state, outbox, run, task, textField(payload.phase), "failed", summary, request.message.message_id);
+      await save(); return json({ status: run.status, failedMeasurements: failures, maxIterations: run.maxIterations });
+    });
+  }
   private verificationPlan(run: RunRecord, task?: TaskRecord): VerificationPlan {
     if (task?.verificationPlan) return task.verificationPlan;
     const dossier = task?.spec ?? run.workflowSpec!;
@@ -632,9 +679,11 @@ export class AgenticWorkflowRuntime {
       checks: (task ? [...this.ports.taskChecks] : [...this.ports.workflowChecks]).map(check => {
         if (check.metadata?.bindAcceptedCriteria !== true) return check;
         const config = record(check.configuration);
-        const criteria = dossier.specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived" && criterion.verificationMethod === config.method);
+        const criteria = dossier.specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived" &&
+          (config.kind === "review" || criterion.verificationMethod === config.method && dossier.strategy.criterionMappings.some(mapping =>
+            mapping.criterionId === criterion.id && mapping.testNames.length && mapping.testNames.every(name => Array.isArray(config.testNames) && config.testNames.includes(name)))));
         return { ...check, configuration: json({ ...config, criterionIds: criteria.map(criterion => criterion.id),
-          testNames: dossier.strategy.criterionMappings.filter(mapping => criteria.some(criterion => criterion.id === mapping.criterionId)).flatMap(mapping => mapping.testNames) }) };
+          testNames: config.kind === "review" ? dossier.strategy.criterionMappings.filter(mapping => criteria.some(criterion => criterion.id === mapping.criterionId)).flatMap(mapping => mapping.testNames) : config.testNames }) };
       }),
       implementerIds: run.tasks.flatMap(item => item.outboundIds).map(id => this.activeState!.outbound.find(out => out.message.message_id === id)?.handle?.target.agentId).filter((id): id is string => !!id),
       maxIterations: run.maxIterations });

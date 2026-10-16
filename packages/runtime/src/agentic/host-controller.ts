@@ -10,10 +10,12 @@ import {
   type RuntimeService, type SessionManifest
 } from "@bflow/contracts";
 import { callHost } from "./host-protocol.js";
-import { record, textField } from "./journal.js";
+import { digest, record, textField } from "./journal.js";
+import { parseBehavioralCommands, type BehavioralCommand } from "./behavioral-runner.js";
 
 export interface AgenticHostOptions {
   repositoryPath: string; sessionId: string; herdrBinary?: string; manifestDirectory?: string; maxDeveloperCapacity?: number;
+  behavioralCommands?: readonly BehavioralCommand[];
   policy?: { sdd: { minimumLevel: "lightweight" | "full"; approvalRequired: boolean };
     tdd: { policy: "conditional" }; verification: { maxIterations: number; onExhausted: "require_human" };
     concurrency: { maxConcurrency: number } };
@@ -36,6 +38,7 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
   if (!stat.isFile() || (stat.mode & 0o077) !== 0) throw new Error("Host configuration must be a private regular file");
   const value = record(JSON.parse(await readFile(path, "utf8")));
   for (const key of ["repositoryPath", "sessionId", "directory", "socketPath", "token"]) textField(value[key]);
+  parseBehavioralCommands(value.behavioralCommands);
   if (value.maxDeveloperCapacity !== undefined && (!Number.isInteger(value.maxDeveloperCapacity) || Number(value.maxDeveloperCapacity) < 1 || Number(value.maxDeveloperCapacity) > 32)) throw new Error("Invalid host Developer capacity");
   if (value.policy !== undefined) {
     const policy = record(value.policy), sdd = record(policy.sdd), tdd = record(policy.tdd), verification = record(policy.verification), concurrency = record(policy.concurrency);
@@ -85,6 +88,8 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
   const configuration = await readHostConfiguration(configPath);
   if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory) throw new Error("Foreign host configuration");
   if (options.policy && JSON.stringify(configuration.policy) !== JSON.stringify(options.policy)) throw new Error("Persisted host policy differs from project policy; quiesce and reconcile the existing host before changing it");
+  if (digest(parseBehavioralCommands(configuration.behavioralCommands)) !== digest(parseBehavioralCommands(options.behavioralCommands)))
+    throw new Error("Persisted behavioral commands differ from owner configuration; quiesce and reconcile before changing verification authority");
   const request = (method: string, params: unknown = {}) => callHost(configuration.socketPath, configuration.token, method, params);
   try { await request("ping"); }
   catch (error) {

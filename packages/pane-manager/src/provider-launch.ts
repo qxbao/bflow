@@ -52,7 +52,7 @@ export function buildProviderRoleLaunch(options: ProviderRoleLaunchOptions): rea
     // Conversation and Coordinator get their scoped context through trusted host
     // tools; native repository reads would also expose host state/secrets.
     const tools = spec.topologyRole === "chat" || spec.topologyRole === "coordinator"
-      ? "" : spec.readOnlyWorkspace ? "Read,Glob,Grep" : "Read,Glob,Grep,Edit,Write,Bash";
+      ? "" : spec.readOnlyWorkspace ? "Read,Glob,Grep" : "Read,Glob,Grep,Edit,Write";
     return ["--restricted", "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands",
       "--permission-mode", "dontAsk", "--tools", tools,
       "--allowedTools", [tools, ...Object.keys(servers).map(name => `mcp__${name}__*`)].filter(Boolean).join(","),

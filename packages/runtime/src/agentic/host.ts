@@ -18,8 +18,10 @@ import { digest, json, record, textField } from "./journal.js";
 import { COORDINATOR_TOOLS } from "./tools.js";
 import { openAgenticWorkspace, type AgenticWorkspaceHandle } from "./workspace.js";
 import { unwrap } from "./outbox.js";
-import { HostVerification, DEFAULT_HOST_CHECKS } from "./host-verification.js";
+import { HostVerification, HostBehavioralFailure, DEFAULT_HOST_CHECKS } from "./host-verification.js";
 import { HostReceiptJournal, type HumanHookProvenance } from "./host-receipts.js";
+import { parseBehavioralCommands } from "./behavioral-runner.js";
+import { HostDevelopment } from "./host-development.js";
 import { redactString } from "../resilience/redaction.js";
 
 const execute = promisify(execFile);
@@ -78,14 +80,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const hooksSettingsFile = join(configuration.directory, role + ".hooks.json");
     await privateFile(mcpConfigFile, JSON.stringify({ mcpServers: { bflow: { type: "stdio", command: process.execPath, args: [executable, "mcp", path] } } }));
     const hookCommand = (event: string) => [process.execPath, executable, "hook", path, event].map(shellQuote).join(" ");
-    const hooks = Object.fromEntries(["SessionStart", "UserPromptSubmit", "Stop"].map(event => [event, [{ hooks: [{ type: "command", command: hookCommand(event), timeout: 30 }] }]]));
+    const hooks = Object.fromEntries(["SessionStart", "UserPromptSubmit", "Stop", "PreToolUse"].map(event => [event, [{ hooks: [{ type: "command", command: hookCommand(event), timeout: 30 }] }]]));
     await privateFile(hooksSettingsFile, JSON.stringify({ hooks }));
     let systemPrompt = `You are Bflow's ${role} in a dedicated Herdr pane. Use the bflow MCP tools. All cross-role messages must use send_role_message through native Herdr; never use files as a mailbox. Never fabricate evidence or approvals. `;
     if (role === "conversation") systemPrompt += "You are the sole user interface. The trusted UserPromptSubmit hook supplies the Conversation Gateway result as additional context. Greetings and questions need no workflow. Explain Gateway clarifications and forward the user's actual intent through that Gateway. Never call coordination tools or edit source. User approval comes exclusively from the trusted hook; an MCP call cannot approve.";
     else if (role === "coordinator") {
       try { systemPrompt += await readFile(new URL("../../../../agents/coordinator/system-prompt.md", import.meta.url), "utf8"); }
       catch { systemPrompt += "Inspect the durable inbox, assess the spec, propose a schema-valid workflow. Runtime controls all dispatch and quality/approval gates. Never edit source or approve human-required gates."; }
-    } else if (role === "developer") systemPrompt += "Read assignment_context for your exact accepted specification and worktree. Never change approved criteria/specification. Call authorize_implementation before production edits. Commit only assigned paths in your task worktree. Call submit_implementation after committing, then end your turn. You cannot grant yourself evidence or approvals.";
+    } else if (role === "developer") systemPrompt += "Read assignment_context and workspace_status for the exact accepted specification, owned paths and worktree. Native shell is disabled: use commit_changes with expectedHead for scoped commits and check_work for untrusted feedback. Required TDD: first edit/commit only configured testPaths, request_verification(red), then END YOUR TURN. Runtime sends a phase outcome to resume you. After independent Red, tests are frozen: authorize_implementation, edit source, commit, check_work, then request_verification(green) and yield. On Green receipt, refactor source if appropriate without editing Red tests, commit, request_verification(refactor) and yield. For non-required automated work, request_verification(verification) after a clean commit and yield. Submit implementation only when all required automated phase receipts exist. Manual docs evidence is requested after submission. Never modify accepted criteria/specification or claim your own feedback is independent acceptance.";
     else systemPrompt += "Read incoming RoleMessage. Inspect the exact assigned revision and criteria independently. Use host verification tools for evidence; never invent command output. Send replies through send_role_message with original correlation and causation. End your turn after sending.";
     if (role === "coordinator") systemPrompt += " Use planning_reference to read the shipped specification example, policy metadata schema and workflow contract before proposing a workflow. Specialist requests can gather project details; repository files are never a mailbox.";
     launch[role] = { systemPrompt, mcpConfigFile, hooksSettingsFile };
@@ -133,7 +135,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
     throw new Error("Native delivery acknowledgement is uncertain; inspect/reconcile before replay");
   };
-  const verification = new HostVerification(() => requireWorkspace().runtime, () => requireWorkspace().runtime.ports.artifactStore, receipts);
+  const behavioralCommands = parseBehavioralCommands(configuration.behavioralCommands);
+  const verification = new HostVerification(() => requireWorkspace().runtime, () => requireWorkspace().runtime.ports.artifactStore, receipts, behavioralCommands);
+  const development = new HostDevelopment(() => requireWorkspace().runtime, behavioralCommands);
   const nativeSessions = new Map<string, {role: AgentRole; sessionId: string}>();
   try { for (const [pane, value] of Object.entries(record(JSON.parse(await readFile(join(configuration.directory, "native-sessions.json"), "utf8"))))) {
     const session = record(value); nativeSessions.set(pane, { role: AgentRoleSchema.parse(session.role), sessionId: textField(session.sessionId) });
@@ -179,7 +183,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     workspace = await openAgenticWorkspace({ repositoryPath: configuration.repositoryPath, sessionId: configuration.sessionId, herdrBinary: binary,
       ...(configuration.manifestDirectory ? { manifestDirectory: configuration.manifestDirectory } : {}), maxDeveloperCapacity: configuration.policy?.concurrency.maxConcurrency ?? configuration.maxDeveloperCapacity ?? 2,
       nativeIngressSocket: nativeSocket, bindingReceiptKeys: { [issuerId]: publicKey }, roleLaunch: launch,
-      roleCapabilities: capabilities, taskChecks: DEFAULT_HOST_CHECKS, workflowChecks: DEFAULT_HOST_CHECKS, deterministicGates: [verification.deterministicGate()],
+      roleCapabilities: capabilities, taskChecks: [...DEFAULT_HOST_CHECKS, ...verification.behavioralChecks()],
+      workflowChecks: [...DEFAULT_HOST_CHECKS, ...verification.behavioralChecks()], deterministicGates: [verification.deterministicGate(), ...verification.behavioralGates()],
       authenticateMessage: authenticateNativeHerdrMessage,
       authenticateResult: async (result, handle, message) => await authenticateNativeHerdrMessage(message) && result.requestId === handle.requestId && result.executionId === handle.executionId,
       authenticateEvidence: async (result, message) => await authenticateNativeHerdrMessage(message) && verification.authenticateEvidence(result),
@@ -201,14 +206,16 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const args = record(input); const name = textField(args.name); const parameters = record(JsonValueSchema.parse(args.arguments ?? {}));
     const binding = await principal(role, textField(args.paneId));
     const host = requireWorkspace();
-    if (quiesced && !["host_status", "assignment_context", "inspect_review", "complete_review", "inspect_alternative_verification", "record_alternative_verification", "submit_implementation"].includes(name)) throw new Error("Host is quiesced; new work is disabled while existing receipts can drain");
+    if (quiesced && !["host_status", "assignment_context", "inspect_review", "complete_review", "inspect_alternative_verification", "record_alternative_verification", "record_behavioral_verification", "submit_implementation"].includes(name)) throw new Error("Host is quiesced; new work is disabled while existing receipts can drain");
     if (name === "planning_reference") {
       if (role !== "coordinator") throw new Error("Only Coordinator reads host planning guidance");
       const section = textField(parameters.section);
       const references: Record<string, string[]> = { specification:["../../../../templates/node-typescript/specifications/docs.spec.json","../../../specification/dist/schema.js","../../../specification/dist/classification.js"],
         test_strategy:["../../../test-strategy/dist/schema.js","../../../../templates/node-typescript/specifications/bugfix.spec.json"], workflow:["../../../contracts/dist/workflow.js"] };
       const selected = references[section]; if (!selected) throw new Error("Unknown planning section: choose specification, test_strategy, workflow");
-      return json(await Promise.all(selected.map(async path => ({source:path,content:await readFile(new URL(path,import.meta.url),"utf8")}))));
+      return json({ references: await Promise.all(selected.map(async path => ({source:path,content:await readFile(new URL(path,import.meta.url),"utf8")}))),
+        behavioralCommands: behavioralCommands.map(({ id, command, method, levels, testNames, testPaths, reporter }) =>
+          ({ id, command, method, levels, testNames, testPaths, reporter: reporter ?? "node_tap" })) });
     }
     if (name === "host_status") return json({ active: !!workspace, quiesced, schedulerRunning: !!scheduler, schedulerError: schedulerError ?? null });
     if (name === "send_role_message") {
@@ -231,6 +238,12 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const out = [...state.outbound as Record<string, unknown>[]].reverse().find(item => item.status === "accepted" && record(item.message).type === "task.assignment" &&
         record(item.message).run_id === parameters.runId && item.taskId === parameters.taskId && item.handle && record(record(item.handle).target).paneId === binding.paneId);
       if (!out) throw new Error("No accepted assignment for this Developer");
+      const run = record(await host.runtime.inspect(textField(parameters.runId)));
+      const task = Array.isArray(run.tasks) ? run.tasks.map(record).find(item => item.taskId === parameters.taskId) : undefined;
+      if (!task) throw new Error("Missing accepted task dossier");
+      const strategy = record(record(task.spec).strategy);
+      if (Array.isArray(strategy.targetCommands) && strategy.targetCommands.length)
+        host.runtime.ports.policies.assertEvidenceComplete(strategy);
       const handle = AgentExecutionHandleSchema.parse(out.handle), original = RoleMessageSchema.parse(out.message);
       const envelope = (type: RoleMessage["type"], payload: unknown) => RoleMessageSchema.parse({ schema_version: 2, message_id: randomUUID(), correlation_id: original.correlation_id,
         causation_id: original.message_id, run_id: original.run_id, sender: { role, agent_id: binding.agentId, pane_id: binding.paneId }, recipient: { role: "coordinator" }, type, payload: json(payload), artifact_references: [], occurred_at: new Date().toISOString(), idempotency_key: randomUUID() });
@@ -251,6 +264,39 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       sender: { role, agent_id: binding.agentId, pane_id: binding.paneId }, recipient: { role: "coordinator" }, type, payload: json(payload), artifact_references: artifacts,
       occurred_at: new Date().toISOString(), idempotency_key: randomUUID() });
     if (name === "inspect_review") return verification.inspectReview(binding, parameters);
+    if (name === "workspace_status") return development.status(binding, parameters);
+    if (name === "commit_changes") return development.commit(binding, parameters);
+    if (name === "check_work") return development.check(binding, parameters);
+    if (name === "request_verification") {
+      const current = record(await development.status(binding, parameters));
+      return host.runtime.requestPhaseVerification(binding, textField(current.runId), textField(current.taskId), textField(parameters.phase), textField(current.head));
+    }
+    if (name === "record_behavioral_verification") {
+      if (!["qa", "tester"].includes(role)) throw new Error("Only independent QA/Tester may measure policy evidence");
+      const state = record(await host.runtime.inspect());
+      const requests = Array.isArray(state.outbound) ? state.outbound.map(record).filter(out => ["accepted", "released"].includes(String(out.status)) && out.handle &&
+        record(record(out.handle).target).paneId === binding.paneId && record(record(out.handle).target).agentId === binding.agentId &&
+        digest(record(record(out.handle).target).session) === digest(binding.session) && record(out.message).type === "verification.requested" &&
+        record(out.message).run_id === parameters.runId && record(record(out.message).payload).kind === "conditional_evidence" &&
+        record(record(out.message).payload).taskId === parameters.taskId && record(record(out.message).payload).phase === parameters.phase &&
+        !String(out.error ?? "").startsWith("policy_phase_failed:")) : [];
+      if (requests.length !== 1) throw new Error("No unique assigned policy-phase request for this verifier");
+      const source = RoleMessageSchema.parse(requests[0]!.message);
+      const applied = Array.isArray(state.inbox) ? state.inbox.map(record).find(item => item.status === "applied" &&
+        record(item.message).causation_id === source.message_id && record(item.message).type === "verification.result") : undefined;
+      if (applied) return json({ alreadyRecorded: true, verificationId: record(record(applied.message).payload).verificationId });
+      if (requests[0]!.status !== "accepted") throw new Error("Policy verifier lease released without applied evidence; reconcile the original request");
+      let completed: Awaited<ReturnType<HostVerification["behavioralEvidence"]>>;
+      try {
+        completed = await verification.behavioralEvidence(binding, parameters);
+        if (record(completed.result.metadata?.conditionalTdd).sourceRevision !== record(source.payload).sourceRevision)
+          throw new Error("Policy phase source changed after the request; reconcile before accepting evidence");
+      } catch (error) {
+        return host.runtime.recordPhaseFailure(binding, source.message_id, redactString(String(error)), error instanceof HostBehavioralFailure,
+          error instanceof HostBehavioralFailure ? error.evidence : undefined);
+      }
+      return nativeDeliver(envelope(source, "verification.result", completed.result, completed.result.evidenceArtifacts), `behavioral:${completed.result.verificationId}`);
+    }
     if (name === "inspect_alternative_verification") return verification.inspectAlternative(binding, parameters);
     if (name === "complete_review") {
       const completed = await verification.completeReview(binding, parameters);
@@ -270,9 +316,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       }
       const spec = record(parameters.specification);
       if (configuration.policy?.sdd.minimumLevel === "full" && spec.level !== "full") throw new Error("Project policy requires a full specification");
-      if (!Array.isArray(spec.affectedPaths) || spec.affectedPaths.some(path => typeof path !== "string" || !/\.(md|txt|rst)$/i.test(path)) ||
-          !Array.isArray(spec.acceptanceCriteria) || spec.acceptanceCriteria.some(criterion => record(criterion).verificationMethod !== "manual_review"))
-        throw new Error("Default host supports documentation with manual review criteria; behavioral development requires configured independent runners");
+      verification.assertSupported(spec, host.runtime.ports.policies.strategy.resolve(spec));
     }
     return host.tools.invoke(name, parameters, { role });
   };
@@ -280,6 +324,15 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const dispatch = async (token: string, method: string, params: unknown): Promise<unknown> => {
     if (token !== configuration.token) {
       const role = roleTokens.get(token); if (!role) throw new Error("Host authentication failed");
+      if (method === "tool_guard") {
+        const input = record(params), hook = record(input.hook), binding = await principal(role, textField(input.paneId));
+        if (hook.hook_event_name !== "PreToolUse" || !binding.session || hook.session_id !== binding.session.value)
+          throw new Error("Tool guard native session mismatch");
+        const tool = textField(hook.tool_name);
+        if (tool.startsWith("mcp__bflow__") || ["Read", "Glob", "Grep", "ToolSearch"].includes(tool)) return { permitted: true };
+        if (role !== "developer" || !["Edit", "Write"].includes(tool)) throw new Error("Native mutation/command tool is unavailable for this role");
+        await development.authorizeFileEdit(binding, hook); return { permitted: true };
+      }
       if (method === "provider_started") {
         const receipt = record(params), paneId = textField(receipt.paneId), nativeSessionId = textField(receipt.nativeSessionId);
         const directory = join(configuration.directory, "launch-receipts");
@@ -364,7 +417,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   };
   const sockets = new Set<Socket>();
   const server = createServer(socket => {
-    sockets.add(socket); socket.on("close", () => sockets.delete(socket)); socket.on("error", () => undefined); socket.setTimeout(35_000, () => socket.destroy());
+    sockets.add(socket); socket.on("close", () => sockets.delete(socket)); socket.on("error", () => undefined); socket.setTimeout(600_000, () => socket.destroy());
     let input = "", started = false;
     socket.on("data", chunk => { if (started) return; input += String(chunk);
       if (Buffer.byteLength(input) > 4 * 1024 * 1024) { socket.destroy(); return; }
@@ -419,10 +472,16 @@ function availableTools(role: AgentRole) {
     { name: "send_role_message", description: "Send a schema-valid RoleMessage through the signed native Herdr plugin; parameters: {message: RoleMessage}" }];
   if (role === "coordinator") tools.push(...COORDINATOR_TOOLS, {name:"planning_reference",description:"Read canonical shipped examples and exact metadata/contract definitions; section: specification, test_strategy, workflow"});
   if (role === "developer") tools.push({ name: "authorize_implementation", description: "Verify accepted spec and Red evidence; parameters: runId, taskId" }, { name: "submit_implementation", description: "Submit committed implementation under your exact native assignment binding; parameters: runId, taskId" });
+  if (role === "developer") tools.push(
+    { name: "workspace_status", description: "Inspect your assigned task worktree, current Git HEAD and recorded TDD phases; runId,taskId" },
+    { name: "commit_changes", description: "Commit only approved owned files on your task branch with expectedHead and message. No shell, push or merge; runId,taskId,expectedHead,message" },
+    { name: "check_work", description: "Run owner-configured checks as Developer feedback. This never counts as independent acceptance evidence; runId,taskId" },
+    { name: "request_verification", description: "Ask Runtime to dispatch an independent QA phase, then end your turn. Phase: red,green,refactor,verification; runId,taskId,phase" });
   if (["reviewer", "qa", "tester"].includes(role)) tools.push(
     { name: "inspect_review", description: "Independently capture exact assigned diff before review; parameters: messageId" },
     { name: "complete_review", description: "Return a verdict after inspect_review; parameters: reviewId, messageId, summary, criteria:[{criterionId,passed,summary}]" });
   if (["qa", "tester"].includes(role)) tools.push({ name: "inspect_alternative_verification", description: "Capture exact committed diff and accepted dossier before evaluating criteria; parameters: runId,taskId" }, { name: "record_alternative_verification", description: "Capture actual committed documentation diff and independent manual acceptance evidence; parameters: observationId,runId,taskId,criteria:[{criterionId,passed,summary}]" });
+  if (["qa", "tester"].includes(role)) tools.push({ name: "record_behavioral_verification", description: "Execute an assigned phase using the owner's argv, exact committed tests and real output; runId,taskId,phase. Never supply test output yourself." });
   const string = { type:"string", minLength:1 }, array = {type:"array",items:string}, object = {type:"object"};
   const argumentsByName: Record<string, {properties: Record<string, unknown>; required: string[]}> = {
     planning_reference:{properties:{section:{type:"string",enum:["specification","test_strategy","workflow"]}},required:["section"]},
@@ -437,7 +496,12 @@ function availableTools(role: AgentRole) {
     inspect_review:{properties:{messageId:string},required:["messageId"]},
     complete_review:{properties:{reviewId:string,messageId:string,summary:string,criteria:{type:"array",items:{type:"object",properties:{criterionId:string,passed:{type:"boolean"},summary:string},required:["criterionId","passed","summary"],additionalProperties:false}}},required:["reviewId","messageId","summary","criteria"]},
     inspect_alternative_verification:{properties:{runId:string,taskId:string},required:["runId","taskId"]},
-    record_alternative_verification:{properties:{observationId:string,runId:string,taskId:string,criteria:{type:"array",items:{type:"object",properties:{criterionId:string,passed:{type:"boolean"},summary:string},required:["criterionId","passed","summary"],additionalProperties:false}}},required:["observationId","runId","taskId","criteria"]}
+    record_alternative_verification:{properties:{observationId:string,runId:string,taskId:string,criteria:{type:"array",items:{type:"object",properties:{criterionId:string,passed:{type:"boolean"},summary:string},required:["criterionId","passed","summary"],additionalProperties:false}}},required:["observationId","runId","taskId","criteria"]},
+    workspace_status:{properties:{runId:string,taskId:string},required:["runId","taskId"]},
+    commit_changes:{properties:{runId:string,taskId:string,expectedHead:string,message:string},required:["runId","taskId","expectedHead","message"]},
+    check_work:{properties:{runId:string,taskId:string},required:["runId","taskId"]},
+    request_verification:{properties:{runId:string,taskId:string,phase:{type:"string",enum:["red","green","refactor","verification"]}},required:["runId","taskId","phase"]},
+    record_behavioral_verification:{properties:{runId:string,taskId:string,phase:{type:"string",enum:["red","green","refactor","verification"]}},required:["runId","taskId","phase"]}
   };
   return tools.map(tool => ({ ...tool, inputSchema: { type: "object", ...(argumentsByName[tool.name] ?? {properties:{},required:[]}), additionalProperties:false } }));
 }
@@ -455,7 +519,8 @@ export async function runRoleMcp(configuration: RoleConfiguration): Promise<void
       if (request.method === "ping") { reply({}); continue; }
       if (request.method !== "tools/call") throw new Error("Unsupported MCP method");
       const params = record(request.params); if (!availableTools(configuration.role).some(tool => tool.name === params.name)) throw new Error("Tool is unavailable for this role");
-      const result = await callHost(configuration.socketPath, configuration.token, "role_call", { ...params, paneId: textField(process.env.HERDR_PANE_ID) });
+      const measured = ["record_behavioral_verification", "check_work", "complete_review", "record_alternative_verification"].includes(String(params.name));
+      const result = await callHost(configuration.socketPath, configuration.token, "role_call", { ...params, paneId: textField(process.env.HERDR_PANE_ID) }, measured ? 600_000 : 30_000);
       reply({ content: [{ type: "text", text: JSON.stringify(result) }] });
     } catch (error) { reply({ isError: true, content: [{ type: "text", text: String(error) }] }); }
   }
@@ -495,6 +560,13 @@ export async function runProviderHook(configuration: RoleConfiguration, event: s
   if (event === "UserPromptSubmit" && configuration.role === "conversation") {
     const result = await callHost(configuration.socketPath, configuration.token, "user_prompt", { paneId, hook });
     process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: "Trusted Bflow Conversation Gateway result: " + JSON.stringify(result) } }) + "\n");
+  }
+  if (event === "PreToolUse") {
+    try { await callHost(configuration.socketPath, configuration.token, "tool_guard", { paneId, hook }); }
+    catch (error) {
+      process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny",
+        permissionDecisionReason: redactString(String(error)) } }) + "\n");
+    }
   }
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

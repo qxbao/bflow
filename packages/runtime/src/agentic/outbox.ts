@@ -116,6 +116,8 @@ export class HerdrOutbox {
         const health = await this.ports.panes.inspectRoleHealth(out.selector);
         if (health.ok && health.value.readyForPrompt && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId)
           await this.release(out); // transport capacity only; never task-success evidence
+        else if (health.ok && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId && !out.parentAssignmentId)
+          await this.renew(out); // a bounded host measurement may outlive one lease period
         continue;
       }
       if (out.status !== "queued") continue;

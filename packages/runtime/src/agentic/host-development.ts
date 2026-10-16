@@ -3,7 +3,7 @@ import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { AgentExecutionHandleSchema, PaneBindingSchema, RoleMessageSchema, type PaneBinding } from "@bflow/contracts";
-import type { BehavioralCommand } from "./behavioral-runner.js";
+import { measureBehavior, type BehavioralCommand } from "./behavioral-runner.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
 import { json, record, strings, textField } from "./journal.js";
 
@@ -72,6 +72,18 @@ export class HostDevelopment {
         branch: (await this.git(context.cwd, ["branch", "--show-current"])).trim(), worktreePath: context.cwd,
         tddDecision: task.spec.strategy.tddDecision, recordedEvidence: task.spec.strategy.metadata?.tddEvidence ?? [] }));
   }
+  /** Useful Developer feedback, deliberately not authenticated QA evidence. */
+  async check(binding: PaneBinding, input: unknown) {
+    const context = await this.identity(binding, input);
+    const selected = await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async task => ({
+      commands: this.commands.filter(command => task.spec.strategy.targetCommands.includes(command.command)),
+      head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim()
+    }));
+    if (!selected.commands.length) throw new Error("No owner-configured automated checks for this task");
+    const measurements = [];
+    for (const command of selected.commands) measurements.push(await measureBehavior(command, context.cwd, selected.head));
+    return json({ independentAcceptanceEvidence: false, sourceRevision: selected.head, measurements });
+  }
   async commit(binding: PaneBinding, input: unknown) {
     const context = await this.identity(binding, input), expected = textField(context.args.expectedHead), message = textField(context.args.message);
     if (!/^[a-f0-9]{40}$/.test(expected) || message.includes("\0") || message.length > 500) throw new Error("Invalid expected revision or commit message");
@@ -90,9 +102,11 @@ export class HostDevelopment {
       });
       if (!paths.length) return json({ committed: false, head: expected });
       const tests = this.commands.filter(command => task.spec.strategy.targetCommands.includes(command.command)).flatMap(command => command.testPaths);
-      if (task.spec.strategy.tddDecision.mode === "required" && paths.every(path => tests.includes(path))) {
+      if (task.spec.strategy.tddDecision.mode === "required") {
         const evidence = task.spec.strategy.metadata?.tddEvidence;
-        if (Array.isArray(evidence) && evidence.length) throw new Error("Red test files are frozen after independent Red measurement");
+        if (Array.isArray(evidence) && evidence.length && paths.some(path => tests.includes(path)))
+          throw new Error("Red test files are frozen after independent Red measurement");
+        if (!paths.every(path => tests.includes(path))) this.runtime().ports.policies.assertReadyToImplement(task.spec.strategy);
       } else this.runtime().ports.policies.assertReadyToImplement(task.spec.strategy);
       await this.git(context.cwd, ["add", "--all", "--", ...paths]);
       await this.git(context.cwd, ["commit", "-m", message]);

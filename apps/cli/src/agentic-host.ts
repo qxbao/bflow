@@ -1,5 +1,6 @@
 import type { OperationOptions, OperationResult, SessionManifest } from "@bflow/contracts";
 import { resolve } from "node:path";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import type { EnvironmentCompositionInput, EnvironmentIntegration } from "./environment.js";
 
 export interface HostRoleLaunch {
@@ -27,10 +28,22 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
   // concrete workspace composition does. No repository module is executed.
   const runtime = await import(new URL("../../../packages/runtime/dist/index.js", import.meta.url).href);
   if (typeof runtime.ensureAgenticHost !== "function") throw new Error("Installed Runtime has no persistent Agentic host API; rebuild all workspace packages.");
+  const verificationPath = resolve(input.repository.root, ".bflow/verification.json");
+  let behavioralCommands = [];
+  try {
+    if (!(await lstat(verificationPath)).isFile() || await realpath(verificationPath) !== verificationPath)
+      throw new Error("Owner verification configuration must be a regular file inside this repository");
+    const value: unknown = JSON.parse(await readFile(verificationPath, "utf8"));
+    if (value === null || typeof value !== "object" || Array.isArray(value) || !("schemaVersion" in value) || value.schemaVersion !== 1 ||
+        !("behavioralCommands" in value) || Object.keys(value).some(key => key !== "schemaVersion" && key !== "behavioralCommands"))
+      throw new Error("Invalid owner verification configuration (expected schemaVersion:1 and behavioralCommands)");
+    behavioralCommands = runtime.parseBehavioralCommands(value.behavioralCommands);
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   return runtime.ensureAgenticHost({ repositoryPath: input.repository.root,
     sessionId: input.repository.sessionName, herdrBinary: input.config.environment.herdrBinary,
     manifestDirectory: resolve(input.repository.root, ".bflow/state/panes"),
     maxDeveloperCapacity: input.config.environment.concurrency.maxConcurrency,
+    behavioralCommands,
     policy: { sdd: input.config.environment.sdd, tdd: input.config.environment.tdd,
       verification: input.config.environment.verification, concurrency: input.config.environment.concurrency }
   });

@@ -35,7 +35,8 @@ describe("explicit provider role launch policy", () => {
   });
   it("gives Claude Developer write tools only when requested as Developer", () => {
     const args = buildProviderRoleLaunch({ agentKind: "claude", role: "developer", systemPrompt: "Implement scoped work." });
-    expect(args[args.indexOf("--tools") + 1]).toBe("Read,Glob,Grep,Edit,Write,Bash");
+    expect(args[args.indexOf("--tools") + 1]).toBe("Read,Glob,Grep,Edit,Write");
+    expect(args[args.indexOf("--tools") + 1]).not.toContain("Bash");
   });
   it("rejects unsupported provider policy rather than silently configuring another provider", () => {
     expect(() => buildProviderRoleLaunch({ agentKind: "other" as "codex", role: "reviewer", systemPrompt: "Review" })).toThrow();

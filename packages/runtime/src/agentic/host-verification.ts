@@ -31,6 +31,10 @@ export interface HostVerificationReceipts {
   putObservation(kind: "review" | "alternative", id: string, value: { binding: PaneBinding; observation: JsonValue; context?: unknown; runId?: string; taskId?: string }): Promise<unknown>;
   getObservation(kind: "review" | "alternative", id: string): Promise<{ binding: PaneBinding; observation: JsonValue; context?: unknown; runId?: string; taskId?: string } | undefined>;
 }
+/** A completed, valid measurement that requires a bounded Developer repair. */
+export class HostBehavioralFailure extends Error {
+  constructor(message: string, readonly evidence: import("@bflow/contracts").ArtifactReference) { super(message); }
+}
 export class HostVerification {
   private readonly gateReceipts = new Map<string, string>();
   private readonly gateRecords = new Map<string, QualityGateResult>();
@@ -171,7 +175,10 @@ export class HostVerification {
         digest(measured.map(item => ({ commandId: item.commandId, testNames: item.testNames, testBlobs: item.testBlobs })))) throw new Error("Green/Refactor must preserve the exact committed Red test files and observed identities");
       if (redDetails?.sourceRevision === revision) throw new Error("Green/Refactor require the implementation revision after Red");
     }
-    if (phase === "red" ? !measured.some(item => item.targetFailure) : measured.some(item => item.failed)) throw new Error(phase === "red" ? "Red requires an independently observed assertion failure" : "Behavioral acceptance failed; request repairs");
+    if (phase === "red" ? !measured.some(item => item.targetFailure) : measured.some(item => item.failed)) {
+      const evidence = await this.artifact(runId, taskId, { phase, observation, measurements: measured, verifiedBy: binding.agentId, accepted: false });
+      throw new HostBehavioralFailure(phase === "red" ? "Red requires an independently observed assertion failure" : "Behavioral acceptance failed; request repairs", evidence);
+    }
     if (phase === "red") {
       const targetNames = new Set(strategy.criterionMappings.filter(mapping => criteria.some(criterion => criterion.id === mapping.criterionId)).flatMap(mapping => mapping.testNames));
       if (measured.some(item => item.testResults.some(test => !test.passed && !targetNames.has(test.name)))) throw new Error("Red failure belongs to an unrelated test rather than an accepted target criterion");

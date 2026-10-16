@@ -101,6 +101,8 @@ export * from "./resilience/index.js";
 export * from "./observability/index.js";
 export * from "./context/index.js";
 export * from "./session-recovery/index.js";
+export { parseBehavioralCommands } from "./agentic/behavioral-runner.js";
+export type { BehavioralCommand } from "./agentic/behavioral-runner.js";
 
 export { ensureAgenticHost } from "./agentic/host-controller.js";
 export type { AgenticHostController, AgenticHostOptions, RoleLaunchDescriptor } from "./agentic/host-controller.js";
