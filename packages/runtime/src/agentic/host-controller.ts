@@ -63,7 +63,11 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
     if (!observed.isDirectory() || observed.isSymbolicLink()) throw new Error("Host state directories must not be symlinks or special files");
   }
   await chmod(directory, 0o700);
-  const socketRoot = join(tmpdir(), `bflow-host-${process.getuid?.() ?? "local"}`);
+  // Unix socket paths have a byte limit independent of filesystem path limits.
+  // Long profile-provided TMPDIRs must not break the default CLI on Linux.
+  const socketDirectoryName = `bflow-host-${process.getuid?.() ?? "local"}`;
+  const temporaryRoot = Buffer.byteLength(join(tmpdir(), socketDirectoryName, identity + ".native.sock")) <= 103 ? tmpdir() : "/tmp";
+  const socketRoot = join(temporaryRoot, socketDirectoryName);
   await mkdir(socketRoot, { recursive: true, mode: 0o700 });
   const stat = await lstat(socketRoot);
   if (!stat.isDirectory() || (stat.mode & 0o077) !== 0 || (process.getuid && stat.uid !== process.getuid())) throw new Error("Unsafe host socket directory");

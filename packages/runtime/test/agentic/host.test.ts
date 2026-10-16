@@ -23,6 +23,37 @@ async function fixture() {
   return {root, controller, options};
 }
 describe("default durable host lifecycle and role MCP", () => {
+  it("pins owner verification authority and installs a fail-closed native edit hook", async () => {
+    const f = await fixture(), launch = await f.controller.prepare();
+    const hooks = JSON.parse(await readFile(launch.roleLaunch.developer!.hooksSettingsFile, "utf8"));
+    expect(hooks.hooks.PreToolUse[0].hooks[0].command).toContain("PreToolUse");
+    const config = JSON.parse(await readFile(launch.roleLaunch.developer!.mcpConfigFile, "utf8"));
+    const host = fileURLToPath(new URL("../../dist/agentic/host.js", import.meta.url));
+    const denied = await new Promise<string>((accept, reject) => {
+      const child = spawn(process.execPath, [host, "hook", config.mcpServers.bflow.args[2], "PreToolUse"],
+        { env: { ...process.env, HERDR_PANE_ID: "unassigned-pane" }, stdio: ["pipe", "pipe", "pipe"] });
+      let output = "", errors = "";
+      child.stdout.on("data", chunk => output += String(chunk)); child.stderr.on("data", chunk => errors += String(chunk));
+      child.once("error", reject); child.once("exit", code => code === 0 ? accept(output) : reject(new Error(errors)));
+      child.stdin.end(JSON.stringify({ hook_event_name: "PreToolUse", session_id: "unassigned-session", tool_name: "Write", tool_input: { file_path: join(f.root, "source.js"), content: "escape" } }));
+    });
+    expect(JSON.parse(denied).hookSpecificOutput.permissionDecision).toBe("deny");
+    await expect(ensureAgenticHost({ ...f.options, behavioralCommands: [{ id: "owner-unit", command: "owner:unit", executable: process.execPath,
+      args: ["--test", "--test-reporter=tap", "test.cjs"], method: "unit_test", levels: ["unit"],
+      testNames: ["target"], testPaths: ["test.cjs"], timeoutMs: 1000 }] })).rejects.toThrow("configuration");
+  });
+  it("uses a short private Unix socket directory when TMPDIR exceeds socket limits", async () => {
+    const previous = process.env.TMPDIR;
+    try {
+      process.env.TMPDIR = "/tmp/" + "profile-directory-".repeat(12);
+      const f = await fixture();
+      const config = JSON.parse(await readFile(join(f.root, ".bflow/state/host", f.options.sessionId, "host.json"), "utf8"));
+      expect(Buffer.byteLength(config.socketPath.replace(/\.sock$/, ".native.sock"))).toBeLessThanOrEqual(103);
+      expect((await f.controller.runtime.findRuns({ limit: 1 })).ok).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous;
+    }
+  });
   it("recognizes Core succeeded runs as terminal independently of SDLC completed status", async () => {
     const f = await fixture();
     expect((await f.controller.runtime.findRuns({ limit: 100 })).ok).toBe(true);

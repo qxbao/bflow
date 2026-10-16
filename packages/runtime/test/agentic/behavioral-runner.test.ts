@@ -44,6 +44,13 @@ async function fixture(taskType = "bugfix", reporter: "node_tap" | "vitest_json"
   return { cwd, git, commit, command, specification, redRevision, base, binding, host, restart(commands = [command]) { return new HostVerification(() => runtime, () => opened.value, new HostReceiptJournal(receiptsPath, cwd, "session-1"), commands); }, get strategy() { return strategy; }, accept(result: unknown) { strategy = recordEvidence(strategy, result); } };
 }
 describe("independent behavioral command measurements", () => {
+  it("bounds aggregate command time and output within host transport capacity", async () => {
+    const f = await fixture();
+    expect(() => parseBehavioralCommands([{ ...f.command, timeoutMs: 300_001 }])).toThrow("execution bounds");
+    expect(() => parseBehavioralCommands([{ ...f.command, maxOutputBytes: 4_194_305 }])).toThrow("execution bounds");
+    expect(() => parseBehavioralCommands([{ ...f.command, timeoutMs: 300_000 },
+      { ...f.command, id: "second", command: "owner:second", timeoutMs: 300_000 }])).toThrow("Aggregate");
+  });
   it.each(["node_tap", "vitest_json"] as const)("%s observes Red before authorization, then Green/Refactor with immutable tests and trusted artifacts", async reporter => {
     const f = await fixture("bugfix", reporter);
     expect(() => assertReadyToImplement(f.strategy)).toThrow(/Red/);
