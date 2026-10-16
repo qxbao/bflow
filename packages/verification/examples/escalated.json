@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 2,
+  "verificationId": "verify-998cc74f4efe2298419f16fae5613b4b3ab6fd2b1b13636bc24756ac5b56207a",
+  "runId": "run-1",
+  "taskId": "task-1",
+  "cycleNumber": 1,
+  "attemptId": "attempt-1",
+  "status": "escalated",
+  "verificationScope": "task",
+  "independentExecution": true,
+  "evaluatedCriteria": [
+    {
+      "criterionId": "ac-1",
+      "passed": false,
+      "evidenceArtifactId": "verification-644e001e015fdeb0327527babf04cba40ac41d70ec40740ab94e93a28e22b8ba",
+      "summary": "No valid independent evidence; see verification audit"
+    },
+    {
+      "criterionId": "ac-types",
+      "passed": false,
+      "evidenceArtifactId": "verification-644e001e015fdeb0327527babf04cba40ac41d70ec40740ab94e93a28e22b8ba",
+      "summary": "No valid independent evidence; see verification audit"
+    },
+    {
+      "criterionId": "ac-review",
+      "passed": false,
+      "evidenceArtifactId": "verification-644e001e015fdeb0327527babf04cba40ac41d70ec40740ab94e93a28e22b8ba",
+      "summary": "No valid independent evidence; see verification audit"
+    }
+  ],
+  "qualityGateResults": [],
+  "evidenceArtifacts": [
+    {
+      "trust": "stored",
+      "artifactId": "verification-9e6b6793bb5b77bf052725ce00d287fd6163bfde93e7f6e190d40f91c2ff38b7",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "kind": "log",
+      "uri": "artifact://test/verification-9e6b6793bb5b77bf052725ce00d287fd6163bfde93e7f6e190d40f91c2ff38b7",
+      "mediaType": "application/json",
+      "sizeBytes": 5537,
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "7ea3e5145558bc6b76f2ec3480a412572abce128b686d33d6fafa7278b6c97f2"
+      },
+      "createdAt": "2026-10-16T01:00:00Z"
+    },
+    {
+      "trust": "stored",
+      "artifactId": "verification-644e001e015fdeb0327527babf04cba40ac41d70ec40740ab94e93a28e22b8ba",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "kind": "report",
+      "uri": "artifact://test/verification-644e001e015fdeb0327527babf04cba40ac41d70ec40740ab94e93a28e22b8ba",
+      "mediaType": "application/json",
+      "sizeBytes": 1541,
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "f1befcf15d24feef7c0951d7cb9ed7dfff8ba02aa8333ceb69c889f0c65376eb"
+      },
+      "createdAt": "2026-10-16T01:00:00Z"
+    },
+    {
+      "trust": "stored",
+      "artifactId": "patch-1",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "kind": "patch",
+      "uri": "artifact://test/patch-1",
+      "mediaType": "application/json",
+      "sizeBytes": 85,
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "3ccca22ae703536b9f172ab34667d45bc2f1e420f9bca4c91d0eb2598a384129"
+      },
+      "createdAt": "2026-10-16T01:00:00Z"
+    }
+  ],
+  "findings": [
+    {
+      "code": "spec_changed",
+      "severity": "error",
+      "message": "Specification changed; obtain a new approved plan",
+      "details": {
+        "taskId": "task-1",
+        "responsibleRole": "architect",
+        "requiresNewTaskIfOutsideScope": true
+      }
+    }
+  ],
+  "changeSet": {
+    "schemaVersion": 2,
+    "changeSetId": "change-1",
+    "runId": "run-1",
+    "taskId": "task-1",
+    "attemptId": "attempt-1",
+    "worktreePath": "/tmp/example-task",
+    "branchName": "agent/example/task",
+    "baseCommitHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "headCommitHash": "1111111111111111111111111111111111111111",
+    "dirtyWorkingTree": false,
+    "filesChanged": [
+      {
+        "path": "packages/example/src/logic.ts",
+        "changeType": "modified",
+        "additions": 1,
+        "deletions": 1
+      }
+    ],
+    "patchArtifact": {
+      "trust": "stored",
+      "artifactId": "patch-1",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "kind": "patch",
+      "uri": "artifact://test/patch-1",
+      "mediaType": "application/json",
+      "sizeBytes": 85,
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "3ccca22ae703536b9f172ab34667d45bc2f1e420f9bca4c91d0eb2598a384129"
+      },
+      "createdAt": "2026-10-16T01:00:00Z"
+    },
+    "createdAt": "2026-10-16T01:00:00Z"
+  },
+  "verifiedBy": "quality_gate",
+  "startedAt": "2026-10-16T01:00:00Z",
+  "completedAt": "2026-10-16T01:00:00Z"
+}

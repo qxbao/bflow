@@ -1,0 +1,241 @@
+{
+  "schemaVersion": 2,
+  "verificationId": "verify-87890eb7c8ccdcc8c73762662143a5f5132a50164dc1413f7c812be13c9fa455",
+  "runId": "run-1",
+  "taskId": "task-1",
+  "cycleNumber": 1,
+  "attemptId": "attempt-1",
+  "status": "inconclusive",
+  "verificationScope": "task",
+  "independentExecution": true,
+  "evaluatedCriteria": [
+    {
+      "criterionId": "ac-1",
+      "passed": false,
+      "evidenceArtifactId": "verification-27bd925205844f105f801cce6968525a25b7766464ea066177122cc57538d6ae",
+      "summary": "No valid independent evidence; see verification audit"
+    },
+    {
+      "criterionId": "ac-types",
+      "passed": true,
+      "command": "pnpm typecheck",
+      "exitCode": 0,
+      "evidenceArtifactId": "verification-3129c590693364c15e5ad17ab94863b4fc419b65a3e7b2b7305c843165fbecc4",
+      "summary": "Expected behavior independently observed"
+    },
+    {
+      "criterionId": "ac-review",
+      "passed": true,
+      "evidenceArtifactId": "verification-0ea9f8d0f53ef2e8413e32db2d1945b254c9bf04b2e0f427fe5348c09d03ebc2",
+      "summary": "Expected behavior independently observed"
+    }
+  ],
+  "qualityGateResults": [
+    {
+      "gateId": "type-check",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "evaluationId": "type-check-attempt-1-1",
+      "status": "passed",
+      "findings": [],
+      "producedArtifacts": [],
+      "evaluatedAt": "2026-10-16T01:00:00Z",
+      "metadata": {
+        "verification": {
+          "schemaVersion": 2,
+          "checkId": "type-check",
+          "runId": "run-1",
+          "taskId": "task-1",
+          "attemptId": "attempt-1",
+          "sourceRevision": "1111111111111111111111111111111111111111",
+          "specFingerprint": "c8fe665c2e0340a7adf12ef446063ce63572b4cfa8e13e2e00ba87365007580a",
+          "scope": "task",
+          "independentExecution": true,
+          "isolated": true,
+          "executorId": "independent-verifier",
+          "role": "quality_gate",
+          "method": "typecheck",
+          "command": "pnpm typecheck",
+          "exitCode": 0,
+          "testNames": [
+            "types-valid"
+          ],
+          "criteria": [
+            {
+              "criterionId": "ac-types",
+              "passed": true,
+              "summary": "Expected behavior independently observed"
+            }
+          ],
+          "summary": "Independent check passed"
+        }
+      }
+    },
+    {
+      "gateId": "review-check",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "evaluationId": "review-check-attempt-1-1",
+      "status": "passed",
+      "findings": [],
+      "producedArtifacts": [],
+      "evaluatedAt": "2026-10-16T01:00:00Z",
+      "metadata": {
+        "verification": {
+          "schemaVersion": 2,
+          "checkId": "review-check",
+          "runId": "run-1",
+          "taskId": "task-1",
+          "attemptId": "attempt-1",
+          "sourceRevision": "1111111111111111111111111111111111111111",
+          "specFingerprint": "c8fe665c2e0340a7adf12ef446063ce63572b4cfa8e13e2e00ba87365007580a",
+          "scope": "task",
+          "independentExecution": true,
+          "isolated": true,
+          "executorId": "independent-verifier",
+          "role": "reviewer",
+          "method": "manual_review",
+          "testNames": [
+            "review-scope"
+          ],
+          "criteria": [
+            {
+              "criterionId": "ac-review",
+              "passed": true,
+              "summary": "Expected behavior independently observed"
+            }
+          ],
+          "summary": "Independent check passed"
+        }
+      }
+    }
+  ],
+  "evidenceArtifacts": [
+    {
+      "trust": "stored",
+      "artifactId": "verification-cde03b45bff995f4aedd5c7f249fec133a7d8c1c9f677ebee27dfda056407d29",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "kind": "log",
+      "uri": "artifact://test/verification-cde03b45bff995f4aedd5c7f249fec133a7d8c1c9f677ebee27dfda056407d29",
+      "mediaType": "application/json",
+      "sizeBytes": 5540,
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "965e98640486dd70eb1db79279c09e03c896120592ac9dacb5252d3bcd65a219"
+      },
+      "createdAt": "2026-10-16T01:00:00Z"
+    },
+    {
+      "trust": "stored",
+      "artifactId": "verification-27bd925205844f105f801cce6968525a25b7766464ea066177122cc57538d6ae",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "kind": "report",
+      "uri": "artifact://test/verification-27bd925205844f105f801cce6968525a25b7766464ea066177122cc57538d6ae",
+      "mediaType": "application/json",
+      "sizeBytes": 5645,
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "5f72a5aa095c1e0b1925c773c4151e618f82581705c6c77b7006de46aa97eae8"
+      },
+      "createdAt": "2026-10-16T01:00:00Z"
+    },
+    {
+      "trust": "stored",
+      "artifactId": "patch-1",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "kind": "patch",
+      "uri": "artifact://test/patch-1",
+      "mediaType": "application/json",
+      "sizeBytes": 85,
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "3ccca22ae703536b9f172ab34667d45bc2f1e420f9bca4c91d0eb2598a384129"
+      },
+      "createdAt": "2026-10-16T01:00:00Z"
+    },
+    {
+      "trust": "stored",
+      "artifactId": "verification-3129c590693364c15e5ad17ab94863b4fc419b65a3e7b2b7305c843165fbecc4",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "kind": "test-result",
+      "uri": "artifact://test/verification-3129c590693364c15e5ad17ab94863b4fc419b65a3e7b2b7305c843165fbecc4",
+      "mediaType": "application/json",
+      "sizeBytes": 1432,
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "ceff8380f2ca18e1cb744876d508dcb33640444c128f55784bc66a57428319df"
+      },
+      "createdAt": "2026-10-16T01:00:00Z"
+    },
+    {
+      "trust": "stored",
+      "artifactId": "verification-0ea9f8d0f53ef2e8413e32db2d1945b254c9bf04b2e0f427fe5348c09d03ebc2",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "kind": "report",
+      "uri": "artifact://test/verification-0ea9f8d0f53ef2e8413e32db2d1945b254c9bf04b2e0f427fe5348c09d03ebc2",
+      "mediaType": "application/json",
+      "sizeBytes": 1364,
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "ccdddcf4aa13087b9f9255de2567989269f37d71a196cfe16a80bab5ff0a3855"
+      },
+      "createdAt": "2026-10-16T01:00:00Z"
+    }
+  ],
+  "findings": [
+    {
+      "code": "invalid_or_missing_evidence",
+      "severity": "error",
+      "message": "test-check: [\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"object\",\n    \"received\": \"undefined\",\n    \"path\": [],\n    \"message\": \"Required\"\n  }\n]",
+      "details": {
+        "taskId": "task-1",
+        "responsibleRole": "qa",
+        "requiresNewTaskIfOutsideScope": true
+      }
+    }
+  ],
+  "changeSet": {
+    "schemaVersion": 2,
+    "changeSetId": "change-1",
+    "runId": "run-1",
+    "taskId": "task-1",
+    "attemptId": "attempt-1",
+    "worktreePath": "/tmp/example-task",
+    "branchName": "agent/example/task",
+    "baseCommitHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "headCommitHash": "1111111111111111111111111111111111111111",
+    "dirtyWorkingTree": false,
+    "filesChanged": [
+      {
+        "path": "packages/example/src/logic.ts",
+        "changeType": "modified",
+        "additions": 1,
+        "deletions": 1
+      }
+    ],
+    "patchArtifact": {
+      "trust": "stored",
+      "artifactId": "patch-1",
+      "runId": "run-1",
+      "taskId": "task-1",
+      "kind": "patch",
+      "uri": "artifact://test/patch-1",
+      "mediaType": "application/json",
+      "sizeBytes": 85,
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "3ccca22ae703536b9f172ab34667d45bc2f1e420f9bca4c91d0eb2598a384129"
+      },
+      "createdAt": "2026-10-16T01:00:00Z"
+    },
+    "createdAt": "2026-10-16T01:00:00Z"
+  },
+  "verifiedBy": "quality_gate",
+  "startedAt": "2026-10-16T01:00:00Z",
+  "completedAt": "2026-10-16T01:00:00Z"
+}
