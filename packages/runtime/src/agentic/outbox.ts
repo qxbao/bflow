@@ -1,7 +1,7 @@
 import {
   AgentAssignmentSchema, AgentConfigurationSchema, AgentLeaseSchema, AgentReconciliationResultSchema,
-  AgentRequestSchema, AgentSubmissionReceiptSchema, PaneBindingSchema, RoleMessageSchema,
-  type AgentExecutionHandle, type OperationResult, type RoleMessage
+  AgentRequestSchema, AgentSubmissionReceiptSchema, PaneBindingSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema, WorkflowRunSnapshotSchema,
+  type AgentExecutionHandle, type OperationResult, type RoleMessage, type PaneBinding
 } from "@bflow/contracts";
 import type { AgenticRuntimePorts } from "./ports.js";
 import { digest, json, type JournalState, type Outbound } from "./journal.js";
@@ -27,17 +27,73 @@ export class HerdrOutbox {
     this.state.outbound.push(out);
     return out;
   }
+  private noticeParent(out: Outbound): Outbound {
+    const parent = this.state.outbound.find(item => item.message.message_id === out.parentAssignmentId);
+    if (!parent || parent.parentAssignmentId || parent.message.type !== "task.assignment" || parent.status !== "accepted" ||
+        parent.cancelRequested || !parent.assignment || !parent.handle || !parent.request || !parent.lease)
+      throw new Error("Task notice requires an active parent assignment");
+    if (parent.lease.agentId !== parent.handle.target.agentId || parent.lease.runId !== parent.message.run_id ||
+        parent.lease.taskId !== parent.taskId || parent.lease.attemptId !== parent.attemptId ||
+        parent.assignment.leaseId !== parent.lease.leaseId || parent.assignment.fencingToken !== parent.lease.fencingToken ||
+        Date.parse(parent.lease.expiresAt) <= Date.parse(this.now())) throw new Error("Task notice parent lease is expired or mismatched");
+    const run = this.state.runs.find(item => item.runId === parent.message.run_id);
+    const task = run?.tasks.find(item => item.taskId === parent.taskId);
+    if (!run || run.cancelled || ["completed", "failed", "cancelled", "escalated"].includes(run.status) || !task || task.writerReleased || task.result ||
+        out.message.run_id !== parent.message.run_id || out.taskId !== parent.taskId || out.attemptId !== parent.attemptId)
+      throw new Error("Task notice parent execution is stopped or terminal");
+    return parent;
+  }
+  enqueueTaskNotice(message: RoleMessage, parentAssignment: Outbound): Outbound {
+    if (!this.state.outbound.includes(parentAssignment)) throw new Error("Task notice parent is outside this journal");
+    const parsed = RoleMessageSchema.parse(message);
+    const candidate: Outbound = { message: parsed, status: "queued", selector: parentAssignment.selector,
+      taskId: parentAssignment.taskId, attemptId: parentAssignment.attemptId, capabilities: [], parentAssignmentId: parentAssignment.message.message_id };
+    const parent = this.noticeParent(candidate);
+    if (parsed.type !== "task.status" || parsed.sender.role !== "coordinator" || parsed.recipient.role !== "developer" ||
+        parsed.recipient.agent_id && parsed.recipient.agent_id !== parent.handle!.target.agentId ||
+        parsed.recipient.pane_id && parsed.recipient.pane_id !== parent.handle!.target.paneId)
+      throw new Error("Task notice must address the assigned Developer");
+    const existing = this.state.outbound.find(item => item.message.message_id === parsed.message_id || item.message.idempotency_key === parsed.idempotency_key);
+    if (existing && existing.parentAssignmentId !== candidate.parentAssignmentId) throw new Error("Conflicting task notice parent");
+    const out = this.enqueue(parsed, candidate.selector, candidate.taskId, candidate.attemptId);
+    out.parentAssignmentId = parent.message.message_id; out.lease = parent.lease!;
+    return out;
+  }
+  private target(pane: PaneBinding) {
+    return { transport: "herdr", agentId: pane.agentId, paneId: pane.paneId, workspaceId: pane.workspaceId,
+      tabId: pane.tabId, ...(pane.terminalId ? { terminalId: pane.terminalId } : {}),
+      ...(pane.session ? { session: pane.session } : {}), ...(pane.worktreePath ? { worktreePath: pane.worktreePath } : {}) };
+  }
+  private async validateNotice(out: Outbound, pane: PaneBinding): Promise<void> {
+    const parent = this.noticeParent(out);
+    if (digest(this.target(pane)) !== digest(parent.handle!.target) || pane.cwd !== parent.request!.workingDirectory)
+      throw new Error("Task notice recipient session or worktree changed");
+    const value = unwrap(await this.ports.engine.getSnapshot(parent.message.run_id!));
+    const snapshot = value && WorkflowRunSnapshotSchema.parse(value), task = snapshot?.tasks.find(item => item.taskId === parent.taskId);
+    if (!snapshot || ["succeeded", "failed", "cancelled", "cancelling"].includes(snapshot.status) || !task || task.status !== "running" ||
+        task.attemptId !== parent.attemptId || !task.agentExecution || digest(task.agentExecution) !== digest(parent.handle))
+      throw new Error("Task notice parent Core execution is stopped or terminal");
+  }
   async renew(out: Outbound): Promise<void> {
-    if (!out.lease) throw new Error("Assignment has no current lease");
-    out.lease = AgentLeaseSchema.parse(unwrap(await this.ports.registry.renewLease({ leaseId: out.lease.leaseId,
-      fencingToken: out.lease.fencingToken, expectedVersion: out.lease.version, ttlMs: 300_000,
-      requestedAt: this.now(), idempotencyKey: `renew:${out.message.message_id}:${out.lease.version}` })));
-    if (Date.parse(out.lease.expiresAt) <= Date.parse(this.now())) throw new Error("Expired assignment lease");
+    const owner = out.parentAssignmentId ? this.noticeParent(out) : out;
+    if (!owner.lease) throw new Error("Assignment has no current lease");
+    const recovering = owner.leaseRenewal !== undefined;
+    owner.leaseRenewal ??= RenewAgentLeaseRequestSchema.parse({ leaseId: owner.lease.leaseId,
+      fencingToken: owner.lease.fencingToken, expectedVersion: owner.lease.version, ttlMs: 300_000,
+      requestedAt: this.now(), idempotencyKey: `renew:${owner.message.message_id}:${owner.lease.version}` });
+    await this.save(); // Retain exact renewal arguments if Registry commits before journal persistence.
+    const lease = AgentLeaseSchema.parse(unwrap(await this.ports.registry.renewLease(owner.leaseRenewal)));
+    if (Date.parse(lease.expiresAt) <= Date.parse(this.now())) throw new Error("Expired assignment lease");
+    owner.lease = lease; delete owner.leaseRenewal;
+    for (const child of this.state.outbound) if (child.parentAssignmentId === owner.message.message_id) child.lease = lease;
     await this.save();
+    // A recovered idempotency receipt is historical: verify the current Registry
+    // authority with a fresh version before it can authorize another side effect.
+    if (recovering) await this.renew(owner);
   }
   async release(out: Outbound): Promise<void> {
     if (out.status === "released") return;
-    if (out.lease) unwrap(await this.ports.registry.releaseLease({
+    if (out.lease && !out.parentAssignmentId) unwrap(await this.ports.registry.releaseLease({
       leaseId: out.lease.leaseId, fencingToken: out.lease.fencingToken, expectedVersion: out.lease.version,
       releasedAt: this.now(), idempotencyKey: `release:${out.lease.leaseId}:${out.lease.version}`
     }));
@@ -49,7 +105,7 @@ export class HerdrOutbox {
     for (const out of this.state.outbound) {
       if (out.status === "sending") { out.status = "unknown_delivery"; await this.save(); }
       if (out.status === "accepted" && out.handle) {
-        await onBound(out, out.handle);
+        if (!out.parentAssignmentId) await onBound(out, out.handle);
         if (out.message.type === "task.assignment") {
           const run = this.state.runs.find(item => item.runId === out.message.run_id);
           if (run && !run.cancelled && !["completed", "failed", "escalated"].includes(run.status)) {
@@ -63,6 +119,9 @@ export class HerdrOutbox {
         continue;
       }
       if (out.status !== "queued") continue;
+      if (out.parentAssignmentId) {
+        try { this.noticeParent(out); } catch (error) { out.status = "cancelled"; out.error = String(error); await this.save(); continue; }
+      }
       const run = this.state.runs.find(item => item.runId === out.message.run_id);
       if (run && (run.cancelled || ["completed", "failed", "escalated"].includes(run.status)) &&
           (out.message.type === "task.assignment" || out.message.type === "delegation.request" && out.message.sender.role === "coordinator")) {
@@ -74,29 +133,37 @@ export class HerdrOutbox {
       const pane = PaneBindingSchema.parse(bindingValue);
       const health = unwrap(await this.ports.panes.inspectRoleHealth(out.selector));
       if (!health.readyForPrompt || !health.occupantMatches || health.paneId !== pane.paneId || health.agentId !== pane.agentId) continue;
-      const capabilities = [...(this.ports.roleCapabilities[pane.role] ?? [])];
-      const config = AgentConfigurationSchema.parse({ agentId: pane.agentId, role: pane.role, transport: "herdr", enabled: true,
-        priority: 0, maxConcurrentTasks: 1, capabilities, settings: {} });
-      unwrap(await this.ports.registry.upsert(config));
-      const resolved = unwrap(await this.ports.registry.resolve(pane.role, { runId: out.message.run_id!,
-        taskId: out.taskId, preferredAgentId: pane.agentId, requiredCapabilities: out.capabilities }));
-      if (!resolved || resolved.agentId !== pane.agentId) { out.error = "No capable agent in recipient pane"; continue; }
-      if (!out.lease) {
-        const acquired = await this.ports.registry.acquireLease({
-          leaseId: `lease-${digest(out.message.message_id)}`, agentId: pane.agentId, runId: out.message.run_id!,
-          taskId: out.taskId, attemptId: out.attemptId, ttlMs: 300_000, requestedAt: this.now(),
-          idempotencyKey: `acquire:${out.message.message_id}`
-        });
-        if (!acquired.ok) { out.error = acquired.error.message; continue; }
-        out.lease = AgentLeaseSchema.parse(acquired.value);
-        await this.save();
+      if (out.parentAssignmentId) {
+        try { await this.validateNotice(out, pane); }
+        catch (error) { out.status = "cancelled"; out.error = String(error); await this.save(); continue; }
+      }
+      if (!out.parentAssignmentId) {
+        const capabilities = [...(this.ports.roleCapabilities[pane.role] ?? [])];
+        const config = AgentConfigurationSchema.parse({ agentId: pane.agentId, role: pane.role, transport: "herdr", enabled: true,
+          priority: 0, maxConcurrentTasks: 1, capabilities, settings: {} });
+        unwrap(await this.ports.registry.upsert(config));
+        const resolved = unwrap(await this.ports.registry.resolve(pane.role, { runId: out.message.run_id!,
+          taskId: out.taskId, preferredAgentId: pane.agentId, requiredCapabilities: out.capabilities }));
+        if (!resolved || resolved.agentId !== pane.agentId) { out.error = "No capable agent in recipient pane"; continue; }
+        if (!out.lease) {
+          const acquired = await this.ports.registry.acquireLease({
+            leaseId: `lease-${digest(out.message.message_id)}`, agentId: pane.agentId, runId: out.message.run_id!,
+            taskId: out.taskId, attemptId: out.attemptId, ttlMs: 300_000, requestedAt: this.now(),
+            idempotencyKey: `acquire:${out.message.message_id}`
+          });
+          if (!acquired.ok) { out.error = acquired.error.message; continue; }
+          out.lease = AgentLeaseSchema.parse(acquired.value);
+          await this.save();
+        }
       }
       // Registry is authoritative: renewal detects stale/released fencing tokens and optimistic versions.
-      await this.renew(out);
+      try { await this.renew(out); } catch (error) {
+        if (!out.parentAssignmentId) throw error;
+        out.error = String(error); await this.save(); continue;
+      }
+      if (!out.lease) throw new Error("Dispatch has no lease");
       if (out.lease.agentId !== pane.agentId || Date.parse(out.lease.expiresAt) <= Date.parse(this.now())) throw new Error("Stale dispatch lease");
-      const target = { transport: "herdr", agentId: pane.agentId, paneId: pane.paneId, workspaceId: pane.workspaceId,
-        tabId: pane.tabId, ...(pane.terminalId ? { terminalId: pane.terminalId } : {}),
-        ...(pane.session ? { session: pane.session } : {}), ...(pane.worktreePath ? { worktreePath: pane.worktreePath } : {}) };
+      const target = this.target(pane);
       let wire = out.message;
       if (wire.type === "task.assignment") {
         const run = this.state.runs.find(r => r.runId === wire.run_id);
@@ -121,6 +188,16 @@ export class HerdrOutbox {
         createdAt: this.now(), metadata: { leaseId: out.lease.leaseId, fencingToken: out.lease.fencingToken } });
       out.status = "sending";
       await this.save(); // write-ahead intent; a crash/lost acknowledgement forbids resend
+      if (out.parentAssignmentId) {
+        try {
+          const current = unwrap(await this.ports.panes.getRoleBinding(out.selector));
+          if (!current) throw new Error("Task notice recipient disappeared");
+          const currentPane = PaneBindingSchema.parse(current), currentHealth = unwrap(await this.ports.panes.inspectRoleHealth(out.selector));
+          if (!currentHealth.readyForPrompt || !currentHealth.occupantMatches || currentHealth.paneId !== currentPane.paneId || currentHealth.agentId !== currentPane.agentId)
+            throw new Error("Task notice recipient is no longer ready");
+          await this.validateNotice(out, currentPane); await this.renew(out);
+        } catch (error) { out.status = "queued"; out.error = String(error); await this.save(); continue; }
+      }
       try {
         const value = unwrap(await this.ports.transport.send(out.request));
         const receipt = AgentSubmissionReceiptSchema.parse(value);
@@ -131,7 +208,7 @@ export class HerdrOutbox {
             throw new Error("Transport binding mismatch");
           out.handle = receipt.handle; out.status = "accepted"; delete out.error;
           await this.save();
-          await onBound(out, receipt.handle);
+          if (!out.parentAssignmentId) await onBound(out, receipt.handle);
         } else if (receipt.status === "unknown_delivery") {
           out.status = "unknown_delivery"; out.error = receipt.reason; await this.save();
         } else {
@@ -156,7 +233,7 @@ export class HerdrOutbox {
       if (result.handle.requestId !== req.requestId || result.handle.attemptId !== req.attemptId || result.handle.runId !== req.runId ||
           result.handle.taskId !== req.taskId || result.handle.idempotencyKey !== req.idempotency.key || digest(result.handle.target) !== digest(req.target))
         throw new Error("Reconciled handle ownership mismatch");
-      out.handle = result.handle; out.status = "accepted"; await this.save(); await onBound(out, result.handle);
+      out.handle = result.handle; out.status = "accepted"; await this.save(); if (!out.parentAssignmentId) await onBound(out, result.handle);
     } else if (result.status === "not_delivered") {
       if (result.requestId !== req.requestId) throw new Error("Reconciliation request mismatch");
       out.status = "queued"; await this.save();

@@ -5,13 +5,13 @@ import { join, resolve } from "node:path";
 import {
   AgentAssignmentSchema, AgentExecutionHandleSchema, AgentLeaseSchema, AgentRequestSchema,
   AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema,
-  DelegationRequestSchema, GitChangeSetSchema, JsonValueSchema, RoleMessageSchema,
+  DelegationRequestSchema, GitChangeSetSchema, JsonValueSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema,
   SdlcWorkStatusSchema, SpecificationSchema, TestStrategySchema, VerificationCycleSchema,
   VerificationResultSchema, WorkflowDefinitionSchema, type AgentAssignment, type AgentExecutionHandle, type AgentLease,
   type AgentRequest, type AgentResult, type AppendEventsRequest, type ApprovalDecision,
   type ApprovalRequest, type DelegationRequest, type GitChangeSet, type JsonValue,
   type RoleMessage, type SdlcWorkStatus, type Specification, type TestStrategy,
-  type VerificationCycle, type WorkflowDefinition
+  type VerificationCycle, type WorkflowDefinition, type RenewAgentLeaseRequest
 } from "@bflow/contracts";
 import type { TaskWorktree, VerificationPlan } from "./ports.js";
 
@@ -55,6 +55,9 @@ export interface Outbound {
   selector: string; taskId: string; attemptId: string; capabilities: string[];
   assignment?: AgentAssignment; lease?: AgentLease; request?: AgentRequest; handle?: AgentExecutionHandle;
   error?: string; cancelRequested?: boolean;
+  /** A control notice borrows its task assignment's lease; it never owns capacity. */
+  parentAssignmentId?: string;
+  leaseRenewal?: RenewAgentLeaseRequest;
 }
 export interface JournalState {
   version: 1; repository: string; runs: RunRecord[]; outbound: Outbound[];
@@ -98,8 +101,27 @@ function parseState(input: unknown, repository: string): JournalState {
     if (out.request) out.request = AgentRequestSchema.parse(out.request);
     if (out.lease) out.lease = AgentLeaseSchema.parse(out.lease);
     if (out.handle) out.handle = AgentExecutionHandleSchema.parse(out.handle);
+    if (out.leaseRenewal) {
+      out.leaseRenewal = RenewAgentLeaseRequestSchema.parse(out.leaseRenewal);
+      if (out.parentAssignmentId || !out.lease || out.leaseRenewal.leaseId !== out.lease.leaseId ||
+          out.leaseRenewal.fencingToken !== out.lease.fencingToken || out.leaseRenewal.expectedVersion !== out.lease.version)
+        throw new Error("Invalid pending outbound lease renewal");
+    }
     if (["sending", "unknown_delivery", "accepted"].includes(out.status) && !out.request) throw new Error("Missing outbound dispatch intent");
     if (out.status === "accepted" && (!out.handle || !out.lease)) throw new Error("Missing outbound binding/lease");
+  }
+  for (const out of state.outbound) if (out.parentAssignmentId !== undefined) {
+    textField(out.parentAssignmentId);
+    const parents = state.outbound.filter(parent => parent.message.message_id === out.parentAssignmentId);
+    const parent = parents[0];
+    if (parents.length !== 1 || !parent || parent === out || parent.parentAssignmentId || parent.message.type !== "task.assignment" ||
+        !parent.assignment || !parent.request || !parent.handle || !parent.lease || out.assignment ||
+        out.message.type !== "task.status" || out.message.sender.role !== "coordinator" || out.message.recipient.role !== "developer" ||
+        out.message.run_id !== parent.message.run_id || out.taskId !== parent.taskId || out.attemptId !== parent.attemptId || out.selector !== parent.selector ||
+        out.message.recipient.agent_id && out.message.recipient.agent_id !== parent.handle.target.agentId ||
+        out.message.recipient.pane_id && out.message.recipient.pane_id !== parent.handle.target.paneId ||
+        out.lease && digest(out.lease) !== digest(parent.lease) ||
+        out.request && digest(out.request.target) !== digest(parent.handle.target)) throw new Error("Invalid task notice parent assignment");
   }
   for (const item of state.inbox) {
     item.message = RoleMessageSchema.parse(item.message);
