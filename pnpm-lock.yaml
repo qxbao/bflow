@@ -258,6 +258,15 @@ importers:
         specifier: workspace:*
         version: link:../quality-gates
 
+  packages/specification:
+    dependencies:
+      '@bflow/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      zod:
+        specifier: ^3.24.2
+        version: 3.25.76
+
 packages:
 
   '@esbuild/aix-ppc64@0.21.5':

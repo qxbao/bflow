@@ -81,6 +81,7 @@ All commands support `-j, --json` for structured JSON output and `-h, --help` fo
 | [`@bflow/herdr-adapter`](packages/herdr-adapter) | CLI-backed `AgentTransport` adapter for Herdr agent sessions |
 | [`@bflow/persistence`](packages/persistence) | SQLite `RunStore` for atomic event batches, execution receipts, and checkpoints |
 | [`@bflow/artifact-store`](packages/artifact-store) | Filesystem `ArtifactStore` with SQLite catalog and SHA-256 stream verification |
+| [`@bflow/specification`](packages/specification) | Adaptive specification classification, validation, versioning, traceability and approval policy (P15); Runtime composition is scheduled for P19 |
 | [`@bflow/quality-gates`](packages/quality-gates) | Preset command evaluators, workspace security policies, and RBAC governance |
 
 ---
@@ -110,6 +111,9 @@ pnpm exec vitest run --config tests/e2e/vitest.config.ts --shard=1/2
 
 # Run tests for a single package
 pnpm exec vitest run packages/runtime/test
+
+# Run Specification Engine tests
+pnpm --filter @bflow/specification test
 ```
 
 ---
