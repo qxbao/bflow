@@ -14,3 +14,6 @@ export * from "./skills.js";
 export * from "./doctor.js";
 export * from "./plan.js";
 export * from "./approval.js";
+export * from "./manifest.js";
+export * from "./executor.js";
+export * from "./setup-service.js";

@@ -28,7 +28,9 @@ export const JournalSchema = z
         .object({
           status: z.enum(["started", "finished"]),
           startedAt: IsoDateTimeSchema,
-          idempotencyKey: IdentifierSchema
+          idempotencyKey: IdentifierSchema,
+          /** State observed immediately before the side effect; used to judge safe retry after interruption. */
+          expectedStateDigest: Sha256DigestSchema.nullable().optional()
         })
         .strict()
     )

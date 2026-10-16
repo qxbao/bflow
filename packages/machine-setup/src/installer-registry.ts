@@ -51,6 +51,11 @@ export class ToolInstallerRegistry {
     return { ok: true, value: undefined };
   }
 
+  /** Installer registered under `installerId`, or null. */
+  get(installerId: string): ToolInstaller | null {
+    return this.installers.get(installerId) ?? null;
+  }
+
   resolve(
     toolId: string,
     platform: "linux" | "darwin" | "win32",
