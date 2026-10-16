@@ -8,6 +8,7 @@
     { "path": "./packages/artifact-store" },
     { "path": "./packages/agent-registry" },
     { "path": "./packages/pane-manager" },
+    { "path": "./packages/conversation" },
     { "path": "./packages/specification" },
     { "path": "./packages/quality-gates" },
     { "path": "./packages/runtime" },
