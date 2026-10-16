@@ -23,6 +23,15 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Verify release tag matches source
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9A-Za-z][0-9A-Za-z._-]*$ ]]
+          git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -40,6 +49,11 @@ jobs:
         run: |
           pnpm run lint
           pnpm run build
+
+      - name: Unit, integration & E2E gates
+        run: |
+          pnpm run test
+          pnpm run test:e2e
 
       - name: Package release artifacts
         env:
@@ -73,12 +87,38 @@ jobs:
             packages/quality-gates/package.json \
             packages/quality-gates/dist \
             packages/runtime/package.json \
-            packages/runtime/dist
+            packages/runtime/dist \
+            packages/pane-manager/package.json \
+            packages/pane-manager/dist \
+            packages/conversation/package.json \
+            packages/conversation/dist \
+            packages/specification/package.json \
+            packages/specification/dist \
+            packages/test-strategy/package.json \
+            packages/test-strategy/dist \
+            packages/verification/package.json \
+            packages/verification/dist \
+            packages/git-orchestrator/package.json \
+            packages/git-orchestrator/dist \
+            agents \
+            templates \
+            docs
 
           # Generate SHA-256 checksums for all release assets
           cd "${GITHUB_WORKSPACE}/release-assets"
           sha256sum * > SHA256SUMS.txt
           ls -lh "${GITHUB_WORKSPACE}/release-assets"
+
+      - name: Smoke test compiled distribution
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          smoke_dir=$(mktemp -d)
+          trap 'rm -rf "$smoke_dir"' EXIT
+          tar -xzf "${GITHUB_WORKSPACE}/release-assets/bflow-${RELEASE_TAG}-dist.tar.gz" -C "$smoke_dir"
+          cd "$smoke_dir"
+          pnpm install --offline --frozen-lockfile --ignore-scripts
+          node apps/cli/dist/bin.js --help
 
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
