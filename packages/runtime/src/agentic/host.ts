@@ -308,7 +308,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         try { const candidate = JSON.parse(prompt); if (candidate && typeof candidate === "object" && ("schema_version" in candidate || "sender" in candidate || "type" in candidate)) throw new Error("Role envelopes cannot become authenticated human input"); }
         catch (error) { if (!(error instanceof SyntaxError)) throw error; }
         const work = userQueue.catch(() => undefined).then(async () => {
-          if (digest(await principal(role, textField(input.paneId))) !== digest(binding)) throw new Error("Physical user input pane changed while queued");
+          const current = await principal(role, textField(input.paneId));
+          if (digest({ ...current, transportState: undefined }) !== digest({ ...binding, transportState: undefined }))
+            throw new Error("Physical user input pane changed while queued");
           const messageId = `user-${digest([hook.session_id, hook.prompt, hook.transcript_path, randomUUID()])}`;
           const userId = `local-user-${process.getuid?.() ?? "local"}`;
           humanHookProvenance = { origin: "UserPromptSubmit", binding, nativeSessionId, userId, messageId,
