@@ -102,6 +102,14 @@ export interface ManagedToolInstallerOptions {
   readonly pins: readonly ManagedToolPin[];
   readonly host?: ToolHost;
   readonly clock?: () => Date;
+  readonly providerPlugin?: ProviderPluginAdapter;
+}
+
+/** A native provider adapter owns its CLI/config protocol and must verify actual activation. */
+export interface ProviderPluginAdapter {
+  verify(pin: ManagedToolPin, destination: string): Promise<{ ready: boolean; diagnostic: string }>;
+  activate(pin: ManagedToolPin, artifact: string, action: "install" | "update" | "repair",
+    options?: OperationOptions): Promise<{ success: boolean; diagnostic: string }>;
 }
 
 interface OwnedMarker { toolId: string; installerId: string; version: string; integrity: string; source: string; executable: string; license: string; recipeDigest: string; }
@@ -114,6 +122,7 @@ export class ManagedToolInstaller implements ToolInstaller {
   readonly #pins: Map<string, ManagedToolPin>;
   readonly #host: ToolHost;
   readonly #clock: () => Date;
+  readonly #providerPlugin: ProviderPluginAdapter | undefined;
 
   constructor(options: ManagedToolInstallerOptions) {
     if (!isAbsolute(options.managedRoot)) throw new Error("managedRoot must be absolute");
@@ -124,7 +133,8 @@ export class ManagedToolInstaller implements ToolInstaller {
       if (this.#pins.has(pin.toolId)) throw new Error(`Duplicate tool pin: ${pin.toolId}`);
       const url = new URL(pin.source);
       if (url.protocol !== "https:" || url.username || url.password || url.hash) throw new Error("Pinned source must be HTTPS without credentials or fragment");
-      if (pin.recipe.kind === "npm" && !/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(pin.version)) throw new Error("npm package version must be exact");
+      if ((pin.recipe.kind === "npm" || pin.recipe.kind === "provider_plugin") &&
+        !/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(pin.version)) throw new Error("Package/plugin version must be exact");
       if (pin.toolId === "claude-mem" && pin.recipe.kind === "npm") throw new Error("Claude-Mem npm SDK is not a plugin installation; use provider-specific installation");
       if (pin.toolId === "rtk" && pin.recipe.kind !== "rtk_archive") throw new Error("RTK must use the rtk-ai release binary archive");
       if (pin.toolId === "gitnexus" && (pin.recipe.kind !== "npm" || pin.recipe.packageName !== "gitnexus")) throw new Error("GitNexus must use its official npm package");
@@ -136,6 +146,7 @@ export class ManagedToolInstaller implements ToolInstaller {
     if ([...this.#pins.values()].some(pin => pin.installerId !== this.installerId)) throw new Error("Mixed installer IDs");
     this.#host = options.host ?? systemToolHost;
     this.#clock = options.clock ?? (() => new Date());
+    this.#providerPlugin = options.providerPlugin;
   }
 
   #pin(request: ToolInstallRequest): ManagedToolPin | null {
@@ -169,12 +180,17 @@ export class ManagedToolInstaller implements ToolInstaller {
     const pin = this.#pin(request);
     if (!pin) return fail("Tool pin is absent or does not match approved source, version and integrity", "not_found");
     if (!(await this.#destination(request.destination))) return fail("Destination escapes managed root or traverses a symlink");
-    if (pin.recipe.kind === "provider_plugin") return fail("Native plugin installation needs a provider-specific verified installer; use the documented manual route", "not_found");
-    return ok(SetupStepSchema.parse({ schemaVersion: 3, stepId: `install-${request.toolId}`, action: "install_tool",
+    if (pin.recipe.kind === "provider_plugin" && !this.#providerPlugin)
+      return fail("Provider plugin adapter is not configured", "not_found");
+    if (pin.recipe.kind === "provider_plugin" && request.scope.kind !== "machine")
+      return fail("Native provider plugins require an approved machine setup scope");
+    return ok(SetupStepSchema.parse({ schemaVersion: 3,
+      stepId: `install-${request.toolId}${pin.recipe.kind === "provider_plugin" ? `-${pin.recipe.provider}` : ""}`, action: "install_tool",
       componentId: request.toolId, level: request.scope.kind, scope: request.scope, dependsOn: [],
       desiredStateDigest: digest(JSON.stringify({ toolId: request.toolId, version: request.version, source: request.source,
         integrity: request.integrity, destination: resolve(request.destination), recipe: pin.recipe, license: pin.license })),
-      expectedStateDigest: null, requiresApproval: request.scope.kind === "machine", rollback: "remove_owned_install",
+      expectedStateDigest: null, requiresApproval: request.scope.kind === "machine",
+      rollback: pin.recipe.kind === "provider_plugin" ? "manual" : "remove_owned_install",
       toolInstall: request, idempotencyKey: request.idempotencyKey }));
   }
 
@@ -217,6 +233,13 @@ export class ManagedToolInstaller implements ToolInstaller {
     const destination = request.step.toolInstall!.destination;
     const marker = await this.#marker(destination);
     if (!marker) {
+      if (pin.recipe.kind === "provider_plugin" && this.#providerPlugin) {
+        try {
+          const observation = await this.#providerPlugin.verify(pin, destination);
+          if (observation.ready) return ok(await this.#receipt(request, "already_satisfied",
+            [`Existing provider plugin verified without claiming ownership: ${observation.diagnostic}`]));
+        } catch { /* report the missing or unowned destination below */ }
+      }
       try { await lstat(destination); return ok(await this.#receipt(request, "blocked", ["Destination exists without a valid Bflow ownership marker"])); }
       catch { return ok(await this.#receipt(request, "blocked", ["Tool is not installed"])); }
     }
@@ -228,7 +251,13 @@ export class ManagedToolInstaller implements ToolInstaller {
   }
 
   async #probe(destination: string, pin: ManagedToolPin): Promise<boolean> {
-    if (pin.recipe.kind === "provider_plugin") return false;
+    const artifact = join(destination, pin.recipe.kind === "npm" || pin.toolId === "claude-mem" ? "artifact.tgz" : "artifact");
+    try { if (await digestFile(artifact) !== pin.integrity) return false; }
+    catch { return false; }
+    if (pin.recipe.kind === "provider_plugin") {
+      try { return (await this.#providerPlugin?.verify(pin, destination))?.ready === true; }
+      catch { return false; }
+    }
     const executable = pin.recipe.kind === "rtk_archive" ? join(destination, "rtk") : join(destination, "node_modules", ".bin", pin.recipe.executable);
     try {
       const path = await realpath(executable);
@@ -274,7 +303,7 @@ export class ManagedToolInstaller implements ToolInstaller {
       }
       catch { /* absent */ }
       await mkdir(stage, { mode: 0o700 });
-      const artifact = join(stage, "artifact");
+      const artifact = join(stage, pin.recipe.kind === "npm" || pin.toolId === "claude-mem" ? "artifact.tgz" : "artifact");
       await this.#host.download(pin.source, artifact, options?.signal);
       if (await digestFile(artifact) !== pin.integrity) return ok(await this.#receipt(request, "failed", ["Downloaded artifact SHA-256 mismatch"]));
       if (pin.recipe.kind === "npm") {
@@ -294,8 +323,18 @@ export class ManagedToolInstaller implements ToolInstaller {
         const info = await lstat(binary);
         if (!info.isFile() || info.isSymbolicLink()) return ok(await this.#receipt(request, "failed", ["RTK archive member is not a regular binary"]));
         await chmod(join(stage, "rtk"), 0o700);
-      } else return ok(await this.#receipt(request, "blocked", ["Provider plugin installation is not automated"]));
-      const executable = pin.recipe.kind === "rtk_archive" ? "rtk" : join("node_modules", ".bin", pin.recipe.executable);
+      } else {
+        const marker = await this.#marker(destination);
+        const action = !marker ? "install" : marker.version !== pin.version ? "update" : "repair";
+        let activation;
+        try { activation = await this.#providerPlugin!.activate(pin, artifact, action, options); }
+        catch (error) { return ok(await this.#receipt(request, "unknown", [`Provider plugin activation interrupted: ${String(error)}`])); }
+        if (!activation.success) return ok(await this.#receipt(request, "unknown", [activation.diagnostic]));
+        if (!(await this.#probe(stage, pin)))
+          return ok(await this.#receipt(request, "unknown", ["Provider plugin action returned success, but activation was not verified"]));
+      }
+      const executable = pin.recipe.kind === "rtk_archive" ? "rtk" : pin.recipe.kind === "provider_plugin" ?
+        `native:${pin.recipe.provider}` : join("node_modules", ".bin", pin.recipe.executable);
       await writeFile(join(stage, ".bflow-tool.json"), JSON.stringify({ toolId: pin.toolId, installerId: pin.installerId, version: pin.version,
         integrity: pin.integrity, source: pin.source, executable, license: pin.license,
         recipeDigest: digest(JSON.stringify(pin.recipe)) }), { mode: 0o600 });

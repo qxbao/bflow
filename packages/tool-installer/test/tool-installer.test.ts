@@ -7,6 +7,7 @@ import { ManagedToolInstaller, createToolCapability, type ManagedToolPin, type T
 import { ClaudeMemProjectReader, FileToolCapabilityRegistry, ToolCapabilityRegistry, ensureGitNexusIndex, observeClaudeMemGrowth, observeClaudeMemWorker,
   planChromeSession, rtkProviderIntegration, runWithRtk, superpowersInstallRoute, verifyMcpStartup, verifyRtk,
   verifySuperpowersSkills, writeOwnedToolConfig } from "../src/integrations.js";
+import { OfficialProviderPluginAdapter } from "../src/provider-plugins.js";
 
 const hash = (bytes: string) => createHash("sha256").update(bytes).digest("hex");
 const roots: string[] = [];
@@ -47,6 +48,48 @@ async function fixture() {
 }
 
 describe("managed tool installer", () => {
+  it("plans approved native plugins, verifies activation and leaves uncertain mutations unresolved", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bflow-native-")); roots.push(root);
+    const pin: ManagedToolPin = { toolId: "superpowers", installerId: "bflow-tools", version: "6.4.2",
+      source: "https://github.com/obra/superpowers/archive/refs/tags/v6.4.2.tar.gz", integrity: hash("plugin"),
+      recipe: { kind: "provider_plugin", provider: "codex" }, license: "MIT" };
+    let active = false;
+    let activations = 0;
+    const installer = new ManagedToolInstaller({ managedRoot: join(root, "managed"), pins: [pin],
+      host: { async download(_source, target) { await writeFile(target, "plugin"); },
+        async run() { throw new Error("native adapter owns provider commands"); } },
+      providerPlugin: { async verify() { return { ready: active, diagnostic: active ? "skill active" : "missing" }; },
+        async activate() { activations++; active = true; return { success: true, diagnostic: "installed" }; } } });
+    const request = { schemaVersion: 3 as const, toolId: pin.toolId, installerId: pin.installerId,
+      version: pin.version, source: pin.source, integrity: pin.integrity,
+      scope: { kind: "machine" as const, machineId: "m" }, destination: join(root, "managed", "superpowers-codex"),
+      idempotencyKey: "install-superpowers-codex" };
+    const step = await installer.plan(request);
+    expect(step.ok).toBe(true);
+    if (!step.ok) return;
+    expect(step.value.rollback).toBe("manual");
+    const apply = { schemaVersion: 3 as const, planId: "p", planDigest: hash("plan"), step: step.value,
+      approvalReceiptId: "approved" };
+    expect((await installer.apply({ ...apply, approvalReceiptId: undefined })).ok).toBe(false);
+    const first = await installer.apply(apply);
+    expect(first.ok && first.value.status).toBe("applied");
+    const second = await installer.apply(apply);
+    expect(second.ok && second.value.status).toBe("already_satisfied");
+    expect(activations).toBe(1);
+    await writeFile(join(request.destination, "artifact"), "tampered");
+    const repaired = await installer.apply(apply);
+    expect(repaired.ok && repaired.value.status).toBe("applied");
+    expect(activations).toBe(2);
+
+    active = false;
+    const failed = new ManagedToolInstaller({ managedRoot: join(root, "managed"), pins: [pin],
+      host: { async download(_source, target) { await writeFile(target, "plugin"); }, async run() { throw new Error("unused"); } },
+      providerPlugin: { async verify() { return { ready: false, diagnostic: "hook inactive" }; },
+        async activate() { return { success: true, diagnostic: "command exited zero" }; } } });
+    const uncertain = await failed.apply(apply);
+    expect(uncertain.ok && uncertain.value.status).toBe("unknown");
+  });
+
   it("installs once, verifies on repeat and preserves a known-good install after update failure", async () => {
     const f = await fixture();
     const first = await f.installer.apply(f.applyRequest);
@@ -113,6 +156,77 @@ describe("managed tool installer", () => {
 });
 
 describe("tool integrations", () => {
+  it("runs official Superpowers provider commands and requires active skill discovery", async () => {
+    const calls: string[] = [];
+    const pin: ManagedToolPin = { toolId: "superpowers", installerId: "bflow-tools", version: "6.4.2",
+      source: "https://github.com/obra/superpowers/archive/refs/tags/v6.4.2.tar.gz", integrity: hash("plugin"),
+      recipe: { kind: "provider_plugin", provider: "codex" }, license: "MIT" };
+    let skills: string[] = [];
+    let provenanceReady = false;
+    const adapter = new OfficialProviderPluginAdapter({
+      host: { async download() {}, async run(executable, args) {
+        calls.push(`${executable} ${args.join(" ")}`);
+        if (args[1] === "list") return { exitCode: 0, stdout: JSON.stringify({ installed: [{
+          pluginId: "superpowers@openai-curated-remote", name: "superpowers", version: "6.4.2",
+          enabled: true, installed: true }] }), stderr: "" };
+        return { exitCode: 0, stdout: "{}", stderr: "" };
+      } }, discoverSkills: async () => skills, verifyProvenance: async () => provenanceReady, probeMemory: async () => false
+    });
+    expect((await adapter.verify(pin, "/unused")).ready).toBe(false);
+    expect((await adapter.activate(pin, "/verified/archive", "install")).success).toBe(true);
+    expect(calls).toContain("codex plugin add superpowers@openai-curated-remote --json");
+    skills = ["using-superpowers"];
+    expect((await adapter.verify(pin, "/unused")).ready).toBe(false);
+    provenanceReady = true;
+    expect((await adapter.verify(pin, "/unused")).ready).toBe(true);
+  });
+
+  it.each([
+    ["claude", "claude plugin install superpowers@claude-plugins-official"],
+    ["agy", "agy plugin install https://github.com/obra/superpowers"]
+  ] as const)("uses the %s native Superpowers route", async (provider, expected) => {
+    const calls: string[] = [];
+    const pin: ManagedToolPin = { toolId: "superpowers", installerId: "bflow-tools", version: "6.4.2",
+      source: "https://github.com/obra/superpowers/archive/refs/tags/v6.4.2.tar.gz", integrity: hash("plugin"),
+      recipe: { kind: "provider_plugin", provider }, license: "MIT" };
+    const adapter = new OfficialProviderPluginAdapter({ host: { async download() {}, async run(executable, args) {
+      calls.push(`${executable} ${args.join(" ")}`);
+      return { exitCode: 0, stdout: JSON.stringify([{ id: provider === "claude" ?
+        "superpowers@claude-plugins-official" : "superpowers", version: pin.version, enabled: true }]), stderr: "" };
+    } }, discoverSkills: async () => ["using-superpowers"], verifyProvenance: async () => true, probeMemory: async () => false });
+    expect((await adapter.activate(pin, "/verified/archive", "install")).success).toBe(true);
+    expect(calls).toContain(expected);
+    expect((await adapter.verify(pin, "/unused")).ready).toBe(true);
+  });
+
+  it("installs pinned Claude-Mem dependencies and verifies the adopted worker adapter", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bflow-memory-plugin-")); roots.push(root);
+    const artifact = join(root, "artifact.tgz"); await writeFile(artifact, "archive");
+    const pin: ManagedToolPin = { toolId: "claude-mem", installerId: "bflow-tools", version: "13.11.0",
+      source: "https://registry.npmjs.org/claude-mem/-/claude-mem-13.11.0.tgz", integrity: hash("archive"),
+      recipe: { kind: "provider_plugin", provider: "codex" }, license: "Apache-2.0" };
+    const calls: string[] = [];
+    let workerReady = false;
+    const adapter = new OfficialProviderPluginAdapter({
+      host: { async download() {}, async run(executable, args) {
+        calls.push(`${executable} ${args.join(" ")}`);
+        if (executable === "npm") {
+          await mkdir(join(root, "node_modules", "claude-mem"), { recursive: true });
+          await mkdir(join(root, "node_modules", ".bin"), { recursive: true });
+          await writeFile(join(root, "node_modules", "claude-mem", "package.json"),
+            JSON.stringify({ name: "claude-mem", version: pin.version, license: pin.license }));
+          await writeFile(join(root, "node_modules", ".bin", "claude-mem"), "cli");
+        }
+        return { exitCode: 0, stdout: "ok", stderr: "" };
+      } }, discoverSkills: async () => [], verifyProvenance: async () => false, probeMemory: async () => workerReady
+    });
+    expect((await adapter.activate(pin, artifact, "install")).success).toBe(true);
+    expect(calls.some(call => call.includes("install --ide codex-cli --provider host --no-auto-start"))).toBe(true);
+    expect((await adapter.verify(pin, root)).ready).toBe(false);
+    workerReady = true;
+    expect((await adapter.verify(pin, root)).ready).toBe(true);
+  });
+
   it("requires functional evidence before publishing a capability", () => {
     const registry = new ToolCapabilityRegistry();
     const capability = createToolCapability("rtk", "1.2.3", "r");
@@ -210,7 +324,7 @@ describe("tool integrations", () => {
 
   it("keeps Superpowers installations separate per provider", () => {
     expect(superpowersInstallRoute("claude").command).toContain("claude-plugins-official");
-    expect(superpowersInstallRoute("codex").command).toContain("/plugins");
+    expect(superpowersInstallRoute("codex").command).toContain("codex plugin add");
     expect(superpowersInstallRoute("agy").command).toContain("agy plugin install");
     expect(verifySuperpowersSkills(["using-superpowers"], []).ready).toBe(true);
     expect(verifySuperpowersSkills([], []).ready).toBe(false);

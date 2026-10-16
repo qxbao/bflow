@@ -389,7 +389,7 @@ export function superpowersInstallRoute(provider: z.infer<typeof SuperpowersProv
   SuperpowersProviderSchema.parse(provider);
   const routes = {
     claude: { command: "/plugin install superpowers@claude-plugins-official", verification: "/plugins" },
-    codex: { command: "/plugins → Superpowers → Install Plugin", verification: "/plugins" },
+    codex: { command: "codex plugin add superpowers@openai-curated-remote --json", verification: "codex plugin list --json" },
     agy: { command: "agy plugin install https://github.com/obra/superpowers", verification: "agy plugin list" }
   };
   return { provider, ...routes[provider], bflowPolicy: "External skills are namespaced and subordinate to Bflow's TDD decision and required gates" };
