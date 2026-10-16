@@ -486,6 +486,30 @@ function categorizeFile(relPath: string): RepositoryFileCategory {
   return "other";
 }
 
+/** Read repository content through a confined regular-file descriptor. */
+async function readRepositoryFile(repositoryRoot: string, fullPath: string): Promise<Buffer> {
+  const rootReal = await fs.promises.realpath(repositoryRoot);
+  const realPath = await fs.promises.realpath(fullPath);
+  const relative = path.relative(rootReal, realPath);
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error("Path escapes repository root");
+  }
+  const file = await fs.promises.open(realPath,
+    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  try {
+    const opened = await file.stat();
+    if (!opened.isFile()) throw new Error("Repository content must be a regular file");
+    const currentPath = await fs.promises.realpath(fullPath);
+    const current = await fs.promises.stat(currentPath);
+    if (currentPath !== realPath || current.dev !== opened.dev || current.ino !== opened.ino) {
+      throw new Error("Repository file changed during open");
+    }
+    return await file.readFile();
+  } finally {
+    await file.close();
+  }
+}
+
 // --- Architectural Decision Store ---
 
 export class ArchitecturalDecisionStore {
@@ -508,7 +532,7 @@ export class ArchitecturalDecisionStore {
         }
         const fullPath = path.join(adrDir, entry.name);
         const relPath = path.relative(this.repositoryRoot, fullPath).replace(/\\/g, "/");
-        const content = await fs.promises.readFile(fullPath, "utf8");
+        const content = (await readRepositoryFile(this.repositoryRoot, fullPath)).toString("utf8");
         const sha256 = crypto.createHash("sha256").update(content, "utf8").digest("hex");
 
         const parsed = this.parseAdrContent(content, relPath, sha256);
@@ -957,7 +981,7 @@ export class ProjectContextService {
         } else if (isFile) {
           let buffer: Buffer;
           try {
-            buffer = await fs.promises.readFile(fullPath);
+            buffer = await readRepositoryFile(this.repositoryRoot, fullPath);
           } catch {
             continue;
           }
@@ -1102,7 +1126,7 @@ export class ProjectContextService {
           if (f.name === "role-profile.json") {
             roleProfilePath = fRel;
             try {
-              const content = await fs.promises.readFile(path.join(agentFolder, f.name), "utf8");
+              const content = (await readRepositoryFile(this.repositoryRoot, path.join(agentFolder, f.name))).toString("utf8");
               const parsed = JSON.parse(content);
               const validated = AgentRoleProfileSchema.safeParse(parsed);
               if (validated.success) {
@@ -1144,7 +1168,7 @@ export class ProjectContextService {
     for (const relPath of analysis.documentationFiles) {
       const fullPath = path.join(this.repositoryRoot, relPath);
       try {
-        const content = await fs.promises.readFile(fullPath, "utf8");
+        const content = (await readRepositoryFile(this.repositoryRoot, fullPath)).toString("utf8");
         const sha256 = crypto.createHash("sha256").update(content, "utf8").digest("hex");
         documents.push({
           relativePath: relPath,
@@ -1168,7 +1192,7 @@ export class ProjectContextService {
       for (const promptFile of profileSummary.promptPaths) {
         const fullPath = path.join(this.repositoryRoot, promptFile);
         try {
-          const content = await fs.promises.readFile(fullPath, "utf8");
+          const content = (await readRepositoryFile(this.repositoryRoot, fullPath)).toString("utf8");
           const sha256 = crypto.createHash("sha256").update(content, "utf8").digest("hex");
           documents.push({
             relativePath: promptFile,
@@ -1429,29 +1453,11 @@ export class ProjectContextService {
     const includedFiles: SelectedFileContent[] = [];
     const excludedMatchingFiles: string[] = [];
     let totalBytes = 0;
-    const rootReal = await fs.promises.realpath(this.repositoryRoot);
-
     for (const candidate of candidates) {
       const fullPath = path.join(this.repositoryRoot, candidate.entry.relativePath);
       let buffer: Buffer;
       try {
-        // Cached analysis is a ranking hint, not authority to read a changed path.
-        // realpath also resolves parent-directory symlinks before containment checks.
-        const realPath = await fs.promises.realpath(fullPath);
-        const relative = path.relative(rootReal, realPath);
-        if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
-        const file = await fs.promises.open(realPath,
-          fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
-        try {
-          const opened = await file.stat();
-          if (!opened.isFile()) continue;
-          const currentPath = await fs.promises.realpath(fullPath);
-          const current = await fs.promises.stat(currentPath);
-          if (currentPath !== realPath || current.dev !== opened.dev || current.ino !== opened.ino) continue;
-          buffer = await file.readFile();
-        } finally {
-          await file.close();
-        }
+        buffer = await readRepositoryFile(this.repositoryRoot, fullPath);
       } catch {
         continue;
       }
@@ -1710,43 +1716,18 @@ export class ProjectContextService {
     let specVersionDrifted = false;
 
     // 1. Check all included files for modification, deletion, or symlink escaping
-    const rootReal = await fs.promises.realpath(this.repositoryRoot);
     for (const [relPath, recordedHash] of Object.entries(bundle.fileFingerprints)) {
       const fullPath = path.resolve(this.repositoryRoot, relPath);
-      const relCheck = path.relative(this.repositoryRoot, fullPath);
-      if (relCheck.startsWith("..") || path.isAbsolute(relCheck)) {
-        deletedFiles.push(relPath);
-        reasons.push(`File "${relPath}" resolves outside repository root.`);
-        continue;
-      }
-
       try {
-        const lstat = await fs.promises.lstat(fullPath);
-        let realPath = fullPath;
-        if (lstat.isSymbolicLink()) {
-          realPath = await fs.promises.realpath(fullPath);
-          const relReal = path.relative(rootReal, realPath);
-          if (relReal.startsWith("..") || path.isAbsolute(relReal)) {
-            deletedFiles.push(relPath);
-            reasons.push(`Symlink "${relPath}" escapes repository root.`);
-            continue;
-          }
-        }
-        const stat = await fs.promises.stat(realPath);
-        if (!stat.isFile()) {
-          deletedFiles.push(relPath);
-          reasons.push(`Path "${relPath}" is no longer a regular file.`);
-          continue;
-        }
-        const buffer = await fs.promises.readFile(realPath);
+        const buffer = await readRepositoryFile(this.repositoryRoot, fullPath);
         const currentHash = crypto.createHash("sha256").update(buffer).digest("hex");
         if (currentHash !== recordedHash) {
           modifiedFiles.push(relPath);
           reasons.push(`File "${relPath}" content was modified (hash mismatch).`);
         }
-      } catch {
+      } catch (error) {
         deletedFiles.push(relPath);
-        reasons.push(`File "${relPath}" was deleted or became inaccessible.`);
+        reasons.push(`File "${relPath}" was deleted, became inaccessible or unsafe: ${error instanceof Error ? error.message : "unknown error"}.`);
       }
     }
 

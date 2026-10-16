@@ -191,6 +191,33 @@ const required = require("./legacy.js");
   });
 
   describe("2. Project Documentation & Agent Instructions Reader", () => {
+    it.each(["README.md", "agents/chat/system-prompt.md"])("rejects cached documentation replaced by an escaping symlink: %s", async rel => {
+      const original = await writeFile(rel, "original instructions");
+      await service.analyzeRepositoryStructure();
+      const external = await fs.mkdtemp(path.join(os.tmpdir(), "bflow-doc-external-"));
+      try {
+        const secret = path.join(external, "canary.txt");
+        await fs.writeFile(secret, "SYNTHETIC_EXTERNAL_CANARY");
+        await fs.unlink(original); await fs.symlink(secret, original);
+        const docs = await service.loadProjectDocumentation();
+        expect(JSON.stringify(docs)).not.toContain("SYNTHETIC_EXTERNAL_CANARY");
+        expect(docs.documents.some(doc => doc.relativePath === rel)).toBe(false);
+      } finally { await fs.rm(external, { recursive: true, force: true }); }
+    });
+
+    it("rejects a cached documentation parent replaced by an escaping symlink", async () => {
+      await writeFile("docs/reference.md", "original documentation");
+      await service.analyzeRepositoryStructure();
+      const external = await fs.mkdtemp(path.join(os.tmpdir(), "bflow-doc-parent-"));
+      try {
+        await fs.writeFile(path.join(external, "reference.md"), "SYNTHETIC_PARENT_CANARY");
+        await fs.rm(path.join(tmpRepoRoot, "docs"), { recursive: true });
+        await fs.symlink(external, path.join(tmpRepoRoot, "docs"));
+        const docs = await service.loadProjectDocumentation();
+        expect(JSON.stringify(docs)).not.toContain("SYNTHETIC_PARENT_CANARY");
+      } finally { await fs.rm(external, { recursive: true, force: true }); }
+    });
+
     it("loads docs and agent instructions with role mapping and profile validation", async () => {
       await writeFile("README.md", "# Project Root");
       await writeFile("AGENTS.md", "# Multi-agent Rules");
