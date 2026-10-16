@@ -19,6 +19,7 @@ export type CliCommandName =
   | "up"
   | "down"
   | "attach"
+  | "recover"
   | "doctor"
   | "init"
   | "run"
@@ -52,7 +53,7 @@ export interface InitCommandArgs extends GlobalCliFlags {
 }
 
 export interface EnvironmentCommandArgs extends GlobalCliFlags {
-  readonly command: "up" | "down" | "attach" | "doctor";
+  readonly command: "up" | "down" | "attach" | "doctor" | "recover";
   readonly timeoutMs?: number | undefined;
   readonly yes: boolean;
 }

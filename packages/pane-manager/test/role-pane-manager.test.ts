@@ -384,6 +384,14 @@ class FakeHerdrCommandRunner implements HerdrCommandRunner {
           stderr: ""
         };
       }
+      if (action === "layout") {
+        const id = rest[rest.indexOf("--pane") + 1]!;
+        const pane = this.panes.get(id)!;
+        const panes = [...this.panes.values()].filter(p => p.tabId === pane.tabId);
+        return { exitCode: 0, stderr: "", stdout: JSON.stringify({ id: "1", result: { type: "pane_layout", layout: {
+          workspace_id: pane.workspaceId, tab_id: pane.tabId, panes: panes.map((p,i) => ({ pane_id:p.paneId,
+            rect:{x:i*40,y:0,width:40,height:40} })), splits:[] } } }) };
+      }
       if (action === "process-info") {
         const paneIdx = rest.indexOf("--pane");
         const paneId = paneIdx !== -1 && rest[paneIdx + 1] ? rest[paneIdx + 1]! : (rest[0] ?? "");
@@ -850,6 +858,60 @@ describe("RolePaneManager Verification Suite", () => {
     runner = new FakeHerdrCommandRunner();
     inspector = new FakeWorktreeInspector();
     store = new InMemorySessionManifestStore();
+  });
+  it("labels every role and splits Coordination into a balanced 2x2 without restarting on reconciliation", async () => {
+    const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+    const first = await manager.initializeTopology(); expect(first.ok).toBe(true); if (!first.ok) return;
+    const chat = first.value.panes.find(p => p.role === "conversation")!;
+    expect(runner.panes.get(chat.paneId)?.label).toBe("Chat · Conversation");
+    const splits = runner.calls.filter(c => c.args[0] === "pane" && c.args[1] === "split");
+    const coordination = first.value.panes.find(p => p.role === "coordinator")!.tabId;
+    const grouped = splits.filter(c => runner.panes.get(c.args[2]!)?.tabId === coordination);
+    expect(grouped.map(c => c.args[c.args.indexOf("--direction") + 1])).toEqual(["right", "down", "down"]);
+    expect(grouped[1]!.args[2]).not.toBe(grouped[2]!.args[2]);
+    for (const pane of first.value.panes) expect(runner.panes.get(pane.paneId)?.label).toBeTruthy();
+    const starts = runner.calls.filter(c => c.args[0] === "agent" && c.args[1] === "start").length;
+    expect((await manager.reconcileTopology()).ok).toBe(true);
+    expect(runner.calls.filter(c => c.args[0] === "agent" && c.args[1] === "start")).toHaveLength(starts);
+    expect((await manager.getManifest() as {ok:true;value:typeof first.value}).value.attachTarget).toEqual(first.value.attachTarget);
+  });
+  it("loads the original Chat and Coordinator prompts through Codex native file options before first turn", async () => {
+    const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+    const result = await manager.initializeTopology(); expect(result.ok).toBe(true); if (!result.ok) return;
+    for (const role of ["conversation", "coordinator"]) {
+      const pane = result.value.panes.find(p => p.role === role)!;
+      const start = runner.calls.find(c => c.args[0] === "agent" && c.args[1] === "start" && c.args.includes(pane.paneId))!;
+      expect(start.args.find(a => a.startsWith("model_instructions_file="))).toContain(role === "conversation" ? "agents/chat/system-prompt.md" : "agents/coordinator/system-prompt.md");
+      expect(start.args.some(a => a.includes("\n"))).toBe(false);
+      expect(pane.metadata?.promptInitialized).toBe(true);
+    }
+  });
+  it("explains Codex update blocking with exact targets and never echoes raw screen secrets or accepts the dialog", async () => {
+    const secret = "SCREEN_SECRET_CANARY_DO_NOT_ECHO";
+    runner.onCommand = invocation => {
+      if (invocation.args[0] === "agent" && invocation.args[1] === "start") return { exitCode: 1, stdout: "", stderr: '{"error":{"code":"agent_not_ready","message":"blocked"}}' };
+      if (invocation.args[0] === "pane" && invocation.args[1] === "read") return { exitCode: 0, stderr: "", stdout: `Update CLI? New Codex version available. ${secret}` };
+    };
+    const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+    const result = await manager.initializeTopology(); expect(result.ok).toBe(false); if (result.ok) return;
+    expect(result.error.message).toContain("CLI update confirmation"); expect(result.error.message).toContain(config.sessionId);
+    expect(result.error.message).toContain("bflow up"); expect(result.error.details).toMatchObject({ role: "chat", provider: "codex" });
+    expect(JSON.stringify(result.error)).not.toContain(secret);
+    expect(runner.calls.some(c => c.args.includes("send-keys") || c.args.includes("send-text"))).toBe(false);
+  });
+  it("captures late native sessions only for recorded launches and never rewrites an already-bound session", async () => {
+    const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+    const first = await manager.initializeTopology(); expect(first.ok).toBe(true); if (!first.ok) return;
+    const chat = first.value.panes.find(p => p.role === "conversation")!;
+    expect(chat.session).toBeUndefined(); expect(chat.metadata?.nativeSessionPending).toBe(true);
+    const agent = runner.agents.get("chat")!; runner.agents.set("chat", { ...agent, session: { source: "herdr:codex", kind: "id", value: "first-native-session" } });
+    expect((await manager.inspectTopologyHealth()).ok).toBe(true);
+    const saved = await manager.getManifest(); expect(saved.ok).toBe(true); if (!saved.ok || !saved.value) return;
+    expect(saved.value.panes.find(p => p.paneId === chat.paneId)?.session?.value).toBe("first-native-session");
+    runner.agents.set("chat", { ...agent, session: { source: "herdr:codex", kind: "id", value: "replacement-native-session" } });
+    const observed = await manager.inspectRoleHealth("chat"); expect(observed.ok && observed.value.status).toBe("agent_replaced");
+    const retry = await manager.reconcileTopology(); expect(retry.ok).toBe(false);
+    if (!retry.ok) expect(retry.error.message).toContain("Native session changed");
   });
 
   // Scenario 1: Khởi tạo topology (Initialize full topology)

@@ -34,6 +34,11 @@ import type {
   TopologyRole,
   WorktreeInspector
 } from "./types.js";
+import { balanceOwnedTab } from "./layout.js";
+import { readBuiltinRolePrompt } from "./role-prompts.js";
+import { buildProviderRoleLaunch } from "./provider-launch.js";
+import { open } from "node:fs/promises";
+import { constants } from "node:fs";
 import {
   AGENT_NAME_PATTERN,
   PERMANENT_TOPOLOGY_ROLES,
@@ -215,6 +220,32 @@ export class RolePaneManager {
       parseOkResponse(outcome);
     }
   }
+  async #namePane(paneId: string, role: TopologyRole, agentName: string, options?: OperationOptions): Promise<OperationResult<void>> {
+    const names: Record<TopologyRole, string> = { chat: "Chat · Conversation", coordinator: "Coordinator", planner: "Planner",
+      analyst: "Analyst · Specification", architect: "Architect", reviewer: "Reviewer", "qa-verifier": "QA · Verifier", developer: `Developer · ${agentName}` };
+    const outcome = await this.#runHerdr(["pane", "rename", paneId, names[role]], options);
+    if (outcome.exitCode !== 0 || outcome.failure) return toCommandError(outcome, `Could not label ${role} pane '${paneId}'`);
+    parsePaneInfoResult(outcome); return ok(undefined);
+  }
+  async #startupBlocked(role: TopologyRole, agentName: string, kind: string, paneId: string, state: string, options?: OperationOptions): Promise<OperationResult<PaneBinding>> {
+    // Classify locally. Terminal snapshots can contain secrets; do not return or
+    // log raw screens and never answer an update/trust/permission dialog here.
+    const session = this.#config.sessionId;
+    const inspected = await this.#runHerdr(["pane", "read", paneId, "--source", "detection", "--lines", "35"], options);
+    const screen = inspected.exitCode === 0 ? inspected.stdout : "";
+    const reason = /updat(?:e|ing).{0,50}(?:cli|codex|available)|(?:cli|codex).{0,50}updat|new version available/is.test(screen)
+      ? "CLI update confirmation is waiting for your choice"
+      : /trust.{0,50}(?:folder|directory|repo)|safety check/is.test(screen) ? "Repository trust confirmation is waiting for your choice"
+      : /sign.?in|log.?in|authenticat/is.test(screen) ? "Provider sign-in is required in this pane"
+      : "An interactive dialog or provider startup is waiting in this pane";
+    return conflictError(`${role} (${agentName}, ${kind}) in pane '${paneId}' is ${state}. ${reason}.\n` +
+      `Open this exact session: herdr --session ${session} session attach ${session}\n` +
+      `Select pane ${paneId} (${role}), resolve the dialog, then rerun bflow up.\n` +
+      `Inspect: herdr --session ${session} pane read ${paneId} --source detection --lines 35\n` +
+      "To stop safely: bflow down --yes. State and panes were preserved; do not delete .bflow.",
+      { role, agentName, provider: kind, paneId, sessionId: session, reason,
+        remediation: ["Resolve the interactive dialog in the named session", "bflow up", "bflow down --yes"] });
+  }
 
   async initializeTopology(options?: OperationOptions): Promise<OperationResult<SessionManifest>> {
     try {
@@ -383,6 +414,11 @@ export class RolePaneManager {
       livePanes = [...livePanes, createdConv.rootPane];
     }
     const finalConversationTabId = convTab.tabId;
+    if (convTab.label !== convLabel) {
+      const renamed = await this.#runHerdr(["tab", "rename", convTab.tabId, convLabel], options);
+      if (renamed.exitCode !== 0 || renamed.failure) return toCommandError(renamed, "Could not name the Conversation tab");
+      parseTabInfoResult(renamed);
+    }
 
     const configuredPermanentRoles: readonly PermanentTopologyRole[] =
       this.#config.permanentRoles ?? PERMANENT_TOPOLOGY_ROLES;
@@ -431,6 +467,7 @@ export class RolePaneManager {
     }
 
     const assignedPaneIds = new Set<string>();
+    const splitDepths = new Map(livePanes.map(pane => [pane.paneId, 0]));
     const manifestPanes: PaneBinding[] = [];
     const persistProgress = async (binding: PaneBinding): Promise<OperationResult<SessionManifest>> => {
       const panes = [...manifestPanes.filter(p => p.paneId !== binding.paneId), binding];
@@ -512,6 +549,12 @@ export class RolePaneManager {
       }
 
       if (healthyOccupant) {
+        if (savedBinding?.session && healthyOccupant.session && savedManifest?.status !== "down" &&
+            savedBinding.paneId === healthyOccupant.paneId &&
+            (savedBinding.session.source !== healthyOccupant.session.source || savedBinding.session.kind !== healthyOccupant.session.kind || savedBinding.session.value !== healthyOccupant.session.value))
+          return conflictError(`Native session changed for ${role} in pane '${healthyOccupant.paneId}'; refusing to adopt it as the old role execution. Preserve work, inspect bflow doctor, and use bflow down --yes before a fresh startup.`);
+        const named = await this.#namePane(healthyOccupant.paneId, role, agentName, options);
+        if (!named.ok) return named;
         assignedPaneIds.add(healthyOccupant.paneId);
         const bindingResult = this.#buildAndValidateBinding({
           spec,
@@ -522,7 +565,7 @@ export class RolePaneManager {
             workspaceId: healthyOccupant.workspaceId,
             tabId: healthyOccupant.tabId,
             cwd: this.#config.workspaceRoot,
-            permanent: true
+            permanent: true, ...(savedBinding?.metadata ? { metadata: savedBinding.metadata } : {})
           },
           agentName,
           agentKind
@@ -561,11 +604,13 @@ export class RolePaneManager {
         selectedPaneId = candidatePane.paneId;
       } else {
         // Split existing pane in targetTabId
-        const sourcePane = livePanes.find((p) => p.tabId === targetTabId) ?? livePanes[0];
+        const sourcePane = livePanes.filter(p => p.tabId === targetTabId)
+          .sort((a, b) => (splitDepths.get(a.paneId) ?? 0) - (splitDepths.get(b.paneId) ?? 0))[0];
         if (!sourcePane) {
           return validationError(`No pane available to split in tab '${targetTabId}'`);
         }
-        const direction = roleConfig?.splitDirection ?? "right";
+        const depth = splitDepths.get(sourcePane.paneId) ?? 0;
+        const direction = roleConfig?.splitDirection ?? (depth % 2 === 0 ? "right" : "down");
         const splitOutcome = await this.#runHerdr(
           ["pane", "split", sourcePane.paneId, "--direction", direction, "--cwd", this.#config.workspaceRoot, "--no-focus"],
           options
@@ -575,6 +620,7 @@ export class RolePaneManager {
         }
         const splitResult = parsePaneInfoResult(splitOutcome);
         selectedPaneId = splitResult.paneId;
+        splitDepths.set(sourcePane.paneId, depth + 1); splitDepths.set(selectedPaneId, depth + 1);
         livePanes = [...livePanes, splitResult];
       }
 
@@ -621,6 +667,9 @@ export class RolePaneManager {
       }
     }
 
+    for (const tabId of new Set(manifestPanes.filter(p => p.permanent).map(p => p.tabId))) {
+      await balanceOwnedTab(args => this.#runHerdr(args, options), herdrWorkspaceId, tabId, manifestPanes.filter(p => p.tabId === tabId).map(p => p.paneId));
+    }
     // Step 3: Focus Conversation Pane
     const chatBinding = manifestPanes.find((p) => p.role === "conversation");
     if (!chatBinding) {
@@ -676,7 +725,7 @@ export class RolePaneManager {
       },
       createdAt: savedManifest?.createdAt ?? this.#clock().toISOString(),
       updatedAt: this.#clock().toISOString(),
-      metadata: { ...savedManifest?.metadata, startupPending: false }
+      metadata: { ...savedManifest?.metadata, startupPending: false, panePresentationVersion: 1 }
     };
 
     const parsedManifest = SessionManifestSchema.safeParse(manifest);
@@ -748,6 +797,8 @@ export class RolePaneManager {
         return toCommandError(paneGetOutcome, `Pane '${request.paneId}' not found`);
       }
       const pane = parsePaneInfoResult(paneGetOutcome);
+      const named = await this.#namePane(request.paneId, spec.topologyRole, agentName, options);
+      if (!named.ok) return named;
 
       if (pane.agent !== null) {
         const agentGetOutcome = await this.#runHerdr(["agent", "get", request.paneId], options);
@@ -755,10 +806,10 @@ export class RolePaneManager {
           const existingAgent = parseAgentInfoResult(agentGetOutcome, "agent_info");
           if (existingAgent.name === agentName && existingAgent.agent === agentKind) {
             if (existingAgent.agentStatus === "blocked" || existingAgent.agentStatus === "unknown") {
-              return conflictError(`Agent in pane '${request.paneId}' is not ready: ${existingAgent.agentStatus}`);
+              return this.#startupBlocked(spec.topologyRole, agentName, agentKind, request.paneId, existingAgent.agentStatus, options);
             }
             if (existingAgent.launchPending === true || existingAgent.interactiveReady === false) {
-              return conflictError(`Agent in pane '${request.paneId}' has launch pending or interactive not ready`);
+              return this.#startupBlocked(spec.topologyRole, agentName, agentKind, request.paneId, "launch pending or interactive not ready", options);
             }
             return this.#buildAndValidateBinding({
               spec,
@@ -790,7 +841,41 @@ export class RolePaneManager {
       if (timeout !== undefined) {
         startArgs.push("--timeout", String(timeout));
       }
-      const passedArgs = request.args ?? roleConfig?.args;
+      let passedArgs = request.args ?? roleConfig?.args;
+      let originalPromptSource: string | undefined;
+      if (["chat", "coordinator"].includes(spec.topologyRole)) {
+        const original = await readBuiltinRolePrompt(spec.topologyRole);
+        if (!original) return validationError(`Required original prompt is missing for ${spec.topologyRole}`);
+        if (agentKind !== "claude" && agentKind !== "codex") return validationError(`Native initial prompt injection for ${agentKind} is not verified. Configure role launch args for ${spec.topologyRole}.`);
+        const args = passedArgs?.length ? [...passedArgs] : [...buildProviderRoleLaunch({ agentKind, role: spec.topologyRole, systemPrompt: original.prompt })];
+        if (agentKind === "claude") {
+          const index = args.indexOf("--append-system-prompt"), fromFile = args.indexOf("--append-system-prompt-file");
+          if (index >= 0) {
+            if (passedArgs?.length && args[index + 1] !== original.prompt) return validationError("Use a launch prompt file containing the original Bflow role plus custom instructions; inline override would lose role or host instructions.");
+            args[index] = "--append-system-prompt-file"; args[index + 1] = original.source;
+          }
+          else if (fromFile < 0) args.push("--append-system-prompt-file", original.source);
+          originalPromptSource = args[args.indexOf("--append-system-prompt-file") + 1];
+        } else {
+          const configuredFile = args.findIndex(value => value.startsWith("model_instructions_file="));
+          if (configuredFile >= 0) originalPromptSource = JSON.parse(args[configuredFile]!.slice("model_instructions_file=".length)) as string;
+          else {
+            const inline = args.findIndex(value => value.startsWith("developer_instructions="));
+            const fileOption = `model_instructions_file=${JSON.stringify(original.source)}`;
+            if (inline >= 0 && !passedArgs?.length) args[inline] = fileOption;
+            else args.push("-c", fileOption);
+            originalPromptSource = original.source;
+          }
+        }
+        if (typeof originalPromptSource !== "string") return validationError("Original role prompt file is missing from native launch arguments");
+        const file = await open(originalPromptSource, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        try {
+          const stat = await file.stat();
+          if (!stat.isFile() || stat.size > 131_072 || !(await file.readFile("utf8")).includes(original.prompt))
+            return validationError(`The native ${spec.topologyRole} launch prompt does not contain its original Bflow role prompt. Rebuild the host launch configuration.`);
+        } finally { await file.close(); }
+        passedArgs = args;
+      }
       if (passedArgs && passedArgs.length > 0) {
         startArgs.push("--", ...passedArgs);
       }
@@ -803,7 +888,7 @@ export class RolePaneManager {
           startOutcome.stderr.includes("agent_blocked") ||
           startOutcome.stdout.includes("agent_blocked")
         ) {
-          return conflictError(`Agent failed readiness check during startup: ${startOutcome.stderr || startOutcome.stdout}`);
+          return this.#startupBlocked(spec.topologyRole, agentName, agentKind, request.paneId, "blocked during startup", options);
         }
         return toCommandError(startOutcome, `Failed to start agent '${agentName}' in pane '${request.paneId}'`);
       }
@@ -811,16 +896,17 @@ export class RolePaneManager {
       const agentInfo = parseAgentInfoResult(startOutcome, "agent_started");
 
       if (agentInfo.agentStatus === "blocked" || agentInfo.agentStatus === "unknown") {
-        return conflictError(`Agent started in non-ready state: ${agentInfo.agentStatus}`);
+        return this.#startupBlocked(spec.topologyRole, agentName, agentKind, request.paneId, agentInfo.agentStatus, options);
       }
       if (agentInfo.launchPending === true || agentInfo.interactiveReady === false) {
-        return conflictError("Agent started with launch pending or interactive not ready");
+        return this.#startupBlocked(spec.topologyRole, agentName, agentKind, request.paneId, "launch pending or interactive not ready", options);
       }
 
       return this.#buildAndValidateBinding({
         spec,
         agentInfo,
-        request,
+        request: { ...request, metadata: { ...request.metadata, ...(originalPromptSource ? { promptInitialized: true, promptSource: originalPromptSource } : {}),
+          ...(!agentInfo.session ? { nativeSessionPending: true } : {}) } },
         agentName,
         agentKind
       });
@@ -1174,6 +1260,9 @@ export class RolePaneManager {
 
         updatedPanes.push({
           ...binding,
+          ...(!binding.session && report.occupantMatches && report.observedAgent?.session &&
+            (binding.metadata?.nativeSessionPending === true || binding.metadata?.launchIntent === true)
+            ? { session: report.observedAgent.session, metadata: { ...binding.metadata, nativeSessionPending: false } } : {}),
           transportState: report.transportState,
           lastHeartbeatAt: this.#clock().toISOString()
         });

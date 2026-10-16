@@ -58,6 +58,18 @@ export class HerdrProcesses implements EnvironmentProcessRunner {
       const tab = newTab(flag("--workspace"), flag("--label")); return wire("tab_created", { tab, root_pane: newPane(tab) });
     }
     if (domain === "tab" && action === "focus") return wire("tab_info", { tab: session.tabs.find((t) => t.tab_id === target) });
+    if (domain === "tab" && action === "rename") {
+      const tab = session.tabs.find(t => t.tab_id === target)!; tab.label = args[3]!; return wire("tab_info", {tab});
+    }
+    if (domain === "pane" && action === "rename") {
+      const pane = session.panes.find(p => p.pane_id === target)!; Object.assign(pane, {label:args[3]}); return wire("pane_info", {pane});
+    }
+    if (domain === "pane" && action === "read") return {exitCode:0,stderr:"",stdout:"Update CLI? A new Codex version is available."};
+    if (domain === "pane" && action === "layout") {
+      const pane = session.panes.find(p=>p.pane_id === flag("--pane"))!;
+      return wire("pane_layout", {layout:{workspace_id:pane.workspace_id,tab_id:pane.tab_id,
+        panes:session.panes.filter(p=>p.tab_id===pane.tab_id).map((p,i)=>({pane_id:p.pane_id,rect:{x:i*40,y:0,width:40,height:40}})),splits:[]}});
+    }
     if (domain === "pane" && action === "list") return wire("pane_list", { panes: session.panes.filter((p) => p.workspace_id === flag("--workspace")) });
     if (domain === "pane" && action === "close") {
       session.panes = session.panes.filter(pane => pane.pane_id !== target);
@@ -76,7 +88,7 @@ export class HerdrProcesses implements EnvironmentProcessRunner {
     if (domain === "agent" && action === "start") {
       const pane = session.panes.find((p) => p.pane_id === flag("--pane"))!;
       if (session.panes.some((p) => p.name === target)) return failure("Duplicate agent start");
-      Object.assign(pane, { agent: flag("--kind"), name: target, agent_status: target === this.blockedAgent ? "blocked" : "idle", interactive_ready: true });
+      Object.assign(pane, { agent: flag("--kind"), name: target, agent_status: target === this.blockedAgent ? "blocked" : "idle", interactive_ready: true, agent_session: {source:"herdr:"+flag("--kind"),kind:"id",value:"native-"+target} });
       if (target === this.blockedAgent) return { exitCode: 1, stdout: "", stderr: JSON.stringify({ id: "1", error: { code: "agent_not_ready", message: `${target} blocked` } }) };
       return wire("agent_started", { agent: pane });
     }

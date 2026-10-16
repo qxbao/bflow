@@ -132,7 +132,7 @@ export function formatCommandSuccess(
 
   if ("checks" in data) {
     return [`Repository: ${data.workspaceRoot}`, `Session: ${data.sessionId ?? "none"}`,
-      ...data.checks.map((check) => `${check.status.toUpperCase()} ${check.name}: ${check.message}`)].join("\n");
+      ...data.checks.map((check) => `${check.status.toUpperCase()} ${check.name}: ${check.message}${check.remediation ? `\n  Next: ${check.remediation}` : ""}`)].join("\n");
   }
   if ("server" in data) {
     return [`Repository: ${data.workspaceRoot}`, `Session: ${data.sessionName}`,
@@ -190,6 +190,9 @@ export function formatCommandError(
   let out = `Error [${error.code}]: ${error.message}`;
   if (error.details !== undefined && error.details !== null) {
     out += `\nDetails: ${JSON.stringify(error.details, null, 2)}`;
+  }
+  if (command && ["up", "down", "attach", "status", "doctor", "recover"].includes(command)) {
+    out += "\nNext: bflow status and bflow doctor show this repository's session and recovery instructions. Preserve .bflow; use bflow down --yes for a checked shutdown.";
   }
   return out;
 }

@@ -49,6 +49,8 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
   return value as unknown as HostConfiguration;
 }
 function failure<T>(error: unknown): OperationResult<T> {
+  if (String(error).includes("[bflow:native-startup-pending]")) return { ok: false, error: { code: "conflict", retryable: true,
+    message: String(error), details: { stage: "native_startup" } } };
   return { ok: false, error: { code: "transport_unavailable", retryable: true, message: String(error) } };
 }
 /** Idempotently starts a durable host before provider MCP startup. Never steals a stale socket. */

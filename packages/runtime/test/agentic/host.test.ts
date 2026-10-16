@@ -117,6 +117,10 @@ describe("default durable host lifecycle and role MCP", () => {
     const f = await fixture();
     const first = await f.controller.prepare();
     expect(first.roleLaunch.coordinator!.systemPrompt).toContain("technical lead");
+    const chatOriginal = await readFile(new URL("../../../../agents/chat/system-prompt.md", import.meta.url), "utf8");
+    const coordinatorOriginal = await readFile(new URL("../../../../agents/coordinator/system-prompt.md", import.meta.url), "utf8");
+    expect(first.roleLaunch.conversation!.systemPrompt).toContain(chatOriginal);
+    expect(first.roleLaunch.coordinator!.systemPrompt).toContain(coordinatorOriginal);
     const config = JSON.parse(await readFile(first.roleLaunch.coordinator!.mcpConfigFile,"utf8"));
     expect(config.mcpServers.bflow.args[1]).toBe("mcp");
     await f.controller.close();

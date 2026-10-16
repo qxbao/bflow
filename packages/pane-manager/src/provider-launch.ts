@@ -81,18 +81,22 @@ export async function buildProviderRoleLaunchFromFiles(options: ProviderRoleLaun
   if (!settings || typeof settings !== "object" || !settings.hooks || typeof settings.hooks !== "object" || Array.isArray(settings.hooks))
     throw new Error("Trusted host settings must contain lifecycle hooks");
   const args = [...buildProviderRoleLaunch({ ...options, mcpServers: mcp.mcpServers })];
+  const promptFile = options.mcpConfigFile + ".system-prompt.txt";
+  const file = await open(promptFile, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
+  try { await file.writeFile(options.systemPrompt); } finally { await file.close(); }
   if (options.agentKind === "claude") {
     args[args.indexOf("--mcp-config") + 1] = options.mcpConfigFile;
     args[args.indexOf("--settings") + 1] = options.hooksSettingsFile;
     // Herdr rejects multiline shell arguments. Claude's native file option also
     // keeps long role instructions out of the shell command line.
-    const promptFile = options.mcpConfigFile + ".system-prompt.txt";
-    const file = await open(promptFile, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
-    try { await file.writeFile(options.systemPrompt); } finally { await file.close(); }
     const promptFlag = args.indexOf("--append-system-prompt");
     args[promptFlag] = "--append-system-prompt-file";
     args[promptFlag + 1] = promptFile;
   } else {
+    // Native file loading replaces built-in instructions and avoids terminal line limits.
+    // https://developers.openai.com/codex/config-reference#model_instructions_file
+    const instructions = args.findIndex(value => value.startsWith("developer_instructions="));
+    args[instructions] = `model_instructions_file=${JSON.stringify(promptFile)}`;
     args.push("--enable", "hooks", "--dangerously-bypass-hook-trust", "-c", `hooks=${toml(settings.hooks)}`);
   }
   return args;

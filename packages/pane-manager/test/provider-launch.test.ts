@@ -59,6 +59,9 @@ describe("explicit provider role launch policy", () => {
       expect(await readFile(claude[claude.indexOf("--append-system-prompt-file") + 1]!, "utf8")).toBe(options.systemPrompt);
       const codex = await buildProviderRoleLaunchFromFiles({ ...options, agentKind: "codex" });
       expect(codex.find(arg => arg.startsWith("hooks="))).toContain("UserPromptSubmit");
+      const promptArg = codex.find(arg => arg.startsWith("model_instructions_file="))!;
+      expect(await readFile(JSON.parse(promptArg.slice("model_instructions_file=".length)), "utf8")).toBe(options.systemPrompt);
+      expect(codex.some(arg => arg.startsWith("developer_instructions="))).toBe(false);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 });

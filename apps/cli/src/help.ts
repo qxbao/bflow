@@ -10,6 +10,7 @@ Commands:
   down       Checkpoint and stop the repository environment
   attach     Attach to its Conversation pane
   doctor     Diagnose environment and dependencies
+  recover    Recover a legacy lifecycle lock without deleting project state
   run        Start a new workflow run with a requirement
   status     Show environment; a run ID or filters query workflow runs
   approve    Record human approval, rejection, or rework request for a task
@@ -162,6 +163,7 @@ const HELP_MAP: Record<CliCommandName, string> = {
   up: "Usage: bflow up [--timeout <milliseconds>] [--json]\nStart/reconcile this repository's headless named session and wait for required roles.",
   down: "Usage: bflow down [--yes] [--timeout <milliseconds>] [--json]\nCheckpoint active work and gracefully stop only this repository session. --yes confirms unsafe work; it never bypasses checkpoints.",
   attach: "Usage: bflow attach [--json]\nFocus Conversation and attach to an existing repository session. Run up first.",
+  recover: "Usage: bflow recover --yes [--json]\nStop old Bflow commands first. Migrates only an empty legacy lock; preserves project state, agents and worktrees. Then run bflow up or bflow down --yes.",
   doctor: "Usage: bflow doctor [--json]\nCheck configuration, dependencies, named session and P13 integration.",
   init: INIT_HELP,
   run: RUN_HELP,

@@ -10,6 +10,7 @@ import {
   type SessionManifestStore, type TopologyRole
 } from "@bflow/pane-manager";
 import type { EnvironmentCompositionInput, EnvironmentIntegration } from "./environment.js";
+import { EnvironmentError } from "./environment.js";
 import { environmentProcessRunner, namedSessionEnvironment, type EnvironmentProcessRunner } from "./environment-process.js";
 import { openLifecycleHost, providerRoleArguments, type LifecycleHost, type LifecycleHostFactory } from "./agentic-host.js";
 
@@ -158,6 +159,7 @@ export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, r
   const connect = () => host ??= hostFactory(input);
   let manager = new PaneManagerLifecycleAdapter(input, runner);
   return {
+    requiresNativeSession: true,
     manager: {
       init: (manifest, options) => manager.init(manifest, options),
       async up(sessionId, options) {
@@ -184,7 +186,7 @@ export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, r
     },
     async activate(manifest, options) {
       const result = await (await connect()).activate(manifest, options);
-      if (!result.ok) throw new Error(result.error.message);
+      if (!result.ok) throw new EnvironmentError(result.error);
     },
     quiesce: async options => (await connect()).quiesce(options),
     checkpoint: async (command, options) => (await connect()).checkpoint(command, options),

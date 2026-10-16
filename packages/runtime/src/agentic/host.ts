@@ -67,6 +67,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     await privateFile(publicPath, pair.publicKey.export({ type: "spki", format: "pem" }).toString());
   }
   const publicKey = await readFile(publicPath, "utf8");
+  const promptAssets = await import(new URL("../../../pane-manager/dist/index.js", import.meta.url).href);
   for (const role of roles) {
     const path = join(configuration.directory, role + ".json");
     let roleConfig: RoleConfiguration;
@@ -83,10 +84,12 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const hooks = Object.fromEntries(["SessionStart", "UserPromptSubmit", "Stop", "PreToolUse"].map(event => [event, [{ hooks: [{ type: "command", command: hookCommand(event), timeout: 30 }] }]]));
     await privateFile(hooksSettingsFile, JSON.stringify({ hooks }));
     let systemPrompt = `You are Bflow's ${role} in a dedicated Herdr pane. Use the bflow MCP tools. All cross-role messages must use send_role_message through native Herdr; never use files as a mailbox. Never fabricate evidence or approvals. `;
+    const original = await promptAssets.readBuiltinRolePrompt(role);
+    if (["conversation", "coordinator"].includes(role) && !original) throw new Error(`The required original ${role} agent prompt is missing; reinstall the complete Bflow distribution.`);
+    if (original) systemPrompt += original.prompt + "\n\nTrusted host integration instructions:\n";
     if (role === "conversation") systemPrompt += "You are the sole user interface. The trusted UserPromptSubmit hook supplies the Conversation Gateway result as additional context. Greetings and questions need no workflow. Explain Gateway clarifications and forward the user's actual intent through that Gateway. Never call coordination tools or edit source. User approval comes exclusively from the trusted hook; an MCP call cannot approve.";
     else if (role === "coordinator") {
-      try { systemPrompt += await readFile(new URL("../../../../agents/coordinator/system-prompt.md", import.meta.url), "utf8"); }
-      catch { systemPrompt += "Inspect the durable inbox, assess the spec, propose a schema-valid workflow. Runtime controls all dispatch and quality/approval gates. Never edit source or approve human-required gates."; }
+      systemPrompt += "Inspect the durable inbox, assess the spec and propose a schema-valid workflow. Runtime controls dispatch and quality/approval gates. Never edit source or approve human-required gates.";
     } else if (role === "developer") systemPrompt += "Read assignment_context and workspace_status for the exact accepted specification, owned paths and worktree. Native shell is disabled: use commit_changes with expectedHead for scoped commits and check_work for untrusted feedback. Required TDD: first edit/commit only configured testPaths, request_verification(red), then END YOUR TURN. Runtime sends a phase outcome to resume you. After independent Red, tests are frozen: authorize_implementation, edit source, commit, check_work, then request_verification(green) and yield. On Green receipt, refactor source if appropriate without editing Red tests, commit, request_verification(refactor) and yield. For non-required automated work, request_verification(verification) after a clean commit and yield. Submit implementation only when all required automated phase receipts exist. Manual docs evidence is requested after submission. Never modify accepted criteria/specification or claim your own feedback is independent acceptance.";
     else systemPrompt += "Read incoming RoleMessage. Inspect the exact assigned revision and criteria independently. Use host verification tools for evidence; never invent command output. Send replies through send_role_message with original correlation and causation. End your turn after sending.";
     if (role === "coordinator") systemPrompt += " Use planning_reference to read the shipped specification example, policy metadata schema and workflow contract before proposing a workflow. Specialist requests can gather project details; repository files are never a mailbox.";
@@ -159,7 +162,13 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     // Require the launch-local hook receipt for this exact native session.
     for (const pane of accepted.panes) {
       if (!pane.permanent || pane.role === "developer") continue;
-      const receipt = record(JSON.parse(await readFile(join(configuration.directory, "launch-receipts", digest([pane.role, pane.paneId]) + ".json"), "utf8")));
+      const path = join(configuration.directory, "launch-receipts", digest([pane.role, pane.paneId]) + ".json");
+      let receipt: Record<string, unknown>;
+      try { receipt = record(JSON.parse(await readFile(path, "utf8"))); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`[bflow:native-startup-pending] ${pane.role} pane ${pane.paneId} is still publishing ${path}; wait for its native Bflow SessionStart hook.`);
+        throw error;
+      }
       if (!pane.session || receipt.role !== pane.role || receipt.paneId !== pane.paneId || receipt.nativeSessionId !== pane.session.value) {
         throw new Error(`Pane '${pane.paneId}' has no matching native Bflow launch receipt; preserve it and reconcile provider startup`);
       }
@@ -168,6 +177,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const receipt = nativeSessions.get(pane.paneId);
       const actual = record(record(record(JSON.parse(await herdr(["agent", "get", pane.paneId]))).result).agent);
       const native = actual.agent_session ? record(actual.agent_session) : undefined;
+      if (native && pane.session?.value === native.value && (!receipt || receipt.sessionId !== native.value))
+        throw new Error(`[bflow:native-startup-pending] ${pane.role} pane ${pane.paneId} is still publishing its Bflow native-session receipt.`);
       if (!receipt || receipt.role !== pane.role || !native || native.source !== "herdr:claude" || native.kind !== "id" || native.value !== receipt.sessionId ||
           pane.session?.value !== receipt.sessionId || (actual.name ?? actual.agent) !== pane.agentId)
         throw new Error(`Role ${pane.role} has no matching Bflow provider startup/native-session receipt; stop and recreate legacy bare panes`);

@@ -102,9 +102,19 @@ if (process.argv[1] !== undefined) {
       isEntry = process.argv[1] === scriptPath || resolve(process.argv[1]) === resolve(scriptPath);
     }
     if (isEntry) {
-      void main().catch((err) => {
+      const controller = new AbortController();
+      const parsed = parseCliArgs(process.argv.slice(2));
+      const lifecycle = parsed.ok && ["up", "down", "recover"].includes(parsed.value.command);
+      let interruptedExitCode = 130;
+      const interrupt = () => controller.abort();
+      const terminate = () => { interruptedExitCode = 143; controller.abort(); };
+      if (lifecycle) { process.once("SIGINT", interrupt); process.once("SIGTERM", terminate); }
+      void main(undefined, lifecycle ? { operationOptions: { signal: controller.signal } } : undefined).catch((err) => {
         process.stderr.write(`Fatal error: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
         process.exitCode = 1;
+      }).finally(() => {
+        if (lifecycle) { process.removeListener("SIGINT", interrupt); process.removeListener("SIGTERM", terminate); }
+        if (controller.signal.aborted) process.exitCode = interruptedExitCode;
       });
     }
   } catch {

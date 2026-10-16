@@ -7,7 +7,7 @@ import {
   SessionManifestSchema, type SessionLifecycleManager, type SessionManifest, type RuntimeService,
   type RecoveryCheckpoint, type WorkflowRunSnapshot, type CreateCheckpointCommand
 } from "@bflow/contracts";
-import { EnvironmentLifecycle, identifyRepository, main, namedSessionEnvironment, parseCliArgs, runCli,
+import { EnvironmentError, EnvironmentLifecycle, identifyRepository, main, namedSessionEnvironment, parseCliArgs, runCli,
   environmentProcessRunner, type EnvironmentConfig, type EnvironmentProcessRequest, type EnvironmentProcessRunner } from "../src/index.js";
 import { PaneManagerLifecycleAdapter } from "../src/pane-manager-integration.js";
 
@@ -50,7 +50,7 @@ class FakeProcesses implements EnvironmentProcessRunner {
 function mockManager(repository: Awaited<ReturnType<typeof identifyRepository>>) {
   let current: SessionManifest | null = null;
   const create = () => SessionManifestSchema.parse({ schemaVersion: 2, sessionId: repository.sessionName, projectName: "repo", workspaceRoot: repository.root,
-    herdrWorkspaceId: "w1", herdrTabId: "w1:t1", status: "up", conversationSessionId: "conversation-1", activeRunIds: [],
+    herdrWorkspaceId: "w1", herdrTabId: "w1:t1", status: "up", conversationSessionId: "conversation-1", activeRunIds: [], metadata: { panePresentationVersion: 1 },
     panes: roles.map((role, i) => ({ schemaVersion: 2, bindingId: `binding-${i}`, sessionId: repository.sessionName, role, agentId: `agent-${i}`,
       workspaceId: "w1", tabId: "w1:t1", paneId: `w1:p${i}`, provider: "openai", agentKind: "codex", cwd: repository.root,
       isolationMode: "dedicated_pane", readOnlyWorkspace: role === "conversation", transportState: "idle", boundAt: now })),
@@ -150,6 +150,21 @@ describe("P12 repository environment lifecycle", () => {
     expect(activate).toHaveBeenCalledWith(expect.objectContaining({ status: "up" }), expect.any(Object));
     const state = JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8"));
     expect(state.phase).toBe("manager_pending");
+  });
+  it("waits for authenticated native startup receipts without resending role startup", async () => {
+    const activate = vi.fn(async () => undefined).mockRejectedValueOnce(new EnvironmentError({ code: "conflict", retryable: true,
+      message: "Native hook is still publishing its receipt", details: { stage: "native_startup" } }));
+    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, activate } });
+    expect((await composed.up()).status).toBe("up");
+    expect(activate).toHaveBeenCalledTimes(2); expect(fixture.manager.up).toHaveBeenCalledTimes(1);
+    expect(runner.requests.filter(r => r.args[0] === "server")).toHaveLength(1);
+  });
+  it("retains actionable native-hook context when activation readiness times out", async () => {
+    const activate = vi.fn(async () => { throw new EnvironmentError({ code: "conflict", retryable: true,
+      message: "Coordinator pane pane-7 is still publishing its native receipt", details: { stage: "native_startup" } }); });
+    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, activate } });
+    await expect(composed.up(350)).rejects.toThrow("Coordinator pane pane-7");
+    expect(fixture.manager.up).toHaveBeenCalledTimes(1);
   });
   it("resolves nested and symlink paths to the same repository", async () => {
     await mkdir(join(dir, "nested")); await symlink(dir, join(dir, "alias"));
@@ -256,8 +271,13 @@ describe("P12 repository environment lifecycle", () => {
   });
   it("serializes lifecycle mutations with a repository lock", async () => {
     await mkdir(join(dir, ".bflow/state/lifecycle.lock"), { recursive: true });
-    await expect(lifecycle.up()).rejects.toThrow("Another environment operation");
+    await expect(lifecycle.up()).rejects.toThrow("legacy lifecycle lock");
     expect(fixture.manager.up).not.toHaveBeenCalled();
+    const config = await readFile(join(dir, ".bflow/config.yaml"), "utf8");
+    const recovered = await runCli(["recover", "--yes", "--json"], { cwd: dir, environment: { runner, integration: { manager: fixture.manager } } });
+    expect(recovered.ok).toBe(true); expect(JSON.parse(recovered.stdout).command).toBe("recover");
+    expect(await readFile(join(dir, ".bflow/config.yaml"), "utf8")).toBe(config);
+    expect((await lifecycle.up()).status).toBe("up");
   });
   it("requires confirmation for active runs and does not stop agents", async () => {
     await lifecycle.up();
@@ -309,12 +329,60 @@ describe("P12 repository environment lifecycle", () => {
   it("does not force-stop after graceful shutdown times out", async () => {
     await lifecycle.up(); vi.mocked(fixture.manager.down).mockImplementation(async () => new Promise(() => {}));
     await expect(lifecycle.down(true, 500)).rejects.toThrow("timed out");
-    await expect(lifecycle.down(true)).rejects.toThrow("Earlier shutdown is unresolved");
-    expect(fixture.manager.down).toHaveBeenCalledTimes(1); expect(runner.requests.some((r) => r.args.includes("stop"))).toBe(false);
+    expect(runner.requests.some((r) => r.args.includes("stop"))).toBe(false);
+    vi.mocked(fixture.manager.down).mockImplementation(async () => ({ ok: true, value: { ...fixture.get(), status: "down" } }));
+    expect((await lifecycle.down(true)).status).toBe("down");
+    expect(fixture.manager.down).toHaveBeenCalledTimes(2);
+    expect(runner.running.has(repository.sessionName)).toBe(false);
   });
   it("reports live server, panes and agent state", async () => {
     await lifecycle.up(); const status = await lifecycle.status();
     expect(status.server).toBe("running"); expect(status.liveObservation).toBe(true); expect(status.manifest?.panes).toHaveLength(7);
+  });
+  it("cancels an in-flight up and resumes the same saved topology without deleting state", async () => {
+    const abort = new AbortController(), sentinel = join(dir, "notes.txt"); await writeFile(sentinel, "uncommitted work");
+    const original = fixture.manager.up;
+    vi.mocked(fixture.manager.up).mockImplementationOnce(async () => {
+      fixture.set({ ...fixture.create(), status: "initializing" });
+      await new Promise(() => {}); return { ok: true, value: fixture.get() };
+    });
+    const interrupted = new EnvironmentLifecycle(dir, { runner, signal: abort.signal, integration: { manager: fixture.manager } });
+    const pending = interrupted.up();
+    await expect.poll(() => vi.mocked(original).mock.calls.length).toBe(1); abort.abort();
+    await expect(pending).rejects.toMatchObject({ contractError: { code: "cancelled" } });
+    expect((await lifecycle.up()).status).toBe("up");
+    expect(runner.requests.filter(r => r.args[0] === "server")).toHaveLength(1);
+    expect(await readFile(sentinel, "utf8")).toBe("uncommitted work");
+  });
+  it("recovers a pre-manifest stopped startup and keeps configuration intact", async () => {
+    const config = await readFile(join(dir, ".bflow/config.yaml"), "utf8");
+    await mkdir(join(dir, ".bflow/state"), { recursive: true });
+    await writeFile(join(dir, ".bflow/state/operation.json"), JSON.stringify({ repositoryId: repository.id, sessionName: repository.sessionName, phase: "server_starting" }));
+    await expect(lifecycle.up()).rejects.toThrow("bflow recover --yes");
+    await expect(lifecycle.recover()).rejects.toThrow("recover --yes");
+    await lifecycle.recover(true); expect((await lifecycle.up()).status).toBe("up");
+    expect(await readFile(join(dir, ".bflow/config.yaml"), "utf8")).toBe(config);
+  });
+  it("stops a server-only partial startup after the runtime barrier and rejects active work", async () => {
+    await mkdir(join(dir, ".bflow/state"), { recursive: true });
+    await writeFile(join(dir, ".bflow/state/operation.json"), JSON.stringify({ repositoryId: repository.id, sessionName: repository.sessionName, phase: "manager_pending" }));
+    runner.running.add(repository.sessionName);
+    await expect(lifecycle.down()).rejects.toThrow("down --yes");
+    const active = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime([activeRun]), quiesce: async () => ({ ok: true, value: undefined }) } });
+    await expect(active.down(true)).rejects.toThrow("Active workflows");
+    expect(runner.running.has(repository.sessionName)).toBe(true);
+    expect((await lifecycle.down(true)).server).toBe("stopped");
+    expect(runner.running.has(repository.sessionName)).toBe(false);
+  });
+  it("finishes a retained host after the Herdr server has already stopped", async () => {
+    await lifecycle.up(); runner.running.delete(repository.sessionName);
+    const shutdownHost = vi.fn(async () => undefined), quiesce = vi.fn(async () => ({ ok: true as const, value: undefined }));
+    const save = vi.fn(async (command: CreateCheckpointCommand) => ({ ok: true as const, value: checkpoint(command) }));
+    const resumed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager,
+      runtime: mockRuntime([activeRun]), checkpoint: save, quiesce, shutdownHost } });
+    expect((await resumed.down(true)).status).toBe("down");
+    expect(quiesce).toHaveBeenCalled(); expect(save).toHaveBeenCalled(); expect(shutdownHost).toHaveBeenCalledOnce();
+    expect(save.mock.invocationCallOrder[0]).toBeLessThan(shutdownHost.mock.invocationCallOrder[0]!);
   });
   it("diagnoses missing dependencies and configuration without starting servers", async () => {
     runner.missing.add("codex");
@@ -337,7 +405,7 @@ describe("P12 repository environment lifecycle", () => {
 });
 
 describe("environment command parsing and session context", () => {
-  it.each(["up", "down", "attach", "doctor"])("supports %s and its help", (command) => {
+  it.each(["up", "down", "attach", "doctor", "recover"])("supports %s and its help", (command) => {
     expect(parseCliArgs([command, "--json"]).ok).toBe(true); expect(parseCliArgs([command, "--help"]).ok).toBe(true);
   });
   it.each([["up", "--timeout", "0"], ["down", "--timeout", "NaN"], ["up", "--timeout", "600001"], ["up", "--yes"], ["attach", "--timeout", "10"], ["doctor", "extra"]])("rejects invalid flags %s %s", (...args) => {

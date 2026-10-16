@@ -24,6 +24,7 @@ const VALID_COMMANDS: ReadonlySet<CliCommandName> = new Set([
   "down",
   "attach",
   "doctor",
+  "recover",
   "init",
   "run",
   "status",
@@ -327,10 +328,11 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
     case "up":
     case "down":
     case "attach":
+    case "recover":
     case "doctor": {
       const booleans = new Set(["--json", "-j", "--yes", "-y"]);
       const allowed = new Set(["--json", "-j"]);
-      if (command === "down") { allowed.add("--yes"); allowed.add("-y"); }
+      if (command === "down" || command === "recover") { allowed.add("--yes"); allowed.add("-y"); }
       if (command === "up" || command === "down") allowed.add("--timeout");
       const result = extractOptionsAndPositional(commandArgs, booleans, allowed, command, json);
       if (!result.ok) return result.result;

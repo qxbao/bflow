@@ -107,16 +107,17 @@ export async function executeCommand(
     return makeResult(CLI_EXIT_CODES.SUCCESS, true, "version", data, undefined, parsed.json, io);
   }
 
-  if (["up", "down", "attach", "doctor"].includes(parsed.command) ||
+  if (["up", "down", "attach", "doctor", "recover"].includes(parsed.command) ||
     parsed.command === "status" && parsed.runId === undefined && parsed.statusFilter === undefined &&
     parsed.workflowId === undefined && parsed.limit === undefined && parsed.cursor === undefined && context?.runtime === undefined) {
-    const lifecycle = new EnvironmentLifecycle(cwd, context?.environment);
+    const lifecycle = new EnvironmentLifecycle(cwd, { ...context?.environment, ...(context?.operationOptions?.signal ? { signal: context.operationOptions.signal } : {}) });
     try {
       let data: CliCommandData;
       switch (parsed.command) {
         case "up": data = await lifecycle.up(parsed.timeoutMs); break;
         case "down": data = await lifecycle.down(parsed.yes, parsed.timeoutMs); break;
         case "attach": data = await lifecycle.attach(); break;
+        case "recover": data = await lifecycle.recover(parsed.yes); break;
         case "doctor": data = await lifecycle.doctor(); break;
         default: data = await lifecycle.status();
       }
@@ -148,7 +149,7 @@ export async function executeCommand(
     return makeResult(CLI_EXIT_CODES.SUCCESS, true, "init", initRes.value, undefined, parsed.json, io);
   }
 
-  if (parsed.command === "up" || parsed.command === "down" || parsed.command === "attach" || parsed.command === "doctor") {
+  if (parsed.command === "up" || parsed.command === "down" || parsed.command === "attach" || parsed.command === "doctor" || parsed.command === "recover") {
     throw new Error("Unreachable environment command");
   }
   if (context?.runtime === undefined) {

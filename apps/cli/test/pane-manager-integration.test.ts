@@ -72,9 +72,13 @@ describe("P12 composition with real P13 RolePaneManager", () => {
   });
   it("preserves failed blocked startup and refuses duplicate dispatch", async () => {
     runner.blockedAgent = "coordinator";
-    await expect(lifecycle().up()).rejects.toThrow("readiness");
+    await expect(lifecycle().up()).rejects.toThrow("CLI update confirmation");
+    try { await lifecycle().up(); } catch (error) {
+      const message = String(error); expect(message).toContain(input.repository.sessionName); expect(message).toContain("pane");
+      expect(message).toContain("bflow up"); expect(message).toContain("do not delete .bflow");
+    }
     const count = starts(runner).length;
-    await expect(lifecycle().up()).rejects.toThrow("not ready: blocked");
+    await expect(lifecycle().up()).rejects.toThrow("blocked");
     expect(starts(runner)).toHaveLength(count);
     const report = await lifecycle().doctor();
     expect(report.healthy).toBe(false);
