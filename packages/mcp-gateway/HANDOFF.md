@@ -37,9 +37,7 @@
 
 ---
 
-## 3. Proposed Integration Wiring for P30 / Integrator
+## 3. Workspace Integration & P30 Runtime Composition
 
-Per `AGENTS.md`, leaf packages do not edit root `tsconfig.json`, `pnpm-lock.yaml`, or `packages/runtime/**`. During the P25–P28 integration gate and P30 wiring:
-1. Add `{ "path": "./packages/mcp-gateway" }` to root `tsconfig.json` `references`.
-2. Update `pnpm-lock.yaml` at the integration gate so `@bflow/mcp-gateway` workspace dependencies are locked.
-3. In P30 (`packages/runtime/**`), compose `BflowSharedMCPGateway`, `DefaultMCPServiceManager`, and `StreamableHttpGatewayServer` into the session lifecycle (`ensure` before agent launch, `register` per role, `revoke`/`release` on session `down`).
+1. Root `tsconfig.json` `references`, `pnpm-lock.yaml` importer, and `README.md` include `@bflow/mcp-gateway`, so root `pnpm build`, `pnpm check:deps`, `pnpm typecheck`, and `pnpm test` cover P27.
+2. In P30 (`packages/runtime/**`), compose `BflowSharedMCPGateway`, `DefaultMCPServiceManager`, and `StreamableHttpGatewayServer` into the session lifecycle (`ensure` before agent launch, `register` per role, `revoke`/`release` on session `down`).

@@ -245,6 +245,15 @@ importers:
         specifier: workspace:*
         version: link:../contracts
 
+  packages/mcp-gateway:
+    dependencies:
+      '@bflow/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      zod:
+        specifier: ^3.24.2
+        version: 3.25.76
+
   packages/pane-manager:
     dependencies:
       '@bflow/contracts':
