@@ -23,6 +23,21 @@ async function fixture() {
   return {root, controller, options};
 }
 describe("default durable host lifecycle and role MCP", () => {
+  it("recognizes Core succeeded runs as terminal independently of SDLC completed status", async () => {
+    const f = await fixture();
+    expect((await f.controller.runtime.findRuns({ limit: 100 })).ok).toBe(true);
+    const opened = openSqliteRunStore({ filename: join(f.root, ".bflow/state/agentic/runs.db") });
+    if (!opened.ok) throw new Error(opened.error.message);
+    try {
+      const definition = workflow(), at = new Date().toISOString();
+      expect((await opened.value.create({ definition, snapshot: { runId: "terminal-run", workflowId: definition.id,
+        workflowVersion: definition.version, status: "succeeded", createdAt: at, updatedAt: at, version: 10, lastEventSequence: 10,
+        tasks: definition.tasks.map(task => ({ taskId: task.id, status: "succeeded", attempt: 1, attemptId: `${task.id}-attempt`,
+          generation: 0, version: 2, startedAt: at, completedAt: at })) } }, "terminal-run")).ok).toBe(true);
+      expect((await f.controller.quiesce()).ok).toBe(true);
+    } finally { opened.value.close(); }
+  });
+
   it("refuses to activate existing native panes which never loaded Bflow's launch-local hook", async () => {
     const f = await fixture(), at = new Date().toISOString();
     const manifest = SessionManifestSchema.parse({ schemaVersion: 2, sessionId: f.options.sessionId,

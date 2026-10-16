@@ -317,7 +317,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           let cursor: string | undefined;
           do {
             const page = unwrap(await (await getQueryStore()).find({limit:100, ...(cursor ? {cursor} : {})}));
-            if (page.items.some(item => !["completed", "failed", "cancelled"].includes(item.snapshot.status))) throw new Error("Persisted Core run requires activation/recovery before safe shutdown");
+            if (page.items.some(item => !["succeeded", "failed", "cancelled"].includes(item.snapshot.status))) throw new Error("Persisted Core run requires activation/recovery before safe shutdown");
             cursor = page.nextCursor;
           } while (cursor);
           const journalModule = await import("./journal.js");
