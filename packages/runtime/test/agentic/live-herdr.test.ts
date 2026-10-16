@@ -99,7 +99,19 @@ describe.runIf(process.env.BFLOW_LIVE_HERDR === "1")("installed Herdr native rec
         }
       }
       await find(configRoot); expect(configDirs.length).toBeGreaterThan(0);
-      for (const path of configDirs) await writeFile(join(path, "host.json"), JSON.stringify({ issuerId: "native-live-host", privateKeyFile: nativeKey, runtimeSocket, manifestFile }), {mode:0o600});
+      const foreignManifestFile = join(directory, "foreign-manifest.json");
+      const { readFile } = await import("node:fs/promises");
+      const foreignManifest = JSON.parse(await readFile(manifestFile, "utf8"));
+      foreignManifest.sessionId = "another-session";
+      foreignManifest.panes = foreignManifest.panes.map((binding: Record<string, unknown>) => ({ ...binding, sessionId: "another-session" }));
+      await writeFile(foreignManifestFile, JSON.stringify(foreignManifest));
+      for (const path of configDirs) {
+        const hosts = join(path, "hosts"); await mkdir(hosts, { recursive: true, mode: 0o700 });
+        await writeFile(join(hosts, "smoke.json"), JSON.stringify({ issuerId: "native-live-host", privateKeyFile: nativeKey, runtimeSocket, manifestFile }), {mode:0o600});
+        // Pane/workspace IDs repeat in different named sessions. Select only the
+        // actual native session even when a foreign manifest has identical IDs.
+        await writeFile(join(hosts, "foreign.json"), JSON.stringify({ issuerId: "native-live-host", privateKeyFile: nativeKey, runtimeSocket, manifestFile: foreignManifestFile }), {mode:0o600});
+      }
       const at = new Date().toISOString();
       const message = RoleMessageSchema.parse({ schema_version: 2, message_id: randomUUID(), correlation_id: "live-correlation", causation_id: assignmentId, run_id: "live-run",
         sender: {role:"developer",agent_id:target.agentId,pane_id:target.paneId}, recipient:{role:"coordinator"}, type:"task.status", artifact_references: [], occurred_at: at, idempotency_key: randomUUID(),

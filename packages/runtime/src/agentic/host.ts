@@ -24,7 +24,7 @@ const execute = promisify(execFile);
 const roles = ["conversation", "coordinator", "specifier", "architect", "planner", "developer", "tester", "reviewer", "qa", "security"] as const;
 const capabilities = { conversation: ["conversation"], coordinator: ["coordination", "planning", "specification"],
   specifier: ["specification"], architect: ["architecture"], planner: ["planning"], developer: ["implementation"],
-  tester: ["testing"], reviewer: ["review"], qa: ["verification"], security: ["security"] };
+  tester: ["testing"], reviewer: ["review"], qa: ["verification", "testing"], security: ["security"] };
 interface RoleConfiguration { socketPath: string; token: string; role: AgentRole; herdrBinary: string; sessionId: string }
 async function privateFile(path: string, content: string): Promise<void> {
   await writeFile(path, content, { mode: 0o600 }); await chmod(path, 0o600);

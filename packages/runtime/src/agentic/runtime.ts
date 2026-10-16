@@ -481,15 +481,17 @@ export class AgenticWorkflowRuntime {
     await save();
     await core.mutate(run.runId, current => this.ports.engine.recordAgentResult({ runId: run.runId,
       taskId: task.taskId, expectedVersion: current.version, result, occurredAt: this.now(), idempotencyKey: `result:${result.requestId}` }));
-    if (result.status === "succeeded" && task.spec.strategy.tddDecision.mode !== "required") {
+    let evidenceComplete = false;
+    try { this.ports.policies.assertEvidenceComplete(task.spec.strategy); evidenceComplete = true; } catch { /* Independent evidence is still required. */ }
+    if (result.status === "succeeded" && !evidenceComplete && task.spec.strategy.tddDecision.mode !== "required") {
       const requestId = `alternative-${result.requestId}`;
       outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: requestId,
         correlation_id: run.delegation.correlationId, causation_id: message.message_id, run_id: run.runId,
-        sender: { role: "coordinator" }, recipient: { role: "tester" }, type: "verification.requested",
+        sender: { role: "coordinator" }, recipient: { role: "qa" }, type: "verification.requested",
         payload: json({ kind: "conditional_evidence", runId: run.runId, taskId: task.taskId,
           instruction: "Inspect the exact committed diff with inspect_alternative_verification, evaluate the accepted criteria independently, then record_alternative_verification. Do not invent evidence.",
           specification: task.spec.specification, strategy: task.spec.strategy }), artifact_references: [],
-        occurred_at: this.now(), idempotency_key: requestId }), "tester", `evidence-${task.taskId}`, `evidence-${result.attemptId}`, ["testing"]);
+        occurred_at: this.now(), idempotency_key: requestId }), "qa", `evidence-${task.taskId}`, `evidence-${result.attemptId}`, ["testing"]);
     }
     if (result.status === "blocked") { run.error = result.blockage?.message ?? "Developer is blocked"; this.progress(state, outbox, run, run.error); }
     if (["failed", "timed_out"].includes(result.status)) this.progress(state, outbox, run, result.error?.message ?? "Implementation failed");

@@ -14,6 +14,11 @@ export async function deliverNativeHerdrMessage(env = process.env): Promise<void
   if (env.HERDR_ENV !== "1" || env.HERDR_PLUGIN_ID !== "bflow.receipts") throw new Error("Native Herdr plugin invocation required");
   const directory = textField(env.HERDR_PLUGIN_CONFIG_DIR);
   const context = record(JSON.parse(textField(env.HERDR_PLUGIN_CONTEXT_JSON)));
+  const serverObservation = await promisify(execFile)(env.HERDR_BIN_PATH ?? "herdr", ["status", "server", "--json"],
+    { env, timeout: 10_000, maxBuffer: 1024 * 1024 });
+  const currentServer = record(JSON.parse(serverObservation.stdout));
+  const currentSession = textField(currentServer.session);
+  if (currentServer.running !== true) throw new Error("Native Herdr session is not running");
   // A linked plugin can be shared by named sessions. Select a host only by its
   // actual manifest pane/workspace, never a mutable process-global host.json.
   let configs: Record<string, unknown>[];
@@ -24,7 +29,7 @@ export async function deliverNativeHerdrMessage(env = process.env): Promise<void
   const matching: Record<string, unknown>[] = [];
   for (const candidate of configs) {
     const candidateManifest = SessionManifestSchema.parse(JSON.parse(await readFile(textField(candidate.manifestFile), "utf8")));
-    if (candidateManifest.panes.some(pane => pane.paneId === context.focused_pane_id && pane.workspaceId === context.workspace_id)) matching.push(candidate);
+    if (candidateManifest.sessionId === currentSession && candidateManifest.panes.some(pane => pane.paneId === context.focused_pane_id && pane.workspaceId === context.workspace_id)) matching.push(candidate);
   }
   if (matching.length !== 1) throw new Error("Native pane must belong to exactly one active host manifest");
   const config = matching[0]!;
