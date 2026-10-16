@@ -23,6 +23,7 @@ import {
   type HerdrWorktreeInfo,
   type RoleHealthReport,
   type TopologyHealthSummary,
+  type SessionManifestStore,
   PERMANENT_TOPOLOGY_ROLES
 } from "../src/types.js";
 import {
@@ -1497,6 +1498,181 @@ describe("RolePaneManager Verification Suite", () => {
         expect(dirtyRes.value.exists).toBe(true);
         expect(dirtyRes.value.isClean).toBe(false);
         expect(dirtyRes.value.dirtyFiles).toContain("dirty.txt");
+      }
+    });
+  });
+
+  describe("P13 Audit Remediation Tests: shutdownTopology, store.save error propagation, and developer reallocation", () => {
+    let runner: FakeHerdrCommandRunner;
+    let store: InMemorySessionManifestStore;
+    let inspector: FakeWorktreeInspector;
+    let config: RolePaneManagerConfig;
+
+    beforeEach(() => {
+      runner = new FakeHerdrCommandRunner();
+      store = new InMemorySessionManifestStore();
+      inspector = new FakeWorktreeInspector();
+      config = {
+        sessionId: "remediation-session",
+        projectName: "remediation-project",
+        workspaceRoot: "/workspace/remediation"
+      };
+    });
+
+    it("shutdownTopology closes live panes, updates status to down, and sets transportState to cancelled", async () => {
+      const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+      const initRes = await manager.initializeTopology();
+      expect(initRes.ok).toBe(true);
+
+      const shutdownRes = await manager.shutdownTopology();
+      expect(shutdownRes.ok).toBe(true);
+      if (!shutdownRes.ok) return;
+
+      expect(shutdownRes.value.status).toBe("down");
+      expect(shutdownRes.value.panes.every((p) => p.transportState === "cancelled")).toBe(true);
+
+      // Verify pane close commands were executed in runner
+      const closeCalls = runner.calls.filter((c) => c.args[0] === "pane" && c.args[1] === "close");
+      expect(closeCalls.length).toBeGreaterThanOrEqual(initRes.ok ? initRes.value.panes.length : 1);
+
+      // Verify persisted manifest is down
+      const loaded = await store.load(config.sessionId);
+      expect(loaded.ok).toBe(true);
+      if (loaded.ok && loaded.value) {
+        expect(loaded.value.status).toBe("down");
+        expect(loaded.value.panes.every((p) => p.transportState === "cancelled")).toBe(true);
+      }
+    });
+
+    it("propagates store.save error in inspectTopologyHealth, focusConversationPane, and allocateDeveloper", async () => {
+      const normalManager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+      const initRes = await normalManager.initializeTopology();
+      expect(initRes.ok).toBe(true);
+
+      const failingStore: SessionManifestStore = {
+        load: (sessionId, opts) => store.load(sessionId, opts),
+        save: async () => ({
+          ok: false,
+          error: { code: "io", retryable: true, message: "Disk write failure simulated" }
+        })
+      };
+
+      const failingManager = createRolePaneManager({
+        config,
+        runner,
+        store: failingStore,
+        worktreeInspector: inspector
+      });
+
+      // 1. inspectTopologyHealth
+      const healthRes = await failingManager.inspectTopologyHealth();
+      expect(healthRes.ok).toBe(false);
+      if (!healthRes.ok) {
+        expect(healthRes.error.code).toBe("io");
+      }
+
+      // 2. focusConversationPane
+      const focusRes = await failingManager.focusConversationPane();
+      expect(focusRes.ok).toBe(false);
+      if (!focusRes.ok) {
+        expect(focusRes.error.code).toBe("io");
+      }
+
+      // 3. allocateDeveloper (new worktree path)
+      inspector.setCleanliness("/repo/.worktrees/fail-save-new", { exists: false, isClean: true, dirtyFiles: [] });
+      const allocNewRes = await failingManager.allocateDeveloper({
+        taskId: "task-fail-new",
+        worktreePath: "/repo/.worktrees/fail-save-new"
+      });
+      expect(allocNewRes.ok).toBe(false);
+      if (!allocNewRes.ok) {
+        expect(allocNewRes.error.code).toBe("io");
+      }
+
+      // 4. allocateDeveloper (reused pane path)
+      // First allocate and release cleanly using normalManager
+      inspector.setCleanliness("/repo/.worktrees/fail-save-reuse", { exists: false, isClean: true, dirtyFiles: [] });
+      const allocClean = await normalManager.allocateDeveloper({
+        taskId: "task-reuse-prep",
+        worktreePath: "/repo/.worktrees/fail-save-reuse"
+      });
+      expect(allocClean.ok).toBe(true);
+      inspector.setCleanliness("/repo/.worktrees/fail-save-reuse", { exists: true, isClean: true, dirtyFiles: [] });
+      const releaseClean = await normalManager.releaseDeveloper({
+        taskId: "task-reuse-prep",
+        closePane: false,
+        removeWorktree: false
+      });
+      expect(releaseClean.ok).toBe(true);
+
+      // Now attempt reuse with failing manager
+      const allocReuseRes = await failingManager.allocateDeveloper({
+        taskId: "task-reuse-fail",
+        worktreePath: "/repo/.worktrees/fail-save-reuse"
+      });
+      expect(allocReuseRes.ok).toBe(false);
+      if (!allocReuseRes.ok) {
+        expect(allocReuseRes.error.code).toBe("io");
+      }
+    });
+
+    it("reallocating a released developer slot with a new agentName splits fresh pane and closes old pane", async () => {
+      const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+      await manager.initializeTopology();
+
+      const wtPath = "/repo/.worktrees/realloc-wt";
+      inspector.setCleanliness(wtPath, { exists: false, isClean: true, dirtyFiles: [] });
+
+      // Step 1: Allocate developer with dev-orig
+      const alloc1 = await manager.allocateDeveloper({
+        taskId: "task-100",
+        worktreePath: wtPath,
+        agentName: "dev-orig"
+      });
+      expect(alloc1.ok).toBe(true);
+      if (!alloc1.ok) return;
+      expect(alloc1.value.agentId).toBe("dev-orig");
+      const oldPaneId = alloc1.value.paneId;
+
+      // Step 2: Release developer but retain pane
+      inspector.setCleanliness(wtPath, { exists: true, isClean: true, dirtyFiles: [] });
+      const releaseRes = await manager.releaseDeveloper({
+        taskId: "task-100",
+        closePane: false,
+        removeWorktree: false
+      });
+      expect(releaseRes.ok).toBe(true);
+      if (!releaseRes.ok) return;
+      expect(releaseRes.value.retainedForReuse).toBe(true);
+
+      // Step 3: Reallocate with a NEW agentName: "dev-new"
+      const alloc2 = await manager.allocateDeveloper({
+        taskId: "task-200",
+        worktreePath: wtPath,
+        agentName: "dev-new"
+      });
+      expect(alloc2.ok).toBe(true);
+      if (!alloc2.ok) return;
+
+      expect(alloc2.value.agentId).toBe("dev-new");
+      expect(alloc2.value.metadata?.["taskId"]).toBe("task-200");
+      expect(alloc2.value.metadata?.["allocationStatus"]).toBe("active");
+      // The pane should have been replaced (fresh split pane, not the old occupied pane)
+      expect(alloc2.value.paneId).not.toBe(oldPaneId);
+
+      // Verify the old pane was closed
+      const closeCalls = runner.calls.filter(
+        (c) => c.args[0] === "pane" && c.args[1] === "close" && c.args[2] === oldPaneId
+      );
+      expect(closeCalls.length).toBe(1);
+
+      // Verify manifest reflects dev-new
+      const manifestRes = await manager.getManifest();
+      expect(manifestRes.ok).toBe(true);
+      if (manifestRes.ok && manifestRes.value) {
+        const devPanes = manifestRes.value.panes.filter((p) => p.role === "developer");
+        expect(devPanes.some((p) => p.agentId === "dev-new" && p.paneId === alloc2.value.paneId)).toBe(true);
+        expect(devPanes.some((p) => p.paneId === oldPaneId)).toBe(false);
       }
     });
   });

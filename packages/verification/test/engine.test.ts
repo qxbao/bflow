@@ -393,6 +393,121 @@ describe("VerificationEngine", () => {
     expect(JSON.stringify(outcome.result.findings)).toContain("remote stop is unproven");
     expect(calls).toBe(1);
   });
+
+  it("accepts safe glob patterns in affectedPaths and verifies matching changed files", async () => {
+    const f = await fixture();
+    const { artifactRef: _oldRef, ...specDoc } = f.specification;
+    const docWithGlob = { ...specDoc, affectedPaths: ["packages/**/*.ts"] };
+    const artifactRef = await f.store.seed("spec-doc-glob", "document", docWithGlob);
+    const specWithGlob = { ...docWithGlob, artifactRef };
+    f.setSpecification(specWithGlob);
+    const plan = createVerificationPlan({ ...f.input, specification: specWithGlob });
+    const engine = new VerificationEngine(f.ports);
+    const change = await f.change();
+    const outcome = await engine.verify(plan, engine.start(plan, "cycle-1"), change);
+    expect(outcome.result.status).toBe("passed");
+  });
+
+  it("supports waived acceptance criteria without mapped checks", async () => {
+    const f = await fixture();
+    const { artifactRef: _oldRef, ...specDoc } = f.specification;
+    const docWithWaived = {
+      ...specDoc,
+      acceptanceCriteria: [
+        ...specDoc.acceptanceCriteria,
+        {
+          id: "ac-waived",
+          description: "Waived criterion for testing",
+          category: "functional" as const,
+          verificationMethod: "unit_test" as const,
+          required: false,
+          status: "waived" as const,
+          waiverReason: "Temporarily waived for release",
+          evidenceArtifactIds: []
+        }
+      ]
+    };
+    const artifactRef = await f.store.seed("spec-doc-waived", "document", docWithWaived);
+    const specWithWaived = { ...docWithWaived, artifactRef };
+    f.setSpecification(specWithWaived);
+    const plan = createVerificationPlan({ ...f.input, specification: specWithWaived });
+    const engine = new VerificationEngine(f.ports);
+    const outcome = await engine.verify(plan, engine.start(plan, "cycle-1"), await f.change());
+    expect(outcome.result.status).toBe("passed");
+    const waived = outcome.result.evaluatedCriteria.find(c => c.criterionId === "ac-waived");
+    expect(waived?.passed).toBe(true);
+    expect(waived?.summary).toContain("Temporarily waived");
+  });
+
+  it("does not fail verification when an optional criterion fails", async () => {
+    const f = await fixture();
+    const { artifactRef: _oldRef, ...specDoc } = f.specification;
+    const strategyWithOpt = {
+      ...f.input.strategy,
+      criterionMappings: [
+        ...f.input.strategy.criterionMappings,
+        { criterionId: "ac-opt", testNames: ["optional test"] }
+      ]
+    };
+    const docWithOpt = {
+      ...specDoc,
+      acceptanceCriteria: [
+        ...specDoc.acceptanceCriteria,
+        {
+          id: "ac-opt",
+          description: "Optional performance criterion",
+          category: "performance" as const,
+          verificationMethod: "unit_test" as const,
+          required: false,
+          status: "pending" as const,
+          evidenceArtifactIds: []
+        }
+      ],
+      testStrategy: strategyWithOpt
+    };
+    const artifactRef = await f.store.seed("spec-doc-opt", "document", docWithOpt);
+    const specWithOpt = { ...docWithOpt, artifactRef };
+    f.setSpecification(specWithOpt);
+    const checksWithOpt = f.input.checks.map(check => check.id === "test-check" ? {
+      ...check,
+      configuration: {
+        ...check.configuration as Record<string, unknown>,
+        criterionIds: ["ac-1", "ac-opt"],
+        testNames: ["target-behavior", "optional test"]
+      }
+    } : check);
+    const plan = createVerificationPlan({ ...f.input, specification: specWithOpt, strategy: strategyWithOpt, checks: checksWithOpt });
+    const originalEvaluate = f.runners[0]!.evaluate.bind(f.runners[0]);
+    f.runners[0]!.evaluate = async (ctx, opts) => {
+      const res = await originalEvaluate(ctx, opts);
+      if (res.ok && res.value.metadata?.verification) {
+        const obs = res.value.metadata.verification as any;
+        obs.criteria = [
+          { criterionId: "ac-1", passed: true, summary: "ac-1 passed" },
+          { criterionId: "ac-opt", passed: false, summary: "optional check failed" }
+        ];
+        obs.testNames = ["target-behavior", "optional test"];
+      }
+      return res;
+    };
+    const engine = new VerificationEngine(f.ports);
+    const outcome = await engine.verify(plan, engine.start(plan, "cycle-1"), await f.change());
+    expect(outcome.result.status).toBe("passed");
+    const optEval = outcome.result.evaluatedCriteria.find(c => c.criterionId === "ac-opt");
+    expect(optEval?.passed).toBe(true);
+    expect(optEval?.summary).toContain("Optional criterion not satisfied");
+  });
+
+  it("binds integrationCommitHash and integratedTaskIds into result metadata for workflow verification", async () => {
+    const f = await fixture({ scope: "workflow" });
+    const engine = new VerificationEngine(f.ports);
+    const change = await f.change();
+    const integration = { headCommitHash: change.headCommitHash, integratedTaskIds: ["task-1"] };
+    const outcome = await engine.verify(f.plan, engine.start(f.plan, "cycle-workflow"), change, { integration });
+    expect(outcome.result.status).toBe("passed");
+    expect(outcome.result.metadata?.integrationCommitHash).toBe(change.headCommitHash);
+    expect(outcome.result.metadata?.integratedTaskIds).toEqual(["task-1"]);
+  });
 });
 
 describe("verification planning", () => {

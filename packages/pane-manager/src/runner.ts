@@ -50,7 +50,8 @@ const MAX_SAFE_TIMEOUT_MS = 2147483647; // 2^31 - 1, Node timer limit
 
 export function createProcessRunner(binary = "herdr"): HerdrCommandRunner {
   return {
-    run({ args, cwd, signal, timeoutMs, maxOutputBytes = 1024 * 1024 }: CommandInvocation): Promise<CommandOutcome> {
+    run(invocation: CommandInvocation): Promise<CommandOutcome> {
+      const { args, cwd, env, signal, timeoutMs, maxOutputBytes = 1024 * 1024 } = invocation;
       return new Promise<CommandOutcome>((resolve) => {
         if (typeof binary !== "string" || !binary || binary.includes("\0") || !validArguments(args)) {
           resolve({
@@ -93,7 +94,8 @@ export function createProcessRunner(binary = "herdr"): HerdrCommandRunner {
           child = spawn(binary, [...args], {
             shell: false,
             stdio: ["ignore", "pipe", "pipe"],
-            ...(cwd ? { cwd } : {})
+            ...(cwd ? { cwd } : {}),
+            env: env ?? process.env
           });
         } catch (spawnError) {
           resolve({

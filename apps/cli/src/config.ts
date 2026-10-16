@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
-import { initializeEnvironmentConfig } from "./environment-config.js";
+import { ensureEnvironmentInitialized } from "./environment-config.js";
 import {
   WorkflowDefinitionSchema,
   type OperationResult,
@@ -364,7 +364,16 @@ export async function initRepositoryConfig(options: {
   readonly confirmOverwrite?: ((configPath: string) => Promise<boolean> | boolean) | undefined;
 }): Promise<OperationResult<InitCommandOutput>> {
   try {
-    return { ok: true, value: await initializeEnvironmentConfig(options) };
+    const targetDir = resolve(options.cwd, options.dir ?? ".");
+    return {
+      ok: true,
+      value: await ensureEnvironmentInitialized(targetDir, {
+        force: options?.force,
+        configPath: options?.configPath,
+        projectName: options?.projectName,
+        clock: options?.clock
+      })
+    };
   } catch (error) {
     return { ok: false, error: { code: "validation", retryable: false,
       message: error instanceof Error ? error.message : String(error) } };

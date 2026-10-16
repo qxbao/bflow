@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, open, readFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { AgentRoleSchema, WorkflowDefinitionSchema, type AgentRole } from "@bflow/contracts";
@@ -80,7 +81,7 @@ export async function readEnvironmentConfig(repository: RepositoryIdentity): Pro
 
 export async function initializeEnvironmentConfig(options: {
   readonly cwd: string; readonly dir?: string | undefined; readonly configPath?: string | undefined;
-  readonly projectName?: string | undefined; readonly clock?: (() => Date) | undefined;
+  readonly projectName?: string | undefined; readonly force?: boolean | undefined; readonly clock?: (() => Date) | undefined;
 }): Promise<InitCommandOutput> {
   const repository = await identifyRepository(resolve(options.cwd, options.dir ?? "."));
   const configPath = resolve(repository.root, ENVIRONMENT_CONFIG_PATH);
@@ -97,6 +98,12 @@ export async function initializeEnvironmentConfig(options: {
     try { await ignore.writeFile(`${existing && !existing.endsWith("\n") ? "\n" : ""}${missing.join("\n")}\n`); } finally { await ignore.close(); }
   }
   const config = defaultEnvironmentConfig(repository, options.projectName, options.clock?.());
+  if (options.force) {
+    const existed = existsSync(configPath);
+    const file = await open(configPath, "w", 0o600);
+    try { await file.writeFile(JSON.stringify(config, null, 2) + "\n"); } finally { await file.close(); }
+    return { configPath, config, overwritten: existed };
+  }
   try {
     const file = await open(configPath, "wx", 0o600);
     try { await file.writeFile(JSON.stringify(config, null, 2) + "\n"); } finally { await file.close(); }
@@ -107,4 +114,24 @@ export async function initializeEnvironmentConfig(options: {
     if (!saved.ok) throw new Error(`Existing configuration was preserved: ${saved.error.message}`);
     return { configPath, config: saved.value, overwritten: false };
   }
+}
+
+export async function ensureEnvironmentInitialized(
+  targetDir: string,
+  options?: {
+    readonly force?: boolean | undefined;
+    readonly dir?: string | undefined;
+    readonly configPath?: string | undefined;
+    readonly projectName?: string | undefined;
+    readonly clock?: (() => Date) | undefined;
+  }
+): Promise<InitCommandOutput> {
+  return initializeEnvironmentConfig({
+    cwd: targetDir,
+    dir: options?.dir,
+    configPath: options?.configPath,
+    projectName: options?.projectName,
+    force: options?.force,
+    clock: options?.clock
+  });
 }

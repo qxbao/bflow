@@ -1,10 +1,10 @@
 import type { AcceptanceCriterion, ChangeClassification, RiskLevel, TddMode } from "@bflow/contracts";
 import type { Assessment, TestLevel, VerificationMethod } from "./schema.js";
 
-export const behavioralMethods: readonly VerificationMethod[] = ["unit_test", "integration_test", "e2e_test", "snapshot_test"];
+export const behavioralMethods: readonly VerificationMethod[] = ["unit_test", "integration_test", "e2e_test"];
 const riskOrder: RiskLevel[] = ["low", "medium", "high", "critical"];
 const levelFor: Partial<Record<VerificationMethod, TestLevel>> = {
-  unit_test: "unit", integration_test: "integration", e2e_test: "e2e", snapshot_test: "unit", smoke_test: "smoke"
+  unit_test: "unit", integration_test: "integration", e2e_test: "e2e"
 };
 const unique = <T>(values: T[]): T[] => [...new Set(values)];
 
@@ -31,12 +31,12 @@ export function evaluatePolicy(a: Assessment, criteria: AcceptanceCriterion[], p
   if (behavior && (logic || regression || api) && !methods.some(method => behavioralMethods.includes(method))) {
     methods.push(api ? "integration_test" : "unit_test");
   }
-  if (has("configuration")) methods.push("schema_validation", "smoke_test");
-  if (has("infrastructure")) methods.push("smoke_test", "integration_test");
-  if (has("ui_layout")) methods.push("visual_review");
+  if (has("configuration")) methods.push("typecheck", "static_analysis");
+  if (has("infrastructure")) methods.push("integration_test", "static_analysis");
+  if (has("ui_layout")) methods.push("manual_review");
   if (has("formatting")) methods.push("lint");
   if (behavior && (has("integration") || a.changeImpact.scope !== "local")) methods.push("integration_test");
-  if (a.changeImpact.dataMigration) methods.push("schema_validation", "integration_test", "smoke_test");
+  if (a.changeImpact.dataMigration) methods.push("typecheck", "static_analysis", "integration_test");
   if (highRisk) {
     methods.push("static_analysis", "manual_review");
     if (behavior) methods.push("integration_test");
@@ -75,7 +75,7 @@ export function evaluatePolicy(a: Assessment, criteria: AcceptanceCriterion[], p
     ...(regression && behavior ? ["regression" as const] : [])
   ]);
   const commands = unique(a.infrastructure.commands.filter(c => requiredMethods.includes(c.method)).map(c => c.command));
-  const missing = requiredMethods.filter(method => !["manual_review", "visual_review"].includes(method) &&
+  const missing = requiredMethods.filter(method => method !== "manual_review" &&
     !a.infrastructure.commands.some(c => c.method === method));
   const conditions = [
     ...requiredCriteria.map(c => `${c.id}: ${c.description}; verify using ${c.verificationMethod}.`),

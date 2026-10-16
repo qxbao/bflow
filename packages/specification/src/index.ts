@@ -20,6 +20,7 @@ export {
   SpecApprovedPayloadSchema,
   SpecDraftPayloadSchema,
   SpecificationDocumentSchema,
+  parseContractOrP15Specification,
   parseSpecification,
   policyDetails,
   validateSpecificationDocument

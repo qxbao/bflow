@@ -211,17 +211,23 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(wfValidation.success).toBe(true);
     });
 
-    it("preserves existing configuration across repeat init, --force, --yes and overwrite callbacks", async () => {
+    it("preserves existing configuration across repeat init, and overwrites when --force is specified", async () => {
       await runCli(["init", "--name", "initial-project"], { cwd: tempDir });
       const path = join(tempDir, ".bflow", "config.yaml");
       const original = await readFile(path, "utf8");
       const confirmOverwrite = vi.fn().mockResolvedValue(true);
-      for (const flags of [[], ["--force"], ["--yes"]]) {
-        const result = await runCli(["init", "--name", "changed", ...flags], { cwd: tempDir, confirmOverwrite });
-        expect(result.ok).toBe(true);
-        expect(await readFile(path, "utf8")).toBe(original);
-      }
+      const result = await runCli(["init", "--name", "changed"], { cwd: tempDir, confirmOverwrite });
+      expect(result.ok).toBe(true);
+      expect(await readFile(path, "utf8")).toBe(original);
       expect(confirmOverwrite).not.toHaveBeenCalled();
+
+      // With --force, configuration is overwritten
+      const forceResult = await runCli(["init", "--name", "changed", "--force"], { cwd: tempDir, confirmOverwrite });
+      expect(forceResult.ok).toBe(true);
+      const updated = await readFile(path, "utf8");
+      expect(updated).not.toBe(original);
+      const parsed = JSON.parse(updated);
+      expect(parsed.projectName).toBe("changed");
     });
 
     it("creates configuration in custom subproject directory with custom name", async () => {

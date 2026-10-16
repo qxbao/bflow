@@ -9,6 +9,7 @@ import type { OperationResult, Specification } from "@bflow/contracts";
 import { z } from "zod";
 import { canonicalJson } from "./content.js";
 import { ChangeAssessmentSchema, classifyChange } from "./classification.js";
+import type { ChangeAssessment } from "./classification.js";
 
 const Text = z.string().trim().min(1);
 export const PolicyDetailsSchema = z.object({
@@ -87,12 +88,117 @@ export const SpecificationDocumentSchema = SpecificationSchema.superRefine((spec
   }
 });
 
+export function parseContractOrP15Specification(input: unknown): Specification {
+  const p15Result = SpecificationDocumentSchema.safeParse(input);
+  if (p15Result.success) {
+    return p15Result.data;
+  }
+
+  const contractSpec = SpecificationSchema.parse(input);
+  const existingSdd = contractSpec.metadata?.sdd;
+
+  const sddParsed = PolicyDetailsSchema.safeParse(existingSdd);
+  if (sddParsed.success) {
+    return {
+      ...contractSpec,
+      metadata: {
+        ...contractSpec.metadata,
+        sdd: JSON.parse(JSON.stringify(sddParsed.data))
+      }
+    };
+  }
+
+  const rawSdd = (existingSdd && typeof existingSdd === "object") ? (existingSdd as Record<string, unknown>) : {};
+  const rawAssessment = (rawSdd.assessment && typeof rawSdd.assessment === "object") ? (rawSdd.assessment as Record<string, unknown>) : {};
+
+  const kind = contractSpec.complexity === "trivial" ? "documentation" : "feature";
+  const assessment: ChangeAssessment = {
+    kind: (typeof rawAssessment.kind === "string" && ["documentation", "formatting", "feature", "bugfix", "refactoring", "configuration"].includes(rawAssessment.kind))
+      ? (rawAssessment.kind as ChangeAssessment["kind"])
+      : kind,
+    behaviorChange: typeof rawAssessment.behaviorChange === "boolean"
+      ? rawAssessment.behaviorChange
+      : contractSpec.complexity !== "trivial",
+    modules: Array.isArray(rawAssessment.modules) && rawAssessment.modules.length > 0
+      ? rawAssessment.modules.map(String)
+      : (contractSpec.affectedPaths.length > 0 ? [...contractSpec.affectedPaths] : ["root"]),
+    securityImpact: Boolean(rawAssessment.securityImpact),
+    publicApiImpact: Boolean(rawAssessment.publicApiImpact),
+    dataSchemaImpact: typeof rawAssessment.dataSchemaImpact === "boolean"
+      ? rawAssessment.dataSchemaImpact
+      : Boolean(contractSpec.dataModelChanges),
+    architectureImpact: typeof rawAssessment.architectureImpact === "boolean"
+      ? rawAssessment.architectureImpact
+      : contractSpec.complexity === "complex",
+    migrationRequired: typeof rawAssessment.migrationRequired === "boolean"
+      ? rawAssessment.migrationRequired
+      : Boolean(contractSpec.dataModelChanges),
+    risk: (typeof rawAssessment.risk === "string" && ["low", "medium", "high", "critical"].includes(rawAssessment.risk))
+      ? (rawAssessment.risk as ChangeAssessment["risk"])
+      : (contractSpec.riskLevel ?? "low"),
+    unresolvedQuestions: Array.isArray(rawAssessment.unresolvedQuestions)
+      ? rawAssessment.unresolvedQuestions.map(String)
+      : []
+  };
+
+  let traceability: PolicyDetails["traceability"] = [];
+  if (Array.isArray(rawSdd.traceability)) {
+    const validMappings = rawSdd.traceability
+      .filter((m): m is { criterionId: string; taskIds: string[] } =>
+        typeof m === "object" && m !== null && typeof (m as any).criterionId === "string" && Array.isArray((m as any).taskIds) && (m as any).taskIds.length > 0
+      )
+      .map(m => ({ criterionId: String(m.criterionId), taskIds: m.taskIds.map(String) }));
+    if (validMappings.length > 0) {
+      traceability = validMappings;
+    }
+  }
+
+  if (traceability.length === 0 && contractSpec.acceptanceCriteria.length > 0) {
+    const defaultTaskIds = contractSpec.traceabilityTaskIds && contractSpec.traceabilityTaskIds.length > 0
+      ? [...contractSpec.traceabilityTaskIds]
+      : ["implement"];
+    traceability = contractSpec.acceptanceCriteria.map(c => ({
+      criterionId: c.id,
+      taskIds: defaultTaskIds
+    }));
+  }
+
+  const functionalRequirements = Array.isArray(rawSdd.functionalRequirements) && rawSdd.functionalRequirements.length > 0
+    ? rawSdd.functionalRequirements.map(String)
+    : (contractSpec.summary ? [contractSpec.summary] : [contractSpec.title]);
+
+  const synthesizedDetails: PolicyDetails = {
+    policyVersion: 1,
+    assessment,
+    functionalRequirements,
+    proposedTestStrategy: typeof rawSdd.proposedTestStrategy === "string"
+      ? rawSdd.proposedTestStrategy
+      : (contractSpec.testStrategy ? "Test strategy defined in contract" : undefined),
+    designProposal: typeof rawSdd.designProposal === "string" ? rawSdd.designProposal : undefined,
+    technicalConstraints: Array.isArray(rawSdd.technicalConstraints) ? rawSdd.technicalConstraints.map(String) : [],
+    apiDataContracts: Array.isArray(rawSdd.apiDataContracts) ? rawSdd.apiDataContracts.map(String) : [],
+    risksAndTradeoffs: Array.isArray(rawSdd.risksAndTradeoffs) ? rawSdd.risksAndTradeoffs.map(String) : [],
+    migrationStrategy: typeof rawSdd.migrationStrategy === "string" ? rawSdd.migrationStrategy : undefined,
+    traceability,
+    revisionReason: typeof rawSdd.revisionReason === "string" ? rawSdd.revisionReason : undefined
+  };
+
+  return {
+    ...contractSpec,
+    metadata: {
+      ...contractSpec.metadata,
+      sdd: JSON.parse(JSON.stringify(synthesizedDetails))
+    }
+  };
+}
+
 export function parseSpecification(input: unknown) {
   return SpecificationDocumentSchema.parse(input);
 }
 
-export function policyDetails(input: unknown) {
-  return PolicyDetailsSchema.parse(parseSpecification(input).metadata?.sdd);
+export function policyDetails(input: unknown): PolicyDetails {
+  const spec = parseContractOrP15Specification(input);
+  return PolicyDetailsSchema.parse(spec.metadata?.sdd);
 }
 
 export function validateSpecificationDocument(input: unknown): OperationResult<Specification> {

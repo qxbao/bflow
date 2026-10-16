@@ -1921,5 +1921,59 @@ describe("P14 Conversation Agent & Delegation Gateway Test Suite", () => {
         expect(changeTargetingRun1.value.delegationRequest?.runId).toBe(runId1);
       }
     });
+
+    it("7. re-keys runIdToCorrelationId and updates session.activeRunId when authoritative run_id arrives from Coordinator", async () => {
+      const { gateway, sessionId } = setupTestGateway();
+      await gateway.initializeOrRecoverSession();
+
+      // User initiates a feature request, gateway creates provisional runId
+      const turn = await gateway.handleUserTurn({
+        sessionId,
+        content: "Triển khai microservice thanh toán trong packages/payment",
+        provenance: { origin: "user", authenticatedUser: true }
+      });
+      expect(turn.ok).toBe(true);
+      if (!turn.ok) return;
+
+      const correlationId = turn.value.correlationId;
+      const provisionalRunId = turn.value.runId!;
+      expect(provisionalRunId).toBeDefined();
+
+      const snapshotBefore = gateway.getContextSnapshot();
+      expect(snapshotBefore.runIdToCorrelationId[provisionalRunId]).toBe(correlationId);
+      expect(snapshotBefore.session.activeRunId).toBe(provisionalRunId);
+
+      // Coordinator sends message back with the same correlation_id but a new authoritative run_id
+      const authoritativeRunId = "run-auth-999";
+      const coordMsg: RoleMessage = {
+        schema_version: 2,
+        message_id: "msg-coord-auth-1",
+        correlation_id: correlationId,
+        run_id: authoritativeRunId,
+        sender: { role: "coordinator", agent_id: "coord-1" },
+        recipient: { role: "conversation", agent_id: "chat-1" },
+        type: "conversation.progress",
+        payload: {
+          headline: "Workflow started with authoritative run ID",
+          sdlcStatus: "specifying",
+          progressPercentage: 15
+        },
+        artifact_references: [],
+        occurred_at: new Date().toISOString()
+      };
+
+      const handleRes = await gateway.handleCoordinatorRoleMessage(coordMsg);
+      expect(handleRes.ok).toBe(true);
+
+      const snapshotAfter = gateway.getContextSnapshot();
+      // Old provisional runId must be removed
+      expect(snapshotAfter.runIdToCorrelationId[provisionalRunId]).toBeUndefined();
+      // New authoritative runId must be mapped to correlationId
+      expect(snapshotAfter.runIdToCorrelationId[authoritativeRunId]).toBe(correlationId);
+      // activeRunId must be updated to authoritativeRunId
+      expect(snapshotAfter.session.activeRunId).toBe(authoritativeRunId);
+      // Workflow's own runId must be updated
+      expect(snapshotAfter.workflows[correlationId]?.runId).toBe(authoritativeRunId);
+    });
   });
 });

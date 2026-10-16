@@ -14,8 +14,7 @@ export function assessment(taskType = "domain_logic", overrides: Record<string, 
       { method: "integration_test", command: "pnpm test:integration", level: "integration" },
       { method: "typecheck", command: "pnpm typecheck" },
       { method: "static_analysis", command: "pnpm analyze" },
-      { method: "schema_validation", command: "pnpm validate" },
-      { method: "smoke_test", command: "pnpm smoke", level: "smoke" }
+      { method: "lint", command: "pnpm lint" }
     ] },
     testability: { level: "automated", rationale: "Inputs and outputs can be tested deterministically." },
     riskClassification: "low",

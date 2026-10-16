@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { WorkflowDefinitionSchema } from "@bflow/contracts";
 import { canonicalJson } from "./content.js";
-import { parseSpecification, policyDetails } from "./schema.js";
+import { parseContractOrP15Specification, policyDetails } from "./schema.js";
 
 export interface TraceabilityMatrix {
   readonly criterionToTasks: Record<string, readonly string[]>;
@@ -9,50 +9,81 @@ export interface TraceabilityMatrix {
   readonly orphanCriterionIds: readonly string[];
   readonly unmappedWorkflowTaskIds: readonly string[];
   readonly unknownMappedTaskIds: readonly string[];
+  readonly unknownCriterionIds?: readonly string[];
   readonly valid: boolean;
 }
 
-export function validateTraceability(input: unknown, workflowInput: unknown): void {
-  const spec = parseSpecification(input);
-  const workflow = WorkflowDefinitionSchema.parse(workflowInput);
-  const mappings = policyDetails(spec).traceability;
-  const tasks = new Set(workflow.tasks.map(task => task.id));
-  const mappedTasks = new Set(mappings.flatMap(mapping => mapping.taskIds));
-  if (spec.acceptanceCriteria.some(criterion => !mappings.some(mapping => mapping.criterionId === criterion.id))) {
-    throw new Error("Every acceptance criterion must map to a task");
-  }
-  if ([...mappedTasks].some(task => !tasks.has(task)) || [...tasks].some(task => !mappedTasks.has(task))) {
-    throw new Error("Workflow tasks must exactly match specification traceability");
-  }
-}
-
 export function buildTraceabilityMatrix(specInput: unknown, workflowInput?: unknown): TraceabilityMatrix {
-  const spec = parseSpecification(specInput);
+  const spec = parseContractOrP15Specification(specInput);
   const mappings = policyDetails(spec).traceability;
-  const criteriaIds = spec.acceptanceCriteria.map(c => c.id);
+  const criteriaIds = new Set(spec.acceptanceCriteria.map(c => c.id));
+
+  const hasExplicitSddTraceability =
+    typeof specInput === "object" &&
+    specInput !== null &&
+    "metadata" in specInput &&
+    typeof (specInput as Record<string, unknown>).metadata === "object" &&
+    (specInput as Record<string, unknown>).metadata !== null &&
+    "sdd" in ((specInput as Record<string, unknown>).metadata as Record<string, unknown>);
+
+  let parsedWorkflow: ReturnType<typeof WorkflowDefinitionSchema.parse> | undefined;
+  if (workflowInput !== undefined) {
+    parsedWorkflow = WorkflowDefinitionSchema.parse(workflowInput);
+  }
+
+  const unknownCriterionIds = parsedWorkflow !== undefined
+    ? [...new Set(parsedWorkflow.tasks.flatMap(t => t.acceptanceCriteria ?? []).filter(cId => !criteriaIds.has(cId)))].sort()
+    : [];
 
   const criterionToTasks: Record<string, readonly string[]> = {};
-  for (const id of criteriaIds) {
-    const mapping = mappings.find(m => m.criterionId === id);
-    criterionToTasks[id] = mapping ? [...mapping.taskIds] : [];
+  for (const criterion of spec.acceptanceCriteria) {
+    const specMapping = mappings.find(m => m.criterionId === criterion.id);
+
+    if (hasExplicitSddTraceability) {
+      if (specMapping && specMapping.taskIds.length > 0) {
+        criterionToTasks[criterion.id] = [...specMapping.taskIds].sort();
+      } else {
+        criterionToTasks[criterion.id] = [];
+      }
+    } else {
+      if (parsedWorkflow) {
+        const workflowTaskIds = parsedWorkflow.tasks
+          .filter(t => t.acceptanceCriteria?.includes(criterion.id))
+          .map(t => t.id)
+          .sort();
+        if (workflowTaskIds.length > 0) {
+          criterionToTasks[criterion.id] = workflowTaskIds;
+        } else if (specMapping && specMapping.taskIds.length > 0) {
+          criterionToTasks[criterion.id] = [...specMapping.taskIds].sort();
+        } else {
+          criterionToTasks[criterion.id] = [];
+        }
+      } else {
+        if (specMapping && specMapping.taskIds.length > 0) {
+          criterionToTasks[criterion.id] = [...specMapping.taskIds].sort();
+        } else {
+          criterionToTasks[criterion.id] = [];
+        }
+      }
+    }
   }
 
-  const orphanCriterionIds = criteriaIds
-    .filter(id => !mappings.some(m => m.criterionId === id && m.taskIds.length > 0))
+  const orphanCriterionIds = spec.acceptanceCriteria
+    .map(c => c.id)
+    .filter(id => (criterionToTasks[id]?.length ?? 0) === 0)
     .sort();
 
-  const mappedTasks = new Set(mappings.flatMap(m => m.taskIds));
+  const mappedTasks = new Set<string>(Object.values(criterionToTasks).flat());
+  const allTaskIds = new Set<string>(mappedTasks);
 
   let unmappedWorkflowTaskIds: readonly string[] = [];
   let unknownMappedTaskIds: readonly string[] = [];
-  const allTaskIds = new Set<string>(mappedTasks);
 
-  if (workflowInput !== undefined) {
-    const workflow = WorkflowDefinitionSchema.parse(workflowInput);
-    const workflowTasks = new Set(workflow.tasks.map(t => t.id));
-    workflow.tasks.forEach(t => allTaskIds.add(t.id));
+  if (parsedWorkflow !== undefined) {
+    const workflowTasks = new Set(parsedWorkflow.tasks.map(t => t.id));
+    parsedWorkflow.tasks.forEach(t => allTaskIds.add(t.id));
 
-    unmappedWorkflowTaskIds = workflow.tasks
+    unmappedWorkflowTaskIds = parsedWorkflow.tasks
       .map(t => t.id)
       .filter(id => !mappedTasks.has(id))
       .sort();
@@ -64,16 +95,19 @@ export function buildTraceabilityMatrix(specInput: unknown, workflowInput?: unkn
 
   const taskToCriteria: Record<string, readonly string[]> = {};
   for (const taskId of [...allTaskIds].sort()) {
-    const mappedCriterionIds = mappings
-      .filter(m => m.taskIds.includes(taskId))
-      .map(m => m.criterionId)
-      .sort();
-    taskToCriteria[taskId] = mappedCriterionIds;
+    const mappedCriteria = new Set<string>();
+    for (const [cId, taskIds] of Object.entries(criterionToTasks)) {
+      if (taskIds.includes(taskId)) {
+        mappedCriteria.add(cId);
+      }
+    }
+    taskToCriteria[taskId] = [...mappedCriteria].sort();
   }
 
   const valid = orphanCriterionIds.length === 0 &&
     unmappedWorkflowTaskIds.length === 0 &&
-    unknownMappedTaskIds.length === 0;
+    unknownMappedTaskIds.length === 0 &&
+    unknownCriterionIds.length === 0;
 
   return {
     criterionToTasks,
@@ -81,8 +115,22 @@ export function buildTraceabilityMatrix(specInput: unknown, workflowInput?: unkn
     orphanCriterionIds,
     unmappedWorkflowTaskIds,
     unknownMappedTaskIds,
+    unknownCriterionIds,
     valid
   };
+}
+
+export function validateTraceability(input: unknown, workflowInput: unknown): void {
+  const matrix = buildTraceabilityMatrix(input, workflowInput);
+  if (matrix.unknownCriterionIds && matrix.unknownCriterionIds.length > 0) {
+    throw new Error(`Workflow tasks reference unknown acceptance criteria: ${matrix.unknownCriterionIds.join(", ")}`);
+  }
+  if (matrix.orphanCriterionIds.length > 0) {
+    throw new Error("Every acceptance criterion must map to a task");
+  }
+  if (matrix.unknownMappedTaskIds.length > 0 || matrix.unmappedWorkflowTaskIds.length > 0) {
+    throw new Error("Workflow tasks must exactly match specification traceability");
+  }
 }
 
 const TOP_LEVEL_REQUIREMENT_FIELDS = [
@@ -112,8 +160,8 @@ const SDD_REQUIREMENT_FIELDS = [
 ] as const;
 
 export function detectSpecChanges(previousInput: unknown, nextInput: unknown, workflowInput?: unknown) {
-  const previous = parseSpecification(previousInput);
-  const next = parseSpecification(nextInput);
+  const previous = parseContractOrP15Specification(previousInput);
+  const next = parseContractOrP15Specification(nextInput);
   if (previous.specId !== next.specId || previous.sessionId !== next.sessionId || previous.runId !== next.runId) {
     throw new Error("Change detection requires the same specification, session and run");
   }
@@ -159,9 +207,9 @@ export function detectSpecChanges(previousInput: unknown, nextInput: unknown, wo
     while (queue.length > 0) {
       const current = queue.shift()!;
       for (const dep of workflow.dependencies) {
-        const fromId = dep.dependsOnTaskId ?? (dep as unknown as { from?: string }).from;
-        const toId = dep.taskId ?? (dep as unknown as { to?: string }).to;
-        if (fromId === current && toId !== undefined && !visited.has(toId)) {
+        const fromId = dep.dependsOnTaskId;
+        const toId = dep.taskId;
+        if (fromId === current && !visited.has(toId)) {
           visited.add(toId);
           queue.push(toId);
         }
@@ -235,7 +283,7 @@ export function validateChangedFilesScope(
   specInput: unknown,
   changedPathsInput: unknown
 ): { withinScope: boolean; outOfScopePaths: string[] } {
-  const spec = parseSpecification(specInput);
+  const spec = parseContractOrP15Specification(specInput);
   const validatedPaths = z.array(z.string().trim().min(1)).parse(changedPathsInput);
   const outOfScopePaths = validatedPaths.filter(
     changedPath => !spec.affectedPaths.some(pattern => pathMatchesPattern(pattern, changedPath))

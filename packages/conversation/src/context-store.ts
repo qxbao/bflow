@@ -1,11 +1,10 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { OperationResult } from "@bflow/contracts";
 import {
-  ConversationMessageSchema,
-  ConversationSessionSchema,
-  type OperationResult
-} from "@bflow/contracts";
-import type { ConversationContextSnapshot } from "./types.js";
+  ConversationContextSnapshotSchema,
+  type ConversationContextSnapshot
+} from "./types.js";
 
 /**
  * Persistence interface for Conversation Agent session context & pending state recovery.
@@ -22,8 +21,7 @@ export interface ConversationContextStore {
 }
 
 /**
- * Validates a ConversationContextSnapshot against schemaVersion,
- * ConversationSessionSchema, and ConversationMessageSchema.
+ * Validates a ConversationContextSnapshot using strict ConversationContextSnapshotSchema.
  */
 function validateSnapshot(
   snapshot: unknown,
@@ -56,57 +54,33 @@ function validateSnapshot(
     };
   }
 
-  const sessionResult = ConversationSessionSchema.safeParse(s["session"]);
-  if (!sessionResult.success) {
+  const parseResult = ConversationContextSnapshotSchema.safeParse(snapshot);
+  if (!parseResult.success) {
     return {
       ok: false,
       error: {
         code: "validation",
         retryable: false,
-        message: `Invalid conversation session: ${sessionResult.error.message}`,
-        details: JSON.parse(JSON.stringify(sessionResult.error.issues))
+        message: `Invalid conversation context snapshot: ${parseResult.error.message}`,
+        details: JSON.parse(JSON.stringify(parseResult.error.issues))
       }
     };
   }
 
-  if (expectedSessionId !== undefined && sessionResult.data.sessionId !== expectedSessionId) {
+  const data = parseResult.data;
+
+  if (expectedSessionId !== undefined && data.session.sessionId !== expectedSessionId) {
     return {
       ok: false,
       error: {
         code: "validation",
         retryable: false,
-        message: `Session ID mismatch in snapshot: expected '${expectedSessionId}', got '${sessionResult.data.sessionId}'`
+        message: `Session ID mismatch in snapshot: expected '${expectedSessionId}', got '${data.session.sessionId}'`
       }
     };
   }
 
-  if (!Array.isArray(s["messages"])) {
-    return {
-      ok: false,
-      error: {
-        code: "validation",
-        retryable: false,
-        message: "Snapshot messages must be an array"
-      }
-    };
-  }
-
-  for (let i = 0; i < s["messages"].length; i++) {
-    const msgResult = ConversationMessageSchema.safeParse(s["messages"][i]);
-    if (!msgResult.success) {
-      return {
-        ok: false,
-        error: {
-          code: "validation",
-          retryable: false,
-          message: `Invalid conversation message at index ${i}: ${msgResult.error.message}`,
-          details: JSON.parse(JSON.stringify(msgResult.error.issues))
-        }
-      };
-    }
-  }
-
-  return { ok: true, value: snapshot as ConversationContextSnapshot };
+  return { ok: true, value: data };
 }
 
 /**

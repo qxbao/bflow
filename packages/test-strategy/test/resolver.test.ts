@@ -118,11 +118,11 @@ describe("risk-based conditional TDD", () => {
     const a = assessment("refactoring"); a.changeImpact.surfaces.push("bugfix");
     expect(resolver.resolve(spec(a)).tddDecision.mode).toBe("required");
   });
-  it("data migrations require schema, integration, smoke and review evidence", () => {
+  it("data migrations require typecheck, static_analysis, integration and review evidence", () => {
     const a = assessment("configuration"); a.changeImpact.dataMigration = true;
     const strategy = resolver.resolve(spec(a));
     expect(strategy.metadata.conditionalTdd.requiredVerificationMethods).toEqual(expect.arrayContaining([
-      "schema_validation", "integration_test", "smoke_test", "manual_review"
+      "typecheck", "static_analysis", "integration_test", "manual_review"
     ]));
   });
   it("does not let caller humanOverride metadata suppress policy", () => {
@@ -164,5 +164,46 @@ describe("risk-based conditional TDD", () => {
     const strategy = resolver.resolve(s);
     expect(strategy.tddDecision.mode).toBe("recommended");
     expect(strategy.tddDecision.verifiableConditions.join(" ")).toMatch(/Provision a runnable e2e_test/);
+  });
+  it("resolves draft level: 'full' specification before testStrategy and tddDecision are attached", () => {
+    const s = spec();
+    s.level = "full";
+    s.architectureNotes = "Valid arch notes";
+    s.securityConsiderations = "Valid security considerations";
+    s.rollbackPlan = "Valid rollback plan";
+    expect(s.testStrategy).toBeUndefined();
+    expect(s.tddDecision).toBeUndefined();
+    const strategy = resolver.resolve(s);
+    expect(strategy).toBeDefined();
+    expect(strategy.tddDecision.mode).toBe("required");
+  });
+  it("updating spec.updatedAt upon approval does not invalidate strategyId or decisionId", () => {
+    const s = spec();
+    const strategy1 = resolver.resolve(s);
+    s.updatedAt = "2026-10-16T02:00:00Z";
+    s.status = "approved";
+    s.approvedBy = "lead";
+    s.artifactRef = {
+      trust: "stored",
+      artifactId: "spec-art",
+      runId: s.runId!,
+      taskId: "task-1",
+      kind: "document",
+      mediaType: "application/json",
+      uri: `artifact://${s.runId}/spec-art`,
+      checksum: { algorithm: "sha256", value: "a".repeat(64) },
+      createdAt: s.updatedAt
+    };
+    const strategy2 = resolver.resolve(s);
+    expect(strategy2.strategyId).toBe(strategy1.strategyId);
+    expect(strategy2.tddDecision.decisionId).toBe(strategy1.tddDecision.decisionId);
+    expect(() => resolver.validateAgainstSpecification(strategy1, s)).not.toThrow();
+  });
+  it("allows custom non-empty testNames in strategy criterion mappings", () => {
+    const s = spec();
+    const strategy = resolver.resolve(s);
+    strategy.criterionMappings = [{ criterionId: "ac-1", testNames: ["should round properly"] }];
+    expect(resolver.validate(strategy)).toBeDefined();
+    expect(resolver.validateAgainstSpecification(strategy, s)).toBeDefined();
   });
 });

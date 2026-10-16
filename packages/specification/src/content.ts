@@ -10,7 +10,7 @@ import type {
   Specification
 } from "@bflow/contracts";
 import {
-  parseSpecification,
+  parseContractOrP15Specification,
   SpecApprovedPayloadSchema,
   SpecDraftPayloadSchema
 } from "./schema.js";
@@ -44,7 +44,7 @@ export function createSpecificationArtifactProposal(
     renderedMarkdown?: string;
   }
 ): { proposal: ArtifactProposal; bytes: Buffer; checksum: string } {
-  const spec = parseSpecification(specInput);
+  const spec = parseContractOrP15Specification(specInput);
 
   if (!spec.runId) {
     throw new Error("A run ID is required to create a specification artifact proposal");
@@ -103,7 +103,7 @@ export function buildSpecRoleMessage(options: {
   idempotencyKey?: string;
   notes?: string;
 }): RoleMessage {
-  const spec = parseSpecification(options.spec);
+  const spec = parseContractOrP15Specification(options.spec);
 
   if (spec.runId !== undefined && spec.runId !== options.runId) {
     throw new Error("Specification runId must match RoleMessage runId");

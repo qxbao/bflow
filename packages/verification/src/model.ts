@@ -87,8 +87,43 @@ export function safePath(path: string): boolean {
   return !path.startsWith("/") && !path.includes("\\") && !path.includes(":") && !/[*?]/.test(path) &&
     path.split("/").every(part => part.length > 0 && part !== "." && part !== "..");
 }
-export function covers(prefix: string, path: string): boolean {
-  return prefix === path || path.startsWith(`${prefix.replace(/\/$/, "")}/`);
+export function safeAffectedPathOrGlob(value: string): boolean {
+  return !value.startsWith("/") && !value.endsWith("/") && !value.includes("\\") && !value.includes(":") &&
+    value.split("/").every(part => part.length > 0 && part !== "." && part !== "..");
+}
+function globToRegex(glob: string): RegExp {
+  let regexStr = "";
+  let i = 0;
+  while (i < glob.length) {
+    if (glob.slice(i, i + 3) === "**/") {
+      regexStr += "(?:.+/)?";
+      i += 3;
+    } else if (glob.slice(i, i + 2) === "**") {
+      regexStr += ".*";
+      i += 2;
+    } else if (glob[i] === "*") {
+      regexStr += "[^/]*";
+      i += 1;
+    } else if (glob[i] === "?") {
+      regexStr += "[^/]";
+      i += 1;
+    } else {
+      const char = glob[i]!;
+      if (/[.+^${}()|[\]\\]/.test(char)) {
+        regexStr += `\\${char}`;
+      } else {
+        regexStr += char;
+      }
+      i += 1;
+    }
+  }
+  return new RegExp(`^${regexStr}$`);
+}
+export function covers(prefixOrGlob: string, path: string): boolean {
+  if (/[*?]/.test(prefixOrGlob)) {
+    return globToRegex(prefixOrGlob).test(path);
+  }
+  return prefixOrGlob === path || path.startsWith(`${prefixOrGlob.replace(/\/$/, "")}/`);
 }
 // P16 appends runtime evidence to TestStrategy metadata after policy approval.
 // Receipts are validated as contract data, but never change the accepted policy.
@@ -118,7 +153,7 @@ export function createVerificationPlan(input: unknown): VerificationPlan {
     throw new Error("TDD receipt run/task does not match strategy");
   if (spec.artifactRef?.runId !== value.runId || spec.artifactRef.kind !== "document" || spec.artifactRef.mediaType !== "application/json")
     throw new Error("Specification evidence must be a stored JSON document in the same run");
-  if (!spec.affectedPaths.every(safePath)) throw new Error("Affected paths must be safe literal repository paths");
+  if (!spec.affectedPaths.every(safeAffectedPathOrGlob)) throw new Error("Affected paths must be safe repository paths or globs");
   const criteria = new Set(spec.acceptanceCriteria.map(c => c.id));
   const mappings = new Map<string, string[]>();
   for (const mapping of strategy.criterionMappings) {
@@ -137,6 +172,7 @@ export function createVerificationPlan(input: unknown): VerificationPlan {
   });
   if (!configs.some(c => c.kind === "review")) throw new Error("An independent Reviewer or QA check is required");
   for (const criterion of spec.acceptanceCriteria) {
+    if (criterion.required === false || criterion.status === "waived") continue;
     const names = mappings.get(criterion.id);
     if (!names || !configs.some(c => c.method === criterion.verificationMethod && c.criterionIds.includes(criterion.id) &&
         names.every(name => c.testNames.includes(name)))) throw new Error(`No complete check mapping for ${criterion.id}`);

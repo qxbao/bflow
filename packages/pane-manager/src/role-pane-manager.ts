@@ -1,4 +1,5 @@
 import type {
+  AgentSessionLocator,
   AgentTransportState,
   OperationOptions,
   OperationResult,
@@ -208,6 +209,13 @@ export class RolePaneManager {
     });
   }
 
+  async #closePane(paneId: string, options?: OperationOptions): Promise<void> {
+    const outcome = await this.#runHerdr(["pane", "close", paneId], options);
+    if (outcome.exitCode === 0 && !outcome.failure) {
+      parseOkResponse(outcome);
+    }
+  }
+
   async initializeTopology(options?: OperationOptions): Promise<OperationResult<SessionManifest>> {
     try {
       return await this.#reconcileTopologyInternal(false, options);
@@ -221,6 +229,50 @@ export class RolePaneManager {
       return await this.#reconcileTopologyInternal(true, options);
     } catch (err) {
       return toProtocolError(err, "Failed to reconcile topology");
+    }
+  }
+
+  async shutdownTopology(options?: OperationOptions): Promise<OperationResult<SessionManifest>> {
+    try {
+      const loadResult = await this.#store.load(this.#config.sessionId, options);
+      if (!loadResult.ok) return loadResult;
+      const manifest = loadResult.value;
+      if (!manifest) {
+        return notFoundError(`Session manifest not found for session '${this.#config.sessionId}'`);
+      }
+
+      for (const pane of manifest.panes) {
+        await this.#closePane(pane.paneId, options);
+      }
+
+      const nowIso = this.#clock().toISOString();
+      const updatedPanes: PaneBinding[] = manifest.panes.map((p) => ({
+        ...p,
+        transportState: "cancelled" as AgentTransportState,
+        lastHeartbeatAt: nowIso
+      }));
+
+      const updatedManifest: SessionManifest = {
+        ...manifest,
+        status: "down",
+        panes: updatedPanes,
+        updatedAt: nowIso
+      };
+
+      const parsedManifest = SessionManifestSchema.safeParse(updatedManifest);
+      if (!parsedManifest.success) {
+        return validationError(
+          `Failed to validate shutdown session manifest: ${parsedManifest.error.message}`,
+          parsedManifest.error.issues
+        );
+      }
+
+      const saveResult = await this.#store.save(parsedManifest.data, options);
+      if (!saveResult.ok) return saveResult;
+
+      return ok(saveResult.value);
+    } catch (err) {
+      return toProtocolError(err, "Failed to shutdown topology");
     }
   }
 
@@ -552,7 +604,12 @@ export class RolePaneManager {
     // Step 4: Persist Manifest
     const coordinatorBinding = manifestPanes.find((p) => p.role === "coordinator");
     const allHealthy = manifestPanes.every(
-      (p) => p.transportState === "idle" || p.transportState === "done" || p.transportState === "working"
+      (p) =>
+        (p.role === "developer" && p.metadata?.["allocationStatus"] === "released") ||
+        p.transportState === "idle" ||
+        p.transportState === "done" ||
+        p.transportState === "working" ||
+        p.transportState === "accepted"
     );
     const status: SessionManifestStatus = (allHealthy && chatBinding && coordinatorBinding) ? "up" : "degraded";
 
@@ -1078,8 +1135,16 @@ export class RolePaneManager {
         });
       }
 
+      const isHealthyTransport = (state: AgentTransportState) =>
+        state === "idle" || state === "done" || state === "working" || state === "accepted";
+      const hasConversation = updatedPanes.some(
+        (p) => p.role === "conversation" && isHealthyTransport(p.transportState)
+      );
+      const hasCoordinator = updatedPanes.some(
+        (p) => p.role === "coordinator" && isHealthyTransport(p.transportState)
+      );
       const healthy = anomalies.length === 0;
-      const newStatus: SessionManifestStatus = healthy ? "up" : "degraded";
+      const newStatus: SessionManifestStatus = healthy && hasConversation && hasCoordinator ? "up" : "degraded";
 
       const updatedManifest: SessionManifest = {
         ...manifest,
@@ -1088,7 +1153,16 @@ export class RolePaneManager {
         updatedAt: this.#clock().toISOString()
       };
 
-      await this.#store.save(updatedManifest, options);
+      const validatedManifest = SessionManifestSchema.safeParse(updatedManifest);
+      if (!validatedManifest.success) {
+        return validationError(
+          `Failed to validate updated session manifest: ${validatedManifest.error.message}`,
+          validatedManifest.error.issues
+        );
+      }
+
+      const saveResult = await this.#store.save(validatedManifest.data, options);
+      if (!saveResult.ok) return saveResult;
 
       return ok<TopologyHealthSummary>({
         sessionId: manifest.sessionId,
@@ -1175,7 +1249,7 @@ export class RolePaneManager {
 
         if (matchingLiveAgent) {
           usedPaneIds.add(matchingLiveAgent.paneId);
-          recoveredPanes.push({
+          const updatedBinding: PaneBinding = {
             ...binding,
             bindingId: `binding-${topologyRole}-${matchingLiveAgent.paneId}`,
             paneId: matchingLiveAgent.paneId,
@@ -1185,7 +1259,42 @@ export class RolePaneManager {
             ...(matchingLiveAgent.session !== undefined ? { session: matchingLiveAgent.session } : {}),
             transportState: matchingLiveAgent.agentStatus as AgentTransportState,
             lastHeartbeatAt: this.#clock().toISOString()
-          });
+          };
+          if (matchingLiveAgent.terminalId === undefined) {
+            delete (updatedBinding as { terminalId?: string }).terminalId;
+          }
+          if (matchingLiveAgent.session === undefined) {
+            delete (updatedBinding as { session?: AgentSessionLocator }).session;
+          }
+          const parsedBinding = PaneBindingSchema.safeParse(updatedBinding);
+          if (!parsedBinding.success) {
+            return validationError(
+              `Failed to validate recovered binding: ${parsedBinding.error.message}`,
+              parsedBinding.error.issues
+            );
+          }
+          recoveredPanes.push(parsedBinding.data);
+          continue;
+        }
+
+        // Released developer binding: do not respawn live agent
+        if (binding.role === "developer" && binding.metadata?.["allocationStatus"] === "released") {
+          const existingPane = livePanes.find((p) => p.paneId === binding.paneId && !usedPaneIds.has(p.paneId));
+          const releasedBinding: PaneBinding = {
+            ...binding,
+            transportState: "disconnected",
+            lastHeartbeatAt: this.#clock().toISOString(),
+            ...(existingPane ? { paneId: existingPane.paneId, workspaceId: existingPane.workspaceId, tabId: existingPane.tabId } : {})
+          };
+          if (existingPane) {
+            usedPaneIds.add(existingPane.paneId);
+          }
+          const parsed = PaneBindingSchema.safeParse(releasedBinding);
+          if (parsed.success) {
+            recoveredPanes.push(parsed.data);
+          } else {
+            recoveredPanes.push(releasedBinding);
+          }
           continue;
         }
 
@@ -1367,7 +1476,12 @@ export class RolePaneManager {
 
       const coordinatorBinding = recoveredPanes.find((p) => p.role === "coordinator");
       const allHealthy = recoveredPanes.every(
-        (p) => p.transportState === "idle" || p.transportState === "done" || p.transportState === "working"
+        (p) =>
+          (p.role === "developer" && p.metadata?.["allocationStatus"] === "released") ||
+          p.transportState === "idle" ||
+          p.transportState === "done" ||
+          p.transportState === "working" ||
+          p.transportState === "accepted"
       );
       const newStatus: SessionManifestStatus = (allHealthy && chatBinding && coordinatorBinding) ? "up" : "degraded";
 
@@ -1457,7 +1571,8 @@ export class RolePaneManager {
         updatedAt: this.#clock().toISOString()
       };
 
-      await this.#store.save(updatedManifest, options);
+      const saveResult = await this.#store.save(updatedManifest, options);
+      if (!saveResult.ok) return saveResult;
 
       return ok(chatBinding);
     } catch (err) {
@@ -1553,13 +1668,28 @@ export class RolePaneManager {
         const paneOutcome = await this.#runHerdr(["pane", "get", releasedCandidate.paneId], options);
         if (paneOutcome.exitCode === 0 && !paneOutcome.failure) {
           const paneInfo = parsePaneInfoResult(paneOutcome);
-          const effectiveAgentName = request.agentName ?? releasedCandidate.agentId;
-          const startResult = await this.startAgentInPane(
+          let targetPane = paneInfo;
+          let oldPaneToClose: string | null = null;
+
+          const liveAgent = liveAgents.find((a) => a.paneId === releasedCandidate.paneId);
+          const effectiveAgentName = request.agentName ?? (liveAgent ? releasedCandidate.agentId : this.#allocateUniqueDeveloperName(request.taskId, manifest, liveAgents));
+
+          // If the live pane is already occupied by an agent with a different name than requested,
+          // split a fresh pane in the same tab and close the old pane so the new agent does not conflict.
+          if (paneInfo.agent !== null && liveAgent && liveAgent.name !== effectiveAgentName) {
+            const splitOutcome = await this.#runHerdr(["pane", "split", releasedCandidate.paneId, "--direction", "right"], options);
+            if (splitOutcome.exitCode === 0 && !splitOutcome.failure) {
+              targetPane = parsePaneInfoResult(splitOutcome);
+              oldPaneToClose = releasedCandidate.paneId;
+            }
+          }
+
+          let startResult = await this.startAgentInPane(
             {
               role: "developer",
-              paneId: paneInfo.paneId,
-              workspaceId: paneInfo.workspaceId,
-              tabId: paneInfo.tabId,
+              paneId: targetPane.paneId,
+              workspaceId: targetPane.workspaceId,
+              tabId: targetPane.tabId,
               cwd: request.worktreePath,
               worktreePath: request.worktreePath,
               agentName: effectiveAgentName,
@@ -1578,19 +1708,69 @@ export class RolePaneManager {
             },
             options
           );
+
+          if (!startResult.ok && oldPaneToClose === null && startResult.error.code === "conflict") {
+            const splitOutcome = await this.#runHerdr(["pane", "split", releasedCandidate.paneId, "--direction", "right"], options);
+            if (splitOutcome.exitCode === 0 && !splitOutcome.failure) {
+              targetPane = parsePaneInfoResult(splitOutcome);
+              oldPaneToClose = releasedCandidate.paneId;
+              startResult = await this.startAgentInPane(
+                {
+                  role: "developer",
+                  paneId: targetPane.paneId,
+                  workspaceId: targetPane.workspaceId,
+                  tabId: targetPane.tabId,
+                  cwd: request.worktreePath,
+                  worktreePath: request.worktreePath,
+                  agentName: effectiveAgentName,
+                  agentKind: request.agentKind ?? this.#config.defaultAgentKind ?? "codex",
+                  ...(request.model !== undefined ? { model: request.model } : {}),
+                  ...(request.args !== undefined ? { args: request.args } : {}),
+                  ...(request.startupTimeoutMs !== undefined ? { timeoutMs: request.startupTimeoutMs } : {}),
+                  permanent: false,
+                  metadata: {
+                    topologyRole: "developer",
+                    taskId: request.taskId,
+                    ...(request.runId !== undefined ? { runId: request.runId } : {}),
+                    ...(request.branchName !== undefined ? { branchName: request.branchName } : {}),
+                    allocationStatus: "active"
+                  }
+                },
+                options
+              );
+            }
+          }
+
           if (startResult.ok) {
-            const updatedPanes = manifest.panes.map((p) =>
-              p.bindingId === releasedCandidate.bindingId || p.paneId === startResult.value.paneId
-                ? startResult.value
-                : p
-            );
+            if (oldPaneToClose !== null) {
+              await this.#closePane(oldPaneToClose, options);
+            }
+            const updatedPanes = oldPaneToClose !== null
+              ? [
+                  ...manifest.panes.filter(
+                    (p) => p.paneId !== oldPaneToClose && p.bindingId !== releasedCandidate.bindingId
+                  ),
+                  startResult.value
+                ]
+              : manifest.panes.map((p) =>
+                  p.bindingId === releasedCandidate.bindingId || p.paneId === startResult.value.paneId
+                    ? startResult.value
+                    : p
+                );
             const updatedManifest: SessionManifest = {
               ...manifest,
               panes: updatedPanes,
               updatedAt: this.#clock().toISOString()
             };
-            await this.#store.save(updatedManifest, options);
+            const validatedManifest = SessionManifestSchema.safeParse(updatedManifest);
+            if (!validatedManifest.success) {
+              return validationError(`Updated session manifest is invalid: ${validatedManifest.error.message}`);
+            }
+            const saveResult = await this.#store.save(validatedManifest.data, options);
+            if (!saveResult.ok) return saveResult;
             return ok(startResult.value);
+          } else if (oldPaneToClose !== null) {
+            await this.#closePane(targetPane.paneId, options);
           }
         }
       }
@@ -1682,7 +1862,8 @@ export class RolePaneManager {
         panes: updatedPanes,
         updatedAt: this.#clock().toISOString()
       };
-      await this.#store.save(updatedManifest, options);
+      const saveResult = await this.#store.save(updatedManifest, options);
+      if (!saveResult.ok) return saveResult;
 
       return ok(startResult.value);
     } catch (err) {
@@ -1844,8 +2025,15 @@ export class RolePaneManager {
 
       const moveResult = parsePaneMoveResult(moveOutcome);
 
+      const role =
+        (binding.metadata?.["topologyRole"] as TopologyRole | undefined) ??
+        resolveTopologyRole(binding.role) ??
+        binding.role;
+      const newBindingId = `binding-${role}-${moveResult.pane.paneId}`;
+
       const updatedBinding: PaneBinding = {
         ...binding,
+        bindingId: newBindingId,
         paneId: moveResult.pane.paneId,
         workspaceId: moveResult.pane.workspaceId,
         tabId: moveResult.pane.tabId,
@@ -1853,8 +2041,17 @@ export class RolePaneManager {
         lastHeartbeatAt: this.#clock().toISOString()
       };
 
+      const parsedBinding = PaneBindingSchema.safeParse(updatedBinding);
+      if (!parsedBinding.success) {
+        return validationError(
+          `Failed to validate moved pane binding: ${parsedBinding.error.message}`,
+          parsedBinding.error.issues
+        );
+      }
+      const validatedBinding = parsedBinding.data;
+
       const updatedPanes = manifest.panes.map((p) =>
-        p.bindingId === binding.bindingId ? updatedBinding : p
+        p.bindingId === binding.bindingId ? validatedBinding : p
       );
 
       const updatedManifest: SessionManifest = {
@@ -1862,6 +2059,8 @@ export class RolePaneManager {
         panes: updatedPanes,
         ...(binding.role === "conversation"
           ? {
+              herdrWorkspaceId: moveResult.pane.workspaceId,
+              herdrTabId: moveResult.pane.tabId,
               attachTarget: {
                 role: "conversation" as const,
                 paneId: moveResult.pane.paneId,
@@ -1872,10 +2071,18 @@ export class RolePaneManager {
         updatedAt: this.#clock().toISOString()
       };
 
-      const saveResult = await this.#store.save(updatedManifest, options);
+      const validatedManifest = SessionManifestSchema.safeParse(updatedManifest);
+      if (!validatedManifest.success) {
+        return validationError(
+          `Failed to validate updated session manifest: ${validatedManifest.error.message}`,
+          validatedManifest.error.issues
+        );
+      }
+
+      const saveResult = await this.#store.save(validatedManifest.data, options);
       if (!saveResult.ok) return saveResult;
 
-      return ok(updatedBinding);
+      return ok(validatedBinding);
     } catch (err) {
       return toProtocolError(err, `Failed to move pane for selector '${selector}'`);
     }

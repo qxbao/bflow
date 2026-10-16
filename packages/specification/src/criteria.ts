@@ -5,7 +5,7 @@ import {
   type AcceptanceCriterion,
   type Specification
 } from "@bflow/contracts";
-import { parseSpecification, policyDetails } from "./schema.js";
+import { parseContractOrP15Specification, parseSpecification, policyDetails } from "./schema.js";
 
 const METHOD_RIGOR: Record<AcceptanceCriterion["verificationMethod"], number> = {
   e2e_test: 5,
@@ -222,8 +222,8 @@ export function assertNoCriteriaWeakeningOnFailure(
   failedVerificationInput: unknown,
   options?: { explicitUserRequirementChangeAuthorized?: boolean }
 ): void {
-  const previousSpec = parseSpecification(previousSpecInput);
-  const proposedSpec = parseSpecification(proposedSpecInput);
+  const previousSpec = parseContractOrP15Specification(previousSpecInput);
+  const proposedSpec = parseContractOrP15Specification(proposedSpecInput);
   const failedVerification = VerificationResultSchema.parse(failedVerificationInput);
 
   if (
@@ -288,7 +288,7 @@ export function evaluateCriteriaFromVerification(
   specInput: unknown,
   verificationInput: unknown
 ): CriteriaEvaluationSummary {
-  const spec = parseSpecification(specInput);
+  const spec = parseContractOrP15Specification(specInput);
   const verification = VerificationResultSchema.parse(verificationInput);
 
   if (spec.runId !== undefined && verification.runId !== spec.runId) {

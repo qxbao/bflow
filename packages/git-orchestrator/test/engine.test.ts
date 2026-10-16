@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GitChangeSetSchema, RoleMessageSchema, VerificationResultSchema } from "@bflow/contracts";
-import { openFilesystemArtifactStore, type FilesystemArtifactStore } from "../../artifact-store/src/index.js";
+import { openFilesystemArtifactStore, type FilesystemArtifactStore } from "./test-artifact-store.js";
 import { GitIntegrationEngine, taskBranchName, type GitProvider } from "../src/index.js";
 
 const execute = promisify(execFile);
@@ -102,7 +102,9 @@ describe("GitIntegrationEngine using real isolated repositories", () => {
     expect(await readFile(join(result.worktreePath, "src", "task-b.txt"), "utf8")).toBe("task-b\n");
     expect(await git(repository, "rev-parse", "main")).toBe(base);
     expect(await git(repository, "status", "--porcelain")).toBe("");
-    expect(result.requests.some(message => message.type === "verification.requested")).toBe(true);
+    const verificationRequest = result.requests.find(message => message.type === "verification.requested");
+    expect(verificationRequest).toBeDefined();
+    expect((verificationRequest?.payload as Record<string, unknown>)?.integratedTaskIds).toEqual(["task-a", "task-b"]);
     for (const message of result.requests) expect(RoleMessageSchema.safeParse(message).success).toBe(true);
   });
 

@@ -10,7 +10,7 @@ import {
   type OperationOptions, type OperationResult, type RecoveryCheckpoint, type RuntimeService,
   type SessionLifecycleManager, type SessionManifest
 } from "@bflow/contracts";
-import { defaultEnvironmentConfig, readEnvironmentConfig, type EnvironmentConfig } from "./environment-config.js";
+import { readEnvironmentConfig, type EnvironmentConfig } from "./environment-config.js";
 import { environmentProcessRunner, namedSessionEnvironment, type EnvironmentProcessRunner } from "./environment-process.js";
 import { identifyRepository, type RepositoryIdentity } from "./repository.js";
 import { openPaneManagerEnvironment } from "./pane-manager-integration.js";
@@ -25,6 +25,9 @@ export interface EnvironmentIntegration {
   readonly checkpoint?: (command: CreateCheckpointCommand, options: OperationOptions) => Promise<OperationResult<RecoveryCheckpoint>>;
   readonly close?: () => Promise<void>;
 }
+
+export const READY_TRANSPORT_STATES: ReadonlySet<string> = new Set(["idle", "done", "working", "accepted"]);
+
 export interface EnvironmentCompositionInput {
   readonly repository: RepositoryIdentity;
   readonly config: EnvironmentConfig;
@@ -189,7 +192,7 @@ export class EnvironmentLifecycle {
   private ready(manifest: SessionManifest, config: EnvironmentConfig): boolean {
     return manifest.status === "up" && config.environment.roles.filter((r) => r.required).every((r) =>
       manifest.panes.filter((pane) => pane.role === r.role).length === 1 &&
-      manifest.panes.some((pane) => pane.role === r.role && ["idle", "done"].includes(pane.transportState)));
+      manifest.panes.some((pane) => pane.role === r.role && READY_TRANSPORT_STATES.has(pane.transportState)));
   }
   async up(timeoutMs?: number): Promise<SessionManifest> {
     const repository = await identifyRepository(this.cwd, this.runner);
@@ -216,7 +219,7 @@ export class EnvironmentLifecycle {
           if (started.exitCode !== 0) fail(`Herdr headless server failed to start: ${started.stderr}`);
           while (!await this.probe(repository, config, deadline)) await deadline.pause();
         }
-        if (!running || manifest === null || manifest.status === "down") {
+        if (!running || manifest === null || manifest.status === "down" || manifest.status === "degraded") {
           if (previous?.phase === "manager_pending") fail("Earlier role startup is unresolved and manager has no recoverable manifest; refusing duplicate agents");
           await this.writeIntent(repository, "manager_pending");
           manifest = this.validateManifest(unwrap(await deadline.call((opts) => integration.manager.up(repository.sessionName, opts))), repository);
@@ -378,14 +381,14 @@ export class EnvironmentLifecycle {
     const [major = 0, minor = 0] = process.versions.node.split(".").map(Number);
     checks.push({ checkId: "node", name: "Node.js >=22.13", status: major > 22 || major === 22 && minor >= 13 ? "passed" : "failed", message: process.version });
     for (const executable of ["git", "pnpm"]) await check(executable, () => this.command(repository, executable, ["--version"]));
-    let config: EnvironmentConfig = defaultEnvironmentConfig(repository);
+    let config: EnvironmentConfig | null = null;
     await check("configuration", async () => { config = await readEnvironmentConfig(repository); return "Valid .bflow/config.yaml and repository identity"; });
     await check("permissions", async () => { await access(repository.root, constants.R_OK | constants.W_OK); return "Repository is readable/writable"; });
-    if (config) {
-      const validConfig = config;
+    const validConfig = config as EnvironmentConfig | null;
+    if (validConfig) {
       await check("herdr", async () => { await this.dependenciesAvailable(repository, validConfig, new Deadline(validConfig.environment.startupTimeoutMs)); return "Named-session/headless CLI and protocol 22/schema 1 available"; });
       // Report each missing agent independently instead of stopping at the first dependency.
-      for (const executable of new Set(config.environment.roles.map((r) => r.cli))) await check(`agent-${executable.replace(/[^a-zA-Z0-9_-]/g, "_").slice(-100)}`, () => this.command(repository, executable, ["--version"]));
+      for (const executable of new Set(validConfig.environment.roles.map((r) => r.cli))) await check(`agent-${executable.replace(/[^a-zA-Z0-9_-]/g, "_").slice(-100)}`, () => this.command(repository, executable, ["--version"]));
       await check("session", async () => await this.probe(repository, validConfig) ? "Repository named session is running" : "Repository named session is stopped (run bflow up)");
       await check("lifecycle-lock", async () => {
         try { await access(this.statePath(repository, "lifecycle.lock")); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return "No lifecycle operation lock"; throw error; }

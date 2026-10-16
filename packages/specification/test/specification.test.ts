@@ -1,4 +1,5 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -9,11 +10,15 @@ import {
   SpecificationSchema,
   WorkflowDefinitionSchema,
   type AcceptanceCriterion,
+  type ArtifactQuery,
   type ArtifactReference,
   type ArtifactStore,
+  type ArtifactWrite,
+  type OperationOptions,
+  type OperationResult,
+  type Page,
   type VerificationResult
 } from "@bflow/contracts";
-import { openFilesystemArtifactStore, type FilesystemArtifactStore } from "../../artifact-store/src/index.js";
 import {
   ANALYST_ROLE_PROFILE,
   ARCHITECT_ROLE_PROFILE,
@@ -31,6 +36,7 @@ import {
   hasDataSchemaPathHint,
   hasPublicApiPathHint,
   hasSecurityPathHint,
+  parseContractOrP15Specification,
   parseSpecification,
   policyDetails,
   removeCriterionFromDraft,
@@ -43,16 +49,138 @@ import {
 } from "../src/index.js";
 import { draft, now, later, workflow } from "./fixtures.js";
 
+export interface TestArtifactStore extends ArtifactStore {
+  close(): Promise<void> | void;
+}
+
+export async function openTestArtifactStore(options: { root: string; storeId: string }): Promise<OperationResult<TestArtifactStore>> {
+  const { root, storeId } = options;
+  await mkdir(root, { recursive: true });
+
+  const store: TestArtifactStore = {
+    async put(write: ArtifactWrite, _options?: OperationOptions): Promise<OperationResult<ArtifactReference>> {
+      const { artifactId, kind, mediaType, runId, taskId, metadata, idempotencyKey } = write.options as any;
+      const chunks: Buffer[] = [];
+      for await (const chunk of write.content) {
+        chunks.push(Buffer.from(chunk));
+      }
+      const data = Buffer.concat(chunks);
+      const hash = createHash("sha256").update(data).digest("hex");
+      const refPath = join(root, `${artifactId}.meta.json`);
+      const dataPath = join(root, `${artifactId}.data`);
+
+      try {
+        const stored = JSON.parse(await readFile(refPath, "utf8")) as { ref: ArtifactReference; idempotencyKey?: string };
+        if (idempotencyKey && stored.idempotencyKey === idempotencyKey) {
+          return { ok: true, value: stored.ref };
+        }
+      } catch {
+        // file doesn't exist yet, proceed
+      }
+
+      const ref: ArtifactReference = {
+        trust: "stored",
+        artifactId,
+        runId,
+        uri: `artifact://${storeId}/${artifactId}`,
+        kind,
+        mediaType,
+        sizeBytes: data.length,
+        checksum: { algorithm: "sha256", value: hash },
+        createdAt: new Date().toISOString(),
+        metadata: metadata ?? {},
+        ...(taskId ? { taskId } : {})
+      };
+
+      await writeFile(dataPath, data);
+      await writeFile(refPath, JSON.stringify({ ref, idempotencyKey }), "utf8");
+      return { ok: true, value: ref };
+    },
+
+    get(reference: ArtifactReference, _options?: OperationOptions): AsyncIterable<OperationResult<Uint8Array>> {
+      return (async function* () {
+        const dataPath = join(root, `${reference.artifactId}.data`);
+        try {
+          const data = await readFile(dataPath);
+          yield { ok: true, value: new Uint8Array(data) };
+        } catch (err: any) {
+          yield {
+            ok: false,
+            error: {
+              code: "not_found",
+              message: `Artifact ${reference.artifactId} not found`,
+              retryable: false
+            }
+          };
+        }
+      })();
+    },
+
+    async resolve(artifactId: string, _options?: OperationOptions): Promise<OperationResult<ArtifactReference | null>> {
+      const refPath = join(root, `${artifactId}.meta.json`);
+      try {
+        const stored = JSON.parse(await readFile(refPath, "utf8")) as { ref: ArtifactReference };
+        return { ok: true, value: stored.ref };
+      } catch {
+        return { ok: true, value: null };
+      }
+    },
+
+    async find(query: ArtifactQuery, _options?: OperationOptions): Promise<OperationResult<Page<ArtifactReference>>> {
+      try {
+        const files = await readdir(root);
+        const metaFiles = files.filter(f => f.endsWith(".meta.json"));
+        const items: ArtifactReference[] = [];
+        for (const f of metaFiles) {
+          const stored = JSON.parse(await readFile(join(root, f), "utf8")) as { ref: ArtifactReference };
+          const meta = stored.ref;
+          if (query.runId && meta.runId !== query.runId) continue;
+          if (query.kind && meta.kind !== query.kind) continue;
+          items.push(meta);
+        }
+        return { ok: true, value: { items, total: items.length } };
+      } catch (err: any) {
+        return {
+          ok: false,
+          error: {
+            code: "internal",
+            message: err.message,
+            retryable: false
+          }
+        };
+      }
+    },
+
+    async delete(artifactId: string, _options?: OperationOptions): Promise<OperationResult<boolean>> {
+      const refPath = join(root, `${artifactId}.meta.json`);
+      const dataPath = join(root, `${artifactId}.data`);
+      try {
+        await unlink(refPath);
+      } catch {}
+      try {
+        await unlink(dataPath);
+      } catch {}
+      return { ok: true, value: true };
+    },
+
+    close() {
+      // noop
+    }
+  };
+
+  return { ok: true, value: store };
+}
+
 let directory: string;
-let realStore: FilesystemArtifactStore;
-let currentWrapper: FilesystemArtifactStore | undefined;
-let store: FilesystemArtifactStore;
+let realStore: TestArtifactStore;
+let currentWrapper: TestArtifactStore | undefined;
+let store: TestArtifactStore;
 let engine: SpecificationEngine;
 let clockTime: string;
 let testSeq = 0;
 let firstWriteTestSeq: number | undefined;
 
-function createNamespacedStore( getBacking: () => FilesystemArtifactStore, seq: number): FilesystemArtifactStore {
+function createNamespacedStore( getBacking: () => TestArtifactStore, seq: number): TestArtifactStore {
   const getPrefix = () => {
     if (firstWriteTestSeq === undefined) {
       firstWriteTestSeq = seq;
@@ -124,7 +252,7 @@ async function initStoreAndEngine(): Promise<void> {
 
 beforeAll(async () => {
   directory = await mkdtemp(join(tmpdir(), "bflow-spec-"));
-  const opened = await openFilesystemArtifactStore({ root: join(directory, "artifacts"), storeId: "spec-tests" });
+  const opened = await openTestArtifactStore({ root: join(directory, "artifacts"), storeId: "spec-tests" });
   if (!opened.ok) throw new Error(opened.error.message);
   realStore = opened.value;
 });
@@ -304,7 +432,7 @@ describe("immutable artifacts and approval policy", () => {
     const second = await engine.submitForReview(draft());
     expect(second.artifactRef).toEqual(first.artifactRef);
     await store.close();
-    const reopened = await openFilesystemArtifactStore({ root: join(directory, "artifacts"), storeId: "spec-tests" });
+    const reopened = await openTestArtifactStore({ root: join(directory, "artifacts"), storeId: "spec-tests" });
     if (!reopened.ok) throw new Error(reopened.error.message);
     store = reopened.value;
     const recovered = new SpecificationEngine({ artifactStore: store, authorizeApprover: () => false });
@@ -1363,7 +1491,7 @@ describe("Argon 4 High Review Remediation regressions", () => {
     expect(msg.artifact_references[0]).toEqual(approvedSpec.artifactRef);
   });
 
-  it("createSpecificationArtifactProposal rejects spec missing metadata.sdd", () => {
+  it("createSpecificationArtifactProposal accepts standard contract spec without metadata.sdd", () => {
     const rawContractsSpec = {
       schemaVersion: 2,
       specId: "spec-1",
@@ -1395,9 +1523,192 @@ describe("Argon 4 High Review Remediation regressions", () => {
       metadata: {} // missing sdd!
     };
 
-    expect(() => createSpecificationArtifactProposal(rawContractsSpec, {
+    const result = createSpecificationArtifactProposal(rawContractsSpec, {
       proposalId: "prop-1"
-    })).toThrow();
+    });
+    expect(result.proposal.proposalId).toBe("prop-1");
+    expect(result.proposal.runId).toBe("run-1");
+    expect(result.proposal.kind).toBe("document");
+    expect(result.checksum).toBeDefined();
+  });
+
+  it("functions accepting Specification handle standard contract spec without metadata.sdd", () => {
+    const rawContractsSpec = {
+      schemaVersion: 2,
+      specId: "spec-1",
+      runId: "run-1",
+      sessionId: "session-1",
+      level: "lightweight",
+      complexity: "trivial",
+      riskLevel: "low",
+      version: 1,
+      title: "Contracts-only spec",
+      summary: "Summary of changes",
+      problemStatement: "Problem description",
+      scope: { inScope: ["Example"], outOfScope: [] },
+      acceptanceCriteria: [{
+        id: "ac-1",
+        description: "Criterion description",
+        category: "functional",
+        verificationMethod: "unit_test",
+        required: true,
+        status: "pending",
+        evidenceArtifactIds: []
+      }],
+      affectedPaths: ["src/index.ts"],
+      traceabilityTaskIds: ["implement"],
+      status: "draft",
+      createdBy: "analyst",
+      createdAt: now,
+      updatedAt: now,
+      metadata: {}
+    };
+
+    // 1. evaluateCriteriaFromVerification
+    const artRef: ArtifactReference = {
+      trust: "stored",
+      artifactId: "art-ev-1",
+      runId: "run-1",
+      kind: "log",
+      uri: "artifact://spec-tests/art-ev-1",
+      mediaType: "text/plain",
+      sizeBytes: 10,
+      checksum: { algorithm: "sha256", value: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
+      createdAt: now
+    };
+
+    const verification: VerificationResult = {
+      schemaVersion: 2,
+      verificationId: "ver-1",
+      runId: "run-1",
+      taskId: "implement",
+      cycleNumber: 1,
+      attemptId: "att-1",
+      status: "passed",
+      independentExecution: true,
+      evaluatedCriteria: [{
+        criterionId: "ac-1",
+        passed: true,
+        evidenceArtifactId: "art-ev-1",
+        summary: "Unit test passed"
+      }],
+      qualityGateResults: [],
+      evidenceArtifacts: [artRef],
+      findings: [],
+      verifiedBy: "tester",
+      startedAt: now,
+      completedAt: now
+    };
+    const evalSummary = evaluateCriteriaFromVerification(rawContractsSpec, verification);
+    expect(evalSummary.allRequiredSatisfied).toBe(true);
+    expect(evalSummary.evaluations).toHaveLength(1);
+
+    // 2. buildTraceabilityMatrix
+    const wf = workflow(["implement"]);
+    const matrix = buildTraceabilityMatrix(rawContractsSpec, wf);
+    expect(matrix.valid).toBe(true);
+    expect(matrix.criterionToTasks["ac-1"]).toContain("implement");
+
+    // 3. validateTraceability
+    expect(() => validateTraceability(rawContractsSpec, wf)).not.toThrow();
+
+    // 4. validateChangedFilesScope
+    const scopeCheck = validateChangedFilesScope(rawContractsSpec, ["src/index.ts"]);
+    expect(scopeCheck.withinScope).toBe(true);
+
+    // 5. renderSpecification
+    const rendered = renderSpecification(rawContractsSpec);
+    expect(rendered).toContain("# Contracts-only spec");
+    expect(rendered).toContain("[ac-1] Criterion description");
+  });
+
+  it("buildTraceabilityMatrix correctly maps multi-task workflow criteria for contract specs without metadata.sdd", () => {
+    const rawMultiTaskSpec = {
+      schemaVersion: 2,
+      specId: "spec-multi-1",
+      runId: "run-1",
+      sessionId: "session-1",
+      level: "lightweight",
+      complexity: "standard",
+      riskLevel: "medium",
+      version: 1,
+      title: "Multi-task spec without sdd",
+      summary: "Multi-task test",
+      problemStatement: "Problem description",
+      scope: { inScope: ["Example"], outOfScope: [] },
+      acceptanceCriteria: [
+        {
+          id: "ac-1",
+          description: "First criterion",
+          category: "functional",
+          verificationMethod: "unit_test",
+          required: true,
+          status: "pending",
+          evidenceArtifactIds: []
+        },
+        {
+          id: "ac-2",
+          description: "Second criterion",
+          category: "functional",
+          verificationMethod: "unit_test",
+          required: true,
+          status: "pending",
+          evidenceArtifactIds: []
+        }
+      ],
+      affectedPaths: ["src/index.ts"],
+      traceabilityTaskIds: ["task-a", "task-b"],
+      status: "draft",
+      createdBy: "analyst",
+      createdAt: now,
+      updatedAt: now,
+      metadata: {} // No sdd!
+    };
+
+    const multiTaskWf = {
+      schemaVersion: "1",
+      id: "flow-multi",
+      name: "Multi-Task Flow",
+      version: "1.0.0",
+      tasks: [
+        {
+          id: "task-a",
+          title: "Task A",
+          role: "developer",
+          instruction: "Implement ac-1",
+          acceptanceCriteria: ["ac-1"],
+          retry: { maxAttempts: 1, strategy: "fixed", initialDelayMs: 0, maxDelayMs: 0, jitter: false },
+          timeout: { executionTimeoutMs: 60000, heartbeatTimeoutMs: 10000, onTimeout: "block" },
+          requiresApproval: false,
+          qualityGates: []
+        },
+        {
+          id: "task-b",
+          title: "Task B",
+          role: "developer",
+          instruction: "Implement ac-2",
+          acceptanceCriteria: ["ac-2"],
+          retry: { maxAttempts: 1, strategy: "fixed", initialDelayMs: 0, maxDelayMs: 0, jitter: false },
+          timeout: { executionTimeoutMs: 60000, heartbeatTimeoutMs: 10000, onTimeout: "block" },
+          requiresApproval: false,
+          qualityGates: []
+        }
+      ],
+      dependencies: [],
+      qualityGates: [],
+      maxConcurrency: 2,
+      failurePolicy: "block",
+      recovery: { checkpoint: "task-boundary", resumeStrategy: "checkpoint-then-replay", staleExecution: "reconcile" }
+    };
+
+    const matrix = buildTraceabilityMatrix(rawMultiTaskSpec, multiTaskWf);
+    expect(matrix.valid).toBe(true);
+    expect(matrix.criterionToTasks["ac-1"]).toEqual(["task-a"]);
+    expect(matrix.criterionToTasks["ac-2"]).toEqual(["task-b"]);
+    expect(matrix.taskToCriteria["task-a"]).toEqual(["ac-1"]);
+    expect(matrix.taskToCriteria["task-b"]).toEqual(["ac-2"]);
+
+    expect(() => validateTraceability(rawMultiTaskSpec, multiTaskWf)).not.toThrow();
   });
 
   it("validateChangedFilesScope rejects path traversal and does not treat file pattern as directory prefix", () => {

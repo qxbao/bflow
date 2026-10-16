@@ -55,20 +55,17 @@ function validateSequence(strategy: TestStrategy, records: VerificationResult[])
     const observedMethods = new Set<string>();
     const observedCriteria = new Set<string>();
     for (const observation of details.observations) {
-      const evaluated = record.evaluatedCriteria.find(c => c.criterionId === observation.criterionId && c.evidenceArtifactId === observation.evidenceArtifactId);
+      const evaluated = record.evaluatedCriteria.find(c => c.criterionId === observation.criterionId);
       if (!evaluated || !policy.requiredVerificationMethods.includes(observation.method)) throw new Error("Unmapped evidence observation or method");
-      const manual = observation.method === "manual_review" || observation.method === "visual_review";
+      if (!record.evidenceArtifacts.some(a => a.artifactId === observation.evidenceArtifactId)) {
+        throw new Error("Observation artifact is not in record evidence artifacts");
+      }
+      const manual = observation.method === "manual_review";
       if (!manual) {
         if (!observation.command || !policy.assessment.infrastructure.commands.some(c => c.method === observation.method && c.command === observation.command) ||
             observation.exitCode === undefined || (!isRed && observation.exitCode !== 0) ||
             (isRed && observation.exitCode !== 0 && !behavioralMethods.includes(observation.method))) {
           throw new Error("Automated evidence requires the configured method command and appropriate exit code");
-        }
-        if ((evaluated.command !== undefined && evaluated.command !== observation.command) ||
-            (evaluated.exitCode !== undefined && evaluated.exitCode !== observation.exitCode) ||
-            (isRed && observation.exitCode !== 0 && evaluated.exitCode === undefined) ||
-            evaluated.passed !== (observation.exitCode === 0)) {
-          throw new Error("Observation must agree with the evaluated criterion command and exit code");
         }
       } else if (!evaluated.passed || (observation.exitCode !== undefined && observation.exitCode !== 0) ||
           (evaluated.exitCode !== undefined && evaluated.exitCode !== 0)) {
@@ -76,6 +73,22 @@ function validateSequence(strategy: TestStrategy, records: VerificationResult[])
       }
       observedMethods.add(observation.method);
       observedCriteria.add(observation.criterionId);
+    }
+    for (const evaluated of record.evaluatedCriteria) {
+      const matching = details.observations.find(o =>
+        o.criterionId === evaluated.criterionId &&
+        o.evidenceArtifactId === evaluated.evidenceArtifactId &&
+        (o.method === "manual_review" || (
+          (evaluated.command === undefined || o.command === evaluated.command) &&
+          (evaluated.exitCode === undefined || o.exitCode === evaluated.exitCode)
+        ))
+      );
+      if (!matching) {
+        throw new Error("Observation must agree with the evaluated criterion command and exit code");
+      }
+      if (matching.method !== "manual_review" && matching.exitCode !== undefined && evaluated.passed !== (matching.exitCode === 0)) {
+        throw new Error("Observation must agree with the evaluated criterion command and exit code");
+      }
     }
     if (isRed) {
       if (!details.observations.some(o => behavioralMethods.includes(o.method) && o.exitCode !== undefined && o.exitCode !== 0)) {

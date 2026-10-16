@@ -1,3 +1,4 @@
+import { z } from "zod";
 import {
   AgentRequestSchema,
   ApprovalDecisionSchema,
@@ -32,6 +33,17 @@ import {
   type SdlcWorkStatus
 } from "@bflow/contracts";
 import type { DeliveryTrackingRecord } from "./types.js";
+
+export const OutboundCoordinatorMessageTypeSchema = z.enum([
+  "delegation.request",
+  "approval.decision"
+]);
+
+export const OutboundCoordinatorPayloadSchema = z.union([
+  DelegationRequestSchema,
+  ApprovalDecisionSchema,
+  z.record(z.unknown())
+]);
 
 /**
  * Configuration options for HerdrConversationBridge.
@@ -132,6 +144,19 @@ export class HerdrConversationBridge implements ConversationCoordinatorPort {
           code: "validation",
           retryable: false,
           message: `Conversation bridge only sends from role 'conversation' to 'coordinator' (got sender: '${validatedMessage.sender.role}', recipient: '${validatedMessage.recipient.role}')`
+        }
+      };
+    }
+
+    // Protocol 22 routing matrix check: only delegation.request and approval.decision allowed
+    const typeParse = OutboundCoordinatorMessageTypeSchema.safeParse(validatedMessage.type);
+    if (!typeParse.success) {
+      return {
+        ok: false,
+        error: {
+          code: "validation",
+          retryable: false,
+          message: `Conversation-to-Coordinator transport only permits 'delegation.request' and 'approval.decision' messages, received '${validatedMessage.type}'`
         }
       };
     }

@@ -108,7 +108,7 @@ describe("P12 repository environment lifecycle", () => {
   });
   it("preserves config on repeat init and ignores state/log/secrets without hiding config", async () => {
     const before = await readFile(join(dir, ".bflow/config.yaml"), "utf8");
-    await runCli(["init", "--force", "--name", "replacement"], { cwd: dir, environment: { runner } });
+    await runCli(["init", "--name", "replacement"], { cwd: dir, environment: { runner } });
     expect(await readFile(join(dir, ".bflow/config.yaml"), "utf8")).toBe(before);
     const ignore = await readFile(join(dir, ".bflow/.gitignore"), "utf8");
     expect(ignore.match(/secrets\//g)).toHaveLength(1); expect(ignore).not.toContain("config.yaml");

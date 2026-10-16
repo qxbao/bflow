@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { openFilesystemArtifactStore } from "../../artifact-store/src/index.js";
+import { openFilesystemArtifactStore } from "./test-artifact-store.js";
 import { GitIntegrationEngine } from "../src/index.js";
 const execute = promisify(execFile);
 const temporaryDirectories: string[] = [];
@@ -41,7 +41,8 @@ describe("SIGKILL at persisted merge boundaries", () => {
         await writeFile(join(binaries, "git"), wrapper); await chmod(join(binaries, "git"), 0o700);
         const plan = { runId: "crash-run", integrationId: "integration", baseRevision: base, tasks: [{ taskKey: task.key }] };
         const script = join(temporary, "engine.mjs");
-        await writeFile(script, `import {GitIntegrationEngine} from ${JSON.stringify(fileURLToPath(new URL("../dist/index.js", import.meta.url)))};\nimport {openFilesystemArtifactStore} from ${JSON.stringify(fileURLToPath(new URL("../../artifact-store/dist/index.js", import.meta.url)))};\nconst s=await openFilesystemArtifactStore({root:${JSON.stringify(artifacts)},storeId:'crash-tests'});if(!s.ok)throw Error('store');\nconst e=await GitIntegrationEngine.open({repositoryPath:${JSON.stringify(repository)},artifactStore:s.value});\nawait e.beginIntegration(${JSON.stringify(plan)});s.value.close();\n`);
+        const storePath = fileURLToPath(new URL("./test-artifact-store.ts", import.meta.url));
+        await writeFile(script, `import {GitIntegrationEngine} from ${JSON.stringify(fileURLToPath(new URL("../dist/index.js", import.meta.url)))};\nimport {openFilesystemArtifactStore} from ${JSON.stringify(storePath)};\nconst s=await openFilesystemArtifactStore({root:${JSON.stringify(artifacts)},storeId:'crash-tests'});if(!s.ok)throw Error('store');\nconst e=await GitIntegrationEngine.open({repositoryPath:${JSON.stringify(repository)},artifactStore:s.value});\nawait e.beginIntegration(${JSON.stringify(plan)});s.value.close();\n`);
         const child = spawn(process.execPath, [script], { env: { ...process.env, PATH: `${binaries}:${process.env.PATH}` }, stdio: ["ignore", "pipe", "pipe"] });
         let diagnostic = ""; child.stderr.on("data", bytes => { diagnostic += bytes; });
         const closed = new Promise<void>(accept => child.once("close", () => accept()));

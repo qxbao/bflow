@@ -23,7 +23,8 @@ const configuration = [
   "-c", "merge.autoStash=false",
   "-c", "rerere.enabled=false",
   "-c", "core.fsmonitor=false",
-  "-c", "diff.external="
+  "-c", "diff.external=",
+  "-c", "diff.renames=false"
 ];
 
 /** Execute literal Git arguments. Output remains untrimmed for patches and NUL records. */
@@ -163,10 +164,10 @@ export async function changedFiles(cwd: string, base: string, head: string): Pro
   for (let index = 0; index < names.length; index += 2) {
     const status = names[index];
     const path = names[index + 1];
-    if (path === undefined) throw new Error("Missing Git changed path");
+    if (path === undefined || status === undefined) throw new Error("Missing Git changed path");
     const count = counts.get(path);
     if (!count) throw new Error("Missing Git numstat path");
-    const changeType = status === "A" ? "added" : status === "D" ? "deleted" : status === "M" || status === "T" ? "modified" : null;
+    const changeType = status === "A" || status.startsWith("C") ? "added" : status === "D" ? "deleted" : status === "M" || status === "T" ? "modified" : null;
     if (!changeType) throw new Error(`Unsupported Git change status: ${status}`);
     result.push(GitChangedFileSchema.parse({ path, changeType, ...count }));
     counts.delete(path);

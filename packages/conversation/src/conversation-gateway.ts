@@ -1,10 +1,13 @@
 import {
   ApprovalRequestSchema,
+  ConversationMessageSchema,
+  DelegationRequestSchema,
   type AgentTransportState,
   type ApprovalRequest,
   type ConversationMessage,
   type ConversationSession,
   type ConversationSessionStatus,
+  type JsonValue,
   type OperationOptions,
   type OperationResult,
   type SdlcWorkStatus
@@ -14,7 +17,6 @@ import type { ConversationContextStore } from "./context-store.js";
 import {
   buildApprovalDecision,
   buildCancellationRequest,
-  buildCoordinatorRoleMessage,
   buildDelegationRequest
 } from "./delegation-builder.js";
 import { HerdrConversationBridge } from "./herdr-bridge.js";
@@ -28,15 +30,16 @@ import {
   inspectRepositoryContentSafety,
   verifyUserApprovalProvenance
 } from "./safety.js";
-import type {
-  ConversationContextSnapshot,
-  CoordinatorUpdateOutcome,
-  ExtractedRequirementDraft,
-  PendingClarificationContext,
-  PendingInboundItem,
-  UserFriendlyResponse,
-  UserTurnInput,
-  WorkflowRequestContext
+import {
+  UserTurnInputSchema,
+  type ConversationContextSnapshot,
+  type CoordinatorUpdateOutcome,
+  type ExtractedRequirementDraft,
+  type PendingClarificationContext,
+  type PendingInboundItem,
+  type UserFriendlyResponse,
+  type UserTurnInput,
+  type WorkflowRequestContext
 } from "./types.js";
 
 /**
@@ -153,6 +156,24 @@ export class ConversationGateway {
     return `${prefix}-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
   }
 
+  private validateConversationMessages(...messages: readonly ConversationMessage[]): OperationResult<void> {
+    for (const msg of messages) {
+      const parsed = ConversationMessageSchema.safeParse(msg);
+      if (!parsed.success) {
+        return {
+          ok: false,
+          error: {
+            code: "validation",
+            retryable: false,
+            message: `Invalid ConversationMessage: ${parsed.error.message}`,
+            details: JSON.parse(JSON.stringify(parsed.error.issues))
+          }
+        };
+      }
+    }
+    return { ok: true, value: undefined };
+  }
+
   /**
    * Returns current memory snapshot. Throws if not initialized.
    */
@@ -265,6 +286,19 @@ export class ConversationGateway {
     input: UserTurnInput,
     options?: OperationOptions
   ): Promise<OperationResult<UserFriendlyResponse>> {
+    const parsedInput = UserTurnInputSchema.safeParse(input);
+    if (!parsedInput.success) {
+      return {
+        ok: false,
+        error: {
+          code: "validation",
+          retryable: false,
+          message: parsedInput.error.issues.map((i: { path: readonly (string | number)[]; message: string }) => `${i.path.join(".")}: ${i.message}`).join("; "),
+          details: JSON.parse(JSON.stringify(parsedInput.error.issues))
+        }
+      };
+    }
+
     if (!this.snapshot) {
       const initResult = await this.initializeOrRecoverSession();
       if (!initResult.ok) {
@@ -332,6 +366,11 @@ export class ConversationGateway {
         artifactReferences: [],
         createdAt: now
       };
+
+      const msgValidation = this.validateConversationMessages(userMsg, agentReply);
+      if (!msgValidation.ok) {
+        return msgValidation;
+      }
 
       return {
         ok: true,
@@ -443,6 +482,9 @@ export class ConversationGateway {
             createdAt: now
           };
 
+          const msgValidation = this.validateConversationMessages(userMsg, agentReply);
+          if (!msgValidation.ok) return msgValidation;
+
           const updatedSession: ConversationSession = {
             ...this.snapshot!.session,
             turnCount: agentTurnSequence,
@@ -507,6 +549,9 @@ export class ConversationGateway {
             artifactReferences: [],
             createdAt: now
           };
+
+          const msgValidation = this.validateConversationMessages(userMsg, agentReply);
+          if (!msgValidation.ok) return msgValidation;
 
           const draft: ExtractedRequirementDraft = classification.requirementDraft ?? {
             title: input.content.slice(0, 60),
@@ -595,12 +640,6 @@ export class ConversationGateway {
 
           const delegationRequest = delegationResult.value;
 
-          // Handoff to Coordinator via Herdr bridge
-          const handOffResult = await this.config.bridge.handOffToCoordinator(delegationRequest, options);
-          if (!handOffResult.ok) {
-            return handOffResult;
-          }
-
           const userMsg: ConversationMessage = {
             schemaVersion: 2,
             messageId: input.messageId ?? this.generateId("msg-user"),
@@ -632,6 +671,15 @@ export class ConversationGateway {
             artifactReferences: [],
             createdAt: now
           };
+
+          const msgValidation = this.validateConversationMessages(userMsg, agentReply);
+          if (!msgValidation.ok) return msgValidation;
+
+          // Handoff to Coordinator via Herdr bridge
+          const handOffResult = await this.config.bridge.handOffToCoordinator(delegationRequest, options);
+          if (!handOffResult.ok) {
+            return handOffResult;
+          }
 
           const workflowContext: WorkflowRequestContext = {
             correlationId,
@@ -746,6 +794,9 @@ export class ConversationGateway {
             createdAt: now
           };
 
+          const msgValidation = this.validateConversationMessages(userMsg, agentReply);
+          if (!msgValidation.ok) return msgValidation;
+
           const updatedSession: ConversationSession = {
             ...this.snapshot!.session,
             turnCount: agentTurnSequence,
@@ -843,15 +894,6 @@ export class ConversationGateway {
 
           const approvalDecision = decisionResult.value;
 
-          // Send approval decision to Coordinator via Herdr bridge
-          const sendDecisionResult = await this.config.bridge.receiveApprovalDecision(
-            approvalDecision,
-            options
-          );
-          if (!sendDecisionResult.ok) {
-            return sendDecisionResult;
-          }
-
           const userMsg: ConversationMessage = {
             schemaVersion: 2,
             messageId: input.messageId ?? this.generateId("msg-user"),
@@ -881,6 +923,18 @@ export class ConversationGateway {
             artifactReferences: [],
             createdAt: now
           };
+
+          const msgValidation = this.validateConversationMessages(userMsg, agentReply);
+          if (!msgValidation.ok) return msgValidation;
+
+          // Send approval decision to Coordinator via Herdr bridge
+          const sendDecisionResult = await this.config.bridge.receiveApprovalDecision(
+            approvalDecision,
+            options
+          );
+          if (!sendDecisionResult.ok) {
+            return sendDecisionResult;
+          }
 
           const updatedPendingApprovals = { ...this.snapshot!.pendingApprovals };
           delete updatedPendingApprovals[targetApproval.approvalId];
@@ -988,34 +1042,57 @@ export class ConversationGateway {
 
           const cancellationRequest = cancelResult.value;
 
-          // Build RoleMessage to Coordinator to request cancellation
-          const roleMsgResult = buildCoordinatorRoleMessage({
+          const cancelDelegationRaw = {
+            schemaVersion: 2 as const,
+            delegationId: this.generateId("del-cancel"),
             messageId: this.generateId("msg-cancel"),
             correlationId,
+            sessionId: this.config.sessionId,
             runId: targetRunId,
-            conversationAgentId: this.config.conversationAgentId ?? "chat",
-            conversationPaneId: this.config.paneId,
-            type: "task.status",
-            payload: {
+            requestedBy: "conversation" as const,
+            targetRole: "coordinator" as const,
+            title: `Hủy workflow run: ${targetRunId}`,
+            objective: cancellationRequest.reason,
+            specificationId: `spec-cancel-${targetRunId}`,
+            sddLevel: "lightweight" as const,
+            acceptanceCriteria: [
+              {
+                id: "ac-cancel-1",
+                description: cancellationRequest.reason,
+                category: "functional" as const,
+                verificationMethod: "manual_review" as const,
+                required: true,
+                status: "pending" as const,
+                evidenceArtifactIds: []
+              }
+            ],
+            inputArtifacts: [],
+            priority: "critical" as const,
+            requestedAt: now,
+            idempotencyKey: cancellationRequest.idempotencyKey,
+            metadata: {
               action: "cancel",
-              runId: targetRunId,
-              cancellationRequest
-            },
-            occurredAt: now,
-            idempotencyKey: cancellationRequest.idempotencyKey
-          });
+              targetRunId,
+              cancellationRequest: cancellationRequest as unknown as JsonValue,
+              requestedScope: [cancelInput?.taskId ?? targetRunId],
+              rawUserRequest: input.content,
+              interpretedIntent: cancellationRequest.reason
+            }
+          };
 
-          if (!roleMsgResult.ok) {
-            return roleMsgResult;
+          const parsedCancelDel = DelegationRequestSchema.safeParse(cancelDelegationRaw);
+          if (!parsedCancelDel.success) {
+            return {
+              ok: false,
+              error: {
+                code: "validation",
+                retryable: false,
+                message: `Invalid cancel DelegationRequest: ${parsedCancelDel.error.message}`,
+                details: JSON.parse(JSON.stringify(parsedCancelDel.error.issues))
+              }
+            };
           }
-
-          const sendCancelResult = await this.config.bridge.sendRoleMessageToCoordinator(
-            roleMsgResult.value,
-            options
-          );
-          if (!sendCancelResult.ok) {
-            return sendCancelResult;
-          }
+          const cancelDelegation = parsedCancelDel.data;
 
           const userMsg: ConversationMessage = {
             schemaVersion: 2,
@@ -1046,6 +1123,17 @@ export class ConversationGateway {
             artifactReferences: [],
             createdAt: now
           };
+
+          const msgValidation = this.validateConversationMessages(userMsg, agentReply);
+          if (!msgValidation.ok) return msgValidation;
+
+          const sendCancelResult = await this.config.bridge.handOffToCoordinator(
+            cancelDelegation,
+            options
+          );
+          if (!sendCancelResult.ok) {
+            return sendCancelResult;
+          }
 
           const updatedWorkflows = { ...this.snapshot!.workflows };
           if (targetWorkflow) {
@@ -1218,7 +1306,25 @@ export class ConversationGateway {
         (message.run_id ? this.snapshot!.runIdToCorrelationId[message.run_id] : undefined) ??
         "corr-unknown";
 
-      const workflow = this.snapshot!.workflows[correlationId];
+      let workflow = this.snapshot!.workflows[correlationId];
+
+      const updatedRunIdToCorrelationId = { ...this.snapshot!.runIdToCorrelationId };
+      let activeRunId = this.snapshot!.session.activeRunId;
+
+      if (message.run_id) {
+        if (workflow && workflow.runId && workflow.runId !== message.run_id) {
+          delete updatedRunIdToCorrelationId[workflow.runId];
+          if (activeRunId === workflow.runId) {
+            activeRunId = message.run_id;
+          }
+          workflow = {
+            ...workflow,
+            runId: message.run_id,
+            updatedAt: now
+          };
+        }
+        updatedRunIdToCorrelationId[message.run_id] = correlationId;
+      }
 
       // Format message for human readability & check substantiveness
       const formattedResult = formatCoordinatorMessageForUser({
@@ -1241,6 +1347,9 @@ export class ConversationGateway {
 
       const updatedProcessedMessageIds = [...this.snapshot!.processedMessageIds, message.message_id];
       const updatedWorkflows = { ...this.snapshot!.workflows };
+      if (workflow) {
+        updatedWorkflows[correlationId] = workflow;
+      }
       const updatedPendingApprovals = { ...this.snapshot!.pendingApprovals };
       const updatedActiveApprovalIds = [...this.snapshot!.session.activeApprovalIds];
       let nextSessionStatus = this.snapshot!.session.status;
@@ -1340,6 +1449,7 @@ export class ConversationGateway {
         status: nextSessionStatus,
         activeApprovalIds: updatedActiveApprovalIds,
         turnCount,
+        ...(activeRunId !== undefined ? { activeRunId } : {}),
         updatedAt: now
       };
 
@@ -1348,6 +1458,7 @@ export class ConversationGateway {
         session: updatedSession,
         messages,
         workflows: updatedWorkflows,
+        runIdToCorrelationId: updatedRunIdToCorrelationId,
         pendingApprovals: updatedPendingApprovals,
         processedMessageIds: updatedProcessedMessageIds
       };

@@ -230,6 +230,7 @@ export interface RolePaneManagerConfig {
 export interface CommandInvocation {
   readonly args: readonly string[];
   readonly cwd?: string;
+  readonly env?: NodeJS.ProcessEnv | undefined;
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly maxOutputBytes?: number;

@@ -155,8 +155,14 @@ export class VerificationEngine {
       throw new Error("Aggregate coverage measurement is missing");
     return obs;
   }
-  private checkPassed(plan: VerificationPlan, config: CheckConfiguration, receipt: CheckReceipt): boolean {
-    return receipt.gate.status === "passed" && receipt.observation.criteria.every(c => c.passed) &&
+  private checkPassed(plan: VerificationPlan, config: CheckConfiguration, receipt: CheckReceipt, criterionId?: string): boolean {
+    const relevantCriteria = criterionId
+      ? receipt.observation.criteria.filter(c => c.criterionId === criterionId)
+      : receipt.observation.criteria.filter(c => {
+          const specCrit = plan.specification.acceptanceCriteria.find(ac => ac.id === c.criterionId);
+          return !specCrit || (specCrit.required !== false && specCrit.status !== "waived");
+        });
+    return receipt.gate.status === "passed" && relevantCriteria.every(c => c.passed) &&
       (receipt.observation.exitCode === undefined ? config.kind === "review" : receipt.observation.exitCode === 0) &&
       !receipt.gate.findings.some(f => f.severity === "error") &&
       (!config.measuresCoverage || plan.strategy.coverageThresholdPercent === undefined ||
@@ -307,17 +313,31 @@ export class VerificationEngine {
             blocked = true;
             findings.push(this.finding(plan, "environment_blocked", `${definition.id}: ${receipt.gate.error?.message ?? "Independent check blocked"}`, "coordinator"));
           }
-          if (receipt.gate.status === "failed" || receipt.observation.exitCode !== undefined && receipt.observation.exitCode !== 0 ||
-              receipt.observation.criteria.some(c => !c.passed) || receipt.gate.findings.some(f => f.severity === "error")) {
+          const failedCriteria = receipt.observation.criteria.filter(c => !c.passed);
+          const hasFailedRequiredCriterion = failedCriteria.some(c => {
+            const specCrit = plan.specification.acceptanceCriteria.find(ac => ac.id === c.criterionId);
+            return !specCrit || (specCrit.required !== false && specCrit.status !== "waived");
+          });
+          const checkItselfFailed = receipt.gate.status === "failed" ||
+            (receipt.observation.exitCode !== undefined && receipt.observation.exitCode !== 0) ||
+            receipt.gate.findings.some(f => f.severity === "error");
+
+          if (checkItselfFailed || hasFailedRequiredCriterion) {
             failed = true;
-            const failedCriteria = receipt.observation.criteria.filter(c => !c.passed);
+          }
+          if (checkItselfFailed || failedCriteria.length > 0) {
             const targets = failedCriteria.length ? failedCriteria : [{ criterionId: undefined, summary: receipt.observation.summary }];
-            for (const target of targets) findings.push({
-              ...this.finding(plan, "check_failed", `${definition.id}: ${target.summary}`),
-              artifactId: receipt.evidence.artifactId,
-              details: { taskId: plan.taskId, responsibleRole: "developer", checkId: definition.id,
-                ...(target.criterionId ? { criterionId: target.criterionId } : {}), requiresNewTaskIfOutsideScope: true }
-            });
+            for (const target of targets) {
+              const specCrit = target.criterionId ? plan.specification.acceptanceCriteria.find(ac => ac.id === target.criterionId) : undefined;
+              const isOptional = specCrit && (specCrit.required === false || specCrit.status === "waived");
+              findings.push({
+                ...this.finding(plan, "check_failed", `${definition.id}: ${target.summary}`),
+                severity: isOptional ? "warning" : "error",
+                artifactId: receipt.evidence.artifactId,
+                details: { taskId: plan.taskId, responsibleRole: "developer", checkId: definition.id,
+                  ...(target.criterionId ? { criterionId: target.criterionId } : {}), requiresNewTaskIfOutsideScope: true }
+              });
+            }
           }
         } catch (error) {
           if (error instanceof VerificationUnavailable) blocked = true; else inconclusive = true;
@@ -331,22 +351,42 @@ export class VerificationEngine {
     if (failed && !findings.some(f => f.severity === "error")) findings.push(this.finding(plan, "check_failed", "Independent test/review failed; fix the assigned task"));
     const status: VerificationResult["status"] = conflict ? "escalated" : blocked ? "blocked" : inconclusive ? "inconclusive" : failed ? "failed" : "passed";
     const completedAt = this.now();
-    const audit = await this.store(plan, `${key}:audit`, { intent, changeSet: change, iteration, status, findings, checks: receipts, options }, "report");
+    const audit = await this.store(plan, `${key}:audit`, {
+      intent, changeSet: change, iteration, status, findings, checks: receipts, options,
+      ...(options.integration ? {
+        integrationCommitHash: options.integration.headCommitHash,
+        integratedTaskIds: options.integration.integratedTaskIds
+      } : {})
+    }, "report");
     const evaluatedCriteria = plan.specification.acceptanceCriteria.map(criterion => {
+      const isWaived = criterion.status === "waived";
       const relevant = receipts.filter(r => r.observation.criteria.some(c => c.criterionId === criterion.id));
       const primary = relevant.find(r => r.observation.method === criterion.verificationMethod);
       const observation = primary?.observation.criteria.find(c => c.criterionId === criterion.id);
       const expectedChecks = plan.checks.filter(check => CheckConfigurationSchema.parse(check.configuration).criterionIds.includes(criterion.id));
       const missing = expectedChecks.filter(check => !relevant.some(r => r.gate.gateId === check.id));
+
+      if (isWaived && expectedChecks.length === 0) {
+        return {
+          criterionId: criterion.id,
+          passed: true,
+          evidenceArtifactId: audit.artifactId,
+          summary: criterion.waiverReason ? `Waived: ${criterion.waiverReason}` : "Criterion waived"
+        };
+      }
+
+      const isOptional = criterion.required === false;
       const passed = Boolean(primary && missing.length === 0 && relevant.every(receipt => {
         const definition = expectedChecks.find(check => check.id === receipt.gate.gateId)!;
-        return this.checkPassed(plan, CheckConfigurationSchema.parse(definition.configuration), receipt);
+        return this.checkPassed(plan, CheckConfigurationSchema.parse(definition.configuration), receipt, criterion.id);
       }));
-      return { criterionId: criterion.id, passed: !conflict && !blocked && passed,
+      return { criterionId: criterion.id, passed: !conflict && !blocked && (isWaived || passed || (!failed && isOptional)),
         ...(primary?.observation.command !== undefined ? { command: primary.observation.command } : {}),
         ...(primary?.observation.exitCode !== undefined ? { exitCode: primary.observation.exitCode } : {}),
         evidenceArtifactId: primary?.evidence.artifactId ?? audit.artifactId,
-        summary: missing.length ? `Missing valid evidence from ${missing.map(check => check.id).join(", ")}; see verification audit` :
+        summary: isWaived ? (criterion.waiverReason ? `Waived: ${criterion.waiverReason}` : "Criterion waived") :
+          (!passed && isOptional) ? (observation?.summary ? `Optional criterion not satisfied: ${observation.summary}` : "Optional criterion not satisfied") :
+          missing.length ? `Missing valid evidence from ${missing.map(check => check.id).join(", ")}; see verification audit` :
           observation?.summary ?? "No valid independent evidence; see verification audit" };
     });
     const evidenceArtifacts = [intent, audit, change.patchArtifact, ...receipts.flatMap(r => [r.evidence, ...r.outputArtifacts])]
@@ -356,17 +396,27 @@ export class VerificationEngine {
       cycleNumber: iteration, attemptId: change.attemptId, status, verificationScope: plan.scope,
       independentExecution: true, evaluatedCriteria, qualityGateResults: gateResults, evidenceArtifacts,
       findings, changeSet: change, verifiedBy: "quality_gate", startedAt, completedAt,
-      metadata: { planId: plan.planId, specFingerprint: plan.specFingerprint, checks: receipts, ...(options.repair ? { repair: options.repair } : {}) }
+      metadata: {
+        planId: plan.planId,
+        specFingerprint: plan.specFingerprint,
+        checks: receipts,
+        ...(options.repair ? { repair: options.repair } : {}),
+        ...(options.integration ? {
+          integrationCommitHash: options.integration.headCommitHash,
+          integratedTaskIds: options.integration.integratedTaskIds
+        } : {})
+      }
     });
     // Missing evidence and infrastructure issues stop immediately; only known code failures receive rework.
     const escalate = status !== "passed" && (status !== "failed" || iteration >= cycle.maxIterations);
+    const { verificationReceipt: _priorReceipt, ...cleanMetadata } = cycle.metadata ?? {};
     const next = VerificationCycleSchema.parse({ ...cycle, currentIteration: iteration, updatedAt: completedAt,
       status: status === "passed" ? "passed" : escalate ? "escalated" : "rework_required",
       history: [...cycle.history, result],
       ...(escalate ? { escalation: { escalatedAt: completedAt, reason: conflict ? "Specification/scope conflict" :
         status === "inconclusive" ? "Missing or invalid objective evidence" : status === "blocked" ? "Verification environment blocked; reconcile before retry" :
         "Verification iteration limit exhausted", target: "human_operator", evidenceArtifacts } } : {}),
-      metadata: { planId: plan.planId }
+      metadata: { ...cleanMetadata, planId: plan.planId }
     });
     const persisted = await this.store(plan, `${key}:result`, { result, cycle: next });
     const returned = VerificationCycleSchema.parse({ ...next, metadata: { ...next.metadata, verificationReceipt: persisted } });

@@ -2,10 +2,7 @@ import { AcceptanceCriterionSchema, IdentifierSchema, RiskLevelSchema } from "@b
 import { z } from "zod";
 
 const Text = z.string().trim().min(1);
-export const VerificationMethodSchema = z.enum([
-  "unit_test", "integration_test", "e2e_test", "typecheck", "lint", "static_analysis",
-  "manual_review", "smoke_test", "visual_review", "snapshot_test", "schema_validation"
-]);
+export const VerificationMethodSchema = AcceptanceCriterionSchema.innerType().shape.verificationMethod;
 export const TestLevelSchema = z.enum(["unit", "integration", "e2e", "property", "regression", "smoke"]);
 const SurfaceSchema = z.enum([
   "domain_logic", "bugfix", "api_contract", "validation", "transformation", "state_machine",

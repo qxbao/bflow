@@ -1,7 +1,7 @@
-import { parseSpecification, policyDetails } from "./schema.js";
+import { parseContractOrP15Specification, policyDetails } from "./schema.js";
 
 export function renderSpecification(input: unknown): string {
-  const spec = parseSpecification(input);
+  const spec = parseContractOrP15Specification(input);
   const details = policyDetails(spec);
   const lines = [`# ${spec.title}`, "", `Spec: ${spec.specId} · Version: ${spec.version} · ${spec.complexity} · Risk: ${spec.riskLevel} · ${spec.status}`, "", spec.summary];
   const section = (title: string, content: string | readonly string[] | undefined) => {

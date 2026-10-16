@@ -133,9 +133,9 @@ describe("objective TDD evidence", () => {
     expect(() => assertEvidenceComplete(recorded)).not.toThrow();
   });
   it.each([
-    ["configuration", [["schema_validation", "pnpm validate"], ["smoke_test", "pnpm smoke"]]],
-    ["infrastructure", [["smoke_test", "pnpm smoke"], ["integration_test", "pnpm test:integration"]]],
-    ["ui_layout", [["visual_review", ""]]],
+    ["configuration", [["typecheck", "pnpm typecheck"], ["static_analysis", "pnpm analyze"]]],
+    ["infrastructure", [["integration_test", "pnpm test:integration"], ["static_analysis", "pnpm analyze"]]],
+    ["ui_layout", [["manual_review", ""]]],
     ["formatting", [["lint", "pnpm lint"]]]
   ])("accepts concrete alternative verification for %s", (task, checks) => {
     const a = nonBehavior(task as string);
@@ -147,6 +147,24 @@ describe("objective TDD evidence", () => {
         summary: "Independent alternative check passed", ...(command ? { command, exitCode: 0 } : {}) });
     }
     expect(() => assertEvidenceComplete(recordEvidence(s, r))).not.toThrow();
+  });
+  it("validates multiple observations on a single acceptance criterion", () => {
+    const a = assessment("domain_logic");
+    a.conventions.requiredMethods = ["typecheck"];
+    const s = resolver.resolve(spec(a));
+    const red = recordEvidence(s, result(s, "red"));
+    const green = result(s, "green");
+    const artifactId2 = "evidence-green-2";
+    green.evidenceArtifacts.push({
+      trust: "stored", artifactId: artifactId2, runId: "run-1", taskId: "task-1", kind: "test-result",
+      uri: `artifact://tests/${artifactId2}`, mediaType: "application/json", checksum: { algorithm: "sha256", value: "b".repeat(64) },
+      createdAt: "2026-10-16T01:00:04Z"
+    });
+    green.metadata.conditionalTdd.observations.push({
+      method: "typecheck", criterionId: "ac-1", evidenceArtifactId: artifactId2,
+      summary: "Typecheck passed", command: "pnpm typecheck", exitCode: 0
+    });
+    expect(() => recordEvidence(red, green)).not.toThrow();
   });
   it("allows passing existing criteria beside the new failing behavior in Red", () => {
     const input = spec();

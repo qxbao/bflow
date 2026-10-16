@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { VerificationResultSchema } from "@bflow/contracts";
-import { openFilesystemArtifactStore, type FilesystemArtifactStore } from "../../artifact-store/src/index.js";
+import { openFilesystemArtifactStore, type FilesystemArtifactStore } from "./test-artifact-store.js";
 import { GitIntegrationEngine } from "../src/index.js";
 const execute = promisify(execFile);
 async function git(cwd: string, ...args: string[]) {

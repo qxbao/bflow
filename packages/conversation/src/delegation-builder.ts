@@ -267,7 +267,7 @@ export function buildCoordinatorRoleMessage(params: {
   readonly conversationPaneId: string;
   readonly coordinatorAgentId?: string | undefined;
   readonly coordinatorPaneId?: string | undefined;
-  readonly type: "delegation.request" | "approval.decision" | "conversation.progress" | "task.status";
+  readonly type: "delegation.request" | "approval.decision";
   readonly payload: Record<string, unknown>;
   readonly artifactReferences?: readonly ArtifactReference[] | undefined;
   readonly occurredAt: string;

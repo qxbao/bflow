@@ -275,6 +275,7 @@ export class GitIntegrationEngine {
         worktreePath: record.worktreePath, branchName: record.branchName, beforeMerge: record.beforeMerge,
         incomingCommitHash: snapshot.headCommitHash } : {
         verificationScope: "workflow", integrationId: record.request.integrationId, integrationCommitHash: record.expectedHead,
+        integratedTaskIds: record.order.map(key => record.snapshots[key]!.taskId),
         worktreePath: record.worktreePath, branchName: record.branchName, taskKeys: record.order },
       artifact_references: Object.values(record.snapshots).map(change => change.patchArtifact),
       occurred_at: new Date().toISOString(), idempotency_key: id });
@@ -320,7 +321,8 @@ export class GitIntegrationEngine {
         const merging = await this.mergeHead(record.worktreePath);
         if (merging) {
           requireCondition(merging === snapshot.headCommitHash, "unexpected_merge", "Unexpected MERGE_HEAD; manual reconciliation required");
-          record.conflictPaths = (await git(record.worktreePath, ["diff", "--name-only", "--diff-filter=U", "-z"])).split("\0").filter(Boolean);
+          const conflicts = (await git(record.worktreePath, ["diff", "--name-only", "--diff-filter=U", "-z"])).split("\0").filter(Boolean);
+          record.conflictPaths = conflicts.length > 0 || record.conflictPaths.length === 0 ? conflicts : record.conflictPaths;
           // Also require explicit acknowledgement after crash with a resolved but uncommitted merge.
           record.status = "conflict"; this.enqueue(record, this.message(record, "task.status", taskKey, task.request.developerId)); await this.save(state); return record;
         }
