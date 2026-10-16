@@ -117,6 +117,12 @@ describe.runIf(process.env.BFLOW_LIVE_HERDR === "1")("installed Herdr native rec
       expect(snapshot.tasks[0]!.bindingVerification).toBeUndefined();
       expect(snapshot.tasks[0]!.status).toBe("running"); // authenticated acknowledgement is still not business success
       expect(await authenticateNativeHerdrMessage(message)).toBe(false);
+      console.info(JSON.stringify({ evidence: "herdr-native-plugin-message", protocol: initialized.protocolVersion,
+        session: "smoke", runId: "live-run", taskId: task.taskId, assignmentId, messageId: message.message_id,
+        agentId: target.agentId, paneId: target.paneId, workspaceId: target.workspaceId, tabId: target.tabId,
+        nativeSessionObserved: target.session !== undefined, submissionStatus: receipt.status,
+        authenticatedMessageReceived: received, bindingVerified: false, taskStatus: snapshot.tasks[0]!.status,
+        modelProviderUsed: false }));
     } finally {
       await ingress?.close();
       await call(["session", "stop", "smoke"]).catch(() => undefined); if (server.exitCode === null) server.kill("SIGTERM");
