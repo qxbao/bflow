@@ -282,3 +282,20 @@ BFLOW_LIVE_HERDR=1 TMPDIR=/tmp pnpm exec vitest run packages/runtime/test/agenti
 
 This test owns its short XDG/socket paths and shell configuration, registers a
 custom native host process (not an AI model), and stops only its own test session.
+
+## Session recovery, context management, observability and resilience
+
+`@bflow/runtime` also exports production reliability services for real repositories:
+
+- **Session Recovery (`SessionRecoveryService`)**: Distinguishes `graceful_shutdown`, `crash`, and `transient_disconnect` across `bflow down` / `bflow up`; flushes and deduplicates `AgenticJournal` and SQLite `RunStore` state; restores incomplete runs from aggregate checkpoints plus event tails; reconciles SQLite with Herdr panes/roles to detect `agent_lost`, `agent_replaced`, and `orphan_agent` discrepancies; revokes stale leases; inspects Git worktrees/commits without destructive commands; forbids blind prompt resends when prior execution is uncertain (`unknown_delivery` or worktree modified); and never marks a task succeeded without a correlated, verified `AgentResult` and passing gates.
+- **Context Management (`ProjectContextService`)**: Analyzes repository structure and workspace packages without a vector database, reads project documentation and role instructions, stores and queries architectural decision records (ADRs), deterministically selects task-relevant files within strict byte/file budgets, tracks `Specification` and `ArtifactReference` versions, prepares role-specific bounded context bundles with secret scrubbing, and detects context/spec drift across restarts.
+- **Observability (`ObservabilityTracker`)**: Tracks run duration, per-task and per-attempt duration, agent assignments, verification cycles, retry/rework counts, blocked time episodes, test pass/fail rates, context bundle sizes, and verified model token/cost metrics strictly when `source: "provider_reported"` (never estimating tokens or costs when provider telemetry is absent).
+- **Resilience (`BoundedConcurrencyLimiter`, `StructuredLogger`, `redactSecrets`, `executeWithRetry`, `withOperationTimeout`)**: Provides bounded concurrency with `quiesce()` drain barriers, structured JSONL logging with automatic secret redaction (preserving domain identifiers like `fencingToken` and token counters), and backoff/timeout helpers that block automatic retry on `unknown_delivery` until reconciliation completes.
+
+Targeted verification commands:
+
+```sh
+pnpm exec vitest run packages/runtime/test/unit/resilience-observability.test.ts
+pnpm exec vitest run packages/runtime/test/unit/project-context-service.test.ts
+pnpm exec vitest run packages/runtime/test/scenarios/09-session-recovery-reliability.test.ts
+```

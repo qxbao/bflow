@@ -95,3 +95,9 @@ export type { OpenAgenticWorkspaceOptions, AgenticWorkspaceHandle } from "./agen
 
 export { createSignedBindingReceipt } from "./agentic/receipt-host.js";
 export { startHerdrReceiptIngress, authenticateNativeHerdrMessage } from "./agentic/herdr-ingress.js";
+
+// Reliability: Resilience, Observability, Project Context Service, and Session Recovery
+export * from "./resilience/index.js";
+export * from "./observability/index.js";
+export * from "./context/index.js";
+export * from "./session-recovery/index.js";
