@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
@@ -102,7 +102,13 @@ export async function measureBehavior(command: BehavioralCommand, cwd: string, r
     const module = await import(new URL("../../../quality-gates/dist/index.js", import.meta.url).href);
     const env: Record<string, string> = { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", HOME: temporary, TMPDIR: temporary };
     // The official JSON reporter omits runtime errors. A fixed host companion attests its onFinished errors argument.
-    const reporter = command.reporter === "vitest_json" ? fileURLToPath(new URL("../../dist/agentic/vitest-runtime-reporter.js", import.meta.url)) : undefined;
+    const reporter = command.reporter === "vitest_json" ? join(temporary, "vitest-runtime-reporter.mjs") : undefined;
+    if (reporter) {
+      const source = await readFile(fileURLToPath(new URL("../../dist/agentic/vitest-runtime-reporter.js", import.meta.url)), "utf8");
+      // A standalone immutable copy avoids exposing the host source tree just to
+      // satisfy Vite's optional source-map reads inside the empty namespace.
+      await writeFile(reporter, source.replace(/^\/\/# sourceMappingURL=.*$/gm, ""), { mode: 0o600 });
+    }
     const args = reporter ? [...command.args, `--reporter=${reporter}`] : command.args;
     const sandbox = await sandboxBehavior(command, checkout, args, reporter);
     const result = await module.createQualityCommandRunner().run({ ...sandbox, cwd: checkout, env, timeoutMs: command.timeoutMs, maxOutputBytes: command.maxOutputBytes ?? 1_048_576 });
