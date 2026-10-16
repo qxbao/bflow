@@ -90,6 +90,7 @@ export class AgenticWorkflowRuntime {
   }
   async flushOutbound(): Promise<void> {
     await this.initialize();
+    if (this.quiesced) return;
     await this.transaction(async (state, save, core, outbox) => {
       await outbox.flush((out, handle) => this.bind(state, core, out, handle)); await save();
     });

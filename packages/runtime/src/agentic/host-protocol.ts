@@ -9,6 +9,7 @@ export async function callHost(socketPath: string, token: string, method: string
     const socket = connect(socketPath); let buffer = "";
     socket.setTimeout(timeoutMs, () => { socket.destroy(); reject(new Error("Bflow host acknowledgement timed out; reconcile before retry")); });
     socket.once("error", reject);
+    socket.once("close", () => { if (!buffer.includes("\n")) reject(new Error("Bflow host closed before acknowledgement; reconcile before retry")); });
     socket.once("connect", () => socket.write(JSON.stringify({ token, method, params }) + "\n"));
     socket.on("data", chunk => {
       buffer += String(chunk);

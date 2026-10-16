@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:net";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile, symlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -56,6 +56,17 @@ describe("default durable host lifecycle and role MCP", () => {
     expect((await recovered.runtime.findRuns({ limit: 100 })).ok).toBe(true);
   });
 
+  it("rejects a lost control acknowledgement and refuses symlinked state directories", async () => {
+    const root = await mkdtemp("/tmp/bflow-host-boundary-");
+    cleanup.push(()=>rm(root,{recursive:true,force:true}));
+    const socketPath=join(root,"closed.sock"), server=createServer(socket=>socket.once("data",()=>socket.end()));
+    await new Promise<void>(accept=>server.listen(socketPath,accept));
+    cleanup.push(()=>new Promise<void>(accept=>server.close(()=>accept())));
+    await expect(callHost(socketPath,"token","ping")).rejects.toThrow("closed before acknowledgement");
+    const outside=await mkdtemp("/tmp/bflow-host-outside-"); cleanup.push(()=>rm(outside,{recursive:true,force:true}));
+    await symlink(outside,join(root,".bflow"));
+    await expect(ensureAgenticHost({repositoryPath:root,sessionId:"boundary"})).rejects.toThrow("must not be symlinks");
+  });
   it("survives client disconnect, prepares private launch config before activation, and queries real SQLite", async () => {
     const f = await fixture();
     const first = await f.controller.prepare();

@@ -110,6 +110,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const socket = connect(socketPath); let output = "";
       socket.setTimeout(20_000, () => { socket.destroy(); reject(new Error("Native Herdr action timed out; reconcile before retry")); });
       socket.once("error", reject);
+      socket.once("close", () => { if (!output.includes("\n")) reject(new Error("Native Herdr action closed before acknowledgement; reconcile before retry")); });
       socket.once("connect", () => socket.write(JSON.stringify({ id: message.message_id, method: "plugin.action.invoke", params: { plugin_id: "bflow.receipts", action_id: "deliver",
         context: { selected_text: JSON.stringify(message), correlation_id: message.causation_id ?? message.message_id, focused_pane_id: sender.paneId, workspace_id: sender.workspaceId } } }) + "\n"));
       socket.on("data", chunk => { output += String(chunk); if (output.length > 1024 * 1024) { socket.destroy(); reject(new Error("Oversized native response")); }
@@ -457,6 +458,7 @@ export async function runProviderHook(configuration: RoleConfiguration, event: s
     await new Promise<void>((accept, reject) => {
       const socket = connect(textField(process.env.HERDR_SOCKET_PATH)); let response = "";
       socket.setTimeout(5000, () => { socket.destroy(); reject(new Error("Native session report timed out")); }); socket.once("error", reject);
+      socket.once("close", () => { if (!response.includes("\n")) reject(new Error("Native session report closed before acknowledgement")); });
       socket.once("connect", () => socket.write(JSON.stringify(request) + "\n"));
       socket.on("data", chunk => { response += String(chunk); if (!response.includes("\n")) return; socket.end();
         try { record(JSON.parse(response.split("\n")[0]!)).error ? reject(new Error("Herdr rejected native provider session")) : accept(); } catch (error) { reject(error); } });

@@ -54,7 +54,12 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
   if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Unsafe host session ID");
   const identity = createHash("sha256").update(repositoryPath + "\0" + options.sessionId).digest("hex").slice(0, 24);
   const directory = resolve(repositoryPath, ".bflow/state/host", options.sessionId);
-  await mkdir(directory, { recursive: true, mode: 0o700 }); await chmod(directory, 0o700);
+  for (const parent of [resolve(repositoryPath,".bflow"),resolve(repositoryPath,".bflow/state"),resolve(repositoryPath,".bflow/state/host"),directory]) {
+    try { await mkdir(parent,{mode:0o700}); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+    const observed = await lstat(parent);
+    if (!observed.isDirectory() || observed.isSymbolicLink()) throw new Error("Host state directories must not be symlinks or special files");
+  }
+  await chmod(directory, 0o700);
   const socketRoot = join(tmpdir(), `bflow-host-${process.getuid?.() ?? "local"}`);
   await mkdir(socketRoot, { recursive: true, mode: 0o700 });
   const stat = await lstat(socketRoot);
@@ -128,7 +133,16 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
     quiesce: op => result("quiesce", {}, () => undefined, op),
     checkpoint: (command, op) => result("checkpoint", CreateCheckpointCommandSchema.parse(command), value => RecoveryCheckpointSchema.parse(value), op),
     async close() {},
-    async shutdown() { await request("shutdown"); }
+    async shutdown() {
+      await request("shutdown");
+      const deadline = Date.now() + 10_000;
+      while (true) {
+        try { await lstat(configuration.socketPath); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+        if (Date.now() >= deadline) throw new Error("Host stop acknowledgement received but endpoint is still present; reconcile its owner");
+        await new Promise(accept=>setTimeout(accept,25));
+      }
+    }
   };
   } finally { await bootLock.close(); }
 }
