@@ -3,6 +3,9 @@ import {
   openWorkspaceRuntime,
   type ConcreteRuntimeService
 } from "@bflow/runtime";
+import { identifyRepository } from "./repository.js";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { loadRepositoryConfig, resolveConfigPath } from "./config.js";
 import type { BflowRepositoryConfig } from "./types.js";
 
@@ -24,7 +27,14 @@ export interface ComposedCliRuntime {
 export async function composeCliRuntime(
   options?: ComposeCliRuntimeOptions
 ): Promise<OperationResult<ComposedCliRuntime>> {
-  const cwd = options?.cwd ?? process.cwd();
+  let cwd = options?.cwd ?? process.cwd();
+  // Environment config is rooted at the checkout even when invoked from a subdirectory.
+  if (options?.configPath === undefined) {
+    try {
+      const repository = await identifyRepository(cwd);
+      if (existsSync(resolve(repository.root, ".bflow/config.yaml"))) cwd = repository.root;
+    } catch { /* Preserve the legacy explicit-directory Runtime error path. */ }
+  }
   const resolvedConfigPath = resolveConfigPath(cwd, options?.configPath);
 
   const configRes = await loadRepositoryConfig(resolvedConfigPath);

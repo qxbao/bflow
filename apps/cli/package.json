@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "@bflow/contracts": "workspace:*",
-    "@bflow/runtime": "workspace:*"
+    "@bflow/runtime": "workspace:*",
+    "@bflow/pane-manager": "workspace:*"
   }
 }

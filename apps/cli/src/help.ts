@@ -6,8 +6,12 @@ Autonomous SDLC workflow orchestration CLI.
 
 Commands:
   init       Initialize bflow repository configuration and default workflow
+  up         Start/reconcile the repository environment
+  down       Checkpoint and stop the repository environment
+  attach     Attach to its Conversation pane
+  doctor     Diagnose environment and dependencies
   run        Start a new workflow run with a requirement
-  status     Query workflow run status or list runs
+  status     Show environment; a run ID or filters query workflow runs
   approve    Record human approval, rejection, or rework request for a task
   resume     Resume an active or waiting workflow run
   cancel     Cancel an active workflow run or task
@@ -31,13 +35,13 @@ Run 'bflow help <command>' or 'bflow <command> --help' for command-specific opti
 
 const INIT_HELP = `Usage: bflow init [options]
 
-Initialize bflow repository configuration and default workflow.
+Initialize .bflow/config.yaml at the canonical Git repository root. Safe to repeat.
 
 Options:
   --dir <path>          Target directory for initialization (default: current directory)
-  --config <path>       Custom configuration file path (default: .bflow/config.json)
+  --config <path>       Custom configuration file path (default: .bflow/config.yaml)
   --name <name>         Project name
-  -f, --force, -y, --yes  Overwrite existing configuration if present
+  -f, --force, -y, --yes  Accepted for compatibility; existing configuration is always preserved
   -j, --json            Output response in JSON envelope format
   -h, --help            Show help for init command
 
@@ -56,7 +60,7 @@ Arguments:
 Options:
   --run-id <id>         Explicit run identifier
   -w, --workflow <path> Path to custom workflow definition JSON file
-  --config <path>       Path to configuration file (default: .bflow/config.json)
+  --config <path>       Path to configuration file (default: .bflow/config.yaml)
   --idempotency-key <key> Idempotency key for run creation
   -j, --json            Output response in JSON envelope format
   -h, --help            Show help for run command
@@ -68,7 +72,7 @@ Examples:
 
 const STATUS_HELP = `Usage: bflow status [run-id] [options]
 
-Query workflow run status or list runs.
+Show environment status. A run ID or filters query workflow runs.
 
 Arguments:
   [run-id]              Optional run identifier to inspect a specific run
@@ -153,6 +157,10 @@ Examples:
   bflow cancel run-123 --task implement`;
 
 const HELP_MAP: Record<CliCommandName, string> = {
+  up: "Usage: bflow up [--timeout <milliseconds>] [--json]\nStart/reconcile this repository's headless named session and wait for required roles.",
+  down: "Usage: bflow down [--yes] [--timeout <milliseconds>] [--json]\nCheckpoint active work and gracefully stop only this repository session. --yes confirms unsafe work; it never bypasses checkpoints.",
+  attach: "Usage: bflow attach [--json]\nFocus Conversation and attach to an existing repository session. Run up first.",
+  doctor: "Usage: bflow doctor [--json]\nCheck configuration, dependencies, named session and P13 integration.",
   init: INIT_HELP,
   run: RUN_HELP,
   status: STATUS_HELP,

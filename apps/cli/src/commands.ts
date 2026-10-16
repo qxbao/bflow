@@ -1,3 +1,4 @@
+import { EnvironmentError, EnvironmentLifecycle } from "./environment.js";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { isAbsolute, resolve } from "node:path";
@@ -106,6 +107,28 @@ export async function executeCommand(
     return makeResult(CLI_EXIT_CODES.SUCCESS, true, "version", data, undefined, parsed.json, io);
   }
 
+  if (["up", "down", "attach", "doctor"].includes(parsed.command) ||
+    parsed.command === "status" && parsed.runId === undefined && parsed.statusFilter === undefined &&
+    parsed.workflowId === undefined && parsed.limit === undefined && parsed.cursor === undefined && context?.runtime === undefined) {
+    const lifecycle = new EnvironmentLifecycle(cwd, context?.environment);
+    try {
+      let data: CliCommandData;
+      switch (parsed.command) {
+        case "up": data = await lifecycle.up(parsed.timeoutMs); break;
+        case "down": data = await lifecycle.down(parsed.yes, parsed.timeoutMs); break;
+        case "attach": data = await lifecycle.attach(); break;
+        case "doctor": data = await lifecycle.doctor(); break;
+        default: data = await lifecycle.status();
+      }
+      const healthy = ( !("healthy" in data) || data.healthy ) && ( !("configuration" in data) || data.configuration === "valid" );
+      return makeResult(healthy ? 0 : 1, true, parsed.command, data, undefined, parsed.json, io);
+    } catch (error) {
+      const contractError: ContractError = error instanceof EnvironmentError ? error.contractError
+        : { code: "validation", retryable: false, message: error instanceof Error ? error.message : String(error) };
+      return makeResult(1, false, parsed.command, undefined, contractError, parsed.json, io);
+    }
+  }
+
   if (parsed.command === "init") {
     const initRes = await initRepositoryConfig({
       cwd,
@@ -124,6 +147,9 @@ export async function executeCommand(
     return makeResult(CLI_EXIT_CODES.SUCCESS, true, "init", initRes.value, undefined, parsed.json, io);
   }
 
+  if (parsed.command === "up" || parsed.command === "down" || parsed.command === "attach" || parsed.command === "doctor") {
+    throw new Error("Unreachable environment command");
+  }
   if (context?.runtime === undefined) {
     const error: ContractError = {
       code: "transport_unavailable",

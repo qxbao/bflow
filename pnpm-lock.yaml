@@ -181,6 +181,9 @@ importers:
       '@bflow/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@bflow/pane-manager':
+        specifier: workspace:*
+        version: link:../../packages/pane-manager
       '@bflow/runtime':
         specifier: workspace:*
         version: link:../../packages/runtime

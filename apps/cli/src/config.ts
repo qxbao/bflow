@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
+import { initializeEnvironmentConfig } from "./environment-config.js";
 import {
   WorkflowDefinitionSchema,
   type OperationResult,
@@ -8,7 +10,7 @@ import {
 } from "@bflow/contracts";
 import type { BflowRepositoryConfig, InitCommandOutput } from "./types.js";
 
-export const DEFAULT_CONFIG_RELATIVE_PATH = ".bflow/config.json";
+export const DEFAULT_CONFIG_RELATIVE_PATH = ".bflow/config.yaml";
 
 export function createDefaultWorkflowDefinition(): WorkflowDefinition {
   const definition: WorkflowDefinition = {
@@ -145,7 +147,9 @@ export function resolveConfigPath(cwd: string, configPath?: string, dir?: string
     return resolve(baseDir, configPath);
   }
   const targetDir = dir !== undefined ? (isAbsolute(dir) ? dir : resolve(cwd, dir)) : cwd;
-  return resolve(targetDir, DEFAULT_CONFIG_RELATIVE_PATH);
+  const preferred = resolve(targetDir, DEFAULT_CONFIG_RELATIVE_PATH);
+  return !existsSync(preferred) && existsSync(resolve(targetDir, ".bflow/config.json"))
+    ? resolve(targetDir, ".bflow/config.json") : preferred;
 }
 
 export async function loadRepositoryConfig(
@@ -359,71 +363,10 @@ export async function initRepositoryConfig(options: {
   readonly clock?: (() => Date) | undefined;
   readonly confirmOverwrite?: ((configPath: string) => Promise<boolean> | boolean) | undefined;
 }): Promise<OperationResult<InitCommandOutput>> {
-  const targetPath = resolveConfigPath(options.cwd, options.configPath, options.dir);
-
-  let fileExists = false;
   try {
-    await access(targetPath);
-    fileExists = true;
-  } catch {
-    fileExists = false;
+    return { ok: true, value: await initializeEnvironmentConfig(options) };
+  } catch (error) {
+    return { ok: false, error: { code: "validation", retryable: false,
+      message: error instanceof Error ? error.message : String(error) } };
   }
-
-  let overwritten = false;
-  if (fileExists) {
-    if (options.force) {
-      overwritten = true;
-    } else if (options.confirmOverwrite !== undefined) {
-      const confirmed = await options.confirmOverwrite(targetPath);
-      if (!confirmed) {
-        return {
-          ok: false,
-          error: {
-            code: "conflict",
-            retryable: true,
-            message: `Configuration file already exists at '${targetPath}'. Pass --force (or --yes) to overwrite.`
-          }
-        };
-      }
-      overwritten = true;
-    } else {
-      return {
-        ok: false,
-        error: {
-          code: "conflict",
-          retryable: true,
-          message: `Configuration file already exists at '${targetPath}'. Pass --force (or --yes) to overwrite.`
-        }
-      };
-    }
-  }
-
-  const now = options.clock !== undefined ? options.clock() : new Date();
-  const config = createDefaultRepositoryConfig({
-    ...(options.projectName !== undefined ? { projectName: options.projectName } : {}),
-    createdAt: now.toISOString()
-  });
-
-  try {
-    await mkdir(dirname(targetPath), { recursive: true });
-    await writeFile(targetPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
-  } catch (err) {
-    return {
-      ok: false,
-      error: {
-        code: "corruption",
-        retryable: false,
-        message: `Failed to write configuration file to '${targetPath}': ${err instanceof Error ? err.message : String(err)}`
-      }
-    };
-  }
-
-  return {
-    ok: true,
-    value: {
-      configPath: targetPath,
-      config,
-      overwritten
-    }
-  };
 }

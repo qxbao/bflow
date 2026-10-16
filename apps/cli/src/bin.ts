@@ -34,7 +34,10 @@ export async function main(
 
   if (context?.runtime === undefined) {
     const parseRes = parseCliArgs(args);
-    if (parseRes.ok && BUSINESS_COMMANDS.has(parseRes.value.command)) {
+    const environmentStatus = parseRes.ok && parseRes.value.command === "status" &&
+      parseRes.value.runId === undefined && parseRes.value.statusFilter === undefined && parseRes.value.workflowId === undefined &&
+      parseRes.value.limit === undefined && parseRes.value.cursor === undefined;
+    if (parseRes.ok && BUSINESS_COMMANDS.has(parseRes.value.command) && !environmentStatus) {
       const configPath =
         parseRes.value.command === "run" ? parseRes.value.configPath : undefined;
 

@@ -20,6 +20,10 @@ import type {
 } from "./types.js";
 
 const VALID_COMMANDS: ReadonlySet<CliCommandName> = new Set([
+  "up",
+  "down",
+  "attach",
+  "doctor",
   "init",
   "run",
   "status",
@@ -320,6 +324,24 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
   const commandArgs = argv.slice(1);
 
   switch (command) {
+    case "up":
+    case "down":
+    case "attach":
+    case "doctor": {
+      const booleans = new Set(["--json", "-j", "--yes", "-y"]);
+      const allowed = new Set(["--json", "-j"]);
+      if (command === "down") { allowed.add("--yes"); allowed.add("-y"); }
+      if (command === "up" || command === "down") allowed.add("--timeout");
+      const result = extractOptionsAndPositional(commandArgs, booleans, allowed, command, json);
+      if (!result.ok) return result.result;
+      if (result.value.positional.length) return makeValidationError(`Unexpected positional argument for '${command}'.`, json, command);
+      const timeout = result.value.flags.get("--timeout");
+      const timeoutMs = timeout === undefined ? undefined : Number(timeout);
+      if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600000))
+        return makeValidationError("--timeout must be an integer from 1 to 600000 milliseconds.", json, command);
+      return { ok: true, value: { command, json, help: false, yes: result.value.flags.has("--yes") || result.value.flags.has("-y"), timeoutMs } };
+    }
+
     case "version": {
       const booleanFlags = new Set(["--json", "-j", "--help", "-h", "--version", "-v"]);
       const allowedFlags = new Set(["--json", "-j", "--help", "-h", "--version", "-v"]);
