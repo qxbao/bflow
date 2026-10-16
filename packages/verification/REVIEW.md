@@ -24,6 +24,7 @@ and below-threshold coverage reuse. The regression suite now covers:
 - Require workflow integration provenance to cover all task IDs traced in the
   approved specification, reject duplicate IDs, and forward integration context
   to the independent runner. Task-level success remains insufficient.
+- Compare approved strategy policy separately from append-only P16 `tddEvidence` metadata. Validate receipt shapes/run/task and preserve any approved receipt prefix without changing the accepted specification. P19 still enforces P16 phase sequence and dossier completeness.
 - Emit a scoped finding for every observed failing check/criterion even if another
   gate already emitted an error. Include the evidence artifact and responsible
   Developer task/role so one failure cannot hide a second repair obligation.

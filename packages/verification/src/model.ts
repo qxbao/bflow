@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   AcceptanceCriterionSchema, IdentifierSchema, QualityGateDefinitionSchema,
-  SpecificationSchema, TestStrategySchema, VerificationScopeSchema
+  SpecificationSchema, TestStrategySchema, VerificationResultSchema, VerificationScopeSchema, type TestStrategy
 } from "@bflow/contracts";
 
 export const MethodSchema = AcceptanceCriterionSchema.innerType().shape.verificationMethod;
@@ -90,6 +90,14 @@ export function safePath(path: string): boolean {
 export function covers(prefix: string, path: string): boolean {
   return prefix === path || path.startsWith(`${prefix.replace(/\/$/, "")}/`);
 }
+// P16 appends runtime evidence to TestStrategy metadata after policy approval.
+// Receipts are validated as contract data, but never change the accepted policy.
+function strategyPolicy(strategy: TestStrategy): unknown {
+  const { metadata, ...policy } = strategy;
+  const { tddEvidence, ...policyMetadata } = metadata ?? {};
+  if (tddEvidence !== undefined) z.array(VerificationResultSchema).parse(tddEvidence);
+  return { ...policy, ...(Object.keys(policyMetadata).length ? { metadata: policyMetadata } : {}) };
+}
 export function createVerificationPlan(input: unknown): VerificationPlan {
   const value = PlanInputSchema.parse(input);
   const { specification: spec, strategy, checks } = value;
@@ -97,9 +105,17 @@ export function createVerificationPlan(input: unknown): VerificationPlan {
       strategy.tddDecision.runId !== value.runId ||
       (strategy.tddDecision.taskId !== undefined && value.scope === "task" && strategy.tddDecision.taskId !== value.taskId))
     throw new Error("Approved specification, strategy and run/task must agree");
-  if ((spec.testStrategy && digest(spec.testStrategy) !== digest(strategy)) ||
+  const policy = strategyPolicy(strategy);
+  if ((spec.testStrategy && digest(strategyPolicy(spec.testStrategy)) !== digest(policy)) ||
       (spec.tddDecision && digest(spec.tddDecision) !== digest(strategy.tddDecision)))
     throw new Error("Conflicting specification strategy or TDD decision");
+  const approvedReceipts = z.array(VerificationResultSchema).parse(spec.testStrategy?.metadata?.tddEvidence ?? []);
+  const suppliedReceipts = z.array(VerificationResultSchema).parse(strategy.metadata?.tddEvidence ?? []);
+  if (approvedReceipts.some((receipt, index) => digest(receipt) !== digest(suppliedReceipts[index])))
+    throw new Error("Approved TDD receipts must remain an unchanged prefix of the strategy dossier");
+  if (suppliedReceipts.some(receipt => receipt.runId !== value.runId ||
+      strategy.tddDecision.taskId !== undefined && receipt.taskId !== strategy.tddDecision.taskId))
+    throw new Error("TDD receipt run/task does not match strategy");
   if (spec.artifactRef?.runId !== value.runId || spec.artifactRef.kind !== "document" || spec.artifactRef.mediaType !== "application/json")
     throw new Error("Specification evidence must be a stored JSON document in the same run");
   if (!spec.affectedPaths.every(safePath)) throw new Error("Affected paths must be safe literal repository paths");
