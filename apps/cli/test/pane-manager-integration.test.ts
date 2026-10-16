@@ -4,80 +4,95 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionManifestSchema } from "@bflow/contracts";
 import { FileSessionManifestStore } from "@bflow/pane-manager";
-import { EnvironmentLifecycle, PaneManagerLifecycleAdapter, createNamedPaneRunner, identifyRepository, readEnvironmentConfig, runCli,
+import { EnvironmentLifecycle, PaneManagerLifecycleAdapter, createNamedPaneRunner, identifyRepository, readEnvironmentConfig, runCli, openPaneManagerEnvironment,
   type EnvironmentCompositionInput } from "../src/index.js";
 import { HerdrProcesses } from "./fixtures/herdr-processes.js";
+import type { LifecycleHost } from "../src/agentic-host.js";
 
 describe("P12 composition with real P13 RolePaneManager", () => {
   let dir: string;
   let input: EnvironmentCompositionInput;
   let runner: HerdrProcesses;
+  let host: LifecycleHost;
+  const lifecycle = () => new EnvironmentLifecycle(dir, { runner,
+    openIntegration: async composition => openPaneManagerEnvironment(composition, runner, async () => host,
+      async () => ["--test-host-role-config"]) });
   beforeEach(async () => {
     dir = await mkdtemp("/tmp/bflow-p12-p13-"); execFileSync("git", ["init", "--quiet", dir]);
     expect((await runCli(["init"], { cwd: dir })).ok).toBe(true);
     const repository = await identifyRepository(dir);
     input = { repository, config: await readEnvironmentConfig(repository), env: { ...process.env, HERDR_SESSION: "foreign", HERDR_SOCKET: "/foreign" } };
     runner = new HerdrProcesses();
+    host = {
+      prepare: vi.fn(async () => ({ roleLaunch: Object.fromEntries(input.config.environment.roles.map(role => [role.role,
+        { systemPrompt: `Trusted ${role.role} prompt`, mcpConfigFile: "/test/mcp.json", hooksSettingsFile: "/test/hooks.json" }])) })),
+      activate: vi.fn(async () => ({ ok: true, value: undefined })),
+      runtime: { findRuns: vi.fn(async () => ({ ok: true, value: { items: [] } })), getRun: vi.fn(async () => ({ ok: true, value: null })) },
+      quiesce: vi.fn(async () => ({ ok: true, value: undefined })), checkpoint: vi.fn(), shutdown: vi.fn(async () => {}), close: vi.fn(async () => {})
+    };
   });
   afterEach(async () => { vi.restoreAllMocks(); await rm(dir, { recursive: true, force: true }); });
   const starts = (runner: HerdrProcesses) => runner.calls.filter((r) => r.args[0] === "agent" && r.args[1] === "start");
-  it("default bflow up starts all seven P13 roles and persists their real returned IDs", async () => {
-    const lifecycle = new EnvironmentLifecycle(dir, { runner });
-    const manifest = await lifecycle.up();
+  it("starts all seven P13 roles with trusted host arguments and persists returned IDs", async () => {
+    const environment = lifecycle();
+    const manifest = await environment.up();
     expect(starts(runner)).toHaveLength(7); expect(manifest.panes.map((p) => p.role).sort()).toEqual(["conversation", "coordinator", "planner", "architect", "specifier", "reviewer", "qa"].sort());
     expect(manifest.status).toBe("up"); expect(new Set(manifest.panes.map((p) => p.tabId)).size).toBe(3);
     const saved = SessionManifestSchema.parse(JSON.parse(await readFile(join(dir, `.bflow/state/panes/${input.repository.sessionName}.manifest.json`), "utf8")));
     expect(saved.panes.map((p) => p.paneId)).toEqual(manifest.panes.map((p) => p.paneId));
     expect(saved.metadata?.["repositoryId"]).toBe(input.repository.id);
+    expect(starts(runner).every(call => call.args.includes("--test-host-role-config"))).toBe(true);
+    expect(host.prepare).toHaveBeenCalledTimes(1);
+    expect(host.activate).toHaveBeenCalledWith(expect.objectContaining({ status: "up" }), expect.any(Object));
   });
   it("reopens composition across CLI invocations without starting duplicate agents", async () => {
-    await new EnvironmentLifecycle(dir, { runner }).up();
-    await new EnvironmentLifecycle(dir, { runner }).up();
+    await lifecycle().up();
+    await lifecycle().up();
     expect(starts(runner)).toHaveLength(7);
     expect(runner.calls.filter((r) => r.args[0] === "workspace" && r.args[1] === "create")).toHaveLength(1);
   });
   it("refreshes live health and focuses Conversation through P13 before the TUI", async () => {
-    const lifecycle = new EnvironmentLifecycle(dir, { runner }); await lifecycle.up();
-    const first = await lifecycle.status(); expect(first.liveObservation).toBe(true);
+    const environment = lifecycle(); await environment.up();
+    const first = await environment.status(); expect(first.liveObservation).toBe(true);
     const panes = runner.session(input.repository.sessionName).panes;
     panes.find((p) => p.name === "reviewer")!.agent_status = "blocked";
-    const blocked = await lifecycle.status(); expect(blocked.manifest?.status).toBe("degraded");
+    const blocked = await environment.status(); expect(blocked.manifest?.status).toBe("degraded");
     expect(blocked.manifest?.panes.find((p) => p.role === "reviewer")?.transportState).toBe("blocked");
-    await lifecycle.attach();
+    await environment.attach();
     const last = runner.calls.findLast((r) => r.args[0] === "agent" && r.args[1] === "focus")!;
     expect(last.args[2]).toBe(blocked.manifest?.attachTarget.paneId);
     expect(runner.calls.findLast((r) => r.mode === "interactive")?.args).toEqual(["session", "attach", input.repository.sessionName]);
-    expect((await lifecycle.doctor()).healthy).toBe(false);
+    expect((await environment.doctor()).healthy).toBe(false);
   });
   it("detects a shell replacing an agent instead of reporting a persisted idle state", async () => {
-    const lifecycle = new EnvironmentLifecycle(dir, { runner }); await lifecycle.up();
+    const environment = lifecycle(); await environment.up();
     runner.session(input.repository.sessionName).panes.find((p) => p.name === "qa-verifier")!.agent = null;
-    const observed = await lifecycle.status();
+    const observed = await environment.status();
     expect(observed.manifest?.panes.find((p) => p.role === "qa")?.transportState).toBe("disconnected");
   });
   it("preserves failed blocked startup and refuses duplicate dispatch", async () => {
     runner.blockedAgent = "coordinator";
-    await expect(new EnvironmentLifecycle(dir, { runner }).up()).rejects.toThrow("readiness");
+    await expect(lifecycle().up()).rejects.toThrow("readiness");
     const count = starts(runner).length;
-    await expect(new EnvironmentLifecycle(dir, { runner }).up()).rejects.toThrow("refusing duplicate");
+    await expect(lifecycle().up()).rejects.toThrow("refusing duplicate");
     expect(starts(runner)).toHaveLength(count);
-    const report = await new EnvironmentLifecycle(dir, { runner }).doctor();
+    const report = await lifecycle().doctor();
     expect(report.healthy).toBe(false);
     expect(report.checks.find((c) => c.checkId === "operation-recovery")?.status).toBe("failed");
   });
   it("rejects a foreign durable manifest without dispatching P13 commands", async () => {
-    await new EnvironmentLifecycle(dir, { runner }).up();
+    await lifecycle().up();
     const file = join(dir, `.bflow/state/panes/${input.repository.sessionName}.manifest.json`);
     const manifest = JSON.parse(await readFile(file, "utf8")); manifest.workspaceRoot = "/other-repo";
     await writeFile(file, JSON.stringify(manifest)); const before = starts(runner).length;
-    await expect(new EnvironmentLifecycle(dir, { runner }).up()).rejects.toThrow("another repository");
+    await expect(lifecycle().up()).rejects.toThrow("another repository");
     expect(starts(runner)).toHaveLength(before);
   });
   it("does not report stale idle bindings as live when P13 cannot persist its health refresh", async () => {
-    await new EnvironmentLifecycle(dir, { runner }).up();
+    await lifecycle().up();
     runner.session(input.repository.sessionName).panes.find((p) => p.name === "reviewer")!.agent_status = "blocked";
     vi.spyOn(FileSessionManifestStore.prototype, "save").mockResolvedValue({ ok: false, error: { code: "corruption", retryable: false, message: "disk write failed" } });
-    const status = await new EnvironmentLifecycle(dir, { runner }).status();
+    const status = await lifecycle().status();
     expect(status.liveObservation).toBe(false);
     expect(status.issues.some((issue) => issue.includes("disk write failed"))).toBe(true);
   });
@@ -95,12 +110,16 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     expect((await adapter.getManifest("foreign")).ok).toBe(false); expect((await adapter.down(input.repository.sessionName)).ok).toBe(false);
     expect(runner.calls).toHaveLength(0);
   });
-  it("reports composition before up and refuses down without Runtime safety APIs", async () => {
-    const lifecycle = new EnvironmentLifecycle(dir, { runner });
-    const report = await lifecycle.doctor();
+  it("reports topology before up and shuts down only after the composed host lifecycle barrier", async () => {
+    const environment = lifecycle();
+    const report = await environment.doctor();
     expect(report.checks.find((c) => c.checkId === "p13-composition")?.status).toBe("passed");
-    await lifecycle.up(); await expect(lifecycle.down(true)).rejects.toThrow("Runtime is unavailable");
-    expect(runner.session(input.repository.sessionName).running).toBe(true);
+    expect(host.prepare).not.toHaveBeenCalled();
+    await environment.up();
+    expect((await environment.down(true)).status).toBe("down");
+    expect(host.quiesce).toHaveBeenCalledTimes(1);
+    expect(host.shutdown).toHaveBeenCalledTimes(1);
+    expect(runner.session(input.repository.sessionName).running).toBe(false);
   });
   it("passes cancellation to the P13 process runner without starting on an already-aborted signal", async () => {
     const controller = new AbortController(); controller.abort();

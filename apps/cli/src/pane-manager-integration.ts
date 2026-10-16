@@ -11,6 +11,7 @@ import {
 } from "@bflow/pane-manager";
 import type { EnvironmentCompositionInput, EnvironmentIntegration } from "./environment.js";
 import { environmentProcessRunner, namedSessionEnvironment, type EnvironmentProcessRunner } from "./environment-process.js";
+import { openLifecycleHost, providerRoleArguments, type LifecycleHost, type LifecycleHostFactory } from "./agentic-host.js";
 
 function failure<T>(message: string): OperationResult<T> {
   return { ok: false, error: { code: "validation", retryable: false, message } };
@@ -40,7 +41,8 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
   private readonly store: SessionManifestStore;
   private readonly panes: RolePaneManager;
   private persistenceFailure: ContractError | undefined;
-  constructor(private readonly input: EnvironmentCompositionInput, private readonly runner = environmentProcessRunner) {
+  constructor(private readonly input: EnvironmentCompositionInput, private readonly runner = environmentProcessRunner,
+    roleArguments: Partial<Record<TopologyRole, readonly string[]>> = {}) {
     const roles: PermanentTopologyRole[] = [];
     const roleConfigs: Partial<Record<TopologyRole, Partial<RoleAgentConfig>>> = {};
     for (const role of input.config.environment.roles) {
@@ -52,7 +54,8 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
       if (kind !== role.cli || !isSupportedAgentKind(kind)) throw new Error(`P13 requires a supported agent kind on PATH; custom executable '${role.cli}' is not supported`);
       roles.push(topologyRole);
       // Native arguments are owned by P13. No code, prompts or assignments are dispatched by P12.
-      roleConfigs[topologyRole] = { agentKind: kind, startupTimeoutMs: input.config.environment.startupTimeoutMs };
+      roleConfigs[topologyRole] = { agentKind: kind, startupTimeoutMs: input.config.environment.startupTimeoutMs,
+        ...(roleArguments[topologyRole] ? { args: roleArguments[topologyRole] } : {}) };
     }
     const diskStore = new FileSessionManifestStore(resolve(input.repository.root, ".bflow/state/panes"));
     this.store = {
@@ -146,6 +149,46 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
   }
 }
 
-export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, runner: EnvironmentProcessRunner = environmentProcessRunner): EnvironmentIntegration {
-  return { manager: new PaneManagerLifecycleAdapter(input, runner) };
+export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, runner: EnvironmentProcessRunner = environmentProcessRunner,
+  hostFactory: LifecycleHostFactory = openLifecycleHost,
+  launchArguments = providerRoleArguments): EnvironmentIntegration {
+  // Read-only commands do not start a daemon. It is opened only for startup or
+  // authoritative shutdown queries, and survives the invoking CLI's exit.
+  let host: Promise<LifecycleHost> | undefined;
+  const connect = () => host ??= hostFactory(input);
+  let manager = new PaneManagerLifecycleAdapter(input, runner);
+  return {
+    manager: {
+      init: (manifest, options) => manager.init(manifest, options),
+      async up(sessionId, options) {
+        if (sessionId !== input.repository.sessionName) return failure("Cannot start another repository's session");
+        const descriptors = await (await connect()).prepare();
+        const args: Partial<Record<TopologyRole, readonly string[]>> = {};
+        for (const role of input.config.environment.roles) {
+          const launch = descriptors.roleLaunch[role.role];
+          const topology = resolveTopologyRole(role.role);
+          if (!launch || !topology) return failure(`Host has no trusted launch descriptor for ${role.role}`);
+          args[topology] = await launchArguments(role.cli, role.role, launch);
+        }
+        manager = new PaneManagerLifecycleAdapter(input, runner, args);
+        return manager.up(sessionId, options);
+      },
+      getManifest: (sessionId, options) => manager.getManifest(sessionId, options),
+      attach: (sessionId, options) => manager.attach(sessionId, options),
+      down: (sessionId, options) => manager.down(sessionId, options),
+      doctorSession: options => manager.doctorSession(options)
+    },
+    runtime: {
+      findRuns: async (query, options) => (await connect()).runtime.findRuns(query, options),
+      getRun: async (runId, options) => (await connect()).runtime.getRun(runId, options)
+    },
+    async activate(manifest, options) {
+      const result = await (await connect()).activate(manifest, options);
+      if (!result.ok) throw new Error(result.error.message);
+    },
+    quiesce: async options => (await connect()).quiesce(options),
+    checkpoint: async (command, options) => (await connect()).checkpoint(command, options),
+    shutdownHost: async () => (await connect()).shutdown(),
+    async close() { if (host) await (await host).close(); }
+  };
 }

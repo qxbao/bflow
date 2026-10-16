@@ -9,6 +9,7 @@ import {
 } from "@bflow/contracts";
 import { EnvironmentLifecycle, identifyRepository, main, namedSessionEnvironment, parseCliArgs, runCli,
   environmentProcessRunner, type EnvironmentConfig, type EnvironmentProcessRequest, type EnvironmentProcessRunner } from "../src/index.js";
+import { PaneManagerLifecycleAdapter } from "../src/pane-manager-integration.js";
 
 const now = "2026-10-16T00:00:00.000Z";
 const roles = ["conversation", "coordinator", "planner", "architect", "specifier", "reviewer", "qa"] as const;
@@ -199,7 +200,8 @@ describe("P12 repository environment lifecycle", () => {
     expect(saved.metadata?.["repositoryId"]).toBe(repository.id); expect(saved.panes).toHaveLength(roles.length);
   });
   it("does not fabricate success when the default P13 receives malformed topology responses", async () => {
-    await expect(new EnvironmentLifecycle(dir, { runner }).up()).rejects.toThrow();
+    await expect(new EnvironmentLifecycle(dir, { runner,
+      openIntegration: async input => ({ manager: new PaneManagerLifecycleAdapter(input, runner) }) }).up()).rejects.toThrow();
     expect(runner.requests.some((r) => r.args[0] === "workspace" && r.args[1] === "list")).toBe(true);
   });
   it("rejects attach before up without starting any session", async () => {

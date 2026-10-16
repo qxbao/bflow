@@ -6,8 +6,8 @@ Node >=22.13 and the root's pinned pnpm are required for the existing storage ru
 
 | Command | Behavior |
 | --- | --- |
-| `bflow init` | Resolves the canonical Git checkout root; creates `.bflow/config.yaml` and `.bflow/.gitignore`. Safe to repeat, including with legacy `--force`/`--yes`: existing configuration is preserved. Does not invoke Herdr. |
-| `bflow up [--timeout <ms>]` | Checks executables and Herdr protocol; starts a headless named server, calls the default P13 manager and waits for **every configured required role** to be idle/done. Persists validated pane/agent bindings. Reuses live roles. |
+| `bflow init [--provider claude\|codex]` | Creates `.bflow/config.yaml` and `.bflow/.gitignore` at the canonical Git root. Default provider is Codex. Repeat init preserves configuration; explicit `--force`/`--yes` replaces it. Does not invoke Herdr. |
+| `bflow up [--timeout <ms>]` | Checks executables, provider authentication and Herdr protocol; starts a named server, prepares the persistent P19 host and trusted role MCP/hooks, then calls P13. Waits for every required role and host activation acknowledgement before recording ready. Persists validated bindings and reuses live roles. |
 | `bflow attach` | Requires an existing manifest and a running matching session. Calls P13 to focus/validate Conversation, then runs `herdr session attach <name>` with inherited terminal I/O. |
 | `bflow down [--yes] [--timeout <ms>]` | Inspects active runs and dirty files. Refuses unsafe shutdown without confirmation. Quiesces Runtime intake/dispatch, recollects runs, requires durable aggregate checkpoints, calls P13 graceful shutdown, then stops only the named session. Deletes no worktree, database, artifact, commit or source file. |
 | `bflow status` | Reports configuration, named server, panes/agents and missing executables. Labels persisted observations as potentially stale. Does not open the legacy workflow Runtime. |
@@ -25,8 +25,8 @@ Configuration uses the JSON flow-style subset of YAML 1.2. Edit it as JSON;
 indentation-style YAML, custom tags and aliases are not supported. This avoids a
 new dependency/lockfile change in the shared P11 baseline. Defaults cover roles,
 the existing workflow, SDD approval, conditional TDD, bounded verification and
-concurrency. P19 must enforce the policies through Runtime; P12 does not implement
-Coordinator or workflow policy logic. A config copied/moved to another checkout
+concurrency. The default composition passes these policies to the persistent P19
+host; P12 does not implement Coordinator or workflow policy logic. A config copied/moved to another checkout
 fails identity validation instead of attaching to the original repository.
 
 Session identity is `bf-` plus 20 hexadecimal characters of SHA-256 over the
@@ -36,12 +36,22 @@ commands receive `HERDR_SESSION` explicitly. Inherited `HERDR_SOCKET`, pane,
 remote and other caller context is removed. No socket path is constructed or
 managed by Bflow. Explicit `HERDR_CONFIG_PATH` is retained.
 
-## Composition boundary and current integration limits
+## Default host and physical topology composition
 
 P13 is composed automatically through `PaneManagerLifecycleAdapter`. It adapts
 `initializeTopology` / `reconcileTopology` to lifecycle `up`,
 `focusConversationPane` to `attach`, and `inspectTopologyHealth` followed by
 schema-validated manifest reads to `getManifest` / `doctorSession`.
+Before P13 starts roles, the default integration prepares the persistent Runtime
+host and obtains trusted role prompts, MCP configuration and provider lifecycle
+hooks. P13's Claude/Codex launch policy builds the provider arguments. The host
+survives CLI process exit and owns scheduling, authenticated message ingress, run
+queries and shutdown checkpoints. `doctor` and environment `status` inspect
+topology without starting a daemon. `up` checks `codex login status` or Claude's
+structured `auth status`; it does not print provider account diagnostics or infer
+authentication from an idle pane. First-use provider trust prompts can still block
+startup and require operator action in that named session.
+
 P13 receives an argv runner that explicitly selects this repository's named
 session. No global process environment is changed. Role CLI names must be supported
 Herdr agent kinds on PATH; custom executable paths and dynamic Developer roles
@@ -54,10 +64,12 @@ logic. CLI never fabricates physical IDs. Both CLI and P13 are built through the
 CLI's TypeScript project reference; no manual composition module is needed for
 `up`, `attach`, `status` or `doctor`.
 
-The baseline `RuntimeService` has no public quiesce/checkpoint API. P12 exposes a
-local composition seam using the existing `CreateCheckpointCommand` and
-`RecoveryCheckpoint` contracts, without modifying those contracts or Runtime.
-Before graceful shutdown is enabled, P19 integration must provide these real operations. P13 currently has no graceful shutdown entry point either; the default adapter returns an explicit error for lifecycle `down`.
+Shutdown uses the host's real intake/dispatch barrier, authoritative `findRuns`
+and `getRun` queries and persisted aggregate checkpoints. P13's `shutdownTopology`
+closes recorded panes only after those barriers succeed, then CLI stops only the
+repository's named Herdr session and explicitly stops the host. No no-op barrier
+or synthetic checkpoint is used. The local lifecycle seam uses the existing
+`CreateCheckpointCommand` and `RecoveryCheckpoint` contracts.
 
 Embedders pass `CliContext.environment.integration` or `openIntegration(input)`.
 To override the default P13 composition in the executable, the operator can set `BFLOW_ENVIRONMENT_MODULE` to an absolute
@@ -68,9 +80,11 @@ export async function openBflowEnvironment({ repository, config, env }) {
   // Compose real P13 and Runtime implementations here.
   return {
     manager, // SessionLifecycleManager, configured for repository.sessionName/root
-    runtime, // RuntimeService, repository-scoped authoritative run queries
+    runtime, // Pick<RuntimeService, "findRuns" | "getRun">; authoritative repository run queries
     quiesce, // (OperationOptions) => OperationResult<void>
     checkpoint, // (CreateCheckpointCommand, OperationOptions) => OperationResult<RecoveryCheckpoint>
+    activate, // optional; acknowledge host startup after the role manifest is up
+    shutdownHost, // optional; stop host after checkpoints/panes/session are preserved
     close // optional; closes composition handles, never stops the live session
   };
 }
@@ -83,14 +97,11 @@ an unpersisted snapshot is not sufficient. Schema/identity/version/sequence
 checks run at ingress. The factory is selected only through the operator's
 environment, never through repository configuration.
 
-The default composition starts and observes real P13 roles. `doctor` reports a
-warning that Runtime shutdown coordination is still unavailable. `down` refuses
-stopping when that safety integration is missing, including with `--yes`.
-It does not construct a success-only barrier or fabricate an aggregate checkpoint.
-A custom provider can supply the full lifecycle plus Runtime operations shown
-above. Live agent startup depends on the installed CLI being authenticated and
-ready; P13 blocked/startup failures remain errors. No full SDLC end-to-end claim
-is made.
+The physical adapter's doctor report describes only topology; a healthy pane does
+not prove an SDLC run passed. A custom integration missing authoritative Runtime
+shutdown operations remains guarded, including with `--yes`. Provider hooks,
+role tools and workflow evidence require separate live verification. No full SDLC
+end-to-end claim follows from lifecycle checks.
 
 ## Recovery and verification
 
@@ -101,11 +112,18 @@ validated observation. An active session's manifest is refreshed through P13
 health inspection before status/readiness decisions. A repository operation lock serializes up/down. Concurrent
 operations are refused. After an interrupted CLI leaves `lifecycle.lock`, verify
 the owning process has exited before removing that lock. Unresolved role/server
-startup or shutdown delivery is retained and automatic resend is refused until
-the manager/server can reconcile it. A blocked role remains available for
+startup or shutdown delivery is retained. A pending startup can resume through
+P13 only when its validated physical topology receipt exists; missing receipts
+continue to forbid resend. A partial first startup can be shut down using that
+same receipt, with the normal Runtime barriers. A blocked role remains available for
 inspection and is recorded as degraded. No automatic forced kill is used during
 shutdown timeout. These guarantees target local filesystems and cooperative
 same-user processes; power-loss recovery and multi-host operation are unverified.
+
+The headless server's detached log relay writes a private mode-0600 log. It
+buffers complete lines across chunks before redaction, suppresses multiline PEM
+private keys and discards oversized log lines. These local logs are diagnostics,
+not trusted task-success evidence.
 
 From the repository root:
 

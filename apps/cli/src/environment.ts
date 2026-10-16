@@ -25,6 +25,8 @@ export interface EnvironmentIntegration {
   readonly checkpoint?: (command: CreateCheckpointCommand, options: OperationOptions) => Promise<OperationResult<RecoveryCheckpoint>>;
   /** Start/reconcile the durable provider host after physical roles are ready. */
   readonly activate?: (manifest: SessionManifest, options: OperationOptions) => Promise<void>;
+  /** Stop the host only after checkpoint, pane and named-session shutdown succeeds. */
+  readonly shutdownHost?: () => Promise<void>;
   readonly close?: () => Promise<void>;
 }
 
@@ -367,7 +369,9 @@ export class EnvironmentLifecycle {
         if (await this.probe(repository, config, deadline)) await this.command(repository, config.environment.herdrBinary, ["session", "stop", repository.sessionName, "--json"], deadline);
         while (await this.probe(repository, config, deadline)) await deadline.pause();
         await this.writeIntent(repository, "down");
-        return this.saveManifest(repository, stopped);
+        const finalManifest = await this.saveManifest(repository, stopped);
+        await integration.shutdownHost?.();
+        return finalManifest;
       } finally { await integration.close?.(); }
     });
   }

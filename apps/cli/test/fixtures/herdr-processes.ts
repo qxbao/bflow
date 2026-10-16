@@ -59,6 +59,10 @@ export class HerdrProcesses implements EnvironmentProcessRunner {
     }
     if (domain === "tab" && action === "focus") return wire("tab_info", { tab: session.tabs.find((t) => t.tab_id === target) });
     if (domain === "pane" && action === "list") return wire("pane_list", { panes: session.panes.filter((p) => p.workspace_id === flag("--workspace")) });
+    if (domain === "pane" && action === "close") {
+      session.panes = session.panes.filter(pane => pane.pane_id !== target);
+      return wire("ok", {});
+    }
     if (domain === "pane" && action === "get") {
       const pane = session.panes.find((p) => p.pane_id === target); return pane ? wire("pane_info", { pane }) : failure("Pane missing");
     }
