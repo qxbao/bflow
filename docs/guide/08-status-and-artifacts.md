@@ -1,5 +1,9 @@
 # 8. Đọc trạng thái và artifact
 
+> **Phạm vi legacy P00–P10.** Trang này giữ API/demo và đánh giá integration ở thời điểm trước P19.
+> Dùng [hướng dẫn hiện tại](README.md) cho onboarding, lifecycle/config.yaml và P19.
+> Không áp dụng các nhận định integration cũ hoặc thao tác Core trực tiếp để bypass policy P19.
+
 ## Công cụ có sẵn
 
 Với state directory do demo tạo:

@@ -1,5 +1,9 @@
 # 10. Kiểm tra kết quả trước khi hợp nhất mã
 
+> **Phạm vi legacy P00–P10.** Trang này giữ API/demo và đánh giá integration ở thời điểm trước P19.
+> Dùng [hướng dẫn hiện tại](README.md) cho onboarding, lifecycle/config.yaml và P19.
+> Không áp dụng các nhận định integration cũ hoặc thao tác Core trực tiếp để bypass policy P19.
+
 bflow **không tự merge hay deploy**. Run `succeeded` chỉ có nghĩa là workflow đã đi hết các bước với bằng chứng được ghi lại; người duyệt vẫn quyết định merge. Không coi Herdr `done`, ảnh chụp terminal, hay việc một artifact đã được lưu là bằng chứng task thành công.
 
 ## Danh sách kiểm tra

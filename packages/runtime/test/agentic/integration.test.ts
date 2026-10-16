@@ -47,6 +47,7 @@ class Panes implements PanePolicy {
 async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean } = {}) {
   const root = await mkdtemp("/tmp/bflow-p19-");
   const repository = join(root, "repo"); await mkdir(repository); git(repository, "init", "-b", "main");
+  git(repository, "config", "user.name", "Test"); git(repository, "config", "user.email", "test@example.test");
   await writeFile(join(repository, "guide.md"), "initial\n");
   await writeFile(join(repository, "other.md"), "initial\n");
   git(repository, "add", "."); git(repository, "commit", "-m", "baseline");

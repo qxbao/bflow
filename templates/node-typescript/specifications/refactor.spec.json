@@ -1,0 +1,239 @@
+{
+  "schemaVersion": 2,
+  "specId": "refactor-spec",
+  "runId": "example-refactor",
+  "sessionId": "example-session",
+  "level": "lightweight",
+  "complexity": "standard",
+  "riskLevel": "medium",
+  "title": "Extract integer validation",
+  "summary": "Existing integer validation behavior and tests are preserved.",
+  "problemStatement": "The example project needs this change: Extract integer validation.",
+  "scope": {
+    "inScope": [
+      "Extract integer validation"
+    ],
+    "outOfScope": [
+      "Network services",
+      "Deployment",
+      "Other source changes"
+    ]
+  },
+  "acceptanceCriteria": [
+    {
+      "id": "refactor-1",
+      "description": "Existing integer validation behavior and tests are preserved.",
+      "category": "functional",
+      "verificationMethod": "unit_test",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    }
+  ],
+  "affectedPaths": [
+    "src",
+    "test"
+  ],
+  "version": 1,
+  "traceabilityTaskIds": [
+    "refactor-change"
+  ],
+  "status": "draft",
+  "createdBy": "coordinator",
+  "createdAt": "2026-10-16T00:00:00.000Z",
+  "updatedAt": "2026-10-16T00:00:00.000Z",
+  "metadata": {
+    "conditionalTdd": {
+      "policyVersion": 1,
+      "taskId": "refactor-change",
+      "taskType": "refactoring",
+      "changeImpact": {
+        "surfaces": [
+          "refactoring"
+        ],
+        "behaviorChanged": true,
+        "deterministic": true,
+        "regressionReproducible": true,
+        "securitySensitive": false,
+        "dataMigration": false,
+        "scope": "local"
+      },
+      "infrastructure": {
+        "readiness": "ready",
+        "commands": [
+          {
+            "method": "unit_test",
+            "command": "pnpm test",
+            "level": "unit"
+          }
+        ]
+      },
+      "testability": {
+        "level": "automated",
+        "rationale": "Pure integer arithmetic is deterministic and covered by the Node test runner."
+      },
+      "riskClassification": "medium",
+      "conventions": {
+        "tdd": "contextual",
+        "requiredMethods": [],
+        "suggestedLevels": [
+          "unit"
+        ]
+      }
+    },
+    "sdd": {
+      "policyVersion": 1,
+      "assessment": {
+        "kind": "refactoring",
+        "behaviorChange": true,
+        "modules": [
+          "calculator"
+        ],
+        "securityImpact": false,
+        "publicApiImpact": false,
+        "dataSchemaImpact": false,
+        "architectureImpact": false,
+        "migrationRequired": false,
+        "risk": "medium",
+        "unresolvedQuestions": []
+      },
+      "functionalRequirements": [
+        "Existing integer validation behavior and tests are preserved."
+      ],
+      "proposedTestStrategy": "Run independent pnpm test against the pinned change revision.",
+      "technicalConstraints": [],
+      "apiDataContracts": [],
+      "risksAndTradeoffs": [],
+      "traceability": [
+        {
+          "criterionId": "refactor-1",
+          "taskIds": [
+            "refactor-change"
+          ]
+        }
+      ]
+    }
+  },
+  "testStrategy": {
+    "schemaVersion": 2,
+    "strategyId": "strategy-de47e70d0429d40836b4b2eea43fb5ae22e5fd2e62a5445906c0383ad9a283f3",
+    "specId": "refactor-spec",
+    "tddDecision": {
+      "schemaVersion": 2,
+      "decisionId": "tdd-de47e70d0429d40836b4b2eea43fb5ae22e5fd2e62a5445906c0383ad9a283f3",
+      "runId": "example-refactor",
+      "taskId": "refactor-change",
+      "specId": "refactor-spec",
+      "mode": "recommended",
+      "rationale": "Integration, refactoring, or exploratory work benefits from tests; a mandatory failing-test-first sequence is not justified by the current impact. Testability: Pure integer arithmetic is deterministic and covered by the Node test runner. Effective risk: medium.",
+      "verifiableConditions": [
+        "refactor-1: Existing integer validation behavior and tests are preserved.; verify using unit_test."
+      ],
+      "changeClassification": "refactoring",
+      "requiresFailingTestFirst": false,
+      "decidedBy": "coordinator",
+      "decidedAt": "2026-10-16T00:00:00.000Z"
+    },
+    "requiredTestLevels": [
+      "unit"
+    ],
+    "targetCommands": [
+      "pnpm test"
+    ],
+    "independentVerificationRequired": true,
+    "criterionMappings": [
+      {
+        "criterionId": "refactor-1",
+        "testNames": [
+          "refactor-1: Existing integer validation behavior and tests are preserved."
+        ]
+      }
+    ],
+    "createdAt": "2026-10-16T00:00:00.000Z",
+    "metadata": {
+      "conditionalTdd": {
+        "policyVersion": 1,
+        "assessment": {
+          "policyVersion": 1,
+          "taskId": "refactor-change",
+          "taskType": "refactoring",
+          "changeImpact": {
+            "surfaces": [
+              "refactoring"
+            ],
+            "behaviorChanged": true,
+            "deterministic": true,
+            "regressionReproducible": true,
+            "securitySensitive": false,
+            "dataMigration": false,
+            "scope": "local"
+          },
+          "infrastructure": {
+            "readiness": "ready",
+            "commands": [
+              {
+                "method": "unit_test",
+                "command": "pnpm test",
+                "level": "unit"
+              }
+            ]
+          },
+          "testability": {
+            "level": "automated",
+            "rationale": "Pure integer arithmetic is deterministic and covered by the Node test runner."
+          },
+          "riskClassification": "medium",
+          "conventions": {
+            "tdd": "contextual",
+            "requiredMethods": [],
+            "suggestedLevels": [
+              "unit"
+            ]
+          }
+        },
+        "acceptanceCriteria": [
+          {
+            "id": "refactor-1",
+            "description": "Existing integer validation behavior and tests are preserved.",
+            "category": "functional",
+            "verificationMethod": "unit_test",
+            "required": true,
+            "status": "pending",
+            "evidenceArtifactIds": []
+          }
+        ],
+        "affectedPaths": [
+          "src",
+          "test"
+        ],
+        "riskLevel": "medium",
+        "requiredVerificationMethods": [
+          "unit_test"
+        ],
+        "suggestedTestLevels": [
+          "unit"
+        ],
+        "evidenceRequirements": [
+          "Record successful alternative verification with criterion mappings, method observations and trusted artifacts; not_applicable does not waive verification.",
+          "Cover every required method and acceptance criterion; independent VerificationResult evidence is mandatory."
+        ]
+      }
+    }
+  },
+  "tddDecision": {
+    "schemaVersion": 2,
+    "decisionId": "tdd-de47e70d0429d40836b4b2eea43fb5ae22e5fd2e62a5445906c0383ad9a283f3",
+    "runId": "example-refactor",
+    "taskId": "refactor-change",
+    "specId": "refactor-spec",
+    "mode": "recommended",
+    "rationale": "Integration, refactoring, or exploratory work benefits from tests; a mandatory failing-test-first sequence is not justified by the current impact. Testability: Pure integer arithmetic is deterministic and covered by the Node test runner. Effective risk: medium.",
+    "verifiableConditions": [
+      "refactor-1: Existing integer validation behavior and tests are preserved.; verify using unit_test."
+    ],
+    "changeClassification": "refactoring",
+    "requiresFailingTestFirst": false,
+    "decidedBy": "coordinator",
+    "decidedAt": "2026-10-16T00:00:00.000Z"
+  }
+}

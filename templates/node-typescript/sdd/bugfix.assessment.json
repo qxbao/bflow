@@ -1,0 +1,14 @@
+{
+  "kind": "bugfix",
+  "behaviorChange": true,
+  "modules": [
+    "calculator"
+  ],
+  "securityImpact": false,
+  "publicApiImpact": false,
+  "dataSchemaImpact": false,
+  "architectureImpact": false,
+  "migrationRequired": false,
+  "risk": "medium",
+  "unresolvedQuestions": []
+}

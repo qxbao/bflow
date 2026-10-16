@@ -1,5 +1,9 @@
 # 2. Yêu cầu môi trường
 
+> **Phạm vi legacy P00–P10.** Trang này giữ API/demo và đánh giá integration ở thời điểm trước P19.
+> Dùng [hướng dẫn hiện tại](README.md) cho onboarding, lifecycle/config.yaml và P19.
+> Không áp dụng các nhận định integration cũ hoặc thao tác Core trực tiếp để bypass policy P19.
+
 | Thành phần | Yêu cầu |
 | --- | --- |
 | Node.js | **>= 22.13** (cần `node:sqlite` không cờ). Đã kiểm chứng trên 22.23.2. `engines` ở root ghi `>=22`, rộng hơn yêu cầu thực tế. `node:sqlite` vẫn là experimental trên Node 22 và in `ExperimentalWarning` |

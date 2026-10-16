@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "message_id": "example-status-1",
+  "correlation_id": "example-feature-correlation",
+  "causation_id": "example-assignment-1",
+  "run_id": "example-feature",
+  "sender": {
+    "role": "developer",
+    "agent_id": "example-developer",
+    "pane_id": "example-pane"
+  },
+  "recipient": {
+    "role": "coordinator"
+  },
+  "type": "task.status",
+  "payload": {
+    "headline": "Implementation is in progress",
+    "state": "running"
+  },
+  "artifact_references": [],
+  "occurred_at": "2026-10-16T00:00:00.000Z",
+  "idempotency_key": "example-status-1"
+}

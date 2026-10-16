@@ -1,0 +1,58 @@
+{
+  "environment": {
+    "herdrBinary": "herdr",
+    "roles": [
+      {
+        "role": "conversation",
+        "cli": "codex",
+        "required": true
+      },
+      {
+        "role": "coordinator",
+        "cli": "codex",
+        "required": true
+      },
+      {
+        "role": "planner",
+        "cli": "codex",
+        "required": true
+      },
+      {
+        "role": "architect",
+        "cli": "codex",
+        "required": true
+      },
+      {
+        "role": "specifier",
+        "cli": "codex",
+        "required": true
+      },
+      {
+        "role": "reviewer",
+        "cli": "codex",
+        "required": true
+      },
+      {
+        "role": "qa",
+        "cli": "codex",
+        "required": true
+      }
+    ],
+    "sdd": {
+      "minimumLevel": "lightweight",
+      "approvalRequired": true
+    },
+    "tdd": {
+      "policy": "conditional"
+    },
+    "verification": {
+      "maxIterations": 3,
+      "onExhausted": "require_human"
+    },
+    "concurrency": {
+      "maxConcurrency": 2
+    },
+    "startupTimeoutMs": 60000,
+    "shutdownTimeoutMs": 30000
+  }
+}

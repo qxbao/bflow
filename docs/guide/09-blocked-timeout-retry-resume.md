@@ -1,5 +1,9 @@
 # 9. Xử lý blocked, timeout, retry và resume
 
+> **Phạm vi legacy P00–P10.** Trang này giữ API/demo và đánh giá integration ở thời điểm trước P19.
+> Dùng [hướng dẫn hiện tại](README.md) cho onboarding, lifecycle/config.yaml và P19.
+> Không áp dụng các nhận định integration cũ hoặc thao tác Core trực tiếp để bypass policy P19.
+
 Nguyên tắc chung:
 
 - Mọi lỗi là `OperationResult` có `error.code`: `validation`, `conflict`, `not_found`, `timeout`, `transport_unavailable`, `unknown_delivery`, `cancelled`, `corruption`, `unsupported_version`. `conflict`/`timeout`/`transport_unavailable` chỉ được thử lại sau điều kiện tiên quyết (ví dụ đọc lại trạng thái). `unknown_delivery` **không bao giờ** được gửi lại mù quáng.

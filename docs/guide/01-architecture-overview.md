@@ -1,5 +1,9 @@
 # 1. Tổng quan kiến trúc
 
+> **Phạm vi legacy P00–P10.** Trang này giữ API/demo và đánh giá integration ở thời điểm trước P19.
+> Dùng [hướng dẫn hiện tại](README.md) cho onboarding, lifecycle/config.yaml và P19.
+> Không áp dụng các nhận định integration cũ hoặc thao tác Core trực tiếp để bypass policy P19.
+
 bflow là một nền tảng TypeScript theo module để điều phối các AI coding agent qua quy trình phát triển phần mềm. **Herdr vận hành agent**; dự án này sở hữu quyết định workflow, bản ghi thực thi bền vững, artifact và các ranh giới tích hợp.
 
 Hiện tại sản phẩm là **tập thư viện** trong một pnpm workspace. Không có tiến trình server, CLI thực thi hay lệnh `start`. Ứng dụng nhúng các package và tự ghép chúng qua `createRuntimeService` — xem ví dụ [runtime-demo](../../examples/runtime-demo/README.md).
