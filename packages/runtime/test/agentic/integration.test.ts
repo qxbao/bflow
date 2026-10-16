@@ -1,5 +1,6 @@
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, realpath } from "node:fs/promises";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID, generateKeyPairSync } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +15,9 @@ import { CoordinatorTools } from "../../src/agentic/tools.js";
 import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import { loadAgenticPolicies, type PanePolicy } from "../../src/agentic/ports.js";
 import { createAgenticConversationHost } from "../../src/agentic/conversation.js";
+import { HostDevelopment } from "../../src/agentic/host-development.js";
+import { DEFAULT_HOST_CHECKS, HostBehavioralFailure, HostVerification } from "../../src/agentic/host-verification.js";
+import { parseBehavioralCommands, type BehavioralCommand } from "../../src/agentic/behavioral-runner.js";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
 import { FakeAgentTransport } from "../helpers/fake-transport.js";
 import { draft, workflow } from "../../../specification/test/fixtures.js";
@@ -45,17 +49,29 @@ class Panes implements PanePolicy {
   async releaseDeveloper() { return { ok: true as const, value: undefined }; }
 }
 
-async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean; humanApproval?: boolean } = {}) {
+async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean; humanApproval?: boolean; behavioral?: BehavioralCommand } = {}) {
   const root = await mkdtemp("/tmp/bflow-p19-");
   const repository = join(root, "repo"); await mkdir(repository); git(repository, "init", "-b", "main");
   git(repository, "config", "user.name", "Test"); git(repository, "config", "user.email", "test@example.test");
   await writeFile(join(repository, "guide.md"), "initial\n");
   await writeFile(join(repository, "other.md"), "initial\n");
+  if (options.behavioral) {
+    await mkdir(join(repository, "src"));
+    await writeFile(join(repository, "src/double.cjs"), "module.exports=x=>x+1;\n");
+  }
   git(repository, "add", "."); git(repository, "commit", "-m", "baseline");
   let store = unwrap(openSqliteRunStore({ filename: join(root, "runs.db") }));
   const artifacts = unwrap(await openFilesystemArtifactStore({ root: join(root, "artifacts"), storeId: "p19" }));
   cleanups.push(async () => { store.close(); artifacts.close(); await rm(root, { recursive: true, force: true }); });
   const transport = new FakeAgentTransport(); const panes = new Panes();
+  if (options.behavioral) transport.customSendHandler = request => {
+    const nativeProofRequired = JSON.parse(request.instruction).type === "task.assignment";
+    const handle = { executionId: randomUUID(), requestId: request.requestId, attemptId: request.attemptId, runId: request.runId,
+      taskId: request.taskId, idempotencyKey: request.idempotency.key, target: request.target,
+      correlation: { token: request.requestId, provenance: nativeProofRequired ? "orchestrator" as const : "transport" as const, verified: !nativeProofRequired }, acceptedAt: new Date().toISOString() };
+    return { ok: true, value: { status: "accepted", requestId: request.requestId, attemptId: request.attemptId, runId: request.runId,
+      taskId: request.taskId, observedAt: handle.acceptedAt, handle } };
+  };
   const pair = generateKeyPairSync("ed25519");
   const publicKey = pair.publicKey.export({ type: "spki", format: "pem" }).toString();
   const privateKey = pair.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
@@ -85,37 +101,47 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
         criteria: config.criterionIds.map((criterionId: string) => ({ criterionId, passed, summary: "Host independently checked the criterion" })), summary: "Independent check" } } } };
   } }));
   let runtime: AgenticWorkflowRuntime;
-  const actualGates = options.remoteReview ? gates.map(gate => gate.id === "review" ? { id: gate.id,
+  const receipts = new HostReceiptJournal(join(root, "host-receipts"), repository, "session-1");
+  const verification = new HostVerification(() => runtime, () => artifacts, receipts, options.behavioral ? [options.behavioral] : []);
+  if (options.behavioral) checks.splice(0, checks.length, ...DEFAULT_HOST_CHECKS, ...verification.behavioralChecks());
+  const actualGates = options.behavioral ? [
+    ...DEFAULT_HOST_CHECKS.filter(check => (check.configuration as any).kind === "review").map(check => ({ id: check.id,
+      evaluate: (...args: Parameters<QualityGate["evaluate"]>) => runtime.herdrQualityGate(check.id).evaluate(...args) })),
+    verification.deterministicGate(), ...verification.behavioralGates().map(gate => ({ id: gate.id, evaluate: async (context: QualityGateContext) => {
+      calls.push(context); return gate.evaluate(context);
+    } }))
+  ] : options.remoteReview ? gates.map(gate => gate.id === "review" ? { id: gate.id,
     evaluate: (...args: Parameters<QualityGate["evaluate"]>) => runtime.herdrQualityGate(gate.id).evaluate(...args) } : gate) : gates;
   const policies = await loadAgenticPolicies({ repositoryPath: repository, artifactStore: artifacts, gates: actualGates,
     loadSpecification: id => runtime.loadSpecification(id), authorizeApprover: decision => ["coordinator", "human-1"].includes(decision.decidedBy) });
   const ports = { engine, runStore: store, artifactStore: artifacts, registry, transport, panes, policies,
-    roleCapabilities: { developer: ["implementation"], coordinator: ["coordination"], conversation: ["conversation"], specifier: ["specification"], architect: ["architecture"], planner: ["planning"], reviewer: ["review"], qa: ["verification"], tester: ["testing"] },
+    roleCapabilities: { developer: ["implementation"], coordinator: ["coordination"], conversation: ["conversation"], specifier: ["specification"], architect: ["architecture"], planner: ["planning"], reviewer: ["review"], qa: ["verification", ...(options.behavioral ? ["testing"] : [])], tester: ["testing"] },
     taskChecks: checks, workflowChecks: checks,
-    authenticateMessage: async () => true, authenticateResult: async () => true, authenticateEvidence: async () => true,
-    authenticateGateResult: async () => true, authorizeHuman: async (decision: any) => decision.decidedBy === "human-1",
+    authenticateMessage: async () => true, authenticateResult: async () => true, authenticateEvidence: async (result: any) => options.behavioral ? verification.authenticateEvidence(result) : true,
+    authenticateGateResult: async (result: any) => options.behavioral ? verification.authenticateGate(result) : true,
+    authorizeHuman: async (decision: any) => options.behavioral ? receipts.authenticateHuman(decision) : decision.decidedBy === "human-1",
     projectApprovalRequired: () => options.humanApproval === true };
   const runtimeOptions = { journalDirectory: join(root, "journal"), repositoryPath: repository };
   runtime = new AgenticWorkflowRuntime(ports, runtimeOptions);
-  const spec: Specification = draft(options.complex ? "api" : "documentation");
+  const spec: Specification = draft(options.complex ? "api" : options.behavioral ? "bugfix" : "documentation");
   const time = new Date().toISOString(); spec.createdAt = time; spec.updatedAt = time;
-  spec.affectedPaths = ["guide.md", ...(options.parallel ? ["other.md"] : [])];
+  spec.affectedPaths = options.behavioral ? ["src", "test"] : ["guide.md", ...(options.parallel ? ["other.md"] : [])];
   spec.traceabilityTaskIds = options.parallel ? ["implement", "other"] : ["implement"];
   if (options.complex) { (spec.metadata!.sdd as any).assessment.modules = ["one", "two"]; }
   const sdd = spec.metadata!.sdd as any; sdd.traceability[0].taskIds = spec.traceabilityTaskIds;
-  spec.metadata!.conditionalTdd = { policyVersion: 1, taskId: "implement", taskType: options.tdd ? "domain_logic" : "documentation",
-    changeImpact: { surfaces: [options.tdd ? "domain_logic" : "documentation"], behaviorChanged: !!options.tdd, deterministic: !!options.tdd,
-      regressionReproducible: !!options.tdd, securitySensitive: false, dataMigration: false, scope: "local" },
-    infrastructure: { readiness: "ready", commands: [{ method: "integration_test", command: "test-regression", level: "integration" }, ...(options.complex ? [{ method: "static_analysis", command: "static-check" }] : [])] },
+  spec.metadata!.conditionalTdd = { policyVersion: 1, taskId: "implement", taskType: options.tdd || options.behavioral ? "domain_logic" : "documentation",
+    changeImpact: { surfaces: [options.tdd || options.behavioral ? "domain_logic" : "documentation"], behaviorChanged: !!(options.tdd || options.behavioral), deterministic: !!(options.tdd || options.behavioral),
+      regressionReproducible: !!(options.tdd || options.behavioral), securitySensitive: false, dataMigration: false, scope: "local" },
+    infrastructure: { readiness: "ready", commands: [{ method: "integration_test", command: options.behavioral?.command ?? "test-regression", level: "integration" }, ...(options.complex ? [{ method: "static_analysis", command: "static-check" }] : [])] },
     testability: { level: "automated", rationale: "Independent repeatable behavioral checks are available" }, riskClassification: "low",
     conventions: { tdd: "contextual", requiredMethods: [], suggestedLevels: [] } };
-  if (options.tdd) spec.acceptanceCriteria[0]!.verificationMethod = "integration_test";
+  if (options.tdd || options.behavioral) spec.acceptanceCriteria[0]!.verificationMethod = "integration_test";
   if (options.complex) {
     const strategy = policies.strategy.resolve(spec);
     spec.testStrategy = strategy; spec.tddDecision = strategy.tddDecision;
   } else { delete spec.testStrategy; delete spec.tddDecision; }
   const def = workflow(spec.traceabilityTaskIds); def.maxConcurrency = options.parallel ? 2 : 1;
-  def.tasks.forEach((task, index) => { (task as any).metadata = { ownedPaths: [index && !options.conflict ? "other.md" : "guide.md"] }; });
+  def.tasks.forEach((task, index) => { (task as any).metadata = { ownedPaths: options.behavioral ? ["src", "test"] : [index && !options.conflict ? "other.md" : "guide.md"] }; });
   const delegation = { schemaVersion: 2, delegationId: "delegation-1", messageId: "intake-1", correlationId: "correlation-1", sessionId: "session-1", runId: "run-1",
     requestedBy: "conversation", targetRole: "coordinator", title: spec.title, objective: spec.summary, specificationId: spec.specId, sddLevel: spec.level,
     acceptanceCriteria: spec.acceptanceCriteria, inputArtifacts: [], priority: "normal", requestedAt: time, idempotencyKey: "intake-1" };
@@ -141,12 +167,12 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
           summary: "Independent observation", ...(method === "integration_test" ? { command: "test-regression", exitCode: red ? 1 : 0 } : {}) }] } } });
     await runtime.receiveHerdr(envelope("verification.result", result, { sender: { role: "tester" } }));
   }
-  async function submit(taskId = "implement", content = "updated\n") {
+  async function submit(taskId = "implement", content: string | null = "updated\n") {
     const state = await runtime.inspect() as any;
     const outbound = [...state.outbound].reverse().find((out: any) => out.taskId === taskId && out.message.type === "task.assignment");
     const handle = outbound.handle; expect(handle).toBeDefined();
     const path = handle.target.worktreePath; const file = taskId === "other" && !options.conflict ? "other.md" : "guide.md";
-    await writeFile(join(path, file), content); git(path, "add", file); git(path, "commit", "-m", "implement");
+    if (content !== null) { await writeFile(join(path, file), content); git(path, "add", file); git(path, "commit", "-m", "implement"); }
     const result = AgentResultSchema.parse({ requestId: handle.requestId, attemptId: handle.attemptId, runId: "run-1", taskId,
       executionId: handle.executionId, status: "succeeded", verification: { status: "verified", evidence: "Authenticated test-host result", correlation:
         unwrap(await ports.engine.getSnapshot("run-1"))!.tasks.find(task => task.taskId === taskId)!.bindingVerification?.receipt.correlation ?? handle.correlation },
@@ -156,16 +182,197 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
   }
   async function approve(decision = "approved") {
     const run = await inspect(); const request = run.approval;
-    await runtime.receiveHerdr(envelope("approval.decision", ApprovalDecisionSchema.parse({ schemaVersion: 2, approvalId: request.approvalId,
+    const approved = ApprovalDecisionSchema.parse({ schemaVersion: 2, approvalId: request.approvalId,
       runId: "run-1", sessionId: "session-1", target: request.target, revision: request.revision, generation: request.generation,
-      decision, ...(decision !== "approved" ? { reason: "User refused" } : {}), decidedBy: "human-1", decidedAt: new Date().toISOString(), feedbackArtifacts: [], idempotencyKey: randomUUID() })));
+      decision, ...(decision !== "approved" ? { reason: "User refused" } : {}), decidedBy: "human-1", decidedAt: new Date().toISOString(), feedbackArtifacts: [], idempotencyKey: randomUUID() });
+    if (options.behavioral) {
+      const binding = panes.bindings.find(pane => pane.role === "conversation")!;
+      const chat = await createAgenticConversationHost({ runtime, manifest: unwrap(await panes.getManifest()), contextDirectory: join(root, "phase-conversation"),
+        onHumanDecision: async actual => receipts.recordHuman(actual, { origin: "UserPromptSubmit", binding, nativeSessionId: binding.session!.value,
+          conversationSessionId: "session-1", userId: "human-1", messageId: "real-phase-test-approval", promptDigest: createHash("sha256").update(decision).digest("hex") }) });
+      const requestOut = (await runtime.inspect() as any).outbound.find((out: any) => out.message.type === "approval.request" && out.message.payload.approvalId === request.approvalId);
+      await chat.receiveHerdr(requestOut.message);
+      const response = await chat.handleUserTurn({ sessionId: "session-1", messageId: "real-phase-test-approval", content: decision === "approved" ? "approve" : "reject",
+        provenance: { origin: "user", authenticatedUser: true, userId: "human-1", paneId: binding.paneId, channel: "herdr_attach" } });
+      expect(response.ok).toBe(true);
+      const decisionOut = (await runtime.inspect() as any).outbound.find((out: any) => out.message.type === "approval.decision" && out.message.payload.approvalId === request.approvalId);
+      expect(await receipts.authenticateHuman(decisionOut.message.payload)).toBe(true);
+      await runtime.flushOutbound();
+      expect((await runtime.inspect() as any).outbound.find((out: any) => out.message.message_id === decisionOut.message.message_id).status).toBe("accepted");
+      await runtime.receiveHerdr(decisionOut.message); return;
+    }
+    await runtime.receiveHerdr(envelope("approval.decision", approved));
   }
-  return { root, repository, runtime, ports, privateKey, publicKey, runtimeOptions, panes, transport, spec, def, envelope, inspect, dossier, evidence, submit, approve,
+  return { root, repository, get runtime() { return runtime; }, ports, privateKey, publicKey, runtimeOptions, panes, transport, spec, def, envelope, inspect, dossier, evidence, submit, approve, verification, receipts,
     calls, localReview: (context: QualityGateContext) => gates.find(gate => gate.id === "review")!.evaluate(context), setFailReview: (value: boolean) => { failReview = value; },
     setReviewerExecutor: (value: string) => { reviewerExecutorId = value; },
     reopenStorage: () => { store.close(); store = unwrap(openSqliteRunStore({ filename: join(root, "runs.db") })); ports.runStore = store; },
     restart: () => { runtime = new AgenticWorkflowRuntime({ ...ports, engine: new DeterministicWorkflowEngine({ bindingReceiptKeys }) }, runtimeOptions); return runtime; } };
 }
+
+const phaseTestName = "ac-1: The requested outcome is independently verifiable";
+async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json", maxIterations = 3) {
+  const testPath = "test/double.test.cjs", sourcePath = "src/double.cjs";
+  const command = parseBehavioralCommands([{ id: "real-regression", command: "owner:double-regression", executable: process.execPath,
+    args: reporter === "node_tap" ? ["--test", "--test-reporter=tap", testPath] : [createRequire(import.meta.url).resolve("vitest/vitest.mjs"), "run", "--globals", "--reporter=json", "--no-cache", "--maxWorkers=1", "--minWorkers=1", testPath],
+    ...(reporter === "vitest_json" ? { reporter, dependencyRoots: [await realpath("node_modules")] } : {}), method: "integration_test", levels: ["integration", "regression"],
+    testPaths: [testPath], testNames: [phaseTestName], timeoutMs: 10_000 }])[0]!;
+  const f = await fixture({ behavioral: command });
+  await f.runtime.proposeWorkflow("run-1", f.spec, f.def, maxIterations); await f.runtime.tick();
+  const original = (await f.runtime.inspect() as any).outbound.find((item: any) => item.message.type === "task.assignment");
+  expect(original.status).toBe("accepted");
+  const developer = f.panes.bindings.find(binding => binding.paneId === original.handle.target.paneId)!;
+  const qa = f.panes.bindings.find(binding => binding.role === "qa")!;
+  const development = new HostDevelopment(() => f.runtime, [command]);
+  const testSource = reporter === "node_tap" ? `const {test}=require('node:test'); const assert=require('node:assert/strict'); const double=require('../src/double.cjs'); test(${JSON.stringify(phaseTestName)},()=>assert.equal(double(2),4));\n` :
+    `const double=require('../src/double.cjs'); it(${JSON.stringify(phaseTestName)},()=>expect(double(2)).toBe(4));\n`;
+  const receipt = createSignedBindingReceipt({ issuerId: "native-test-host", receiptId: randomUUID(), handle: original.handle,
+    correlation: { token: original.message.message_id, provenance: "transport", verified: true }, observedAt: new Date().toISOString(), privateKey: f.privateKey });
+  await f.runtime.receiveHerdr(f.envelope("execution.receipt", receipt, { causation_id: original.message.message_id,
+    sender: { role: "developer", agent_id: developer.agentId, pane_id: developer.paneId } }));
+  const bound = unwrap(await f.ports.engine.getSnapshot("run-1"))!.tasks[0]!;
+  expect(bound.agentExecution!.correlation.verified).toBe(false);
+  expect(bound.bindingVerification!.receipt.signature.algorithm).toBe("ed25519");
+  expect(bound.bindingVerification!.receipt.correlation.verified).toBe(true);
+  const currentHead = () => git(developer.worktreePath!, "rev-parse", "HEAD");
+  const edit = (path: string) => development.authorizeFileEdit(developer, { tool_name: "Write", tool_input: { file_path: join(developer.worktreePath!, path) } });
+  const commit = (message: string) => development.commit(developer, { runId: "run-1", taskId: "implement", expectedHead: currentHead(), message });
+  async function addTests() {
+    await edit(testPath); await mkdir(join(developer.worktreePath!, "test"));
+    await writeFile(join(developer.worktreePath!, testPath), testSource); await commit("Red: specify doubled output");
+  }
+  async function request(phase: string) {
+    const head = currentHead();
+    const queued = await f.runtime.requestPhaseVerification(developer, "run-1", "implement", phase, head) as any;
+    await f.runtime.flushOutbound();
+    const pending = (await f.runtime.inspect() as any).outbound.find((out: any) => out.message.message_id === queued.messageId);
+    expect(pending.status).toBe("accepted"); expect(pending.handle.target.paneId).toBe(qa.paneId);
+    expect(pending.lease.leaseId).not.toBe(original.lease.leaseId);
+    return { pending, head };
+  }
+  async function measure(phase: string) {
+    const { pending, head } = await request(phase);
+    const completed = await f.verification.behavioralEvidence(qa, { runId: "run-1", taskId: "implement", phase });
+    expect((completed.result.metadata!.conditionalTdd as any).sourceRevision).toBe(head);
+    await f.runtime.receiveHerdr(f.envelope("verification.result", completed.result, { causation_id: pending.message.message_id,
+      sender: { role: "qa", agent_id: qa.agentId, pane_id: qa.paneId }, artifact_references: completed.result.evidenceArtifacts }));
+    await f.runtime.flushOutbound();
+    const state = await f.runtime.inspect() as any;
+    const notice = state.outbound.find((out: any) => out.message.type === "task.status" && out.message.payload.kind === "policy_phase_outcome" && out.message.payload.phase === phase && out.message.payload.status === "passed");
+    const parent = state.outbound.find((out: any) => out.message.message_id === original.message.message_id);
+    expect(notice.status).toBe("accepted"); expect(notice.parentAssignmentId).toBe(parent.message.message_id);
+    expect(notice.lease).toEqual(parent.lease); expect(notice.handle.target).toEqual(parent.handle.target);
+    expect(parent.status).toBe("accepted");
+    expect(state.outbound.find((out: any) => out.message.message_id === pending.message.message_id).status).toBe("released");
+    expect(unwrap(await f.ports.engine.getSnapshot("run-1"))!.tasks[0]!.agentExecution).toEqual(original.handle);
+    return completed.result;
+  }
+  /** Reply through Runtime to real Reviewer/QA gate requests while tick awaits them outside its lock. */
+  async function tickWithReviews() {
+    let done = false;
+    const ticking = f.runtime.tick().finally(() => { done = true; }); void ticking.catch(() => undefined);
+    let cursor = 0; const deadline = Date.now() + 60_000;
+    while (!done) {
+      if (Date.now() > deadline) {
+        const snapshot = await f.runtime.inspect() as any;
+        const pending = snapshot.outbound.filter((out: any) => out.message.type === "verification.requested").map((out: any) => ({ id: out.message.message_id, status: out.status, error: out.error, gate: out.message.payload.definition?.id }));
+        await f.runtime.cancel("run-1", "Stop timed-out test verification"); await ticking.catch(() => undefined);
+        throw new Error(`Connected verification did not finish: ${JSON.stringify(pending)}`);
+      }
+      while (cursor < f.transport.sentRequests.length) {
+        const delivered = f.transport.sentRequests[cursor++]!, message = JSON.parse(delivered.instruction);
+        if (message.type !== "verification.requested" || !message.payload.definition) continue;
+        const out = { message };
+        const binding = f.panes.bindings.find(pane => pane.paneId === delivered.target.paneId)!;
+        const observed = await f.verification.inspectReview(binding, { messageId: out.message.message_id }) as any;
+        expect(observed.observation.revision).toBe(out.message.payload.input.sourceRevision);
+        expect(observed.observation.diff).toContain("double.cjs");
+        const completed = await f.verification.completeReview(binding, { reviewId: observed.reviewId, summary: "Reviewed the exact committed implementation and immutable acceptance test", criteria: observed.context.definition.configuration.criterionIds.map((criterionId: string) => ({ criterionId, passed: true, summary: "The observed committed diff doubles the input and retains the spec-derived acceptance test" })) });
+        await f.runtime.receiveHerdr(f.envelope("review.verdict", completed.result, { causation_id: out.message.message_id,
+          sender: { role: binding.role, agent_id: binding.agentId, pane_id: binding.paneId }, artifact_references: [completed.artifact] }));
+      }
+      if (!done) await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    await ticking;
+  }
+  return { ...f, command, developer, qa, development, original, testPath, sourcePath, testSource, currentHead, edit, commit, addTests, request, measure, tickWithReviews };
+}
+
+describe("connected independent policy phases", () => {
+  it.each(["node_tap", "vitest_json"] as const)("%s follows real Red/Green/Refactor through QA, borrowed notices, gates and human delivery", async reporter => {
+    const f = await connectedPhaseFixture(reporter);
+    expect((await f.dossier()).strategy.tddDecision.mode).toBe("required");
+    await expect(f.edit(f.sourcePath)).rejects.toThrow("Red evidence");
+    await expect(f.runtime.authorizeImplementation("run-1", "implement")).rejects.toThrow("Red evidence");
+    await expect(f.edit("guide.md")).rejects.toThrow("outside the accepted task ownership");
+    await f.addTests(); const redRevision = f.currentHead();
+    const red = await f.measure("red"); expect(red.status).toBe("failed");
+    expect(await f.runtime.authorizeImplementation("run-1", "implement")).toMatchObject({ authorized: true });
+    await expect(f.edit(f.testPath)).rejects.toThrow("frozen");
+    await f.edit(f.sourcePath); await writeFile(join(f.developer.worktreePath!, f.sourcePath), "module.exports=x=>x*2;\n");
+    await writeFile(join(f.developer.worktreePath!, f.testPath), f.testSource + "// mixed test change\n");
+    await expect(f.commit("mixed source and frozen tests")).rejects.toThrow("frozen");
+    expect(f.currentHead()).toBe(redRevision); expect(git(f.developer.worktreePath!, "diff", "--cached", "--name-only")).toBe("");
+    await writeFile(join(f.developer.worktreePath!, f.testPath), f.testSource);
+    const greenCommit = await f.commit("Green: double the input") as any;
+    expect(greenCommit).toMatchObject({ committed: true });
+    expect(git(f.developer.worktreePath!, "show", "--format=", "--name-only", greenCommit.head)).toBe(f.sourcePath);
+    const feedback = await f.development.check(f.developer, { runId: "run-1", taskId: "implement" }) as any;
+    expect(feedback.independentAcceptanceEvidence).toBe(false); expect(feedback.measurements[0].failed).toBe(0);
+    expect((await f.dossier()).strategy.metadata.tddEvidence).toHaveLength(1);
+    const green = await f.measure("green"); expect(green.status).toBe("passed");
+    await f.edit(f.sourcePath); await writeFile(join(f.developer.worktreePath!, f.sourcePath), "const double=x=>2*x; module.exports=double;\n"); await f.commit("Refactor: name the doubling operation");
+    const refactor = await f.measure("refactor"); expect(refactor.status).toBe("passed");
+    for (const receipt of [red, green, refactor]) {
+      expect(await f.receipts.authenticateEvidence(receipt)).toBe(true);
+      expect((receipt.metadata!.conditionalTdd as any).testRevision).toBe(redRevision);
+      expect((receipt.metadata!.conditionalTdd as any).testNames).toEqual([phaseTestName]);
+      expect(unwrap(await f.ports.artifactStore.resolve(receipt.evidenceArtifacts[0]!.artifactId))).toEqual(receipt.evidenceArtifacts[0]);
+    }
+    expect((await f.runtime.inspect() as any).outbound.filter((out: any) => out.message.type === "task.assignment")).toHaveLength(1);
+    const developerTurns = f.transport.sentRequests.filter(request => request.role === "developer");
+    expect(developerTurns).toHaveLength(4); expect(new Set(developerTurns.map(request => request.target.paneId))).toEqual(new Set([f.developer.paneId]));
+    await f.submit("implement", null); await f.tickWithReviews(); await f.tickWithReviews();
+    const run = await f.inspect();
+    expect(run.tasks[0].cycle.status).toBe("passed"); expect(run.workflowCycle.status).toBe("passed");
+    expect(run.workflowCycle.history[0].metadata.integrationCommitHash).toBe(run.workflowChange.headCommitHash);
+    expect(f.calls.map(context => (context.input as any).scope)).toEqual(["task", "workflow"]);
+    expect((f.calls[0]!.input as any).sourceRevision).toBe(f.currentHead());
+    expect((f.calls[1]!.input as any).sourceRevision).toBe(run.workflowChange.headCommitHash);
+    expect(run.status).toBe("awaiting_approval"); expect(run.approvalKind).toBe("delivery");
+    await f.approve(); expect((await f.inspect()).status).toBe("completed");
+    expect(unwrap(await f.ports.runStore.get("run-1"))!.snapshot.status).toBe("succeeded");
+    expect(git(f.repository, "branch", "--show-current")).toBe("main");
+  }, 120_000);
+
+  it("failed Green measurements reject the same revision and escalate at the configured bound", async () => {
+    const f = await connectedPhaseFixture("node_tap", 2);
+    await f.addTests(); await f.measure("red");
+    for (let failureNumber = 1; failureNumber <= 2; failureNumber++) {
+      await f.edit(f.sourcePath); await writeFile(join(f.developer.worktreePath!, f.sourcePath), `module.exports=x=>x+${failureNumber + 2};\n`); await f.commit(`Incomplete repair ${failureNumber}`);
+      const { pending, head } = await f.request("green");
+      let failure: unknown;
+      try { await f.verification.behavioralEvidence(f.qa, { runId: "run-1", taskId: "implement", phase: "green" }); } catch (error) { failure = error; }
+      expect(failure).toBeInstanceOf(HostBehavioralFailure);
+      const result = await f.runtime.recordPhaseFailure(f.qa, pending.message.message_id, String(failure), true, (failure as HostBehavioralFailure).evidence) as any;
+      expect(result).toMatchObject({ maxIterations: 2 });
+      expect((await f.dossier()).strategy.metadata.tddEvidence).toHaveLength(1);
+      if (failureNumber === 1) {
+        await expect(f.runtime.requestPhaseVerification(f.developer, "run-1", "implement", "green", head)).rejects.toThrow("already failed the phase");
+        await f.runtime.flushOutbound();
+        const notice = (await f.runtime.inspect() as any).outbound.find((out: any) => out.message.payload.kind === "policy_phase_outcome" && out.message.payload.phase === "green");
+        expect(notice.status).toBe("accepted"); expect(notice.parentAssignmentId).toBe(f.original.message.message_id);
+      } else expect(result.status).toBe("escalated");
+    }
+    expect((await f.inspect()).error).toContain("repair limit exhausted");
+    await expect(f.edit(f.sourcePath)).rejects.toThrow();
+    const before = f.transport.sentRequests.filter(request => ["developer", "qa"].includes(request.role)).length; await f.runtime.tick();
+    expect(f.transport.sentRequests.filter(request => ["developer", "qa"].includes(request.role))).toHaveLength(before);
+    const history = (await f.runtime.inspect() as any).outbound.filter((out: any) => out.error?.startsWith("policy_phase_failed:"));
+    expect(history).toHaveLength(2); expect(history.every((out: any) => out.status === "released" && out.phaseFailureEvidence?.trust === "stored")).toBe(true);
+  }, 120_000);
+});
+
 
 describe("P19 integrated Agentic SDLC", () => {
   it("conversation-only creates no workflow", async () => {
