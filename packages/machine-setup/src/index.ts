@@ -7,3 +7,4 @@ export * from "./state-store.js";
 export * from "./tools.js";
 export * from "./installer-registry.js";
 export * from "./machine-config.js";
+export * from "./path-manager.js";
