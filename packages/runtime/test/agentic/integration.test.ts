@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomUUID, generateKeyPairSync } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentResultSchema, ApprovalDecisionSchema, RoleMessageSchema, VerificationResultSchema,
-  type PaneBinding, type Specification, type QualityGate, type QualityGateContext } from "@bflow/contracts";
+  type AgentRequest, type PaneBinding, type Specification, type QualityGate, type QualityGateContext } from "@bflow/contracts";
 import { DeterministicWorkflowEngine } from "@bflow/core";
 import { FileAgentRegistry } from "@bflow/agent-registry";
 import { openSqliteRunStore } from "@bflow/persistence";
@@ -567,23 +567,33 @@ describe("P19 integrated Agentic SDLC", () => {
     const f = await fixture({ remoteReview: true });
     await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
     await f.evidence("implement"); await f.submit();
+    // Observe the transport event instead of racing real Git/fsync work against
+    // a 2.5-second polling budget. Runtime inspection then queues behind receipt
+    // persistence and must return while the background tick awaits the verdict.
+    let delivered!: (request: AgentRequest) => void;
+    const delivery = new Promise<AgentRequest>(resolve => { delivered = resolve; });
+    const send = f.transport.send.bind(f.transport);
+    vi.spyOn(f.transport, "send").mockImplementation(async (request, options) => {
+      const receipt = await send(request, options);
+      if (JSON.parse(request.instruction).type === "verification.requested") delivered(request);
+      return receipt;
+    });
     const tools = new CoordinatorTools(f.runtime);
     expect(await tools.invoke("tick", {}, { role: "coordinator" })).toMatchObject({ scheduled: true });
     const ticking = tools.drain();
     ticking.catch(() => undefined);
-    let request: any;
     try {
-      await expect.poll(async () => {
-        request = f.transport.sentRequests.find(req => JSON.parse(req.instruction).type === "verification.requested");
-        if (!request) return false;
-        const state = await f.runtime.inspect() as any;
-        return state.outbound.some((out: any) => out.request?.requestId === request.requestId && out.status === "accepted");
-      }, { timeout: 2500, interval: 20 }).toBe(true);
+      const request = await Promise.race([delivery, ticking.then(() => {
+        throw new Error("Runtime tick completed before delivering the Reviewer request");
+      })]);
+      const state = await f.runtime.inspect() as any;
+      expect(state.outbound.some((out: any) => out.request?.requestId === request.requestId && out.status === "accepted")).toBe(true);
+      expect(await tools.invoke("tick_status", {}, { role: "coordinator" })).toMatchObject({ running: true });
+      const message = JSON.parse(request.instruction);
+      const result = unwrap(await f.localReview(message.payload));
+      await f.runtime.receiveHerdr(f.envelope("review.verdict", result, { sender: { role: "reviewer", agent_id: request.target.agentId, pane_id: request.target.paneId }, causation_id: message.message_id }));
+      await ticking; expect((await f.inspect()).tasks[0].cycle.status).toBe("passed");
     } catch (error) { await ticking; throw error; }
-    const message = JSON.parse(request.instruction);
-    const result = unwrap(await f.localReview(message.payload));
-    await f.runtime.receiveHerdr(f.envelope("review.verdict", result, { sender: { role: "reviewer", agent_id: request.target.agentId, pane_id: request.target.paneId }, causation_id: message.message_id }));
-    await ticking; expect((await f.inspect()).tasks[0].cycle.status).toBe("passed");
   });
   it("reconciliation permits resend only after a proven not_delivered result", async () => {
     const f = await fixture(); f.panes.busy.add("conversation");
