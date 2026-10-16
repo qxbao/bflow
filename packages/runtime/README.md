@@ -251,8 +251,42 @@ binding receipts are rejected; signing/Core/checkpoint acceptance is covered in
 the separate integration tests. Official agent integrations must supply their
 actual native session identity for receipt attestation. Passing them does not establish live
 AI-generated implementation, independent model review or a full SDLC delivery.
-Provider-specific prompt/tool registration and automatic CLI host boot/shutdown
-still require a concrete host integration; `bflow up` does not install one implicitly.
+The default local host is exposed through `ensureAgenticHost`. It starts a detached
+process before provider launch and prepares role-specific MCP and Claude hook
+settings. Activation requires the complete `up` manifest and matching native
+SessionStart receipts, including Herdr's actual `herdr:claude` session locator.
+Legacy bare provider panes must be stopped/recreated; a process name alone does
+not establish a configured role. The host's scheduler and inbound Herdr prompt
+pump run independently of model turns. `close()` disconnects a CLI client;
+`quiesce()`, aggregate `checkpoint()`, and `shutdown()` are separate lifecycle
+operations. Shutdown requires the named Herdr server to have stopped. Failed or
+uncertain work keeps its worktrees and requires reconciliation.
+
+The stdio MCP entrypoint exposes orchestration tools only to Coordinator, and
+implementation authorization/submission only to Developer. Tester/QA alternative
+evidence and Reviewer/QA verdicts are tied to host-captured exact committed diffs
+and accepted criteria. Host authentication compares the exact issued receipts;
+model-supplied `independentExecution` or approval flags grant no authority. Native
+role messages still travel through the actual Herdr plugin; the control socket
+carries host operations, rather than delivering assignments between agents.
+
+The default verification configuration supports documentation (`.md`, `.txt`,
+`.rst`) with manual acceptance criteria. It runs `git diff --check` against exact
+task and integrated revisions, requires independent Reviewer and QA judgments,
+and requires Tester/QA alternative evidence before task acceptance. This Git
+integrity check does not establish arbitrary application behavior. Behavioral
+changes and required TDD need configured measurement runners and fail closed in
+the default host. Delivery and project-mandated approvals remain human decisions;
+the approved low-risk specification policy may accept a lightweight spec.
+
+Only Conversation's launch-local UserPromptSubmit hook feeds authenticated user
+turns to the Gateway; exact Runtime RoleMessage deliveries are handled as
+transport, and role envelopes cannot be promoted into human approval text. No
+MCP tool approves on behalf of a user. Private host keys/configuration and Unix
+sockets have owner-only permissions. These are local host trust controls, not
+hostile same-user OS isolation. Live provider launch, native-session binding,
+role-message receipt, task implementation and final delivery are distinct pieces
+of evidence; local host tests alone do not prove a full live SDLC run.
 
 ## Validation
 

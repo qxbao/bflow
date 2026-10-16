@@ -28,8 +28,10 @@ export async function deliverNativeHerdrMessage(env = process.env): Promise<void
     configs = [record(JSON.parse(await readFile(resolve(directory, "host.json"), "utf8")))]; }
   const matching: Record<string, unknown>[] = [];
   for (const candidate of configs) {
-    const candidateManifest = SessionManifestSchema.parse(JSON.parse(await readFile(textField(candidate.manifestFile), "utf8")));
-    if (candidateManifest.sessionId === currentSession && candidateManifest.panes.some(pane => pane.paneId === context.focused_pane_id && pane.workspaceId === context.workspace_id)) matching.push(candidate);
+    try {
+      const candidateManifest = SessionManifestSchema.parse(JSON.parse(await readFile(textField(candidate.manifestFile), "utf8")));
+      if (candidateManifest.sessionId === currentSession && candidateManifest.panes.some(pane => pane.paneId === context.focused_pane_id && pane.workspaceId === context.workspace_id)) matching.push(candidate);
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   }
   if (matching.length !== 1) throw new Error("Native pane must belong to exactly one active host manifest");
   const config = matching[0]!;

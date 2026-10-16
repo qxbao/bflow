@@ -89,7 +89,7 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       } });
     runtime = new AgenticWorkflowRuntime({ engine: new coreModule.DeterministicWorkflowEngine({ bindingReceiptKeys: options.bindingReceiptKeys }), runStore, artifactStore,
       registry: new registryModule.FileAgentRegistry({ stateFile: resolve(directory, "registry.json") }), transport, panes, policies,
-      roleCapabilities: options.roleCapabilities, maxConcurrency: options.maxDeveloperCapacity ?? 2, taskChecks: options.taskChecks, workflowChecks: options.workflowChecks,
+      automaticAlternativeEvidence: true, roleCapabilities: options.roleCapabilities, maxConcurrency: options.maxDeveloperCapacity ?? 2, taskChecks: options.taskChecks, workflowChecks: options.workflowChecks,
       authenticateMessage: async message => await authenticateNativeHerdrMessage(message) || await options.authenticateMessage(message), authenticateResult: options.authenticateResult,
       authenticateEvidence: options.authenticateEvidence, authenticateGateResult: options.authenticateGateResult,
       authorizeHuman: async decision => { const authorized = await options.authorizeHuman(decision);

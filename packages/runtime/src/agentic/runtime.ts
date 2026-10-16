@@ -483,7 +483,7 @@ export class AgenticWorkflowRuntime {
       taskId: task.taskId, expectedVersion: current.version, result, occurredAt: this.now(), idempotencyKey: `result:${result.requestId}` }));
     let evidenceComplete = false;
     try { this.ports.policies.assertEvidenceComplete(task.spec.strategy); evidenceComplete = true; } catch { /* Independent evidence is still required. */ }
-    if (result.status === "succeeded" && !evidenceComplete && task.spec.strategy.tddDecision.mode !== "required") {
+    if (this.ports.automaticAlternativeEvidence && result.status === "succeeded" && !evidenceComplete && task.spec.strategy.tddDecision.mode !== "required") {
       const requestId = `alternative-${result.requestId}`;
       outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: requestId,
         correlation_id: run.delegation.correlationId, causation_id: message.message_id, run_id: run.runId,

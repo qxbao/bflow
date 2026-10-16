@@ -52,6 +52,18 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
   await mkdir(socketRoot, { recursive: true, mode: 0o700 });
   const stat = await lstat(socketRoot);
   if (!stat.isDirectory() || (stat.mode & 0o077) !== 0 || (process.getuid && stat.uid !== process.getuid())) throw new Error("Unsafe host socket directory");
+  const bootLock = await open(join(directory, "boot.lock"), "a+", 0o600);
+  try {
+    const deadline = Date.now() + 15_000;
+    while (true) {
+      const acquired = await new Promise<boolean>((accept, reject) => {
+        const child = spawn("flock", ["--nonblock", "3"], {stdio:["ignore","ignore","ignore",bootLock.fd]});
+        child.once("error",reject); child.once("exit",code=>accept(code===0));
+      });
+      if (acquired) break;
+      if (Date.now() >= deadline) throw new Error("Agentic host startup is busy; reconcile before retry");
+      await new Promise(accept=>setTimeout(accept,50));
+    }
   const configPath = join(directory, "host.json");
   try {
     const file = await open(configPath, "wx", 0o600);
@@ -101,4 +113,5 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
     async close() {},
     async shutdown() { await request("shutdown"); }
   };
+  } finally { await bootLock.close(); }
 }
