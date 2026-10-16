@@ -126,17 +126,17 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
     if (pane.role !== "conversation" || pane.sessionId !== sessionId) return failure("P13 returned a foreign Conversation pane");
     return { ok: true, value: pane };
   }
-  async down(sessionId: string, _options?: OperationOptions): Promise<OperationResult<SessionManifest>> {
+  async down(sessionId: string, options?: OperationOptions): Promise<OperationResult<SessionManifest>> {
     if (!this.matches(sessionId)) return failure("Cannot stop another repository's session");
-    return { ok: false, error: { code: "transport_unavailable", retryable: true,
-      message: "P13 provides topology management but no graceful shutdown API. Compose Runtime quiesce/checkpoint and a lifecycle shutdown provider before down." } };
+    const stopped = await this.panes.shutdownTopology(options);
+    return stopped.ok ? this.validate(stopped.value) : stopped;
   }
   async doctorSession(_options: { workspaceRoot: string }): Promise<EnvironmentDoctorReport> {
     const root = this.input.repository.root;
     if (_options.workspaceRoot !== root) throw new Error("Cannot diagnose another repository");
     const current = await this.getManifest(this.input.repository.sessionName, { timeoutMs: 5000 });
     const checks: EnvironmentDoctorReport["checks"] = [{ checkId: "p13-composition", name: "P13 lifecycle adapter", status: "passed", message: "Real RolePaneManager with repository-scoped runner and FileSessionManifestStore" },
-      { checkId: "runtime-shutdown", name: "Runtime graceful shutdown", status: "warn", message: "Runtime quiesce/checkpoint and P13 graceful shutdown API are unavailable; down remains guarded." }];
+      { checkId: "runtime-shutdown", name: "Runtime graceful shutdown", status: "warn", message: "Pane shutdown is available; the provider host must quiesce and persist aggregate checkpoints before it is called." }];
     if (!current.ok) checks.push({ checkId: "p13-manifest", name: "P13 manifest", status: "failed", message: current.error.message });
     else if (!current.value) checks.push({ checkId: "p13-manifest", name: "P13 manifest", status: "warn", message: "No topology manifest yet. Run bflow up." });
     else for (const pane of current.value.panes) checks.push({ checkId: `pane-${pane.bindingId}`.slice(0, 200), name: `${pane.role}: ${pane.paneId}`,

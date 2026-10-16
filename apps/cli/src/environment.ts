@@ -18,11 +18,13 @@ import { openPaneManagerEnvironment } from "./pane-manager-integration.js";
 /** CLI composition seam. The provider owns P13 bootstrap/reconciliation and Runtime checkpoint persistence. */
 export interface EnvironmentIntegration {
   readonly manager: SessionLifecycleManager;
-  readonly runtime?: RuntimeService;
+  readonly runtime?: Pick<RuntimeService, "findRuns" | "getRun">;
   /** Establish a shutdown barrier: stop intake/dispatch and drain in-flight state writes. */
   readonly quiesce?: (options: OperationOptions) => Promise<OperationResult<void>>;
   /** Quiesce dispatch and durably persist an aggregate checkpoint before returning. */
   readonly checkpoint?: (command: CreateCheckpointCommand, options: OperationOptions) => Promise<OperationResult<RecoveryCheckpoint>>;
+  /** Start/reconcile the durable provider host after physical roles are ready. */
+  readonly activate?: (manifest: SessionManifest, options: OperationOptions) => Promise<void>;
   readonly close?: () => Promise<void>;
 }
 
@@ -187,7 +189,24 @@ export class EnvironmentLifecycle {
     if (!help.includes("--session") || !help.includes("headless")) fail("Installed Herdr does not advertise named sessions/headless server");
     const schema = object(JSON.parse(await this.command(repository, config.environment.herdrBinary, ["api", "schema", "--json"], deadline)) as unknown);
     if (schema["protocol"] !== 22 || schema["schema_version"] !== 1) fail("Unsupported Herdr API: expected protocol 22/schema 1");
-    for (const cli of new Set(config.environment.roles.map((r) => r.cli))) await this.command(repository, cli, ["--version"], deadline);
+    for (const cli of new Set(config.environment.roles.map((r) => r.cli))) {
+      await this.command(repository, cli, ["--version"], deadline);
+      await this.providerAuthentication(repository, cli, deadline);
+    }
+  }
+  private async providerAuthentication(repository: RepositoryIdentity, cli: string, deadline?: Deadline): Promise<string> {
+    const args = cli === "codex" ? ["login", "status"] : cli === "claude" ? ["auth", "status", "--json"] : null;
+    if (!args) fail(`Authentication diagnostics are unsupported for '${cli}'; configure codex or claude before starting agentic roles.`);
+    const result = await this.runner.run({ executable: cli, args, cwd: repository.root,
+      env: namedSessionEnvironment(repository.sessionName), timeoutMs: Math.min(5000, deadline?.remaining() ?? 5000) });
+    // Do not echo provider auth output: it may contain account identity or secrets.
+    if (result.exitCode !== 0) fail(`Provider '${cli}' is not authenticated. Run ${cli === "codex" ? "codex login" : "claude auth login"} in this profile before bflow up.`);
+    if (cli === "claude") {
+      let status: unknown;
+      try { status = JSON.parse(result.stdout); } catch { fail("Claude authentication status is malformed; cannot establish readiness."); }
+      if (object(status)["loggedIn"] !== true) fail("Provider 'claude' is not authenticated. Run claude auth login before bflow up.");
+    }
+    return `Provider '${cli}' reports authenticated; transport idle alone is not authentication evidence`;
   }
   private ready(manifest: SessionManifest, config: EnvironmentConfig): boolean {
     return manifest.status === "up" && config.environment.roles.filter((r) => r.required).every((r) =>
@@ -220,7 +239,7 @@ export class EnvironmentLifecycle {
           while (!await this.probe(repository, config, deadline)) await deadline.pause();
         }
         if (!running || manifest === null || manifest.status === "down" || manifest.status === "degraded") {
-          if (previous?.phase === "manager_pending") fail("Earlier role startup is unresolved and manager has no recoverable manifest; refusing duplicate agents");
+          if (previous?.phase === "manager_pending" && manifest === null) fail("Earlier role startup is unresolved and manager has no recoverable manifest; refusing duplicate agents");
           await this.writeIntent(repository, "manager_pending");
           manifest = this.validateManifest(unwrap(await deadline.call((opts) => integration.manager.up(repository.sessionName, opts))), repository);
         }
@@ -238,6 +257,7 @@ export class EnvironmentLifecycle {
           manifest = this.validateManifest(manifestRaw, repository);
         }
         if (!await this.probe(repository, config, deadline)) fail("Herdr server stopped before roles became ready");
+        if (integration.activate) await deadline.call(opts => integration.activate!(manifest!, opts));
         await this.writeIntent(repository, "ready");
         return this.saveManifest(repository, manifest);
       } finally { await integration.close?.(); }
@@ -389,6 +409,7 @@ export class EnvironmentLifecycle {
       await check("herdr", async () => { await this.dependenciesAvailable(repository, validConfig, new Deadline(validConfig.environment.startupTimeoutMs)); return "Named-session/headless CLI and protocol 22/schema 1 available"; });
       // Report each missing agent independently instead of stopping at the first dependency.
       for (const executable of new Set(validConfig.environment.roles.map((r) => r.cli))) await check(`agent-${executable.replace(/[^a-zA-Z0-9_-]/g, "_").slice(-100)}`, () => this.command(repository, executable, ["--version"]));
+      for (const executable of new Set(validConfig.environment.roles.map((r) => r.cli))) await check(`auth-${executable.replace(/[^a-zA-Z0-9_-]/g, "_").slice(-100)}`, () => this.providerAuthentication(repository, executable));
       await check("session", async () => await this.probe(repository, validConfig) ? "Repository named session is running" : "Repository named session is stopped (run bflow up)");
       await check("lifecycle-lock", async () => {
         try { await access(this.statePath(repository, "lifecycle.lock")); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return "No lifecycle operation lock"; throw error; }

@@ -23,6 +23,8 @@ class FakeProcesses implements EnvironmentProcessRunner {
   readonly requests: EnvironmentProcessRequest[] = [];
   readonly running = new Set<string>();
   serverFails = false;
+  authenticated = true;
+  claudeStatus: unknown = { loggedIn: true };
   missing = new Set<string>();
   async run(request: EnvironmentProcessRequest) {
     this.requests.push(request);
@@ -30,6 +32,8 @@ class FakeProcesses implements EnvironmentProcessRunner {
     if (this.missing.has(request.executable)) throw new Error(`ENOENT ${request.executable}`);
     const session = request.env?.["HERDR_SESSION"] ?? "incorrect-default";
     const args = request.args.join(" ");
+    if (args === "login status") return { exitCode: this.authenticated ? 0 : 1, stdout: "", stderr: this.authenticated ? "Logged in" : "secret-account-information" };
+    if (args === "auth status --json") return { exitCode: 0, stdout: JSON.stringify(this.claudeStatus), stderr: "" };
     let value: unknown = {};
     if (args === "--help") return { exitCode: 0, stdout: "herdr --session NAME; Run as headless server", stderr: "" };
     if (args === "api schema --json") value = { protocol: 22, schema_version: 1 };
@@ -92,6 +96,45 @@ describe("P12 repository environment lifecycle", () => {
       expect(result.ok).toBe(false); expect(result.stderr).toContain("Not a Git");
       await expect(readFile(join(other, ".bflow/config.yaml"))).rejects.toThrow();
     } finally { await rm(other, { recursive: true, force: true }); }
+  });
+  it("fails startup before launching Herdr when provider is not authenticated and redacts auth diagnostics", async () => {
+    runner.authenticated = false;
+    await expect(lifecycle.up()).rejects.toThrow("not authenticated");
+    expect(runner.requests.some(request => request.args[0] === "server")).toBe(false);
+    expect(fixture.manager.up).not.toHaveBeenCalled();
+    const report = await lifecycle.doctor();
+    expect(report.healthy).toBe(false);
+    expect(report.checks.find(check => check.checkId === "auth-codex")?.status).toBe("failed");
+    expect(JSON.stringify(report)).not.toContain("secret-account-information");
+  });
+  it("reconciles manager_pending only with an existing validated physical manifest", async () => {
+    await lifecycle.up();
+    fixture.set({ ...fixture.get(), status: "degraded" });
+    await writeFile(join(dir, ".bflow/state/operation.json"), JSON.stringify({ repositoryId: repository.id, sessionName: repository.sessionName, phase: "manager_pending" }));
+    const recovered = await lifecycle.up();
+    expect(recovered.status).toBe("up");
+    expect(fixture.manager.up).toHaveBeenCalledTimes(2);
+    expect(runner.requests.filter(request => request.args[0] === "server")).toHaveLength(1);
+  });
+  it("requires an authenticated Claude status payload rather than accepting exit zero alone", async () => {
+    const path = join(dir, ".bflow/config.yaml");
+    const config = JSON.parse(await readFile(path, "utf8"));
+    config.environment.roles = config.environment.roles.map((role: object) => ({ ...role, cli: "claude" }));
+    await writeFile(path, JSON.stringify(config));
+    runner.claudeStatus = { loggedIn: false, email: "private-account@example.test" };
+    await expect(lifecycle.up()).rejects.toThrow("not authenticated");
+    expect(fixture.manager.up).not.toHaveBeenCalled();
+    const report = await lifecycle.doctor();
+    expect(report.checks.find(check => check.checkId === "auth-claude")?.status).toBe("failed");
+    expect(JSON.stringify(report)).not.toContain("private-account@example.test");
+  });
+  it("activates the real host only after roles are ready and does not report ready when host startup fails", async () => {
+    const activate = vi.fn(async () => { throw new Error("host startup failed"); });
+    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, activate } });
+    await expect(composed.up()).rejects.toThrow("host startup failed");
+    expect(activate).toHaveBeenCalledWith(expect.objectContaining({ status: "up" }), expect.any(Object));
+    const state = JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8"));
+    expect(state.phase).toBe("manager_pending");
   });
   it("resolves nested and symlink paths to the same repository", async () => {
     await mkdir(join(dir, "nested")); await symlink(dir, join(dir, "alias"));
