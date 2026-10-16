@@ -1,6 +1,6 @@
 import { mkdir, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
-import { SessionManifestSchema, type ApprovalDecision, type QualityGate } from "@bflow/contracts";
+import { SessionManifestSchema, type ApprovalDecision, type QualityGate, type RoleMessage } from "@bflow/contracts";
 import { AgenticWorkflowRuntime } from "./runtime.js";
 import { loadAgenticPolicies, type AgenticRuntimePorts, type PanePolicy } from "./ports.js";
 import { createAgenticConversationHost, type AgenticConversationHost } from "./conversation.js";
@@ -25,6 +25,10 @@ export interface OpenAgenticWorkspaceOptions {
   authenticateGateResult: AgenticRuntimePorts["authenticateGateResult"];
   authorizeHuman: AgenticRuntimePorts["authorizeHuman"];
   projectApprovalRequired?: AgenticRuntimePorts["projectApprovalRequired"];
+  onHumanDecision?: (decision: ApprovalDecision) => Promise<void>;
+  onNativeDelivery?: (message: RoleMessage) => Promise<void>;
+  /** Provider launch configuration used for dynamic Developer panes. */
+  roleLaunch?: Record<string, { systemPrompt: string; mcpConfigFile: string; hooksSettingsFile: string }>;
 }
 export interface AgenticWorkspaceHandle {
   runtime: AgenticWorkflowRuntime; conversation: AgenticConversationHost; tools: CoordinatorTools;
@@ -52,10 +56,16 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
   const transport = herdrModule.createHerdrAdapter({ runner });
   // Verify the available Herdr version/protocol before opening persistent resources or allocating agents.
   unwrap(await transport.initialize({ runtimeId: `p19-${options.sessionId}`, configuration: {}, recoveryMode: true, initializedAt: new Date().toISOString() }));
+  const roleConfigs: Record<string, unknown> = {};
+  for (const [role, launch] of Object.entries(options.roleLaunch ?? {})) {
+    const args = await paneModule.buildProviderRoleLaunchFromFiles({ ...launch, agentKind: manifest.panes.find(p => p.role === "coordinator")!.agentKind, role });
+    roleConfigs[role] = { args };
+  }
   const panes: PanePolicy = new paneModule.RolePaneManager({ config: { sessionId: options.sessionId,
     projectName: manifest.projectName, workspaceRoot: repository, conversationSessionId: manifest.conversationSessionId,
     maxDeveloperCapacity: options.maxDeveloperCapacity ?? 2,
-    defaultAgentKind: manifest.panes.find(p => p.role === "coordinator")!.agentKind }, runner, store: manifestStore });
+    defaultAgentKind: manifest.panes.find(p => p.role === "coordinator")!.agentKind,
+    roleConfigs }, runner, store: manifestStore });
   const directory = options.storageDirectory ?? resolve(repository, ".bflow/state/agentic");
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const runStore = unwrap<any>(persistenceModule.openSqliteRunStore({ filename: resolve(directory, "runs.db") }));
@@ -87,11 +97,13 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       ...(options.projectApprovalRequired ? { projectApprovalRequired: options.projectApprovalRequired } : {})
     }, { journalDirectory: resolve(directory, "journal"), repositoryPath: repository });
     await runtime.initialize();
-    const conversation = await createAgenticConversationHost({ runtime, manifest, contextDirectory: resolve(directory, "conversation") });
+    const conversation = await createAgenticConversationHost({ runtime, manifest, contextDirectory: resolve(directory, "conversation"), ...(options.onHumanDecision ? { onHumanDecision: options.onHumanDecision } : {}) });
     const tools = new CoordinatorTools(runtime);
     const ingress = options.nativeIngressSocket ? await startHerdrReceiptIngress({ socketPath: options.nativeIngressSocket,
-      publicKeys: options.bindingReceiptKeys ?? {}, receive: message => message.recipient.role === "conversation"
-        ? conversation.receiveHerdr(message) : runtime.receiveHerdr(message) }) : undefined;
+      publicKeys: options.bindingReceiptKeys ?? {}, receive: async message => {
+        const result = message.recipient.role === "conversation" ? await conversation.receiveHerdr(message) : await runtime.receiveHerdr(message);
+        await options.onNativeDelivery?.(message); return result;
+      } }) : undefined;
     return { runtime, conversation, tools, async close() { await tools.drain(); await ingress?.close(); artifactStore.close(); runStore.close(); } };
   } catch (error) { artifactStore?.close(); runStore.close(); throw error; }
 }

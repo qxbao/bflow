@@ -101,3 +101,6 @@ export * from "./resilience/index.js";
 export * from "./observability/index.js";
 export * from "./context/index.js";
 export * from "./session-recovery/index.js";
+
+export { ensureAgenticHost } from "./agentic/host-controller.js";
+export type { AgenticHostController, AgenticHostOptions, RoleLaunchDescriptor } from "./agentic/host-controller.js";

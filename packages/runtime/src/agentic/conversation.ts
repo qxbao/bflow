@@ -14,6 +14,7 @@ export interface AgenticConversationHost {
 /** Compose the actual P14 Gateway with P19's durable Herdr outbox, retaining P14 dialogue/queue policies. */
 export async function createAgenticConversationHost(options: {
   runtime: AgenticWorkflowRuntime; manifest: SessionManifest; contextDirectory: string;
+  onHumanDecision?: (decision: import("@bflow/contracts").ApprovalDecision) => Promise<void>;
 }): Promise<AgenticConversationHost> {
   const manifest = SessionManifestSchema.parse(options.manifest);
   const conversation = manifest.panes.find(pane => pane.role === "conversation");
@@ -38,6 +39,7 @@ export async function createAgenticConversationHost(options: {
     }
     async receiveApprovalDecision(input: unknown): Promise<OperationResult<void>> {
       const decision = ApprovalDecisionSchema.parse(input);
+      await options.onHumanDecision?.(decision);
       const run = record(await runtime.inspect(decision.runId));
       const correlationId = textField(record(run.delegation).correlationId);
       return enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: `approval-${digest(decision)}`,

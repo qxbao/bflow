@@ -1,5 +1,5 @@
 import {
-  AgentBindingReceiptSchema, canonicalReceiptJson, hasAuthenticatedBindings,
+  AgentBindingReceiptSchema, canonicalReceiptJson, hasAuthenticatedBindings, CreateCheckpointCommandSchema, RecoveryCheckpointSchema, WorkflowAggregateCheckpointStateSchema,
   AgentResultSchema, AgentTransportCapabilitiesSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
   CancellationRequestSchema, DelegationRequestSchema, GitChangeSetSchema,
   PaneBindingSchema, QualityGateContextSchema, QualityGateResultSchema, RoleMessageSchema, SessionManifestSchema,
@@ -22,6 +22,21 @@ export class AgenticWorkflowRuntime {
   private readonly journal: AgenticJournal;
   constructor(readonly ports: AgenticRuntimePorts, options: { journalDirectory: string; repositoryPath: string }) {
     this.journal = new AgenticJournal(options.journalDirectory, options.repositoryPath);
+  }
+  private quiesced = false;
+  /** Stop new scheduling before lifecycle checkpointing; retain in-flight receipts and worktrees. */
+  async quiesce(): Promise<void> {
+    this.quiesced = true;
+    await this.transaction(async (_state, _save, core) => { await core.flush(); });
+  }
+  async checkpoint(input: unknown) {
+    const command = CreateCheckpointCommandSchema.parse(input);
+    return this.transaction(async () => {
+      const checkpoint = RecoveryCheckpointSchema.parse(unwrap(await this.ports.engine.createCheckpoint(command)));
+      WorkflowAggregateCheckpointStateSchema.parse(checkpoint.state);
+      unwrap(await this.ports.runStore.saveCheckpoint(checkpoint, command.expectedVersion));
+      return checkpoint;
+    });
   }
   private initialization: Promise<void> | undefined;
   async initialize(): Promise<void> {
@@ -67,6 +82,7 @@ export class AgenticWorkflowRuntime {
   }
   /** Trusted local host enqueues a message; actual inter-agent delivery always uses Herdr. */
   async queueHerdr(input: unknown): Promise<JsonValue> {
+    if (this.quiesced) throw new Error("Runtime is quiesced");
     const message = RoleMessageSchema.parse(input);
     return this.transaction(async (_state, save, _core, outbox) => {
       const out = outbox.enqueue(message); await save(); return json(out.message);
@@ -269,6 +285,7 @@ export class AgenticWorkflowRuntime {
   }
 
   async proposeWorkflow(runId: string, specificationInput: unknown, definitionInput: unknown, maxIterations = 3): Promise<JsonValue> {
+    if (this.quiesced) throw new Error("Runtime is quiesced");
     const draft = SpecificationSchema.parse(specificationInput);
     const proposed = WorkflowDefinitionSchema.parse(definitionInput);
     if (!Number.isInteger(maxIterations) || maxIterations < 1 || maxIterations > 10) throw new Error("Invalid verification limit");
@@ -464,6 +481,16 @@ export class AgenticWorkflowRuntime {
     await save();
     await core.mutate(run.runId, current => this.ports.engine.recordAgentResult({ runId: run.runId,
       taskId: task.taskId, expectedVersion: current.version, result, occurredAt: this.now(), idempotencyKey: `result:${result.requestId}` }));
+    if (result.status === "succeeded" && task.spec.strategy.tddDecision.mode !== "required") {
+      const requestId = `alternative-${result.requestId}`;
+      outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: requestId,
+        correlation_id: run.delegation.correlationId, causation_id: message.message_id, run_id: run.runId,
+        sender: { role: "coordinator" }, recipient: { role: "tester" }, type: "verification.requested",
+        payload: json({ kind: "conditional_evidence", runId: run.runId, taskId: task.taskId,
+          instruction: "Inspect the exact committed diff with inspect_alternative_verification, evaluate the accepted criteria independently, then record_alternative_verification. Do not invent evidence.",
+          specification: task.spec.specification, strategy: task.spec.strategy }), artifact_references: [],
+        occurred_at: this.now(), idempotency_key: requestId }), "tester", `evidence-${task.taskId}`, `evidence-${result.attemptId}`, ["testing"]);
+    }
     if (result.status === "blocked") { run.error = result.blockage?.message ?? "Developer is blocked"; this.progress(state, outbox, run, run.error); }
     if (["failed", "timed_out"].includes(result.status)) this.progress(state, outbox, run, result.error?.message ?? "Implementation failed");
     await save();
@@ -527,7 +554,13 @@ export class AgenticWorkflowRuntime {
     const dossier = task?.spec ?? run.workflowSpec!;
     const plan = this.ports.policies.createVerificationPlan({ runId: run.runId, taskId: task?.taskId ?? FINAL_TASK,
       scope: task ? "task" : "workflow", specification: dossier.specification, strategy: dossier.strategy,
-      checks: task ? [...this.ports.taskChecks] : [...this.ports.workflowChecks],
+      checks: (task ? [...this.ports.taskChecks] : [...this.ports.workflowChecks]).map(check => {
+        if (check.metadata?.bindAcceptedCriteria !== true) return check;
+        const config = record(check.configuration);
+        const criteria = dossier.specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived" && criterion.verificationMethod === config.method);
+        return { ...check, configuration: json({ ...config, criterionIds: criteria.map(criterion => criterion.id),
+          testNames: dossier.strategy.criterionMappings.filter(mapping => criteria.some(criterion => criterion.id === mapping.criterionId)).flatMap(mapping => mapping.testNames) }) };
+      }),
       implementerIds: run.tasks.flatMap(item => item.outboundIds).map(id => this.activeState!.outbound.find(out => out.message.message_id === id)?.handle?.target.agentId).filter((id): id is string => !!id),
       maxIterations: run.maxIterations });
     if (task) task.verificationPlan = plan;
@@ -537,6 +570,7 @@ export class AgenticWorkflowRuntime {
   /** A bounded scheduler step; performs independent verification outside the journal lock. */
   async tick(): Promise<JsonValue> {
     await this.initialize();
+    if (this.quiesced) return this.inspect();
     const pending = await this.transaction(async state => structuredClone(state.pendingVerifications));
     for (const item of pending) await this.finishVerification(this.parseJob(item.job), this.parseOutcome(item.outcome));
     const jobs = await this.transaction(async (state, save, core, outbox) => {
@@ -544,6 +578,7 @@ export class AgenticWorkflowRuntime {
       this.activeState = state;
       try {
         for (const run of state.runs) {
+          if (this.quiesced) break;
           if (run.cancelled || ["completed", "failed", "cancelled", "escalated", "awaiting_approval", "intake", "clarifying", "specifying", "planning"].includes(run.status)) continue;
           if (!run.coreCreated) await core.create(run);
           let awaitingWriterStop = false;
@@ -603,7 +638,7 @@ export class AgenticWorkflowRuntime {
           }
           await core.checkpoint(run.runId);
         }
-        await outbox.flush((out, handle) => this.bind(state, core, out, handle));
+        if (!this.quiesced) await outbox.flush((out, handle) => this.bind(state, core, out, handle));
         await save(); return jobs;
       } finally { this.activeState = undefined; }
     });

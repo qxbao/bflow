@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFile, lstat } from "node:fs/promises";
+import { readFile, lstat, readdir } from "node:fs/promises";
 import { connect } from "node:net";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
@@ -13,12 +13,25 @@ import { record, textField } from "./journal.js";
 export async function deliverNativeHerdrMessage(env = process.env): Promise<void> {
   if (env.HERDR_ENV !== "1" || env.HERDR_PLUGIN_ID !== "bflow.receipts") throw new Error("Native Herdr plugin invocation required");
   const directory = textField(env.HERDR_PLUGIN_CONFIG_DIR);
-  const config = record(JSON.parse(await readFile(resolve(directory, "host.json"), "utf8")));
+  const context = record(JSON.parse(textField(env.HERDR_PLUGIN_CONTEXT_JSON)));
+  // A linked plugin can be shared by named sessions. Select a host only by its
+  // actual manifest pane/workspace, never a mutable process-global host.json.
+  let configs: Record<string, unknown>[];
+  try { configs = await Promise.all((await readdir(resolve(directory, "hosts"))).filter(name => /^[A-Za-z0-9._-]+\.json$/.test(name))
+    .map(async name => record(JSON.parse(await readFile(resolve(directory, "hosts", name), "utf8"))))); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    configs = [record(JSON.parse(await readFile(resolve(directory, "host.json"), "utf8")))]; }
+  const matching: Record<string, unknown>[] = [];
+  for (const candidate of configs) {
+    const candidateManifest = SessionManifestSchema.parse(JSON.parse(await readFile(textField(candidate.manifestFile), "utf8")));
+    if (candidateManifest.panes.some(pane => pane.paneId === context.focused_pane_id && pane.workspaceId === context.workspace_id)) matching.push(candidate);
+  }
+  if (matching.length !== 1) throw new Error("Native pane must belong to exactly one active host manifest");
+  const config = matching[0]!;
   const keyPath = textField(config.privateKeyFile);
   const keyStat = await lstat(keyPath);
   if (!keyStat.isFile() || (keyStat.mode & 0o077) !== 0) throw new Error("Native signing key must be a private regular file");
   const privateKey = await readFile(keyPath, "utf8");
-  const context = record(JSON.parse(textField(env.HERDR_PLUGIN_CONTEXT_JSON)));
   let message = RoleMessageSchema.parse(JSON.parse(textField(context.selected_text)));
   const manifest = SessionManifestSchema.parse(JSON.parse(await readFile(textField(config.manifestFile), "utf8")));
   const binding = manifest.panes.find(pane => pane.paneId === message.sender.pane_id && pane.agentId === message.sender.agent_id && pane.role === message.sender.role);
