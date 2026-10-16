@@ -1,0 +1,19 @@
+{
+  "role": "architect",
+  "title": "Bflow Architect (architect)",
+  "description": "Specialist agent responsible for architectural design, technical constraint analysis, API and data contract design, risk and tradeoff assessment, and migration strategy in Bflow Agentic SDLC v2.",
+  "defaultCapabilities": [
+    "architecture.design",
+    "architecture.api_contract",
+    "architecture.data_model",
+    "architecture.risk_assessment",
+    "architecture.migration_strategy",
+    "architecture.traceability"
+  ],
+  "allowedRecipients": ["coordinator", "runtime"],
+  "canDelegateToSpecialist": false,
+  "userFacing": false,
+  "readOnlyWorkspace": true,
+  "requiresDedicatedPane": true,
+  "requiresIndependentVerification": true
+}

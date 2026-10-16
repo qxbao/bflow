@@ -1,0 +1,196 @@
+{
+  "schemaVersion": 2,
+  "specId": "spec-api-1",
+  "runId": "run-api-1",
+  "sessionId": "session-api-1",
+  "level": "full",
+  "complexity": "complex",
+  "riskLevel": "high",
+  "version": 1,
+  "title": "Add paginated run query and filtering contract",
+  "summary": "Introduce PageRequest pagination, status filtering, and timestamp bounds to the public run query contract.",
+  "problemStatement": "The current run query contract returns unbounded lists without filter parameters, risking excessive payload sizes and preventing efficient cursor-based run retrieval.",
+  "scope": {
+    "inScope": [
+      "Public PageRequest and PageResponse query types in @bflow/contracts",
+      "Cursor-based pagination with limit bounds (1 to 500)",
+      "Run status and time-range query filter criteria",
+      "Backwards compatibility for unpaginated callers"
+    ],
+    "outOfScope": [
+      "Database index modifications",
+      "CLI presentation formatting",
+      "Multi-tenant authorization logic"
+    ]
+  },
+  "acceptanceCriteria": [
+    {
+      "id": "ac-1",
+      "description": "PageRequestSchema validates cursor strings and clamps limit between 1 and 500 items.",
+      "category": "functional",
+      "verificationMethod": "unit_test",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    },
+    {
+      "id": "ac-2",
+      "description": "RunQueryFilterSchema validates optional status filters and ISO datetime range bounds while rejecting undeclared properties.",
+      "category": "functional",
+      "verificationMethod": "unit_test",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    },
+    {
+      "id": "ac-3",
+      "description": "Unpaginated query requests remain valid and produce conforming RunQueryResult collections without backward incompatibility.",
+      "category": "regression",
+      "verificationMethod": "integration_test",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    }
+  ],
+  "affectedPaths": [
+    "packages/contracts/src/run.ts",
+    "packages/contracts/src/common.ts"
+  ],
+  "traceabilityTaskIds": [
+    "task-contracts-schema",
+    "task-contracts-tests"
+  ],
+  "architectureNotes": "Extend @bflow/contracts with additive PageRequestSchema and RunQueryFilterSchema definitions. Ensure zero breaking changes for existing query callers.",
+  "securityConsiderations": "Enforce maximum page size limit of 500 to prevent memory exhaustion DoS; sanitize opaque cursor strings to prevent data leakage.",
+  "rollbackPlan": "Revert contract additions and rebuild packages/contracts; existing clients remain fully operational because new fields are optional.",
+  "tddDecision": {
+    "schemaVersion": 2,
+    "decisionId": "tdd-api-1",
+    "runId": "run-api-1",
+    "specId": "spec-api-1",
+    "mode": "required",
+    "rationale": "Public API contract changes require schema boundary tests before export",
+    "verifiableConditions": [
+      "Schema validation tests fail prior to export implementation"
+    ],
+    "changeClassification": "api_contract",
+    "requiresFailingTestFirst": true,
+    "decidedBy": "coordinator",
+    "decidedAt": "2026-10-16T00:00:00.000Z"
+  },
+  "testStrategy": {
+    "schemaVersion": 2,
+    "strategyId": "strategy-api-1",
+    "specId": "spec-api-1",
+    "tddDecision": {
+      "schemaVersion": 2,
+      "decisionId": "tdd-api-1",
+      "runId": "run-api-1",
+      "specId": "spec-api-1",
+      "mode": "required",
+      "rationale": "Public API contract changes require schema boundary tests before export",
+      "verifiableConditions": [
+        "Schema validation tests fail prior to export implementation"
+      ],
+      "changeClassification": "api_contract",
+      "requiresFailingTestFirst": true,
+      "decidedBy": "coordinator",
+      "decidedAt": "2026-10-16T00:00:00.000Z"
+    },
+    "requiredTestLevels": [
+      "unit",
+      "integration"
+    ],
+    "targetCommands": [
+      "pnpm --filter @bflow/contracts test"
+    ],
+    "independentVerificationRequired": true,
+    "criterionMappings": [
+      {
+        "criterionId": "ac-1",
+        "testNames": [
+          "PageRequestSchema boundary validation"
+        ]
+      },
+      {
+        "criterionId": "ac-2",
+        "testNames": [
+          "RunQueryFilterSchema field validation and strict rejection"
+        ]
+      },
+      {
+        "criterionId": "ac-3",
+        "testNames": [
+          "RunQuery backwards compatibility test"
+        ]
+      }
+    ],
+    "createdAt": "2026-10-16T00:00:00.000Z"
+  },
+  "status": "draft",
+  "createdBy": "analyst",
+  "createdAt": "2026-10-16T00:00:00.000Z",
+  "updatedAt": "2026-10-16T00:00:00.000Z",
+  "metadata": {
+    "sdd": {
+      "policyVersion": 1,
+      "assessment": {
+        "kind": "feature",
+        "behaviorChange": true,
+        "modules": [
+          "contracts"
+        ],
+        "securityImpact": false,
+        "publicApiImpact": true,
+        "dataSchemaImpact": false,
+        "architectureImpact": false,
+        "migrationRequired": false,
+        "risk": "high",
+        "unresolvedQuestions": []
+      },
+      "functionalRequirements": [
+        "Export PageRequestSchema validating cursor string and limit between 1 and 500.",
+        "Export RunQueryFilterSchema validating optional status and ISO datetime range filters.",
+        "Support backwards-compatible query execution when pagination parameters are omitted."
+      ],
+      "proposedTestStrategy": "TDD unit tests validating schema boundary conditions followed by integration tests ensuring backward compatibility with unpaginated query fixtures.",
+      "designProposal": "Define composable pagination and filter Zod schemas in @bflow/contracts with optional fields, preserving existing query signatures.",
+      "technicalConstraints": [
+        "Strict TypeScript typing with exactOptionalPropertyTypes and verbatimModuleSyntax.",
+        "Clamp limit to maximum 500 items per page.",
+        "Preserve existing caller signatures without breaking changes."
+      ],
+      "apiDataContracts": [
+        "PageRequestSchema: { cursor?: string, limit?: number (1..500) }",
+        "RunQueryFilterSchema: { status?: RunStatus, startedAfter?: IsoDateTime, startedBefore?: IsoDateTime }",
+        "Page<RunSummary>: { items: readonly RunSummary[], nextCursor?: string }"
+      ],
+      "risksAndTradeoffs": [
+        "Opaque cursor tokens prevent client coupling to internal database primary keys.",
+        "Additive contract surface slightly increases bundle size in exchange for strong runtime validation."
+      ],
+      "traceability": [
+        {
+          "criterionId": "ac-1",
+          "taskIds": [
+            "task-contracts-schema",
+            "task-contracts-tests"
+          ]
+        },
+        {
+          "criterionId": "ac-2",
+          "taskIds": [
+            "task-contracts-schema",
+            "task-contracts-tests"
+          ]
+        },
+        {
+          "criterionId": "ac-3",
+          "taskIds": [
+            "task-contracts-tests"
+          ]
+        }
+      ]
+    }
+  }
+}

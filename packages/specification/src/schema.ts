@@ -1,4 +1,11 @@
-import { SpecificationSchema } from "@bflow/contracts";
+import {
+  AgentRoleSchema,
+  IdentifierSchema,
+  IsoDateTimeSchema,
+  SddPolicyLevelSchema,
+  SpecificationSchema
+} from "@bflow/contracts";
+import type { OperationResult, Specification } from "@bflow/contracts";
 import { z } from "zod";
 import { canonicalJson } from "./content.js";
 import { ChangeAssessmentSchema, classifyChange } from "./classification.js";
@@ -17,6 +24,8 @@ export const PolicyDetailsSchema = z.object({
   traceability: z.array(z.object({ criterionId: Text, taskIds: z.array(Text).min(1) }).strict()),
   revisionReason: Text.optional()
 }).strict();
+
+export type PolicyDetails = z.infer<typeof PolicyDetailsSchema>;
 
 /** Same public Specification contract; P15 policy details live in namespaced metadata. */
 export const SpecificationDocumentSchema = SpecificationSchema.superRefine((spec, ctx) => {
@@ -85,3 +94,41 @@ export function parseSpecification(input: unknown) {
 export function policyDetails(input: unknown) {
   return PolicyDetailsSchema.parse(parseSpecification(input).metadata?.sdd);
 }
+
+export function validateSpecificationDocument(input: unknown): OperationResult<Specification> {
+  const result = SpecificationDocumentSchema.safeParse(input);
+  if (result.success) {
+    return { ok: true, value: result.data };
+  }
+  return {
+    ok: false,
+    error: {
+      code: "validation",
+      message: result.error.message,
+      retryable: false,
+      details: { issues: JSON.parse(JSON.stringify(result.error.issues)) }
+    }
+  };
+}
+
+export const SpecDraftPayloadSchema = z
+  .object({
+    specId: IdentifierSchema,
+    specLevel: SddPolicyLevelSchema,
+    title: z.string().trim().min(1),
+    authorRole: AgentRoleSchema,
+    summary: z.string().trim().min(1),
+    affectedPaths: z.array(z.string().trim().min(1)).min(1)
+  })
+  .strict();
+export type SpecDraftPayload = z.infer<typeof SpecDraftPayloadSchema>;
+
+export const SpecApprovedPayloadSchema = z
+  .object({
+    specId: IdentifierSchema,
+    approvedBy: z.string().trim().min(1),
+    approvedAt: IsoDateTimeSchema,
+    notes: z.string().trim().min(1).optional()
+  })
+  .strict();
+export type SpecApprovedPayload = z.infer<typeof SpecApprovedPayloadSchema>;

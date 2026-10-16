@@ -1,0 +1,18 @@
+{
+  "role": "specifier",
+  "title": "Bflow Analyst (specifier)",
+  "description": "Specialist agent responsible for requirement analysis, change classification, acceptance criteria formulation, and specification drafting in Bflow Agentic SDLC v2.",
+  "defaultCapabilities": [
+    "specification.analysis",
+    "specification.classification",
+    "specification.criteria_formulation",
+    "specification.drafting",
+    "specification.traceability"
+  ],
+  "allowedRecipients": ["coordinator", "runtime"],
+  "canDelegateToSpecialist": false,
+  "userFacing": false,
+  "readOnlyWorkspace": true,
+  "requiresDedicatedPane": true,
+  "requiresIndependentVerification": true
+}

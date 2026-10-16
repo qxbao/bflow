@@ -118,6 +118,41 @@ export class SpecificationEngine {
     return parseSpecification({ ...spec, status: "approved", approvedBy: decision.decidedBy, updatedAt: decision.decidedAt });
   }
 
+  async reject(input: unknown, requestInput: unknown, decisionInput: unknown): Promise<{ specification: Specification; decision: ApprovalDecision }> {
+    const spec = parseSpecification(input);
+    if (spec.status !== "review_pending") throw new Error("Only a reviewed specification can be rejected");
+    const request = ApprovalRequestSchema.parse(requestInput);
+    if (request.expiresAt && Date.parse(request.expiresAt) <= Date.parse(this.now())) throw new Error("Approval request expired");
+    const decision = await this.verifyReject(spec, request, decisionInput);
+    if (decision.decision === "rejected") {
+      const rejectedSpec = parseSpecification({ ...spec, status: "rejected", updatedAt: decision.decidedAt });
+      return { specification: rejectedSpec, decision };
+    } else {
+      const { artifactRef: _ref, approvedBy: _app, ...rest } = spec;
+      const draftSpec = parseSpecification({ ...rest, status: "draft", updatedAt: decision.decidedAt });
+      return { specification: draftSpec, decision };
+    }
+  }
+
+  async supersede(previousApprovedInput: unknown, nextApprovedInput: unknown): Promise<Specification> {
+    const previous = parseSpecification(previousApprovedInput);
+    const next = parseSpecification(nextApprovedInput);
+    if (previous.status !== "approved") throw new Error("Previous specification must be approved to be superseded");
+    if (next.status !== "approved") throw new Error("Next specification must be approved to supersede a previous specification");
+    if (previous.specId !== next.specId || previous.sessionId !== next.sessionId || previous.runId !== next.runId) {
+      throw new Error("Superseding requires the same specification, session and run");
+    }
+    if (previous.version === undefined || next.version !== previous.version + 1) {
+      throw new Error("Superseding specification must increment version exactly once");
+    }
+    if (Date.parse(next.updatedAt) < Date.parse(previous.updatedAt)) {
+      throw new Error("Superseding specification timestamp cannot precede previous specification");
+    }
+    await this.verifyArtifact(previous);
+    await this.verifyArtifact(next);
+    return parseSpecification({ ...previous, status: "superseded", updatedAt: next.updatedAt });
+  }
+
   async assertImplementationReady(input: unknown, requestInput: unknown, decisionInput: unknown, workflowInput: unknown): Promise<void> {
     const spec = parseSpecification(input);
     if (spec.status !== "approved") throw new Error("Implementation requires an approved specification");
@@ -167,6 +202,29 @@ export class SpecificationEngine {
     if (decision.decision !== "approved" || decision.approvalId !== request.approvalId || decision.runId !== request.runId ||
         decision.sessionId !== request.sessionId || decision.revision !== request.revision || decision.generation !== request.generation ||
         canonicalJson(decision.target) !== canonicalJson(request.target)) throw new Error("Decision does not approve this specification request");
+    if (Date.parse(decision.decidedAt) < Date.parse(request.requestedAt) || Date.parse(decision.decidedAt) > Date.parse(this.now()) ||
+        (request.expiresAt && Date.parse(decision.decidedAt) >= Date.parse(request.expiresAt))) throw new Error("Decision is outside its approval time window");
+    const humanRequired = classifyChange(policyDetails(spec).assessment, spec.affectedPaths).humanApprovalRequired;
+    if (!await this.authorize(decision, humanRequired)) throw new Error(humanRequired ? "Authenticated human approval required" : "Approver is not authorized");
+    return decision;
+  }
+
+  private async verifyReject(spec: Specification, request: ReturnType<typeof ApprovalRequestSchema.parse>, decisionInput: unknown) {
+    this.assertClear(spec);
+    const decision = ApprovalDecisionSchema.parse(decisionInput);
+    await this.verifyArtifact(spec);
+    if (request.status !== "pending" || request.target.type !== "specification" || request.target.specId !== spec.specId ||
+        request.runId !== spec.runId || request.sessionId !== spec.sessionId || request.revision !== spec.version || request.generation !== 0 ||
+        request.metadata?.specificationDigest !== digest(contentBytes(spec)) ||
+        request.evidence.length !== 1 || canonicalJson(request.evidence[0]) !== canonicalJson(spec.artifactRef)) {
+      throw new Error("Approval request does not match the current specification version and artifact");
+    }
+    if ((decision.decision !== "rejected" && decision.decision !== "changes_requested") ||
+        decision.approvalId !== request.approvalId || decision.runId !== request.runId ||
+        decision.sessionId !== request.sessionId || decision.revision !== request.revision || decision.generation !== request.generation ||
+        canonicalJson(decision.target) !== canonicalJson(request.target)) {
+      throw new Error("Decision does not reject or request changes on this specification request");
+    }
     if (Date.parse(decision.decidedAt) < Date.parse(request.requestedAt) || Date.parse(decision.decidedAt) > Date.parse(this.now()) ||
         (request.expiresAt && Date.parse(decision.decidedAt) >= Date.parse(request.expiresAt))) throw new Error("Decision is outside its approval time window");
     const humanRequired = classifyChange(policyDetails(spec).assessment, spec.affectedPaths).humanApprovalRequired;

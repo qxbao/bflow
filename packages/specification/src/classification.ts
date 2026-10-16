@@ -1,4 +1,5 @@
 import { ChangeComplexitySchema, RiskLevelSchema, SddPolicyLevelSchema } from "@bflow/contracts";
+import type { ChangeComplexity, OperationResult } from "@bflow/contracts";
 import { z } from "zod";
 
 /** Structured impact assessment, supplied by Analyst/Architect, never inferred from diff size. */
@@ -15,6 +16,8 @@ export const ChangeAssessmentSchema = z.object({
   unresolvedQuestions: z.array(z.string().trim().min(1))
 }).strict();
 
+export type ChangeAssessment = z.infer<typeof ChangeAssessmentSchema>;
+
 export const ClassificationSchema = z.object({
   complexity: ChangeComplexitySchema,
   level: SddPolicyLevelSchema,
@@ -23,18 +26,32 @@ export const ClassificationSchema = z.object({
   reasons: z.array(z.string().min(1)).min(1)
 }).strict();
 
-export function classifyChange(input: unknown, affectedPaths: readonly string[] = []) {
+export type Classification = z.infer<typeof ClassificationSchema>;
+
+export function hasSecurityPathHint(paths: readonly string[]): boolean {
+  return paths.some(path => /(?:security|auth|crypto|secret|permission|credential|rbac|token|jwt|oauth|acl|tls|cert|password|sanitize)/i.test(path));
+}
+
+export function hasPublicApiPathHint(paths: readonly string[]): boolean {
+  return paths.some(path => /(?:^|\/)(?:contracts|openapi|proto|graphql)(?:\/|\.|$)/i.test(path));
+}
+
+export function hasDataSchemaPathHint(paths: readonly string[]): boolean {
+  return paths.some(path => /(?:^|\/)(?:migrations?|schema)(?:\/|\.|$)|\.sql$/i.test(path));
+}
+
+export function classifyChange(input: unknown, affectedPaths: readonly string[] = []): Classification {
   const change = ChangeAssessmentSchema.parse(input);
   const paths = z.array(z.string().trim().min(1)).parse(affectedPaths);
   const reasons: string[] = [];
   // Conservative hints complement the explicit assessment, including docs about security.
-  if (change.securityImpact || paths.some(path => /(?:security|auth|crypto|secret|permission|credential)/i.test(path))) {
+  if (change.securityImpact || hasSecurityPathHint(paths)) {
     reasons.push("security impact");
   }
-  if (change.publicApiImpact || paths.some(path => /(?:^|\/)(?:contracts|openapi|proto)(?:\/|\.|$)/i.test(path))) {
+  if (change.publicApiImpact || hasPublicApiPathHint(paths)) {
     reasons.push("public API contract impact");
   }
-  if (change.dataSchemaImpact || paths.some(path => /(?:^|\/)(?:migrations?|schema)(?:\/|\.|$)/i.test(path))) {
+  if (change.dataSchemaImpact || hasDataSchemaPathHint(paths)) {
     reasons.push("persistent data schema impact");
   }
   if (change.architectureImpact) reasons.push("architecture impact");
@@ -50,4 +67,88 @@ export function classifyChange(input: unknown, affectedPaths: readonly string[] 
     humanApprovalRequired: complex,
     reasons: complex ? reasons : [trivial ? "local change without behavioral impact" : "ordinary behavior change"]
   });
+}
+
+export function classifyChangeSafe(
+  input: unknown,
+  affectedPaths: readonly string[] = []
+): OperationResult<Classification> {
+  try {
+    const value = classifyChange(input, affectedPaths);
+    return { ok: true, value };
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return {
+        ok: false,
+        error: {
+          code: "validation",
+          message: error.message,
+          retryable: false,
+          details: { issues: JSON.parse(JSON.stringify(error.issues)) }
+        }
+      };
+    }
+    return {
+      ok: false,
+      error: {
+        code: "validation",
+        message: error instanceof Error ? error.message : String(error),
+        retryable: false
+      }
+    };
+  }
+}
+
+export const RequiredSpecSectionsSchema = z.array(z.string().trim().min(1));
+export type RequiredSpecSections = z.infer<typeof RequiredSpecSectionsSchema>;
+
+export function getRequiredSpecSections(
+  complexity: ChangeComplexity,
+  migrationOrSchemaImpact = false
+): string[] {
+  if (complexity === "trivial") {
+    return [
+      "title",
+      "summary",
+      "problemStatement",
+      "scope",
+      "acceptanceCriteria",
+      "affectedPaths"
+    ];
+  }
+  if (complexity === "standard") {
+    return [
+      "title",
+      "summary",
+      "problemStatement",
+      "scope",
+      "acceptanceCriteria",
+      "affectedPaths",
+      "functionalRequirements",
+      "proposedTestStrategy"
+    ];
+  }
+  const sections = [
+    "title",
+    "summary",
+    "problemStatement",
+    "scope",
+    "acceptanceCriteria",
+    "affectedPaths",
+    "functionalRequirements",
+    "proposedTestStrategy",
+    "designProposal",
+    "technicalConstraints",
+    "apiDataContracts",
+    "risksAndTradeoffs",
+    "architectureNotes",
+    "securityConsiderations",
+    "rollbackPlan",
+    "testStrategy",
+    "tddDecision"
+  ];
+  if (migrationOrSchemaImpact) {
+    sections.push("dataModelChanges", "migrationStrategy");
+  }
+  return sections;
 }
