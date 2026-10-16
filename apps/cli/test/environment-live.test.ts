@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { environmentProcessRunner, namedSessionEnvironment } from "../src/index.js";
+import { environmentProcessRunner, namedSessionEnvironment } from "../dist/index.js";
 
 // Explicit opt-in: creates only two isolated named test sessions, and stops both in finally.
 it.skipIf(process.env["BFLOW_TEST_LIVE_HERDR"] !== "1")("live Herdr: headless named sessions, protocol 22 and selective stop", async () => {

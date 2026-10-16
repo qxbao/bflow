@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
 export interface EnvironmentProcessRequest {
   readonly executable: string;
@@ -33,10 +34,12 @@ export const environmentProcessRunner: EnvironmentProcessRunner = {
       : undefined;
     try {
       return await new Promise<EnvironmentProcessResult>((resolve, reject) => {
-        const child = spawn(request.executable, [...request.args], {
+        const relay = background && log !== undefined;
+        const child = spawn(relay ? process.execPath : request.executable,
+          relay ? [fileURLToPath(new URL("./background-process.js", import.meta.url)), request.executable, ...request.args] : [...request.args], {
           cwd: request.cwd, env: request.env ?? process.env,
           shell: false, detached: !interactive,
-          stdio: background ? ["ignore", log?.fd ?? "ignore", log?.fd ?? "ignore"]
+          stdio: relay ? ["ignore", "ignore", "ignore", log.fd] : background ? ["ignore", "ignore", "ignore"]
             : interactive ? "inherit" : ["ignore", "pipe", "pipe"]
         });
         let stdout = "";
