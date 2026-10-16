@@ -40,6 +40,21 @@ async function readRoleConfiguration(path: string): Promise<RoleConfiguration> {
 }
 function shellQuote(value: string): string { return "'" + value.replaceAll("'", "'\\''") + "'"; }
 
+export const NON_USER_FACING_AUTONOMOUS_POLICY = [
+  "You are a non-user-facing execution agent.",
+  "The user does not monitor or read your pane.",
+  "Do not ask the user questions. Do not wait for a user response. Do not request conversational permission to continue.",
+  "Execute your assigned task autonomously using the tools, skills, and permissions available to you.",
+  "When information is missing, make a reversible, low-risk assumption and record it.",
+  "If a decision requires user approval, changes an approved specification, or exceeds your authority, send a structured escalation to Coordinator through Herdr and mark the task as blocked.",
+  "Never treat the lack of a user response in your pane as permission to bypass a security or approval boundary.",
+  "Do not claim success without verification evidence.",
+  "When finished, emit a structured result and notify Coordinator."
+].join("\n\n");
+
+export const NON_USER_FACING_STRUCTURED_RESULT_REQUIREMENT =
+  "Structured result requirements: Emit structured results with fields: status, summary, evidence, artifacts, blockers, requested_action, next_role (and optional assumptions). Specialist panes must never send messages to the user.";
+
 /** Long-lived composition owner. Startup is separate from activation to support provider MCP startup. */
 export async function runAgenticHost(configuration: HostConfiguration): Promise<void> {
   const binary = configuration.herdrBinary ?? "herdr";
@@ -87,13 +102,26 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const promptInput = await promptAssets.readBuiltinRolePrompt(role);
     const original = promptInput === null ? null : record(JsonValueSchema.parse(promptInput));
     if (["conversation", "coordinator"].includes(role) && !original) throw new Error(`The required original ${role} agent prompt is missing; reinstall the complete Bflow distribution.`);
-    if (original) { textField(original.source); systemPrompt += textField(original.prompt) + "\n\nTrusted host integration instructions:\n"; }
+    const basePrompt = original ? textField(original.prompt) : "";
+    if (original) {
+      textField(original.source);
+      systemPrompt += basePrompt;
+      if (role !== "conversation" && !basePrompt.includes("You are a non-user-facing execution agent.")) {
+        systemPrompt += "\n\n" + NON_USER_FACING_AUTONOMOUS_POLICY + "\n\n" + NON_USER_FACING_STRUCTURED_RESULT_REQUIREMENT;
+      }
+      systemPrompt += "\n\nTrusted host integration instructions:\n";
+    } else if (role !== "conversation") {
+      systemPrompt += "\n\n" + NON_USER_FACING_AUTONOMOUS_POLICY + "\n\n" + NON_USER_FACING_STRUCTURED_RESULT_REQUIREMENT + "\n\nTrusted host integration instructions:\n";
+    }
     if (role === "conversation") systemPrompt += "You are the sole user interface. The trusted UserPromptSubmit hook supplies the Conversation Gateway result as additional context. Greetings and questions need no workflow. Explain Gateway clarifications and forward the user's actual intent through that Gateway. Never call coordination tools or edit source. User approval comes exclusively from the trusted hook; an MCP call cannot approve.";
     else if (role === "coordinator") {
       systemPrompt += "Inspect the durable inbox, assess the spec and propose a schema-valid workflow. Runtime controls dispatch and quality/approval gates. Never edit source or approve human-required gates.";
     } else if (role === "developer") systemPrompt += "Read assignment_context and workspace_status for the exact accepted specification, owned paths and worktree. Native shell is disabled: use commit_changes with expectedHead for scoped commits and check_work for untrusted feedback. Required TDD: first edit/commit only configured testPaths, request_verification(red), then END YOUR TURN. Runtime sends a phase outcome to resume you. After independent Red, tests are frozen: authorize_implementation, edit source, commit, check_work, then request_verification(green) and yield. On Green receipt, refactor source if appropriate without editing Red tests, commit, request_verification(refactor) and yield. For non-required automated work, request_verification(verification) after a clean commit and yield. Submit implementation only when all required automated phase receipts exist. Manual docs evidence is requested after submission. Never modify accepted criteria/specification or claim your own feedback is independent acceptance.";
     else systemPrompt += "Read incoming RoleMessage. Inspect the exact assigned revision and criteria independently. Use host verification tools for evidence; never invent command output. Send replies through send_role_message with original correlation and causation. End your turn after sending.";
     if (role === "coordinator") systemPrompt += " Use planning_reference to read the shipped specification example, policy metadata schema and workflow contract before proposing a workflow. Specialist requests can gather project details; repository files are never a mailbox.";
+    if (role !== "conversation") {
+      systemPrompt += " Never ask the user questions directly or wait for user responses in your pane; make and record reversible low-risk assumptions, or escalate blockers/approvals to Coordinator via Herdr (RoleMessage) and mark the task blocked. Emit structured results (status, summary, evidence, artifacts, blockers, requested_action, next_role) with verification evidence before claiming completion.";
+    }
     launch[role] = { systemPrompt, mcpConfigFile, hooksSettingsFile };
   }
   const requireWorkspace = () => { if (!workspace) throw new Error("Bflow host awaits an up SessionManifest; retry only after bflow up completes"); return workspace; };

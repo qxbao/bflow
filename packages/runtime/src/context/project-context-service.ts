@@ -230,7 +230,7 @@ const ROLE_TO_AGENT_DIR: Readonly<Record<string, string>> = {
   architect: "agents/architect",
   coordinator: "agents/coordinator",
   qa: "agents/verifier",
-  reviewer: "agents/verifier",
+  reviewer: "agents/reviewer",
   tester: "agents/verifier",
   developer: "agents/developer",
   planner: "agents/planner",
@@ -1256,6 +1256,19 @@ export class ProjectContextService {
       for (const instr of Object.values(docs.agentInstructions)) {
         if (instr.directory === mappedDir) {
           return instr;
+        }
+      }
+      if (mappedDir === "agents/reviewer" || mappedDir === "agents/security") {
+        for (const instr of Object.values(docs.agentInstructions)) {
+          if (instr.directory === "agents/verifier") {
+            return instr;
+          }
+        }
+        if (docs.agentInstructions["verifier"] !== undefined) {
+          return docs.agentInstructions["verifier"];
+        }
+        if (docs.agentInstructions["qa"] !== undefined) {
+          return docs.agentInstructions["qa"];
         }
       }
     }

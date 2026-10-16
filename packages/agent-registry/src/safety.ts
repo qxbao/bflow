@@ -121,6 +121,12 @@ const DANGEROUS_PATTERNS: readonly DangerousPatternDefinition[] = Object.freeze(
     patternName: "new_role_assignment",
     message: "Instruction attempts to assign unauthorized privileged role"
   },
+  {
+    category: "role_escape",
+    pattern: /(?:message|ask|prompt)\s+(?:the\s+)?user\s+(?:in\s+(?:your|this)\s+pane\s+)?directly/i,
+    patternName: "direct_pane_user_prompt",
+    message: "Instruction attempts to force non-user-facing agent to message the user directly"
+  },
 
   // 3. approval_or_test_bypass
   {
@@ -164,6 +170,12 @@ const DANGEROUS_PATTERNS: readonly DangerousPatternDefinition[] = Object.freeze(
     pattern: /skip\s+test\s+execution/i,
     patternName: "skip_test_execution",
     message: "Instruction directs skipping test execution"
+  },
+  {
+    category: "approval_or_test_bypass",
+    pattern: /(?:treat|interpret|consider)\s+(?:the\s+)?(?:lack|absence)\s+of\s+(?:a\s+)?(?:user\s+)?response\s+as\s+(?:explicit\s+)?(?:approval|permission|consent)/i,
+    patternName: "silence_as_approval",
+    message: "Instruction attempts to treat lack of user response as approval or permission"
   },
 
   // 4. arbitrary_delegation

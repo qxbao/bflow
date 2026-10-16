@@ -1,0 +1,19 @@
+{
+  "role": "developer",
+  "title": "Bflow Developer Agent",
+  "description": "Non-user-facing implementation specialist executing scoped code and test changes inside an isolated Git worktree.",
+  "defaultCapabilities": [
+    "coding",
+    "worktree-implementation",
+    "unit-testing"
+  ],
+  "allowedRecipients": [
+    "coordinator",
+    "runtime"
+  ],
+  "canDelegateToSpecialist": false,
+  "userFacing": false,
+  "readOnlyWorkspace": false,
+  "requiresDedicatedPane": true,
+  "requiresIndependentVerification": true
+}

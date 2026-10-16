@@ -1,0 +1,19 @@
+{
+  "role": "qa",
+  "title": "Bflow QA & Verifier Specialist",
+  "description": "Non-user-facing independent verification and quality-gate specialist executing test suites, deterministic checks, and acceptance criteria evaluations.",
+  "defaultCapabilities": [
+    "qa",
+    "tester",
+    "security"
+  ],
+  "allowedRecipients": [
+    "coordinator",
+    "runtime"
+  ],
+  "canDelegateToSpecialist": false,
+  "userFacing": false,
+  "readOnlyWorkspace": true,
+  "requiresDedicatedPane": true,
+  "requiresIndependentVerification": true
+}

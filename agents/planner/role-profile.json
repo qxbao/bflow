@@ -1,0 +1,19 @@
+{
+  "role": "planner",
+  "title": "Bflow Workflow Planner",
+  "description": "Non-user-facing planning specialist responsible for deterministic task DAG decomposition and explicit acceptance criteria.",
+  "defaultCapabilities": [
+    "planning",
+    "task-decomposition",
+    "dag-design"
+  ],
+  "allowedRecipients": [
+    "coordinator",
+    "runtime"
+  ],
+  "canDelegateToSpecialist": false,
+  "userFacing": false,
+  "readOnlyWorkspace": true,
+  "requiresDedicatedPane": true,
+  "requiresIndependentVerification": true
+}

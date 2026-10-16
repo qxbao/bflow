@@ -1,0 +1,19 @@
+{
+  "role": "reviewer",
+  "title": "Bflow Code Reviewer",
+  "description": "Non-user-facing independent review specialist evaluating changes against specifications, acceptance criteria, and security boundaries.",
+  "defaultCapabilities": [
+    "code-review",
+    "security-audit",
+    "maintainability-review"
+  ],
+  "allowedRecipients": [
+    "coordinator",
+    "runtime"
+  ],
+  "canDelegateToSpecialist": false,
+  "userFacing": false,
+  "readOnlyWorkspace": true,
+  "requiresDedicatedPane": true,
+  "requiresIndependentVerification": true
+}

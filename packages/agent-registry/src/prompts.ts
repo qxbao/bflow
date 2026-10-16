@@ -14,6 +14,12 @@ import {
   type ContentSafetyReport,
   type DangerousInstructionFinding
 } from "./safety.js";
+import {
+  NON_USER_FACING_AUTONOMOUS_POLICY,
+  STRUCTURED_RESULT_REQUIRED_FIELDS
+} from "./behavior-policy.js";
+
+export { NON_USER_FACING_AUTONOMOUS_POLICY, STRUCTURED_RESULT_REQUIRED_FIELDS };
 
 export interface PlannerPromptParams {
   readonly runId: string;
@@ -593,20 +599,26 @@ Return ONLY a valid JSON object matching this schema:
 
   // Role constraints summary
   let roleConstraintsText = "";
+  const handoffConstraintsText =
+    "- Structured Herdr handoff required: Emit a structured result containing all required fields: status, summary, evidence, artifacts, blockers, requested_action, next_role.";
+
   if (role === "planner") {
-    roleConstraintsText = "- READ-ONLY ROLE: Do NOT modify repository files. Focus solely on workflow DAG decomposition.\n- Task delegation outside workflow scope is strictly prohibited.";
+    roleConstraintsText = `- READ-ONLY ROLE: Do NOT modify repository files. Focus solely on workflow DAG decomposition.\n- Task delegation outside workflow scope is strictly prohibited.\n${handoffConstraintsText}`;
   } else if (role === "developer") {
-    roleConstraintsText = `- CONFINED WORKSPACE: Modify files ONLY inside assigned worktreePath '${validatedWorktreePath}'. Modifying files outside this directory is strictly prohibited.\n- Independent test execution evidence is required for all changes.\n- Task delegation outside workflow scope is strictly prohibited.`;
+    roleConstraintsText = `- CONFINED WORKSPACE: Modify files ONLY inside assigned worktreePath '${validatedWorktreePath}'. Modifying files outside this directory is strictly prohibited.\n- Independent test execution evidence is required for all changes.\n- Task delegation outside workflow scope is strictly prohibited.\n${handoffConstraintsText}`;
   } else if (role === "reviewer") {
-    roleConstraintsText = "- READ-ONLY ROLE: Do NOT modify any source files. Your output 'modifiedFiles' must be strictly [].\n- Evaluate changes strictly against the provided acceptance criteria.\n- Task delegation outside workflow scope is strictly prohibited.";
+    roleConstraintsText = `- READ-ONLY ROLE: Do NOT modify any source files. Your output 'modifiedFiles' must be strictly [].\n- Evaluate changes strictly against the provided acceptance criteria.\n- Task delegation outside workflow scope is strictly prohibited.\n${handoffConstraintsText}`;
   } else if (role === "qa") {
-    roleConstraintsText = "- READ-ONLY ROLE: Do NOT modify repository files.\n- INDEPENDENT VERIFICATION: Do NOT assume agent self-assertions prove test success; verify independent test execution evidence.\n- Task delegation outside workflow scope is strictly prohibited.";
+    roleConstraintsText = `- READ-ONLY ROLE: Do NOT modify repository files.\n- INDEPENDENT VERIFICATION: Do NOT assume agent self-assertions prove test success; verify independent test execution evidence.\n- Task delegation outside workflow scope is strictly prohibited.\n${handoffConstraintsText}`;
   }
 
   const prompt = `# ROLE: ${profile.title} (${role})
 
 ## Mission
 ${profile.description}
+
+## Non-User-Facing Autonomous Execution Policy
+${NON_USER_FACING_AUTONOMOUS_POLICY}
 
 ## Role Constraints
 ${roleConstraintsText}

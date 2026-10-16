@@ -33,3 +33,6 @@ export * from "./workflows.js";
 
 // End-to-end Feature Workflow Example
 export * from "./feature-example.js";
+
+// Autonomous Execution & Behavior Policy
+export * from "./behavior-policy.js";
