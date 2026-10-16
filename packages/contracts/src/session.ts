@@ -460,6 +460,7 @@ export const RoleMessageSchema = z
       "task.assignment",
       "task.status",
       "implementation.submitted",
+      "execution.receipt",
       "verification.requested",
       "verification.result",
       "verification.escalation",

@@ -40,6 +40,24 @@ describe("Herdr CLI adapter", () => {
     expect(await adapter.initialize({ runtimeId: "runtime-1", configuration: {}, recoveryMode: false, initializedAt: time })).toMatchObject({ ok: true, value: { supportsSubmissionCorrelation: false, supportsStreaming: false, protocolVersion: "22" } });
   });
 
+  it.each(["0.9.0", "0.9.1", "0.9.5", "0.10.0", "1.0.0", "99.0.0-dev"])(
+    "accepts CLI %s when the actual protocol/schema is compatible", async version => {
+      const { adapter, calls } = fake(({ args }) => args[0] === "--version"
+        ? { exitCode: 0, stdout: `herdr ${version}\n`, stderr: "" }
+        : { exitCode: 0, stdout: "protocol: 22\nschema_version: 1", stderr: "" });
+      expect(await adapter.initialize({ runtimeId: "runtime-1", configuration: {}, recoveryMode: false, initializedAt: time }))
+        .toMatchObject({ ok: true, value: { protocolVersion: "22", metadata: { cliVersion: `herdr ${version}` } } });
+      expect(calls.map(call => call.args)).toEqual([["--version"], ["api", "schema"]]);
+    });
+
+  it.each(["protocol: 22\nschema_version: 99", "protocol: 99\nschema_version: 1", "not a schema"])(
+    "checks actual incompatibility even with a familiar release label: %s", async schema => {
+      const { adapter } = fake(({ args }) => args[0] === "--version"
+        ? { exitCode: 0, stdout: "herdr 0.9.1", stderr: "" } : { exitCode: 0, stdout: schema, stderr: "" });
+      expect(await adapter.initialize({ runtimeId: "runtime-1", configuration: {}, recoveryMode: false, initializedAt: time }))
+        .toMatchObject({ ok: false });
+    });
+
   it("requires explicit existing pane and detects startup mismatch", async () => {
     const { adapter, calls } = fake(() => success("agent_started"));
     expect(await adapter.startAgent({ name: "worker", kind: "codex", paneId: "pane-1" })).toMatchObject({ ok: true, value: { paneId: "pane-1", session: { value: "session-1" } } });

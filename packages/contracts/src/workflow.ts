@@ -1,3 +1,4 @@
+import { AgentBindingVerificationSchema } from "./receipts.js";
 import { z } from "zod";
 import { AgentExecutionHandleSchema } from "./agent.js";
 import { IdentifierSchema, IsoDateTimeSchema, JsonValueSchema, MetadataSchema } from "./common.js";
@@ -170,6 +171,7 @@ export const TaskStateSchema = z
     generation: z.number().int().nonnegative(),
     attemptId: IdentifierSchema.optional(),
     agentExecution: AgentExecutionHandleSchema.optional(),
+    bindingVerification: AgentBindingVerificationSchema.optional(),
     blockage: BlockageSchema.optional(),
     startedAt: IsoDateTimeSchema.optional(),
     completedAt: IsoDateTimeSchema.optional(),

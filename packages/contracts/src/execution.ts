@@ -190,7 +190,7 @@ export const RecoveryCheckpointSchema = z
     checkpointSchemaVersion: z.literal(1),
     codec: z.discriminatedUnion("name", [
       z.object({ name: z.literal("bflow.workflow-run-snapshot+json"), version: z.literal(1) }).strict(),
-      z.object({ name: z.literal("bflow.workflow-aggregate+json"), version: z.literal(1) }).strict()
+      z.object({ name: z.literal("bflow.workflow-aggregate+json"), version: z.union([z.literal(1), z.literal(2)]) }).strict()
     ]),
     checkpointId: IdentifierSchema,
     runId: IdentifierSchema,

@@ -82,3 +82,16 @@ export type {
   WorkflowEngine,
   WorkflowRunSnapshot
 } from "@bflow/contracts";
+
+// P19: durable adaptive Agentic SDLC orchestration through the frozen v2 contracts.
+export { AgenticWorkflowRuntime } from "./agentic/runtime.js";
+export { loadAgenticPolicies } from "./agentic/ports.js";
+export type { AgenticRuntimePorts, AgenticPolicies, AgenticCompositionOptions, PanePolicy } from "./agentic/ports.js";
+export { CoordinatorTools, COORDINATOR_TOOLS, COORDINATOR_ROLE_PROFILE } from "./agentic/tools.js";
+export { createAgenticConversationHost } from "./agentic/conversation.js";
+export type { AgenticConversationHost } from "./agentic/conversation.js";
+export { openAgenticWorkspace } from "./agentic/workspace.js";
+export type { OpenAgenticWorkspaceOptions, AgenticWorkspaceHandle } from "./agentic/workspace.js";
+
+export { createSignedBindingReceipt } from "./agentic/receipt-host.js";
+export { startHerdrReceiptIngress, authenticateNativeHerdrMessage } from "./agentic/herdr-ingress.js";

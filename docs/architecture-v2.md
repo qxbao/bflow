@@ -54,7 +54,7 @@ Hệ thống bflow v1 đã hoàn thành đầy đủ các gói chức năng cơ 
    - Hỗ trợ lưu trữ trạng thái tổng hợp qua codec `bflow.workflow-aggregate+json` và xuất biên lai lệnh (`CommandReceipt`) được băm dấu vân tay SHA-256 (`fingerprint`) để chống lặp lệnh (idempotent command processing).
 
 3. **`@bflow/herdr-adapter` (Herdr CLI Adapter)**:
-   - Tương thích với Herdr CLI phiên bản `0.9.1`, protocol `22`, schema version `1`.
+   - Baseline đã kiểm chứng Herdr CLI `0.9.1`, protocol `22`, schema `1`. Theo ADR 0003, phiên bản CLI chỉ là metadata; tính tương thích được xác định từ protocol/schema và hành vi operation thực tế, không dùng allowlist phiên bản.
    - Triển khai cổng `AgentTransport`: `initialize`, `send`, `wait`, `read`, `reconcile`, `cancel`.
    - Cơ chế single-flight: Chỉ cho phép một lệnh prompt đang bay tại một thời điểm trên mỗi handle.
    - Trả về biên lai `AgentSubmissionReceipt` thay vì kết quả công việc; ghi nhận trạng thái giao vận `AgentTransportState` (`starting`, `accepted`, `idle`, `working`, `blocked`, `done`, `unknown`, `disconnected`, `cancelled`).

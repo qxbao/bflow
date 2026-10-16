@@ -1,0 +1,164 @@
+import { spawn } from "node:child_process";
+import { randomUUID, createHash } from "node:crypto";
+import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import {
+  AgentAssignmentSchema, AgentExecutionHandleSchema, AgentLeaseSchema, AgentRequestSchema,
+  AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema,
+  DelegationRequestSchema, GitChangeSetSchema, JsonValueSchema, RoleMessageSchema,
+  SdlcWorkStatusSchema, SpecificationSchema, TestStrategySchema, VerificationCycleSchema,
+  VerificationResultSchema, WorkflowDefinitionSchema, type AgentAssignment, type AgentExecutionHandle, type AgentLease,
+  type AgentRequest, type AgentResult, type AppendEventsRequest, type ApprovalDecision,
+  type ApprovalRequest, type DelegationRequest, type GitChangeSet, type JsonValue,
+  type RoleMessage, type SdlcWorkStatus, type Specification, type TestStrategy,
+  type VerificationCycle, type WorkflowDefinition
+} from "@bflow/contracts";
+import type { TaskWorktree, VerificationPlan } from "./ports.js";
+
+export function json(value: unknown): JsonValue { return JsonValueSchema.parse(JSON.parse(JSON.stringify(value))); }
+export function digest(value: unknown): string {
+  const canonical = (v: unknown): string => Array.isArray(v) ? `[${v.map(canonical)}]` : v !== null && typeof v === "object"
+    ? `{${Object.entries(v).filter(([, x]) => x !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([k, x]) => `${JSON.stringify(k)}:${canonical(x)}`)}}`
+    : JSON.stringify(v) ?? "null";
+  return createHash("sha256").update(canonical(value)).digest("hex");
+}
+export function record(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected an object");
+  return value as Record<string, unknown>;
+}
+export function textField(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error("Expected nonempty string");
+  return value;
+}
+export function strings(value: unknown): string[] {
+  if (!Array.isArray(value)) throw new Error("Expected a string array");
+  return value.map(textField);
+}
+export interface SpecRecord {
+  specification: Specification; request: ApprovalRequest; decision?: ApprovalDecision; strategy: TestStrategy;
+}
+export interface TaskRecord {
+  taskId: string; spec: SpecRecord; worktrees: TaskWorktree[]; outboundIds: string[];
+  changeSet?: GitChangeSet; cycle?: VerificationCycle; result?: AgentResult;
+  verificationPlan?: VerificationPlan; verificationPending?: boolean; writerReleased?: boolean;
+}
+export interface RunRecord {
+  runId: string; delegation: DelegationRequest; status: SdlcWorkStatus;
+  definition?: WorkflowDefinition; workflowSpec?: SpecRecord; tasks: TaskRecord[];
+  baseRevision?: string; approval?: ApprovalRequest; decision?: ApprovalDecision;
+  approvalKind?: "design" | "delivery" | "action" | "task";
+  integrationKey?: string; workflowCycle?: VerificationCycle; workflowChange?: GitChangeSet;
+  workflowVerificationPending?: boolean; coreCreated: boolean; cancelled: boolean; error?: string; maxIterations: number;
+}
+export interface Outbound {
+  message: RoleMessage; status: "queued" | "sending" | "unknown_delivery" | "accepted" | "released" | "cancelled";
+  selector: string; taskId: string; attemptId: string; capabilities: string[];
+  assignment?: AgentAssignment; lease?: AgentLease; request?: AgentRequest; handle?: AgentExecutionHandle;
+  error?: string; cancelRequested?: boolean;
+}
+export interface JournalState {
+  version: 1; repository: string; runs: RunRecord[]; outbound: Outbound[];
+  inbox: { message: RoleMessage; status: "received" | "applied" }[];
+  pendingCore: AppendEventsRequest[];
+  pendingVerifications: { job: JsonValue; outcome: JsonValue }[];
+}
+/** Private storage codec; exported schemas validate every persisted boundary value. */
+function parseState(input: unknown, repository: string): JournalState {
+  const root = record(input);
+  if (root.version !== 1 || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
+  for (const key of ["runs", "outbound", "inbox", "pendingCore", "pendingVerifications"]) if (!Array.isArray(root[key])) throw new Error(`Invalid journal ${key}`);
+  const state = root as unknown as JournalState;
+  for (const run of state.runs) {
+    textField(run.runId); run.delegation = DelegationRequestSchema.parse(run.delegation);
+    if (run.delegation.runId !== run.runId) throw new Error("Journal run/delegation mismatch");
+    run.status = SdlcWorkStatusSchema.parse(run.status);
+    if (typeof run.coreCreated !== "boolean" || typeof run.cancelled !== "boolean" || !Number.isInteger(run.maxIterations) || run.maxIterations < 1 || run.maxIterations > 10)
+      throw new Error("Invalid run flags/limit");
+    if (!Array.isArray(run.tasks)) throw new Error("Invalid task journal");
+    if (run.definition) run.definition = WorkflowDefinitionSchema.parse(run.definition);
+    if (run.workflowSpec) parseSpec(run.workflowSpec);
+    if (run.approval) run.approval = ApprovalRequestSchema.parse(run.approval);
+    if (run.decision) run.decision = ApprovalDecisionSchema.parse(run.decision);
+    if (run.approvalKind && !["design", "delivery", "action", "task"].includes(run.approvalKind)) throw new Error("Invalid approval kind");
+    for (const task of run.tasks) {
+      textField(task.taskId); parseSpec(task.spec); strings(task.outboundIds);
+      if (!Array.isArray(task.worktrees)) throw new Error("Invalid worktree history");
+      for (const tree of task.worktrees) { textField(tree.key); textField(tree.worktreePath); textField(tree.branchName); textField(tree.baseCommitHash); }
+      if (task.changeSet) task.changeSet = GitChangeSetSchema.parse(task.changeSet);
+      if (task.cycle) task.cycle = VerificationCycleSchema.parse(task.cycle);
+      if (task.result) task.result = AgentResultSchema.parse(task.result);
+    }
+    if (run.workflowCycle) run.workflowCycle = VerificationCycleSchema.parse(run.workflowCycle);
+    if (run.workflowChange) run.workflowChange = GitChangeSetSchema.parse(run.workflowChange);
+  }
+  for (const out of state.outbound) {
+    out.message = RoleMessageSchema.parse(out.message); textField(out.selector); textField(out.taskId); textField(out.attemptId); strings(out.capabilities);
+    if (!["queued", "sending", "unknown_delivery", "accepted", "released", "cancelled"].includes(out.status)) throw new Error("Invalid outbound status");
+    if (out.assignment) out.assignment = AgentAssignmentSchema.parse(out.assignment);
+    if (out.request) out.request = AgentRequestSchema.parse(out.request);
+    if (out.lease) out.lease = AgentLeaseSchema.parse(out.lease);
+    if (out.handle) out.handle = AgentExecutionHandleSchema.parse(out.handle);
+    if (["sending", "unknown_delivery", "accepted"].includes(out.status) && !out.request) throw new Error("Missing outbound dispatch intent");
+    if (out.status === "accepted" && (!out.handle || !out.lease)) throw new Error("Missing outbound binding/lease");
+  }
+  for (const item of state.inbox) {
+    item.message = RoleMessageSchema.parse(item.message);
+    if (!["received", "applied"].includes(item.status)) throw new Error("Invalid inbox status");
+  }
+  for (const pending of state.pendingVerifications) {
+    const job = record(pending.job); const outcome = record(pending.outcome);
+    textField(job.runId); textField(job.taskId); record(job.plan);
+    VerificationCycleSchema.parse(job.cycle); GitChangeSetSchema.parse(job.change);
+    VerificationResultSchema.parse(outcome.result); VerificationCycleSchema.parse(outcome.cycle);
+  }
+  state.pendingCore = state.pendingCore.map(value => AppendEventsRequestSchema.parse(value));
+  return state;
+}
+function parseSpec(value: SpecRecord): void {
+  value.specification = SpecificationSchema.parse(value.specification);
+  value.request = ApprovalRequestSchema.parse(value.request);
+  value.strategy = TestStrategySchema.parse(value.strategy);
+  if (value.decision) value.decision = ApprovalDecisionSchema.parse(value.decision);
+}
+/** Linux flock + fsync/rename. A crashed process releases its lock; stale PID files are never stolen. */
+export class AgenticJournal {
+  readonly directory: string;
+  constructor(directory: string, readonly repository: string) { this.directory = resolve(directory); }
+  private static readonly queues = new Map<string, Promise<unknown>>();
+  async exclusive<T>(action: (state: JournalState, save: () => Promise<void>) => Promise<T>): Promise<T> {
+    const previous = AgenticJournal.queues.get(this.directory) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(() => this.locked(action));
+    AgenticJournal.queues.set(this.directory, next);
+    try { return await next; }
+    finally { if (AgenticJournal.queues.get(this.directory) === next) AgenticJournal.queues.delete(this.directory); }
+  }
+  private async locked<T>(action: (state: JournalState, save: () => Promise<void>) => Promise<T>): Promise<T> {
+    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    const lock = await open(join(this.directory, "lock"), "a+", 0o600);
+    try {
+      await new Promise<void>((accept, reject) => {
+        const child = spawn("flock", ["--nonblock", "3"], { stdio: ["ignore", "ignore", "ignore", lock.fd] });
+        const timer = setTimeout(() => { child.kill(); reject(new Error("Journal lock timeout")); }, 5000);
+        child.once("error", e => { clearTimeout(timer); reject(e); });
+        child.once("close", code => { clearTimeout(timer); code === 0 ? accept() : reject(new Error("Agentic runtime busy")); });
+      });
+      let state: JournalState;
+      try { state = parseState(JSON.parse(await readFile(join(this.directory, "state.json"), "utf8")), this.repository); }
+      catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+        state = { version: 1, repository: this.repository, runs: [], outbound: [], inbox: [], pendingCore: [], pendingVerifications: [] };
+      }
+      return await action(state, async () => {
+        parseState(state, this.repository);
+        const path = join(this.directory, `state-${randomUUID()}.tmp`);
+        const file = await open(path, "wx", 0o600);
+        try { await file.writeFile(JSON.stringify(state)); await file.sync(); } finally { await file.close(); }
+        try {
+          await rename(path, join(this.directory, "state.json"));
+          const dir = await open(this.directory, "r");
+          try { await dir.sync(); } finally { await dir.close(); }
+        } finally { await rm(path, { force: true }); }
+      });
+    } finally { await lock.close(); }
+  }
+}

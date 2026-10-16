@@ -1,3 +1,4 @@
+import { AgentBindingVerificationSchema } from "./receipts.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
@@ -29,7 +30,7 @@ import { validateRunTransition, validateTaskTransition } from "./transitions.js"
 export const CURRENT_DOMAIN_EVENT_SCHEMA_VERSION = 1 as const;
 
 export const WorkflowCommandOperationSchema = z.enum([
-  "createRun", "advance", "transitionTask", "bindAgentExecution", "recordDeliveryReconciliation",
+  "verifyAgentBinding", "createRun", "advance", "transitionTask", "bindAgentExecution", "recordDeliveryReconciliation",
   "recordAgentResult", "requestApproval", "applyApproval", "requestQualityGateEvaluation",
   "recordQualityGateResult", "requestCancellation", "recordCancellationResult", "confirmCancellationStop"
 ]);
@@ -132,6 +133,7 @@ export const TaskRetryScheduledEventSchema = z.object({
 
 export const CommandCompletedEventSchema = z.object({
   ...eventEnvelopeShape,
+  schemaVersion: z.union([z.literal(1), z.literal(2)]),
   type: z.literal("command.completed"),
   payload: CommandReceiptSchema
 }).strict();
@@ -290,6 +292,11 @@ export const CheckpointSavedEventSchema = z
   })
   .strict();
 
+export const AgentBindingVerifiedEventSchema = z.object({
+  ...eventEnvelopeShape, schemaVersion: z.literal(2), type: z.literal("agent.binding_verified"),
+  payload: AgentBindingVerificationSchema
+}).strict();
+
 export const DomainEventSchema = z
   .discriminatedUnion("type", [
     RunCreatedEventSchema,
@@ -299,6 +306,7 @@ export const DomainEventSchema = z
     CommandCompletedEventSchema,
     TaskDispatchRequestedEventSchema,
     AgentExecutionBoundEventSchema,
+    AgentBindingVerifiedEventSchema,
     AgentDeliveryUncertainEventSchema,
     AgentDeliveryReconciledEventSchema,
     AgentResultRecordedEventSchema,
@@ -318,6 +326,7 @@ export const DomainEventSchema = z
       "task.status_changed",
       "task.dispatch_requested",
       "agent.execution_bound",
+      "agent.binding_verified",
       "agent.delivery_uncertain",
       "agent.delivery_reconciled",
       "agent.result_recorded",
@@ -337,6 +346,10 @@ export const DomainEventSchema = z
         context.addIssue({ code: z.ZodIssueCode.custom, message: validation.reason ?? "invalid task transition" });
       }
     }
+    if (event.type === "command.completed" && ((event.payload.operation === "verifyAgentBinding") !== (event.schemaVersion === 2)))
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Authenticated binding command receipts require event schema 2" });
+    if (event.type === "agent.binding_verified" && (event.payload.receipt.handle.runId !== event.runId || event.payload.receipt.handle.taskId !== event.taskId || event.payload.verifiedAt !== event.occurredAt))
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Binding proof event ownership mismatch" });
     if (event.type === "command.completed" && event.payload.firstEventSequence > event.sequence) {
       context.addIssue({ code: z.ZodIssueCode.custom, message: "command receipt cannot start after its event" });
     }

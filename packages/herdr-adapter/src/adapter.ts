@@ -162,11 +162,9 @@ export class HerdrCliTransport implements AgentTransport {
     const version = await this.#run(["--version"], options);
     const versionError = mapFailure(version);
     if (versionError) return fail(versionError);
-    const versionMatch = /^herdr\s+(\d+)\.(\d+)\.(\d+)/m.exec(version.stdout);
-    if (!versionMatch) return fail({ code: "corruption", retryable: false, message: "Malformed Herdr version" });
-    if (Number(versionMatch[1]) !== 0 || Number(versionMatch[2]) !== 9 || Number(versionMatch[3]) !== 1) {
-      return fail({ code: "unsupported_version", retryable: false, supportedVersions: [22], receivedVersion: 0, message: `Herdr ${versionMatch[0]} has not been verified` });
-    }
+    // CLI release labels are diagnostic, not a compatibility contract. Probe the wire schema instead.
+    const cliVersion = version.stdout.trim().split(/\r?\n/, 1)[0];
+    if (!cliVersion || !/^herdr\b/i.test(cliVersion)) return fail({ code: "corruption", retryable: false, message: "Malformed Herdr version" });
     const schema = await this.#run(["api", "schema"], options);
     const schemaError = mapFailure(schema);
     if (schemaError) return fail(schemaError);
@@ -179,7 +177,7 @@ export class HerdrCliTransport implements AgentTransport {
     return ok(AgentTransportCapabilitiesSchema.parse({
       transportName: "herdr", protocolVersion: protocol[1], supportsStreaming: false,
       supportsCancellation: true, supportsResume: false, supportsSubmissionCorrelation: false,
-      metadata: { cliVersion: versionMatch[0], schemaVersion: schemaVersion[1] }
+      metadata: { cliVersion, schemaVersion: schemaVersion[1] }
     }));
   }
 
