@@ -7,12 +7,12 @@ the P11 contract freeze and reviewed P15/P16 implementations. Local `origin/main
 was `4e818b4a7c0c9b102bf1e85906a24d57fd6c192c`; it was an ancestor, six commits
 behind local main. No remote write is performed.
 
-The integration owner should add `{ "path": "./packages/verification" }` to root
-`tsconfig.json` references and run the pinned `pnpm install --lockfile-only` to
-register the `@bflow/contracts` workspace dependency and existing `zod` version in
-`pnpm-lock.yaml`. No dependency version change is needed. Root tests discover the
-new tests automatically; targeted package build/typecheck includes its source now.
-A clean checkout with frozen install requires this lockfile integration first.
+Under the user's review/fix/merge authorization, local integration registers
+`{ "path": "./packages/verification" }` in root `tsconfig.json` and the package
+importer in `pnpm-lock.yaml`. Existing dependency versions are preserved. Root
+build/typecheck now includes P17, and root tests discover its cases automatically.
+The root README also records package status and the targeted test command. These
+shared-file changes belong to the integration commit, separately from source ownership.
 
 P19 must compose the exported contract ports with the authoritative Runtime:
 

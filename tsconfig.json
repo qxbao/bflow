@@ -11,6 +11,7 @@
     { "path": "./packages/conversation" },
     { "path": "./packages/specification" },
     { "path": "./packages/test-strategy" },
+    { "path": "./packages/verification" },
     { "path": "./packages/quality-gates" },
     { "path": "./packages/runtime" },
     { "path": "./apps/cli" }
