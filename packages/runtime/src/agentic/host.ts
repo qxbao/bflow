@@ -235,7 +235,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     if (name === "submit_implementation") {
       if (role !== "developer") throw new Error("Only the assigned Developer may submit implementation");
       const state = record(await host.runtime.inspect());
-      const out = [...state.outbound as Record<string, unknown>[]].reverse().find(item => item.status === "accepted" && record(item.message).type === "task.assignment" &&
+      const out = [...state.outbound as Record<string, unknown>[]].reverse().find(item => ["accepted", "released"].includes(String(item.status)) && record(item.message).type === "task.assignment" &&
         record(item.message).run_id === parameters.runId && item.taskId === parameters.taskId && item.handle && record(record(item.handle).target).paneId === binding.paneId);
       if (!out) throw new Error("No accepted assignment for this Developer");
       const run = record(await host.runtime.inspect(textField(parameters.runId)));
@@ -245,11 +245,17 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (Array.isArray(strategy.targetCommands) && strategy.targetCommands.length)
         host.runtime.ports.policies.assertEvidenceComplete(strategy);
       const handle = AgentExecutionHandleSchema.parse(out.handle), original = RoleMessageSchema.parse(out.message);
+      if (digest(handle.target.session) !== digest(binding.session) || handle.target.agentId !== binding.agentId)
+        throw new Error("Implementation submission native assignment changed");
+      const priorSubmission = await receipts.nativeDelivery(`implementation:${handle.requestId}`);
+      if (priorSubmission) return nativeDeliver(priorSubmission.message, `implementation:${handle.requestId}`);
+      if (out.status !== "accepted") throw new Error("Implementation assignment released without an authenticated submission receipt");
       const envelope = (type: RoleMessage["type"], payload: unknown) => RoleMessageSchema.parse({ schema_version: 2, message_id: randomUUID(), correlation_id: original.correlation_id,
         causation_id: original.message_id, run_id: original.run_id, sender: { role, agent_id: binding.agentId, pane_id: binding.paneId }, recipient: { role: "coordinator" }, type, payload: json(payload), artifact_references: [], occurred_at: new Date().toISOString(), idempotency_key: randomUUID() });
       const receipt = AgentBindingReceiptSchema.parse({ schemaVersion: 1, receiptId: `binding-${handle.requestId}`, issuerId, handle,
         correlation: { token: original.message_id, provenance: "transport", verified: true }, observedAt: new Date().toISOString(), signature: { algorithm: "ed25519", value: Buffer.alloc(64).toString("base64") } });
-      await nativeDeliver(envelope("execution.receipt", receipt));
+      const priorBinding = await receipts.nativeDelivery(`binding:${handle.requestId}`);
+      await nativeDeliver(priorBinding?.message ?? envelope("execution.receipt", receipt), `binding:${handle.requestId}`);
       const snapshot = unwrap(await host.runtime.ports.engine.getSnapshot(handle.runId));
       const proof = snapshot?.tasks.find(task => task.taskId === handle.taskId)?.bindingVerification;
       if (!proof) throw new Error("Native binding has not been verified by Core");
@@ -257,7 +263,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const result = AgentResultSchema.parse({ requestId: handle.requestId, attemptId: handle.attemptId, runId: handle.runId, taskId: handle.taskId, executionId: handle.executionId,
         status: "succeeded", verification: { status: "verified", correlation: proof.receipt.correlation, evidence: "Native Herdr host checked the actual assignment/session binding; independent acceptance is pending" },
         artifactProposals: [], retryable: false, startedAt: handle.acceptedAt, completedAt: new Date().toISOString() });
-      return nativeDeliver(envelope("implementation.submitted", result));
+      return nativeDeliver(envelope("implementation.submitted", result), `implementation:${handle.requestId}`);
     }
     const envelope = (source: RoleMessage, type: RoleMessage["type"], payload: unknown, artifacts: RoleMessage["artifact_references"] = []) => RoleMessageSchema.parse({ schema_version: 2,
       message_id: randomUUID(), correlation_id: source.correlation_id, causation_id: source.message_id, run_id: source.run_id,
