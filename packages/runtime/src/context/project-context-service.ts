@@ -1511,6 +1511,8 @@ export class ProjectContextService {
    * Prepares a role-specific task context bundle with secret scrubbing and deterministic fingerprinting.
    */
   public async prepareRoleTaskContext(request: PrepareRoleContextRequest): Promise<RoleTaskContextBundle> {
+    const totalBudget = request.maxTotalBytes ?? 64_000;
+    if (!Number.isSafeInteger(totalBudget) || totalBudget < 1) throw new Error("Context byte budget must be a positive safe integer");
     const roleInstructions = await this.getAgentRoleInstructions(request.role);
 
     // Look up specification
@@ -1616,7 +1618,11 @@ export class ProjectContextService {
       promptSections.push(`## Relevant Repository Files\n${fileBlocks}`);
     }
 
-    const formattedPromptContext = promptSections.join("\n\n");
+    const formattedPromptContext = scrubSecrets(promptSections.join("\n\n"));
+    // Do not silently truncate governance, criteria or role instructions to fit.
+    if (Buffer.byteLength(formattedPromptContext, "utf8") > totalBudget) {
+      throw new Error(`Complete role context exceeds ${totalBudget} byte budget; narrow the task or increase its explicit budget`);
+    }
 
     // Build file fingerprints
     const fileFingerprints: Record<string, string> = {};

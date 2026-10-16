@@ -312,12 +312,15 @@ expires: aborting the wait does not prove a started operation stopped. The
 deprecated `onTimeoutCode` option remains accepted for source compatibility but
 cannot override that uncertainty. `executeWithRetry` will not resend it.
 
-File selection rechecks resolved-path containment, including parent symlinks,
+Repository context reads (including documentation, role prompts, ADRs and file
+selection) recheck resolved-path containment, including parent symlinks,
 rejects special files using nonblocking/no-follow descriptor opens, and computes
 size/checksum from the bytes read rather than cached analysis. This does not
 claim protection from a hostile same-user process continuously replacing paths.
-Selection byte/file limits cover repository file content; added role instructions,
-specification text and ADR summaries do not currently share a global prompt budget.
+`prepareRoleTaskContext` also enforces `maxTotalBytes` on the complete prompt,
+including instructions, specifications and ADR summaries. Oversized contexts fail
+with an actionable error instead of silently truncating governance or criteria.
+This output budget does not bound all analysis memory allocations.
 
 Targeted verification commands:
 

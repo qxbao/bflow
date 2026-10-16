@@ -191,6 +191,16 @@ const required = require("./legacy.js");
   });
 
   describe("2. Project Documentation & Agent Instructions Reader", () => {
+    it("enforces the complete prompt budget including role instructions and task details", async () => {
+      await writeFile("agents/chat/system-prompt.md", "Role instruction ".repeat(100));
+      await expect(service.prepareRoleTaskContext({ role: "conversation", title: "Task", description: "Details",
+        ownedPaths: [], affectedPaths: [], maxTotalBytes: 256 })).rejects.toThrow("Complete role context exceeds");
+      const bundle = await service.prepareRoleTaskContext({ role: "conversation", title: "Task", description: "Details",
+        ownedPaths: [], affectedPaths: [], maxTotalBytes: 4096 });
+      expect(bundle.totalBytes).toBeLessThanOrEqual(4096);
+      expect(bundle.formattedPromptContext).toContain("Role instruction");
+    });
+
     it.each(["README.md", "agents/chat/system-prompt.md"])("rejects cached documentation replaced by an escaping symlink: %s", async rel => {
       const original = await writeFile(rel, "original instructions");
       await service.analyzeRepositoryStructure();
