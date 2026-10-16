@@ -4,12 +4,12 @@ import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import {
   ApprovalDecisionSchema, JsonValueSchema, PaneBindingSchema, QualityGateContextSchema,
-  QualityGateResultSchema, VerificationResultSchema,
-  type ApprovalDecision, type JsonValue, type PaneBinding, type QualityGateResult, type VerificationResult
+  QualityGateResultSchema, RoleMessageSchema, VerificationResultSchema,
+  type ApprovalDecision, type JsonValue, type PaneBinding, type QualityGateResult, type RoleMessage, type VerificationResult
 } from "@bflow/contracts";
 import { digest, json, record, textField } from "./journal.js";
 
-type Kind = "human" | "gate" | "evidence" | "review" | "alternative";
+type Kind = "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack";
 export interface HumanHookProvenance {
   origin: "UserPromptSubmit"; binding: PaneBinding; nativeSessionId: string;
   conversationSessionId: string; userId: string; messageId: string; promptDigest: string;
@@ -37,6 +37,7 @@ export class HostReceiptJournal {
   }
   private filename(kind: Kind, id: string): string { return `${kind}-${digest(textField(id))}.json`; }
   private parsePayload(kind: Kind, input: unknown): JsonValue {
+    if (kind === "native-intent" || kind === "native-ack") return json(RoleMessageSchema.parse(input));
     if (kind === "gate") return json(QualityGateResultSchema.parse(input));
     if (kind === "evidence") return json(VerificationResultSchema.parse(input));
     if (kind === "human") {
@@ -66,7 +67,8 @@ export class HostReceiptJournal {
     if (value.checksum !== digest(envelope)) throw new Error("Host receipt integrity mismatch");
     if (kind === "human" && ApprovalDecisionSchema.parse(record(payload).decision).approvalId !== id ||
         kind === "gate" && QualityGateResultSchema.parse(payload).evaluationId !== id ||
-        kind === "evidence" && VerificationResultSchema.parse(payload).verificationId !== id)
+        kind === "evidence" && VerificationResultSchema.parse(payload).verificationId !== id ||
+        kind === "native-ack" && RoleMessageSchema.parse(payload).message_id !== id)
       throw new Error("Host receipt identity mismatch");
     return { ...envelope, checksum: textField(value.checksum) };
   }
@@ -82,21 +84,24 @@ export class HostReceiptJournal {
       return this.validate(JSON.parse(await file.readFile("utf8")), kind, id).payload;
     } finally { await file.close(); }
   }
-  private async write(kind: Kind, id: string, input: unknown): Promise<void> {
+  private async write(kind: Kind, id: string, input: unknown): Promise<boolean> {
     const payload = this.parsePayload(kind, input);
     const value = { version: 1 as const, repository: this.repository, sessionId: this.sessionId, kind, id, payload };
     const envelope = this.validate({ ...value, checksum: digest(value) }, kind, id);
     await this.prepare();
     const path = join(this.directory, `pending-${randomUUID()}.tmp`), file = await open(path, "wx", 0o600);
     try { await file.writeFile(JSON.stringify(envelope)); await file.sync(); } finally { await file.close(); }
+    let created = true;
     try {
       try { await link(path, join(this.directory, this.filename(kind, id))); }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        created = false;
         if (digest(await this.read(kind, id)) !== digest(payload)) throw new Error("Conflicting immutable host receipt");
       }
       const directory = await open(this.directory, "r");
       try { await directory.sync(); } finally { await directory.close(); }
+      return created;
     } finally { await rm(path, { force: true }); }
   }
   async recordHuman(decision: ApprovalDecision, provenance: HumanHookProvenance): Promise<void> {
@@ -126,6 +131,14 @@ export class HostReceiptJournal {
   async recordEvidence(result: VerificationResult): Promise<void> { const parsed = VerificationResultSchema.parse(result); await this.write("evidence", parsed.verificationId, parsed); }
   async getEvidence(id: string): Promise<VerificationResult | undefined> { const value = await this.read("evidence", id); return value === undefined ? undefined : VerificationResultSchema.parse(value); }
   async getGate(id: string): Promise<QualityGateResult | undefined> { const value = await this.read("gate", id); return value === undefined ? undefined : QualityGateResultSchema.parse(value); }
+  async recordNativeIntent(operationId: string, message: RoleMessage): Promise<boolean> { return this.write("native-intent", operationId, message); }
+  async recordNativeAcknowledgement(message: RoleMessage): Promise<void> { const parsed = RoleMessageSchema.parse(message); await this.write("native-ack", parsed.message_id, parsed); }
+  async nativeDelivery(operationId: string): Promise<{ message: RoleMessage; status: "unknown_delivery" | "acknowledged" } | undefined> {
+    const value = await this.read("native-intent", operationId); if (value === undefined) return undefined;
+    const message = RoleMessageSchema.parse(value), acknowledgement = await this.read("native-ack", message.message_id);
+    if (acknowledgement !== undefined && digest(acknowledgement) !== digest(message)) throw new Error("Native acknowledgement conflicts with delivery intent");
+    return { message, status: acknowledgement === undefined ? "unknown_delivery" : "acknowledged" };
+  }
   async authenticateEvidence(input: VerificationResult): Promise<boolean> { const result = VerificationResultSchema.parse(input); return digest(await this.read("evidence", result.verificationId)) === digest(result); }
   async putObservation(kind: "review" | "alternative", id: string, value: HostObservation): Promise<void> { await this.write(kind, id, value); }
   async getObservation(kind: "review" | "alternative", id: string): Promise<HostObservation | undefined> {

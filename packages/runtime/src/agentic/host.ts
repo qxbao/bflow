@@ -103,9 +103,17 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       throw new Error("MCP pane occupant/native session changed");
     return binding;
   };
-  const nativeDeliver = async (message: RoleMessage) => {
+  const nativeDeliver = async (message: RoleMessage, operationId = message.message_id) => {
     const sender = (await principal(AgentRoleSchema.parse(message.sender.role), textField(message.sender.pane_id)));
     if (message.sender.agent_id !== sender.agentId) throw new Error("Role message sender does not match authenticated pane");
+    const previous = await receipts.nativeDelivery(operationId);
+    if (previous) {
+      const semanticMessage = (value: RoleMessage) => ({ ...value, message_id: undefined, occurred_at: undefined, idempotency_key: undefined });
+      if (digest(semanticMessage(previous.message)) !== digest(semanticMessage(message))) throw new Error("Native operation already has a different immutable receipt; inspect its original result");
+      if (previous.status === "acknowledged") return json({ delivered: true, messageId: previous.message.message_id });
+      throw new Error("Native delivery is uncertain; reconcile the original operation before retrying");
+    }
+    if (!await receipts.recordNativeIntent(operationId, message)) throw new Error("Native delivery already started; reconcile before retrying");
     const socketPath = textField(record(JSON.parse(await herdr(["status", "server", "--json"]))).socket);
     await new Promise<void>((accept, reject) => {
       const socket = connect(socketPath); let output = "";
@@ -179,7 +187,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       projectApprovalRequired: () => configuration.policy?.sdd.approvalRequired === true,
       authorizeHuman: decision => receipts.authenticateHuman(decision),
       recoveredHumanDecisions: await receipts.humanDecisions(),
-      onNativeDelivery: async message => { deliveredMessageIds.add(message.message_id); },
+      onNativeDelivery: async message => { await receipts.recordNativeAcknowledgement(message); deliveredMessageIds.add(message.message_id); },
       onHumanDecision: async decision => { if (!humanHookProvenance) throw new Error("Human approval requires physical user input hook");
         await receipts.recordHuman(ApprovalDecisionSchema.parse(decision), humanHookProvenance); }
     });
@@ -249,11 +257,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const state = record(await host.runtime.inspect());
       const out = (state.outbound as Record<string, unknown>[]).find(item => record(item.message).message_id === parameters.messageId);
       if (!out) throw new Error("Review causation unavailable");
-      return nativeDeliver(envelope(RoleMessageSchema.parse(out.message), "review.verdict", completed.result, [completed.artifact]));
+      return nativeDeliver(envelope(RoleMessageSchema.parse(out.message), "review.verdict", completed.result, [completed.artifact]), `review:${textField(parameters.reviewId)}`);
     }
     if (name === "record_alternative_verification") {
       const completed = await verification.alternativeEvidence(binding, parameters);
-      return nativeDeliver(envelope(RoleMessageSchema.parse(completed.assignment), "verification.result", completed.result, completed.result.evidenceArtifacts));
+      return nativeDeliver(envelope(RoleMessageSchema.parse(completed.assignment), "verification.result", completed.result, completed.result.evidenceArtifacts), `alternative:${textField(parameters.observationId)}`);
     }
     if (name === "propose_workflow") {
       if (configuration.policy?.verification.maxIterations !== undefined) {

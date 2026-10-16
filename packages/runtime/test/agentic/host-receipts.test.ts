@@ -1,11 +1,13 @@
 import { mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
+import { connect } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { ApprovalDecisionSchema, PaneBindingSchema, QualityGateContextSchema, QualityGateResultSchema, VerificationResultSchema } from "@bflow/contracts";
+import { ApprovalDecisionSchema, PaneBindingSchema, QualityGateContextSchema, QualityGateResultSchema, RoleMessageSchema, VerificationResultSchema, canonicalReceiptJson } from "@bflow/contracts";
 import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 import { HostReceiptJournal, type HumanHookProvenance } from "../../src/agentic/host-receipts.js";
 import { digest, json } from "../../src/agentic/journal.js";
+import { startHerdrReceiptIngress, authenticateNativeHerdrMessage } from "../../src/agentic/herdr-ingress.js";
 
 const cleanup: string[] = [];
 afterEach(async () => { for (const path of cleanup.splice(0)) await rm(path, { recursive: true, force: true }); });
@@ -88,5 +90,36 @@ describe("private durable host authentication receipts", () => {
     const path = join(f.directory, (await readdir(f.directory)).find(name => name.startsWith("human-"))!);
     const outside = join(f.root, "outside.json"); await writeFile(outside, await readFile(path)); await rm(path); await symlink(outside, path);
     await expect(f.reopen().authenticateHuman(decision)).rejects.toThrow();
+  });
+  it("retains uncertain native intent across restart and fsyncs signed ingress acknowledgement before ACK", async () => {
+    const f = await fixture();
+    const message = RoleMessageSchema.parse({ schema_version: 2, message_id: "native-verdict", correlation_id: "correlation", run_id: "run",
+      sender: { role: "reviewer", agent_id: "reviewer", pane_id: "review-pane" }, recipient: { role: "coordinator" },
+      type: "review.verdict", payload: { status: "passed" }, artifact_references: [], idempotency_key: "native-verdict" });
+    const claims = await Promise.all([f.journal.recordNativeIntent("review:operation", message), f.reopen().recordNativeIntent("review:operation", message)]);
+    expect(claims.sort()).toEqual([false, true]);
+    expect(await f.reopen().nativeDelivery("review:operation")).toEqual({ message, status: "unknown_delivery" });
+    const pair = generateKeyPairSync("ed25519"), socketPath = join(f.root, "native.sock");
+    let accepted = 0;
+    const ingress = await startHerdrReceiptIngress({ socketPath, publicKeys: { host: pair.publicKey.export({ type: "spki", format: "pem" }).toString() },
+      receive: async received => {
+        if (!await authenticateNativeHerdrMessage(received)) throw new Error("Untrusted ingress");
+        await f.reopen().recordNativeAcknowledgement(received); accepted += 1;
+      } });
+    const send = (signature: string) => new Promise<any>((accept, reject) => {
+      const socket = connect(socketPath); let response = "";
+      socket.once("error", reject); socket.once("connect", () => socket.write(JSON.stringify({ issuerId: "host", signature, message }) + "\n"));
+      socket.on("data", chunk => response += String(chunk)); socket.once("end", () => { try { accept(JSON.parse(response)); } catch (error) { reject(error); } });
+    });
+    try {
+      expect((await send(Buffer.alloc(64).toString("base64"))).ok).toBe(false);
+      expect(accepted).toBe(0);
+      expect((await f.reopen().nativeDelivery("review:operation"))?.status).toBe("unknown_delivery");
+      const signature = sign(null, Buffer.from(canonicalReceiptJson(message)), pair.privateKey).toString("base64");
+      expect((await send(signature)).ok).toBe(true);
+      expect(accepted).toBe(1);
+      expect(await f.reopen().nativeDelivery("review:operation")).toEqual({ message, status: "acknowledged" });
+      await expect(f.journal.recordNativeIntent("review:operation", { ...message, payload: { status: "failed" } })).rejects.toThrow("immutable");
+    } finally { await ingress.close(); }
   });
 });
