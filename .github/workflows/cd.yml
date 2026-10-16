@@ -42,6 +42,28 @@ jobs:
           node-version: "22"
           cache: "pnpm"
 
+      - name: Install and verify the mandatory behavioral sandbox
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends bubblewrap apparmor-profiles
+
+          # Ubuntu's opt-in bwrap profile permits user namespaces while restricting
+          # capabilities in its children; keep the system-wide restriction enabled.
+          restriction=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [[ -r "$restriction" && "$(cat "$restriction")" == "1" ]]; then
+            sudo apparmor_parser --replace /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          fi
+
+          /usr/bin/bwrap --version
+          # Check Runtime's empty-filesystem layout with setup-node's actual binary.
+          sandbox_node="$(command -v node)"
+          timeout 10s /usr/bin/bwrap --unshare-all --die-with-parent --new-session --cap-drop ALL \
+            --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 \
+            --proc /proc --dev /dev --tmpfs /tmp --ro-bind /etc/hosts /etc/hosts \
+            --ro-bind "$(readlink -f "$sandbox_node")" "$sandbox_node" --chdir / \
+            -- "$sandbox_node" -e "console.log('Bflow sandbox preflight passed')"
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
