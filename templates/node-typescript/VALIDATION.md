@@ -1,5 +1,9 @@
 # DX validation evidence — 2026-10-16
 
+Follow-up fixes and validation against the newer main baseline are recorded in
+[REVIEW.md](REVIEW.md). The evidence below describes the original implementation
+pass and remains scoped to its stated tested HEAD.
+
 Tested source HEAD: `48e1c5ecd438bd9300abbc6372f56a5ef5007ac0`
 (`Merge P19 coordinator and authenticated Herdr receipts`), with this documentation,
 template and standalone example diff in worktree `/tmp/bflow-dx-docs`, branch
