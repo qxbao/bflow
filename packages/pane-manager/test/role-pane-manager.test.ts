@@ -1544,6 +1544,23 @@ describe("RolePaneManager Verification Suite", () => {
       }
     });
 
+    it.each(["error", "timeout"])("does not record shutdown success when pane close returns %s", async failure => {
+      const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+      const initialized = await manager.initializeTopology();
+      expect(initialized.ok).toBe(true);
+      runner.onCommand = invocation => invocation.args[0] === "pane" && invocation.args[1] === "close"
+        ? failure === "timeout"
+          ? { exitCode: null, stdout: "", stderr: "", failure: "timeout", started: true }
+          : { exitCode: 1, stdout: "", stderr: JSON.stringify({ error: { code: "denied", message: "cannot close" } }) }
+        : undefined;
+      const result = await manager.shutdownTopology();
+      expect(result.ok).toBe(false);
+      const persisted = await store.load(config.sessionId);
+      expect(persisted.ok).toBe(true);
+      if (persisted.ok && initialized.ok) expect(persisted.value).toEqual(initialized.value);
+      expect(runner.panes.size).toBeGreaterThan(0);
+    });
+
     it("propagates store.save error in inspectTopologyHealth, focusConversationPane, and allocateDeveloper", async () => {
       const normalManager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
       const initRes = await normalManager.initializeTopology();

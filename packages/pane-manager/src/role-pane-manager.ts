@@ -242,7 +242,11 @@ export class RolePaneManager {
       }
 
       for (const pane of manifest.panes) {
-        await this.#closePane(pane.paneId, options);
+        const outcome = await this.#runHerdr(["pane", "close", pane.paneId], options);
+        if (outcome.exitCode !== 0 || outcome.failure) {
+          return toCommandError(outcome, `Shutdown did not confirm closure of pane '${pane.paneId}'`);
+        }
+        parseOkResponse(outcome);
       }
 
       const nowIso = this.#clock().toISOString();

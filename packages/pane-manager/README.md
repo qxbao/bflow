@@ -85,6 +85,26 @@ flowchart TD
 9. **Dirty Worktree Release Guard**: Never auto-close a pane or remove a worktree containing uncommitted changes (`isClean: false`).
 10. **Atomic Manifest Persistence**: File-based manifest persistence uses atomic temporary file creation and replacement.
 
+The production Git inspector clears inherited `GIT_*` repository/index overrides
+and disables Git fsmonitor for its read operations. Allocation and release reject
+`assume-unchanged` and `skip-worktree` index flags because Git status can hide edits
+behind them. Clear flags explicitly after inspecting the files; sparse checkouts
+using these flags are unsupported. Ignored files also make the tree dirty, so
+preserve or remove generated files explicitly before releasing a worktree. The
+inspector never clears flags, deletes files or discards edits.
+
+`shutdownTopology` records `down` only after every pane-close response confirms
+success. A failed or timed-out close returns an error and retains the previous
+manifest; earlier panes may already have closed, so reconcile physical state
+before another shutdown attempt. Runtime quiesce and durable checkpoints remain
+the caller's responsibility.
+
+`readOnlyWorkspace` describes a role's policy in the manifest. Agent startup does
+not install an OS sandbox or filesystem access controls. Dedicated panes and Git
+worktrees isolate routing and ordinary edits, but processes under the same user
+can access other worktrees and repository state. Do not treat this metadata as a
+security boundary against a malicious or misconfigured agent.
+
 ---
 
 ## Herdr CLI Protocol & API Map
@@ -122,7 +142,7 @@ Run unit and integration tests:
 
 ```bash
 # Targeted package test suite
-pnpm exec vitest run packages/pane-manager/test/role-pane-manager.test.ts
+pnpm exec vitest run packages/pane-manager/test
 
 # Full workspace verification
 pnpm check:deps

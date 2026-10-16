@@ -226,11 +226,35 @@ export function createGitWorktreeInspector(gitBinary = "git"): WorktreeInspector
         };
       }
 
-      const statusOutcome = await runner.run({
-        args: ["-C", worktreePath, "status", "--porcelain", "--untracked-files=normal"],
+      // Repository/index overrides inherited from a caller must never make a
+      // different checkout look clean. Disable fsmonitor, which can also hide
+      // local changes (or invoke an external command configured by a repository).
+      const env = { ...process.env };
+      for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
+      const inspectGit = (args: readonly string[]) => runner.run({
+        args: ["-c", "core.fsmonitor=false", "-C", worktreePath, ...args], env,
         ...(options?.signal !== undefined && { signal: options.signal }),
-        ...(options?.timeoutMs !== undefined && { timeoutMs: options.timeoutMs })
+        timeoutMs: options?.timeoutMs ?? 5000
       });
+      const indexOutcome = await inspectGit(["ls-files", "-v", "-z"]);
+      if (indexOutcome.failure || indexOutcome.exitCode !== 0) {
+        return { ok: false, error: mapCommandFailure(indexOutcome) ?? {
+          code: "validation", retryable: false,
+          message: "Cannot inspect Git index flags; refusing to declare worktree clean"
+        } };
+      }
+      if (indexOutcome.stdout.split("\0").some(entry => /^[a-zS] /.test(entry))) {
+        return { ok: false, error: {
+          code: "validation", retryable: false,
+          message: "Git index contains assume-unchanged or skip-worktree flags; inspect hidden edits and clear flags explicitly before allocation or release"
+        } };
+      }
+      // Ignored files are unpreserved user data too. NUL records preserve names
+      // containing newlines or whitespace; no rename records need special parsing.
+      const statusOutcome = await inspectGit([
+        "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all",
+        "--ignored=matching", "--ignore-submodules=none"
+      ]);
 
       if (statusOutcome.failure) {
         const mapped = mapCommandFailure(statusOutcome);
@@ -256,19 +280,10 @@ export function createGitWorktreeInspector(gitBinary = "git"): WorktreeInspector
         };
       }
 
-      const rawLines = statusOutcome.stdout
-        .split("\n")
-        .map((l) => l.trimEnd())
-        .filter((l) => l.length > 0);
-
-      const dirtyFiles = rawLines.map((line) => line.slice(3).trim());
+      const dirtyFiles = statusOutcome.stdout.split("\0").filter(Boolean).map(line => line.slice(3));
       const isClean = dirtyFiles.length === 0;
 
-      const revParseOutcome = await runner.run({
-        args: ["-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD"],
-        ...(options?.signal !== undefined && { signal: options.signal }),
-        ...(options?.timeoutMs !== undefined && { timeoutMs: options.timeoutMs })
-      });
+      const revParseOutcome = await inspectGit(["rev-parse", "--abbrev-ref", "HEAD"]);
 
       let currentBranch: string | undefined;
       if (revParseOutcome.exitCode === 0) {
