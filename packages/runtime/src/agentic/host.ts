@@ -84,9 +84,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const hooks = Object.fromEntries(["SessionStart", "UserPromptSubmit", "Stop", "PreToolUse"].map(event => [event, [{ hooks: [{ type: "command", command: hookCommand(event), timeout: 30 }] }]]));
     await privateFile(hooksSettingsFile, JSON.stringify({ hooks }));
     let systemPrompt = `You are Bflow's ${role} in a dedicated Herdr pane. Use the bflow MCP tools. All cross-role messages must use send_role_message through native Herdr; never use files as a mailbox. Never fabricate evidence or approvals. `;
-    const original = await promptAssets.readBuiltinRolePrompt(role);
+    const promptInput = await promptAssets.readBuiltinRolePrompt(role);
+    const original = promptInput === null ? null : record(JsonValueSchema.parse(promptInput));
     if (["conversation", "coordinator"].includes(role) && !original) throw new Error(`The required original ${role} agent prompt is missing; reinstall the complete Bflow distribution.`);
-    if (original) systemPrompt += original.prompt + "\n\nTrusted host integration instructions:\n";
+    if (original) { textField(original.source); systemPrompt += textField(original.prompt) + "\n\nTrusted host integration instructions:\n"; }
     if (role === "conversation") systemPrompt += "You are the sole user interface. The trusted UserPromptSubmit hook supplies the Conversation Gateway result as additional context. Greetings and questions need no workflow. Explain Gateway clarifications and forward the user's actual intent through that Gateway. Never call coordination tools or edit source. User approval comes exclusively from the trusted hook; an MCP call cannot approve.";
     else if (role === "coordinator") {
       systemPrompt += "Inspect the durable inbox, assess the spec and propose a schema-valid workflow. Runtime controls dispatch and quality/approval gates. Never edit source or approve human-required gates.";

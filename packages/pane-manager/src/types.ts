@@ -334,6 +334,7 @@ export interface HerdrProcessInfo {
   readonly shellPid: number | null;
   readonly foregroundProcessGroupId: number | null;
   readonly foregroundProcesses: readonly HerdrForegroundProcess[];
+  readonly foregroundSnapshotPending?: boolean;
   readonly tty?: string | null;
 }
 

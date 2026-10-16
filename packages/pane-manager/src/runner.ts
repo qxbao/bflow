@@ -835,11 +835,13 @@ export function parsePaneProcessInfoResult(outcome: CommandOutcome): HerdrProces
         ? number(raw.foregroundProcessGroupId, "foregroundProcessGroupId")
         : null;
 
-  const fgProcsRaw = raw.foreground_processes ?? raw.foregroundProcesses;
-  if (!Array.isArray(fgProcsRaw)) {
-    throw new HerdrProtocolError("Missing foreground_processes array in process_info", "malformed");
+  const fgProcsRaw = raw.foreground_processes !== undefined ? raw.foreground_processes : raw.foregroundProcesses;
+  // Protocol 22 requires only pane_id here. Omitted process data is a pending
+  // observation, never evidence that the foreground is empty or shell-ready.
+  if (fgProcsRaw !== undefined && !Array.isArray(fgProcsRaw)) {
+    throw new HerdrProtocolError("Invalid foreground_processes array in process_info", "malformed");
   }
-  const foregroundProcesses: readonly HerdrForegroundProcess[] = fgProcsRaw.map((pRaw) => {
+  const foregroundProcesses: readonly HerdrForegroundProcess[] = (fgProcsRaw ?? []).map((pRaw: unknown) => {
     const p = record(pRaw, "foreground_process");
     const pid = number(p.pid, "foreground_process.pid");
     const command = typeof p.command === "string" ? p.command : undefined;
@@ -857,6 +859,7 @@ export function parsePaneProcessInfoResult(outcome: CommandOutcome): HerdrProces
     shellPid,
     foregroundProcessGroupId: fgPgid,
     foregroundProcesses,
+    ...(fgProcsRaw === undefined ? { foregroundSnapshotPending: true } : {}),
     ...(tty !== undefined && { tty })
   };
 }
@@ -956,6 +959,9 @@ export function isShellReadyForAgent(
   }
 
   if (processInfo !== undefined) {
+    if (processInfo.paneId !== pane.paneId) return { ready: false, reason: "Process observation belongs to a different pane" };
+    if (processInfo.foregroundSnapshotPending || processInfo.foregroundProcessGroupId === null) return { ready: false,
+      reason: `Pane ${pane.paneId} shell process metadata is still initializing; retry bflow up. No agent was started.` };
     if (processInfo.shellPid === null || processInfo.shellPid <= 0) {
       return {
         ready: false,

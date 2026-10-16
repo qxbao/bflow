@@ -886,6 +886,19 @@ describe("RolePaneManager Verification Suite", () => {
       expect(pane.metadata?.promptInitialized).toBe(true);
     }
   });
+  it("waits for a new pane's pending process snapshot instead of starting into an unobserved foreground", async () => {
+    let pending = true;
+    runner.onCommand = call => {
+      if (call.args[0] === "pane" && call.args[1] === "process-info" && pending) {
+        pending = false;
+        expect(runner.calls.some(c => c.args[0] === "agent" && c.args[1] === "start")).toBe(false);
+        return { exitCode: 0, stderr: "", stdout: JSON.stringify({id:"1",result:{type:"pane_process_info",process_info:{pane_id:call.args[call.args.indexOf("--pane")+1]}}}) };
+      }
+    };
+    const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+    expect((await manager.initializeTopology()).ok).toBe(true);
+    expect(runner.calls.filter(c => c.args[0] === "agent" && c.args[1] === "start")).toHaveLength(7);
+  });
   it("explains Codex update blocking with exact targets and never echoes raw screen secrets or accepts the dialog", async () => {
     const secret = "SCREEN_SECRET_CANARY_DO_NOT_ECHO";
     runner.onCommand = invocation => {

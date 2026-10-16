@@ -826,11 +826,18 @@ export class RolePaneManager {
         return conflictError(`Pane '${request.paneId}' is already occupied by agent '${pane.agent}'`);
       }
 
-      const procOutcome = await this.#runHerdr(["pane", "process-info", "--pane", request.paneId], options);
+      let procOutcome = await this.#runHerdr(["pane", "process-info", "--pane", request.paneId], options);
       if (procOutcome.exitCode !== 0 || procOutcome.failure) {
         return toCommandError(procOutcome, `Failed to inspect process info for pane '${request.paneId}'`);
       }
-      const processInfo = parsePaneProcessInfoResult(procOutcome);
+      let processInfo = parsePaneProcessInfoResult(procOutcome);
+      for (let attempt = 0; attempt < 40 && (processInfo.foregroundSnapshotPending || processInfo.shellPid === null || processInfo.foregroundProcessGroupId === null); attempt++) {
+        if (options?.signal?.aborted) return { ok: false, error: { code: "cancelled", retryable: false, message: "Shell startup wait interrupted; state preserved." } };
+        await new Promise(resolve => setTimeout(resolve, 50));
+        procOutcome = await this.#runHerdr(["pane", "process-info", "--pane", request.paneId], options);
+        if (procOutcome.exitCode !== 0 || procOutcome.failure) return toCommandError(procOutcome, `Cannot observe startup shell in pane '${request.paneId}'`);
+        processInfo = parsePaneProcessInfoResult(procOutcome);
+      }
       const readiness = isShellReadyForAgent(pane, processInfo);
       if (!readiness.ready) {
         return conflictError(readiness.reason ?? `Pane '${request.paneId}' shell is not ready for agent startup`);
