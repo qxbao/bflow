@@ -54,7 +54,9 @@ export class AgenticWorkflowRuntime {
     return this.journal.exclusive(async (state, save) => {
       const core = new CoreSession(this.ports, state, save);
       await core.restore();
-      return action(state, save, core, new HerdrOutbox(this.ports, state, save));
+      const outbox = new HerdrOutbox(this.ports, state, save);
+      await this.recoverPhaseFailures(state, save, outbox);
+      return action(state, save, core, outbox);
     });
   }
   private run(state: JournalState, runId: string): RunRecord {
@@ -651,25 +653,46 @@ export class AgenticWorkflowRuntime {
     const binding = PaneBindingSchema.parse(bindingInput);
     return this.transaction(async (state, save, _core, outbox) => {
       const request = state.outbound.find(item => item.message.message_id === requestId);
-      if (!request?.handle || request.message.type !== "verification.requested" || request.status !== "accepted" ||
+      if (!request?.handle || request.message.type !== "verification.requested" || !["accepted", "released"].includes(request.status) ||
           request.handle.target.paneId !== binding.paneId || request.handle.target.agentId !== binding.agentId ||
           digest(request.handle.target.session) !== digest(binding.session) || record(request.message.payload).kind !== "conditional_evidence")
         throw new Error("Phase failure does not belong to this independent verifier");
-      const run = this.run(state, request.message.run_id!); this.live(run);
-      const payload = record(request.message.payload), task = run.tasks.find(item => item.taskId === payload.taskId);
-      if (!task) throw new Error("Policy failure task is missing");
+      const run = this.run(state, request.message.run_id!);
+      if (request.phaseFailure) {
+        if (request.phaseFailure.summary !== summary || request.phaseFailure.repairable !== repairable || digest(request.phaseFailureEvidence) !== digest(evidence))
+          throw new Error("Conflicting immutable policy failure outcome");
+        return json({ alreadyRecorded: true, status: run.status });
+      }
+      this.live(run);
+      if (request.status !== "accepted") throw new Error("Verifier released without a saved phase failure; reconcile its original request");
       if (evidence) { await this.verifyReferences([evidence], run.runId); request.phaseFailureEvidence = ArtifactReferenceSchema.parse(evidence); }
-      await outbox.renew(request); await outbox.release(request);
+      await outbox.renew(request);
+      request.phaseFailure = { summary: textField(summary), repairable, applied: false };
       request.error = `policy_phase_failed:${summary}`;
+      await save(); // preserve the measured outcome before releasing its lease
+      await this.recoverPhaseFailures(state, save, outbox);
+      return json({ status: run.status, maxIterations: run.maxIterations });
+    });
+  }
+  private async recoverPhaseFailures(state: JournalState, save: () => Promise<void>, outbox: HerdrOutbox): Promise<void> {
+    for (const request of state.outbound.filter(item => item.phaseFailure && !item.phaseFailure.applied)) {
+      const { summary, repairable } = request.phaseFailure!;
+      const run = this.run(state, request.message.run_id!), payload = record(request.message.payload);
+      const task = run.tasks.find(item => item.taskId === payload.taskId);
+      if (!task) throw new Error("Policy failure task is missing");
+      await outbox.release(request);
       const failures = state.outbound.filter(item => item.message.run_id === run.runId && item.error?.startsWith("policy_phase_failed:") &&
         record(item.message.payload).taskId === task.taskId && record(item.message.payload).phase === payload.phase &&
         record(item.message.payload).implementationAttemptId === payload.implementationAttemptId).length;
-      if (!repairable || failures >= run.maxIterations) {
+      if (run.cancelled || ["completed", "failed", "cancelled", "escalated"].includes(run.status)) {
+        // Retain the receipt while preserving a newer terminal decision.
+      } else if (!repairable || failures >= run.maxIterations) {
         run.status = "escalated"; run.error = !repairable ? `Policy measurement blocked: ${summary}` : `Policy phase repair limit exhausted: ${summary}`;
         this.progress(state, outbox, run, run.error);
       } else this.phaseNotice(state, outbox, run, task, textField(payload.phase), "failed", summary, request.message.message_id);
-      await save(); return json({ status: run.status, failedMeasurements: failures, maxIterations: run.maxIterations });
-    });
+      request.phaseFailure!.applied = true;
+      await save();
+    }
   }
   private verificationPlan(run: RunRecord, task?: TaskRecord): VerificationPlan {
     if (task?.verificationPlan) return task.verificationPlan;

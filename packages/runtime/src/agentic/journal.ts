@@ -56,6 +56,7 @@ export interface Outbound {
   assignment?: AgentAssignment; lease?: AgentLease; request?: AgentRequest; handle?: AgentExecutionHandle;
   error?: string; cancelRequested?: boolean;
   phaseFailureEvidence?: ArtifactReference;
+  phaseFailure?: { summary: string; repairable: boolean; applied: boolean };
   /** A control notice borrows its task assignment's lease; it never owns capacity. */
   parentAssignmentId?: string;
   leaseRenewal?: RenewAgentLeaseRequest;
@@ -103,6 +104,12 @@ function parseState(input: unknown, repository: string): JournalState {
     if (out.lease) out.lease = AgentLeaseSchema.parse(out.lease);
     if (out.handle) out.handle = AgentExecutionHandleSchema.parse(out.handle);
     if (out.phaseFailureEvidence) out.phaseFailureEvidence = ArtifactReferenceSchema.parse(out.phaseFailureEvidence);
+    if (out.phaseFailure) {
+      textField(out.phaseFailure.summary);
+      if (typeof out.phaseFailure.repairable !== "boolean" || typeof out.phaseFailure.applied !== "boolean" ||
+          out.message.type !== "verification.requested" || record(out.message.payload).kind !== "conditional_evidence")
+        throw new Error("Invalid private policy failure outcome");
+    }
     if (out.leaseRenewal) {
       out.leaseRenewal = RenewAgentLeaseRequestSchema.parse(out.leaseRenewal);
       if (out.parentAssignmentId || !out.lease || out.leaseRenewal.leaseId !== out.lease.leaseId ||

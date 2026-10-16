@@ -107,7 +107,7 @@ export class HostVerification {
       const strategy = TestStrategySchema.parse(strategyInput);
       for (const criterion of automated) {
         const mapping = strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id);
-        if (!mapping?.testNames.length || !this.commands.some(command => command.method === criterion.verificationMethod && mapping.testNames.every(name => command.testNames.includes(name)))) throw new Error(`No complete owner-configured test mapping for ${criterion.id}`);
+        if (!mapping?.testNames.length || !this.commands.some(command => strategy.targetCommands.includes(command.command) && command.method === criterion.verificationMethod && mapping.testNames.every(name => command.testNames.includes(name)))) throw new Error(`No complete owner-configured test mapping for ${criterion.id}`);
       }
       for (const command of strategy.targetCommands) if (!this.commands.some(config => config.command === command)) throw new Error(`No owner-configured argv for ${command}`);
       if (strategy.coverageThresholdPercent !== undefined) throw new Error("Configured behavioral reporters do not measure aggregate coverage");
@@ -152,8 +152,7 @@ export class HostVerification {
     if (target.agentId === binding.agentId || target.paneId === binding.paneId) throw new Error("Implementer cannot verify its own change");
     const cwd = textField(target.worktreePath), revision = (await this.git(cwd, ["rev-parse", "HEAD"])).trim(), startedAt = new Date().toISOString();
     const criteria = spec.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived");
-    const commands = this.commands.filter(command => strategy.targetCommands.includes(command.command) || criteria.some(criterion => criterion.verificationMethod === command.method &&
-      strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id)?.testNames.every(name => command.testNames.includes(name))));
+    const commands = this.commands.filter(command => strategy.targetCommands.includes(command.command));
     if (!commands.length || criteria.some(criterion => criterion.verificationMethod === "manual_review")) throw new Error("This strategy requires independent alternative evidence");
     const verificationId = `host-behavioral-${digest([runId, taskId, strategy.tddDecision.decisionId, phase, revision, commands])}`;
     const replay = this.receipts ? await this.receipts.getEvidence(verificationId) : this.evidenceRecords.get(verificationId);

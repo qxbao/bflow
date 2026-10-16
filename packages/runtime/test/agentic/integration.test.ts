@@ -565,3 +565,34 @@ describe("P19 integrated Agentic SDLC", () => {
   });
 
 });
+
+it("recovers the exact failed phase after a crash following lease release without duplicating repair notices", async () => {
+  const f = await fixture({ tdd: true });
+  f.ports.roleCapabilities.qa = ["verification", "testing"];
+  await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+  const state = await f.runtime.inspect() as any;
+  const assignment = state.outbound.find((out: any) => out.message.type === "task.assignment");
+  const binding = f.panes.bindings.find(item => item.paneId === assignment.handle.target.paneId)!;
+  const revision = git(assignment.handle.target.worktreePath, "rev-parse", "HEAD");
+  const queued = await f.runtime.requestPhaseVerification(binding, "run-1", "implement", "red", revision) as any;
+  await f.runtime.flushOutbound();
+  const request = (await f.runtime.inspect() as any).outbound.find((out: any) => out.message.message_id === queued.messageId);
+  const qa = f.panes.bindings.find(item => item.paneId === request.handle.target.paneId)!;
+  const journal = (f.runtime as any).journal, exclusive = journal.exclusive.bind(journal);
+  const spy = vi.spyOn(journal, "exclusive").mockImplementation((action: any) => exclusive(async (current: any, save: any) => action(current, async () => {
+    await save();
+    if (current.outbound.find((out: any) => out.message.message_id === queued.messageId)?.status === "released")
+      throw new Error("crash after released checkpoint");
+  })));
+  await expect(f.runtime.recordPhaseFailure(qa, queued.messageId, "Actual assertion failure", true)).rejects.toThrow("crash after released checkpoint");
+  spy.mockRestore();
+  const reopened = f.restart(), restored = await reopened.inspect() as any;
+  const failed = restored.outbound.find((out: any) => out.message.message_id === queued.messageId);
+  expect(failed).toMatchObject({ status: "released", error: "policy_phase_failed:Actual assertion failure", phaseFailure: { applied: true } });
+  expect(restored.outbound.filter((out: any) => out.parentAssignmentId === assignment.message.message_id)).toHaveLength(1);
+  expect(await reopened.recordPhaseFailure(qa, queued.messageId, "Actual assertion failure", true)).toMatchObject({ alreadyRecorded: true });
+  await expect(reopened.requestPhaseVerification(binding, "run-1", "implement", "red", revision)).rejects.toThrow("already failed");
+  const again = await reopened.inspect() as any;
+  expect(again.outbound.filter((out: any) => out.parentAssignmentId === assignment.message.message_id)).toHaveLength(1);
+  await expect(reopened.recordPhaseFailure(qa, queued.messageId, "Different result", true)).rejects.toThrow("Conflicting");
+});
