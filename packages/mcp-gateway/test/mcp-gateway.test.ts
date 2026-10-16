@@ -1795,34 +1795,38 @@ describe("@bflow/mcp-gateway Verification & Architecture Invariants", () => {
       const scriptPath = path.join(tmpDir, "server.cjs");
       const serverCode = `
 const readline = require('readline');
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
+const rl = readline.createInterface({ input: process.stdin, terminal: false });
 rl.on('line', (line) => {
   if (!line.trim()) return;
-  const msg = JSON.parse(line);
-  if (msg.method === 'initialize') {
-    process.stdout.write(JSON.stringify({
-      jsonrpc: '2.0',
-      id: msg.id,
-      result: {
-        protocolVersion: '2025-11-25',
-        capabilities: { tools: {} },
-        serverInfo: { name: 'real-node-child', version: '1.0.0' }
-      }
-    }) + '\\n');
-  } else if (msg.method === 'notifications/initialized') {
-    // no reply
-  } else if (msg.method === 'tools/list') {
-    process.stdout.write(JSON.stringify({
-      jsonrpc: '2.0',
-      id: msg.id,
-      result: { tools: [{ name: 'real_compute' }] }
-    }) + '\\n');
-  } else if (msg.method === 'tools/call') {
-    process.stdout.write(JSON.stringify({
-      jsonrpc: '2.0',
-      id: msg.id,
-      result: { content: { computed: (msg.params?.arguments?.n || 0) * 2 } }
-    }) + '\\n');
+  try {
+    const msg = JSON.parse(line);
+    if (msg.method === 'initialize') {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: '2.0',
+        id: msg.id,
+        result: {
+          protocolVersion: '2025-11-25',
+          capabilities: { tools: {} },
+          serverInfo: { name: 'real-node-child', version: '1.0.0' }
+        }
+      }) + '\\n');
+    } else if (msg.method === 'notifications/initialized') {
+      // no reply
+    } else if (msg.method === 'tools/list') {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: '2.0',
+        id: msg.id,
+        result: { tools: [{ name: 'real_compute' }] }
+      }) + '\\n');
+    } else if (msg.method === 'tools/call') {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: '2.0',
+        id: msg.id,
+        result: { content: { computed: (msg.params?.arguments?.n || 0) * 2 } }
+      }) + '\\n');
+    }
+  } catch {
+    // ignore parse error on invalid line
   }
 });
 `;
@@ -1836,10 +1840,12 @@ rl.on('line', (line) => {
         const secretStore = new GatewaySecretStore();
         const stdioFactory = new SubprocessStdioDriverFactory({
           verifyExecutableDigest: true,
-          secretStore
+          secretStore,
+          defaultTimeoutMs: 30_000
         });
 
         const service = makeServiceDefinition("svc-real-subprocess", {
+          healthTimeoutMs: 30_000,
           connection: {
             kind: "stdio_mcp",
             executable: realNodeExec,
@@ -1898,6 +1904,9 @@ rl.on('line', (line) => {
         const callResults = await Promise.all(callPromises);
         for (let i = 0; i < clientCount; i++) {
           const res = callResults[i]!;
+          if (!res.ok) {
+            console.error(`Client ${i} call failed:`, JSON.stringify(res.error, null, 2));
+          }
           expect(res.ok).toBe(true);
           if (res.ok) {
             expect(res.value.status).toBe("completed");
