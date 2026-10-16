@@ -1,7 +1,10 @@
 # Proposal: authenticated Herdr receipt and binding verification
 
-Status: **PROPOSED, NOT APPROVED**. Approving owner: project owner and the shared
-contract/integration owner. No contract or adapter change is made by P19.
+Status: **APPROVED** by the project owner in this conversation on 2026-10-16
+(“Proposal: duyệt”). The implementation decision, compatibility plan and affected
+owners are recorded in [ADR 0003](../../docs/adr/0003-authenticated-herdr-receipts.md).
+The original proposal below is retained as decision history; the Runtime README
+and current validation report describe implemented versus live-verified scope.
 
 ## Exact failing boundary
 

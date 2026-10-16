@@ -92,3 +92,6 @@ export { createAgenticConversationHost } from "./agentic/conversation.js";
 export type { AgenticConversationHost } from "./agentic/conversation.js";
 export { openAgenticWorkspace } from "./agentic/workspace.js";
 export type { OpenAgenticWorkspaceOptions, AgenticWorkspaceHandle } from "./agentic/workspace.js";
+
+export { createSignedBindingReceipt } from "./agentic/receipt-host.js";
+export { startHerdrReceiptIngress, authenticateNativeHerdrMessage } from "./agentic/herdr-ingress.js";

@@ -239,3 +239,11 @@ export interface ConversationCoordinatorPort {
   promptApproval(request: ApprovalRequest, options?: OperationOptions): Promise<OperationResult<void>>;
   receiveApprovalDecision(decision: ApprovalDecision, options?: OperationOptions): Promise<OperationResult<void>>;
 }
+
+/** Additive capability; legacy WorkflowEngine consumers remain source-compatible. */
+export interface AuthenticatedWorkflowEngine extends WorkflowEngine {
+  verifyAgentBinding(command: import("./receipts.js").VerifyAgentBindingCommand, options?: OperationOptions): Promise<OperationResult<WorkflowAdvanceResult>>;
+}
+export function hasAuthenticatedBindings(engine: WorkflowEngine): engine is AuthenticatedWorkflowEngine {
+  return "verifyAgentBinding" in engine && typeof engine.verifyAgentBinding === "function";
+}

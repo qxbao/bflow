@@ -177,30 +177,76 @@ stale-version/fingerprint errors and does not assume that mutation was rolled ba
 Linux/local-filesystem assumptions remain; no network-filesystem, hostile same-user,
 multi-host or power-loss guarantees are added. Existing P02-RA01/P03-RA01 remain open.
 
-## Live Herdr limitation / integration decision required
+## Authenticated Herdr host receipts
 
-The supplied Adapter is verified for CLI 0.9.1 / protocol 22 / schema 1. The machine
-used for this implementation has CLI 0.9.0; actual adapter initialization returns
-`unsupported_version`, and `herdr status server` reports no running server.
-No compatibility guard was relaxed and no existing user session was started/changed.
+CLI release labels are diagnostic metadata. Initialization probes protocol 22 /
+schema 1 and each operation validates its response. There is no release allowlist
+or version-bypass flag. An installed version is tested directly; only actual wire
+incompatibility is grounds for rejection.
 
-There is also a conclusive-result boundary: current Herdr `send()` returns an
-orchestrator correlation with `verified: false`, and `read()` returns unverified
-`terminal_snapshot` observations. Core's `recordAgentResult` requires a matching
-verified correlation on both the result and the already-bound handle.
-`bindAgentExecution` and `recordDeliveryReconciliation` refuse replacement of an
-existing binding. Therefore the supplied CLI adapter cannot currently produce an
-accepted live business outcome, even if an agent prints JSON saying it succeeded.
-P19 deliberately rejects that case; a regression fixture demonstrates the refusal.
+The CLI submission handle remains unverified and immutable. ADR 0003, approved by
+the project owner, adds `AuthenticatedWorkflowEngine.verifyAgentBinding` and an
+`execution.receipt` RoleMessage. Runtime authenticates its sender/assignment and
+lease, ingests the canonical signed receipt through ArtifactStore, and records the
+Core proof event before accepting a correlated result. Core verifies Ed25519
+against `bindingReceiptKeys`, exact original handle/target/session and receipt hash;
+unknown issuers, forged signatures, conflicting proofs and cancelled/terminal
+executions are rejected. Old unverified handles without proof still cannot succeed.
 
-Live closure requires an integration-reviewed authenticated structured Herdr ingress
-and receipt protocol (and, if needed, an explicit compatible contract decision for
-receipt-backed correlation promotion). The proposal must preserve request/attempt/
-execution identity, pane/session binding, immutable receipt evidence and replay
-validation, with approval from the adapter/contract integration owner. It must not
-turn snapshots or orchestrator-generated tokens into remote proof. The current
-package supplies the host interfaces and actual composition; it does not claim that
-missing bridge, provider-native tool registration or live Herdr E2E has been verified.
+The native plugin is `agents/coordinator/herdr-receipts/herdr-plugin.toml`. Its
+`deliver` action receives the structured RoleMessage in Herdr invocation context,
+validates the sender against the host's P13 manifest, and for a binding receipt
+rechecks the actual Herdr agent/session before signing. It forwards the signed
+RoleMessage to the Runtime host ingress. No terminal snapshot is promoted into
+proof. A signed binding acknowledges the request; P17 still independently verifies
+the implementation. Host measurement/user-approval authentication callbacks remain
+required and may not be replaced with unconditional success functions.
+
+Configure a trusted issuer public key through `bindingReceiptKeys` on the Core
+engine or `openAgenticWorkspace`. Set `nativeIngressSocket` to enable the native
+host adapter. Link the plugin through the same named Herdr session. In the plugin's
+Herdr-created config directory, create a private `host.json`:
+
+```json
+{
+  "issuerId": "project-native-host",
+  "privateKeyFile": "/private/native-host-key.pem",
+  "runtimeSocket": "/short/path/bflow-ingress.sock",
+  "manifestFile": "/project/.bflow/state/panes/session.manifest.json"
+}
+```
+
+The signing key must be a private regular Ed25519 key file, outside source control
+and model prompts. The public key configured in Core must match its issuer. Native
+host signing is not an agent-facing model tool. Restrict plugin/config access as
+part of the trusted local host boundary; hostile same-user isolation is not claimed.
+
+Invoke the action using the installed Herdr API `plugin.action.invoke`, with
+`plugin_id: "bflow.receipts"`, `action_id: "deliver"`, and invocation context
+containing `selected_text` (the RoleMessage JSON), `focused_pane_id`, `workspace_id`
+and `correlation_id` equal to the assignment message ID. The `execution.receipt`
+payload carries the original handle and observation time; the host chooses its
+issuer and transport correlation and replaces the input signature. Lost
+acknowledgements still require reconciliation; never blindly retry a changed body.
+
+The immutable handle stays in `agent.execution_bound`; `agent.binding_verified`
+and its command receipt use event envelope v2. Receipt-bearing aggregates use
+aggregate codec v2. Old runs remain readable and gain no fabricated evidence;
+old readers reject the new event/codec instead of guessing. SQLite storage layout
+is unchanged. Keep historical issuer public keys available for authoritative replay.
+
+Native transport smoke tests deliberately use a real custom host process and
+Herdr plugin, without a model/provider. On the installed 0.9.5 binary, that custom
+actor has no exposed native `agent_session` and is not ready for normal agent
+prompts; its prompt delivery remains unverified/uncertain. The smoke verifies
+protocol initialization and signed structured RoleMessage delivery through the
+plugin, not successful binding attestation for that custom actor. Session-less
+binding receipts are rejected; signing/Core/checkpoint acceptance is covered in
+the separate integration tests. Official agent integrations must supply their
+actual native session identity for receipt attestation. Passing them does not establish live
+AI-generated implementation, independent model review or a full SDLC delivery.
+Provider-specific prompt/tool registration and automatic CLI host boot/shutdown
+still require a concrete host integration; `bflow up` does not install one implicitly.
 
 ## Validation
 
@@ -219,10 +265,20 @@ git status --short
 
 P19 tests use real Core/Registry/SQLite/ArtifactStore/P15/P16/P17/P18 and real temporary
 Git repositories, with fake physical panes/Herdr transport and injected independent
-check runners. These verify composition and policy, not live AI behavior or Herdr
-receipt authenticity. `TMPDIR=/tmp` avoids the Unix-domain-socket path limit in an
+check runners. These verify composition/policy. Separate opt-in native transport tests exercise
+actual Herdr plugin/signature delivery, without claiming live AI behavior or
+live binding attestation for a custom host without session identity. `TMPDIR=/tmp` avoids the Unix-domain-socket path limit in an
 existing ArtifactStore POSIX fixture under this environment's long default temp path.
 
 A clean isolated install also exposed P14's existing direct Zod imports without its
 manifest dependency. The integration correction adds only `zod` to that package's
 manifest and lockfile importer; no P14 implementation or shared contract is changed.
+
+To exercise the installed binary in a temporary named session, after building:
+
+```sh
+BFLOW_LIVE_HERDR=1 TMPDIR=/tmp pnpm exec vitest run packages/runtime/test/agentic/live-herdr.test.ts --maxWorkers=1 --minWorkers=1
+```
+
+This test owns its short XDG/socket paths and shell configuration, registers a
+custom native host process (not an AI model), and stops only its own test session.

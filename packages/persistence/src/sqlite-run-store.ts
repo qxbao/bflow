@@ -211,8 +211,10 @@ export class SqliteRunStore implements RunStore {
   }
   private checkpoint(input: unknown, stored = false): RecoveryCheckpoint {
     if (typeof input === "object" && input !== null && "codec" in input && typeof input.codec === "object" && input.codec !== null &&
-      "version" in input.codec && typeof input.codec.version === "number" && Number.isSafeInteger(input.codec.version) && input.codec.version >= 0 && input.codec.version !== 1) {
-      throw new StoreFailure({ code: "unsupported_version", retryable: false, supportedVersions: [1],
+      "version" in input.codec && typeof input.codec.version === "number" && Number.isSafeInteger(input.codec.version) && input.codec.version >= 0 && input.codec.version !== 1 &&
+      !("name" in input.codec && input.codec.name === "bflow.workflow-aggregate+json" && input.codec.version === 2)) {
+      throw new StoreFailure({ code: "unsupported_version", retryable: false,
+        supportedVersions: "name" in input.codec && input.codec.name === "bflow.workflow-aggregate+json" ? [1, 2] : [1],
         receivedVersion: input.codec.version, message: "Unsupported checkpoint codec version" });
     }
     const parsed = parseRecoveryCheckpointWithCompatibility(input);

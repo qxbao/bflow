@@ -1,4 +1,4 @@
-import { StoredRunSchema, type DomainEvent, type StoredRun, type TaskState } from "@bflow/contracts";
+import { canonicalReceiptJson, StoredRunSchema, type DomainEvent, type StoredRun, type TaskState } from "@bflow/contracts";
 import { fail, parse } from "./support.js";
 
 /** A storage/index projection, not Core replay. Never derives business outcomes or invents attempt IDs. */
@@ -43,6 +43,13 @@ export function project(run: StoredRun, events: readonly DomainEvent[]): StoredR
       task.agentExecution = event.payload.handle;
       task.version++;
     }
+    if (task !== undefined && event.type === "agent.binding_verified") {
+      if (!task.agentExecution || task.bindingVerification || task.attemptId !== event.payload.receipt.handle.attemptId ||
+          canonicalReceiptJson(task.agentExecution) !== canonicalReceiptJson(event.payload.receipt.handle))
+        fail("validation", "Binding proof projection does not match the immutable execution");
+      task.bindingVerification = event.payload;
+      task.version++;
+    }
     if (task !== undefined && event.type === "agent.delivery_reconciled" && event.payload.status === "bound") {
       const handle = event.payload.handle;
       if (handle.runId !== snapshot.runId || handle.taskId !== task.taskId || task.agentExecution !== undefined ||
@@ -58,6 +65,6 @@ export function project(run: StoredRun, events: readonly DomainEvent[]): StoredR
   return parse(StoredRunSchema, { definition: run.definition, snapshot });
 }
 function clearAttempt(task: TaskState): void {
-  delete task.attemptId; delete task.agentExecution; delete task.blockage;
+  delete task.attemptId; delete task.agentExecution; delete task.bindingVerification; delete task.blockage;
   delete task.startedAt; delete task.completedAt;
 }

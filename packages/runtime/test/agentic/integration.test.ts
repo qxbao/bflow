@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, generateKeyPairSync } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentResultSchema, ApprovalDecisionSchema, RoleMessageSchema, VerificationResultSchema,
   type PaneBinding, type Specification, type QualityGate, type QualityGateContext } from "@bflow/contracts";
@@ -9,6 +9,7 @@ import { DeterministicWorkflowEngine } from "@bflow/core";
 import { FileAgentRegistry } from "@bflow/agent-registry";
 import { openSqliteRunStore } from "@bflow/persistence";
 import { openFilesystemArtifactStore } from "@bflow/artifact-store";
+import { createSignedBindingReceipt } from "../../src/agentic/receipt-host.js";
 import { CoordinatorTools } from "../../src/agentic/tools.js";
 import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import { loadAgenticPolicies, type PanePolicy } from "../../src/agentic/ports.js";
@@ -27,6 +28,7 @@ class Panes implements PanePolicy {
     schemaVersion: 2, bindingId: `binding-${role}`, sessionId: "session-1", role: role as PaneBinding["role"],
     paneGroup: "coordination", agentId: role, workspaceId: "workspace-1", tabId: "tab-1", paneId: `pane-${role}`,
     provider: "test", agentKind: "test", cwd: "/tmp", isolationMode: "dedicated_pane", readOnlyWorkspace: true,
+    session: { source: "test", kind: "id", value: `session-${role}` },
     transportState: "idle", boundAt: new Date().toISOString()
   }));
   async getManifest() { return { ok: true as const, value: { schemaVersion: 2 as const, sessionId: "session-1", projectName: "Test", workspaceRoot: "/tmp", herdrWorkspaceId: "workspace-1", herdrTabId: "tab-1", status: "up" as const,
@@ -52,7 +54,11 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
   const artifacts = unwrap(await openFilesystemArtifactStore({ root: join(root, "artifacts"), storeId: "p19" }));
   cleanups.push(async () => { store.close(); artifacts.close(); await rm(root, { recursive: true, force: true }); });
   const transport = new FakeAgentTransport(); const panes = new Panes();
-  const engine = new DeterministicWorkflowEngine();
+  const pair = generateKeyPairSync("ed25519");
+  const publicKey = pair.publicKey.export({ type: "spki", format: "pem" }).toString();
+  const privateKey = pair.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  const bindingReceiptKeys = { "native-test-host": publicKey };
+  const engine = new DeterministicWorkflowEngine({ bindingReceiptKeys });
   const registry = new FileAgentRegistry({ stateFile: join(root, "registry.json") });
   let failReview = options.failReview ?? false;
   const calls: QualityGateContext[] = [];
@@ -138,7 +144,8 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
     const path = handle.target.worktreePath; const file = taskId === "other" && !options.conflict ? "other.md" : "guide.md";
     await writeFile(join(path, file), content); git(path, "add", file); git(path, "commit", "-m", "implement");
     const result = AgentResultSchema.parse({ requestId: handle.requestId, attemptId: handle.attemptId, runId: "run-1", taskId,
-      executionId: handle.executionId, status: "succeeded", verification: { status: "verified", evidence: "Authenticated test-host result", correlation: handle.correlation },
+      executionId: handle.executionId, status: "succeeded", verification: { status: "verified", evidence: "Authenticated test-host result", correlation:
+        unwrap(await ports.engine.getSnapshot("run-1"))!.tasks.find(task => task.taskId === taskId)!.bindingVerification?.receipt.correlation ?? handle.correlation },
       artifactProposals: [], retryable: false, startedAt: handle.acceptedAt, completedAt: new Date().toISOString() });
     await runtime.receiveHerdr(envelope("implementation.submitted", result, { causation_id: outbound.message.message_id,
       sender: { role: "developer", agent_id: handle.target.agentId, pane_id: handle.target.paneId } }));
@@ -149,8 +156,8 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
       runId: "run-1", sessionId: "session-1", target: request.target, revision: request.revision, generation: request.generation,
       decision, ...(decision !== "approved" ? { reason: "User refused" } : {}), decidedBy: "human-1", decidedAt: new Date().toISOString(), feedbackArtifacts: [], idempotencyKey: randomUUID() })));
   }
-  return { root, repository, runtime, ports, runtimeOptions, panes, transport, spec, def, envelope, inspect, dossier, evidence, submit, approve,
-    calls, localReview: (context: QualityGateContext) => gates.find(gate => gate.id === "review")!.evaluate(context), setFailReview: (value: boolean) => { failReview = value; }, restart: () => { runtime = new AgenticWorkflowRuntime({ ...ports, engine: new DeterministicWorkflowEngine() }, runtimeOptions); return runtime; } };
+  return { root, repository, runtime, ports, privateKey, publicKey, runtimeOptions, panes, transport, spec, def, envelope, inspect, dossier, evidence, submit, approve,
+    calls, localReview: (context: QualityGateContext) => gates.find(gate => gate.id === "review")!.evaluate(context), setFailReview: (value: boolean) => { failReview = value; }, restart: () => { runtime = new AgenticWorkflowRuntime({ ...ports, engine: new DeterministicWorkflowEngine({ bindingReceiptKeys }) }, runtimeOptions); return runtime; } };
 }
 
 describe("P19 integrated Agentic SDLC", () => {
@@ -373,6 +380,52 @@ describe("P19 integrated Agentic SDLC", () => {
     expect(f.transport.sentRequests.filter(req => req.role === "developer")).toHaveLength(1);
     f.panes.busy.delete("developer"); await f.runtime.tick();
     expect(f.transport.sentRequests.filter(req => req.role === "developer")).toHaveLength(2);
+  });
+
+  it("accepts signed native binding proof while retaining the raw handle across SQLite/checkpoint recovery", async () => {
+    const f = await fixture();
+    f.transport.customSendHandler = request => ({ ok: true, value: { status: "accepted", requestId: request.requestId,
+      attemptId: request.attemptId, runId: request.runId, taskId: request.taskId, observedAt: new Date().toISOString(),
+      handle: { executionId: randomUUID(), requestId: request.requestId, attemptId: request.attemptId, runId: request.runId,
+        taskId: request.taskId, idempotencyKey: request.idempotency.key, target: request.target,
+        correlation: { token: request.requestId, provenance: "orchestrator", verified: false }, acceptedAt: new Date().toISOString() } } });
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    const state = await f.runtime.inspect() as any; const out = state.outbound.find((item: any) => item.message.type === "task.assignment");
+    const handle = out.handle;
+    const receipt = createSignedBindingReceipt({ issuerId: "native-test-host", receiptId: randomUUID(), handle,
+      correlation: { token: out.message.message_id, provenance: "transport", verified: true }, observedAt: new Date().toISOString(), privateKey: f.privateKey });
+    const message = f.envelope("execution.receipt", receipt, { causation_id: out.message.message_id,
+      sender: { role: "developer", agent_id: handle.target.agentId, pane_id: handle.target.paneId } });
+    await f.runtime.receiveHerdr(message); await f.runtime.receiveHerdr(message);
+    let current = unwrap(await f.ports.engine.getSnapshot("run-1"))!;
+    expect(current.tasks[0]!.agentExecution!.correlation.verified).toBe(false);
+    expect(current.tasks[0]!.bindingVerification!.receipt.correlation.verified).toBe(true);
+    const projected = unwrap(await f.ports.runStore.get("run-1"))!.snapshot.tasks[0]!;
+    expect(projected.bindingVerification).toEqual(current.tasks[0]!.bindingVerification);
+    expect(projected.version).toBe(current.tasks[0]!.version);
+    const checkpoint = unwrap(await f.ports.engine.createCheckpoint({ runId: "run-1", expectedVersion: current.version,
+      checkpointId: "signed-binding-checkpoint", createdAt: new Date().toISOString() }));
+    expect(checkpoint.codec.version).toBe(2);
+    expect(unwrap(await f.ports.runStore.saveCheckpoint(checkpoint, current.version))).toBeUndefined();
+    const restarted = new DeterministicWorkflowEngine({ definitions: [(await f.inspect()).definition], bindingReceiptKeys: { "native-test-host": f.publicKey } });
+    expect(unwrap(await restarted.recover({ runId: "run-1", checkpoint, events: [], expectedVersion: current.version })).snapshot.tasks[0]!.bindingVerification).toBeDefined();
+    const untrusted = new DeterministicWorkflowEngine({ definitions: [(await f.inspect()).definition] });
+    expect(await untrusted.recover({ runId: "run-1", checkpoint, events: [], expectedVersion: current.version })).toMatchObject({ ok: false });
+    await f.evidence("implement"); await f.submit(); await f.runtime.tick();
+    expect((await f.inspect()).tasks[0].cycle.status).toBe("passed");
+  });
+
+  it.each(["signature", "issuer", "identity", "cancelled"])("refuses %s binding receipts without promoting the handle", async failure => {
+    const f = await fixture(); await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    const state = await f.runtime.inspect() as any; const out = state.outbound.find((item: any) => item.message.type === "task.assignment");
+    const receipt = createSignedBindingReceipt({ issuerId: failure === "issuer" ? "untrusted" : "native-test-host", receiptId: randomUUID(),
+      handle: failure === "identity" ? { ...out.handle, executionId: "another-execution" } : out.handle,
+      correlation: { token: out.message.message_id, provenance: "transport", verified: true }, observedAt: new Date().toISOString(), privateKey: f.privateKey });
+    if (failure === "signature") receipt.signature.value = Buffer.alloc(64, 1).toString("base64");
+    if (failure === "cancelled") await f.runtime.cancel("run-1", "Cancel before proof");
+    await expect(f.runtime.receiveHerdr(f.envelope("execution.receipt", receipt, { causation_id: out.message.message_id,
+      sender: { role: "developer", agent_id: out.handle.target.agentId, pane_id: out.handle.target.paneId } }))).rejects.toThrow();
+    expect(unwrap(await f.ports.engine.getSnapshot("run-1"))!.tasks[0]!.bindingVerification).toBeUndefined();
   });
 
 });

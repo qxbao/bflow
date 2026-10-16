@@ -114,6 +114,7 @@ export const RoleMessageTypeSchema = z.enum([
   "task.assignment",
   "task.status",
   "implementation.submitted",
+  "execution.receipt",
 
   // Nhóm kiểm thử và chu trình nghiệm thu (Verification Loop)
   "verification.requested",
@@ -633,3 +634,23 @@ export const VerificationEscalationPayloadSchema = z
 
 3. **Tính toàn vẹn kiểm toán (Audit Trail)**:
    Mọi `RoleMessage` sau khi được xác thực hợp lệ đều được ghi nhận vào nhật ký sự kiện của `RunStore` thông qua sự kiện `domain_event`. Không một thông điệp nào có thể bị xóa hoặc sửa đổi sau khi đã được chắp bút vào stream.
+
+
+## Authenticated binding receipts (ADR 0003)
+
+`execution.receipt` carries a signed `AgentBindingReceipt` inside the existing
+schema-version-2 RoleMessage envelope. It preserves correlation/causation, pins the
+original raw handle and pane/session, and is delivered through the native Herdr
+plugin action surface. The private signing key belongs to the trusted native host,
+not the model prompt. Runtime verifies sender/assignment/lease, ingests immutable
+receipt bytes through ArtifactStore, and calls the additive
+`AuthenticatedWorkflowEngine.verifyAgentBinding` capability. Core verifies the
+configured issuer's Ed25519 signature and immutable identity before persisting
+`agent.binding_verified` (event envelope v2). It never rewrites the original handle
+or calls Herdr done proof of success. Independent acceptance gates still apply.
+
+The native ingress adapter verifies a signature over the entire RoleMessage before
+installing per-invocation authentication context. It is an adapter endpoint for a
+message already carried through Herdr, not a direct agent-to-agent socket channel.
+Aggregate codec v2 retains proof/command history; legacy receipt-free event and
+checkpoint shapes remain unchanged. See ADR 0003 for fail-closed compatibility.

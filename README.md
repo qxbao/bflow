@@ -78,11 +78,11 @@ All commands support `-j, --json` for structured JSON output and `-h, --help` fo
 | [`@bflow/core`](packages/core) | Pure deterministic workflow engine (DAG scheduling, transitions, retry/rework, replay) |
 | [`@bflow/contracts`](packages/contracts) | Shared Zod schemas, public port interfaces, and transition/event validators |
 | [`@bflow/agent-registry`](packages/agent-registry) | File-backed role-to-agent registry, leases, fencing tokens, and workflow templates |
-| [`@bflow/herdr-adapter`](packages/herdr-adapter) | CLI-backed `AgentTransport` adapter for Herdr agent sessions |
+| [`@bflow/herdr-adapter`](packages/herdr-adapter) | CLI-backed `AgentTransport`; protocol/schema negotiation without a CLI version allowlist |
 | [`@bflow/persistence`](packages/persistence) | SQLite `RunStore` for atomic event batches, execution receipts, and checkpoints |
 | [`@bflow/artifact-store`](packages/artifact-store) | Filesystem `ArtifactStore` with SQLite catalog and SHA-256 stream verification |
-| [`@bflow/conversation`](packages/conversation) | Conversation Agent (`chat`) gateway, intent classification, structured `DelegationRequest` builder, and Herdr Coordinator bridge (P14); Runtime composition is scheduled for P19 |
-| [`@bflow/specification`](packages/specification) | Adaptive specification classification, validation, versioning, traceability and approval policy (P15); Runtime composition is scheduled for P19 |
+| [`@bflow/conversation`](packages/conversation) | Conversation Agent (`chat`) gateway, intent classification, structured `DelegationRequest` builder, and Herdr Coordinator bridge (P14); P19 host composition and authenticated native-message ingress are available through `@bflow/runtime`; live AI delivery requires separate verification |
+| [`@bflow/specification`](packages/specification) | Adaptive specification classification, validation, versioning, traceability and approval policy (P15); P19 host composition and authenticated native-message ingress are available through `@bflow/runtime`; live AI delivery requires separate verification |
 | [`@bflow/test-strategy`](packages/test-strategy) | Conditional TDD policy, required verification methods, criterion mappings and Red/Green/refactor evidence checks (P16); Runtime enforcement is scheduled for P19 |
 | [`@bflow/verification`](packages/verification) | Independent task/workflow verification, criterion evidence, Reviewer/QA checks, bounded rework and escalation (P17); requires trusted host gates and P19 Runtime composition |
 | [`@bflow/git-orchestrator`](packages/git-orchestrator) | Parallel task worktrees, ownership checks, stored patches, recoverable dependency-ordered integration, conflict handoff, workflow verification and provider PR support (P18); requires Linux/local Git and P19 Runtime composition |

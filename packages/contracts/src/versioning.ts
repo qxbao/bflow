@@ -8,7 +8,7 @@ import { WorkflowRunSnapshotSchema } from "./workflow.js";
 import { WorkflowAggregateCheckpointStateSchema, type WorkflowAggregateCheckpointState } from "./recovery.js";
 
 export const CURRENT_CHECKPOINT_SCHEMA_VERSION = 1 as const;
-export const SUPPORTED_DOMAIN_EVENT_SCHEMA_VERSIONS = [0, CURRENT_DOMAIN_EVENT_SCHEMA_VERSION] as const;
+export const SUPPORTED_DOMAIN_EVENT_SCHEMA_VERSIONS = [0, CURRENT_DOMAIN_EVENT_SCHEMA_VERSION, 2] as const;
 export const SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS = [0, CURRENT_CHECKPOINT_SCHEMA_VERSION] as const;
 
 function objectRecord(value: unknown): Record<string, unknown> | undefined {
@@ -28,7 +28,7 @@ export function parseDomainEventWithCompatibility(input: unknown): OperationResu
   if (typeof version !== "number" || !Number.isInteger(version) || version < 0) {
     return validationFailure("domain event schemaVersion must be a non-negative integer");
   }
-  if (!SUPPORTED_DOMAIN_EVENT_SCHEMA_VERSIONS.includes(version as 0 | 1)) {
+  if (!SUPPORTED_DOMAIN_EVENT_SCHEMA_VERSIONS.includes(version as 0 | 1 | 2)) {
     return {
       ok: false,
       error: {
@@ -108,14 +108,22 @@ export function decodeWorkflowRunCheckpointState(
 export function decodeWorkflowAggregateCheckpointState(
   checkpoint: RecoveryCheckpoint
 ): OperationResult<WorkflowAggregateCheckpointState> {
-  if (checkpoint.codec.name !== "bflow.workflow-aggregate+json" || checkpoint.codec.version !== 1) {
+  if (checkpoint.codec.name !== "bflow.workflow-aggregate+json" || ![1, 2].includes(checkpoint.codec.version)) {
     return validationFailure("checkpoint codec is not supported by the workflow aggregate decoder");
   }
   const parsed = WorkflowAggregateCheckpointStateSchema.safeParse(checkpoint.state);
+  if (parsed.success && checkpoint.codec.version === 1 && requiresAuthenticatedBindingCodec(parsed.data))
+    return validationFailure("Authenticated bindings require aggregate codec 2");
   return parsed.success
     ? { ok: true, value: parsed.data }
     : { ok: false, error: {
       code: "corruption", retryable: false,
       message: `checkpoint aggregate state does not match its codec: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`
     } };
+}
+
+export function requiresAuthenticatedBindingCodec(state: WorkflowAggregateCheckpointState): boolean {
+  return state.snapshot.tasks.some(task => !!task.bindingVerification) || state.commands.some(command =>
+    command.result.snapshot.tasks.some(task => !!task.bindingVerification) ||
+    command.result.emittedEvents.some(event => event.type === "agent.binding_verified"));
 }

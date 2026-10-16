@@ -82,7 +82,7 @@ export async function recoverWorkflowRun(
     if (!parsedCp.ok) return parsedCp as OperationResult<WorkflowRecoveryResult>;
 
     // Reject non-aggregate codec for tail recovery
-    if (checkpoint.codec.name !== "bflow.workflow-aggregate+json" || checkpoint.codec.version !== 1) {
+    if (checkpoint.codec.name !== "bflow.workflow-aggregate+json" || ![1, 2].includes(checkpoint.codec.version)) {
       return {
         ok: false,
         error: {

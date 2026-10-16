@@ -4,12 +4,15 @@ import { SessionManifestSchema, type ApprovalDecision, type QualityGate } from "
 import { AgenticWorkflowRuntime } from "./runtime.js";
 import { loadAgenticPolicies, type AgenticRuntimePorts, type PanePolicy } from "./ports.js";
 import { createAgenticConversationHost, type AgenticConversationHost } from "./conversation.js";
+import { startHerdrReceiptIngress, authenticateNativeHerdrMessage } from "./herdr-ingress.js";
 import { CoordinatorTools } from "./tools.js";
 import { record } from "./journal.js";
 import { unwrap } from "./outbox.js";
 
 export interface OpenAgenticWorkspaceOptions {
   repositoryPath: string; sessionId: string; herdrBinary?: string;
+  bindingReceiptKeys?: Readonly<Record<string, string>>;
+  nativeIngressSocket?: string;
   /** Existing P12/P13 session manifests; defaults to .bflow/state/panes. No duplicate topology is created. */
   manifestDirectory?: string; storageDirectory?: string; maxDeveloperCapacity?: number;
   roleCapabilities: AgenticRuntimePorts["roleCapabilities"];
@@ -74,10 +77,10 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
         return source?.decision === "approved" && source.runId === decision.runId && source.sessionId === decision.sessionId &&
           source.decidedBy === decision.decidedBy && source.decidedAt === decision.decidedAt;
       } });
-    runtime = new AgenticWorkflowRuntime({ engine: new coreModule.DeterministicWorkflowEngine(), runStore, artifactStore,
+    runtime = new AgenticWorkflowRuntime({ engine: new coreModule.DeterministicWorkflowEngine({ bindingReceiptKeys: options.bindingReceiptKeys }), runStore, artifactStore,
       registry: new registryModule.FileAgentRegistry({ stateFile: resolve(directory, "registry.json") }), transport, panes, policies,
       roleCapabilities: options.roleCapabilities, maxConcurrency: options.maxDeveloperCapacity ?? 2, taskChecks: options.taskChecks, workflowChecks: options.workflowChecks,
-      authenticateMessage: options.authenticateMessage, authenticateResult: options.authenticateResult,
+      authenticateMessage: async message => await authenticateNativeHerdrMessage(message) || await options.authenticateMessage(message), authenticateResult: options.authenticateResult,
       authenticateEvidence: options.authenticateEvidence, authenticateGateResult: options.authenticateGateResult,
       authorizeHuman: async decision => { const authorized = await options.authorizeHuman(decision);
         if (authorized) approvedBundles.set(decision.approvalId, decision); return authorized; },
@@ -86,6 +89,9 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
     await runtime.initialize();
     const conversation = await createAgenticConversationHost({ runtime, manifest, contextDirectory: resolve(directory, "conversation") });
     const tools = new CoordinatorTools(runtime);
-    return { runtime, conversation, tools, async close() { await tools.drain(); artifactStore.close(); runStore.close(); } };
+    const ingress = options.nativeIngressSocket ? await startHerdrReceiptIngress({ socketPath: options.nativeIngressSocket,
+      publicKeys: options.bindingReceiptKeys ?? {}, receive: message => message.recipient.role === "conversation"
+        ? conversation.receiveHerdr(message) : runtime.receiveHerdr(message) }) : undefined;
+    return { runtime, conversation, tools, async close() { await tools.drain(); await ingress?.close(); artifactStore.close(); runStore.close(); } };
   } catch (error) { artifactStore?.close(); runStore.close(); throw error; }
 }

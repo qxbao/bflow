@@ -1,0 +1,11 @@
+id = "bflow.receipts"
+name = "Bflow authenticated receipt ingress"
+version = "0.1.0"
+min_herdr_version = "0.0.0"
+description = "Forward structured role messages and attest bindings from the trusted native host"
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "deliver"
+title = "Deliver a Bflow role message"
+command = ["node", "../../../packages/runtime/dist/agentic/native-plugin.js"]

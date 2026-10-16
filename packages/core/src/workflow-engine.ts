@@ -1,4 +1,10 @@
 import {
+  VerifyAgentBindingCommandSchema,
+  authenticateBindingReceipt,
+  canonicalReceiptJson,
+  requiresAuthenticatedBindingCodec,
+  type AgentBindingVerification,
+  type VerifyAgentBindingCommand,
   AdvanceRunCommandSchema,
   ApplyApprovalCommandSchema,
   BindAgentExecutionCommandSchema,
@@ -124,6 +130,7 @@ export interface DeterministicWorkflowEngineOptions {
   readonly definitions?: readonly WorkflowDefinition[];
   readonly resolveDefinition?: (workflowId: string, workflowVersion: string) => WorkflowDefinition | undefined;
   readonly now?: () => string;
+  readonly bindingReceiptKeys?: Readonly<Record<string, string>>;
 }
 
 function success<T>(value: T): OperationResult<T> {
@@ -234,10 +241,12 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
   readonly #definitions = new Map<string, WorkflowDefinition>();
   readonly #resolveDefinition?: DeterministicWorkflowEngineOptions["resolveDefinition"];
   readonly #now: () => string;
+  readonly #bindingReceiptKeys: Readonly<Record<string, string>>;
 
   constructor(options: DeterministicWorkflowEngineOptions = {}) {
     this.#resolveDefinition = options.resolveDefinition;
     this.#now = options.now ?? (() => new Date().toISOString());
+    this.#bindingReceiptKeys = { ...options.bindingReceiptKeys };
     for (const candidate of options.definitions ?? []) {
       const parsed = WorkflowDefinitionSchema.safeParse(candidate);
       if (!parsed.success) throw new Error(`Invalid injected workflow definition: ${parsed.error.message}`);
@@ -530,6 +539,34 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
       });
   }
 
+  async verifyAgentBinding(command: VerifyAgentBindingCommand, options?: OperationOptions): Promise<OperationResult<WorkflowAdvanceResult>> {
+    const parsed = VerifyAgentBindingCommandSchema.safeParse(command);
+    if (!parsed.success) return validation(this.#issues("Invalid binding verification", parsed.error.issues));
+    const data = parsed.data;
+    return this.#mutate("verifyAgentBinding", data.runId, data.idempotencyKey, data.expectedVersion, data, options, (aggregate, emitted) => {
+      const task = taskState(aggregate, data.taskId);
+      if (!task || !["running", "waiting", "blocked"].includes(task.status) || aggregate.snapshot.status === "cancelling")
+        return conflict("Binding proof is stale, terminal or cancelled");
+      try { this.#validateBindingProof(task, data.verification); } catch (error) { return validation(String(error)); }
+      if (Date.parse(data.occurredAt) > Date.parse(this.#now())) return validation("Binding proof cannot be recorded in the future");
+      if (task.bindingVerification) return canonicalReceiptJson(task.bindingVerification) === canonicalReceiptJson(data.verification)
+        ? success([]) : conflict("Binding already has a different receipt");
+      const result = this.#emit(aggregate, emitted, { type: "agent.binding_verified", taskId: data.taskId,
+        occurredAt: data.occurredAt, commandKey: data.idempotencyKey, payload: data.verification });
+      return result.ok ? success([]) : result;
+    });
+  }
+
+  #validateBindingProof(task: TaskState, proof: AgentBindingVerification): void {
+    const receipt = proof.receipt;
+    const key = this.#bindingReceiptKeys[receipt.issuerId];
+    if (!key || !authenticateBindingReceipt(receipt, key)) throw new Error("Binding receipt signature/issuer is not trusted");
+    if (task.agentExecution?.correlation.verified && canonicalReceiptJson(task.agentExecution.correlation) !== canonicalReceiptJson(receipt.correlation))
+      throw new Error("An already verified binding cannot be re-correlated");
+    if (!task.agentExecution || task.attemptId !== receipt.handle.attemptId ||
+        canonicalReceiptJson(task.agentExecution) !== canonicalReceiptJson(receipt.handle)) throw new Error("Receipt does not attest the exact immutable execution binding");
+  }
+
   async recordAgentResult(command: Parameters<WorkflowEngine["recordAgentResult"]>[0], options?: OperationOptions) {
     const parsed = RecordAgentResultCommandSchema.safeParse(command);
     if (!parsed.success) return validation<WorkflowAdvanceResult>(this.#issues("Invalid agent result command", parsed.error.issues));
@@ -545,10 +582,11 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
             task.attemptId !== data.result.attemptId || task.agentExecution.requestId !== data.result.requestId) {
           return conflict(`Agent result does not match the bound execution for task ${data.taskId}`);
         }
+        const correlation = task.bindingVerification?.receipt.correlation ?? task.agentExecution.correlation;
         if (data.result.verification.status !== "verified" ||
-            !data.result.verification.correlation.verified || !task.agentExecution.correlation.verified ||
-            data.result.verification.correlation.token !== task.agentExecution.correlation.token ||
-            data.result.verification.correlation.provenance !== task.agentExecution.correlation.provenance) {
+            !data.result.verification.correlation.verified || !correlation.verified ||
+            data.result.verification.correlation.token !== correlation.token ||
+            data.result.verification.correlation.provenance !== correlation.provenance) {
           return validation("Agent result correlation is not verified for the bound execution");
         }
         if ([...aggregate.commands.values()].some((cached) => cached.result.emittedEvents.some((event) =>
@@ -1074,7 +1112,7 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
         return failure({ code: "corruption", retryable: false,
           message: "Aggregate checkpoint does not contain complete durable command receipts" });
       }
-      const verifier = new DeterministicWorkflowEngine({ definitions: [definition], now: this.#now });
+      const verifier = new DeterministicWorkflowEngine({ bindingReceiptKeys: this.#bindingReceiptKeys, definitions: [definition], now: this.#now });
       const checked = await verifier.recover({ runId: data.runId, events: receiptEvents,
         expectedVersion: snapshot!.version });
       if (!checked.ok) return failure({ code: "corruption", retryable: false,
@@ -1183,7 +1221,7 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
     const state = this.#checkpointState(aggregate);
     const checkpoint = RecoveryCheckpointSchema.safeParse({
       checkpointSchemaVersion: 1,
-      codec: { name: "bflow.workflow-aggregate+json", version: 1 },
+      codec: { name: "bflow.workflow-aggregate+json", version: requiresAuthenticatedBindingCodec(state) ? 2 : 1 },
       checkpointId: parsed.data.checkpointId,
       runId: parsed.data.runId,
       eventSequence: aggregate.snapshot.lastEventSequence,
@@ -1464,7 +1502,8 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
     const sequence = aggregate.snapshot.lastEventSequence + 1;
     const aggregateVersion = aggregate.snapshot.version + 1;
     const candidate = {
-      schemaVersion: CURRENT_DOMAIN_EVENT_SCHEMA_VERSION,
+      schemaVersion: input.type === "agent.binding_verified" || input.type === "command.completed" &&
+        isRecord(input.payload) && input.payload.operation === "verifyAgentBinding" ? 2 : CURRENT_DOMAIN_EVENT_SCHEMA_VERSION,
       eventId: deterministicId("event", aggregate.snapshot.runId, String(sequence), input.type, input.commandKey),
       runId: aggregate.snapshot.runId,
       ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
@@ -1512,6 +1551,12 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
       aggregate.commands.set(receipt.idempotencyKey, { receipt, result });
       aggregate.pendingCommandEvents.length = 0;
       return;
+    }
+    if (event.type === "agent.binding_verified") {
+      const task = before?.tasks.find(candidate => candidate.taskId === event.taskId);
+      if (!task || !["running", "waiting", "blocked"].includes(task.status) || before?.status === "cancelling" || task.bindingVerification)
+        throw new Error("Binding proof event has no current, unverified execution");
+      this.#validateBindingProof(task, event.payload);
     }
     if (event.type === "task.status_changed") {
       if (event.payload.intent === "rework") {

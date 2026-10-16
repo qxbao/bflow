@@ -118,7 +118,7 @@ export function reduceWorkflowEvent(
           };
         }
         if (enteringReady) {
-          const { agentExecution: _agentExecution, attemptId: _attemptId, blockage: _blockage,
+          const { agentExecution: _agentExecution, bindingVerification: _bindingVerification, attemptId: _attemptId, blockage: _blockage,
             startedAt: _startedAt, completedAt: _completedAt, ...ready } = base;
           return ready;
         }
@@ -162,16 +162,23 @@ export function reduceWorkflowEvent(
         return { ...task, agentExecution: handle, version: task.version + 1 };
       })
     };
+  } else if (event.type === "agent.binding_verified") {
+    next = { ...next, tasks: updateTask(snapshot, event.taskId!, task => {
+      if (!task.agentExecution || task.bindingVerification || task.attemptId !== event.payload.receipt.handle.attemptId)
+        throw new Error("Binding proof does not match the current execution");
+      return { ...task, bindingVerification: event.payload, version: task.version + 1 };
+    }) };
   } else if (event.type === "agent.result_recorded") {
     const task = snapshot.tasks.find((candidate) => candidate.taskId === event.taskId);
     const bound = task?.agentExecution;
     const result = event.payload;
+    const correlation = task?.bindingVerification?.receipt.correlation ?? bound?.correlation;
     if (task === undefined || bound === undefined || task.attemptId !== result.attemptId ||
         bound.executionId !== result.executionId || bound.requestId !== result.requestId ||
         result.runId !== snapshot.runId || result.taskId !== task.taskId ||
         result.verification.status !== "verified" || !result.verification.correlation.verified ||
-        !bound.correlation.verified || result.verification.correlation.token !== bound.correlation.token ||
-        result.verification.correlation.provenance !== bound.correlation.provenance) {
+        !correlation?.verified || result.verification.correlation.token !== correlation.token ||
+        result.verification.correlation.provenance !== correlation.provenance) {
       throw new Error("Agent result is not verified for the bound execution");
     }
   }

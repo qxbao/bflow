@@ -1,4 +1,5 @@
 import {
+  AgentBindingReceiptSchema, canonicalReceiptJson, hasAuthenticatedBindings,
   AgentResultSchema, AgentTransportCapabilitiesSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
   CancellationRequestSchema, DelegationRequestSchema, GitChangeSetSchema,
   PaneBindingSchema, QualityGateContextSchema, QualityGateResultSchema, RoleMessageSchema, SessionManifestSchema,
@@ -173,6 +174,29 @@ export class AgenticWorkflowRuntime {
         if (message.type === "approval.decision") {
           if (message.sender.role !== "conversation") throw new Error("Approval must return via Conversation");
           await this.applyDecision(state, save, core, outbox, run, ApprovalDecisionSchema.parse(message.payload));
+        } else if (message.type === "execution.receipt") {
+          const receipt = AgentBindingReceiptSchema.parse(message.payload);
+          const out = state.outbound.find(item => item.message.message_id === message.causation_id);
+          if (!out?.handle || out.message.type !== "task.assignment" || out.status !== "accepted" ||
+              message.sender.agent_id !== out.handle.target.agentId || message.sender.pane_id !== out.handle.target.paneId ||
+              message.sender.role !== out.message.recipient.role || canonicalReceiptJson(out.handle) !== canonicalReceiptJson(receipt.handle))
+            throw new Error("Receipt is not correlated to the current Herdr assignment");
+          const engine = this.ports.engine;
+          if (!hasAuthenticatedBindings(engine)) throw new Error("Core does not support authenticated binding receipts");
+          await outbox.renew(out);
+          const bytes = Buffer.from(canonicalReceiptJson(receipt));
+          const { createHash } = await import("node:crypto");
+          const checksum = createHash("sha256").update(bytes).digest("hex");
+          const evidence = ArtifactReferenceSchema.parse(unwrap(await this.ports.artifactStore.put({ options: {
+            artifactId: `binding-receipt-${checksum}`, runId: receipt.handle.runId, taskId: receipt.handle.taskId,
+            kind: "report", mediaType: "application/json", expectedIntegrity: { checksum: { algorithm: "sha256", value: checksum }, sizeBytes: bytes.length },
+            idempotencyKey: `binding-receipt:${checksum}`
+          }, content: (async function* () { yield bytes; })() })));
+          const previous = (await core.snapshot(run.runId)).tasks.find(task => task.taskId === receipt.handle.taskId)?.bindingVerification;
+          if (previous && canonicalReceiptJson(previous.receipt) !== canonicalReceiptJson(receipt)) throw new Error("Execution already has another binding proof");
+          if (!previous) await core.mutate(run.runId, snapshot => engine.verifyAgentBinding({ runId: run.runId, taskId: receipt.handle.taskId,
+            expectedVersion: snapshot.version, verification: { receipt, evidence, verifiedAt: message.occurred_at ?? receipt.observedAt },
+            occurredAt: message.occurred_at ?? receipt.observedAt, idempotencyKey: `verify-binding:${receipt.receiptId}` }));
         } else if (message.type === "implementation.submitted") {
           await this.submit(state, save, core, outbox, run, message);
         } else if (message.type === "verification.result") {
@@ -422,8 +446,10 @@ export class AgenticWorkflowRuntime {
         message.sender.pane_id !== out.handle.target.paneId || result.runId !== run.runId ||
         result.executionId !== out.handle.executionId || result.requestId !== out.handle.requestId || result.attemptId !== out.handle.attemptId ||
         !await this.ports.authenticateResult(result, out.handle, message)) throw new Error("Uncorrelated or unauthenticated implementation result");
-    if (!out.handle.correlation.verified || result.verification.status !== "verified" || !result.verification.correlation.verified ||
-        digest(result.verification.correlation) !== digest(out.handle.correlation))
+    const currentTask = (await core.snapshot(run.runId)).tasks.find(item => item.taskId === result.taskId);
+    const correlation = currentTask?.bindingVerification?.receipt.correlation ?? out.handle.correlation;
+    if (!correlation.verified || result.verification.status !== "verified" || !result.verification.correlation.verified ||
+        digest(result.verification.correlation) !== digest(correlation))
       throw new Error("Transport handle lacks verified remote correlation; authenticated receipt integration is required");
     if (task.result?.attemptId === result.attemptId) {
       if (digest(task.result) !== digest(result)) throw new Error("Conflicting implementation receipt");

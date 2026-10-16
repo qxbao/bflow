@@ -268,7 +268,7 @@ describe("SQLite RunStore", () => {
     await create();
     expect(await store.saveCheckpoint({ ...checkpoint(), checkpointSchemaVersion: 2 } as unknown as ReturnType<typeof checkpoint>, 0))
       .toMatchObject({ ok: false, error: { code: "unsupported_version" } });
-    const request = batch(); request.events[0] = { ...request.events[0], schemaVersion: 2 } as typeof request.events[number];
+    const request = batch(); request.events[0] = { ...request.events[0], schemaVersion: 999 } as typeof request.events[number];
     expect(await store.appendEvents(request)).toMatchObject({ ok: false, error: { code: "unsupported_version" } });
   });
   it("rejects unsupported checkpoint codec version with a typed compatibility error", async () => {

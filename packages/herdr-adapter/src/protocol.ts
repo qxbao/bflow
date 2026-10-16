@@ -60,7 +60,7 @@ export function parseAgentInfo(value: unknown): HerdrAgentInfo {
   if (info.agent_session !== undefined && info.agent_session !== null) {
     const raw = record(info.agent_session);
     const kind = string(raw.kind, "agent_session.kind");
-    if (kind !== "id" && kind !== "path") throw new HerdrProtocolError("Invalid Herdr 0.9.1 session kind", "malformed");
+    if (kind !== "id" && kind !== "path") throw new HerdrProtocolError("Invalid Herdr session kind", "malformed");
     if (raw.agent !== undefined && typeof info.agent === "string" && string(raw.agent, "agent_session.agent") !== info.agent) {
       throw new HerdrProtocolError("Herdr session agent does not match the pane agent", "malformed");
     }
