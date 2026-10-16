@@ -150,7 +150,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const pluginDirectory = (await herdr(["plugin", "config-dir", "bflow.receipts"])).trim();
     await mkdir(join(pluginDirectory, "hosts"), { recursive: true, mode: 0o700 });
     const manifestFile = join(configuration.manifestDirectory ?? resolve(configuration.repositoryPath, ".bflow/state/panes"), configuration.sessionId + ".manifest.json");
-    await privateFile(join(pluginDirectory, "hosts", configuration.sessionId + ".json"), JSON.stringify({ issuerId, privateKeyFile: keyPath, runtimeSocket: nativeSocket, manifestFile }));
+    await privateFile(join(pluginDirectory, "hosts", configuration.sessionId + ".json"), JSON.stringify({ issuerId, privateKeyFile: keyPath, runtimeSocket: nativeSocket, manifestFile,
+      herdrSocketPath: textField(record(JSON.parse(await herdr(["status", "server", "--json"]))).socket) }));
     workspace = await openAgenticWorkspace({ repositoryPath: configuration.repositoryPath, sessionId: configuration.sessionId, herdrBinary: binary,
       ...(configuration.manifestDirectory ? { manifestDirectory: configuration.manifestDirectory } : {}), maxDeveloperCapacity: configuration.policy?.concurrency.maxConcurrency ?? configuration.maxDeveloperCapacity ?? 2,
       nativeIngressSocket: nativeSocket, bindingReceiptKeys: { [issuerId]: publicKey }, roleLaunch: launch,
@@ -326,6 +327,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   });
   await new Promise<void>((accept, reject) => { server.once("error", reject); server.listen(configuration.socketPath, accept); });
   await chmod(configuration.socketPath, 0o600);
+  await privateFile(join(configuration.directory,"owner.json"), JSON.stringify({pid:process.pid,startedAt:new Date().toISOString()}));
   let pumping = false;
   const pump = setInterval(() => {
     if (!workspace || pumping || !physicalPrompts.length) return;

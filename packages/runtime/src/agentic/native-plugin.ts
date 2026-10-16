@@ -28,6 +28,7 @@ export async function deliverNativeHerdrMessage(env = process.env): Promise<void
     configs = [record(JSON.parse(await readFile(resolve(directory, "host.json"), "utf8")))]; }
   const matching: Record<string, unknown>[] = [];
   for (const candidate of configs) {
+    if (candidate.herdrSocketPath !== undefined && candidate.herdrSocketPath !== env.HERDR_SOCKET_PATH) continue;
     try {
       const candidateManifest = SessionManifestSchema.parse(JSON.parse(await readFile(textField(candidate.manifestFile), "utf8")));
       if (candidateManifest.sessionId === currentSession && candidateManifest.panes.some(pane => pane.paneId === context.focused_pane_id && pane.workspaceId === context.workspace_id)) matching.push(candidate);

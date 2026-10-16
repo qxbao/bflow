@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmod, lstat, mkdir, open, readFile, realpath } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +36,13 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
   if (!stat.isFile() || (stat.mode & 0o077) !== 0) throw new Error("Host configuration must be a private regular file");
   const value = record(JSON.parse(await readFile(path, "utf8")));
   for (const key of ["repositoryPath", "sessionId", "directory", "socketPath", "token"]) textField(value[key]);
+  if (value.maxDeveloperCapacity !== undefined && (!Number.isInteger(value.maxDeveloperCapacity) || Number(value.maxDeveloperCapacity) < 1 || Number(value.maxDeveloperCapacity) > 32)) throw new Error("Invalid host Developer capacity");
+  if (value.policy !== undefined) {
+    const policy = record(value.policy), sdd = record(policy.sdd), tdd = record(policy.tdd), verification = record(policy.verification), concurrency = record(policy.concurrency);
+    if (!["lightweight", "full"].includes(String(sdd.minimumLevel)) || typeof sdd.approvalRequired !== "boolean" || tdd.policy !== "conditional" ||
+        verification.onExhausted !== "require_human" || !Number.isInteger(verification.maxIterations) || Number(verification.maxIterations) < 1 || Number(verification.maxIterations) > 10 ||
+        !Number.isInteger(concurrency.maxConcurrency) || Number(concurrency.maxConcurrency) < 1 || Number(concurrency.maxConcurrency) > 32) throw new Error("Invalid persisted host policy");
+  }
   return value as unknown as HostConfiguration;
 }
 function failure<T>(error: unknown): OperationResult<T> {
@@ -71,14 +78,24 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
     finally { await file.close(); }
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
   const configuration = await readHostConfiguration(configPath);
-  if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId) throw new Error("Foreign host configuration");
+  if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory) throw new Error("Foreign host configuration");
   if (options.policy && JSON.stringify(configuration.policy) !== JSON.stringify(options.policy)) throw new Error("Persisted host policy differs from project policy; quiesce and reconcile the existing host before changing it");
   const request = (method: string, params: unknown = {}) => callHost(configuration.socketPath, configuration.token, method, params);
   try { await request("ping"); }
   catch (error) {
     if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
-    try { await lstat(configuration.socketPath); throw new Error("Host endpoint exists without a reachable owner; reconcile before restarting"); }
-    catch (statError) { if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError; }
+    try {
+      await lstat(configuration.socketPath);
+      const owner = record(JSON.parse(await readFile(join(directory,"owner.json"),"utf8")));
+      if (!Number.isInteger(owner.pid) || Number(owner.pid) < 1) throw new Error("Host endpoint has no valid process owner; reconcile before restarting");
+      try { process.kill(Number(owner.pid),0); throw new Error("Host owner is still alive but unreachable; preserve the endpoint and reconcile"); }
+      catch (ownerError) { if ((ownerError as NodeJS.ErrnoException).code !== "ESRCH") throw ownerError; }
+      // A refused connection plus a dead recorded owner proves this process endpoint stale.
+      // Durable dispatch intents remain unchanged and unknown deliveries are never resent.
+      await unlink(configuration.socketPath);
+      try { await unlink(configuration.socketPath.replace(/\.sock$/, ".native.sock")); }
+      catch (nativeError) { if ((nativeError as NodeJS.ErrnoException).code !== "ENOENT") throw nativeError; }
+    } catch (statError) { if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError; }
     const log = await open(join(directory, "host.log"), "a", 0o600);
     try {
       const child = spawn(process.execPath, [fileURLToPath(new URL("./host.js", import.meta.url)), "daemon", configPath],
