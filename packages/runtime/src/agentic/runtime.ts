@@ -615,7 +615,8 @@ export class AgenticWorkflowRuntime {
       } catch (error) {
         await this.transaction(async (state, save, _core, outbox) => {
           const run = this.run(state, job.runId);
-          if (!run.cancelled) { run.status = "escalated"; run.error = `Verification delivery/storage requires reconciliation: ${String(error)}`;
+          if (!run.cancelled && !["failed", "completed", "cancelled", "escalated"].includes(run.status)) {
+            run.status = "escalated"; run.error = `Verification delivery/storage requires reconciliation: ${String(error)}`;
             this.progress(state, outbox, run, run.error); }
           await save();
         });
@@ -642,6 +643,12 @@ export class AgenticWorkflowRuntime {
         cycle.cycleId !== job.cycle.cycleId || result.changeSet?.changeSetId !== job.change.changeSetId) throw new Error("Verification outcome mismatch");
     await this.transaction(async (state, save, core, outbox) => {
       const run = this.run(state, job.runId);
+      const pendingId = result.verificationId;
+      const clearPending = () => { state.pendingVerifications = state.pendingVerifications.filter(item => record(record(item.outcome).result).verificationId !== pendingId); };
+      if (run.cancelled || ["failed", "completed", "cancelled"].includes(run.status) ||
+          run.status === "escalated" && !run.error?.startsWith("Verification delivery/storage requires reconciliation:")) {
+        clearPending(); await save(); return; // late evidence cannot revive a terminal decision
+      }
       // A frozen P17 plan predates identities allocated for later repairs.
       // Enforce independence against every actual implementation assignment as well.
       const implementerIds = new Set(state.outbound.filter(out => out.message.run_id === run.runId &&
@@ -651,14 +658,8 @@ export class AgenticWorkflowRuntime {
         return observation !== null && typeof observation === "object" && !Array.isArray(observation) &&
           typeof observation.executorId === "string" && implementerIds.has(observation.executorId);
       })) throw new Error("Verification evidence executor is a workflow implementer");
-      const pendingId = result.verificationId;
       const existingPending = state.pendingVerifications.find(item => record(record(item.outcome).result).verificationId === pendingId);
       if (!existingPending) { state.pendingVerifications.push({ job: json(job), outcome: json(outcome) }); await save(); }
-      const clearPending = () => { state.pendingVerifications = state.pendingVerifications.filter(item => record(record(item.outcome).result).verificationId !== pendingId); };
-      if (run.cancelled || ["failed", "completed"].includes(run.status) ||
-          run.status === "escalated" && !run.error?.startsWith("Verification delivery/storage requires reconciliation:")) {
-        clearPending(); await save(); return; // late evidence cannot revive a terminal decision
-      }
       // Other parallel checks may finish while a human is deciding this task.
       // Retain their durable outcomes without replacing the active approval or phase.
       if (run.status === "awaiting_approval" && run.approvalKind === "task" &&

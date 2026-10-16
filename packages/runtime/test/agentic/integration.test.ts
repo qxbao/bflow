@@ -357,6 +357,29 @@ describe("P19 integrated Agentic SDLC", () => {
     expect((await f.inspect()).status).toBe("failed");
     expect((await f.inspect()).integrationKey).toBeUndefined();
   });
+  it("retains human rejection when a concurrent verifier throws after the decision", async () => {
+    const f = await fixture({ parallel: true }); f.def.tasks[0]!.requiresApproval = true;
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    await f.evidence("implement"); await f.evidence("other"); await f.submit(); await f.submit("other", "second file\n");
+    const verify = f.ports.policies.verification.verify.bind(f.ports.policies.verification);
+    let entered!: () => void, rejectVerification!: (error: Error) => void;
+    const checkingOther = new Promise<void>(resolve => { entered = resolve; });
+    const deferred = new Promise<never>((_resolve, reject) => { rejectVerification = reject; });
+    vi.spyOn(f.ports.policies.verification, "verify").mockImplementation(async (...args) => {
+      if (args[0].taskId === "other") { entered(); return deferred; }
+      return verify(...args);
+    });
+    const ticking = f.runtime.tick(); await checkingOther;
+    expect((await f.inspect()).approval.target).toEqual({ type: "task", taskId: "implement" });
+    await f.approve("rejected");
+    rejectVerification(new Error("Injected concurrent verification storage failure")); await ticking;
+    expect((await f.inspect()).status).toBe("failed");
+    expect((await f.inspect()).error).toBe("User refused");
+    await f.restart().tick();
+    expect((await f.inspect()).status).toBe("failed");
+    expect((await f.inspect()).error).toBe("User refused");
+    expect((await f.inspect()).integrationKey).toBeUndefined();
+  });
   it("rejects forged results and conflicting inbox messages before advancing task state", async () => {
     const f = await fixture(); await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
     await expect(f.runtime.receiveHerdr(f.envelope("implementation.submitted", { status: "succeeded" }, { sender: { role: "developer" } }))).rejects.toThrow();
