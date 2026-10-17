@@ -134,4 +134,25 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     expect(await createNamedPaneRunner(input, fake).run({ args: ["agent", "start", "chat"], signal: controller.signal })).toMatchObject({ failure: "aborted", started: false });
     expect(fake.run).not.toHaveBeenCalled();
   });
+  linuxIt("shuts down a partial non-Claude startup with the default openLifecycleHost without blocking on Claude hook validation", async () => {
+    const defaultLifecycle = new EnvironmentLifecycle(dir, {
+      runner,
+      openIntegration: async composition => openPaneManagerEnvironment(composition, runner)
+    });
+    await expect(defaultLifecycle.up()).rejects.toThrow("requires Claude native hooks");
+    expect(runner.session(input.repository.sessionName).running).toBe(true);
+    const stopped = await defaultLifecycle.down(true);
+    expect(stopped).toMatchObject({ server: "stopped", manifest: null });
+    expect(runner.session(input.repository.sessionName).running).toBe(false);
+  });
+  linuxIt("shuts down an active topology with the default openLifecycleHost even when config roles use non-Claude CLI and no host daemon was started", async () => {
+    await lifecycle().up();
+    const defaultLifecycle = new EnvironmentLifecycle(dir, {
+      runner,
+      openIntegration: async composition => openPaneManagerEnvironment(composition, runner)
+    });
+    const stopped = await defaultLifecycle.down(true);
+    expect(stopped.status).toBe("down");
+    expect(runner.session(input.repository.sessionName).running).toBe(false);
+  });
 });
