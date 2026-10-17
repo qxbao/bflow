@@ -1,0 +1,369 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type {
+  ContractError, MCPClientRegistration, MCPServiceObservation, OperationOptions, OperationResult, ScopedOperation, TrustScope
+} from "@bflow/contracts";
+import { failWith, ok } from "../../src/platform/errors.js";
+import { GatewayRegistrationManager } from "../../src/platform/gateway-registrations.js";
+import type {
+  GatewayControlPort, GatewayRegistrationGrant, GatewayRoleRequest, PlatformSessionIdentity
+} from "../../src/platform/ports.js";
+
+const ENDPOINT = "http://127.0.0.1:7777/mcp";
+const CONFIG_DIGEST = "a".repeat(64);
+
+/** In-memory Gateway with real registration state; failures are injected one call at a time. */
+class FakeGatewayControl implements GatewayControlPort {
+  readonly registrations = new Map<string, { registration: MCPClientRegistration; bearerToken: string }>();
+  readonly revokeCalls: string[] = [];
+  services: MCPServiceObservation[] = [];
+  registerCalls = 0;
+  inspectCalls = 0;
+  /** Stores the registration, then reports this error: the side effect happened but the reply was lost. */
+  failNextRegisterAfterStore: ContractError | undefined;
+  /** Returns a registration whose endpoint differs from what was sent. */
+  mismatchNextRegister = false;
+  /** Fails the next revoke with this error without touching state. */
+  failNextRevoke: ContractError | undefined;
+  onRegister: ((registration: MCPClientRegistration) => void) | undefined;
+
+  async register(registration: MCPClientRegistration, _options?: OperationOptions):
+    Promise<OperationResult<GatewayRegistrationGrant>> {
+    this.registerCalls += 1;
+    this.onRegister?.(registration);
+    if (this.registrations.has(registration.registrationId)) {
+      return failWith({ code: "conflict", retryable: true, message: "registration already exists" });
+    }
+    const bearerToken = randomBytes(24).toString("hex");
+    const echoed = this.mismatchNextRegister
+      ? { ...registration, connection: { ...registration.connection, endpoint: "http://127.0.0.1:9999/mcp" } }
+      : registration;
+    this.mismatchNextRegister = false;
+    this.registrations.set(registration.registrationId, { registration: echoed, bearerToken });
+    const failure = this.failNextRegisterAfterStore;
+    this.failNextRegisterAfterStore = undefined;
+    if (failure) return failWith(failure);
+    return ok({ registration: echoed, bearerToken });
+  }
+
+  async revoke(registrationId: string, _operation: ScopedOperation, _options?: OperationOptions):
+    Promise<OperationResult<void>> {
+    this.revokeCalls.push(registrationId);
+    if (this.failNextRevoke) {
+      const failure = this.failNextRevoke;
+      this.failNextRevoke = undefined;
+      return failWith(failure);
+    }
+    if (!this.registrations.has(registrationId)) {
+      return failWith({ code: "not_found", retryable: false, message: "registration not found" });
+    }
+    this.registrations.delete(registrationId);
+    return ok(undefined);
+  }
+
+  async list(scope: TrustScope, _options?: OperationOptions): Promise<OperationResult<readonly MCPClientRegistration[]>> {
+    const listed = [...this.registrations.values()].map(entry => entry.registration)
+      .filter(registration => JSON.stringify(registration.scope) === JSON.stringify(scope));
+    return ok(listed);
+  }
+
+  async inspectServices(_operation: ScopedOperation, _options?: OperationOptions):
+    Promise<OperationResult<readonly MCPServiceObservation[]>> {
+    this.inspectCalls += 1;
+    return ok(this.services);
+  }
+}
+
+function observation(serviceId: string, overrides: Partial<MCPServiceObservation> = {}): MCPServiceObservation {
+  return {
+    schemaVersion: 3,
+    serviceId,
+    revision: 1,
+    instanceId: `${serviceId}-instance`,
+    status: "ready",
+    protocolVersion: "2025-06-18",
+    discoveredTools: ["search", "read"],
+    ownership: "bflow",
+    activeClientCount: 0,
+    observedAt: "2026-10-18T00:00:00.000Z",
+    diagnosticCode: "ok",
+    ...overrides
+  };
+}
+
+function request(overrides: Partial<GatewayRoleRequest> = {}): GatewayRoleRequest {
+  return {
+    role: "developer",
+    provider: "claude",
+    taskId: "task-1",
+    environmentId: "env-developer-task-1",
+    serviceIds: ["svc-search"],
+    allowedTools: ["search"],
+    configDigest: CONFIG_DIGEST,
+    ...overrides
+  };
+}
+
+describe("GatewayRegistrationManager", () => {
+  let root: string;
+  let identity: PlatformSessionIdentity;
+  let control: FakeGatewayControl;
+  let now: Date;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "bflow-gateway-registrations-"));
+    identity = {
+      machineId: "machine-1",
+      repositoryId: "repo-1",
+      workspaceRoot: "/work/repo",
+      sessionId: "session-1",
+      generation: 1,
+      stateDirectory: join(root, "state")
+    };
+    control = new FakeGatewayControl();
+    control.services = [observation("svc-search")];
+    now = new Date("2026-10-18T00:00:00.000Z");
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  function manager(): GatewayRegistrationManager {
+    return new GatewayRegistrationManager({ control, endpoint: ENDPOINT, now: () => now });
+  }
+
+  function ledgerPath(): string {
+    return join(identity.stateDirectory, "gen-1", "gateway-registrations.json");
+  }
+
+  async function readLedger(): Promise<string> {
+    return readFile(ledgerPath(), "utf8");
+  }
+
+  it("returns an empty access without calling the Gateway when no services are requested", async () => {
+    const result = await manager().ensureForRole(identity, request({ serviceIds: [], allowedTools: [] }));
+
+    expect(result).toEqual({ ok: true, value: { registrations: [], observations: [], tokenEnvironment: {} } });
+    expect(control.inspectCalls).toBe(0);
+    expect(control.registerCalls).toBe(0);
+  });
+
+  it("persists the intent entry before register is called", async () => {
+    let stateAtRegister: string | undefined;
+    control.onRegister = registration => {
+      const ledger = JSON.parse(readFileSync(ledgerPath(), "utf8")) as { entries: Record<string, { state: string }> };
+      stateAtRegister = ledger.entries[registration.registrationId]?.state;
+    };
+
+    const result = await manager().ensureForRole(identity, request());
+
+    expect(result.ok).toBe(true);
+    expect(stateAtRegister).toBe("intent");
+  });
+
+  it("returns the bearer token under a sanitized environment name and keeps it out of the ledger", async () => {
+    const result = await manager().ensureForRole(identity, request());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const [registration] = result.value.registrations;
+    expect(registration?.registrationId).toMatch(/^reg-[0-9a-f]{32}$/);
+    expect(registration?.connection).toEqual({
+      transport: "streamable_http",
+      endpoint: ENDPOINT,
+      token: `secret://bflow/session-1/${registration?.registrationId}`
+    });
+    expect(registration?.scope).toEqual({
+      kind: "session", machineId: "machine-1", repositoryId: "repo-1", workspaceRoot: "/work/repo", sessionId: "session-1"
+    });
+
+    const suffix = (registration?.registrationId ?? "").slice(4).toUpperCase();
+    const names = Object.keys(result.value.tokenEnvironment);
+    expect(names).toEqual([`BFLOW_MCP_TOKEN_${suffix}`]);
+    expect(names[0]?.length).toBeLessThanOrEqual(64);
+    expect(/^[A-Z0-9_]+$/.test(names[0] ?? "")).toBe(true);
+
+    const bearer = [...control.registrations.values()][0]?.bearerToken ?? "";
+    expect(result.value.tokenEnvironment[names[0] ?? ""]).toBe(bearer);
+    expect(result.value.observations.map(item => item.serviceId)).toEqual(["svc-search"]);
+
+    const ledger = await readLedger();
+    expect(ledger).not.toContain(bearer);
+    expect(JSON.parse(ledger).entries[registration?.registrationId ?? ""].state).toBe("registered");
+    expect(JSON.parse(ledger).schemaVersion).toBe(3);
+  });
+
+  it("writes the ledger file with owner-only permissions", async () => {
+    await manager().ensureForRole(identity, request());
+
+    expect((await stat(ledgerPath())).mode & 0o777).toBe(0o600);
+    expect((await stat(join(identity.stateDirectory, "gen-1"))).mode & 0o777).toBe(0o700);
+  });
+
+  it("returns the cached token without registering again while it is fresh", async () => {
+    const gateway = manager();
+    const first = await gateway.ensureForRole(identity, request());
+    const second = await gateway.ensureForRole(identity, request());
+
+    expect(control.registerCalls).toBe(1);
+    expect(second).toEqual(first);
+  });
+
+  it("fails before register when a requested service is not ready", async () => {
+    control.services = [observation("svc-search", { status: "starting" })];
+
+    const result = await manager().ensureForRole(identity, request());
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("validation");
+    expect(result.error.details).toEqual({ missingServices: ["svc-search"], missingTools: [] });
+    expect(control.registerCalls).toBe(0);
+  });
+
+  it("fails before register when a requested tool is not discovered", async () => {
+    control.services = [observation("svc-search", { discoveredTools: ["read"] })];
+
+    const result = await manager().ensureForRole(identity, request());
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("validation");
+    expect(result.error.details).toEqual({ missingServices: [], missingTools: ["search"] });
+    expect(control.registerCalls).toBe(0);
+  });
+
+  it("reconciles an uncertain register through list and revoke before registering again", async () => {
+    const timeout: ContractError = { code: "timeout", retryable: true, retrySafety: "observation_only",
+      message: "gateway reply lost" };
+    control.failNextRegisterAfterStore = timeout;
+    const gateway = manager();
+
+    const first = await gateway.ensureForRole(identity, request());
+    expect(first).toEqual({ ok: false, error: timeout });
+    const failedId = [...control.registrations.keys()][0] ?? "";
+    expect(JSON.parse(await readLedger()).entries[failedId].state).toBe("unknown");
+
+    const second = await gateway.ensureForRole(identity, request());
+    expect(second.ok).toBe(true);
+    expect(control.revokeCalls).toEqual([failedId]);
+    expect(control.registerCalls).toBe(2);
+    expect(control.registrations.size).toBe(1);
+    expect(JSON.parse(await readLedger()).entries[failedId].state).toBe("registered");
+  });
+
+  it("marks an acknowledged registration whose echo mismatches as unknown", async () => {
+    control.mismatchNextRegister = true;
+    const gateway = manager();
+
+    const first = await gateway.ensureForRole(identity, request());
+    expect(first.ok).toBe(false);
+    if (first.ok) return;
+    expect(first.error.code).toBe("corruption");
+    expect(JSON.stringify(first.error)).not.toMatch(/[0-9a-f]{48}/);
+
+    const id = [...control.registrations.keys()][0] ?? "";
+    expect(JSON.parse(await readLedger()).entries[id].state).toBe("unknown");
+
+    const second = await gateway.ensureForRole(identity, request());
+    expect(second.ok).toBe(true);
+    expect(control.revokeCalls).toEqual([id]);
+  });
+
+  it("revokes and registers again when a new manager instance finds a registration without its token", async () => {
+    const first = await manager().ensureForRole(identity, request());
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const oldId = first.value.registrations[0]?.registrationId ?? "";
+    const oldToken = first.value.tokenEnvironment[Object.keys(first.value.tokenEnvironment)[0] ?? ""];
+
+    const restarted = await manager().ensureForRole(identity, request());
+
+    expect(restarted.ok).toBe(true);
+    if (!restarted.ok) return;
+    expect(control.revokeCalls).toEqual([oldId]);
+    expect(control.registerCalls).toBe(2);
+    expect(restarted.value.tokenEnvironment[Object.keys(restarted.value.tokenEnvironment)[0] ?? ""]).not.toBe(oldToken);
+  });
+
+  it("revokes every session registration and is idempotent", async () => {
+    const gateway = manager();
+    expect((await gateway.ensureForRole(identity, request())).ok).toBe(true);
+    expect((await gateway.ensureForRole(identity, request({
+      role: "coordinator", taskId: undefined, environmentId: "env-coordinator"
+    }))).ok).toBe(true);
+    expect(control.registrations.size).toBe(2);
+
+    expect(await gateway.revokeSession(identity)).toEqual({ ok: true, value: undefined });
+    expect(control.registrations.size).toBe(0);
+    expect(control.revokeCalls).toHaveLength(2);
+
+    expect(await gateway.revokeSession(identity)).toEqual({ ok: true, value: undefined });
+    expect(control.revokeCalls).toHaveLength(2);
+  });
+
+  it("counts a Gateway not_found on revoke as revoked", async () => {
+    const gateway = manager();
+    const result = await gateway.ensureForRole(identity, request());
+    expect(result.ok).toBe(true);
+    const id = [...control.registrations.keys()][0] ?? "";
+    control.registrations.delete(id);
+
+    expect(await gateway.revokeRole(identity, "developer", "task-1")).toEqual({ ok: true, value: undefined });
+    expect(JSON.parse(await readLedger()).entries[id].state).toBe("revoked");
+  });
+
+  it("marks an uncertain revoke as unknown and reports the failure", async () => {
+    const gateway = manager();
+    expect((await gateway.ensureForRole(identity, request())).ok).toBe(true);
+    const id = [...control.registrations.keys()][0] ?? "";
+    const failure: ContractError = { code: "transport_unavailable", retryable: true, message: "gateway unreachable" };
+    control.failNextRevoke = failure;
+
+    const result = await gateway.revokeSession(identity);
+
+    expect(result).toEqual({ ok: false, error: failure });
+    expect(JSON.parse(await readLedger()).entries[id].state).toBe("unknown");
+  });
+
+  it("refuses a corrupted ledger", async () => {
+    await manager().ensureForRole(identity, request());
+    await writeFile(ledgerPath(), "{not json", { mode: 0o600 });
+
+    const result = await manager().ensureForRole(identity, request());
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("corruption");
+    expect(control.registerCalls).toBe(1);
+  });
+
+  it("refuses a ledger with a malformed entry", async () => {
+    await manager().ensureForRole(identity, request());
+    const raw = JSON.parse(await readLedger());
+    const [id] = Object.keys(raw.entries);
+    raw.entries[id ?? ""].state = "bogus";
+    await writeFile(ledgerPath(), JSON.stringify(raw), { mode: 0o600 });
+
+    const result = await manager().ensureForRole(identity, request());
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("corruption");
+  });
+
+  it("rejects a non-positive registration lifetime at construction", () => {
+    expect(() => new GatewayRegistrationManager({ control, endpoint: ENDPOINT, registrationTtlMs: 3_600_001 }))
+      .toThrow(RangeError);
+  });
+
+  it("rejects an endpoint carrying credentials at construction", () => {
+    expect(() => new GatewayRegistrationManager({ control, endpoint: "http://user:pw@127.0.0.1:7777/mcp" }))
+      .toThrow(TypeError);
+  });
+});
