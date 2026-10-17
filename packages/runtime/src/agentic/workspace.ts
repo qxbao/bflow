@@ -30,6 +30,35 @@ export interface OpenAgenticWorkspaceOptions {
   onNativeDelivery?: (message: RoleMessage) => Promise<void>;
   /** Provider launch configuration used for dynamic Developer panes. */
   roleLaunch?: Record<string, { systemPrompt: string; mcpConfigFile: string; hooksSettingsFile: string }>;
+  /** P30: per-task Developer launch material from the platform readiness service; absent for legacy hosts. */
+  developerLaunches?: DeveloperLaunchPort;
+}
+/** Launch material for one Developer task. `env` may carry bearer tokens: it is passed to Herdr only, never persisted. */
+export interface DeveloperLaunchPort {
+  allocate(request: { taskId: string; worktreePath: string }): Promise<{ provider: string; argv: readonly string[]; env: Readonly<Record<string, string>>; launchId: string; launchFingerprint: string }>;
+  release(taskId: string): Promise<void>;
+}
+/** Pane policy whose Developer allocation carries a readiness-approved launch and whose release drops it. */
+function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunchPort): PanePolicy {
+  return {
+    getManifest: options => base.getManifest(options),
+    getRoleBinding: (role, options) => base.getRoleBinding(role, options),
+    inspectRoleHealth: (role, options) => base.inspectRoleHealth(role, options),
+    async allocateDeveloper(request, options) {
+      let launch;
+      try { launch = await launches.allocate({ taskId: request.taskId, worktreePath: request.worktreePath }); }
+      catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
+      const allocation = { ...request, agentKind: launch.provider, launch };
+      return base.allocateDeveloper(allocation, options);
+    },
+    async releaseDeveloper(request, options) {
+      const released = await base.releaseDeveloper(request, options);
+      if (!released.ok) return released;
+      try { await launches.release(request.taskId); }
+      catch (error) { return { ok: false, error: { code: "conflict", retryable: true, message: String(error) } }; }
+      return released;
+    }
+  };
 }
 export interface AgenticWorkspaceHandle {
   runtime: AgenticWorkflowRuntime; conversation: AgenticConversationHost; tools: CoordinatorTools;
@@ -64,11 +93,12 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
     const args = await paneModule.buildProviderRoleLaunchFromFiles({ ...launch, agentKind: manifest.panes.find(p => p.role === "coordinator")!.agentKind, role });
     roleConfigs[topology.topologyRole] = { args };
   }
-  const panes: PanePolicy = new paneModule.RolePaneManager({ config: { sessionId: options.sessionId,
+  const rolePanes: PanePolicy = new paneModule.RolePaneManager({ config: { sessionId: options.sessionId,
     projectName: manifest.projectName, workspaceRoot: repository, conversationSessionId: manifest.conversationSessionId,
     maxDeveloperCapacity: options.maxDeveloperCapacity ?? 2,
     defaultAgentKind: manifest.panes.find(p => p.role === "coordinator")!.agentKind,
     roleConfigs }, runner, store: manifestStore });
+  const panes: PanePolicy = options.developerLaunches ? withDeveloperLaunches(rolePanes, options.developerLaunches) : rolePanes;
   const directory = options.storageDirectory ?? resolve(repository, ".bflow/state/agentic");
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const runStore = unwrap<any>(persistenceModule.openSqliteRunStore({ filename: resolve(directory, "runs.db") }));

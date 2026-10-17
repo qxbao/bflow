@@ -886,6 +886,52 @@ describe("RolePaneManager Verification Suite", () => {
       expect(pane.metadata?.promptInitialized).toBe(true);
     }
   });
+  it("accepts a provider launch profile whose prompt file carries the original role prompt for each provider", async () => {
+    const { readBuiltinRolePrompt } = await import("../src/role-prompts.js");
+    const { writeFile } = await import("node:fs/promises");
+    const directory = await mkdtemp(join(tmpdir(), "bflow-launch-prompt-"));
+    try {
+      const chat = await readBuiltinRolePrompt("conversation"), coordinator = await readBuiltinRolePrompt("coordinator");
+      if (!chat || !coordinator) throw new Error("original role prompts are missing");
+      const promptFor = async (name: string, text: string) => { const path = join(directory, name); await writeFile(path, text, "utf8"); return path; };
+      const settingsFor = async (name: string, systemPromptFile: string) => {
+        const path = join(directory, name); await writeFile(path, JSON.stringify({ systemPromptFile }), "utf8"); return path;
+      };
+      const chatPrompt = await promptFor("chat-claude.md", chat.prompt + "\n\nHost integration.");
+      const coordinatorPrompt = await promptFor("coordinator-codex.md", coordinator.prompt);
+      const agySettings = await settingsFor("agy-settings.json", await promptFor("agy-prompt.md", chat.prompt));
+      const coordinatorAgy = await promptFor("coordinator-agy.md", coordinator.prompt);
+      const agyCoordinatorSettings = await settingsFor("agy-coordinator-settings.json", coordinatorAgy);
+      const profile = (provider: "claude" | "codex" | "agy", argv: string[], launchId: string) =>
+        ({ provider, argv, env: {}, launchId, launchFingerprint: `${launchId}-fingerprint` });
+      const manager = createRolePaneManager({ config: { ...config, roleConfigs: {
+        chat: { agentKind: "claude", launch: profile("claude", ["--settings", "/dev/null", "--append-system-prompt-file", chatPrompt], "chat-claude") },
+        coordinator: { agentKind: "codex", launch: profile("codex", ["-c", `model_instructions_file=${JSON.stringify(coordinatorPrompt)}`], "coordinator-codex") }
+      } }, runner, store, worktreeInspector: inspector });
+      const claudeOnly = await manager.initializeTopology();
+      expect(claudeOnly.ok).toBe(true);
+      const agyConfig = createRolePaneManager({ config: { ...config, roleConfigs: {
+        chat: { agentKind: "agy", launch: profile("agy", ["--settings", agySettings], "chat-agy") },
+        coordinator: { agentKind: "agy", launch: profile("agy", ["--settings", agyCoordinatorSettings], "coordinator-agy") }
+      } }, runner: new FakeHerdrCommandRunner(), store: new InMemorySessionManifestStore(), worktreeInspector: inspector });
+      const agy = await agyConfig.initializeTopology();
+      expect(agy.ok).toBe(true);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+  it("rejects a provider launch profile whose files do not carry the original role prompt", async () => {
+    const { writeFile } = await import("node:fs/promises");
+    const directory = await mkdtemp(join(tmpdir(), "bflow-launch-prompt-bad-"));
+    try {
+      const unrelated = join(directory, "unrelated.md");
+      await writeFile(unrelated, "Some other instructions entirely.", "utf8");
+      const manager = createRolePaneManager({ config: { ...config, roleConfigs: {
+        chat: { agentKind: "codex", launch: { provider: "codex", argv: [`model_instructions_file=${JSON.stringify(unrelated)}`], env: {}, launchId: "chat-bad", launchFingerprint: "chat-bad-fp" } }
+      } }, runner, store, worktreeInspector: inspector });
+      const result = await manager.initializeTopology();
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.message).toContain("must reference the original Bflow role prompt");
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
   it("waits for a new pane's pending process snapshot instead of starting into an unobserved foreground", async () => {
     let pending = true;
     runner.onCommand = call => {

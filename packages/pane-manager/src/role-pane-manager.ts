@@ -42,6 +42,7 @@ import { readBuiltinRolePrompt } from "./role-prompts.js";
 import { buildProviderRoleLaunch } from "./provider-launch.js";
 import { open } from "node:fs/promises";
 import { constants } from "node:fs";
+import { isAbsolute } from "node:path";
 import {
   AGENT_NAME_PATTERN,
   PERMANENT_TOPOLOGY_ROLES,
@@ -172,6 +173,72 @@ export interface RolePaneManagerOptions {
   readonly worktreeInspector?: WorktreeInspector;
   readonly clock?: () => Date;
   readonly defaultTimeoutMs?: number;
+}
+
+const PROMPT_FILE_MAX_BYTES = 131_072;
+
+/** True only for a regular, non-symlink file no larger than the prompt limit that contains `text`. */
+async function regularFileContains(path: string, text: string, expectedJson = false): Promise<string | false> {
+  let file;
+  try {
+    file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch {
+    return false;
+  }
+  try {
+    const stat = await file.stat();
+    if (!stat.isFile() || stat.size > PROMPT_FILE_MAX_BYTES) return false;
+    const content = await file.readFile("utf8");
+    if (expectedJson) return content;
+    return content.includes(text) ? path : false;
+  } catch {
+    return false;
+  } finally {
+    await file.close();
+  }
+}
+
+/**
+ * Finds the provider prompt file that carries the original Bflow role prompt. Provider-neutral: a launch argv token
+ * may name it directly (`--append-system-prompt-file <path>`, `key=<json path>`), or name a JSON settings file whose
+ * `systemPromptFile` does. Returns the referenced prompt path, or undefined when the launch does not reference it.
+ */
+async function launchPromptSource(argv: readonly string[], prompt: string): Promise<string | undefined> {
+  const candidates = new Set<string>();
+  for (const token of argv) {
+    candidates.add(token);
+    const equals = token.indexOf("=");
+    if (equals > 0) {
+      const value = token.slice(equals + 1);
+      candidates.add(value);
+      try {
+        const unquoted: unknown = JSON.parse(value);
+        if (typeof unquoted === "string") candidates.add(unquoted);
+      } catch {
+        // Not a JSON string; the raw value candidate is enough.
+      }
+    }
+  }
+  const absolute = [...candidates].filter(candidate => isAbsolute(candidate));
+  for (const candidate of absolute) {
+    const matched = await regularFileContains(candidate, prompt);
+    if (matched !== false) return matched;
+  }
+  for (const candidate of absolute) {
+    const content = await regularFileContains(candidate, "", true);
+    if (content === false) continue;
+    let settings: unknown;
+    try {
+      settings = JSON.parse(content);
+    } catch {
+      continue;
+    }
+    const systemPromptFile = typeof settings === "object" && settings !== null && "systemPromptFile" in settings ? settings.systemPromptFile : undefined;
+    if (typeof systemPromptFile !== "string" || !isAbsolute(systemPromptFile)) continue;
+    const matched = await regularFileContains(systemPromptFile, prompt);
+    if (matched !== false) return matched;
+  }
+  return undefined;
 }
 
 export class RolePaneManager {
@@ -866,22 +933,13 @@ export class RolePaneManager {
       let passedArgs = launch !== undefined ? [...launch.argv] : (request.args ?? roleConfig?.args);
       let originalPromptSource: string | undefined;
       if (launch !== undefined && ["chat", "coordinator"].includes(spec.topologyRole)) {
-        // Launch profiles are not rewritten: the profile must already reference the original role prompt.
+        // Launch profiles are not rewritten: any provider's profile must already reference the original role prompt.
         const original = await readBuiltinRolePrompt(spec.topologyRole);
         if (!original) return validationError(`Required original prompt is missing for ${spec.topologyRole}`);
-        if (agentKind !== "claude" && agentKind !== "codex") return validationError(`Native initial prompt injection for ${agentKind} is not verified. Configure role launch args for ${spec.topologyRole}.`);
-        const argv = launch.argv;
-        const referenced = agentKind === "claude"
-          ? argv.some((value, index) => value === "--append-system-prompt-file" && argv[index + 1] === original.source)
-          : argv.includes(`model_instructions_file=${JSON.stringify(original.source)}`);
-        if (!referenced) return validationError(`Launch profile for ${spec.topologyRole} must reference the original Bflow role prompt; rebuild the launch profile.`);
-        const file = await open(original.source, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-        try {
-          const stat = await file.stat();
-          if (!stat.isFile() || stat.size > 131_072 || !(await file.readFile("utf8")).includes(original.prompt))
-            return validationError(`The native ${spec.topologyRole} launch prompt does not contain its original Bflow role prompt. Rebuild the host launch configuration.`);
-        } finally { await file.close(); }
-        originalPromptSource = original.source;
+        const promptSource = await launchPromptSource(launch.argv, original.prompt);
+        if (promptSource === undefined)
+          return validationError(`Launch profile for ${spec.topologyRole} must reference the original Bflow role prompt; rebuild the launch profile.`);
+        originalPromptSource = promptSource;
       } else if (["chat", "coordinator"].includes(spec.topologyRole)) {
         const original = await readBuiltinRolePrompt(spec.topologyRole);
         if (!original) return validationError(`Required original prompt is missing for ${spec.topologyRole}`);

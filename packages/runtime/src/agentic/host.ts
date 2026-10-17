@@ -7,9 +7,9 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
-  AgentBindingReceiptSchema, AgentExecutionHandleSchema, AgentResultSchema, AgentRoleSchema, ApprovalDecisionSchema,
+  AgentBindingReceiptSchema, AgentExecutionHandleSchema, AgentProviderIdSchema, AgentResultSchema, AgentRoleSchema, ApprovalDecisionSchema,
   JsonValueSchema, RoleMessageSchema, RunQuerySchema, SessionManifestSchema,
-  type AgentRole, type RoleMessage, type SessionManifest, type RunStore
+  type AgentProviderId, type AgentRole, type RoleMessage, type SessionManifest, type RunStore
 } from "@bflow/contracts";
 import { authenticateNativeHerdrMessage } from "./herdr-ingress.js";
 import { callHost } from "./host-protocol.js";
@@ -23,22 +23,27 @@ import { HostReceiptJournal, type HumanHookProvenance } from "./host-receipts.js
 import { parseBehavioralCommands } from "./behavioral-runner.js";
 import { HostDevelopment } from "./host-development.js";
 import { redactString } from "../resilience/redaction.js";
+import { createHostPlatformSession, launchMaterial, type HostAgentObservation, type HostPlatformSession } from "./host-platform.js";
 
 const execute = promisify(execFile);
 const roles = ["conversation", "coordinator", "specifier", "architect", "planner", "developer", "tester", "reviewer", "qa", "security"] as const;
 const capabilities = { conversation: ["conversation"], coordinator: ["coordination", "planning", "specification"],
   specifier: ["specification"], architect: ["architecture"], planner: ["planning"], developer: ["implementation"],
   tester: ["testing"], reviewer: ["review"], qa: ["verification", "testing"], security: ["security"] };
-interface RoleConfiguration { socketPath: string; token: string; role: AgentRole; herdrBinary: string; sessionId: string }
+interface RoleConfiguration { socketPath: string; token: string; role: AgentRole; provider: AgentProviderId; herdrBinary: string; sessionId: string }
 async function privateFile(path: string, content: string): Promise<void> {
   await writeFile(path, content, { mode: 0o600 }); await chmod(path, 0o600);
 }
 async function readRoleConfiguration(path: string): Promise<RoleConfiguration> {
   const stat = await lstat(path); if (!stat.isFile() || (stat.mode & 0o077) !== 0) throw new Error("Unsafe role host configuration");
   const raw = record(JSON.parse(await readFile(path, "utf8")));
-  return { socketPath: textField(raw.socketPath), token: textField(raw.token), role: AgentRoleSchema.parse(raw.role), herdrBinary: textField(raw.herdrBinary), sessionId: textField(raw.sessionId) };
+  // Legacy role files predate the provider field and always meant Claude.
+  return { socketPath: textField(raw.socketPath), token: textField(raw.token), role: AgentRoleSchema.parse(raw.role), provider: AgentProviderIdSchema.parse(raw.provider ?? "claude"),
+    herdrBinary: textField(raw.herdrBinary), sessionId: textField(raw.sessionId) };
 }
 function shellQuote(value: string): string { return "'" + value.replaceAll("'", "'\\''") + "'"; }
+const NATIVE_HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "PreToolUse"] as const;
+function hookCommandFor(rolePath: string, event: string): string { return [process.execPath, fileURLToPath(import.meta.url), "hook", rolePath, event].map(shellQuote).join(" "); }
 
 export const NON_USER_FACING_AUTONOMOUS_POLICY = [
   "You are a non-user-facing execution agent.",
@@ -83,20 +88,23 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   }
   const publicKey = await readFile(publicPath, "utf8");
   const promptAssets = await import(new URL("../../../pane-manager/dist/index.js", import.meta.url).href);
+  const platformRoles = configuration.platform?.roles ?? [];
   for (const role of roles) {
     const path = join(configuration.directory, role + ".json");
+    const provider: AgentProviderId = platformRoles.find(option => option.role === role)?.provider ?? "claude";
     let roleConfig: RoleConfiguration;
     try { roleConfig = await readRoleConfiguration(path); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      roleConfig = { socketPath: configuration.socketPath, role, token: randomBytes(32).toString("hex"), sessionId: configuration.sessionId, herdrBinary: binary };
+      roleConfig = { socketPath: configuration.socketPath, role, token: randomBytes(32).toString("hex"), provider, sessionId: configuration.sessionId, herdrBinary: binary };
       await privateFile(path, JSON.stringify(roleConfig)); }
     if (roleConfig.role !== role || roleConfig.socketPath !== configuration.socketPath || roleConfig.sessionId !== configuration.sessionId) throw new Error("Foreign role configuration");
+    // Same token, new provider: a platform change is only admissible while no host owns the endpoint.
+    if (roleConfig.provider !== provider) { roleConfig = { ...roleConfig, provider }; await privateFile(path, JSON.stringify(roleConfig)); }
     roleTokens.set(roleConfig.token, role);
     const mcpConfigFile = join(configuration.directory, role + ".mcp.json");
     const hooksSettingsFile = join(configuration.directory, role + ".hooks.json");
     await privateFile(mcpConfigFile, JSON.stringify({ mcpServers: { bflow: { type: "stdio", command: process.execPath, args: [executable, "mcp", path] } } }));
-    const hookCommand = (event: string) => [process.execPath, executable, "hook", path, event].map(shellQuote).join(" ");
-    const hooks = Object.fromEntries(["SessionStart", "UserPromptSubmit", "Stop", "PreToolUse"].map(event => [event, [{ hooks: [{ type: "command", command: hookCommand(event), timeout: 30 }] }]]));
+    const hooks = Object.fromEntries(NATIVE_HOOK_EVENTS.map(event => [event, [{ hooks: [{ type: "command", command: hookCommandFor(path, event), timeout: 30 }] }]]));
     await privateFile(hooksSettingsFile, JSON.stringify({ hooks }));
     let systemPrompt = `You are Bflow's ${role} in a dedicated Herdr pane. Use the bflow MCP tools. All cross-role messages must use send_role_message through native Herdr; never use files as a mailbox. Never fabricate evidence or approvals. `;
     const promptInput = await promptAssets.readBuiltinRolePrompt(role);
@@ -124,6 +132,25 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
     launch[role] = { systemPrompt, mcpConfigFile, hooksSettingsFile };
   }
+  // P30 readiness is composed once per daemon. Without `platform` the legacy launch material above is served unchanged.
+  const platformSession: HostPlatformSession | undefined = configuration.platform === undefined ? undefined : await createHostPlatformSession({
+    platform: configuration.platform, repositoryPath: configuration.repositoryPath, sessionId: configuration.sessionId, directory: configuration.directory,
+    issuerId, privateKeyPem: await readFile(keyPath, "utf8"), publicKeyPem: publicKey, hostCapabilities: capabilities,
+    rolePrompt: role => launch[role]?.systemPrompt,
+    hostLaunch: role => {
+      const rolePath = join(configuration.directory, role + ".json");
+      const hookEntries = Object.fromEntries(NATIVE_HOOK_EVENTS.map(event => [event, hookCommandFor(rolePath, event)]));
+      return { mcpServers: { bflow: { command: process.execPath, args: [executable, "mcp", rolePath] } }, hooks: hookEntries };
+    },
+    nativeSessionHookCommand: role => hookCommandFor(join(configuration.directory, role + ".json"), "SessionStart")
+  });
+  const observeAgent = async (paneId: string): Promise<HostAgentObservation> => {
+    const agent = record(record(record(JSON.parse(await herdr(["agent", "get", paneId]))).result).agent);
+    const native = agent.agent_session ? record(agent.agent_session) : undefined;
+    const status = agent.agent_status ?? agent.agentStatus;
+    return { ...(typeof agent.name === "string" ? { name: agent.name } : {}), status: typeof status === "string" ? status : "unknown",
+      ...(native ? { nativeSession: { source: String(native.source), kind: native.kind as "id" | "path" | "opaque", value: String(native.value) } } : {}) };
+  };
   const requireWorkspace = () => { if (!workspace) throw new Error("Bflow host awaits an up SessionManifest; retry only after bflow up completes"); return workspace; };
   const principal = async (role: AgentRole, paneId: string) => {
     const host = requireWorkspace();
@@ -208,10 +235,12 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const native = actual.agent_session ? record(actual.agent_session) : undefined;
       if (native && pane.session?.value === native.value && (!receipt || receipt.sessionId !== native.value))
         throw new Error(`[bflow:native-startup-pending] ${pane.role} pane ${pane.paneId} is still publishing its Bflow native-session receipt.`);
-      if (!receipt || receipt.role !== pane.role || !native || native.source !== "herdr:claude" || native.kind !== "id" || native.value !== receipt.sessionId ||
+      if (!receipt || receipt.role !== pane.role || !native || native.source !== `herdr:${pane.provider}` || native.kind !== "id" || native.value !== receipt.sessionId ||
           pane.session?.value !== receipt.sessionId || (actual.name ?? actual.agent) !== pane.agentId)
         throw new Error(`Role ${pane.role} has no matching Bflow provider startup/native-session receipt; stop and recreate legacy bare panes`);
     }
+    // Native sessions are proven above; platform readiness must now be activated-ready for every required role.
+    if (platformSession) await platformSession.verifyActivation(accepted.panes, observeAgent);
     queryStore?.close(); queryStore = undefined;
     const pluginRoot = fileURLToPath(new URL("../../../../agents/coordinator/herdr-receipts", import.meta.url));
     await herdr(["plugin", "link", pluginRoot]);
@@ -221,7 +250,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     await privateFile(join(pluginDirectory, "hosts", configuration.sessionId + ".json"), JSON.stringify({ issuerId, privateKeyFile: keyPath, runtimeSocket: nativeSocket, manifestFile,
       herdrSocketPath: textField(record(JSON.parse(await herdr(["status", "server", "--json"]))).socket) }));
     workspace = await openAgenticWorkspace({ repositoryPath: configuration.repositoryPath, sessionId: configuration.sessionId, herdrBinary: binary,
-      ...(configuration.manifestDirectory ? { manifestDirectory: configuration.manifestDirectory } : {}), maxDeveloperCapacity: configuration.policy?.concurrency.maxConcurrency ?? configuration.maxDeveloperCapacity ?? 2,
+      ...(configuration.manifestDirectory ? { manifestDirectory: configuration.manifestDirectory } : {}),
+      ...(platformSession ? { developerLaunches: {
+        allocate: request => platformSession.allocateDeveloper(request.taskId, request.worktreePath),
+        release: taskId => platformSession.releaseDeveloper(taskId)
+      } } : {}), maxDeveloperCapacity: configuration.policy?.concurrency.maxConcurrency ?? configuration.maxDeveloperCapacity ?? 2,
       nativeIngressSocket: nativeSocket, bindingReceiptKeys: { [issuerId]: publicKey }, roleLaunch: launch,
       roleCapabilities: capabilities, taskChecks: [...DEFAULT_HOST_CHECKS, ...verification.behavioralChecks()],
       workflowChecks: [...DEFAULT_HOST_CHECKS, ...verification.behavioralChecks()], deterministicGates: [verification.deterministicGate(), ...verification.behavioralGates()],
@@ -424,7 +457,16 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
     switch (method) {
       case "ping": return { active: !!workspace, quiesced, schedulerError: schedulerError ?? null };
-      case "prepare": return { roleLaunch: launch };
+      case "prepare": {
+        if (!platformSession) return { roleLaunch: launch };
+        const prepared = await platformSession.prepare();
+        const roleLaunch = Object.fromEntries(Object.entries(launch).map(([role, descriptor]) => {
+          const ready = prepared.launches.get(role as AgentRole);
+          return [role, ready ? { ...descriptor, launch: launchMaterial(ready) } : descriptor];
+        }));
+        return { roleLaunch, platform: prepared.report };
+      }
+      case "platform_status": return platformSession?.status() ?? { report: null, status: { generation: null, launches: [] }, gatewayDiagnostic: null };
       case "activate": return activate(params);
       case "get_run": { const stored = unwrap(await (await getQueryStore()).get(textField(record(params).runId))); return stored?.snapshot ?? null; }
       case "find_runs": { const page = unwrap(await (await getQueryStore()).find(RunQuerySchema.parse(params))); return { ...page, items: page.items.map(item => item.snapshot) }; }
@@ -443,12 +485,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
             if (state.pendingCore.length || state.pendingVerifications.length || state.runs.some(run => !["completed", "cancelled", "failed"].includes(run.status)))
               throw new Error("Persisted agentic work requires activation/reconciliation before safe shutdown");
           });
+          await platformSession?.shutdown();
           quiesceCompleted = true; return null;
         }
         await workspace.runtime.quiesce();
         if (scheduler) await Promise.race([scheduler, new Promise((_, reject) => setTimeout(() => reject(new Error("Outstanding verification has not drained; preserve the live session and retry shutdown after reconciliation")), 15_000))]);
         await requireWorkspace().tools.drain(); await userQueue;
         if (physicalPrompts.length || pumping) throw new Error("Inbound transport receipts are still draining; preserve session and retry shutdown");
+        await platformSession?.shutdown();
         quiesceCompleted = true; return null;
       }
       case "checkpoint": return requireWorkspace().runtime.checkpoint(params);
@@ -456,6 +500,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (workspace && !quiesceCompleted) throw new Error("Quiesce and checkpoint before stopping the host");
         const status = record(JSON.parse(await herdr(["status", "server", "--json"])));
         if (status.running === true) throw new Error("Stop the named Herdr session before stopping its host");
+        await platformSession?.shutdown();
         closing = true; setImmediate(() => { void close(); }); return null;
       }
       default: throw new Error("Unknown host operation");
@@ -581,7 +626,7 @@ export async function runProviderHook(configuration: RoleConfiguration, event: s
     if (event !== hook.hook_event_name) throw new Error("Provider hook event mismatch");
     if (hook.agent_id || process.env.CURSOR_VERSION || hook.cursor_version) return;
     const request = { id: `bflow-native-${Date.now()}`, method: "pane.report_agent_session", params: { pane_id: paneId,
-      source: "herdr:claude", agent: "claude", seq: Date.now() * 1000, agent_session_id: session,
+      source: `herdr:${configuration.provider}`, agent: configuration.provider, seq: Date.now() * 1000, agent_session_id: session,
       ...(typeof hook.transcript_path === "string" ? { agent_session_path: hook.transcript_path } : {}),
       ...(typeof hook.source === "string" ? { session_start_source: hook.source } : {}) } };
     await new Promise<void>((accept, reject) => {
