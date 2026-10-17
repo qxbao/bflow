@@ -39,3 +39,8 @@ export type {
   SkillResolverPort,
   SkillSessionPort
 } from "./ports.js";
+export {
+  AgenticHostPlatformOptionsSchema, HostLaunchMaterialSchema, HostPrepareResponseSchema, HostRoleLaunchSchema,
+  PlatformPreflightReportSchema, PlatformRoleOptionSchema, RolePreflightSummarySchema,
+  type AgenticHostPlatformOptions, type HostLaunchMaterial, type HostPrepareResponse, type HostRoleLaunch, type PlatformRoleOption
+} from "./host-options.js";

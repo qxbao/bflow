@@ -331,6 +331,9 @@ importers:
       '@bflow/skills':
         specifier: workspace:*
         version: link:../skills
+      zod:
+        specifier: ^3.24.2
+        version: 3.25.76
     devDependencies:
       '@bflow/agent-registry':
         specifier: workspace:*

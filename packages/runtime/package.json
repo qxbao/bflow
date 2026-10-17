@@ -21,7 +21,8 @@
     "@bflow/contracts": "workspace:*",
     "@bflow/machine-setup": "workspace:*",
     "@bflow/mcp-gateway": "workspace:*",
-    "@bflow/skills": "workspace:*"
+    "@bflow/skills": "workspace:*",
+    "zod": "^3.24.2"
   },
   "devDependencies": {
     "@bflow/agent-registry": "workspace:*",
