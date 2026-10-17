@@ -19,6 +19,7 @@ import { fail, failWith, ok } from "./errors.js";
 import type {
   GatewayRegistrationPort,
   LaunchAttestationSigner,
+  LaunchJournalPort,
   PlatformPreflightReport,
   PlatformReadinessService,
   PlatformSessionIdentity,
@@ -39,6 +40,8 @@ export interface DefaultPlatformReadinessServiceDeps {
   readonly skills: SkillSessionPort;
   readonly gateway?: GatewayRegistrationPort | undefined;
   readonly providers: ProviderReadinessPort;
+  /** Same journal the providers record intents in; receives `released` so restart recovery never sees a dropped launch as pending. */
+  readonly journal?: LaunchJournalPort | undefined;
   readonly signer: LaunchAttestationSigner;
   readonly rolePrompt?: ((role: AgentRole) => string | undefined) | undefined;
   readonly nativeSessionHookCommand?: ((role: AgentRole, taskId?: string) => string | undefined) | undefined;
@@ -182,7 +185,7 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     // All-or-nothing: any required failure discards every launch made in this call.
     const ready = !requiredBlocked && !requiredLaunchFailed;
     if (!ready) {
-      for (const prepared of launched.values()) this.dropLaunch(prepared.launch.launchId);
+      for (const prepared of launched.values()) await this.dropLaunch(prepared.launch.launchId, true);
       launched.clear();
     }
 
@@ -280,7 +283,8 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       const revoked = await this.revokeRoleGateway(material.identity, material.requirement, options);
       if (!revoked.ok) return revoked;
     }
-    this.dropLaunch(launchId);
+    try { await this.dropLaunch(launchId); }
+    catch (error) { return fail("corruption", `launch release could not be journaled: ${error instanceof Error ? error.message : String(error)}`); }
     return ok(undefined);
   }
 
@@ -296,7 +300,7 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
         }
       }
       for (const record of this.launches.values()) {
-        if (record.material?.identity.stateDirectory === identity.stateDirectory) this.dropLaunch(record.launchId);
+        if (record.material?.identity.stateDirectory === identity.stateDirectory) await this.dropLaunch(record.launchId, true);
       }
     }
     if (failures.length === 0) return ok(undefined);
@@ -469,10 +473,16 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
   }
 
   /** Marks the launch released and drops its launch material (including bearer tokens). */
-  private dropLaunch(launchId: string): void {
+  private async dropLaunch(launchId: string, bestEffort = false): Promise<void> {
     const record = this.launches.get(launchId);
-    if (!record) return;
+    if (!record || record.state === "released") return;
     record.state = "released";
     delete record.material;
+    try {
+      await this.deps.journal?.append({ kind: "released", launchId, recordedAt: (this.deps.now?.() ?? new Date()).toISOString() });
+    } catch (error) {
+      // Bulk cleanup keeps going; recovery must still reconcile an unreleased intent before reuse.
+      if (!bestEffort) throw error;
+    }
   }
 }

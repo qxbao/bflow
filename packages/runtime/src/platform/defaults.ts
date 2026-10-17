@@ -105,6 +105,7 @@ export function createPlatformReadinessService(options: PlatformReadinessService
     skills: new SkillSessionStore({ resolver: createSkillResolver(options.skillManager) }),
     ...(gateway ? { gateway } : {}),
     providers,
+    journal,
     signer: options.signer,
     rolePrompt: options.rolePrompt,
     nativeSessionHookCommand: options.nativeSessionHookCommand,

@@ -10,6 +10,7 @@ export {
   type PlatformReadinessServiceOptions,
   type ProviderAdapterFactoryOptions
 } from "./defaults.js";
+export { GatewayControlClient } from "./gateway-control-client.js";
 export { Ed25519LaunchAttestationSigner, type Ed25519LaunchAttestationSignerOptions } from "./attestation-signer.js";
 export type {
   ActivationRequest,

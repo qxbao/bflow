@@ -196,6 +196,7 @@ describe("DefaultPlatformReadinessService", () => {
       skills: new SkillSessionStore({ resolver: createSkillResolver(skillManager) }),
       ...(gateway ? { gateway } : {}),
       providers,
+      journal,
       signer,
       rolePrompt: role => `Role prompt for ${role}.`,
       now
@@ -368,7 +369,7 @@ describe("DefaultPlatformReadinessService", () => {
   });
 
   it("releases a launch by revoking its registrations and is idempotent", async () => {
-    const { service } = buildService();
+    const { service, journal } = buildService();
     const prepared = await service.prepareSession(identity, [requirement({ mcpServiceIds: ["svc-search"] })]);
     if (!prepared.ok) throw new Error(JSON.stringify(prepared.error));
     const launchId = prepared.value.launches[0]?.launch.launchId ?? "";
@@ -380,16 +381,19 @@ describe("DefaultPlatformReadinessService", () => {
     expect(service.assertFresh(launchId).ok).toBe(false);
     expect((await service.releaseLaunch(launchId)).ok).toBe(true);
     expect((await service.releaseLaunch("launch-unknown")).ok).toBe(true);
+    // Released exactly once, so restart recovery never treats the intent as pending.
+    expect(await journalKinds(journal)).toEqual(["intent", "released"]);
   });
 
   it("revokes every session registration on shutdown", async () => {
-    const { service } = buildService();
+    const { service, journal } = buildService();
     const prepared = await service.prepareSession(identity, [requirement({ mcpServiceIds: ["svc-search"] })]);
     if (!prepared.ok) throw new Error(JSON.stringify(prepared.error));
     expect(gatewayControl.registrations.size).toBe(1);
 
     expect((await service.shutdown()).ok).toBe(true);
     expect(gatewayControl.registrations.size).toBe(0);
+    expect(await journalKinds(journal)).toEqual(["intent", "released"]);
     expect(service.status().launches.every(launch => launch.state === "released")).toBe(true);
   });
 
