@@ -301,11 +301,20 @@ describe("executePlan", () => {
 
   it("abort signal after start → unknown", async () => {
     const p = { observed: null, after: "desired", applyCalls: 0, hang: true } as FakeState;
-    const comps = [fake("path", p)];
+    const ac = new AbortController();
+    const component = fake("path", p);
+    const comps: SetupComponent[] = [{
+      ...component,
+      apply: async (ctx) => {
+        const pending = component.apply(ctx);
+        // Abort only once the mutation has actually started, independent of
+        // filesystem/approval latency when the full suite runs concurrently.
+        ac.abort();
+        return pending;
+      }
+    }];
     const { plan, preview } = await planFor(comps);
     const approvalReceiptId = await approve(plan, preview);
-    const ac = new AbortController();
-    setTimeout(() => ac.abort(), 50);
     const receipts = await okExec(plan, comps, { approvalReceiptId, preview, ctx: ctxOf("apply", "linux", ac.signal) });
     expect(receipts[0]!.status).toBe("unknown");
     expect(receipts[0]!.diagnostics.join(" ")).toContain("aborted");
