@@ -230,7 +230,7 @@ export class NativePluginRuntime {
     const executable = join(generation, "node_modules", ".bin", "claude-mem");
     const provider = this.#provider(pin);
     const ide = { claude: "claude-code", codex: "codex-cli", agy: "antigravity" }[provider];
-    const result = await this.#host.run(executable, ["install", "--ide", ide, "--no-auto-start"],
+    const result = await this.#host.run(executable, ["install", "--ide", ide, "--provider", "host", "--no-auto-start"],
       { timeoutMs: options?.timeoutMs ?? 300_000, environment, ...(options?.signal ? { signal: options.signal } : {}) });
     await writeFile(join(dirname(artifact), "native-installer.log"), result.stdout + result.stderr, { mode: 0o600 });
     if (result.exitCode !== 0) return { success: false, diagnostic: `Official Claude-Mem installer exited ${result.exitCode}; full output retained in native-installer.log` };

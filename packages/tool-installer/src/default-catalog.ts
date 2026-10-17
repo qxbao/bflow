@@ -246,3 +246,17 @@ export function defaultToolCatalog(os: string, arch: string): { pins: ManagedToo
   }
   return { pins, manual };
 }
+
+/** Native archives are inputs to the Bflow-owned, policy-preserving provider runtime. */
+export function defaultNativeToolPins(): ManagedToolPin[] {
+  return [
+    { toolId: "superpowers", installerId: "bflow-native-superpowers-v1", version: "7.0.0",
+      source: "https://github.com/obra/superpowers/archive/refs/tags/v7.0.0.tar.gz",
+      integrity: "b1fa757963ba9817035e77b3039518bca95fd250684d49299616fa2676f5baee",
+      license: "MIT", recipe: { kind: "provider_plugin", provider: "codex" } },
+    { toolId: "claude-mem", installerId: "bflow-native-claude-mem-v1", version: "14.0.1",
+      source: "https://registry.npmjs.org/claude-mem/-/claude-mem-14.0.1.tgz",
+      integrity: "48fb5123bc0f9d7f5962692775b9b6293be8bba2566006d8a608cb42bf301bd8",
+      license: "Apache-2.0", recipe: { kind: "provider_plugin", provider: "codex" } }
+  ].map(pin => ManagedToolPinSchema.parse(pin));
+}

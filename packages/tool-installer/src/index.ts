@@ -7,3 +7,5 @@ export * from "./mcp-probe.js";
 export * from "./rtk-config.js";
 
 export * from "./default-catalog.js";
+
+export * from "./native-providers-installer.js";

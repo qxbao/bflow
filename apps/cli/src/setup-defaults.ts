@@ -1,7 +1,9 @@
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
+import { access } from "node:fs/promises";
+import { constants } from "node:fs";
 import type { ToolInstaller } from "@bflow/contracts";
 import { MachineConfigSchema, ToolInstallerRegistry, defaultMachineConfig,
-  type MachineConfig, type PlatformProfile } from "@bflow/machine-setup";
+  type MachineConfig, type PlatformProfile, type ToolObservation } from "@bflow/machine-setup";
 
 export interface DefaultSetupInventory {
   toolId: string;
@@ -25,7 +27,8 @@ export async function createDefaultSetupConfiguration(options: {
   config?: MachineConfig;
   registry?: ToolInstallerRegistry;
 }): Promise<{ config: MachineConfig; registry: ToolInstallerRegistry; diagnostics: string[];
-  inventory: DefaultSetupInventory[]; launchRequirements: DefaultSetupLaunchRequirement[] }> {
+  inventory: DefaultSetupInventory[]; launchRequirements: DefaultSetupLaunchRequirement[];
+  additionalToolObservations: (platform: PlatformProfile, config: MachineConfig) => Promise<ToolObservation[]> }> {
   const { platform } = options;
   const config = MachineConfigSchema.parse(options.config ?? {
     ...defaultMachineConfig(), providers: ["claude", "codex", "agy"]
@@ -33,14 +36,42 @@ export async function createDefaultSetupConfiguration(options: {
   const registry = options.registry ?? new ToolInstallerRegistry();
   const leaf = await import(new URL("../../../packages/tool-installer/dist/index.js", import.meta.url).href);
   const catalog = leaf.defaultToolCatalog(platform.os, platform.arch);
-  const manual: { toolId: string; diagnostic: string; documentation: string }[] = catalog.manual;
+  const nativeSupported = (platform.os === "linux" || platform.os === "darwin") && ["x64", "arm64"].includes(platform.arch) && config.providers.length > 0;
+  const nativePins = nativeSupported ? leaf.defaultNativeToolPins() : [];
+  const manual: { toolId: string; diagnostic: string; documentation: string }[] = catalog.manual
+    .filter((item: { toolId: string }) => !nativePins.some((pin: { toolId: string }) => pin.toolId === item.toolId));
   const installer: ToolInstaller = new leaf.ManagedToolInstaller({ managedRoot: join(platform.paths.data, "tools"), pins: catalog.pins });
   if (catalog.pins.length > 0 && !registry.get(installer.installerId)) {
     const registration = registry.register(installer);
     if (!registration.ok) throw new Error(registration.error.message);
   }
   const explicitTools = new Set(config.toolPins.map(pin => pin.toolId));
-  const descriptors = catalog.pins.filter((pin: { toolId: string }) => !explicitTools.has(pin.toolId))
+  const providerExecutables: Partial<Record<"claude" | "codex" | "agy", string>> = {};
+  for (const provider of config.providers) {
+    for (const directory of platform.pathEntries) {
+      const path = join(directory, provider);
+      try { await access(path, constants.X_OK); providerExecutables[provider] = path; break; } catch { /* inspect next path */ }
+    }
+    providerExecutables[provider] ??= join(platform.paths.data, "tools", provider,
+      provider === "agy" ? "agy" : join("node_modules", ".bin", provider));
+  }
+  const nativePath = [...new Set([...platform.pathEntries, ...Object.values(providerExecutables).map(path => path.slice(0, path.lastIndexOf("/")))])].join(delimiter);
+  const nativeHost = { ...leaf.systemToolHost,
+    run: (executable: string, args: readonly string[], runOptions?: { environment?: Readonly<Record<string, string>> }) =>
+      leaf.systemToolHost.run(executable, args, { ...runOptions, environment: { ...runOptions?.environment, PATH: nativePath } }) };
+  for (const pin of nativePins) {
+    if (explicitTools.has(pin.toolId)) continue;
+    const nativeInstaller: ToolInstaller = new leaf.NativeProvidersToolInstaller({ managedRoot: join(platform.paths.data, "tools"),
+      pin, providers: config.providers, host: nativeHost,
+      configuration: { homeDirectory: platform.homeDir, executables: providerExecutables,
+        memory: { dataDir: join(platform.paths.data, "claude-mem"), projectRoot: process.cwd(), project: process.cwd(), startIfMissing: true } } });
+    if (!registry.get(nativeInstaller.installerId)) {
+      const registration = registry.register(nativeInstaller);
+      if (!registration.ok) throw Error(registration.error.message);
+    }
+  }
+  const allPins = [...catalog.pins, ...nativePins];
+  const descriptors = allPins.filter((pin: { toolId: string }) => !explicitTools.has(pin.toolId))
     .map((pin: { toolId: string; installerId: string; version: string; source: string; integrity: string; recipe: { kind: string } }) => ({
       schemaVersion: 3, toolId: pin.toolId, installerId: pin.installerId,
       method: pin.recipe.kind === "npm" ? "npm" : "verified_archive", version: pin.version,
@@ -55,6 +86,10 @@ export async function createDefaultSetupConfiguration(options: {
       ...(builtIn ? { executable: join(platform.paths.data, "tools", pin.toolId, leaf.managedToolExecutable(builtIn)) } : {}),
       diagnostic: "Installation requires the approved machine setup plan. Binary presence does not prove provider authentication, native plugin activation or MCP readiness." };
   });
+  for (const pin of nativePins) {
+    const entry = inventory.find(item => item.toolId === pin.toolId);
+    if (entry) entry.diagnostic = `Native installation for ${config.providers.join(", ")} through each provider's documented CLI, with policy-preserving Bflow namespace and exact active-cache/worker probes. Approval includes the provider's native configuration changes. Interrupted native delivery remains unknown and is never replayed automatically.`;
+  }
   inventory.push(...manual.map(item => ({ ...item, status: "manual" as const })));
   const diagnostics = manual.map(item => `${item.toolId}: ${item.diagnostic} ${item.documentation}`);
   diagnostics.push("claude/codex/agy: Complete each selected provider's own login flow; setup does not create credentials or widen permissions.");
@@ -70,5 +105,29 @@ export async function createDefaultSetupConfiguration(options: {
         ? ["Gateway scoped registration and MCP initialize/tools/list verification", "Verified repository index, allowed repository paths and a single index writer", "Node ^22.18.0 or >=24.11.0 for the selected upstream release"]
         : ["Gateway scoped registration and MCP initialize/tools/list verification", "Verified Chrome executable, Bflow-owned per-task userDataDir and exclusive browser resource lease"] });
   }
-  return { config: merged, registry, diagnostics, inventory, launchRequirements };
+  const additionalToolObservations = async (currentPlatform: PlatformProfile, currentConfig: MachineConfig): Promise<ToolObservation[]> => {
+    const observations: ToolObservation[] = [];
+    for (const pin of currentConfig.toolPins.filter(pin => ["superpowers", "claude-mem"].includes(pin.toolId))) {
+      const resolved = currentPlatform.os === "other" ? null : registry.resolve(pin.toolId, currentPlatform.os, [pin]);
+      const observation: ToolObservation = { toolId: pin.toolId, status: "missing", resolvedPath: null, realPath: null,
+        version: null, binaryDigest: null, pathMissingDir: null, required: true, diagnostics: [] };
+      if (!resolved) { observation.diagnostics.push("No native provider installer registered for this explicit pin"); observations.push(observation); continue; }
+      const planned = await resolved.installer.plan({ schemaVersion: 3, toolId: pin.toolId, installerId: pin.installerId,
+        version: pin.version, source: pin.source, integrity: pin.integrity, destination: join(currentPlatform.paths.data, "tools", pin.toolId),
+        scope: { kind: "machine", machineId: currentPlatform.machineId },
+        idempotencyKey: `install:${currentPlatform.machineId}:${pin.toolId}:${pin.version}:${pin.integrity}` });
+      if (!planned.ok) { observation.diagnostics.push(planned.error.message); observations.push(observation); continue; }
+      const receipt = await resolved.installer.reconcile({ schemaVersion: 3, planId: "native-readiness", planDigest: planned.value.desiredStateDigest,
+        step: planned.value });
+      if (!receipt.ok) observation.diagnostics.push(receipt.error.message);
+      else {
+        observation.diagnostics.push(...receipt.value.diagnostics);
+        if (receipt.value.status === "already_satisfied") { observation.status = "present"; observation.version = pin.version; }
+        else if (receipt.value.status === "unknown") observation.status = "probe_failed";
+      }
+      observations.push(observation);
+    }
+    return observations;
+  };
+  return { config: merged, registry, diagnostics, inventory, launchRequirements, additionalToolObservations };
 }

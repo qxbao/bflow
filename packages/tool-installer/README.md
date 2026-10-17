@@ -76,8 +76,13 @@ selected RTK release includes the BUSL-1.1 engine license alongside its MIT CLI 
 Agy uses the native archive linked by the [official installer](https://antigravity.google/docs/cli/install/).
 Herdr uses the raw release binary from the [official release manifest](https://herdr.dev/latest.json).
 The installer adds no shell initialization, provider permissions, hooks or credentials.
-Claude-Mem and Superpowers remain actionable manual requirements because setup lacks the
-independent provider activation/provenance/worker probes needed to certify those native
-installations. MCP launch requirements are returned separately for Runtime/Gateway scope,
+Claude-Mem and Superpowers use `NativeProvidersToolInstaller`, composing an approved
+provider-specific installation for every selected provider. The existing native runtime
+verifies active-cache provenance, Bflow policy overlays and shared worker/project-filtered
+memory hooks. Memory explicitly selects the host observer instead of choosing a hosted
+subscription or asking for account credentials. Unknown native delivery remains retained
+and is never automatically replayed. Native provider config changes require the machine
+setup approval. `additionalToolObservations` supplies functional native readiness to the
+machine setup doctor without pretending that plugin files are standalone executables. MCP launch requirements are returned separately for Runtime/Gateway scope,
 Chrome profile isolation and verified index setup; installing a server does not register
 or start it. Binary version checks do not establish live SDLC readiness.

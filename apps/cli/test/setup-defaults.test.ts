@@ -14,8 +14,11 @@ describe("CLI setup default inventory", () => {
     expect(result.config.mcpServices).toEqual([]);
     expect(result.config.services).toEqual([]);
     expect(result.registry.resolve("rtk", "linux", result.config.toolPins)).not.toBeNull();
-    expect(result.inventory.find(item => item.toolId === "claude-mem")?.status).toBe("manual");
+    expect(result.inventory.find(item => item.toolId === "claude-mem")?.status).toBe("pinned");
     expect(result.launchRequirements.map(item => item.toolId)).toEqual(["gitnexus", "chrome-devtools-mcp"]);
+    const native = await result.additionalToolObservations(platform, result.config);
+    expect(native.map(item => item.toolId).sort()).toEqual(["claude-mem", "superpowers"]);
+    expect(native.every(item => item.status === "missing" && item.required)).toBe(true);
   });
   it("preserves explicit operator pins, providers, services and secrets", async () => {
     const platform = detectPlatform(defaultHostEnvironment());platform.os = "linux"; platform.arch = "x64";
