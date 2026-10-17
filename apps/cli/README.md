@@ -38,8 +38,9 @@ Setup configures the shared MCP Gateway as a current-user service and verifies
 upstream MCP negotiation and tool discovery. GitNexus indexing is scoped to the
 selected Git repository; outside a repository, installation proceeds and indexing
 is deferred until `bflow setup --dir <repository>`. Chrome uses a separate Bflow
-profile. Connecting actual workflow roles to the background Gateway still needs
-the Runtime registration control endpoint; setup does not claim that integration.
+profile. Workflow roles connect to the background Gateway through its private
+`gateway-control.json` locator in the Gateway state directory. `bflow up` passes that
+locator to the host when it exists; setup does not establish those role connections.
 
 The result includes every step receipt and the final machine doctor report.
 Applied steps display their receipt status instead of a pending approval label.
@@ -49,7 +50,7 @@ exit status. A dry run with planned changes remains a successful preview.
 | Command | Behavior |
 | --- | --- |
 | `bflow init [--provider claude\|codex]` | Creates `.bflow/config.yaml` and `.bflow/.gitignore` at the canonical Git root. Default provider is Codex. Repeat init preserves configuration; explicit `--force`/`--yes` replaces it. Does not invoke Herdr. |
-| `bflow up [--timeout <ms>]` | Checks executables, provider authentication and Herdr protocol; starts a named server, prepares the persistent P19 host and trusted role MCP/hooks, then calls P13. Waits for every required role and host activation acknowledgement before recording ready. Persists validated bindings and reuses live roles. |
+| `bflow up [--timeout <ms>]` | Checks executables, provider authentication and Herdr protocol; starts a named server, prepares the persistent P19 host with platform readiness (refusing to start panes when a required role is blocked), then calls P13. Waits for every required role and host activation acknowledgement before recording ready. Persists validated bindings and reuses live roles. |
 | `bflow attach` | Requires an existing manifest and a running matching session. Calls P13 to focus/validate Conversation, then runs `herdr session attach <name>` with inherited terminal I/O. |
 | `bflow down [--yes] [--timeout <ms>]` | Inspects active runs and dirty files. Refuses unsafe shutdown without confirmation. Quiesces Runtime intake/dispatch, recollects runs, requires durable aggregate checkpoints, calls P13 graceful shutdown, then stops only the named session. Deletes no worktree, database, artifact, commit or source file. |
 | `bflow status` | Reports configuration, named server, panes/agents and missing executables. Labels persisted observations as potentially stale. Does not open the legacy workflow Runtime. |
@@ -125,9 +126,15 @@ P13 is composed automatically through `PaneManagerLifecycleAdapter`. It adapts
 schema-validated manifest reads to `getManifest` / `doctorSession`.
 Before P13 starts roles, the default integration prepares the persistent Runtime
 host and obtains trusted role prompts, MCP configuration and provider lifecycle
-hooks. P13 exposes Claude/Codex launch helpers; the default host currently requires
-verified Claude native hooks (use `init --provider claude`). It fails closed for
-other providers unless an operator supplies a verified host. The host
+hooks. Readiness is not keyed to a provider name: the host's provider preflight
+reports `ready`, `blocked` or `unsupported` per role with the adapter's reason, and
+`up` returns that report before any pane is created when a required role is not
+ready. Roles prepared with a v3 launch profile start with their provider's launch
+arguments; hosts without one fall back to the legacy Claude/Codex prompt injection.
+`bflow up` sends the machine-scoped platform options (machine, repository, role
+providers, permission modes, skill pins, the builtin skill store and the Gateway
+locator when present) to the host, and it never reads or prints launch environment
+values. The host
 survives CLI process exit and owns scheduling, authenticated message ingress, run
 queries and shutdown checkpoints. `doctor` and environment `status` inspect
 topology without starting a daemon. `up` checks `codex login status` or Claude's

@@ -1,16 +1,16 @@
 import type { OperationOptions, OperationResult, SessionManifest } from "@bflow/contracts";
+import type { HostPrepareResponse, HostRoleLaunch } from "@bflow/runtime";
 import { resolve } from "node:path";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import type { EnvironmentCompositionInput, EnvironmentIntegration } from "./environment.js";
+import { buildHostPlatformOptions, loadHostPlatformContext } from "./platform-options.js";
 
-export interface HostRoleLaunch {
-  readonly systemPrompt: string;
-  readonly mcpConfigFile: string;
-  readonly hooksSettingsFile: string;
-}
+export type { HostPrepareResponse, HostRoleLaunch };
+
 /** The persistent P19 host owns its scheduler, authenticated ingress and stores. */
 export interface LifecycleHost {
-  prepare(): Promise<{ roleLaunch: Record<string, HostRoleLaunch> }>;
+  /** Parsed with `HostPrepareResponseSchema`; `platform.ready === false` means no pane may be started. */
+  prepare(): Promise<HostPrepareResponse>;
   activate(manifest: SessionManifest, options?: OperationOptions): Promise<OperationResult<void>>;
   readonly runtime: NonNullable<EnvironmentIntegration["runtime"]>;
   readonly quiesce: NonNullable<EnvironmentIntegration["quiesce"]>;
@@ -50,12 +50,10 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
   };
 
   const openForStartup = (): Promise<LifecycleHost> => {
-    if (input.config.environment.roles.some(role => role.cli !== "claude")) {
-      return Promise.reject(new Error("The default Agentic host currently requires Claude native hooks. Initialize with --provider claude or supply a verified provider host through BFLOW_ENVIRONMENT_MODULE."));
-    }
     return activeHost ??= (async () => {
       const runtime = await loadRuntime();
       const behavioralCommands = await readOwnerBehavioralCommands(runtime);
+      const platform = await buildHostPlatformOptions(input, { context: await loadHostPlatformContext() });
       return runtime.ensureAgenticHost({
         repositoryPath: input.repository.root,
         sessionId: input.repository.sessionName,
@@ -63,6 +61,7 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
         manifestDirectory: resolve(input.repository.root, ".bflow/state/panes"),
         maxDeveloperCapacity: input.config.environment.concurrency.maxConcurrency,
         behavioralCommands,
+        platform,
         policy: {
           sdd: input.config.environment.sdd,
           tdd: input.config.environment.tdd,
@@ -117,7 +116,11 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
   };
 
   return {
-    prepare: async () => (await openForStartup()).prepare(),
+    prepare: async () => {
+      const prepared: unknown = await (await openForStartup()).prepare();
+      const { HostPrepareResponseSchema } = await loadRuntime();
+      return HostPrepareResponseSchema.parse(prepared);
+    },
     activate: async (manifest, options) => (await openForStartup()).activate(manifest, options),
     runtime: {
       findRuns: async (query, options) => {
@@ -156,9 +159,11 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
   };
 };
 
+/** Legacy prompt-injection path for hosts that return no v3 `launch` profile. Platform-prepared roles never reach it. */
 export async function providerRoleArguments(kind: string, role: string, launch: HostRoleLaunch): Promise<readonly string[]> {
   if (kind !== "claude" && kind !== "codex") throw new Error(`Agentic provider '${kind}' is unsupported; select claude or codex.`);
   const panes = await import(new URL("../../../packages/pane-manager/dist/index.js", import.meta.url).href);
   if (typeof panes.buildProviderRoleLaunchFromFiles !== "function") throw new Error("Installed Pane Manager has no trusted provider launch API; rebuild all workspace packages.");
-  return panes.buildProviderRoleLaunchFromFiles({ agentKind: kind, role, ...launch });
+  return panes.buildProviderRoleLaunchFromFiles({ agentKind: kind, role, systemPrompt: launch.systemPrompt,
+    mcpConfigFile: launch.mcpConfigFile, hooksSettingsFile: launch.hooksSettingsFile });
 }
