@@ -1307,7 +1307,8 @@ describe("High-Level Commands Test Suite", () => {
       expect(syncData.status).toBe("succeeded");
       expect(syncData.executionResult.output.mode).toBe("sync");
       expect(syncData.executionResult.output.catalogCount).toBeGreaterThan(0);
-    });
+    // Two real CLI processes over the full skills catalog; the 30 s default timed out under full-suite load.
+    }, 120_000);
 
     it("runs mcp status --json without mock ports", async () => {
       const result = await runCli(["mcp", "status", "--json"], { cwd: realRepoDir });
