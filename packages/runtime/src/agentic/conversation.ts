@@ -3,6 +3,7 @@ import {
   type JsonValue, type OperationResult, type RoleMessage, type SessionManifest
 } from "@bflow/contracts";
 import { digest, json, record, textField } from "./journal.js";
+import { validateUserDecisionAnswer } from "./decision-routing.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
 
 export interface AgenticConversationHost {
@@ -40,10 +41,16 @@ export async function createAgenticConversationHost(options: {
       return { ok: true, value: undefined };
     }
     const run = record(await runtime.inspect(decision.runId));
-    const request = ApprovalRequestSchema.parse(run.approval);
-    if (request.approvalId !== decision.approvalId || request.runId !== decision.runId || request.sessionId !== decision.sessionId ||
-        request.revision !== decision.revision || request.generation !== decision.generation || digest(request.target) !== digest(decision.target))
-      throw new Error("Recovered decision does not match the exact approval request");
+    const userDecision = (run.userDecisions as Record<string, { request: unknown } | undefined> | undefined)?.[decision.approvalId];
+    if (userDecision) {
+      // Specialist user decisions have their own record; they never occupy the single design/task approval slot.
+      validateUserDecisionAnswer(ApprovalRequestSchema.parse(userDecision.request), decision, new Date().toISOString());
+    } else {
+      const request = ApprovalRequestSchema.parse(run.approval);
+      if (request.approvalId !== decision.approvalId || request.runId !== decision.runId || request.sessionId !== decision.sessionId ||
+          request.revision !== decision.revision || request.generation !== decision.generation || digest(request.target) !== digest(decision.target))
+        throw new Error("Recovered decision does not match the exact approval request");
+    }
     const correlationId = textField(record(run.delegation).correlationId);
     return enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: messageId,
       correlation_id: correlationId, run_id: decision.runId,

@@ -6,10 +6,11 @@ import {
   SpecificationSchema, TestStrategySchema, VerificationCycleSchema, VerificationResultSchema,
   WorkflowDefinitionSchema, type AgentExecutionHandle, type ApprovalDecision,
   type ArtifactReference, type JsonValue, type RoleMessage, type QualityGate, type QualityGateResult, type Specification,
-  type PaneBinding, type TaskDefinition
+  type PaneBinding, type TaskDefinition, type AgentRole
 } from "@bflow/contracts";
 import { AgenticJournal, digest, json, record, strings, textField, type JournalState,
-  type Outbound, type RunRecord, type SpecRecord, type TaskRecord } from "./journal.js";
+  type Outbound, type RunRecord, type SpecRecord, type TaskRecord, type UserDecisionRecord } from "./journal.js";
+import { buildDecisionRequestMessage, buildUserDecisionRequest, validateUserDecisionAnswer, type UserDecisionToolInput } from "./decision-routing.js";
 import { captureIntegratedChange } from "./integration-change.js";
 import { CoreSession } from "./core-session.js";
 import { HerdrOutbox, unwrap } from "./outbox.js";
@@ -193,7 +194,9 @@ export class AgenticWorkflowRuntime {
         this.live(run);
         if (message.type === "approval.decision") {
           if (message.sender.role !== "conversation") throw new Error("Approval must return via Conversation");
-          await this.applyDecision(state, save, core, outbox, run, ApprovalDecisionSchema.parse(message.payload));
+          const decision = ApprovalDecisionSchema.parse(message.payload);
+          if (run.userDecisions?.[decision.approvalId] !== undefined) await this.answerUserDecision(save, outbox, run, decision);
+          else await this.applyDecision(state, save, core, outbox, run, decision);
         } else if (message.type === "execution.receipt") {
           const receipt = AgentBindingReceiptSchema.parse(message.payload);
           const out = state.outbound.find(item => item.message.message_id === message.causation_id);
@@ -405,6 +408,77 @@ export class AgenticWorkflowRuntime {
       await this.ports.policies.specification.assertImplementationReady(task.spec.specification, task.spec.request, task.spec.decision, projected);
     }
     run.decision = decision; run.status = "implementing";
+  }
+  /** P30 T9b: a specialist or Coordinator asks the user through Runtime -> Herdr -> Conversation; the answer resumes only the asker. */
+  async requestUserDecision(bindingInput: PaneBinding, role: AgentRole, input: UserDecisionToolInput): Promise<JsonValue> {
+    const binding = PaneBindingSchema.parse(bindingInput);
+    if (role === "conversation" || binding.role !== role) throw new Error("User decisions are requested by the bound non-Conversation role");
+    return this.transaction(async (state, save, _core, outbox) => {
+      if (this.quiesced) throw new Error("Runtime is quiesced");
+      const run = this.run(state, input.runId); this.live(run);
+      if (role !== "coordinator" && !state.outbound.some(out => out.message.run_id === run.runId && ["accepted", "released"].includes(out.status) &&
+          out.handle !== undefined && out.handle.target.paneId === binding.paneId && out.handle.target.agentId === binding.agentId &&
+          (out.message.type === "task.assignment" ? out.taskId === input.taskId : out.message.type === "delegation.request")))
+        throw new Error("Only the Runtime-bound specialist execution for this run may request a user decision");
+      const decisions = run.userDecisions ?? (run.userDecisions = {});
+      // Revision counts resolved decisions for the task, so a still-pending identical request keeps its approvalId (idempotent).
+      const revision = Object.values(decisions).filter(item => item.taskId === input.taskId && item.status !== "pending").length + 1;
+      const request = buildUserDecisionRequest({ input, role, sessionId: run.delegation.sessionId, revision,
+        generation: run.approval?.generation ?? 0, now: this.now() });
+      const existing = decisions[request.approvalId];
+      if (existing) {
+        if (existing.status !== "pending" || existing.paneId !== binding.paneId) throw new Error("This user decision request was already resolved or belongs to another pane");
+        return json(this.userDecisionReceipt(request.approvalId));
+      }
+      decisions[request.approvalId] = { request, role, agentId: binding.agentId, paneId: binding.paneId, taskId: input.taskId, status: "pending" };
+      outbox.enqueue(buildDecisionRequestMessage({ request, correlationId: run.delegation.correlationId,
+        sender: { role: "runtime" }, conversation: { role: "conversation" } }), "conversation");
+      this.progress(state, outbox, run, `Waiting for a user decision requested by ${role}`);
+      await save();
+      return json(this.userDecisionReceipt(request.approvalId));
+    });
+  }
+  private userDecisionReceipt(approvalId: string) {
+    return { approvalId, status: "pending", instruction: "End your turn; Runtime resumes you with the answer." };
+  }
+  private async answerUserDecision(save: () => Promise<void>, outbox: HerdrOutbox, run: RunRecord, decision: ApprovalDecision): Promise<void> {
+    const entry = run.userDecisions?.[decision.approvalId];
+    if (!entry || entry.status !== "pending") throw new Error("User decision is not pending");
+    if (!await this.ports.authorizeHuman(decision)) throw new Error("Human approval is not authenticated");
+    const now = this.now();
+    if (entry.request.expiresAt !== undefined && Date.parse(now) >= Date.parse(entry.request.expiresAt)) {
+      this.expireUserDecision(outbox, run, entry); await save(); return;
+    }
+    // Throws on any approvalId, revision, generation, target, option or timing mismatch; nothing is mutated before this.
+    const answer = validateUserDecisionAnswer(entry.request, decision, now);
+    entry.status = answer.outcome === "rejected" ? "rejected" : "answered";
+    entry.answer = answer;
+    this.resumeUserDecisionAsker(outbox, run, entry, { kind: "user_decision_answer", approvalId: entry.request.approvalId, outcome: answer.outcome,
+      ...(answer.selectedOption !== undefined ? { selectedOption: answer.selectedOption } : {}),
+      ...(answer.reason !== undefined ? { reason: answer.reason } : {}) });
+    await save();
+  }
+  private expireUserDecision(outbox: HerdrOutbox, run: RunRecord, entry: UserDecisionRecord): void {
+    entry.status = "expired";
+    this.resumeUserDecisionAsker(outbox, run, entry, { kind: "user_decision_answer", approvalId: entry.request.approvalId, outcome: "expired" });
+  }
+  private expireUserDecisions(state: JournalState, outbox: HerdrOutbox): boolean {
+    const now = Date.parse(this.now());
+    let changed = false;
+    for (const run of state.runs) for (const entry of Object.values(run.userDecisions ?? {})) {
+      if (entry.status === "pending" && entry.request.expiresAt !== undefined && now >= Date.parse(entry.request.expiresAt)) {
+        this.expireUserDecision(outbox, run, entry); changed = true;
+      }
+    }
+    return changed;
+  }
+  /** Resumes the asking pane through the normal Herdr outbox (lease, pane health and recipient checks apply). */
+  private resumeUserDecisionAsker(outbox: HerdrOutbox, run: RunRecord, entry: UserDecisionRecord, payload: Record<string, unknown>): void {
+    const id = `user-decision-answer-${digest([run.runId, entry.request.approvalId, entry.status])}`;
+    outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: run.delegation.correlationId,
+      causation_id: `decision-${entry.request.approvalId}`, run_id: run.runId, sender: { role: "coordinator" },
+      recipient: { role: entry.role, agent_id: entry.agentId, pane_id: entry.paneId }, type: "task.status",
+      payload: json(payload), artifact_references: [], occurred_at: this.now(), idempotency_key: id }), entry.role, entry.taskId, `attempt-${id}`);
   }
   private async applyDecision(state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox,
     run: RunRecord, decision: ApprovalDecision): Promise<void> {
@@ -718,6 +792,7 @@ export class AgenticWorkflowRuntime {
   async tick(): Promise<JsonValue> {
     await this.initialize();
     if (this.quiesced) return this.inspect();
+    await this.transaction(async (state, save, _core, outbox) => { if (this.expireUserDecisions(state, outbox)) await save(); });
     const pending = await this.transaction(async state => structuredClone(state.pendingVerifications));
     for (const item of pending) await this.finishVerification(this.parseJob(item.job), this.parseOutcome(item.outcome));
     const jobs = await this.transaction(async (state, save, core, outbox) => {

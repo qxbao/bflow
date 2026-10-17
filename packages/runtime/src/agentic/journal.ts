@@ -3,17 +3,18 @@ import { randomUUID, createHash } from "node:crypto";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
-  AgentAssignmentSchema, AgentExecutionHandleSchema, AgentLeaseSchema, AgentRequestSchema,
+  AgentAssignmentSchema, AgentExecutionHandleSchema, AgentLeaseSchema, AgentRequestSchema, AgentRoleSchema,
   AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
   DelegationRequestSchema, GitChangeSetSchema, JsonValueSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema, ReleaseAgentLeaseRequestSchema,
   SdlcWorkStatusSchema, SpecificationSchema, TestStrategySchema, VerificationCycleSchema,
   VerificationResultSchema, WorkflowDefinitionSchema, type AgentAssignment, type AgentExecutionHandle, type AgentLease,
   type AgentRequest, type AgentResult, type AppendEventsRequest, type ApprovalDecision,
-  type ApprovalRequest, type DelegationRequest, type GitChangeSet, type JsonValue, type ArtifactReference,
+  type AgentRole, type ApprovalRequest, type DelegationRequest, type GitChangeSet, type JsonValue, type ArtifactReference,
   type RoleMessage, type SdlcWorkStatus, type Specification, type TestStrategy,
   type VerificationCycle, type WorkflowDefinition, type RenewAgentLeaseRequest, type ReleaseAgentLeaseRequest
 } from "@bflow/contracts";
 import type { TaskWorktree, VerificationPlan } from "./ports.js";
+import { isUserDecisionRequest, type UserDecisionAnswer } from "./decision-routing.js";
 
 export function json(value: unknown): JsonValue { return JsonValueSchema.parse(JSON.parse(JSON.stringify(value))); }
 export function digest(value: unknown): string {
@@ -49,6 +50,27 @@ export interface RunRecord {
   approvalKind?: "design" | "delivery" | "action" | "task";
   integrationKey?: string; workflowCycle?: VerificationCycle; workflowChange?: GitChangeSet;
   workflowVerificationPending?: boolean; coreCreated: boolean; cancelled: boolean; error?: string; maxIterations: number;
+  /** Specialist/Coordinator user decisions keyed by approvalId; separate from the single design/task `approval` slot. */
+  userDecisions?: Record<string, UserDecisionRecord>;
+}
+export interface UserDecisionRecord {
+  request: ApprovalRequest; role: AgentRole; agentId: string; paneId: string; taskId: string;
+  status: "pending" | "answered" | "rejected" | "expired"; answer?: UserDecisionAnswer;
+}
+function parseUserDecisions(value: unknown, runId: string): void {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Invalid user decision journal");
+  for (const [approvalId, entry] of Object.entries(value as Record<string, unknown>)) {
+    const item = record(entry);
+    const request = ApprovalRequestSchema.parse(item.request);
+    if (request.approvalId !== approvalId || request.runId !== runId || !isUserDecisionRequest(request)) throw new Error("Invalid user decision request");
+    AgentRoleSchema.parse(item.role); textField(item.agentId); textField(item.paneId); textField(item.taskId);
+    if (!["pending", "answered", "rejected", "expired"].includes(String(item.status))) throw new Error("Invalid user decision status");
+    if (item.status === "pending" ? item.answer !== undefined : item.answer === undefined && item.status !== "expired") throw new Error("Invalid user decision answer state");
+    if (item.answer !== undefined) {
+      const answer = record(item.answer); textField(answer.outcome);
+      if (answer.selectedOption !== undefined) textField(answer.selectedOption);
+    }
+  }
 }
 export interface Outbound {
   message: RoleMessage; status: "queued" | "sending" | "unknown_delivery" | "accepted" | "released" | "cancelled";
@@ -84,6 +106,7 @@ function parseState(input: unknown, repository: string): JournalState {
     if (run.definition) run.definition = WorkflowDefinitionSchema.parse(run.definition);
     if (run.workflowSpec) parseSpec(run.workflowSpec);
     if (run.approval) run.approval = ApprovalRequestSchema.parse(run.approval);
+    if (run.userDecisions !== undefined) parseUserDecisions(run.userDecisions, run.runId);
     if (run.decision) run.decision = ApprovalDecisionSchema.parse(run.decision);
     if (run.approvalKind && !["design", "delivery", "action", "task"].includes(run.approvalKind)) throw new Error("Invalid approval kind");
     for (const task of run.tasks) {

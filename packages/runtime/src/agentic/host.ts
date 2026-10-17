@@ -16,6 +16,7 @@ import { callHost } from "./host-protocol.js";
 import { readHostConfiguration, type HostConfiguration, type RoleLaunchDescriptor } from "./host-controller.js";
 import { digest, json, record, textField } from "./journal.js";
 import { COORDINATOR_TOOLS } from "./tools.js";
+import { USER_DECISION_TOOL, guardDirectUserInteraction, parseUserDecisionToolInput } from "./decision-routing.js";
 import { openAgenticWorkspace, type AgenticWorkspaceHandle } from "./workspace.js";
 import { unwrap } from "./outbox.js";
 import { HostVerification, HostBehavioralFailure, DEFAULT_HOST_CHECKS } from "./host-verification.js";
@@ -342,6 +343,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       message_id: randomUUID(), correlation_id: source.correlation_id, causation_id: source.message_id, run_id: source.run_id,
       sender: { role, agent_id: binding.agentId, pane_id: binding.paneId }, recipient: { role: "coordinator" }, type, payload: json(payload), artifact_references: artifacts,
       occurred_at: new Date().toISOString(), idempotency_key: randomUUID() });
+    if (name === USER_DECISION_TOOL) {
+      if (role === "conversation") throw new Error("Conversation asks the user directly; request_user_decision is for other roles");
+      return host.runtime.requestUserDecision(binding, role, parseUserDecisionToolInput(parameters));
+    }
     if (name === "inspect_review") return verification.inspectReview(binding, parameters);
     if (name === "workspace_status") return development.status(binding, parameters);
     if (name === "commit_changes") return development.commit(binding, parameters);
@@ -408,6 +413,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (hook.hook_event_name !== "PreToolUse" || !binding.session || hook.session_id !== binding.session.value)
           throw new Error("Tool guard native session mismatch");
         const tool = textField(hook.tool_name);
+        const direct = guardDirectUserInteraction(role, tool);
+        if (!direct.permitted) throw new Error(direct.reason);
         if (tool.startsWith("mcp__bflow__") || ["Read", "Glob", "Grep", "ToolSearch"].includes(tool)) return { permitted: true };
         if (role !== "developer" || !["Edit", "Write"].includes(tool)) throw new Error("Native mutation/command tool is unavailable for this role");
         await development.authorizeFileEdit(binding, hook); return { permitted: true };
@@ -557,10 +564,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   process.once("SIGTERM", () => { void close().then(() => process.exit(0), () => process.exit(1)); });
 }
 
-function availableTools(role: AgentRole) {
+export function availableTools(role: AgentRole) {
   const tools = [{ name: "host_status", description: "Read the durable host scheduler status" },
     { name: "assignment_context", description: "Read assignments addressed to this authenticated pane and the accepted specification" },
     { name: "send_role_message", description: "Send a schema-valid RoleMessage through the signed native Herdr plugin; parameters: {message: RoleMessage}" }];
+  if (role !== "conversation") tools.push({ name: USER_DECISION_TOOL, description: "Ask the user a decision through Runtime and Conversation, then end your turn; parameters: runId, taskId, question, options?, context?, expiresInMinutes?" });
   if (role === "coordinator") tools.push(...COORDINATOR_TOOLS, {name:"planning_reference",description:"Read canonical shipped examples and exact metadata/contract definitions; section: specification, test_strategy, workflow"});
   if (role === "developer") tools.push({ name: "authorize_implementation", description: "Verify accepted spec and Red evidence; parameters: runId, taskId" }, { name: "submit_implementation", description: "Submit committed implementation under your exact native assignment binding; parameters: runId, taskId" });
   if (role === "developer") tools.push(
@@ -576,6 +584,9 @@ function availableTools(role: AgentRole) {
   const string = { type:"string", minLength:1 }, array = {type:"array",items:string}, object = {type:"object"};
   const argumentsByName: Record<string, {properties: Record<string, unknown>; required: string[]}> = {
     planning_reference:{properties:{section:{type:"string",enum:["specification","test_strategy","workflow"]}},required:["section"]},
+    [USER_DECISION_TOOL]:{properties:{runId:string,taskId:string,question:{type:"string",minLength:1,maxLength:2000},
+      options:{type:"array",items:{type:"string",minLength:1,maxLength:200},minItems:2,maxItems:6},
+      context:{type:"string",maxLength:4000},expiresInMinutes:{type:"integer",minimum:1,maximum:1440}},required:["runId","taskId","question"]},
     inspect:{properties:{runId:string},required:[]}, report_progress:{properties:{runId:string,headline:string,questions:array},required:["runId","headline"]},
     assess:{properties:{specification:object},required:["specification"]},
     request_specialist:{properties:{runId:string,role:string,objective:string,requiredCapabilities:array},required:["runId","role","objective","requiredCapabilities"]},
