@@ -177,9 +177,11 @@ export class RecordingGitPort implements GitOrchestratorPort {
 /** Trusted host gate double: emits a valid independent observation; never runs a subprocess. */
 export class IndependentGate implements QualityGate {
   readonly calls: QualityGateContext[] = [];
+  delayMs = 0;
   constructor(readonly id: string, public mode: "passed" | "failed" = "passed") {}
   async evaluate(context: QualityGateContext): Promise<OperationResult<QualityGateResult>> {
     this.calls.push(context);
+    if (this.delayMs > 0) await new Promise(resolve => setTimeout(resolve, this.delayMs));
     const config = CheckConfigurationSchema.parse(context.definition.configuration);
     const input = context.input as Record<string, unknown>;
     const passed = this.mode === "passed";
@@ -231,6 +233,14 @@ export async function storedChangeSet(store: ArtifactStore, attempt = 1): Promis
     baseCommitHash: "a".repeat(40), headCommitHash: attempt.toString(16).repeat(40), dirtyWorkingTree: false,
     filesChanged: [{ path: "src/math/average.ts", changeType: "modified", additions: 1, deletions: 0 }],
     patchArtifact: stored.value, createdAt: new Date().toISOString() });
+}
+
+/** Host platform whose XDG config/state/data paths are private temporary directories. */
+export async function isolatedPlatform(): Promise<PlatformProfile> {
+  const base = await (await createDefaultHighLevelServices()).machine.platform();
+  const home = tempDir("bflow-hl-xdg-home-");
+  return { ...base, homeDir: home, paths: { config: join(home, "config"), data: join(home, "data"),
+    state: join(home, "state"), managedBin: join(home, "data", "bin") } };
 }
 
 export interface ServiceOverrides {

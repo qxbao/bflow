@@ -15,7 +15,7 @@ import {
   type HighLevelCommandName
 } from "./envelope.js";
 import { readOnlyGit } from "./git.js";
-import { CommandJournal, reportFromRecord, type JournalAttempt } from "./journal.js";
+import { CommandJournal, reportFromRecord, type JournalAttempt, type JournalRecord } from "./journal.js";
 import type { HighLevelServices } from "./services.js";
 
 export interface HighLevelContext {
@@ -128,7 +128,10 @@ export async function guarded(
 
 export interface JournaledOptions {
   readonly command: HighLevelCommandName;
-  readonly repositoryRoot: string;
+  /** Repository whose Git-ignored `.bflow/state/cli/commands` holds the receipts. */
+  readonly repositoryRoot?: string | undefined;
+  /** Explicit receipt directory for machine-scoped commands that need no repository. */
+  readonly directory?: string | undefined;
   readonly key: string;
   /** Semantic request only; control flags such as --yes/--resume/--json are excluded. */
   readonly request: JsonValue;
@@ -149,14 +152,25 @@ export async function assertStateIgnored(root: string): Promise<void> {
       { reason: "state_not_ignored" }));
 }
 
+export async function openJournal(location: { repositoryRoot?: string | undefined; directory?: string | undefined }): Promise<CommandJournal> {
+  if (location.directory !== undefined) return CommandJournal.open(location.directory);
+  if (location.repositoryRoot === undefined) throw new Error("A journal needs a repository root or a directory");
+  await assertStateIgnored(location.repositoryRoot);
+  return CommandJournal.open(join(location.repositoryRoot, CLI_STATE_DIRECTORY, "commands"));
+}
+
+/** Receipts of machine-scoped commands live in the user's private Bflow state directory. */
+export function machineJournalDirectory(stateDirectory: string): string {
+  return join(stateDirectory, "cli", "commands");
+}
+
 /** Runs a command body under an idempotency receipt and returns the stored or new report. */
 export async function runJournaled(
   options: JournaledOptions,
   body: (log: StepLog, attempt: JournalAttempt) => Promise<CommandReport>,
   onError: (error: unknown, log: StepLog) => CommandReport
 ): Promise<CommandReport> {
-  await assertStateIgnored(options.repositoryRoot);
-  const journal = await CommandJournal.open(join(options.repositoryRoot, CLI_STATE_DIRECTORY, "commands"));
+  const journal = await openJournal(options);
   const begin = await journal.begin({
     key: options.key,
     command: options.command,
@@ -193,20 +207,25 @@ export async function runJournaled(
   return report;
 }
 
+/**
+ * Completed receipts of one command, oldest first by completion time. Receipt files are named by
+ * key hash, so directory order is meaningless; callers that need "the" task take the last match.
+ */
 export async function listJournalReports(repositoryRoot: string, command: HighLevelCommandName): Promise<CommandReport[]> {
   const { readdir } = await import("node:fs/promises");
   const directory = join(repositoryRoot, CLI_STATE_DIRECTORY, "commands");
   let names: string[];
   try { names = await readdir(directory); } catch { return []; }
   const journal = await CommandJournal.open(directory);
-  const reports: CommandReport[] = [];
-  for (const name of names.filter(n => n.endsWith(".json")).sort()) {
+  const records: JournalRecord[] = [];
+  for (const name of names.filter(n => n.endsWith(".json"))) {
     let raw: unknown;
     try { raw = JSON.parse(await readFile(join(directory, name), "utf8")); } catch { continue; }
     const key = (raw as { idempotencyKey?: unknown }).idempotencyKey;
     if (typeof key !== "string") continue;
     const record = await journal.read(key);
-    if (record?.command === command && record.status === "succeeded" && record.report !== undefined) reports.push(reportFromRecord(record));
+    if (record?.command === command && record.status === "succeeded" && record.report !== undefined) records.push(record);
   }
-  return reports;
+  records.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt) || a.idempotencyKey.localeCompare(b.idempotencyKey));
+  return records.map(reportFromRecord);
 }

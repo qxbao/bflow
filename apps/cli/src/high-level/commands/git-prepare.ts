@@ -75,6 +75,7 @@ export const gitPrepare: HighLevelHandler = async (args, ctx, identity) => {
     const requested = args.lists.get("--task");
     const prepared = await log.check("resolve-tasks", async () => {
       const reports = (await listJournalReports(repository.root, "task.implement")).filter(r => r.runId === runId);
+      // Reports are oldest first, so a later attempt of the same task replaces an earlier one.
       const byTask = new Map<string, string>();
       for (const report of reports) {
         const key = (report.data as { taskKey?: unknown }).taskKey;
@@ -86,7 +87,7 @@ export const gitPrepare: HighLevelHandler = async (args, ctx, identity) => {
         throw new HighLevelError(notFoundError(ids.length === 0 ? `Run '${runId}' has no prepared tasks; run 'bflow task implement' first`
           : `Run '${runId}' has no prepared task(s): ${missing.join(", ")}`, { reason: "task_not_found", missing }));
       return ids.map(id => ({ taskId: id, taskKey: byTask.get(id)! }));
-    }, value => value.map(v => v.taskId));
+    }, value => value.map(v => ({ taskId: v.taskId, taskKey: v.taskKey })));
 
     const workflowPath = args.strings.get("--workflow");
     const dependencies = await log.check("resolve-dependencies", async () => {
