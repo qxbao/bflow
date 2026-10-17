@@ -14,6 +14,7 @@
     { "path": "./packages/verification" },
     { "path": "./packages/git-orchestrator" },
     { "path": "./packages/mcp-gateway" },
+    { "path": "./packages/skills" },
     { "path": "./packages/quality-gates" },
     { "path": "./packages/runtime" },
     { "path": "./packages/tool-installer" },

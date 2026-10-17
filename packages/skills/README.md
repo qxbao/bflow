@@ -28,8 +28,8 @@ setup requests and repository desired config use strict package-local schemas.
   discovery remains disabled unless separately approved; this package changes no provider
   homes, hooks, global settings or native discovery paths.
 
-Root build references, workspace lockfile, CLI parser and Runtime wiring are owned by
-integration/P29/P30. This branch intentionally does not edit them. `bflow setup`,
+Root build references and the workspace lockfile include this package after P28 integration.
+CLI parser and Runtime wiring remain owned by P29/P30. `bflow setup`,
 `bflow skills ...` and automatic `bflow init` skill activation are **not runnable claims**
 on this baseline. The package API and integration points are ready; final command wiring
 and live provider activation remain integration work. No new scheduler or gates exist here.
@@ -163,11 +163,10 @@ git diff --check
 git status --short
 ```
 
-Integration owner must add the workspace importer to `pnpm-lock.yaml` and
-`{ "path": "./packages/skills" }` to root TypeScript references, then compose the ports
-above. Until then the root typecheck does not include this new package; the package's
-own build/typecheck is mandatory. Tests cover all requested negative cases, cross-provider
-selection equivalence, stale approval, content drift, concurrency, read-only planning,
+The workspace importer and root TypeScript reference are integrated, so root build and
+typecheck include this package. Integration owners still need to compose the setup/init/
+Runtime ports above; package-local checks remain available for focused validation. Tests
+cover all requested negative cases, cross-provider selection equivalence, stale approval, content drift, concurrency, read-only planning,
 preserved configuration and immutable restart/update semantics. They are local source
 and rendering tests; no live model session, native skill-discovery acceptance or full
 SDLC success is claimed.
