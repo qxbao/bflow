@@ -665,7 +665,7 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
     );
 
     const hlMachineRoot = join(tmpRoot, "hl-machine");
-    for (const sub of ["config", "data", "state", "cache", "logs", "bin"]) {
+    for (const sub of ["config", "data", "state", "data/bin"]) {
       const p = join(hlMachineRoot, sub);
       mkdirSync(p, { recursive: true, mode: 0o700 });
       chmodSync(p, 0o700);
@@ -682,9 +682,7 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
             config: join(hlMachineRoot, "config"),
             data: join(hlMachineRoot, "data"),
             state: join(hlMachineRoot, "state"),
-            cache: join(hlMachineRoot, "cache"),
-            logs: join(hlMachineRoot, "logs"),
-            bin: join(hlMachineRoot, "bin")
+            managedBin: join(hlMachineRoot, "data", "bin")
           }
         })
       },
