@@ -23,6 +23,8 @@ import {
 
 const now = "2026-10-17T00:00:00.000Z";
 const roles = ["conversation", "coordinator", "planner", "architect", "specifier", "reviewer", "qa"] as const;
+// These lifecycle startup/shutdown scenarios acquire EnvironmentLifecycle's Linux flock guard.
+const linuxDescribe = describe.skipIf(process.platform !== "linux");
 
 function makeConfig(
   repository: RepositoryIdentity,
@@ -265,7 +267,7 @@ describe("Task 3: Full 11-Scenario Integration Test Suite & Platform v3 Lifecycl
   // ==========================================
   // Scenario 1: Required Claude unavailable
   // ==========================================
-  describe("Scenario 1: Required Claude unavailable", () => {
+  linuxDescribe("Scenario 1: Required Claude unavailable", () => {
     it("fails bflow up with actionable remediation, no Herdr server started, and bflow doctor reports fail", async () => {
       await writeFile(join(dir, ".bflow/config.yaml"), makeConfig(repository, "claude"));
       runner.missing.add("claude");
@@ -319,7 +321,7 @@ describe("Task 3: Full 11-Scenario Integration Test Suite & Platform v3 Lifecycl
   // ==========================================
   // Scenario 2: Required Codex unauthenticated
   // ==========================================
-  describe("Scenario 2: Required Codex unauthenticated", () => {
+  linuxDescribe("Scenario 2: Required Codex unauthenticated", () => {
     it("fails bflow up with redacted secret, identifies provider:codex, instructs codex login, no server started", async () => {
       await writeFile(join(dir, ".bflow/config.yaml"), makeConfig(repository, "codex"));
       runner.authenticated = false;
@@ -355,7 +357,7 @@ describe("Task 3: Full 11-Scenario Integration Test Suite & Platform v3 Lifecycl
   // ==========================================
   // Scenario 3: Required Agy blocked
   // ==========================================
-  describe("Scenario 3: Required Agy blocked", () => {
+  linuxDescribe("Scenario 3: Required Agy blocked", () => {
     it("fails when agy is blocked via providerOverrides", async () => {
       await writeFile(join(dir, ".bflow/config.yaml"), makeConfig(repository, "agy"));
       const { integration } = createMockIntegration(repository);
@@ -422,7 +424,7 @@ describe("Task 3: Full 11-Scenario Integration Test Suite & Platform v3 Lifecycl
   // ==========================================
   // Scenario 4: Permission flags unsupported
   // ==========================================
-  describe("Scenario 4: Permission flags unsupported", () => {
+  linuxDescribe("Scenario 4: Permission flags unsupported", () => {
     it("fails when unsupported permission flags are configured", async () => {
       await writeFile(
         join(dir, ".bflow/config.yaml"),
@@ -478,7 +480,7 @@ describe("Task 3: Full 11-Scenario Integration Test Suite & Platform v3 Lifecycl
   // ==========================================
   // Scenario 5: MCP unavailable
   // ==========================================
-  describe("Scenario 5: MCP unavailable", () => {
+  linuxDescribe("Scenario 5: MCP unavailable", () => {
     it("fails when required MCP service is unavailable", async () => {
       await writeFile(
         join(dir, ".bflow/config.yaml"),
@@ -539,7 +541,7 @@ describe("Task 3: Full 11-Scenario Integration Test Suite & Platform v3 Lifecycl
   // ==========================================
   // Scenario 6: Skills missing
   // ==========================================
-  describe("Scenario 6: Skills missing", () => {
+  linuxDescribe("Scenario 6: Skills missing", () => {
     it("fails when required skills are missing from catalog", async () => {
       await writeFile(
         join(dir, ".bflow/config.yaml"),
@@ -595,7 +597,7 @@ describe("Task 3: Full 11-Scenario Integration Test Suite & Platform v3 Lifecycl
   // ==========================================
   // Scenario 7: Provider partially starts
   // ==========================================
-  describe("Scenario 7: Provider partially starts", () => {
+  linuxDescribe("Scenario 7: Provider partially starts", () => {
     it("fails immediately on partialStart role and persists manifest as degraded", async () => {
       await writeFile(join(dir, ".bflow/config.yaml"), makeConfig(repository, "claude"));
       const { integration } = createMockIntegration(repository, { partialStartRole: "reviewer" });
@@ -643,7 +645,7 @@ describe("Task 3: Full 11-Scenario Integration Test Suite & Platform v3 Lifecycl
   // ==========================================
   // Scenario 8: Multiple repositories
   // ==========================================
-  describe("Scenario 8: Multiple repositories", () => {
+  linuxDescribe("Scenario 8: Multiple repositories", () => {
     it("manages independent sessions and manifests across multiple repositories", async () => {
       const dirA = await mkdtemp(join(tmpdir(), "bflow-repo-a-"));
       const dirB = await mkdtemp(join(tmpdir(), "bflow-repo-b-"));
@@ -707,7 +709,7 @@ describe("Task 3: Full 11-Scenario Integration Test Suite & Platform v3 Lifecycl
   // ==========================================
   // Scenario 9: Up interrupted
   // ==========================================
-  describe("Scenario 9: Up interrupted", () => {
+  linuxDescribe("Scenario 9: Up interrupted", () => {
     it("handles abort interruption safely, preserves files, and reconciles on retry", async () => {
       await writeFile(join(dir, ".bflow/config.yaml"), makeConfig(repository, "claude"));
 
@@ -757,7 +759,7 @@ describe("Task 3: Full 11-Scenario Integration Test Suite & Platform v3 Lifecycl
   // ==========================================
   // Scenario 10: Up repeated
   // ==========================================
-  describe("Scenario 10: Up repeated", () => {
+  linuxDescribe("Scenario 10: Up repeated", () => {
     it("is idempotent: returns same sessionId, starts server once, calls manager.up once", async () => {
       await writeFile(join(dir, ".bflow/config.yaml"), makeConfig(repository, "claude"));
       const { integration, manager } = createMockIntegration(repository);
@@ -792,7 +794,7 @@ describe("Task 3: Full 11-Scenario Integration Test Suite & Platform v3 Lifecycl
   // ==========================================
   // Scenario 11: Down with another project still active
   // ==========================================
-  describe("Scenario 11: Down with another project still active", () => {
+  linuxDescribe("Scenario 11: Down with another project still active", () => {
     it("tears down repoA while keeping repoB active and stopping only repoA-local MCP services", async () => {
       const dirA = await mkdtemp(join(tmpdir(), "bflow-down-a-"));
       const dirB = await mkdtemp(join(tmpdir(), "bflow-down-b-"));

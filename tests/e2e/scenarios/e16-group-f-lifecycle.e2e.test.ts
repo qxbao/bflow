@@ -1,6 +1,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { FileAgentRegistry } from "@bflow/agent-registry";
@@ -65,15 +66,6 @@ const git = (cwd: string, ...args: string[]): string =>
       GIT_COMMITTER_EMAIL: "qa@bflow.local"
     }
   }).trim();
-
-function hasHerdr(): boolean {
-  try {
-    execFileSync("herdr", ["--version"], { stdio: "ignore", timeout: 5_000 });
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 interface WirePane {
   pane_id: string;
@@ -400,18 +392,18 @@ class InMemoryTransport implements AgentTransport {
 
 describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Conversation SDLC, down, up & resume)", () => {
   let tmpRoot: string;
+  const liveHerdrEnabled = process.env.BFLOW_TEST_LIVE_PLATFORM === "1" || process.env.BFLOW_TEST_LIVE_HERDR === "1";
 
   beforeAll(() => {
-    tmpRoot = mkdtempSync("/tmp/bflow-e2e-group-f-");
+    tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "bflow-e2e-group-f-")));
   });
 
   afterAll(() => {
     rmSync(tmpRoot, { recursive: true, force: true });
   });
 
-  it("[LIVE HERDR 0.9.5 DAEMON] starts named session, creates 3 Bflow tabs, focuses Conversation agent, stops on down, and restarts on resume", async () => {
-    if (!hasHerdr()) return;
-
+  it.skipIf(process.platform !== "linux" || !liveHerdrEnabled)("[LIVE HERDR DAEMON] starts named session, creates 3 Bflow tabs, focuses Conversation agent, stops on down, and restarts on resume", async () => {
+    execFileSync("herdr", ["--version"], { stdio: "ignore", timeout: 5_000 });
     const liveDir = join(tmpRoot, "live-herdr-repo");
     mkdirSync(liveDir, { recursive: true });
     git(liveDir, "init", "-b", "main");
@@ -606,7 +598,7 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
     }
   }, 30_000);
 
-  it("[HARNESS + REAL SQLITE / ARTIFACT STORE / GIT WORKTREES] executes full lifecycle: init -> up -> attach -> Conversation SDLC task -> down (guard + checkpoint) -> up & resume", async () => {
+  it.skipIf(process.platform !== "linux")("[HARNESS + REAL SQLITE / ARTIFACT STORE / GIT WORKTREES] executes full lifecycle: init -> up -> attach -> Conversation SDLC task -> down (guard + checkpoint) -> up & resume", async () => {
     const repoDir = join(tmpRoot, "sdlc-repo");
     mkdirSync(repoDir, { recursive: true });
     git(repoDir, "init", "-b", "main");

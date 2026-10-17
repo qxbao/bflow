@@ -1,4 +1,5 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApprovalRequestSchema, DelegationRequestSchema, PaneBindingSchema, RoleMessageSchema, type PaneBinding } from "@bflow/contracts";
@@ -13,7 +14,7 @@ import type { AgenticRuntimePorts } from "../../src/agentic/ports.js";
 const cleanup: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const root of cleanup.splice(0)) await rm(root, { recursive: true, force: true }); });
 async function fixture() {
-  const root = await mkdtemp("/tmp/bflow-task-notices-"); cleanup.push(root);
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-task-notices-"))); cleanup.push(root);
   let at = new Date("2026-10-16T10:00:00.000Z"), ready = true;
   const registryFile = join(root, "registry.json"), registry = new FileAgentRegistry({ stateFile: registryFile, clock: () => at });
   const engine = new DeterministicWorkflowEngine(), transport = new FakeAgentTransport();
@@ -61,7 +62,8 @@ async function fixture() {
     clock: (milliseconds: number) => { at = new Date(at.getTime() + milliseconds); }, ready: (value: boolean) => { ready = value; },
     replace: (patch: Partial<PaneBinding>) => { binding = { ...binding, ...patch }; } };
 }
-describe("task notices borrowing active assignment authority", () => {
+// AgenticJournal.exclusive uses Linux flock to serialize durable notices.
+describe.skipIf(process.platform !== "linux")("task notices borrowing active assignment authority", () => {
   it("sends through a one-slot Registry without another assignment, Core binding, or lease release", async () => {
     const f = await fixture();
     const acquire = vi.spyOn(f.registry, "acquireLease"), release = vi.spyOn(f.registry, "releaseLease");
@@ -179,7 +181,7 @@ describe("task notices borrowing active assignment authority", () => {
   });
 });
 
-describe("durable lease release recovery", () => {
+describe.skipIf(process.platform !== "linux")("durable lease release recovery", () => {
   it("replays the exact release after Registry commit before journal save and a delayed clock", async () => {
     const f = await fixture(), release = vi.spyOn(f.registry, "releaseLease");
     await f.open().exclusive(async (state, save) => {

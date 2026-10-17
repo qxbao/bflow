@@ -1,4 +1,6 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createBackgroundLogRedactor } from "../src/background-process.js";
@@ -28,7 +30,7 @@ describe("background log redaction", () => {
     expect(output).toContain("normal message");
   });
   it("keeps a detached relay alive and writes only scrubbed private log bytes", async () => {
-    const dir = await mkdtemp("/tmp/bflow-background-log-");
+    const dir = await realpath(await mkdtemp(join(tmpdir(), "bflow-background-log-")));
     const path = join(dir, "server.log");
     try {
       const result = await environmentProcessRunner.run({ executable: process.execPath,

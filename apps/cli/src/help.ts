@@ -36,6 +36,8 @@ Global Options:
   -v, --version  Show version
   -j, --json     Output response in JSON envelope format
 
+Agents and scripts should pass --json and use the process exit code; human output is for terminal reading.
+
 Examples:
   bflow init
   bflow setup --check

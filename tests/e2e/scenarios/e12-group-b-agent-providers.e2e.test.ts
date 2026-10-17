@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -27,9 +27,11 @@ const sha256Hex = (text: string): string => createHash("sha256").update(text, "u
 
 describe("Scenario E12 (Group B) — Agent Providers Verification (Claude, Codex, Agy)", () => {
   const tempDirs: string[] = [];
+  const liveProviderChecksEnabled = process.env.BFLOW_TEST_LIVE_PLATFORM === "1";
+  const liveHerdrEnabled = liveProviderChecksEnabled || process.env.BFLOW_TEST_LIVE_HERDR === "1";
 
   function makeTempDir(prefix = "bflow-e12-"): string {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
     chmodSync(dir, 0o700);
     tempDirs.push(dir);
     return dir;
@@ -386,7 +388,7 @@ exit 0
   });
 
   describe("[REAL PROVIDER / LIVE HOST] Live Binary, Auth, Readiness & Herdr Pane Verification", () => {
-    it("verifies live Claude (2.1.301), Codex (0.162.0), and Agy (1.4.0) preflight readiness and launch profile compilation (QA-P34-03..06 fixed)", async () => {
+    it.skipIf(!liveProviderChecksEnabled)("verifies live Claude, Codex, and Agy preflight readiness and launch profile compilation", async () => {
       const root = makeTempDir("bflow-e12-live-");
       const stateDir = join(root, "state");
       mkdirSync(stateDir, { mode: 0o700 });
@@ -465,8 +467,15 @@ exit 0
       expect(existsSync(join(stateDir, "agy-home", ".gemini", "antigravity-cli", "settings.json"))).toBe(true);
     }, 90_000);
 
-    it("starts real Herdr panes for Claude, Codex, and Agy in an isolated live Herdr 0.9.5 session", async () => {
+    it.skipIf(!liveHerdrEnabled)("starts real Herdr panes for Claude, Codex, and Agy in an isolated live Herdr session", async () => {
       const root = makeTempDir("bflow-e12-herdr-");
+      const herdrVersion = await environmentProcessRunner.run({
+        executable: "herdr",
+        args: ["--version"],
+        cwd: root,
+        timeoutMs: 5_000
+      });
+      expect(herdrVersion.exitCode, `Herdr must be installed for live platform checks: ${herdrVersion.stderr}`).toBe(0);
       const sessionName = `bflow-e12-${process.pid}`;
       const baseEnv: Record<string, string | undefined> = {
         ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("HERDR_"))),

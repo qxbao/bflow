@@ -471,7 +471,8 @@ describe("Task 1: Bflow Platform v3 Setup Integration & Lifecycle", () => {
           }
         };
 
-        const result = await executeSetupCommand(args, context);
+        const progress: string[] = [];
+        const result = await executeSetupCommand(args, context, step => progress.push(step));
         expect(planFn).toHaveBeenCalledWith({ mode: "apply", config: expect.anything() });
         expect(applyFn).toHaveBeenCalledWith({
           mode: "apply",
@@ -485,6 +486,8 @@ describe("Task 1: Bflow Platform v3 Setup Integration & Lifecycle", () => {
         expect(result.tools).toEqual([{ toolId: "rtk", status: "ready", version: "0.9.1" }]);
         expect(result.diagnostics).toContain("Plan calculated");
         expect(result.diagnostics).toContain("Step applied");
+        expect(progress).toContain("Building apply setup plan...");
+        expect(progress).toContain("Applying approved setup steps...");
       } finally {
         await rm(tempDir, { recursive: true, force: true });
       }

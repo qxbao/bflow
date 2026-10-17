@@ -1678,5 +1678,34 @@ describe("Presentation & Formatting Engine", () => {
         expect(humanOut).toContain("stage: native_startup");
       });
     });
+
+    describe("setup and doctor human output", () => {
+      it("colors setup state and sanitizes diagnostics while retaining approval warnings", () => {
+        const setup = {
+          mode: "apply", machineId: "machine-1", os: "linux", serviceManagerKind: "systemd-user",
+          plan: { planId: "plan-1", revision: 1, steps: [{ stepId: "install-node", componentId: "node", action: "install", requiresApproval: true }] },
+          tools: [{ toolId: "node", status: "missing", version: "none" }],
+          skills: { catalogLoaded: true, skillCount: 2, syncedManifests: 1, storeRoot: "/safe/store" },
+          diagnostics: ["Bearer abcdefghijklmnopqrstuvwxyz\u001b[31m"]
+        } as any;
+        const rendered = formatCommandSuccess("setup", setup, false, { stdoutColor: true });
+        expect(rendered).toContain(ANSI.cyan);
+        expect(rendered).toContain(ANSI.yellow);
+        expect(rendered).toContain("[REDACTED_TOKEN]");
+        expect(rendered).not.toContain("\u001b[31mBearer");
+      });
+
+      it("colors and sanitizes grouped doctor findings", () => {
+        const report = {
+          healthy: false, workspaceRoot: "/repo", sessionId: "session-1",
+          checks: [{ name: "provider", status: "failed", message: "not ready", remediation: "Run setup" }],
+          metadata: { groups: [{ name: "Providers", items: [{ component: "claude", status: "blocked", reason: "token=secret-value", remediation: "Authenticate" }] }] }
+        } as any;
+        const rendered = formatCommandSuccess("doctor", report, false, { stdoutColor: true });
+        expect(rendered).toContain(ANSI.red);
+        expect(rendered).toContain(ANSI.cyan);
+        expect(rendered).toContain("token=[REDACTED]");
+      });
+    });
   });
 });

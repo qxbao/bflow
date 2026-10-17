@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -59,7 +59,7 @@ describe("canonical role catalog", () => {
     expect(Object.keys(bindings.bindings).sort()).toEqual(
       [...AGENT_ROLES].sort(),
     );
-    const root = await mkdtemp(join(tmpdir(), "skills-catalog-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "skills-catalog-")));
     roots.push(root);
     const manager = new SkillManager({
       store: new SkillFileStore(join(root, "store")),
@@ -110,7 +110,7 @@ describe("canonical role catalog", () => {
     }
   }, 60000);
   it("rejects duplicate names, unknown references and forbidden role binding", async () => {
-    const root = await mkdtemp(join(tmpdir(), "skills-duplicate-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "skills-duplicate-")));
     roots.push(root);
     for (const sub of ["first", "second"]) {
       await mkdir(join(root, sub));

@@ -27,6 +27,8 @@ import {
 } from "../src/index.js";
 
 const now = "2026-10-17T00:00:00.000Z";
+// EnvironmentLifecycle.up/down use the Linux flock guard; doctor diagnostics stay portable.
+const linuxDescribe = describe.skipIf(process.platform !== "linux");
 const roles = ["conversation", "coordinator", "planner", "architect", "specifier", "reviewer", "qa"] as const;
 
 function makeConfig(repository: RepositoryIdentity, overrides?: Partial<EnvironmentConfig["environment"]>): string {
@@ -273,7 +275,7 @@ describe("Task 2: Platform v3 Lifecycle & Doctor Integration", () => {
     });
   });
 
-  describe("EnvironmentLifecycle.up() 12-step Sequence Validation", () => {
+  linuxDescribe("EnvironmentLifecycle.up() 12-step Sequence Validation", () => {
     it("fails when required provider is missing and has no fallback", async () => {
       const lifecycle = new EnvironmentLifecycle(dir, {
         runner,
@@ -446,7 +448,7 @@ describe("Task 2: Platform v3 Lifecycle & Doctor Integration", () => {
     });
   });
 
-  describe("EnvironmentLifecycle.down() Multi-Repository Shared MCP Protection", () => {
+  linuxDescribe("EnvironmentLifecycle.down() Multi-Repository Shared MCP Protection", () => {
     it("protects shared and external MCP services when down is executed", async () => {
       const fixture = createMockManager(repository);
 

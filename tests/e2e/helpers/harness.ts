@@ -1,6 +1,6 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import type {
   OperationOptions,
   OperationResult,
@@ -98,6 +98,7 @@ export async function createE2eHarness(options?: E2eHarnessOptions): Promise<E2e
   const artifactStoreFactory = options?.openArtifactStore ?? openFilesystemArtifactStore;
 
   let tmpDir: string | undefined;
+  let tmpParent: string | undefined;
   let currentRunStore: SqliteRunStore | undefined;
   let currentArtifactStore: FilesystemArtifactStore | undefined;
 
@@ -121,20 +122,24 @@ export async function createE2eHarness(options?: E2eHarnessOptions): Promise<E2e
     }
     if (tmpDir) {
       try {
-        const expectedPrefix = tmpdir();
-        if (tmpDir.startsWith(expectedPrefix)) {
+        if (!tmpParent) throw new Error("Cannot verify the captured temporary parent for the E2E harness directory");
+        const fromPrefix = relative(tmpParent, tmpDir);
+        if (fromPrefix !== "" && fromPrefix !== ".." && !fromPrefix.startsWith(`..${sep}`) && !isAbsolute(fromPrefix)) {
           await rm(tmpDir, { recursive: true, force: true });
+          tmpDir = undefined;
+        } else {
+          throw new Error(`Refusing to remove E2E harness directory outside its captured temporary parent: ${tmpDir}`);
         }
       } catch (err) {
         cleanupErrors.push(err);
       }
-      tmpDir = undefined;
     }
     return cleanupErrors;
   }
 
   try {
-    tmpDir = await mkdtemp(join(tmpdir(), "bflow-p08-e2e-"));
+    tmpParent = await realpath(tmpdir());
+    tmpDir = await realpath(await mkdtemp(join(tmpParent, "bflow-p08-e2e-")));
     const dbPath = join(tmpDir, "run-store.db");
     const artifactsDir = join(tmpDir, "artifacts");
     const registryPath = join(tmpDir, "registry.json");

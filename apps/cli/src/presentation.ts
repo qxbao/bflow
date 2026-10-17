@@ -199,13 +199,15 @@ export function extractSafeDetails(details: unknown): Record<string, string | nu
     "sessionName",
     "workspaceRoot",
     "taskId",
-    "runId"
+    "runId",
+    "reason"
   ]);
   const safe: Record<string, string | number | boolean> = {};
   for (const [key, value] of Object.entries(details as Record<string, unknown>)) {
     if (allowedKeys.has(key)) {
       if (typeof value === "string") {
         const clean = sanitizeIdentifier(value);
+        if (key === "reason" && !/^[a-z0-9_:-]{1,100}$/i.test(clean)) continue;
         const maxLen = key === "workspaceRoot" ? 300 : 200;
         safe[key] = clean.length > maxLen ? clean.slice(0, maxLen).trimEnd() + "... [truncated]" : clean;
       } else if (typeof value === "number" || typeof value === "boolean") {

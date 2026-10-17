@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { PaneBindingSchema, QualityGateContextSchema } from "@bflow/contracts";
@@ -10,7 +11,7 @@ import type { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 const cleanups:(()=>Promise<unknown>)[]=[];
 afterEach(async()=>{for(const cleanup of cleanups.splice(0).reverse()) await cleanup();});
 async function fixture() {
-  const root=await mkdtemp("/tmp/bflow-host-verification-"), repository=join(root,"repo"); await mkdir(repository);
+  const root=await realpath(await mkdtemp(join(tmpdir(), "bflow-host-verification-"))), repository=join(root,"repo"); await mkdir(repository);
   const git=(...args:string[])=>execFileSync("git",["-c","core.hooksPath=/dev/null","-c","commit.gpgSign=false",...args],{cwd:repository,encoding:"utf8"}).trim();
   git("init","-b","main"); git("config","user.name","Test");git("config","user.email","test@example.test");
   await writeFile(join(repository,"guide.md"),"before\n");git("add","guide.md");git("commit","-m","base"); const base=git("rev-parse","HEAD");

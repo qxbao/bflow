@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, realpathSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -36,7 +36,8 @@ export const NOW = "2026-10-17T05:00:00.000Z";
 export const RUN_ID = "run-1";
 export const TASK_ID = "implement";
 
-export const hasFlock = spawnSync("flock", ["--version"]).status === 0;
+// Real GitIntegrationEngine conformance requires the production Linux flock journal.
+export const supportsLinuxGitEngine = process.platform === "linux";
 
 export function tempDir(prefix: string): string {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
@@ -275,7 +276,7 @@ export async function services(overrides: ServiceOverrides = {}): Promise<HighLe
       }
     },
     async openResources(root, options) {
-      if (overrides.git === undefined && hasFlock) return base.openResources(root, options);
+      if (overrides.git === undefined && supportsLinuxGitEngine) return base.openResources(root, options);
       const store = await openStore(root);
       return { git: overrides.git ?? new RecordingGitPort(root), artifactStore: store, async close() { store.close(); } };
     }

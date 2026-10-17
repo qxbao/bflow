@@ -1,6 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:net";
-import { mkdtemp, readFile, rm, writeFile, symlink } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -13,16 +14,19 @@ import { SessionManifestSchema } from "@bflow/contracts";
 const execute = promisify(execFile);
 const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const action of cleanup.splice(0).reverse()) await action(); });
-async function fixture() {
-  const root = await mkdtemp("/tmp/bflow-host-test-");
+async function fixture(beforeEnsure?: () => void) {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-host-test-")));
+  cleanup.push(() => rm(root, { recursive: true, force: true }));
   const binary = join(root, "herdr-fixture.mjs");
   await writeFile(binary, '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({running:false})+"\\n");\n', { mode: 0o700 });
   const options = { repositoryPath: root, sessionId: "test-host", herdrBinary: binary };
+  beforeEnsure?.();
   const controller = await ensureAgenticHost(options);
-  cleanup.push(async () => { await controller.shutdown(); await rm(root, {recursive:true, force:true}); });
+  cleanup.push(() => controller.shutdown());
   return {root, controller, options};
 }
-describe("default durable host lifecycle and role MCP", () => {
+// Agentic host startup uses Linux flock; one recovery case also inspects /proc.
+describe.skipIf(process.platform !== "linux")("default durable host lifecycle and role MCP", () => {
   it("pins owner verification authority and installs a fail-closed native edit hook", async () => {
     const f = await fixture(), launch = await f.controller.prepare();
     const hooks = JSON.parse(await readFile(launch.roleLaunch.developer!.hooksSettingsFile, "utf8"));
@@ -45,8 +49,7 @@ describe("default durable host lifecycle and role MCP", () => {
   it("uses a short private Unix socket directory when TMPDIR exceeds socket limits", async () => {
     const previous = process.env.TMPDIR;
     try {
-      process.env.TMPDIR = "/tmp/" + "profile-directory-".repeat(12);
-      const f = await fixture();
+      const f = await fixture(() => { process.env.TMPDIR = "/tmp/" + "profile-directory-".repeat(12); });
       const config = JSON.parse(await readFile(join(f.root, ".bflow/state/host", f.options.sessionId, "host.json"), "utf8"));
       expect(Buffer.byteLength(config.socketPath.replace(/\.sock$/, ".native.sock"))).toBeLessThanOrEqual(103);
       expect((await f.controller.runtime.findRuns({ limit: 1 })).ok).toBe(true);
@@ -102,17 +105,6 @@ describe("default durable host lifecycle and role MCP", () => {
     expect((await recovered.runtime.findRuns({ limit: 100 })).ok).toBe(true);
   });
 
-  it("rejects a lost control acknowledgement and refuses symlinked state directories", async () => {
-    const root = await mkdtemp("/tmp/bflow-host-boundary-");
-    cleanup.push(()=>rm(root,{recursive:true,force:true}));
-    const socketPath=join(root,"closed.sock"), server=createServer(socket=>socket.once("data",()=>socket.end()));
-    await new Promise<void>(accept=>server.listen(socketPath,accept));
-    cleanup.push(()=>new Promise<void>(accept=>server.close(()=>accept())));
-    await expect(callHost(socketPath,"token","ping")).rejects.toThrow("closed before acknowledgement");
-    const outside=await mkdtemp("/tmp/bflow-host-outside-"); cleanup.push(()=>rm(outside,{recursive:true,force:true}));
-    await symlink(outside,join(root,".bflow"));
-    await expect(ensureAgenticHost({repositoryPath:root,sessionId:"boundary"})).rejects.toThrow("must not be symlinks");
-  });
   it("survives client disconnect, prepares private launch config before activation, and queries real SQLite", async () => {
     const f = await fixture();
     const first = await f.controller.prepare();
@@ -177,5 +169,21 @@ describe("default durable host lifecycle and role MCP", () => {
     expect(packets).toEqual([expect.objectContaining({method:"pane.report_agent_session",params:expect.objectContaining({source:"herdr:claude",agent_session_id:"actual-session",agent_session_path:"/actual/transcript.jsonl"})})]);
     await invoke({hook_event_name:"SessionStart",session_id:"subagent-session",agent_id:"subagent"});
     expect(packets).toHaveLength(1);
+  });
+});
+
+// Unix sockets and symlink rejection are POSIX features; this case does not start the flock-guarded host.
+describe.skipIf(process.platform === "win32")("portable host path validation", () => {
+  it("rejects a lost control acknowledgement and refuses symlinked state directories", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-host-boundary-")));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const socketPath = join(root, "closed.sock"), server = createServer(socket => socket.once("data", () => socket.end()));
+    await new Promise<void>(accept => server.listen(socketPath, accept));
+    cleanup.push(() => new Promise<void>(accept => server.close(() => accept())));
+    await expect(callHost(socketPath, "token", "ping")).rejects.toThrow("closed before acknowledgement");
+    const outside = await realpath(await mkdtemp(join(tmpdir(), "bflow-host-outside-")));
+    cleanup.push(() => rm(outside, { recursive: true, force: true }));
+    await symlink(outside, join(root, ".bflow"));
+    await expect(ensureAgenticHost({ repositoryPath: root, sessionId: "boundary" })).rejects.toThrow("must not be symlinks");
   });
 });

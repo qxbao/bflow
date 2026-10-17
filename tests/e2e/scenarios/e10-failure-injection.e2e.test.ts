@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { randomUUID, createHash } from "node:crypto";
-import { readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { createE2eHarness, type E2eHarness } from "../helpers/harness.js";
@@ -130,6 +131,27 @@ describe("Scenario E10 — Failure Injection, Concurrency & Corrupted State", ()
     const seqErr = expectFailure(seqAppendRes);
     expect(seqErr.code).toBe("conflict");
     expect(seqErr.message).toContain("Event sequence mismatch");
+  });
+
+  it("cleans its owned temp directory using the captured parent after TMPDIR changes", async () => {
+    const previousTmpDir = process.env.TMPDIR;
+    const alternateParent = realpathSync(mkdtempSync(join(tmpdir(), "bflow-e10-new-tmp-")));
+    const sentinel = join(alternateParent, "keep.txt");
+    writeFileSync(sentinel, "preserve alternate temp parent");
+    try {
+      harness = await createE2eHarness();
+      const ownedDirectory = harness.tmpDir;
+      process.env.TMPDIR = alternateParent;
+
+      await harness.cleanup();
+
+      expect(existsSync(ownedDirectory)).toBe(false);
+      expect(readFileSync(sentinel, "utf8")).toBe("preserve alternate temp parent");
+    } finally {
+      if (previousTmpDir === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmpDir;
+      rmSync(alternateParent, { recursive: true, force: true });
+    }
   });
 
   it("guarantees atomic rollback on invalid event batch without dangling commits", async () => {

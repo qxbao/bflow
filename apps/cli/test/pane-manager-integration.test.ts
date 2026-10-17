@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionManifestSchema } from "@bflow/contracts";
@@ -9,6 +10,7 @@ import { EnvironmentLifecycle, PaneManagerLifecycleAdapter, createNamedPaneRunne
 import { HerdrProcesses } from "./fixtures/herdr-processes.js";
 import type { LifecycleHost } from "../src/agentic-host.js";
 
+const linuxIt = it.skipIf(process.platform !== "linux");
 describe("P12 composition with real P13 RolePaneManager", () => {
   let dir: string;
   let input: EnvironmentCompositionInput;
@@ -18,7 +20,7 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     openIntegration: async composition => openPaneManagerEnvironment(composition, runner, async () => host,
       async () => ["--test-host-role-config"]) });
   beforeEach(async () => {
-    dir = await mkdtemp("/tmp/bflow-p12-p13-"); execFileSync("git", ["init", "--quiet", dir]);
+    dir = await realpath(await mkdtemp(join(tmpdir(), "bflow-p12-p13-"))); execFileSync("git", ["init", "--quiet", dir]);
     expect((await runCli(["init"], { cwd: dir })).ok).toBe(true);
     const repository = await identifyRepository(dir);
     input = { repository, config: await readEnvironmentConfig(repository), env: { ...process.env, HERDR_SESSION: "foreign", HERDR_SOCKET: "/foreign" } };
@@ -33,7 +35,8 @@ describe("P12 composition with real P13 RolePaneManager", () => {
   });
   afterEach(async () => { vi.restoreAllMocks(); await rm(dir, { recursive: true, force: true }); });
   const starts = (runner: HerdrProcesses) => runner.calls.filter((r) => r.args[0] === "agent" && r.args[1] === "start");
-  it("starts all seven P13 roles with trusted host arguments and persists returned IDs", async () => {
+  // EnvironmentLifecycle startup/shutdown uses the Linux flock guard.
+  linuxIt("starts all seven P13 roles with trusted host arguments and persists returned IDs", async () => {
     const environment = lifecycle();
     const manifest = await environment.up();
     expect(starts(runner)).toHaveLength(7); expect(manifest.panes.map((p) => p.role).sort()).toEqual(["conversation", "coordinator", "planner", "architect", "specifier", "reviewer", "qa"].sort());
@@ -45,13 +48,13 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     expect(host.prepare).toHaveBeenCalledTimes(1);
     expect(host.activate).toHaveBeenCalledWith(expect.objectContaining({ status: "up" }), expect.any(Object));
   });
-  it("reopens composition across CLI invocations without starting duplicate agents", async () => {
+  linuxIt("reopens composition across CLI invocations without starting duplicate agents", async () => {
     await lifecycle().up();
     await lifecycle().up();
     expect(starts(runner)).toHaveLength(7);
     expect(runner.calls.filter((r) => r.args[0] === "workspace" && r.args[1] === "create")).toHaveLength(1);
   });
-  it("refreshes live health and focuses Conversation through P13 before the TUI", async () => {
+  linuxIt("refreshes live health and focuses Conversation through P13 before the TUI", async () => {
     const environment = lifecycle(); await environment.up();
     const first = await environment.status(); expect(first.liveObservation).toBe(true);
     const panes = runner.session(input.repository.sessionName).panes;
@@ -64,13 +67,13 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     expect(runner.calls.findLast((r) => r.mode === "interactive")?.args).toEqual(["session", "attach", input.repository.sessionName]);
     expect((await environment.doctor()).healthy).toBe(false);
   });
-  it("detects a shell replacing an agent instead of reporting a persisted idle state", async () => {
+  linuxIt("detects a shell replacing an agent instead of reporting a persisted idle state", async () => {
     const environment = lifecycle(); await environment.up();
     runner.session(input.repository.sessionName).panes.find((p) => p.name === "qa-verifier")!.agent = null;
     const observed = await environment.status();
     expect(observed.manifest?.panes.find((p) => p.role === "qa")?.transportState).toBe("disconnected");
   });
-  it("preserves failed blocked startup and refuses duplicate dispatch", async () => {
+  linuxIt("preserves failed blocked startup and refuses duplicate dispatch", async () => {
     runner.blockedAgent = "coordinator";
     await expect(lifecycle().up()).rejects.toThrow("CLI update confirmation");
     try { await lifecycle().up(); } catch (error) {
@@ -84,7 +87,7 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     expect(report.healthy).toBe(false);
     expect(report.checks.find((c) => c.checkId === "operation-recovery")?.status).toBe("failed");
   });
-  it("rejects a foreign durable manifest without dispatching P13 commands", async () => {
+  linuxIt("rejects a foreign durable manifest without dispatching P13 commands", async () => {
     await lifecycle().up();
     const file = join(dir, `.bflow/state/panes/${input.repository.sessionName}.manifest.json`);
     const manifest = JSON.parse(await readFile(file, "utf8")); manifest.workspaceRoot = "/other-repo";
@@ -92,7 +95,7 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     await expect(lifecycle().up()).rejects.toThrow("another repository");
     expect(starts(runner)).toHaveLength(before);
   });
-  it("does not report stale idle bindings as live when P13 cannot persist its health refresh", async () => {
+  linuxIt("does not report stale idle bindings as live when P13 cannot persist its health refresh", async () => {
     await lifecycle().up();
     runner.session(input.repository.sessionName).panes.find((p) => p.name === "reviewer")!.agent_status = "blocked";
     vi.spyOn(FileSessionManifestStore.prototype, "save").mockResolvedValue({ ok: false, error: { code: "corruption", retryable: false, message: "disk write failed" } });
@@ -114,7 +117,7 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     expect((await adapter.getManifest("foreign")).ok).toBe(false); expect((await adapter.down(input.repository.sessionName)).ok).toBe(false);
     expect(runner.calls).toHaveLength(0);
   });
-  it("reports topology before up and shuts down only after the composed host lifecycle barrier", async () => {
+  linuxIt("reports topology before up and shuts down only after the composed host lifecycle barrier", async () => {
     const environment = lifecycle();
     const report = await environment.doctor();
     expect(report.checks.find((c) => c.checkId === "p13-composition")?.status).toBe("passed");

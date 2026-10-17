@@ -1,11 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CommandExecutionResultSchema } from "@bflow/contracts";
 import { CommandJournal, HighLevelEnvelopeSchema, runCli } from "../../src/index.js";
 import { newCommandIdentity } from "../../src/high-level/envelope.js";
+import { runHighLevelCli } from "../../src/high-level/index.js";
+import { stripAnsi } from "../../src/presentation.js";
 import {
   approvedSpecification,
   bflow,
@@ -13,7 +15,7 @@ import {
   createRepository,
   draftSpecification,
   git,
-  hasFlock,
+  supportsLinuxGitEngine,
   IndependentGate,
   isolatedPlatform,
   openStore,
@@ -77,6 +79,62 @@ describe("bflow help and argument contract", () => {
   });
 });
 
+describe("human and agent presentation", () => {
+  it("summarizes human results, keeps JSON exact, and only emits opted-in terminal progress", async () => {
+    const root = createRepository();
+    const svc = await services();
+    const human = captureIo();
+    const result = await runCli(["repo", "inspect"], { cwd: root, highLevelServices: svc, io: human,
+      presentation: { stdoutColor: true, stderrColor: true, interactive: true } });
+    expect(result.exitCode).toBe(0);
+    expect(stripAnsi(human.out.join("\n"))).toContain("bflow repo inspect: inspected [OK]");
+    expect(stripAnsi(human.out.join("\n")).match(/inspected/g)).toHaveLength(1);
+    expect(human.out.join("\n")).toContain("Package manager: pnpm@12.5.1");
+    expect(human.out.join("\n")).not.toContain('"repositoryId"');
+    expect(human.out.join("\n")).toContain("\u001b[");
+    expect(human.err.some(line => line.startsWith("\u001b["))).toBe(true);
+
+    const json = captureIo();
+    const machine = await runCli(["repo", "inspect", "--json"], { cwd: root, highLevelServices: svc, io: json,
+      presentation: { stdoutColor: true, stderrColor: true, interactive: true } });
+    expect(machine.exitCode).toBe(0);
+    expect(json.out).toHaveLength(1);
+    expect(json.out[0]).not.toContain("\u001b[");
+    expect(JSON.parse(json.out[0]!).result.output.data.repository.repositoryId).toBeTruthy();
+    expect(json.err).toEqual([]);
+  });
+
+  it("sanitizes provider failures for people while preserving the exact JSON error", async () => {
+    const root = createRepository();
+    const base = await services();
+    const raw = "Bearer abcdefghijklmnopqrstuvwxyz token=secret-value \u001b[31mprovider failed\u001b[0m\n    at unsafeStackFrame (provider.js:1:1)";
+    const providerHealth = { ...base.providers, async checkHealth(): Promise<never> { throw new Error(raw); } };
+    const svc = { ...base, providers: providerHealth };
+    const human = captureIo();
+    const humanResult = await runCli(["agent", "check", "claude"], { cwd: root, highLevelServices: svc, io: human });
+    expect(humanResult.exitCode).toBe(1);
+    expect(human.err.join("\n")).toContain("[REDACTED_TOKEN]");
+    expect(human.err.join("\n")).toContain("token=[REDACTED]");
+    expect(human.err.join("\n")).not.toContain("secret-value");
+    expect(human.err.join("\n")).not.toContain("\u001b[31m");
+    expect(human.err.join("\n")).not.toContain("unsafeStackFrame");
+
+    const machine = captureIo();
+    await runCli(["agent", "check", "claude", "--json"], { cwd: root, highLevelServices: svc, io: machine });
+    const envelope = JSON.parse(machine.out[0]!);
+    expect(envelope.result.error.message).toBe(raw);
+  });
+
+  it("keeps custom collectors plain and reports actionable validation errors", async () => {
+    const io = captureIo();
+    const root = createRepository();
+    const result = await runCli(["repo", "inspect", "--bogus"], { cwd: root, highLevelServices: await services(), io });
+    expect(result.exitCode).toBe(2);
+    expect(io.err.join("\n")).toContain("Next:");
+    expect(io.err.join("\n")).not.toContain("\u001b[");
+  });
+});
+
 describe("bflow repo inspect", () => {
   it("reports repository, Git and project context without writing", async () => {
     const root = createRepository();
@@ -113,6 +171,11 @@ describe("bflow task plan", () => {
     expect(output(preview).outcome).toBe("preview");
     expect(output(preview).data.graph.tasks).toEqual([{ id: TASK_ID, role: "developer", dependsOn: [] }]);
     expect(existsSync(join(root, ".bflow/plans"))).toBe(false);
+    const human = captureIo();
+    await runCli(["task", "plan", "--spec", specPath], { cwd: root, highLevelServices: svc, io: human });
+    expect(stripAnsi(human.out.join("\n"))).toContain("Task graph:");
+    expect(stripAnsi(human.out.join("\n"))).toContain(`${TASK_ID} (depends on: none)`);
+    expect(stripAnsi(human.out.join("\n"))).toContain("Traceability: valid");
 
     const written = await bflow(root, svc, "task", "plan", "--spec", specPath, "--write");
     expect(output(written).data).toMatchObject({ written: true, path: ".bflow/plans/spec-1.workflow.json" });
@@ -314,7 +377,7 @@ describe("bflow task implement", () => {
     expect(attempts.map(r => r.exitCode)).toEqual([0, 0]);
   });
 
-  it.skipIf(!hasFlock)("creates a real task worktree through the P18 Git engine", async () => {
+  it.skipIf(!supportsLinuxGitEngine)("creates a real task worktree through the P18 Git engine", async () => {
     const root = createRepository();
     const spec = await approvedSpecification(root);
     const specPath = writeJson(tempDir("bflow-hl-in-"), "spec.json", spec);
@@ -376,6 +439,12 @@ describe("bflow verify", () => {
     expect(envelope.exitCode).toBe(3);
     expect(output(envelope).data.verification.status).toBe("failed");
     expect(output(envelope).data.cycle.status).toBe("rework_required");
+    const human = captureIo();
+    await runCli(["verify", TASK_ID, "--run", RUN_ID, "--plan", planPath, "--change-set", changePath],
+      { cwd: root, highLevelServices: svc, io: human });
+    expect(human.out.join("\n")).toContain("not_passed");
+    expect(human.out.join("\n")).toContain("Findings");
+    expect(human.out.join("\n")).toContain("Next:");
   });
 
   it("is blocked, never passed, without independent runners", async () => {
@@ -417,6 +486,14 @@ describe("bflow git prepare", () => {
     expect(output(envelope).outcome).toBe("approval_required");
     expect(output(envelope).data.tasks[0]).toMatchObject({ taskId: TASK_ID, clean: true, commitCount: 1, ready: true });
     expect(port.calls).toEqual(["prepare:implement"]);
+    const human = captureIo();
+    await runCli(["git", "prepare", RUN_ID], { cwd: root, highLevelServices: svc, io: human });
+    const summary = stripAnsi(human.out.join("\n"));
+    expect(summary).toContain("Integration ID: integration-1");
+    expect(summary).toContain("Base revision: HEAD");
+    expect(summary).toContain("Task readiness:");
+    expect(summary).toContain("branch");
+    expect(summary).toContain("ready");
   });
 
   it("prepares the integration branch and requests workflow-level verification", async () => {
@@ -506,6 +583,26 @@ describe("bflow mcp status", () => {
     expect(output(envelope).data.config.state).toBe("absent");
   });
 
+  it("does not infer remote backend health from a valid config without a Gateway probe", async () => {
+    const configRoot = tempDir("bflow-default-mcp-xdg-");
+    const configDirectory = join(configRoot, "bflow");
+    mkdirSync(configDirectory, { recursive: true });
+    const def = service("machine-default-mcp");
+    writeFileSync(join(configDirectory, "mcp.json"), JSON.stringify({ schemaVersion: 3, services: { docs: def }, managedIds: ["docs"] }));
+    const previous = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = configRoot;
+    try {
+      const result = await runHighLevelCli(["mcp", "status", "--json"], { cwd: process.cwd() });
+      expect(result.exitCode).toBe(3);
+      const data = JSON.parse(result.stdout).result.output.data;
+      expect(data.gateway).toMatchObject({ configured: false, reachable: false });
+      expect(data.backends).toEqual([expect.objectContaining({ serviceId: "docs", state: "unknown", healthy: false })]);
+    } finally {
+      if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previous;
+    }
+  });
+
   it("combines Gateway backend health with configured services", async () => {
     const base = await (await services()).machine.platform();
     const def = service(base.machineId);
@@ -581,7 +678,14 @@ describe("bflow skills sync", () => {
     expect(blocked.exitCode).toBe(5);
     expect(blocked.result.status).toBe("waiting_user");
     expect(sync.calls).not.toContain("sync");
+    const human = captureIo();
+    await runCli(["skills", "sync"], { cwd: root, highLevelServices: svc, io: human });
+    expect(stripAnsi(human.out.join("\n"))).toContain("/skills/claude");
+    expect(stripAnsi(human.out.join("\n"))).toContain("--allow-machine-scope");
     expect((await bflow(root, svc, "skills", "sync", "--allow-machine-scope")).exitCode).toBe(0);
+    const success = captureIo();
+    await runCli(["skills", "sync"], { cwd: root, highLevelServices: svc, io: success });
+    expect(stripAnsi(success.out.join("\n"))).not.toContain("--allow-machine-scope");
   });
 
   it("reports a sync that does not converge as failed", async () => {

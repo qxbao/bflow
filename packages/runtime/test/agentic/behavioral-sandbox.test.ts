@@ -36,7 +36,8 @@ async function listen(pathOrPort: string | number) {
   return { server, connections: () => connections };
 }
 
-describe("mandatory Linux behavioral sandbox adversarial boundaries", () => {
+// These adversarial checks require Bubblewrap namespaces, host socket isolation, and Linux procfs.
+describe.skipIf(process.platform !== "linux")("mandatory Linux behavioral sandbox adversarial boundaries", () => {
   it("runs normal Node tests without inheriting host environment or Git metadata", async () => {
     const f = await fixture(), revision = await f.commit(`
       assert.equal(2+2,4);

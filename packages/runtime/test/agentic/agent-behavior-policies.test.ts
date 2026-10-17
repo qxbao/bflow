@@ -283,7 +283,8 @@ describe("Bflow Agent Behavioral Policies & Autonomous Non-User-Facing Execution
   });
 
   describe("3. Agentic Host Launch Prompt Assembly & Reinforcement", () => {
-    it("assembles prompts with non-user-facing policy and reinforces autonomous execution for non-chat roles", async () => {
+    // Agentic host initialization requires Linux flock; other policy sections remain portable.
+    it.skipIf(process.platform !== "linux")("assembles prompts with non-user-facing policy and reinforces autonomous execution for non-chat roles", async () => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), "bflow-host-prompts-"));
       const binary = path.join(root, "herdr-fixture.mjs");
       await fs.writeFile(

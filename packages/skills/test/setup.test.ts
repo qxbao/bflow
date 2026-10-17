@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile, readdir } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, writeFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -17,7 +17,7 @@ afterEach(async () => {
 });
 describe("P26 setup bridge and repository init data", () => {
   it("plans without writes, applies pinned skills idempotently and observes content drift", async () => {
-    const root = await mkdtemp(join(tmpdir(), "skills-setup-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "skills-setup-")));
     roots.push(root);
     const source = join(root, "source");
     await mkdir(source);
@@ -55,7 +55,7 @@ describe("P26 setup bridge and repository init data", () => {
     expect((await setup.observe({ mode: "check" })).valid).toBe(false);
   });
   it("aborts before installation, preserves unrelated role pins and user settings", async () => {
-    const root = await mkdtemp(join(tmpdir(), "skills-setup-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "skills-setup-")));
     roots.push(root);
     const store = new SkillFileStore(join(root, "store"));
     const manager = new SkillManager({ store, supportedCommands: ["status"] });

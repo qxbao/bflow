@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
@@ -21,7 +22,7 @@ const testSource = `const {test}=require('node:test'); const assert=require('nod
 const vitestCli = createRequire(import.meta.url).resolve("vitest/vitest.mjs");
 const vitestSource = `const value=require('../source.cjs'); it(${JSON.stringify(testName)},()=>expect(value(2)).toBe(4));\n`;
 async function fixture(taskType = "bugfix", reporter: "node_tap" | "vitest_json" = "node_tap") {
-  const root = await mkdtemp("/tmp/bflow-measurement-test-"), cwd = join(root, "repo"); await mkdir(cwd); await mkdir(join(cwd, "test"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-measurement-test-"))), cwd = join(root, "repo"); await mkdir(cwd); await mkdir(join(cwd, "test"));
   const git = (...args: string[]) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", ...args], { cwd, encoding: "utf8" }).trim();
   git("init", "-b", "main"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.test");
   await writeFile(join(cwd, "source.cjs"), "module.exports=x=>x+1;\n"); git("add", "."); git("commit", "-m", "baseline"); const base = git("rev-parse", "HEAD");
@@ -44,7 +45,8 @@ async function fixture(taskType = "bugfix", reporter: "node_tap" | "vitest_json"
   const host = new HostVerification(() => runtime, () => opened.value, new HostReceiptJournal(receiptsPath, cwd, "session-1"), [command]);
   return { cwd, git, commit, command, specification, redRevision, base, binding, host, restart(commands = [command]) { return new HostVerification(() => runtime, () => opened.value, new HostReceiptJournal(receiptsPath, cwd, "session-1"), commands); }, get strategy() { return strategy; }, accept(result: unknown) { strategy = recordEvidence(strategy, result); } };
 }
-describe("independent behavioral command measurements", () => {
+// Measurement launches require the production Bubblewrap namespace sandbox.
+describe.skipIf(process.platform !== "linux")("independent behavioral command measurements", () => {
   it("bounds aggregate command time and output within host transport capacity", async () => {
     const f = await fixture();
     expect(() => parseBehavioralCommands([{ ...f.command, timeoutMs: 300_001 }])).toThrow("execution bounds");

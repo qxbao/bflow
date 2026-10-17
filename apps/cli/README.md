@@ -229,11 +229,21 @@ Every command supports `--help` and `--json`. With `--json` the result is one
 (must be Git-ignored), replay completed requests, serialize concurrent invocations and refuse to
 repeat an interrupted non-idempotent step until `--resume`.
 
+Agents and scripts should pass `--json`, parse the single envelope, and use the process exit
+code as the authoritative command result. Human output summarizes the command, its ordered
+steps, relevant domain findings and any next action; it does not print the complete result data.
+Color is resolved per output stream, and progress appears only on interactive human stderr. A
+successful command can still report a negative domain outcome such as `not_passed` or
+`not_ready`; those outcomes retain their documented exit codes.
+
 See [docs/command-reference.md](docs/command-reference.md), the generated
 [docs/command-reference.json](docs/command-reference.json) (checked by a unit test), and
 [COMMAND_REFERENCE.md](./COMMAND_REFERENCE.md) for the full contract and skill bindings,
-including current limitations (Linux `flock` for the P18 engine; MCP Gateway,
-skill manager and verification gate runners are injected, not composed by default).
+including current limitations (Linux `flock` for the P18 engine; MCP Gateway and verification
+gate runners still require real injected or composed ports). The default CLI Skills synchronizer
+uses the real skill manager and store with the pinned builtin catalog, while explicitly supplied
+service ports remain in effect. `bflow mcp status` reports `not_ready` without a Gateway health
+observation; a configured MCP file alone does not establish backend health.
 
 ### High-level command summary
 

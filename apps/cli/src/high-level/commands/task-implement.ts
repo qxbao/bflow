@@ -104,7 +104,7 @@ export async function observeExecution(ctx: HighLevelContext, root: string, runI
 }
 
 export const taskImplement: HighLevelHandler = async (args, ctx, identity) => {
-  const log = new StepLog();
+  const log = new StepLog(undefined, ctx.onProgress);
   const taskId = args.positionals["task-id"]!;
   const runId = args.strings.get("--run")!;
   const attemptId = args.strings.get("--attempt") ?? "attempt-1";
@@ -148,7 +148,7 @@ export const taskImplement: HighLevelHandler = async (args, ctx, identity) => {
     try {
       const report = await runJournaled({
         command: "task.implement", repositoryRoot: repository.root, key, request, retrySafe: false,
-        resume: args.booleans.has("--resume"), identity, clock: ctx.clock
+        resume: args.booleans.has("--resume"), identity, clock: ctx.clock, onProgress: ctx.onProgress
       }, async (journalLog): Promise<CommandReport> => {
         journalLog.steps.unshift(...log.steps);
         resources = await journalLog.check("open-resources", () => ctx.services.openResources(repository.root, {
