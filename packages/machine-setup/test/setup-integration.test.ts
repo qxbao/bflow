@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SetupReceiptSchema, type ToolInstaller } from "@bflow/contracts";
 import {
   MachineSetupService, NonInteractiveApprover, ToolInstallerRegistry, defaultMachineConfig,
-  detectPlatform, digest, PathComponent, type CommandRunner, type MachineConfig, type MachineSetupServiceOptions,
+  detectPlatform, digest, PathComponent, parseEnvironmentManifest, manifestSatisfactionDigest, type CommandRunner, type MachineConfig, type MachineSetupServiceOptions,
   type PlatformProfile, type ToolInstallDescriptor
 } from "../src/index.js";
 
@@ -180,6 +180,26 @@ describe("resolved setup integration", () => {
     });
     expect(report.doctor?.healthy).toBe(true);
     expect(report.outcome).toBe("applied");
+    const manifest = JSON.parse(await readFile(path.join(platform.paths.state, "environment.json"), "utf8"));
+    expect(manifest.toolsSnapshotPhase).toBe("before_setup");
+    expect(manifest.tools.find((tool: { toolId: string }) => tool.toolId === "gitnexus").status).toBe("missing");
+    expect(manifest.afterSetupTools.phase).toBe("after_setup");
+    expect(manifest.afterSetupTools.tools.find((tool: { toolId: string }) => tool.toolId === "gitnexus")).toMatchObject({
+      status: "path_missing", resolvedPath: path.join(platform.paths.data, "tools/gitnexus/node_modules/.bin/gitnexus")
+    });
+    expect(parseEnvironmentManifest(manifest).ok).toBe(true);
+    const legacy = structuredClone(manifest);
+    delete legacy.toolsSnapshotPhase;
+    delete legacy.afterSetupTools;
+    expect(parseEnvironmentManifest(legacy).ok).toBe(true);
+    const approvedDigest = manifestSatisfactionDigest(manifest);
+    const alteredOriginal = structuredClone(manifest);
+    alteredOriginal.tools[0].version = "changed original observation";
+    expect(manifestSatisfactionDigest(alteredOriginal)).not.toBe(approvedDigest);
+    const manifestReceipt = report.receipts.find((receipt) => receipt.stepId === "configure:environment-manifest")!;
+    expect(manifestReceipt.observedStateDigest).toBe(manifestReceipt.desiredStateDigest);
+    manifest.afterSetupTools.tools[0].version = "tampered";
+    expect(parseEnvironmentManifest(manifest).ok).toBe(false);
     expect(await readFile(path.join(root, ".bashrc"), "utf8")).toContain(path.join(platform.paths.data, "tools/gitnexus/node_modules/.bin"));
     const next = await service({ config }).run({ mode: "check" });
     expect(next.doctor?.healthy).toBe(true);

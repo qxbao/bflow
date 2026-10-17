@@ -23,6 +23,18 @@ import type {
 
 export const ENVIRONMENT_MANIFEST_FILE = "environment.json";
 
+const ManifestToolObservationSchema = z.object({
+  toolId: IdentifierSchema,
+  status: z.enum(["present", "missing", "version_mismatch", "path_missing", "unparseable_version", "probe_failed"]),
+  version: z.string().nullable(), resolvedPath: z.string().nullable(), binaryDigest: Sha256DigestSchema.nullable()
+}).strict();
+
+export const AfterSetupToolsSnapshotSchema = z.object({
+  phase: z.literal("after_setup"), observedAt: IsoDateTimeSchema,
+  tools: z.array(ManifestToolObservationSchema), snapshotDigest: Sha256DigestSchema
+}).strict().refine(({ snapshotDigest, ...body }) => digest(body) === snapshotDigest,
+  { message: "post-setup observation snapshot checksum mismatch" });
+
 export const EnvironmentManifestSchema = z
   .object({
     schemaVersion: z.literal(3),
@@ -39,17 +51,10 @@ export const EnvironmentManifestSchema = z
     paths: z
       .object({ config: z.string().min(1), data: z.string().min(1), state: z.string().min(1), managedBin: z.string().min(1) })
       .strict(),
-    tools: z.array(
-      z
-        .object({
-          toolId: IdentifierSchema,
-          status: z.enum(["present", "missing", "version_mismatch", "path_missing", "unparseable_version", "probe_failed"]),
-          version: z.string().nullable(),
-          resolvedPath: z.string().nullable(),
-          binaryDigest: Sha256DigestSchema.nullable()
-        })
-        .strict()
-    ),
+    tools: z.array(ManifestToolObservationSchema),
+    /** Existing tools remain the exact pre-plan snapshot covered by the approved digest. */
+    toolsSnapshotPhase: z.literal("before_setup").optional(),
+    afterSetupTools: AfterSetupToolsSnapshotSchema.optional(),
     pathBlock: z.object({ target: z.string().min(1), dirs: z.array(z.string().min(1)) }).strict().nullable(),
     mcpServiceIds: z.array(IdentifierSchema),
     serviceIds: z.array(IdentifierSchema),
@@ -63,8 +68,8 @@ export const EnvironmentManifestSchema = z
 export type EnvironmentManifest = z.infer<typeof EnvironmentManifestSchema>;
 export type ManifestPlanRef = NonNullable<EnvironmentManifest["lastPlan"]>;
 
-/** Content that decides satisfaction: everything except the per-run fields `generatedAt` and `lastPlan`. */
-type ManifestBody = Omit<EnvironmentManifest, "generatedAt" | "lastPlan">;
+/** Approved state, including the original tool snapshot. Post-setup observations are supplemental evidence. */
+type ManifestBody = Omit<EnvironmentManifest, "generatedAt" | "lastPlan" | "afterSetupTools">;
 
 export function parseEnvironmentManifest(raw: unknown): OperationResult<EnvironmentManifest> {
   const v = raw !== null && typeof raw === "object" ? (raw as { schemaVersion?: unknown }).schemaVersion : undefined;
@@ -76,9 +81,9 @@ export function parseEnvironmentManifest(raw: unknown): OperationResult<Environm
   return { ok: true, value: parsed.data };
 }
 
-/** Satisfaction digest: excludes `generatedAt` and `lastPlan`, which change on every run. */
+/** Original approved fields retain digest coverage; new post-setup evidence has its own checksum. */
 export function manifestSatisfactionDigest(m: ManifestBody | EnvironmentManifest): string {
-  const { generatedAt: _g, lastPlan: _l, ...body } = m as EnvironmentManifest;
+  const { generatedAt: _g, lastPlan: _l, afterSetupTools: _p, ...body } = m as EnvironmentManifest;
   return digest(body);
 }
 
@@ -105,6 +110,7 @@ export class EnvironmentManifestComponent implements SetupComponent {
   private planned: ManifestBody | null = null;
   private lastPlan: ManifestPlanRef | null = null;
   private machineConfig: MachineConfig | null = null;
+  private postSetupProbe: (() => Promise<readonly ToolObservation[]>) | null = null;
 
   constructor(options: EnvironmentManifestComponentOptions) {
     this.opts = options;
@@ -118,6 +124,11 @@ export class EnvironmentManifestComponent implements SetupComponent {
   /** Resolved machine configuration is persisted under the same approved component step. */
   bindMachineConfig(config: MachineConfig): void {
     this.machineConfig = MachineConfigSchema.parse(config);
+  }
+
+  /** Invoked only inside the approved manifest apply, after predecessor installation steps. */
+  bindPostSetupProbe(probe: () => Promise<readonly ToolObservation[]>): void {
+    this.postSetupProbe = probe;
   }
 
   private configFile(): string {
@@ -152,6 +163,7 @@ export class EnvironmentManifestComponent implements SetupComponent {
       machineId: p.machineId,
       platform: { os: p.os, arch: p.arch, shell: p.shell, supportStatus: p.supportStatus },
       paths: { ...p.paths },
+      toolsSnapshotPhase: "before_setup",
       tools: this.opts.observations.map((o) => ({
         toolId: o.toolId,
         status: o.status,
@@ -189,14 +201,16 @@ export class EnvironmentManifestComponent implements SetupComponent {
     const loaded = await this.load();
     const diagnostics = loaded.state === "invalid" ? [`${loaded.reason}; it will be regenerated`] : [];
     const manifestDigest = loaded.state === "valid" ? manifestSatisfactionDigest(loaded.manifest) : null;
-    if (!this.machineConfig) return { stateDigest: manifestDigest, valid: true, diagnostics };
+    const snapshotMissing = this.postSetupProbe !== null && loaded.state === "valid" && !loaded.manifest.afterSetupTools;
+    if (snapshotMissing) diagnostics.push("post-setup tool observation is missing; the manifest will be refreshed");
+    if (!this.machineConfig) return { stateDigest: manifestDigest, valid: !snapshotMissing, diagnostics };
     const config = await loadMachineConfig(this.configFile());
     if (config.status === "invalid" || config.status === "unsupported_version") {
       return { stateDigest: null, valid: false, diagnostics: [...diagnostics, "machine config requires repair"] };
     }
     return {
       stateDigest: this.satisfactionDigest(manifestDigest, config.status === "absent" ? null : config.config ?? null),
-      valid: true, diagnostics
+      valid: !snapshotMissing, diagnostics
     };
   }
 
@@ -235,10 +249,18 @@ export class EnvironmentManifestComponent implements SetupComponent {
     // Write exactly the content whose digest was planned.
     const body = this.planned ?? (await this.body(ctx));
     const loaded = await this.load();
-    if (loaded.state === "valid" && manifestSatisfactionDigest(loaded.manifest) === manifestSatisfactionDigest(body)) {
+    if (!this.postSetupProbe && loaded.state === "valid" && manifestSatisfactionDigest(loaded.manifest) === manifestSatisfactionDigest(body)) {
       return { ownedPaths: [...ownedPaths, this.filePath], diagnostics: [] };
     }
-    const full = EnvironmentManifestSchema.safeParse({ ...body, generatedAt: ctx.now().toISOString(), lastPlan: this.lastPlan });
+    let afterSetupTools: EnvironmentManifest["afterSetupTools"];
+    if (this.postSetupProbe) {
+      const tools = (await this.postSetupProbe()).map(({ toolId, status, version, resolvedPath, binaryDigest }) =>
+        ManifestToolObservationSchema.parse({ toolId, status, version, resolvedPath, binaryDigest }));
+      const snapshot = { phase: "after_setup" as const, observedAt: ctx.now().toISOString(), tools };
+      afterSetupTools = AfterSetupToolsSnapshotSchema.parse({ ...snapshot, snapshotDigest: digest(snapshot) });
+    }
+    const full = EnvironmentManifestSchema.safeParse({ ...body, generatedAt: ctx.now().toISOString(), lastPlan: this.lastPlan,
+      ...(afterSetupTools ? { afterSetupTools } : {}) });
     if (!full.success) return { ownedPaths: [], diagnostics: [`invalid environment manifest: ${full.error.message}`] };
     if (loaded.state !== "absent") {
       const b = await this.opts.store.backupFile(this.filePath);

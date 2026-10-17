@@ -35,7 +35,18 @@ Unsupported required pins remain visible and unhealthy.
 
 Independent component configuration continues after unrelated installer failures. The
 manifest retains its predecessor dependencies; failed or unknown predecessors block it.
-Doctor still runs and planning failures remain failed health checks. Installation and
+Doctor still runs and planning failures remain failed health checks.
+
+The saved environment manifest labels its original, approval-covered `tools` inventory as
+`toolsSnapshotPhase: "before_setup"`. An additive `afterSetupTools` snapshot contains actual
+post-configuration probe results, observation time, explicit `after_setup` phase and its own
+validated checksum. It is sampled inside the approved manifest apply after predecessor steps
+and before the final doctor. The original planned fields keep their semantic digest coverage;
+the supplemental observation is descriptive evidence and does not establish workflow success.
+Check and dry-run never refresh it or write the manifest; repeated satisfied setup retains
+the prior immutable observation time.
+
+Installation and
 native-probe tests use controlled fixtures; the launcher shell tests execute real Bash and
 Node in temporary homes. These tests do not establish live provider or full SDLC acceptance.
 

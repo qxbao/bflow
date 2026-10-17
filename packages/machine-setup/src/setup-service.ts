@@ -191,6 +191,7 @@ export class MachineSetupService {
     const components = this.options.decorateComponents?.(builtComponents.components, componentInput) ?? builtComponents.components;
     const { manifest, diagnostics } = builtComponents;
     report.diagnostics.push(...diagnostics);
+    manifest?.bindPostSetupProbe(probe);
 
     let lastDoctor: MachineDoctorReport | null = null;
     const doctor: SetupDoctor = {
