@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -15,6 +15,7 @@ import {
   git,
   hasFlock,
   IndependentGate,
+  isolatedPlatform,
   openStore,
   output,
   RecordingGitPort,
@@ -117,17 +118,40 @@ describe("bflow task plan", () => {
     expect(output(written).data).toMatchObject({ written: true, path: ".bflow/plans/spec-1.workflow.json" });
     const again = await bflow(root, svc, "task", "plan", "--spec", specPath, "--write");
     expect(again.exitCode).toBe(0);
-    expect(output(again).replayed).toBe(true);
-    expect(output(again).steps[0]!.id).toBe("idempotent-replay");
+    expect(output(again).data).toMatchObject({ written: false, unchanged: true });
+    expect(output(again).steps.at(-1)).toMatchObject({ id: "write-plan", status: "reused" });
 
+    // A manual edit after the write must be detected, not hidden behind a replayed receipt.
     const planPath = join(root, ".bflow/plans/spec-1.workflow.json");
     writeFileSync(planPath, "{}\n");
-    const changed = await bflow(root, svc, "task", "plan", "--spec", specPath, "--write", "--idempotency-key", "plan-2");
+    const changed = await bflow(root, svc, "task", "plan", "--spec", specPath, "--write");
     expect(changed.exitCode).toBe(5);
+    expect(output(changed).replayed).toBe(false);
     expect(changed.result.error?.details).toMatchObject({ reason: "permission_required", permission: "--force" });
-    const forced = await bflow(root, svc, "task", "plan", "--spec", specPath, "--write", "--force", "--idempotency-key", "plan-3");
+    expect(readFileSync(planPath, "utf8")).toBe("{}\n");
+    const forced = await bflow(root, svc, "task", "plan", "--spec", specPath, "--write", "--force");
     expect(forced.exitCode).toBe(0);
     expect(JSON.parse(readFileSync(planPath, "utf8")).id).toBe("spec-spec-1");
+  });
+
+  it("refuses plan outputs that escape the repository through symlinks", async () => {
+    const root = createRepository();
+    const specPath = writeJson(root, "spec.json", draftSpecification());
+    const svc = await services();
+    const outside = tempDir("bflow-hl-outside-");
+    symlinkSync(outside, join(root, "linked"));
+    const viaDir = await bflow(root, svc, "task", "plan", "--spec", specPath, "--write", "--out", "linked/plan.json");
+    expect(viaDir.exitCode).toBe(1);
+    expect(viaDir.result.error?.details).toMatchObject({ reason: "path_outside_repository" });
+    symlinkSync(join(outside, "target.json"), join(root, "plan-link.json"));
+    const viaFile = await bflow(root, svc, "task", "plan", "--spec", specPath, "--write", "--out", "plan-link.json");
+    expect(viaFile.exitCode).toBe(1);
+    expect(viaFile.result.error?.details).toMatchObject({ reason: "path_outside_repository" });
+    expect((await bflow(root, svc, "task", "plan", "--spec", specPath, "--write", "--out", "../escape.json")).exitCode).toBe(1);
+    expect(readdirSync(outside)).toEqual([]);
+    const inside = await bflow(root, svc, "task", "plan", "--spec", specPath, "--write", "--out", "plans/new/plan.json");
+    expect(inside.exitCode).toBe(0);
+    expect(existsSync(join(root, "plans/new/plan.json"))).toBe(true);
   });
 
   it("checks an existing workflow and reports traceability gaps as not ready", async () => {
@@ -332,6 +356,19 @@ describe("bflow verify", () => {
     expect(runners.every(r => r.calls.length === 1)).toBe(true);
   });
 
+  it("serializes concurrent verifications of one task across different change sets", async () => {
+    const { root, planPath, changePath, runners, svc } = await setup();
+    const store = await openStore(root);
+    const second = writeJson(tempDir("bflow-hl-verify-"), "change-2.json", await storedChangeSet(store, 2));
+    store.close();
+    for (const runner of runners) runner.delayMs = 300;
+    const results = await Promise.all([changePath, second].map(change =>
+      bflow(root, svc, "verify", TASK_ID, "--run", RUN_ID, "--plan", planPath, "--change-set", change)));
+    expect(results.map(r => r.exitCode).sort()).toEqual([0, 6]);
+    expect(results.find(r => r.exitCode === 6)!.result.error).toMatchObject({ code: "conflict", details: { reason: "busy" } });
+    expect(runners.every(r => r.calls.length === 1)).toBe(true);
+  });
+
   it("reports a failing check as not passed with rework required", async () => {
     const { root, planPath, changePath, runners, svc } = await setup();
     runners[0]!.mode = "failed";
@@ -402,6 +439,17 @@ describe("bflow git prepare", () => {
     expect(envelope.exitCode).toBe(3);
     expect(output(envelope).outcome).toBe("conflict_detected");
     expect(output(envelope).data.integration.conflict).toMatchObject({ paths: ["src/math/average.ts"] });
+  });
+
+  it("integrates the most recently prepared attempt of a task", async () => {
+    const { root, specPath, svc, git: port } = await implemented();
+    for (const attempt of ["attempt-2", "attempt-3"])
+      expect((await bflow(root, svc, "task", "implement", TASK_ID, "--run", RUN_ID, "--spec", specPath, "--attempt", attempt)).exitCode).toBe(0);
+    const latest = port.tasks.get(`${RUN_ID}-${TASK_ID}-attempt-3`)!;
+    latest.worktreePath = [...port.tasks.values()][0]!.worktreePath;
+    const envelope = await bflow(root, svc, "git", "prepare", RUN_ID);
+    expect(envelope.result.error?.message ?? "no error").toBe("no error");
+    expect(output(envelope).data.tasks.map((t: { taskKey: string }) => t.taskKey)).toEqual([latest.key]);
   });
 
   it("rejects uncommitted worktrees and runs without prepared tasks", async () => {
@@ -506,10 +554,11 @@ describe("bflow skills sync", () => {
     expect(envelope.result.error?.details).toMatchObject({ reason: "skills_synchronizer_not_configured" });
   });
 
-  it("syncs, then is idempotent and performs no further writes", async () => {
-    const root = createRepository();
+  it("syncs outside a repository with machine-scoped receipts, then performs no further writes", async () => {
+    const root = tempDir("bflow-hl-norepo-skills-");
     const sync = synchronizer();
-    const svc = await services({ skills: sync.factory });
+    const platform = await isolatedPlatform();
+    const svc = await services({ skills: sync.factory, platform });
     const dry = await bflow(root, svc, "skills", "sync", "--provider", "claude", "--dry-run");
     expect(output(dry).outcome).toBe("preview");
     expect(sync.calls).not.toContain("sync");
@@ -517,6 +566,8 @@ describe("bflow skills sync", () => {
     expect(first.exitCode).toBe(0);
     expect(output(first).outcome).toBe("synced");
     expect(output(first).data.ownedPaths).toEqual(["/skills/claude", "/skills/codex"]);
+    expect(readdirSync(join(platform.paths.state, "cli/commands")).some(name => name.endsWith(".json"))).toBe(true);
+    expect(existsSync(join(root, ".bflow"))).toBe(false);
     const second = await bflow(root, svc, "skills", "sync", "--provider", "codex", "--provider", "claude");
     expect(output(second).outcome).toBe("already_synced");
     expect(sync.calls.filter(c => c === "sync")).toHaveLength(1);
@@ -525,7 +576,7 @@ describe("bflow skills sync", () => {
   it("requires explicit permission for machine-wide targets", async () => {
     const root = createRepository();
     const sync = synchronizer({ machineWide: true });
-    const svc = await services({ skills: sync.factory });
+    const svc = await services({ skills: sync.factory, platform: await isolatedPlatform() });
     const blocked = await bflow(root, svc, "skills", "sync");
     expect(blocked.exitCode).toBe(5);
     expect(blocked.result.status).toBe("waiting_user");
@@ -536,7 +587,7 @@ describe("bflow skills sync", () => {
   it("reports a sync that does not converge as failed", async () => {
     const root = createRepository();
     const sync = synchronizer({ failSync: true });
-    const envelope = await bflow(root, await services({ skills: sync.factory }), "skills", "sync");
+    const envelope = await bflow(root, await services({ skills: sync.factory, platform: await isolatedPlatform() }), "skills", "sync");
     expect(envelope.exitCode).toBe(1);
     expect(envelope.result.error?.details).toMatchObject({ reason: "sync_not_converged" });
   });

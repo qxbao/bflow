@@ -9,7 +9,7 @@ import {
   validationError,
   type CommandReport
 } from "../envelope.js";
-import { guarded, requireRepository, runJournaled, StepLog, type HighLevelHandler } from "../context.js";
+import { guarded, machineJournalDirectory, runJournaled, StepLog, type HighLevelHandler } from "../context.js";
 
 export const PROVIDERS = ["claude", "codex", "agy"] as const;
 
@@ -64,9 +64,8 @@ export const skillsSync: HighLevelHandler = async (args, ctx, identity) => {
         steps: [...log.steps, { id: "sync", status: "blocked", message: "Targets are machine-wide; pass --allow-machine-scope to permit it" }],
         data: summary };
 
-    const repository = await requireRepository(ctx.cwd);
     const key = args.idempotencyKey ?? `skills.sync:${providers.join(",")}:${desired.digest}`;
-    return runJournaled({ command: "skills.sync", repositoryRoot: repository.root, key,
+    return runJournaled({ command: "skills.sync", directory: machineJournalDirectory(platform.paths.state), key,
       request: { providers, digest: desired.digest, targets: desired.targets }, retrySafe: false,
       resume: args.booleans.has("--resume"), identity, clock: ctx.clock }, async (journalLog, attempt): Promise<CommandReport> => {
       journalLog.steps.unshift(...log.steps);

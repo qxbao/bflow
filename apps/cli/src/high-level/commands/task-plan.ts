@@ -1,8 +1,8 @@
-import { mkdir, readFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative } from "node:path";
+import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { WorkflowDefinitionSchema, type JsonValue, type Specification, type WorkflowDefinition } from "@bflow/contracts";
 import type { CommandSpec } from "../args.js";
-import { errorReport, HIGH_LEVEL_EXIT_CODES, HighLevelError, permissionError, validationError, type CommandReport } from "../envelope.js";
+import { conflictError, errorReport, HIGH_LEVEL_EXIT_CODES, HighLevelError, permissionError, validationError, type CommandReport } from "../envelope.js";
 import { guarded, readWorkflowFile, requireRepository, resolveInput, runJournaled, StepLog, type HighLevelHandler } from "../context.js";
 import { requestDigest } from "../journal.js";
 import { loadSpecification, tracedTaskIds } from "./shared.js";
@@ -22,6 +22,47 @@ export const TASK_PLAN_SPEC: CommandSpec = {
 };
 
 export const PLAN_DIRECTORY = ".bflow/plans";
+
+async function readExisting(path: string): Promise<string | undefined> {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+/**
+ * The output must resolve inside the canonical repository root even through symlinks: the target
+ * itself may not be a symlink and its nearest existing ancestor must resolve inside the root.
+ */
+export async function assertPlanPathInside(root: string, out: string): Promise<string> {
+  const outside = (reason: string) => new HighLevelError(validationError(
+    `Plan output must stay inside the repository (${reason}): ${out}`, { reason: "path_outside_repository" }));
+  const canonicalRoot = await realpath(root);
+  const lexical = relative(canonicalRoot, resolve(out));
+  if (lexical === "" || lexical.startsWith("..") || isAbsolute(lexical)) throw outside("outside root");
+  try {
+    if ((await lstat(out)).isSymbolicLink()) throw outside("target is a symlink");
+  } catch (error) {
+    if (error instanceof HighLevelError) throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  let ancestor = dirname(resolve(out));
+  for (;;) {
+    try {
+      const real = await realpath(ancestor);
+      const rel = relative(canonicalRoot, real);
+      if (rel.startsWith("..") || isAbsolute(rel)) throw outside("a parent directory resolves outside the root");
+      break;
+    } catch (error) {
+      if (error instanceof HighLevelError) throw error;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      ancestor = dirname(ancestor);
+    }
+  }
+  return lexical;
+}
 
 export function defaultPlanPath(root: string, specId: string): string {
   return join(root, PLAN_DIRECTORY, `${specId.replace(/[^A-Za-z0-9._-]/g, "_")}.workflow.json`);
@@ -120,22 +161,26 @@ export const taskPlan: HighLevelHandler = async (args, ctx, identity) => {
     const repository = await requireRepository(ctx.cwd);
     const outArg = args.strings.get("--out");
     const out = outArg === undefined ? defaultPlanPath(repository.root, spec.specId) : resolveInput(ctx, outArg);
-    const rel = relative(repository.root, out);
-    if (rel.startsWith("..") || isAbsolute(rel))
-      throw new HighLevelError(validationError(`Plan output must stay inside the repository: ${out}`, { reason: "path_outside_repository" }));
-    const key = args.idempotencyKey ?? `task.plan:${spec.specId}:${requestDigest({ out: rel, document })}`;
+    const rel = await log.check("check-output-path", () => assertPlanPathInside(repository.root, out), value => ({ path: value }));
+    // The file's current content is part of the request: a replay can never report a write that a
+    // later manual edit has since undone, and an edited plan is re-evaluated (and needs --force).
+    const existing = await readExisting(out);
+    if (existing === document)
+      return { command: "task.plan", outcome: "planned", status: "succeeded", exitCode: 0,
+        steps: [...log.steps, { id: "write-plan", status: "reused", message: "Plan already up to date", data: { path: rel } }],
+        data: { ...baseData, written: false, unchanged: true, path: rel } };
+    const existingDigest = existing === undefined ? null : requestDigest(existing);
+    const key = args.idempotencyKey ?? `task.plan:${spec.specId}:${requestDigest({ out: rel, document, existingDigest })}`;
     return runJournaled({
-      command: "task.plan", repositoryRoot: repository.root, key, request: { specDigest: loaded.digest, out: rel, document },
+      command: "task.plan", repositoryRoot: repository.root, key,
+      request: { specDigest: loaded.digest, out: rel, document, existingDigest },
       retrySafe: true, resume: false, identity, clock: ctx.clock
     }, async (journalLog): Promise<CommandReport> => {
       journalLog.steps.unshift(...log.steps);
-      let existing: string | undefined;
-      try { existing = await readFile(out, "utf8"); } catch { existing = undefined; }
-      if (existing === document) {
-        journalLog.add({ id: "write-plan", status: "reused", message: "Plan already up to date", data: { path: rel } });
-        return { command: "task.plan", outcome: "planned", status: "succeeded", exitCode: 0, steps: journalLog.steps,
-          idempotencyKey: key, data: { ...baseData, written: false, unchanged: true, path: rel } };
-      }
+      // Re-read under the receipt lock; another invocation may have written meanwhile.
+      if (await readExisting(out) !== existing)
+        throw new HighLevelError(conflictError(`Plan '${rel}' changed while preparing the write; re-run the command`,
+          { reason: "plan_changed" }));
       if (existing !== undefined && !args.booleans.has("--force"))
         throw new HighLevelError(permissionError(`Plan '${rel}' exists with different content; pass --force to replace it`, "--force"));
       await journalLog.sideEffect("write-plan", async () => {

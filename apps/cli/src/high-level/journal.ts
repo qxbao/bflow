@@ -162,6 +162,19 @@ export class CommandJournal {
     throw new HighLevelError(conflictError(`Another invocation is running for idempotency key '${key}'`, { reason: "busy" }));
   }
 
+  /**
+   * Runs `action` while holding the named lock. A concurrent holder makes this throw a busy
+   * conflict instead of waiting, so callers never interleave writes to shared state.
+   */
+  async withLock<T>(name: string, action: () => Promise<T>): Promise<T> {
+    const release = await this.acquire(`lock:${name}`);
+    try {
+      return await action();
+    } finally {
+      await release();
+    }
+  }
+
   async begin(input: JournalBeginInput): Promise<JournalBegin> {
     const release = await this.acquire(input.key);
     try {
