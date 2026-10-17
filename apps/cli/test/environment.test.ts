@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -12,6 +12,7 @@ import { EnvironmentError, EnvironmentLifecycle, identifyRepository, main, named
 import { PaneManagerLifecycleAdapter } from "../src/pane-manager-integration.js";
 
 const now = "2026-10-16T00:00:00.000Z";
+const linuxIt = it.skipIf(process.platform !== "linux");
 const roles = ["conversation", "coordinator", "planner", "architect", "specifier", "reviewer", "qa"] as const;
 const activeRun: WorkflowRunSnapshot = { runId: "active-run", workflowId: "workflow", workflowVersion: "1", status: "running", tasks: [], createdAt: now, updatedAt: now, version: 2, lastEventSequence: 2 };
 function checkpoint(command: CreateCheckpointCommand): RecoveryCheckpoint {
@@ -98,7 +99,8 @@ describe("P12 repository environment lifecycle", () => {
       await expect(readFile(join(other, ".bflow/config.yaml"))).rejects.toThrow();
     } finally { await rm(other, { recursive: true, force: true }); }
   });
-  it("fails startup before launching Herdr when provider is not authenticated and redacts auth diagnostics", async () => {
+  // EnvironmentLifecycle uses the production Linux flock repository guard.
+  linuxIt("fails startup before launching Herdr when provider is not authenticated and redacts auth diagnostics", async () => {
     runner.authenticated = false;
     await expect(lifecycle.up()).rejects.toThrow("not authenticated");
     expect(runner.requests.some(request => request.args[0] === "server")).toBe(false);
@@ -108,7 +110,7 @@ describe("P12 repository environment lifecycle", () => {
     expect(report.checks.find(check => check.checkId === "auth-codex")?.status).toBe("failed");
     expect(JSON.stringify(report)).not.toContain("secret-account-information");
   });
-  it("reconciles manager_pending only with an existing validated physical manifest", async () => {
+  linuxIt("reconciles manager_pending only with an existing validated physical manifest", async () => {
     await lifecycle.up();
     // Health can mark an incomplete but idle topology up; the pending receipt
     // still requires P13 reconciliation to create the remaining role panes.
@@ -119,7 +121,7 @@ describe("P12 repository environment lifecycle", () => {
     expect(fixture.manager.up).toHaveBeenCalledTimes(2);
     expect(runner.requests.filter(request => request.args[0] === "server")).toHaveLength(1);
   });
-  it("can shut down a failed first startup using the manager's durable topology receipt", async () => {
+  linuxIt("can shut down a failed first startup using the manager's durable topology receipt", async () => {
     vi.mocked(fixture.manager.up).mockImplementation(async () => {
       fixture.set({ ...fixture.create(), status: "degraded" });
       throw new Error("role blocked after receipt persisted");
@@ -131,7 +133,7 @@ describe("P12 repository environment lifecycle", () => {
     expect(fixture.manager.down).toHaveBeenCalledTimes(1);
     expect(runner.running.has(repository.sessionName)).toBe(false);
   });
-  it("requires an authenticated Claude status payload rather than accepting exit zero alone", async () => {
+  linuxIt("requires an authenticated Claude status payload rather than accepting exit zero alone", async () => {
     const path = join(dir, ".bflow/config.yaml");
     const config = JSON.parse(await readFile(path, "utf8"));
     config.environment.roles = config.environment.roles.map((role: object) => ({ ...role, cli: "claude" }));
@@ -143,7 +145,7 @@ describe("P12 repository environment lifecycle", () => {
     expect(report.checks.find(check => check.checkId === "auth-claude")?.status).toBe("failed");
     expect(JSON.stringify(report)).not.toContain("private-account@example.test");
   });
-  it("activates the real host only after roles are ready and does not report ready when host startup fails", async () => {
+  linuxIt("activates the real host only after roles are ready and does not report ready when host startup fails", async () => {
     const activate = vi.fn(async () => { throw new Error("host startup failed"); });
     const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, activate } });
     await expect(composed.up()).rejects.toThrow("host startup failed");
@@ -151,7 +153,7 @@ describe("P12 repository environment lifecycle", () => {
     const state = JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8"));
     expect(state.phase).toBe("manager_pending");
   });
-  it("waits for authenticated native startup receipts without resending role startup", async () => {
+  linuxIt("waits for authenticated native startup receipts without resending role startup", async () => {
     const activate = vi.fn(async () => undefined).mockRejectedValueOnce(new EnvironmentError({ code: "conflict", retryable: true,
       message: "Native hook is still publishing its receipt", details: { stage: "native_startup" } }));
     const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, activate } });
@@ -159,7 +161,7 @@ describe("P12 repository environment lifecycle", () => {
     expect(activate).toHaveBeenCalledTimes(2); expect(fixture.manager.up).toHaveBeenCalledTimes(1);
     expect(runner.requests.filter(r => r.args[0] === "server")).toHaveLength(1);
   });
-  it("retains actionable native-hook context when activation readiness times out", async () => {
+  linuxIt("retains actionable native-hook context when activation readiness times out", async () => {
     const activate = vi.fn(async () => { throw new EnvironmentError({ code: "conflict", retryable: true,
       message: "Coordinator pane pane-7 is still publishing its native receipt", details: { stage: "native_startup" } }); });
     const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, activate } });
@@ -189,7 +191,7 @@ describe("P12 repository environment lifecycle", () => {
     expect(runner.requests).toHaveLength(0);
   });
   it("initializes Claude roles explicitly and preserves existing provider selection on repeat init", async () => {
-    const other = await mkdtemp("/tmp/bflow-provider-init-");
+    const other = await realpath(await mkdtemp(join(tmpdir(), "bflow-provider-init-")));
     try {
       execFileSync("git", ["init", "--quiet", other]);
       expect((await runCli(["init", "--provider", "claude"], { cwd: other })).ok).toBe(true);
@@ -201,7 +203,7 @@ describe("P12 repository environment lifecycle", () => {
     } finally { await rm(other, { recursive: true, force: true }); }
   });
   it("rejects an unsupported provider before writing any configuration", async () => {
-    const other = await mkdtemp("/tmp/bflow-provider-invalid-");
+    const other = await realpath(await mkdtemp(join(tmpdir(), "bflow-provider-invalid-")));
     try {
       execFileSync("git", ["init", "--quiet", other]);
       expect(parseCliArgs(["init", "--provider", "arbitrary-command"]).ok).toBe(false);
@@ -209,14 +211,14 @@ describe("P12 repository environment lifecycle", () => {
       await expect(readFile(join(other, ".bflow/config.yaml"))).rejects.toThrow();
     } finally { await rm(other, { recursive: true, force: true }); }
   });
-  it("starts a headless server and reuses ready roles without duplicate startup", async () => {
+  linuxIt("starts a headless server and reuses ready roles without duplicate startup", async () => {
     const first = await lifecycle.up(); const second = await lifecycle.up();
     expect(first.sessionId).toBe(second.sessionId); expect(fixture.manager.up).toHaveBeenCalledTimes(1);
     expect(runner.requests.filter((r) => r.mode === "background")).toHaveLength(1);
     const saved = SessionManifestSchema.parse(JSON.parse(await readFile(join(dir, ".bflow/state/session.json"), "utf8")));
     expect(saved.metadata?.["repositoryId"]).toBe(repository.id); expect(saved.panes).toHaveLength(roles.length);
   });
-  it("does not fabricate success when the default P13 receives malformed topology responses", async () => {
+  linuxIt("does not fabricate success when the default P13 receives malformed topology responses", async () => {
     await expect(new EnvironmentLifecycle(dir, { runner,
       openIntegration: async input => ({ manager: new PaneManagerLifecycleAdapter(input, runner) }) }).up()).rejects.toThrow();
     expect(runner.requests.some((r) => r.args[0] === "workspace" && r.args[1] === "list")).toBe(true);
@@ -225,51 +227,51 @@ describe("P12 repository environment lifecycle", () => {
     await expect(lifecycle.attach()).rejects.toThrow("Run bflow up");
     expect(runner.requests.filter((r) => r.executable === "herdr")).toHaveLength(0);
   });
-  it("focuses Conversation through the manager before opening the matching named TUI", async () => {
+  linuxIt("focuses Conversation through the manager before opening the matching named TUI", async () => {
     await lifecycle.up(); await lifecycle.attach();
     expect(fixture.manager.attach).toHaveBeenCalledWith(repository.sessionName, expect.any(Object));
     const attach = runner.requests.find((r) => r.mode === "interactive")!;
     expect(attach.args).toEqual(["session", "attach", repository.sessionName]);
     expect(attach.env?.["HERDR_SESSION"]).toBe(repository.sessionName);
   });
-  it("rejects a manager attach target belonging to another role", async () => {
+  linuxIt("rejects a manager attach target belonging to another role", async () => {
     await lifecycle.up(); vi.mocked(fixture.manager.attach).mockResolvedValue({ ok: true, value: fixture.get().panes[1]! });
     await expect(lifecycle.attach()).rejects.toThrow("incorrect Conversation");
     expect(runner.requests.some((r) => r.mode === "interactive")).toBe(false);
   });
-  it("reports blocked startup and re-observes without duplicate agents", async () => {
+  linuxIt("reports blocked startup and re-observes without duplicate agents", async () => {
     const manifest = fixture.create(); manifest.panes[1]!.transportState = "blocked";
     vi.mocked(fixture.manager.up).mockImplementation(async () => { fixture.set(manifest); return { ok: true, value: manifest }; });
     await expect(lifecycle.up()).rejects.toThrow("coordinator' is blocked");
     await expect(lifecycle.up()).rejects.toThrow("blocked"); expect(fixture.manager.up).toHaveBeenCalledTimes(2);
     const saved = JSON.parse(await readFile(join(dir, ".bflow/state/session.json"), "utf8")); expect(saved.status).toBe("degraded");
   });
-  it("does not report success when a required role is missing", async () => {
+  linuxIt("does not report success when a required role is missing", async () => {
     const partial = fixture.create(); partial.panes = partial.panes.filter((p) => p.role !== "reviewer");
     vi.mocked(fixture.manager.up).mockImplementation(async () => { fixture.set(partial); return { ok: true, value: partial }; });
     await expect(lifecycle.up(500)).rejects.toThrow("timed out");
     expect(fixture.manager.up).toHaveBeenCalledTimes(1);
   });
-  it("retains uncertain startup and forbids automatic resend", async () => {
+  linuxIt("retains uncertain startup and forbids automatic resend", async () => {
     vi.mocked(fixture.manager.up).mockImplementation(async () => new Promise(() => {}));
     await expect(lifecycle.up(500)).rejects.toThrow("timed out");
     await expect(lifecycle.up()).rejects.toThrow("refusing duplicate"); expect(fixture.manager.up).toHaveBeenCalledTimes(1);
   });
-  it("reports server launch failure without creating roles", async () => {
+  linuxIt("reports server launch failure without creating roles", async () => {
     runner.serverFails = true;
     await expect(lifecycle.up()).rejects.toThrow("cannot bind"); expect(fixture.manager.up).not.toHaveBeenCalled();
   });
-  it("refuses a foreign manifest and never touches its session", async () => {
+  linuxIt("refuses a foreign manifest and never touches its session", async () => {
     const foreign = { ...fixture.create(), sessionId: "foreign" };
     await mkdir(join(dir, ".bflow/state")); await writeFile(join(dir, ".bflow/state/session.json"), JSON.stringify(foreign));
     await expect(lifecycle.attach()).rejects.toThrow(); await expect(lifecycle.down(true)).rejects.toThrow();
     expect(runner.requests.some((r) => r.args.includes("stop"))).toBe(false);
   });
-  it("refuses an existing named session without ownership evidence", async () => {
+  linuxIt("refuses an existing named session without ownership evidence", async () => {
     runner.running.add(repository.sessionName);
     await expect(lifecycle.up()).rejects.toThrow("ownership evidence"); expect(fixture.manager.up).not.toHaveBeenCalled();
   });
-  it("serializes lifecycle mutations with a repository lock", async () => {
+  linuxIt("serializes lifecycle mutations with a repository lock", async () => {
     await mkdir(join(dir, ".bflow/state/lifecycle.lock"), { recursive: true });
     await expect(lifecycle.up()).rejects.toThrow("legacy lifecycle lock");
     expect(fixture.manager.up).not.toHaveBeenCalled();
@@ -279,17 +281,17 @@ describe("P12 repository environment lifecycle", () => {
     expect(await readFile(join(dir, ".bflow/config.yaml"), "utf8")).toBe(config);
     expect((await lifecycle.up()).status).toBe("up");
   });
-  it("requires confirmation for active runs and does not stop agents", async () => {
+  linuxIt("requires confirmation for active runs and does not stop agents", async () => {
     await lifecycle.up();
     const runtime = mockRuntime([activeRun]);
     lifecycle = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime } });
     await expect(lifecycle.down()).rejects.toThrow("1 active runs"); expect(fixture.manager.down).not.toHaveBeenCalled();
   });
-  it("never bypasses checkpoints with --yes", async () => {
+  linuxIt("never bypasses checkpoints with --yes", async () => {
     await lifecycle.up(); lifecycle = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime([activeRun]) } });
     await expect(lifecycle.down(true)).rejects.toThrow("checkpoint/quiesce API"); expect(fixture.manager.down).not.toHaveBeenCalled();
   });
-  it("checkpoints active runs before graceful shutdown and stops only the selected named session", async () => {
+  linuxIt("checkpoints active runs before graceful shutdown and stops only the selected named session", async () => {
     await lifecycle.up(); runner.running.add("other-repository");
     const save = vi.fn(async (command: CreateCheckpointCommand) => ({ ok: true as const, value: checkpoint(command) }));
     lifecycle = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime([activeRun]), quiesce: async () => ({ ok: true, value: undefined }), checkpoint: save } });
@@ -301,17 +303,17 @@ describe("P12 repository environment lifecycle", () => {
     expect((await lifecycle.down()).status).toBe("down"); expect(fixture.manager.down).toHaveBeenCalledTimes(1);
     expect(await readFile(join(dir, ".bflow/config.yaml"), "utf8")).toContain("defaultWorkflow");
   });
-  it("rejects a checkpoint for a different run", async () => {
+  linuxIt("rejects a checkpoint for a different run", async () => {
     await lifecycle.up();
     lifecycle = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime([activeRun]), quiesce: async () => ({ ok: true, value: undefined }), checkpoint: async (command) => ({ ok: true, value: { ...checkpoint(command), runId: "foreign" } }) } });
     await expect(lifecycle.down(true)).rejects.toThrow("invalid aggregate checkpoint"); expect(fixture.manager.down).not.toHaveBeenCalled();
   });
-  it("requires confirmation for dirty files and keeps them after down", async () => {
+  linuxIt("requires confirmation for dirty files and keeps them after down", async () => {
     await lifecycle.up(); await writeFile(join(dir, "keep-me.txt"), "preserve");
     await expect(lifecycle.down()).rejects.toThrow("uncommitted changes"); await lifecycle.down(true);
     expect(await readFile(join(dir, "keep-me.txt"), "utf8")).toBe("preserve");
   });
-  it("recollects and checkpoints a run that appeared before the shutdown barrier", async () => {
+  linuxIt("recollects and checkpoints a run that appeared before the shutdown barrier", async () => {
     await lifecycle.up();
     const runs: WorkflowRunSnapshot[] = [];
     const save = vi.fn(async (command: CreateCheckpointCommand) => ({ ok: true as const, value: checkpoint(command) }));
@@ -320,13 +322,13 @@ describe("P12 repository environment lifecycle", () => {
     await lifecycle.down(true);
     expect(save).toHaveBeenCalledWith(expect.objectContaining({ runId: activeRun.runId }), expect.any(Object));
   });
-  it("refuses shutdown when the Runtime barrier is not composed", async () => {
+  linuxIt("refuses shutdown when the Runtime barrier is not composed", async () => {
     await lifecycle.up();
     lifecycle = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime() } });
     await expect(lifecycle.down(true)).rejects.toThrow("shutdown barrier");
     expect(fixture.manager.down).not.toHaveBeenCalled();
   });
-  it("does not force-stop after graceful shutdown times out", async () => {
+  linuxIt("does not force-stop after graceful shutdown times out", async () => {
     await lifecycle.up(); vi.mocked(fixture.manager.down).mockImplementation(async () => new Promise(() => {}));
     await expect(lifecycle.down(true, 500)).rejects.toThrow("timed out");
     expect(runner.requests.some((r) => r.args.includes("stop"))).toBe(false);
@@ -335,11 +337,11 @@ describe("P12 repository environment lifecycle", () => {
     expect(fixture.manager.down).toHaveBeenCalledTimes(2);
     expect(runner.running.has(repository.sessionName)).toBe(false);
   });
-  it("reports live server, panes and agent state", async () => {
+  linuxIt("reports live server, panes and agent state", async () => {
     await lifecycle.up(); const status = await lifecycle.status();
     expect(status.server).toBe("running"); expect(status.liveObservation).toBe(true); expect(status.manifest?.panes).toHaveLength(7);
   });
-  it("cancels an in-flight up and resumes the same saved topology without deleting state", async () => {
+  linuxIt("cancels an in-flight up and resumes the same saved topology without deleting state", async () => {
     const abort = new AbortController(), sentinel = join(dir, "notes.txt"); await writeFile(sentinel, "uncommitted work");
     const original = fixture.manager.up;
     vi.mocked(fixture.manager.up).mockImplementationOnce(async () => {
@@ -354,7 +356,7 @@ describe("P12 repository environment lifecycle", () => {
     expect(runner.requests.filter(r => r.args[0] === "server")).toHaveLength(1);
     expect(await readFile(sentinel, "utf8")).toBe("uncommitted work");
   });
-  it("recovers a pre-manifest stopped startup and keeps configuration intact", async () => {
+  linuxIt("recovers a pre-manifest stopped startup and keeps configuration intact", async () => {
     const config = await readFile(join(dir, ".bflow/config.yaml"), "utf8");
     await mkdir(join(dir, ".bflow/state"), { recursive: true });
     await writeFile(join(dir, ".bflow/state/operation.json"), JSON.stringify({ repositoryId: repository.id, sessionName: repository.sessionName, phase: "server_starting" }));
@@ -363,7 +365,7 @@ describe("P12 repository environment lifecycle", () => {
     await lifecycle.recover(true); expect((await lifecycle.up()).status).toBe("up");
     expect(await readFile(join(dir, ".bflow/config.yaml"), "utf8")).toBe(config);
   });
-  it("stops a server-only partial startup after the runtime barrier and rejects active work", async () => {
+  linuxIt("stops a server-only partial startup after the runtime barrier and rejects active work", async () => {
     await mkdir(join(dir, ".bflow/state"), { recursive: true });
     await writeFile(join(dir, ".bflow/state/operation.json"), JSON.stringify({ repositoryId: repository.id, sessionName: repository.sessionName, phase: "manager_pending" }));
     runner.running.add(repository.sessionName);
@@ -374,7 +376,7 @@ describe("P12 repository environment lifecycle", () => {
     expect((await lifecycle.down(true)).server).toBe("stopped");
     expect(runner.running.has(repository.sessionName)).toBe(false);
   });
-  it("finishes a retained host after the Herdr server has already stopped", async () => {
+  linuxIt("finishes a retained host after the Herdr server has already stopped", async () => {
     await lifecycle.up(); runner.running.delete(repository.sessionName);
     const shutdownHost = vi.fn(async () => undefined), quiesce = vi.fn(async () => ({ ok: true as const, value: undefined }));
     const save = vi.fn(async (command: CreateCheckpointCommand) => ({ ok: true as const, value: checkpoint(command) }));

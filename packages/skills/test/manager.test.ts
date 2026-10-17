@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -23,7 +23,7 @@ const scope = {
   sessionId: "s",
 };
 async function setup(bundles: BundleFiles[] = [files()]) {
-  const root = await mkdtemp(join(tmpdir(), "skills-manager-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "skills-manager-")));
   roots.push(root);
   const store = new SkillFileStore(join(root, "store"));
   const manager = new SkillManager({

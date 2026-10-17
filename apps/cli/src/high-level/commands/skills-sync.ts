@@ -28,7 +28,7 @@ export const SKILLS_SYNC_SPEC: CommandSpec = {
 
 /** Synchronizes approved, pinned role skills through the injected P28 synchronizer port. */
 export const skillsSync: HighLevelHandler = async (args, ctx, identity) => {
-  const log = new StepLog();
+  const log = new StepLog(undefined, ctx.onProgress);
   return guarded("skills.sync", log, {}, async () => {
     const providers = [...new Set(args.lists.get("--provider") ?? PROVIDERS)].sort();
     const synchronizer = await log.check("resolve-synchronizer", () => {
@@ -67,7 +67,7 @@ export const skillsSync: HighLevelHandler = async (args, ctx, identity) => {
     const key = args.idempotencyKey ?? `skills.sync:${providers.join(",")}:${desired.digest}`;
     return runJournaled({ command: "skills.sync", directory: machineJournalDirectory(platform.paths.state), key,
       request: { providers, digest: desired.digest, targets: desired.targets }, retrySafe: false,
-      resume: args.booleans.has("--resume"), identity, clock: ctx.clock }, async (journalLog, attempt): Promise<CommandReport> => {
+      resume: args.booleans.has("--resume"), identity, clock: ctx.clock, onProgress: ctx.onProgress }, async (journalLog, attempt): Promise<CommandReport> => {
       journalLog.steps.unshift(...log.steps);
       if (attempt.resumed) {
         // Reconcile before writing: an interrupted sync may already have completed.

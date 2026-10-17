@@ -15,7 +15,8 @@ async function git(directory: string, ...args: string[]) {
   })).stdout.trim();
 }
 
-describe("GitIntegrationEngine using real isolated repositories", () => {
+// The production repository journal uses Linux flock for cross-process exclusion.
+describe.skipIf(process.platform !== "linux")("GitIntegrationEngine using real isolated repositories", () => {
   let temporary: string;
   let repository: string;
   let base: string;

@@ -127,7 +127,7 @@ function matrixData(matrix: unknown): JsonValue {
 }
 
 export const taskPlan: HighLevelHandler = async (args, ctx, identity) => {
-  const log = new StepLog();
+  const log = new StepLog(undefined, ctx.onProgress);
   return guarded("task.plan", log, {}, async () => {
     const loaded = await loadSpecification(ctx, log, args.strings.get("--spec")!);
     const { spec } = loaded;
@@ -174,7 +174,7 @@ export const taskPlan: HighLevelHandler = async (args, ctx, identity) => {
     return runJournaled({
       command: "task.plan", repositoryRoot: repository.root, key,
       request: { specDigest: loaded.digest, out: rel, document, existingDigest },
-      retrySafe: true, resume: false, identity, clock: ctx.clock
+      retrySafe: true, resume: false, identity, clock: ctx.clock, onProgress: ctx.onProgress
     }, async (journalLog): Promise<CommandReport> => {
       journalLog.steps.unshift(...log.steps);
       // Re-read under the receipt lock; another invocation may have written meanwhile.

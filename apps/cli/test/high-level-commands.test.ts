@@ -1247,7 +1247,8 @@ describe("High-Level Commands Test Suite", () => {
       expect(data.details.traceability.valid).toBe(true);
     });
 
-    it("runs task implement task-1 --run-id run-1 --spec <specPath> --json without mock ports against real engines", async () => {
+    // The production P18 integration journal requires Linux flock.
+    it.skipIf(process.platform !== "linux")("runs task implement task-1 --run-id run-1 --spec <specPath> --json without mock ports against real engines", async () => {
       const result = await runCli(
         ["task", "implement", "--task-id", "task-1", "--run-id", "run-1", "--spec", specPath, "--json"],
         { cwd: realRepoDir }

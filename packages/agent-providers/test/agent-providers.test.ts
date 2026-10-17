@@ -1,6 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   type AgentEnvironment,
@@ -39,7 +40,7 @@ describe("@bflow/agent-providers", () => {
   let testPublicKeyPem: string;
 
   beforeAll(async () => {
-    testBaseDir = join("/tmp", `bflow-provider-tests-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    testBaseDir = await realpath(await mkdtemp(join(tmpdir(), "bflow-provider-tests-")));
     testCwd = join(testBaseDir, "workspace");
     testStateDir = join(testBaseDir, "state");
 

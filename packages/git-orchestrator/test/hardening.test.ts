@@ -11,6 +11,7 @@ const execute = promisify(execFile);
 async function git(cwd: string, ...args: string[]) {
   return (await execute("git", ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", ...args], { cwd })).stdout.trim();
 }
+// Every test below exercises GitIntegrationEngine's Linux flock journal.
 let temporary: string, repository: string, artifacts: string, base: string;
 let store: FilesystemArtifactStore, engine: GitIntegrationEngine;
 beforeEach(async () => {
@@ -36,14 +37,14 @@ async function submitted() {
   await git(record.worktreePath, "add", "."); await git(record.worktreePath, "commit", "-m", "implementation");
   return { task: record, changeSet: await engine.collectTask(record.key) };
 }
-it("checks every task commit so reverting an out-of-scope edit does not conceal it", async () => {
+it.skipIf(process.platform !== "linux")("checks every task commit so reverting an out-of-scope edit does not conceal it", async () => {
   const record = await task();
   await writeFile(join(record.worktreePath, "README.md"), "unauthorized\n"); await git(record.worktreePath, "add", "."); await git(record.worktreePath, "commit", "-m", "unauthorized");
   await writeFile(join(record.worktreePath, "README.md"), "original\n");
   await writeFile(join(record.worktreePath, "src", "okay.txt"), "allowed\n"); await git(record.worktreePath, "add", "."); await git(record.worktreePath, "commit", "-m", "revert unauthorized path");
   await expect(engine.collectTask(record.key)).rejects.toThrow(/own/i);
 });
-it("preserves ignored data during cleanup and recovers an already unlocked worktree", async () => {
+it.skipIf(process.platform !== "linux")("preserves ignored data during cleanup and recovers an already unlocked worktree", async () => {
   const record = await task(); await engine.cancelTask(record.key);
   await mkdir(join(record.worktreePath, "cache")); await writeFile(join(record.worktreePath, "cache", "keep.txt"), "keep\n");
   await expect(engine.cleanupTask(record.key)).rejects.toThrow(/ignored/i);
@@ -54,13 +55,13 @@ it("preserves ignored data during cleanup and recovers an already unlocked workt
   expect((await engine.cleanupTask(record.key)).status).toBe("cleaned");
   expect(await git(repository, "rev-parse", record.branchName)).toBe(base);
 });
-it("rejects a committed task changed after its patch snapshot was submitted", async () => {
+it.skipIf(process.platform !== "linux")("rejects a committed task changed after its patch snapshot was submitted", async () => {
   const { task: record } = await submitted();
   await writeFile(join(record.worktreePath, "src", "later.txt"), "later\n"); await git(record.worktreePath, "add", "."); await git(record.worktreePath, "commit", "-m", "later");
   await expect(engine.beginIntegration({ runId: "run", integrationId: "integration", baseRevision: base, tasks: [{ taskKey: record.key }] })).rejects.toThrow(/changed|stale/i);
   expect(await git(repository, "branch", "--list", "integration/*")).toBe("");
 });
-it("requires readable evidence bytes even if the ArtifactStore catalog still resolves them", async () => {
+it.skipIf(process.platform !== "linux")("requires readable evidence bytes even if the ArtifactStore catalog still resolves them", async () => {
   const { task: record, changeSet } = await submitted();
   const integration = await engine.beginIntegration({ runId: "run", integrationId: "integration", baseRevision: base, tasks: [{ taskKey: record.key }] });
   const blob = (await readdir(artifacts)).find(path => path.startsWith("blob-")); expect(blob).toBeTruthy();
@@ -74,14 +75,14 @@ it("requires readable evidence bytes even if the ArtifactStore catalog still res
   await expect(engine.recordVerification(integration.key, verification)).rejects.toThrow(/artifact|evidence/i);
   expect((await engine.getIntegration(integration.key)).status).toBe("awaiting_verification");
 });
-it("does not interpret cleanup of a cancelled integration as successful verification", async () => {
+it.skipIf(process.platform !== "linux")("does not interpret cleanup of a cancelled integration as successful verification", async () => {
   const { task: record } = await submitted();
   const integration = await engine.beginIntegration({ runId: "run", integrationId: "integration", baseRevision: base, tasks: [{ taskKey: record.key }] });
   await engine.cancelIntegration(integration.key); await engine.cleanupIntegration(integration.key);
   await expect(engine.cleanupTask(record.key)).rejects.toThrow(/release|verification|verified/i);
   await engine.cancelTask(record.key); expect((await engine.cleanupTask(record.key)).status).toBe("cleaned");
 });
-it("checks ownership when recovering a merge committed before its receipt was persisted", async () => {
+it.skipIf(process.platform !== "linux")("checks ownership when recovering a merge committed before its receipt was persisted", async () => {
   const { task: record, changeSet } = await submitted();
   const integration = await engine.beginIntegration({ runId: "run", integrationId: "integration", baseRevision: base, tasks: [{ taskKey: record.key }] });
   // Craft the precise crash fixture: valid merge parents, but unauthorized resolver edit.
@@ -100,7 +101,7 @@ it("checks ownership when recovering a merge committed before its receipt was pe
 });
 
 for (const flag of ["--assume-unchanged", "--skip-worktree"]) {
-  it(`preserves tracked local edits hidden by ${flag} during cleanup`, async () => {
+  it.skipIf(process.platform !== "linux")(`preserves tracked local edits hidden by ${flag} during cleanup`, async () => {
     const record = await task();
     await git(record.worktreePath, "update-index", flag, "src/initial.txt");
     await writeFile(join(record.worktreePath, "src", "initial.txt"), "hidden uncommitted work\n");
@@ -111,7 +112,7 @@ for (const flag of ["--assume-unchanged", "--skip-worktree"]) {
     expect((await engine.getTask(record.key)).status).toBe("cancelled");
   });
 
-  it(`refuses a clean submission which hides edits through ${flag}`, async () => {
+  it.skipIf(process.platform !== "linux")(`refuses a clean submission which hides edits through ${flag}`, async () => {
     const { task: record } = await submitted();
     await git(record.worktreePath, "update-index", flag, "src/initial.txt");
     await writeFile(join(record.worktreePath, "src", "initial.txt"), "unsubmitted local change\n");
@@ -121,7 +122,7 @@ for (const flag of ["--assume-unchanged", "--skip-worktree"]) {
   });
 }
 
-it("rejects inherited object keys as unknown task and integration identities", async () => {
+it.skipIf(process.platform !== "linux")("rejects inherited object keys as unknown task and integration identities", async () => {
   for (const key of ["__proto__", "constructor", "toString"]) {
     await expect(engine.getTask(key)).rejects.toThrow(/unknown task/i);
     await expect(engine.getIntegration(key)).rejects.toThrow(/unknown integration/i);

@@ -26,6 +26,7 @@ export interface HighLevelContext {
   /** Explicit RuntimeService (tests, embedding hosts). Otherwise services.openRuntime is used. */
   readonly runtime?: RuntimeService | undefined;
   readonly signal?: AbortSignal | undefined;
+  readonly onProgress?: ((step: string) => void) | undefined;
 }
 
 export type HighLevelHandler = (args: ParsedHighLevelArgs, ctx: HighLevelContext, identity: CommandIdentity) => Promise<CommandReport>;
@@ -79,34 +80,45 @@ export function describeError(error: unknown): string {
 /** Ordered command steps; progress is persisted before each side-effecting step. */
 export class StepLog {
   readonly steps: CommandStep[] = [];
-  constructor(private readonly attempt?: JournalAttempt | undefined) {}
+  constructor(private readonly attempt?: JournalAttempt | undefined, private readonly onProgress?: ((step: string) => void) | undefined) {}
+
+  private progress(step: string): void {
+    try { this.onProgress?.(step.replace(/[-_]+/g, " ")); } catch { /* presentation cannot affect command execution */ }
+  }
 
   add(step: CommandStep): void {
     this.steps.push(step);
+    this.progress(`${step.id}: ${step.status}`);
   }
 
   /** Records the intent of a side effect durably, then performs it. */
   async sideEffect<T>(id: string, action: () => Promise<T>, describe?: (value: T) => JsonValue): Promise<T> {
+    this.progress(`${id}: starting`);
     await this.attempt?.progress([...this.steps, { id, status: "blocked", message: "in progress" }]);
     try {
       const value = await action();
       this.steps.push({ id, status: "succeeded", ...(describe !== undefined ? { data: describe(value) } : {}) });
       await this.attempt?.progress(this.steps);
+      this.progress(`${id}: complete`);
       return value;
     } catch (error) {
       this.steps.push({ id, status: "failed", message: describeError(error) });
+      this.progress(`${id}: failed`);
       throw error;
     }
   }
 
   /** A side-effect-free step: failures become a failed step and propagate. */
   async check<T>(id: string, action: () => Promise<T> | T, describe?: (value: T) => JsonValue): Promise<T> {
+    this.progress(`${id}: checking`);
     try {
       const value = await action();
       this.steps.push({ id, status: "succeeded", ...(describe !== undefined ? { data: describe(value) } : {}) });
+      this.progress(`${id}: complete`);
       return value;
     } catch (error) {
       this.steps.push({ id, status: "failed", message: describeError(error) });
+      this.progress(`${id}: failed`);
       throw error;
     }
   }
@@ -139,6 +151,7 @@ export interface JournaledOptions {
   readonly resume: boolean;
   readonly identity: CommandIdentity;
   readonly clock: () => Date;
+  readonly onProgress?: ((step: string) => void) | undefined;
 }
 
 /**
@@ -189,7 +202,7 @@ export async function runJournaled(
     };
   }
   const { attempt } = begin;
-  const log = new StepLog(attempt);
+  const log = new StepLog(attempt, options.onProgress);
   if (attempt.resumed)
     log.add({ id: "resume", status: "succeeded", message: "Reconciling an interrupted invocation",
       data: { previousCommandId: attempt.previous?.commandId ?? null, previousSteps: attempt.previous?.steps.map(s => s.id) ?? [] } });

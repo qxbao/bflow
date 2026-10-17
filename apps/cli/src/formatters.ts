@@ -80,25 +80,26 @@ function isHighLevelOutput(data: CliCommandData): data is HighLevelCommandOutput
   );
 }
 
-function formatHighLevelOutput(output: HighLevelCommandOutput): string {
+function formatHighLevelOutput(output: HighLevelCommandOutput, useColor = false): string {
   const lines: string[] = [];
 
   const statusStr = output.status.toUpperCase();
-  lines.push(`Command:   ${output.command}`);
-  lines.push(`Status:    ${statusStr}`);
-  lines.push(`CommandId: ${output.commandId}`);
-  lines.push(`CorrId:    ${output.correlationId}`);
+  const statusPaint = output.status === "succeeded" ? green : output.status === "failed" || output.status === "unknown" ? red : yellow;
+  lines.push(`${useColor ? cyan(bold("Command:"), true) : "Command:"}   ${humanText(output.command, 100)}`);
+  lines.push(`${useColor ? cyan(bold("Status:"), true) : "Status:"}    ${useColor ? statusPaint(statusStr, true) : statusStr}`);
+  lines.push(`CommandId: ${humanText(output.commandId, 100)}`);
+  lines.push(`CorrId:    ${humanText(output.correlationId, 100)}`);
   if (output.runId) {
-    lines.push(`Run ID:    ${output.runId}`);
+    lines.push(`Run ID:    ${humanText(output.runId, 100)}`);
   }
   if (output.taskId) {
-    lines.push(`Task ID:   ${output.taskId}`);
+    lines.push(`Task ID:   ${humanText(output.taskId, 100)}`);
   }
   if (output.reusedReceipt) {
-    lines.push(`Notice:    Reused prior successful receipt (${output.idempotencyKey})`);
+    lines.push(`Notice:    Reused prior successful receipt (${humanText(output.idempotencyKey, 100)})`);
   }
   if (output.resumedFromStep) {
-    lines.push(`Notice:    Resumed from step '${output.resumedFromStep}'`);
+    lines.push(`Notice:    Resumed from step '${humanText(output.resumedFromStep, 100)}'`);
   }
 
   if (output.steps && output.steps.length > 0) {
@@ -107,9 +108,10 @@ function formatHighLevelOutput(output: HighLevelCommandOutput): string {
     for (const step of output.steps) {
       const stepStatus = step.status.toUpperCase().padEnd(9);
       const mutating = step.mutating ? " [mutating]" : "";
-      lines.push(`  - [${stepStatus}] ${step.stepId}: ${step.name}${mutating}`);
+      const paint = step.status === "succeeded" ? green : step.status === "failed" ? red : yellow;
+      lines.push(`  - [${useColor ? paint(stepStatus, true) : stepStatus}] ${humanText(step.stepId, 100)}: ${humanText(step.name, 180)}${mutating}`);
       if (step.error) {
-        lines.push(`      Error: [${step.error.code}] ${step.error.message}`);
+        lines.push(`      ${useColor ? red("Error:", true) : "Error:"} [${humanText(step.error.code, 60)}] ${humanText(step.error.message, 220)}`);
       }
     }
   }
@@ -122,9 +124,9 @@ function formatHighLevelOutput(output: HighLevelCommandOutput): string {
         const git = details.git as any;
         lines.push("");
         lines.push("Repository Summary:");
-        if (repo?.root) lines.push(`  Root:    ${repo.root}`);
-        if (repo?.sessionName) lines.push(`  Session: ${repo.sessionName}`);
-        if (git?.branch) lines.push(`  Branch:  ${git.branch} (${git.head ? git.head.slice(0, 8) : "unknown"})`);
+        if (repo?.root) lines.push(`  Root:    ${humanText(repo.root, 220)}`);
+        if (repo?.sessionName) lines.push(`  Session: ${humanText(repo.sessionName, 100)}`);
+        if (git?.branch) lines.push(`  Branch:  ${humanText(git.branch, 100)} (${git.head ? humanText(git.head, 12) : "unknown"})`);
         if (git !== undefined && "dirty" in git) lines.push(`  Dirty:   ${git.dirty ? "yes" : "clean"}`);
         break;
       }
@@ -134,7 +136,7 @@ function formatHighLevelOutput(output: HighLevelCommandOutput): string {
           lines.push("");
           lines.push(`Planned Tasks (${wf.tasks.length}):`);
           for (const t of wf.tasks) {
-            lines.push(`  - ${t.id ?? t.taskId}: ${t.title ?? t.name ?? ""}`);
+            lines.push(`  - ${humanText(t.id ?? t.taskId, 100)}: ${humanText(t.title ?? t.name ?? "", 180)}`);
           }
         }
         break;
@@ -145,29 +147,29 @@ function formatHighLevelOutput(output: HighLevelCommandOutput): string {
         const wtPath = (details.worktree as any)?.worktreePath ?? (details.worktree as any)?.path ?? details.worktree;
         lines.push("");
         lines.push("Implementation Summary:");
-        if (execStatus?.taskId ?? execStatus?.id) lines.push(`  Task:     ${execStatus?.taskId ?? execStatus?.id}`);
-        if (tdd?.mode) lines.push(`  TDD Mode: ${tdd.mode}`);
-        if (wtPath) lines.push(`  Worktree: ${wtPath}`);
+        if (execStatus?.taskId ?? execStatus?.id) lines.push(`  Task:     ${humanText(execStatus?.taskId ?? execStatus?.id, 100)}`);
+        if (tdd?.mode) lines.push(`  TDD Mode: ${humanText(tdd.mode, 80)}`);
+        if (wtPath) lines.push(`  Worktree: ${humanText(wtPath, 220)}`);
         break;
       }
       case "verify": {
         const res = (details.result ?? details.verificationResult) as any;
         lines.push("");
         lines.push("Verification Result:");
-        if (res?.status) lines.push(`  Status:    ${String(res.status).toUpperCase()}`);
-        if (res?.summary) lines.push(`  Summary:   ${res.summary}`);
+        if (res?.status) lines.push(`  Status:    ${humanText(String(res.status).toUpperCase(), 60)}`);
+        if (res?.summary) lines.push(`  Summary:   ${humanText(res.summary, 220)}`);
         if (res?.score !== undefined) lines.push(`  Score:     ${res.score}`);
         break;
       }
       case "git prepare": {
         lines.push("");
         lines.push("Git Integration Summary:");
-        if (details.targetBranch) lines.push(`  Target Branch: ${details.targetBranch}`);
+        if (details.targetBranch) lines.push(`  Target Branch: ${humanText(details.targetBranch, 120)}`);
         if (details.conflictsDetected !== undefined) {
           lines.push(`  Conflicts:     ${details.conflictsDetected ? "YES (conflicts found)" : "none"}`);
         }
         if (Array.isArray(details.branches)) {
-          lines.push(`  Branches (${details.branches.length}): ${details.branches.join(", ")}`);
+          lines.push(`  Branches (${details.branches.length}): ${details.branches.map((x: unknown) => humanText(x, 100)).slice(0, 10).join(", ")}`);
         }
         break;
       }
@@ -179,7 +181,7 @@ function formatHighLevelOutput(output: HighLevelCommandOutput): string {
         for (const s of services) {
           const sName = s.serviceId ?? s.name ?? "unknown";
           const sStatus = String(s.status ?? (s.healthy !== undefined ? (s.healthy ? "healthy" : "unhealthy") : "unknown")).toUpperCase();
-          lines.push(`  - ${sName}: ${sStatus}`);
+          lines.push(`  - ${humanText(sName, 100)}: ${humanText(sStatus, 60)}`);
         }
         break;
       }
@@ -192,19 +194,19 @@ function formatHighLevelOutput(output: HighLevelCommandOutput): string {
           const tName = t.toolId ?? t.name ?? "unknown";
           const tStatus = String(t.status ?? (t.available !== undefined ? (t.available ? "available" : "missing") : "unknown")).toUpperCase();
           const tVer = t.version ? ` (v${t.version})` : "";
-          lines.push(`  - ${tName}: ${tStatus}${tVer}`);
+          lines.push(`  - ${humanText(tName, 100)}: ${humanText(tStatus, 60)}${humanText(tVer, 80)}`);
         }
         break;
       }
       case "skills sync": {
         lines.push("");
         lines.push("Skills Synchronization Summary:");
-        if (details.mode) lines.push(`  Mode:     ${details.mode}`);
-        if (details.provider) lines.push(`  Provider: ${details.provider}`);
+        if (details.mode) lines.push(`  Mode:     ${humanText(details.mode, 80)}`);
+        if (details.provider) lines.push(`  Provider: ${humanText(details.provider, 80)}`);
         if (Array.isArray(details.skills)) {
-          lines.push(`  Skills (${details.skills.length}): ${details.skills.map((s: any) => s.skillId ?? s.name ?? s).join(", ")}`);
+          lines.push(`  Skills (${details.skills.length}): ${details.skills.slice(0, 10).map((s: any) => humanText(s.skillId ?? s.name ?? s, 100)).join(", ")}`);
         } else if (Array.isArray(details.syncedSkills)) {
-          lines.push(`  Synced Skills (${details.syncedSkills.length}): ${details.syncedSkills.join(", ")}`);
+          lines.push(`  Synced Skills (${details.syncedSkills.length}): ${details.syncedSkills.slice(0, 10).map((s: unknown) => humanText(s, 100)).join(", ")}`);
         }
         if (Array.isArray(details.syncedManifests)) {
           lines.push(`  Synced Manifests: ${details.syncedManifests.length}`);
@@ -227,7 +229,7 @@ function formatHighLevelOutput(output: HighLevelCommandOutput): string {
         for (const p of providers) {
           const pName = p.provider ?? p.providerId ?? p.name ?? "unknown";
           const pStatus = String(p.status ?? (p.healthy !== undefined ? (p.healthy ? "ready" : "blocked") : "unknown")).toUpperCase();
-          lines.push(`  - ${pName}: ${pStatus}`);
+          lines.push(`  - ${humanText(pName, 100)}: ${humanText(pStatus, 60)}`);
         }
         break;
       }
@@ -532,29 +534,41 @@ export function formatDownOutput(data: SessionManifest | EnvironmentStatus, useC
   return lines.join("\n");
 }
 
-function formatSetupOutput(output: SetupCommandOutput): string {
+function formatSetupOutput(output: SetupCommandOutput, useColor = false): string {
   const lines: string[] = [];
-  lines.push(`Setup Mode:         ${output.mode.toUpperCase()}`);
-  lines.push(`Machine ID:         ${output.machineId}`);
-  lines.push(`Operating System:   ${output.os}`);
-  lines.push(`Service Manager:    ${output.serviceManagerKind}`);
+  const positive = (value: string) => useColor ? green(value, true) : value;
+  const warning = (value: string) => useColor ? yellow(value, true) : value;
+  const heading = (value: string) => useColor ? cyan(value, true) : value;
+  lines.push(`${heading("Setup Mode:")}         ${humanText(output.mode.toUpperCase())}`);
+  lines.push(`${heading("Machine ID:")}         ${sanitizeIdentifier(output.machineId)}`);
+  lines.push(`${heading("Operating System:")}   ${sanitizeIdentifier(output.os)}`);
+  lines.push(`${heading("Service Manager:")}    ${sanitizeIdentifier(output.serviceManagerKind)}`);
   if (output.plan) {
-    lines.push(`Plan ID:            ${output.plan.planId} (revision ${output.plan.revision})`);
-    lines.push(`Plan Steps:         ${output.plan.steps.length}`);
+    lines.push(`${heading("Plan ID:")}            ${sanitizeIdentifier(output.plan.planId)} (revision ${output.plan.revision})`);
+    lines.push(`${heading("Plan Steps:")}         ${output.plan.steps.length}`);
     for (const step of output.plan.steps) {
-      const approval = step.requiresApproval ? " [requires approval]" : "";
-      lines.push(`  - [${step.action}] ${step.stepId} (${step.componentId})${approval}`);
+      const approval = step.requiresApproval ? ` ${warning("[requires approval]")}` : "";
+      const status = step.requiresApproval ? warning(sanitizeIdentifier(step.action)) : sanitizeIdentifier(step.action);
+      lines.push(`  - [${status}] ${sanitizeIdentifier(step.stepId)} (${sanitizeIdentifier(step.componentId)})${approval}`);
     }
   }
   if (output.receipt) {
-    lines.push(`Receipt ID:         ${output.receipt.receiptId} (status: ${output.receipt.status})`);
+    const receiptStatus = output.receipt.status === "applied" || output.receipt.status === "already_satisfied"
+      ? positive(output.receipt.status) : output.receipt.status === "failed"
+        ? (useColor ? red(output.receipt.status, true) : output.receipt.status) : warning(output.receipt.status);
+    lines.push(`${heading("Receipt ID:")}         ${sanitizeIdentifier(output.receipt.receiptId)} (status: ${receiptStatus})`);
   }
   if (output.tools && output.tools.length > 0) {
     lines.push("");
     lines.push("Tools:");
     for (const tool of output.tools) {
-      const ver = tool.version ? ` (${tool.version})` : "";
-      lines.push(`  - ${tool.toolId}: ${tool.status}${ver}`);
+      const ver = tool.version ? ` (${sanitizeIdentifier(tool.version)})` : "";
+      const status = ["present", "installed", "ready", "healthy", "available"].includes(tool.status.toLowerCase())
+        ? positive(sanitizeIdentifier(tool.status))
+        : ["failed", "missing", "unavailable", "error"].includes(tool.status.toLowerCase())
+          ? (useColor ? red(sanitizeIdentifier(tool.status), true) : sanitizeIdentifier(tool.status))
+          : warning(sanitizeIdentifier(tool.status));
+      lines.push(`  - ${sanitizeIdentifier(tool.toolId)}: ${status}${ver}`);
     }
   }
   lines.push("");
@@ -562,19 +576,19 @@ function formatSetupOutput(output: SetupCommandOutput): string {
   lines.push(`  Catalog Loaded:   ${output.skills.catalogLoaded ? "yes" : "no"}`);
   lines.push(`  Skill Count:      ${output.skills.skillCount}`);
   lines.push(`  Synced Manifests: ${output.skills.syncedManifests}`);
-  lines.push(`  Store Root:       ${output.skills.storeRoot}`);
+  lines.push(`  Store Root:       ${sanitizeIdentifier(output.skills.storeRoot)}`);
 
   if (output.diagnostics && output.diagnostics.length > 0) {
     lines.push("");
     lines.push("Diagnostics:");
     for (const diag of output.diagnostics) {
-      lines.push(`  - ${diag}`);
+      lines.push(`  - ${humanText(diag, 250)}`);
     }
   }
   return lines.join("\n");
 }
 
-function formatDoctorGroups(groups: unknown): string[] {
+function formatDoctorGroups(groups: unknown, useColor = false): string[] {
   const lines: string[] = [];
   lines.push("");
   lines.push("Component Groups:");
@@ -585,12 +599,13 @@ function formatDoctorGroups(groups: unknown): string[] {
     const component = humanText(item.component ?? item.name ?? item.toolId ?? item.checkId ?? "unknown");
     const ver = item.detected_version ?? item.version ?? item.detectedVersion;
     const verStr = ver ? ` (version: ${humanText(ver)})` : "";
-    lines.push(`  - [${status}] ${component}${verStr}`);
+    const statusColor = status === "PASSED" || status === "READY" || status === "HEALTHY" ? green : status === "FAILED" || status === "BLOCKED" ? red : yellow;
+    lines.push(`  - [${useColor ? statusColor(status, true) : status}] ${component}${verStr}`);
     if (item.reason ?? item.message) {
       lines.push(`      Reason: ${humanText(item.reason ?? item.message)}`);
     }
     if (item.remediation) {
-      lines.push(`      Remediation: ${humanText(item.remediation)}`);
+      lines.push(`      ${useColor ? cyan("Remediation:", true) : "Remediation:"} ${humanText(item.remediation)}`);
     }
     if (item.repair_command ?? item.repairCommand) {
       lines.push(`      Repair: ${humanText(item.repair_command ?? item.repairCommand)}`);
@@ -601,14 +616,14 @@ function formatDoctorGroups(groups: unknown): string[] {
     for (const group of groups) {
       if (group && typeof group === "object") {
         const title = group.group ?? group.name ?? group.title ?? "Group";
-        lines.push(`\n[${humanText(title)}]`);
+        lines.push(`\n[${useColor ? cyan(humanText(title), true) : humanText(title)}]`);
         const items = Array.isArray(group.items) ? group.items : Array.isArray(group.checks) ? group.checks : [group];
         for (const item of items) renderItem(item);
       }
     }
   } else if (groups && typeof groups === "object") {
     for (const [groupName, groupContent] of Object.entries(groups)) {
-      lines.push(`\n[${humanText(groupName)}]`);
+      lines.push(`\n[${useColor ? cyan(humanText(groupName), true) : humanText(groupName)}]`);
       if (Array.isArray(groupContent)) {
         for (const item of groupContent) renderItem(item);
       } else if (groupContent && typeof groupContent === "object") {
@@ -654,18 +669,18 @@ export function formatCommandSuccess(
   }
 
   if (isSetupOutput(data)) {
-    return formatSetupOutput(data);
+    return formatSetupOutput(data, useColor);
   }
 
   if (isHighLevelOutput(data)) {
-    return formatHighLevelOutput(data);
+    return formatHighLevelOutput(data, useColor);
   }
 
   if (isDoctorReport(data)) {
     const lines = [formatDoctorReport(data, useColor)];
     const groups = data.metadata?.["groups"];
     if (command === "doctor" && groups) {
-      lines.push(...formatDoctorGroups(groups));
+      lines.push(...formatDoctorGroups(groups, useColor));
     }
     return lines.join("\n");
   }

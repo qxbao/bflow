@@ -68,7 +68,7 @@ function integrationSummary(record: IntegrationRecord): JsonValue {
 }
 
 export const gitPrepare: HighLevelHandler = async (args, ctx, identity) => {
-  const log = new StepLog();
+  const log = new StepLog(undefined, ctx.onProgress);
   const runId = args.positionals["run-id"]!;
   return guarded("git.prepare", log, { runId }, async () => {
     const repository = await requireRepository(ctx.cwd);
@@ -137,7 +137,7 @@ export const gitPrepare: HighLevelHandler = async (args, ctx, identity) => {
       const key = args.idempotencyKey ?? `git.prepare:${runId}:${integrationId}`;
       return await runJournaled({ command: "git.prepare", repositoryRoot: repository.root, key,
         request: JSON.parse(JSON.stringify(integrationRequest)) as JsonValue, retrySafe: false,
-        resume: args.booleans.has("--resume"), identity, clock: ctx.clock }, async (journalLog): Promise<CommandReport> => {
+        resume: args.booleans.has("--resume"), identity, clock: ctx.clock, onProgress: ctx.onProgress }, async (journalLog): Promise<CommandReport> => {
         journalLog.steps.unshift(...log.steps);
         for (const item of prepared)
           await journalLog.sideEffect(`collect-submission:${item.taskId}`, async () => {

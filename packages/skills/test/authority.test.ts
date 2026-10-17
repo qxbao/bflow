@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -38,7 +38,7 @@ function change(f: BundleFiles, patch: Record<string, unknown>): BundleFiles {
   };
 }
 async function store() {
-  const root = await mkdtemp(join(tmpdir(), "skills-authority-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "skills-authority-")));
   roots.push(root);
   return new SkillFileStore(join(root, "store"));
 }

@@ -12,7 +12,8 @@ const temporaryDirectories: string[] = [];
 const command = async (cwd: string, ...args: string[]) => (await execute("git", args, { cwd })).stdout.trim();
 afterEach(async () => { for (const path of temporaryDirectories.splice(0)) await rm(path, { recursive: true, force: true }); });
 
-describe("SIGKILL at persisted merge boundaries", () => {
+// This process-crash contract depends on the production journal's Linux flock lock.
+describe.skipIf(process.platform !== "linux")("SIGKILL at persisted merge boundaries", () => {
   for (const point of ["before", "after", "during"] as const) {
     it(`reconciles a process killed ${point} the Git merge without duplicate commits or lost evidence`, async () => {
       const temporary = await mkdtemp(join(tmpdir(), "bflow-p18-crash-")); temporaryDirectories.push(temporary);

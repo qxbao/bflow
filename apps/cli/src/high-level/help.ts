@@ -1,7 +1,7 @@
 import type { HighLevelCommandName } from "./envelope.js";
 
 const COMMON = `Common options:
-  -j, --json                 Print the JSON envelope (see docs/guide/high-level-commands.md)
+  -j, --json                 Print the JSON envelope for agents and scripts; use the process exit code for outcome
   --correlation-id <id>      Correlation ID propagated into the result (default: generated)
   --idempotency-key <key>    Override the deterministic idempotency key of mutating commands
   -h, --help                 Show this help

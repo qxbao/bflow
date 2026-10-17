@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8,10 +9,11 @@ import { lifecycleLockStatus, withLifecycleLock } from "../src/lifecycle-lock.js
 const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
 async function fixture() {
-  const dir = await mkdtemp("/tmp/bflow-lock-recovery-"); cleanup.push(() => rm(dir, { recursive: true, force: true }));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), "bflow-lock-recovery-"))); cleanup.push(() => rm(dir, { recursive: true, force: true }));
   await writeFile(join(dir, "sentinel"), "preserve"); return dir;
 }
-describe("lifecycle kernel lock and legacy migration", () => {
+// The lock contract under test is specifically the kernel flock implementation.
+describe.skipIf(process.platform !== "linux")("lifecycle kernel lock and legacy migration", () => {
   it("serializes concurrent commands and keeps a stable guard inode after release", async () => {
     const dir = await fixture(); let release!: () => void, ready!: () => void;
     const entered = new Promise<void>(resolve => ready = resolve);
@@ -44,13 +46,21 @@ describe("lifecycle kernel lock and legacy migration", () => {
     expect(await readFile(join(legacy, "unknown"), "utf8")).toBe("keep");
     expect(await readFile(join(dir, "sentinel"), "utf8")).toBe("preserve");
   });
-  it("rejects symlink state directories and owner receipts without changing their targets", async () => {
+  it("rejects a symlink owner receipt without changing its target", async () => {
+    const dir = await fixture(), outside = await fixture();
+    await symlink(join(outside, "sentinel"), join(dir, "lifecycle-owner.json"));
+    await expect(withLifecycleLock(dir, async () => undefined)).rejects.toThrow();
+    expect(await readFile(join(outside, "sentinel"), "utf8")).toBe("preserve");
+  });
+});
+
+// State-root symlink rejection happens before lock acquisition and is portable across POSIX hosts.
+describe.skipIf(process.platform === "win32")("portable lifecycle lock path validation", () => {
+  it("rejects a symlink state directory without changing its target", async () => {
     const dir = await fixture(), outside = await fixture();
     await symlink(outside, join(dir, "state"));
     await expect(withLifecycleLock(join(dir, "state"), async () => undefined)).rejects.toThrow("symlinks");
     await expect(stat(join(outside, "lifecycle.guard"))).rejects.toMatchObject({ code: "ENOENT" });
-    await symlink(join(outside, "sentinel"), join(dir, "lifecycle-owner.json"));
-    await expect(withLifecycleLock(dir, async () => undefined)).rejects.toThrow();
     expect(await readFile(join(outside, "sentinel"), "utf8")).toBe("preserve");
   });
 });

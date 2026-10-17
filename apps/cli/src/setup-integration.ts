@@ -75,11 +75,14 @@ export function issueSetupApproval(
 
 export async function executeSetupCommand(
   args: SetupCommandArgs,
-  context?: CliContext
+  context?: CliContext,
+  onProgress?: ((step: string) => void) | undefined
 ): Promise<SetupCommandOutput> {
   const diagnostics: string[] = [];
+  const progress = (step: string) => { try { onProgress?.(step); } catch { /* presentation must not affect setup */ } };
 
   // 1. Resolve Platform
+  progress("Checking machine platform and setup scope...");
   let platform: PlatformProfile = context?.setup?.platform ?? detectPlatform(defaultHostEnvironment());
   const isolatedRoot = context?.setup?.isolatedRoot ?? process.env.BFLOW_HOME;
   if (isolatedRoot) {
@@ -111,6 +114,7 @@ export async function executeSetupCommand(
   await mkdir(platform.paths.data, { recursive: true });
 
   // 2. Resolve Runner & Store
+  progress("Checking setup state and approvals...");
   const runner: CommandRunner = context?.setup?.runner ?? new NodeCommandRunner();
   const readOnly = args.mode === "check" || args.mode === "dry_run";
   const store = new SetupStateStore(platform.paths, {
@@ -120,6 +124,7 @@ export async function executeSetupCommand(
   });
 
   // 3. Resolve Tool Installers & Capabilities
+  progress("Checking pinned tool installers...");
   const toolMod = await loadToolInstallerModule();
   const capabilityRegistryPath = join(platform.paths.state, "tool-capabilities.json");
   const capabilityRegistry = new toolMod.FileToolCapabilityRegistry(capabilityRegistryPath);
@@ -144,15 +149,18 @@ export async function executeSetupCommand(
   }
 
   // 4. Resolve Service Manager
+  progress("Checking service manager capabilities...");
   const serviceManager: ServiceManager =
     context?.setup?.serviceManager ?? selectServiceManager(platform, runner, store);
 
   // 5. Resolve Providers
+  progress("Checking agent provider capabilities...");
   const providers: AgentProviderRegistry =
     context?.setup?.providers ?? createDefaultProviderRegistry();
   void providers;
 
   // 6. Resolve Skills Catalog & Synchronizer
+  progress("Checking approved skills catalog...");
   const skillsMod = await loadSkillsModule();
   const candidateDirs = [
     args.catalogDir,
@@ -220,6 +228,7 @@ export async function executeSetupCommand(
   }
 
   // 7. Resolve Machine Config
+  progress("Loading machine configuration...");
   const configPath = join(platform.paths.config, MACHINE_CONFIG_FILE);
   let machineConfig: MachineConfig = context?.setup?.machineConfig ?? defaultMachineConfig();
   if (!context?.setup?.machineConfig && existsSync(configPath)) {
@@ -228,6 +237,7 @@ export async function executeSetupCommand(
   }
 
   // 8. Execute Machine Setup
+  progress(`Building ${args.mode} setup plan...`);
   const machineSetup: any =
     context?.setup?.machineSetup ??
     new MachineSetupService({
@@ -259,8 +269,10 @@ export async function executeSetupCommand(
         await store.writeApproval(approval);
       }
       if (typeof machineSetup.apply === "function") {
+        progress("Applying approved setup steps...");
         const applyRes = await machineSetup.apply({ mode: args.mode, config: machineConfig, approval });
         if (applyRes) {
+          progress("Checking setup receipt...");
           receipt =
             applyRes.receipt ??
             (Array.isArray(applyRes.receipts)
@@ -275,6 +287,7 @@ export async function executeSetupCommand(
     }
   } else if (typeof machineSetup.run === "function") {
     // Standard MachineSetupService execution
+    progress(`Running ${args.mode} setup checks...`);
     const report = await machineSetup.run({
       mode: args.mode,
       assumeYes: args.yes
@@ -287,6 +300,7 @@ export async function executeSetupCommand(
 
   // Ensure plan is always populated
   if (!plan) {
+    progress("Finalizing setup plan...");
     const built = await buildSetupPlan({
       platform,
       runner,
@@ -327,6 +341,7 @@ export async function executeSetupCommand(
 
   if (toolObservations.length === 0) {
     try {
+      progress("Checking installed tools...");
       toolObservations = await probeTools(platform, runner, { required: new Set() });
     } catch {
       // Ignore probe failures in test/isolated environments
@@ -341,6 +356,8 @@ export async function executeSetupCommand(
       ...(version ? { version } : {})
     };
   });
+
+  progress("Summarizing setup results...");
 
   return {
     mode: args.mode,

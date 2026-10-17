@@ -1,4 +1,5 @@
 import { mkdtemp, mkdir, writeFile, rm, realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
@@ -50,7 +51,7 @@ class Panes implements PanePolicy {
 }
 
 async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean; humanApproval?: boolean; behavioral?: BehavioralCommand } = {}) {
-  const root = await mkdtemp("/tmp/bflow-p19-");
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-p19-")));
   const repository = join(root, "repo"); await mkdir(repository); git(repository, "init", "-b", "main");
   git(repository, "config", "user.name", "Test"); git(repository, "config", "user.email", "test@example.test");
   await writeFile(join(repository, "guide.md"), "initial\n");
@@ -298,7 +299,8 @@ async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json", maxIt
   return { ...f, command, developer, qa, development, original, testPath, sourcePath, testSource, currentHead, edit, commit, addTests, request, measure, tickWithReviews };
 }
 
-describe("connected independent policy phases", () => {
+// AgenticJournal persists changes under Linux flock; these integration cases exercise that boundary.
+describe.skipIf(process.platform !== "linux")("connected independent policy phases", () => {
   it.each(["node_tap", "vitest_json"] as const)("%s follows real Red/Green/Refactor through QA, borrowed notices, gates and human delivery", async reporter => {
     const f = await connectedPhaseFixture(reporter);
     expect((await f.dossier()).strategy.tddDecision.mode).toBe("required");
@@ -374,7 +376,7 @@ describe("connected independent policy phases", () => {
 });
 
 
-describe("P19 integrated Agentic SDLC", () => {
+describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () => {
   it("conversation-only creates no workflow", async () => {
     const f = await fixture();
     const before = await f.runtime.inspect() as any;
@@ -783,7 +785,8 @@ describe("P19 integrated Agentic SDLC", () => {
 
 });
 
-it("recovers the exact failed phase after a crash following lease release without duplicating repair notices", async () => {
+// This recovery path acquires AgenticJournal.exclusive, which uses Linux flock.
+it.skipIf(process.platform !== "linux")("recovers the exact failed phase after a crash following lease release without duplicating repair notices", async () => {
   const f = await fixture({ tdd: true });
   f.ports.roleCapabilities.qa = ["verification", "testing"];
   await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();

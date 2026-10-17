@@ -229,6 +229,13 @@ Every command supports `--help` and `--json`. With `--json` the result is one
 (must be Git-ignored), replay completed requests, serialize concurrent invocations and refuse to
 repeat an interrupted non-idempotent step until `--resume`.
 
+Agents and scripts should pass `--json`, parse the single envelope, and use the process exit
+code as the authoritative command result. Human output summarizes the command, its ordered
+steps, relevant domain findings and any next action; it does not print the complete result data.
+Color is resolved per output stream, and progress appears only on interactive human stderr. A
+successful command can still report a negative domain outcome such as `not_passed` or
+`not_ready`; those outcomes retain their documented exit codes.
+
 See [docs/command-reference.md](docs/command-reference.md), the generated
 [docs/command-reference.json](docs/command-reference.json) (checked by a unit test), and
 [COMMAND_REFERENCE.md](./COMMAND_REFERENCE.md) for the full contract and skill bindings,

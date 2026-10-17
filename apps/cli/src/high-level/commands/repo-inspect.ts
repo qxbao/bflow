@@ -62,7 +62,7 @@ async function workspacePackages(root: string): Promise<string[]> {
 
 /** Read-only repository, Git and project context inspection. */
 export const repoInspect: HighLevelHandler = async (_args, ctx) => {
-  const log = new StepLog();
+  const log = new StepLog(undefined, ctx.onProgress);
   return guarded("repo.inspect", log, {}, async () => {
     const repository = await log.check("identify-repository", () => requireRepository(ctx.cwd),
       value => ({ root: value.root, repositoryId: value.id }));

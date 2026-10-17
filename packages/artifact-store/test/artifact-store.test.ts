@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { link, mkdir, mkdtemp, open, readdir, readFile, rm, stat, symlink, unlink, writeFile, type FileHandle } from "node:fs/promises";
+import { link, mkdir, mkdtemp, open, readdir, readFile, realpath, rm, stat, symlink, unlink, writeFile, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
@@ -31,7 +31,7 @@ describe("Filesystem ArtifactStore", () => {
   let store: FilesystemArtifactStore;
   const stores: FilesystemArtifactStore[] = [];
   beforeEach(async () => {
-    directory = await mkdtemp(join(tmpdir(), "bflow-p03-artifacts-")); root = join(directory, "store");
+    directory = await realpath(await mkdtemp(join(tmpdir(), "bflow-p03-artifacts-"))); root = join(directory, "store");
     store = value(await openFilesystemArtifactStore({ root, storeId: "local" })); stores.push(store);
   });
   afterEach(async () => { for (const item of stores.splice(0)) item.close(); await rm(directory, { recursive: true, force: true }); });

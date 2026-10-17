@@ -74,7 +74,7 @@ async function writeCycle(path: string, cycle: VerificationCycle): Promise<void>
 
 /** Runs the VerificationPlan checks through the P17 engine and returns its structured result. */
 export const verify: HighLevelHandler = async (args, ctx, identity) => {
-  const log = new StepLog();
+  const log = new StepLog(undefined, ctx.onProgress);
   const taskId = args.positionals["task-id"]!;
   const runId = args.strings.get("--run")!;
   const partial = { runId, taskId };
@@ -143,7 +143,7 @@ export const verify: HighLevelHandler = async (args, ctx, identity) => {
       const journal = await openJournal({ repositoryRoot: repository.root });
       return await journal.withLock(`verify-cycle:${runId}:${taskId}`, () => runJournaled({ command: "verify",
         repositoryRoot: repository.root, key, request, retrySafe: true, resume: false,
-        identity, clock: ctx.clock }, async (journalLog): Promise<CommandReport> => {
+        identity, clock: ctx.clock, onProgress: ctx.onProgress }, async (journalLog): Promise<CommandReport> => {
         journalLog.steps.unshift(...log.steps);
         const cycle = await journalLog.check("load-cycle", async () => {
           // A new plan (e.g. a revised specification) starts a new bounded cycle.

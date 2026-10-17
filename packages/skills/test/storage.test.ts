@@ -4,6 +4,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  realpath,
   readFile,
   readdir,
   rm,
@@ -23,7 +24,7 @@ import {
 
 let sandbox: string;
 beforeEach(async () => {
-  sandbox = await mkdtemp(join(tmpdir(), "bflow-skills-storage-"));
+  sandbox = await realpath(await mkdtemp(join(tmpdir(), "bflow-skills-storage-")));
 });
 afterEach(async () => {
   await rm(sandbox, { recursive: true, force: true });

@@ -1,4 +1,5 @@
-import { mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { connect } from "node:net";
@@ -13,7 +14,7 @@ import { createSignedBindingReceipt } from "../../src/agentic/receipt-host.js";
 const cleanup: string[] = [];
 afterEach(async () => { for (const path of cleanup.splice(0)) await rm(path, { recursive: true, force: true }); });
 async function fixture() {
-  const root = await mkdtemp("/tmp/bflow-host-receipts-"); cleanup.push(root);
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-host-receipts-"))); cleanup.push(root);
   const directory = join(root, "receipts"), journal = new HostReceiptJournal(directory, root, "herdr-session");
   const at = new Date().toISOString();
   const binding = PaneBindingSchema.parse({ schemaVersion: 2, bindingId: "chat-binding", sessionId: "herdr-session", role: "conversation",

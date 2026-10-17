@@ -82,19 +82,19 @@ export function resolvePresentation(
   const stdoutColor = resolveStreamColor({
     isTTY: isStdoutTTY,
     env: process.env,
-    explicit: context?.presentation?.stdoutColor
+    explicit: customIo ? context?.presentation?.stdoutColor ?? false : context?.presentation?.stdoutColor
   });
 
   const stderrColor = resolveStreamColor({
     isTTY: isStderrTTY,
     env: process.env,
-    explicit: context?.presentation?.stderrColor
+    explicit: customIo ? context?.presentation?.stderrColor ?? false : context?.presentation?.stderrColor
   });
 
   const interactive = isStderrInteractive({
     isTTY: isStderrTTY,
     env: process.env,
-    explicitInteractive: context?.presentation?.interactive
+    explicitInteractive: customIo ? context?.presentation?.interactive ?? false : context?.presentation?.interactive
   });
 
   return {
@@ -253,7 +253,7 @@ export async function executeCommand(
 
   if (parsed.command === "setup") {
     try {
-      const data = await executeSetupCommand(parsed, context);
+      const data = await executeSetupCommand(parsed, context, showProgress ? emitProgress : undefined);
       return makeResult(CLI_EXIT_CODES.SUCCESS, true, "setup", data, undefined, isJson, io, presentation);
     } catch (error) {
       const contractError = toContractError(error);
@@ -599,7 +599,8 @@ export async function runCli(
   if (!useFacadePath && isHighLevelInvocation(argv)) {
     const options: HighLevelRunOptions = {
       cwd: context?.cwd, io: context?.io, clock: context?.clock, services: context?.highLevelServices,
-      runtime: context?.runtime as HighLevelRunOptions["runtime"], signal: context?.operationOptions?.signal
+      runtime: context?.runtime as HighLevelRunOptions["runtime"], signal: context?.operationOptions?.signal,
+      presentation: resolvePresentation(context, Boolean(context?.presentation?.json))
     };
     const effectiveArgv = context?.presentation?.json ? ["--json", ...argv] : argv;
     const result = await runHighLevelCli(effectiveArgv, options);

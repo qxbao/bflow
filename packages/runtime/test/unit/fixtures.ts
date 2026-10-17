@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -156,7 +156,7 @@ export interface TestHarness {
 }
 
 export async function createTestHarness(clock?: () => Date): Promise<TestHarness> {
-  const tmpDir = await mkdtemp(join(tmpdir(), "bflow-runtime-test-"));
+  const tmpDir = await realpath(await mkdtemp(join(tmpdir(), "bflow-runtime-test-")));
   const dbPath = join(tmpDir, "run-store.db");
   const artifactsPath = join(tmpDir, "artifacts");
   const registryPath = join(tmpDir, "registry.json");

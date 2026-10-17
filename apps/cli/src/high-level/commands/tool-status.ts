@@ -14,7 +14,7 @@ export const TOOL_STATUS_SPEC: CommandSpec = {
 
 /** Read-only probe of the P26 tool catalog; never installs or upgrades anything. */
 export const toolStatus: HighLevelHandler = async (args, ctx) => {
-  const log = new StepLog();
+  const log = new StepLog(undefined, ctx.onProgress);
   return guarded("tool.status", log, {}, async () => {
     const selected = args.lists.get("--tool");
     const known = TOOL_CATALOG.map(entry => entry.toolId);

@@ -30,7 +30,7 @@ const sha256 = (value: string) => createHash("sha256").update(value).digest("hex
 
 /** Preflight provider health/readiness through the P25 adapter registry; never launches the provider. */
 export const agentCheck: HighLevelHandler = async (args, ctx) => {
-  const log = new StepLog();
+  const log = new StepLog(undefined, ctx.onProgress);
   return guarded("agent.check", log, {}, async () => {
     const provider = args.positionals.provider!;
     if (!(PROVIDERS as readonly string[]).includes(provider))

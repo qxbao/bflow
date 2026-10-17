@@ -35,7 +35,7 @@ async function localCheck(service: MCPServiceDefinition, pathEntries: readonly s
 
 /** Read-only status of the shared MCP Gateway and configured backends. Never starts or stops a worker. */
 export const mcpStatus: HighLevelHandler = async (args, ctx) => {
-  const log = new StepLog();
+  const log = new StepLog(undefined, ctx.onProgress);
   return guarded("mcp.status", log, {}, async () => {
     const platform = await log.check("detect-platform", () => ctx.services.machine.platform(), value => ({ machineId: value.machineId }));
     const file = join(platform.paths.config, "mcp.json");
