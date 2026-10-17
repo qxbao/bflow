@@ -11,8 +11,9 @@ unknown call, chặn elicitation/sampling/OAuth tương tác, `/health`, `/metri
 `packages/mcp-services` (OS service manager user-level, resource pool/quota, dedicated Chrome
 profile runtime, loopback-only debugging). P26 `tool-installer` cung cấp capability inventory và
 `verifyMcpStartup`; P29 CLI có `bflow mcp status` và bước validate MCP của `up`/`doctor`.
-**Chưa làm:** P30 chưa đăng ký client Gateway theo role/session trong host, chưa gắn lease vào
-Runtime dispatch; P31 chưa có kiểm thử live (Chrome thật, OS service thật, crash của upstream
+**P30 (source + local test):** daemon Gateway mở control endpoint có xác thực (`gateway-control.json`);
+Runtime đăng ký/revoke client theo role/session qua `GatewayControlClient`. **Chưa làm:** chưa gắn
+resource lease vào Runtime dispatch; P31 chưa có kiểm thử live (Chrome thật, OS service thật, crash của upstream
 trên nhiều repo đồng thời). Test hiện có là deterministic/local; same-user compromise,
 multi-host lease và cách ly tài nguyên không giới hạn vẫn NOT VERIFIED. Câu "No Gateway/service
 module is implemented in P24" dưới đây mô tả baseline P24, không phải trạng thái hiện tại.

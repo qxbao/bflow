@@ -5,21 +5,21 @@ P24 chỉ bổ sung thiết kế, schemas, public ports và contract tests. Các
 chưa được triển khai bởi thay đổi này. Đây là baseline kiến trúc, không phải chứng nhận
 full Agentic SDLC hay production readiness.
 
-## Trạng thái triển khai (cập nhật 2026-10-17)
+## Trạng thái triển khai (cập nhật 2026-10-18)
 
 Phần này ghi lại source đã có sau baseline P24; các quyết định thiết kế đóng băng bên dưới
 không đổi. Mức bằng chứng được tách riêng: **source** (có code trong repo), **local test**
 (fake runner/mock/fixture), **live probe** (binary/Herdr/provider thật) và **full SDLC
-acceptance**. Chưa có hồ sơ nghiệm thu live hoặc full SDLC cho bất kỳ phase P25–P29.
+acceptance**. Chưa có hồ sơ nghiệm thu live hoặc full SDLC cho bất kỳ phase P25–P30.
 
 | Phase | Package / đường dẫn | Source | Còn thiếu / giới hạn |
 | --- | --- | --- | --- |
-| P25 | `packages/agent-providers` | Có: adapter Claude/Codex/Agy, `checkHealth` preflight/activated, permission profile compile, launch profile, Ed25519 launch attestation, `buildHerdrAgentStartCommand`, registry mặc định | Chỉ sinh dữ liệu launch; `packages/pane-manager`/`runtime` chưa gọi `prepareLaunch` (P30). Agy báo `unsupported` cho unattended và chưa certify native attestation. Chưa có bằng chứng login/launch provider thật trong hồ sơ nghiệm thu |
+| P25 | `packages/agent-providers` | Có: adapter Claude/Codex/Agy, `checkHealth` preflight/activated, permission profile compile, launch profile, Ed25519 launch attestation, `buildHerdrAgentStartCommand`, registry mặc định | Runtime host gọi preflight/`prepareLaunch`/activated health (P30); adapter render host MCP, Gateway HTTP và 4 native hook. Agy báo `unsupported` cho unattended và chưa certify native attestation. Chưa có bằng chứng login/launch provider thật trong hồ sơ nghiệm thu |
 | P26 | `packages/machine-setup`, `packages/tool-installer` | Có: state store/journal/receipt, plan/preview/apply/reconcile, PATH manager, MCP registry, service manager, doctor, `ManagedToolInstaller` (RTK, Claude-Mem, GitNexus, Chrome DevTools MCP, Superpowers), `FileToolCapabilityRegistry` | Test dùng fake installer/command runner; Windows chỉ `designed_unverified`; npm transitive deps chưa lock đầy đủ; native plugin rollback thủ công; chưa kiểm license GitNexus thương mại |
-| P27 | `packages/mcp-gateway`, `packages/mcp-services` | Có: loopback Streamable HTTP gateway, stdio bridge, client revoke, sharing policy, lease + fencing, unknown-call quarantine, chặn elicitation; OS service manager, resource pool, dedicated Chrome profile runtime | Test deterministic với driver/launcher giả hoặc cục bộ; `runtime`/`pane-manager` chưa đăng ký client Gateway cho role (P30); chưa có live Chrome/OS-service E2E trong hồ sơ nghiệm thu |
-| P28 | `packages/skills`, `skills/**` | Có: catalog 20 shared skill + 12 role skill, bundle store bất biến, pin/dependency, role manifest, provider rendering, `SkillsSetupSynchronizer`, `recover(exactDigest)` | Runtime chưa resolve/persist manifest theo session generation (P30); chưa có live native skill discovery |
-| P29 | `apps/cli` | Có: `setup`, `repo inspect`, `task plan`, `task implement`, `verify`, `git prepare`, `mcp status`, `tool status`/`tools status`, `skills sync|list`, `agent check`; `up`/`doctor` mở rộng với các bước validate provider/binary/auth/permission/MCP/skills; lệnh cấp cao có receipt, serialization và envelope JSON | CLI chỉ là command UX: không có scheduler/gate riêng. Các engine P25–P28 được nạp động từ `dist/` hoặc inject; `up` kiểm tra provider/MCP/skills bằng probe CLI-level và override, chưa dựa trên Runtime facade P30 |
-| P30 | `packages/runtime`, `packages/pane-manager`, `packages/conversation`, `agents/**` | **Chưa triển khai**: `runtime`, `pane-manager`, `conversation` không import `agent-providers`, `mcp-gateway`, `skills`, `machine-setup`. Commit `045a4e4` chỉ thêm system prompt, `behavior-policy` trong Registry và chỉnh role prompt/host, không thêm wiring P30 | Strict readiness trong host, launch qua ProviderAdapter, skills manifest theo session, Gateway registration/revocation, định tuyến quyết định người dùng qua Conversation cho mọi role |
+| P27 | `packages/mcp-gateway`, `packages/mcp-services` | Có: loopback Streamable HTTP gateway, stdio bridge, client revoke, sharing policy, lease + fencing, unknown-call quarantine, chặn elicitation; OS service manager, resource pool, dedicated Chrome profile runtime | Test deterministic với driver/launcher giả hoặc cục bộ; Runtime đăng ký client Gateway theo role qua control endpoint (P30); chưa có live Chrome/OS-service E2E trong hồ sơ nghiệm thu |
+| P28 | `packages/skills`, `skills/**` | Có: catalog 20 shared skill + 12 role skill, bundle store bất biến, pin/dependency, role manifest, provider rendering, `SkillsSetupSynchronizer`, `recover(exactDigest)` | Runtime resolve/persist manifest theo session generation (P30); chưa có live native skill discovery |
+| P29 | `apps/cli` | Có: `setup`, `repo inspect`, `task plan`, `task implement`, `verify`, `git prepare`, `mcp status`, `tool status`/`tools status`, `skills sync|list`, `agent check`; `up`/`doctor` mở rộng với các bước validate provider/binary/auth/permission/MCP/skills; lệnh cấp cao có receipt, serialization và envelope JSON | CLI chỉ là command UX: không có scheduler/gate riêng. Các engine P25–P28 được nạp động từ `dist/` hoặc inject; `up` dựa preflight report của Runtime host (P30), không gate theo tên provider |
+| P30 | `packages/runtime`, `packages/pane-manager`, `packages/conversation`, `agents/**` (+ control endpoint trong `apps/cli`) | Có (source + local test): `runtime/src/platform/**` (environment, session skills, Gateway registrations + control client, provider readiness, launch journal, attestation signer, `PlatformReadinessService`, wire contract CLI↔host); host `prepare`/`activate`/`platform_status`, Developer launch, revoke khi quiesce/shutdown; activation chấp nhận `herdr:<provider>`; Pane Manager launch từ launch material; `request_user_decision` + chặn `AskUserQuestion` | Chưa live provider/Herdr; `platform-launches.json` chưa đọc lại sau restart; launch Developer và sweep hết hạn quyết định chưa test end-to-end; bản sao `PLATFORM_SUPPORTED_COMMANDS` |
 | P31 | `tests/platform-v3/**`, `tests/acceptance/platform-v3/**` | **Chưa triển khai**: hai thư mục không tồn tại | Cross-provider conformance, fault/security/live evidence, báo cáo nghiệm thu cuối |
 
 Xem [known limitations](known-limitations.md), [roadmap](next-roadmap.md) và
@@ -212,7 +212,7 @@ agent runtime không âm thầm tự login hoặc chấp nhận trust/update pro
 `bflow feature/bugfix/refactor/review` và `workflow.request` qua ConversationGateway **chưa
 có parser/handler**. Tên `bflow tools status`/`skills list` ở bảng trên là thiết kế; syntax
 đã triển khai ghi ở [CLI README](../apps/cli/README.md). Gateway, skill manager và gate
-runner được inject, chưa compose mặc định qua Runtime (P30).
+runner được inject; Gateway và skill manager được Runtime host compose (P30).
 
 P29 tái sử dụng parser/JSON envelope
 và lifecycle hiện có, giữ syntax legacy; không thêm scheduler/gates trong CLI. `accepted`

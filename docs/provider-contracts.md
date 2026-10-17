@@ -11,9 +11,10 @@ preflight/activated; compile permission profile; `prepareLaunch`; ký/kiểm ch�
 `AgentLaunchAttestation` Ed25519; `buildHerdrAgentStartCommand`; registry mặc định). Agy
 báo `unsupported` cho `unattended_isolated` và chưa certify native attestation, đúng yêu cầu
 bên dưới. CLI P29 gọi registry qua `bflow agent check`, `bflow setup` và các bước validate của
-`bflow up`/`doctor`. **Chưa làm (P30):** `pane-manager`/`runtime` chưa dùng `prepareLaunch` hay
-attestation; `provider-launch.ts` hiện có vẫn là đường launch thực của host. Mức bằng chứng:
-source + local test; không có hồ sơ live provider login/launch/permission enforcement cho P25.
+`bflow up`/`doctor`. **P30 (source + local test):** Runtime host gọi preflight/`prepareLaunch`, ký attestation và
+yêu cầu activated health; adapter render MCP server của host, Gateway HTTP (token qua tên env var)
+và đủ 4 native hook; `provider-launch.ts` chỉ còn là đường legacy. Mức bằng chứng: source + local
+test; không có hồ sơ live provider login/launch/permission enforcement cho P25/P30.
 Chi tiết ở [package README](../packages/agent-providers/README.md) và
 [hồ sơ P25–P29](acceptance/2026-10-17-p25-p29.md). Nội dung dưới đây là thiết kế đóng băng.
 

@@ -6,7 +6,7 @@ This repository is designed for five implementation agents working in isolated G
 
 Contracts, the deterministic Core workflow engine, Herdr CLI adapter, file-backed Agent Registry, SQLite RunStore, filesystem ArtifactStore, Quality-gates, RuntimeService and CLI (`bflow`) are implemented. Do not replace implemented modules with bootstrap scaffolds or claim live Herdr end-to-end verification without evidence. See [README.md](README.md) for package status and runnable commands, and package READMEs for guarantees and limitations.
 
-Since the P24 baseline, source implementations with package-local tests exist for P25 (`packages/agent-providers`), P26 (`packages/machine-setup`, `packages/tool-installer`), P27 (`packages/mcp-gateway`, `packages/mcp-services`), P28 (`packages/skills`, `skills/**`) and P29 (`apps/cli` high-level and setup/platform commands), plus agent system prompts and behavior policies under `agents/**`. P30 Runtime/Pane Manager/Conversation integration of these platform packages and P31 platform-v3 acceptance (`tests/platform-v3/**`) are not present in source: `packages/runtime` does not depend on the P25–P28 packages and there is no `tests/platform-v3` directory. See the P24 section below for evidence levels.
+Since the P24 baseline, source implementations with package-local tests exist for P25 (`packages/agent-providers`), P26 (`packages/machine-setup`, `packages/tool-installer`), P27 (`packages/mcp-gateway`, `packages/mcp-services`), P28 (`packages/skills`, `skills/**`) and P29 (`apps/cli` high-level and setup/platform commands), plus agent system prompts and behavior policies under `agents/**`. P30 Runtime/Pane Manager/Conversation integration of these platform packages is implemented in source with local tests (`packages/runtime/src/platform/**`, host wiring in `packages/runtime/src/agentic/**`, Gateway control endpoint in `apps/cli`); it has no live provider/Herdr evidence. P31 platform-v3 acceptance (`tests/platform-v3/**`) is not present in source. See the P24 section below for evidence levels.
 
 ## Stable boundary
 
@@ -74,10 +74,18 @@ Herdr transport or full SDLC acceptance):
 - P29: `apps/cli` provides `setup`, `repo inspect`, `task plan`, `task implement`, `verify`,
   `git prepare`, `mcp status`, `tool status`, `skills sync` and `agent check` in addition to the
   lifecycle commands. The CLI consumes `agent-providers` and `machine-setup`; `mcp status`/`tool status`/
-  `skills sync` operate on machine-setup state and repository config. Per the gate below, P29
-  cannot close until the P30 Runtime facade is integrated and compatibility verified.
-- P30: NOT implemented. Readiness, provider launch, skills, Gateway and Conversation decision
-  routing are not composed into Runtime, Pane Manager or Conversation.
+  `skills sync` operate on machine-setup state and repository config. `up` now derives host
+  platform options and gates on the Runtime host's per-role preflight report (no provider-name
+  gate); P29 command acceptance still awaits P31 compatibility evidence.
+- P30: implemented in source with local/fake-runner tests. `packages/runtime/src/platform/**`
+  composes role environments, session skill manifests, Gateway registrations (via the
+  authenticated control endpoint started by the setup Gateway daemon), provider preflight,
+  launch profiles, Ed25519 startup attestations and activated health. The persistent host uses
+  it for `prepare`/`activate`, dynamic Developer launches, `platform_status` and Gateway
+  revocation on quiesce/shutdown; activation accepts `herdr:<provider>` sessions for any
+  adapter-ready provider. Pane Manager launches from validated launch material. Non-Conversation
+  roles route user decisions through `request_user_decision` → Runtime → Conversation; native
+  `AskUserQuestion`/elicitation is denied. Not live-verified with real providers or Herdr.
 - P31: NOT implemented. No cross-provider conformance or platform-v3 live acceptance exists;
   existing acceptance records cover P11–P22 and lifecycle startup only.
 - Agent system prompts and behavior policies (`agents/**`) are implemented and covered by

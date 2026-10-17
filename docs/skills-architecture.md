@@ -9,8 +9,8 @@ P28 đã có source: `packages/skills` (list/validate/install/sync/link/verify/u
 store private bất biến, pin/digest/dependency, role manifest, provider rendering,
 `SkillsSetupSynchronizer`) và `skills/**` (20 shared skill, 12 role skill, ví dụ). P29 CLI có
 `bflow skills list|sync` và validate skill trong `bflow up`/`doctor`; `bflow setup` dùng
-synchronizer. **Chưa làm:** P30 chưa resolve manifest theo capability/tool inventory thực,
-chưa persist digest cùng session generation, chưa cấp instruction text cho launch; chưa có
+synchronizer. **P30 (source + local test):** Runtime resolve/sync manifest theo role, persist theo session
+generation, recover theo digest và cấp instruction text cho launch. **Chưa làm:** chưa có
 live native skill discovery trên Claude/Codex/Agy. Test là local source/rendering; kỹ năng
 đã load không chứng minh agent tuân thủ hay pass SDD/TDD/verification gates. Câu "P24 creates
 no installed skill pack or loader" dưới đây mô tả baseline P24.
