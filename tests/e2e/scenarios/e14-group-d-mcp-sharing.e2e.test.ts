@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -33,7 +33,7 @@ describe("Scenario E14 (Group D) — MCP Sharing Across Claude, Codex, Agy & Mul
   const children: ChildProcess[] = [];
 
   function makeTempDir(prefix = "bflow-e14-"): string {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
     chmodSync(dir, 0o700);
     tempDirs.push(dir);
     return dir;
@@ -54,7 +54,7 @@ describe("Scenario E14 (Group D) — MCP Sharing Across Claude, Codex, Agy & Mul
     }
   });
 
-  it("[REAL SUBPROCESS BACKEND + 6 CONCURRENT AGENTS] shares 1 MCP backend across Claude, Codex, Agy & 3 Developer instances, enforces leases/isolation, recovers from crash, and measures real /proc memory savings", async () => {
+  it.skipIf(process.platform !== "linux")("[REAL SUBPROCESS BACKEND + 6 CONCURRENT AGENTS] shares 1 MCP backend across Claude, Codex, Agy & 3 Developer instances, enforces leases/isolation, recovers from crash, and measures real /proc memory savings", async () => {
     const root = makeTempDir();
     const repoAlpha = join(root, "repo-alpha");
     const repoBeta = join(root, "repo-beta");

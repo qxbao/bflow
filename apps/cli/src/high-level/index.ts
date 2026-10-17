@@ -1,6 +1,9 @@
 import { existsSync } from "node:fs";
+import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { ContractError, RuntimeService } from "@bflow/contracts";
+import type { SetupContext } from "@bflow/machine-setup";
+import { SUPPORTED_CLI_COMMANDS } from "../command-reference.js";
 import { composeCliRuntime } from "../runtime.js";
 import type { CliIo, PresentationOptions } from "../types.js";
 import { bold, cyan, dim, extractSafeDetails, green, humanText, red, resolveActionableRemediation, yellow } from "../presentation.js";
@@ -285,6 +288,53 @@ function formatHuman(envelope: HighLevelEnvelope, useColor = false): string {
   return lines.join("\n");
 }
 
+function withDefaultSkillsPort(services: HighLevelServices): HighLevelServices {
+  return {
+    ...services,
+    skills:
+      services.skills ??
+      (() => {
+        let cachedSynchronizer: Promise<any> | undefined;
+        const getSynchronizer = (ctx: SetupContext) => {
+          if (!cachedSynchronizer) {
+            cachedSynchronizer = (async () => {
+              const storeRoot = join(ctx.platform.paths.data, "skills-store");
+              await mkdir(storeRoot, { recursive: true, mode: 0o700 });
+              await chmod(storeRoot, 0o700);
+              const skillsMod: any = await import(
+                new URL("../../../../packages/skills/dist/index.js", import.meta.url).href
+              );
+              const catalog = await skillsMod.loadDefaultSkillCatalog({
+                supportedCommands: SUPPORTED_CLI_COMMANDS
+              });
+              const store = new skillsMod.SkillFileStore(storeRoot);
+              const manager = new skillsMod.SkillManager({
+                store,
+                supportedCommands: SUPPORTED_CLI_COMMANDS,
+                approvedBuiltinDigests: catalog.map((item: any) => item.definition.digest)
+              });
+              return skillsMod.createSkillsSetupSynchronizer(
+                manager,
+                store,
+                catalog.map((item: any) => ({
+                  root: item.directory,
+                  source: "builtin" as const,
+                  expectedDigest: item.definition.digest
+                }))
+              );
+            })();
+          }
+          return cachedSynchronizer;
+        };
+        return {
+          observe: async (ctx: SetupContext) => (await getSynchronizer(ctx)).observe(ctx),
+          desired: async (ctx: SetupContext) => (await getSynchronizer(ctx)).desired(ctx),
+          sync: async (ctx: SetupContext) => (await getSynchronizer(ctx)).sync(ctx)
+        };
+      }),
+  };
+}
+
 function withDefaultRuntime(services: HighLevelServices): HighLevelServices {
   if (services.openRuntime !== undefined) return services;
   return {
@@ -348,7 +398,8 @@ export async function runHighLevelCli(argv: readonly string[], options: HighLeve
     const parsed = parseCommandArgs(entry.spec, rest.slice(entry.spec.words.length));
     if (parsed.help) return help(getHighLevelHelp(name), entry.spec.words.join(" "));
     identity = newCommandIdentity(parsed.correlationId ?? process.env.BFLOW_CORRELATION_ID);
-    const services = withDefaultRuntime(options.services ?? await createDefaultHighLevelServices());
+    const baseServices = options.services ?? withDefaultSkillsPort(await createDefaultHighLevelServices());
+    const services = withDefaultRuntime(baseServices);
     const progress = emitProgress ? (step: string) => {
       try { write("stderr", formatProgressStep(humanText(step, 160), stderrColor)); } catch { /* progress cannot affect command execution */ }
     } : undefined;

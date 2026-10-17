@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, 
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 
 import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 import {
@@ -85,9 +86,10 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
   let tmpRoot: string;
   let rtkRepoDir: string;
   let rtkStateDir: string;
+  const livePlatformEnabled = process.env.BFLOW_TEST_LIVE_PLATFORM === "1";
 
   beforeAll(() => {
-    tmpRoot = realpathSync(mkdtempSync("/tmp/bflow-e2e-group-e-"));
+    tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "bflow-e2e-group-e-")));
     chmodSync(tmpRoot, 0o700);
     rtkRepoDir = join(tmpRoot, "rtk-repo");
     rtkStateDir = join(tmpRoot, "rtk-state");
@@ -103,9 +105,9 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
     rmSync(tmpRoot, { recursive: true, force: true });
   });
 
-  it("[REAL TOOL BINARY] verifies RTK 0.42.4 binary, provider routes, idempotent configuration apply/rollback, and proxy execution", async () => {
-    const rtkBin = "/home/baodq/.local/bin/rtk";
-    if (!hasBinaryAt(rtkBin)) return;
+  it.skipIf(!livePlatformEnabled)("[LIVE TOOL] verifies RTK 0.42.4 binary, provider routes, idempotent configuration apply/rollback, and proxy execution", async () => {
+    const rtkBin = process.env.BFLOW_TEST_RTK_BIN ?? "rtk";
+    expect(hasBinaryAt(rtkBin), `RTK binary required for live platform checks: ${rtkBin}`).toBe(true);
 
     const rtkVerified = await verifyRtk(rtkBin, "0.42.4");
     expect(rtkVerified).toBe(true);
@@ -240,39 +242,28 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
     }
   });
 
-  it("[HARNESS + REAL TOOL BINARY] verifies GitNexus 1.6.12 repository indexing, QA-P34-08 status schema mismatch, and live stdio MCP server tools", async () => {
-    const gnBin = "/home/baodq/.local/bin/gitnexus";
-    if (!hasBinaryAt(gnBin)) return;
-
-    const gnStateDir = join(tmpRoot, "gn-state");
-    const gnConfigDir = join(tmpRoot, "gn-config");
+  it("[HARNESS] handles GitNexus not-indexed to indexed status with leading warnings", async () => {
+    const gnStateDir = join(tmpRoot, "gn-state-harness");
     mkdirSync(gnStateDir, { mode: 0o700 });
-    mkdirSync(gnConfigDir, { mode: 0o700 });
     const canonicalRtkRepo = realpathSync(rtkRepoDir);
-
-    // 1. Harness verification: when status transitions not-indexed -> up-to-date, ensureGitNexusIndex returns "indexed"
     let statusCalls = 0;
-    const gnHarnessObs = await ensureGitNexusIndex({
+    const harnessObservation = await ensureGitNexusIndex({
       repositoryRoot: rtkRepoDir,
       stateRoot: gnStateDir,
-      executable: gnBin,
+      executable: "gitnexus",
       host: {
         async download() {},
         async run(executable, args) {
-          if (executable === "git" && args[0] === "rev-parse") {
+          if (executable === "git" && args[0] === "rev-parse")
             return { exitCode: 0, stdout: "0123456789abcdef0123456789abcdef01234567\n", stderr: "" };
-          }
-          if (executable === "git" && args[0] === "status") {
-            return { exitCode: 0, stdout: "", stderr: "" };
-          }
+          if (executable === "git" && args[0] === "status") return { exitCode: 0, stdout: "", stderr: "" };
           if (args[0] === "status") {
             statusCalls += 1;
             return {
               exitCode: 0,
-              stdout:
-                statusCalls === 1
-                  ? JSON.stringify({ schemaVersion: 1, repository: canonicalRtkRepo, error: "not-indexed" })
-                  : JSON.stringify({ schemaVersion: 1, repository: canonicalRtkRepo, status: "up-to-date" }),
+              stdout: statusCalls === 1
+                ? JSON.stringify({ schemaVersion: 1, repository: canonicalRtkRepo, error: "not-indexed" })
+                : `Partial index found...\n${JSON.stringify({ schemaVersion: 1, repository: canonicalRtkRepo, status: "registered" })}`,
               stderr: ""
             };
           }
@@ -280,9 +271,20 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
         }
       }
     });
-    expect(gnHarnessObs.status).toBe("indexed");
+    expect(harnessObservation.status).toBe("indexed");
+  });
 
-    // 2. Real gitnexus 1.6.12 status --json verification & QA-P34-08 documentation ("status": "registered" vs "up-to-date")
+  it.skipIf(!livePlatformEnabled)("[LIVE TOOL] verifies GitNexus 1.6.12 repository indexing, status schema, and live stdio MCP tools", async () => {
+    const gnBin = process.env.BFLOW_TEST_GITNEXUS_BIN ?? "gitnexus";
+    expect(hasBinaryAt(gnBin), `GitNexus binary required for live platform checks: ${gnBin}`).toBe(true);
+
+    const gnStateDir = join(tmpRoot, "gn-state");
+    const gnConfigDir = join(tmpRoot, "gn-config");
+    mkdirSync(gnStateDir, { mode: 0o700 });
+    mkdirSync(gnConfigDir, { mode: 0o700 });
+    const canonicalRtkRepo = realpathSync(rtkRepoDir);
+
+    // Real GitNexus status schema ("registered" vs "up-to-date") and stdio MCP negotiation.
     const rawStatusOut = execFileSync(gnBin, ["status", "--json"], {
       cwd: rtkRepoDir,
       encoding: "utf8",
@@ -318,7 +320,7 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
               stdout:
                 realSchemaStatusCalls === 1
                   ? JSON.stringify({ schemaVersion: 1, repository: canonicalRtkRepo, error: "not-indexed" })
-                  : JSON.stringify({ schemaVersion: 1, repository: canonicalRtkRepo, status: "registered" }),
+                  : `Partial index found...\n${JSON.stringify({ schemaVersion: 1, repository: canonicalRtkRepo, status: "registered" })}`,
               stderr: ""
             };
           }
@@ -326,8 +328,8 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
         }
       }
     });
-    // QA-P34-08: gitnexus 1.6.12 emits status="registered" after analyze, which gitNexusFreshnessSchema treats as stale
-    expect(gnRealSchemaObs.status).toBe("stale");
+    // QA-P34-08 fixed: gitnexus 1.6.12 status="registered" (with leading warning line) is accepted as indexed
+    expect(gnRealSchemaObs.status).toBe("indexed");
 
     // 3. Real GitNexus service definition & real stdio MCP server negotiation
     const gnServiceDef = await createGitNexusService({
@@ -358,9 +360,11 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
     expect(gnMcpProbe.discoveredTools).toEqual(expect.arrayContaining(["query", "impact", "context"]));
   }, 60_000);
 
-  it("[HARNESS + REAL CHROME BINARY] verifies Chrome DevTools isolated profile planning, SingletonLock rejection, and DedicatedBrowserRuntime page ownership", async () => {
+  it("[HARNESS / INJECTED BROWSER LAUNCHER] verifies Chrome profile planning, SingletonLock rejection, and page ownership", async () => {
     const chromeManagedRoot = join(tmpRoot, "chrome-managed");
     mkdirSync(chromeManagedRoot, { mode: 0o700 });
+    const fakeChromeExecutable = join(tmpRoot, "fake-chrome");
+    writeFileSync(fakeChromeExecutable, "#!/usr/bin/env bash\necho 'Google Chrome 130.0.0.0'\n", { mode: 0o700 });
     const fakeChromeMcpServer = join(tmpRoot, "fake-chrome-devtools-mcp.sh");
     writeFileSync(fakeChromeMcpServer, '#!/usr/bin/env bash\necho "chrome-devtools-mcp 0.1.0"\n', { mode: 0o755 });
 
@@ -368,7 +372,7 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
       managedRoot: chromeManagedRoot,
       repositoryId: "repo-alpha",
       taskId: "task-ui-1",
-      browserExecutable: "/usr/bin/google-chrome",
+      browserExecutable: fakeChromeExecutable,
       serverExecutable: fakeChromeMcpServer
     });
     expect(chromePlanReady.status).toBe("ready");
@@ -379,7 +383,7 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
       managedRoot: chromeManagedRoot,
       repositoryId: "repo-alpha",
       taskId: "task-ui-1",
-      browserExecutable: "/usr/bin/google-chrome",
+      browserExecutable: fakeChromeExecutable,
       serverExecutable: fakeChromeMcpServer
     });
     expect(chromePlanLocked.status).toBe("profile_locked");
@@ -396,7 +400,7 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
     };
     const browserRt = new DedicatedBrowserRuntime({
       browserProfilesRoot: browserRuntimeDir,
-      executablePath: "/usr/bin/google-chrome",
+      executablePath: fakeChromeExecutable,
       launcher: {
         probeBinary: async () => ({ ok: true, value: { version: "Google Chrome 130.0.0.0" } }),
         launch: async (opts) => ({
@@ -534,10 +538,14 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
     }
   });
 
-  it("[HARNESS + REAL CLI] executes all 9 P29 unified commands and documents QA-P34-07 default HighLevelServices wiring gap", async () => {
+  // This end-to-end command sequence creates/integrates real Git worktrees through the Linux flock journal.
+  it.skipIf(process.platform !== "linux")("[HARNESS + REAL CLI] exercises all 9 P29 commands with real worktrees and explicit platform ports", async () => {
     const hlRepo = join(tmpRoot, "hl-repo");
     mkdirSync(join(hlRepo, "src/math"), { recursive: true, mode: 0o700 });
     git(hlRepo, "init", "-q", "-b", "main");
+    // GitIntegrationEngine performs its merge with repository configuration only; CI has no global identity.
+    git(hlRepo, "config", "user.name", "Bflow E15 Test");
+    git(hlRepo, "config", "user.email", "bflow-e15@example.invalid");
     writeFileSync(
       join(hlRepo, "src/math/average.ts"),
       "export const average = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;\n"
@@ -833,22 +841,25 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
       ["git", "prepare", "run-1", "--workflow", planWorkflowPath, "--yes", "--json"],
       { cwd: hlRepo, services: fullServices }
     );
-    expect(cmdGitPrepareYes.ok).toBe(true);
+    expect(cmdGitPrepareYes.ok, JSON.stringify(cmdGitPrepareYes.envelope)).toBe(true);
     expect(extractCommandOutput(cmdGitPrepareYes).outcome).toBe("integration_prepared");
 
-    // 6. mcp status & 8. skills sync (QA-P34-07 default unconfigured vs wired port)
-    const cmdMcpStatusDefault = await runHighLevelCli(["mcp", "status", "--json"], {
-      cwd: hlRepo,
-      services: defaultServices
-    });
-    expect(cmdMcpStatusDefault.ok).toBe(false);
-    expect(extractCommandOutput(cmdMcpStatusDefault).outcome).toBe("not_ready");
-
-    const cmdMcpStatusWired = await runHighLevelCli(["mcp", "status", "--json"], {
-      cwd: hlRepo,
-      services: fullServices
-    });
-    expect(["ready", "not_ready"]).toContain(extractCommandOutput(cmdMcpStatusWired).outcome);
+    // 6. mcp status & 8. skills sync: absent Gateway stays not-ready; default skills wiring remains available.
+    const previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    const defaultXdgConfigHome = join(tmpRoot, "default-cli-xdg");
+    process.env.XDG_CONFIG_HOME = defaultXdgConfigHome;
+    mkdirSync(defaultXdgConfigHome, { recursive: true, mode: 0o700 });
+    try {
+      const cmdMcpStatusDefaultCli = await runHighLevelCli(["mcp", "status", "--json"], { cwd: hlRepo });
+      expect(cmdMcpStatusDefaultCli.ok).toBe(false);
+      expect(extractCommandOutput(cmdMcpStatusDefaultCli).outcome).toBe("not_ready");
+      const mcpData = (cmdMcpStatusDefaultCli.envelope?.result.output as { data: { gateway: unknown; backends: unknown[] } }).data;
+      expect(mcpData.gateway).toMatchObject({ configured: false, reachable: false });
+      expect(mcpData.backends).toEqual([]);
+    } finally {
+      if (previousXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
+    }
 
     // 7. tool status
     const cmdToolStatus = await runHighLevelCli(["tool", "status", "--json"], {
@@ -857,39 +868,27 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
     });
     expect(["ready", "not_ready"]).toContain(extractCommandOutput(cmdToolStatus).outcome);
 
-    const cmdSkillsSyncDefault = await runHighLevelCli(["skills", "sync", "--json"], {
-      cwd: hlRepo,
-      services: defaultServices
-    });
-    expect(cmdSkillsSyncDefault.ok).toBe(false);
-    expect(cmdSkillsSyncDefault.error?.code).toBe("transport_unavailable");
-    expect(cmdSkillsSyncDefault.error?.details).toEqual(
-      expect.objectContaining({ reason: "skills_synchronizer_not_configured" })
-    );
-
+    // 8. skills sync: QA-P34-02 fixed — 1st run on empty store converges immediately with outcome="synced", 2nd run returns "already_synced"
     const cmdSkillsSyncWiredFirst = await runHighLevelCli(["skills", "sync", "--allow-machine-scope", "--json"], {
       cwd: hlRepo,
       services: fullServices
     });
-    if (!cmdSkillsSyncWiredFirst.ok) {
-      // QA-P34-02: 1st run on empty SkillFileStore installs all 32 bundles during apply(),
-      // but skills-sync.ts checks !desired.repairNeeded captured before apply().
-      expect(cmdSkillsSyncWiredFirst.error?.details).toEqual(
-        expect.objectContaining({ reason: "sync_not_converged" })
-      );
-    }
-    const cmdSkillsSyncWired = await runHighLevelCli(["skills", "sync", "--allow-machine-scope", "--json"], {
+    expect(cmdSkillsSyncWiredFirst.ok).toBe(true);
+    expect(extractCommandOutput(cmdSkillsSyncWiredFirst).outcome).toBe("synced");
+
+    const cmdSkillsSyncWiredSecond = await runHighLevelCli(["skills", "sync", "--allow-machine-scope", "--json"], {
       cwd: hlRepo,
       services: fullServices
     });
-    expect(cmdSkillsSyncWired.ok).toBe(true);
-    expect(["synced", "already_synced"]).toContain(extractCommandOutput(cmdSkillsSyncWired).outcome);
+    expect(cmdSkillsSyncWiredSecond.ok).toBe(true);
+    expect(extractCommandOutput(cmdSkillsSyncWiredSecond).outcome).toBe("already_synced");
 
-    // 9. agent check (claude) — documents QA-P34-05 preflight outcome on real claude 2.1.301
+    // 9. agent check (claude) — QA-P34-05 fixed: real claude 2.1.301 preflight is "ready"
     const cmdAgentCheckClaude = await runHighLevelCli(["agent", "check", "claude", "--json"], {
       cwd: hlRepo,
       services: fullServices
     });
-    expect(["ready", "not_ready"]).toContain(extractCommandOutput(cmdAgentCheckClaude).outcome);
+    expect(cmdAgentCheckClaude.ok).toBe(true);
+    expect(extractCommandOutput(cmdAgentCheckClaude).outcome).toBe("ready");
   }, 180_000);
 });

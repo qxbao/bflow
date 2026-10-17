@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,9 +18,10 @@ import { afterEach, describe, expect, it } from "vitest";
 
 describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & OS Service Registration", () => {
   const tempDirs: string[] = [];
+  const liveHerdrEnabled = process.env.BFLOW_TEST_LIVE_PLATFORM === "1" || process.env.BFLOW_TEST_LIVE_HERDR === "1";
 
   function makeTempDir(prefix = "bflow-e11-"): string {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
     tempDirs.push(dir);
     return dir;
   }
@@ -35,13 +36,16 @@ describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & O
   });
 
   describe("[REAL HOST] Platform, PATH & Binary Discovery", () => {
-    it("detects supported Linux x64 platform and resolves real host binaries on PATH without trusting CWD", async () => {
-      const runner = new NodeCommandRunner();
-      const hostEnv = defaultHostEnvironment();
-      const platform = detectPlatform(hostEnv);
+    // This assertion is specifically about the supported Linux x64 profile.
+    it.skipIf(process.platform !== "linux")("detects supported Linux x64 platform", async () => {
+      const platform = detectPlatform(defaultHostEnvironment());
       expect(platform.os).toBe("linux");
       expect(platform.supportStatus).toBe("supported");
+    });
 
+    it("resolves Git and Node on PATH without trusting CWD or relative PATH entries", async () => {
+      const runner = new NodeCommandRunner();
+      const hostEnv = defaultHostEnvironment();
       const workspaceDir = makeTempDir("bflow-e11-cwd-");
       // Plant a malicious/decoy 'git' in CWD and "." in PATH to verify CWD/relative PATH entries are ignored
       const decoyGit = join(workspaceDir, "git");
@@ -53,7 +57,7 @@ describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & O
       });
 
       const observations = await probeTools(cwdPlatform, runner, {
-        required: new Set(["git", "node", "herdr"])
+        required: new Set(["git", "node"])
       });
 
       const gitObs = observations.find((o) => o.toolId === "git")!;
@@ -64,10 +68,15 @@ describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & O
       const nodeObs = observations.find((o) => o.toolId === "node")!;
       expect(nodeObs.status).toBe("present");
       expect(nodeObs.version).toMatch(/\d+\.\d+\.\d+/);
+    });
 
-      const herdrObs = observations.find((o) => o.toolId === "herdr")!;
-      expect(herdrObs.status).toBe("present");
-      expect(herdrObs.version).toBeTruthy();
+    it.skipIf(!liveHerdrEnabled)("probes the real Herdr binary and requires a version when live-platform checks are enabled", async () => {
+      const runner = new NodeCommandRunner();
+      const platform = detectPlatform(defaultHostEnvironment());
+      const observations = await probeTools(platform, runner, { required: new Set(["herdr"]) });
+      const herdr = observations.find((observation) => observation.toolId === "herdr");
+      expect(herdr?.status).toBe("present");
+      expect(herdr?.version).toBeTruthy();
     });
 
     it("discovers tools in knownInstallDirs (managedBin) when not yet on PATH and flags path_missing", async () => {
@@ -102,47 +111,32 @@ describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & O
     });
   });
 
-  describe("[REAL HOST] Isolated bflow setup (1st run, 2nd run idempotency, --check, --repair) & QA-P34-01 / QA-P34-02 Verification", () => {
-    it("demonstrates QA-P34-01 (skills-store 0700 mode check) and completes setup -> repair -> idempotent setup -> check in isolated state", async () => {
+  describe("[REAL HOST] Isolated bflow setup (1st run, 2nd run idempotency, --check, --repair) & QA-P34-01 / QA-P34-02 Fix Verification", () => {
+    it("verifies QA-P34-01 (automatic 0700 skills-store creation) and QA-P34-02 (1st apply installs all 32 skills) plus idempotency, --check, and --repair", async () => {
       const root = makeTempDir("bflow-e11-setup-");
       const repoDir = join(root, "repo");
       const isolatedState = join(root, "isolated");
       mkdirSync(repoDir, { recursive: true });
       execFileSync("git", ["init", "-q", repoDir]);
 
-      // Pre-create 0700 skills-store to satisfy SkillFileStore's strict 0700 directory permission invariant
       const skillsStoreDir = join(isolatedState, "data", "skills-store");
-      mkdirSync(skillsStoreDir, { recursive: true, mode: 0o700 });
-      chmodSync(skillsStoreDir, 0o700);
-      expect(statSync(skillsStoreDir).mode & 0o777).toBe(0o700);
-
       const ctx = { cwd: repoDir, setup: { isolatedRoot: isolatedState } };
 
-      // 1st run: bflow setup --yes --json (QA-P34-02: empty skills-store sets repairNeeded=true on 1st apply)
+      // 1st run on clean isolated state: creates 0700 skills-store (QA-P34-01 fixed) and installs all 32 skills on 1st apply (QA-P34-02 fixed)
       const firstRun = await runCli(["setup", "--yes", "--json"], ctx);
-      expect(firstRun.ok).toBe(true);
+      expect(firstRun.ok, JSON.stringify(firstRun.data ?? firstRun)).toBe(true);
       expect(firstRun.exitCode).toBe(0);
+      expect(statSync(skillsStoreDir).mode & 0o777).toBe(0o700);
       const firstData = firstRun.data as unknown as {
         mode: string;
+        receipt?: { status: string };
         skills: { catalogLoaded: boolean; skillCount: number; syncedManifests: number };
         diagnostics: string[];
       };
       expect(firstData.mode).toBe("apply");
       expect(firstData.skills.catalogLoaded).toBe(true);
       expect(firstData.skills.skillCount).toBe(32);
-      expect(firstData.diagnostics.some((d) => d.includes("role-skills"))).toBe(true);
-      expect(readdirSync(skillsStoreDir).length).toBe(0);
-
-      // Repair run: bflow setup --repair --yes --json installs all 32 builtin skills into skills-store
-      const repairRun = await runCli(["setup", "--repair", "--yes", "--json"], ctx);
-      expect(repairRun.ok).toBe(true);
-      expect(repairRun.exitCode).toBe(0);
-      const repairData = repairRun.data as unknown as {
-        mode: string;
-        receipt?: { status: string };
-      };
-      expect(repairData.mode).toBe("repair");
-      expect(["applied", "already_satisfied"]).toContain(repairData.receipt?.status);
+      expect(firstData.diagnostics.some((d) => d.includes("role-skills requires --repair"))).toBe(false);
       expect(readdirSync(join(skillsStoreDir, "bundles")).length).toBe(32);
 
       // 2nd run (idempotency): bflow setup --yes --json after skills are synchronized
@@ -151,7 +145,7 @@ describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & O
       expect(secondRun.exitCode).toBe(0);
       const secondData = secondRun.data as unknown as {
         mode: string;
-        receipt?: { outcome: string };
+        receipt?: { status: string };
         skills: { catalogLoaded: boolean; skillCount: number };
         diagnostics: string[];
       };
@@ -215,10 +209,26 @@ describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & O
       expect(report.checks.some((c) => c.checkId === "node" && c.status === "passed")).toBe(true);
       expect(report.checks.some((c) => c.checkId === "pnpm" && c.status === "passed")).toBe(true);
       expect(report.metadata?.groups?.runtime?.some((c) => c.checkId === "git" && c.status === "pass")).toBe(true);
-      expect(report.metadata?.groups?.runtime?.some((c) => c.checkId === "herdr" && c.status === "pass")).toBe(true);
+      const herdr = await probeTools(detectPlatform(defaultHostEnvironment()), new NodeCommandRunner(), {
+        required: new Set(["herdr"])
+      });
+      const herdrObservation = herdr.find((observation) => observation.toolId === "herdr");
+      const herdrCheck = report.metadata?.groups?.runtime?.find((check) => check.checkId === "herdr");
+      expect(herdrCheck).toBeDefined();
+      if (herdrObservation?.status !== "present") expect(herdrCheck?.status).toBe("fail");
     });
 
-    it("resolves systemd-user unit plans and registers/starts/stops a real systemd --user service unit", async () => {
+    it.skipIf(!liveHerdrEnabled)("requires doctor to confirm Herdr compatibility when live-platform checks are enabled", async () => {
+      const repoDir = makeTempDir("bflow-e11-live-doctor-");
+      execFileSync("git", ["init", "-q", repoDir]);
+      expect((await runCli(["init", "--json"], { cwd: repoDir })).ok).toBe(true);
+      const doctor = await runCli(["doctor", "--json"], { cwd: repoDir });
+      const report = doctor.data as { metadata?: { groups?: { runtime?: Array<{ checkId: string; status: string }> } } };
+      expect(report.metadata?.groups?.runtime?.find((check) => check.checkId === "herdr")?.status).toBe("pass");
+    });
+
+    // systemd --user registration is a Linux service-manager integration.
+    it.skipIf(process.platform !== "linux")("resolves systemd-user unit plans and registers/starts/stops a real systemd --user service unit", async () => {
       const runner = new NodeCommandRunner();
       const platform = detectPlatform(defaultHostEnvironment());
       const root = makeTempDir("bflow-e11-svc-");

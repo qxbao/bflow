@@ -45,11 +45,11 @@ export class AgyProviderAdapter extends BaseProviderAdapter {
   }
 
   protected override getProbeCommand(_environment: AgentEnvironment): readonly string[] {
-    const probe = ["--print"];
+    const probe: string[] = [];
     if (this.options.model) {
       probe.push("--model", this.options.model);
     }
-    probe.push("ping");
+    probe.push("--print", "ping");
     return probe;
   }
 

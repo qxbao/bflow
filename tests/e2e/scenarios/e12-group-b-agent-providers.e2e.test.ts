@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -27,9 +27,11 @@ const sha256Hex = (text: string): string => createHash("sha256").update(text, "u
 
 describe("Scenario E12 (Group B) — Agent Providers Verification (Claude, Codex, Agy)", () => {
   const tempDirs: string[] = [];
+  const liveProviderChecksEnabled = process.env.BFLOW_TEST_LIVE_PLATFORM === "1";
+  const liveHerdrEnabled = liveProviderChecksEnabled || process.env.BFLOW_TEST_LIVE_HERDR === "1";
 
   function makeTempDir(prefix = "bflow-e12-"): string {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
     chmodSync(dir, 0o700);
     tempDirs.push(dir);
     return dir;
@@ -386,16 +388,25 @@ exit 0
   });
 
   describe("[REAL PROVIDER / LIVE HOST] Live Binary, Auth, Readiness & Herdr Pane Verification", () => {
-    it("verifies live Claude (2.1.301), Codex (0.162.0), and Agy (1.4.0) binaries and documents real host findings (QA-P34-03, QA-P34-04, QA-P34-05)", async () => {
+    it.skipIf(!liveProviderChecksEnabled)("verifies live Claude, Codex, and Agy preflight readiness and launch profile compilation", async () => {
       const root = makeTempDir("bflow-e12-live-");
       const stateDir = join(root, "state");
       mkdirSync(stateDir, { mode: 0o700 });
       chmodSync(stateDir, 0o700);
+      await environmentProcessRunner.run({
+        executable: "git",
+        args: ["init"],
+        cwd: root,
+        timeoutMs: 10_000
+      });
       const runner = createProviderProcessRunner();
 
-      // 1. Claude 2.1.301 live preflight check: binary, version, and live authentication pass; flags/capabilities hit QA-P34-05
+      // 1. Claude 2.1.301 live preflight check & prepareLaunch (QA-P34-05 fixed)
       const claudeAdapter = new ClaudeProviderAdapter({ runner });
-      const claudeEnv = makeEnvironment("claude", root, stateDir, { mode: "restricted" });
+      const claudeEnv = makeEnvironment("claude", root, stateDir, {
+        mode: "restricted",
+        skillManifestDigest: "0".repeat(64)
+      });
       const claudePreflight = await claudeAdapter.checkHealth({
         schemaVersion: CURRENT_PLATFORM_SCHEMA_VERSION,
         environment: claudeEnv,
@@ -404,14 +415,22 @@ exit 0
       });
       expect(claudePreflight.ok).toBe(true);
       if (claudePreflight.ok) {
-        expect(claudePreflight.value.checks.find((c) => c.check === "binary")?.status).toBe("passed");
-        expect(claudePreflight.value.checks.find((c) => c.check === "version")?.status).toBe("passed");
-        expect(claudePreflight.value.checks.find((c) => c.check === "authentication")?.code).toBe("auth_ok");
+        expect(claudePreflight.value.status).toBe("ready");
+        expect(claudePreflight.value.checks.every((c) => c.status === "passed")).toBe(true);
+      }
+      const claudeLaunch = await claudeAdapter.prepareLaunch(claudeEnv);
+      expect(claudeLaunch.ok).toBe(true);
+      if (claudeLaunch.ok) {
+        expect(claudeLaunch.value.argv).toContain("--append-system-prompt-file");
+        expect(claudeLaunch.value.argv).toContain("--permission-mode");
       }
 
-      // 2. Codex 0.162.0 live check: binary is 280.8 MiB (> 256 MiB attestation cap -> QA-P34-03)
+      // 2. Codex 0.162.0 live preflight check & prepareLaunch (QA-P34-03 fixed: 512 MiB cap)
       const codexAdapter = new CodexProviderAdapter({ runner });
-      const codexEnv = makeEnvironment("codex", root, stateDir, { mode: "workspace_auto" });
+      const codexEnv = makeEnvironment("codex", root, stateDir, {
+        mode: "workspace_auto",
+        skillManifestDigest: "0".repeat(64)
+      });
       const codexPreflight = await codexAdapter.checkHealth({
         schemaVersion: CURRENT_PLATFORM_SCHEMA_VERSION,
         environment: codexEnv,
@@ -420,13 +439,18 @@ exit 0
       });
       expect(codexPreflight.ok).toBe(true);
       if (codexPreflight.ok) {
-        expect(codexPreflight.value.checks.find((c) => c.check === "binary")?.status).toBe("failed");
-        expect(codexPreflight.value.checks.find((c) => c.check === "binary")?.code).toBe("binary_missing");
+        expect(codexPreflight.value.checks.filter((c) => c.status !== "passed")).toEqual([]);
+        expect(codexPreflight.value.status).toBe("ready");
       }
+      const codexLaunch = await codexAdapter.prepareLaunch(codexEnv);
+      expect(codexLaunch.ok).toBe(true);
 
-      // 3. Agy 1.4.0 live preflight check: binary and version pass, probe command hits QA-P34-04 (--print --model order)
-      const agyAdapter = new AgyProviderAdapter({ runner, model: "Gemini 3.1 Flash Lite" });
-      const agyEnv = makeEnvironment("agy", root, stateDir, { mode: "restricted" });
+      // 3. Agy 1.4.0 live preflight check & prepareLaunch (QA-P34-04 & QA-P34-06 fixed)
+      const agyAdapter = new AgyProviderAdapter({ runner, model: "gemini-3.8-flash-low" });
+      const agyEnv = makeEnvironment("agy", root, stateDir, {
+        mode: "restricted",
+        skillManifestDigest: "0".repeat(64)
+      });
       const agyPreflight = await agyAdapter.checkHealth({
         schemaVersion: CURRENT_PLATFORM_SCHEMA_VERSION,
         environment: agyEnv,
@@ -435,13 +459,23 @@ exit 0
       });
       expect(agyPreflight.ok).toBe(true);
       if (agyPreflight.ok) {
-        expect(agyPreflight.value.checks.find((c) => c.check === "binary")?.status).toBe("passed");
-        expect(agyPreflight.value.checks.find((c) => c.check === "version")?.status).toBe("passed");
+        expect(agyPreflight.value.checks.filter((c) => c.status !== "passed")).toEqual([]);
+        expect(agyPreflight.value.status).toBe("ready");
       }
-    }, 45_000);
+      const agyLaunch = await agyAdapter.prepareLaunch(agyEnv);
+      expect(agyLaunch.ok).toBe(true);
+      expect(existsSync(join(stateDir, "agy-home", ".gemini", "antigravity-cli", "settings.json"))).toBe(true);
+    }, 90_000);
 
-    it("starts real Herdr panes for Claude, Codex, and Agy in an isolated live Herdr 0.9.5 session", async () => {
+    it.skipIf(!liveHerdrEnabled)("starts real Herdr panes for Claude, Codex, and Agy in an isolated live Herdr session", async () => {
       const root = makeTempDir("bflow-e12-herdr-");
+      const herdrVersion = await environmentProcessRunner.run({
+        executable: "herdr",
+        args: ["--version"],
+        cwd: root,
+        timeoutMs: 5_000
+      });
+      expect(herdrVersion.exitCode, `Herdr must be installed for live platform checks: ${herdrVersion.stderr}`).toBe(0);
       const sessionName = `bflow-e12-${process.pid}`;
       const baseEnv: Record<string, string | undefined> = {
         ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("HERDR_"))),

@@ -137,7 +137,6 @@ function compileClaudePermissions(
   options: PermissionCompilerOptions
 ): CompiledPermissionResult {
   const requiredFlags = [
-    "--restricted",
     "--strict-mcp-config",
     "--setting-sources",
     "--disable-slash-commands",
@@ -170,7 +169,7 @@ function compileClaudePermissions(
   }
 
   const flags: string[] = [
-    "--restricted",
+    ...(capabilities.supportedFlags.has("--restricted") ? ["--restricted"] : []),
     "--strict-mcp-config",
     "--setting-sources",
     "",

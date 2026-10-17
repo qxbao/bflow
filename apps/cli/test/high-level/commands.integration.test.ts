@@ -1,11 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CommandExecutionResultSchema } from "@bflow/contracts";
 import { CommandJournal, HighLevelEnvelopeSchema, runCli } from "../../src/index.js";
 import { newCommandIdentity } from "../../src/high-level/envelope.js";
+import { runHighLevelCli } from "../../src/high-level/index.js";
 import { stripAnsi } from "../../src/presentation.js";
 import {
   approvedSpecification,
@@ -580,6 +581,26 @@ describe("bflow mcp status", () => {
     expect(envelope.exitCode).toBe(3);
     expect(output(envelope).data.gateway).toMatchObject({ configured: false, reachable: false });
     expect(output(envelope).data.config.state).toBe("absent");
+  });
+
+  it("does not infer remote backend health from a valid config without a Gateway probe", async () => {
+    const configRoot = tempDir("bflow-default-mcp-xdg-");
+    const configDirectory = join(configRoot, "bflow");
+    mkdirSync(configDirectory, { recursive: true });
+    const def = service("machine-default-mcp");
+    writeFileSync(join(configDirectory, "mcp.json"), JSON.stringify({ schemaVersion: 3, services: { docs: def }, managedIds: ["docs"] }));
+    const previous = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = configRoot;
+    try {
+      const result = await runHighLevelCli(["mcp", "status", "--json"], { cwd: process.cwd() });
+      expect(result.exitCode).toBe(3);
+      const data = JSON.parse(result.stdout).result.output.data;
+      expect(data.gateway).toMatchObject({ configured: false, reachable: false });
+      expect(data.backends).toEqual([expect.objectContaining({ serviceId: "docs", state: "unknown", healthy: false })]);
+    } finally {
+      if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previous;
+    }
   });
 
   it("combines Gateway backend health with configured services", async () => {
