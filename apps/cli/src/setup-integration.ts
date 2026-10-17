@@ -227,7 +227,7 @@ export async function executeSetupCommand(
   }
 
   if (launchRequirements.length) {
-    diagnostics.push(...setupGatewayDiagnostics({ launchRequirements, ...(repositoryRoot ? { repositoryRoot } : {}) }));
+    diagnostics.push(...setupGatewayDiagnostics({ launchRequirements, ...(repositoryRoot ? { repositoryRoot } : {}), gatewayStateDirectory: platform.paths.state }));
   }
 
   if (onProgress) {

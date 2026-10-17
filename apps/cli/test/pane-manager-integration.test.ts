@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionManifestSchema } from "@bflow/contracts";
-import { FileSessionManifestStore } from "@bflow/pane-manager";
+import type { HostPrepareResponse } from "@bflow/runtime";
+import { FileSessionManifestStore, readBuiltinRolePrompt, resolveTopologyRole } from "@bflow/pane-manager";
 import { EnvironmentLifecycle, PaneManagerLifecycleAdapter, createNamedPaneRunner, identifyRepository, readEnvironmentConfig, runCli, openPaneManagerEnvironment,
   type EnvironmentCompositionInput } from "../src/index.js";
 import { HerdrProcesses } from "./fixtures/herdr-processes.js";
@@ -134,17 +135,6 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     expect(await createNamedPaneRunner(input, fake).run({ args: ["agent", "start", "chat"], signal: controller.signal })).toMatchObject({ failure: "aborted", started: false });
     expect(fake.run).not.toHaveBeenCalled();
   });
-  linuxIt("shuts down a partial non-Claude startup with the default openLifecycleHost without blocking on Claude hook validation", async () => {
-    const defaultLifecycle = new EnvironmentLifecycle(dir, {
-      runner,
-      openIntegration: async composition => openPaneManagerEnvironment(composition, runner)
-    });
-    await expect(defaultLifecycle.up()).rejects.toThrow("requires Claude native hooks");
-    expect(runner.session(input.repository.sessionName).running).toBe(true);
-    const stopped = await defaultLifecycle.down(true);
-    expect(stopped).toMatchObject({ server: "stopped", manifest: null });
-    expect(runner.session(input.repository.sessionName).running).toBe(false);
-  });
   linuxIt("shuts down an active topology with the default openLifecycleHost even when config roles use non-Claude CLI and no host daemon was started", async () => {
     await lifecycle().up();
     const defaultLifecycle = new EnvironmentLifecycle(dir, {
@@ -154,5 +144,111 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     const stopped = await defaultLifecycle.down(true);
     expect(stopped.status).toBe("down");
     expect(runner.session(input.repository.sessionName).running).toBe(false);
+  });
+});
+
+type Provider = "claude" | "codex" | "agy";
+/** Provider-specific startup argv. Conversation/Coordinator must reference their original prompt, as P13 verifies. */
+async function launchFor(role: string, provider: Provider): Promise<HostPrepareResponse["roleLaunch"][string]> {
+  const source = (await readBuiltinRolePrompt(role as never))?.source ?? "";
+  const topology = resolveTopologyRole(role);
+  const argv = topology === "chat" || topology === "coordinator"
+    ? provider === "claude" ? ["--append-system-prompt-file", source] : ["-c", `model_instructions_file=${JSON.stringify(source)}`]
+    : [`--role-test=${role}`];
+  return { systemPrompt: `Trusted ${role} prompt`, mcpConfigFile: "/test/mcp.json", hooksSettingsFile: "/test/hooks.json",
+    launch: { provider, argv, env: { BFLOW_TEST_SECRET: "must-not-leak" }, launchId: `launch-${role}`, launchFingerprint: "a".repeat(64) } };
+}
+
+describe("P30 platform readiness in up", () => {
+  let dir: string;
+  let runner: HerdrProcesses;
+  let base: EnvironmentCompositionInput;
+  beforeEach(async () => {
+    dir = await realpath(await mkdtemp(join(tmpdir(), "bflow-p30-up-"))); execFileSync("git", ["init", "--quiet", dir]);
+    expect((await runCli(["init"], { cwd: dir })).ok).toBe(true);
+    const repository = await identifyRepository(dir);
+    base = { repository, config: await readEnvironmentConfig(repository), env: { ...process.env } };
+    runner = new HerdrProcesses();
+  });
+  afterEach(async () => { vi.restoreAllMocks(); await rm(dir, { recursive: true, force: true }); });
+  const starts = () => runner.calls.filter((r) => r.args[0] === "agent" && r.args[1] === "start");
+  const kindOf = (call: { args: readonly string[] }) => call.args[call.args.indexOf("--kind") + 1];
+  const withProviders = (assign: (role: string) => Provider): EnvironmentCompositionInput => {
+    const config = structuredClone(base.config);
+    config.environment.roles = config.environment.roles.map(role => ({ ...role, cli: assign(role.role) }));
+    return { ...base, config };
+  };
+  const hostWith = (roleLaunch: HostPrepareResponse["roleLaunch"], platform?: HostPrepareResponse["platform"]): LifecycleHost => ({
+    prepare: vi.fn(async () => ({ roleLaunch, ...(platform ? { platform } : {}) })),
+    activate: vi.fn(async () => ({ ok: true as const, value: undefined })),
+    runtime: { findRuns: vi.fn(async () => ({ ok: true, value: { items: [] } })), getRun: vi.fn(async () => ({ ok: true, value: null })) },
+    quiesce: vi.fn(async () => ({ ok: true, value: undefined })), checkpoint: vi.fn(), shutdown: vi.fn(async () => {}), close: vi.fn(async () => {})
+  } as unknown as LifecycleHost);
+  /** The Herdr server is started by `up` through the lifecycle; these tests drive the manager directly. */
+  const serverRunning = (input: EnvironmentCompositionInput) => { runner.session(input.repository.sessionName).running = true; };
+  const roleLaunchesFor = async (input: EnvironmentCompositionInput) => Object.fromEntries(await Promise.all(
+    input.config.environment.roles.map(async role => [role.role, await launchFor(role.role, role.cli as Provider)])));
+
+  linuxIt("starts an all-Codex configuration with the host-prepared launch profile", async () => {
+    const input = withProviders(() => "codex");
+    serverRunning(input);
+    const host = hostWith(await roleLaunchesFor(input));
+    const result = await openPaneManagerEnvironment(input, runner, async () => host).manager.up(input.repository.sessionName);
+    expect(result.ok ? "ok" : result.error.message).toBe("ok");
+    expect(starts()).toHaveLength(7);
+    expect(starts().every(call => kindOf(call) === "codex")).toBe(true);
+    expect(host.prepare).toHaveBeenCalledTimes(1);
+  });
+
+  linuxIt("fails up with the readiness report before any agent start when a required role is blocked", async () => {
+    const input = withProviders(role => role === "coordinator" ? "codex" : "claude");
+    serverRunning(input);
+    const roleLaunch = await roleLaunchesFor(input);
+    const platform: HostPrepareResponse["platform"] = { ready: false, generation: 1, checkedAt: new Date().toISOString(), roles: [
+      { role: "coordinator", provider: "codex", required: true, status: "blocked", message: "Codex is not authenticated",
+        checks: [{ check: "authentication", status: "failed", code: "codex_auth_missing", message: "Codex login is missing", remediation: "Run codex login" }] },
+      { role: "conversation", provider: "claude", required: true, status: "ready", checks: [] }
+    ] };
+    const result = await openPaneManagerEnvironment(input, runner, async () => hostWith(roleLaunch, platform)).manager.up(input.repository.sessionName);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.message).toContain("coordinator [codex]: blocked");
+    expect(result.error.message).toContain("codex_auth_missing");
+    expect(result.error.message).toContain("Codex login is missing");
+    expect(result.error.message).not.toContain("conversation [claude]");
+    expect(result.error.message).not.toContain("must-not-leak");
+    expect(starts()).toHaveLength(0);
+  });
+
+  linuxIt("starts a mixed Claude, Codex and Agy configuration with each role's own provider", async () => {
+    const input = withProviders(role => role === "conversation" ? "claude" : role === "coordinator" ? "codex" : "agy");
+    serverRunning(input);
+    const result = await openPaneManagerEnvironment(input, runner, async () => hostWith(await roleLaunchesFor(input))).manager.up(input.repository.sessionName);
+    expect(result.ok ? "ok" : result.error.message).toBe("ok");
+    const kinds = starts().map(kindOf).sort();
+    expect(kinds).toEqual(["agy", "agy", "agy", "agy", "agy", "claude", "codex"]);
+  });
+
+  linuxIt("uses the legacy provider arguments when the host prepares no launch profile", async () => {
+    const input = withProviders(() => "codex");
+    serverRunning(input);
+    const legacy: HostPrepareResponse["roleLaunch"] = Object.fromEntries(input.config.environment.roles.map(role => [role.role,
+      { systemPrompt: "Trusted prompt", mcpConfigFile: "/test/mcp.json", hooksSettingsFile: "/test/hooks.json" }]));
+    const launchArguments = vi.fn(async (kind: string, role: string) => ["--legacy-test", `${kind}:${role}`]);
+    const result = await openPaneManagerEnvironment(input, runner, async () => hostWith(legacy), launchArguments).manager.up(input.repository.sessionName);
+    expect(result.ok ? "ok" : result.error.message).toBe("ok");
+    expect(launchArguments).toHaveBeenCalledTimes(7);
+    expect(starts().every(call => call.args.includes("--legacy-test"))).toBe(true);
+  });
+
+  linuxIt("refuses a prepared launch whose provider differs from the configured role provider", async () => {
+    const input = withProviders(() => "codex");
+    const roleLaunch = await roleLaunchesFor(input);
+    roleLaunch["coordinator"] = await launchFor("coordinator", "claude");
+    serverRunning(input);
+    const result = await openPaneManagerEnvironment(input, runner, async () => hostWith(roleLaunch)).manager.up(input.repository.sessionName);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.message).toContain("configuration selects 'codex'");
+    expect(starts()).toHaveLength(0);
   });
 });

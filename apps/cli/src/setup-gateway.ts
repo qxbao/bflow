@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { z } from "zod";
 import { MCPClientRegistrationSchema, MCPServiceDefinitionSchema, MCPServiceObservationSchema, ScopedOperationSchema,
   type MCPServiceDefinition, type MCPServiceObservation } from "@bflow/contracts";
-import { startGatewayControl, type GatewayControl } from "./gateway-control.js";
+import { GATEWAY_CONTROL_LOCATOR_FILE, startGatewayControl, type GatewayControl } from "./gateway-control.js";
 import { MachineConfigSchema, McpConfigComponent, ServicesComponent, SetupStateStore, EnvironmentManifestComponent,
   loadMachineConfig, MACHINE_CONFIG_FILE, digest, McpConfigFileSchema, SERVICE_MARKER, ToolInstallDescriptorSchema,
   type MachineConfig, type PlatformProfile, type SetupComponent, type SetupContext, type CommandRunner,
@@ -28,11 +28,12 @@ export interface SetupGatewayInput {
   repositoryRoot?: string;
 }
 
-export function setupGatewayDiagnostics(input: Pick<SetupGatewayInput, "repositoryRoot" | "launchRequirements">): string[] {
+export function setupGatewayDiagnostics(input: Pick<SetupGatewayInput, "repositoryRoot" | "launchRequirements"> & { gatewayStateDirectory?: string | undefined }): string[] {
+  const locator = input.gatewayStateDirectory ? ` at ${join(input.gatewayStateDirectory, GATEWAY_CONTROL_LOCATOR_FILE)}` : "";
   return [
     ...(!input.repositoryRoot && input.launchRequirements.some(item => item.toolId === "gitnexus")
       ? ["GitNexus installs globally; repository indexing and its MCP activation are deferred until bflow setup --dir <repository>."] : []),
-    "The background Gateway verifies installed backends and serves role registration through its private gateway-control.json locator in the Gateway state directory; machine setup does not establish those role connections."
+    `The background Gateway verifies installed backends and serves role registration through its private ${GATEWAY_CONTROL_LOCATOR_FILE} locator${locator}; machine setup does not establish those role connections.`
   ];
 }
 

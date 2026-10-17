@@ -6,13 +6,15 @@ import {
 } from "@bflow/contracts";
 import {
   FileSessionManifestStore, RolePaneManager, isSupportedAgentKind, resolveTopologyRole,
-  type HerdrCommandRunner, type PermanentTopologyRole, type RoleAgentConfig,
+  type AgentLaunchProfile, type HerdrCommandRunner, type PermanentTopologyRole, type RoleAgentConfig,
   type SessionManifestStore, type TopologyRole
 } from "@bflow/pane-manager";
+import type { HostPrepareResponse } from "@bflow/runtime";
 import type { EnvironmentCompositionInput, EnvironmentIntegration } from "./environment.js";
 import { EnvironmentError } from "./environment.js";
 import { environmentProcessRunner, namedSessionEnvironment, type EnvironmentProcessRunner } from "./environment-process.js";
 import { openLifecycleHost, providerRoleArguments, type LifecycleHost, type LifecycleHostFactory } from "./agentic-host.js";
+import { formatPlatformNotReady } from "./platform-options.js";
 
 function failure<T>(message: string): OperationResult<T> {
   return { ok: false, error: { code: "validation", retryable: false, message } };
@@ -43,7 +45,7 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
   private readonly panes: RolePaneManager;
   private persistenceFailure: ContractError | undefined;
   constructor(private readonly input: EnvironmentCompositionInput, private readonly runner = environmentProcessRunner,
-    roleArguments: Partial<Record<TopologyRole, readonly string[]>> = {}) {
+    roleArguments: Partial<Record<TopologyRole, readonly string[]>> = {}, roleLaunches: Partial<Record<TopologyRole, AgentLaunchProfile>> = {}) {
     const roles: PermanentTopologyRole[] = [];
     const roleConfigs: Partial<Record<TopologyRole, Partial<RoleAgentConfig>>> = {};
     for (const role of input.config.environment.roles) {
@@ -55,7 +57,9 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
       if (kind !== role.cli || !isSupportedAgentKind(kind)) throw new Error(`P13 requires a supported agent kind on PATH; custom executable '${role.cli}' is not supported`);
       roles.push(topologyRole);
       // Native arguments are owned by P13. No code, prompts or assignments are dispatched by P12.
+      // A host-prepared v3 launch profile supersedes legacy argument injection for the same role.
       roleConfigs[topologyRole] = { agentKind: kind, startupTimeoutMs: input.config.environment.startupTimeoutMs,
+        ...(roleLaunches[topologyRole] ? { launch: roleLaunches[topologyRole] } : {}),
         ...(roleArguments[topologyRole] ? { args: roleArguments[topologyRole] } : {}) };
     }
     const diskStore = new FileSessionManifestStore(resolve(input.repository.root, ".bflow/state/panes"));
@@ -158,6 +162,8 @@ export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, r
   let host: Promise<LifecycleHost> | undefined;
   const connect = () => host ??= hostFactory(input);
   let manager = new PaneManagerLifecycleAdapter(input, runner);
+  // Latest platform preflight from this process; doctor reports it only when present.
+  let lastPlatform: HostPrepareResponse["platform"];
   return {
     requiresNativeSession: true,
     manager: {
@@ -165,20 +171,39 @@ export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, r
       async up(sessionId, options) {
         if (sessionId !== input.repository.sessionName) return failure("Cannot start another repository's session");
         const descriptors = await (await connect()).prepare();
+        lastPlatform = descriptors.platform;
+        // Readiness is the host's verdict; a blocked report stops before any pane is created.
+        if (descriptors.platform && !descriptors.platform.ready) return failure(formatPlatformNotReady(descriptors.platform));
         const args: Partial<Record<TopologyRole, readonly string[]>> = {};
+        const launches: Partial<Record<TopologyRole, AgentLaunchProfile>> = {};
         for (const role of input.config.environment.roles) {
           const launch = descriptors.roleLaunch[role.role];
           const topology = resolveTopologyRole(role.role);
           if (!launch || !topology) return failure(`Host has no trusted launch descriptor for ${role.role}`);
-          args[topology] = await launchArguments(role.cli, role.role, launch);
+          if (launch.launch) {
+            if (launch.launch.provider !== role.cli)
+              return failure(`Host prepared provider '${launch.launch.provider}' for role ${role.role}, but configuration selects '${role.cli}'.`);
+            launches[topology] = launch.launch;
+          } else {
+            args[topology] = await launchArguments(role.cli, role.role, launch);
+          }
         }
-        manager = new PaneManagerLifecycleAdapter(input, runner, args);
+        manager = new PaneManagerLifecycleAdapter(input, runner, args, launches);
         return manager.up(sessionId, options);
       },
       getManifest: (sessionId, options) => manager.getManifest(sessionId, options),
       attach: (sessionId, options) => manager.attach(sessionId, options),
       down: (sessionId, options) => manager.down(sessionId, options),
-      doctorSession: options => manager.doctorSession(options)
+      async doctorSession(options) {
+        const report = await manager.doctorSession(options);
+        if (!lastPlatform) return report;
+        const checks = [...report.checks, ...lastPlatform.roles.map(role => ({
+          checkId: `platform-${role.role}`, name: `${role.role} provider readiness (${role.provider})`,
+          status: role.status === "ready" ? "passed" as const : role.required ? "failed" as const : "warn" as const,
+          message: role.message ?? `Preflight status: ${role.status}`
+        }))];
+        return { ...report, healthy: !checks.some(check => check.status === "failed"), checks };
+      }
     },
     runtime: {
       findRuns: async (query, options) => (await connect()).runtime.findRuns(query, options),

@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
-import { createServer, type Server, type Socket } from "node:net";
+import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { isAbsolute, join } from "node:path";
 import { z } from "zod";
 import { IdentifierSchema, MCPClientRegistrationSchema, MCPEndpointSchema, MCPResourceLeaseSchema,
@@ -420,7 +420,24 @@ async function removeStaleSocket(path: string, uid: number): Promise<void> {
   });
   if (!info) return;
   if (!info.isSocket() || info.uid !== uid) throw new Error("Refusing to replace a non-socket or foreign control path");
+  // A socket file alone does not prove a dead daemon: a live Gateway keeps answering and must not be displaced.
+  if (await socketAnswers(path)) throw new Error("Another Gateway control is running for this state directory; refusing to replace its live socket");
   await rm(path, { force: true });
+}
+
+/** Connect probe: resolves true only when a listener accepts the connection within the timeout. */
+function socketAnswers(path: string, timeoutMs = 1000): Promise<boolean> {
+  return new Promise(resolve => {
+    const socket = createConnection(path);
+    const finish = (answered: boolean) => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(answered);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
 }
 
 function listen(server: Server, path: string): Promise<void> {

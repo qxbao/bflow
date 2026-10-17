@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { ContractError, RuntimeService } from "@bflow/contracts";
 import type { SetupContext } from "@bflow/machine-setup";
 import { SUPPORTED_CLI_COMMANDS } from "../command-reference.js";
+import { loadMachineSkillCatalog } from "../skill-catalog.js";
 import { composeCliRuntime } from "../runtime.js";
 import type { CliIo, PresentationOptions } from "../types.js";
 import { bold, cyan, dim, extractSafeDetails, green, humanText, red, resolveActionableRemediation, yellow } from "../presentation.js";
@@ -304,24 +305,14 @@ function withDefaultSkillsPort(services: HighLevelServices): HighLevelServices {
               const skillsMod: any = await import(
                 new URL("../../../../packages/skills/dist/index.js", import.meta.url).href
               );
-              const catalog = await skillsMod.loadDefaultSkillCatalog({
-                supportedCommands: SUPPORTED_CLI_COMMANDS
-              });
+              const catalog = await loadMachineSkillCatalog();
               const store = new skillsMod.SkillFileStore(storeRoot);
               const manager = new skillsMod.SkillManager({
                 store,
                 supportedCommands: SUPPORTED_CLI_COMMANDS,
-                approvedBuiltinDigests: catalog.map((item: any) => item.definition.digest)
+                approvedBuiltinDigests: [...catalog.approvedBuiltinSkillDigests]
               });
-              return skillsMod.createSkillsSetupSynchronizer(
-                manager,
-                store,
-                catalog.map((item: any) => ({
-                  root: item.directory,
-                  source: "builtin" as const,
-                  expectedDigest: item.definition.digest
-                }))
-              );
+              return skillsMod.createSkillsSetupSynchronizer(manager, store, [...catalog.entries]);
             })();
           }
           return cachedSynchronizer;

@@ -397,7 +397,7 @@ function formatInitOutput(output: InitCommandOutput, useColor = false): string {
   lines.push("");
   lines.push("Next action:");
   lines.push("  Run 'bflow up' to start the environment.");
-  lines.push("  Note: Default provider is Codex. Default agentic up currently requires verified Claude native hooks (bflow init --provider claude) or an operator-supplied custom host; see README.md for details.");
+  lines.push("  Note: Default provider is Codex. 'bflow up' starts panes only when the host's provider preflight reports every required role ready; see README.md for details.");
   return lines.join("\n");
 }
 
