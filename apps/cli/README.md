@@ -5,6 +5,34 @@ Build from the repository root with `pnpm build`, then run
 Node >=22.13 and the root's pinned pnpm are required for the existing storage runtime.
 Lifecycle locking requires Linux `flock` from util-linux on PATH.
 
+
+## First-time setup
+
+From a source checkout, run `pnpm build`, then `node apps/cli/dist/bin.js setup`.
+Setup previews the machine plan and asks once before applying it in an interactive
+terminal. Use `setup --yes` to approve that plan without a prompt. `--check` and
+`--dry-run` observe without creating directories, changing shell files or installing
+software. A non-interactive invocation without `--yes` reports the missing approval
+and exits with status 1.
+
+Machine installation belongs to the current account and works across repositories;
+`--dir` selects repository context without putting machine installs inside its
+`.bflow` directory. The CLI installs an owned `bflow` launcher and manages its PATH
+entry. Existing shell configuration is preserved. An already-open parent shell
+cannot receive environment changes from a child process; the output explains how
+to load the managed PATH when needed.
+
+Default setup uses the reviewed, exact-version tool catalog for the supported
+platform: Herdr, Claude Code, Codex, Agy, RTK, GitNexus and Chrome DevTools MCP.
+Explicit machine pins are preserved. Provider login remains the account owner's
+interactive action; installing a CLI does not establish authentication. Upstream
+license conditions are shown in the installation diagnostics.
+
+The result includes every step receipt and the final machine doctor report.
+Applied steps display their receipt status instead of a pending approval label.
+Partial application, failed health checks and missing approval return a nonzero
+exit status. A dry run with planned changes remains a successful preview.
+
 | Command | Behavior |
 | --- | --- |
 | `bflow init [--provider claude\|codex]` | Creates `.bflow/config.yaml` and `.bflow/.gitignore` at the canonical Git root. Default provider is Codex. Repeat init preserves configuration; explicit `--force`/`--yes` replaces it. Does not invoke Herdr. |

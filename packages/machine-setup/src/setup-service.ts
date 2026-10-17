@@ -56,6 +56,10 @@ export interface ComponentFactoryInput {
 }
 
 export interface MachineSetupServiceOptions {
+  /** Add integration components while retaining the default path/skills/manifest composition. */
+  decorateComponents?: (components: readonly SetupComponent[], input: ComponentFactoryInput) => readonly SetupComponent[];
+  /** False when a composed, approved component persists the resolved machine configuration. */
+  persistMachineConfig?: boolean;
   /** Already resolved by the caller (including isolated roots). */
   platform?: PlatformProfile;
   /** Desired config supplied by the caller; an invalid on-disk config still requires repair. */
@@ -182,9 +186,10 @@ export class MachineSetupService {
     const observations = await probe();
     report.observations = observations;
 
-    const { components, manifest, diagnostics } = this.buildComponents({
-      platform, store, runner: this.runner, config, observations, env: this.host.env
-    });
+    const componentInput = { platform, store, runner: this.runner, config, observations, env: this.host.env };
+    const builtComponents = this.buildComponents(componentInput);
+    const components = this.options.decorateComponents?.(builtComponents.components, componentInput) ?? builtComponents.components;
+    const { manifest, diagnostics } = builtComponents;
     report.diagnostics.push(...diagnostics);
 
     let lastDoctor: MachineDoctorReport | null = null;
@@ -313,7 +318,7 @@ export class MachineSetupService {
     if (injected !== undefined) {
       const components = typeof injected === "function" ? injected(input) : injected;
       const manifest = components.find((c): c is EnvironmentManifestComponent => c instanceof EnvironmentManifestComponent) ?? null;
-      manifest?.bindMachineConfig(input.config);
+      if (this.options.persistMachineConfig !== false) manifest?.bindMachineConfig(input.config);
       return { components, manifest, diagnostics: [] };
     }
     const { platform, store, runner, config, observations, env } = input;
@@ -331,7 +336,8 @@ export class MachineSetupService {
     const manager = this.options.serviceManager ?? selectServiceManager(platform, runner, store);
     const services = new ServicesComponent({ platform, store, manager, services: config.services });
     const manifest = new EnvironmentManifestComponent({
-      platform, store, observations, pathComponent, config,
+      platform, store, observations, pathComponent,
+      ...(this.options.persistMachineConfig !== false ? { config } : {}),
       mcpServiceIds: config.mcpServices.map((s) => s.serviceId),
       serviceIds: config.services.map((s) => s.serviceId),
       skills: skills.component

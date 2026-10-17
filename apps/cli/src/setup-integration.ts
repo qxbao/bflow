@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
+import { createInterface } from "node:readline/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -19,7 +20,9 @@ import {
   defaultHostEnvironment,
   NodeCommandRunner,
   AssumeYesApprover,
-  NonInteractiveApprover,
+  InteractiveApprover,
+  type SetupOutcome,
+  type MachineDoctorReport,
   buildSetupPlan,
   probeTools,
   MACHINE_CONFIG_FILE,
@@ -30,9 +33,9 @@ import {
   type ToolObservation
 } from "@bflow/machine-setup";
 import {
-  createDefaultProviderRegistry,
   AgentProviderRegistry
 } from "@bflow/agent-providers";
+import { createDefaultSetupConfiguration } from "./setup-defaults.js";
 import { SUPPORTED_CLI_COMMANDS } from "./command-reference.js";
 import type { CliContext, SetupCommandArgs, SetupCommandOutput } from "./types.js";
 
@@ -41,11 +44,6 @@ export type { SetupCommandOutput };
 /** Aliases for compatibility and prompt conformance */
 export const SpawnCommandRunner = NodeCommandRunner;
 export const DefaultProviderAdapterRegistry = AgentProviderRegistry;
-
-/** Dynamic loaders for packages not in apps/cli/package.json */
-async function loadToolInstallerModule(): Promise<any> {
-  return import(new URL("../../../packages/tool-installer/dist/index.js", import.meta.url).href);
-}
 
 async function loadSkillsModule(): Promise<any> {
   return import(new URL("../../../packages/skills/dist/index.js", import.meta.url).href);
@@ -95,26 +93,7 @@ export async function executeSetupCommand(
         managedBin: join(isolatedRoot, "data", "bin")
       }
     };
-  } else if (args.dir) {
-    const scopedRoot = resolve(context?.cwd ?? process.cwd(), args.dir);
-    platform = {
-      ...platform,
-      paths: {
-        config: join(scopedRoot, ".bflow", "config"),
-        data: join(scopedRoot, ".bflow", "data"),
-        state: join(scopedRoot, ".bflow", "state"),
-        managedBin: join(scopedRoot, ".bflow", "data", "bin")
-      }
-    };
   }
-
-  // Ensure state & config directories exist with 0o700 mode
-  await mkdir(platform.paths.state, { recursive: true, mode: 0o700 });
-  await mkdir(platform.paths.config, { recursive: true, mode: 0o700 });
-  await mkdir(platform.paths.data, { recursive: true, mode: 0o700 });
-  await chmod(platform.paths.state, 0o700);
-  await chmod(platform.paths.config, 0o700);
-  await chmod(platform.paths.data, 0o700);
 
   // 2. Resolve Runner & Store
   progress("Checking setup state and approvals...");
@@ -128,10 +107,6 @@ export async function executeSetupCommand(
 
   // 3. Resolve Tool Installers & Capabilities
   progress("Checking pinned tool installers...");
-  const toolMod = await loadToolInstallerModule();
-  const capabilityRegistryPath = join(platform.paths.state, "tool-capabilities.json");
-  const capabilityRegistry = new toolMod.FileToolCapabilityRegistry(capabilityRegistryPath);
-  void capabilityRegistry;
 
   let installerRegistry: ToolInstallerRegistry;
   if (context?.setup?.toolInstaller instanceof ToolInstallerRegistry) {
@@ -139,16 +114,8 @@ export async function executeSetupCommand(
   } else {
     installerRegistry = new ToolInstallerRegistry();
     if (context?.setup?.toolInstaller) {
-      installerRegistry.register(context.setup.toolInstaller as ToolInstaller);
-    } else {
-      const managedToolsDir = join(platform.paths.data, "tools");
-      await mkdir(managedToolsDir, { recursive: true, mode: 0o700 });
-      await chmod(managedToolsDir, 0o700);
-      const managedInstaller = new toolMod.ManagedToolInstaller({
-        managedRoot: managedToolsDir,
-        pins: []
-      });
-      installerRegistry.register(managedInstaller);
+      const registered = installerRegistry.register(context.setup.toolInstaller as ToolInstaller);
+      if (!registered.ok) throw new Error(registered.error.message);
     }
   }
 
@@ -156,12 +123,6 @@ export async function executeSetupCommand(
   progress("Checking service manager capabilities...");
   const serviceManager: ServiceManager =
     context?.setup?.serviceManager ?? selectServiceManager(platform, runner, store);
-
-  // 5. Resolve Providers
-  progress("Checking agent provider capabilities...");
-  const providers: AgentProviderRegistry =
-    context?.setup?.providers ?? createDefaultProviderRegistry();
-  void providers;
 
   // 6. Resolve Skills Catalog & Synchronizer
   progress("Checking approved skills catalog...");
@@ -197,11 +158,9 @@ export async function executeSetupCommand(
         supportedCommands: SUPPORTED_CLI_COMMANDS
       });
       const bindingsContent = await readFile(join(catalogDir, "roles", "bindings.json"), "utf8");
-      const bindings = skillsMod.RoleSkillBindingsSchema.parse(JSON.parse(bindingsContent));
+      skillsMod.RoleSkillBindingsSchema.parse(JSON.parse(bindingsContent));
 
       const storeRoot = join(platform.paths.data, "skills-store");
-      await mkdir(storeRoot, { recursive: true, mode: 0o700 });
-      await chmod(storeRoot, 0o700);
       const skillFileStore = new skillsMod.SkillFileStore(storeRoot);
       const skillManager =
         context?.setup?.skillManager ??
@@ -224,7 +183,7 @@ export async function executeSetupCommand(
       skillsInfo = {
         catalogLoaded: true,
         skillCount: catalog.length,
-        syncedManifests: Object.keys(bindings.bindings).length,
+        syncedManifests: 0,
         storeRoot
       };
     } catch (e) {
@@ -241,24 +200,52 @@ export async function executeSetupCommand(
     if (loaded.config) machineConfig = loaded.config;
   }
 
+  let inventory: Awaited<ReturnType<typeof createDefaultSetupConfiguration>>["inventory"] = [];
+  let additionalToolObservations: Awaited<ReturnType<typeof createDefaultSetupConfiguration>>["additionalToolObservations"] | undefined;
+  if (!context?.setup?.machineSetup && !context?.setup?.toolInstaller) {
+    progress("Loading the supported tool and agent CLI installation catalog...");
+    const defaults = await createDefaultSetupConfiguration({ platform,
+      ...(context?.setup?.machineConfig || existsSync(configPath) ? { config: machineConfig } : {}),
+      registry: installerRegistry });
+    machineConfig = defaults.config;
+    installerRegistry = defaults.registry;
+    inventory = defaults.inventory;
+    additionalToolObservations = defaults.additionalToolObservations;
+    diagnostics.push(...defaults.diagnostics);
+  }
+
   // 8. Execute Machine Setup
   progress(`Building ${args.mode} setup plan...`);
   const machineSetup: any =
     context?.setup?.machineSetup ??
     new MachineSetupService({
       runner,
+      platform,
+      config: machineConfig,
+      launcher: { nodeBinary: process.execPath, entrypoint: fileURLToPath(new URL("../dist/bin.js", import.meta.url)) },
       registry: installerRegistry,
       skills: synchronizer,
+      ...(additionalToolObservations ? { additionalToolObservations } : {}),
       serviceManager,
       approver: args.yes
         ? new AssumeYesApprover(store, () => new Date())
-        : new NonInteractiveApprover(),
+        : new InteractiveApprover(async text => {
+            if (context?.setup?.confirm) return context.setup.confirm(text);
+            if (args.json || !process.stdin.isTTY || !process.stderr.isTTY) return false;
+            const terminal = createInterface({ input: process.stdin, output: process.stderr });
+            try { return /^(y|yes)$/i.test((await terminal.question(`${text} [y/N] `)).trim()); }
+            finally { terminal.close(); }
+          }, store, () => new Date()),
       now: () => new Date()
     });
 
   let plan: SetupPlan | undefined;
   let receipt: SetupReceipt | undefined;
   let toolObservations: ToolObservation[] = [];
+  let toolsReported = false;
+  let receipts: SetupReceipt[] = [];
+  let outcome: SetupOutcome | undefined;
+  let doctor: MachineDoctorReport | undefined;
 
   if (typeof machineSetup.plan === "function") {
     // Custom machineSetup engine supporting explicit plan / apply
@@ -298,6 +285,10 @@ export async function executeSetupCommand(
       assumeYes: args.yes
     });
     diagnostics.push(...(report.diagnostics ?? []));
+    outcome = report.outcome;
+    doctor = report.doctor ?? undefined;
+    receipts = report.receipts ?? [];
+    toolsReported = Array.isArray(report.observations);
     plan = report.plan ?? undefined;
     receipt = report.receipts?.find((r: any) => r.stepId !== "verify:doctor") ?? report.receipts?.[0];
     toolObservations = report.observations ?? [];
@@ -320,31 +311,13 @@ export async function executeSetupCommand(
     if (built.ok) {
       plan = built.value.plan;
     } else {
-      plan = {
-        schemaVersion: 3,
-        planId: `setup-${args.mode}`,
-        machineId: platform.machineId,
-        revision: 1,
-        planDigest: "0".repeat(64),
-        createdAt: new Date().toISOString(),
-        idempotencyKey: `setup-fallback-${Date.now()}`,
-        steps: []
-      };
+      throw new Error(built.error.message);
     }
   }
 
-  const resolvedPlan: SetupPlan = plan ?? {
-    schemaVersion: 3,
-    planId: `setup-${args.mode}`,
-    machineId: platform.machineId,
-    revision: 1,
-    planDigest: "0".repeat(64),
-    createdAt: new Date().toISOString(),
-    idempotencyKey: `setup-fallback-${Date.now()}`,
-    steps: []
-  };
+  const resolvedPlan = plan;
 
-  if (toolObservations.length === 0) {
+  if (toolObservations.length === 0 && !toolsReported) {
     try {
       progress("Checking installed tools...");
       toolObservations = await probeTools(platform, runner, { required: new Set() });
@@ -371,6 +344,10 @@ export async function executeSetupCommand(
     serviceManagerKind: serviceManager.kind,
     plan: resolvedPlan,
     ...(receipt ? { receipt } : {}),
+    receipts,
+    inventory,
+    ...(outcome ? { outcome } : {}),
+    ...(doctor ? { doctor } : {}),
     tools,
     skills: skillsInfo,
     diagnostics

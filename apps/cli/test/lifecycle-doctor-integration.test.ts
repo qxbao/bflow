@@ -173,6 +173,57 @@ describe("Task 2: Platform v3 Lifecycle & Doctor Integration", () => {
   });
 
   describe("runDoctorDiagnostics", () => {
+    it.each([false, true])("probes the repository session despite inherited Herdr context (running=%s)", async (running) => {
+      if (running) runner.running.add(repository.sessionName);
+      const inheritedEnv = {
+        ...process.env,
+        HERDR_SESSION: "another-repository",
+        HERDR_SOCKET: "/tmp/another-repository.sock",
+        HERDR_PANE_ID: "another-pane",
+        HERDR_CONFIG_PATH: "/tmp/operator-herdr-config.toml"
+      };
+      const fixture = createMockManager(repository);
+      const lifecycle = new EnvironmentLifecycle(dir, {
+        runner,
+        env: inheritedEnv,
+        integration: { manager: fixture.manager }
+      });
+
+      const report = await lifecycle.doctor();
+
+      expect(report.checks.find((check) => check.checkId === "herdr-session")).toMatchObject({
+        status: "passed",
+        message: running ? "Repository named session is running" : "Repository named session is stopped (run bflow up)"
+      });
+      const statusRequest = runner.requests.find((request) => request.args.join(" ") === "status server --json")!;
+      expect(statusRequest.env).toMatchObject({
+        HERDR_SESSION: repository.sessionName,
+        HERDR_CONFIG_PATH: "/tmp/operator-herdr-config.toml"
+      });
+      expect(statusRequest.env).not.toHaveProperty("HERDR_SOCKET");
+      expect(statusRequest.env).not.toHaveProperty("HERDR_PANE_ID");
+      expect(inheritedEnv.HERDR_SESSION).toBe("another-repository");
+    });
+
+    it.each([
+      { session: "another-repository", running: false },
+      { session: "another-repository", running: true, protocol: 22 },
+      { running: false },
+      { running: "false" }
+    ])("rejects an uncorrelated or malformed session response: %j", async (status) => {
+      const statusRunner: EnvironmentProcessRunner = {
+        run: async (request) => request.args.join(" ") === "status server --json"
+          ? { exitCode: 0, stdout: JSON.stringify(status), stderr: "" }
+          : runner.run(request)
+      };
+      const report = await runDoctorDiagnostics({ repository, config: null, runner: statusRunner });
+
+      expect(report.checks.find((check) => check.checkId === "herdr-session")).toMatchObject({
+        status: "failed",
+        message: "Herdr returned an uncorrelated session status"
+      });
+    });
+
     it("returns valid EnvironmentDoctorReport matching schema with 5 diagnostic groups", async () => {
       const report = await runDoctorDiagnostics({
         repository,

@@ -92,6 +92,7 @@ export interface SetupCommandArgs extends GlobalCliFlags {
   readonly yes: boolean;
   readonly dir?: string | undefined;
   readonly catalogDir?: string | undefined;
+  readonly memoryProvider?: "auto" | "claude" | "codex" | "host" | undefined;
 }
 
 export interface SetupCommandOutput {
@@ -101,6 +102,10 @@ export interface SetupCommandOutput {
   readonly serviceManagerKind: "systemd-user" | "launchd" | "windows-unverified";
   readonly plan: SetupPlan;
   readonly receipt?: SetupReceipt;
+  readonly receipts?: readonly SetupReceipt[];
+  readonly inventory?: readonly import("./setup-defaults.js").DefaultSetupInventory[];
+  readonly outcome?: import("@bflow/machine-setup").SetupOutcome;
+  readonly doctor?: import("@bflow/machine-setup").MachineDoctorReport;
   readonly tools: readonly { toolId: string; status: string; version?: string }[];
   readonly skills: {
     readonly catalogLoaded: boolean;
@@ -112,6 +117,7 @@ export interface SetupCommandOutput {
 }
 
 export interface SetupIntegrationOptions {
+  readonly confirm?: ((preview: string) => Promise<boolean>) | undefined;
   readonly platform?: import("@bflow/machine-setup").PlatformProfile | undefined;
   readonly runner?: import("@bflow/machine-setup").CommandRunner | undefined;
   readonly machineConfig?: import("@bflow/machine-setup").MachineConfig | undefined;

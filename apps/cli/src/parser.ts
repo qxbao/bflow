@@ -1680,6 +1680,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         "-y",
         "--dir",
         "--catalog-dir",
+        "--memory-provider",
         "--json",
         "-j",
         "--help",
@@ -1725,6 +1726,11 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
       }
       const catalogDir = rawCatalogDir?.trim();
 
+      const memoryProvider = optRes.value.flags.get("--memory-provider") ?? "auto";
+      if (!["auto", "claude", "codex", "host"].includes(String(memoryProvider))) {
+        return makeValidationError("Option '--memory-provider' must be auto, claude, codex, or host.", json, "setup");
+      }
+
       const yes = optRes.value.flags.has("--yes") || optRes.value.flags.has("-y");
 
       const value: SetupCommandArgs = {
@@ -1733,6 +1739,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         yes,
         dir,
         catalogDir,
+        memoryProvider: memoryProvider as "auto" | "claude" | "codex" | "host",
         json,
         help: false
       };

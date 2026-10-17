@@ -543,13 +543,26 @@ function formatSetupOutput(output: SetupCommandOutput, useColor = false): string
   lines.push(`${heading("Machine ID:")}         ${sanitizeIdentifier(output.machineId)}`);
   lines.push(`${heading("Operating System:")}   ${sanitizeIdentifier(output.os)}`);
   lines.push(`${heading("Service Manager:")}    ${sanitizeIdentifier(output.serviceManagerKind)}`);
+  if (output.outcome) lines.push(`${heading("Setup Result:")}       ${humanText(output.outcome)}`);
   if (output.plan) {
     lines.push(`${heading("Plan ID:")}            ${sanitizeIdentifier(output.plan.planId)} (revision ${output.plan.revision})`);
     lines.push(`${heading("Plan Steps:")}         ${output.plan.steps.length}`);
     for (const step of output.plan.steps) {
-      const approval = step.requiresApproval ? ` ${warning("[requires approval]")}` : "";
-      const status = step.requiresApproval ? warning(sanitizeIdentifier(step.action)) : sanitizeIdentifier(step.action);
-      lines.push(`  - [${status}] ${sanitizeIdentifier(step.stepId)} (${sanitizeIdentifier(step.componentId)})${approval}`);
+      const receipt = output.receipts?.find(r => r.stepId === step.stepId) ??
+        (output.receipt?.stepId === step.stepId ? output.receipt : undefined);
+      const approval = !receipt && step.requiresApproval ? ` ${warning("[requires approval]")}` : "";
+      const status = receipt ? sanitizeIdentifier(receipt.status) : sanitizeIdentifier(step.action);
+      const labels: Record<string, string> = {
+        path: "Make bflow and installed tools available in the terminal",
+        "role-skills": "Install agent skills",
+        "mcp-config": "Configure MCP tools",
+        services: "Start and verify the MCP Gateway",
+        "environment-manifest": "Save verified machine configuration",
+        doctor: "Check the completed setup"
+      };
+      const label = step.action === "install_tool" ? `Install ${sanitizeIdentifier(step.componentId)}`
+        : labels[step.componentId] ?? sanitizeIdentifier(step.componentId);
+      lines.push(`  - [${status}] ${label}${approval}`);
     }
   }
   if (output.receipt) {
@@ -577,6 +590,16 @@ function formatSetupOutput(output: SetupCommandOutput, useColor = false): string
   lines.push(`  Skill Count:      ${output.skills.skillCount}`);
   lines.push(`  Synced Manifests: ${output.skills.syncedManifests}`);
   lines.push(`  Store Root:       ${sanitizeIdentifier(output.skills.storeRoot)}`);
+
+  if (output.doctor) {
+    const failed = output.doctor.checks.filter(check => check.status === "failed");
+    lines.push("");
+    lines.push(`Machine checks: ${output.doctor.healthy ? positive("passed") : warning("failed")}`);
+    for (const check of failed) {
+      lines.push(`  - ${humanText(check.summary)}`);
+      if (check.remediation) lines.push(`    Next: ${humanText(check.remediation)}`);
+    }
+  }
 
   if (output.diagnostics && output.diagnostics.length > 0) {
     lines.push("");

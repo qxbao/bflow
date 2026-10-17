@@ -254,7 +254,9 @@ export async function executeCommand(
   if (parsed.command === "setup") {
     try {
       const data = await executeSetupCommand(parsed, context, showProgress ? emitProgress : undefined);
-      return makeResult(CLI_EXIT_CODES.SUCCESS, true, "setup", data, undefined, isJson, io, presentation);
+      const successful = data.outcome === undefined || ["healthy", "applied"].includes(data.outcome) ||
+        parsed.mode === "dry_run" && data.outcome === "changes_pending";
+      return makeResult(successful ? CLI_EXIT_CODES.SUCCESS : CLI_EXIT_CODES.RUNTIME_ERROR, true, "setup", data, undefined, isJson, io, presentation);
     } catch (error) {
       const contractError = toContractError(error);
       return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "setup", undefined, contractError, isJson, io, presentation);

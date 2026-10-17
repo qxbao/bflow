@@ -100,7 +100,7 @@ export async function runDoctorDiagnostics(
   options: DoctorDiagnosticsOptions
 ): Promise<EnvironmentDoctorReport> {
   const { repository, config, runner, dependencies } = options;
-  const env = options.env ?? namedSessionEnvironment(repository.sessionName);
+  const env = namedSessionEnvironment(repository.sessionName, options.env);
   const runtimeChecks: DoctorDetailedCheck[] = [];
   const agentProviderChecks: DoctorDetailedCheck[] = [];
   const mcpChecks: DoctorDetailedCheck[] = [];
