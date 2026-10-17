@@ -15,6 +15,8 @@ import type {
   WorkflowRunSnapshot
 } from "@bflow/contracts";
 import type { ConcreteRuntimeService } from "@bflow/runtime";
+import type { HighLevelEnvelope, HighLevelExitCode } from "./high-level/envelope.js";
+import type { HighLevelServices } from "./high-level/services.js";
 
 export type HighLevelCommandName =
   | "repo inspect"
@@ -49,7 +51,8 @@ export const CLI_EXIT_CODES = {
   USAGE_ERROR: 2
 } as const;
 
-export type CliExitCode = (typeof CLI_EXIT_CODES)[keyof typeof CLI_EXIT_CODES];
+/** Legacy commands use 0–2; high-level commands extend this with codes 3–7 (see HIGH_LEVEL_EXIT_CODES). */
+export type CliExitCode = (typeof CLI_EXIT_CODES)[keyof typeof CLI_EXIT_CODES] | HighLevelExitCode;
 
 export interface GlobalCliFlags {
   readonly json: boolean;
@@ -306,7 +309,7 @@ export interface HighLevelCommandOutput {
   readonly details: Readonly<Record<string, unknown>>;
 }
 
-export interface HighLevelServices {
+export interface HighLevelFacadeServices {
   readonly [key: string]: unknown;
 }
 
@@ -348,7 +351,9 @@ export interface CliContext {
   readonly clock?: (() => Date) | undefined;
   readonly confirmOverwrite?: ((configPath: string) => Promise<boolean> | boolean) | undefined;
   readonly operationOptions?: OperationOptions | undefined;
-  readonly highLevel?: HighLevelServices | undefined;
+  readonly highLevel?: HighLevelFacadeServices | undefined;
+  /** Engine facades for high-level commands; defaults compose the reviewed packages. */
+  readonly highLevelServices?: HighLevelServices | undefined;
 }
 
 export interface CliExecutionResult {
@@ -359,6 +364,8 @@ export interface CliExecutionResult {
   readonly stderr: string;
   readonly data?: CliCommandData | undefined;
   readonly error?: ContractError | undefined;
+  /** Validated JSON envelope of a high-level command. */
+  readonly highLevel?: HighLevelEnvelope | undefined;
 }
 
 export type {

@@ -1,6 +1,44 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "composite": true, "rootDir": "src", "outDir": "dist", "tsBuildInfoFile": "dist/.tsbuildinfo" },
-  "include": ["src/**/*.ts"],
-  "references": [{ "path": "../../packages/contracts" }, { "path": "../../packages/runtime" }, { "path": "../../packages/pane-manager" }]
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
+  },
+  "include": [
+    "src/**/*.ts"
+  ],
+  "references": [
+    {
+      "path": "../../packages/contracts"
+    },
+    {
+      "path": "../../packages/runtime"
+    },
+    {
+      "path": "../../packages/pane-manager"
+    },
+    {
+      "path": "../../packages/agent-providers"
+    },
+    {
+      "path": "../../packages/artifact-store"
+    },
+    {
+      "path": "../../packages/git-orchestrator"
+    },
+    {
+      "path": "../../packages/machine-setup"
+    },
+    {
+      "path": "../../packages/specification"
+    },
+    {
+      "path": "../../packages/test-strategy"
+    },
+    {
+      "path": "../../packages/verification"
+    }
+  ]
 }

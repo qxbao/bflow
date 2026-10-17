@@ -1,3 +1,4 @@
+import { HIGH_LEVEL_SUMMARY } from "./high-level/help.js";
 import type { CliCommandName } from "./types.js";
 
 const GLOBAL_HELP = `Usage: bflow <command> [options]
@@ -26,6 +27,8 @@ Commands:
   skills sync     Synchronize or list agent skills across providers
   agent check     Check provider readiness and activated health
   help            Show help for a command
+
+${HIGH_LEVEL_SUMMARY}
 
 Global Options:
   -h, --help     Show help

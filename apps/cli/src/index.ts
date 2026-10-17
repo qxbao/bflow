@@ -50,7 +50,7 @@ export {
   type HighLevelParsedCliCommand,
   type HighLevelStepRecord,
   type HighLevelCommandOutput,
-  type HighLevelServices,
+  type HighLevelFacadeServices,
   type CommandExecutionResult
 } from "./types.js";
 
@@ -128,3 +128,40 @@ export {
   executeHighLevelCommand,
   type HighLevelExecutionResult
 } from "./high-level-commands.js";
+
+export {
+  HIGH_LEVEL_COMMAND_SPECS,
+  getHighLevelHelp,
+  isHighLevelInvocation,
+  runHighLevelCli
+} from "./high-level/index.js";
+export type { HighLevelRunOptions, HighLevelRunResult } from "./high-level/index.js";
+export {
+  CommandOutcomeSchema,
+  CommandStepSchema,
+  HIGH_LEVEL_COMMANDS,
+  HIGH_LEVEL_EXIT_CODES,
+  HighLevelEnvelopeSchema,
+  HighLevelOutputSchema
+} from "./high-level/envelope.js";
+export type { CommandOutcome, CommandStep, HighLevelEnvelope, HighLevelExitCode, HighLevelOutput } from "./high-level/envelope.js";
+export { CommandJournal, JournalRecordSchema, requestDigest } from "./high-level/journal.js";
+export {
+  bindSpecificationArtifacts,
+  createDefaultHighLevelServices,
+  DEFAULT_ARTIFACT_ROOT,
+  DEFAULT_ARTIFACT_STORE_ID
+} from "./high-level/services.js";
+export type {
+  GitOrchestratorPort,
+  HighLevelResources,
+  HighLevelServices,
+  MachinePort,
+  McpGatewayPort,
+  ProviderPort,
+  SpecificationPort,
+  StrategyPort,
+  VerificationPort
+} from "./high-level/services.js";
+export { deriveTaskGraph } from "./high-level/commands/task-plan.js";
+export { describeHighLevelCommands } from "./high-level/reference.js";

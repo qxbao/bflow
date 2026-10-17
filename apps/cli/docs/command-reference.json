@@ -1,0 +1,487 @@
+{
+  "schemaVersion": 1,
+  "invocation": "bflow <words> [positionals] [options] --json",
+  "envelope": {
+    "stream": "stdout (also for failures when --json is given)",
+    "shape": "{ ok, command, exitCode, result: CommandExecutionResult(schemaVersion 3) }",
+    "output": "result.output = { schemaVersion: 1, command, outcome, ids, replayed, steps[], data }"
+  },
+  "exitCodes": {
+    "0": "SUCCESS",
+    "1": "FAILED",
+    "2": "USAGE",
+    "3": "NOT_READY",
+    "4": "NOT_FOUND",
+    "5": "PERMISSION_REQUIRED",
+    "6": "CONFLICT",
+    "7": "UNKNOWN_STATE"
+  },
+  "commonFlags": [
+    {
+      "name": "--json",
+      "type": "boolean",
+      "required": false,
+      "repeatable": false
+    },
+    {
+      "name": "--help",
+      "type": "boolean",
+      "required": false,
+      "repeatable": false
+    },
+    {
+      "name": "--correlation-id",
+      "type": "string",
+      "required": false,
+      "repeatable": false
+    },
+    {
+      "name": "--idempotency-key",
+      "type": "string",
+      "required": false,
+      "repeatable": false
+    }
+  ],
+  "commands": [
+    {
+      "name": "repo.inspect",
+      "usage": "bflow repo inspect",
+      "summary": "Inspect repository, Git, worktrees, project structure and context",
+      "mutates": "none",
+      "retry": "read_only",
+      "permissionFlags": [],
+      "outcomes": [
+        "inspected",
+        "failed"
+      ],
+      "positionals": [],
+      "flags": []
+    },
+    {
+      "name": "task.plan",
+      "usage": "bflow task plan",
+      "summary": "Create (preview/write) or check the task graph of a specification",
+      "mutates": "repository",
+      "retry": "retry_safe",
+      "idempotencyKey": "task.plan:<spec-id>:<content-digest>",
+      "permissionFlags": [
+        "--write",
+        "--force"
+      ],
+      "outcomes": [
+        "preview",
+        "planned",
+        "checked",
+        "failed"
+      ],
+      "positionals": [],
+      "flags": [
+        {
+          "name": "--spec",
+          "type": "string",
+          "required": true,
+          "repeatable": false
+        },
+        {
+          "name": "--workflow",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--write",
+          "type": "boolean",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--out",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--force",
+          "type": "boolean",
+          "required": false,
+          "repeatable": false
+        }
+      ]
+    },
+    {
+      "name": "task.implement",
+      "usage": "bflow task implement <task-id>",
+      "summary": "Prepare worktree, specification context, TDD policy and Developer assignment request",
+      "mutates": "repository",
+      "retry": "resume_required",
+      "idempotencyKey": "task.implement:<run-id>:<task-id>:<attempt>",
+      "permissionFlags": [],
+      "outcomes": [
+        "prepared",
+        "failed",
+        "reconciliation_required"
+      ],
+      "positionals": [
+        {
+          "name": "task-id",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "name": "--run",
+          "type": "string",
+          "required": true,
+          "repeatable": false
+        },
+        {
+          "name": "--spec",
+          "type": "string",
+          "required": true,
+          "repeatable": false
+        },
+        {
+          "name": "--workflow",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--base",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--attempt",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--developer",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--owned-path",
+          "type": "string",
+          "required": false,
+          "repeatable": true
+        },
+        {
+          "name": "--forbidden-path",
+          "type": "string",
+          "required": false,
+          "repeatable": true
+        },
+        {
+          "name": "--artifact-root",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--artifact-store-id",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--resume",
+          "type": "boolean",
+          "required": false,
+          "repeatable": false
+        }
+      ]
+    },
+    {
+      "name": "verify",
+      "usage": "bflow verify <task-id>",
+      "summary": "Run VerificationPlan checks through the Verification Engine and return evidence",
+      "mutates": "repository",
+      "retry": "retry_safe",
+      "idempotencyKey": "verify:<run-id>:<task-id>:<plan-id>:<change-set-id>:<head>",
+      "permissionFlags": [],
+      "outcomes": [
+        "passed",
+        "not_passed",
+        "failed"
+      ],
+      "positionals": [
+        {
+          "name": "task-id",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "name": "--run",
+          "type": "string",
+          "required": true,
+          "repeatable": false
+        },
+        {
+          "name": "--plan",
+          "type": "string",
+          "required": true,
+          "repeatable": false
+        },
+        {
+          "name": "--change-set",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--repair",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--integration",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--artifact-root",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--artifact-store-id",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        }
+      ]
+    },
+    {
+      "name": "git.prepare",
+      "usage": "bflow git prepare <run-id>",
+      "summary": "Check task commits/worktrees, prepare the integration branch, detect conflicts, request workflow verification",
+      "mutates": "repository",
+      "retry": "resume_required",
+      "idempotencyKey": "git.prepare:<run-id>:<integration-id>",
+      "permissionFlags": [
+        "--yes"
+      ],
+      "outcomes": [
+        "approval_required",
+        "integration_prepared",
+        "conflict_detected",
+        "failed",
+        "reconciliation_required"
+      ],
+      "positionals": [
+        {
+          "name": "run-id",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "name": "--task",
+          "type": "string",
+          "required": false,
+          "repeatable": true
+        },
+        {
+          "name": "--workflow",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--integration-id",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--base",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--yes",
+          "type": "boolean",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--resume",
+          "type": "boolean",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--artifact-root",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--artifact-store-id",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        }
+      ]
+    },
+    {
+      "name": "mcp.status",
+      "usage": "bflow mcp status",
+      "summary": "Check the shared MCP Gateway and each configured backend",
+      "mutates": "none",
+      "retry": "read_only",
+      "permissionFlags": [],
+      "outcomes": [
+        "ready",
+        "not_ready",
+        "failed"
+      ],
+      "positionals": [],
+      "flags": [
+        {
+          "name": "--service",
+          "type": "string",
+          "required": false,
+          "repeatable": true
+        }
+      ]
+    },
+    {
+      "name": "tool.status",
+      "usage": "bflow tool status",
+      "summary": "Check path, version and digest of each catalog tool",
+      "mutates": "none",
+      "retry": "read_only",
+      "permissionFlags": [],
+      "outcomes": [
+        "ready",
+        "not_ready",
+        "failed"
+      ],
+      "positionals": [],
+      "flags": [
+        {
+          "name": "--tool",
+          "type": "string",
+          "required": false,
+          "repeatable": true
+        }
+      ]
+    },
+    {
+      "name": "skills.sync",
+      "usage": "bflow skills sync",
+      "summary": "Synchronize pinned role skills for providers",
+      "mutates": "machine",
+      "retry": "resume_required",
+      "idempotencyKey": "skills.sync:<providers>:<desired-digest>",
+      "permissionFlags": [
+        "--allow-machine-scope"
+      ],
+      "outcomes": [
+        "already_synced",
+        "preview",
+        "approval_required",
+        "synced",
+        "failed",
+        "reconciliation_required"
+      ],
+      "positionals": [],
+      "flags": [
+        {
+          "name": "--provider",
+          "type": "string",
+          "required": false,
+          "repeatable": true,
+          "choices": [
+            "claude",
+            "codex",
+            "agy"
+          ]
+        },
+        {
+          "name": "--dry-run",
+          "type": "boolean",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--allow-machine-scope",
+          "type": "boolean",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--resume",
+          "type": "boolean",
+          "required": false,
+          "repeatable": false
+        }
+      ]
+    },
+    {
+      "name": "agent.check",
+      "usage": "bflow agent check <provider>",
+      "summary": "Preflight provider health and readiness without launching it",
+      "mutates": "none",
+      "retry": "read_only",
+      "permissionFlags": [],
+      "outcomes": [
+        "ready",
+        "not_ready",
+        "failed"
+      ],
+      "positionals": [
+        {
+          "name": "provider",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "name": "--role",
+          "type": "string",
+          "required": false,
+          "repeatable": false,
+          "choices": [
+            "coordinator",
+            "planner",
+            "architect",
+            "specifier",
+            "developer",
+            "tester",
+            "reviewer",
+            "qa",
+            "security"
+          ]
+        },
+        {
+          "name": "--mode",
+          "type": "string",
+          "required": false,
+          "repeatable": false,
+          "choices": [
+            "restricted",
+            "workspace_auto"
+          ]
+        },
+        {
+          "name": "--session",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        }
+      ]
+    }
+  ]
+}

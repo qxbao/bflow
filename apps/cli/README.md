@@ -175,14 +175,27 @@ Native startup waits for authenticated SessionStart receipts within the command
 deadline. A blocked provider reports the role, provider, exact pane/session and
 manual remediation without returning raw terminal output or accepting dialogs.
 
-## High-level SDLC commands (P29)
+## High-level Agentic SDLC commands (P29)
 
-Phase P29 adds 9 high-level, skill-friendly commands for autonomous agent execution and human operations.
-These commands compose underlying SDLC packages (`@bflow/specification`, `@bflow/test-strategy`,
-`@bflow/verification`, `@bflow/git-orchestrator`, `@bflow/mcp-gateway`, `@bflow/skills`, etc.)
-through the unified `HighLevelCliFacade` without exposing concrete internal engines directly.
+`bflow repo inspect`, `task plan`, `task implement`, `verify`, `git prepare`, `mcp status`,
+`tool status`, `skills sync` and `agent check` give agents one goal-level command each. They
+reuse the Specification Engine, Conditional TDD Resolver, Verification Engine, Git Orchestrator,
+machine setup tool/MCP/skills components and the Agent Provider Registry through ports in
+`src/high-level/services.ts` and `HighLevelCliFacade`; the CLI adds parsing, ingress validation,
+idempotency receipts, permission stops and the structured envelope, never scheduling, gates or approvals.
 
-For exhaustive parameter references, schema definitions, and skill bindings, see [COMMAND_REFERENCE.md](./COMMAND_REFERENCE.md).
+Every command supports `--help` and `--json`. With `--json` the result is one
+`CommandExecutionResult`-based envelope on stdout and the process exit code matches it
+(0 success, 1 failed, 2 usage, 3 not ready, 4 not found, 5 permission required, 6 conflict,
+7 unknown state). Mutating commands keep receipts in `.bflow/state/cli/` and `.bflow/state/commands/`
+(must be Git-ignored), replay completed requests, serialize concurrent invocations and refuse to
+repeat an interrupted non-idempotent step until `--resume`.
+
+See [docs/command-reference.md](docs/command-reference.md), the generated
+[docs/command-reference.json](docs/command-reference.json) (checked by a unit test), and
+[COMMAND_REFERENCE.md](./COMMAND_REFERENCE.md) for the full contract and skill bindings,
+including current limitations (Linux `flock` for the P18 engine; MCP Gateway,
+skill manager and verification gate runners are injected, not composed by default).
 
 ### High-level command summary
 
@@ -198,27 +211,7 @@ For exhaustive parameter references, schema definitions, and skill bindings, see
 | `bflow skills sync` | Synchronizes approved skills from catalog to agent provider storage. | `SkillManager`, `SkillStore` | `--list`, `--provider <claude\|codex\|agy>` |
 | `bflow agent check` | Validates provider readiness and activated health against contracts. | `AgentProviderRegistry` | `--provider <claude\|codex\|agy>`, `--stage <preflight\|activated>` |
 
-All high-level commands accept standard execution flags:
-- `--correlation-id <id>`: Distributed tracing correlation identifier.
-- `--idempotency-key <key>`: Deterministic execution key for durable receipt reuse.
-- `--resume`: Resumes execution from the first incomplete or uncertain step.
-- `--actor <id>`, `--role <role>`: Execution identity and role attribution.
-- `--permission-mode <mode>`: Permission mode (`restricted`, `workspace_auto`, `unattended_isolated`).
-- `--session-id <id>`: Session identifier (mandatory for `unattended_isolated`).
-- `--isolation <kind>`: Isolation level (`provider_policy`, `os_sandbox`, `container`).
-- `-j, --json`: Structured JSON envelope output complying with schema version 3.
-- `-h, --help`: Displays command usage and available flags.
-
-### Governance and security enforcement
-
-Every high-level command passes through deterministic governance checks before executing side effects:
-1. **Protected Branch & Production Guard**: Merges targeting protected branches (`main`, `master`, `prod*`, `release/*`, `hotfix/*`) or production environments strictly reject `--auto-approve`. Explicit human approval (`--approved-by <human_operator>`) is required.
-2. **Permission Profile Constraints**: Mutating commands (`task implement`, `git prepare`, `skills sync`) are rejected under `restricted` mode (read-only). `unattended_isolated` mode requires an explicit `--session-id` and OS or container isolation (`--isolation os_sandbox|container`).
-3. **Role Boundary Enforcement**: The `conversation` role represents the user interface only. Direct mutation commands (`task implement`, `git prepare`, `verify`) are rejected if invoked with `--role conversation`.
-
-### Concurrency locking, durable ledger, and idempotency
-
-- **Concurrency Locking**: Command execution scopes are guarded by file-based concurrency locks located at `.bflow/state/commands/locks/<hash>.lock` with in-process PID tracking. Simultaneous invocations on the same scope reject with a `conflict` error.
-- **Durable Operation Ledger**: Execution progress is recorded step-by-step in `.bflow/state/commands/receipts/<hash>.json`. Repeated invocations with the same idempotency key return the cached receipt (`reusedReceipt: true`) without re-running operations.
-- **Uncertain State Protection**: If a mutating step fails or is interrupted, subsequent attempts require `--resume` to reconcile prior state rather than blindly re-running mutations.
-- **Step Resumption**: Passing `--resume` detects completed steps from the prior receipt, skips already-succeeded steps, invokes step-level reconciliation handlers if defined, and continues from the first incomplete step.
+```bash
+pnpm --filter @bflow/cli build
+pnpm exec vitest run apps/cli/test/high-level
+```

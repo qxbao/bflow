@@ -23,6 +23,7 @@ import {
 import { formatCommandError, formatCommandSuccess } from "./formatters.js";
 import { getHelpText } from "./help.js";
 import { parseCliArgs } from "./parser.js";
+import { isHighLevelInvocation, runHighLevelCli, type HighLevelRunOptions } from "./high-level/index.js";
 import {
   CLI_EXIT_CODES,
   type CliCommandData,
@@ -493,6 +494,26 @@ export async function runCli(
   argv: readonly string[],
   context?: CliContext | undefined
 ): Promise<CliExecutionResult> {
+  const useFacadePath =
+    context?.highLevel !== undefined ||
+    (context?.cwd !== undefined &&
+      context?.io === undefined &&
+      context?.highLevelServices === undefined);
+  if (!useFacadePath && isHighLevelInvocation(argv)) {
+    const options: HighLevelRunOptions = {
+      cwd: context?.cwd, io: context?.io, clock: context?.clock, services: context?.highLevelServices,
+      runtime: context?.runtime as HighLevelRunOptions["runtime"], signal: context?.operationOptions?.signal
+    };
+    const result = await runHighLevelCli(argv, options);
+    return {
+      exitCode: result.exitCode,
+      ok: result.ok,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      ...(result.envelope !== undefined ? { highLevel: result.envelope } : {}),
+      ...(result.error !== undefined ? { error: result.error } : {})
+    };
+  }
   const parseRes = parseCliArgs(argv);
   if (!parseRes.ok) {
     const stderr = formatCommandError(parseRes.error, parseRes.command, parseRes.json);
