@@ -178,15 +178,39 @@ importers:
 
   apps/cli:
     dependencies:
+      '@bflow/agent-providers':
+        specifier: workspace:*
+        version: link:../../packages/agent-providers
+      '@bflow/artifact-store':
+        specifier: workspace:*
+        version: link:../../packages/artifact-store
       '@bflow/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@bflow/git-orchestrator':
+        specifier: workspace:*
+        version: link:../../packages/git-orchestrator
+      '@bflow/machine-setup':
+        specifier: workspace:*
+        version: link:../../packages/machine-setup
       '@bflow/pane-manager':
         specifier: workspace:*
         version: link:../../packages/pane-manager
       '@bflow/runtime':
         specifier: workspace:*
         version: link:../../packages/runtime
+      '@bflow/specification':
+        specifier: workspace:*
+        version: link:../../packages/specification
+      '@bflow/test-strategy':
+        specifier: workspace:*
+        version: link:../../packages/test-strategy
+      '@bflow/verification':
+        specifier: workspace:*
+        version: link:../../packages/verification
+      zod:
+        specifier: ^3.24.2
+        version: 3.25.76
 
   packages/agent-providers:
     dependencies:

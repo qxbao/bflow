@@ -21,8 +21,16 @@
     "test": "vitest run --root ../.. apps/cli/test"
   },
   "dependencies": {
+    "@bflow/agent-providers": "workspace:*",
+    "@bflow/artifact-store": "workspace:*",
     "@bflow/contracts": "workspace:*",
+    "@bflow/git-orchestrator": "workspace:*",
+    "@bflow/machine-setup": "workspace:*",
+    "@bflow/pane-manager": "workspace:*",
     "@bflow/runtime": "workspace:*",
-    "@bflow/pane-manager": "workspace:*"
+    "@bflow/specification": "workspace:*",
+    "@bflow/test-strategy": "workspace:*",
+    "@bflow/verification": "workspace:*",
+    "zod": "^3.24.2"
   }
 }
