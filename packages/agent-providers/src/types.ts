@@ -67,6 +67,13 @@ export interface LiveReadinessObservation {
   readonly permissionDenied?: boolean;
 }
 
+export type HostHookEvent = "SessionStart" | "UserPromptSubmit" | "Stop" | "PreToolUse";
+
+export interface HostMcpServer {
+  readonly command: string;
+  readonly args: readonly string[];
+}
+
 export interface ProviderAdapterOptions {
   readonly executablePath?: string;
   readonly pinnedExecutableDigest?: string;
@@ -80,6 +87,12 @@ export interface ProviderAdapterOptions {
   readonly skillManifest?: SkillManifest;
   readonly renderedSkillsContent?: string;
   readonly nativeSessionHookCommand?: string;
+  /** Trusted Bflow host stdio MCP servers; command must be absolute. Names must not collide with registrations. */
+  readonly hostMcpServers?: Readonly<Record<string, HostMcpServer>>;
+  /** Full shell command per native hook event. `SessionStart` here supersedes `nativeSessionHookCommand`. */
+  readonly hostHooks?: Readonly<Partial<Record<HostHookEvent, string>>>;
+  /** registrationId -> environment variable NAME holding the bearer token of a streamable_http registration. */
+  readonly mcpTokenEnvironmentNames?: Readonly<Record<string, string>>;
   readonly trustedIssuerKeys?: Readonly<Record<string, string>>;
   readonly liveObservation?: LiveReadinessObservation;
   readonly osSandboxPath?: string;

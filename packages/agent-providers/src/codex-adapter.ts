@@ -69,6 +69,14 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
     return probe;
   }
 
+  protected override renderStreamableHttpMcpServer(
+    endpoint: string,
+    tokenEnvironmentName: string
+  ): Record<string, unknown> {
+    // Codex reads the bearer token from the named environment variable; the config holds only the name.
+    return { url: endpoint, bearer_token_env_var: tokenEnvironmentName };
+  }
+
   protected override async compileArgv(
     environment: AgentEnvironment,
     configFiles: { promptFile: string; mcpConfigFile: string; settingsFile: string },

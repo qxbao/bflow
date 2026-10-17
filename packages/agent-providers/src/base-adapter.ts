@@ -29,6 +29,7 @@ import {
 } from "./attestation.js";
 import { createHealthCheck } from "./diagnostics.js";
 import { validateProviderEnvironment } from "./environment.js";
+import { type LaunchMaterialFailure, resolveLaunchMaterial, type ResolvedLaunchMaterial } from "./launch-material.js";
 import { compileProviderPermissions } from "./permissions.js";
 import { createProviderProcessRunner } from "./runner.js";
 import type {
@@ -94,6 +95,29 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
 
   protected getExecutablePath(): string {
     return this.options.executablePath ?? this.descriptor.executableName;
+  }
+
+  /**
+   * Renders a streamable_http MCP entry that references the bearer token by environment variable name.
+   * Adapters without a verified header/env-reference form keep the default and fail closed.
+   */
+  protected renderStreamableHttpMcpServer(_endpoint: string, _tokenEnvironmentName: string): Record<string, unknown> | undefined {
+    return undefined;
+  }
+
+  /** Whether the provider CLI can load the written MCP config file. */
+  protected supportsMcpConfigFile(_capabilities: DetectedProviderCapabilities): boolean {
+    return true;
+  }
+
+  private resolveHostLaunchMaterial(capabilities: DetectedProviderCapabilities): ResolvedLaunchMaterial {
+    return resolveLaunchMaterial({
+      options: this.options,
+      supportsNativeHooks: capabilities.supportsNativeHooks,
+      supportsMcpConfigFile: this.supportsMcpConfigFile(capabilities),
+      renderStreamableHttpServer: (endpoint, tokenEnvironmentName) =>
+        this.renderStreamableHttpMcpServer(endpoint, tokenEnvironmentName)
+    });
   }
 
   protected abstract getAuthCommand(): readonly string[];
@@ -659,6 +683,9 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       !this.options.supportedModels.includes(this.options.model);
     const modelFlagMissing =
       this.options.model !== undefined && !capabilities.supportedFlags.has("--model");
+    const materialFailure: LaunchMaterialFailure | undefined = mcpCheckHandled
+      ? undefined
+      : this.resolveHostLaunchMaterial(capabilities).failure;
 
     if (!permResult.supported) {
       if (
@@ -723,6 +750,29 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
           "invalid_flag",
           `Provider '${this.descriptor.provider}' does not support the --model flag`,
           "Remove model override or upgrade the provider CLI."
+        )
+      );
+    } else if (materialFailure !== undefined) {
+      if (materialFailure.kind === "unsupported") {
+        hasUnsupported = true;
+      } else {
+        hasFailed = true;
+      }
+      checks.push(
+        createHealthCheck(
+          "permissions",
+          "passed",
+          "permissions_ok",
+          "Permission profile and sandbox boundaries verified."
+        )
+      );
+      checks.push(
+        createHealthCheck(
+          "launch_arguments",
+          "failed",
+          materialFailure.code,
+          materialFailure.message,
+          "Adjust host MCP servers, Gateway registrations or hooks to what this provider can launch."
         )
       );
     } else {
@@ -1246,7 +1296,19 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       };
     }
 
-    // 5. Build system prompt & private config files in stateDirectory
+    // 5. Resolve host MCP/hook material before any side effect, then build the private config files
+    const material = this.resolveHostLaunchMaterial(capabilities);
+    if (material.failure) {
+      return {
+        ok: false,
+        error: {
+          code: "validation",
+          retryable: false,
+          message: material.failure.message
+        }
+      };
+    }
+
     const rolePrompt =
       this.options.rolePrompt ??
       DEFAULT_ROLE_PROMPTS[environment.role] ??
@@ -1272,16 +1334,8 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       await promptFile.close();
     }
 
-    // Write MCP config file
-    const mcpServersMap: Record<string, unknown> = {};
-    for (const reg of this.options.mcpRegistrations ?? []) {
-      if (reg.connection.transport === "stdio") {
-        mcpServersMap[reg.registrationId] = {
-          command: reg.connection.executable,
-          args: reg.connection.argv
-        };
-      }
-    }
+    // Write MCP config file (host servers, stdio and streamable_http registrations; env names only, never token values)
+    const mcpServersMap: Record<string, unknown> = { ...material.mcpServers };
     const mcpFile = await open(
       mcpConfigPath,
       constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
@@ -1294,12 +1348,9 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     }
 
     // Write settings file (with native session hooks and provider-specific permissions/trust)
-    const hookCommand = this.options.nativeSessionHookCommand;
     const settingsObj: Record<string, unknown> = {};
-    if (hookCommand && capabilities.supportsNativeHooks) {
-      settingsObj["hooks"] = {
-        SessionStart: [{ hooks: [{ type: "command", command: hookCommand, timeout: 10 }] }]
-      };
+    if (Object.keys(material.hooks).length > 0) {
+      settingsObj["hooks"] = material.hooks;
     }
     if (this.descriptor.provider === "agy") {
       const trustedFolders = Array.from(

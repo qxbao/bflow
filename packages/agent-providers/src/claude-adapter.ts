@@ -60,6 +60,18 @@ export class ClaudeProviderAdapter extends BaseProviderAdapter {
     return probe;
   }
 
+  protected override renderStreamableHttpMcpServer(
+    endpoint: string,
+    tokenEnvironmentName: string
+  ): Record<string, unknown> {
+    // Claude expands ${VAR} in MCP config headers at launch; the config file holds only the variable name.
+    return {
+      type: "http",
+      url: endpoint,
+      headers: { Authorization: `Bearer \${${tokenEnvironmentName}}` }
+    };
+  }
+
   protected override async compileArgv(
     environment: AgentEnvironment,
     configFiles: { promptFile: string; mcpConfigFile: string; settingsFile: string },

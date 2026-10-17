@@ -53,6 +53,10 @@ export class AgyProviderAdapter extends BaseProviderAdapter {
     return probe;
   }
 
+  protected override supportsMcpConfigFile(capabilities: DetectedProviderCapabilities): boolean {
+    return capabilities.supportedFlags.has("--mcp-config");
+  }
+
   protected override async compileArgv(
     environment: AgentEnvironment,
     configFiles: { promptFile: string; mcpConfigFile: string; settingsFile: string },

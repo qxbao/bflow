@@ -10,6 +10,7 @@ import {
   type AgentLaunchProfile,
   type AgentProviderId,
   CURRENT_PLATFORM_SCHEMA_VERSION,
+  type MCPClientRegistration,
   type PermissionProfile,
   type SkillManifest
 } from "@bflow/contracts";
@@ -21,6 +22,7 @@ import {
   createFakeProviderRunner,
   createHealthCheck,
   createProviderProcessRunner,
+  computeFileSha256,
   createSignedLaunchAttestation,
   formatProviderDiagnosticReport,
   resolveAndVerifyExecutable,
@@ -1313,6 +1315,352 @@ describe("@bflow/agent-providers", () => {
           "native_binding_config_mismatch"
         );
       }
+    });
+  });
+
+  describe("9. Host MCP servers, Gateway registrations and native hooks", () => {
+    const HOST_COMMAND = "/opt/bflow/node";
+    const hostServers = {
+      bflow: { command: HOST_COMMAND, args: ["/opt/bflow/host.js", "mcp", "/opt/bflow/developer.json"] }
+    };
+    const hostHooks = {
+      SessionStart: "/opt/bflow/host.js hook session-start",
+      UserPromptSubmit: "/opt/bflow/host.js hook prompt",
+      Stop: "/opt/bflow/host.js hook stop",
+      PreToolUse: "/opt/bflow/host.js hook pre-tool"
+    };
+    const tokenEnvironmentNames = { "gateway-dev": "BFLOW_GATEWAY_TOKEN" };
+
+    function gatewayRegistration(env: AgentEnvironment, provider: AgentProviderId): MCPClientRegistration {
+      return {
+        schemaVersion: 3,
+        registrationId: "gateway-dev",
+        scope: env.scope,
+        environmentId: env.environmentId,
+        provider,
+        role: "developer",
+        serviceIds: ["bflow-gateway"],
+        allowedTools: ["mcp__bflow-gateway__ping"],
+        connection: {
+          transport: "streamable_http",
+          endpoint: "http://127.0.0.1:4317/mcp",
+          token: "secret://mcp/gateway-token"
+        },
+        configDigest: "d".repeat(64),
+        expiresAt: new Date(Date.now() + 300_000).toISOString(),
+        idempotencyKey: "idem-gateway-dev"
+      };
+    }
+
+    async function readLaunchText(profile: AgentLaunchProfile): Promise<string> {
+      const contents = await Promise.all(profile.configFiles.map((file) => readFile(file.path, "utf8")));
+      return [...contents, ...profile.argv].join("\n");
+    }
+
+    const quote = (value: string): string => JSON.stringify(value);
+
+    it("Claude renders host bflow stdio, streamable_http Gateway entry and all four native hooks", async () => {
+      const env = createTestEnvironment("claude");
+      const adapter = new ClaudeProviderAdapter({
+        runner: createFakeProviderRunner({ scenario: "healthy" }),
+        executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true,
+        hostMcpServers: hostServers,
+        hostHooks,
+        mcpRegistrations: [gatewayRegistration(env, "claude")],
+        mcpTokenEnvironmentNames: tokenEnvironmentNames
+      });
+      const res = await adapter.prepareLaunch(env);
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+
+      const mcp = JSON.parse(await readFile(res.value.configFiles[1]!.path, "utf8")) as unknown;
+      expect(mcp).toEqual({
+        mcpServers: {
+          bflow: { command: HOST_COMMAND, args: ["/opt/bflow/host.js", "mcp", "/opt/bflow/developer.json"] },
+          "gateway-dev": {
+            type: "http",
+            url: "http://127.0.0.1:4317/mcp",
+            headers: { Authorization: "Bearer ${BFLOW_GATEWAY_TOKEN}" }
+          }
+        }
+      });
+
+      const settings = JSON.parse(await readFile(res.value.configFiles[2]!.path, "utf8")) as { hooks: unknown };
+      const hook = (command: string) => [{ hooks: [{ type: "command", command, timeout: 30 }] }];
+      expect(settings.hooks).toEqual({
+        SessionStart: hook(hostHooks.SessionStart),
+        UserPromptSubmit: hook(hostHooks.UserPromptSubmit),
+        Stop: hook(hostHooks.Stop),
+        PreToolUse: hook(hostHooks.PreToolUse)
+      });
+    });
+
+    it("Codex renders host and Gateway entries as TOML with bearer_token_env_var and all four hooks", async () => {
+      const env = createTestEnvironment("codex");
+      const adapter = new CodexProviderAdapter({
+        runner: createFakeProviderRunner({ scenario: "healthy" }),
+        executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true,
+        hostMcpServers: hostServers,
+        hostHooks,
+        mcpRegistrations: [gatewayRegistration(env, "codex")],
+        mcpTokenEnvironmentNames: tokenEnvironmentNames
+      });
+      const res = await adapter.prepareLaunch(env);
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      const argv = res.value.argv;
+
+      const expectedMcp =
+        `mcp_servers={${quote("bflow")}={${quote("command")}=${quote(HOST_COMMAND)},` +
+        `${quote("args")}=[${["/opt/bflow/host.js", "mcp", "/opt/bflow/developer.json"].map(quote).join(",")}]},` +
+        `${quote("gateway-dev")}={${quote("url")}=${quote("http://127.0.0.1:4317/mcp")},` +
+        `${quote("bearer_token_env_var")}=${quote("BFLOW_GATEWAY_TOKEN")}}}`;
+      expect(argv).toContain(expectedMcp);
+
+      const hookTable = (command: string) =>
+        `[{${quote("hooks")}=[{${quote("type")}=${quote("command")},${quote("command")}=${quote(command)},${quote("timeout")}=30}]}]`;
+      const expectedHooks =
+        "hooks={" +
+        Object.entries(hostHooks)
+          .map(([event, command]) => `${quote(event)}=${hookTable(command)}`)
+          .join(",") +
+        "}";
+      expect(argv).toContain(expectedHooks);
+      expect(argv).toEqual(expect.arrayContaining(["--enable", "hooks", "--dangerously-bypass-hook-trust"]));
+
+      const mcp = JSON.parse(await readFile(res.value.configFiles[1]!.path, "utf8")) as unknown;
+      expect(mcp).toEqual({
+        mcpServers: {
+          bflow: { command: HOST_COMMAND, args: ["/opt/bflow/host.js", "mcp", "/opt/bflow/developer.json"] },
+          "gateway-dev": { url: "http://127.0.0.1:4317/mcp", bearer_token_env_var: "BFLOW_GATEWAY_TOKEN" }
+        }
+      });
+    });
+
+    it("writes only the token variable name, never the token value, into files or argv", async () => {
+      const fakeToken = "fake-gateway-token-7f3a91c2e5";
+      process.env["BFLOW_GATEWAY_TOKEN"] = fakeToken;
+      try {
+        for (const provider of ["claude", "codex"] as const) {
+          const env = createTestEnvironment(provider);
+          const adapter =
+            provider === "claude"
+              ? new ClaudeProviderAdapter({
+                  runner: createFakeProviderRunner({ scenario: "healthy" }),
+                  executablePath: fakeBinaryPath,
+                  allowTestFilesystemOwnership: true,
+                  hostMcpServers: hostServers,
+                  hostHooks,
+                  mcpRegistrations: [gatewayRegistration(env, provider)],
+                  mcpTokenEnvironmentNames: tokenEnvironmentNames
+                })
+              : new CodexProviderAdapter({
+                  runner: createFakeProviderRunner({ scenario: "healthy" }),
+                  executablePath: fakeBinaryPath,
+                  allowTestFilesystemOwnership: true,
+                  hostMcpServers: hostServers,
+                  hostHooks,
+                  mcpRegistrations: [gatewayRegistration(env, provider)],
+                  mcpTokenEnvironmentNames: tokenEnvironmentNames
+                });
+          const res = await adapter.prepareLaunch(env);
+          expect(res.ok).toBe(true);
+          if (!res.ok) return;
+          const text = await readLaunchText(res.value);
+          expect(text).not.toContain(fakeToken);
+          expect(text).toContain("BFLOW_GATEWAY_TOKEN");
+        }
+      } finally {
+        delete process.env["BFLOW_GATEWAY_TOKEN"];
+      }
+    });
+
+    it("fails validation when a streamable_http registration has no token environment mapping", async () => {
+      for (const provider of ["claude", "codex"] as const) {
+        const env = createTestEnvironment(provider);
+        const adapter =
+          provider === "claude"
+            ? new ClaudeProviderAdapter({
+                runner: createFakeProviderRunner({ scenario: "healthy" }),
+                executablePath: fakeBinaryPath,
+                allowTestFilesystemOwnership: true,
+                mcpRegistrations: [gatewayRegistration(env, provider)]
+              })
+            : new CodexProviderAdapter({
+                runner: createFakeProviderRunner({ scenario: "healthy" }),
+                executablePath: fakeBinaryPath,
+                allowTestFilesystemOwnership: true,
+                mcpRegistrations: [gatewayRegistration(env, provider)]
+              });
+        const res = await adapter.prepareLaunch(env);
+        expect(res.ok).toBe(false);
+        if (!res.ok) expect(res.error).toMatchObject({ code: "validation" });
+        if (!res.ok) expect(res.error.message).toMatch(/no token environment variable mapping/);
+      }
+    });
+
+    it("rejects malformed token environment names, host server names, and relative host commands", async () => {
+      const env = createTestEnvironment("claude");
+      const base = {
+        runner: createFakeProviderRunner({ scenario: "healthy" }),
+        executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true,
+        mcpRegistrations: [gatewayRegistration(env, "claude")]
+      };
+      const cases = [
+        {
+          options: { ...base, mcpTokenEnvironmentNames: { "gateway-dev": "gateway-token" } },
+          message: /Token environment variable name/
+        },
+        {
+          options: {
+            ...base,
+            mcpTokenEnvironmentNames: tokenEnvironmentNames,
+            hostMcpServers: { Bflow: { command: HOST_COMMAND, args: [] } }
+          },
+          message: /must match/
+        },
+        {
+          options: {
+            ...base,
+            mcpTokenEnvironmentNames: tokenEnvironmentNames,
+            hostMcpServers: { bflow: { command: "node", args: [] } }
+          },
+          message: /must be an absolute path/
+        }
+      ];
+      for (const testCase of cases) {
+        const res = await new ClaudeProviderAdapter(testCase.options).prepareLaunch(env);
+        expect(res.ok).toBe(false);
+        if (!res.ok) expect(res.error.message).toMatch(testCase.message);
+      }
+    });
+
+    it("fails validation when a host MCP server name collides with a registration", async () => {
+      const env = createTestEnvironment("claude");
+      const adapter = new ClaudeProviderAdapter({
+        runner: createFakeProviderRunner({ scenario: "healthy" }),
+        executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true,
+        hostMcpServers: { "gateway-dev": { command: HOST_COMMAND, args: [] } },
+        mcpRegistrations: [gatewayRegistration(env, "claude")],
+        mcpTokenEnvironmentNames: tokenEnvironmentNames
+      });
+      const res = await adapter.prepareLaunch(env);
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error.message).toMatch(/collides with a Bflow host MCP server/);
+    });
+
+    it("Agy fails closed for streamable_http registrations and for host MCP servers without --mcp-config", async () => {
+      const env = createTestEnvironment("agy");
+      const httpAdapter = new AgyProviderAdapter({
+        runner: createFakeProviderRunner({ scenario: "healthy" }),
+        executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true,
+        mcpRegistrations: [gatewayRegistration(env, "agy")],
+        mcpTokenEnvironmentNames: tokenEnvironmentNames
+      });
+      const httpRes = await httpAdapter.prepareLaunch(env);
+      expect(httpRes.ok).toBe(false);
+      if (!httpRes.ok) expect(httpRes.error.message).toMatch(/environment-referenced bearer token/);
+
+      const hostAdapter = new AgyProviderAdapter({
+        runner: createFakeProviderRunner({ scenario: "healthy" }),
+        executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true,
+        hostMcpServers: hostServers
+      });
+      const hostRes = await hostAdapter.prepareLaunch(env);
+      expect(hostRes.ok).toBe(false);
+      if (!hostRes.ok) expect(hostRes.error.message).toMatch(/--mcp-config/);
+    });
+
+    it("reports unsupported when hooks are required by a provider without native hooks", async () => {
+      const env = createTestEnvironment("agy");
+      const adapter = new AgyProviderAdapter({
+        runner: createFakeProviderRunner({ scenario: "healthy" }),
+        executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true,
+        hostHooks: { SessionStart: hostHooks.SessionStart }
+      });
+      const res = await adapter.prepareLaunch(env);
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error.message).toMatch(/does not support native hooks/);
+
+      const health = await adapter.checkHealth({
+        schemaVersion: 3,
+        environment: env,
+        stage: "preflight",
+        requestedAt: new Date().toISOString()
+      });
+      expect(health.ok).toBe(true);
+      if (health.ok) {
+        expect(health.value.status).toBe("unsupported");
+        expect(health.value.checks.find((c) => c.check === "launch_arguments")?.code).toBe("native_hooks_unsupported");
+      }
+    });
+
+    it("keeps legacy nativeSessionHookCommand as a single SessionStart hook with timeout 10", async () => {
+      const env = createTestEnvironment("claude");
+      const adapter = new ClaudeProviderAdapter({
+        runner: createFakeProviderRunner({ scenario: "healthy" }),
+        executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true,
+        nativeSessionHookCommand: "/opt/bflow/legacy-hook"
+      });
+      const res = await adapter.prepareLaunch(env);
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      const settings = JSON.parse(await readFile(res.value.configFiles[2]!.path, "utf8")) as { hooks: unknown };
+      expect(settings.hooks).toEqual({
+        SessionStart: [{ hooks: [{ type: "command", command: "/opt/bflow/legacy-hook", timeout: 10 }] }]
+      });
+    });
+
+    it("hostHooks.SessionStart supersedes nativeSessionHookCommand", async () => {
+      const env = createTestEnvironment("claude");
+      const adapter = new ClaudeProviderAdapter({
+        runner: createFakeProviderRunner({ scenario: "healthy" }),
+        executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true,
+        nativeSessionHookCommand: "/opt/bflow/legacy-hook",
+        hostHooks: { SessionStart: hostHooks.SessionStart }
+      });
+      const res = await adapter.prepareLaunch(env);
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      const settings = JSON.parse(await readFile(res.value.configFiles[2]!.path, "utf8")) as { hooks: unknown };
+      expect(settings.hooks).toEqual({
+        SessionStart: [{ hooks: [{ type: "command", command: hostHooks.SessionStart, timeout: 30 }] }]
+      });
+    });
+
+    it("configFiles digests cover the rendered hooks and change when a hook changes", async () => {
+      const env = createTestEnvironment("claude");
+      const build = (stop: string) =>
+        new ClaudeProviderAdapter({
+          runner: createFakeProviderRunner({ scenario: "healthy" }),
+          executablePath: fakeBinaryPath,
+          allowTestFilesystemOwnership: true,
+          hostHooks: { ...hostHooks, Stop: stop }
+        }).prepareLaunch(env);
+
+      const first = await build(hostHooks.Stop);
+      expect(first.ok).toBe(true);
+      if (!first.ok) return;
+      const firstSettings = first.value.configFiles[2]!;
+      expect(firstSettings.digest).toBe(await computeFileSha256(firstSettings.path));
+      const firstDigest = firstSettings.digest;
+      const firstFingerprint = first.value.launchFingerprint;
+
+      const second = await build("/opt/bflow/host.js hook stop --changed");
+      expect(second.ok).toBe(true);
+      if (!second.ok) return;
+      expect(second.value.configFiles[2]!.digest).not.toBe(firstDigest);
+      expect(second.value.configFiles[2]!.digest).toBe(await computeFileSha256(firstSettings.path));
+      expect(second.value.launchFingerprint).not.toBe(firstFingerprint);
     });
   });
 });
