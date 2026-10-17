@@ -79,10 +79,18 @@ The installer adds no shell initialization, provider permissions, hooks or crede
 Claude-Mem and Superpowers use `NativeProvidersToolInstaller`, composing an approved
 provider-specific installation for every selected provider. The existing native runtime
 verifies active-cache provenance, Bflow policy overlays and shared worker/project-filtered
-memory hooks. Memory explicitly selects the host observer instead of choosing a hosted
-subscription or asking for account credentials. Unknown native delivery remains retained
+memory hooks. Memory defaults to `auto`: preserve a compatible saved route, otherwise
+select an already authenticated Claude subscription or file-backed ChatGPT/Codex login.
+`memory.provider` (CLI `--memory-provider`) can explicitly select `claude`, `codex` or
+`host`. Account discovery reads status/structured metadata without inference, token
+refresh, credential copying or signup. The selected quota route and data directory are
+bound to the approved native desired-state digest; account-route drift invalidates the
+plan before installation. Models already saved in memory settings are preserved. Host
+mode requires an existing external loopback observer only when explicitly selected. Unknown native delivery remains retained
 and is never automatically replayed. Native provider config changes require the machine
 setup approval. `additionalToolObservations` supplies functional native readiness to the
 machine setup doctor without pretending that plugin files are standalone executables. MCP launch requirements are returned separately for Runtime/Gateway scope,
 Chrome profile isolation and verified index setup; installing a server does not register
 or start it. Binary version checks do not establish live SDLC readiness.
+
+Pinned Claude-Mem provider behavior follows the [v14.0.1 configuration](https://raw.githubusercontent.com/thedotmack/claude-mem/v14.0.1/docs/public/configuration.mdx) and [installation](https://raw.githubusercontent.com/thedotmack/claude-mem/v14.0.1/docs/public/installation.mdx) documentation. Codex subscription authentication must be file-backed ChatGPT login; API keys and keychain-only credentials are rejected. Missing login reports `claude auth login` or `codex login`, without creating credentials. Setup tests do not generate memory observations or make inference calls.

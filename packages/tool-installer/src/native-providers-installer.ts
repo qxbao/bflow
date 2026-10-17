@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { SetupApplyRequestSchema, SetupReceiptSchema, SetupStepSchema, ToolInstallRequestSchema,
   type OperationOptions, type OperationResult, type SetupApplyRequest, type SetupReceipt, type SetupStep,
@@ -6,6 +7,7 @@ import { SetupApplyRequestSchema, SetupReceiptSchema, SetupStepSchema, ToolInsta
 import { ManagedToolInstaller, ManagedToolPinSchema, type ManagedToolPin, type ToolInspection, type ProviderPluginAdapter, type ToolHost } from "./installer.js";
 import { OfficialProviderPluginAdapter } from "./provider-plugins.js";
 import type { NativeProvider, NativeRuntimeOptions } from "./native-runtime.js";
+import { resolveMemoryProvider } from "./memory-provider.js";
 import { systemToolHost } from "./installer.js";
 
 /** One machine-approved tool step composes provider-specific native activations.
@@ -15,6 +17,9 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
   readonly installerId: string;
   readonly #root: string;
   readonly #pin: ManagedToolPin;
+  readonly #host: ToolHost;
+  readonly #configuration: Omit<NativeRuntimeOptions, "managedRoot"> | undefined;
+  readonly #providerPlugin: ProviderPluginAdapter | undefined;
   readonly #children: { provider: NativeProvider; pin: ManagedToolPin; installer: ManagedToolInstaller }[];
   constructor(options: { managedRoot: string; pin: ManagedToolPin; providers: readonly NativeProvider[];
     host?: ToolHost; configuration?: Omit<NativeRuntimeOptions, "managedRoot">; providerPlugin?: ProviderPluginAdapter }) {
@@ -23,6 +28,7 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
     this.#root = resolve(options.managedRoot); this.#pin = pin; this.installerId = pin.installerId;
     if (!options.providers.length || new Set(options.providers).size !== options.providers.length) throw Error("Unique selected providers required");
     const host = options.host ?? systemToolHost;
+    this.#host = host; this.#configuration = options.configuration; this.#providerPlugin = options.providerPlugin;
     this.#children = options.providers.map(provider => {
       const childPin = ManagedToolPinSchema.parse({ ...pin, installerId: `${pin.installerId}-${provider}`, recipe: { kind: "provider_plugin", provider } });
       return { provider, pin: childPin, installer: new ManagedToolInstaller({ managedRoot: this.#root, pins: [childPin], host,
@@ -31,15 +37,28 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
     });
   }
   #fail<T>(message: string): OperationResult<T> { return { ok: false, error: { code: "validation", retryable: false, message } }; }
-  async #childSteps(request: ToolInstallRequest): Promise<OperationResult<SetupStep[]>> {
-    const steps: SetupStep[] = [];
+  async #childSteps(request: ToolInstallRequest): Promise<OperationResult<{ provider: NativeProvider; installer: ManagedToolInstaller; step: SetupStep }[]>> {
+    const plans: { provider: NativeProvider; installer: ManagedToolInstaller; step: SetupStep }[] = [];
+    let selected: Awaited<ReturnType<typeof resolveMemoryProvider>> | undefined;
+    const home = this.#configuration?.homeDirectory ?? homedir();
+    const memory = this.#configuration?.memory ?? { dataDir: join(home, ".claude-mem"), projectRoot: process.cwd(), project: process.cwd() };
+    if (this.#pin.toolId === "claude-mem") {
+      try { selected = await resolveMemoryProvider({ provider: memory.provider ?? "auto", homeDirectory: home, dataDir: memory.dataDir,
+        host: this.#host, ...(this.#configuration?.executables ? { executables: this.#configuration.executables } : {}),
+        ...(process.env.CODEX_HOME ? { environment: { CODEX_HOME: process.env.CODEX_HOME } } : {}) }); }
+      catch (error) { return this.#fail(error instanceof Error ? error.message : "Claude-Mem subscription login could not be verified"); }
+    }
     for (const child of this.#children) {
-      const planned = await child.installer.plan({ ...request, installerId: child.pin.installerId,
+      const installer = selected ? new ManagedToolInstaller({ managedRoot: this.#root, pins: [child.pin], host: this.#host,
+        desiredStateContext: { memoryProvider: selected.provider, memoryDataDir: memory.dataDir },
+        providerPlugin: this.#providerPlugin ?? new OfficialProviderPluginAdapter({ host: this.#host,
+          configuration: { ...this.#configuration, managedRoot: join(this.#root, ".native"), memory: { ...memory, provider: selected.provider } } }) }) : child.installer;
+      const planned = await installer.plan({ ...request, installerId: child.pin.installerId,
         destination: join(request.destination, child.provider), idempotencyKey: `${request.idempotencyKey}:${child.provider}` });
       if (!planned.ok) return planned;
-      steps.push(planned.value);
+      plans.push({ provider: child.provider, installer, step: planned.value });
     }
-    return { ok: true, value: steps };
+    return { ok: true, value: plans };
   }
   async plan(raw: ToolInstallRequest): Promise<OperationResult<SetupStep>> {
     const parsed = ToolInstallRequestSchema.safeParse(raw);
@@ -50,7 +69,7 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
       resolve(request.destination) !== join(this.#root, pin.toolId)) return this.#fail("Native request differs from approved machine pin or destination");
     const children = await this.#childSteps(request);
     if (!children.ok) return children;
-    const desiredStateDigest = createHash("sha256").update(JSON.stringify(children.value)).digest("hex");
+    const desiredStateDigest = createHash("sha256").update(JSON.stringify(children.value.map(child => child.step))).digest("hex");
     return { ok: true, value: SetupStepSchema.parse({ schemaVersion: 3, stepId: `install-${pin.toolId}`, action: "install_tool",
       componentId: pin.toolId, level: "machine", scope: request.scope, dependsOn: [], desiredStateDigest,
       expectedStateDigest: null, requiresApproval: true, rollback: "manual", toolInstall: request,
@@ -62,8 +81,8 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
     const children = await this.#childSteps(planned.value.toolInstall!);
     if (!children.ok) return children;
     const diagnostics: string[] = [], ownedPaths: string[] = [];
-    for (const [index, child] of this.#children.entries()) {
-      const result = await child.installer.inspect(children.value[index]!.toolInstall!, options);
+    for (const child of children.value) {
+      const result = await child.installer.inspect(child.step.toolInstall!, options);
       if (!result.ok) return result;
       diagnostics.push(...result.value.diagnostics.map(message => `${child.provider}: ${message}`));
       ownedPaths.push(...result.value.ownedPaths);
@@ -82,10 +101,12 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
     if (apply && !request.approvalReceiptId) return this.#fail("Machine setup approval is required");
     const childSteps = await this.#childSteps(request.step.toolInstall);
     if (!childSteps.ok) return childSteps;
+    const currentDigest = createHash("sha256").update(JSON.stringify(childSteps.value.map(child => child.step))).digest("hex");
+    if (currentDigest !== request.step.desiredStateDigest) return this.#fail("Native subscription route changed after plan validation; create a new approved plan");
     const receipts: SetupReceipt[] = [], diagnostics: string[] = [];
     let status: SetupReceipt["status"] = "already_satisfied";
-    for (const [index, child] of this.#children.entries()) {
-      const input = SetupApplyRequestSchema.parse({ ...request, step: childSteps.value[index] });
+    for (const child of childSteps.value) {
+      const input = SetupApplyRequestSchema.parse({ ...request, step: child.step });
       const result = apply ? await child.installer.apply(input, options) : await child.installer.reconcile(input, options);
       if (!result.ok) return result;
       receipts.push(result.value);

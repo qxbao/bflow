@@ -9,12 +9,14 @@ import type { ManagedToolPin, ToolHost } from "./installer.js";
 import { atomicJson, existingPrivateDirectory, extractPinnedArchive, fileDigest, privateDirectory, readRegular, sha256, treeDigest, withFileLock } from "./files.js";
 import { ClaudeMemProjectReader, observeClaudeMemWorker, readClaudeMemWorkerIdentity } from "./integrations.js";
 
+import { resolveMemoryProvider, type MemoryProviderMode } from "./memory-provider.js";
+
 export type NativeProvider = "claude" | "codex" | "agy";
 export interface NativeRuntimeOptions {
   managedRoot: string;
   homeDirectory?: string;
   executables?: Partial<Record<NativeProvider, string>>;
-  memory?: { dataDir: string; projectRoot: string; project: string; port?: number; address?: string; startIfMissing?: boolean };
+  memory?: { provider?: MemoryProviderMode; dataDir: string; projectRoot: string; project: string; port?: number; address?: string; startIfMissing?: boolean };
   bflowSkillIds?: readonly string[];
 }
 
@@ -207,10 +209,17 @@ export class NativePluginRuntime {
       ...this.#options.memory };
   }
   async #activateMemory(pin: ManagedToolPin, artifact: string, options?: OperationOptions) {
+    const memory = this.#memory();
+    const selected = await resolveMemoryProvider({ provider: memory.provider ?? "auto", homeDirectory: this.#home, dataDir: memory.dataDir,
+      host: this.#host, executables: { claude: this.#binary("claude"), codex: this.#binary("codex") },
+      ...(process.env.CODEX_HOME ? { environment: { CODEX_HOME: process.env.CODEX_HOME } } : {}) });
     const managed = await privateDirectory(this.#options.managedRoot);
     const generation = join(managed, `claude-mem-${pin.integrity}`);
-    const memory = this.#memory();
-    const environment = { CI: "1", CLAUDE_MEM_DATA_DIR: memory.dataDir, CLAUDE_MEM_WORKER_HOST: memory.address ?? "127.0.0.1",
+    const environment = { CI: "1", CLAUDE_MEM_DATA_DIR: memory.dataDir,
+      ...(selected.provider === "claude" ? { CLAUDE_MEM_PROVIDER: "claude", CLAUDE_MEM_CLAUDE_AUTH_METHOD: "subscription",
+        ANTHROPIC_API_KEY: "", ANTHROPIC_AUTH_TOKEN: "", ANTHROPIC_BASE_URL: "" } :
+        selected.provider === "codex" ? { CLAUDE_MEM_PROVIDER: "codex", CLAUDE_MEM_CODEX_PATH: this.#binary("codex"), OPENAI_API_KEY: "" } : {}),
+      CLAUDE_MEM_WORKER_HOST: memory.address ?? "127.0.0.1",
       ...(memory.port ? { CLAUDE_MEM_WORKER_PORT: String(memory.port) } : {}) };
     try { await lstat(generation); }
     catch (error) {
@@ -230,7 +239,7 @@ export class NativePluginRuntime {
     const executable = join(generation, "node_modules", ".bin", "claude-mem");
     const provider = this.#provider(pin);
     const ide = { claude: "claude-code", codex: "codex-cli", agy: "antigravity" }[provider];
-    const result = await this.#host.run(executable, ["install", "--ide", ide, "--provider", "host", "--no-auto-start"],
+    const result = await this.#host.run(executable, ["install", "--ide", ide, "--provider", selected.provider, "--no-auto-start"],
       { timeoutMs: options?.timeoutMs ?? 300_000, environment, ...(options?.signal ? { signal: options.signal } : {}) });
     await writeFile(join(dirname(artifact), "native-installer.log"), result.stdout + result.stderr, { mode: 0o600 });
     if (result.exitCode !== 0) return { success: false, diagnostic: /No OpenAI-compatible host observer is listening/.test(result.stderr)
@@ -266,6 +275,13 @@ export class NativePluginRuntime {
   }
   async #verifyMemory(pin: ManagedToolPin, generation: string) {
     const memory = this.#memory();
+    const selected = await resolveMemoryProvider({ provider: memory.provider ?? "auto", homeDirectory: this.#home, dataDir: memory.dataDir,
+      host: this.#host, executables: { claude: this.#binary("claude"), codex: this.#binary("codex") },
+      ...(process.env.CODEX_HOME ? { environment: { CODEX_HOME: process.env.CODEX_HOME } } : {}) });
+    const settings = z.record(z.unknown()).parse(JSON.parse(await readRegular(join(memory.dataDir, "settings.json"))));
+    const expected = selected.provider === "host" ? "openai-compatible" : selected.provider;
+    if (settings.CLAUDE_MEM_PROVIDER !== expected || (expected === "claude" && settings.CLAUDE_MEM_CLAUDE_AUTH_METHOD && settings.CLAUDE_MEM_CLAUDE_AUTH_METHOD !== "subscription"))
+      throw Error("Active Claude-Mem provider differs from the approved subscription route");
     const environment = { CLAUDE_MEM_DATA_DIR: memory.dataDir, PATH: [join(this.#home, ".local", "bin"), process.env.PATH ?? ""].join(delimiter),
       ...(memory.port ? { CLAUDE_MEM_WORKER_PORT: String(memory.port) } : {}) };
     const executable = join(generation, "node_modules", ".bin", "claude-mem");

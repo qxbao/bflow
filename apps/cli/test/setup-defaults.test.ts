@@ -10,7 +10,7 @@ describe("CLI setup default inventory", () => {
     const platform = detectPlatform(defaultHostEnvironment());
     platform.os = "linux"; platform.arch = "x64";
     platform.paths.data = "/tmp/bflow-default-config/data";
-    const result = await createDefaultSetupConfiguration({ platform });
+    const result = await createDefaultSetupConfiguration({ platform, memoryProvider: "host" });
     expect(result.config.toolPins.map(pin => pin.toolId)).toContain("rtk");
     expect(result.config.toolPins.map(pin => pin.toolId)).toContain("claude");
     expect(result.config.providers).toEqual(["claude", "codex", "agy"]);
@@ -23,7 +23,7 @@ describe("CLI setup default inventory", () => {
     expect(native.map(item => item.toolId).sort()).toEqual(["claude-mem", "superpowers"]);
     expect(native.every(item => item.status === "missing" && item.required)).toBe(true);
     expect(native.every(item => item.diagnostics.some(message => message.includes("not installed")))).toBe(true);
-    const persisted = await createDefaultSetupConfiguration({ platform, config: result.config });
+    const persisted = await createDefaultSetupConfiguration({ platform, config: result.config, memoryProvider: "host" });
     const persistedNative = (await persisted.additionalToolObservations(platform, persisted.config)).filter(item => ["superpowers", "claude-mem"].includes(item.toolId));
     expect(persistedNative.every(item => item.diagnostics.some(message => message.includes("not installed")))).toBe(true);
   });

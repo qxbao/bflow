@@ -142,6 +142,7 @@ export interface ToolInspection { status: SetupReceipt["status"]; diagnostics: s
 
 export interface ManagedToolInstallerOptions {
   readonly managedRoot: string;
+  readonly desiredStateContext?: Readonly<Record<string, string>>;
   readonly pins: readonly ManagedToolPin[];
   readonly host?: ToolHost;
   readonly clock?: () => Date;
@@ -164,6 +165,7 @@ const activationIntentSchema = z.object({ schemaVersion: z.literal(3), desiredSt
 export class ManagedToolInstaller implements ToolInstaller {
   readonly installerId: string;
   readonly #root: string;
+  readonly #desiredStateContext: Readonly<Record<string, string>> | undefined;
   readonly #pins: Map<string, ManagedToolPin>;
   readonly #host: ToolHost;
   readonly #clock: () => Date;
@@ -172,6 +174,7 @@ export class ManagedToolInstaller implements ToolInstaller {
   constructor(options: ManagedToolInstallerOptions) {
     if (!isAbsolute(options.managedRoot)) throw new Error("managedRoot must be absolute");
     this.#root = resolve(options.managedRoot);
+    this.#desiredStateContext = options.desiredStateContext;
     this.#pins = new Map();
     for (const raw of options.pins) {
       const pin = ManagedToolPinSchema.parse(raw);
@@ -245,7 +248,8 @@ export class ManagedToolInstaller implements ToolInstaller {
       stepId: `install-${request.toolId}${pin.recipe.kind === "provider_plugin" ? `-${pin.recipe.provider}` : ""}`, action: "install_tool",
       componentId: request.toolId, level: request.scope.kind, scope: request.scope, dependsOn: [],
       desiredStateDigest: digest(JSON.stringify({ toolId: request.toolId, version: request.version, source: request.source,
-        integrity: request.integrity, destination: resolve(request.destination), recipe: pin.recipe, license: pin.license })),
+        integrity: request.integrity, destination: resolve(request.destination), recipe: pin.recipe, license: pin.license,
+        ...(this.#desiredStateContext ? { context: this.#desiredStateContext } : {}) })),
       expectedStateDigest: null, requiresApproval: request.scope.kind === "machine",
       rollback: pin.recipe.kind === "provider_plugin" ? "manual" : "remove_owned_install",
       toolInstall: request, idempotencyKey: request.idempotencyKey }));
