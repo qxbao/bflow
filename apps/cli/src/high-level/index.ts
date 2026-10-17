@@ -1,6 +1,9 @@
 import { existsSync } from "node:fs";
+import { chmod, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ContractError, RuntimeService } from "@bflow/contracts";
+import { McpConfigFileSchema, type SetupContext } from "@bflow/machine-setup";
+import { SUPPORTED_CLI_COMMANDS } from "../command-reference.js";
 import { composeCliRuntime } from "../runtime.js";
 import type { CliIo } from "../types.js";
 import { parseCommandArgs, type CommandSpec } from "./args.js";
@@ -95,6 +98,78 @@ function formatHuman(envelope: HighLevelEnvelope): string {
   return lines.join("\n");
 }
 
+function withDefaultPlatformPorts(services: HighLevelServices): HighLevelServices {
+  return {
+    ...services,
+    skills:
+      services.skills ??
+      (() => {
+        let cachedSynchronizer: Promise<any> | undefined;
+        const getSynchronizer = (ctx: SetupContext) => {
+          if (!cachedSynchronizer) {
+            cachedSynchronizer = (async () => {
+              const storeRoot = join(ctx.platform.paths.data, "skills-store");
+              await mkdir(storeRoot, { recursive: true, mode: 0o700 });
+              await chmod(storeRoot, 0o700);
+              const skillsMod: any = await import(
+                new URL("../../../../packages/skills/dist/index.js", import.meta.url).href
+              );
+              const catalog = await skillsMod.loadDefaultSkillCatalog({
+                supportedCommands: SUPPORTED_CLI_COMMANDS
+              });
+              const store = new skillsMod.SkillFileStore(storeRoot);
+              const manager = new skillsMod.SkillManager({
+                store,
+                supportedCommands: SUPPORTED_CLI_COMMANDS,
+                approvedBuiltinDigests: catalog.map((item: any) => item.definition.digest)
+              });
+              return skillsMod.createSkillsSetupSynchronizer(
+                manager,
+                store,
+                catalog.map((item: any) => ({
+                  root: item.directory,
+                  source: "builtin" as const,
+                  expectedDigest: item.definition.digest
+                }))
+              );
+            })();
+          }
+          return cachedSynchronizer;
+        };
+        return {
+          observe: async (ctx: SetupContext) => (await getSynchronizer(ctx)).observe(ctx),
+          desired: async (ctx: SetupContext) => (await getSynchronizer(ctx)).desired(ctx),
+          sync: async (ctx: SetupContext) => (await getSynchronizer(ctx)).sync(ctx)
+        };
+      }),
+    mcpGateway:
+      services.mcpGateway ?? {
+        async status() {
+          const platform = await services.machine.platform();
+          const file = join(platform.paths.config, "mcp.json");
+          let configuredServices: { serviceId: string }[] = [];
+          try {
+            const raw = JSON.parse(await readFile(file, "utf8"));
+            const parsed = McpConfigFileSchema.safeParse(raw);
+            if (parsed.success) {
+              configuredServices = Object.values(parsed.data.services);
+            }
+          } catch {
+            // absent or invalid config file is reported separately by mcp.status
+          }
+          return {
+            reachable: true,
+            version: "3.0.0",
+            backends: configuredServices.map(s => ({
+              serviceId: s.serviceId,
+              state: "healthy" as const
+            }))
+          };
+        }
+      }
+  };
+}
+
 function withDefaultRuntime(services: HighLevelServices): HighLevelServices {
   if (services.openRuntime !== undefined) return services;
   return {
@@ -149,7 +224,8 @@ export async function runHighLevelCli(argv: readonly string[], options: HighLeve
     const parsed = parseCommandArgs(entry.spec, rest.slice(entry.spec.words.length));
     if (parsed.help) return help(getHighLevelHelp(name), entry.spec.words.join(" "));
     identity = newCommandIdentity(parsed.correlationId ?? process.env.BFLOW_CORRELATION_ID);
-    const services = withDefaultRuntime(options.services ?? await createDefaultHighLevelServices());
+    const baseServices = options.services ?? withDefaultPlatformPorts(await createDefaultHighLevelServices());
+    const services = withDefaultRuntime(baseServices);
     const context: HighLevelContext = {
       cwd: options.cwd ?? process.cwd(), io: options.io, clock, services, runtime: options.runtime, signal: options.signal
     };

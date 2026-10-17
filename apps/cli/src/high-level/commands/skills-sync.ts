@@ -81,7 +81,7 @@ export const skillsSync: HighLevelHandler = async (args, ctx, identity) => {
         value => ({ ownedPaths: value.ownedPaths, diagnostics: value.diagnostics }));
       const after = await journalLog.check("post-check", () => component.observe(context("check")),
         value => ({ stateDigest: value.stateDigest, valid: value.valid }));
-      if (!inSync(after))
+      if (!after.valid || after.stateDigest !== desired.digest)
         throw new HighLevelError(validationError(`Skills did not converge to the pinned manifest: ${applied.diagnostics.join("; ") || "digest mismatch"}`,
           { reason: "sync_not_converged" }));
       return { command: "skills.sync", outcome: "synced", status: "succeeded", exitCode: 0, steps: journalLog.steps,

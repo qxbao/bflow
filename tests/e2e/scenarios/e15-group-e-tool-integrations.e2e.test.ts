@@ -318,7 +318,7 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
               stdout:
                 realSchemaStatusCalls === 1
                   ? JSON.stringify({ schemaVersion: 1, repository: canonicalRtkRepo, error: "not-indexed" })
-                  : JSON.stringify({ schemaVersion: 1, repository: canonicalRtkRepo, status: "registered" }),
+                  : `Partial index found...\n${JSON.stringify({ schemaVersion: 1, repository: canonicalRtkRepo, status: "registered" })}`,
               stderr: ""
             };
           }
@@ -326,8 +326,8 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
         }
       }
     });
-    // QA-P34-08: gitnexus 1.6.12 emits status="registered" after analyze, which gitNexusFreshnessSchema treats as stale
-    expect(gnRealSchemaObs.status).toBe("stale");
+    // QA-P34-08 fixed: gitnexus 1.6.12 status="registered" (with leading warning line) is accepted as indexed
+    expect(gnRealSchemaObs.status).toBe("indexed");
 
     // 3. Real GitNexus service definition & real stdio MCP server negotiation
     const gnServiceDef = await createGitNexusService({
@@ -534,7 +534,7 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
     }
   });
 
-  it("[HARNESS + REAL CLI] executes all 9 P29 unified commands and documents QA-P34-07 default HighLevelServices wiring gap", async () => {
+  it("[HARNESS + REAL CLI] executes all 9 P29 unified commands with QA-P34-02, QA-P34-05, and QA-P34-07 fixes verified", async () => {
     const hlRepo = join(tmpRoot, "hl-repo");
     mkdirSync(join(hlRepo, "src/math"), { recursive: true, mode: 0o700 });
     git(hlRepo, "init", "-q", "-b", "main");
@@ -838,19 +838,12 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
     expect(cmdGitPrepareYes.ok).toBe(true);
     expect(extractCommandOutput(cmdGitPrepareYes).outcome).toBe("integration_prepared");
 
-    // 6. mcp status & 8. skills sync (QA-P34-07 default unconfigured vs wired port)
-    const cmdMcpStatusDefault = await runHighLevelCli(["mcp", "status", "--json"], {
-      cwd: hlRepo,
-      services: defaultServices
+    // 6. mcp status & 8. skills sync (QA-P34-07 fixed: default CLI invocation without options.services wires mcpGateway & skills)
+    const cmdMcpStatusDefaultCli = await runHighLevelCli(["mcp", "status", "--json"], {
+      cwd: hlRepo
     });
-    expect(cmdMcpStatusDefault.ok).toBe(false);
-    expect(extractCommandOutput(cmdMcpStatusDefault).outcome).toBe("not_ready");
-
-    const cmdMcpStatusWired = await runHighLevelCli(["mcp", "status", "--json"], {
-      cwd: hlRepo,
-      services: fullServices
-    });
-    expect(["ready", "not_ready"]).toContain(extractCommandOutput(cmdMcpStatusWired).outcome);
+    expect(cmdMcpStatusDefaultCli.ok).toBe(true);
+    expect(extractCommandOutput(cmdMcpStatusDefaultCli).outcome).toBe("ready");
 
     // 7. tool status
     const cmdToolStatus = await runHighLevelCli(["tool", "status", "--json"], {
@@ -859,39 +852,27 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
     });
     expect(["ready", "not_ready"]).toContain(extractCommandOutput(cmdToolStatus).outcome);
 
-    const cmdSkillsSyncDefault = await runHighLevelCli(["skills", "sync", "--json"], {
-      cwd: hlRepo,
-      services: defaultServices
-    });
-    expect(cmdSkillsSyncDefault.ok).toBe(false);
-    expect(cmdSkillsSyncDefault.error?.code).toBe("transport_unavailable");
-    expect(cmdSkillsSyncDefault.error?.details).toEqual(
-      expect.objectContaining({ reason: "skills_synchronizer_not_configured" })
-    );
-
+    // 8. skills sync: QA-P34-02 fixed — 1st run on empty store converges immediately with outcome="synced", 2nd run returns "already_synced"
     const cmdSkillsSyncWiredFirst = await runHighLevelCli(["skills", "sync", "--allow-machine-scope", "--json"], {
       cwd: hlRepo,
       services: fullServices
     });
-    if (!cmdSkillsSyncWiredFirst.ok) {
-      // QA-P34-02: 1st run on empty SkillFileStore installs all 32 bundles during apply(),
-      // but skills-sync.ts checks !desired.repairNeeded captured before apply().
-      expect(cmdSkillsSyncWiredFirst.error?.details).toEqual(
-        expect.objectContaining({ reason: "sync_not_converged" })
-      );
-    }
-    const cmdSkillsSyncWired = await runHighLevelCli(["skills", "sync", "--allow-machine-scope", "--json"], {
+    expect(cmdSkillsSyncWiredFirst.ok).toBe(true);
+    expect(extractCommandOutput(cmdSkillsSyncWiredFirst).outcome).toBe("synced");
+
+    const cmdSkillsSyncWiredSecond = await runHighLevelCli(["skills", "sync", "--allow-machine-scope", "--json"], {
       cwd: hlRepo,
       services: fullServices
     });
-    expect(cmdSkillsSyncWired.ok).toBe(true);
-    expect(["synced", "already_synced"]).toContain(extractCommandOutput(cmdSkillsSyncWired).outcome);
+    expect(cmdSkillsSyncWiredSecond.ok).toBe(true);
+    expect(extractCommandOutput(cmdSkillsSyncWiredSecond).outcome).toBe("already_synced");
 
-    // 9. agent check (claude) — documents QA-P34-05 preflight outcome on real claude 2.1.301
+    // 9. agent check (claude) — QA-P34-05 fixed: real claude 2.1.301 preflight is "ready"
     const cmdAgentCheckClaude = await runHighLevelCli(["agent", "check", "claude", "--json"], {
       cwd: hlRepo,
       services: fullServices
     });
-    expect(["ready", "not_ready"]).toContain(extractCommandOutput(cmdAgentCheckClaude).outcome);
+    expect(cmdAgentCheckClaude.ok).toBe(true);
+    expect(extractCommandOutput(cmdAgentCheckClaude).outcome).toBe("ready");
   }, 180_000);
 });

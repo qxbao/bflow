@@ -1,5 +1,6 @@
 import { constants } from "node:fs";
-import { open, stat } from "node:fs/promises";
+import { chmod, mkdir, open, readdir, readFile, stat, symlink } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   type AgentEnvironment,
@@ -127,6 +128,13 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     for (const match of flagMatches) {
       if (match[0]) supportedFlags.add(match[0]);
     }
+    const bracketedFlagMatches = helpText.matchAll(/--([A-Za-z0-9_-]+)\[([A-Za-z0-9_-]+)\]/g);
+    for (const match of bracketedFlagMatches) {
+      if (match[1] && match[2]) {
+        supportedFlags.add(`--${match[1]}`);
+        supportedFlags.add(`--${match[1]}${match[2]}`);
+      }
+    }
 
     const supportedSubcommands = new Set<string>();
     const subMatches = helpText.matchAll(/^[ \t]+([a-z][a-z0-9_-]+)[ \t]+/gm);
@@ -138,7 +146,10 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     const supportsMcpStdio = this.descriptor.mcpTransports.includes("stdio");
     const supportsMcpHttp = this.descriptor.mcpTransports.includes("streamable_http");
     const supportsSkills = true;
-    const supportsWorkspaceTrust = supportedFlags.has("--restricted") || supportedFlags.has("--sandbox");
+    const supportsWorkspaceTrust =
+      supportedFlags.has("--restricted") ||
+      supportedFlags.has("--permission-mode") ||
+      supportedFlags.has("--sandbox");
     const supportsDangerouslySkipPermissions = supportedFlags.has("--dangerously-skip-permissions");
     const supportsSandboxFlag = supportedFlags.has("--sandbox");
     const supportsApprovalPolicyFlag = supportedFlags.has("--ask-for-approval");
@@ -350,7 +361,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
         executable,
         args: authArgs,
         env: { BFLOW_PROVIDER: this.descriptor.provider },
-        timeoutMs: 15_000
+        timeoutMs: 45_000
       });
 
       const combinedAuthOutput = `${authOutcome.stdout}\n${authOutcome.stderr}`;
@@ -372,12 +383,19 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       } else {
         // Run minimal non-interactive execution probe
         const probeArgs = this.getProbeCommand(environment);
+        const agyProbeHome =
+          this.descriptor.provider === "agy"
+            ? await this.prepareAgySessionHome(environment)
+            : undefined;
         const probeOutcome = await this.runner.run({
           executable,
           args: probeArgs,
           cwd: environment.cwd,
-          env: { BFLOW_PROVIDER: this.descriptor.provider },
-          timeoutMs: 15_000
+          env: {
+            BFLOW_PROVIDER: this.descriptor.provider,
+            ...(agyProbeHome ? { HOME: agyProbeHome } : {})
+          },
+          timeoutMs: 45_000
         });
 
         const combinedProbe = `${probeOutcome.stdout}\n${probeOutcome.stderr}`;
@@ -1284,22 +1302,25 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       };
     }
     if (this.descriptor.provider === "agy") {
+      const trustedFolders = Array.from(
+        new Set([
+          environment.cwd,
+          ...environment.permissionProfile.readableRoots,
+          ...environment.permissionProfile.writableRoots
+        ])
+      );
       settingsObj["permissions"] = {
         allow: permResult.settingsPermissionsAllow ?? [],
         deny: permResult.settingsPermissionsDeny ?? []
       };
       settingsObj["workspaceTrust"] = {
         enabled: true,
-        trustedFolders: Array.from(
-          new Set([
-            environment.cwd,
-            ...environment.permissionProfile.readableRoots,
-            ...environment.permissionProfile.writableRoots
-          ])
-        )
+        trustedFolders
       };
+      settingsObj["trustedWorkspaces"] = trustedFolders;
       settingsObj["systemPromptFile"] = promptPath;
       settingsObj["mcpConfigFile"] = mcpConfigPath;
+      await this.prepareAgySessionHome(environment);
     } else if (this.descriptor.provider === "claude") {
       settingsObj["permissions"] = {
         allow: permResult.allowedTools ?? [],
@@ -1393,5 +1414,70 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       ok: true,
       value: parsedProfile.data
     };
+  }
+
+  private async prepareAgySessionHome(environment: AgentEnvironment): Promise<string | undefined> {
+    try {
+      const stateStat = await stat(environment.stateDirectory);
+      if (!stateStat.isDirectory()) return undefined;
+    } catch {
+      return undefined;
+    }
+    const agyHome = join(environment.stateDirectory, "agy-home");
+    const targetCliDir = join(agyHome, ".gemini", "antigravity-cli");
+    await mkdir(targetCliDir, { recursive: true, mode: 0o700 });
+    await chmod(agyHome, 0o700);
+    await chmod(join(agyHome, ".gemini"), 0o700);
+    await chmod(targetCliDir, 0o700);
+
+    const realHome = process.env["HOME"] || homedir();
+    const sourceCliDir = join(realHome, ".gemini", "antigravity-cli");
+    let baseSettings: Record<string, unknown> = {};
+    try {
+      const entries = await readdir(sourceCliDir);
+      for (const entry of entries) {
+        if (entry === "settings.json" || entry === "log" || entry === "cli.log") continue;
+        try {
+          await symlink(join(sourceCliDir, entry), join(targetCliDir, entry));
+        } catch {
+          // ignore EEXIST or race
+        }
+      }
+      await mkdir(join(targetCliDir, "log"), { recursive: true, mode: 0o700 });
+      const rawSettings = await readFile(join(sourceCliDir, "settings.json"), "utf8");
+      const parsed = JSON.parse(rawSettings);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        baseSettings = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // No existing agy user settings directory
+    }
+
+    const existingTrusted = Array.isArray(baseSettings["trustedWorkspaces"])
+      ? (baseSettings["trustedWorkspaces"] as unknown[]).filter((x): x is string => typeof x === "string")
+      : [];
+    const trustedWorkspaces = Array.from(
+      new Set([
+        ...existingTrusted,
+        environment.cwd,
+        ...environment.permissionProfile.readableRoots,
+        ...environment.permissionProfile.writableRoots
+      ])
+    );
+
+    const settingsFile = await open(
+      join(targetCliDir, "settings.json"),
+      constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+      0o600
+    );
+    try {
+      await settingsFile.writeFile(
+        JSON.stringify({ ...baseSettings, trustedWorkspaces }, null, 2),
+        "utf8"
+      );
+    } finally {
+      await settingsFile.close();
+    }
+    return agyHome;
   }
 }

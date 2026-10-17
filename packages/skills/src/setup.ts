@@ -85,12 +85,16 @@ export class SkillsSetupSynchronizer {
     repairNeeded: boolean;
   }> {
     const definitions = await this.desiredEntries(ctx);
+    const observed = await this.observe(ctx);
+    const corrupted =
+      !observed.valid &&
+      observed.diagnostics.some((d) => d.includes("integrity"));
     return {
       digest: digestJson(definitions),
       summary: `Install ${definitions.length} pinned instruction-only skills`,
       targets: definitions.map((d) => `${this.store.root}/bundles/${d.digest}`),
       machineWide: true,
-      repairNeeded: !(await this.observe(ctx)).valid,
+      repairNeeded: ctx.mode === "apply" ? corrupted : !observed.valid,
     };
   }
   async sync(

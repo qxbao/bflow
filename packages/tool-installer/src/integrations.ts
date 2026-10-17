@@ -12,7 +12,7 @@ const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 const gitNexusFreshnessSchema = z.object({
   schemaVersion: z.literal(1),
   repository: z.string().min(1),
-  status: z.enum(["up-to-date", "stale"])
+  status: z.enum(["up-to-date", "registered", "stale"])
 }).passthrough();
 const gitNexusUnindexedSchema = z.object({
   schemaVersion: z.literal(1), repository: z.string().min(1),
@@ -22,7 +22,12 @@ const gitNexusStatusSchema = z.union([gitNexusFreshnessSchema, gitNexusUnindexed
 
 function parseGitNexusStatus(result: { exitCode: number; stdout: string }): z.infer<typeof gitNexusStatusSchema> | null {
   if (result.exitCode !== 0) return null;
-  const parsed = gitNexusStatusSchema.safeParse(JSON.parse(result.stdout));
+  let jsonCandidate = result.stdout.trim();
+  const braceIdx = jsonCandidate.indexOf("{");
+  if (braceIdx > 0) {
+    jsonCandidate = jsonCandidate.slice(braceIdx);
+  }
+  const parsed = gitNexusStatusSchema.safeParse(JSON.parse(jsonCandidate));
   return parsed.success ? parsed.data : null;
 }
 
@@ -412,7 +417,7 @@ export async function ensureGitNexusIndex(input: {
     const statusRepo = status ? await realpath(status.repository).catch(() => null) : null;
     if (!status || statusResult.exitCode !== 0 || statusRepo !== root)
       return { status: "failed", repositoryRoot: root, fingerprint, diagnostic: "GitNexus status JSON is unsupported, invalid or identifies another repository" };
-    if ("status" in status && status.status === "up-to-date")
+    if ("status" in status && (status.status === "up-to-date" || status.status === "registered"))
       return { status: "fresh", repositoryRoot: root, fingerprint, diagnostic: "GitNexus status --json confirms a current index" };
     const analyzed = await host.run(input.executable, ["analyze", root, "--index-only"], { cwd: root, timeoutMs: input.timeoutMs ?? 300_000, environment });
     if (analyzed.exitCode !== 0)
@@ -421,7 +426,7 @@ export async function ensureGitNexusIndex(input: {
     let after: z.infer<typeof gitNexusStatusSchema> | null = null;
     try { after = parseGitNexusStatus(afterResult); } catch { /* fail closed */ }
     const afterRepo = after ? await realpath(after.repository).catch(() => null) : null;
-    if (afterRepo !== root || !after || !("status" in after) || after.status !== "up-to-date")
+    if (afterRepo !== root || !after || !("status" in after) || (after.status !== "up-to-date" && after.status !== "registered"))
       return { status: "stale", repositoryRoot: root, fingerprint, diagnostic: "Post-index status did not verify freshness" };
     await writeFile(receiptPath, JSON.stringify({ repositoryRoot: root, fingerprint, indexedAt: new Date().toISOString() }), { mode: 0o600 });
     return { status: "indexed", repositoryRoot: root, fingerprint, diagnostic: "Index refreshed and status verified" };

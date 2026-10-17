@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile } from "node:fs/promises";
+import { chmod, mkdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -105,10 +105,13 @@ export async function executeSetupCommand(
     };
   }
 
-  // Ensure state & config directories exist
-  await mkdir(platform.paths.state, { recursive: true });
-  await mkdir(platform.paths.config, { recursive: true });
-  await mkdir(platform.paths.data, { recursive: true });
+  // Ensure state & config directories exist with 0o700 mode
+  await mkdir(platform.paths.state, { recursive: true, mode: 0o700 });
+  await mkdir(platform.paths.config, { recursive: true, mode: 0o700 });
+  await mkdir(platform.paths.data, { recursive: true, mode: 0o700 });
+  await chmod(platform.paths.state, 0o700);
+  await chmod(platform.paths.config, 0o700);
+  await chmod(platform.paths.data, 0o700);
 
   // 2. Resolve Runner & Store
   const runner: CommandRunner = context?.setup?.runner ?? new NodeCommandRunner();
@@ -134,7 +137,8 @@ export async function executeSetupCommand(
       installerRegistry.register(context.setup.toolInstaller as ToolInstaller);
     } else {
       const managedToolsDir = join(platform.paths.data, "tools");
-      await mkdir(managedToolsDir, { recursive: true });
+      await mkdir(managedToolsDir, { recursive: true, mode: 0o700 });
+      await chmod(managedToolsDir, 0o700);
       const managedInstaller = new toolMod.ManagedToolInstaller({
         managedRoot: managedToolsDir,
         pins: []
@@ -188,7 +192,8 @@ export async function executeSetupCommand(
       const bindings = skillsMod.RoleSkillBindingsSchema.parse(JSON.parse(bindingsContent));
 
       const storeRoot = join(platform.paths.data, "skills-store");
-      await mkdir(storeRoot, { recursive: true });
+      await mkdir(storeRoot, { recursive: true, mode: 0o700 });
+      await chmod(storeRoot, 0o700);
       const skillFileStore = new skillsMod.SkillFileStore(storeRoot);
       const skillManager =
         context?.setup?.skillManager ??

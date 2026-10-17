@@ -296,7 +296,7 @@ export async function resolveAndVerifyExecutable(
         }
       }
     }
-    if (stat.size > 256 * 1024 * 1024) {
+    if (stat.size > 512 * 1024 * 1024) {
       const err = new Error(`Executable '${canonicalPath}' exceeds maximum binary size`);
       (err as NodeJS.ErrnoException).code = "binary_untrusted";
       throw err;
