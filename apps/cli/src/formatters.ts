@@ -1,6 +1,8 @@
 import type {
   ContractError,
+  EnvironmentDoctorReport,
   Page,
+  SessionManifest,
   WorkflowRunSnapshot
 } from "@bflow/contracts";
 import type {
@@ -8,8 +10,39 @@ import type {
   CliCommandName,
   HighLevelCommandOutput,
   InitCommandOutput,
-  SetupCommandOutput
+  SetupCommandOutput,
+  PresentationOptions
 } from "./types.js";
+import {
+  bold,
+  boundMessage,
+  cyan,
+  dim,
+  extractSafeDetails,
+  green,
+  humanText,
+  red,
+  redactSensitive,
+  resolveActionableRemediation,
+  sanitizeIdentifier,
+  stripAnsi,
+  yellow
+} from "./presentation.js";
+import type { EnvironmentStatus } from "./environment.js";
+
+export interface FormatterOptions {
+  readonly color?: boolean | undefined;
+  readonly stdoutColor?: boolean | undefined;
+  readonly stderrColor?: boolean | undefined;
+}
+
+function resolveColor(options: FormatterOptions | PresentationOptions | undefined, stream: "stdout" | "stderr"): boolean {
+  if (!options) return false;
+  if ("color" in options && options.color !== undefined) return options.color;
+  if (stream === "stdout" && "stdoutColor" in options && options.stdoutColor !== undefined) return Boolean(options.stdoutColor);
+  if (stream === "stderr" && "stderrColor" in options && options.stderrColor !== undefined) return Boolean(options.stderrColor);
+  return false;
+}
 
 function isInitOutput(data: CliCommandData): data is InitCommandOutput {
   return typeof data === "object" && data !== null && "configPath" in data && "config" in data;
@@ -204,75 +237,298 @@ function formatHighLevelOutput(output: HighLevelCommandOutput): string {
   return lines.join("\n");
 }
 
-function formatWorkflowRun(snapshot: WorkflowRunSnapshot): string {
+function isDoctorReport(data: CliCommandData): data is EnvironmentDoctorReport {
+  return typeof data === "object" && data !== null && "checks" in data && Array.isArray((data as EnvironmentDoctorReport).checks);
+}
+
+function isEnvironmentStatus(data: CliCommandData): data is EnvironmentStatus {
+  return typeof data === "object" && data !== null && "server" in data && "configuration" in data;
+}
+
+function isSessionManifest(data: CliCommandData): data is SessionManifest {
+  return typeof data === "object" && data !== null && "panes" in data && Array.isArray((data as SessionManifest).panes) && !("server" in data);
+}
+
+function formatStatusTag(status: string, useColor: boolean): string {
+  const upper = status.trim().toUpperCase();
+  switch (upper) {
+    // Green: confirmed success / pass / up / valid / idle / done
+    case "PASSED":
+    case "PASS":
+    case "SUCCEEDED":
+    case "UP":
+    case "IDLE":
+    case "DONE":
+    case "VALID":
+      return green(upper, useColor);
+
+    // Yellow: warning / waiting / blocked / degraded / unknown / stale / cancelling / initializing
+    case "WAITING":
+    case "BLOCKED":
+    case "DEGRADED":
+    case "UNKNOWN":
+    case "WARN":
+    case "WARNING":
+    case "CANCELLING":
+    case "INITIALIZING":
+    case "STOPPING":
+      return yellow(upper, useColor);
+
+    // Red: errors / failed / invalid
+    case "FAILED":
+    case "FAIL":
+    case "INVALID":
+      return red(upper, useColor);
+
+    // Cyan: active steps / working / running / starting / accepted
+    case "WORKING":
+    case "RUNNING":
+    case "STARTING":
+    case "ACCEPTED":
+      return cyan(upper, useColor);
+
+    // Dim / Neutral: stopped / down / cancelled / queued / not started
+    case "STOPPED":
+    case "DOWN":
+    case "CANCELLED":
+    case "QUEUED":
+    case "NOT STARTED":
+      return dim(upper, useColor);
+
+    default:
+      return upper;
+  }
+}
+
+function formatWorkflowRun(snapshot: WorkflowRunSnapshot, useColor = false): string {
   const lines: string[] = [];
-  lines.push(`Run ID:   ${snapshot.runId}`);
-  lines.push(`Workflow: ${snapshot.workflowId} (v${snapshot.workflowVersion})`);
-  lines.push(`Status:   ${snapshot.status.toUpperCase()}`);
+  lines.push(`Run ID:   ${sanitizeIdentifier(snapshot.runId)}`);
+  lines.push(`Workflow: ${sanitizeIdentifier(snapshot.workflowId)} (v${sanitizeIdentifier(snapshot.workflowVersion)})`);
+  const statusStr = snapshot.status === "cancelling"
+    ? `CANCELLING (Cancellation requested)`
+    : snapshot.status.toUpperCase();
+  lines.push(`Status:   ${formatStatusTag(statusStr, useColor)}`);
   lines.push(`Version:  ${snapshot.version}`);
   lines.push(`Created:  ${snapshot.createdAt}`);
   lines.push(`Updated:  ${snapshot.updatedAt}`);
   lines.push("");
   lines.push("Tasks:");
   for (const t of snapshot.tasks) {
-    let taskLine = `  - ${t.taskId.padEnd(14)} [${t.status.toUpperCase()}] (gen: ${t.generation}, attempt: ${t.attempt})`;
+    const rawTag = `[${t.status.toUpperCase()}]`;
+    const tag = useColor ? formatStatusTag(t.status, true) : rawTag;
+    const cleanTaskId = sanitizeIdentifier(t.taskId);
+    let taskLine = `  - ${cleanTaskId.padEnd(14)} ${useColor ? `[${tag}]` : rawTag} (gen: ${t.generation}, attempt: ${t.attempt})`;
     if (t.blockage) {
-      taskLine += ` [Blockage: ${t.blockage.code}${t.blockage.message ? ` - ${t.blockage.message}` : ""}]`;
+      const cleanCode = humanText(t.blockage.code, 50);
+      const cleanMsg = t.blockage.message ? ` - ${humanText(t.blockage.message, 150)}` : "";
+      taskLine += ` [Blockage: ${cleanCode}${cleanMsg}]`;
     }
     lines.push(taskLine);
   }
 
   if (snapshot.status === "waiting" || snapshot.status === "blocked") {
     const blockingTasks = snapshot.tasks.filter((t) => t.status === "waiting" || t.status === "blocked");
-    const taskNames = blockingTasks.length > 0 ? blockingTasks.map((t) => `'${t.taskId}'`).join(", ") : "a task";
+    const taskNames = blockingTasks.length > 0 ? blockingTasks.map((t) => `'${sanitizeIdentifier(t.taskId)}'`).join(", ") : "a task";
     lines.push("");
     lines.push(`Notice: Run is ${snapshot.status} on ${taskNames}.`);
-    if (blockingTasks.some((t) => t.blockage?.code === "awaiting_approval" || t.status === "waiting")) {
-      const waitTask = blockingTasks.find((t) => t.status === "waiting") ?? blockingTasks[0];
-      lines.push(`  To record human approval: bflow approve ${waitTask?.taskId ?? "<task-id>"} --run ${snapshot.runId}`);
+    // Human approval guidance ONLY when blockage.code === "awaiting_approval", never waiting alone!
+    if (blockingTasks.some((t) => t.blockage?.code === "awaiting_approval")) {
+      const waitTask = blockingTasks.find((t) => t.blockage?.code === "awaiting_approval") ?? blockingTasks[0];
+      lines.push(`  To record human approval: bflow approve ${sanitizeIdentifier(waitTask?.taskId ?? "<task-id>")} --run ${sanitizeIdentifier(snapshot.runId)}`);
     }
-    lines.push(`  To resume the run: bflow resume ${snapshot.runId}`);
+    lines.push(`  To resume the run: bflow resume ${sanitizeIdentifier(snapshot.runId)}`);
   }
 
   return lines.join("\n");
 }
 
-function formatRunPage(page: Page<WorkflowRunSnapshot>): string {
+function formatRunPage(page: Page<WorkflowRunSnapshot>, useColor = false): string {
   if (page.items.length === 0) {
     return "No workflow runs found.";
   }
   const lines: string[] = [];
   lines.push(`Found ${page.items.length} run(s):`);
   lines.push("");
-  lines.push(`  ${"RUN ID".padEnd(24)} ${"STATUS".padEnd(12)} ${"WORKFLOW".padEnd(25)} UPDATED`);
-  lines.push(`  ${"-".repeat(24)} ${"-".repeat(12)} ${"-".repeat(25)} ${"-".repeat(24)}`);
+
+  const runIdColWidth = Math.max(24, ...page.items.map((r) => sanitizeIdentifier(r.runId).length));
+  const wfColWidth = Math.max(25, ...page.items.map((r) => `${sanitizeIdentifier(r.workflowId)} (v${sanitizeIdentifier(r.workflowVersion)})`.length));
+
+  lines.push(`  ${"RUN ID".padEnd(runIdColWidth)} ${"STATUS".padEnd(12)} ${"WORKFLOW".padEnd(wfColWidth)} UPDATED`);
+  lines.push(`  ${"-".repeat(runIdColWidth)} ${"-".repeat(12)} ${"-".repeat(wfColWidth)} ${"-".repeat(24)}`);
   for (const r of page.items) {
+    const cleanRunId = sanitizeIdentifier(r.runId);
+    const rawStatus = r.status.toUpperCase();
+    const paddedStatus = rawStatus.padEnd(12);
+    const statusCol = useColor
+      ? formatStatusTag(rawStatus, true) + " ".repeat(Math.max(0, 12 - rawStatus.length))
+      : paddedStatus;
+    const cleanWf = `${sanitizeIdentifier(r.workflowId)} (v${sanitizeIdentifier(r.workflowVersion)})`;
     lines.push(
-      `  ${r.runId.padEnd(24)} ${r.status.toUpperCase().padEnd(12)} ${(r.workflowId + " (v" + r.workflowVersion + ")").padEnd(25)} ${r.updatedAt}`
+      `  ${cleanRunId.padEnd(runIdColWidth)} ${statusCol} ${cleanWf.padEnd(wfColWidth)} ${humanText(r.updatedAt, 30)}`
     );
   }
   if (page.nextCursor) {
+    const cleanCursor = sanitizeIdentifier(page.nextCursor);
     lines.push("");
-    lines.push(`Next page cursor: ${page.nextCursor} (use --cursor ${page.nextCursor})`);
+    lines.push(`Next page cursor: ${cleanCursor} (use --cursor ${cleanCursor})`);
   }
   return lines.join("\n");
 }
 
-function formatInitOutput(output: InitCommandOutput): string {
+function formatInitOutput(output: InitCommandOutput, useColor = false): string {
   const lines: string[] = [];
+  const okMarker = useColor ? green(bold("[OK]"), true) : "[OK]";
   if (output.overwritten) {
-    lines.push(`Initialized bflow repository configuration (overwritten) at:`);
+    lines.push(`${okMarker} bflow repository configuration (overwritten) at:`);
   } else {
-    lines.push(`Initialized bflow repository configuration at:`);
+    // overwritten: false is either creation OR preservation, cannot say created
+    lines.push(`${okMarker} bflow repository configuration ready at:`);
   }
-  lines.push(`  ${output.configPath}`);
+  lines.push(`  ${sanitizeIdentifier(output.configPath)}`);
   lines.push("");
-  lines.push(`Project Name:  ${output.config.projectName}`);
-  lines.push(`Runtime ID:    ${output.config.runtimeId}`);
-  lines.push(`Run Store:     ${output.config.storage.runStorePath}`);
-  lines.push(`Artifacts:     ${output.config.storage.artifactStoreRoot}`);
-  lines.push(`Registry:      ${output.config.storage.registryStateFile}`);
-  lines.push(`Default Tasks: ${output.config.defaultWorkflow.tasks.map((t) => t.id).join(" -> ")}`);
+  lines.push(`Project Name:  ${sanitizeIdentifier(output.config.projectName)}`);
+  lines.push(`Runtime ID:    ${sanitizeIdentifier(output.config.runtimeId)}`);
+  lines.push(`Run Store:     ${sanitizeIdentifier(output.config.storage.runStorePath)}`);
+  lines.push(`Artifacts:     ${sanitizeIdentifier(output.config.storage.artifactStoreRoot)}`);
+  lines.push(`Registry:      ${sanitizeIdentifier(output.config.storage.registryStateFile)}`);
+  lines.push(`Default Tasks: ${output.config.defaultWorkflow.tasks.map((t) => sanitizeIdentifier(t.id)).join(" -> ")}`);
+  lines.push("");
+  lines.push("Next action:");
+  lines.push("  Run 'bflow up' to start the environment.");
+  lines.push("  Note: Default provider is Codex. Default agentic up currently requires verified Claude native hooks (bflow init --provider claude) or an operator-supplied custom host; see README.md for details.");
+  return lines.join("\n");
+}
+
+function formatDoctorReport(report: EnvironmentDoctorReport, useColor = false): string {
+  const passed = report.checks.filter((c) => c.status === "passed").length;
+  const failed = report.checks.filter((c) => c.status === "failed").length;
+  const warn = report.checks.filter((c) => c.status === "warn").length;
+  const total = report.checks.length;
+
+  const lines: string[] = [];
+  if (report.healthy) {
+    const okMarker = useColor ? green(bold("[OK]"), true) : "[OK]";
+    if (warn > 0) {
+      lines.push(`${okMarker} Environment healthy (${passed} passed, ${warn} warning(s))`);
+    } else {
+      lines.push(`${okMarker} Environment healthy (all ${total} checks passed)`);
+    }
+  } else {
+    const failMarker = useColor ? red(bold("[FAIL]"), true) : "[FAIL]";
+    lines.push(`${failMarker} Environment unhealthy (${failed} check(s) failed, ${passed} passed${warn > 0 ? `, ${warn} warning(s)` : ""})`);
+  }
+  lines.push(`Repository: ${sanitizeIdentifier(report.workspaceRoot)}`);
+  lines.push(`Session:    ${sanitizeIdentifier(report.sessionId ?? "none")}`);
+  lines.push("");
+  lines.push("Checks:");
+  for (const check of report.checks) {
+    const grouped = report.metadata?.["groups"] !== undefined;
+    const tag = grouped ? check.status.toUpperCase()
+      : check.status === "passed" ? "PASS" : check.status === "failed" ? "FAIL" : "WARN";
+    const paddedTag = grouped ? tag : tag.padEnd(6);
+    const coloredTag = useColor
+      ? check.status === "passed"
+        ? green(paddedTag, true)
+        : check.status === "failed"
+        ? red(paddedTag, true)
+        : yellow(paddedTag, true)
+      : paddedTag;
+    const cleanName = humanText(check.name, 100);
+    const cleanMsg = humanText(check.message, 250);
+    lines.push(`  ${coloredTag} ${cleanName}: ${cleanMsg}`);
+    if (check.remediation) {
+      const cleanRemediation = humanText(check.remediation, 250);
+      const nextLabel = useColor ? cyan("Next:") : "Next:";
+      lines.push(`         ${nextLabel} ${cleanRemediation}`);
+    }
+  }
+  lines.push("");
+  lines.push(`Summary: ${passed} passed, ${failed} failed${warn > 0 ? `, ${warn} warning(s)` : ""} (${total} total)`);
+  return lines.join("\n");
+}
+
+export function formatEnvironmentStatus(status: EnvironmentStatus, useColor = false): string {
+  const lines: string[] = [];
+  const statusMarker = status.configuration === "valid"
+    ? (useColor ? green(bold("[OK]"), true) : "[OK]")
+    : (useColor ? red(bold("[FAIL]"), true) : "[FAIL]");
+  lines.push(`${statusMarker} Repository Environment Status`);
+  lines.push(`Repository:              ${sanitizeIdentifier(status.workspaceRoot)}`);
+  lines.push(`Session:                 ${sanitizeIdentifier(status.sessionName)}`);
+  lines.push(`Server:                  ${useColor ? formatStatusTag(status.server, true) : status.server}`);
+  lines.push(`Configuration:           ${useColor ? formatStatusTag(status.configuration, true) : status.configuration}`);
+  const obsLabel = status.liveObservation ? "live" : "persisted (may be stale)";
+  lines.push(`Pane/agent observation:  ${useColor ? (status.liveObservation ? green("live", true) : yellow("persisted (may be stale)", true)) : obsLabel}`);
+  const envStatus = status.manifest?.status ?? "not started";
+  lines.push(`Environment:             ${useColor ? formatStatusTag(envStatus, true) : envStatus}`);
+  if (status.manifest?.panes && status.manifest.panes.length > 0) {
+    lines.push("");
+    lines.push("Roles:");
+    for (const pane of status.manifest.panes) {
+      const stateStr = pane.transportState.toUpperCase();
+      const cleanRole = sanitizeIdentifier(pane.role);
+      const paddedRole = cleanRole.padEnd(16);
+      const coloredState = useColor ? formatStatusTag(stateStr, true) : stateStr;
+      lines.push(`  - ${paddedRole} [${coloredState}] (${sanitizeIdentifier(pane.workspaceId)}/${sanitizeIdentifier(pane.tabId)}/${sanitizeIdentifier(pane.paneId)}, agent ${sanitizeIdentifier(pane.agentId)})`);
+    }
+  }
+  if (status.issues.length > 0) {
+    lines.push("");
+    lines.push("Issues:");
+    for (const issue of status.issues) {
+      const cleanIssue = humanText(issue, 300);
+      lines.push(`  - ${useColor ? yellow(cleanIssue, true) : cleanIssue}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+export function formatUpOutput(manifest: SessionManifest, useColor = false): string {
+  const lines: string[] = [];
+  const okMarker = useColor ? green(bold("[OK]"), true) : "[OK]";
+  lines.push(`${okMarker} Environment ready`);
+  lines.push(`Repository:  ${sanitizeIdentifier(manifest.workspaceRoot)}`);
+  lines.push(`Session:     ${sanitizeIdentifier(manifest.sessionId)}`);
+  lines.push(`Environment: ${useColor ? formatStatusTag(manifest.status, true) : manifest.status}`);
+  lines.push("");
+  lines.push("Roles:");
+  for (const pane of manifest.panes) {
+    const stateStr = pane.transportState.toUpperCase();
+    const cleanRole = sanitizeIdentifier(pane.role);
+    const coloredState = useColor ? formatStatusTag(stateStr, true) : stateStr;
+    lines.push(`  - ${cleanRole.padEnd(14)} [${coloredState}] (${sanitizeIdentifier(pane.paneId)}, agent ${sanitizeIdentifier(pane.agentId)})`);
+  }
+  lines.push("");
+  lines.push("Next: run 'bflow attach' to interact with the Conversation Agent.");
+  return lines.join("\n");
+}
+
+function isDownConfirmed(data: SessionManifest | EnvironmentStatus): boolean {
+  if ("server" in data) {
+    // For EnvironmentStatus, only an actual server==stopped observation permits claiming stopped
+    return data.server === "stopped";
+  }
+  if ("status" in data) {
+    // For SessionManifest, only status==down permits claiming stopped
+    return data.status === "down";
+  }
+  return false;
+}
+
+export function formatDownOutput(data: SessionManifest | EnvironmentStatus, useColor = false): string {
+  const lines: string[] = [];
+  if (isDownConfirmed(data)) {
+    const okMarker = useColor ? green(bold("[OK]"), true) : "[OK]";
+    lines.push(`${okMarker} Environment stopped`);
+  } else {
+    const currentStatus = "server" in data ? data.server : "status" in data ? data.status : "unknown";
+    const statusTag = useColor ? formatStatusTag(currentStatus, true) : currentStatus;
+    lines.push(`Environment status: ${statusTag}`);
+  }
+  const root = "workspaceRoot" in data ? data.workspaceRoot : "";
+  const session = "sessionName" in data ? data.sessionName : "sessionId" in data ? data.sessionId : "";
+  if (root) lines.push(`Repository:  ${sanitizeIdentifier(root)}`);
+  if (session) lines.push(`Session:     ${sanitizeIdentifier(session)}`);
   return lines.join("\n");
 }
 
@@ -325,19 +581,19 @@ function formatDoctorGroups(groups: unknown): string[] {
 
   const renderItem = (item: any) => {
     if (!item || typeof item !== "object") return;
-    const status = (item.status ?? "unknown").toString().toUpperCase();
-    const component = item.component ?? item.name ?? item.toolId ?? item.checkId ?? "unknown";
+    const status = humanText(item.status ?? "unknown").toUpperCase();
+    const component = humanText(item.component ?? item.name ?? item.toolId ?? item.checkId ?? "unknown");
     const ver = item.detected_version ?? item.version ?? item.detectedVersion;
-    const verStr = ver ? ` (version: ${ver})` : "";
+    const verStr = ver ? ` (version: ${humanText(ver)})` : "";
     lines.push(`  - [${status}] ${component}${verStr}`);
     if (item.reason ?? item.message) {
-      lines.push(`      Reason: ${item.reason ?? item.message}`);
+      lines.push(`      Reason: ${humanText(item.reason ?? item.message)}`);
     }
     if (item.remediation) {
-      lines.push(`      Remediation: ${item.remediation}`);
+      lines.push(`      Remediation: ${humanText(item.remediation)}`);
     }
     if (item.repair_command ?? item.repairCommand) {
-      lines.push(`      Repair: ${item.repair_command ?? item.repairCommand}`);
+      lines.push(`      Repair: ${humanText(item.repair_command ?? item.repairCommand)}`);
     }
   };
 
@@ -345,14 +601,14 @@ function formatDoctorGroups(groups: unknown): string[] {
     for (const group of groups) {
       if (group && typeof group === "object") {
         const title = group.group ?? group.name ?? group.title ?? "Group";
-        lines.push(`\n[${title}]`);
+        lines.push(`\n[${humanText(title)}]`);
         const items = Array.isArray(group.items) ? group.items : Array.isArray(group.checks) ? group.checks : [group];
         for (const item of items) renderItem(item);
       }
     }
   } else if (groups && typeof groups === "object") {
     for (const [groupName, groupContent] of Object.entries(groups)) {
-      lines.push(`\n[${groupName}]`);
+      lines.push(`\n[${humanText(groupName)}]`);
       if (Array.isArray(groupContent)) {
         for (const item of groupContent) renderItem(item);
       } else if (groupContent && typeof groupContent === "object") {
@@ -366,9 +622,11 @@ function formatDoctorGroups(groups: unknown): string[] {
 export function formatCommandSuccess(
   command: CliCommandName,
   data: CliCommandData,
-  json: boolean
+  json: boolean,
+  options?: FormatterOptions | PresentationOptions | undefined
 ): string {
-  if (json) {
+  const isJson = Boolean(json) || (options !== undefined && "json" in options && Boolean((options as PresentationOptions).json));
+  if (isJson) {
     return JSON.stringify(
       {
         ok: true,
@@ -380,6 +638,9 @@ export function formatCommandSuccess(
     );
   }
 
+  // Default to plain deterministic output if color options are omitted or false
+  const useColor = resolveColor(options, "stdout");
+
   if (isHelpData(data)) {
     return data.helpText;
   }
@@ -389,7 +650,7 @@ export function formatCommandSuccess(
   }
 
   if (isInitOutput(data)) {
-    return formatInitOutput(data);
+    return formatInitOutput(data, useColor);
   }
 
   if (isSetupOutput(data)) {
@@ -400,50 +661,56 @@ export function formatCommandSuccess(
     return formatHighLevelOutput(data);
   }
 
-  if ("checks" in data) {
-    const lines = [
-      `Repository: ${data.workspaceRoot}`,
-      `Session: ${data.sessionId ?? "none"}`,
-      ...data.checks.map(
-        (check) => `${check.status.toUpperCase()} ${check.name}: ${check.message}${check.remediation ? `\n  Next: ${check.remediation}` : ""}`
-      )
-    ];
-    if (command === "doctor" && (data as any).metadata?.groups) {
-      lines.push(...formatDoctorGroups((data as any).metadata.groups));
+  if (isDoctorReport(data)) {
+    const lines = [formatDoctorReport(data, useColor)];
+    const groups = data.metadata?.["groups"];
+    if (command === "doctor" && groups) {
+      lines.push(...formatDoctorGroups(groups));
     }
     return lines.join("\n");
   }
-  if ("server" in data) {
-    return [`Repository: ${data.workspaceRoot}`, `Session: ${data.sessionName}`,
-      `Server: ${data.server}; configuration: ${data.configuration}`,
-      `Pane/agent observation: ${data.liveObservation ? "live" : "persisted (may be stale)"}`,
-      `Environment: ${data.manifest?.status ?? "not started"}`,
-      ...(data.manifest?.panes.map((pane) => `${pane.role}: ${pane.transportState} (${pane.workspaceId}/${pane.tabId}/${pane.paneId}, agent ${pane.agentId})`) ?? []),
-      ...data.issues].join("\n");
+
+  if (command === "attach") {
+    const okMarker = useColor ? green(bold("[OK]"), true) : "[OK]";
+    return `${okMarker} Returned from Conversation attach.`;
   }
-  if ("panes" in data) {
-    return [`Repository: ${data.workspaceRoot}`, `Session: ${data.sessionId}; environment: ${data.status}`,
-      ...data.panes.map((pane) => `${pane.role}: ${pane.transportState} (${pane.paneId}, agent ${pane.agentId})`)].join("\n");
+
+  if (command === "down") {
+    if (isEnvironmentStatus(data) || isSessionManifest(data)) {
+      return formatDownOutput(data, useColor);
+    }
+  }
+
+  if (command === "up" && isSessionManifest(data)) {
+    return formatUpOutput(data, useColor);
+  }
+
+  if (isEnvironmentStatus(data)) {
+    return formatEnvironmentStatus(data, useColor);
+  }
+
+  if (isSessionManifest(data)) {
+    return formatUpOutput(data, useColor);
   }
 
   if (isSnapshot(data)) {
     switch (command) {
       case "run":
-        return `Started workflow run '${data.runId}':\n\n${formatWorkflowRun(data)}`;
+        return `Started workflow run '${sanitizeIdentifier(data.runId)}':\n\n${formatWorkflowRun(data, useColor)}`;
       case "approve":
-        return `Approval decision recorded for run '${data.runId}':\n\n${formatWorkflowRun(data)}`;
+        return `Approval decision recorded for run '${sanitizeIdentifier(data.runId)}':\n\n${formatWorkflowRun(data, useColor)}`;
       case "resume":
-        return `Resumed workflow run '${data.runId}':\n\n${formatWorkflowRun(data)}`;
+        return `Resumed workflow run '${sanitizeIdentifier(data.runId)}':\n\n${formatWorkflowRun(data, useColor)}`;
       case "cancel":
-        return `Cancellation applied to run '${data.runId}':\n\n${formatWorkflowRun(data)}`;
+        return `Cancellation requested for run '${sanitizeIdentifier(data.runId)}':\n\n${formatWorkflowRun(data, useColor)}`;
       case "status":
       default:
-        return formatWorkflowRun(data);
+        return formatWorkflowRun(data, useColor);
     }
   }
 
   if (isPage(data)) {
-    return formatRunPage(data);
+    return formatRunPage(data, useColor);
   }
 
   return JSON.stringify(data, null, 2);
@@ -452,9 +719,11 @@ export function formatCommandSuccess(
 export function formatCommandError(
   error: ContractError,
   command: CliCommandName | undefined,
-  json: boolean
+  json: boolean,
+  options?: FormatterOptions | PresentationOptions | undefined
 ): string {
-  if (json) {
+  const isJson = Boolean(json) || (options !== undefined && "json" in options && Boolean((options as PresentationOptions).json));
+  if (isJson) {
     return JSON.stringify(
       {
         ok: false,
@@ -466,12 +735,32 @@ export function formatCommandError(
     );
   }
 
-  let out = `Error [${error.code}]: ${error.message}`;
-  if (error.details !== undefined && error.details !== null) {
-    out += `\nDetails: ${JSON.stringify(error.details, null, 2)}`;
+  // Default to plain deterministic output if color options are omitted or false
+  const useColor = resolveColor(options, "stderr");
+
+  // Clean, redact sensitive credentials, and bound untrusted messages
+  const cleanMessage = boundMessage(redactSensitive(stripAnsi(error.message)));
+
+  const errorTag = useColor ? red(bold(`Error [${error.code}]:`), true) : `Error [${error.code}]:`;
+  let out = `${errorTag} ${cleanMessage}`;
+
+  // Safe details only: show validated scalar fields stage/role/provider/pane/session
+  const safe = extractSafeDetails(error.details);
+  if (safe !== null) {
+    let detailsStr = Object.entries(safe)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join(", ");
+    if (detailsStr.length > 500) {
+      detailsStr = detailsStr.slice(0, 500).trimEnd() + "... [truncated]";
+    }
+    const detailsTag = useColor ? dim(`Details: ${detailsStr}`) : `Details: ${detailsStr}`;
+    out += `\n${detailsTag}`;
   }
-  if (command && ["up", "down", "attach", "status", "doctor", "recover"].includes(command)) {
-    out += "\nNext: bflow status and bflow doctor show this repository's session and recovery instructions. Preserve .bflow; use bflow down --yes for a checked shutdown.";
-  }
+
+  // Next: specific useful supported action
+  const remediation = resolveActionableRemediation(error, command);
+  const nextTag = useColor ? cyan(bold("Next:")) : "Next:";
+  out += `\n${nextTag} ${remediation}`;
+
   return out;
 }

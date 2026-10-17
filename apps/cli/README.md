@@ -38,6 +38,44 @@ commands receive `HERDR_SESSION` explicitly. Inherited `HERDR_SOCKET`, pane,
 remote and other caller context is removed. No socket path is constructed or
 managed by Bflow. Explicit `HERDR_CONFIG_PATH` is retained.
 
+## CLI Output Presentation, Progress, and Error Handling
+
+### Color Precedence and Stream Resolution
+Bflow CLI formats human terminal output using a dedicated presentation engine without external dependencies. Color capabilities are resolved independently for `stdout` and `stderr`:
+1. **Explicit options**: Respected when provided via `CliContext.presentation` or formatter options.
+2. **`NO_COLOR`**: In the absence of an explicit option, non-empty `NO_COLOR` disables color output, overriding `FORCE_COLOR`.
+3. **`FORCE_COLOR="0"`**: Disables color output.
+4. **`FORCE_COLOR` (non-zero)**: Explicit non-zero values enable color output, including across piped streams (`isTTY: false`).
+5. **Terminal detection**: Otherwise, colors are enabled if the target stream has `isTTY: true` and `TERM !== "dumb"`.
+6. **Structured JSON**: When `--json` or `-j` is passed, output is guaranteed to be plain deterministic JSON with zero ANSI escape codes.
+7. **Custom I/O Collectors**: Caller-supplied `io` collectors (e.g. in test suites or programmatic embeds) default to plain, non-interactive output unless explicitly opting in via `context.presentation`.
+
+### Real-Time Observational Progress
+- Lifecycle and long-running commands (`up`, `down`, `attach`, `init`, etc.) stream real-time progress steps to human interactive `stderr` only.
+- Progress steps are emitted with `[..]` markers (styled in bold cyan when color is active) at truthful boundaries.
+- Progress reporting is strictly informational (emitting in-flight phase transitions only) and never emits premature conclusive success claims (e.g. `Environment ready` or `Environment stopped`). Conclusive success is reported exclusively by command formatters after underlying operations, state persistence, and resource cleanup succeed.
+- `FORCE_COLOR` never enables progress streaming; progress strictly requires an interactive `stderr` stream (`isTTY: true && TERM !== "dumb"`).
+- Help and version commands never emit progress.
+
+### Actionable Error Format
+Human error output follows a bounded, actionable format:
+```text
+Error [<code>]: <concise bounded explanation>
+Details: <safe scalar details: stage, role, provider, paneId, sessionId, workspaceRoot, taskId, runId>
+Next: <specific actionable next step>
+```
+- **Sanitization & Redaction**: All human dynamic fields are stripped of ANSI escapes, C0 control characters (including carriage return `\r`), and C1 control sequences (`\u0080`–`\u009F`). Dynamic text is bounded against runaway terminal/subprocess dumps, and automatically redacted for sensitive tokens (`ghp_*`, `gho_*`, `ghu_*`, `ghs_*`, `ghr_*`, `sk-*`, `sk-ant-*`, Bearer tokens, JWTs, generic PKCS#8 / algorithm PEM private keys, passwords, and API keys).
+- **Handled JSON Intact**: Machine-readable JSON envelopes (`--json`) preserve exact unredacted error details and data structures for tooling integration.
+- **Single-Envelope Ownership**: Unexpected runtime errors and lifecycle close failures are validated against `ContractErrorSchema` and emitted in a single authoritative envelope, preventing conflicting output.
+
+### Status and Shutdown Truthfulness
+- `formatDownOutput` strictly enforces that an environment status only permits claiming `[OK] Environment stopped` when the Herdr server process is confirmed stopped (`server: "stopped"`). A running server with missing or `down` manifest is never reported as stopped. For session manifests, `status: "down"` is required.
+
+### Interactive Attach Limitations
+`bflow attach` focuses the Conversation pane and invokes Herdr's interactive terminal attach (`herdr session attach <name>`).
+- **Limitation**: While `attach --json` returns an error envelope on non-interactive failure, an interactive attach session inherits Herdr's interactive TUI standard I/O streams and cannot provide a purely headless, pipe-safe JSON stream while attached.
+- Upon session exit, the human CLI truthfully reports `[OK] Returned from Conversation attach.`.
+
 ## Default host and physical topology composition
 
 P13 is composed automatically through `PaneManagerLifecycleAdapter`. It adapts

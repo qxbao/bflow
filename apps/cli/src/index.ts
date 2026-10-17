@@ -24,6 +24,7 @@ export {
   type CoreParsedCliCommand,
   type ParseCliResult,
   type ParsedCliCommand,
+  type PresentationOptions,
   type ResumeCommandArgs,
   type RunCommandArgs,
   type StatusCommandArgs,
@@ -70,8 +71,14 @@ export {
   loadWorkflowDefinitionFromFile,
   initRepositoryConfig
 } from "./config.js";
-export { formatCommandSuccess, formatCommandError } from "./formatters.js";
-export { CLI_VERSION, executeCommand, runCli } from "./commands.js";
+export {
+  formatCommandSuccess,
+  formatCommandError,
+  formatDownOutput,
+  formatEnvironmentStatus,
+  formatUpOutput
+} from "./formatters.js";
+export { CLI_VERSION, executeCommand, resolvePresentation, runCli } from "./commands.js";
 export {
   composeCliRuntime,
   type ComposeCliRuntimeOptions,
