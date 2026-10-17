@@ -59,4 +59,3 @@ Every non-Conversation role routes missing requirements, permission requests and
 ## Concrete examples
 
 See [the worked example](worked-example.md) for inputs, authorized steps, expected evidence and a failure branch. The example is illustrative; it does not create approval or a live run.
-
