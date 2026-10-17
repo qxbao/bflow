@@ -18,6 +18,7 @@ import { sha256Hex } from "./environment.js";
 import { fail, failWith, ok } from "./errors.js";
 import type {
   GatewayRegistrationPort,
+  HostLaunchExtras,
   LaunchAttestationSigner,
   LaunchJournalPort,
   PlatformPreflightReport,
@@ -34,6 +35,7 @@ import type {
   RolePreflightSummary,
   SkillSessionPort
 } from "./ports.js";
+import { tokenEnvironmentName } from "./gateway-registrations.js";
 
 export interface DefaultPlatformReadinessServiceDeps {
   readonly environments: RoleEnvironmentResolverPort;
@@ -45,6 +47,8 @@ export interface DefaultPlatformReadinessServiceDeps {
   readonly signer: LaunchAttestationSigner;
   readonly rolePrompt?: ((role: AgentRole) => string | undefined) | undefined;
   readonly nativeSessionHookCommand?: ((role: AgentRole, taskId?: string) => string | undefined) | undefined;
+  /** Trusted host MCP servers and hooks for a role launch (provider-neutral; adapters render them). */
+  readonly hostLaunch?: ((role: AgentRole, taskId?: string) => HostLaunchExtras | undefined) | undefined;
   readonly now?: (() => Date) | undefined;
 }
 
@@ -393,6 +397,9 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
 
     const rolePrompt = this.deps.rolePrompt?.(requirement.role);
     const hookCommand = this.deps.nativeSessionHookCommand?.(requirement.role, requirement.taskId);
+    const extras = this.deps.hostLaunch?.(requirement.role, requirement.taskId);
+    const tokenNames = Object.fromEntries(gateway.registrations.map(registration =>
+      [registration.registrationId, tokenEnvironmentName(registration.registrationId)]));
     const context: ProviderAdapterContext = {
       ...(rolePrompt !== undefined ? { rolePrompt } : {}),
       mcpRegistrations: gateway.registrations,
@@ -400,7 +407,10 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       skillManifest: skills.value.manifest,
       renderedSkillsContent: skills.value.rendered.instructionText,
       ...(hookCommand !== undefined ? { nativeSessionHookCommand: hookCommand } : {}),
-      trustedIssuerKeys: { [this.deps.signer.issuerId]: this.deps.signer.publicKeyPem }
+      trustedIssuerKeys: { [this.deps.signer.issuerId]: this.deps.signer.publicKeyPem },
+      ...(extras?.mcpServers !== undefined ? { hostMcpServers: extras.mcpServers } : {}),
+      ...(extras?.hooks !== undefined ? { hostHooks: extras.hooks } : {}),
+      ...(gateway.registrations.length > 0 ? { mcpTokenEnvironmentNames: tokenNames } : {})
     };
 
     const preflight = await this.deps.providers.preflight(environment.value, context, options);

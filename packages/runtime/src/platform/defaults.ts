@@ -16,6 +16,7 @@ import { SkillSessionStore } from "./skills-session.js";
 import { DefaultPlatformReadinessService } from "./service.js";
 import type {
   GatewayControlPort,
+  HostLaunchExtras,
   LaunchAttestationSigner,
   ProviderAdapterFactory,
   SkillResolverPort
@@ -47,7 +48,10 @@ export function createProviderAdapterFactory(options: ProviderAdapterFactoryOpti
         ? { nativeSessionHookCommand: context.nativeSessionHookCommand }
         : {}),
       trustedIssuerKeys: { ...context.trustedIssuerKeys },
-      ...(context.liveObservation !== undefined ? { liveObservation: context.liveObservation } : {})
+      ...(context.liveObservation !== undefined ? { liveObservation: context.liveObservation } : {}),
+      ...(context.hostMcpServers !== undefined ? { hostMcpServers: context.hostMcpServers } : {}),
+      ...(context.hostHooks !== undefined ? { hostHooks: context.hostHooks } : {}),
+      ...(context.mcpTokenEnvironmentNames !== undefined ? { mcpTokenEnvironmentNames: context.mcpTokenEnvironmentNames } : {})
     };
     switch (provider) {
       case "claude":
@@ -82,6 +86,7 @@ export interface PlatformReadinessServiceOptions {
   readonly now?: (() => Date) | undefined;
   readonly rolePrompt?: ((role: AgentRole) => string | undefined) | undefined;
   readonly nativeSessionHookCommand?: ((role: AgentRole, taskId?: string) => string | undefined) | undefined;
+  readonly hostLaunch?: ((role: AgentRole, taskId?: string) => HostLaunchExtras | undefined) | undefined;
 }
 
 /** Wires the P30 readiness components together with the real implementations. */
@@ -109,6 +114,7 @@ export function createPlatformReadinessService(options: PlatformReadinessService
     signer: options.signer,
     rolePrompt: options.rolePrompt,
     nativeSessionHookCommand: options.nativeSessionHookCommand,
+    hostLaunch: options.hostLaunch,
     now
   });
 }

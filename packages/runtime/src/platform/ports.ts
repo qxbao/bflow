@@ -3,7 +3,7 @@ import type {
   AgentProviderAdapter, AgentProviderId, AgentRole, MCPClientRegistration, MCPServiceObservation,
   OperationOptions, OperationResult, PermissionProfile, ScopedOperation, SkillManifest, SkillPin, TrustScope
 } from "@bflow/contracts";
-import type { LiveReadinessObservation } from "@bflow/agent-providers";
+import type { HostHookEvent, HostMcpServer, LiveReadinessObservation } from "@bflow/agent-providers";
 import type { RenderedSkills, ResolveSkillsRequest } from "@bflow/skills";
 
 /**
@@ -138,6 +138,17 @@ export interface ProviderAdapterContext {
   readonly nativeSessionHookCommand?: string;
   readonly trustedIssuerKeys: Readonly<Record<string, string>>;
   readonly liveObservation?: LiveReadinessObservation;
+  /** Trusted host stdio MCP servers (e.g. `bflow`) and native hooks the launched process must load. */
+  readonly hostMcpServers?: Readonly<Record<string, HostMcpServer>>;
+  readonly hostHooks?: Readonly<Partial<Record<HostHookEvent, string>>>;
+  /** registrationId → env var name holding that Gateway registration's bearer token. */
+  readonly mcpTokenEnvironmentNames?: Readonly<Record<string, string>>;
+}
+
+/** Host-owned launch material per role, independent of provider. */
+export interface HostLaunchExtras {
+  readonly mcpServers?: Readonly<Record<string, HostMcpServer>>;
+  readonly hooks?: Readonly<Partial<Record<HostHookEvent, string>>>;
 }
 
 /** Builds a provider adapter bound to one role launch context (adapter options are constructor-scoped). */

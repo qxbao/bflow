@@ -383,7 +383,8 @@ function accessFor(registration: MCPClientRegistration, bearerToken: string,
 }
 
 /** `BFLOW_MCP_TOKEN_<UPPER registration suffix>`, restricted to `[A-Z0-9_]`, at most 64 characters. */
-function tokenEnvironmentName(registrationId: string): string {
+/** Env var carrying a registration's bearer token; adapters reference it by name only. */
+export function tokenEnvironmentName(registrationId: string): string {
   const suffix = registrationId.replace(/^reg-/, "").toUpperCase().replace(/[^A-Z0-9_]/g, "_");
   const name = `${TOKEN_ENV_PREFIX}${suffix}`;
   if (name.length > MAX_ENV_NAME_LENGTH) reject("validation", "Gateway token environment name is too long");

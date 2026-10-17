@@ -18,6 +18,7 @@ export type {
   GatewayRegistrationGrant,
   GatewayRegistrationPort,
   GatewayRoleRequest,
+  HostLaunchExtras,
   LaunchAttestationInput,
   LaunchAttestationSigner,
   LaunchJournalEntry,
