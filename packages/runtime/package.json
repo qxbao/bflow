@@ -17,7 +17,11 @@
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
-    "@bflow/contracts": "workspace:*"
+    "@bflow/agent-providers": "workspace:*",
+    "@bflow/contracts": "workspace:*",
+    "@bflow/machine-setup": "workspace:*",
+    "@bflow/mcp-gateway": "workspace:*",
+    "@bflow/skills": "workspace:*"
   },
   "devDependencies": {
     "@bflow/agent-registry": "workspace:*",

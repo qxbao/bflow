@@ -316,9 +316,21 @@ importers:
 
   packages/runtime:
     dependencies:
+      '@bflow/agent-providers':
+        specifier: workspace:*
+        version: link:../agent-providers
       '@bflow/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@bflow/machine-setup':
+        specifier: workspace:*
+        version: link:../machine-setup
+      '@bflow/mcp-gateway':
+        specifier: workspace:*
+        version: link:../mcp-gateway
+      '@bflow/skills':
+        specifier: workspace:*
+        version: link:../skills
     devDependencies:
       '@bflow/agent-registry':
         specifier: workspace:*
