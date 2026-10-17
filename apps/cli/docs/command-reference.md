@@ -82,11 +82,15 @@ for success and failure alike, and exits with the code in that document:
 Mutating commands record a receipt under `.bflow/state/cli/commands/` keyed by a deterministic
 idempotency key (override with `--idempotency-key`). That directory must be Git-ignored
 (`bflow init` installs `.bflow/.gitignore`); otherwise the command fails before writing.
+`skills sync` is machine-scoped: it needs no repository and keeps its receipts in
+`$XDG_STATE_HOME/bflow/cli/commands/` (default `~/.local/state/bflow/cli/commands/`).
 
 - **Completed receipt**: the same request replays the stored result (`replayed: true`, first
   step `idempotent-replay`) and repeats no side effect. `task implement` still re-observes state.
 - **Same key, different request**: exit 6, `details.reason: idempotency_key_reuse`.
 - **Concurrent invocation of the same key**: one runs; the others exit 6 with `reason: busy`.
+  `verify` additionally holds one lock per run/task, so concurrent verifications of the same task
+  with different change sets also exit 6 instead of overwriting each other's verification cycle.
 - **Failed receipt**: re-running executes again; engines reconcile their own partial state.
 - **Interrupted receipt** (process died mid-command): `read_only`/`retry_safe` commands run again.
   `resume_required` commands exit 7 with `error.code: unknown_delivery` and the last step; they
@@ -124,7 +128,11 @@ Outcome `inspected`; exit 4 outside a Git repository.
 - Otherwise derives a task graph: one `developer` task per traced task ID, criteria by ID,
   **no inferred dependencies** (the Coordinator declares ordering). Outcome `preview`; with
   `--write` persists `.bflow/plans/<spec-id>.workflow.json` (outcome `planned`). Identical content
-  is a no-op; different content needs `--force` (exit 5 otherwise).
+  is a no-op (`unchanged: true`); different content needs `--force` (exit 5 otherwise). The current
+  file content is part of the request, so a plan edited after a write is re-evaluated rather than
+  hidden behind a replayed receipt.
+- `--out` must resolve inside the repository: `..`, a symlinked target file or a parent directory
+  that resolves outside the root is rejected (exit 1, `reason: path_outside_repository`).
 - Invalid specification: exit 1 (`reason: invalid_specification`); missing file: exit 4.
 
 ### `bflow task implement <task-id> --run <run-id> --spec <file>`

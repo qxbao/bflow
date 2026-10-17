@@ -23,6 +23,7 @@ import {
   CLI_STATE_DIRECTORY,
   guarded,
   listJournalReports,
+  openJournal,
   readJsonFile,
   requireRepository,
   resolveInput,
@@ -118,7 +119,8 @@ export const verify: HighLevelHandler = async (args, ctx, identity) => {
           if (!parsed.success) throw new HighLevelError(validationError(`Invalid change set: ${parsed.error.message}`, { reason: "invalid_change_set" }));
           return parsed.data;
         }
-        const prepared = (await listJournalReports(repository.root, "task.implement")).find(r => r.runId === runId && r.taskId === taskId);
+        // The most recently prepared attempt, consistent with `git prepare`.
+        const prepared = (await listJournalReports(repository.root, "task.implement")).filter(r => r.runId === runId && r.taskId === taskId).at(-1);
         const taskKey = (prepared?.data as { taskKey?: unknown } | undefined)?.taskKey;
         if (typeof taskKey !== "string")
           throw new HighLevelError(notFoundError(`No prepared task '${taskId}' in run '${runId}'; run 'bflow task implement' or pass --change-set`,
@@ -136,7 +138,11 @@ export const verify: HighLevelHandler = async (args, ctx, identity) => {
       const key = args.idempotencyKey ?? `verify:${runId}:${taskId}:${plan.planId}:${change.changeSetId}:${change.headCommitHash}`;
       const request = json({ planId: plan.planId, changeSetId: change.changeSetId, head: change.headCommitHash,
         options: requestDigest(json(options)) });
-      return await runJournaled({ command: "verify", repositoryRoot: repository.root, key, request, retrySafe: true, resume: false,
+      // One verification cycle per run/task: concurrent invocations with different change sets must
+      // not both read and overwrite the same persisted cycle.
+      const journal = await openJournal({ repositoryRoot: repository.root });
+      return await journal.withLock(`verify-cycle:${runId}:${taskId}`, () => runJournaled({ command: "verify",
+        repositoryRoot: repository.root, key, request, retrySafe: true, resume: false,
         identity, clock: ctx.clock }, async (journalLog): Promise<CommandReport> => {
         journalLog.steps.unshift(...log.steps);
         const cycle = await journalLog.check("load-cycle", async () => {
@@ -162,7 +168,7 @@ export const verify: HighLevelHandler = async (args, ctx, identity) => {
             pendingMessages: json(outcome.messages)
           }
         };
-      }, (error, journalLog) => errorReport("verify", error, { ...partial, idempotencyKey: key, steps: journalLog.steps }));
+      }, (error, journalLog) => errorReport("verify", error, { ...partial, idempotencyKey: key, steps: journalLog.steps })));
     } finally {
       await resources?.close();
     }
