@@ -143,6 +143,9 @@ describe("private immutable SkillFileStore", () => {
     expect(await storage.getBundle(await operation)).toEqual({ "SKILL.md": "original" });
     await expect(storage.putBundle({ "SKILL.md": "\ud800" })).rejects.toThrow("Invalid UTF8");
     await expect(storage.putBundle({ "SKILL.md": "x".repeat(256 * 1024 + 1) })).rejects.toThrow("size exceeds");
+    await expect(storage.putBundle({ [`${"nested/".repeat(33)}SKILL.md`]: "x" })).rejects.toThrow("depth");
+    const manyDirectories = Object.fromEntries(Array.from({ length: 128 }, (_, index) => [`a${index}/b/c/d/file`, "x"]));
+    await expect(storage.putBundle(manyDirectories)).rejects.toThrow("entry count");
   });
 
   it("does not overwrite corrupt bundle bytes, modes or documents", async () => {

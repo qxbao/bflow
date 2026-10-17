@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { link, lstat, mkdir, open, readdir, rename, rm } from "node:fs/promises";
+import { link, lstat, mkdir, open, opendir, readdir, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, parse, resolve } from "node:path";
 
 const MAX_FILES = 128;
@@ -114,8 +114,11 @@ async function readFileBounded(path: string, limit: number, privateFile = false)
       length += bytesRead;
     }
     const after = await handle.stat();
+    // Immutable docs are published with link(); removing the temporary link changes ctime
+    // without changing bytes. Private content is authenticated by its exact bytes/hash.
     if (length > limit || after.size !== stat.size || length !== stat.size
-        || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs) {
+        || after.mtimeMs !== stat.mtimeMs || (!privateFile && after.ctimeMs !== stat.ctimeMs)
+        || after.mode !== stat.mode || after.uid !== stat.uid) {
       throw new Error(`File changed during bounded read: ${path}`);
     }
     return decoder.decode(buffer.subarray(0, length));
@@ -139,8 +142,10 @@ function validateFiles(files: Record<string, string>): string[] {
   if (!paths.length || paths.length > MAX_FILES) throw new Error("Bundle file count exceeds bounds");
   let total = 0;
   const names = new Set(paths);
+  const directoriesInBundle = new Set<string>();
   for (const path of paths) {
     const parts = resourcePath(path);
+    if (parts.length > 33) throw new Error("Bundle directory depth exceeds bounds");
     const descriptor = Object.getOwnPropertyDescriptor(files, path)!;
     if (!("value" in descriptor) || !descriptor.enumerable || typeof descriptor.value !== "string") throw new Error("Expected UTF8 file contents");
     const content: string = descriptor.value;
@@ -149,9 +154,12 @@ function validateFiles(files: Record<string, string>): string[] {
     total += bytes.length;
     if (bytes.length > MAX_FILE_BYTES || total > MAX_BUNDLE_BYTES) throw new Error("Bundle size exceeds bounds");
     for (let index = 1; index < parts.length; index++) {
-      if (names.has(parts.slice(0, index).join("/"))) throw new Error("Conflicting bundle paths");
+      const directory = parts.slice(0, index).join("/");
+      if (names.has(directory)) throw new Error("Conflicting bundle paths");
+      directoriesInBundle.add(directory);
     }
   }
+  if (directoriesInBundle.size + paths.length > 512) throw new Error("Bundle entry count exceeds bounds");
   return paths;
 }
 
@@ -165,10 +173,12 @@ async function scanBundle(root: string, privateFiles = false): Promise<{ files: 
     if (depth > 32) throw new Error("Bundle directory depth exceeds bounds");
     if (privateFiles) await privateDirectory(directory);
     else await directories(directory);
-    const children = await readdir(directory, { withFileTypes: true });
-    // Count directories too so empty directory trees cannot consume unbounded work.
-    entries += children.length;
-    if (entries > 512) throw new Error("Bundle entry count exceeds bounds");
+    const children = [];
+    // Stream entries so a huge directory cannot defeat the count bound before validation.
+    for await (const entry of await opendir(directory)) {
+      if (++entries > 512) throw new Error("Bundle entry count exceeds bounds");
+      children.push(entry);
+    }
     for (const entry of children.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
       const path = prefix ? `${prefix}/${entry.name}` : entry.name;
       resourcePath(path);
