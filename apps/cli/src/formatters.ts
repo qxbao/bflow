@@ -7,11 +7,16 @@ import type {
   CliCommandData,
   CliCommandName,
   HighLevelCommandOutput,
-  InitCommandOutput
+  InitCommandOutput,
+  SetupCommandOutput
 } from "./types.js";
 
 function isInitOutput(data: CliCommandData): data is InitCommandOutput {
   return typeof data === "object" && data !== null && "configPath" in data && "config" in data;
+}
+
+function isSetupOutput(data: CliCommandData): data is SetupCommandOutput {
+  return typeof data === "object" && data !== null && "machineId" in data && "serviceManagerKind" in data && "plan" in data;
 }
 
 function isSnapshot(data: CliCommandData): data is WorkflowRunSnapshot {
@@ -271,6 +276,93 @@ function formatInitOutput(output: InitCommandOutput): string {
   return lines.join("\n");
 }
 
+function formatSetupOutput(output: SetupCommandOutput): string {
+  const lines: string[] = [];
+  lines.push(`Setup Mode:         ${output.mode.toUpperCase()}`);
+  lines.push(`Machine ID:         ${output.machineId}`);
+  lines.push(`Operating System:   ${output.os}`);
+  lines.push(`Service Manager:    ${output.serviceManagerKind}`);
+  if (output.plan) {
+    lines.push(`Plan ID:            ${output.plan.planId} (revision ${output.plan.revision})`);
+    lines.push(`Plan Steps:         ${output.plan.steps.length}`);
+    for (const step of output.plan.steps) {
+      const approval = step.requiresApproval ? " [requires approval]" : "";
+      lines.push(`  - [${step.action}] ${step.stepId} (${step.componentId})${approval}`);
+    }
+  }
+  if (output.receipt) {
+    lines.push(`Receipt ID:         ${output.receipt.receiptId} (status: ${output.receipt.status})`);
+  }
+  if (output.tools && output.tools.length > 0) {
+    lines.push("");
+    lines.push("Tools:");
+    for (const tool of output.tools) {
+      const ver = tool.version ? ` (${tool.version})` : "";
+      lines.push(`  - ${tool.toolId}: ${tool.status}${ver}`);
+    }
+  }
+  lines.push("");
+  lines.push("Skills:");
+  lines.push(`  Catalog Loaded:   ${output.skills.catalogLoaded ? "yes" : "no"}`);
+  lines.push(`  Skill Count:      ${output.skills.skillCount}`);
+  lines.push(`  Synced Manifests: ${output.skills.syncedManifests}`);
+  lines.push(`  Store Root:       ${output.skills.storeRoot}`);
+
+  if (output.diagnostics && output.diagnostics.length > 0) {
+    lines.push("");
+    lines.push("Diagnostics:");
+    for (const diag of output.diagnostics) {
+      lines.push(`  - ${diag}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function formatDoctorGroups(groups: unknown): string[] {
+  const lines: string[] = [];
+  lines.push("");
+  lines.push("Component Groups:");
+
+  const renderItem = (item: any) => {
+    if (!item || typeof item !== "object") return;
+    const status = (item.status ?? "unknown").toString().toUpperCase();
+    const component = item.component ?? item.name ?? item.toolId ?? item.checkId ?? "unknown";
+    const ver = item.detected_version ?? item.version ?? item.detectedVersion;
+    const verStr = ver ? ` (version: ${ver})` : "";
+    lines.push(`  - [${status}] ${component}${verStr}`);
+    if (item.reason ?? item.message) {
+      lines.push(`      Reason: ${item.reason ?? item.message}`);
+    }
+    if (item.remediation) {
+      lines.push(`      Remediation: ${item.remediation}`);
+    }
+    if (item.repair_command ?? item.repairCommand) {
+      lines.push(`      Repair: ${item.repair_command ?? item.repairCommand}`);
+    }
+  };
+
+  if (Array.isArray(groups)) {
+    for (const group of groups) {
+      if (group && typeof group === "object") {
+        const title = group.group ?? group.name ?? group.title ?? "Group";
+        lines.push(`\n[${title}]`);
+        const items = Array.isArray(group.items) ? group.items : Array.isArray(group.checks) ? group.checks : [group];
+        for (const item of items) renderItem(item);
+      }
+    }
+  } else if (groups && typeof groups === "object") {
+    for (const [groupName, groupContent] of Object.entries(groups)) {
+      lines.push(`\n[${groupName}]`);
+      if (Array.isArray(groupContent)) {
+        for (const item of groupContent) renderItem(item);
+      } else if (groupContent && typeof groupContent === "object") {
+        renderItem(groupContent);
+      }
+    }
+  }
+  return lines;
+}
+
 export function formatCommandSuccess(
   command: CliCommandName,
   data: CliCommandData,
@@ -300,13 +392,26 @@ export function formatCommandSuccess(
     return formatInitOutput(data);
   }
 
+  if (isSetupOutput(data)) {
+    return formatSetupOutput(data);
+  }
+
   if (isHighLevelOutput(data)) {
     return formatHighLevelOutput(data);
   }
 
   if ("checks" in data) {
-    return [`Repository: ${data.workspaceRoot}`, `Session: ${data.sessionId ?? "none"}`,
-      ...data.checks.map((check) => `${check.status.toUpperCase()} ${check.name}: ${check.message}${check.remediation ? `\n  Next: ${check.remediation}` : ""}`)].join("\n");
+    const lines = [
+      `Repository: ${data.workspaceRoot}`,
+      `Session: ${data.sessionId ?? "none"}`,
+      ...data.checks.map(
+        (check) => `${check.status.toUpperCase()} ${check.name}: ${check.message}${check.remediation ? `\n  Next: ${check.remediation}` : ""}`
+      )
+    ];
+    if (command === "doctor" && (data as any).metadata?.groups) {
+      lines.push(...formatDoctorGroups((data as any).metadata.groups));
+    }
+    return lines.join("\n");
   }
   if ("server" in data) {
     return [`Repository: ${data.workspaceRoot}`, `Session: ${data.sessionName}`,

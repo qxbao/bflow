@@ -23,6 +23,7 @@ import type {
   RepoInspectCommandArgs,
   ResumeCommandArgs,
   RunCommandArgs,
+  SetupCommandArgs,
   SkillsSyncCommandArgs,
   StatusCommandArgs,
   TaskImplementCommandArgs,
@@ -39,6 +40,7 @@ const VALID_COMMANDS: ReadonlySet<CliCommandName> = new Set([
   "doctor",
   "recover",
   "init",
+  "setup",
   "run",
   "status",
   "approve",
@@ -1626,9 +1628,14 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         return makeValidationError("Option '--name' cannot be empty.", json, "init");
       }
       const projectName = rawName?.trim();
-      const provider = optRes.value.flags.get("--provider");
-      if (provider !== undefined && provider !== "claude" && provider !== "codex")
-        return makeValidationError("--provider must be 'claude' or 'codex'.", json, "init");
+      const rawProvider = optRes.value.flags.get("--provider");
+      let provider: "claude" | "codex" | "agy" | undefined;
+      if (rawProvider !== undefined) {
+        if (rawProvider !== "claude" && rawProvider !== "codex" && rawProvider !== "agy") {
+          return makeValidationError("--provider must be 'claude', 'codex', or 'agy'.", json, "init");
+        }
+        provider = rawProvider;
+      }
 
       const force =
         optRes.value.flags.has("--force") ||
@@ -1643,6 +1650,89 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         projectName,
         provider,
         force,
+        json,
+        help: false
+      };
+      return { ok: true, value };
+    }
+
+    case "setup": {
+      const booleanFlags = new Set([
+        "--check",
+        "--dry-run",
+        "--plan",
+        "--apply",
+        "--repair",
+        "--yes",
+        "-y",
+        "--json",
+        "-j",
+        "--help",
+        "-h"
+      ]);
+      const allowedFlags = new Set([
+        "--check",
+        "--dry-run",
+        "--plan",
+        "--apply",
+        "--repair",
+        "--yes",
+        "-y",
+        "--dir",
+        "--catalog-dir",
+        "--json",
+        "-j",
+        "--help",
+        "-h"
+      ]);
+
+      const optRes = extractOptionsAndPositional(commandArgs, booleanFlags, allowedFlags, "setup", json);
+      if (!optRes.ok) return optRes.result;
+
+      if (optRes.value.positional.length > 0) {
+        return makeValidationError(
+          `Unexpected positional argument '${optRes.value.positional[0]}' for 'bflow setup'.`,
+          json,
+          "setup"
+        );
+      }
+
+      const modes: ("check" | "dry_run" | "apply" | "repair")[] = [];
+      if (optRes.value.flags.has("--check")) modes.push("check");
+      if (optRes.value.flags.has("--dry-run") || optRes.value.flags.has("--plan")) modes.push("dry_run");
+      if (optRes.value.flags.has("--apply")) modes.push("apply");
+      if (optRes.value.flags.has("--repair")) modes.push("repair");
+
+      if (modes.length > 1) {
+        return makeValidationError(
+          "Conflicting setup mode flags specified. Choose only one of --check, --dry-run/--plan, --apply, or --repair.",
+          json,
+          "setup"
+        );
+      }
+
+      const mode = modes[0] ?? "apply";
+
+      const rawDir = optRes.value.flags.get("--dir") as string | undefined;
+      if (rawDir !== undefined && rawDir.trim().length === 0) {
+        return makeValidationError("Option '--dir' cannot be empty.", json, "setup");
+      }
+      const dir = rawDir?.trim();
+
+      const rawCatalogDir = optRes.value.flags.get("--catalog-dir") as string | undefined;
+      if (rawCatalogDir !== undefined && rawCatalogDir.trim().length === 0) {
+        return makeValidationError("Option '--catalog-dir' cannot be empty.", json, "setup");
+      }
+      const catalogDir = rawCatalogDir?.trim();
+
+      const yes = optRes.value.flags.has("--yes") || optRes.value.flags.has("-y");
+
+      const value: SetupCommandArgs = {
+        command: "setup",
+        mode,
+        yes,
+        dir,
+        catalogDir,
         json,
         help: false
       };

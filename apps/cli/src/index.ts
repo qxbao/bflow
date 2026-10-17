@@ -1,4 +1,5 @@
 export {
+  CLI_COMMAND_NAMES,
   CLI_EXIT_CODES,
   type ApproveCommandArgs,
   type CancelCommandArgs,
@@ -17,6 +18,10 @@ export {
   type HelpCommandArgs,
   type InitCommandArgs,
   type InitCommandOutput,
+  type SetupCommandArgs,
+  type SetupCommandOutput,
+  type SetupIntegrationOptions,
+  type CoreParsedCliCommand,
   type ParseCliResult,
   type ParsedCliCommand,
   type ResumeCommandArgs,
@@ -75,11 +80,44 @@ export {
 export { main } from "./bin.js";
 
 export { EnvironmentLifecycle, EnvironmentError } from "./environment.js";
-export type { EnvironmentIntegration, EnvironmentDependencies, EnvironmentCompositionInput, EnvironmentStatus } from "./environment.js";
+export type {
+  EnvironmentIntegration,
+  EnvironmentDependencies,
+  EnvironmentCompositionInput,
+  EnvironmentStatus,
+  ProviderProbeOverride,
+  McpLifecycleState
+} from "./environment.js";
+export {
+  runDoctorDiagnostics,
+  loadToolInstallerModule,
+  loadSkillsModule,
+  loadMcpGatewayModule,
+  type DoctorCheckStatus,
+  type DoctorGroupName,
+  type DoctorDetailedCheck,
+  type DoctorGroupedMetadata,
+  type DoctorDiagnosticsOptions
+} from "./doctor-integration.js";
 export { identifyRepository } from "./repository.js";
 export type { RepositoryIdentity } from "./repository.js";
-export { readEnvironmentConfig, defaultEnvironmentConfig, ENVIRONMENT_CONFIG_PATH } from "./environment-config.js";
-export type { EnvironmentConfig } from "./environment-config.js";
+export {
+  readEnvironmentConfig,
+  defaultEnvironmentConfig,
+  ENVIRONMENT_CONFIG_PATH,
+  EnvironmentProviderSchema,
+  DEFAULT_PROVIDER_BY_CLI,
+  EnvironmentRoleConfigSchema,
+  EnvironmentConfigEnvironmentSchema,
+  EnvironmentConfigSchema
+} from "./environment-config.js";
+export type { EnvironmentConfig, EnvironmentProvider, EnvironmentRoleConfig } from "./environment-config.js";
+export {
+  executeSetupCommand,
+  issueSetupApproval,
+  SpawnCommandRunner,
+  DefaultProviderAdapterRegistry
+} from "./setup-integration.js";
 export { environmentProcessRunner, namedSessionEnvironment } from "./environment-process.js";
 export type { EnvironmentProcessRunner, EnvironmentProcessRequest, EnvironmentProcessResult } from "./environment-process.js";
 export { PaneManagerLifecycleAdapter, createNamedPaneRunner, openPaneManagerEnvironment } from "./pane-manager-integration.js";

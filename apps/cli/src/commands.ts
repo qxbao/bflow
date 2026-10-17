@@ -36,6 +36,7 @@ import {
   type ParsedCliCommand
 } from "./types.js";
 import { executeHighLevelCommand, isHighLevelCommand } from "./high-level-commands.js";
+import { executeSetupCommand } from "./setup-integration.js";
 
 function loadPackageVersion(): string {
   try {
@@ -70,7 +71,11 @@ function makeResult(
       io.stdout(stdout);
     }
   } else if (!ok && error !== undefined) {
-    stderr = formatCommandError(error, command, json);
+    const formatted = formatCommandError(error, command, json);
+    stderr = formatted;
+    if (json) {
+      stdout = formatted;
+    }
     if (io !== undefined) {
       io.stderr(stderr);
     }
@@ -166,6 +171,23 @@ export async function executeCommand(
     }
 
     return makeResult(CLI_EXIT_CODES.SUCCESS, true, "init", initRes.value, undefined, parsed.json, io);
+  }
+
+  if (parsed.command === "setup") {
+    try {
+      const data = await executeSetupCommand(parsed, context);
+      return makeResult(CLI_EXIT_CODES.SUCCESS, true, "setup", data, undefined, parsed.json, io);
+    } catch (error) {
+      const contractError: ContractError =
+        typeof error === "object" && error !== null && "code" in error && typeof (error as any).code === "string"
+          ? (error as ContractError)
+          : {
+              code: "validation",
+              retryable: false,
+              message: error instanceof Error ? error.message : String(error)
+            };
+      return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "setup", undefined, contractError, parsed.json, io);
+    }
   }
 
   if (parsed.command === "up" || parsed.command === "down" || parsed.command === "attach" || parsed.command === "doctor" || parsed.command === "recover") {

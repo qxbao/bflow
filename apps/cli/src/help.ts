@@ -7,6 +7,7 @@ Autonomous SDLC workflow orchestration CLI.
 
 Commands:
   init            Initialize bflow repository configuration and default workflow
+  setup           Plan and apply host environment and platform prerequisites
   up              Start/reconcile the repository environment
   down            Checkpoint and stop the repository environment
   attach          Attach to its Conversation pane
@@ -37,6 +38,7 @@ Global Options:
 
 Examples:
   bflow init
+  bflow setup --check
   bflow run "Add user authentication feature"
   bflow repo inspect
   bflow task plan ./specs/auth.json
@@ -63,7 +65,7 @@ Options:
   --dir <path>          Target directory for initialization (default: current directory)
   --config <path>       Custom configuration file path (default: .bflow/config.yaml)
   --name <name>         Project name
-  --provider <kind>     Role provider: claude or codex (default: codex)
+  --provider <kind>     Role provider: claude, codex, or agy (default: codex)
   -f, --force, -y, --yes  Explicitly replace existing configuration
   -j, --json            Output response in JSON envelope format
   -h, --help            Show help for init command
@@ -73,6 +75,30 @@ Examples:
   bflow init --name my-project
   bflow init --provider claude
   bflow init --dir ./subproject --force`;
+
+const SETUP_HELP = `Usage: bflow setup [options]
+
+Plan and apply machine-wide and local setup prerequisites, agent tools, and role skills.
+
+Modes:
+  --check               Audit prerequisites and diagnose drift without modifying state
+  --dry-run, --plan     Generate and preview the setup plan without applying changes
+  --apply               Apply planned changes (default mode)
+  --repair              Repair invalid machine configuration and restore state
+
+Options:
+  -y, --yes             Assume yes for required approvals (non-interactive)
+  --dir <path>          Target directory / repository root (default: current directory)
+  --catalog-dir <path>  Custom skills catalog directory
+  -j, --json            Output response in JSON envelope format
+  -h, --help            Show help for setup command
+
+Examples:
+  bflow setup
+  bflow setup --check
+  bflow setup --dry-run
+  bflow setup --apply --yes
+  bflow setup --repair --yes`;
 
 const RUN_HELP = `Usage: bflow run <requirement> [options]
 
@@ -429,6 +455,7 @@ const HELP_MAP: Record<CliCommandName, string> = {
   recover: "Usage: bflow recover --yes [--json]\nStop old Bflow commands first. Migrates only an empty legacy lock; preserves project state, agents and worktrees. Then run bflow up or bflow down --yes.",
   doctor: "Usage: bflow doctor [--json]\nCheck configuration, dependencies, named session and P13 integration.",
   init: INIT_HELP,
+  setup: SETUP_HELP,
   run: RUN_HELP,
   status: STATUS_HELP,
   approve: APPROVE_HELP,

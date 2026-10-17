@@ -1,5 +1,5 @@
 import type { EnvironmentDependencies, EnvironmentStatus } from "./environment.js";
-import type { EnvironmentDoctorReport, SessionManifest } from "@bflow/contracts";
+import type { EnvironmentDoctorReport, SessionManifest, MachineSetupPlan as SetupPlan, SetupReceipt, ToolInstaller } from "@bflow/contracts";
 import type {
   ApprovalDecision,
   CancellationRequest,
@@ -29,6 +29,23 @@ export type HighLevelCommandName =
   | "skills sync"
   | "agent check";
 
+export const CLI_COMMAND_NAMES = [
+  "up",
+  "down",
+  "attach",
+  "recover",
+  "doctor",
+  "init",
+  "setup",
+  "run",
+  "status",
+  "approve",
+  "resume",
+  "cancel",
+  "help",
+  "version"
+] as const;
+
 export type CliCommandName =
   | "up"
   | "down"
@@ -36,6 +53,7 @@ export type CliCommandName =
   | "recover"
   | "doctor"
   | "init"
+  | "setup"
   | "run"
   | "status"
   | "approve"
@@ -64,8 +82,46 @@ export interface InitCommandArgs extends GlobalCliFlags {
   readonly dir?: string | undefined;
   readonly configPath?: string | undefined;
   readonly projectName?: string | undefined;
-  readonly provider?: "claude" | "codex" | undefined;
+  readonly provider?: "claude" | "codex" | "agy" | undefined;
   readonly force: boolean;
+}
+
+export interface SetupCommandArgs extends GlobalCliFlags {
+  readonly command: "setup";
+  readonly mode: "check" | "dry_run" | "apply" | "repair";
+  readonly yes: boolean;
+  readonly dir?: string | undefined;
+  readonly catalogDir?: string | undefined;
+}
+
+export interface SetupCommandOutput {
+  readonly mode: "check" | "dry_run" | "apply" | "repair";
+  readonly machineId: string;
+  readonly os: string;
+  readonly serviceManagerKind: "systemd-user" | "launchd" | "windows-unverified";
+  readonly plan: SetupPlan;
+  readonly receipt?: SetupReceipt;
+  readonly tools: readonly { toolId: string; status: string; version?: string }[];
+  readonly skills: {
+    readonly catalogLoaded: boolean;
+    readonly skillCount: number;
+    readonly syncedManifests: number;
+    readonly storeRoot: string;
+  };
+  readonly diagnostics: readonly string[];
+}
+
+export interface SetupIntegrationOptions {
+  readonly platform?: import("@bflow/machine-setup").PlatformProfile | undefined;
+  readonly runner?: import("@bflow/machine-setup").CommandRunner | undefined;
+  readonly machineConfig?: import("@bflow/machine-setup").MachineConfig | undefined;
+  readonly catalogDir?: string | undefined;
+  readonly serviceManager?: import("@bflow/machine-setup").ServiceManager | undefined;
+  readonly providers?: import("@bflow/agent-providers").AgentProviderRegistry | undefined;
+  readonly toolInstaller?: ToolInstaller | import("@bflow/machine-setup").ToolInstallerRegistry | undefined;
+  readonly skillManager?: any;
+  readonly machineSetup?: any;
+  readonly isolatedRoot?: string | undefined;
 }
 
 export interface EnvironmentCommandArgs extends GlobalCliFlags {
@@ -240,16 +296,20 @@ export type HighLevelParsedCliCommand =
   | SkillsSyncCommandArgs
   | AgentCheckCommandArgs;
 
-export type ParsedCliCommand =
+export type CoreParsedCliCommand =
   | EnvironmentCommandArgs
   | InitCommandArgs
+  | SetupCommandArgs
   | RunCommandArgs
   | StatusCommandArgs
   | ApproveCommandArgs
   | ResumeCommandArgs
   | CancelCommandArgs
   | HelpCommandArgs
-  | VersionCommandArgs
+  | VersionCommandArgs;
+
+export type ParsedCliCommand =
+  | CoreParsedCliCommand
   | HighLevelParsedCliCommand;
 
 export type ParseCliResult =
@@ -318,6 +378,7 @@ export type CliCommandData =
   | EnvironmentDoctorReport
   | SessionManifest
   | InitCommandOutput
+  | SetupCommandOutput
   | WorkflowRunSnapshot
   | Page<WorkflowRunSnapshot>
   | { readonly helpText: string; readonly topic?: string | undefined }
@@ -354,6 +415,7 @@ export interface CliContext {
   readonly highLevel?: HighLevelFacadeServices | undefined;
   /** Engine facades for high-level commands; defaults compose the reviewed packages. */
   readonly highLevelServices?: HighLevelServices | undefined;
+  readonly setup?: SetupIntegrationOptions | undefined;
 }
 
 export interface CliExecutionResult {

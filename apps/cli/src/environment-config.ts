@@ -1,30 +1,115 @@
+import { z } from "zod";
 import { existsSync } from "node:fs";
 import { mkdir, open, readFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
-import { AgentRoleSchema, WorkflowDefinitionSchema, type AgentRole } from "@bflow/contracts";
+import { AgentRoleSchema, WorkflowDefinitionSchema } from "@bflow/contracts";
 import { createDefaultRepositoryConfig, loadRepositoryConfig } from "./config.js";
 import { identifyRepository, type RepositoryIdentity } from "./repository.js";
 import type { BflowRepositoryConfig, InitCommandOutput } from "./types.js";
 
+export const EnvironmentProviderSchema = z.enum(["claude", "codex", "agy"]);
+export type EnvironmentProvider = z.infer<typeof EnvironmentProviderSchema>;
+
+export const DEFAULT_PROVIDER_BY_CLI: Record<EnvironmentProvider, string> = {
+  claude: "anthropic",
+  codex: "openai",
+  agy: "google"
+};
+
+export const EnvironmentRoleConfigSchema = z
+  .object({
+    role: AgentRoleSchema,
+    cli: z.string().trim().min(1),
+    required: z.boolean().optional(),
+    permissionMode: z.enum(["restricted", "workspace_auto", "unattended_isolated"]).optional(),
+    fallbackCli: EnvironmentProviderSchema.optional(),
+    requiredEnv: z.array(z.string().trim().min(1)).optional(),
+    skills: z.array(z.string().trim().min(1)).optional(),
+    unsupportedFlags: z.array(z.string().trim().min(1)).optional()
+  })
+  .strict();
+export type EnvironmentRoleConfig = z.infer<typeof EnvironmentRoleConfigSchema>;
+
+export const EnvironmentConfigEnvironmentSchema = z
+  .object({
+    repositoryId: z.string().min(1),
+    workspaceRoot: z.string().min(1),
+    sessionName: z.string().min(1),
+    herdrBinary: z.string().min(1),
+    roles: z.array(EnvironmentRoleConfigSchema).min(1),
+    sdd: z
+      .object({
+        minimumLevel: z.enum(["lightweight", "full"]),
+        approvalRequired: z.boolean()
+      })
+      .strict(),
+    tdd: z
+      .object({
+        policy: z.literal("conditional")
+      })
+      .strict(),
+    verification: z
+      .object({
+        maxIterations: z.number().int().min(1).max(100),
+        onExhausted: z.literal("require_human")
+      })
+      .strict(),
+    concurrency: z
+      .object({
+        maxConcurrency: z.number().int().min(1).max(64)
+      })
+      .strict(),
+    startupTimeoutMs: z.number().int().min(1).max(600_000),
+    shutdownTimeoutMs: z.number().int().min(1).max(600_000),
+    allowProviderFallback: z.boolean().optional(),
+    permissions: z
+      .object({
+        mode: z.enum(["restricted", "workspace_auto", "unattended_isolated"]).optional(),
+        isolation: z.enum(["provider_policy", "os_sandbox", "container"]).optional(),
+        trustedWorkspace: z.boolean().optional(),
+        unsupportedFlags: z.array(z.string().trim().min(1)).optional()
+      })
+      .strict()
+      .optional(),
+    requiredMcpServices: z.array(z.string().trim().min(1)).optional(),
+    requiredTools: z.array(z.string().trim().min(1)).optional(),
+    skills: z
+      .object({
+        required: z.boolean().optional(),
+        catalogDir: z.string().trim().min(1).optional(),
+        bindingsPath: z.string().trim().min(1).optional(),
+        requiredSkills: z.array(z.string().trim().min(1)).optional()
+      })
+      .strict()
+      .optional()
+  })
+  .strict();
+
+export const EnvironmentConfigSchema = z
+  .object({
+    schemaVersion: z.literal("1"),
+    projectName: z.string().min(1),
+    runtimeId: z.string().min(1),
+    createdAt: z.string().min(1),
+    storage: z
+      .object({
+        runStorePath: z.string().min(1),
+        artifactStoreRoot: z.string().min(1),
+        registryStateFile: z.string().min(1)
+      })
+      .strict(),
+    defaultWorkflow: WorkflowDefinitionSchema,
+    environment: EnvironmentConfigEnvironmentSchema
+  })
+  .strict();
+
 export interface EnvironmentConfig extends BflowRepositoryConfig {
-  readonly environment: {
-    readonly repositoryId: string;
-    readonly workspaceRoot: string;
-    readonly sessionName: string;
-    readonly herdrBinary: string;
-    readonly roles: readonly { readonly role: AgentRole; readonly cli: string; readonly required: boolean }[];
-    readonly sdd: { readonly minimumLevel: "lightweight" | "full"; readonly approvalRequired: boolean };
-    readonly tdd: { readonly policy: "conditional" };
-    readonly verification: { readonly maxIterations: number; readonly onExhausted: "require_human" };
-    readonly concurrency: { readonly maxConcurrency: number };
-    readonly startupTimeoutMs: number;
-    readonly shutdownTimeoutMs: number;
-  };
+  readonly environment: z.infer<typeof EnvironmentConfigEnvironmentSchema>;
 }
 export const ENVIRONMENT_CONFIG_PATH = ".bflow/config.yaml";
 
-export function defaultEnvironmentConfig(repository: RepositoryIdentity, name?: string, now = new Date(), provider: "claude" | "codex" = "codex"): EnvironmentConfig {
-  if (provider !== "claude" && provider !== "codex") throw new Error("Provider must be claude or codex");
+export function defaultEnvironmentConfig(repository: RepositoryIdentity, name?: string, now = new Date(), provider: EnvironmentProvider = "codex"): EnvironmentConfig {
+  if (provider !== "claude" && provider !== "codex" && provider !== "agy") throw new Error("Provider must be claude, codex, or agy");
   return {
     ...createDefaultRepositoryConfig({ projectName: name ?? basename(repository.root), runtimeId: `runtime-${repository.id.slice(0, 20)}`, createdAt: now.toISOString() }),
     environment: {
@@ -58,11 +143,9 @@ export async function readEnvironmentConfig(repository: RepositoryIdentity): Pro
   const rawRoles = env["roles"];
   if (!Array.isArray(rawRoles) || !rawRoles.length) throw new Error("Missing role configuration");
   const roles = rawRoles.map((value: unknown) => {
-    const role = record(value);
-    if (typeof role["cli"] !== "string" || !role["cli"].trim() || typeof role["required"] !== "boolean") throw new Error("Invalid role executable/required flag");
-    return { role: AgentRoleSchema.parse(role["role"]), cli: role["cli"], required: role["required"] };
+    return EnvironmentRoleConfigSchema.parse(value);
   });
-  if (new Set(roles.map((r) => r.role)).size !== roles.length || !["conversation", "coordinator"].every((r) => roles.some((role) => role.role === r && role.required)))
+  if (new Set(roles.map((r) => r.role)).size !== roles.length || !["conversation", "coordinator"].every((r) => roles.some((role) => role.role === r && (role.required ?? true))))
     throw new Error("Unique roles and required conversation/coordinator roles are mandatory");
   const sdd = record(env["sdd"]);
   const tdd = record(env["tdd"]);
@@ -72,18 +155,17 @@ export async function readEnvironmentConfig(repository: RepositoryIdentity): Pro
       !integer(verification["maxIterations"], 100) || verification["onExhausted"] !== "require_human" || !integer(concurrency["maxConcurrency"], 64) ||
       !integer(env["startupTimeoutMs"], 600_000) || !integer(env["shutdownTimeoutMs"], 600_000)) throw new Error("Invalid SDLC policies, concurrency or timeouts");
   WorkflowDefinitionSchema.parse(base.value.defaultWorkflow);
-  return { ...base.value, environment: {
-    repositoryId: repository.id, workspaceRoot: repository.root, sessionName: repository.sessionName, herdrBinary: env["herdrBinary"], roles,
-    sdd: { minimumLevel: sdd["minimumLevel"], approvalRequired: sdd["approvalRequired"] }, tdd: { policy: "conditional" },
-    verification: { maxIterations: verification["maxIterations"], onExhausted: "require_human" },
-    concurrency: { maxConcurrency: concurrency["maxConcurrency"] }, startupTimeoutMs: env["startupTimeoutMs"], shutdownTimeoutMs: env["shutdownTimeoutMs"]
-  } };
+  const parsedEnv = EnvironmentConfigEnvironmentSchema.parse({
+    ...env,
+    roles
+  });
+  return { ...base.value, environment: parsedEnv };
 }
 
 export async function initializeEnvironmentConfig(options: {
   readonly cwd: string; readonly dir?: string | undefined; readonly configPath?: string | undefined;
   readonly projectName?: string | undefined; readonly force?: boolean | undefined; readonly clock?: (() => Date) | undefined;
-  readonly provider?: "claude" | "codex" | undefined;
+  readonly provider?: EnvironmentProvider | undefined;
 }): Promise<InitCommandOutput> {
   const repository = await identifyRepository(resolve(options.cwd, options.dir ?? "."));
   const configPath = resolve(repository.root, ENVIRONMENT_CONFIG_PATH);
@@ -125,7 +207,7 @@ export async function ensureEnvironmentInitialized(
     readonly dir?: string | undefined;
     readonly configPath?: string | undefined;
     readonly projectName?: string | undefined;
-    readonly provider?: "claude" | "codex" | undefined;
+    readonly provider?: EnvironmentProvider | undefined;
     readonly clock?: (() => Date) | undefined;
   }
 ): Promise<InitCommandOutput> {

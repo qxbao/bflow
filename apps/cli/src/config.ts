@@ -359,7 +359,7 @@ export async function initRepositoryConfig(options: {
   readonly dir?: string | undefined;
   readonly configPath?: string | undefined;
   readonly projectName?: string | undefined;
-  readonly provider?: "claude" | "codex" | undefined;
+  readonly provider?: "claude" | "codex" | "agy" | undefined;
   readonly force: boolean;
   readonly clock?: (() => Date) | undefined;
   readonly confirmOverwrite?: ((configPath: string) => Promise<boolean> | boolean) | undefined;
