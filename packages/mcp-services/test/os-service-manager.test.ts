@@ -253,6 +253,7 @@ describe("BflowOSServiceManager", () => {
   describe("1. Linux systemd-user full lifecycle", () => {
     it("renders valid systemd unit with secrets transformed and executes lifecycle commands", async () => {
       const manager = new BflowOSServiceManager({
+        env: {},
         platform: "linux",
         homeDir: tmpDir,
         runner: mockRunner,
@@ -346,6 +347,7 @@ describe("BflowOSServiceManager", () => {
   describe("2. macOS launchd full lifecycle", () => {
     it("renders valid XML plist and exercises launchd gui domain operations", async () => {
       const manager = new BflowOSServiceManager({
+        env: {},
         platform: "darwin",
         homeDir: tmpDir,
         uid: 501,
@@ -431,6 +433,7 @@ describe("BflowOSServiceManager", () => {
   describe("3. Windows windows-startup support", () => {
     it("rejects mutating operations by default when windowsVerified is false", async () => {
       const manager = new BflowOSServiceManager({
+        env: {},
         platform: "win32",
         homeDir: tmpDir,
         runner: mockRunner,
@@ -455,6 +458,7 @@ describe("BflowOSServiceManager", () => {
 
     it("renders Scheduled Task XML with LeastPrivilege and executes lifecycle when windowsVerified is true", async () => {
       const manager = new BflowOSServiceManager({
+        env: {},
         platform: "win32",
         homeDir: tmpDir,
         runner: mockRunner,
@@ -557,6 +561,7 @@ describe("BflowOSServiceManager", () => {
 
     it("rejects privilege escalation binary in service config program or args", async () => {
       const manager = new BflowOSServiceManager({
+        env: {},
         platform: "linux",
         homeDir: tmpDir,
         runner: mockRunner
@@ -581,6 +586,7 @@ describe("BflowOSServiceManager", () => {
   describe("5. Gateway crash & automatic recovery (recoverIfDead)", () => {
     it("detects healthy service and returns already_healthy without unnecessary restarts", async () => {
       const manager = new BflowOSServiceManager({
+        env: {},
         platform: "linux",
         homeDir: tmpDir,
         runner: mockRunner,
@@ -600,6 +606,7 @@ describe("BflowOSServiceManager", () => {
     it("recovers a dead/stopped process and passes healthCheck", async () => {
       let isHealthy = false;
       const manager = new BflowOSServiceManager({
+        env: {},
         platform: "linux",
         homeDir: tmpDir,
         runner: mockRunner,
@@ -625,6 +632,7 @@ describe("BflowOSServiceManager", () => {
 
     it("returns restart_limit_exceeded when restart burst limit is reached", async () => {
       const manager = new BflowOSServiceManager({
+        env: {},
         platform: "linux",
         homeDir: tmpDir,
         runner: mockRunner,
@@ -658,6 +666,7 @@ describe("BflowOSServiceManager", () => {
   describe("6. Repair (repair)", () => {
     it("refuses to overwrite an existing unit file not marked 'Managed by bflow'", async () => {
       const manager = new BflowOSServiceManager({
+        env: {},
         platform: "linux",
         homeDir: tmpDir,
         runner: mockRunner
@@ -676,6 +685,7 @@ describe("BflowOSServiceManager", () => {
 
     it("backs up corrupted unit file, restores canonical unit, reloads, restarts, and confirms health", async () => {
       const manager = new BflowOSServiceManager({
+        env: {},
         platform: "linux",
         homeDir: tmpDir,
         runner: mockRunner,
@@ -711,6 +721,7 @@ describe("BflowOSServiceManager", () => {
   describe("7. System login simulation (simulateUserLogin)", () => {
     it("starts only services with enabledOnLogin: true and leaves disabled services stopped", async () => {
       const manager = new BflowOSServiceManager({
+        env: {},
         platform: "linux",
         homeDir: tmpDir,
         runner: mockRunner
@@ -758,6 +769,7 @@ describe("BflowOSServiceManager", () => {
   describe("8. Loopback health endpoint verification", () => {
     it("rejects non-loopback health endpoint URLs", async () => {
       const manager = new BflowOSServiceManager({
+        env: {},
         platform: "linux",
         homeDir: tmpDir,
         runner: mockRunner
@@ -780,6 +792,7 @@ describe("BflowOSServiceManager", () => {
 
     it("accepts loopback health endpoint URLs", async () => {
       const manager = new BflowOSServiceManager({
+        env: {},
         platform: "linux",
         homeDir: tmpDir,
         runner: mockRunner,
@@ -804,6 +817,7 @@ describe("BflowOSServiceManager", () => {
   describe("9. Unowned unit file protection & ExecStart argument quoting", () => {
     it("refuses to overwrite an existing unowned unit file without BFLOW_SERVICE_MARKER", async () => {
       const manager = new BflowOSServiceManager({
+        env: {},
         platform: "linux",
         homeDir: tmpDir,
         runner: mockRunner
@@ -832,6 +846,7 @@ describe("BflowOSServiceManager", () => {
 
     it("quotes program and arguments with spaces or double quotes in systemd ExecStart", async () => {
       const manager = new BflowOSServiceManager({
+        env: {},
         platform: "linux",
         homeDir: tmpDir,
         runner: mockRunner
