@@ -222,7 +222,15 @@ export class EnvironmentManifestComponent implements SetupComponent {
   }
 
   async desired(ctx: SetupContext): Promise<ComponentDesiredState> {
-    this.planned = await this.body(ctx);
+    const current = await this.body(ctx);
+    // A successful installation keeps its approved intake snapshot. Compare new
+    // observations with the separately verified post-setup evidence on later runs.
+    const existing = await this.load();
+    if (existing.state === "valid" && existing.manifest.afterSetupTools &&
+      digest(existing.manifest.afterSetupTools.tools) === digest(current.tools)) {
+      const candidate = { ...current, tools: existing.manifest.tools };
+      this.planned = manifestSatisfactionDigest(candidate) === manifestSatisfactionDigest(existing.manifest) ? candidate : current;
+    } else this.planned = current;
     return {
       digest: this.satisfactionDigest(manifestSatisfactionDigest(this.planned), this.machineConfig)!,
       summary: `Record the environment manifest in ${this.filePath}`,

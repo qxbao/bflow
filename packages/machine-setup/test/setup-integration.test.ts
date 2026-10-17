@@ -297,3 +297,22 @@ describe("launcher process environment", () => {
     expect(result.stdout.trim()).toBe("managed-tool-available");
   });
 });
+
+describe("fresh installation manifest", () => {
+  it("is healthy on the next check while preserving the approved before-setup snapshot", async () => {
+    const config = { ...defaultMachineConfig(), toolPins: [pin("gitnexus")] };
+    const installer = registry();
+    const first = await service({ config, registry: installer }).run({ mode: "apply", assumeYes: true });
+    expect(first.outcome).toBe("applied");
+    const file = path.join(platform.paths.state, "environment.json");
+    const before = await readFile(file, "utf8");
+    const saved = JSON.parse(before);
+    expect(saved.tools.find((tool: { toolId: string }) => tool.toolId === "gitnexus").status).toBe("missing");
+    expect(saved.afterSetupTools.tools.find((tool: { toolId: string }) => tool.toolId === "gitnexus").status).toBe("path_missing");
+    expect((await service({ config, registry: installer }).run({ mode: "check" })).outcome).toBe("healthy");
+    expect(await readFile(file, "utf8")).toBe(before);
+    const binary = path.join(platform.paths.data, "tools", "gitnexus", "node_modules", ".bin", "gitnexus");
+    await writeFile(binary, "#!/bin/sh\necho changed-executable\n");
+    expect((await service({ config, registry: installer }).run({ mode: "check" })).outcome).toBe("changes_pending");
+  });
+});
