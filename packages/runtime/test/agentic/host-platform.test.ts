@@ -154,6 +154,16 @@ describe("P30 host platform composition", () => {
     expect(service.calls.filter(call => call === "release:launch-dev")).toHaveLength(1);
   });
 
+  it("releases the previous launch when the same task is allocated again", async () => {
+    const service = fakeService();
+    const { host } = await session(service);
+    await host.prepare();
+    await host.allocateDeveloper("task-1", "/worktrees/task-1");
+    await host.allocateDeveloper("task-1", "/worktrees/task-1");
+    const order = service.calls.filter(call => call === "prepareDeveloper" || call === "release:launch-dev");
+    expect(order).toEqual(["prepareDeveloper", "release:launch-dev", "prepareDeveloper"]);
+  });
+
   it("blocks a Developer allocation when readiness refuses it, without any launch", async () => {
     const service = fakeService({ prepareDeveloper: async () => failure("transport_unavailable", "codex not ready") as never });
     const { host } = await session(service);

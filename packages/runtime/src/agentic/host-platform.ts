@@ -259,6 +259,8 @@ export class HostPlatformSession {
     if (this.identity === undefined) throw new Error("Platform has no prepared generation; run bflow up again");
     const template = this.options.platform.roles.find(option => option.role === "developer");
     if (template === undefined) throw new Error("Platform configuration has no developer template for dynamic Developer launches");
+    // Re-allocation for the same task (e.g. after restart) must not orphan the previous launch and its Gateway registration.
+    await this.releaseDeveloper(taskId);
     const result = await this.options.service.prepareDeveloper(this.identity,
       requirementFor(template, this.options.hostCapabilities, worktreePath, taskId));
     if (!result.ok) throw new Error(`Developer ${taskId} launch is blocked: ${describeFailure(result.error)}`);
