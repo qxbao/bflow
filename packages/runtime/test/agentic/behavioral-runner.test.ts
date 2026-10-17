@@ -28,7 +28,9 @@ async function fixture(taskType = "bugfix", reporter: "node_tap" | "vitest_json"
   await writeFile(join(cwd, "source.cjs"), "module.exports=x=>x+1;\n"); git("add", "."); git("commit", "-m", "baseline"); const base = git("rev-parse", "HEAD");
   const commit = (message: string) => { git("add", "."); git("commit", "-m", message); return git("rev-parse", "HEAD"); };
   await writeFile(join(cwd, "test/behavior.test.cjs"), reporter === "vitest_json" ? vitestSource : testSource); const redRevision = commit("failing acceptance test");
-  const command = parseBehavioralCommands([{ id: "node-unit", command: "owner:test-unit", executable: process.execPath, args: reporter === "vitest_json" ? [vitestCli, "run", "--globals", "--reporter=json", "--no-cache", "--maxWorkers=1", "--minWorkers=1", "test/behavior.test.cjs"] : ["--test", "--test-reporter=tap", "test/behavior.test.cjs"], ...(reporter === "vitest_json" ? { reporter, dependencyRoots: [fileURLToPath(new URL("../../../../node_modules", import.meta.url))] } : {}), method: "unit_test", levels: ["unit", "regression"], testNames: [testName], testPaths: ["test/behavior.test.cjs"], timeoutMs: 3000 }])[0]!;
+  const command = parseBehavioralCommands([{ id: "node-unit", command: "owner:test-unit", executable: process.execPath, args: reporter === "vitest_json" ? [vitestCli, "run", "--globals", "--reporter=json", "--no-cache", "--maxWorkers=1", "--minWorkers=1", "test/behavior.test.cjs"] : ["--test", "--test-reporter=tap", "test/behavior.test.cjs"], ...(reporter === "vitest_json" ? { reporter, dependencyRoots: [fileURLToPath(new URL("../../../../node_modules", import.meta.url))] } : {}), method: "unit_test", levels: ["unit", "regression"], testNames: [testName], testPaths: ["test/behavior.test.cjs"],
+    // A nested Vitest needs more than 3 s to start under full-suite load; deadline handling is covered with timeoutMs: 1 below.
+    timeoutMs: reporter === "vitest_json" ? 15_000 : 3000 }])[0]!;
   const policyAssessment = assessment(taskType);
   const draft = SpecificationSchema.parse({ ...spec(assessment(taskType, { ...(taskType === "documentation" ? { changeImpact: { ...policyAssessment.changeImpact, behaviorChanged: false, deterministic: false, regressionReproducible: false } } : {}), infrastructure: { readiness: "ready", commands: [{ method: "unit_test", command: command.command, level: "unit" }] } })), affectedPaths: taskType === "documentation" ? ["guide.md"] : ["source.cjs", "test/behavior.test.cjs"] });
   let strategy = new TestStrategyResolver().resolve(draft);
@@ -73,7 +75,7 @@ describe.skipIf(process.platform !== "linux")("independent behavioral command me
     }
     expect(await f.host.authenticateEvidence({ ...green.result, status: "failed" })).toBe(false);
     expect(f.git("worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1);
-  });
+  }, 120_000);
   it.each(["node_tap", "vitest_json"] as const)("%s replays an identical durable phase after host restart and rejects a changed verifier binding", async reporter => {
     const f = await fixture("bugfix", reporter);
     const first = await f.host.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "red" });
@@ -84,7 +86,7 @@ describe.skipIf(process.platform !== "linux")("independent behavioral command me
     f.accept(first.result);
     expect((await restored.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "red" })).result).toEqual(first.result);
     await expect(restored.behavioralEvidence({ ...f.binding, session: { source: "test", kind: "id", value: "different-native-session" } }, { runId: "run-1", taskId: "task-1", phase: "red" })).rejects.toThrow("another verifier binding");
-  });
+  }, 120_000);
   it("rejects changed Red test bytes, stale phases, self verification and agent supplied success claims", async () => {
     const f = await fixture();
     await expect(f.host.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "green" })).rejects.toThrow("Expected red");
