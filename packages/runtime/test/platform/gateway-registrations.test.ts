@@ -366,4 +366,22 @@ describe("GatewayRegistrationManager", () => {
     expect(() => new GatewayRegistrationManager({ control, endpoint: "http://user:pw@127.0.0.1:7777/mcp" }))
       .toThrow(TypeError);
   });
+
+  it("sends a fresh idempotency key per register attempt while keeping the registrationId deterministic", async () => {
+    const sent: MCPClientRegistration[] = [];
+    control.onRegister = registration => { sent.push(registration); };
+    const gateway = manager();
+
+    expect((await gateway.ensureForRole(identity, request())).ok).toBe(true);
+    const firstId = sent[0]?.registrationId ?? "";
+    expect((await gateway.revokeRole(identity, "developer", "task-1")).ok).toBe(true);
+    expect((await gateway.ensureForRole(identity, request())).ok).toBe(true);
+
+    expect(sent).toHaveLength(2);
+    const [first, second] = sent;
+    expect(second?.registrationId).toBe(firstId);
+    expect(first?.idempotencyKey).toMatch(new RegExp(`^${firstId}:[0-9a-f-]{36}$`));
+    expect(second?.idempotencyKey).toMatch(new RegExp(`^${firstId}:[0-9a-f-]{36}$`));
+    expect(second?.idempotencyKey).not.toBe(first?.idempotencyKey);
+  });
 });
