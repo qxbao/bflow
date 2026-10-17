@@ -389,3 +389,26 @@ Linux/filesystem trust model, not live AI fault-campaign or power-loss evidence.
 During startup, a missing launch-local SessionStart receipt or native-session receipt is reported as `[bflow:native-startup-pending]`, which `host-controller` surfaces as a retryable `conflict` (`details.stage: "native_startup"`) instead of a transport failure; retry after the native hooks publish their receipts.
 
 `ProjectContextService` now maps the `reviewer` role to `agents/reviewer` (previously `agents/verifier`) and falls back to the verifier/QA instructions only when reviewer or security instructions are absent. Behavior tests: `pnpm exec vitest run packages/runtime/test/agentic/agent-behavior-policies.test.ts`.
+
+## P30 platform readiness
+
+`DefaultPlatformReadinessService` (exported from `src/platform/index.ts`) composes the implemented
+platform components for one session generation: role environment, skill session records, Gateway
+registrations, provider preflight/launch intent, and activation with a host-signed launch attestation.
+`createPlatformReadinessService` wires the real components from a state directory, a `SkillManager`,
+an optional Gateway control port and an attestation signer. Concrete provider adapter classes are not
+exported.
+
+Guarantees implemented here, with package-local tests in `test/platform/service.test.ts`:
+
+- `prepareSession` is all-or-nothing. Any required role that is not ready (or whose launch intent cannot
+  be journaled) produces `ready: false` and no launch material; Gateway registrations made in that call are
+  revoked per role. Optional roles that fail are reported as `blocked` and skipped.
+- A role that needs Gateway services without a configured Gateway control port is `blocked`.
+- Launch material (`launch.env` bearer tokens) is kept in memory only. Reports, status snapshots and errors
+  never contain token values. Released or shut-down launches drop their material.
+- `verifyActivated` requires a launch this instance prepared; `assertFresh` delegates to the cached preflight.
+
+Limitations: this is source composition with local fake-runner and fake-Gateway evidence only. Live
+provider probes, a live Gateway daemon and Pane Manager/Conversation wiring are not verified here. The
+service creates each role's private `gen-<n>/roles/<role>` state directory before preflight.

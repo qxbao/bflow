@@ -106,3 +106,6 @@ export type { BehavioralCommand } from "./agentic/behavioral-runner.js";
 
 export { ensureAgenticHost } from "./agentic/host-controller.js";
 export type { AgenticHostController, AgenticHostOptions, RoleLaunchDescriptor } from "./agentic/host-controller.js";
+
+// P30: platform readiness composition (no concrete provider adapter classes are exported).
+export * from "./platform/index.js";
