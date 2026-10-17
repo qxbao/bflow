@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:net";
-import { mkdtemp, readFile, realpath, rm, writeFile, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -185,5 +185,125 @@ describe.skipIf(process.platform === "win32")("portable host path validation", (
     cleanup.push(() => rm(outside, { recursive: true, force: true }));
     await symlink(outside, join(root, ".bflow"));
     await expect(ensureAgenticHost({ repositoryPath: root, sessionId: "boundary" })).rejects.toThrow("must not be symlinks");
+  });
+});
+
+
+// P30 platform composition runs the real daemon: provider preflight, host-held signer and private state files.
+describe.skipIf(process.platform !== "linux")("P30 platform host", () => {
+  const option = (role: "conversation" | "coordinator" | "developer", provider: "claude" | "codex" | "agy", required: boolean) => ({
+    role, provider, required, permissionMode: "restricted", capabilityIds: [], mcpServiceIds: [], toolIds: [], skillSelections: []
+  });
+  const platformFor = (root: string, overrides: Record<string, unknown> = {}) => ({
+    schemaVersion: 3, machineId: "machine-test", repositoryId: "repository-test",
+    roles: [option("conversation", "codex", true), option("coordinator", "codex", true)],
+    skillsStoreRoot: join(root, "skills-store"), approvedBuiltinSkillDigests: [], ...overrides
+  });
+  // Fake Herdr: answers `agent get <pane>` from agents/<pane>.json and reports the session as not running otherwise.
+  const fakeHerdr = [
+    "#!/usr/bin/env node",
+    'import { readFileSync } from "node:fs";',
+    'import { dirname, join } from "node:path";',
+    'import { fileURLToPath } from "node:url";',
+    "const root = dirname(fileURLToPath(import.meta.url));",
+    'const args = process.argv.slice(2); const rest = args[0] === "--session" ? args.slice(2) : args;',
+    'if (rest[0] === "agent" && rest[1] === "get") process.stdout.write(JSON.stringify({ result: { agent: JSON.parse(readFileSync(join(root, "agents", rest[2] + ".json"), "utf8")) } }) + "\\n");',
+    'else process.stdout.write(JSON.stringify({ running: false, socket: join(root, "herdr.sock") }) + "\\n");',
+    ""
+  ].join("\n");
+  const fixture = async (platform?: (root: string) => Record<string, unknown>) => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-host-platform-")));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const binary = join(root, "herdr-fixture.mjs");
+    await writeFile(binary, fakeHerdr, { mode: 0o700 });
+    const base = { repositoryPath: root, sessionId: "platform-host", herdrBinary: binary };
+    const config = platform === undefined ? base : { ...base, platform: platform(root) as never };
+    const controller = await ensureAgenticHost(config);
+    cleanup.push(() => controller.shutdown().catch(() => undefined));
+    return { root, controller, config, directory: join(root, ".bflow/state/host", base.sessionId) };
+  };
+
+  it("keeps legacy hosts unchanged: no platform report and Claude role providers", async () => {
+    const f = await fixture();
+    expect(await f.controller.platformStatus()).toEqual({ report: null, status: { generation: null, launches: [] }, gatewayDiagnostic: null });
+    expect(JSON.parse(await readFile(join(f.directory, "conversation.json"), "utf8")).provider).toBe("claude");
+    const prepared = await f.controller.prepare();
+    expect(prepared.platform).toBeUndefined();
+    expect(Object.values(prepared.roleLaunch).every(launch => launch.launch === undefined)).toBe(true);
+  });
+
+  it("blocks prepare without launch material when a required provider is not ready, and persists codex role providers", async () => {
+    const f = await fixture(root => platformFor(root));
+    const prepared = await f.controller.prepare();
+    expect(prepared.platform?.ready).toBe(false);
+    expect(prepared.platform?.generation).toBe(1);
+    expect(Object.values(prepared.roleLaunch).some(launch => launch.launch !== undefined)).toBe(false);
+    expect(prepared.roleLaunch.conversation?.systemPrompt).toContain("Bflow's conversation");
+    expect(JSON.parse(await readFile(join(f.directory, "conversation.json"), "utf8")).provider).toBe("codex");
+    expect(JSON.parse(await readFile(join(f.directory, "developer.json"), "utf8")).provider).toBe("claude");
+    const status = await f.controller.platformStatus();
+    expect(status.report).toEqual(prepared.platform);
+    expect(status.status).toEqual({ generation: 1, launches: [] });
+    expect(status.gatewayDiagnostic).toBeNull();
+    expect((await f.controller.prepare()).platform?.generation).toBe(2);
+    // No bearer token or launch environment may reach any host file.
+    for (const name of await readdir(f.directory)) {
+      const content = await readFile(join(f.directory, name), "utf8").catch(() => "");
+      expect(content).not.toContain("BFLOW_MCP_TOKEN_");
+    }
+  });
+
+  it("rewrites a stopped host's platform in place, keeping its endpoint and token", async () => {
+    const f = await fixture(root => platformFor(root));
+    const before = JSON.parse(await readFile(join(f.directory, "host.json"), "utf8"));
+    await f.controller.shutdown();
+    const restarted = await ensureAgenticHost({ ...f.config, platform: platformFor(f.root, { machineId: "machine-other" }) } as never);
+    cleanup.push(() => restarted.shutdown().catch(() => undefined));
+    const after = JSON.parse(await readFile(join(f.directory, "host.json"), "utf8"));
+    expect(after.platform.machineId).toBe("machine-other");
+    expect(after.socketPath).toBe(before.socketPath);
+    expect(after.token).toBe(before.token);
+    expect(after.directory).toBe(before.directory);
+    expect((await restarted.platformStatus()).report).toBeNull();
+  });
+
+  it("refuses to change the platform of a running host", async () => {
+    const f = await fixture(root => platformFor(root));
+    await expect(ensureAgenticHost({ ...f.config, platform: platformFor(f.root, { machineId: "machine-other" }) } as never))
+      .rejects.toThrow("Persisted host platform differs; run bflow down before changing providers/roles");
+  });
+
+  it("requires a prepared platform launch for each required role before activation, and enforces the provider source", async () => {
+    const f = await fixture(root => platformFor(root));
+    const at = new Date().toISOString();
+    const roles = ["conversation", "coordinator"] as const;
+    await mkdir(join(f.root, "agents"), { recursive: true });
+    for (const [index, role] of roles.entries()) {
+      const pane = `p${index + 1}`, native = `native-${role}`;
+      const token = JSON.parse(await readFile(join(f.directory, role + ".json"), "utf8"));
+      await callHost(token.socketPath, token.token, "provider_started", { paneId: pane, nativeSessionId: native });
+      await callHost(token.socketPath, token.token, "native_session", { paneId: pane, sessionId: native });
+      await writeFile(join(f.root, "agents", pane + ".json"), JSON.stringify({ name: `${role}-agent`, agent_status: "idle",
+        agent_session: { source: "herdr:codex", kind: "id", value: native } }));
+    }
+    const manifest = () => SessionManifestSchema.parse({ schemaVersion: 2, sessionId: f.config.sessionId,
+      workspaceRoot: f.root, projectName: "platform", herdrWorkspaceId: "w1", herdrTabId: "t1", status: "up",
+      conversationSessionId: "chat-session", activeRunIds: [], attachTarget: { role: "conversation", paneId: "p1" },
+      panes: roles.map((role, index) => ({ schemaVersion: 2, bindingId: `b${index}`, sessionId: f.config.sessionId, role, agentId: `${role}-agent`,
+        paneId: `p${index + 1}`, workspaceId: "w1", tabId: "t1", provider: "codex", agentKind: "codex", cwd: f.root, readOnlyWorkspace: true,
+        permanent: true, session: { source: "herdr:codex", kind: "id", value: `native-${role}` }, isolationMode: "dedicated_pane",
+        transportState: "idle", boundAt: at })),
+      createdAt: at, updatedAt: at });
+    // Herdr reports a Claude-native session for a Codex-provisioned pane: activation must refuse it.
+    const agentFile = join(f.root, "agents", "p1.json");
+    const reported = JSON.parse(await readFile(agentFile, "utf8"));
+    await writeFile(agentFile, JSON.stringify({ ...reported, agent_session: { ...reported.agent_session, source: "herdr:claude" } }));
+    const mismatch = await f.controller.activate(manifest());
+    expect(mismatch.ok).toBe(false);
+    if (!mismatch.ok) expect(mismatch.error.message).toContain("has no matching Bflow provider startup/native-session receipt");
+    await writeFile(agentFile, JSON.stringify(reported));
+    const unprepared = await f.controller.activate(manifest());
+    expect(unprepared.ok).toBe(false);
+    if (!unprepared.ok) expect(unprepared.error.message).toContain("has no prepared launch in this host process");
   });
 });

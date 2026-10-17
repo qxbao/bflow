@@ -12,17 +12,23 @@ import {
 import { callHost } from "./host-protocol.js";
 import { digest, record, textField } from "./journal.js";
 import { parseBehavioralCommands, type BehavioralCommand } from "./behavioral-runner.js";
+import { AgenticHostPlatformOptionsSchema, HostPrepareResponseSchema, type AgenticHostPlatformOptions, type HostPrepareResponse } from "../platform/host-options.js";
+import { HostPlatformStatusSchema, rewritePersistedPlatform, type HostPlatformStatus } from "./host-platform.js";
 
 export interface AgenticHostOptions {
   repositoryPath: string; sessionId: string; herdrBinary?: string; manifestDirectory?: string; maxDeveloperCapacity?: number;
   behavioralCommands?: readonly BehavioralCommand[];
+  /** P30 platform configuration; absent keeps the legacy Claude-native host behavior. */
+  platform?: AgenticHostPlatformOptions;
   policy?: { sdd: { minimumLevel: "lightweight" | "full"; approvalRequired: boolean };
     tdd: { policy: "conditional" }; verification: { maxIterations: number; onExhausted: "require_human" };
     concurrency: { maxConcurrency: number } };
 }
 export interface RoleLaunchDescriptor { systemPrompt: string; mcpConfigFile: string; hooksSettingsFile: string }
 export interface AgenticHostController {
-  prepare(): Promise<{ roleLaunch: Record<string, RoleLaunchDescriptor> }>;
+  prepare(): Promise<HostPrepareResponse>;
+  /** Readiness report and launch-index status. Never includes launch env, tokens or argv. */
+  platformStatus(): Promise<HostPlatformStatus>;
   activate(manifest: SessionManifest, options?: OperationOptions): Promise<OperationResult<void>>;
   runtime: Pick<RuntimeService, "findRuns" | "getRun">;
   quiesce(options?: OperationOptions): Promise<OperationResult<void>>;
@@ -39,6 +45,7 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
   const value = record(JSON.parse(await readFile(path, "utf8")));
   for (const key of ["repositoryPath", "sessionId", "directory", "socketPath", "token"]) textField(value[key]);
   parseBehavioralCommands(value.behavioralCommands);
+  if (value.platform !== undefined) value.platform = AgenticHostPlatformOptionsSchema.parse(value.platform);
   if (value.maxDeveloperCapacity !== undefined && (!Number.isInteger(value.maxDeveloperCapacity) || Number(value.maxDeveloperCapacity) < 1 || Number(value.maxDeveloperCapacity) > 32)) throw new Error("Invalid host Developer capacity");
   if (value.policy !== undefined) {
     const policy = record(value.policy), sdd = record(policy.sdd), tdd = record(policy.tdd), verification = record(policy.verification), concurrency = record(policy.concurrency);
@@ -91,15 +98,23 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
     try { await file.writeFile(JSON.stringify({ ...options, repositoryPath, directory, socketPath: join(socketRoot, identity + ".sock"), token: randomBytes(32).toString("hex") })); await file.sync(); }
     finally { await file.close(); }
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
-  const configuration = await readHostConfiguration(configPath);
+  let configuration = await readHostConfiguration(configPath);
   if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory) throw new Error("Foreign host configuration");
   if (options.policy && JSON.stringify(configuration.policy) !== JSON.stringify(options.policy)) throw new Error("Persisted host policy differs from project policy; quiesce and reconcile the existing host before changing it");
   if (digest(parseBehavioralCommands(configuration.behavioralCommands)) !== digest(parseBehavioralCommands(options.behavioralCommands)))
     throw new Error("Persisted behavioral commands differ from owner configuration; quiesce and reconcile before changing verification authority");
+  // Platform changes are only admissible while no host process owns the endpoint.
+  const requestedPlatform = options.platform === undefined ? undefined : AgenticHostPlatformOptionsSchema.parse(options.platform);
+  const platformChanged = digest(configuration.platform ?? null) !== digest(requestedPlatform ?? null);
   const request = (method: string, params: unknown = {}) => callHost(configuration.socketPath, configuration.token, method, params);
+  let alive = true;
   try { await request("ping"); }
   catch (error) {
     if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+    alive = false;
+  }
+  if (alive && platformChanged) throw new Error("Persisted host platform differs; run bflow down before changing providers/roles");
+  if (!alive) {
     try {
       await lstat(configuration.socketPath);
       const owner = record(JSON.parse(await readFile(join(directory,"owner.json"),"utf8")));
@@ -112,6 +127,10 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
       try { await unlink(configuration.socketPath.replace(/\.sock$/, ".native.sock")); }
       catch (nativeError) { if ((nativeError as NodeJS.ErrnoException).code !== "ENOENT") throw nativeError; }
     } catch (statError) { if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError; }
+    if (platformChanged) {
+      await rewritePersistedPlatform(configPath, requestedPlatform);
+      configuration = await readHostConfiguration(configPath);
+    }
     const log = await open(join(directory, "host.log"), "a", 0o600);
     try {
       const child = spawn(process.execPath, [fileURLToPath(new URL("./host.js", import.meta.url)), "daemon", configPath],
@@ -130,9 +149,8 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
     try { return { ok: true, value: parse(await request(method, params)) }; } catch (error) { return failure(error); }
   };
   return {
-    async prepare() { const value = record(await request("prepare")); const launches = record(value.roleLaunch); const roleLaunch: Record<string, RoleLaunchDescriptor> = {};
-      for (const [role, raw] of Object.entries(launches)) { const launch = record(raw); roleLaunch[role] = { systemPrompt: textField(launch.systemPrompt), mcpConfigFile: textField(launch.mcpConfigFile), hooksSettingsFile: textField(launch.hooksSettingsFile) }; }
-      return { roleLaunch }; },
+    async prepare() { return HostPrepareResponseSchema.parse(await request("prepare")); },
+    async platformStatus() { return HostPlatformStatusSchema.parse(await request("platform_status")); },
     activate: (manifest, op) => result("activate", SessionManifestSchema.parse(manifest), () => undefined, op),
     runtime: {
       getRun: (runId, op) => result("get_run", { runId }, value => value === null ? null : WorkflowRunSnapshotSchema.parse(value), op),
