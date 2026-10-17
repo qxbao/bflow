@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, readFile } from "node:fs/promises";
-import { isAbsolute, join, resolve, sep } from "node:path";
+import { accessSync, constants, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { lstat, readFile, realpath, rm } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { z } from "zod";
 import { MCPClientRegistrationSchema, MCPServiceDefinitionSchema, MCPServiceObservationSchema, ScopedOperationSchema,
   type MCPServiceDefinition, type MCPServiceObservation } from "@bflow/contracts";
 import { MachineConfigSchema, McpConfigComponent, ServicesComponent, SetupStateStore, EnvironmentManifestComponent,
-  loadMachineConfig, MACHINE_CONFIG_FILE, digest, findExecutable, SERVICE_MARKER,
+  loadMachineConfig, MACHINE_CONFIG_FILE, digest, McpConfigFileSchema, SERVICE_MARKER, ToolInstallDescriptorSchema,
   type MachineConfig, type PlatformProfile, type SetupComponent, type SetupContext, type CommandRunner,
   type ServiceDefinition, type ServiceManager } from "@bflow/machine-setup";
 
@@ -38,12 +39,16 @@ const requiredOperations = {
   gitnexus: ["query", "context", "impact"],
   "chrome-devtools-mcp": ["list_pages", "new_page", "navigate_page"]
 };
+const ApprovalSchema = z.object({ policyVersion: z.literal(2), repositorySelected: z.boolean(), browserExecutable: z.string().nullable(),
+  requirements: z.array(z.object({ toolId: z.enum(["gitnexus", "chrome-devtools-mcp"]), executable: z.string(),
+    args: z.array(z.string()), requirements: z.array(z.string()), version: z.string().min(1), pin: ToolInstallDescriptorSchema }).strict()) }).strict();
 const GatewayConfigSchema = z.object({
   schemaVersion: z.literal(3), desiredDigest: z.string().regex(/^[a-f0-9]{64}$/),
   definitionDigest: z.string().regex(/^[a-f0-9]{64}$/),
   operation: ScopedOperationSchema,
   services: z.array(MCPServiceDefinitionSchema), generatedIds: z.array(z.string()),
-  receiptPath: z.string().min(1), paths: z.object({ config: z.string(), data: z.string(), state: z.string(), managedBin: z.string() }).strict()
+  receiptPath: z.string().min(1), paths: z.object({ config: z.string(), data: z.string(), state: z.string(), managedBin: z.string() }).strict(),
+  approval: ApprovalSchema.optional()
 }).strict();
 const ReadySchema = z.object({ schemaVersion: z.literal(3), definitionDigest: z.string(), pid: z.number().int().positive(),
   endpoint: z.string().url(), observedAt: z.string().datetime(), observations: z.array(MCPServiceObservationSchema) }).strict();
@@ -65,26 +70,123 @@ function unwrap<T>(result: { ok: true; value: T } | { ok: false; error: { messag
   return result.value;
 }
 
+function approvedBrowser(platform: PlatformProfile): string | null {
+  const candidates = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]
+    .flatMap(name => platform.pathEntries.filter(directory => isAbsolute(directory)).map(directory => resolve(directory, name)));
+  candidates.push("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
+  for (const candidate of candidates) {
+    try { if (statSync(candidate).isFile()) { accessSync(candidate, constants.X_OK); return realpathSync(candidate); } }
+    catch { /* No browser at this approved PATH location. */ }
+  }
+  return null;
+}
+
+function ownedConfiguration(file: string): z.infer<typeof GatewayConfigSchema> | undefined {
+  try {
+    const info = lstatSync(file);
+    if (!info.isFile() || info.isSymbolicLink() || info.size > 2_000_000) throw new Error("Invalid owned Gateway configuration file");
+    const saved = GatewayConfigSchema.parse(JSON.parse(readFileSync(file, "utf8")));
+    if (saved.definitionDigest !== digest(saved.services)) throw new Error("Invalid owned Gateway configuration checksum");
+    return saved;
+  } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+}
+
+function configurationDigest(saved: z.infer<typeof GatewayConfigSchema>): string {
+  if (!saved.approval) throw new Error("Gateway configuration needs a canonical approved launch specification; rerun setup");
+  return digest({ setupPolicyVersion: saved.approval.policyVersion, machineId: saved.operation.scope.machineId,
+    repositoryRoot: saved.operation.scope.kind === "machine" ? "" : saved.operation.scope.workspaceRoot,
+    paths: saved.paths,
+    repositorySelected: saved.approval.repositorySelected, browserExecutable: saved.approval.browserExecutable,
+    requirements: saved.approval.requirements, services: saved.services.filter(item => !saved.generatedIds.includes(item.serviceId)) });
+}
+
+/** Reconstruct boundaries from the unit-bound approval, never from a spec's self-checksums alone. */
+async function validateLaunches(saved: z.infer<typeof GatewayConfigSchema>) {
+  if (!saved.approval || configurationDigest(saved) !== saved.desiredDigest || saved.operation.scope.kind !== "session")
+    throw new Error("Gateway launch configuration differs from its approved specification");
+  const root = saved.operation.scope.workspaceRoot;
+  const repositoryId = `setup-${sha(root).slice(0, 24)}`;
+  const expectedOperation = ScopedOperationSchema.parse({ schemaVersion: 3, scope: { kind: "session", machineId: saved.operation.scope.machineId,
+    repositoryId, workspaceRoot: root, sessionId: "setup-gateway" }, idempotencyKey: "setup-gateway" });
+  if (digest(saved.operation) !== digest(expectedOperation) || saved.receiptPath !== join(saved.paths.state, "setup-gateway-ready.json"))
+    throw new Error("Gateway session identity or readiness path differs from the approved boundary");
+  const active = saved.approval.requirements.filter(item => item.toolId !== "gitnexus" || saved.approval!.repositorySelected);
+  if (new Set(saved.generatedIds).size !== active.length) throw new Error("Managed MCP service inventory does not match setup");
+  const tools = await leaf("tool-installer");
+  for (const item of active) {
+    const definition = saved.services.find(candidate => saved.generatedIds.includes(candidate.serviceId) && candidate.tool.toolId === item.toolId);
+    if (!definition || definition.connection.kind !== "stdio_mcp" || definition.connection.argv.length !== 4)
+      throw new Error(`Managed ${item.toolId} service changed since configuration`);
+    const [launcher, specPath, specDigest, launcherDigest] = definition.connection.argv;
+    const spec = tools.ToolLaunchSpecSchema.parse(await readJson(specPath!));
+    const expectedLauncher = fileURLToPath(new URL("../../../packages/tool-installer/dist/service-launcher.js", import.meta.url));
+    if (await realpath(launcher!) !== await realpath(expectedLauncher) || sha(await readFile(launcher!)) !== launcherDigest ||
+      sha(JSON.stringify(spec)) !== specDigest || spec.executable !== item.executable || !isAbsolute(item.executable) ||
+      sha(await readFile(item.executable)) !== spec.executableDigest || !specPath!.startsWith(`${await realpath(join(saved.paths.config, "tool-launches"))}${sep}`))
+      throw new Error(`Managed ${item.toolId} executable or launch specification changed`);
+    let expectedSpec: unknown;
+    let serviceId: string;
+    if (item.toolId === "gitnexus") {
+      const canonicalRoot = await realpath(root), state = await realpath(join(saved.paths.state, "gitnexus"));
+      serviceId = `gitnexus-${sha(canonicalRoot).slice(0, 24)}`;
+      expectedSpec = { schemaVersion: 3, executable: item.executable, executableDigest: spec.executableDigest, argv: ["mcp"], cwd: canonicalRoot,
+        environment: { GITNEXUS_HOME: join(state, "gitnexus-home"), GITNEXUS_MCP_ALLOWED_REPOS: canonicalRoot,
+          GITNEXUS_MCP_READ_ONLY: "1", GITNEXUS_SHARED_STORE: "off" }, lockPath: join(state, `gitnexus-storage-${sha(canonicalRoot)}.lock`) };
+    } else {
+      const profileRoot = await realpath(join(saved.paths.data, "browser-profiles"));
+      const profile = join(profileRoot, "chrome", repositoryId, "setup-browser-probe");
+      if (await realpath(profile) !== profile || !saved.approval.browserExecutable ||
+        await realpath(saved.approval.browserExecutable) !== saved.approval.browserExecutable)
+        throw new Error("Chrome profile or approved executable is not canonical");
+      const argv = ["--userDataDir", profile, "--executablePath", saved.approval.browserExecutable, "--headless", "--no-usage-statistics"];
+      for (const argument of item.args) {
+        if (!["--no-usage-statistics", "--no-performance-crux"].includes(argument)) throw new Error("Unapproved Chrome launch argument");
+        if (!argv.includes(argument)) argv.push(argument);
+      }
+      serviceId = `chrome-${sha(profile).slice(0, 24)}`;
+      expectedSpec = { schemaVersion: 3, executable: item.executable, executableDigest: spec.executableDigest, argv,
+        cwd: dirname(profile), environment: {}, lockPath: join(profile, ".bflow-profile.lock"),
+        browserOwner: { taskId: "setup-browser-probe", repositoryId, profileDir: profile } };
+    }
+    if (digest(spec) !== digest(expectedSpec)) throw new Error(`Managed ${item.toolId} canonical launch boundaries changed`);
+    const expectedDefinition = MCPServiceDefinitionSchema.parse({ schemaVersion: 3, serviceId, revision: 1,
+      scope: { kind: "machine", machineId: saved.operation.scope.machineId },
+      tool: { ...tools.createToolCapability(item.toolId, item.version, saved.operation.scope.machineId), required: true,
+        operations: requiredOperations[item.toolId], resource: { sharing: "exclusive", resourceKey: serviceId } },
+      connection: { kind: "stdio_mcp", executable: process.execPath, executableDigest: sha(await readFile(process.execPath)),
+        argv: [launcher, specPath, specDigest, launcherDigest], environmentBindings: {}, ownership: "bflow", bridgeRequired: true },
+      authentication: { mode: "none" }, healthTimeoutMs: 15_000, idleTimeoutMs: 60_000, restartLimit: 2 });
+    if (digest(definition) !== digest(expectedDefinition)) throw new Error(`Managed ${item.toolId} service policy changed`);
+  }
+}
+
 /** Replaces only the two existing components; planning never loads or launches a managed tool. */
 export function wrapSetupComponents(components: readonly SetupComponent[], input: SetupGatewayInput): SetupComponent[] {
   const { platform, store } = input;
   const config = MachineConfigSchema.parse(input.config);
   const configPath = join(platform.paths.config, "setup-gateway.json");
   const receiptPath = join(platform.paths.state, "setup-gateway-ready.json");
-  const repositoryRoot = resolve(input.repositoryRoot ?? join(platform.paths.data, "gateway-repository"));
+  const repositoryRoot = input.repositoryRoot ? realpathSync(input.repositoryRoot) : resolve(join(platform.paths.data, "gateway-repository"));
   const repositoryId = `setup-${sha(repositoryRoot).slice(0, 24)}`;
   const operation = ScopedOperationSchema.parse({ schemaVersion: 3, scope: { kind: "session", machineId: platform.machineId,
     repositoryId, workspaceRoot: repositoryRoot, sessionId: "setup-gateway" }, idempotencyKey: "setup-gateway" });
-  const requirements = input.launchRequirements.map(item => ({ ...item,
-    version: config.toolPins.find(pin => pin.toolId === item.toolId)?.version ?? "" }));
+  const requirements = input.launchRequirements.map(item => {
+    const pin = config.toolPins.find(candidate => candidate.toolId === item.toolId);
+    return { ...item, pin, version: pin?.version ?? "" };
+  });
   const activeRequirements = requirements.filter(item => item.toolId !== "gitnexus" || input.repositoryRoot);
   for (const item of requirements) {
     if (!isAbsolute(item.executable) || !item.version) throw new Error(`Missing pinned managed executable/version for ${item.toolId}`);
   }
-  const autoIds = new Set(requirements.map(item => item.toolId === "gitnexus" ? `gitnexus-${sha(repositoryRoot).slice(0, 24)}`
-    : `chrome-${sha(join(platform.paths.data, "browser-profiles", "chrome", repositoryId, "setup-browser-probe")).slice(0, 24)}`));
-  const operatorServices = config.mcpServices.filter(item => !autoIds.has(item.serviceId));
-  const desiredDigest = digest({ machineId: platform.machineId, repositoryRoot, requirements, services: operatorServices });
+  const priorConfiguration = ownedConfiguration(configPath);
+  const priorOwnedIds = new Set((priorConfiguration?.generatedIds ?? []).filter(id =>
+    config.mcpServices.some(current => current.serviceId === id && priorConfiguration!.services.some(previous => previous.serviceId === id && digest(previous) === digest(current)))));
+  const operatorServices = config.mcpServices.filter(item => !priorOwnedIds.has(item.serviceId));
+  const approval = ApprovalSchema.parse({ policyVersion: 2, repositorySelected: Boolean(input.repositoryRoot),
+    browserExecutable: approvedBrowser(platform), requirements });
+  const desiredDigest = digest({ setupPolicyVersion: 2, machineId: platform.machineId, repositoryRoot,
+    paths: platform.paths,
+    repositorySelected: approval.repositorySelected, browserExecutable: approval.browserExecutable, requirements, services: operatorServices });
   const service: ServiceDefinition = { serviceId: "mcp-gateway", program: process.execPath,
     args: [fileURLToPath(new URL("../dist/setup-gateway.js", import.meta.url)), "--serve", configPath, desiredDigest], env: {}, keepAlive: true };
   if (config.services.some(item => item.serviceId === service.serviceId &&
@@ -105,39 +207,16 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
     if (saved.desiredDigest !== desiredDigest || saved.definitionDigest !== digest(saved.services) ||
       digest(saved.operation) !== digest(operation) || saved.receiptPath !== receiptPath || digest(saved.paths) !== digest(platform.paths))
       throw new Error("Gateway configuration does not match the approved setup specification");
-    const expectedIds = new Set(saved.generatedIds);
-    if (expectedIds.size !== activeRequirements.length) throw new Error("Managed MCP service inventory does not match setup");
-    if (digest(saved.services.filter(item => !expectedIds.has(item.serviceId))) !== digest(operatorServices))
-      throw new Error("Operator MCP services differ from the approved setup configuration");
-    for (const item of activeRequirements) {
-      const definition = saved.services.find(candidate => expectedIds.has(candidate.serviceId) && candidate.tool.toolId === item.toolId);
-      if (!definition || definition.connection.kind !== "stdio_mcp" || definition.tool.version !== item.version ||
-        digest(definition.tool.operations) !== digest(requiredOperations[item.toolId]) ||
-        definition.connection.executable !== process.execPath || definition.connection.argv.length !== 4)
-        throw new Error(`Managed ${item.toolId} service changed since configuration`);
-      const [launcher, specPath, specDigest, launcherDigest] = definition.connection.argv;
+    if (digest(saved.approval) !== digest(approval)) throw new Error("Gateway canonical launch approval changed");
+    await validateLaunches(saved);
+    for (const item of activeRequirements) if (item.toolId === "gitnexus") {
       const tools = await leaf("tool-installer");
-      const spec = tools.ToolLaunchSpecSchema.parse(await readJson(specPath!));
-      const expectedLauncher = fileURLToPath(new URL("../../../packages/tool-installer/dist/service-launcher.js", import.meta.url));
-      if (sha(JSON.stringify(spec)) !== specDigest || sha(await readFile(launcher!)) !== launcherDigest ||
-        sha(await readFile(expectedLauncher)) !== launcherDigest ||
-        sha(await readFile(process.execPath)) !== definition.connection.executableDigest || spec.executable !== item.executable ||
-        sha(await readFile(item.executable)) !== spec.executableDigest)
-        throw new Error(`Managed ${item.toolId} executable or launch specification changed`);
-      const expectedDefinition = MCPServiceDefinitionSchema.parse({ schemaVersion: 3, serviceId: definition.serviceId, revision: 1,
-        scope: { kind: "machine", machineId: platform.machineId },
-        tool: { ...tools.createToolCapability(item.toolId, item.version, platform.machineId), operations: requiredOperations[item.toolId],
-          resource: { sharing: "exclusive", resourceKey: definition.serviceId } },
-        connection: { kind: "stdio_mcp", executable: process.execPath, executableDigest: sha(await readFile(process.execPath)),
-          argv: [launcher, specPath, specDigest, launcherDigest], environmentBindings: {}, ownership: "bflow", bridgeRequired: true },
-        authentication: { mode: "none" }, healthTimeoutMs: 15_000, idleTimeoutMs: 60_000, restartLimit: 2 });
-      if (digest(definition) !== digest(expectedDefinition)) throw new Error(`Managed ${item.toolId} service policy changed`);
-      if (item.toolId === "gitnexus" && (digest(spec.argv) !== digest(["mcp"]) || spec.cwd !== repositoryRoot ||
-        spec.environment.GITNEXUS_MCP_ALLOWED_REPOS !== repositoryRoot || spec.environment.GITNEXUS_MCP_READ_ONLY !== "1"))
-        throw new Error("GitNexus repository boundary changed");
-      if (item.toolId === "chrome-devtools-mcp" && (!spec.browserOwner ||
-        !spec.browserOwner.profileDir.startsWith(`${join(platform.paths.data, "browser-profiles")}${sep}`)))
-        throw new Error("Chrome is missing its dedicated Bflow profile");
+      const result = await tools.systemToolHost.run(item.executable, ["status", "--json"], { cwd: repositoryRoot, timeoutMs: 15_000,
+        environment: { GITNEXUS_HOME: await realpath(join(platform.paths.state, "gitnexus", "gitnexus-home")), GITNEXUS_SHARED_STORE: "off" } });
+      const status = z.object({ schemaVersion: z.literal(1), repository: z.string(), status: z.literal("up-to-date") }).passthrough().safeParse(
+        (() => { try { const text = result.stdout.trim(); return JSON.parse(text.slice(text.indexOf("{"))); } catch { return null; } })());
+      if (result.exitCode !== 0 || !status.success || await realpath(status.data.repository) !== repositoryRoot)
+        throw new Error("GitNexus repository index is stale or cannot be verified; run the approved repository setup plan");
     }
     const machine = await loadMachineConfig(join(platform.paths.config, MACHINE_CONFIG_FILE));
     if (machine.status !== "valid" || !machine.config ||
@@ -180,16 +259,10 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
             definition = await tools.createGitNexusService({ executable: item.executable, version: item.version, repositoryRoot,
               stateRoot: join(platform.paths.state, "gitnexus"), configRoot: join(platform.paths.config, "tool-launches"), operation: machineOperation });
           } else {
-            let browserExecutable: string | undefined;
-            for (const binary of ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]) {
-              try {
-                const candidate = isAbsolute(binary) ? binary : await findExecutable(binary, platform.pathEntries, process.platform);
-                if (!candidate) continue;
-                const probe = await input.runner.run([candidate, "--version"], { timeoutMs: 5000, ...(ctx.signal ? { signal: ctx.signal } : {}) });
-                if (probe.exitCode === 0 && /chrome|chromium/i.test(probe.stdout + probe.stderr)) { browserExecutable = candidate; break; }
-              } catch { /* Try the next installed browser. */ }
-            }
+            const browserExecutable = approval.browserExecutable;
             if (!browserExecutable) throw new Error("Chrome/Chromium is unavailable; install a supported browser before Gateway browser verification");
+            const browserProbe = await input.runner.run([browserExecutable, "--version"], { timeoutMs: 5000, ...(ctx.signal ? { signal: ctx.signal } : {}) });
+            if (browserProbe.exitCode !== 0 || !/chrome|chromium/i.test(browserProbe.stdout + browserProbe.stderr)) throw new Error("Approved browser failed its version probe");
             definition = await tools.createChromeService({ managedRoot: join(platform.paths.data, "browser-profiles"), repositoryId,
               taskId: "setup-browser-probe", browserExecutable, serverExecutable: item.executable, version: item.version,
               configRoot: join(platform.paths.config, "tool-launches"), operation: machineOperation });
@@ -206,19 +279,29 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
                 launch: { ...spec, argv } });
             }
           }
-          definition = MCPServiceDefinitionSchema.parse({ ...definition, tool: { ...definition.tool, operations: requiredOperations[item.toolId] } });
+          definition = MCPServiceDefinitionSchema.parse({ ...definition, tool: { ...definition.tool, required: true, operations: requiredOperations[item.toolId] } });
           if (config.mcpServices.some(existing => existing.serviceId === definition.serviceId && digest(existing) !== digest(definition) &&
             (!prior?.generatedIds.includes(existing.serviceId) || !prior.services.some(old => old.serviceId === existing.serviceId && digest(old) === digest(existing)))))
             throw new Error(`MCP service ${definition.serviceId} already has an operator definition; preserve it and reconcile explicitly`);
           generated.push(definition);
         }
         const generatedIds = new Set(generated.map(item => item.serviceId));
-        const services = [...config.mcpServices.filter(item => !generatedIds.has(item.serviceId)), ...generated];
+        const services = [...operatorServices, ...generated];
+        const mcpFile = join(platform.paths.config, "mcp.json");
+        try {
+          const existing = McpConfigFileSchema.parse(await readJson(mcpFile));
+          let changed = false;
+          for (const id of priorOwnedIds) if (!generatedIds.has(id) && existing.managedIds.includes(id) &&
+            priorConfiguration!.services.some(previous => previous.serviceId === id && digest(previous) === digest(existing.services[id]))) {
+            delete existing.services[id]; existing.managedIds = existing.managedIds.filter(candidate => candidate !== id); changed = true;
+          }
+          if (changed) { unwrap(await store.backupFile(mcpFile)); unwrap(await store.writeFileAtomic(mcpFile, JSON.stringify(existing) + "\n", 0o600)); }
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
         const mcp = new McpConfigComponent({ platform, store, services });
         const mcpResult = await mcp.apply(ctx);
         if (mcpResult.diagnostics.length) return mcpResult;
         const saved = GatewayConfigSchema.parse({ schemaVersion: 3, desiredDigest, definitionDigest: digest(services), operation,
-          services, generatedIds: [...generatedIds], receiptPath, paths: platform.paths });
+          services, generatedIds: [...generatedIds], receiptPath, paths: platform.paths, approval });
         const machine = MachineConfigSchema.parse({ ...config, mcpServices: services, services: desiredServices });
         const paths = [join(platform.paths.config, MACHINE_CONFIG_FILE), configPath];
         for (const [index, payload] of [machine, saved].entries()) {
@@ -245,11 +328,12 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
         process.kill(ready.pid, 0);
         for (const definition of saved.services) {
           const evidence = ready.observations.find(item => item.serviceId === definition.serviceId);
-          if (!evidence || evidence.status !== "ready" || evidence.revision !== definition.revision ||
-            definition.tool.operations.some(tool => !evidence.discoveredTools.includes(tool)))
+          if (definition.tool.required && (!evidence || evidence.status !== "ready" || evidence.revision !== definition.revision ||
+            definition.tool.operations.some(tool => !evidence.discoveredTools.includes(tool))))
             throw new Error(`Gateway has not negotiated required tools for ${definition.serviceId}`);
         }
-        return observed;
+        return { ...observed, diagnostics: [...observed.diagnostics,
+          ...ready.observations.filter(item => item.status !== "ready").map(item => `Optional MCP service ${item.serviceId} is unavailable (${item.diagnosticCode})`)] };
       } catch (error) { return { stateDigest: null, valid: false, diagnostics: [why(error)] }; }
     },
     apply: async ctx => {
@@ -289,14 +373,23 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
   const configured = GatewayConfigSchema.parse(await readJson(configPath));
   if (configured.definitionDigest !== digest(configured.services)) throw new Error("Gateway service definition checksum mismatch");
   if (expectedDesiredDigest && configured.desiredDigest !== expectedDesiredDigest) throw new Error("Gateway service configuration differs from its installed setup plan");
+  await validateLaunches(configured);
   const module = await leaf("mcp-gateway");
   const gateway = new module.BflowSharedMCPGateway();
   const server = new module.StreamableHttpGatewayServer({ gateway, host: "127.0.0.1", port: 0 });
   const store = new SetupStateStore(configured.paths, { uid: process.getuid?.() ?? null, now: () => new Date() });
   const observations: MCPServiceObservation[] = [];
   let timer: ReturnType<typeof setInterval> | undefined;
+  let stopped = false;
+  const shutdown = new AbortController();
+  const unavailable = (service: MCPServiceDefinition) => MCPServiceObservationSchema.parse({ schemaVersion: 3,
+    serviceId: service.serviceId, revision: service.revision, instanceId: `unavailable-${service.serviceId}`, status: "blocked",
+    discoveredTools: [], ownership: service.connection.ownership, activeClientCount: 0,
+    observedAt: new Date().toISOString(), diagnosticCode: "optional_backend_unavailable" });
   const stop = async () => {
+    stopped = true; shutdown.abort();
     clearInterval(timer);
+    await rm(configured.receiptPath, { force: true });
     await server.stop();
     for (const service of configured.services) if (service.connection.ownership === "bflow")
       await gateway.serviceManager.stop(service.serviceId, configured.operation);
@@ -305,22 +398,26 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
   try {
     const tools = await leaf("tool-installer");
     for (const service of configured.services) {
-      if (service.tool.toolId === "chrome-devtools-mcp") await tools.verifyChromeStartup(service);
-
-      const result = await gateway.serviceManager.ensure(service, configured.operation, { timeoutMs: service.healthTimeoutMs });
-
-      const observation = MCPServiceObservationSchema.parse(unwrap<MCPServiceObservation>(result));
-      if (observation.status !== "ready" || service.tool.operations.some(tool => !observation.discoveredTools.includes(tool)))
-        throw new Error(`Gateway upstream ${service.serviceId} did not negotiate required tools`);
-      observations.push(observation);
+      try {
+        if (service.tool.toolId === "chrome-devtools-mcp") await tools.verifyChromeStartup(service);
+        const result = await gateway.serviceManager.ensure(service, configured.operation, { timeoutMs: service.healthTimeoutMs, signal: shutdown.signal });
+        const observation = MCPServiceObservationSchema.parse(unwrap<MCPServiceObservation>(result));
+        if (observation.status !== "ready" || service.tool.operations.some(tool => !observation.discoveredTools.includes(tool)))
+          throw new Error(`Gateway upstream ${service.serviceId} did not negotiate required tools`);
+        observations.push(observation);
+      } catch (error) {
+        if (service.tool.required) throw error;
+        observations.push(unavailable(service));
+      }
     }
+    const readyServices = configured.services.filter(service => observations.some(item => item.serviceId === service.serviceId && item.status === "ready"));
 
     const endpoint = `${await server.start()}/mcp`;
-    if (configured.services.length) {
+    if (readyServices.length) {
       const registrationId = `setup-probe-${randomUUID()}`;
       const registration = MCPClientRegistrationSchema.parse({ schemaVersion: 3, registrationId, provider: "codex", role: "reviewer",
-        scope: configured.operation.scope, environmentId: "setup-probe", serviceIds: configured.services.map(service => service.serviceId),
-        allowedTools: [...new Set(configured.services.flatMap(service => service.tool.operations))],
+        scope: configured.operation.scope, environmentId: "setup-probe", serviceIds: readyServices.map(service => service.serviceId),
+        allowedTools: [...new Set(readyServices.flatMap(service => service.tool.operations))],
         connection: { transport: "streamable_http", endpoint, token: `secret://setup/${registrationId}` },
         configDigest: configured.definitionDigest, expiresAt: new Date(Date.now() + 60_000).toISOString(), idempotencyKey: registrationId });
       unwrap(await gateway.register(registration));
@@ -340,7 +437,7 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
         InitializeSchema.parse(initialized.result);
         const listed = await call(2, "tools/list", initialized.response.headers.get("Mcp-Session-Id") ?? undefined);
         const discovered = ToolsSchema.parse(listed.result);
-        for (const service of configured.services) for (const tool of service.tool.operations)
+        for (const service of readyServices) for (const tool of service.tool.operations)
           if (!discovered.tools.some(item => item.serviceId === service.serviceId && item.name === tool))
             throw new Error(`Gateway did not discover required tool ${tool}`);
       } finally { await gateway.revoke(registrationId, configured.operation); }
@@ -348,18 +445,40 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
     const publish = async () => {
       for (let index = 0; index < configured.services.length; index++) {
         const service = configured.services[index]!;
-        const current = MCPServiceObservationSchema.parse(unwrap<MCPServiceObservation>(await gateway.serviceManager.inspect(service.serviceId, configured.operation)));
-        if (current.status !== "ready" || service.tool.operations.some(tool => !current.discoveredTools.includes(tool)))
-          throw new Error(`Gateway upstream ${service.serviceId} lost readiness`);
-        observations[index] = current;
+        try {
+          const current = MCPServiceObservationSchema.parse(unwrap<MCPServiceObservation>(await gateway.serviceManager.inspect(service.serviceId, configured.operation)));
+          const entry = gateway.registry.getService(service.serviceId);
+          const partition = entry && unwrap<string>(module.computePartitionKey(entry.definition, entry.policy, configured.operation.scope));
+          const driver = partition && gateway.serviceManager.getDriver(partition);
+          if (current.status !== "ready" || !driver) throw new Error(`Gateway upstream ${service.serviceId} lost readiness`);
+          const timeoutMs = Math.min(service.healthTimeoutMs, 5000);
+          const discovered = z.array(z.string().min(1)).parse(unwrap<readonly string[]>(await driver.listTools("setup-health", {
+            timeoutMs, signal: AbortSignal.any([shutdown.signal, AbortSignal.timeout(timeoutMs)])
+          })));
+          if (!discovered.length || service.tool.operations.some(tool => !discovered.includes(tool)))
+            throw new Error(`Gateway upstream ${service.serviceId} no longer exposes required tools`);
+          observations[index] = MCPServiceObservationSchema.parse({ ...current, discoveredTools: discovered, observedAt: new Date().toISOString() });
+        } catch (error) {
+          if (service.tool.required) throw error;
+          observations[index] = unavailable(service);
+        }
       }
+      if (stopped) return;
       unwrap(await store.writeFileAtomic(configured.receiptPath, `${JSON.stringify(ReadySchema.parse({ schemaVersion: 3,
         definitionDigest: configured.definitionDigest, pid: process.pid, endpoint, observedAt: new Date().toISOString(), observations }))}\n`, 0o600));
     };
 
     await publish();
-
-    timer = setInterval(() => { void publish().catch(() => {}); }, 10_000);
+    let publishing = false;
+    timer = setInterval(() => {
+      if (publishing || stopped) return;
+      publishing = true;
+      void publish().catch(async error => {
+        if (stopped) return;
+        await rm(configured.receiptPath, { force: true });
+        process.stderr.write(`Gateway protocol health failed: ${module.scrubSecrets(why(error))}\n`);
+      }).finally(() => { publishing = false; });
+    }, 10_000);
     timer.unref();
     return { endpoint, observations, stop };
   } catch (error) { await stop(); throw error; }
