@@ -40,6 +40,12 @@ export async function noLinksBelow(root: string, path: string): Promise<void> {
 export async function privateDirectory(path: string): Promise<string> {
   if (!isAbsolute(path)) throw new Error("Managed directory must be absolute");
   await mkdir(path, { recursive: true, mode: 0o700 });
+  return existingPrivateDirectory(path);
+}
+
+/** Observe an existing managed directory without creating or repairing it. */
+export async function existingPrivateDirectory(path: string): Promise<string> {
+  if (!isAbsolute(path)) throw new Error("Managed directory must be absolute");
   const info = await lstat(path);
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Managed directory must not be a link");
   return realpath(path);
@@ -71,7 +77,7 @@ export async function treeDigest(root: string): Promise<string> {
       } else throw new Error("Bundle contains a link or special file");
     }
   };
-  await privateDirectory(root);
+  await existingPrivateDirectory(root);
   await walk(root);
   return sha256(JSON.stringify(inventory));
 }

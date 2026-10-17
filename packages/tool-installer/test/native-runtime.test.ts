@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,6 +15,26 @@ afterEach(async () => {
 });
 
 describe("native plugin runtime", () => {
+  it.each(["managed root", "bundle"])("does not recreate a missing %s during native verification", async missing => {
+    const root = await mkdtemp(join(tmpdir(), "bflow-native-damaged-")); roots.push(root);
+    const managed = join(root, "managed"), bundle = join(managed, "bundle"), destination = join(root, "receipt");
+    await mkdir(destination);
+    if (missing === "bundle") await mkdir(managed);
+    const pin: ManagedToolPin = { toolId: "superpowers", installerId: "test", version: "7.0.0",
+      source: "https://example.com/pinned.tgz", integrity: hash("archive"),
+      recipe: { kind: "provider_plugin", provider: "codex" }, license: "MIT" };
+    await writeFile(join(destination, ".bflow-native.json"), JSON.stringify({ schemaVersion: 3, toolId: pin.toolId,
+      provider: "codex", version: pin.version, sourceIntegrity: pin.integrity, bundleRoot: bundle,
+      bundleDigest: hash("[]"), pluginId: "bflow-superpowers", marketplaceRoot: managed, uninstall: [] }));
+    const runtime = new NativePluginRuntime({ managedRoot: managed, homeDirectory: root }, {
+      async download() { throw Error("inspection must not download"); },
+      async run() { return { exitCode: 0, stdout: JSON.stringify([{ name: "bflow-superpowers", enabled: true, path: bundle }]), stderr: "" }; }
+    });
+    const result = await runtime.verify(pin, destination);
+    expect(result.ready).toBe(false);
+    await expect(lstat(missing === "bundle" ? bundle : managed)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("verifies superpowers plugin bundle and active skill inventory", async () => {
     const root = await (await import("node:fs/promises")).realpath(await mkdtemp(join(tmpdir(), "bflow-native-test-")));
     roots.push(root);

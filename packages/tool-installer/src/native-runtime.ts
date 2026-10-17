@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { cp, lstat, mkdir, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { createConnection } from "node:net";
 import { z } from "zod";
 import type { OperationOptions } from "@bflow/contracts";
 import type { ManagedToolPin, ToolHost } from "./installer.js";
-import { atomicJson, extractPinnedArchive, fileDigest, privateDirectory, readRegular, sha256, treeDigest, withFileLock } from "./files.js";
+import { atomicJson, existingPrivateDirectory, extractPinnedArchive, fileDigest, privateDirectory, readRegular, sha256, treeDigest, withFileLock } from "./files.js";
 import { ClaudeMemProjectReader, observeClaudeMemWorker, readClaudeMemWorkerIdentity } from "./integrations.js";
 
 export type NativeProvider = "claude" | "codex" | "agy";
@@ -72,9 +72,7 @@ export class NativePluginRuntime {
     const record = recordSchema.parse(JSON.parse(await readRegular(join(destination, ".bflow-native.json"))));
     if (record.toolId !== pin.toolId || record.provider !== this.#provider(pin) || record.version !== pin.version ||
       record.sourceIntegrity !== pin.integrity) throw new Error("Native activation receipt differs from approved pin");
-    const managedInfo = await lstat(this.#options.managedRoot);
-    if (!managedInfo.isDirectory() || managedInfo.isSymbolicLink()) throw Error("Native managed directory is not a regular directory");
-    const managed = await realpath(this.#options.managedRoot);
+    const managed = await existingPrivateDirectory(this.#options.managedRoot);
     if (!record.bundleRoot.startsWith(`${managed}/`)) throw new Error("Native bundle escaped managed storage");
     return record;
   }
