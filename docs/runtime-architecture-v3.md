@@ -5,6 +5,27 @@ P24 chỉ bổ sung thiết kế, schemas, public ports và contract tests. Các
 chưa được triển khai bởi thay đổi này. Đây là baseline kiến trúc, không phải chứng nhận
 full Agentic SDLC hay production readiness.
 
+## Trạng thái triển khai (cập nhật 2026-10-17)
+
+Phần này ghi lại source đã có sau baseline P24; các quyết định thiết kế đóng băng bên dưới
+không đổi. Mức bằng chứng được tách riêng: **source** (có code trong repo), **local test**
+(fake runner/mock/fixture), **live probe** (binary/Herdr/provider thật) và **full SDLC
+acceptance**. Chưa có hồ sơ nghiệm thu live hoặc full SDLC cho bất kỳ phase P25–P29.
+
+| Phase | Package / đường dẫn | Source | Còn thiếu / giới hạn |
+| --- | --- | --- | --- |
+| P25 | `packages/agent-providers` | Có: adapter Claude/Codex/Agy, `checkHealth` preflight/activated, permission profile compile, launch profile, Ed25519 launch attestation, `buildHerdrAgentStartCommand`, registry mặc định | Chỉ sinh dữ liệu launch; `packages/pane-manager`/`runtime` chưa gọi `prepareLaunch` (P30). Agy báo `unsupported` cho unattended và chưa certify native attestation. Chưa có bằng chứng login/launch provider thật trong hồ sơ nghiệm thu |
+| P26 | `packages/machine-setup`, `packages/tool-installer` | Có: state store/journal/receipt, plan/preview/apply/reconcile, PATH manager, MCP registry, service manager, doctor, `ManagedToolInstaller` (RTK, Claude-Mem, GitNexus, Chrome DevTools MCP, Superpowers), `FileToolCapabilityRegistry` | Test dùng fake installer/command runner; Windows chỉ `designed_unverified`; npm transitive deps chưa lock đầy đủ; native plugin rollback thủ công; chưa kiểm license GitNexus thương mại |
+| P27 | `packages/mcp-gateway`, `packages/mcp-services` | Có: loopback Streamable HTTP gateway, stdio bridge, client revoke, sharing policy, lease + fencing, unknown-call quarantine, chặn elicitation; OS service manager, resource pool, dedicated Chrome profile runtime | Test deterministic với driver/launcher giả hoặc cục bộ; `runtime`/`pane-manager` chưa đăng ký client Gateway cho role (P30); chưa có live Chrome/OS-service E2E trong hồ sơ nghiệm thu |
+| P28 | `packages/skills`, `skills/**` | Có: catalog 20 shared skill + 12 role skill, bundle store bất biến, pin/dependency, role manifest, provider rendering, `SkillsSetupSynchronizer`, `recover(exactDigest)` | Runtime chưa resolve/persist manifest theo session generation (P30); chưa có live native skill discovery |
+| P29 | `apps/cli` | Có: `setup`, `repo inspect`, `task plan`, `task implement`, `verify`, `git prepare`, `mcp status`, `tool status`/`tools status`, `skills sync|list`, `agent check`; `up`/`doctor` mở rộng với các bước validate provider/binary/auth/permission/MCP/skills; lệnh cấp cao có receipt, serialization và envelope JSON | CLI chỉ là command UX: không có scheduler/gate riêng. Các engine P25–P28 được nạp động từ `dist/` hoặc inject; `up` kiểm tra provider/MCP/skills bằng probe CLI-level và override, chưa dựa trên Runtime facade P30 |
+| P30 | `packages/runtime`, `packages/pane-manager`, `packages/conversation`, `agents/**` | **Chưa triển khai**: `runtime`, `pane-manager`, `conversation` không import `agent-providers`, `mcp-gateway`, `skills`, `machine-setup`. Commit `045a4e4` chỉ thêm system prompt, `behavior-policy` trong Registry và chỉnh role prompt/host, không thêm wiring P30 | Strict readiness trong host, launch qua ProviderAdapter, skills manifest theo session, Gateway registration/revocation, định tuyến quyết định người dùng qua Conversation cho mọi role |
+| P31 | `tests/platform-v3/**`, `tests/acceptance/platform-v3/**` | **Chưa triển khai**: hai thư mục không tồn tại | Cross-provider conformance, fault/security/live evidence, báo cáo nghiệm thu cuối |
+
+Xem [known limitations](known-limitations.md), [roadmap](next-roadmap.md) và
+[hồ sơ trạng thái P25–P29](acceptance/2026-10-17-p25-p29.md). Command acceptance của P29
+không phải workflow acceptance; kết luận sản phẩm vẫn **Not ready** cho Agentic SDLC MVP v2/v3.
+
 ## 1. Kiểm toán P00–P23 và quyết định tái sử dụng
 
 Đã đối chiếu HEAD/index/worktrees, local/remote-tracking refs, ancestry, lịch sử commit,
@@ -46,7 +67,7 @@ không đáp ứng private state permissions; P24 không âm thầm chuyển sta
 | Thành phần | Quan sát P24 | Mức hỗ trợ thực tế |
 | --- | --- | --- |
 | Node / pnpm | `v24.16.0` / `12.5.1` | Yêu cầu storage vẫn Node >=22.13; package manager theo root manifest |
-| Bflow CLI | package `@bflow/cli` `0.1.0`; compiled `--help` | init/up/down/attach/doctor/recover/run/status/approve/resume/cancel đã có. Các command v3 bên dưới chưa có parser/handler |
+| Bflow CLI | package `@bflow/cli` `0.1.0`; compiled `--help` | init/up/down/attach/doctor/recover/run/status/approve/resume/cancel đã có. Các command v3 bên dưới chưa có parser/handler tại thời điểm P24; P29 sau đó đã thêm (xem trạng thái triển khai) |
 | Herdr | `herdr --version`: `0.9.5`; `herdr api schema --json`: protocol 22, schema 1 | Live test P24 tạo hai named sessions riêng, xác minh compatibility/selective stop, không start model. Release label chỉ diagnostics |
 | Claude Code | `claude --version`: `2.1.301`; `--help` có MCP/settings/permission controls | Default P19 host hiện chỉ nhận Claude native hooks đã xác minh; có prior lifecycle/native-hook evidence, chưa full live delivery |
 | Codex | `codex --version`: `0.162.0`; `--help` có workspace sandbox, approval never, MCP, prompt-file config được kiểm tra ở follow-up trước | P13 launch helpers tồn tại. Default P19 từ chối unverified Codex native host; không đổi provider của repo để né lỗi |
@@ -185,7 +206,15 @@ agent runtime không âm thầm tự login hoặc chấp nhận trust/update pro
 | `bflow feature/bugfix/refactor/review/verify <objective>` | `workflow.request` | User intent vào ConversationGateway → DelegationRequest → Coordinator → Runtime; accepted spec/criteria, TDD, independent Quality Gates và approvals cũ |
 | Existing `run/approve/resume/cancel` | `workflow.legacy` + existing RuntimeCommand | Giữ legacy RuntimeService/storage; không giả đây là P19 session recovery |
 
-Các command mới chưa được quảng cáo là runnable. P29 tái sử dụng parser/JSON envelope
+**Trạng thái P29 (source + local test):** đã có `bflow setup` (`--check|--dry-run|--plan|--apply|--repair`),
+`mcp status`, `tool(s) status`, `skills list|sync`, `agent check`, cùng các lệnh cấp cao
+`repo inspect`, `task plan`, `task implement`, `verify`, `git prepare`. Các lệnh
+`bflow feature/bugfix/refactor/review` và `workflow.request` qua ConversationGateway **chưa
+có parser/handler**. Tên `bflow tools status`/`skills list` ở bảng trên là thiết kế; syntax
+đã triển khai ghi ở [CLI README](../apps/cli/README.md). Gateway, skill manager và gate
+runner được inject, chưa compose mặc định qua Runtime (P30).
+
+P29 tái sử dụng parser/JSON envelope
 và lifecycle hiện có, giữ syntax legacy; không thêm scheduler/gates trong CLI. `accepted`
 chỉ là command accepted; `succeeded` chỉ hoàn tất command, không tự hoàn tất run. Workflow
 success phải đọc outcome do Runtime/gates xác thực. Agent không tự gọi CLI để vượt quyền.

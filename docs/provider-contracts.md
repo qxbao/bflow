@@ -4,6 +4,19 @@ Normative P24 design; implementation owner P25. Public exports:
 `packages/contracts/src/{platform,provider}.ts`. [Runtime v3](runtime-architecture-v3.md)
 records source audit, authorization D24-01, migration and phase ownership.
 
+## Implementation status (cập nhật 2026-10-17)
+
+P25 đã có source tại `packages/agent-providers` (adapter Claude Code, Codex, Agy; `checkHealth`
+preflight/activated; compile permission profile; `prepareLaunch`; ký/kiểm chứng
+`AgentLaunchAttestation` Ed25519; `buildHerdrAgentStartCommand`; registry mặc định). Agy
+báo `unsupported` cho `unattended_isolated` và chưa certify native attestation, đúng yêu cầu
+bên dưới. CLI P29 gọi registry qua `bflow agent check`, `bflow setup` và các bước validate của
+`bflow up`/`doctor`. **Chưa làm (P30):** `pane-manager`/`runtime` chưa dùng `prepareLaunch` hay
+attestation; `provider-launch.ts` hiện có vẫn là đường launch thực của host. Mức bằng chứng:
+source + local test; không có hồ sơ live provider login/launch/permission enforcement cho P25.
+Chi tiết ở [package README](../packages/agent-providers/README.md) và
+[hồ sơ P25–P29](acceptance/2026-10-17-p25-p29.md). Nội dung dưới đây là thiết kế đóng băng.
+
 ## Contract inventory
 
 | Contract | Schema / meaning |

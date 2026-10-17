@@ -49,7 +49,15 @@ In Bflow's terminal topology, the Analyst operates within the coordination works
 
 ---
 
-## 4. Associated Files
+## 4. Non-User-Facing Policy & Structured Result
+
+`system-prompt.md` contains the mandatory "Non-User-Facing Execution Policy" verbatim (identical to `NON_USER_FACING_AUTONOMOUS_POLICY` in `@bflow/agent-registry`): the user does not read this pane, so the agent never asks the user questions or waits for a reply, records reversible low-risk assumptions, and sends a structured escalation to Coordinator through Herdr (task `blocked`) when a decision needs approval or exceeds its authority. Absence of a user response never bypasses a security or approval boundary, and success is never claimed without evidence.
+
+Handoffs use the structured result sections of the prompt (`status`, `summary`, `evidence`, `artifacts`, `blockers`, `requested_action`, `next_role`, optional `assumptions`) inside a Herdr `RoleMessage`. The registry's `validateAutonomousRolePrompt` and `validateAutonomousStructuredResult` check this contract statically; they are not evidence that a live provider complies.
+
+---
+
+## 5. Associated Files
 
 - `prompt.md`: Concise operational prompt for task assignments.
 - `system-prompt.md`: Complete system prompt loaded by the agent runner.

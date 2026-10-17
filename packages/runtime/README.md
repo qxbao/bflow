@@ -381,3 +381,11 @@ phase outcomes are written before side effects, with exact idempotent recovery.
 Task notices borrow the active assignment lease and cannot reserve/release a
 second Developer slot. These are local process-crash guarantees under the stated
 Linux/filesystem trust model, not live AI fault-campaign or power-loss evidence.
+
+## Role prompts and non-user-facing policy in the default host
+
+`runAgenticHost` builds each role's launch system prompt from the original installed `agents/<role>/system-prompt.md` via `readBuiltinRolePrompt` from the built `@bflow/pane-manager` (`packages/pane-manager/dist/index.js`, loaded at host start, so build pane-manager first). A missing Conversation or Coordinator prompt aborts host start. For every role except Conversation the host guarantees the verbatim non-user-facing policy (`NON_USER_FACING_AUTONOMOUS_POLICY`, exported from `src/agentic/host.ts`) plus `NON_USER_FACING_STRUCTURED_RESULT_REQUIREMENT` (fields `status`, `summary`, `evidence`, `artifacts`, `blockers`, `requested_action`, `next_role`, optional `assumptions`): it is appended when the loaded prompt lacks it, or when no builtin prompt exists. A closing instruction also forbids asking the user in the pane and requires escalation to Coordinator over Herdr `RoleMessage`. The Coordinator no longer reads its prompt file separately; the shared loader supplies it, followed by host integration instructions. The prompt text is instruction only and does not prove a provider obeys it.
+
+During startup, a missing launch-local SessionStart receipt or native-session receipt is reported as `[bflow:native-startup-pending]`, which `host-controller` surfaces as a retryable `conflict` (`details.stage: "native_startup"`) instead of a transport failure; retry after the native hooks publish their receipts.
+
+`ProjectContextService` now maps the `reviewer` role to `agents/reviewer` (previously `agents/verifier`) and falls back to the verifier/QA instructions only when reviewer or security instructions are absent. Behavior tests: `pnpm exec vitest run packages/runtime/test/agentic/agent-behavior-policies.test.ts`.

@@ -1,8 +1,14 @@
-# Next roadmap sau P22
+# Next roadmap sau P22 (cập nhật P25–P29)
 
 Follow-up lỗi Ctrl+C/readiness/layout/original prompts đã được sửa; kết quả và
 giới hạn riêng ở [lifecycle startup UX](acceptance/2026-10-16-lifecycle-startup-ux.md).
 Các số liệu/baseline bên dưới giữ đúng phạm vi nghiệm thu P22 trước follow-up.
+
+**Đã có source sau P24 (không làm lại từ scaffolding):** P25 provider adapters, P26 machine
+setup + tool installer, P27 MCP Gateway + services, P28 skills, P29 CLI high-level commands
+và unified lifecycle validation, cùng agent system prompt/behavior policy. Mức bằng chứng
+là source + local test; xem [hồ sơ P25–P29](acceptance/2026-10-17-p25-p29.md). Bảng dưới chỉ giữ phần còn mở:
+**tích hợp (P30)**, **nghiệm thu (P31)**, live evidence và các mục P22 chưa đóng.
 
 Đã có default Claude host/lifecycle, owner-configured Node TAP/Vitest runner,
 independent RGR, sandbox, durable approval/native/evidence receipts và exact
@@ -14,6 +20,10 @@ Mục tiêu kế tiếp là **Limited pilot có full AI acceptance evidence**; k
 
 | Ưu tiên | Owner / công việc còn lại | Bằng chứng đóng |
 | --- | --- | --- |
+| P1 — P30 Runtime integration | Runtime/Pane Manager/Conversation owner: nối `agent-providers` (preflight + `prepareLaunch` + attestation) vào launch hiện có, skills manifest persist theo session generation, đăng ký/revoke client Gateway, định tuyến quyết định người dùng của mọi role qua Runtime → Herdr → Conversation. Bắt đầu từ branch chứa P24–P29 đã tích hợp; không viết lại Core/Quality Gates | Readiness `ready` kèm activated health trước `up` success; interrupted-startup receipt giữ lại; không bypass SDD/TDD/gate/lease/fence/human approval; test boundary (không phải fake-runner) |
+| P1 — P31 acceptance | QA: tạo `tests/platform-v3/**`, `tests/acceptance/platform-v3/**` — conformance 3 provider (unsupported báo thật), auth/trust/binary/MCP/skills failure trước up, denied escalation, unattended cần cách ly full-process, hai repo song song, stdio crash/unknown call, external worker survival, Chrome lease/fence race, config drift | Báo cáo nghiệm thu tách mức source/local/live/full SDLC; phát hiện quay về production owner; chỉ sau P29/P30 tích hợp |
+| P1 — P29 closure | CLI owner: chỉ đóng sau khi Runtime facade P30 tích hợp; thay probe/override CLI-level bằng readiness thật; quyết định có thêm `feature/bugfix/refactor/review` hay không (hiện chưa có) | Compatibility verified với facade; command acceptance không bị coi là workflow acceptance |
+| P2 — live provider/platform probes | Provider/Setup/MCP owner: login/permission/MCP/skills probe thật cho Claude, Codex, Agy theo từng version; live install/rollback RTK/Claude-Mem/GitNexus/Chrome DevTools MCP/Superpowers; live Chrome profile + OS service (systemd/launchd); audited npm dependency tree hoặc offline bundle; review license GitNexus | Evidence riêng từng probe (command, version, exit, receipt); Agy chỉ nâng khỏi `unsupported` khi enforcement được chứng minh; Windows vẫn `designed_unverified` đến khi có host thật |
 | P1 — local platform | Operator: dùng POSIX worktree/repository; checkout gốc fuseblk không giữ private file permissions | stat/chmod 0700/0600 đúng owner, host activation/receipts được test ở vị trí đó; external-state migration cần design riêng nếu giữ source trên mount gốc |
 | P1 — live happy path | QA + Runtime: disposable repository, Claude đã login, owner command config có exact tests; một feature/required-TDD bugfix và một docs alternative workflow | Chat-only user request tạo spec/task thật; model Developer commits; independent Red/Green/Refactor, Reviewer và QA exact-revision gates; Git integration; human delivery approval. Giữ run/session/native IDs, receipts, artifacts và provider cost |
 | P1 — active recovery | Lifecycle/QA: down khi task dirty/ignored, SIGKILL host quanh approval/send/phase/release, restart đúng session | Không mất data/approval, không duplicate prompt/worktree, unknown delivery reconcile trước resend; compare HEAD/sentinels/checkpoints/receipts |

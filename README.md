@@ -17,6 +17,7 @@
 - **Role & Lease Registry (`@bflow/agent-registry`)** — Resolves configured SDLC roles to agents with lease acquisition, fencing tokens, and structured output validation.
 - **Independent Quality Gates (`@bflow/quality-gates`)** — Runs verification commands (`typecheck`, `lint`, `unit_test`, `build`, or custom checks) in the target workspace independently of agent self-reports.
 - **Human-in-the-Loop Governance** — Enforces human actor verification on approval gates (`approved`, `changes_requested`, `rejected`) before advancing gated tasks.
+- **Platform v3 building blocks (P25–P29)** — Provider adapters (Claude Code, Codex, Agy), machine setup and pinned tool installer, shared MCP Gateway and OS services, pinned instruction-only skills, and high-level CLI commands. Runtime integration (P30) and platform-v3 acceptance (P31) are not yet implemented.
 - **CLI & Programmatic Runtime (`@bflow/cli` & `@bflow/runtime`)** — Manage workflows from the terminal via `bflow` (human-readable or `--json` output) or embed `createRuntimeService` directly in Node.js applications.
 
 ---
@@ -78,6 +79,8 @@ repository's panes/server; `--yes` never bypasses the barrier. Live smoke has
 verified `up → down → up → down` without workflow/model turns. Full AI SDLC
 acceptance remains unverified; see [release readiness](docs/release-readiness.md).
 
+High-level platform commands (P29), all supporting `--json`: `bflow setup` (`--check`, `--dry-run`/`--plan`, `--apply`, `--repair`, `--yes`), `bflow repo inspect`, `bflow task plan`, `bflow task implement`, `bflow verify`, `bflow git prepare`, `bflow mcp status`, `bflow tool status`, `bflow skills sync` and `bflow agent check`; `bflow recover --yes` clears a legacy lifecycle lock. These reuse existing engines and do not dispatch agents themselves; the Runtime-level platform composition (P30) is not implemented, so command success is not workflow acceptance. See `bflow --help`.
+
 Legacy workflow commands (`run`, `status <run-id>`, `approve`, `resume`, `cancel`)
 remain available through the older workspace Runtime. They do not launch P19.
 Use `--help` for syntax, and the [current guide](docs/guide/README.md) for behavior
@@ -91,7 +94,7 @@ and integration limits. Start with [Getting Started](docs/guide/getting-started.
 
 | Package | Description |
 | --- | --- |
-| [`@bflow/cli`](apps/cli) | Command-line interface (`bflow`) for initializing configs and managing workflow runs |
+| [`@bflow/cli`](apps/cli) | Command-line interface (`bflow`) for environment lifecycle (`init`/`up`/`down`/`attach`/`status`/`doctor`), machine setup and provider/skills/tool checks, high-level SDLC commands and workflow-run management |
 | [`@bflow/runtime`](packages/runtime) | High-level orchestration service composing engine, storage, registry, transport, and gates |
 | [`@bflow/core`](packages/core) | Pure deterministic workflow engine (DAG scheduling, transitions, retry/rework, replay) |
 | [`@bflow/contracts`](packages/contracts) | Shared Zod schemas, public port interfaces, and transition/event validators |
@@ -104,9 +107,13 @@ and integration limits. Start with [Getting Started](docs/guide/getting-started.
 | [`@bflow/test-strategy`](packages/test-strategy) | Conditional TDD policy, criterion mappings and Red/Green/refactor evidence checks (P16); enforced by the implemented P19 host composition |
 | [`@bflow/verification`](packages/verification) | Independent task/workflow verification, criterion evidence, Reviewer/QA checks, bounded rework and escalation (P17); composed by P19 with trusted host gates and authenticated evidence |
 | [`@bflow/git-orchestrator`](packages/git-orchestrator) | Parallel task worktrees, ownership checks, stored patches, recoverable dependency-ordered integration, conflict handoff, workflow verification and provider PR support (P18); composed by P19; requires Linux/local Git |
+| [`@bflow/pane-manager`](packages/pane-manager) | Herdr workspace/tab/pane/agent management, role-to-pane mapping, dynamic Developer worktree panes and restart recovery (P13) |
+| [`@bflow/agent-providers`](packages/agent-providers) | Claude Code, Codex and Agy discovery, preflight/activated health observations, permission-profile compilation, launch profiles and signed startup attestations (P25); launch data only, not yet composed by Runtime (P30 pending) |
+| [`@bflow/machine-setup`](packages/machine-setup) | Machine setup backend: observe, plan, approve, apply and repair with private state, journal, receipts and doctor (P26); consumed by `bflow setup` |
+| [`@bflow/tool-installer`](packages/tool-installer) | Pinned, checksum-verified tool installs (RTK, Claude-Mem, GitNexus, provider plugins) and scoped capability inventory (P26); P30 composition pending |
 | [`@bflow/mcp-gateway`](packages/mcp-gateway) | Shared MCP service registry, loopback Streamable HTTP server, stdio-to-HTTP bridge, sharing/isolation policy enforcement, exclusive resource leases with fencing tokens, and process/memory/latency metrics (P27); P30 Runtime composition pending |
 | [`@bflow/mcp-services`](packages/mcp-services) | User-session OS service manager (`systemd --user`, `launchd`, Windows startup), lazy/eager backend resource pooling, memory RSS & process limits, and dedicated isolated Chrome browser runtime with page ownership gates (P27) |
-| [`@bflow/skills`](packages/skills) | Pinned instruction-only skill catalog, role manifests, private storage and provider-neutral references (P28); setup/init/Runtime activation remains P26/P29/P30 integration work |
+| [`@bflow/skills`](packages/skills) | Pinned instruction-only skill catalog, role manifests, private storage and provider-neutral references (P28); setup synchronizer and CLI `skills sync` use it; Runtime activation (P30) remains pending |
 | [`@bflow/quality-gates`](packages/quality-gates) | Preset command evaluators, workspace security policies, and RBAC governance |
 
 ---
@@ -152,12 +159,25 @@ pnpm --filter @bflow/test-strategy test
 # Run Git Integration Engine tests (real temporary repositories and SIGKILL recovery)
 pnpm --filter @bflow/git-orchestrator test
 
+# Run Provider Adapter, Machine Setup, Tool Installer and Skills tests
+pnpm --filter @bflow/agent-providers test
+pnpm --filter @bflow/machine-setup test
+pnpm --filter @bflow/tool-installer test
+pnpm --filter @bflow/skills test
+
 # Run Shared MCP Gateway tests
 pnpm --filter @bflow/mcp-gateway test
 
 # Run OS Services & Dedicated Browser Runtime tests
 pnpm --filter @bflow/mcp-services test
 ```
+
+---
+
+## Known Limitations
+
+- P30 (Runtime integration of provider launch, skills, Gateway and decision routing) and P31 (platform-v3 acceptance) are not implemented; P25–P29 evidence is source implementation plus local tests only.
+- Live provider (Claude Code/Codex/Agy) and full Agentic SDLC end-to-end acceptance are unverified; see [release readiness](docs/release-readiness.md) and [known limitations](docs/known-limitations.md).
 
 ---
 

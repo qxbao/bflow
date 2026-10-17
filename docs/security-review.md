@@ -1,4 +1,4 @@
-# Security review sau P22
+# Security review sau P22 (cập nhật P25–P29)
 
 Follow-up lỗi Ctrl+C/readiness/layout/original prompts đã được sửa; kết quả và
 giới hạn riêng ở [lifecycle startup UX](acceptance/2026-10-16-lifecycle-startup-ux.md).
@@ -8,6 +8,25 @@ Các số liệu/baseline bên dưới giữ đúng phạm vi nghiệm thu P22 t
 bằng chứng để nghiệm thu toàn Agentic SDLC MVP v2.** Review không phải pentest
 hoặc chứng nhận production. Baseline, source HEAD và kết quả validation cuối ở
 [release-readiness](release-readiness.md).
+
+## Cập nhật sau P24: bề mặt bảo mật P25–P29 (2026-10-17)
+
+Review này chưa được lặp cho P25–P29; phần dưới ghi **thiết kế/guard thấy trong source và
+README package**, không phải kết quả pentest hay live security test. Chưa có P30/P31, nên các
+guard chưa được kiểm chứng trong host thực.
+
+| Bề mặt | Guard trong source (mức: source + local test) | Giới hạn / chưa chứng minh |
+| --- | --- | --- |
+| Provider launch (P25) | Schema v3 ở ingress; permission mode `restricted`/`workspace_auto`/`unattended_isolated`; không dùng flag bypass toàn cục; unattended cần bwrap/container và session scope; secret chỉ qua `secret://` reference, cấm secret/NUL/xuống dòng trong argv; attestation Ed25519 bind digest executable/config | Agy `unsupported` cho unattended; chưa live attestation/pane readiness; same-UID provider vẫn ngoài guarantee (RR-13) |
+| Machine setup/tool install (P26) | Plan → approval → apply có digest, lock, read-back receipt; chỉ ghi file do Bflow sở hữu; PATH/rc block quản lý; installer verify SHA-256 trước khi cài; không chạy install trong `up` | Test dùng fake; native plugin có thể chạm provider home chung nên rollback thủ công; npm transitive deps chưa lock đầy đủ; Windows chưa verify |
+| MCP Gateway/services (P27) | Loopback-only, kiểm Host/Origin, bearer token theo client, cách ly session/repo, ẩn/chặn tool không được phép, scrub secret, chặn elicitation/sampling/OAuth tương tác, lease + fencing đơn điệu, quarantine unknown call (không replay mutation), từ chối privilege-escalation binary, profile Chrome riêng ngoài repo/profile cá nhân, debugging chỉ loopback | Chưa live Chrome/OS service; Gateway không phải kênh RoleMessage; hostile same-user, multi-host lease, giới hạn tài nguyên không giới hạn chưa chứng minh |
+| Skills (P28) | Pin + digest + dependency; bundle bất biến private; giới hạn duyệt bundle, symlink; skill không cấp quyền hay hook cài đặt | Chưa live native skill discovery; manifest chưa bind session (P30) |
+| CLI (P29) | Parse/validate ingress, receipt và journal idempotent, serialize lệnh đồng thời, dừng khi cần permission (exit 5), không scheduler/gate/approval riêng | `up` validate bằng probe CLI-level; Gateway/skill manager nạp động/inject; command accepted ≠ workflow accepted |
+| Agent prompts/policy (`045a4e4`) | Prompt tự trị cho role không-chat, behavior policy và validation kết quả Herdr, test local | Không thay Quality Gate độc lập; chưa adversarial live |
+
+Trust model, sandbox behavioral runner và danh sách finding P22 bên dưới không thay đổi.
+Rủi ro mở: P30 chưa nối nên readiness/launch/skills/Gateway chưa được ép trong host;
+P31 chưa chạy; P02-RA01 và P03-RA01 vẫn OPEN.
 
 ## Trust model
 

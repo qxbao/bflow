@@ -192,3 +192,11 @@ const response = await gateway.handleUserTurn({
 console.log("Intent nhận diện:", response.value.recognizedIntent); // "workflow_request"
 console.log("Phản hồi của Chat:", response.value.agentReply.content);
 ```
+
+---
+
+## 9. Ingress Validation & Ranh giới người dùng so với tác tử chuyên môn
+
+- **Xác thực dữ liệu đầu vào**: `UserTurnInputSchema` (strict Zod) được áp dụng cho mọi `UserTurnInput` trong `ConversationGateway`; đầu vào sai trả về lỗi `validation`. Mỗi `ConversationMessage` được kiểm tra bằng `ConversationMessageSchema` trước khi lưu. `ConversationContextSnapshotSchema` kiểm tra nghiêm ngặt snapshot khi nạp lại ngữ cảnh. Các schema khác (`MessageProvenanceSchema`, `ExtractedRequirementDraftSchema`, `PendingClarificationContextSchema`) được xuất từ `types.ts`.
+- **Prompt hệ thống (`prompts.ts`, `agents/chat/system-prompt.md`)**: mục "User Interaction & Autonomous Specialist Delegation Boundary" nêu rõ Conversation là điểm tương tác người dùng duy nhất; `coordinator`, `analyst`, `architect`, `planner`, `developer`, `reviewer`, `verifier`/`qa` là tác tử thực thi tự trị, không đối thoại với người dùng. Chỉ Conversation được hỏi làm rõ và trung chuyển `approval.request` / `approval.decision`. Prompt của Conversation không được chứa khối chính sách "non-user-facing execution agent" của các vai trò khác (xem `validateAutonomousRolePrompt` trong `@bflow/agent-registry`).
+- Thông điệp từ vai trò chuyên môn tới `user` không được chấp nhận ở tầng Herdr; mọi yêu cầu làm rõ hoặc phê duyệt phải đi qua Coordinator tới Conversation.
