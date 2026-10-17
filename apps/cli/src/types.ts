@@ -404,6 +404,14 @@ export interface CliIo {
   stderr(message: string): void;
 }
 
+export interface PresentationOptions {
+  readonly stdoutColor?: boolean | undefined;
+  readonly stderrColor?: boolean | undefined;
+  readonly interactive?: boolean | undefined;
+  readonly json?: boolean | undefined;
+  readonly isDefaultIo?: boolean | undefined;
+}
+
 export interface CliContext {
   readonly environment?: EnvironmentDependencies | undefined;
   readonly cwd?: string | undefined;
@@ -416,6 +424,7 @@ export interface CliContext {
   /** Engine facades for high-level commands; defaults compose the reviewed packages. */
   readonly highLevelServices?: HighLevelServices | undefined;
   readonly setup?: SetupIntegrationOptions | undefined;
+  readonly presentation?: PresentationOptions | undefined;
 }
 
 export interface CliExecutionResult {
