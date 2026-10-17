@@ -239,8 +239,11 @@ successful command can still report a negative domain outcome such as `not_passe
 See [docs/command-reference.md](docs/command-reference.md), the generated
 [docs/command-reference.json](docs/command-reference.json) (checked by a unit test), and
 [COMMAND_REFERENCE.md](./COMMAND_REFERENCE.md) for the full contract and skill bindings,
-including current limitations (Linux `flock` for the P18 engine; MCP Gateway,
-skill manager and verification gate runners are injected, not composed by default).
+including current limitations (Linux `flock` for the P18 engine; MCP Gateway and verification
+gate runners still require real injected or composed ports). The default CLI Skills synchronizer
+uses the real skill manager and store with the pinned builtin catalog, while explicitly supplied
+service ports remain in effect. `bflow mcp status` reports `not_ready` without a Gateway health
+observation; a configured MCP file alone does not establish backend health.
 
 ### High-level command summary
 
