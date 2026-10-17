@@ -2,6 +2,8 @@
 
 ## Scope
 
+> Ghi chú (2026-10-17): tài liệu này là phạm vi và sơ đồ baseline P00. Các module P01–P10 đã được triển khai; sơ đồ phụ thuộc dưới đây không liệt kê các package về sau (pane-manager, conversation, specification, test-strategy, verification, git-orchestrator, agent-providers, machine-setup, tool-installer, mcp-gateway, mcp-services, skills). Xem [architecture v2](architecture-v2.md) và [runtime architecture v3](runtime-architecture-v3.md); câu "does not implement ..." bên dưới chỉ mô tả P00.
+
 P00 defines module boundaries, validated exchange data, public ports, and pure invariants for bflow. It does not implement scheduling, a Herdr adapter, SQLite persistence, artifact I/O, leases, quality command execution, recovery, CLI behavior, or end-to-end workflows.
 
 The first deployment remains a module-first Node.js process. Herdr is an external execution mechanism reached only through `AgentTransport`; core contracts contain no Herdr wire types.

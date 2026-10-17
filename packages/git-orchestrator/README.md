@@ -59,7 +59,7 @@ force-pushes, or merges a protected/main branch. Branch integration uses a dedic
 `ownedPaths`/`forbiddenPaths` are literal repo-relative files or directory prefixes,
 without glob syntax, trailing slash, `.` or `..`. Prefix matching respects directory
 boundaries. Renames are represented as deletion plus addition so both paths are
-checked. Generated/sensitive tracked paths (`node_modules`, `dist`, `coverage`,
+checked (Git rename detection is disabled for diffs; copies are reported as additions). The workflow verification request message carries `integratedTaskIds` alongside the integration commit. Generated/sensitive tracked paths (`node_modules`, `dist`, `coverage`,
 `.git`, `.bflow`, `.env*`, private keys, databases and build metadata) are rejected.
 Binary line counts are zero; their bytes remain in the stored Git binary patch.
 Unsupported/non-UTF-8 filenames fail rather than changing their ownership meaning.

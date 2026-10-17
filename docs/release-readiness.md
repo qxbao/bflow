@@ -11,6 +11,29 @@ Conversation → Coordinator → Runtime → Developer → Reviewer/QA → integ
 verification → human delivery approval. Không xác nhận MVP v2 hoặc production-ready
 chỉ từ fixture, smoke provider hay tổng số test PASS.
 
+## Cập nhật sau P24: P25–P29 (2026-10-17)
+
+Kết luận **Not ready** không đổi. Từ baseline P24 (`8dbb056`) source đã bổ sung P25
+`agent-providers`, P26 `machine-setup`/`tool-installer`, P27 `mcp-gateway`/`mcp-services`,
+P28 `skills`/`skills/**`, P29 CLI (`setup`, `mcp status`, `tool status`, `skills sync|list`,
+`agent check`, `repo inspect`, `task plan|implement`, `verify`, `git prepare`, `up`/`doctor` mở
+rộng) và agent system prompt/behavior policy. Bảng validation bên dưới vẫn chỉ thuộc nghiệm thu
+P22 và các follow-up đã nêu; **không** được dùng làm bằng chứng cho P25–P29 vì chúng chưa
+được chạy lại cho hồ sơ này.
+
+| Phase | Source | Local test (theo README package) | Live provider/Herdr/OS | Full SDLC |
+| --- | --- | --- | --- | --- |
+| P25–P28 | Có | Có, với fake runner/driver/installer | Chưa có hồ sơ | Không |
+| P29 | Có | Có (`apps/cli/test`) | Chưa có hồ sơ | Không |
+| P30 Runtime integration | **Chưa** (runtime/pane-manager/conversation không import các package mới) | — | — | — |
+| P31 acceptance | **Chưa** (thư mục test không tồn tại) | — | — | — |
+
+Chi tiết và giới hạn ở [hồ sơ trạng thái P25–P29](acceptance/2026-10-17-p25-p29.md),
+[known limitations](known-limitations.md) (PV3-*), [security review](security-review.md) và
+[roadmap](next-roadmap.md). Command accepted của P29 không phải workflow accepted. Không nâng
+mức personal use/limited pilot; điều kiện pilot vẫn gồm P30, P31, live happy-path và active
+recovery.
+
 ## Baseline, quyền và source được nghiệm thu
 
 - P22 theo chỉ định owner: `9a38742e7e6aacbcd9703014ac5c1fc5780646aa`.

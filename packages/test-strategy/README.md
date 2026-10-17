@@ -92,6 +92,16 @@ spec-derived names; waived criteria do not silently remove verification obligati
 rationale, method, command and mapping downgrades. `validateAgainstSpecification`
 additionally binds it to an authoritative specification. Use the latter at
 integration ingress: self-consistency alone cannot authenticate an assessment.
+`validateAgainstSpecification(strategy, specification, decision?)` also accepts an
+optional `TddDecision` and rejects it when its `decisionId` or `mode` differs from
+the strategy's. Verification methods follow the contract `AcceptanceCriterion`
+`verificationMethod` enum (`smoke_test`, `visual_review`, `snapshot_test` and
+`schema_validation` are no longer separate methods; configuration and
+infrastructure changes use `typecheck`/`static_analysis`/`integration_test`, and UI
+layout uses `manual_review`). Existing valid per-criterion test-name mappings on a
+specification are preserved; otherwise mappings are derived from criterion IDs.
+The resolver rejects duplicate criterion IDs, and full-level or approved
+specifications that lack their required sections or approval metadata.
 Decision IDs are deterministic hashes of the relevant specification and assessment.
 
 ## Evidence and persistence

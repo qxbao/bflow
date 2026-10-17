@@ -7,7 +7,7 @@ Shared loopback HTTP gateway, stdio-to-HTTP bridge, and resource arbiter for the
 - **Platform Version**: Version 3 (`CURRENT_PLATFORM_SCHEMA_VERSION = 3`)
 - **Protocol Baseline**: Model Context Protocol Specification `2025-11-25`
 - **Package Type**: ESM (`type: module`)
-- **Status**: Implemented & Verified with 25 deterministically passing test scenarios.
+- **Status**: Implemented with deterministic package-local test scenarios (see the matrix below).
 
 ## Architectural Purpose & Boundary Invariants
 
@@ -96,7 +96,7 @@ pnpm --filter @bflow/mcp-gateway run typecheck
 # Build TypeScript to dist/
 pnpm --filter @bflow/mcp-gateway run build
 
-# Run deterministic verification test suite (25 tests)
+# Run deterministic verification test suite
 pnpm --filter @bflow/mcp-gateway run test
 ```
 
@@ -104,7 +104,7 @@ pnpm --filter @bflow/mcp-gateway run test
 
 ## Verification Test Suite Matrix
 
-The test suite in [`test/mcp-gateway.test.ts`](test/mcp-gateway.test.ts) validates 25 core architecture scenarios:
+The test suite in [`test/mcp-gateway.test.ts`](test/mcp-gateway.test.ts) covers the following core architecture scenarios:
 
 - **Scenario 1**: 10 Concurrent Clients Connecting Simultaneously without ID collision or response leakage.
 - **Scenario 2**: Reusing a Running Backend with single driver creation (`activeProcessCount === 1`).

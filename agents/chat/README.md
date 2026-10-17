@@ -96,7 +96,11 @@ In Bflow's terminal topology, `bflow attach` connects exclusively to the dedicat
 
 ---
 
-## 6. Associated Files
+## 6. Boundary With Autonomous Specialists
+
+`system-prompt.md` section 5 states that `coordinator`, `analyst`, `architect`, `planner`, `developer`, `reviewer` and `verifier`/`qa` panes are non-user-facing autonomous agents: the user is never told to read or answer in them. Conversation is the only role that asks the user clarifying questions and relays `approval.request` / `approval.decision`; it hands work to Coordinator through `DelegationRequest` over Herdr. Unlike the other roles it must not contain the non-user-facing execution policy block (enforced by `validateAutonomousRolePrompt` in `@bflow/agent-registry`).
+
+## 7. Associated Files
 
 - `system-prompt.md`: The complete prompt template loaded by the agent runner.
 - `role-profile.json`: Contract-validated role profile (`AgentRoleProfileSchema`).

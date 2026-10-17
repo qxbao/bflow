@@ -511,3 +511,18 @@ Used by `bflow doctor` (P12) and `SessionLifecycleManager.doctorSession` to insp
   - `checkedAt`: `IsoDateTime`.
   - `metadata`: `Metadata` (optional).
 - `SessionLifecycleManager.doctorSession(options: { workspaceRoot: string }): Promise<EnvironmentDoctorReport>`: Port interface executing the doctor suite against the environment.
+
+## Contracts v3 (P24 platform baseline)
+
+P24 thêm các root document additive với `schemaVersion: 3` (`CURRENT_PLATFORM_SCHEMA_VERSION`), strict parsing; nested value objects thừa hưởng version của envelope. Không đổi signature port cũ, RoleMessage v2, SessionManifest v2, event/checkpoint codec. Version khác 3 phải trả `unsupported_version`; v3 malformed trả `validation`. Quyết định D24-01 và kế hoạch compatibility ở [runtime architecture v3](runtime-architecture-v3.md). Tất cả được export từ barrel `packages/contracts/src/index.ts`.
+
+| File | Exports chính | Thiết kế chi tiết |
+| --- | --- | --- |
+| `platform.ts` | `AgentProviderIdSchema` (`claude`/`codex`/`agy`), `ConfigurationLevelSchema` (`machine`/`repository`/`session`), `TrustScopeSchema` + `isTrustScopeWithin`, `ScopedOperationSchema`, `Sha256DigestSchema`, `SecretReferenceSchema`, `SafeArgumentSchema` | [runtime v3](runtime-architecture-v3.md) |
+| `provider.ts` | `PermissionProfileSchema`, `AgentEnvironmentSchema`, `AgentProviderDescriptorSchema`, `AgentLaunchProfileSchema`, `AgentLaunchAttestationSchema`, `AgentHealthRequestSchema`/`AgentHealthResultSchema`, `AGENT_HEALTH_CHECKS`, port `AgentProviderAdapter` | [provider contracts](provider-contracts.md) |
+| `setup.ts` | `ToolCapabilitySchema`, `ToolInstallRequestSchema`, `SetupStepSchema`, `MachineSetupPlanSchema`, `SetupReceiptSchema`, `SetupApplyRequestSchema`, port `ToolInstaller` | [runtime v3 §4](runtime-architecture-v3.md) |
+| `mcp.ts` | `MCPEndpointSchema`, `MCPServiceDefinitionSchema`, `MCPClientRegistrationSchema`, `MCPServiceObservationSchema`, `MCPResourceLeaseSchema`/`MCPResourceRequestSchema`/`MCPResourceRenewRequestSchema`, `MCPToolCallSchema`/`MCPToolCallResultSchema`, ports `MCPServiceManager`, `SharedMCPGateway` | [shared MCP](shared-mcp-architecture.md) |
+| `skills.ts` | `SkillPinSchema`, `SkillDefinitionSchema`, `RoleSkillBindingSchema`, `SkillManifestSchema` | [skills](skills-architecture.md) |
+| `commands.ts` | `BflowCommandSchema`, `CommandExecutionResultSchema`, port `BflowCommandExecutor` | [runtime v3 §7](runtime-architecture-v3.md) |
+
+Các package leaf P25–P29 phân tích dữ liệu trao đổi bằng các schema này (ví dụ `agent-providers` với `AgentHealthRequestSchema`/`AgentLaunchProfileSchema`). Một số tham số package-local (metadata skill, `.bflow/skills.json`, request của machine-setup) dùng schema strict riêng và không phải public contract. `SkillManager` là class của `@bflow/skills`; contracts v3 chỉ có data schemas cho skills, không có port `SkillManager`. Ngoài các contract trên, `EnvironmentDoctorReportSchema` vẫn ở `schemaVersion: 2`; chi tiết check theo nhóm của `bflow doctor` hiện nằm trong CLI, chưa là contract public.

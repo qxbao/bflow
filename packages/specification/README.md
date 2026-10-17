@@ -91,6 +91,7 @@ Change classification is driven by explicit impact assessment rather than code d
   - `migrationStrategy`: optional string for data schema changes
   - `traceability`: array of `{ criterionId, taskIds }`
   - `revisionReason`: optional string required on revisions
+- **`parseContractOrP15Specification(input)`**: Accepts either a P15 `SpecificationDocumentSchema` document or a plain contract `Specification`; for the latter it synthesizes valid `metadata.sdd` policy details (defaults for assessment, requirements and traceability) so criteria, traceability and change-detection helpers also work on contract specs.
 - **`parseSpecification(input)`**: Validates that:
   - Classification matches declared assessment and affected paths.
   - Scope items (`inScope`, `outOfScope`) are non-blank.
@@ -155,6 +156,7 @@ Acceptance criteria define verifiable preconditions for task completion. They ar
 Every requirement and criterion must trace forward to execution tasks, and every execution task must trace backward to requirements.
 
 - **`validateTraceability(spec, workflow)`**:
+  - Throws if workflow tasks reference unknown acceptance criteria, if any criterion has no mapped task, or if workflow tasks and traceability do not match exactly.
   - Validates that every acceptance criterion in `spec` maps to at least one task in `workflow`.
   - Validates that all tasks referenced in `metadata.sdd.traceability` exist in `workflow.tasks`, and no orphan workflow tasks exist without mapped criteria.
 - **`buildTraceabilityMatrix(spec, workflow?)`**:
@@ -164,6 +166,8 @@ Every requirement and criterion must trace forward to execution tasks, and every
     - `orphanCriterionIds`: Criteria with no assigned tasks.
     - `unmappedWorkflowTaskIds`: Workflow tasks with no mapped criteria.
     - `unknownMappedTaskIds`: Tasks in traceability that do not exist in the workflow.
+    - `unknownCriterionIds` (optional): Criterion IDs referenced by workflow tasks that the spec does not define.
+  - With explicit `metadata.sdd.traceability` on the spec, that mapping is authoritative; without it and with a workflow supplied, mappings are derived from each task's `acceptanceCriteria`.
     - `valid`: boolean indicator of complete bidirectional traceability.
 - **`validateChangedFilesScope(spec, changedPaths)`**:
   - Validates whether changed files fall within `spec.affectedPaths`.
@@ -255,6 +259,7 @@ P15 standardizes communication across Herdr panes and external stores:
   - `ARCHITECT_ROLE_PROFILE`: Specialist profile for Architect (`role: "architect"`, read-only workspace).
   - `ANALYST_SYSTEM_PROMPT`: Complete system prompt defining Analyst boundaries and SDD responsibilities.
   - `ARCHITECT_SYSTEM_PROMPT`: Complete system prompt defining Architect boundaries and technical governance.
+  - Both prompts include the mandatory non-user-facing execution policy (no user questions; reversible assumptions recorded; blockers and spec-changing decisions escalated to Coordinator via Herdr) and the seven-field structured result (`status`, `summary`, `evidence`, `artifacts`, `blockers`, `requested_action`, `next_role`, optional `assumptions`). The shipped `agents/analyst` and `agents/architect` prompts carry the same sections.
   - `renderSpecialistSpecificationPrompt(options)`: Generates task assignment prompts for initial drafting or version revision.
 - **Specification Examples** in `packages/specification/examples/`:
   - `trivial.json` / `trivial.md`: Local documentation update (lightweight, low risk).
