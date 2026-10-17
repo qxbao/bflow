@@ -1,4 +1,4 @@
-import { EnvironmentError, EnvironmentLifecycle } from "./environment.js";
+import { EnvironmentLifecycle } from "./environment.js";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { isAbsolute, resolve } from "node:path";
@@ -20,6 +20,12 @@ import {
   loadWorkflowDefinitionFromFile,
   resolveConfigPath
 } from "./config.js";
+import {
+  formatProgressStep,
+  isStderrInteractive,
+  resolveStreamColor,
+  toContractError
+} from "./presentation.js";
 import { formatCommandError, formatCommandSuccess } from "./formatters.js";
 import { getHelpText } from "./help.js";
 import { parseCliArgs } from "./parser.js";
@@ -33,7 +39,8 @@ import {
   type CliExitCode,
   type CliIo,
   type HighLevelParsedCliCommand,
-  type ParsedCliCommand
+  type ParsedCliCommand,
+  type PresentationOptions
 } from "./types.js";
 import { executeHighLevelCommand, isHighLevelCommand } from "./high-level-commands.js";
 import { executeSetupCommand } from "./setup-integration.js";
@@ -53,6 +60,52 @@ function loadPackageVersion(): string {
 
 export const CLI_VERSION: string = loadPackageVersion();
 
+export function resolvePresentation(
+  context?: CliContext | undefined,
+  json = false,
+  isDefaultIo = false
+): PresentationOptions {
+  if (json || context?.presentation?.json) {
+    return {
+      stdoutColor: false,
+      stderrColor: false,
+      interactive: false,
+      json: true
+    };
+  }
+  const defaultIo = isDefaultIo || Boolean(context?.presentation?.isDefaultIo) || context?.io === undefined;
+  const customIo = context?.io !== undefined && !defaultIo;
+  const isCustomInteractive = Boolean(context?.presentation?.interactive);
+  const isStdoutTTY = customIo ? isCustomInteractive : Boolean(process.stdout.isTTY);
+  const isStderrTTY = customIo ? isCustomInteractive : Boolean(process.stderr.isTTY);
+
+  const stdoutColor = resolveStreamColor({
+    isTTY: isStdoutTTY,
+    env: process.env,
+    explicit: context?.presentation?.stdoutColor
+  });
+
+  const stderrColor = resolveStreamColor({
+    isTTY: isStderrTTY,
+    env: process.env,
+    explicit: context?.presentation?.stderrColor
+  });
+
+  const interactive = isStderrInteractive({
+    isTTY: isStderrTTY,
+    env: process.env,
+    explicitInteractive: context?.presentation?.interactive
+  });
+
+  return {
+    stdoutColor,
+    stderrColor,
+    interactive,
+    json: false,
+    ...(defaultIo ? { isDefaultIo: true } : {})
+  };
+}
+
 function makeResult(
   exitCode: CliExitCode,
   ok: boolean,
@@ -60,18 +113,19 @@ function makeResult(
   data: CliCommandData | undefined,
   error: ContractError | undefined,
   json: boolean,
-  io?: CliIo | undefined
+  io?: CliIo | undefined,
+  presentation?: PresentationOptions | undefined
 ): CliExecutionResult {
   let stdout = "";
   let stderr = "";
 
   if (ok && data !== undefined && command !== undefined) {
-    stdout = formatCommandSuccess(command, data, json);
+    stdout = formatCommandSuccess(command, data, json, presentation);
     if (io !== undefined) {
       io.stdout(stdout);
     }
   } else if (!ok && error !== undefined) {
-    const formatted = formatCommandError(error, command, json);
+    const formatted = formatCommandError(error, command, json, presentation);
     stderr = formatted;
     if (json) {
       stdout = formatted;
@@ -98,6 +152,17 @@ export async function executeCommand(
 ): Promise<CliExecutionResult> {
   const cwd = context?.cwd ?? process.cwd();
   const io = context?.io;
+  const isJson = Boolean(parsed.json) || Boolean(context?.presentation?.json);
+  const presentation = resolvePresentation(context, isJson);
+  const showProgress = presentation.interactive && !isJson && parsed.command !== "help" && parsed.command !== "version";
+  const emitProgress = (step: string) => {
+    const formatted = formatProgressStep(step, presentation.stderrColor);
+    if (io !== undefined) {
+      io.stderr(formatted);
+    } else {
+      process.stderr.write(formatted + "\n");
+    }
+  };
 
   if (parsed.command === "help") {
     const helpText = getHelpText(parsed.topic);
@@ -105,14 +170,14 @@ export async function executeCommand(
       helpText,
       ...(parsed.topic !== undefined ? { topic: parsed.topic } : {})
     };
-    return makeResult(CLI_EXIT_CODES.SUCCESS, true, "help", data, undefined, parsed.json, io);
+    return makeResult(CLI_EXIT_CODES.SUCCESS, true, "help", data, undefined, isJson, io, presentation);
   }
 
   if (parsed.command === "version") {
     const data: CliCommandData = {
       version: CLI_VERSION
     };
-    return makeResult(CLI_EXIT_CODES.SUCCESS, true, "version", data, undefined, parsed.json, io);
+    return makeResult(CLI_EXIT_CODES.SUCCESS, true, "version", data, undefined, isJson, io, presentation);
   }
 
   if (isHighLevelCommand(parsed.command)) {
@@ -126,15 +191,26 @@ export async function executeCommand(
       parsed.command,
       hlResult.data,
       hlResult.error,
-      parsed.json,
-      io
+      isJson,
+      io,
+      presentation
     );
   }
 
   if (["up", "down", "attach", "doctor", "recover"].includes(parsed.command) ||
     parsed.command === "status" && parsed.runId === undefined && parsed.statusFilter === undefined &&
     parsed.workflowId === undefined && parsed.limit === undefined && parsed.cursor === undefined && context?.runtime === undefined) {
-    const lifecycle = new EnvironmentLifecycle(cwd, { ...context?.environment, ...(context?.operationOptions?.signal ? { signal: context.operationOptions.signal } : {}) });
+    const envDeps = {
+      ...context?.environment,
+      ...(context?.operationOptions?.signal ? { signal: context.operationOptions.signal } : {}),
+      onProgress: (step: string) => {
+        try { context?.environment?.onProgress?.(step); } catch {}
+        if (showProgress) {
+          try { emitProgress(step); } catch {}
+        }
+      }
+    };
+    const lifecycle = new EnvironmentLifecycle(cwd, envDeps);
     try {
       let data: CliCommandData;
       switch (parsed.command) {
@@ -146,15 +222,17 @@ export async function executeCommand(
         default: data = await lifecycle.status();
       }
       const healthy = ( !("healthy" in data) || data.healthy ) && ( !("configuration" in data) || data.configuration === "valid" );
-      return makeResult(healthy ? 0 : 1, true, parsed.command, data, undefined, parsed.json, io);
+      return makeResult(healthy ? 0 : 1, true, parsed.command, data, undefined, isJson, io, presentation);
     } catch (error) {
-      const contractError: ContractError = error instanceof EnvironmentError ? error.contractError
-        : { code: "validation", retryable: false, message: error instanceof Error ? error.message : String(error) };
-      return makeResult(1, false, parsed.command, undefined, contractError, parsed.json, io);
+      const contractError = toContractError(error);
+      return makeResult(1, false, parsed.command, undefined, contractError, isJson, io, presentation);
     }
   }
 
   if (parsed.command === "init") {
+    if (showProgress) {
+      emitProgress("Initializing repository configuration...");
+    }
     const initRes = await initRepositoryConfig({
       cwd,
       ...(parsed.dir !== undefined ? { dir: parsed.dir } : {}),
@@ -167,26 +245,19 @@ export async function executeCommand(
     });
 
     if (!initRes.ok) {
-      return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "init", undefined, initRes.error, parsed.json, io);
+      return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "init", undefined, initRes.error, isJson, io, presentation);
     }
 
-    return makeResult(CLI_EXIT_CODES.SUCCESS, true, "init", initRes.value, undefined, parsed.json, io);
+    return makeResult(CLI_EXIT_CODES.SUCCESS, true, "init", initRes.value, undefined, isJson, io, presentation);
   }
 
   if (parsed.command === "setup") {
     try {
       const data = await executeSetupCommand(parsed, context);
-      return makeResult(CLI_EXIT_CODES.SUCCESS, true, "setup", data, undefined, parsed.json, io);
+      return makeResult(CLI_EXIT_CODES.SUCCESS, true, "setup", data, undefined, isJson, io, presentation);
     } catch (error) {
-      const contractError: ContractError =
-        typeof error === "object" && error !== null && "code" in error && typeof (error as any).code === "string"
-          ? (error as ContractError)
-          : {
-              code: "validation",
-              retryable: false,
-              message: error instanceof Error ? error.message : String(error)
-            };
-      return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "setup", undefined, contractError, parsed.json, io);
+      const contractError = toContractError(error);
+      return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "setup", undefined, contractError, isJson, io, presentation);
     }
   }
 
@@ -199,7 +270,11 @@ export async function executeCommand(
       retryable: true,
       message: "RuntimeService is not configured. Provide a RuntimeService instance in CliContext."
     };
-    return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, parsed.command, undefined, error, parsed.json, io);
+    return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, parsed.command, undefined, error, isJson, io, presentation);
+  }
+
+  if (showProgress) {
+    emitProgress(`Executing ${parsed.command} command...`);
   }
 
   const runtime = context.runtime;
@@ -213,7 +288,7 @@ export async function executeCommand(
         const fullWfPath = isAbsolute(parsed.workflowPath) ? parsed.workflowPath : resolve(cwd, parsed.workflowPath);
         const wfRes = await loadWorkflowDefinitionFromFile(fullWfPath);
         if (!wfRes.ok) {
-          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "run", undefined, wfRes.error, parsed.json, io);
+          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "run", undefined, wfRes.error, isJson, io, presentation);
         }
         definition = wfRes.value;
       } else {
@@ -225,10 +300,10 @@ export async function executeCommand(
           if (parsed.configPath === undefined) {
             definition = createDefaultWorkflowDefinition();
           } else {
-            return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "run", undefined, cfgRes.error, parsed.json, io);
+            return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "run", undefined, cfgRes.error, isJson, io, presentation);
           }
         } else {
-          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "run", undefined, cfgRes.error, parsed.json, io);
+          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "run", undefined, cfgRes.error, isJson, io, presentation);
         }
       }
 
@@ -249,22 +324,22 @@ export async function executeCommand(
           retryable: false,
           message: `Invalid start run input: ${parseInput.error.issues.map((i) => i.message).join("; ")}`
         };
-        return makeResult(CLI_EXIT_CODES.USAGE_ERROR, false, "run", undefined, err, parsed.json, io);
+        return makeResult(CLI_EXIT_CODES.USAGE_ERROR, false, "run", undefined, err, isJson, io, presentation);
       }
 
       const startRes = await runtime.start(parseInput.data, context.operationOptions);
       if (!startRes.ok) {
-        return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "run", undefined, startRes.error, parsed.json, io);
+        return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "run", undefined, startRes.error, isJson, io, presentation);
       }
 
-      return makeResult(CLI_EXIT_CODES.SUCCESS, true, "run", startRes.value, undefined, parsed.json, io);
+      return makeResult(CLI_EXIT_CODES.SUCCESS, true, "run", startRes.value, undefined, isJson, io, presentation);
     }
 
     case "status": {
       if (parsed.runId !== undefined) {
         const getRes = await runtime.getRun(parsed.runId, context.operationOptions);
         if (!getRes.ok) {
-          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "status", undefined, getRes.error, parsed.json, io);
+          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "status", undefined, getRes.error, isJson, io, presentation);
         }
         if (getRes.value === null) {
           const notFoundErr: ContractError = {
@@ -272,9 +347,9 @@ export async function executeCommand(
             retryable: false,
             message: `Run '${parsed.runId}' not found.`
           };
-          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "status", undefined, notFoundErr, parsed.json, io);
+          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "status", undefined, notFoundErr, isJson, io, presentation);
         }
-        return makeResult(CLI_EXIT_CODES.SUCCESS, true, "status", getRes.value, undefined, parsed.json, io);
+        return makeResult(CLI_EXIT_CODES.SUCCESS, true, "status", getRes.value, undefined, isJson, io, presentation);
       }
 
       const query = {
@@ -291,15 +366,15 @@ export async function executeCommand(
           retryable: false,
           message: `Invalid run query: ${parseQuery.error.issues.map((i) => i.message).join("; ")}`
         };
-        return makeResult(CLI_EXIT_CODES.USAGE_ERROR, false, "status", undefined, err, parsed.json, io);
+        return makeResult(CLI_EXIT_CODES.USAGE_ERROR, false, "status", undefined, err, isJson, io, presentation);
       }
 
       const findRes = await runtime.findRuns(parseQuery.data, context.operationOptions);
       if (!findRes.ok) {
-        return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "status", undefined, findRes.error, parsed.json, io);
+        return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "status", undefined, findRes.error, isJson, io, presentation);
       }
 
-      return makeResult(CLI_EXIT_CODES.SUCCESS, true, "status", findRes.value, undefined, parsed.json, io);
+      return makeResult(CLI_EXIT_CODES.SUCCESS, true, "status", findRes.value, undefined, isJson, io, presentation);
     }
 
     case "approve": {
@@ -310,7 +385,7 @@ export async function executeCommand(
           retryable: false,
           message: `Mandatory human approval cannot be satisfied by an automated or AI actor ('${decidedBy}').`
         };
-        return makeResult(CLI_EXIT_CODES.USAGE_ERROR, false, "approve", undefined, err, parsed.json, io);
+        return makeResult(CLI_EXIT_CODES.USAGE_ERROR, false, "approve", undefined, err, isJson, io, presentation);
       }
 
       let resolvedRunId: string;
@@ -319,7 +394,7 @@ export async function executeCommand(
       if (parsed.runId !== undefined) {
         const getRes = await runtime.getRun(parsed.runId, context.operationOptions);
         if (!getRes.ok) {
-          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "approve", undefined, getRes.error, parsed.json, io);
+          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "approve", undefined, getRes.error, isJson, io, presentation);
         }
         if (getRes.value === null) {
           const notFoundErr: ContractError = {
@@ -327,7 +402,7 @@ export async function executeCommand(
             retryable: false,
             message: `Run '${parsed.runId}' not found.`
           };
-          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "approve", undefined, notFoundErr, parsed.json, io);
+          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "approve", undefined, notFoundErr, isJson, io, presentation);
         }
         const taskState = getRes.value.tasks.find((t) => t.taskId === parsed.taskId);
         if (taskState === undefined) {
@@ -336,7 +411,7 @@ export async function executeCommand(
             retryable: false,
             message: `Task '${parsed.taskId}' not found in run '${parsed.runId}'.`
           };
-          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "approve", undefined, notFoundErr, parsed.json, io);
+          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "approve", undefined, notFoundErr, isJson, io, presentation);
         }
         resolvedRunId = parsed.runId;
         resolvedGeneration = parsed.generation ?? taskState.generation;
@@ -351,7 +426,7 @@ export async function executeCommand(
             context.operationOptions
           );
           if (!findRes.ok) {
-            return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "approve", undefined, findRes.error, parsed.json, io);
+            return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "approve", undefined, findRes.error, isJson, io, presentation);
           }
           allRuns.push(...findRes.value.items);
           if (!findRes.value.nextCursor || visitedCursors.has(findRes.value.nextCursor)) {
@@ -368,7 +443,7 @@ export async function executeCommand(
             retryable: false,
             message: `No run found containing task '${parsed.taskId}'. Specify --run <run-id>.`
           };
-          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "approve", undefined, notFoundErr, parsed.json, io);
+          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "approve", undefined, notFoundErr, isJson, io, presentation);
         }
 
         const activeRuns = matchingRuns.filter((r) =>
@@ -395,7 +470,7 @@ export async function executeCommand(
             retryable: true,
             message: `Multiple active runs contain task '${parsed.taskId}'. Specify --run <run-id>.`
           };
-          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "approve", undefined, conflictErr, parsed.json, io);
+          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "approve", undefined, conflictErr, isJson, io, presentation);
         }
 
         const targetRun = candidates[0]!;
@@ -426,15 +501,15 @@ export async function executeCommand(
           retryable: false,
           message: `Invalid approval decision: ${parseDec.error.issues.map((i) => i.message).join("; ")}`
         };
-        return makeResult(CLI_EXIT_CODES.USAGE_ERROR, false, "approve", undefined, err, parsed.json, io);
+        return makeResult(CLI_EXIT_CODES.USAGE_ERROR, false, "approve", undefined, err, isJson, io, presentation);
       }
 
       const decideRes = await runtime.decide(parseDec.data, context.operationOptions);
       if (!decideRes.ok) {
-        return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "approve", undefined, decideRes.error, parsed.json, io);
+        return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "approve", undefined, decideRes.error, isJson, io, presentation);
       }
 
-      return makeResult(CLI_EXIT_CODES.SUCCESS, true, "approve", decideRes.value, undefined, parsed.json, io);
+      return makeResult(CLI_EXIT_CODES.SUCCESS, true, "approve", decideRes.value, undefined, isJson, io, presentation);
     }
 
     case "resume": {
@@ -451,15 +526,15 @@ export async function executeCommand(
           retryable: false,
           message: `Invalid resume run input: ${parseResume.error.issues.map((i) => i.message).join("; ")}`
         };
-        return makeResult(CLI_EXIT_CODES.USAGE_ERROR, false, "resume", undefined, err, parsed.json, io);
+        return makeResult(CLI_EXIT_CODES.USAGE_ERROR, false, "resume", undefined, err, isJson, io, presentation);
       }
 
       const resumeRes = await runtime.resume(parseResume.data, context.operationOptions);
       if (!resumeRes.ok) {
-        return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "resume", undefined, resumeRes.error, parsed.json, io);
+        return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "resume", undefined, resumeRes.error, isJson, io, presentation);
       }
 
-      return makeResult(CLI_EXIT_CODES.SUCCESS, true, "resume", resumeRes.value, undefined, parsed.json, io);
+      return makeResult(CLI_EXIT_CODES.SUCCESS, true, "resume", resumeRes.value, undefined, isJson, io, presentation);
     }
 
     case "cancel": {
@@ -467,7 +542,7 @@ export async function executeCommand(
       if (expectedVersion === undefined) {
         const snapRes = await runtime.getRun(parsed.runId, context.operationOptions);
         if (!snapRes.ok) {
-          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "cancel", undefined, snapRes.error, parsed.json, io);
+          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "cancel", undefined, snapRes.error, isJson, io, presentation);
         }
         if (snapRes.value === null) {
           const notFoundErr: ContractError = {
@@ -475,7 +550,7 @@ export async function executeCommand(
             retryable: false,
             message: `Run '${parsed.runId}' not found.`
           };
-          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "cancel", undefined, notFoundErr, parsed.json, io);
+          return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "cancel", undefined, notFoundErr, isJson, io, presentation);
         }
         expectedVersion = snapRes.value.version;
       }
@@ -499,15 +574,15 @@ export async function executeCommand(
           retryable: false,
           message: `Invalid cancellation request: ${parseCancel.error.issues.map((i) => i.message).join("; ")}`
         };
-        return makeResult(CLI_EXIT_CODES.USAGE_ERROR, false, "cancel", undefined, err, parsed.json, io);
+        return makeResult(CLI_EXIT_CODES.USAGE_ERROR, false, "cancel", undefined, err, isJson, io, presentation);
       }
 
       const cancelRes = await runtime.cancel(parseCancel.data, context.operationOptions);
       if (!cancelRes.ok) {
-        return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "cancel", undefined, cancelRes.error, parsed.json, io);
+        return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "cancel", undefined, cancelRes.error, isJson, io, presentation);
       }
 
-      return makeResult(CLI_EXIT_CODES.SUCCESS, true, "cancel", cancelRes.value, undefined, parsed.json, io);
+      return makeResult(CLI_EXIT_CODES.SUCCESS, true, "cancel", cancelRes.value, undefined, isJson, io, presentation);
     }
   }
 }
@@ -526,7 +601,8 @@ export async function runCli(
       cwd: context?.cwd, io: context?.io, clock: context?.clock, services: context?.highLevelServices,
       runtime: context?.runtime as HighLevelRunOptions["runtime"], signal: context?.operationOptions?.signal
     };
-    const result = await runHighLevelCli(argv, options);
+    const effectiveArgv = context?.presentation?.json ? ["--json", ...argv] : argv;
+    const result = await runHighLevelCli(effectiveArgv, options);
     return {
       exitCode: result.exitCode,
       ok: result.ok,
@@ -538,7 +614,9 @@ export async function runCli(
   }
   const parseRes = parseCliArgs(argv);
   if (!parseRes.ok) {
-    const stderr = formatCommandError(parseRes.error, parseRes.command, parseRes.json);
+    const isJson = Boolean(parseRes.json) || Boolean(context?.presentation?.json);
+    const presentation = resolvePresentation(context, isJson);
+    const stderr = formatCommandError(parseRes.error, parseRes.command, isJson, presentation);
     if (context?.io !== undefined) {
       context.io.stderr(stderr);
     }
