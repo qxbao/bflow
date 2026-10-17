@@ -1,0 +1,15 @@
+{
+  "version": "1.0.0",
+  "allowedRoles": [
+    "coordinator",
+    "planner"
+  ],
+  "supportedProviders": [
+    "claude",
+    "codex",
+    "agy"
+  ],
+  "dependencies": [],
+  "requiredCapabilityIds": [],
+  "requiredToolIds": []
+}

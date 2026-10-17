@@ -1,0 +1,21 @@
+{
+  "version": "1.0.0",
+  "allowedRoles": [
+    "specifier",
+    "architect",
+    "planner",
+    "developer",
+    "reviewer",
+    "security"
+  ],
+  "supportedProviders": [
+    "claude",
+    "codex",
+    "agy"
+  ],
+  "dependencies": [],
+  "requiredCapabilityIds": [],
+  "requiredToolIds": [
+    "gitnexus"
+  ]
+}

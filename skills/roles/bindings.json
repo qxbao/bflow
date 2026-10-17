@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 3,
+  "bindings": {
+    "conversation": [
+      "using-bflow",
+      "understand-task",
+      "report-progress",
+      "request-approval"
+    ],
+    "coordinator": [
+      "using-bflow",
+      "task-decomposition",
+      "workflow-orchestration",
+      "agent-delegation",
+      "escalation-resolution",
+      "run-verification"
+    ],
+    "specifier": [
+      "using-bflow",
+      "inspect-repository",
+      "requirements-analysis",
+      "specification-driven-development"
+    ],
+    "architect": [
+      "using-bflow",
+      "architecture-analysis",
+      "use-gitnexus",
+      "design-review"
+    ],
+    "planner": [
+      "using-bflow",
+      "task-decomposition",
+      "dependency-planning",
+      "conditional-tdd"
+    ],
+    "developer": [
+      "using-bflow",
+      "inspect-repository",
+      "implement-task",
+      "conditional-tdd",
+      "use-rtk",
+      "use-gitnexus",
+      "use-git-worktree",
+      "run-verification"
+    ],
+    "reviewer": [
+      "using-bflow",
+      "review-code",
+      "security-review",
+      "use-gitnexus",
+      "run-verification"
+    ],
+    "tester": [
+      "using-bflow",
+      "test-planning",
+      "run-verification",
+      "browser-inspection",
+      "analyze-failure"
+    ],
+    "qa": [
+      "using-bflow",
+      "test-planning",
+      "run-verification",
+      "browser-inspection",
+      "analyze-failure"
+    ],
+    "security": [
+      "using-bflow",
+      "security-review",
+      "review-code",
+      "run-verification"
+    ]
+  }
+}

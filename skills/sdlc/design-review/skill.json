@@ -1,0 +1,16 @@
+{
+  "version": "1.0.0",
+  "allowedRoles": [
+    "architect",
+    "reviewer",
+    "security"
+  ],
+  "supportedProviders": [
+    "claude",
+    "codex",
+    "agy"
+  ],
+  "dependencies": [],
+  "requiredCapabilityIds": [],
+  "requiredToolIds": []
+}

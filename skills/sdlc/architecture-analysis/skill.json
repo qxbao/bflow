@@ -1,0 +1,14 @@
+{
+  "version": "1.0.0",
+  "allowedRoles": [
+    "architect"
+  ],
+  "supportedProviders": [
+    "claude",
+    "codex",
+    "agy"
+  ],
+  "dependencies": [],
+  "requiredCapabilityIds": [],
+  "requiredToolIds": []
+}

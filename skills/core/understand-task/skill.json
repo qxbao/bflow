@@ -1,0 +1,18 @@
+{
+  "version": "1.0.0",
+  "allowedRoles": [
+    "conversation",
+    "coordinator",
+    "specifier",
+    "planner",
+    "architect"
+  ],
+  "supportedProviders": [
+    "claude",
+    "codex",
+    "agy"
+  ],
+  "dependencies": [],
+  "requiredCapabilityIds": [],
+  "requiredToolIds": []
+}

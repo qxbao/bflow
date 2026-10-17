@@ -1,0 +1,19 @@
+{
+  "version": "1.0.0",
+  "allowedRoles": [
+    "developer",
+    "tester",
+    "qa",
+    "reviewer"
+  ],
+  "supportedProviders": [
+    "claude",
+    "codex",
+    "agy"
+  ],
+  "dependencies": [],
+  "requiredCapabilityIds": [],
+  "requiredToolIds": [
+    "rtk"
+  ]
+}
