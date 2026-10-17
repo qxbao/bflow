@@ -3,6 +3,7 @@ import type { EnvironmentDoctorReport, SessionManifest } from "@bflow/contracts"
 import type {
   ApprovalDecision,
   CancellationRequest,
+  CommandExecutionResult,
   ContractError,
   OperationOptions,
   Page,
@@ -14,6 +15,17 @@ import type {
   WorkflowRunSnapshot
 } from "@bflow/contracts";
 import type { ConcreteRuntimeService } from "@bflow/runtime";
+
+export type HighLevelCommandName =
+  | "repo inspect"
+  | "task plan"
+  | "task implement"
+  | "verify"
+  | "git prepare"
+  | "mcp status"
+  | "tool status"
+  | "skills sync"
+  | "agent check";
 
 export type CliCommandName =
   | "up"
@@ -28,7 +40,8 @@ export type CliCommandName =
   | "resume"
   | "cancel"
   | "help"
-  | "version";
+  | "version"
+  | HighLevelCommandName;
 
 export const CLI_EXIT_CODES = {
   SUCCESS: 0,
@@ -114,6 +127,116 @@ export interface VersionCommandArgs extends GlobalCliFlags {
   readonly command: "version";
 }
 
+export interface HighLevelCommonFlags extends GlobalCliFlags {
+  readonly correlationId?: string | undefined;
+  readonly idempotencyKey?: string | undefined;
+  readonly resume: boolean;
+  readonly actor?: string | undefined;
+  readonly role?: string | undefined;
+  readonly permissionMode?: "restricted" | "workspace_auto" | "unattended_isolated" | undefined;
+  readonly sessionId?: string | undefined;
+  readonly isolation?: "provider_policy" | "os_sandbox" | "container" | undefined;
+}
+
+export interface RepoInspectCommandArgs extends HighLevelCommonFlags {
+  readonly command: "repo inspect";
+  readonly dir?: string | undefined;
+  readonly includeFiles: boolean;
+  readonly maxFiles?: number | undefined;
+}
+
+export interface TaskPlanCommandArgs extends HighLevelCommonFlags {
+  readonly command: "task plan";
+  readonly specPath: string;
+  readonly workflowPath?: string | undefined;
+  readonly runId?: string | undefined;
+}
+
+export interface TaskImplementCommandArgs extends HighLevelCommonFlags {
+  readonly command: "task implement";
+  readonly taskId: string;
+  readonly runId: string;
+  readonly specPath?: string | undefined;
+  readonly workflowPath?: string | undefined;
+  readonly attemptId?: string | undefined;
+  readonly baseRevision?: string | undefined;
+  readonly ownedPaths: readonly string[];
+  readonly forbiddenPaths: readonly string[];
+  readonly developerId?: string | undefined;
+  readonly requireRedEvidence: boolean;
+  readonly targetBranch?: string | undefined;
+  readonly environmentName?: string | undefined;
+  readonly autoApprove: boolean;
+  readonly approvedBy?: string | undefined;
+}
+
+export interface VerifyCommandArgs extends HighLevelCommonFlags {
+  readonly command: "verify";
+  readonly runId?: string | undefined;
+  readonly taskId?: string | undefined;
+  readonly scope: "task" | "workflow";
+  readonly specPath?: string | undefined;
+  readonly planPath?: string | undefined;
+  readonly changeSetPath?: string | undefined;
+  readonly cyclePath?: string | undefined;
+  readonly maxIterations?: number | undefined;
+}
+
+export interface GitPrepareTaskDependencyInput {
+  readonly taskKey: string;
+  readonly dependsOn: readonly string[];
+}
+
+export interface GitPrepareCommandArgs extends HighLevelCommonFlags {
+  readonly command: "git prepare";
+  readonly runId: string;
+  readonly integrationId?: string | undefined;
+  readonly baseRevision?: string | undefined;
+  readonly tasks: readonly GitPrepareTaskDependencyInput[];
+  readonly targetBranch?: string | undefined;
+  readonly environmentName?: string | undefined;
+  readonly autoApprove: boolean;
+  readonly approvedBy?: string | undefined;
+}
+
+export interface McpStatusCommandArgs extends HighLevelCommonFlags {
+  readonly command: "mcp status";
+  readonly serviceIds: readonly string[];
+}
+
+export interface ToolStatusCommandArgs extends HighLevelCommonFlags {
+  readonly command: "tool status";
+  readonly toolIds: readonly string[];
+}
+
+export interface SkillsSyncCommandArgs extends HighLevelCommonFlags {
+  readonly command: "skills sync";
+  readonly mode: "sync" | "list";
+  readonly provider?: "claude" | "codex" | "agy" | undefined;
+  readonly manifestId?: string | undefined;
+  readonly environmentId?: string | undefined;
+  readonly catalogDir?: string | undefined;
+  readonly storeDir?: string | undefined;
+}
+
+export interface AgentCheckCommandArgs extends HighLevelCommonFlags {
+  readonly command: "agent check";
+  readonly provider?: "claude" | "codex" | "agy" | undefined;
+  readonly stage: "preflight" | "activated";
+  readonly environmentId?: string | undefined;
+}
+
+export type HighLevelParsedCliCommand =
+  | RepoInspectCommandArgs
+  | TaskPlanCommandArgs
+  | TaskImplementCommandArgs
+  | VerifyCommandArgs
+  | GitPrepareCommandArgs
+  | McpStatusCommandArgs
+  | ToolStatusCommandArgs
+  | SkillsSyncCommandArgs
+  | AgentCheckCommandArgs;
+
 export type ParsedCliCommand =
   | EnvironmentCommandArgs
   | InitCommandArgs
@@ -123,7 +246,8 @@ export type ParsedCliCommand =
   | ResumeCommandArgs
   | CancelCommandArgs
   | HelpCommandArgs
-  | VersionCommandArgs;
+  | VersionCommandArgs
+  | HighLevelParsedCliCommand;
 
 export type ParseCliResult =
   | { readonly ok: true; readonly value: ParsedCliCommand }
@@ -155,6 +279,37 @@ export interface InitCommandOutput {
   readonly overwritten: boolean;
 }
 
+export interface HighLevelStepRecord {
+  readonly stepId: string;
+  readonly name: string;
+  readonly status: "succeeded" | "failed" | "skipped" | "unknown";
+  readonly mutating: boolean;
+  readonly startedAt: string;
+  readonly completedAt?: string | undefined;
+  readonly output?: unknown;
+  readonly error?: ContractError | undefined;
+}
+
+export interface HighLevelCommandOutput {
+  readonly schemaVersion: 3;
+  readonly command: HighLevelCommandName;
+  readonly commandId: string;
+  readonly correlationId: string;
+  readonly idempotencyKey: string;
+  readonly runId?: string | undefined;
+  readonly taskId?: string | undefined;
+  readonly status: "accepted" | "waiting_user" | "succeeded" | "failed" | "unknown";
+  readonly reusedReceipt: boolean;
+  readonly resumedFromStep?: string | undefined;
+  readonly steps: readonly HighLevelStepRecord[];
+  readonly executionResult: CommandExecutionResult;
+  readonly details: Readonly<Record<string, unknown>>;
+}
+
+export interface HighLevelServices {
+  readonly [key: string]: unknown;
+}
+
 export type CliCommandData =
   | EnvironmentStatus
   | EnvironmentDoctorReport
@@ -163,7 +318,8 @@ export type CliCommandData =
   | WorkflowRunSnapshot
   | Page<WorkflowRunSnapshot>
   | { readonly helpText: string; readonly topic?: string | undefined }
-  | { readonly version: string };
+  | { readonly version: string }
+  | HighLevelCommandOutput;
 
 export interface CliJsonSuccessEnvelope<T = CliCommandData> {
   readonly ok: true;
@@ -192,6 +348,7 @@ export interface CliContext {
   readonly clock?: (() => Date) | undefined;
   readonly confirmOverwrite?: ((configPath: string) => Promise<boolean> | boolean) | undefined;
   readonly operationOptions?: OperationOptions | undefined;
+  readonly highLevel?: HighLevelServices | undefined;
 }
 
 export interface CliExecutionResult {
@@ -207,6 +364,7 @@ export interface CliExecutionResult {
 export type {
   ApprovalDecision,
   CancellationRequest,
+  CommandExecutionResult,
   ContractError,
   OperationOptions,
   Page,

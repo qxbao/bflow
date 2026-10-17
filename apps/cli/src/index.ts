@@ -34,7 +34,24 @@ export {
   type StartRunInput,
   type WorkflowDefinition,
   type WorkflowRunSnapshot,
-  type RuntimeServicePort
+  type RuntimeServicePort,
+  type HighLevelCommandName,
+  type HighLevelCommonFlags,
+  type RepoInspectCommandArgs,
+  type TaskPlanCommandArgs,
+  type TaskImplementCommandArgs,
+  type VerifyCommandArgs,
+  type GitPrepareCommandArgs,
+  type GitPrepareTaskDependencyInput,
+  type McpStatusCommandArgs,
+  type ToolStatusCommandArgs,
+  type SkillsSyncCommandArgs,
+  type AgentCheckCommandArgs,
+  type HighLevelParsedCliCommand,
+  type HighLevelStepRecord,
+  type HighLevelCommandOutput,
+  type HighLevelServices,
+  type CommandExecutionResult
 } from "./types.js";
 
 export { parseCliArgs } from "./parser.js";
@@ -67,3 +84,47 @@ export { environmentProcessRunner, namedSessionEnvironment } from "./environment
 export type { EnvironmentProcessRunner, EnvironmentProcessRequest, EnvironmentProcessResult } from "./environment-process.js";
 export { PaneManagerLifecycleAdapter, createNamedPaneRunner, openPaneManagerEnvironment } from "./pane-manager-integration.js";
 export type { LifecycleHost, LifecycleHostFactory, HostRoleLaunch } from "./agentic-host.js";
+
+export {
+  SUPPORTED_CLI_COMMANDS,
+  type SupportedCliCommand,
+  CLI_COMMAND_REFERENCE,
+  type CliCommandReferenceEntry,
+  renderCommandReferenceMarkdown
+} from "./command-reference.js";
+
+export interface CliCommandFlagReference {
+  readonly flag: string;
+  readonly description?: string;
+  readonly required?: boolean;
+}
+
+export {
+  CommandOperationLedger,
+  computeRequestFingerprint,
+  withCommandLock,
+  enforceCommandGovernance,
+  runTrackedSteps,
+  PROTECTED_BRANCH_REGEX,
+  PRODUCTION_ENV_REGEX,
+  type StoredCommandReceipt,
+  type IdempotencyAction,
+  type TrackedStepDef,
+  type TrackedStepDef as TrackedStepDefinition,
+  type RunTrackedStepsOptions,
+  type RunTrackedStepsResult,
+  type CommandGovernanceInput,
+  type CommandGovernanceInput as GovernanceCheckInput
+} from "./operation-ledger.js";
+
+export {
+  HighLevelCliFacade,
+  makeExecutionResult,
+  type HighLevelFacadePorts
+} from "./high-level-facade.js";
+
+export {
+  isHighLevelCommand,
+  executeHighLevelCommand,
+  type HighLevelExecutionResult
+} from "./high-level-commands.js";

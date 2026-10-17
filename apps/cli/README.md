@@ -174,3 +174,51 @@ are preserved until an explicit checked restart; no silent conversation reset.
 Native startup waits for authenticated SessionStart receipts within the command
 deadline. A blocked provider reports the role, provider, exact pane/session and
 manual remediation without returning raw terminal output or accepting dialogs.
+
+## High-level SDLC commands (P29)
+
+Phase P29 adds 9 high-level, skill-friendly commands for autonomous agent execution and human operations.
+These commands compose underlying SDLC packages (`@bflow/specification`, `@bflow/test-strategy`,
+`@bflow/verification`, `@bflow/git-orchestrator`, `@bflow/mcp-gateway`, `@bflow/skills`, etc.)
+through the unified `HighLevelCliFacade` without exposing concrete internal engines directly.
+
+For exhaustive parameter references, schema definitions, and skill bindings, see [COMMAND_REFERENCE.md](./COMMAND_REFERENCE.md).
+
+### High-level command summary
+
+| Command | Purpose | Reused SDLC engines | Key flags |
+| --- | --- | --- | --- |
+| `bflow repo inspect` | Inspects workspace structure, conventions, and Git status for agent intake. | `ProjectContextService`, Git inspection | `--dir <path>`, `--include-files`, `--max-files <n>` |
+| `bflow task plan` | Decomposes a specification into a validated task DAG with acceptance criteria. | `SpecificationEngine`, Planner Agent | `--spec <path>`, `-w, --workflow <path>`, `--run-id <id>` |
+| `bflow task implement` | Implements a task in an isolated Git worktree under conditional TDD rules. | `DeveloperAgent`, `TestStrategyResolver`, `GitOrchestrator` | `<task-id>`, `--run-id <id>`, `--require-red-evidence` |
+| `bflow verify` | Executes task-level or workflow-level verification against acceptance criteria. | `VerificationEngine`, `QualityGates` | `[task-id]`, `--scope <task\|workflow>`, `--spec <path>` |
+| `bflow git prepare` | Prepares dependency-ordered branch integration and validates worktrees. | `GitOrchestrator` | `--run-id <id>`, `--target-branch <branch>`, `--auto-approve` |
+| `bflow mcp status` | Probes registered MCP tools and bridge connectivity. | `McpGateway` | `--service <id>` |
+| `bflow tool status` | Checks availability, version, and health of pinned tools (e.g. RTK). | `ToolInstaller`, `ToolCatalog` | `--tool <id>` (alias: `bflow tools status`) |
+| `bflow skills sync` | Synchronizes approved skills from catalog to agent provider storage. | `SkillManager`, `SkillStore` | `--list`, `--provider <claude\|codex\|agy>` |
+| `bflow agent check` | Validates provider readiness and activated health against contracts. | `AgentProviderRegistry` | `--provider <claude\|codex\|agy>`, `--stage <preflight\|activated>` |
+
+All high-level commands accept standard execution flags:
+- `--correlation-id <id>`: Distributed tracing correlation identifier.
+- `--idempotency-key <key>`: Deterministic execution key for durable receipt reuse.
+- `--resume`: Resumes execution from the first incomplete or uncertain step.
+- `--actor <id>`, `--role <role>`: Execution identity and role attribution.
+- `--permission-mode <mode>`: Permission mode (`restricted`, `workspace_auto`, `unattended_isolated`).
+- `--session-id <id>`: Session identifier (mandatory for `unattended_isolated`).
+- `--isolation <kind>`: Isolation level (`provider_policy`, `os_sandbox`, `container`).
+- `-j, --json`: Structured JSON envelope output complying with schema version 3.
+- `-h, --help`: Displays command usage and available flags.
+
+### Governance and security enforcement
+
+Every high-level command passes through deterministic governance checks before executing side effects:
+1. **Protected Branch & Production Guard**: Merges targeting protected branches (`main`, `master`, `prod*`, `release/*`, `hotfix/*`) or production environments strictly reject `--auto-approve`. Explicit human approval (`--approved-by <human_operator>`) is required.
+2. **Permission Profile Constraints**: Mutating commands (`task implement`, `git prepare`, `skills sync`) are rejected under `restricted` mode (read-only). `unattended_isolated` mode requires an explicit `--session-id` and OS or container isolation (`--isolation os_sandbox|container`).
+3. **Role Boundary Enforcement**: The `conversation` role represents the user interface only. Direct mutation commands (`task implement`, `git prepare`, `verify`) are rejected if invoked with `--role conversation`.
+
+### Concurrency locking, durable ledger, and idempotency
+
+- **Concurrency Locking**: Command execution scopes are guarded by file-based concurrency locks located at `.bflow/state/commands/locks/<hash>.lock` with in-process PID tracking. Simultaneous invocations on the same scope reject with a `conflict` error.
+- **Durable Operation Ledger**: Execution progress is recorded step-by-step in `.bflow/state/commands/receipts/<hash>.json`. Repeated invocations with the same idempotency key return the cached receipt (`reusedReceipt: true`) without re-running operations.
+- **Uncertain State Protection**: If a mutating step fails or is interrupted, subsequent attempts require `--resume` to reconcile prior state rather than blindly re-running mutations.
+- **Step Resumption**: Passing `--resume` detects completed steps from the prior receipt, skips already-succeeded steps, invokes step-level reconciliation handlers if defined, and continues from the first incomplete step.

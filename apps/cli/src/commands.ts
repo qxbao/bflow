@@ -31,8 +31,10 @@ import {
   type CliExecutionResult,
   type CliExitCode,
   type CliIo,
+  type HighLevelParsedCliCommand,
   type ParsedCliCommand
 } from "./types.js";
+import { executeHighLevelCommand, isHighLevelCommand } from "./high-level-commands.js";
 
 function loadPackageVersion(): string {
   try {
@@ -105,6 +107,22 @@ export async function executeCommand(
       version: CLI_VERSION
     };
     return makeResult(CLI_EXIT_CODES.SUCCESS, true, "version", data, undefined, parsed.json, io);
+  }
+
+  if (isHighLevelCommand(parsed.command)) {
+    const hlResult = await executeHighLevelCommand(
+      parsed as HighLevelParsedCliCommand,
+      context
+    );
+    return makeResult(
+      hlResult.exitCode,
+      hlResult.ok,
+      parsed.command,
+      hlResult.data,
+      hlResult.error,
+      parsed.json,
+      io
+    );
   }
 
   if (["up", "down", "attach", "doctor", "recover"].includes(parsed.command) ||

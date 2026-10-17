@@ -1,4 +1,5 @@
 import {
+  AgentRoleSchema,
   IdempotencyKeySchema,
   IdentifierSchema,
   RunStatusSchema,
@@ -7,15 +8,27 @@ import {
 } from "@bflow/contracts";
 import { isHumanApprover } from "@bflow/runtime";
 import type {
+  AgentCheckCommandArgs,
   ApproveCommandArgs,
   CancelCommandArgs,
   CliCommandName,
+  GitPrepareCommandArgs,
+  GitPrepareTaskDependencyInput,
   HelpCommandArgs,
+  HighLevelCommandName,
+  HighLevelCommonFlags,
   InitCommandArgs,
+  McpStatusCommandArgs,
   ParseCliResult,
+  RepoInspectCommandArgs,
   ResumeCommandArgs,
   RunCommandArgs,
+  SkillsSyncCommandArgs,
   StatusCommandArgs,
+  TaskImplementCommandArgs,
+  TaskPlanCommandArgs,
+  ToolStatusCommandArgs,
+  VerifyCommandArgs,
   VersionCommandArgs
 } from "./types.js";
 
@@ -32,7 +45,52 @@ const VALID_COMMANDS: ReadonlySet<CliCommandName> = new Set([
   "resume",
   "cancel",
   "help",
-  "version"
+  "version",
+  "repo inspect",
+  "task plan",
+  "task implement",
+  "verify",
+  "git prepare",
+  "mcp status",
+  "tool status",
+  "skills sync",
+  "agent check"
+]);
+
+const HIGH_LEVEL_PREFIXES: ReadonlySet<string> = new Set([
+  "repo",
+  "task",
+  "verify",
+  "git",
+  "mcp",
+  "tool",
+  "tools",
+  "skills",
+  "agent"
+]);
+
+const COMMON_HIGH_LEVEL_FLAGS: ReadonlySet<string> = new Set([
+  "--json",
+  "-j",
+  "--help",
+  "-h",
+  "--correlation-id",
+  "--idempotency-key",
+  "--resume",
+  "--actor",
+  "--by",
+  "--role",
+  "--permission-mode",
+  "--session-id",
+  "--isolation"
+]);
+
+const COMMON_HIGH_LEVEL_BOOLEANS: ReadonlySet<string> = new Set([
+  "--json",
+  "-j",
+  "--help",
+  "-h",
+  "--resume"
 ]);
 
 const GLOBAL_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
@@ -155,6 +213,1079 @@ function extractOptionsAndPositional(
   return { ok: true, value: { flags, positional } };
 }
 
+interface HighLevelParsedOptions {
+  readonly flags: Map<string, string>;
+  readonly multiFlags: Map<string, string[]>;
+  readonly booleanFlags: Set<string>;
+  readonly positional: readonly string[];
+}
+
+function extractHighLevelOptions(
+  args: readonly string[],
+  booleanFlags: ReadonlySet<string>,
+  allowedFlags: ReadonlySet<string>,
+  command: HighLevelCommandName,
+  json: boolean
+): { readonly ok: true; readonly value: HighLevelParsedOptions } | { readonly ok: false; readonly result: ParseCliResult } {
+  const flags = new Map<string, string>();
+  const multiFlags = new Map<string, string[]>();
+  const parsedBooleanFlags = new Set<string>();
+  const positional: string[] = [];
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+
+    if (arg === "--") {
+      for (let j = i + 1; j < args.length; j++) {
+        positional.push(args[j]!);
+      }
+      break;
+    }
+
+    if (isFlag(arg)) {
+      let flagName: string;
+      let flagValue: string | undefined;
+
+      const equalsIndex = arg.indexOf("=");
+      if (equalsIndex !== -1) {
+        flagName = arg.slice(0, equalsIndex);
+        flagValue = arg.slice(equalsIndex + 1);
+      } else {
+        flagName = arg;
+      }
+
+      if (!allowedFlags.has(flagName)) {
+        return {
+          ok: false,
+          result: makeValidationError(`Unknown option '${flagName}' for command '${command}'.`, json, command)
+        };
+      }
+
+      if (equalsIndex !== -1 && booleanFlags.has(flagName)) {
+        return {
+          ok: false,
+          result: makeValidationError(`Option '${flagName}' does not take a value.`, json, command)
+        };
+      }
+
+      if (equalsIndex !== -1 && flagValue !== undefined && flagValue.length === 0) {
+        return {
+          ok: false,
+          result: makeValidationError(`Option '${flagName}' requires a value.`, json, command)
+        };
+      }
+
+      if (booleanFlags.has(flagName)) {
+        parsedBooleanFlags.add(flagName);
+        continue;
+      }
+
+      if (flagValue === undefined) {
+        const nextArg = args[i + 1];
+        if (nextArg === undefined || isFlag(nextArg)) {
+          return {
+            ok: false,
+            result: makeValidationError(`Option '${flagName}' requires a value.`, json, command)
+          };
+        }
+        flagValue = nextArg;
+        i++;
+      }
+
+      flags.set(flagName, flagValue);
+      const existing = multiFlags.get(flagName);
+      if (existing) {
+        existing.push(flagValue);
+      } else {
+        multiFlags.set(flagName, [flagValue]);
+      }
+    } else {
+      positional.push(arg);
+    }
+  }
+
+  return { ok: true, value: { flags, multiFlags, booleanFlags: parsedBooleanFlags, positional } };
+}
+
+function collectListOption(
+  multiFlags: Map<string, string[]>,
+  ...flagNames: readonly string[]
+): string[] {
+  const result: string[] = [];
+  for (const name of flagNames) {
+    const values = multiFlags.get(name);
+    if (values) {
+      for (const val of values) {
+        for (const item of val.split(",")) {
+          const trimmed = item.trim();
+          if (trimmed.length > 0) {
+            result.push(trimmed);
+          }
+        }
+      }
+    }
+  }
+  return result;
+}
+
+function parseHighLevelCommonFlags(
+  opts: HighLevelParsedOptions,
+  json: boolean,
+  command: HighLevelCommandName
+): { readonly ok: true; readonly value: HighLevelCommonFlags } | { readonly ok: false; readonly result: ParseCliResult } {
+  const correlationId = opts.flags.get("--correlation-id");
+  if (correlationId !== undefined) {
+    if (!isValidIdentifier(correlationId)) {
+      return {
+        ok: false,
+        result: makeValidationError(`Invalid correlation identifier '${correlationId}'.`, json, command)
+      };
+    }
+  }
+
+  const idempotencyKey = opts.flags.get("--idempotency-key");
+  if (idempotencyKey !== undefined) {
+    const idempParse = IdempotencyKeySchema.safeParse(idempotencyKey);
+    if (!idempParse.success) {
+      return {
+        ok: false,
+        result: makeValidationError(`Invalid idempotency key '${idempotencyKey}'.`, json, command)
+      };
+    }
+  }
+
+  const resume = opts.booleanFlags.has("--resume");
+
+  const rawActor = opts.flags.get("--actor") ?? opts.flags.get("--by");
+  let actor: string | undefined;
+  if (rawActor !== undefined) {
+    const flagUsed = opts.flags.has("--actor") ? "--actor" : "--by";
+    if (rawActor.trim().length === 0) {
+      return {
+        ok: false,
+        result: makeValidationError(`Option '${flagUsed}' cannot be empty.`, json, command)
+      };
+    }
+    actor = rawActor.trim();
+  }
+
+  const rawRole = opts.flags.get("--role");
+  let role: string | undefined;
+  if (rawRole !== undefined) {
+    const roleParse = AgentRoleSchema.safeParse(rawRole);
+    if (!roleParse.success) {
+      return {
+        ok: false,
+        result: makeValidationError(
+          `Invalid role '${rawRole}'. Must be one of: ${AgentRoleSchema.options.join(", ")}.`,
+          json,
+          command
+        )
+      };
+    }
+    role = roleParse.data;
+  }
+
+  const rawPermissionMode = opts.flags.get("--permission-mode");
+  let permissionMode: "restricted" | "workspace_auto" | "unattended_isolated" | undefined;
+  if (rawPermissionMode !== undefined) {
+    if (
+      rawPermissionMode !== "restricted" &&
+      rawPermissionMode !== "workspace_auto" &&
+      rawPermissionMode !== "unattended_isolated"
+    ) {
+      return {
+        ok: false,
+        result: makeValidationError(
+          `Invalid permission mode '${rawPermissionMode}'. Must be 'restricted', 'workspace_auto', or 'unattended_isolated'.`,
+          json,
+          command
+        )
+      };
+    }
+    permissionMode = rawPermissionMode;
+  }
+
+  const sessionId = opts.flags.get("--session-id");
+  if (sessionId !== undefined) {
+    if (!isValidIdentifier(sessionId)) {
+      return {
+        ok: false,
+        result: makeValidationError(`Invalid session identifier '${sessionId}'.`, json, command)
+      };
+    }
+  }
+
+  const rawIsolation = opts.flags.get("--isolation");
+  let isolation: "provider_policy" | "os_sandbox" | "container" | undefined;
+  if (rawIsolation !== undefined) {
+    if (
+      rawIsolation !== "provider_policy" &&
+      rawIsolation !== "os_sandbox" &&
+      rawIsolation !== "container"
+    ) {
+      return {
+        ok: false,
+        result: makeValidationError(
+          `Invalid isolation '${rawIsolation}'. Must be 'provider_policy', 'os_sandbox', or 'container'.`,
+          json,
+          command
+        )
+      };
+    }
+    isolation = rawIsolation;
+  }
+
+  return {
+    ok: true,
+    value: {
+      json,
+      help: false,
+      correlationId,
+      idempotencyKey,
+      resume,
+      actor,
+      role,
+      permissionMode,
+      sessionId,
+      isolation
+    }
+  };
+}
+
+function resolveHelpTopic(
+  tokens: readonly string[]
+): { readonly ok: true; readonly topic: CliCommandName } | { readonly ok: false; readonly topic: string } | undefined {
+  if (tokens.length === 0) return undefined;
+  const t0 = tokens[0]!;
+  const t1 = tokens[1];
+
+  if (t0 === "help") {
+    const inner = tokens.slice(1).filter((a) => !isFlag(a));
+    return resolveHelpTopic(inner);
+  }
+
+  if (t0 === "repo") {
+    if (t1 === "inspect" || t1 === undefined || isFlag(t1)) return { ok: true, topic: "repo inspect" };
+    return { ok: false, topic: `${t0} ${t1}` };
+  }
+
+  if (t0 === "task") {
+    if (t1 === "plan") return { ok: true, topic: "task plan" };
+    if (t1 === "implement") return { ok: true, topic: "task implement" };
+    if (t1 === undefined || isFlag(t1)) return { ok: true, topic: "task plan" };
+    return { ok: false, topic: `${t0} ${t1}` };
+  }
+
+  if (t0 === "git") {
+    if (t1 === "prepare" || t1 === undefined || isFlag(t1)) return { ok: true, topic: "git prepare" };
+    return { ok: false, topic: `${t0} ${t1}` };
+  }
+
+  if (t0 === "mcp") {
+    if (t1 === "status" || t1 === undefined || isFlag(t1)) return { ok: true, topic: "mcp status" };
+    return { ok: false, topic: `${t0} ${t1}` };
+  }
+
+  if (t0 === "tool" || t0 === "tools") {
+    if (t1 === "status" || t1 === undefined || isFlag(t1)) return { ok: true, topic: "tool status" };
+    return { ok: false, topic: "tool status" };
+  }
+
+  if (t0 === "skills") {
+    if (t1 === "sync" || t1 === "list" || t1 === undefined || isFlag(t1)) return { ok: true, topic: "skills sync" };
+    return { ok: false, topic: `${t0} ${t1}` };
+  }
+
+  if (t0 === "agent") {
+    if (t1 === "check" || t1 === undefined || isFlag(t1)) return { ok: true, topic: "agent check" };
+    return { ok: false, topic: `${t0} ${t1}` };
+  }
+
+  if (t0 === "verify") {
+    return { ok: true, topic: "verify" };
+  }
+
+  if (VALID_COMMANDS.has(t0 as CliCommandName)) {
+    return { ok: true, topic: t0 as CliCommandName };
+  }
+
+  return { ok: false, topic: t0 };
+}
+
+function parseRepoInspect(args: readonly string[], json: boolean): ParseCliResult {
+  const allowed = new Set([...COMMON_HIGH_LEVEL_FLAGS, "--dir", "--include-files", "--max-files"]);
+  const booleans = new Set([...COMMON_HIGH_LEVEL_BOOLEANS, "--include-files"]);
+  const optRes = extractHighLevelOptions(args, booleans, allowed, "repo inspect", json);
+  if (!optRes.ok) return optRes.result;
+
+  if (optRes.value.positional.length > 0) {
+    return makeValidationError(
+      `Unexpected positional argument '${optRes.value.positional[0]}' for 'bflow repo inspect'.`,
+      json,
+      "repo inspect"
+    );
+  }
+
+  const commonRes = parseHighLevelCommonFlags(optRes.value, json, "repo inspect");
+  if (!commonRes.ok) return commonRes.result;
+
+  const rawDir = optRes.value.flags.get("--dir");
+  let dir: string | undefined;
+  if (rawDir !== undefined) {
+    if (rawDir.trim().length === 0) {
+      return makeValidationError("Option '--dir' cannot be empty.", json, "repo inspect");
+    }
+    dir = rawDir.trim();
+  }
+
+  const includeFiles = optRes.value.booleanFlags.has("--include-files");
+
+  const rawMaxFiles = optRes.value.flags.get("--max-files");
+  let maxFiles: number | undefined;
+  if (rawMaxFiles !== undefined) {
+    const num = Number(rawMaxFiles);
+    if (!Number.isSafeInteger(num) || num < 1 || num > 10000) {
+      return makeValidationError(
+        "Option '--max-files' must be an integer between 1 and 10000.",
+        json,
+        "repo inspect"
+      );
+    }
+    maxFiles = num;
+  }
+
+  const value: RepoInspectCommandArgs = {
+    ...commonRes.value,
+    command: "repo inspect",
+    dir,
+    includeFiles,
+    maxFiles
+  };
+  return { ok: true, value };
+}
+
+function parseTaskPlan(args: readonly string[], json: boolean): ParseCliResult {
+  const allowed = new Set([...COMMON_HIGH_LEVEL_FLAGS, "--spec", "--workflow", "-w", "--run-id", "--run"]);
+  const booleans = COMMON_HIGH_LEVEL_BOOLEANS;
+  const optRes = extractHighLevelOptions(args, booleans, allowed, "task plan", json);
+  if (!optRes.ok) return optRes.result;
+
+  let specPath: string;
+  const flagSpec = optRes.value.flags.get("--spec");
+  if (flagSpec !== undefined) {
+    if (optRes.value.positional.length > 0) {
+      return makeValidationError(
+        `Unexpected positional argument '${optRes.value.positional[0]}' for 'bflow task plan'.`,
+        json,
+        "task plan"
+      );
+    }
+    if (flagSpec.trim().length === 0) {
+      return makeValidationError("Option '--spec' cannot be empty.", json, "task plan");
+    }
+    specPath = flagSpec.trim();
+  } else {
+    if (optRes.value.positional.length === 0) {
+      return makeValidationError("Option '--spec' (or positional spec path) is required for 'task plan'.", json, "task plan");
+    }
+    if (optRes.value.positional.length > 1) {
+      return makeValidationError(
+        `Unexpected positional argument '${optRes.value.positional[1]}' for 'bflow task plan'.`,
+        json,
+        "task plan"
+      );
+    }
+    specPath = optRes.value.positional[0]!.trim();
+    if (specPath.length === 0) {
+      return makeValidationError("Positional spec path cannot be empty for 'task plan'.", json, "task plan");
+    }
+  }
+
+  const commonRes = parseHighLevelCommonFlags(optRes.value, json, "task plan");
+  if (!commonRes.ok) return commonRes.result;
+
+  const rawWorkflow = optRes.value.flags.get("--workflow") ?? optRes.value.flags.get("-w");
+  let workflowPath: string | undefined;
+  if (rawWorkflow !== undefined) {
+    if (rawWorkflow.trim().length === 0) {
+      return makeValidationError("Option '--workflow' cannot be empty.", json, "task plan");
+    }
+    workflowPath = rawWorkflow.trim();
+  }
+
+  const rawRunId = optRes.value.flags.get("--run-id") ?? optRes.value.flags.get("--run");
+  let runId: string | undefined;
+  if (rawRunId !== undefined) {
+    if (!isValidIdentifier(rawRunId)) {
+      return makeValidationError(`Invalid run identifier '${rawRunId}'.`, json, "task plan");
+    }
+    runId = rawRunId;
+  }
+
+  const value: TaskPlanCommandArgs = {
+    ...commonRes.value,
+    command: "task plan",
+    specPath,
+    workflowPath,
+    runId
+  };
+  return { ok: true, value };
+}
+
+function parseTaskImplement(args: readonly string[], json: boolean): ParseCliResult {
+  const allowed = new Set([
+    ...COMMON_HIGH_LEVEL_FLAGS,
+    "--task-id",
+    "--task",
+    "--run-id",
+    "--run",
+    "--spec",
+    "--workflow",
+    "-w",
+    "--attempt-id",
+    "--base-revision",
+    "--owned-path",
+    "--forbidden-path",
+    "--developer-id",
+    "--require-red-evidence",
+    "--target-branch",
+    "--environment",
+    "--auto-approve",
+    "--approved-by"
+  ]);
+  const booleans = new Set([...COMMON_HIGH_LEVEL_BOOLEANS, "--require-red-evidence", "--auto-approve"]);
+  const optRes = extractHighLevelOptions(args, booleans, allowed, "task implement", json);
+  if (!optRes.ok) return optRes.result;
+
+  const flagTaskId = optRes.value.flags.get("--task-id") ?? optRes.value.flags.get("--task");
+  let taskId: string;
+  if (flagTaskId !== undefined) {
+    if (optRes.value.positional.length > 0) {
+      return makeValidationError(
+        `Unexpected positional argument '${optRes.value.positional[0]}' for 'bflow task implement'.`,
+        json,
+        "task implement"
+      );
+    }
+    taskId = flagTaskId.trim();
+  } else {
+    if (optRes.value.positional.length === 0) {
+      return makeValidationError("Task identifier is required for 'task implement'.", json, "task implement");
+    }
+    if (optRes.value.positional.length > 1) {
+      return makeValidationError(
+        `Unexpected positional argument '${optRes.value.positional[1]}' for 'bflow task implement'.`,
+        json,
+        "task implement"
+      );
+    }
+    taskId = optRes.value.positional[0]!.trim();
+  }
+
+  if (!isValidIdentifier(taskId)) {
+    return makeValidationError(`Invalid task identifier '${taskId}'.`, json, "task implement");
+  }
+
+  const rawRunId = optRes.value.flags.get("--run-id") ?? optRes.value.flags.get("--run");
+  if (rawRunId === undefined) {
+    return makeValidationError("Option '--run-id' is required for 'task implement'.", json, "task implement");
+  }
+  if (!isValidIdentifier(rawRunId)) {
+    return makeValidationError(`Invalid run identifier '${rawRunId}'.`, json, "task implement");
+  }
+  const runId = rawRunId;
+
+  const commonRes = parseHighLevelCommonFlags(optRes.value, json, "task implement");
+  if (!commonRes.ok) return commonRes.result;
+
+  const rawSpec = optRes.value.flags.get("--spec");
+  let specPath: string | undefined;
+  if (rawSpec !== undefined) {
+    if (rawSpec.trim().length === 0) {
+      return makeValidationError("Option '--spec' cannot be empty.", json, "task implement");
+    }
+    specPath = rawSpec.trim();
+  }
+
+  const rawWorkflow = optRes.value.flags.get("--workflow") ?? optRes.value.flags.get("-w");
+  let workflowPath: string | undefined;
+  if (rawWorkflow !== undefined) {
+    if (rawWorkflow.trim().length === 0) {
+      return makeValidationError("Option '--workflow' cannot be empty.", json, "task implement");
+    }
+    workflowPath = rawWorkflow.trim();
+  }
+
+  const rawAttempt = optRes.value.flags.get("--attempt-id");
+  let attemptId: string | undefined;
+  if (rawAttempt !== undefined) {
+    if (!isValidIdentifier(rawAttempt)) {
+      return makeValidationError(`Invalid attempt identifier '${rawAttempt}'.`, json, "task implement");
+    }
+    attemptId = rawAttempt;
+  }
+
+  const rawBaseRev = optRes.value.flags.get("--base-revision");
+  let baseRevision: string | undefined;
+  if (rawBaseRev !== undefined) {
+    if (rawBaseRev.trim().length === 0) {
+      return makeValidationError("Option '--base-revision' cannot be empty.", json, "task implement");
+    }
+    baseRevision = rawBaseRev.trim();
+  }
+
+  const ownedPaths = collectListOption(optRes.value.multiFlags, "--owned-path");
+  const forbiddenPaths = collectListOption(optRes.value.multiFlags, "--forbidden-path");
+
+  const rawDevId = optRes.value.flags.get("--developer-id");
+  let developerId: string | undefined;
+  if (rawDevId !== undefined) {
+    if (!isValidIdentifier(rawDevId)) {
+      return makeValidationError(`Invalid developer identifier '${rawDevId}'.`, json, "task implement");
+    }
+    developerId = rawDevId;
+  }
+
+  const requireRedEvidence = optRes.value.booleanFlags.has("--require-red-evidence");
+
+  const rawTargetBranch = optRes.value.flags.get("--target-branch");
+  let targetBranch: string | undefined;
+  if (rawTargetBranch !== undefined) {
+    if (rawTargetBranch.trim().length === 0) {
+      return makeValidationError("Option '--target-branch' cannot be empty.", json, "task implement");
+    }
+    targetBranch = rawTargetBranch.trim();
+  }
+
+  const rawEnv = optRes.value.flags.get("--environment");
+  let environmentName: string | undefined;
+  if (rawEnv !== undefined) {
+    if (rawEnv.trim().length === 0) {
+      return makeValidationError("Option '--environment' cannot be empty.", json, "task implement");
+    }
+    environmentName = rawEnv.trim();
+  }
+
+  const autoApprove = optRes.value.booleanFlags.has("--auto-approve");
+
+  const rawApprovedBy = optRes.value.flags.get("--approved-by");
+  let approvedBy: string | undefined;
+  if (rawApprovedBy !== undefined) {
+    if (rawApprovedBy.trim().length === 0) {
+      return makeValidationError("Option '--approved-by' cannot be empty.", json, "task implement");
+    }
+    approvedBy = rawApprovedBy.trim();
+  }
+
+  const value: TaskImplementCommandArgs = {
+    ...commonRes.value,
+    command: "task implement",
+    taskId,
+    runId,
+    specPath,
+    workflowPath,
+    attemptId,
+    baseRevision,
+    ownedPaths,
+    forbiddenPaths,
+    developerId,
+    requireRedEvidence,
+    targetBranch,
+    environmentName,
+    autoApprove,
+    approvedBy
+  };
+  return { ok: true, value };
+}
+
+function parseVerify(args: readonly string[], json: boolean): ParseCliResult {
+  const allowed = new Set([
+    ...COMMON_HIGH_LEVEL_FLAGS,
+    "--run-id",
+    "--run",
+    "--task-id",
+    "--task",
+    "--scope",
+    "--spec",
+    "--plan",
+    "--change-set",
+    "--cycle",
+    "--max-iterations"
+  ]);
+  const booleans = COMMON_HIGH_LEVEL_BOOLEANS;
+  const optRes = extractHighLevelOptions(args, booleans, allowed, "verify", json);
+  if (!optRes.ok) return optRes.result;
+
+  const flagTaskId = optRes.value.flags.get("--task-id") ?? optRes.value.flags.get("--task");
+  let taskId: string | undefined;
+  if (flagTaskId !== undefined) {
+    if (optRes.value.positional.length > 0) {
+      return makeValidationError(
+        `Unexpected positional argument '${optRes.value.positional[0]}' for 'bflow verify'.`,
+        json,
+        "verify"
+      );
+    }
+    taskId = flagTaskId.trim();
+  } else if (optRes.value.positional.length > 0) {
+    if (optRes.value.positional.length > 1) {
+      return makeValidationError(
+        `Unexpected positional argument '${optRes.value.positional[1]}' for 'bflow verify'.`,
+        json,
+        "verify"
+      );
+    }
+    taskId = optRes.value.positional[0]!.trim();
+  }
+
+  if (taskId !== undefined) {
+    if (!isValidIdentifier(taskId)) {
+      return makeValidationError(`Invalid task identifier '${taskId}'.`, json, "verify");
+    }
+  }
+
+  const commonRes = parseHighLevelCommonFlags(optRes.value, json, "verify");
+  if (!commonRes.ok) return commonRes.result;
+
+  const rawRunId = optRes.value.flags.get("--run-id") ?? optRes.value.flags.get("--run");
+  let runId: string | undefined;
+  if (rawRunId !== undefined) {
+    if (!isValidIdentifier(rawRunId)) {
+      return makeValidationError(`Invalid run identifier '${rawRunId}'.`, json, "verify");
+    }
+    runId = rawRunId;
+  }
+
+  const rawScope = optRes.value.flags.get("--scope");
+  let scope: "task" | "workflow" = "task";
+  if (rawScope !== undefined) {
+    if (rawScope !== "task" && rawScope !== "workflow") {
+      return makeValidationError(`Invalid scope '${rawScope}'. Must be 'task' or 'workflow'.`, json, "verify");
+    }
+    scope = rawScope;
+  }
+
+  const rawSpec = optRes.value.flags.get("--spec");
+  let specPath: string | undefined;
+  if (rawSpec !== undefined) {
+    if (rawSpec.trim().length === 0) {
+      return makeValidationError("Option '--spec' cannot be empty.", json, "verify");
+    }
+    specPath = rawSpec.trim();
+  }
+
+  const rawPlan = optRes.value.flags.get("--plan");
+  let planPath: string | undefined;
+  if (rawPlan !== undefined) {
+    if (rawPlan.trim().length === 0) {
+      return makeValidationError("Option '--plan' cannot be empty.", json, "verify");
+    }
+    planPath = rawPlan.trim();
+  }
+
+  const rawChangeSet = optRes.value.flags.get("--change-set");
+  let changeSetPath: string | undefined;
+  if (rawChangeSet !== undefined) {
+    if (rawChangeSet.trim().length === 0) {
+      return makeValidationError("Option '--change-set' cannot be empty.", json, "verify");
+    }
+    changeSetPath = rawChangeSet.trim();
+  }
+
+  const rawCycle = optRes.value.flags.get("--cycle");
+  let cyclePath: string | undefined;
+  if (rawCycle !== undefined) {
+    if (rawCycle.trim().length === 0) {
+      return makeValidationError("Option '--cycle' cannot be empty.", json, "verify");
+    }
+    cyclePath = rawCycle.trim();
+  }
+
+  const rawMaxIter = optRes.value.flags.get("--max-iterations");
+  let maxIterations: number | undefined;
+  if (rawMaxIter !== undefined) {
+    const num = Number(rawMaxIter);
+    if (!Number.isSafeInteger(num) || num < 1 || num > 10) {
+      return makeValidationError(
+        "Option '--max-iterations' must be an integer between 1 and 10.",
+        json,
+        "verify"
+      );
+    }
+    maxIterations = num;
+  }
+
+  const value: VerifyCommandArgs = {
+    ...commonRes.value,
+    command: "verify",
+    runId,
+    taskId,
+    scope,
+    specPath,
+    planPath,
+    changeSetPath,
+    cyclePath,
+    maxIterations
+  };
+  return { ok: true, value };
+}
+
+function parseGitPrepare(args: readonly string[], json: boolean): ParseCliResult {
+  const allowed = new Set([
+    ...COMMON_HIGH_LEVEL_FLAGS,
+    "--run-id",
+    "--run",
+    "--integration-id",
+    "--base-revision",
+    "--task",
+    "--target-branch",
+    "--environment",
+    "--auto-approve",
+    "--approved-by"
+  ]);
+  const booleans = new Set([...COMMON_HIGH_LEVEL_BOOLEANS, "--auto-approve"]);
+  const optRes = extractHighLevelOptions(args, booleans, allowed, "git prepare", json);
+  if (!optRes.ok) return optRes.result;
+
+  if (optRes.value.positional.length > 0) {
+    return makeValidationError(
+      `Unexpected positional argument '${optRes.value.positional[0]}' for 'bflow git prepare'.`,
+      json,
+      "git prepare"
+    );
+  }
+
+  const rawRunId = optRes.value.flags.get("--run-id") ?? optRes.value.flags.get("--run");
+  if (rawRunId === undefined) {
+    return makeValidationError("Option '--run-id' is required for 'git prepare'.", json, "git prepare");
+  }
+  if (!isValidIdentifier(rawRunId)) {
+    return makeValidationError(`Invalid run identifier '${rawRunId}'.`, json, "git prepare");
+  }
+  const runId = rawRunId;
+
+  const commonRes = parseHighLevelCommonFlags(optRes.value, json, "git prepare");
+  if (!commonRes.ok) return commonRes.result;
+
+  const rawIntegrationId = optRes.value.flags.get("--integration-id");
+  let integrationId: string | undefined;
+  if (rawIntegrationId !== undefined) {
+    if (!isValidIdentifier(rawIntegrationId)) {
+      return makeValidationError(`Invalid integration identifier '${rawIntegrationId}'.`, json, "git prepare");
+    }
+    integrationId = rawIntegrationId;
+  }
+
+  const rawBaseRev = optRes.value.flags.get("--base-revision");
+  let baseRevision: string | undefined;
+  if (rawBaseRev !== undefined) {
+    if (rawBaseRev.trim().length === 0) {
+      return makeValidationError("Option '--base-revision' cannot be empty.", json, "git prepare");
+    }
+    baseRevision = rawBaseRev.trim();
+  }
+
+  const tasks: GitPrepareTaskDependencyInput[] = [];
+  const rawTasks = optRes.value.multiFlags.get("--task") ?? [];
+  for (const raw of rawTasks) {
+    const colonIdx = raw.indexOf(":");
+    let taskKey: string;
+    let dependsOn: string[] = [];
+    if (colonIdx !== -1) {
+      taskKey = raw.slice(0, colonIdx).trim();
+      const depsPart = raw.slice(colonIdx + 1).trim();
+      if (depsPart.length > 0) {
+        dependsOn = depsPart.split(",").map((d) => d.trim()).filter(Boolean);
+      }
+    } else {
+      taskKey = raw.trim();
+    }
+    if (taskKey.length === 0 || !isValidIdentifier(taskKey)) {
+      return makeValidationError(`Invalid task key '${taskKey}' in '--task'.`, json, "git prepare");
+    }
+    for (const dep of dependsOn) {
+      if (!isValidIdentifier(dep)) {
+        return makeValidationError(`Invalid dependency task key '${dep}' in '--task'.`, json, "git prepare");
+      }
+    }
+    tasks.push({ taskKey, dependsOn });
+  }
+
+  const rawTargetBranch = optRes.value.flags.get("--target-branch");
+  let targetBranch: string | undefined;
+  if (rawTargetBranch !== undefined) {
+    if (rawTargetBranch.trim().length === 0) {
+      return makeValidationError("Option '--target-branch' cannot be empty.", json, "git prepare");
+    }
+    targetBranch = rawTargetBranch.trim();
+  }
+
+  const rawEnv = optRes.value.flags.get("--environment");
+  let environmentName: string | undefined;
+  if (rawEnv !== undefined) {
+    if (rawEnv.trim().length === 0) {
+      return makeValidationError("Option '--environment' cannot be empty.", json, "git prepare");
+    }
+    environmentName = rawEnv.trim();
+  }
+
+  const autoApprove = optRes.value.booleanFlags.has("--auto-approve");
+
+  const rawApprovedBy = optRes.value.flags.get("--approved-by");
+  let approvedBy: string | undefined;
+  if (rawApprovedBy !== undefined) {
+    if (rawApprovedBy.trim().length === 0) {
+      return makeValidationError("Option '--approved-by' cannot be empty.", json, "git prepare");
+    }
+    approvedBy = rawApprovedBy.trim();
+  }
+
+  const value: GitPrepareCommandArgs = {
+    ...commonRes.value,
+    command: "git prepare",
+    runId,
+    integrationId,
+    baseRevision,
+    tasks,
+    targetBranch,
+    environmentName,
+    autoApprove,
+    approvedBy
+  };
+  return { ok: true, value };
+}
+
+function parseMcpStatus(args: readonly string[], json: boolean): ParseCliResult {
+  const allowed = new Set([...COMMON_HIGH_LEVEL_FLAGS, "--service", "--services", "--service-id"]);
+  const booleans = COMMON_HIGH_LEVEL_BOOLEANS;
+  const optRes = extractHighLevelOptions(args, booleans, allowed, "mcp status", json);
+  if (!optRes.ok) return optRes.result;
+
+  if (optRes.value.positional.length > 0) {
+    return makeValidationError(
+      `Unexpected positional argument '${optRes.value.positional[0]}' for 'bflow mcp status'.`,
+      json,
+      "mcp status"
+    );
+  }
+
+  const commonRes = parseHighLevelCommonFlags(optRes.value, json, "mcp status");
+  if (!commonRes.ok) return commonRes.result;
+
+  const rawServices = collectListOption(optRes.value.multiFlags, "--service", "--services", "--service-id");
+  for (const s of rawServices) {
+    if (!isValidIdentifier(s)) {
+      return makeValidationError(`Invalid service identifier '${s}'.`, json, "mcp status");
+    }
+  }
+
+  const value: McpStatusCommandArgs = {
+    ...commonRes.value,
+    command: "mcp status",
+    serviceIds: rawServices
+  };
+  return { ok: true, value };
+}
+
+function parseToolStatus(args: readonly string[], json: boolean): ParseCliResult {
+  const allowed = new Set([...COMMON_HIGH_LEVEL_FLAGS, "--tool", "--tools", "--tool-id"]);
+  const booleans = COMMON_HIGH_LEVEL_BOOLEANS;
+  const optRes = extractHighLevelOptions(args, booleans, allowed, "tool status", json);
+  if (!optRes.ok) return optRes.result;
+
+  if (optRes.value.positional.length > 0) {
+    return makeValidationError(
+      `Unexpected positional argument '${optRes.value.positional[0]}' for 'bflow tool status'.`,
+      json,
+      "tool status"
+    );
+  }
+
+  const commonRes = parseHighLevelCommonFlags(optRes.value, json, "tool status");
+  if (!commonRes.ok) return commonRes.result;
+
+  const rawTools = collectListOption(optRes.value.multiFlags, "--tool", "--tools", "--tool-id");
+  for (const t of rawTools) {
+    if (!isValidIdentifier(t)) {
+      return makeValidationError(`Invalid tool identifier '${t}'.`, json, "tool status");
+    }
+  }
+
+  const value: ToolStatusCommandArgs = {
+    ...commonRes.value,
+    command: "tool status",
+    toolIds: rawTools
+  };
+  return { ok: true, value };
+}
+
+function parseSkillsSync(
+  args: readonly string[],
+  json: boolean,
+  defaultMode: "sync" | "list"
+): ParseCliResult {
+  const allowed = new Set([
+    ...COMMON_HIGH_LEVEL_FLAGS,
+    "--list",
+    "--provider",
+    "--manifest-id",
+    "--environment-id",
+    "--catalog-dir",
+    "--store-dir"
+  ]);
+  const booleans = new Set([...COMMON_HIGH_LEVEL_BOOLEANS, "--list"]);
+  const optRes = extractHighLevelOptions(args, booleans, allowed, "skills sync", json);
+  if (!optRes.ok) return optRes.result;
+
+  if (optRes.value.positional.length > 0) {
+    return makeValidationError(
+      `Unexpected positional argument '${optRes.value.positional[0]}' for 'bflow skills sync'.`,
+      json,
+      "skills sync"
+    );
+  }
+
+  const commonRes = parseHighLevelCommonFlags(optRes.value, json, "skills sync");
+  if (!commonRes.ok) return commonRes.result;
+
+  let mode: "sync" | "list" = defaultMode;
+  if (optRes.value.booleanFlags.has("--list")) {
+    mode = "list";
+  }
+
+  const rawProvider = optRes.value.flags.get("--provider");
+  let provider: "claude" | "codex" | "agy" | undefined;
+  if (rawProvider !== undefined) {
+    if (rawProvider !== "claude" && rawProvider !== "codex" && rawProvider !== "agy") {
+      return makeValidationError(
+        `Invalid provider '${rawProvider}'. Must be 'claude', 'codex', or 'agy'.`,
+        json,
+        "skills sync"
+      );
+    }
+    provider = rawProvider;
+  }
+
+  const rawManifestId = optRes.value.flags.get("--manifest-id");
+  let manifestId: string | undefined;
+  if (rawManifestId !== undefined) {
+    if (!isValidIdentifier(rawManifestId)) {
+      return makeValidationError(`Invalid manifest identifier '${rawManifestId}'.`, json, "skills sync");
+    }
+    manifestId = rawManifestId;
+  }
+
+  const rawEnvId = optRes.value.flags.get("--environment-id");
+  let environmentId: string | undefined;
+  if (rawEnvId !== undefined) {
+    if (!isValidIdentifier(rawEnvId)) {
+      return makeValidationError(`Invalid environment identifier '${rawEnvId}'.`, json, "skills sync");
+    }
+    environmentId = rawEnvId;
+  }
+
+  const rawCatalogDir = optRes.value.flags.get("--catalog-dir");
+  let catalogDir: string | undefined;
+  if (rawCatalogDir !== undefined) {
+    if (rawCatalogDir.trim().length === 0) {
+      return makeValidationError("Option '--catalog-dir' cannot be empty.", json, "skills sync");
+    }
+    catalogDir = rawCatalogDir.trim();
+  }
+
+  const rawStoreDir = optRes.value.flags.get("--store-dir");
+  let storeDir: string | undefined;
+  if (rawStoreDir !== undefined) {
+    if (rawStoreDir.trim().length === 0) {
+      return makeValidationError("Option '--store-dir' cannot be empty.", json, "skills sync");
+    }
+    storeDir = rawStoreDir.trim();
+  }
+
+  const value: SkillsSyncCommandArgs = {
+    ...commonRes.value,
+    command: "skills sync",
+    mode,
+    provider,
+    manifestId,
+    environmentId,
+    catalogDir,
+    storeDir
+  };
+  return { ok: true, value };
+}
+
+function parseAgentCheck(args: readonly string[], json: boolean): ParseCliResult {
+  const allowed = new Set([...COMMON_HIGH_LEVEL_FLAGS, "--provider", "--stage", "--environment-id"]);
+  const booleans = COMMON_HIGH_LEVEL_BOOLEANS;
+  const optRes = extractHighLevelOptions(args, booleans, allowed, "agent check", json);
+  if (!optRes.ok) return optRes.result;
+
+  const flagProvider = optRes.value.flags.get("--provider");
+  let provider: "claude" | "codex" | "agy" | undefined;
+  if (flagProvider !== undefined) {
+    if (optRes.value.positional.length > 0) {
+      return makeValidationError(
+        `Unexpected positional argument '${optRes.value.positional[0]}' for 'bflow agent check'.`,
+        json,
+        "agent check"
+      );
+    }
+    if (flagProvider !== "claude" && flagProvider !== "codex" && flagProvider !== "agy") {
+      return makeValidationError(
+        `Invalid provider '${flagProvider}'. Must be 'claude', 'codex', or 'agy'.`,
+        json,
+        "agent check"
+      );
+    }
+    provider = flagProvider;
+  } else if (optRes.value.positional.length > 0) {
+    if (optRes.value.positional.length > 1) {
+      return makeValidationError(
+        `Unexpected positional argument '${optRes.value.positional[1]}' for 'bflow agent check'.`,
+        json,
+        "agent check"
+      );
+    }
+    const pos = optRes.value.positional[0]!.trim();
+    if (pos !== "claude" && pos !== "codex" && pos !== "agy") {
+      return makeValidationError(`Invalid provider '${pos}'. Must be 'claude', 'codex', or 'agy'.`, json, "agent check");
+    }
+    provider = pos;
+  }
+
+  const commonRes = parseHighLevelCommonFlags(optRes.value, json, "agent check");
+  if (!commonRes.ok) return commonRes.result;
+
+  const rawStage = optRes.value.flags.get("--stage");
+  let stage: "preflight" | "activated" = "preflight";
+  if (rawStage !== undefined) {
+    if (rawStage !== "preflight" && rawStage !== "activated") {
+      return makeValidationError(`Invalid stage '${rawStage}'. Must be 'preflight' or 'activated'.`, json, "agent check");
+    }
+    stage = rawStage;
+  }
+
+  const rawEnvId = optRes.value.flags.get("--environment-id");
+  let environmentId: string | undefined;
+  if (rawEnvId !== undefined) {
+    if (!isValidIdentifier(rawEnvId)) {
+      return makeValidationError(`Invalid environment identifier '${rawEnvId}'.`, json, "agent check");
+    }
+    environmentId = rawEnvId;
+  }
+
+  const value: AgentCheckCommandArgs = {
+    ...commonRes.value,
+    command: "agent check",
+    provider,
+    stage,
+    environmentId
+  };
+  return { ok: true, value };
+}
+
 export function parseCliArgs(argv: readonly string[]): ParseCliResult {
   const json = argv.some((a) => a === "--json" || a === "-j");
 
@@ -218,60 +1349,41 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
   }
 
   if (leadingHelp) {
-    const firstRemaining = remaining[0]!;
-    if (VALID_COMMANDS.has(firstRemaining as CliCommandName)) {
-      if (firstRemaining === "help") {
-        const nonFlags = remaining.slice(1).filter((a) => !isFlag(a));
-        const topic = nonFlags[0];
-        if (topic !== undefined) {
-          if (VALID_COMMANDS.has(topic as CliCommandName)) {
-            const value: HelpCommandArgs = {
-              command: "help",
-              topic: topic as CliCommandName,
-              help: true,
-              json: effectiveJson
-            };
-            return { ok: true, value };
-          }
-          return makeValidationError(
-            `Unknown help topic '${topic}'. Run 'bflow --help' for usage.`,
-            effectiveJson,
-            "help"
-          );
-        }
-        const value: HelpCommandArgs = {
-          command: "help",
-          help: true,
-          json: effectiveJson
-        };
-        return { ok: true, value };
-      }
-
+    if (remaining.length > 0 && isFlag(remaining[0]!)) {
+      return makeValidationError(
+        `Unknown command '${remaining[0]}'. Run 'bflow --help' for usage.`,
+        effectiveJson
+      );
+    }
+    const nonFlags = remaining.filter((a) => !isFlag(a));
+    const resolved = resolveHelpTopic(nonFlags);
+    if (resolved === undefined) {
       const value: HelpCommandArgs = {
         command: "help",
-        topic: firstRemaining as CliCommandName,
         help: true,
         json: effectiveJson
       };
       return { ok: true, value };
     }
-
-    if (!isFlag(firstRemaining)) {
-      return makeValidationError(
-        `Unknown help topic '${firstRemaining}'. Run 'bflow --help' for usage.`,
-        effectiveJson,
-        "help"
-      );
+    if (resolved.ok) {
+      const value: HelpCommandArgs = {
+        command: "help",
+        topic: resolved.topic,
+        help: true,
+        json: effectiveJson
+      };
+      return { ok: true, value };
     }
     return makeValidationError(
-      `Unknown command '${firstRemaining}'. Run 'bflow --help' for usage.`,
-      effectiveJson
+      `Unknown help topic '${resolved.topic}'. Run 'bflow --help' for usage.`,
+      effectiveJson,
+      "help"
     );
   }
 
   if (leadingJson) {
     const firstRemaining = remaining[0]!;
-    if (VALID_COMMANDS.has(firstRemaining as CliCommandName)) {
+    if (VALID_COMMANDS.has(firstRemaining as CliCommandName) || HIGH_LEVEL_PREFIXES.has(firstRemaining)) {
       return parseCliArgs([firstRemaining, ...remaining.slice(1), "--json"]);
     }
     return makeValidationError(
@@ -284,44 +1396,149 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
 
   if (first === "help") {
     const nonFlags = argv.slice(1).filter((a) => !isFlag(a));
-    const topic = nonFlags[0];
-    if (topic !== undefined) {
-      if (VALID_COMMANDS.has(topic as CliCommandName)) {
-        const value: HelpCommandArgs = {
-          command: "help",
-          topic: topic as CliCommandName,
-          help: true,
-          json
-        };
-        return { ok: true, value };
-      }
-      return makeValidationError(`Unknown help topic '${topic}'. Run 'bflow --help' for usage.`, json, "help");
+    const resolved = resolveHelpTopic(nonFlags);
+    if (resolved === undefined) {
+      const value: HelpCommandArgs = {
+        command: "help",
+        help: true,
+        json
+      };
+      return { ok: true, value };
     }
-    const value: HelpCommandArgs = {
-      command: "help",
-      help: true,
-      json
-    };
-    return { ok: true, value };
+    if (resolved.ok) {
+      const value: HelpCommandArgs = {
+        command: "help",
+        topic: resolved.topic,
+        help: true,
+        json
+      };
+      return { ok: true, value };
+    }
+    return makeValidationError(`Unknown help topic '${resolved.topic}'. Run 'bflow --help' for usage.`, json, "help");
   }
 
-  if (!VALID_COMMANDS.has(first as CliCommandName)) {
-    return makeValidationError(`Unknown command '${first}'. Run 'bflow --help' for usage.`, json);
-  }
-
-  const command = first as Exclude<CliCommandName, "help">;
   const hasGlobalHelp = argv.some((a) => a === "--help" || a === "-h");
 
   if (hasGlobalHelp) {
-    const value: HelpCommandArgs = {
-      command: "help",
-      topic: command,
-      help: true,
-      json
-    };
-    return { ok: true, value };
+    const nonFlags = argv.filter((a) => !isFlag(a));
+    const resolved = resolveHelpTopic(nonFlags);
+    if (resolved && resolved.ok) {
+      const value: HelpCommandArgs = {
+        command: "help",
+        topic: resolved.topic,
+        help: true,
+        json
+      };
+      return { ok: true, value };
+    }
   }
 
+  if (!VALID_COMMANDS.has(first as CliCommandName) && !HIGH_LEVEL_PREFIXES.has(first)) {
+    return makeValidationError(`Unknown command '${first}'. Run 'bflow --help' for usage.`, json);
+  }
+
+  if (first === "repo") {
+    const subIdx = argv.slice(1).findIndex((a) => !isFlag(a));
+    if (subIdx === -1) {
+      return makeValidationError("Missing subcommand for 'bflow repo'. Expected 'inspect'.", json, "repo inspect");
+    }
+    const sub = argv[1 + subIdx]!;
+    if (sub !== "inspect") {
+      return makeValidationError(`Unknown subcommand '${sub}' for 'bflow repo'. Expected 'inspect'.`, json, "repo inspect");
+    }
+    const remainingArgs = [...argv.slice(1, 1 + subIdx), ...argv.slice(1 + subIdx + 1)];
+    return parseRepoInspect(remainingArgs, json);
+  }
+
+  if (first === "task") {
+    const subIdx = argv.slice(1).findIndex((a) => !isFlag(a));
+    if (subIdx === -1) {
+      return makeValidationError("Missing subcommand for 'bflow task'. Expected 'plan' or 'implement'.", json);
+    }
+    const sub = argv[1 + subIdx]!;
+    const remainingArgs = [...argv.slice(1, 1 + subIdx), ...argv.slice(1 + subIdx + 1)];
+    if (sub === "plan") {
+      return parseTaskPlan(remainingArgs, json);
+    }
+    if (sub === "implement") {
+      return parseTaskImplement(remainingArgs, json);
+    }
+    return makeValidationError(`Unknown subcommand '${sub}' for 'bflow task'. Expected 'plan' or 'implement'.`, json);
+  }
+
+  if (first === "git") {
+    const subIdx = argv.slice(1).findIndex((a) => !isFlag(a));
+    if (subIdx === -1) {
+      return makeValidationError("Missing subcommand for 'bflow git'. Expected 'prepare'.", json, "git prepare");
+    }
+    const sub = argv[1 + subIdx]!;
+    if (sub !== "prepare") {
+      return makeValidationError(`Unknown subcommand '${sub}' for 'bflow git'. Expected 'prepare'.`, json, "git prepare");
+    }
+    const remainingArgs = [...argv.slice(1, 1 + subIdx), ...argv.slice(1 + subIdx + 1)];
+    return parseGitPrepare(remainingArgs, json);
+  }
+
+  if (first === "mcp") {
+    const subIdx = argv.slice(1).findIndex((a) => !isFlag(a));
+    if (subIdx === -1) {
+      return makeValidationError("Missing subcommand for 'bflow mcp'. Expected 'status'.", json, "mcp status");
+    }
+    const sub = argv[1 + subIdx]!;
+    if (sub !== "status") {
+      return makeValidationError(`Unknown subcommand '${sub}' for 'bflow mcp'. Expected 'status'.`, json, "mcp status");
+    }
+    const remainingArgs = [...argv.slice(1, 1 + subIdx), ...argv.slice(1 + subIdx + 1)];
+    return parseMcpStatus(remainingArgs, json);
+  }
+
+  if (first === "tool" || first === "tools") {
+    const subIdx = argv.slice(1).findIndex((a) => !isFlag(a));
+    if (subIdx === -1) {
+      return makeValidationError("Missing subcommand for 'bflow tool'. Expected 'status'.", json, "tool status");
+    }
+    const sub = argv[1 + subIdx]!;
+    if (sub !== "status") {
+      return makeValidationError(`Unknown subcommand '${sub}' for 'bflow tool'. Expected 'status'.`, json, "tool status");
+    }
+    const remainingArgs = [...argv.slice(1, 1 + subIdx), ...argv.slice(1 + subIdx + 1)];
+    return parseToolStatus(remainingArgs, json);
+  }
+
+  if (first === "skills") {
+    const subIdx = argv.slice(1).findIndex((a) => !isFlag(a));
+    if (subIdx === -1) {
+      return makeValidationError("Missing subcommand for 'bflow skills'. Expected 'sync' or 'list'.", json, "skills sync");
+    }
+    const sub = argv[1 + subIdx]!;
+    const remainingArgs = [...argv.slice(1, 1 + subIdx), ...argv.slice(1 + subIdx + 1)];
+    if (sub === "sync") {
+      return parseSkillsSync(remainingArgs, json, "sync");
+    }
+    if (sub === "list") {
+      return parseSkillsSync(remainingArgs, json, "list");
+    }
+    return makeValidationError(`Unknown subcommand '${sub}' for 'bflow skills'. Expected 'sync' or 'list'.`, json, "skills sync");
+  }
+
+  if (first === "agent") {
+    const subIdx = argv.slice(1).findIndex((a) => !isFlag(a));
+    if (subIdx === -1) {
+      return makeValidationError("Missing subcommand for 'bflow agent'. Expected 'check'.", json, "agent check");
+    }
+    const sub = argv[1 + subIdx]!;
+    if (sub !== "check") {
+      return makeValidationError(`Unknown subcommand '${sub}' for 'bflow agent'. Expected 'check'.`, json, "agent check");
+    }
+    const remainingArgs = [...argv.slice(1, 1 + subIdx), ...argv.slice(1 + subIdx + 1)];
+    return parseAgentCheck(remainingArgs, json);
+  }
+
+  if (first === "verify") {
+    return parseVerify(argv.slice(1), json);
+  }
+
+  const command = first as Exclude<CliCommandName, "help" | HighLevelCommandName>;
   const commandArgs = argv.slice(1);
 
   switch (command) {

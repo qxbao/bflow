@@ -6,6 +6,7 @@ import type {
 import type {
   CliCommandData,
   CliCommandName,
+  HighLevelCommandOutput,
   InitCommandOutput
 } from "./types.js";
 
@@ -27,6 +28,175 @@ function isHelpData(data: CliCommandData): data is { readonly helpText: string; 
 
 function isVersionData(data: CliCommandData): data is { readonly version: string } {
   return typeof data === "object" && data !== null && "version" in data && !("runId" in data) && !("configPath" in data);
+}
+
+function isHighLevelOutput(data: CliCommandData): data is HighLevelCommandOutput {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    "schemaVersion" in data &&
+    (data as any).schemaVersion === 3 &&
+    "executionResult" in data &&
+    "steps" in data &&
+    Array.isArray((data as any).steps)
+  );
+}
+
+function formatHighLevelOutput(output: HighLevelCommandOutput): string {
+  const lines: string[] = [];
+
+  const statusStr = output.status.toUpperCase();
+  lines.push(`Command:   ${output.command}`);
+  lines.push(`Status:    ${statusStr}`);
+  lines.push(`CommandId: ${output.commandId}`);
+  lines.push(`CorrId:    ${output.correlationId}`);
+  if (output.runId) {
+    lines.push(`Run ID:    ${output.runId}`);
+  }
+  if (output.taskId) {
+    lines.push(`Task ID:   ${output.taskId}`);
+  }
+  if (output.reusedReceipt) {
+    lines.push(`Notice:    Reused prior successful receipt (${output.idempotencyKey})`);
+  }
+  if (output.resumedFromStep) {
+    lines.push(`Notice:    Resumed from step '${output.resumedFromStep}'`);
+  }
+
+  if (output.steps && output.steps.length > 0) {
+    lines.push("");
+    lines.push("Steps:");
+    for (const step of output.steps) {
+      const stepStatus = step.status.toUpperCase().padEnd(9);
+      const mutating = step.mutating ? " [mutating]" : "";
+      lines.push(`  - [${stepStatus}] ${step.stepId}: ${step.name}${mutating}`);
+      if (step.error) {
+        lines.push(`      Error: [${step.error.code}] ${step.error.message}`);
+      }
+    }
+  }
+
+  const details = output.details;
+  if (details && typeof details === "object") {
+    switch (output.command) {
+      case "repo inspect": {
+        const repo = details.repository as any;
+        const git = details.git as any;
+        lines.push("");
+        lines.push("Repository Summary:");
+        if (repo?.root) lines.push(`  Root:    ${repo.root}`);
+        if (repo?.sessionName) lines.push(`  Session: ${repo.sessionName}`);
+        if (git?.branch) lines.push(`  Branch:  ${git.branch} (${git.head ? git.head.slice(0, 8) : "unknown"})`);
+        if (git !== undefined && "dirty" in git) lines.push(`  Dirty:   ${git.dirty ? "yes" : "clean"}`);
+        break;
+      }
+      case "task plan": {
+        const wf = (details.workflow ?? details.plan) as any;
+        if (wf?.tasks && Array.isArray(wf.tasks)) {
+          lines.push("");
+          lines.push(`Planned Tasks (${wf.tasks.length}):`);
+          for (const t of wf.tasks) {
+            lines.push(`  - ${t.id ?? t.taskId}: ${t.title ?? t.name ?? ""}`);
+          }
+        }
+        break;
+      }
+      case "task implement": {
+        const execStatus = (details.executionStatus ?? details.task) as any;
+        const tdd = (details.testStrategy as any)?.tddDecision ?? (details.tddDecision as any);
+        const wtPath = (details.worktree as any)?.worktreePath ?? (details.worktree as any)?.path ?? details.worktree;
+        lines.push("");
+        lines.push("Implementation Summary:");
+        if (execStatus?.taskId ?? execStatus?.id) lines.push(`  Task:     ${execStatus?.taskId ?? execStatus?.id}`);
+        if (tdd?.mode) lines.push(`  TDD Mode: ${tdd.mode}`);
+        if (wtPath) lines.push(`  Worktree: ${wtPath}`);
+        break;
+      }
+      case "verify": {
+        const res = (details.result ?? details.verificationResult) as any;
+        lines.push("");
+        lines.push("Verification Result:");
+        if (res?.status) lines.push(`  Status:    ${String(res.status).toUpperCase()}`);
+        if (res?.summary) lines.push(`  Summary:   ${res.summary}`);
+        if (res?.score !== undefined) lines.push(`  Score:     ${res.score}`);
+        break;
+      }
+      case "git prepare": {
+        lines.push("");
+        lines.push("Git Integration Summary:");
+        if (details.targetBranch) lines.push(`  Target Branch: ${details.targetBranch}`);
+        if (details.conflictsDetected !== undefined) {
+          lines.push(`  Conflicts:     ${details.conflictsDetected ? "YES (conflicts found)" : "none"}`);
+        }
+        if (Array.isArray(details.branches)) {
+          lines.push(`  Branches (${details.branches.length}): ${details.branches.join(", ")}`);
+        }
+        break;
+      }
+      case "mcp status": {
+        lines.push("");
+        const services = Array.isArray(details.services) ? details.services : [];
+        const healthy = details.healthy;
+        lines.push(`MCP Services (${services.length}) - Healthy: ${healthy === false ? "NO" : "YES"}:`);
+        for (const s of services) {
+          const sName = s.serviceId ?? s.name ?? "unknown";
+          const sStatus = String(s.status ?? (s.healthy !== undefined ? (s.healthy ? "healthy" : "unhealthy") : "unknown")).toUpperCase();
+          lines.push(`  - ${sName}: ${sStatus}`);
+        }
+        break;
+      }
+      case "tool status": {
+        lines.push("");
+        const tools = Array.isArray(details.tools) ? details.tools : [];
+        const healthy = details.healthy;
+        lines.push(`Pinned Tools (${tools.length}) - Healthy: ${healthy === false ? "NO" : "YES"}:`);
+        for (const t of tools) {
+          const tName = t.toolId ?? t.name ?? "unknown";
+          const tStatus = String(t.status ?? (t.available !== undefined ? (t.available ? "available" : "missing") : "unknown")).toUpperCase();
+          const tVer = t.version ? ` (v${t.version})` : "";
+          lines.push(`  - ${tName}: ${tStatus}${tVer}`);
+        }
+        break;
+      }
+      case "skills sync": {
+        lines.push("");
+        lines.push("Skills Synchronization Summary:");
+        if (details.mode) lines.push(`  Mode:     ${details.mode}`);
+        if (details.provider) lines.push(`  Provider: ${details.provider}`);
+        if (Array.isArray(details.skills)) {
+          lines.push(`  Skills (${details.skills.length}): ${details.skills.map((s: any) => s.skillId ?? s.name ?? s).join(", ")}`);
+        } else if (Array.isArray(details.syncedSkills)) {
+          lines.push(`  Synced Skills (${details.syncedSkills.length}): ${details.syncedSkills.join(", ")}`);
+        }
+        if (Array.isArray(details.syncedManifests)) {
+          lines.push(`  Synced Manifests: ${details.syncedManifests.length}`);
+        }
+        if (Array.isArray(details.catalogSkills) || Array.isArray(details.catalog)) {
+          const cat = (details.catalogSkills ?? details.catalog) as any[];
+          lines.push(`  Catalog Skills:   ${cat.length}`);
+        }
+        break;
+      }
+      case "agent check": {
+        lines.push("");
+        const providers = Array.isArray(details.results)
+          ? details.results
+          : Array.isArray(details.providers)
+          ? details.providers
+          : [];
+        const healthy = details.healthy;
+        lines.push(`Agent Providers (${providers.length}) - Healthy: ${healthy === false ? "NO" : "YES"}:`);
+        for (const p of providers) {
+          const pName = p.provider ?? p.providerId ?? p.name ?? "unknown";
+          const pStatus = String(p.status ?? (p.healthy !== undefined ? (p.healthy ? "ready" : "blocked") : "unknown")).toUpperCase();
+          lines.push(`  - ${pName}: ${pStatus}`);
+        }
+        break;
+      }
+    }
+  }
+
+  return lines.join("\n");
 }
 
 function formatWorkflowRun(snapshot: WorkflowRunSnapshot): string {
@@ -128,6 +298,10 @@ export function formatCommandSuccess(
 
   if (isInitOutput(data)) {
     return formatInitOutput(data);
+  }
+
+  if (isHighLevelOutput(data)) {
+    return formatHighLevelOutput(data);
   }
 
   if ("checks" in data) {
