@@ -21,6 +21,7 @@ import {
 } from "./delegation-builder.js";
 import { HerdrConversationBridge } from "./herdr-bridge.js";
 import { classifyUserIntent } from "./intent-classifier.js";
+import { isUserDecisionRequest } from "./user-decision.js";
 import {
   formatCoordinatorMessageForUser,
   formatStatusSummaryForUser
@@ -872,6 +873,34 @@ export class ConversationGateway {
             };
           }
 
+          // Specialist user decisions: the selected option must be one that was offered and the
+          // request must still be live. Validation failures never fall back to a default option.
+          if (isUserDecisionRequest(targetApproval)) {
+            const rawOffered = targetApproval.metadata?.options;
+            const offered = Array.isArray(rawOffered)
+              ? rawOffered.filter((option): option is string => typeof option === "string")
+              : undefined;
+            const selected = approvalInput.selectedOption;
+            if (approvalInput.decision === "approved" && offered !== undefined && (selected === undefined || !offered.includes(selected))) {
+              return {
+                ok: false,
+                error: { code: "validation", retryable: false, message: "User decision must select one of the offered options" }
+              };
+            }
+            if (selected !== undefined && (offered === undefined || !offered.includes(selected))) {
+              return {
+                ok: false,
+                error: { code: "validation", retryable: false, message: "selectedOption is not one of the offered options" }
+              };
+            }
+            if (targetApproval.expiresAt !== undefined && Date.parse(now) >= Date.parse(targetApproval.expiresAt)) {
+              return {
+                ok: false,
+                error: { code: "validation", retryable: false, message: "User decision request has expired" }
+              };
+            }
+          }
+
           const decisionResult = buildApprovalDecision({
             approvalRequest: targetApproval,
             decision: approvalInput.decision,
@@ -884,6 +913,7 @@ export class ConversationGateway {
             feedbackArtifacts: [],
             metadata: {
               ...(targetApproval.metadata ?? {}),
+              ...(approvalInput.selectedOption !== undefined ? { selectedOption: approvalInput.selectedOption } : {}),
               correlationId
             }
           });

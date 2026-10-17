@@ -10,6 +10,7 @@ import type {
   WorkflowRequestContext,
   WorkflowRequestKind
 } from "./types.js";
+import { isUserDecisionRequest, resolveUserDecisionReply } from "./user-decision.js";
 
 const ZERO_WIDTH_STRIP_REGEX = /[\u200B-\u200D\uFEFF\u00AD]/g;
 
@@ -164,6 +165,87 @@ function detectApproval(
       approvalInput,
       ...(targetCorrelationId !== undefined ? { targetCorrelationId } : {}),
       ...(targetRunId !== undefined ? { targetRunId } : {})
+    }
+  };
+}
+
+/**
+ * Routes a reply to a pending specialist user decision. Options are matched strictly; an unknown
+ * reply is answered with a re-ask (conversation_only, no state change) and never defaults.
+ */
+function detectUserDecision(
+  rawContent: string,
+  context: ConversationContextSnapshot
+): { matched: boolean; result?: IntentClassificationResult } {
+  const pending = Object.values(context.pendingApprovals).filter((request) => isUserDecisionRequest(request));
+  if (pending.length === 0) return { matched: false };
+
+  const explicitId = extractExplicitId(rawContent, "apr-");
+  if (explicitId !== undefined && !pending.some((request) => request.approvalId === explicitId)) {
+    // The reply names a non-user approval (design/task); leave it to the approval path.
+    return { matched: false };
+  }
+
+  const target = pending.length === 1 ? pending[0] : pending.find((request) => request.approvalId === explicitId);
+  if (!target) {
+    return {
+      matched: true,
+      result: {
+        intent: "conversation_only",
+        confidence: 0.9,
+        rationale: "Several user decisions are pending; the reply does not identify one.",
+        clarifyingQuestions: [],
+        directReply: "Hiện có nhiều câu hỏi quyết định đang chờ bạn. Vui lòng nêu rõ mã yêu cầu (apr-...) kèm lựa chọn."
+      }
+    };
+  }
+
+  const targetCorrelationId = context.runIdToCorrelationId[target.runId];
+  const common = {
+    confidence: 0.96,
+    clarifyingQuestions: [] as string[],
+    targetRunId: target.runId,
+    ...(targetCorrelationId !== undefined ? { targetCorrelationId } : {})
+  };
+  // A targeted reply ("apr-... 2") answers the named request; strip the id before mapping the answer.
+  const answerText = explicitId !== undefined
+    ? rawContent.replace(explicitId, "").replace(/^[\s:,-]+|[\s:,-]+$/g, "")
+    : rawContent;
+  const resolution = resolveUserDecisionReply(target, answerText);
+  if (resolution.kind === "ambiguous") {
+    return {
+      matched: true,
+      result: {
+        ...common,
+        intent: "conversation_only",
+        rationale: "User decision reply is ambiguous; re-asking without changing approval state.",
+        directReply: resolution.message
+      }
+    };
+  }
+  if (resolution.kind === "reject") {
+    return {
+      matched: true,
+      result: {
+        ...common,
+        intent: "approval_response",
+        rationale: "User rejected a specialist decision request.",
+        approvalInput: { approvalId: target.approvalId, decision: "rejected", reason: resolution.reason }
+      }
+    };
+  }
+  return {
+    matched: true,
+    result: {
+      ...common,
+      intent: "approval_response",
+      rationale: "User answered a specialist decision request.",
+      approvalInput: {
+        approvalId: target.approvalId,
+        decision: "approved",
+        reason: resolution.reason ?? resolution.selectedOption ?? "User answered",
+        ...(resolution.selectedOption !== undefined ? { selectedOption: resolution.selectedOption } : {})
+      }
     }
   };
 }
@@ -561,6 +643,12 @@ export function classifyUserIntent(
   const cancellationCheck = detectCancellation(input, context);
   if (cancellationCheck.matched && cancellationCheck.result) {
     return { ok: true, value: cancellationCheck.result };
+  }
+
+  // 2a. Specialist user decision (options are matched strictly; never defaults)
+  const userDecisionCheck = detectUserDecision(content, context);
+  if (userDecisionCheck.matched && userDecisionCheck.result) {
+    return { ok: true, value: userDecisionCheck.result };
   }
 
   // 2. Approval response

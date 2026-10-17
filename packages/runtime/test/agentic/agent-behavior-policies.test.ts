@@ -164,6 +164,25 @@ describe("Bflow Agent Behavioral Policies & Autonomous Non-User-Facing Execution
       }
     });
 
+    it("routes specialist user decisions through request_user_decision and Conversation, never direct elicitation (P30 T8)", async () => {
+      const specialistDirs = ["coordinator", "analyst", "architect", "planner", "developer", "reviewer", "verifier"];
+      for (const dir of specialistDirs) {
+        const prompt = await fs.readFile(path.join(repoRoot, "agents", dir, "system-prompt.md"), "utf8");
+        expect(prompt, `decision routing missing in ${dir}`).toContain("mcp__bflow__request_user_decision");
+        expect(prompt, `decision routing must end the turn in ${dir}`).toMatch(/end your turn and wait for Runtime to resume/i);
+        expect(prompt, `elicitation prohibition missing in ${dir}`).toMatch(/Never use AskUserQuestion or any elicitation tool/);
+        // The verbatim policy block stays intact and ahead of the routing paragraph.
+        expect(prompt.indexOf(NON_USER_FACING_AUTONOMOUS_POLICY)).toBeLessThan(prompt.indexOf("mcp__bflow__request_user_decision"));
+        const validation = validateAutonomousRolePrompt(dir === "analyst" ? "specifier" : dir, prompt);
+        expect(validation.ok, `validation failed for ${dir}`).toBe(true);
+      }
+
+      const chatPrompt = await fs.readFile(path.join(repoRoot, "agents/chat/system-prompt.md"), "utf8");
+      expect(chatPrompt).toContain('metadata.kind: "user_decision"');
+      expect(chatPrompt).toMatch(/Chuyển tiếp câu hỏi quyết định/);
+      expect(chatPrompt).toMatch(/tuyệt đối không tự chọn lựa chọn mặc định/);
+    });
+
     it("verifies role-specific invariant policies across non-chat roles", async () => {
       // Coordinator
       const coordPrompt = await fs.readFile(path.join(repoRoot, "agents/coordinator/system-prompt.md"), "utf8");

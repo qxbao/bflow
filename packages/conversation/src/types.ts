@@ -140,6 +140,8 @@ export interface ExtractedApprovalInput {
   readonly approvalId?: string;
   readonly decision: "approved" | "rejected" | "changes_requested";
   readonly reason?: string;
+  /** Option chosen by the user for a specialist user-decision request. */
+  readonly selectedOption?: string;
 }
 
 export interface ExtractedCancellationInput {
