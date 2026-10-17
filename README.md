@@ -105,6 +105,7 @@ and integration limits. Start with [Getting Started](docs/guide/getting-started.
 | [`@bflow/verification`](packages/verification) | Independent task/workflow verification, criterion evidence, Reviewer/QA checks, bounded rework and escalation (P17); composed by P19 with trusted host gates and authenticated evidence |
 | [`@bflow/git-orchestrator`](packages/git-orchestrator) | Parallel task worktrees, ownership checks, stored patches, recoverable dependency-ordered integration, conflict handoff, workflow verification and provider PR support (P18); composed by P19; requires Linux/local Git |
 | [`@bflow/mcp-gateway`](packages/mcp-gateway) | Shared MCP service registry, loopback Streamable HTTP server, stdio-to-HTTP bridge, sharing/isolation policy enforcement, exclusive resource leases with fencing tokens, and process/memory/latency metrics (P27); P30 Runtime composition pending |
+| [`@bflow/mcp-services`](packages/mcp-services) | User-session OS service manager (`systemd --user`, `launchd`, Windows startup), lazy/eager backend resource pooling, memory RSS & process limits, and dedicated isolated Chrome browser runtime with page ownership gates (P27) |
 | [`@bflow/skills`](packages/skills) | Pinned instruction-only skill catalog, role manifests, private storage and provider-neutral references (P28); setup/init/Runtime activation remains P26/P29/P30 integration work |
 | [`@bflow/quality-gates`](packages/quality-gates) | Preset command evaluators, workspace security policies, and RBAC governance |
 
@@ -153,6 +154,9 @@ pnpm --filter @bflow/git-orchestrator test
 
 # Run Shared MCP Gateway tests
 pnpm --filter @bflow/mcp-gateway test
+
+# Run OS Services & Dedicated Browser Runtime tests
+pnpm --filter @bflow/mcp-services test
 ```
 
 ---
