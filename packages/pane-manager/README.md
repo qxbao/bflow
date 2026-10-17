@@ -199,6 +199,36 @@ pnpm typecheck
 pnpm test
 ```
 
+## Provider launch profiles (P30)
+
+`RoleAgentConfig.launch` (also accepted on `startAgentInPane` and `DeveloperAllocationRequest`)
+starts a role from a validated provider launch profile:
+`{ argv, env, launchId, launchFingerprint, provider: "claude" | "codex" | "agy" }`.
+The Herdr command becomes `agent start <name> --kind <provider> --pane <id> [--timeout N] -- <argv...>`.
+`env` is passed only as the spawned invocation environment (`process.env` merged with
+`launch.env`); it is never placed in argv and never persisted. `launchId` and
+`launchFingerprint` are recorded in `PaneBinding.metadata` and preserved by reconciliation
+and health refresh. Without `launch`, the legacy `args` path is unchanged.
+
+Validation runs before any Herdr call and returns `validation` on failure: provider must
+equal the configured agent kind; argv items must not contain NUL/newline or look like
+secrets (`sk-…`, `Bearer …`, `ghp_…`, `AIza…`, `secret://`); env keys must match
+`/^[A-Z_][A-Z0-9_]*$/` and values must not contain NUL/newline. For `chat` and `coordinator`,
+the profile argv must already reference the original Bflow role prompt file (it is not
+rewritten), and that file is verified as before.
+
+`inspectLaunchObservation(role)` reports `paneId`, `agentName`, Herdr `transportState`,
+`interactiveReady` (true only for `idle`, `working` or `done` with no pending launch and no
+`interactive_ready: false`), `launchPending` and the native session locator. It reuses the
+`inspectRoleHealth` agent/pane inspection. Herdr `done` is turn completion only and is never
+reported as task success.
+
+Limitations: the process-level env delivery to the agent depends on Herdr forwarding the
+`herdr` process environment, which has not been verified against a live Herdr. Reusing an
+already-running agent in a pane does not re-record launch metadata (the fingerprint of an
+existing occupant cannot be verified). No live Herdr or provider evidence exists for this
+path; tests use a fake runner (`packages/pane-manager/test/launch-profile.test.ts`).
+
 ## Startup presentation and original role prompts
 
 New Coordination topology uses balanced right/down splits to form a 2x2 grid.

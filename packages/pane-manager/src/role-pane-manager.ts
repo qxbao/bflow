@@ -22,6 +22,7 @@ import type {
   HerdrPaneInfo,
   HerdrTabInfo,
   HerdrWorkspaceInfo,
+  LaunchObservation,
   PaneMoveDestinationSpec,
   PermanentTopologyRole,
   RoleHealthReport,
@@ -34,6 +35,8 @@ import type {
   TopologyRole,
   WorktreeInspector
 } from "./types.js";
+import type { AgentLaunchProfile } from "./types.js";
+import { checkLaunchProfile } from "./launch-profile.js";
 import { balanceOwnedTab } from "./layout.js";
 import { readBuiltinRolePrompt } from "./role-prompts.js";
 import { buildProviderRoleLaunch } from "./provider-launch.js";
@@ -204,11 +207,12 @@ export class RolePaneManager {
     this.#defaultTimeoutMs = options.defaultTimeoutMs ?? 30_000;
   }
 
-  async #runHerdr(args: readonly string[], options?: OperationOptions): Promise<CommandOutcome> {
+  async #runHerdr(args: readonly string[], options?: OperationOptions, env?: NodeJS.ProcessEnv): Promise<CommandOutcome> {
     const timeoutMs = options?.timeoutMs ?? this.#defaultTimeoutMs;
     return this.#runner.run({
       args,
       cwd: this.#config.workspaceRoot,
+      ...(env !== undefined && { env }),
       ...(options?.signal && { signal: options.signal }),
       ...(timeoutMs !== undefined && { timeoutMs })
     });
@@ -753,6 +757,7 @@ export class RolePaneManager {
       readonly agentKind?: string;
       readonly model?: string;
       readonly args?: readonly string[];
+      readonly launch?: AgentLaunchProfile;
       readonly timeoutMs?: number;
       readonly permanent?: boolean;
       readonly metadata?: Record<string, unknown>;
@@ -777,6 +782,16 @@ export class RolePaneManager {
       if (typeof agentKind !== "string" || agentKind.length === 0 || !isSupportedAgentKind(agentKind)) {
         return validationError(`Unsupported or invalid agent kind '${agentKind}'`);
       }
+
+      // Launch profiles are validated before any Herdr side effect.
+      const launch = request.launch ?? roleConfig?.launch;
+      if (launch !== undefined) {
+        const problem = checkLaunchProfile(launch, agentKind);
+        if (problem) return validationError(problem.message);
+      }
+      const launchMetadata = launch !== undefined
+        ? { launchId: launch.launchId, launchFingerprint: launch.launchFingerprint }
+        : {};
 
       // Name uniqueness check across session
       const agentListOutcome = await this.#runHerdr(["agent", "list"], options);
@@ -848,9 +863,26 @@ export class RolePaneManager {
       if (timeout !== undefined) {
         startArgs.push("--timeout", String(timeout));
       }
-      let passedArgs = request.args ?? roleConfig?.args;
+      let passedArgs = launch !== undefined ? [...launch.argv] : (request.args ?? roleConfig?.args);
       let originalPromptSource: string | undefined;
-      if (["chat", "coordinator"].includes(spec.topologyRole)) {
+      if (launch !== undefined && ["chat", "coordinator"].includes(spec.topologyRole)) {
+        // Launch profiles are not rewritten: the profile must already reference the original role prompt.
+        const original = await readBuiltinRolePrompt(spec.topologyRole);
+        if (!original) return validationError(`Required original prompt is missing for ${spec.topologyRole}`);
+        if (agentKind !== "claude" && agentKind !== "codex") return validationError(`Native initial prompt injection for ${agentKind} is not verified. Configure role launch args for ${spec.topologyRole}.`);
+        const argv = launch.argv;
+        const referenced = agentKind === "claude"
+          ? argv.some((value, index) => value === "--append-system-prompt-file" && argv[index + 1] === original.source)
+          : argv.includes(`model_instructions_file=${JSON.stringify(original.source)}`);
+        if (!referenced) return validationError(`Launch profile for ${spec.topologyRole} must reference the original Bflow role prompt; rebuild the launch profile.`);
+        const file = await open(original.source, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        try {
+          const stat = await file.stat();
+          if (!stat.isFile() || stat.size > 131_072 || !(await file.readFile("utf8")).includes(original.prompt))
+            return validationError(`The native ${spec.topologyRole} launch prompt does not contain its original Bflow role prompt. Rebuild the host launch configuration.`);
+        } finally { await file.close(); }
+        originalPromptSource = original.source;
+      } else if (["chat", "coordinator"].includes(spec.topologyRole)) {
         const original = await readBuiltinRolePrompt(spec.topologyRole);
         if (!original) return validationError(`Required original prompt is missing for ${spec.topologyRole}`);
         if (agentKind !== "claude" && agentKind !== "codex") return validationError(`Native initial prompt injection for ${agentKind} is not verified. Configure role launch args for ${spec.topologyRole}.`);
@@ -887,7 +919,12 @@ export class RolePaneManager {
         startArgs.push("--", ...passedArgs);
       }
 
-      const startOutcome = await this.#runHerdr(startArgs, options);
+      // Launch env travels only in the invocation environment, never in argv or the manifest.
+      const startOutcome = await this.#runHerdr(
+        startArgs,
+        options,
+        launch !== undefined ? { ...process.env, ...launch.env } : undefined
+      );
       if (startOutcome.exitCode !== 0 || startOutcome.failure) {
         if (
           startOutcome.stderr.includes("agent_not_ready") ||
@@ -912,7 +949,7 @@ export class RolePaneManager {
       return this.#buildAndValidateBinding({
         spec,
         agentInfo,
-        request: { ...request, metadata: { ...request.metadata, ...(originalPromptSource ? { promptInitialized: true, promptSource: originalPromptSource } : {}),
+        request: { ...request, metadata: { ...request.metadata, ...launchMetadata, ...(originalPromptSource ? { promptInitialized: true, promptSource: originalPromptSource } : {}),
           ...(!agentInfo.session ? { nativeSessionPending: true } : {}) } },
         agentName,
         agentKind
@@ -983,6 +1020,35 @@ export class RolePaneManager {
       return validationError(`Failed to create valid PaneBinding: ${parsed.error.message}`, parsed.error.issues);
     }
     return ok(parsed.data);
+  }
+
+  /**
+   * Reports the Herdr-observed state of a launched role using the same pane/agent
+   * inspection as inspectRoleHealth. It never reports task success or readiness
+   * beyond interactive transport state.
+   */
+  async inspectLaunchObservation(
+    selector: RoleSelector | string,
+    options?: OperationOptions
+  ): Promise<OperationResult<LaunchObservation>> {
+    const health = await this.inspectRoleHealth(selector, options);
+    if (!health.ok) return health;
+    const report = health.value;
+    const observed = report.observedAgent;
+    const transportState = report.transportState;
+    const interactiveReady =
+      (transportState === "idle" || transportState === "working" || transportState === "done") &&
+      observed?.interactiveReady !== false &&
+      observed?.launchPending !== true;
+    const session = observed?.session;
+    return ok<LaunchObservation>({
+      paneId: report.paneId,
+      agentName: observed?.name ?? report.agentId,
+      transportState,
+      interactiveReady,
+      ...(observed?.launchPending !== undefined ? { launchPending: observed.launchPending } : {}),
+      ...(session ? { nativeSession: { source: session.source, kind: session.kind, value: session.value } } : {})
+    });
   }
 
   async inspectRoleHealth(
@@ -1835,7 +1901,7 @@ export class RolePaneManager {
               agentName: effectiveAgentName,
               agentKind: request.agentKind ?? this.#config.defaultAgentKind ?? "codex",
               ...(request.model !== undefined ? { model: request.model } : {}),
-              ...(request.args !== undefined ? { args: request.args } : {}),
+              ...(request.args !== undefined ? { args: request.args } : {}), ...(request.launch !== undefined ? { launch: request.launch } : {}),
               ...(request.startupTimeoutMs !== undefined ? { timeoutMs: request.startupTimeoutMs } : {}),
               permanent: false,
               metadata: {
@@ -1865,7 +1931,7 @@ export class RolePaneManager {
                   agentName: effectiveAgentName,
                   agentKind: request.agentKind ?? this.#config.defaultAgentKind ?? "codex",
                   ...(request.model !== undefined ? { model: request.model } : {}),
-                  ...(request.args !== undefined ? { args: request.args } : {}),
+                  ...(request.args !== undefined ? { args: request.args } : {}), ...(request.launch !== undefined ? { launch: request.launch } : {}),
                   ...(request.startupTimeoutMs !== undefined ? { timeoutMs: request.startupTimeoutMs } : {}),
                   permanent: false,
                   metadata: {
@@ -1976,7 +2042,7 @@ export class RolePaneManager {
           agentName,
           agentKind: request.agentKind ?? this.#config.defaultAgentKind ?? "codex",
           ...(request.model !== undefined ? { model: request.model } : {}),
-          ...(request.args !== undefined ? { args: request.args } : {}),
+          ...(request.args !== undefined ? { args: request.args } : {}), ...(request.launch !== undefined ? { launch: request.launch } : {}),
           ...(request.startupTimeoutMs !== undefined ? { timeoutMs: request.startupTimeoutMs } : {}),
           permanent: false,
           metadata: {

@@ -202,12 +202,29 @@ export function isSupportedAgentKind(kind: string): boolean {
   return (SUPPORTED_HERDR_AGENT_KINDS as readonly string[]).includes(kind);
 }
 
+export const AGENT_LAUNCH_PROVIDERS = ["claude", "codex", "agy"] as const;
+export type AgentLaunchProvider = (typeof AGENT_LAUNCH_PROVIDERS)[number];
+
+/**
+ * Validated provider launch profile. `argv` is passed after `--` on the Herdr
+ * command line; `env` is passed only through the spawned invocation environment,
+ * never through argv or the persisted manifest.
+ */
+export interface AgentLaunchProfile {
+  readonly argv: readonly string[];
+  readonly env: Readonly<Record<string, string>>;
+  readonly launchId: string;
+  readonly launchFingerprint: string;
+  readonly provider: AgentLaunchProvider;
+}
+
 export interface RoleAgentConfig {
   readonly agentKind: string;
   readonly provider?: string;
   readonly model?: string;
   readonly agentName?: string;
   readonly args?: readonly string[];
+  readonly launch?: AgentLaunchProfile;
   readonly startupTimeoutMs?: number;
   readonly splitDirection?: "right" | "down";
 }
@@ -230,7 +247,8 @@ export interface RolePaneManagerConfig {
 export interface CommandInvocation {
   readonly args: readonly string[];
   readonly cwd?: string;
-  readonly env?: NodeJS.ProcessEnv | undefined;
+  /** Environment for this single invocation; when set it replaces process.env (callers merge explicitly). */
+  readonly env?: NodeJS.ProcessEnv | Readonly<Record<string, string>> | undefined;
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly maxOutputBytes?: number;
@@ -440,6 +458,19 @@ export interface TopologyHealthSummary {
   readonly anomalies: readonly TopologyAnomaly[];
 }
 
+/**
+ * Herdr observation of a launched role. `transportState` is physical transport
+ * only: Herdr `done` is turn completion and never proves task success.
+ */
+export interface LaunchObservation {
+  readonly paneId: string;
+  readonly agentName?: string;
+  readonly transportState: AgentTransportState;
+  readonly interactiveReady: boolean;
+  readonly launchPending?: boolean;
+  readonly nativeSession?: { readonly source: string; readonly kind: "id" | "path" | "opaque"; readonly value: string };
+}
+
 export interface DeveloperAllocationRequest {
   readonly taskId: string;
   readonly runId?: string;
@@ -450,6 +481,7 @@ export interface DeveloperAllocationRequest {
   readonly agentKind?: string;
   readonly model?: string;
   readonly args?: readonly string[];
+  readonly launch?: AgentLaunchProfile;
   readonly startupTimeoutMs?: number;
 }
 
