@@ -16,6 +16,7 @@
     { "path": "./packages/mcp-gateway" },
     { "path": "./packages/quality-gates" },
     { "path": "./packages/runtime" },
+    { "path": "./packages/tool-installer" },
     { "path": "./apps/cli" }
   ]
 }
