@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MCPServiceDefinition, ScopedOperation, MCPToolCallResult, MCPResourceLease } from "@bflow/contracts";
 import type { ToolHost } from "../src/installer.js";
 import { FileToolCapabilityRegistry } from "../src/integrations.js";
@@ -15,6 +15,21 @@ import {
   BrowserPageSession
 } from "../src/services.js";
 
+// Keep RTK's real global-hook checks inside a disposable provider profile. This
+// suite already injects the tool process; reading the operator's home is not part
+// of its contract and made the idempotence test depend on personal hook layout.
+const profile = vi.hoisted(() => ({ homeDirectory: "" }));
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return {
+    ...actual,
+    homedir: () => {
+      if (!profile.homeDirectory) throw new Error("RTK test profile was not initialized");
+      return profile.homeDirectory;
+    }
+  };
+});
+
 const hash = (data: string) => createHash("sha256").update(data).digest("hex");
 const roots: string[] = [];
 afterEach(async () => {
@@ -24,6 +39,11 @@ afterEach(async () => {
 });
 
 describe("rtk configuration planner and applicator", () => {
+  beforeEach(async () => {
+    profile.homeDirectory = await mkdtemp(join(tmpdir(), "bflow-rtk-profile-"));
+    roots.push(profile.homeDirectory);
+  });
+  afterEach(() => { profile.homeDirectory = ""; });
   it("excludes --no-patch for codex provider but includes it for claude and agy", async () => {
     const root = await mkdtemp(join(tmpdir(), "bflow-rtk-plan-"));
     roots.push(root);
@@ -95,6 +115,66 @@ describe("rtk configuration planner and applicator", () => {
     const second = await applyRtkConfiguration(plan, host);
     expect(second.status).toBe("already_satisfied");
   });
+
+  it("rejects a symlinked global hooks file before invoking RTK and preserves its target", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bflow-rtk-link-"));
+    roots.push(root);
+    const repo = join(root, "repo"), state = join(root, "state"), executable = join(root, "rtk");
+    await mkdir(repo); await mkdir(state);
+    await writeFile(executable, "binary", { mode: 0o755 });
+    const hookDirectory = join(profile.homeDirectory, ".codex");
+    await mkdir(hookDirectory);
+    const target = join(profile.homeDirectory, "original-hooks.json");
+    const content = JSON.stringify({ hooks: {} });
+    await writeFile(target, content);
+    const hookPath = join(hookDirectory, "hooks.json");
+    await symlink(target, hookPath);
+    let initCalls = 0;
+    const host: ToolHost = {
+      async download() {},
+      async run(_executable, args) {
+        if (args.includes("--help")) return { exitCode: 0, stdout: "--codex --dry-run", stderr: "" };
+        if (args.includes("--dry-run")) return { exitCode: 0, stdout: "preview", stderr: "" };
+        initCalls++;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+    const plan = await planRtkConfiguration({ provider: "codex", executable, repositoryRoot: repo, stateRoot: state, host });
+    await expect(applyRtkConfiguration(plan, host)).rejects.toThrow("Not a bounded regular file");
+    expect(initCalls).toBe(0);
+    expect(await readdir(repo)).toEqual([]);
+    expect((await lstat(hookPath)).isSymbolicLink()).toBe(true);
+    expect(await readFile(target, "utf8")).toBe(content);
+  });
+
+  it("rejects duplicate global and repository RTK hooks inside the isolated profile", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bflow-rtk-duplicate-"));
+    roots.push(root);
+    const repo = join(root, "repo"), state = join(root, "state"), executable = join(root, "rtk");
+    await mkdir(repo); await mkdir(state);
+    await writeFile(executable, "binary", { mode: 0o755 });
+    const content = JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: "rtk hook" }] }] } });
+    const globalDirectory = join(profile.homeDirectory, ".codex"), localDirectory = join(repo, ".codex");
+    await mkdir(globalDirectory); await mkdir(localDirectory);
+    await writeFile(join(globalDirectory, "hooks.json"), content);
+    await writeFile(join(localDirectory, "hooks.json"), content);
+    let initCalls = 0;
+    const host: ToolHost = {
+      async download() {},
+      async run(_executable, args) {
+        if (args.includes("--help")) return { exitCode: 0, stdout: "--codex --dry-run", stderr: "" };
+        if (args.includes("--dry-run")) return { exitCode: 0, stdout: "preview", stderr: "" };
+        initCalls++;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+    const plan = await planRtkConfiguration({ provider: "codex", executable, repositoryRoot: repo, stateRoot: state, host });
+    await expect(applyRtkConfiguration(plan, host)).rejects.toThrow("already hooked globally and locally");
+    expect(initCalls).toBe(0);
+    expect(await readFile(join(globalDirectory, "hooks.json"), "utf8")).toBe(content);
+    expect(await readFile(join(localDirectory, "hooks.json"), "utf8")).toBe(content);
+  });
+
 });
 
 describe("mcp services integration", () => {

@@ -40,6 +40,11 @@ For `provider_plugin` pins, pass `OfficialProviderPluginAdapter` as `providerPlu
 
 This package's tests use fake command runners and HTTP probes. They do not prove live Herdr, provider hooks, MCP wire compatibility, Chrome launch or commercial GitNexus license eligibility. `FileToolCapabilityRegistry` is local-filesystem only; a crash can leave a lock file that an operator must inspect before removal.
 
+RTK configuration tests use a disposable provider home and fake tool process, so they do
+not read the operator's hook configuration. They still exercise the production checks
+that reject symlinked global hooks and duplicate global/repository RTK registrations
+before invoking the tool. This test isolation does not change production path policy.
+
 ## Commands
 
 From the repository root: `pnpm exec tsc -b packages/tool-installer --pretty false` and `pnpm exec vitest run packages/tool-installer/test`. The root TypeScript project references and lockfile are shared integration-owned files; the integrator must wire this package in a separate reviewed change.
