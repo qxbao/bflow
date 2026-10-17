@@ -309,7 +309,7 @@ describe("P26 End-to-End Scenarios", () => {
     expect(bashrcRerun).toBe(bashrcContent);
   });
 
-  it("Scenario 5: failed installation (installer fails → failed, dependents blocked, outcome failed, backups intact)", async () => {
+  it("Scenario 5: failed installation preserves backups and applies independent configuration", async () => {
     for (const t of ["node", "git", "herdr"]) await makeExecutable(bin, t);
     // pnpm is missing and installer fails
 
@@ -401,13 +401,14 @@ describe("P26 End-to-End Scenarios", () => {
     const svc = createService({ registry });
     const report = await svc.run({ mode: "apply", assumeYes: true });
 
-    expect(report.outcome).toBe("failed");
+    expect(report.outcome).toBe("partially_applied");
     expect(report.receipts.find((r) => r.stepId === "install_tool:pnpm")?.status).toBe("failed");
-    expect(report.receipts.find((r) => r.stepId === "configure:path")?.status).toBe("blocked");
+    expect(report.receipts.find((r) => r.stepId === "configure:path")?.status).toBe("applied");
     expect(report.receipts.find((r) => r.stepId === "configure:environment-manifest")?.status).toBe("blocked");
 
-    // Backups intact, original bashrc unaltered
-    expect(await readFile(bashrc, "utf8")).toBe(initialBashrc);
+    // The user's original content is retained while the independent PATH block is appended.
+    expect(await readFile(bashrc, "utf8")).toContain(initialBashrc);
+    expect(await readFile(bashrc, "utf8")).toContain(PATH_BLOCK_START);
   });
 
   it("Scenario 6: interrupted setup (abort mid-step → unknown; rerun reconciles)", async () => {
@@ -768,7 +769,7 @@ describe("P26 End-to-End Scenarios", () => {
     const svc = createService({ registry });
     const report = await svc.run({ mode: "apply", assumeYes: true });
 
-    expect(report.outcome).toBe("blocked");
+    expect(report.outcome).toBe("partially_applied");
     const pnpmReceipt = report.receipts.find((r) => r.stepId === "install_tool:pnpm");
     expect(pnpmReceipt?.status).toBe("blocked");
     expect(pnpmReceipt?.diagnostics.join(" ")).toContain("requires OS elevation; run manually");

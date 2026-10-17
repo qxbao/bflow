@@ -69,8 +69,8 @@ const KNOWN = (p: PlatformProfile) => [path.join(p.homeDir, ".local", "bin"), p.
 const byId = (obs: Awaited<ReturnType<typeof probeTools>>, id: string) => obs.find((o) => o.toolId === id)!;
 
 describe("catalog", () => {
-  it("covers the seven tools and never recommends curl | sh", () => {
-    expect(TOOL_CATALOG.map((t) => t.toolId)).toEqual(["node", "pnpm", "git", "herdr", "claude", "codex", "agy"]);
+  it("covers runtime, provider and auxiliary CLIs without shell installers", () => {
+    expect(TOOL_CATALOG.map((t) => t.toolId)).toEqual(["node", "pnpm", "git", "herdr", "claude", "codex", "agy", "rtk", "gitnexus", "chrome-devtools-mcp"]);
     for (const t of TOOL_CATALOG)
       for (const g of Object.values(t.manualGuidance)) expect(g).not.toMatch(/curl|\|\s*(ba)?sh/);
   });
@@ -82,6 +82,23 @@ describe("catalog", () => {
 });
 
 describe("probeTools", () => {
+  it("finds RTK archives and npm tools in their managed destinations", async () => {
+    const rtk = await exe(path.join(platform.paths.data, "tools", "rtk"), "rtk");
+    const gitnexus = await exe(path.join(platform.paths.data, "tools", "gitnexus", "node_modules", ".bin"), "gitnexus");
+    const chrome = await exe(path.join(platform.paths.data, "tools", "chrome-devtools-mcp", "node_modules", ".bin"), "chrome-devtools-mcp");
+    const observations = await probeTools(platform, runnerFor({
+      rtk: { stdout: "rtk 0.33.0" }, gitnexus: { stdout: "1.4.7" }, "chrome-devtools-mcp": { stdout: "0.20.3" }
+    }), { required: new Set(["rtk", "gitnexus", "chrome-devtools-mcp"]), knownInstallDirs: KNOWN });
+    for (const [id, file] of [["rtk", rtk], ["gitnexus", gitnexus], ["chrome-devtools-mcp", chrome]]) {
+      expect(byId(observations, id!)).toMatchObject({ status: "path_missing", resolvedPath: file, required: true });
+    }
+  });
+
+  it("reports unknown required pins instead of silently omitting them", async () => {
+    const observations = await probeTools(platform, runnerFor({}), { required: new Set(["unknown-tool"]), knownInstallDirs: KNOWN });
+    expect(byId(observations, "unknown-tool")).toMatchObject({ status: "missing", required: true });
+  });
+
   it("clean machine: nothing found", async () => {
     const runner = runnerFor({});
     const obs = await probeTools(platform, runner, { required: REQ, knownInstallDirs: KNOWN });
@@ -121,7 +138,7 @@ describe("probeTools", () => {
     };
     for (const n of Object.keys(out)) await exe(binDir, n);
     const obs = await probeTools(platform, runnerFor(out), { required: new Set([...REQ, "claude"]), knownInstallDirs: KNOWN });
-    expect(obs.map((o) => o.status)).toEqual(Array(7).fill("present"));
+    expect(Object.keys(out).every((id) => byId(obs, id).status === "present")).toBe(true);
     expect(byId(obs, "herdr").version).toBe("herdr");
     expect(byId(obs, "claude").required).toBe(true);
     expect(byId(obs, "codex").required).toBe(false);
@@ -270,17 +287,22 @@ describe("ToolInstallerRegistry", () => {
     expect(r.resolve("pnpm", "linux", [desc()])).not.toBeNull();
   });
 
+  it("rejects tool ids that escape their managed install directory", () => {
+    expect(buildInstallRequest(desc({ toolId: "../escape" }), platform).ok).toBe(false);
+    expect(buildInstallRequest(desc({ toolId: "/tmp/escape" }), platform).ok).toBe(false);
+  });
+
   it("builds schema-valid install requests", () => {
     const a = buildInstallRequest(desc(), platform);
     expect(a.ok).toBe(true);
     if (a.ok) {
       expect(ToolInstallRequestSchema.safeParse(a.value).success).toBe(true);
-      expect(a.value.destination).toBe("npm");
+      expect(a.value.destination).toBe(path.join(platform.paths.data, "tools", "pnpm"));
       expect(a.value.scope).toEqual({ kind: "machine", machineId: platform.machineId });
       expect(a.value.idempotencyKey).toBe(`install:${platform.machineId}:pnpm:12.5.1:${SHA}`);
     }
     const b = buildInstallRequest(desc({ method: "verified_archive" }), platform);
-    if (b.ok) expect(b.value.destination).toBe(platform.paths.managedBin);
+    if (b.ok) expect(b.value.destination).toBe(path.join(platform.paths.data, "tools", "pnpm"));
     expect(buildInstallRequest(desc({ version: "latest" }), platform).ok).toBe(false);
   });
 });

@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { realpath } from "node:fs/promises";
 import path from "node:path";
+import { Sha256DigestSchema } from "@bflow/contracts";
+import { z } from "zod";
 import { findExecutable } from "./runner.js";
 import type { CommandRunner, PlatformProfile } from "./types.js";
 
@@ -12,7 +14,7 @@ export type ToolRequirement =
 
 export interface ToolCatalogEntry {
   readonly toolId: string;
-  readonly kind: "runtime" | "provider_cli";
+  readonly kind: "runtime" | "provider_cli" | "tool_cli";
   readonly executables: { readonly posix: readonly string[]; readonly win32: readonly string[] };
   readonly versionArgs: readonly string[];
   /** Regex source; capture group 1 is the version. */
@@ -43,6 +45,14 @@ export interface ToolObservation {
   required: boolean;
   diagnostics: string[];
 }
+
+export const ToolObservationSchema = z.object({
+  toolId: z.string().min(1),
+  status: z.enum(["present", "missing", "version_mismatch", "path_missing", "unparseable_version", "probe_failed"]),
+  resolvedPath: z.string().nullable(), realPath: z.string().nullable(), version: z.string().nullable(),
+  binaryDigest: Sha256DigestSchema.nullable(), pathMissingDir: z.string().nullable(),
+  required: z.boolean(), diagnostics: z.array(z.string())
+}).strict();
 
 const SEMVER = String.raw`(\d+\.\d+\.\d+)`;
 
@@ -158,7 +168,17 @@ export const TOOL_CATALOG: readonly ToolCatalogEntry[] = [
     defaultRequired: false,
     knownInstallDirs: commonDirs,
     manualGuidance: providerGuidance("Agy", "the provider's official documentation")
-  }
+  },
+  ...["rtk", "gitnexus", "chrome-devtools-mcp"].map((toolId): ToolCatalogEntry => ({
+    toolId, kind: "tool_cli", executables: { posix: [toolId], win32: [toolId] },
+    versionArgs: ["--version"], versionPattern: SEMVER, requirement: { type: "present" },
+    defaultRequired: false, knownInstallDirs: commonDirs,
+    manualGuidance: {
+      linux: `Install ${toolId} with an approved pinned setup descriptor.`,
+      darwin: `Install ${toolId} with an approved pinned setup descriptor.`,
+      win32: `Install ${toolId} with an approved pinned setup descriptor.`
+    }
+  }))
 ];
 
 /** Strict major.minor.patch parser (no prerelease/build, no leading zeros requirement relaxed). */
@@ -303,8 +323,20 @@ export async function probeTools(
 ): Promise<ToolObservation[]> {
   const out: ToolObservation[] = [];
   for (const entry of TOOL_CATALOG) {
-    const dirs = options.knownInstallDirs ?? ((p: PlatformProfile) => entry.knownInstallDirs(p));
+    const dirs = (p: PlatformProfile): string[] => {
+      const join = p.os === "win32" ? path.win32.join : path.posix.join;
+      const managed = join(p.paths.data, "tools", entry.toolId);
+      return [managed, join(managed, "node_modules", ".bin"),
+        ...(options.knownInstallDirs ? options.knownInstallDirs(p) : entry.knownInstallDirs(p))];
+    };
     out.push(await probeOne(entry, platform, runner, options.required.has(entry.toolId), dirs));
+  }
+  // Pins without a supported CLI probe must stay visible and unhealthy, never silently disappear.
+  for (const toolId of options.required) {
+    if (out.some((o) => o.toolId === toolId)) continue;
+    out.push({ toolId, status: "missing", resolvedPath: null, realPath: null, version: null,
+      binaryDigest: null, pathMissingDir: null, required: true,
+      diagnostics: [`No supported CLI probe for ${toolId}; verify its native integration separately`] });
   }
   return out;
 }

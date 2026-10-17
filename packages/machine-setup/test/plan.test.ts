@@ -84,6 +84,25 @@ beforeEach(async () => {
 afterEach(async () => { await rm(root, { recursive: true, force: true }); });
 
 describe("buildSetupPlan", () => {
+  it("continues unrelated planning when an installer throws an operational error", async () => {
+    const registry = new ToolInstallerRegistry();
+    registry.register({ ...installer("npm-i"), plan: async () => { throw new Error("download unavailable"); } });
+    const result = await built({ registry, components: [comp("path")] });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.plan.steps.map((s) => s.componentId)).toEqual(["path", "doctor"]);
+    expect(result.value.preview.manual[0]?.guidance).toContain("download unavailable");
+  });
+
+  it("continues planning unrelated components when a component cannot be observed", async () => {
+    const broken = { ...comp("role-skills"), observe: async () => { throw new Error("skill catalog unavailable"); } };
+    const result = await built({ components: [broken, comp("path"), comp("mcp-config")], observations: [] });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.plan.steps.map((s) => s.componentId)).toEqual(["path", "mcp-config", "doctor"]);
+    expect(result.value.diagnostics.join(" ")).toContain("skill catalog unavailable");
+  });
+
   it("clean machine: ordered, schema-valid plan", async () => {
     const { plan, preview } = await okBuilt();
     expect(MachineSetupPlanSchema.parse(plan)).toEqual(plan);
@@ -92,11 +111,11 @@ describe("buildSetupPlan", () => {
       "register_mcp:mcp-config", "configure:services", "configure:environment-manifest", "verify:doctor"
     ]);
     const byId = Object.fromEntries(plan.steps.map((s) => [s.stepId, s]));
-    expect(byId["configure:path"]!.dependsOn).toEqual(["install_tool:pnpm"]);
+    expect(byId["configure:path"]!.dependsOn).toEqual([]);
     expect(byId["configure:environment-manifest"]!.dependsOn).toEqual(plan.steps.slice(0, 5).map((s) => s.stepId));
     expect(byId["verify:doctor"]).toMatchObject({
       componentId: "doctor", action: "verify", requiresApproval: false, rollback: "none",
-      dependsOn: ["configure:environment-manifest"], expectedStateDigest: null, desiredStateDigest: digest({ healthy: true })
+      dependsOn: [], expectedStateDigest: null, desiredStateDigest: digest({ healthy: true })
     });
     expect(byId["configure:path"]).toMatchObject({
       requiresApproval: true, level: "machine", expectedStateDigest: null,

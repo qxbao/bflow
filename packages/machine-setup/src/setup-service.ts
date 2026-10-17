@@ -4,7 +4,7 @@ import { AssumeYesApprover, type SetupApprover } from "./approval.js";
 import { BuiltinSetupDoctor, type DoctorInput, type MachineDoctorReport, type SetupDoctor } from "./doctor.js";
 import { executePlan, WINDOWS_NOT_VERIFIED } from "./executor.js";
 import { ToolInstallerRegistry } from "./installer-registry.js";
-import { defaultMachineConfig, loadMachineConfig, type MachineConfig, type MachineConfigLoadResult } from "./machine-config.js";
+import { defaultMachineConfig, loadMachineConfig, MachineConfigSchema, type MachineConfig, type MachineConfigLoadResult } from "./machine-config.js";
 import { EnvironmentManifestComponent } from "./manifest.js";
 import { McpConfigComponent } from "./mcp-registry.js";
 import { PathComponent } from "./path-manager.js";
@@ -14,7 +14,7 @@ import { NodeCommandRunner } from "./runner.js";
 import { selectServiceManager, ServicesComponent, type ServiceManager } from "./service-manager.js";
 import { createSkillsComponent, type SkillsSynchronizer } from "./skills.js";
 import { SetupStateStore } from "./state-store.js";
-import { probeTools, TOOL_CATALOG, type ToolObservation } from "./tools.js";
+import { probeTools, TOOL_CATALOG, ToolObservationSchema, type ToolObservation } from "./tools.js";
 import type { CommandRunner, HostEnvironment, PlatformProfile, SetupComponent, SetupContext } from "./types.js";
 
 export const MACHINE_CONFIG_FILE = "machine.json";
@@ -56,6 +56,14 @@ export interface ComponentFactoryInput {
 }
 
 export interface MachineSetupServiceOptions {
+  /** Already resolved by the caller (including isolated roots). */
+  platform?: PlatformProfile;
+  /** Desired config supplied by the caller; an invalid on-disk config still requires repair. */
+  config?: MachineConfig;
+  /** Executable launcher installed in the owned managed bin directory. */
+  launcher?: { nodeBinary: string; entrypoint: string };
+  /** Read-only native/plugin probes, merged by tool id on initial and post-install observation. */
+  additionalToolObservations?: (platform: PlatformProfile, config: MachineConfig) => Promise<readonly ToolObservation[]>;
   host?: HostEnvironment;
   runner?: CommandRunner;
   registry?: ToolInstallerRegistry;
@@ -100,7 +108,7 @@ export class MachineSetupService {
     let platform: PlatformProfile;
     const early: string[] = [];
     try {
-      platform = await detectPlatformWithProbe(this.host);
+      platform = this.options.platform ?? await detectPlatformWithProbe(this.host);
     } catch (e) {
       platform = detectPlatform(this.host);
       early.push(`elevation probe failed: ${msg(e)}`);
@@ -127,6 +135,13 @@ export class MachineSetupService {
     const ctx: SetupContext = { platform, runner: this.runner, mode, now, ...(opts.signal ? { signal: opts.signal } : {}) };
     const configPath = path.join(platform.paths.config, MACHINE_CONFIG_FILE);
 
+    const explicitConfig = this.options.config === undefined ? null : MachineConfigSchema.safeParse(this.options.config);
+    if (explicitConfig && !explicitConfig.success) {
+      report.configStatus = "invalid";
+      report.diagnostics.push(`invalid explicit machine config: ${explicitConfig.error.message}`);
+      report.outcome = "blocked";
+      return;
+    }
     let loaded = await loadMachineConfig(configPath);
     const configBroken = loaded.status === "invalid" || loaded.status === "unsupported_version";
     if (configBroken && mode === "repair") {
@@ -143,18 +158,27 @@ export class MachineSetupService {
       report.diagnostics.push(loaded.error.message);
     }
     report.configStatus = loaded.status;
-    const config = loaded.config ?? defaultMachineConfig();
+    const config = explicitConfig?.success ? explicitConfig.data : loaded.config ?? defaultMachineConfig();
     const brokenNow = loaded.status === "invalid" || loaded.status === "unsupported_version";
 
     const required = new Set<string>([
       ...TOOL_CATALOG.filter((t) => t.defaultRequired).map((t) => t.toolId),
-      ...config.providers
+      ...config.providers,
+      ...config.toolPins.map((pin) => pin.toolId)
     ]);
-    const probe = () =>
-      probeTools(platform, this.runner, {
+    const probe = async (): Promise<ToolObservation[]> => {
+      const observed = await probeTools(platform, this.runner, {
         required,
         ...(this.options.knownInstallDirs ? { knownInstallDirs: this.options.knownInstallDirs } : {})
       });
+      const native = await this.options.additionalToolObservations?.(platform, config) ?? [];
+      const merged = new Map(observed.map((o) => [o.toolId, o]));
+      for (const raw of native) {
+        const observation = ToolObservationSchema.parse(raw);
+        merged.set(observation.toolId, { ...observation, required: required.has(observation.toolId) });
+      }
+      return [...merged.values()];
+    };
     const observations = await probe();
     report.observations = observations;
 
@@ -171,12 +195,13 @@ export class MachineSetupService {
       }
     };
     let freshTools = false;
-    const doctorInput = async (): Promise<DoctorInput> => ({
-      machineId: platform.machineId,
-      observations: freshTools ? await probe() : observations,
-      configStatus: loaded.status,
-      components
-    });
+    let componentFailures: NonNullable<DoctorInput["componentFailures"]> = [];
+    const doctorInput = async (): Promise<DoctorInput> => {
+      loaded = await loadMachineConfig(configPath);
+      report.configStatus = loaded.status;
+      if (freshTools) report.observations = await probe();
+      return { machineId: platform.machineId, observations: report.observations, configStatus: loaded.status, components, componentFailures };
+    };
     const runDoctor = async (): Promise<void> => {
       try {
         report.doctor = await doctor.run(ctx, await doctorInput());
@@ -211,6 +236,7 @@ export class MachineSetupService {
       return;
     }
     const { plan, preview } = built.value;
+    componentFailures = built.value.componentFailures;
     report.plan = plan;
     report.preview = preview;
     report.diagnostics.push(...built.value.diagnostics);
@@ -263,6 +289,10 @@ export class MachineSetupService {
       }
     }
     const applied = new Set(executed.value.filter((r) => r.status === "applied").map((r) => r.stepId));
+    if (this.options.launcher && applied.has("configure:path")) {
+      const shellFile = preview.steps.find((s) => s.stepId === "configure:path")?.targets[0];
+      report.diagnostics.push(`PATH updated; open a new terminal or reload ${shellFile ?? "your shell configuration"} to use bflow and managed tools.`);
+    }
     report.machineWideChanges = preview.steps
       .filter((s) => s.machineWide && applied.has(s.stepId))
       .flatMap((s) => s.targets.map((t) => `${s.stepId}: ${t}`));
@@ -283,16 +313,25 @@ export class MachineSetupService {
     if (injected !== undefined) {
       const components = typeof injected === "function" ? injected(input) : injected;
       const manifest = components.find((c): c is EnvironmentManifestComponent => c instanceof EnvironmentManifestComponent) ?? null;
+      manifest?.bindMachineConfig(input.config);
       return { components, manifest, diagnostics: [] };
     }
     const { platform, store, runner, config, observations, env } = input;
-    const pathComponent = new PathComponent({ platform, store, observations, env });
+    const pathComponent = new PathComponent({
+      platform, store, env,
+      ...(this.options.launcher ? { launcher: this.options.launcher } : {}),
+      // Plan PATH ownership before installs: a newly created executable must be usable on the first run.
+      observations: [...observations, ...config.toolPins.map((pin) => ({
+        pathMissingDir: path.join(platform.paths.data, "tools", pin.toolId,
+          ...(pin.method === "npm" || pin.method === "pnpm" ? ["node_modules", ".bin"] : []))
+      }))]
+    });
     const skills = createSkillsComponent(this.options.skills);
     const mcp = new McpConfigComponent({ platform, store, services: config.mcpServices });
     const manager = this.options.serviceManager ?? selectServiceManager(platform, runner, store);
     const services = new ServicesComponent({ platform, store, manager, services: config.services });
     const manifest = new EnvironmentManifestComponent({
-      platform, store, observations, pathComponent,
+      platform, store, observations, pathComponent, config,
       mcpServiceIds: config.mcpServices.map((s) => s.serviceId),
       serviceIds: config.services.map((s) => s.serviceId),
       skills: skills.component

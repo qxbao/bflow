@@ -1,5 +1,6 @@
 import { IdentifierSchema, IsoDateTimeSchema, PlatformSchemaVersionSchema } from "@bflow/contracts";
 import { z } from "zod";
+import { PathComponent } from "./path-manager.js";
 import type { MachineConfigLoadResult } from "./machine-config.js";
 import type { ToolObservation } from "./tools.js";
 import type { SetupComponent, SetupContext } from "./types.js";
@@ -30,6 +31,7 @@ export interface DoctorInput {
   observations: readonly ToolObservation[];
   configStatus: MachineConfigLoadResult["status"];
   components: readonly SetupComponent[];
+  componentFailures?: readonly { componentId: string; message: string }[];
 }
 
 export interface SetupDoctor {
@@ -47,16 +49,28 @@ const COMPONENT_CHECKS: readonly { componentId: string; checkId: string; label: 
 export class BuiltinSetupDoctor implements SetupDoctor {
   /** Read-only: components are only observed, never applied. */
   async run(ctx: SetupContext, input: DoctorInput): Promise<MachineDoctorReport> {
-    const checks: DoctorCheck[] = [];
+    const checks: DoctorCheck[] = (input.componentFailures ?? []).map((failure) => ({
+      checkId: `planning-${failure.componentId}`, status: "failed", summary: failure.message
+    }));
 
+    const pathComponent = input.components.find((c): c is PathComponent => c instanceof PathComponent);
+    let ownedPathDirs: readonly string[] = [];
+    if (pathComponent) {
+      try {
+        const observed = await pathComponent.observe(ctx);
+        const desired = await pathComponent.desired(ctx);
+        if (observed.valid && observed.stateDigest === desired.digest) ownedPathDirs = await pathComponent.desiredDirs();
+      } catch { /* The component check below reports the observation failure. */ }
+    }
     for (const o of input.observations) {
-      const ok = o.status === "present";
-      const status: DoctorCheck["status"] = ok ? "passed" : o.required ? "failed" : "warning";
+      const managedPath = o.status === "path_missing" && o.pathMissingDir !== null && ownedPathDirs.includes(o.pathMissingDir);
+      const ok = o.status === "present" || managedPath;
+      const status: DoctorCheck["status"] = managedPath ? "warning" : ok ? "passed" : o.required ? "failed" : "warning";
       checks.push({
         checkId: `tool-${o.toolId}`,
         status,
         summary: ok
-          ? `${o.toolId} ${o.version ?? "present"}`
+          ? `${o.toolId} ${o.version ?? "present"}${managedPath ? "; managed PATH configured; reload your shell" : ""}`
           : `${o.toolId} ${o.status.replace(/_/g, " ")}${o.diagnostics.length > 0 ? `: ${o.diagnostics.join("; ")}` : ""}`,
         ...(ok ? {} : { remediation: `Install or fix ${o.toolId} manually, then rerun setup.` })
       });

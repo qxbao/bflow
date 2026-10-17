@@ -8,6 +8,7 @@ import {
 } from "@bflow/contracts";
 import { z } from "zod";
 import { digest } from "./canonical.js";
+import { loadMachineConfig, MachineConfigSchema, type MachineConfig } from "./machine-config.js";
 import { unsupportedVersion, validationError } from "./errors.js";
 import type { PathComponent } from "./path-manager.js";
 import type { SetupStateStore } from "./state-store.js";
@@ -91,6 +92,7 @@ export interface EnvironmentManifestComponentOptions {
   serviceIds: readonly string[];
   /** Skills component; its desired digest is recorded. */
   skills?: SetupComponent | null;
+  config?: MachineConfig;
 }
 
 /** Writes `<state>/environment.json`. Records no environment values or secrets. */
@@ -102,13 +104,28 @@ export class EnvironmentManifestComponent implements SetupComponent {
   private readonly opts: EnvironmentManifestComponentOptions;
   private planned: ManifestBody | null = null;
   private lastPlan: ManifestPlanRef | null = null;
+  private machineConfig: MachineConfig | null = null;
 
   constructor(options: EnvironmentManifestComponentOptions) {
     this.opts = options;
+    if (options.config) this.bindMachineConfig(options.config);
   }
 
   get filePath(): string {
     return path.join(this.opts.platform.paths.state, ENVIRONMENT_MANIFEST_FILE);
+  }
+
+  /** Resolved machine configuration is persisted under the same approved component step. */
+  bindMachineConfig(config: MachineConfig): void {
+    this.machineConfig = MachineConfigSchema.parse(config);
+  }
+
+  private configFile(): string {
+    return path.join(this.opts.platform.paths.config, "machine.json");
+  }
+
+  private satisfactionDigest(manifest: string | null, config: MachineConfig | null): string | null {
+    return this.machineConfig ? digest({ manifest, config }) : manifest;
   }
 
   /** Plan recorded as `lastPlan` when the manifest is (re)written. */
@@ -170,20 +187,25 @@ export class EnvironmentManifestComponent implements SetupComponent {
 
   async observe(_ctx: SetupContext): Promise<ComponentObservation> {
     const loaded = await this.load();
-    if (loaded.state === "absent") return { stateDigest: null, valid: true, diagnostics: [] };
-    if (loaded.state === "invalid") {
-      // Fully bflow-generated: an invalid manifest is regenerated, it needs no repair mode.
-      return { stateDigest: null, valid: true, diagnostics: [`${loaded.reason}; it will be regenerated`] };
+    const diagnostics = loaded.state === "invalid" ? [`${loaded.reason}; it will be regenerated`] : [];
+    const manifestDigest = loaded.state === "valid" ? manifestSatisfactionDigest(loaded.manifest) : null;
+    if (!this.machineConfig) return { stateDigest: manifestDigest, valid: true, diagnostics };
+    const config = await loadMachineConfig(this.configFile());
+    if (config.status === "invalid" || config.status === "unsupported_version") {
+      return { stateDigest: null, valid: false, diagnostics: [...diagnostics, "machine config requires repair"] };
     }
-    return { stateDigest: manifestSatisfactionDigest(loaded.manifest), valid: true, diagnostics: [] };
+    return {
+      stateDigest: this.satisfactionDigest(manifestDigest, config.status === "absent" ? null : config.config ?? null),
+      valid: true, diagnostics
+    };
   }
 
   async desired(ctx: SetupContext): Promise<ComponentDesiredState> {
     this.planned = await this.body(ctx);
     return {
-      digest: manifestSatisfactionDigest(this.planned),
+      digest: this.satisfactionDigest(manifestSatisfactionDigest(this.planned), this.machineConfig)!,
       summary: `Record the environment manifest in ${this.filePath}`,
-      targets: [this.filePath],
+      targets: [this.filePath, ...(this.machineConfig ? [this.configFile()] : [])],
       machineWide: false,
       repairNeeded: false
     };
@@ -193,11 +215,28 @@ export class EnvironmentManifestComponent implements SetupComponent {
     if (ctx.mode === "check" || ctx.mode === "dry_run") {
       return { ownedPaths: [], diagnostics: [`environment manifest skipped in ${ctx.mode} mode; nothing written`] };
     }
+    const ownedPaths: string[] = [];
+    if (this.machineConfig) {
+      const file = this.configFile();
+      const previous = await loadMachineConfig(file);
+      if (previous.status === "invalid" || previous.status === "unsupported_version") {
+        return { ownedPaths: [], diagnostics: ["machine config requires repair; refusing to replace it"] };
+      }
+      if (previous.status === "absent" || digest(previous.config) !== digest(this.machineConfig)) {
+        if (previous.status !== "absent") {
+          const backup = await this.opts.store.backupFile(file);
+          if (!backup.ok) return { ownedPaths: [], diagnostics: [`machine config backup failed: ${backup.error.message}`] };
+        }
+        const written = await this.opts.store.writeFileAtomic(file, `${JSON.stringify(this.machineConfig, null, 2)}\n`, 0o600);
+        if (!written.ok) return { ownedPaths: [], diagnostics: [`machine config write failed: ${written.error.message}`] };
+      }
+      ownedPaths.push(file);
+    }
     // Write exactly the content whose digest was planned.
     const body = this.planned ?? (await this.body(ctx));
     const loaded = await this.load();
     if (loaded.state === "valid" && manifestSatisfactionDigest(loaded.manifest) === manifestSatisfactionDigest(body)) {
-      return { ownedPaths: [this.filePath], diagnostics: [] };
+      return { ownedPaths: [...ownedPaths, this.filePath], diagnostics: [] };
     }
     const full = EnvironmentManifestSchema.safeParse({ ...body, generatedAt: ctx.now().toISOString(), lastPlan: this.lastPlan });
     if (!full.success) return { ownedPaths: [], diagnostics: [`invalid environment manifest: ${full.error.message}`] };
@@ -207,6 +246,6 @@ export class EnvironmentManifestComponent implements SetupComponent {
     }
     const w = await this.opts.store.writeFileAtomic(this.filePath, `${JSON.stringify(full.data, null, 2)}\n`, 0o600);
     if (!w.ok) return { ownedPaths: [], diagnostics: [`environment manifest write failed: ${w.error.message}`] };
-    return { ownedPaths: [this.filePath], diagnostics: [] };
+    return { ownedPaths: [...ownedPaths, this.filePath], diagnostics: [] };
   }
 }

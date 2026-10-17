@@ -3,12 +3,41 @@
 `@bflow/machine-setup` implements the **Machine Setup Backend** (Phase P26 of Bflow Platform v3).
 It provides the execution engine and setup service facade for inspecting, planning, approving, applying, and repairing host machine environments across Linux and macOS hosts.
 
-This package is consumed by the future CLI (`apps/cli`, P29) to drive:
+This package is consumed by `apps/cli` to drive:
 - `bflow setup`: Full setup (observe → plan → approve → apply → post-check doctor).
 - `bflow setup --check`: Zero-write observation and machine doctor check.
 - `bflow setup --dry-run`: Plan generation and human-readable change preview with zero writes.
 - `bflow setup --repair`: Plan and repair malformed owned config (`.bashrc`, `mcp.json`), reconcile or retry interrupted/unknown journal steps.
 - `bflow setup --yes`: Auto-approve non-elevation steps already present in the plan.
+
+## Resolved setup inputs and managed command
+
+`MachineSetupService` accepts an optional resolved `platform` and schema-validated `config`.
+The platform controls all setup paths, including isolated roots. Invalid existing machine
+configuration still blocks apply and requires repair. Approved manifest application persists
+the resolved configuration in `<config>/machine.json`, backing up a changed valid file;
+check and dry-run remain read-only.
+
+An optional `launcher: { nodeBinary, entrypoint }` installs an owned POSIX `bflow` wrapper in
+`managedBin` as part of the approved PATH step. When `~/.local/bin` is already on the current
+PATH, setup also puts the wrapper there for immediate use in other directories. Existing
+unowned files, symlinks and foreign-UID launchers are preserved. Launcher content and mode
+participate in read-back and idempotency checks. Otherwise setup reports which shell file
+to reload, or asks the user to open another terminal.
+
+Configured tool pins are required observations. Managed archive and npm executables are
+probed under `<data>/tools/<toolId>` and its `node_modules/.bin` directory. The final report
+refreshes observations after installation. A tool outside the process PATH is healthy only
+when the actual managed shell block covers its directory; the report retains `path_missing`
+and a shell-reload warning. Native plugins have no synthetic CLI executable: the caller can
+supply `additionalToolObservations(platform, config)` for validated, read-only native probes.
+Unsupported required pins remain visible and unhealthy.
+
+Independent component configuration continues after unrelated installer failures. The
+manifest retains its predecessor dependencies; failed or unknown predecessors block it.
+Doctor still runs and planning failures remain failed health checks. Installation and
+native-probe tests use controlled fixtures; the launcher shell tests execute real Bash and
+Node in temporary homes. These tests do not establish live provider or full SDLC acceptance.
 
 ---
 

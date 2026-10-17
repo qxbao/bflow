@@ -7,6 +7,7 @@ import {
   type ToolInstallRequest
 } from "@bflow/contracts";
 import { z } from "zod";
+import path from "node:path";
 import { conflictError, validationError } from "./errors.js";
 import type { PlatformProfile } from "./types.js";
 
@@ -15,7 +16,7 @@ const IdSchema = z.string().trim().min(1).max(200);
 export const ToolInstallDescriptorSchema = z
   .object({
     schemaVersion: PlatformSchemaVersionSchema,
-    toolId: IdSchema,
+    toolId: IdSchema.regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, "tool id must be a safe install directory name"),
     installerId: IdSchema,
     method: z.enum(["npm", "pnpm", "homebrew", "winget", "verified_archive"]),
     version: z.string().regex(/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/, "exact semver required (no range/latest)"),
@@ -95,7 +96,7 @@ export function buildInstallRequest(
     source: v.source,
     integrity: v.integrity,
     scope: { kind: "machine", machineId: platform.machineId },
-    destination: v.method === "verified_archive" ? platform.paths.managedBin : v.method,
+    destination: (platform.os === "win32" ? path.win32 : path.posix).join(platform.paths.data, "tools", v.toolId),
     idempotencyKey: `install:${platform.machineId}:${v.toolId}:${v.version}:${v.integrity}`
   });
   if (!req.success) return { ok: false, error: validationError(`invalid install request: ${req.error.message}`) };

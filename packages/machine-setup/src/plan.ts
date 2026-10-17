@@ -54,6 +54,7 @@ export interface BuiltSetupPlan {
   plan: ReturnType<typeof MachineSetupPlanSchema.parse>;
   preview: SetupPreview;
   diagnostics: string[];
+  componentFailures: { componentId: string; message: string }[];
 }
 
 function fail<T>(message: string): OperationResult<T> {
@@ -116,6 +117,7 @@ export async function buildSetupPlan(input: BuildSetupPlanInput): Promise<Operat
   const satisfied: string[] = [];
   const needsRepair: string[] = [];
   const diagnostics: string[] = [];
+  const componentFailures: BuiltSetupPlan["componentFailures"] = [];
 
   const push = (step: SetupStep, p: Omit<SetupPreviewStep, "stepId" | "action" | "componentId" | "requiresApproval">): void => {
     steps.push(step);
@@ -138,7 +140,13 @@ export async function buildSetupPlan(input: BuildSetupPlanInput): Promise<Operat
     const { descriptor, installer } = resolved as { descriptor: ToolInstallDescriptor; installer: ToolInstaller };
     const req = buildInstallRequest(descriptor, platform);
     if (!req.ok) return { ok: false, error: req.error };
-    const planned = await installer.plan(req.value, input.signal ? { signal: input.signal } : undefined);
+    let planned;
+    try {
+      planned = await installer.plan(req.value, input.signal ? { signal: input.signal } : undefined);
+    } catch (e) {
+      manual.push({ toolId: o.toolId, guidance: `installer ${installer.installerId} failed to plan: ${e instanceof Error ? e.message : String(e)}` });
+      continue;
+    }
     if (!planned.ok) {
       manual.push({ toolId: o.toolId, guidance: `${planned.error.message}. ${guidanceFor(o.toolId, platform.os)}` });
       continue;
@@ -152,7 +160,6 @@ export async function buildSetupPlan(input: BuildSetupPlanInput): Promise<Operat
       requiresElevation: descriptor.requiresElevation
     });
   }
-  const installIds = steps.map((s) => s.stepId);
 
   // 2. component steps in known order
   for (const id of COMPONENT_ORDER) {
@@ -163,7 +170,10 @@ export async function buildSetupPlan(input: BuildSetupPlanInput): Promise<Operat
       observed = await c.observe(ctx);
       desired = await c.desired(ctx);
     } catch (e) {
-      return fail(`component ${id} failed to evaluate: ${e instanceof Error ? e.message : String(e)}`);
+      const message = `component ${id} failed to evaluate: ${e instanceof Error ? e.message : String(e)}`;
+      diagnostics.push(message);
+      componentFailures.push({ componentId: id, message });
+      continue;
     }
     if (observed.valid && observed.stateDigest === desired.digest) {
       satisfied.push(id);
@@ -174,7 +184,7 @@ export async function buildSetupPlan(input: BuildSetupPlanInput): Promise<Operat
       continue;
     }
     const stepId = `${c.action}:${id}`;
-    const dependsOn = id === "environment-manifest" ? [...stepIds] : [...installIds];
+    const dependsOn = id === "environment-manifest" ? [...stepIds] : [];
     const step = SetupStepSchema.safeParse({
       schemaVersion: 3, stepId, action: c.action, componentId: id, level: "machine", scope, dependsOn,
       desiredStateDigest: desired.digest, expectedStateDigest: observed.stateDigest,
@@ -188,10 +198,9 @@ export async function buildSetupPlan(input: BuildSetupPlanInput): Promise<Operat
   }
 
   // 3. doctor verify
-  const manifestStep = steps.find((s) => s.componentId === "environment-manifest");
   const doctor = SetupStepSchema.safeParse({
     schemaVersion: 3, stepId: DOCTOR_STEP_ID, action: "verify", componentId: "doctor", level: "machine", scope,
-    dependsOn: manifestStep ? [manifestStep.stepId] : [...stepIds],
+    dependsOn: [],
     desiredStateDigest: digest({ healthy: true }), expectedStateDigest: null, requiresApproval: false,
     rollback: "none", idempotencyKey: mkIdempotencyKey(platform.machineId, DOCTOR_STEP_ID, digest({ healthy: true }))
   });
@@ -221,7 +230,7 @@ export async function buildSetupPlan(input: BuildSetupPlanInput): Promise<Operat
     needsRepair,
     machineWideChanges: previewSteps.filter((p) => p.machineWide).flatMap((p) => p.targets.map((t) => `${p.stepId}: ${t}`))
   };
-  return { ok: true, value: { plan: parsed.data, preview, diagnostics } };
+  return { ok: true, value: { plan: parsed.data, preview, diagnostics, componentFailures } };
 }
 
 export function renderPreview(preview: SetupPreview): string {

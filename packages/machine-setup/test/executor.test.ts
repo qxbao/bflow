@@ -188,7 +188,7 @@ describe("executePlan", () => {
     expect(j.ok && j.value).toMatchObject({ planId: plan.planId, planDigest: plan.planDigest, revision: 1 });
     if (j.ok && j.value) expect(Object.values(j.value.steps).every((e) => e.status === "finished")).toBe(true);
     const changes = await store.readChanges();
-    expect(changes.ok && changes.value.find((c) => c.stepId === "install_tool:pnpm")).toMatchObject({ target: "npm", machineWide: true });
+    expect(changes.ok && changes.value.find((c) => c.stepId === "install_tool:pnpm")).toMatchObject({ target: path.join(paths.data, "tools", "pnpm"), machineWide: true });
     if (changes.ok) {
       expect(changes.value.find((c) => c.stepId === "configure:services")).toMatchObject({ target: "/t/services", machineWide: true });
       expect(changes.value.find((c) => c.stepId === "configure:path")).toMatchObject({ target: "/t/path", machineWide: false });
@@ -209,7 +209,7 @@ describe("executePlan", () => {
     expect(p.applyCalls).toBe(0);
   });
 
-  it("dependency failure blocks dependents (install fails → components and doctor blocked)", async () => {
+  it("a failed install blocks its manifest while independent configuration and doctor continue", async () => {
     const { installer } = fakeInstaller({ failApply: true });
     const registry = new ToolInstallerRegistry();
     registry.register(installer);
@@ -218,12 +218,12 @@ describe("executePlan", () => {
     const { plan, preview } = await planFor(comps, { observations: [obs("pnpm", "missing")], registry, pins: [desc()] });
     const receipts = await okExec(plan, comps, { registry, approvalReceiptId: await approve(plan, preview), preview });
     expect(statuses(receipts)).toEqual({
-      "install_tool:pnpm": "failed", "configure:path": "blocked", "configure:environment-manifest": "blocked", [DOCTOR_STEP_ID]: "blocked"
+      "install_tool:pnpm": "failed", "configure:path": "applied", "configure:environment-manifest": "blocked", [DOCTOR_STEP_ID]: "applied"
     });
     const failed = receipts.find((r) => r.stepId === "install_tool:pnpm")!;
     expect(failed.diagnostics.join(" ")).toContain("download failed");
-    expect(receipts.find((r) => r.stepId === "configure:path")!.diagnostics[0]).toContain("install_tool:pnpm");
-    expect(p.applyCalls).toBe(0);
+    expect(receipts.find((r) => r.stepId === "configure:environment-manifest")!.diagnostics[0]).toContain("install_tool:pnpm");
+    expect(p.applyCalls).toBe(1);
   });
 
   it("missing or foreign approval → blocked without side effects", async () => {
@@ -286,7 +286,7 @@ describe("executePlan", () => {
     const { plan, preview } = await planFor(comps);
     const approvalReceiptId = await approve(plan, preview);
     const first = await okExec(plan, comps, { approvalReceiptId, preview, stepTimeoutMs: 30 });
-    expect(statuses(first)).toEqual({ "configure:path": "unknown", [DOCTOR_STEP_ID]: "blocked" });
+    expect(statuses(first)).toEqual({ "configure:path": "unknown", [DOCTOR_STEP_ID]: "applied" });
     expect(first[0]!.diagnostics.join(" ")).toContain("timed out");
     const j = await store.readJournal();
     expect(j.ok && j.value!.steps["configure:path"]!.status).toBe("started");

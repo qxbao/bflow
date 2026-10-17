@@ -203,7 +203,8 @@ describe("MachineSetupService", () => {
     expect(r.receipts.find((x) => x.stepId === "install_tool:pnpm")!.status).toBe("applied");
     expect(r.doctor?.healthy).toBe(true);
     expect(r.outcome).toBe("applied");
-    expect(r.machineWideChanges).toEqual(["install_tool:pnpm: npm"]);
+    expect(r.machineWideChanges).toEqual([`install_tool:pnpm: ${path.join(xdg().data, "tools", "pnpm")}`]);
+    expect(r.observations.find((o) => o.toolId === "pnpm")!.status).toBe("present");
   });
 
   it("invalid machine config: apply blocked with zero writes; repair backs up and restores defaults", async () => {

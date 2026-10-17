@@ -1,4 +1,4 @@
-import { mkdir, readFile, realpath, stat } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { digest } from "./canonical.js";
 import type { SetupStateStore } from "./state-store.js";
@@ -13,6 +13,8 @@ import type { ToolObservation } from "./tools.js";
 
 export const PATH_BLOCK_START = "# >>> bflow managed PATH >>>";
 export const PATH_BLOCK_END = "# <<< bflow managed PATH <<<";
+const LAUNCHER_HEADER = "#!/bin/sh\n# bflow managed launcher v1\n";
+const shellQuote = (value: string): string => "'" + value.replaceAll("'", "'\\''") + "'";
 
 /** Interface only: Windows user PATH editing is designed but not verified. */
 export interface WindowsPathEditor {
@@ -25,6 +27,7 @@ export interface PathComponentOptions {
   store: SetupStateStore;
   observations: readonly Pick<ToolObservation, "pathMissingDir">[];
   env: Record<string, string | undefined>;
+  launcher?: { nodeBinary: string; entrypoint: string };
 }
 
 interface ParsedFile {
@@ -57,11 +60,13 @@ export class PathComponent implements SetupComponent {
   private dirs: string[];
   private readonly managed: string;
   private readonly fresh: string[];
+  private readonly launcher: PathComponentOptions["launcher"];
 
   constructor(options: PathComponentOptions) {
     this.platform = options.platform;
     this.store = options.store;
     this.env = options.env;
+    this.launcher = options.launcher;
     const onPath = new Set(options.platform.pathEntries);
     const managed = options.platform.paths.managedBin;
     const out: string[] = [];
@@ -140,6 +145,11 @@ export class PathComponent implements SetupComponent {
 
   private validationErrors(): string[] {
     const errs: string[] = [];
+    if (this.launcher) {
+      for (const [name, value] of Object.entries(this.launcher)) {
+        if (!path.posix.isAbsolute(value) || /[\r\n\0]/.test(value)) errs.push(`launcher ${name} must be an absolute single-line path`);
+      }
+    }
     for (const d of this.dirs) {
       const e = this.dirError(d);
       if (e !== null) errs.push(e);
@@ -207,6 +217,59 @@ export class PathComponent implements SetupComponent {
     return p.lines.slice(b.start + 1, b.end).join("\n");
   }
 
+  private launcherFiles(): string[] {
+    const files = [path.join(this.managed, "bflow")];
+    const userBin = path.join(this.platform.homeDir, ".local", "bin");
+    if (userBin !== this.managed && this.platform.pathEntries.includes(userBin)) files.push(path.join(userBin, "bflow"));
+    return files;
+  }
+
+  private launcherContent(): string {
+    const launcher = this.launcher!;
+    return `${LAUNCHER_HEADER}exec ${shellQuote(launcher.nodeBinary)} ${shellQuote(launcher.entrypoint)} "$@"\n`;
+  }
+
+  private stateDigest(body: string, launcher: unknown): string {
+    return this.launcher ? digest({ path: body, launcher }) : digest(body);
+  }
+
+  private async observeLauncher(file: string): Promise<{ content: string; mode: number; error?: string } | null> {
+    if (!this.launcher) return null;
+    try {
+      const info = await lstat(file);
+      if (!info.isFile() || info.isSymbolicLink() || (this.platform.uid !== null && info.uid !== this.platform.uid)) {
+        return { content: "", mode: 0, error: `launcher is not an owned regular file: ${file}` };
+      }
+      const content = await readFile(file, "utf8");
+      if (!content.startsWith(LAUNCHER_HEADER)) return { content, mode: info.mode & 0o777, error: `refusing to replace launcher without Bflow ownership: ${file}` };
+      return { content, mode: info.mode & 0o777 };
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+      return { content: "", mode: 0, error: `cannot inspect launcher: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+
+  private async applyLauncher(): Promise<{ ownedPaths: string[]; diagnostics: string[] }> {
+    if (!this.launcher) return { ownedPaths: [], diagnostics: [] };
+    const candidates = await Promise.all(this.launcherFiles().map(async (file) => ({ file, observed: await this.observeLauncher(file) })));
+    const error = candidates.find((candidate) => candidate.observed?.error)?.observed?.error;
+    if (error) return { ownedPaths: [], diagnostics: [error] };
+    const ownedPaths: string[] = [];
+    const content = this.launcherContent();
+    for (const { file, observed } of candidates) {
+      if (observed?.content !== content || observed.mode !== 0o755) {
+        if (observed) {
+          const backup = await this.store.backupFile(file);
+          if (!backup.ok) return { ownedPaths, diagnostics: [`launcher backup failed: ${backup.error.message}`] };
+        }
+        const written = await this.store.writeFileAtomic(file, content, 0o755);
+        if (!written.ok) return { ownedPaths, diagnostics: [`launcher write failed: ${written.error.message}`] };
+      }
+      ownedPaths.push(file);
+    }
+    return { ownedPaths, diagnostics: [] };
+  }
+
   async observe(_ctx: SetupContext): Promise<ComponentObservation> {
     await this.refresh();
     if (this.unsupported()) {
@@ -214,6 +277,10 @@ export class PathComponent implements SetupComponent {
     }
     const file = this.targetFile()!;
     const diagnostics = this.validationErrors();
+    const launcher = this.launcher ? await Promise.all(this.launcherFiles().map(async (file) => ({
+      file, ...(await this.observeLauncher(file) ?? { content: null, mode: null })
+    }))) : null;
+    for (const observed of launcher ?? []) if ("error" in observed && observed.error) diagnostics.push(observed.error);
     const parsed = await this.parse(file);
     if ("error" in parsed) return { stateDigest: null, valid: false, diagnostics: [...diagnostics, parsed.error] };
     if (!this.isWellFormed(parsed)) {
@@ -223,7 +290,7 @@ export class PathComponent implements SetupComponent {
       return { stateDigest: null, valid: false, diagnostics };
     }
     if (parsed.blocks.length === 0) return { stateDigest: null, valid: diagnostics.length === 0, diagnostics };
-    return { stateDigest: digest(this.blockBody(parsed)), valid: diagnostics.length === 0, diagnostics };
+    return { stateDigest: this.stateDigest(this.blockBody(parsed), launcher), valid: diagnostics.length === 0, diagnostics };
   }
 
   async desired(_ctx: SetupContext): Promise<ComponentDesiredState> {
@@ -241,9 +308,9 @@ export class PathComponent implements SetupComponent {
     const parsed = await this.parse(file);
     const repairNeeded = !("error" in parsed) && !this.isWellFormed(parsed);
     return {
-      digest: digest(this.bodyText()),
+      digest: this.stateDigest(this.bodyText(), this.launcher ? this.launcherFiles().map((file) => ({ file, content: this.launcherContent(), mode: 0o755 })) : null),
       summary: `Ensure ${this.dirs.length} director${this.dirs.length === 1 ? "y is" : "ies are"} on PATH via ${file}`,
-      targets: [file],
+      targets: [file, ...(this.launcher ? this.launcherFiles() : [])],
       machineWide: false,
       repairNeeded
     };
@@ -271,8 +338,10 @@ export class PathComponent implements SetupComponent {
       return { ownedPaths: [], diagnostics: ["PATH block malformed; run setup --repair"] };
     }
 
+    const launcher = await this.applyLauncher();
+    if (launcher.diagnostics.length > 0) return launcher;
     const next = this.nextContent(parsed);
-    if (parsed.exists && next === parsed.content) return { ownedPaths: [file], diagnostics: [] };
+    if (parsed.exists && next === parsed.content) return { ownedPaths: [...launcher.ownedPaths, file], diagnostics: [] };
 
     if (parsed.exists) {
       const b = await this.store.backupFile(file);
@@ -286,7 +355,7 @@ export class PathComponent implements SetupComponent {
     }
     const w = await this.store.writeFileAtomic(file, next, parsed.mode ?? 0o644);
     if (!w.ok) return { ownedPaths: [], diagnostics: [`PATH write failed: ${w.error.message}`] };
-    return { ownedPaths: [file], diagnostics: [] };
+    return { ownedPaths: [...launcher.ownedPaths, file], diagnostics: [] };
   }
 
   private nextContent(p: ParsedFile): string {
