@@ -537,6 +537,7 @@ describe("Bflow MCP Services Integration Scenarios", () => {
 
     // 2. Linux systemd-user installation and startup
     const linuxMgr = new BflowOSServiceManager({
+      env: {},
       platform: "linux",
       homeDir,
       runner: mockRunner,
@@ -554,6 +555,7 @@ describe("Bflow MCP Services Integration Scenarios", () => {
 
     // 3. macOS launchd installation and startup
     const macosMgr = new BflowOSServiceManager({
+      env: {},
       platform: "darwin",
       homeDir,
       uid: 501,
@@ -572,6 +574,7 @@ describe("Bflow MCP Services Integration Scenarios", () => {
 
     // 4. Windows startup unverified vs verified
     const winUnverifiedMgr = new BflowOSServiceManager({
+      env: {},
       platform: "win32",
       homeDir,
       runner: mockRunner,
@@ -582,6 +585,7 @@ describe("Bflow MCP Services Integration Scenarios", () => {
     expect(unverifiedRes.error.details?.diagnosticCode).toBe("windows_unverified");
 
     const winVerifiedMgr = new BflowOSServiceManager({
+      env: {},
       platform: "win32",
       homeDir,
       runner: mockRunner,
@@ -604,6 +608,7 @@ describe("Bflow MCP Services Integration Scenarios", () => {
   it("Scenario 2 — Service restart & auto-recovery without root privileges", async () => {
     let healthProbeSuccess = true;
     const manager = new BflowOSServiceManager({
+      env: {},
       platform: "linux",
       homeDir,
       runner: mockRunner,
@@ -659,6 +664,7 @@ describe("Bflow MCP Services Integration Scenarios", () => {
   // --------------------------------------------------------------------------
   it("Scenario 3 — System login simulation chained with initializeUserSession: 0 RAM lazy backends until demand", async () => {
     const serviceManager = new BflowOSServiceManager({
+      env: {},
       platform: "linux",
       homeDir,
       runner: mockRunner
