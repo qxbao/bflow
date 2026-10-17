@@ -412,3 +412,22 @@ Guarantees implemented here, with package-local tests in `test/platform/service.
 Limitations: this is source composition with local fake-runner and fake-Gateway evidence only. Live
 provider probes, a live Gateway daemon and Pane Manager/Conversation wiring are not verified here. The
 service creates each role's private `gen-<n>/roles/<role>` state directory before preflight.
+
+### In-process MCP tool reachability (H1)
+
+`src/agentic/tool-reachability.ts` proves Gateway tool reachability from inside the launched provider process,
+not only from config digests. At `prepare`, the host writes a private `<role>.gateway.json` (0600, atomic) for
+each prepared role with Gateway registrations: launch id, Gateway endpoint, registration ids, the derived
+`BFLOW_MCP_TOKEN_*` variable names and allowed tools. It never contains token values, and it is removed for roles
+without registrations. The provider's native `SessionStart` hook reads that plan, probes each registration with the
+bearer token from its own environment (`initialize`, then `tools/list` with the session id, 5 s per request,
+`redirect: "error"`), and sends `provider_started` with `launchId` and `toolReachability`. Each record holds only
+the registration id, env var name, `ok`, discovered tool names and a code (`token_env_missing`, `unauthorized`,
+`http_error`, `timeout`, `unreachable`, `protocol_error`, `missing_tools`).
+
+`activate` requires, for each required role with registrations, a record for the exact prepared launch in which every
+registration is `ok` with all allowed tools. A missing record is `[bflow:native-startup-pending]`; a failed record
+throws a named error (role, registration, env var, code). `platform_status` reports a per-role `toolReachability`
+summary without tokens. Limitations: this relies on the provider passing the launch environment to its SessionStart
+hook, which is verified only in the local spawned-hook test (`test/agentic/tool-reachability.test.ts`). Dynamic
+Developer launches are not covered by this check, and live provider and Herdr runs are not verified.

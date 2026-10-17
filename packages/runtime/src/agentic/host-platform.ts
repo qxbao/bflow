@@ -13,6 +13,7 @@ import {
   type GatewayControlPort, type HostLaunchExtras, type PlatformPreflightReport, type PlatformReadinessService,
   type PlatformSessionIdentity, type PlatformStatusSnapshot, type PreparedRoleLaunch, type RolePlatformRequirement
 } from "../platform/index.js";
+import { RoleToolReachabilitySchema } from "./tool-reachability.js";
 import {
   AgenticHostPlatformOptionsSchema, HostLaunchMaterialSchema, PlatformPreflightReportSchema,
   type AgenticHostPlatformOptions, type HostLaunchMaterial, type PlatformRoleOption
@@ -63,7 +64,9 @@ export const HostPlatformStatusSchema = z.object({
     generation: z.number().int().nonnegative().nullable(),
     launches: z.array(PlatformStatusLaunchSchema)
   }).strict(),
-  gatewayDiagnostic: z.string().nullable()
+  gatewayDiagnostic: z.string().nullable(),
+  /** In-process MCP tool reachability per prepared role with Gateway registrations. Carries no tokens. */
+  toolReachability: z.array(RoleToolReachabilitySchema).optional()
 }).strict();
 export type HostPlatformStatus = z.infer<typeof HostPlatformStatusSchema>;
 

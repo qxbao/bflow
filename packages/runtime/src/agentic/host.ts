@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { createServer, connect, type Socket } from "node:net";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -25,6 +25,11 @@ import { parseBehavioralCommands } from "./behavioral-runner.js";
 import { HostDevelopment } from "./host-development.js";
 import { redactString } from "../resilience/redaction.js";
 import { createHostPlatformSession, launchMaterial, type HostAgentObservation, type HostPlatformSession } from "./host-platform.js";
+import {
+  assertRoleToolReachability, launchReceiptName, probeAllGateways, ProviderStartedPayloadSchema, publishGatewayProbes,
+  readGatewayProbeFile, removeGatewayProbes, reportedReachabilityOf, summarizeToolReachability,
+  type ReachabilityExpectation, type RoleToolReachability
+} from "./tool-reachability.js";
 
 const execute = promisify(execFile);
 const roles = ["conversation", "coordinator", "specifier", "architect", "planner", "developer", "tester", "reviewer", "qa", "security"] as const;
@@ -76,6 +81,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const receipts = new HostReceiptJournal(join(configuration.directory, "authentication-receipts"), configuration.repositoryPath, configuration.sessionId);
   const roleTokens = new Map<string, AgentRole>();
   const launch: Record<string, RoleLaunchDescriptor> = {};
+  /** H1: per prepared role launch with Gateway registrations, what its provider process must prove reachable. */
+  const toolExpectations = new Map<AgentRole, ReachabilityExpectation>();
   const executable = fileURLToPath(import.meta.url);
   const nativeSocket = configuration.socketPath.replace(/\.sock$/, ".native.sock");
   const issuerId = `bflow-${createHash("sha256").update(configuration.repositoryPath + configuration.sessionId).digest("hex").slice(0, 24)}`;
@@ -211,10 +218,16 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
     return queryStore!;
   };
+  const readLaunchReceipt = async (role: AgentRole, paneId: string): Promise<Record<string, unknown> | undefined> => {
+    try { return record(JSON.parse(await readFile(join(configuration.directory, "launch-receipts", launchReceiptName(role, paneId)), "utf8"))); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  };
   const activate = async (input: unknown) => {
     const accepted = SessionManifestSchema.parse(input);
     if (accepted.sessionId !== configuration.sessionId || accepted.workspaceRoot !== configuration.repositoryPath || accepted.status !== "up") throw new Error("Foreign or unready session manifest");
     if (workspace) { if (quiesced) throw new Error("Host is quiesced; reconcile and restart after shutdown"); return null; }
+    // Launch receipts retained for this activation, keyed by role (H1 reads their reachability fields).
+    const launchReceipts = new Map<AgentRole, Record<string, unknown>>();
     // An older pane may have a valid Herdr session but no Bflow tools/hooks.
     // Require the launch-local hook receipt for this exact native session.
     for (const pane of accepted.panes) {
@@ -229,6 +242,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (!pane.session || receipt.role !== pane.role || receipt.paneId !== pane.paneId || receipt.nativeSessionId !== pane.session.value) {
         throw new Error(`Pane '${pane.paneId}' has no matching native Bflow launch receipt; preserve it and reconcile provider startup`);
       }
+      launchReceipts.set(pane.role, receipt);
     }
     for (const pane of accepted.panes) {
       const receipt = nativeSessions.get(pane.paneId);
@@ -240,8 +254,17 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           pane.session?.value !== receipt.sessionId || (actual.name ?? actual.agent) !== pane.agentId)
         throw new Error(`Role ${pane.role} has no matching Bflow provider startup/native-session receipt; stop and recreate legacy bare panes`);
     }
-    // Native sessions are proven above; platform readiness must now be activated-ready for every required role.
-    if (platformSession) await platformSession.verifyActivation(accepted.panes, observeAgent);
+    // Native sessions are proven above. H1: each required role with Gateway registrations must prove, from inside its
+    // launched provider process, that every registration reaches its allowed tools; only then is platform readiness checked.
+    if (platformSession) {
+      for (const [role, expectation] of toolExpectations) {
+        const pane = accepted.panes.find(candidate => candidate.role === role);
+        const required = platformRoles.find(option => option.role === role)?.required === true;
+        if (!pane || !required) continue;
+        assertRoleToolReachability(role, expectation, reportedReachabilityOf(launchReceipts.get(role) ?? {}));
+      }
+      await platformSession.verifyActivation(accepted.panes, observeAgent);
+    }
     queryStore?.close(); queryStore = undefined;
     const pluginRoot = fileURLToPath(new URL("../../../../agents/coordinator/herdr-receipts", import.meta.url));
     await herdr(["plugin", "link", pluginRoot]);
@@ -420,10 +443,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         await development.authorizeFileEdit(binding, hook); return { permitted: true };
       }
       if (method === "provider_started") {
-        const receipt = record(params), paneId = textField(receipt.paneId), nativeSessionId = textField(receipt.nativeSessionId);
+        const receipt = ProviderStartedPayloadSchema.parse(params), paneId = receipt.paneId, nativeSessionId = receipt.nativeSessionId;
         const directory = join(configuration.directory, "launch-receipts");
         await mkdir(directory, { recursive: true, mode: 0o700 });
-        await privateFile(join(directory, digest([role, paneId]) + ".json"), JSON.stringify({ role, paneId, nativeSessionId }));
+        await privateFile(join(directory, digest([role, paneId]) + ".json"), JSON.stringify({ role, paneId, nativeSessionId,
+          ...(receipt.launchId === undefined ? {} : { launchId: receipt.launchId, toolReachability: receipt.toolReachability }) }));
         return { recorded: true };
       }
       if (method === "role_call") return roleCall(role, params);
@@ -465,15 +489,30 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     switch (method) {
       case "ping": return { active: !!workspace, quiesced, schedulerError: schedulerError ?? null };
       case "prepare": {
+        // H1: stale probe plans never survive a new generation; roles without registrations get none.
+        await removeGatewayProbes(configuration.directory, roles);
+        toolExpectations.clear();
         if (!platformSession) return { roleLaunch: launch };
         const prepared = await platformSession.prepare();
+        for (const [role, expectation] of await publishGatewayProbes(configuration.directory, roles, prepared.launches)) toolExpectations.set(role, expectation);
         const roleLaunch = Object.fromEntries(Object.entries(launch).map(([role, descriptor]) => {
           const ready = prepared.launches.get(role as AgentRole);
           return [role, ready ? { ...descriptor, launch: launchMaterial(ready) } : descriptor];
         }));
         return { roleLaunch, platform: prepared.report };
       }
-      case "platform_status": return platformSession?.status() ?? { report: null, status: { generation: null, launches: [] }, gatewayDiagnostic: null };
+      case "platform_status": {
+        // Legacy hosts (no platform) keep the original response shape exactly.
+        if (!platformSession) return { report: null, status: { generation: null, launches: [] }, gatewayDiagnostic: null };
+        const status = platformSession.status();
+        const toolReachability: RoleToolReachability[] = [];
+        for (const [role, expectation] of toolExpectations) {
+          const pane = manifest?.panes.find(candidate => candidate.role === role);
+          const receipt = pane === undefined ? undefined : await readLaunchReceipt(role, pane.paneId);
+          toolReachability.push(summarizeToolReachability(role, expectation, receipt === undefined ? undefined : reportedReachabilityOf(receipt)));
+        }
+        return { ...status, toolReachability };
+      }
       case "activate": return activate(params);
       case "get_run": { const stored = unwrap(await (await getQueryStore()).get(textField(record(params).runId))); return stored?.snapshot ?? null; }
       case "find_runs": { const page = unwrap(await (await getQueryStore()).find(RunQuerySchema.parse(params))); return { ...page, items: page.items.map(item => item.snapshot) }; }
@@ -627,7 +666,7 @@ export async function runRoleMcp(configuration: RoleConfiguration): Promise<void
     } catch (error) { reply({ isError: true, content: [{ type: "text", text: String(error) }] }); }
   }
 }
-export async function runProviderHook(configuration: RoleConfiguration, event: string): Promise<void> {
+export async function runProviderHook(configuration: RoleConfiguration, event: string, roleConfigPath?: string): Promise<void> {
   const chunks: Buffer[] = []; let size = 0;
   for await (const chunk of process.stdin) { size += Buffer.byteLength(chunk); if (size > 1024 * 1024) throw new Error("Oversized provider hook"); chunks.push(Buffer.from(chunk)); }
   const hook = record(JSON.parse(Buffer.concat(chunks).toString("utf8")));
@@ -648,7 +687,12 @@ export async function runProviderHook(configuration: RoleConfiguration, event: s
       socket.on("data", chunk => { response += String(chunk); if (!response.includes("\n")) return; socket.end();
         try { record(JSON.parse(response.split("\n")[0]!)).error ? reject(new Error("Herdr rejected native provider session")) : accept(); } catch (error) { reject(error); } });
     });
-    if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "provider_started", { paneId, nativeSessionId: session });
+    // H1: the probe runs here, inside the provider process, so it sees the launch environment Herdr passed to the provider.
+    const plan = event === "SessionStart" && roleConfigPath !== undefined
+      ? await readGatewayProbeFile(join(dirname(roleConfigPath), configuration.role + ".gateway.json")) : undefined;
+    const reachability = plan === undefined ? undefined : await probeAllGateways(plan, process.env, (url, init) => fetch(url, init));
+    if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "provider_started", { paneId, nativeSessionId: session,
+      ...(plan === undefined || reachability === undefined ? {} : { launchId: plan.launchId, toolReachability: reachability }) });
     if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "native_session", {paneId, sessionId:session});
   }
   if (event === "UserPromptSubmit") {
@@ -674,6 +718,6 @@ export async function runProviderHook(configuration: RoleConfiguration, event: s
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const mode = process.argv[2], path = process.argv[3];
   const task = !path ? Promise.reject(new Error("Host configuration path required")) : mode === "daemon" ? readHostConfiguration(path).then(runAgenticHost)
-    : readRoleConfiguration(path).then(configuration => mode === "mcp" ? runRoleMcp(configuration) : mode === "hook" ? runProviderHook(configuration, textField(process.argv[4])) : Promise.reject(new Error("Unknown host mode")));
+    : readRoleConfiguration(path).then(configuration => mode === "mcp" ? runRoleMcp(configuration) : mode === "hook" ? runProviderHook(configuration, textField(process.argv[4]), path) : Promise.reject(new Error("Unknown host mode")));
   task.catch(error => { process.stderr.write(redactString(String(error)) + "\n"); process.exitCode = 1; });
 }
