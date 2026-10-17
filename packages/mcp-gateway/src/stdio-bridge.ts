@@ -258,9 +258,14 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
     this.pendingWrites++;
     return new Promise<void>((resolve, reject) => {
       let finished = false;
+      let onDrain: (() => void) | undefined;
+      let onError: ((err: Error) => void) | undefined;
+
       const cleanupAndFinish = (err?: Error) => {
         if (finished) return;
         finished = true;
+        if (onDrain) (this.stdin as any).removeListener?.("drain", onDrain);
+        if (onError) (this.stdin as any).removeListener?.("error", onError);
         this.pendingWrites = Math.max(0, this.pendingWrites - 1);
         if (err) {
           reject(err);
@@ -272,22 +277,16 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
       const flushed = this.stdin.write(line + "\n", "utf8", (error) => {
         if (error) {
           cleanupAndFinish(error);
-        } else if (flushed) {
+        } else {
           cleanupAndFinish();
         }
       });
 
       if (!flushed) {
-        const onDrain = () => {
-          (this.stdin as any).removeListener("error", onError);
-          cleanupAndFinish();
-        };
-        const onError = (err: Error) => {
-          (this.stdin as any).removeListener("drain", onDrain);
-          cleanupAndFinish(err);
-        };
-        (this.stdin as any).once("drain", onDrain);
-        (this.stdin as any).once("error", onError);
+        onDrain = () => cleanupAndFinish();
+        onError = (err: Error) => cleanupAndFinish(err);
+        (this.stdin as any).once?.("drain", onDrain);
+        (this.stdin as any).once?.("error", onError);
       }
     });
   }
