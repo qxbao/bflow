@@ -38,8 +38,13 @@ export interface DeveloperLaunchPort {
   allocate(request: { taskId: string; worktreePath: string }): Promise<{ provider: string; argv: readonly string[]; env: Readonly<Record<string, string>>; launchId: string; launchFingerprint: string }>;
   release(taskId: string): Promise<void>;
 }
-/** Pane policy whose Developer allocation carries a readiness-approved launch and whose release drops it. */
-function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunchPort): PanePolicy {
+/**
+ * Pane policy whose Developer allocation carries a readiness-approved launch and whose release drops it.
+ * A refused allocation releases its prepared launch so no Gateway registration or intent is leaked, and a
+ * launched Developer pane is closed on release: its bearer token is revoked with the launch, so the running
+ * agent must not be reused with a later launch.
+ */
+export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunchPort): PanePolicy {
   return {
     getManifest: options => base.getManifest(options),
     getRoleBinding: (role, options) => base.getRoleBinding(role, options),
@@ -48,15 +53,21 @@ function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunchPort):
       let launch;
       try { launch = await launches.allocate({ taskId: request.taskId, worktreePath: request.worktreePath }); }
       catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
+      // Carried as a widened value: the PanePolicy request type predates the launch fields Pane Manager accepts.
       const allocation = { ...request, agentKind: launch.provider, launch };
-      return base.allocateDeveloper(allocation, options);
+      const allocated = await base.allocateDeveloper(allocation, options);
+      if (!allocated.ok) {
+        try { await launches.release(request.taskId); } catch { /* the refused allocation's error is the one to report */ }
+      }
+      return allocated;
     },
     async releaseDeveloper(request, options) {
-      const released = await base.releaseDeveloper(request, options);
-      if (!released.ok) return released;
+      const released = await base.releaseDeveloper({ ...request, closePane: true }, options);
+      // Already released: the binding is gone, so the launch is already dropped as well.
+      if (!released.ok && released.error.code !== "not_found") return released;
       try { await launches.release(request.taskId); }
       catch (error) { return { ok: false, error: { code: "conflict", retryable: true, message: String(error) } }; }
-      return released;
+      return released.ok ? released : { ok: true, value: undefined };
     }
   };
 }
