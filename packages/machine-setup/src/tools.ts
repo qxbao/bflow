@@ -126,7 +126,7 @@ export const TOOL_CATALOG: readonly ToolCatalogEntry[] = [
     kind: "runtime",
     executables: { posix: ["herdr"], win32: ["herdr"] },
     versionArgs: ["--version"],
-    versionPattern: String.raw`(\S+)`,
+    versionPattern: String.raw`(?:herdr\s+)?(\S+)`,
     requirement: { type: "present" },
     defaultRequired: true,
     knownInstallDirs: commonDirs,

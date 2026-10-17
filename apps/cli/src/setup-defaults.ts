@@ -28,6 +28,7 @@ export async function createDefaultSetupConfiguration(options: {
   config?: MachineConfig;
   registry?: ToolInstallerRegistry;
   memoryProvider?: "auto" | "claude" | "codex" | "host";
+  projectRoot?: string;
 }): Promise<{ config: MachineConfig; registry: ToolInstallerRegistry; diagnostics: string[];
   inventory: DefaultSetupInventory[]; launchRequirements: DefaultSetupLaunchRequirement[];
   additionalToolObservations: (platform: PlatformProfile, config: MachineConfig) => Promise<ToolObservation[]> }> {
@@ -67,7 +68,7 @@ export async function createDefaultSetupConfiguration(options: {
     const nativeInstaller = new leaf.NativeProvidersToolInstaller({ managedRoot: join(platform.paths.data, "tools"),
       pin, providers: config.providers, host: nativeHost,
       configuration: { homeDirectory: platform.homeDir, executables: providerExecutables,
-        memory: { provider: options.memoryProvider ?? "auto", dataDir: join(platform.paths.data, "claude-mem"), projectRoot: process.cwd(), project: process.cwd(), startIfMissing: true } } });
+        memory: { provider: options.memoryProvider ?? "auto", dataDir: join(platform.paths.data, "claude-mem"), projectRoot: options.projectRoot ?? process.cwd(), project: options.projectRoot ?? process.cwd(), startIfMissing: true } } });
     nativeInspectors.set(nativeInstaller.installerId, nativeInstaller);
     if (!registry.get(nativeInstaller.installerId)) {
       const registration = registry.register(nativeInstaller);

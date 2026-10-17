@@ -191,7 +191,7 @@ describe("service managers", () => {
     expect(res.ownedPaths).toEqual([unit()]);
     expect(runner.calls).toEqual([
       ["systemctl", "--user", "daemon-reload"],
-      ["systemctl", "--user", "enable", "--now", "bflow-gw.service"]
+      ["systemctl", "--user", "enable", "--now", unit()]
     ]);
     const text = await readFile(unit(), "utf8");
     expect(text).toContain("BFLOW_SECRET_REF_API_TOKEN=secret://bflow/api-token");
@@ -246,7 +246,7 @@ describe("service managers", () => {
     expect((await comp.apply(ctxFor(p))).diagnostics).toEqual([]);
     expect(runner.calls.filter((c) => !c.includes("is-active"))).toEqual([
       ["systemctl", "--user", "daemon-reload"],
-      ["systemctl", "--user", "enable", "--now", "bflow-gw.service"]
+      ["systemctl", "--user", "enable", "--now", unit()]
     ]);
     expect((await stat(unit())).mtimeMs).toBe(m);
     runner.active = true;
@@ -263,7 +263,7 @@ describe("service managers", () => {
     await changed.apply(ctxFor(p2));
     expect(runner.calls.filter((c) => !c.includes("is-active"))).toEqual([
       ["systemctl", "--user", "daemon-reload"],
-      ["systemctl", "--user", "enable", "--now", "bflow-gw.service"],
+      ["systemctl", "--user", "enable", "--now", unit()],
       ["systemctl", "--user", "try-restart", "bflow-gw.service"]
     ]);
   });

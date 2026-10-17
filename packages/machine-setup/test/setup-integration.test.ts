@@ -280,3 +280,20 @@ describe("component composition owns persisted machine config", () => {
     expect((await service(options).run({ mode: "apply", assumeYes: true })).outcome).toBe("healthy");
   });
 });
+
+describe("launcher process environment", () => {
+  it("can execute installed tools immediately without reloading the parent shell", async () => {
+    const userBin = path.join(root, ".local", "bin");
+    await mkdir(userBin, { recursive: true }); platform.pathEntries.push(userBin);
+    const managedTool = path.join(platform.paths.data, "tools", "gitnexus", "node_modules", ".bin", "gitnexus");
+    await executable(managedTool);
+    await writeFile(managedTool, "#!/bin/sh\necho managed-tool-available\n");
+    const entrypoint = path.join(root, "uses-managed-tools.mjs");
+    await writeFile(entrypoint, "import { spawnSync } from 'node:child_process'; const result=spawnSync('gitnexus',[],{encoding:'utf8'}); console.log(result.stdout ?? ''); process.exitCode=result.status ?? 1;\n");
+    const report = await service({ launcher: { nodeBinary: process.execPath, entrypoint } }).run({ mode: "apply", assumeYes: true });
+    expect(report.outcome).toBe("applied");
+    const result = await promisify(execFile)("/bin/bash", ["--noprofile", "--norc", "-c", "bflow"],
+      { cwd: root, env: { HOME: root, PATH: `${userBin}:/usr/bin:/bin` } });
+    expect(result.stdout.trim()).toBe("managed-tool-available");
+  });
+});

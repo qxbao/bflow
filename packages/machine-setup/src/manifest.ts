@@ -110,6 +110,7 @@ export class EnvironmentManifestComponent implements SetupComponent {
   private planned: ManifestBody | null = null;
   private lastPlan: ManifestPlanRef | null = null;
   private machineConfig: MachineConfig | null = null;
+  private serviceInventory: { mcpServiceIds: string[]; serviceIds: string[] } | null = null;
   private postSetupProbe: (() => Promise<readonly ToolObservation[]>) | null = null;
 
   constructor(options: EnvironmentManifestComponentOptions) {
@@ -124,6 +125,12 @@ export class EnvironmentManifestComponent implements SetupComponent {
   /** Resolved machine configuration is persisted under the same approved component step. */
   bindMachineConfig(config: MachineConfig): void {
     this.machineConfig = MachineConfigSchema.parse(config);
+  }
+
+  /** Composed service identifiers are known before installation and remain covered by the plan digest. */
+  bindServiceInventory(mcpServiceIds: readonly string[], serviceIds: readonly string[]): void {
+    this.serviceInventory = { mcpServiceIds: z.array(IdentifierSchema).parse(mcpServiceIds),
+      serviceIds: z.array(IdentifierSchema).parse(serviceIds) };
   }
 
   /** Invoked only inside the approved manifest apply, after predecessor installation steps. */
@@ -172,8 +179,8 @@ export class EnvironmentManifestComponent implements SetupComponent {
         binaryDigest: o.binaryDigest
       })),
       pathBlock,
-      mcpServiceIds: [...new Set(this.opts.mcpServiceIds)].sort(),
-      serviceIds: [...new Set(this.opts.serviceIds)].sort(),
+      mcpServiceIds: [...new Set(this.serviceInventory?.mcpServiceIds ?? this.opts.mcpServiceIds)].sort(),
+      serviceIds: [...new Set(this.serviceInventory?.serviceIds ?? this.opts.serviceIds)].sort(),
       skillsDigest
     };
   }

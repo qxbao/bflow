@@ -88,3 +88,12 @@ describe("memory observer selection", () => {
     if (!parsed.ok) expect(parsed.error.message).toContain("auto, claude, codex, or host");
   });
 });
+
+describe("required skills catalog", () => {
+  it("reports an unavailable explicit catalog before setup writes", async () => {
+    const ctx = await context({ outcome: "healthy" });
+    await expect(executeSetupCommand({ command: "setup", mode: "apply", yes: true, json: true, help: false,
+      catalogDir: join(ctx.cwd, "missing-catalog") }, ctx)).rejects.toThrow(/skills catalog/i);
+    expect(await readdir(ctx.cwd)).toEqual([]);
+  });
+});

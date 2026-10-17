@@ -139,7 +139,7 @@ describe("probeTools", () => {
     for (const n of Object.keys(out)) await exe(binDir, n);
     const obs = await probeTools(platform, runnerFor(out), { required: new Set([...REQ, "claude"]), knownInstallDirs: KNOWN });
     expect(Object.keys(out).every((id) => byId(obs, id).status === "present")).toBe(true);
-    expect(byId(obs, "herdr").version).toBe("herdr");
+    expect(byId(obs, "herdr").version).toBe("0.9.1-weird");
     expect(byId(obs, "claude").required).toBe(true);
     expect(byId(obs, "codex").required).toBe(false);
   });

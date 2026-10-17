@@ -226,7 +226,7 @@ export class PathComponent implements SetupComponent {
 
   private launcherContent(): string {
     const launcher = this.launcher!;
-    return `${LAUNCHER_HEADER}exec ${shellQuote(launcher.nodeBinary)} ${shellQuote(launcher.entrypoint)} "$@"\n`;
+    return `${LAUNCHER_HEADER}PATH=${shellQuote(this.dirs.join(":"))}:"$PATH"\nexport PATH\nexec ${shellQuote(launcher.nodeBinary)} ${shellQuote(launcher.entrypoint)} "$@"\n`;
   }
 
   private stateDigest(body: string, launcher: unknown): string {

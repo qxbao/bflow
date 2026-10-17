@@ -241,10 +241,10 @@ export class SystemdUserServiceManager extends FileServiceManager {
     }
   }
 
-  protected async activate(def: ServiceDefinition, _unit: string, replaced: boolean): Promise<string[]> {
+  protected async activate(def: ServiceDefinition, unit: string, replaced: boolean): Promise<string[]> {
     const argvs = [
       ["systemctl", "--user", "daemon-reload"],
-      ["systemctl", "--user", "enable", "--now", `bflow-${def.serviceId}.service`]
+      ["systemctl", "--user", "enable", "--now", unit]
     ];
     if (replaced) argvs.push(["systemctl", "--user", "try-restart", `bflow-${def.serviceId}.service`]);
     for (const argv of argvs) {

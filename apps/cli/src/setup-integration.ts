@@ -23,6 +23,8 @@ import {
   InteractiveApprover,
   type SetupOutcome,
   type MachineDoctorReport,
+  type SetupComponent,
+  type ComponentFactoryInput,
   buildSetupPlan,
   probeTools,
   MACHINE_CONFIG_FILE,
@@ -35,6 +37,9 @@ import {
 import {
   AgentProviderRegistry
 } from "@bflow/agent-providers";
+import { wrapSetupComponents, setupGatewayDiagnostics } from "./setup-gateway.js";
+import { humanText } from "./presentation.js";
+import { identifyRepository } from "./repository.js";
 import { createDefaultSetupConfiguration } from "./setup-defaults.js";
 import { SUPPORTED_CLI_COMMANDS } from "./command-reference.js";
 import type { CliContext, SetupCommandArgs, SetupCommandOutput } from "./types.js";
@@ -127,13 +132,10 @@ export async function executeSetupCommand(
   // 6. Resolve Skills Catalog & Synchronizer
   progress("Checking approved skills catalog...");
   const skillsMod = await loadSkillsModule();
-  const candidateDirs = [
-    args.catalogDir,
-    context?.setup?.catalogDir,
-    args.dir ? resolve(context?.cwd ?? process.cwd(), args.dir, "skills") : undefined,
-    resolve(context?.cwd ?? process.cwd(), "skills"),
-    resolve(fileURLToPath(import.meta.url), "../../../../skills")
-  ].filter((d): d is string => typeof d === "string" && d.trim().length > 0);
+  const selectedCatalog = args.catalogDir ?? context?.setup?.catalogDir;
+  const candidateDirs = selectedCatalog
+    ? [resolve(context?.cwd ?? process.cwd(), selectedCatalog)]
+    : [fileURLToPath(new URL("../../../skills", import.meta.url))];
 
   let catalogDir: string | undefined;
   for (const dir of candidateDirs) {
@@ -142,6 +144,8 @@ export async function executeSetupCommand(
       break;
     }
   }
+
+  if (!catalogDir) throw new Error("The required skills catalog is unavailable. Restore the bundled skills or pass --catalog-dir with a valid catalog.");
 
   let skillsInfo = {
     catalogLoaded: false,
@@ -187,7 +191,7 @@ export async function executeSetupCommand(
         storeRoot
       };
     } catch (e) {
-      diagnostics.push(`Failed to load skills catalog: ${e instanceof Error ? e.message : String(e)}`);
+      throw new Error(`Failed to load skills catalog: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -200,19 +204,58 @@ export async function executeSetupCommand(
     if (loaded.config) machineConfig = loaded.config;
   }
 
+  let launchRequirements: Awaited<ReturnType<typeof createDefaultSetupConfiguration>>["launchRequirements"] = [];
+  let repositoryRoot: string | undefined;
   let inventory: Awaited<ReturnType<typeof createDefaultSetupConfiguration>>["inventory"] = [];
   let additionalToolObservations: Awaited<ReturnType<typeof createDefaultSetupConfiguration>>["additionalToolObservations"] | undefined;
   if (!context?.setup?.machineSetup && !context?.setup?.toolInstaller) {
     progress("Loading the supported tool and agent CLI installation catalog...");
-    const defaults = await createDefaultSetupConfiguration({ platform,
+    const target = resolve(context?.cwd ?? process.cwd(), args.dir ?? ".");
+    try { repositoryRoot = (await identifyRepository(target)).root; }
+    catch (error) { if (args.dir) throw error; }
+    const defaults = await createDefaultSetupConfiguration({ platform, memoryProvider: args.memoryProvider ?? "auto",
+      projectRoot: repositoryRoot ?? target,
       ...(context?.setup?.machineConfig || existsSync(configPath) ? { config: machineConfig } : {}),
       registry: installerRegistry });
     machineConfig = defaults.config;
     installerRegistry = defaults.registry;
     inventory = defaults.inventory;
+    launchRequirements = defaults.launchRequirements;
     additionalToolObservations = defaults.additionalToolObservations;
     diagnostics.push(...defaults.diagnostics);
   }
+
+  if (launchRequirements.length) {
+    diagnostics.push(...setupGatewayDiagnostics({ launchRequirements, ...(repositoryRoot ? { repositoryRoot } : {}) }));
+  }
+
+  if (onProgress) {
+    const observedRegistry = new ToolInstallerRegistry();
+    for (const installerId of new Set(machineConfig.toolPins.map(pin => pin.installerId))) {
+      const installer = installerRegistry.get(installerId);
+      if (!installer) continue;
+      observedRegistry.register({ installerId, plan: (request, options) => installer.plan(request, options),
+        reconcile: (request, options) => installer.reconcile(request, options),
+        apply: async (request, options) => {
+          progress(`Installing ${request.step.componentId}...`);
+          const result = await installer.apply(request, options);
+          progress(`Checking installation of ${request.step.componentId}...`);
+          return result;
+        } });
+    }
+    installerRegistry = observedRegistry;
+  }
+
+  const decorateComponents = (components: readonly SetupComponent[], input: ComponentFactoryInput) => {
+    const composed = launchRequirements.length ? wrapSetupComponents(components, { ...input, serviceManager, launchRequirements,
+      ...(repositoryRoot ? { repositoryRoot } : {}) }) : components;
+    return !onProgress ? composed : composed.map(component => ({ componentId: component.componentId, action: component.action,
+      rollback: component.rollback, observe: component.observe.bind(component), desired: component.desired.bind(component),
+      apply: async (ctx: Parameters<SetupComponent["apply"]>[0]) => {
+        progress(`Applying ${component.componentId}...`);
+        return component.apply(ctx);
+      } }));
+  };
 
   // 8. Execute Machine Setup
   progress(`Building ${args.mode} setup plan...`);
@@ -227,13 +270,19 @@ export async function executeSetupCommand(
       skills: synchronizer,
       ...(additionalToolObservations ? { additionalToolObservations } : {}),
       serviceManager,
+      persistMachineConfig: launchRequirements.length === 0,
+      decorateComponents,
       approver: args.yes
         ? new AssumeYesApprover(store, () => new Date())
         : new InteractiveApprover(async text => {
-            if (context?.setup?.confirm) return context.setup.confirm(text);
+            const notes = diagnostics.filter(note => /license|PolyForm|build scripts/i.test(note));
+            if (inventory.some(item => item.toolId === "claude-mem" || item.toolId === "superpowers"))
+              notes.push(`Native plugins update the ${machineConfig.providers.join(", ")} configuration folders in this account. Claude-Mem uses the selected account's quota.`);
+            const prompt = [...notes, text].join("\n\n").split("\n").map(line => humanText(line, 2000)).join("\n");
+            if (context?.setup?.confirm) return context.setup.confirm(prompt);
             if (args.json || !process.stdin.isTTY || !process.stderr.isTTY) return false;
             const terminal = createInterface({ input: process.stdin, output: process.stderr });
-            try { return /^(y|yes)$/i.test((await terminal.question(`${text} [y/N] `)).trim()); }
+            try { return /^(y|yes)$/i.test((await terminal.question(`${prompt} [y/N] `)).trim()); }
             finally { terminal.close(); }
           }, store, () => new Date()),
       now: () => new Date()

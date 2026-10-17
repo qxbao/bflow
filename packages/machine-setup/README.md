@@ -167,3 +167,9 @@ At the integration synchronization gate:
 - **OS Services**: Unit files and launchd plists verified via mock `CommandRunner`; live OS service spawning requires integration environment.
 - **Concurrency**: State store locking verified with live vs stale PID contention; distributed filesystem locks are not supported or claimed.
 - **Windows**: Unverified on POSIX test hosts.
+
+The owned `bflow` launcher also adds the approved managed tool directories to its
+own process PATH. This lets subsequent `bflow` commands resolve newly installed
+agent CLIs even when their parent terminal has not reloaded its shell config.
+Systemd user services are enabled by their absolute owned unit path, supporting
+custom XDG configuration locations without requiring them in systemd's search path.
