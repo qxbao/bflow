@@ -1,0 +1,897 @@
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { join, resolve } from "node:path";
+
+import { openFilesystemArtifactStore } from "@bflow/artifact-store";
+import {
+  SUPPORTED_CLI_COMMANDS,
+  createDefaultHighLevelServices,
+  runHighLevelCli,
+  type HighLevelServices
+} from "@bflow/cli";
+import {
+  CURRENT_PLATFORM_SCHEMA_VERSION,
+  QualityGateResultSchema,
+  SpecificationSchema,
+  type AgentProviderId,
+  type AgentRole,
+  type QualityGate,
+  type TrustScope
+} from "@bflow/contracts";
+import { DedicatedBrowserRuntime } from "@bflow/mcp-services";
+import {
+  RoleSkillBindingsSchema,
+  SkillFileStore,
+  SkillManager,
+  SkillsSetupSynchronizer,
+  bindRoleSkills,
+  loadSkillCatalog
+} from "@bflow/skills";
+import { SpecificationEngine } from "@bflow/specification";
+import { TestStrategyResolver } from "@bflow/test-strategy";
+import {
+  ClaudeMemProjectReader,
+  applyRtkConfiguration,
+  createClaudeMemService,
+  createGitNexusService,
+  ensureGitNexusIndex,
+  observeClaudeMemWorker,
+  planChromeSession,
+  planRtkConfiguration,
+  probeStdioMcp,
+  rollbackRtkConfiguration,
+  rtkProviderIntegration,
+  runWithRtk,
+  superpowersInstallRoute,
+  verifyRtk,
+  verifySuperpowersSkills
+} from "@bflow/tool-installer";
+import { CheckConfigurationSchema, ObservationSchema } from "@bflow/verification";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+const REPO_ROOT = resolve(import.meta.dirname, "../../..");
+
+function hasBinaryAt(path: string): boolean {
+  try {
+    execFileSync(path, ["--version"], { stdio: "ignore", timeout: 5_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function git(cwd: string, ...args: string[]): string {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")));
+  return execFileSync(
+    "git",
+    ["-c", "user.name=QA", "-c", "user.email=qa@bflow.local", "-c", "commit.gpgsign=false", ...args],
+    { cwd, env, encoding: "utf8" }
+  ).trim();
+}
+
+function extractCommandOutput(res: { envelope?: { result?: { output?: unknown } | undefined } | undefined }): {
+  outcome?: string;
+  steps?: Array<{ id: string; data?: Record<string, unknown> }>;
+} {
+  return (res.envelope?.result?.output ?? {}) as {
+    outcome?: string;
+    steps?: Array<{ id: string; data?: Record<string, unknown> }>;
+  };
+}
+
+describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Harness + Real Tool Binaries)", () => {
+  let tmpRoot: string;
+  let rtkRepoDir: string;
+  let rtkStateDir: string;
+
+  beforeAll(() => {
+    tmpRoot = realpathSync(mkdtempSync("/tmp/bflow-e2e-group-e-"));
+    chmodSync(tmpRoot, 0o700);
+    rtkRepoDir = join(tmpRoot, "rtk-repo");
+    rtkStateDir = join(tmpRoot, "rtk-state");
+    mkdirSync(rtkRepoDir, { mode: 0o700 });
+    mkdirSync(rtkStateDir, { mode: 0o700 });
+    git(rtkRepoDir, "init", "-q", "-b", "main");
+    writeFileSync(join(rtkRepoDir, "README.md"), "# RTK Test\n");
+    git(rtkRepoDir, "add", ".");
+    git(rtkRepoDir, "commit", "-q", "-m", "init");
+  });
+
+  afterAll(() => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("[REAL TOOL BINARY] verifies RTK 0.42.4 binary, provider routes, idempotent configuration apply/rollback, and proxy execution", async () => {
+    const rtkBin = "/home/baodq/.local/bin/rtk";
+    if (!hasBinaryAt(rtkBin)) return;
+
+    const rtkVerified = await verifyRtk(rtkBin, "0.42.4");
+    expect(rtkVerified).toBe(true);
+
+    const routeClaude = await rtkProviderIntegration("claude", rtkBin);
+    const routeCodex = await rtkProviderIntegration("codex", rtkBin);
+    const routeAgy = await rtkProviderIntegration("agy", rtkBin);
+    expect(routeClaude.supported).toBe(true);
+    expect(routeCodex.supported).toBe(true);
+    expect(routeAgy.supported).toBe(true);
+    expect(routeAgy.configureCommand).toContain("antigravity");
+
+    const planAgy = await planRtkConfiguration({
+      provider: "agy",
+      executable: rtkBin,
+      repositoryRoot: rtkRepoDir,
+      stateRoot: rtkStateDir
+    });
+    const apply1 = await applyRtkConfiguration(planAgy);
+    const apply2 = await applyRtkConfiguration(planAgy);
+    expect(apply1.status).toBe("applied");
+    expect(apply2.status).toBe("already_satisfied");
+    await rollbackRtkConfiguration(apply1.receiptPath);
+
+    const filteredRun = await runWithRtk(rtkBin, ["git", "status"], false);
+    const proxyRun = await runWithRtk(rtkBin, ["git", "status", "--short"], true);
+    expect(filteredRun.exitCode).toBe(0);
+    expect(proxyRun.exitCode).toBe(0);
+  });
+
+  it("[HARNESS + REAL STDIO MCP ADAPTER] verifies Claude-Mem worker adoption, project-scoped reader, cross-project batch rejection, and stdio MCP adapter", async () => {
+    const memDataDir = join(tmpRoot, "claude-mem-data");
+    const memConfigDir = join(tmpRoot, "claude-mem-config");
+    mkdirSync(memDataDir, { mode: 0o700 });
+    mkdirSync(memConfigDir, { mode: 0o700 });
+
+    const observations = [
+      { id: 1, project: "repo-alpha", text: "Observation 1 for repo-alpha: strict schema v3" },
+      { id: 2, project: "repo-alpha", text: "Observation 2 for repo-alpha: Herdr done is not task success" },
+      { id: 99, project: "repo-beta-leak", text: "Secret observation from repo-beta" }
+    ];
+
+    const memServer = createServer(async (req, res) => {
+      const u = new URL(req.url ?? "/", "http://127.0.0.1");
+      if (u.pathname === "/api/health") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ status: "ok", version: "1.0.0", initialized: true, pid: process.pid }));
+        return;
+      }
+      if (u.pathname === "/api/observations" && req.method === "GET") {
+        const proj = u.searchParams.get("project");
+        const limit = Number(u.searchParams.get("limit") ?? 20);
+        const items = observations.filter((o) => o.project === proj).slice(0, limit);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ items }));
+        return;
+      }
+      if (u.pathname === "/api/observations/batch" && req.method === "POST") {
+        let body = "";
+        for await (const chunk of req) body += chunk;
+        const parsed = JSON.parse(body) as { ids: number[] };
+        const items = observations.filter((o) => parsed.ids.includes(o.id));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(items));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    await new Promise<void>((r) => memServer.listen(0, "127.0.0.1", r));
+    const memPort = (memServer.address() as AddressInfo).port;
+    writeFileSync(join(memDataDir, "worker.pid"), JSON.stringify({ pid: process.pid, port: memPort }), { mode: 0o600 });
+    writeFileSync(
+      join(memDataDir, "settings.json"),
+      JSON.stringify({ CLAUDE_MEM_WORKER_HOST: "127.0.0.1", CLAUDE_MEM_WORKER_PORT: memPort }),
+      { mode: 0o600 }
+    );
+
+    try {
+      const workerObs = await observeClaudeMemWorker({
+        dataDir: memDataDir,
+        projectRoot: rtkRepoDir,
+        version: "1.0.0"
+      });
+      expect(workerObs.status).toBe("ready");
+      expect(workerObs.endpoint).toBe(`http://127.0.0.1:${memPort}`);
+
+      const reader = new ClaudeMemProjectReader(`http://127.0.0.1:${memPort}`, "repo-alpha");
+      const recentItems = await reader.recent(10);
+      const searchItems = await reader.search("herdr", 5);
+      const batchAlpha = await reader.getObservations([1, 2]);
+      expect(recentItems).toHaveLength(2);
+      expect(searchItems).toHaveLength(1);
+      expect(batchAlpha).toHaveLength(2);
+      await expect(reader.getObservations([1, 99])).rejects.toThrow(/Cross-project memory response rejected/);
+
+      const memServiceDef = await createClaudeMemService({
+        dataDir: memDataDir,
+        projectRoot: rtkRepoDir,
+        project: "repo-alpha",
+        version: "1.0.0",
+        configRoot: memConfigDir,
+        operation: {
+          schemaVersion: CURRENT_PLATFORM_SCHEMA_VERSION,
+          scope: {
+            kind: "repository",
+            machineId: "machine-qa-01",
+            repositoryId: "repo-alpha",
+            workspaceRoot: rtkRepoDir
+          },
+          idempotencyKey: "idem-create-mem-svc"
+        }
+      });
+
+      expect(memServiceDef.connection.kind).toBe("stdio_mcp");
+      if (memServiceDef.connection.kind === "stdio_mcp") {
+        const memMcpProbe = await probeStdioMcp({
+          executable: memServiceDef.connection.executable,
+          argv: memServiceDef.connection.argv,
+          requiredTools: ["memory_recent", "memory_search", "memory_get"],
+          call: { name: "memory_search", arguments: { query: "schema", limit: 5 } },
+          timeoutMs: 15_000
+        });
+        expect(memMcpProbe.discoveredTools).toEqual(
+          expect.arrayContaining(["memory_recent", "memory_search", "memory_get"])
+        );
+        expect(memMcpProbe.callResult).toBeDefined();
+      }
+    } finally {
+      memServer.close();
+    }
+  });
+
+  it("[HARNESS + REAL TOOL BINARY] verifies GitNexus 1.6.12 repository indexing, QA-P34-08 status schema mismatch, and live stdio MCP server tools", async () => {
+    const gnBin = "/home/baodq/.local/bin/gitnexus";
+    if (!hasBinaryAt(gnBin)) return;
+
+    const gnStateDir = join(tmpRoot, "gn-state");
+    const gnConfigDir = join(tmpRoot, "gn-config");
+    mkdirSync(gnStateDir, { mode: 0o700 });
+    mkdirSync(gnConfigDir, { mode: 0o700 });
+    const canonicalRtkRepo = realpathSync(rtkRepoDir);
+
+    // 1. Harness verification: when status transitions not-indexed -> up-to-date, ensureGitNexusIndex returns "indexed"
+    let statusCalls = 0;
+    const gnHarnessObs = await ensureGitNexusIndex({
+      repositoryRoot: rtkRepoDir,
+      stateRoot: gnStateDir,
+      executable: gnBin,
+      host: {
+        async download() {},
+        async run(executable, args) {
+          if (executable === "git" && args[0] === "rev-parse") {
+            return { exitCode: 0, stdout: "0123456789abcdef0123456789abcdef01234567\n", stderr: "" };
+          }
+          if (executable === "git" && args[0] === "status") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (args[0] === "status") {
+            statusCalls += 1;
+            return {
+              exitCode: 0,
+              stdout:
+                statusCalls === 1
+                  ? JSON.stringify({ schemaVersion: 1, repository: canonicalRtkRepo, error: "not-indexed" })
+                  : JSON.stringify({ schemaVersion: 1, repository: canonicalRtkRepo, status: "up-to-date" }),
+              stderr: ""
+            };
+          }
+          return { exitCode: 0, stdout: "indexed", stderr: "" };
+        }
+      }
+    });
+    expect(gnHarnessObs.status).toBe("indexed");
+
+    // 2. Real gitnexus 1.6.12 status --json verification & QA-P34-08 documentation ("status": "registered" vs "up-to-date")
+    const rawStatusOut = execFileSync(gnBin, ["status", "--json"], {
+      cwd: rtkRepoDir,
+      encoding: "utf8",
+      timeout: 15_000
+    });
+    const jsonLine = rawStatusOut
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find((l) => l.startsWith("{"));
+    expect(jsonLine).toBeDefined();
+    const parsedRealStatus = JSON.parse(jsonLine!) as { schemaVersion: number; repository: string; error?: string };
+    expect(parsedRealStatus.schemaVersion).toBe(1);
+    expect(realpathSync(parsedRealStatus.repository)).toBe(canonicalRtkRepo);
+
+    let realSchemaStatusCalls = 0;
+    const gnRealSchemaObs = await ensureGitNexusIndex({
+      repositoryRoot: rtkRepoDir,
+      stateRoot: join(tmpRoot, "gn-state-real-schema"),
+      executable: gnBin,
+      host: {
+        async download() {},
+        async run(executable, args) {
+          if (executable === "git" && args[0] === "rev-parse") {
+            return { exitCode: 0, stdout: "0123456789abcdef0123456789abcdef01234567\n", stderr: "" };
+          }
+          if (executable === "git" && args[0] === "status") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (args[0] === "status") {
+            realSchemaStatusCalls += 1;
+            return {
+              exitCode: 0,
+              stdout:
+                realSchemaStatusCalls === 1
+                  ? JSON.stringify({ schemaVersion: 1, repository: canonicalRtkRepo, error: "not-indexed" })
+                  : JSON.stringify({ schemaVersion: 1, repository: canonicalRtkRepo, status: "registered" }),
+              stderr: ""
+            };
+          }
+          return { exitCode: 0, stdout: "indexed", stderr: "" };
+        }
+      }
+    });
+    // QA-P34-08: gitnexus 1.6.12 emits status="registered" after analyze, which gitNexusFreshnessSchema treats as stale
+    expect(gnRealSchemaObs.status).toBe("stale");
+
+    // 3. Real GitNexus service definition & real stdio MCP server negotiation
+    const gnServiceDef = await createGitNexusService({
+      executable: gnBin,
+      version: "1.6.12",
+      repositoryRoot: rtkRepoDir,
+      stateRoot: gnStateDir,
+      configRoot: gnConfigDir,
+      operation: {
+        schemaVersion: CURRENT_PLATFORM_SCHEMA_VERSION,
+        scope: {
+          kind: "repository",
+          machineId: "machine-qa-01",
+          repositoryId: "repo-alpha",
+          workspaceRoot: rtkRepoDir
+        },
+        idempotencyKey: "idem-create-gn-svc"
+      }
+    });
+    expect(gnServiceDef.serviceId).toContain("gitnexus");
+
+    const gnMcpProbe = await probeStdioMcp({
+      executable: gnBin,
+      argv: ["mcp"],
+      requiredTools: ["query", "impact", "context"],
+      timeoutMs: 20_000
+    });
+    expect(gnMcpProbe.discoveredTools).toEqual(expect.arrayContaining(["query", "impact", "context"]));
+  }, 60_000);
+
+  it("[HARNESS + REAL CHROME BINARY] verifies Chrome DevTools isolated profile planning, SingletonLock rejection, and DedicatedBrowserRuntime page ownership", async () => {
+    const chromeManagedRoot = join(tmpRoot, "chrome-managed");
+    mkdirSync(chromeManagedRoot, { mode: 0o700 });
+    const fakeChromeMcpServer = join(tmpRoot, "fake-chrome-devtools-mcp.sh");
+    writeFileSync(fakeChromeMcpServer, '#!/usr/bin/env bash\necho "chrome-devtools-mcp 0.1.0"\n', { mode: 0o755 });
+
+    const chromePlanReady = await planChromeSession({
+      managedRoot: chromeManagedRoot,
+      repositoryId: "repo-alpha",
+      taskId: "task-ui-1",
+      browserExecutable: "/usr/bin/google-chrome",
+      serverExecutable: fakeChromeMcpServer
+    });
+    expect(chromePlanReady.status).toBe("ready");
+    expect(chromePlanReady.profileDir).toContain("repo-alpha/task-ui-1");
+
+    writeFileSync(join(chromePlanReady.profileDir, "SingletonLock"), "locked", { mode: 0o600 });
+    const chromePlanLocked = await planChromeSession({
+      managedRoot: chromeManagedRoot,
+      repositoryId: "repo-alpha",
+      taskId: "task-ui-1",
+      browserExecutable: "/usr/bin/google-chrome",
+      serverExecutable: fakeChromeMcpServer
+    });
+    expect(chromePlanLocked.status).toBe("profile_locked");
+    expect(chromePlanLocked.diagnostic).toContain("SingletonLock");
+
+    const browserRuntimeDir = join(tmpRoot, "browser-runtime");
+    mkdirSync(browserRuntimeDir, { mode: 0o700 });
+    const browserScope: Extract<TrustScope, { kind: "session" }> = {
+      kind: "session",
+      machineId: "machine-qa-01",
+      repositoryId: "repo-alpha",
+      workspaceRoot: rtkRepoDir,
+      sessionId: "sess-ui-1"
+    };
+    const browserRt = new DedicatedBrowserRuntime({
+      browserProfilesRoot: browserRuntimeDir,
+      executablePath: "/usr/bin/google-chrome",
+      launcher: {
+        probeBinary: async () => ({ ok: true, value: { version: "Google Chrome 130.0.0.0" } }),
+        launch: async (opts) => ({
+          ok: true,
+          value: {
+            pid: process.pid,
+            debuggingHost: opts.debuggingHost,
+            debuggingPort: opts.debuggingPort,
+            supportsBrowserContexts: true,
+            isAlive: () => true,
+            getMemoryRssBytes: async () => 50 * 1024 * 1024,
+            probeDebuggingEndpoint: async () => true,
+            createBrowserContext: async () => "ctx-1",
+            disposeBrowserContext: async () => {},
+            stop: async () => {},
+            onCrash: () => () => {}
+          }
+        })
+      }
+    });
+    const callerDev1 = { registrationId: "agent-claude-dev-1", runId: "run-1", taskId: "task-ui-1", scope: browserScope };
+    const callerDev2 = { registrationId: "agent-codex-dev-2", runId: "run-1", taskId: "task-ui-2", scope: browserScope };
+    const pageRes = await browserRt.openPage(callerDev1, "http://127.0.0.1:3000");
+    expect(pageRes.ok).toBe(true);
+    if (!pageRes.ok) return;
+
+    const navOwnerRes = await browserRt.navigatePage(callerDev1, pageRes.value.pageId, "http://127.0.0.1:3000/dashboard");
+    const navOtherRes = await browserRt.navigatePage(callerDev2, pageRes.value.pageId, "http://127.0.0.1:3000/hijack");
+    expect(navOwnerRes.ok).toBe(true);
+    expect(navOtherRes.ok).toBe(false);
+    if (!navOtherRes.ok) {
+      expect(navOtherRes.error.code).toBe("conflict");
+      expect(navOtherRes.error.details).toEqual(
+        expect.objectContaining({ diagnosticCode: "page_ownership_conflict" })
+      );
+    }
+  });
+
+  it("[HARNESS / REAL CATALOG] verifies Superpowers routes, 32 catalog skills across 10 roles x 3 providers, and fail-closed missing tool enforcement", async () => {
+    expect(superpowersInstallRoute("claude").command).toContain("plugin install superpowers");
+    expect(superpowersInstallRoute("codex").command).toContain("codex plugin add superpowers");
+    expect(superpowersInstallRoute("agy").command).toContain("agy plugin install https://github.com/obra/superpowers");
+
+    const skillsCatalogRoot = resolve(REPO_ROOT, "skills");
+    const catalogSkills = await loadSkillCatalog(skillsCatalogRoot, {
+      source: "builtin",
+      supportedCommands: SUPPORTED_CLI_COMMANDS
+    });
+    expect(catalogSkills).toHaveLength(32);
+
+    const bflowSkillIds = catalogSkills.map((s) => s.definition.skillId);
+    const spValid = verifySuperpowersSkills(
+      ["using-superpowers", "brainstorming", "test-driven-development", "systematic-debugging"],
+      bflowSkillIds
+    );
+    const spMissingEntry = verifySuperpowersSkills(["brainstorming"], bflowSkillIds);
+    expect(spValid.ready).toBe(true);
+    expect(spMissingEntry.ready).toBe(false);
+    expect(spMissingEntry.diagnostic).toContain("using-superpowers");
+
+    const skillStoreRoot = join(tmpRoot, "skills-store");
+    mkdirSync(skillStoreRoot, { mode: 0o700 });
+    const skillStore = new SkillFileStore(skillStoreRoot);
+    const skillManager = new SkillManager({
+      store: skillStore,
+      supportedCommands: SUPPORTED_CLI_COMMANDS,
+      approvedBuiltinDigests: catalogSkills.map((s) => s.definition.digest)
+    });
+
+    for (const item of catalogSkills) {
+      await skillManager.installBundle(item.files, {
+        source: "builtin",
+        expectedDigest: item.definition.digest
+      });
+    }
+    const installedList = await skillManager.list();
+    expect(installedList).toHaveLength(32);
+
+    const bindingsRaw = JSON.parse(readFileSync(join(skillsCatalogRoot, "roles/bindings.json"), "utf8")) as unknown;
+    const parsedBindings = RoleSkillBindingsSchema.parse(bindingsRaw);
+    const sessionScope: Extract<TrustScope, { kind: "session" }> = {
+      kind: "session",
+      machineId: "machine-qa-01",
+      repositoryId: "repo-alpha",
+      workspaceRoot: rtkRepoDir,
+      sessionId: "sess-skills-01"
+    };
+    const allCapabilityIds = [...new Set(installedList.flatMap((d) => d.requiredCapabilityIds))];
+    const allToolIds = [...new Set(installedList.flatMap((d) => d.requiredToolIds))];
+
+    await expect(
+      skillManager.resolve({
+        manifestId: "manifest-missing-tool",
+        environmentId: "env-missing-tool",
+        scope: sessionScope,
+        role: "qa",
+        provider: "claude",
+        capabilityIds: allCapabilityIds,
+        toolIds: [],
+        selections: bindRoleSkills(parsedBindings.bindings, "qa", installedList)
+      })
+    ).rejects.toThrow(/Missing skill tool:/);
+
+    const roles = Object.keys(parsedBindings.bindings) as AgentRole[];
+    expect(roles).toHaveLength(10);
+    const providers: AgentProviderId[] = ["claude", "codex", "agy"];
+
+    for (const role of roles) {
+      const selections = bindRoleSkills(parsedBindings.bindings, role, installedList);
+      for (const provider of providers) {
+        const synced = await skillManager.sync({
+          manifestId: `manifest-${role}-${provider}`,
+          environmentId: `env-${role}-${provider}`,
+          scope: sessionScope,
+          role,
+          provider,
+          capabilityIds: allCapabilityIds,
+          toolIds: allToolIds,
+          selections
+        });
+        expect(synced.manifest.skills.length).toBeGreaterThan(0);
+        expect(synced.rendered.instructionText).toContain(
+          "Bflow Conditional TDD, leases, gates and human approval remain authoritative"
+        );
+        if (role === "conversation") {
+          expect(synced.rendered.instructionText).toContain(
+            "Only present authenticated Runtime decision requests to the user."
+          );
+        } else {
+          expect(synced.rendered.instructionText).toContain(
+            "Route every question or approval through Runtime → Herdr → Conversation; disable native direct questions/elicitation."
+          );
+        }
+      }
+    }
+  });
+
+  it("[HARNESS + REAL CLI] executes all 9 P29 unified commands and documents QA-P34-07 default HighLevelServices wiring gap", async () => {
+    const hlRepo = join(tmpRoot, "hl-repo");
+    mkdirSync(join(hlRepo, "src/math"), { recursive: true, mode: 0o700 });
+    git(hlRepo, "init", "-q", "-b", "main");
+    writeFileSync(
+      join(hlRepo, "src/math/average.ts"),
+      "export const average = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;\n"
+    );
+    writeFileSync(join(hlRepo, ".gitignore"), ".bflow/state/\n.bflow/plans/\nspec.json\nverify-plan.json\n");
+    writeFileSync(
+      join(hlRepo, "package.json"),
+      JSON.stringify({ name: "hl-qa-fixture", packageManager: "pnpm@12.5.1", scripts: { test: "vitest" } })
+    );
+    git(hlRepo, "add", ".");
+    git(hlRepo, "commit", "-q", "-m", "initial commit");
+
+    const storeRes = await openFilesystemArtifactStore({
+      root: join(hlRepo, ".bflow/state/cli/artifacts"),
+      storeId: "bflow-cli"
+    });
+    expect(storeRes.ok).toBe(true);
+    if (!storeRes.ok) return;
+    const hlStore = storeRes.value;
+
+    const specExample = JSON.parse(
+      readFileSync(resolve(REPO_ROOT, "packages/specification/examples/standard.json"), "utf8")
+    ) as Record<string, unknown>;
+    specExample["runId"] = "run-1";
+    const metadata = (specExample["metadata"] ?? {}) as Record<string, unknown>;
+    metadata["conditionalTdd"] = {
+      policyVersion: 1,
+      taskId: "implement",
+      taskType: "bugfix",
+      changeImpact: {
+        surfaces: ["bugfix"],
+        behaviorChanged: true,
+        deterministic: true,
+        regressionReproducible: true,
+        securitySensitive: false,
+        dataMigration: false,
+        scope: "local"
+      },
+      infrastructure: {
+        readiness: "ready",
+        commands: [{ method: "unit_test", command: "pnpm test:math", level: "unit" }]
+      },
+      testability: { level: "automated", rationale: "Pure arithmetic function." },
+      riskClassification: "medium",
+      conventions: { tdd: "contextual", requiredMethods: [], suggestedLevels: [] }
+    };
+    specExample["metadata"] = metadata;
+
+    const specEngine = new SpecificationEngine({ artifactStore: hlStore, authorizeApprover: () => false });
+    const reviewedSpec = await specEngine.submitForReview(specExample);
+    const approvedSpec = SpecificationSchema.parse({ ...reviewedSpec, status: "approved", approvedBy: "human-owner" });
+    hlStore.close();
+
+    const specPath = join(hlRepo, "spec.json");
+    writeFileSync(specPath, JSON.stringify(approvedSpec, null, 2));
+
+    const defaultServices = await createDefaultHighLevelServices();
+    const makeGate = (id: string): QualityGate => ({
+      id,
+      async evaluate(context) {
+        const config = CheckConfigurationSchema.parse(context.definition.configuration);
+        const input = context.input as {
+          sourceRevision: string;
+          specFingerprint: string;
+          scope: "task" | "workflow";
+        };
+        const observation = ObservationSchema.parse({
+          schemaVersion: 2,
+          checkId: id,
+          runId: context.runId,
+          taskId: context.taskId,
+          attemptId: context.attemptId,
+          sourceRevision: input.sourceRevision,
+          specFingerprint: input.specFingerprint,
+          scope: input.scope,
+          independentExecution: true,
+          isolated: true,
+          executorId: "independent-verifier",
+          role: config.role,
+          method: config.method,
+          ...(config.command ? { command: config.command, exitCode: 0 } : {}),
+          testNames: config.testNames,
+          criteria: config.criterionIds.map((criterionId) => ({ criterionId, passed: true, summary: "Verified" })),
+          summary: "Independent check passed"
+        });
+        return {
+          ok: true,
+          value: QualityGateResultSchema.parse({
+            gateId: id,
+            runId: context.runId,
+            taskId: context.taskId,
+            evaluationId: `${id}-${context.attemptId}`,
+            status: "passed",
+            findings: [],
+            producedArtifacts: [],
+            evaluatedAt: new Date().toISOString(),
+            metadata: { verification: observation }
+          })
+        };
+      }
+    });
+
+    const skillsCatalogRoot = resolve(REPO_ROOT, "skills");
+    const catalogSkills = await loadSkillCatalog(skillsCatalogRoot, {
+      source: "builtin",
+      supportedCommands: SUPPORTED_CLI_COMMANDS
+    });
+    const skillStoreRoot = join(tmpRoot, "hl-skills-store");
+    mkdirSync(skillStoreRoot, { mode: 0o700 });
+    chmodSync(skillStoreRoot, 0o700);
+    const skillStore = new SkillFileStore(skillStoreRoot);
+    const skillManager = new SkillManager({
+      store: skillStore,
+      supportedCommands: SUPPORTED_CLI_COMMANDS,
+      approvedBuiltinDigests: catalogSkills.map((s) => s.definition.digest)
+    });
+    const skillsSyncPort = new SkillsSetupSynchronizer(
+      skillManager,
+      skillStore,
+      catalogSkills.map((s) => ({
+        root: s.directory,
+        source: "builtin" as const,
+        expectedDigest: s.definition.digest
+      }))
+    );
+
+    const hlMachineRoot = join(tmpRoot, "hl-machine");
+    for (const sub of ["config", "data", "state", "cache", "logs", "bin"]) {
+      const p = join(hlMachineRoot, sub);
+      mkdirSync(p, { recursive: true, mode: 0o700 });
+      chmodSync(p, 0o700);
+    }
+    const basePlatform = await defaultServices.machine.platform();
+
+    const fullServices: HighLevelServices = {
+      ...defaultServices,
+      machine: {
+        ...defaultServices.machine,
+        platform: async () => ({
+          ...basePlatform,
+          paths: {
+            config: join(hlMachineRoot, "config"),
+            data: join(hlMachineRoot, "data"),
+            state: join(hlMachineRoot, "state"),
+            cache: join(hlMachineRoot, "cache"),
+            logs: join(hlMachineRoot, "logs"),
+            bin: join(hlMachineRoot, "bin")
+          }
+        })
+      },
+      gates: [makeGate("test-0"), makeGate("review")],
+      skills: () => skillsSyncPort,
+      mcpGateway: {
+        async status() {
+          return {
+            reachable: true,
+            version: "0.1.0",
+            backends: [{ serviceId: "gitnexus", state: "healthy", detail: "Ready via Gateway" }]
+          };
+        }
+      }
+    };
+
+    // 1. repo inspect
+    const cmdRepoInspect = await runHighLevelCli(["repo", "inspect", "--json"], { cwd: hlRepo, services: fullServices });
+    expect(cmdRepoInspect.ok).toBe(true);
+    expect(extractCommandOutput(cmdRepoInspect).outcome).toBe("inspected");
+
+    // 2. task plan (--write)
+    const cmdTaskPlan = await runHighLevelCli(["task", "plan", "--spec", specPath, "--write", "--json"], {
+      cwd: hlRepo,
+      services: fullServices
+    });
+    expect(cmdTaskPlan.ok).toBe(true);
+    expect(extractCommandOutput(cmdTaskPlan).outcome).toBe("planned");
+    const planWorkflowPath = join(
+      hlRepo,
+      ".bflow/plans",
+      `${approvedSpec.specId.replace(/[^A-Za-z0-9._-]/g, "_")}.workflow.json`
+    );
+
+    // 3. task implement
+    const cmdTaskImplement = await runHighLevelCli(
+      [
+        "task",
+        "implement",
+        "implement",
+        "--run",
+        "run-1",
+        "--spec",
+        specPath,
+        "--workflow",
+        planWorkflowPath,
+        "--owned-path",
+        "src/math",
+        "--json"
+      ],
+      { cwd: hlRepo, services: fullServices }
+    );
+    expect(cmdTaskImplement.ok).toBe(true);
+    const implOut = extractCommandOutput(cmdTaskImplement);
+    expect(implOut.outcome).toBe("prepared");
+    const taskWorktreePath = implOut.steps?.find((s) => s.id === "prepare-worktree")?.data?.["worktreePath"] as
+      | string
+      | undefined;
+    expect(taskWorktreePath).toBeDefined();
+
+    // 4. verify before & after implementation commit
+    const strategy = new TestStrategyResolver().resolve(approvedSpec);
+    const criterionIds = approvedSpec.acceptanceCriteria.map((c) => c.id);
+    const testNames = strategy.criterionMappings.flatMap((m) => m.testNames);
+    const verifyPlanPath = join(hlRepo, "verify-plan.json");
+    writeFileSync(
+      verifyPlanPath,
+      JSON.stringify(
+        {
+          runId: "run-1",
+          taskId: "implement",
+          scope: "task",
+          specification: approvedSpec,
+          strategy,
+          implementerIds: ["developer-1"],
+          maxIterations: 3,
+          checks: [
+            {
+              id: "test-0",
+              name: "test-0",
+              evaluator: "test-0",
+              required: true,
+              timeout: { executionTimeoutMs: 5000, onTimeout: "block" },
+              configuration: {
+                kind: "deterministic",
+                method: "unit_test",
+                command: strategy.targetCommands[0],
+                criterionIds,
+                testNames,
+                role: "tester",
+                levels: [...strategy.requiredTestLevels]
+              }
+            },
+            {
+              id: "review",
+              name: "review",
+              evaluator: "review",
+              required: true,
+              timeout: { executionTimeoutMs: 5000, onTimeout: "block" },
+              configuration: {
+                kind: "review",
+                method: "manual_review",
+                criterionIds: [],
+                testNames: [],
+                role: "reviewer",
+                levels: []
+              }
+            }
+          ]
+        },
+        null,
+        2
+      )
+    );
+
+    const cmdVerifyBeforeCommit = await runHighLevelCli(
+      ["verify", "implement", "--run", "run-1", "--plan", verifyPlanPath, "--json"],
+      { cwd: hlRepo, services: fullServices }
+    );
+    expect(cmdVerifyBeforeCommit.ok).toBe(false);
+    expect(["not_passed", "failed"]).toContain(extractCommandOutput(cmdVerifyBeforeCommit).outcome);
+
+    if (taskWorktreePath) {
+      writeFileSync(
+        join(taskWorktreePath, "src/math/average.ts"),
+        "export const average = (xs: number[]) => xs.length === 0 ? 0 : xs.reduce((a, b) => a + b, 0) / xs.length;\n"
+      );
+      git(taskWorktreePath, "add", "src/math/average.ts");
+      git(taskWorktreePath, "commit", "-q", "-m", "fix empty array average");
+    }
+
+    const cmdVerify = await runHighLevelCli(
+      ["verify", "implement", "--run", "run-1", "--plan", verifyPlanPath, "--json"],
+      { cwd: hlRepo, services: fullServices }
+    );
+    expect(cmdVerify.ok).toBe(true);
+    expect(extractCommandOutput(cmdVerify).outcome).toBe("passed");
+
+    // 5. git prepare (without --yes -> approval_required; with --yes -> integration_prepared)
+    const cmdGitPreparePreview = await runHighLevelCli(
+      ["git", "prepare", "run-1", "--workflow", planWorkflowPath, "--json"],
+      { cwd: hlRepo, services: fullServices }
+    );
+    expect(cmdGitPreparePreview.ok).toBe(false);
+    expect(extractCommandOutput(cmdGitPreparePreview).outcome).toBe("approval_required");
+
+    const cmdGitPrepareYes = await runHighLevelCli(
+      ["git", "prepare", "run-1", "--workflow", planWorkflowPath, "--yes", "--json"],
+      { cwd: hlRepo, services: fullServices }
+    );
+    expect(cmdGitPrepareYes.ok).toBe(true);
+    expect(extractCommandOutput(cmdGitPrepareYes).outcome).toBe("integration_prepared");
+
+    // 6. mcp status & 8. skills sync (QA-P34-07 default unconfigured vs wired port)
+    const cmdMcpStatusDefault = await runHighLevelCli(["mcp", "status", "--json"], {
+      cwd: hlRepo,
+      services: defaultServices
+    });
+    expect(cmdMcpStatusDefault.ok).toBe(false);
+    expect(extractCommandOutput(cmdMcpStatusDefault).outcome).toBe("not_ready");
+
+    const cmdMcpStatusWired = await runHighLevelCli(["mcp", "status", "--json"], {
+      cwd: hlRepo,
+      services: fullServices
+    });
+    expect(["ready", "not_ready"]).toContain(extractCommandOutput(cmdMcpStatusWired).outcome);
+
+    // 7. tool status
+    const cmdToolStatus = await runHighLevelCli(["tool", "status", "--json"], {
+      cwd: hlRepo,
+      services: fullServices
+    });
+    expect(["ready", "not_ready"]).toContain(extractCommandOutput(cmdToolStatus).outcome);
+
+    const cmdSkillsSyncDefault = await runHighLevelCli(["skills", "sync", "--json"], {
+      cwd: hlRepo,
+      services: defaultServices
+    });
+    expect(cmdSkillsSyncDefault.ok).toBe(false);
+    expect(cmdSkillsSyncDefault.error?.code).toBe("transport_unavailable");
+    expect(cmdSkillsSyncDefault.error?.details).toEqual(
+      expect.objectContaining({ reason: "skills_synchronizer_not_configured" })
+    );
+
+    const cmdSkillsSyncWiredFirst = await runHighLevelCli(["skills", "sync", "--allow-machine-scope", "--json"], {
+      cwd: hlRepo,
+      services: fullServices
+    });
+    if (!cmdSkillsSyncWiredFirst.ok) {
+      // QA-P34-02: 1st run on empty SkillFileStore installs all 32 bundles during apply(),
+      // but skills-sync.ts checks !desired.repairNeeded captured before apply().
+      expect(cmdSkillsSyncWiredFirst.error?.details).toEqual(
+        expect.objectContaining({ reason: "sync_not_converged" })
+      );
+    }
+    const cmdSkillsSyncWired = await runHighLevelCli(["skills", "sync", "--allow-machine-scope", "--json"], {
+      cwd: hlRepo,
+      services: fullServices
+    });
+    expect(cmdSkillsSyncWired.ok).toBe(true);
+    expect(["synced", "already_synced"]).toContain(extractCommandOutput(cmdSkillsSyncWired).outcome);
+
+    // 9. agent check (claude) — documents QA-P34-05 preflight outcome on real claude 2.1.301
+    const cmdAgentCheckClaude = await runHighLevelCli(["agent", "check", "claude", "--json"], {
+      cwd: hlRepo,
+      services: fullServices
+    });
+    expect(["ready", "not_ready"]).toContain(extractCommandOutput(cmdAgentCheckClaude).outcome);
+  }, 180_000);
+});

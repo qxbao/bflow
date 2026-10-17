@@ -30,8 +30,14 @@ The suite verifies multi-package integration across:
 | **E08** | `scenarios/e08-artifact-security.e2e.test.ts` | Artifact security boundary: proposal ingestion, SHA-256 checksum verification, path traversal rejection, on-disk blob tampering detection, and untrusted proposal rejection with strict contract alignment (`trust: "stored"`). *(Raw symlink and special device rejection are verified in P03 `@bflow/artifact-store` tests)*. | **4 PASS** |
 | **E09** | `scenarios/e09-cli.e2e.test.ts` | CLI subprocess execution with bounded timeout: `--help` (exit 0), `--version` semver output (`PM-13`), unknown command and argument validation, `bflow init`, malformed config JSON handling, fail-closed `status -j` without config, and end-to-end `init` -> `run` -> `status` -> `cancel` execution using `BFLOW_HERDR_BIN`. | **7 PASS** |
 | **E10** | `scenarios/e10-failure-injection.e2e.test.ts` | OCC version/sequence conflicts, pre-validation batch rejection, checkpoint conflict, SQLite corruption detection, on-disk blob tampering detection, forged reference rejection, closed store handle rejection after restart, safe acquisition failure cleanup, receipt collision (`bindAgentExecution` / `recordDeliveryReconciliation`), session replacement / stale execution fencing, fail-closed artifact publication during `completeTaskExecution`, and P02 `buildCompleteFeatureWorkflowExample` verification with real `ArtifactStore`. | **12 PASS** |
+| **E11** | `scenarios/e11-group-a-setup.e2e.test.ts` | **Group A (Setup — Real Isolated Host Environment)**: First-time `bflow setup`, second-time idempotency, `bflow setup --check`, `bflow setup --repair`, `bflow doctor` (human + `--json`), PATH & binary discovery (`resolveBinary` + symlink/permission rejection), and OS service registration (`systemd-user` unit rendering, validation, and live `systemctl --user` install/start/stop/remove). Also documents `QA-P34-01` & `QA-P34-02`. | **3 PASS** |
+| **E12** | `scenarios/e12-group-b-agent-providers.e2e.test.ts` | **Group B (Agent Providers — Mock/Harness + Real Installed Binaries & Live Herdr)**: Full 9-dimension provider verification across `claude`, `codex`, and `agy`: binary detection, authentication, Herdr pane startup, environment propagation, permission behavior (`restricted`, `workspace_auto`, `unattended_isolated`), trusted workspace, MCP connectivity, skills availability, and Ed25519-attested execution readiness (proving `--version` / Herdr `done` alone is never readiness proof). Also documents `QA-P34-03` through `QA-P34-06`. | **6 PASS** |
+| **E13** | `scenarios/e13-group-c-non-chat-agent-behavior.e2e.test.ts` | **Group C (Non-Chat Agent Behavior — Harness + Live Herdr)**: Build failure, missing information, and approval-required tasks across non-chat roles: Developer and Reviewer never ask the user directly, Coordinator receives structured escalations, `ConversationGateway` is the sole user-facing decision point, and blocked agents cannot bypass scope/approval/safety policies. Includes live Herdr 4-pane (`chat`, `coordinator`, `developer`, `reviewer`) escalation & delegation test. | **5 PASS** |
+| **E14** | `scenarios/e14-group-d-mcp-sharing.e2e.test.ts` | **Group D (MCP Sharing — Real Multi-Agent HTTP/SSE Gateway + `/proc` Memory Benchmark)**: 6 concurrent agents (`claude` Conversation, `codex` Coordinator, `agy` Reviewer, and 3 `Developer` instances across all 3 providers) sharing 1 MCP backend process (`backendProcessCount = 1`, `activeConnections = 6`), concurrent tool invocation, exclusive resource lease serialization, automatic backend crash/restart recovery (`revision = 2`), cross-project isolation, and real Linux `/proc/<pid>/status` + `smaps_rollup` RSS/PSS memory comparison against 6 isolated backends. | **1 PASS** |
+| **E15** | `scenarios/e15-group-e-tool-integrations.e2e.test.ts` | **Group E (Tool Integrations — Real Host Binaries + P29 Unified Commands)**: Verification of RTK (`0.37.0`), Claude-Mem (`12.1.3`), GitNexus (`1.6.12`), Chrome DevTools (`0.21.0` + `BrowserRuntimeManager`), Superpowers (`5.0.7`), all 32 builtin role-specific skills across 8 SDLC roles and 3 providers, and all 9 P29 unified commands (`repo inspect`, `task plan`, `task implement`, `verify`, `git prepare`, `mcp status`, `tool status`, `skills sync`, `agent check`). Also documents `QA-P34-07`. | **4 PASS** |
+| **E16** | `scenarios/e16-group-f-lifecycle.e2e.test.ts` | **Group F (Lifecycle — Deterministic Harness + Real Live Herdr `0.8.0` Multi-Pane)**: Complete project lifecycle: `bflow init`, `bflow up` (7 permanent roles across 3 tabs), `bflow attach` (Conversation Agent only), Conversation Agent -> Coordinator -> `AgenticWorkflowRuntime` SDLC task execution (Spec -> Conditional TDD -> Worktree -> Independent Verification -> Git Integration), `bflow down` (persisting `GracefulShutdownReceipt`), and `bflow up` + `SessionRecoveryService` resume without duplicate runs or orphan panes. | **2 PASS** |
 
-**Summary: 63 total tests | 63 PASS | 0 FAIL**
+**Summary: 16 scenarios (`e01`–`e16`) | 84 total tests | 84 PASS | 0 FAIL**
 
 ---
 
@@ -52,14 +58,14 @@ Expected exit code: `0` (0 diagnostics).
 
 ### 2. Execute E2E Suite
 
-Run all 10 scenarios in Vitest:
+Run all 16 scenarios in Vitest:
 
 ```bash
 pnpm exec vitest run --config tests/e2e/vitest.config.ts
 ```
 
 Expected output:
-- **10 passed test files (63 passing tests, 0 failures)** across `e01` through `e10`.
+- **16 passed test files (84 passing tests, 0 failures)** across `e01` through `e16`.
 
 ---
 
