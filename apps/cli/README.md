@@ -174,3 +174,29 @@ are preserved until an explicit checked restart; no silent conversation reset.
 Native startup waits for authenticated SessionStart receipts within the command
 deadline. A blocked provider reports the role, provider, exact pane/session and
 manual remediation without returning raw terminal output or accepting dialogs.
+
+## High-level Agentic SDLC commands (P29)
+
+`bflow repo inspect`, `task plan`, `task implement`, `verify`, `git prepare`, `mcp status`,
+`tool status`, `skills sync` and `agent check` give agents one goal-level command each. They
+reuse the Specification Engine, Conditional TDD Resolver, Verification Engine, Git Orchestrator,
+machine setup tool/MCP/skills components and the Agent Provider Registry through ports in
+`src/high-level/services.ts`; the CLI adds parsing, ingress validation, idempotency receipts,
+permission stops and the structured envelope, never scheduling, gates or approvals.
+
+Every command supports `--help` and `--json`. With `--json` the result is one
+`CommandExecutionResult`-based envelope on stdout and the process exit code matches it
+(0 success, 1 failed, 2 usage, 3 not ready, 4 not found, 5 permission required, 6 conflict,
+7 unknown state). Mutating commands keep receipts in `.bflow/state/cli/` (must be Git-ignored),
+replay completed requests, serialize concurrent invocations and refuse to repeat an interrupted
+non-idempotent step until `--resume`.
+
+See [docs/command-reference.md](docs/command-reference.md) and the generated
+[docs/command-reference.json](docs/command-reference.json) (checked by a unit test) for the
+full contract, including current limitations (Linux `flock` for the P18 engine; MCP Gateway,
+skill manager and verification gate runners are injected, not composed by default).
+
+```bash
+pnpm --filter @bflow/cli build
+pnpm exec vitest run apps/cli/test/high-level
+```

@@ -3,6 +3,7 @@ import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCli } from "./commands.js";
+import { isHighLevelInvocation } from "./high-level/index.js";
 import { formatCommandError } from "./formatters.js";
 import { parseCliArgs } from "./parser.js";
 import { composeCliRuntime } from "./runtime.js";
@@ -32,7 +33,7 @@ export async function main(
     stderr: (msg) => process.stderr.write(msg + "\n")
   };
 
-  if (context?.runtime === undefined) {
+  if (context?.runtime === undefined && !isHighLevelInvocation(args)) {
     const parseRes = parseCliArgs(args);
     const environmentStatus = parseRes.ok && parseRes.value.command === "status" &&
       parseRes.value.runId === undefined && parseRes.value.statusFilter === undefined && parseRes.value.workflowId === undefined &&
