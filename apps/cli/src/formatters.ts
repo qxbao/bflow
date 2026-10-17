@@ -588,7 +588,7 @@ function formatSetupOutput(output: SetupCommandOutput, useColor = false): string
   lines.push("Skills:");
   lines.push(`  Catalog Loaded:   ${output.skills.catalogLoaded ? "yes" : "no"}`);
   lines.push(`  Skill Count:      ${output.skills.skillCount}`);
-  lines.push(`  Synced Manifests: ${output.skills.syncedManifests}`);
+  if (output.skills.installedSkillCount !== undefined) lines.push(`  Installed Skills: ${output.skills.installedSkillCount}`);
   lines.push(`  Store Root:       ${sanitizeIdentifier(output.skills.storeRoot)}`);
 
   if (output.doctor) {

@@ -21,6 +21,7 @@ import {
   NodeCommandRunner,
   AssumeYesApprover,
   InteractiveApprover,
+  NonInteractiveApprover,
   type SetupOutcome,
   type MachineDoctorReport,
   type SetupComponent,
@@ -274,7 +275,9 @@ export async function executeSetupCommand(
       decorateComponents,
       approver: args.yes
         ? new AssumeYesApprover(store, () => new Date())
-        : new InteractiveApprover(async text => {
+        : !context?.setup?.confirm && (args.json || !process.stdin.isTTY || !process.stderr.isTTY)
+          ? new NonInteractiveApprover()
+          : new InteractiveApprover(async text => {
             const notes = diagnostics.filter(note => /license|PolyForm|build scripts/i.test(note));
             if (inventory.some(item => item.toolId === "claude-mem" || item.toolId === "superpowers"))
               notes.push(`Native plugins update the ${machineConfig.providers.join(", ")} configuration folders in this account. Claude-Mem uses the selected account's quota.`);
@@ -398,7 +401,9 @@ export async function executeSetupCommand(
     ...(outcome ? { outcome } : {}),
     ...(doctor ? { doctor } : {}),
     tools,
-    skills: skillsInfo,
+    skills: { ...skillsInfo, installedSkillCount: receipts.some(item => item.stepId === "resolve_skills:role-skills" &&
+      ["applied", "already_satisfied"].includes(item.status)) || doctor?.checks.some(check => check.checkId === "role-skills" && check.status === "passed")
+      ? skillsInfo.skillCount : 0 },
     diagnostics
   };
 }

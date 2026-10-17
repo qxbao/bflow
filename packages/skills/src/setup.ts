@@ -94,7 +94,7 @@ export class SkillsSetupSynchronizer {
       summary: `Install ${definitions.length} pinned instruction-only skills`,
       targets: definitions.map((d) => `${this.store.root}/bundles/${d.digest}`),
       machineWide: true,
-      repairNeeded: ctx.mode === "apply" ? corrupted : !observed.valid,
+      repairNeeded: corrupted,
     };
   }
   async sync(

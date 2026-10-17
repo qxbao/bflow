@@ -111,6 +111,7 @@ export interface SetupCommandOutput {
     readonly catalogLoaded: boolean;
     readonly skillCount: number;
     readonly syncedManifests: number;
+    readonly installedSkillCount?: number;
     readonly storeRoot: string;
   };
   readonly diagnostics: readonly string[];

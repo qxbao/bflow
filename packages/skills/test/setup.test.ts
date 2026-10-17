@@ -33,7 +33,7 @@ describe("P26 setup bridge and repository init data", () => {
       { root: source, source: "builtin", expectedDigest: bundleDigest(f) },
     ]);
     const plan = await setup.desired({ mode: "dry_run" });
-    expect(plan.repairNeeded).toBe(true);
+    expect(plan.repairNeeded).toBe(false);
     expect(await readdir(root)).toEqual(["source"]);
     expect(await setup.sync({ mode: "dry_run" })).toEqual({
       ownedPaths: [],
