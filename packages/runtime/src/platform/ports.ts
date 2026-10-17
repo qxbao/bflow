@@ -55,6 +55,8 @@ export interface RolePlatformRequirement {
 /** Structural port over `@bflow/skills` SkillManager. */
 export interface SkillResolverPort {
   resolve(request: ResolveSkillsRequest): Promise<{ manifest: SkillManifest; diagnostics: string[] }>;
+  /** Resolve, persist the immutable `manifest-<digest>` document `recover` reads, then link. */
+  sync(request: ResolveSkillsRequest): Promise<{ manifest: SkillManifest; rendered: RenderedSkills; diagnostics: string[] }>;
   verify(manifest: SkillManifest): Promise<SkillManifest>;
   link(manifest: SkillManifest): Promise<RenderedSkills>;
   recover(digest: string): Promise<SkillManifest>;

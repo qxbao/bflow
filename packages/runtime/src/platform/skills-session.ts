@@ -10,7 +10,7 @@ import {
   type OperationResult,
   type SkillManifest
 } from "@bflow/contracts";
-import type { RenderedSkills, ResolveSkillsRequest, SkillManager } from "@bflow/skills";
+import type { RenderedSkills, ResolveSkillsRequest } from "@bflow/skills";
 import { fail, ok } from "./errors.js";
 import { boundedIdentifier, sessionTrustScope, taskIdError } from "./environment.js";
 import type {
@@ -28,11 +28,8 @@ interface PersistedRoleSkills {
   readonly diagnostics: string[];
 }
 
-/**
- * `sync` is required beyond the frozen SkillResolverPort: it is the only SkillManager path that writes the
- * `manifest-<digest>` document which `recover` reads back. Without it, recovery could never succeed.
- */
-export type SkillSessionResolver = SkillResolverPort & Pick<SkillManager, "sync">;
+/** `sync` (not bare resolve) persists the `manifest-<digest>` document that `recover` reads back. */
+export type SkillSessionResolver = SkillResolverPort;
 
 export class SkillSessionStore implements SkillSessionPort {
   constructor(private readonly options: { readonly resolver: SkillSessionResolver }) {}
