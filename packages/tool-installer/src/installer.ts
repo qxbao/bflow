@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { chmod, lstat, mkdir, open, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, open, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Readable, Transform } from "node:stream";
@@ -45,18 +45,30 @@ const parse = <T>(schema: z.ZodType<T>, value: unknown): OperationResult<T> => {
 };
 
 export const ManagedToolPinSchema = z.object({
-  toolId: z.enum(["rtk", "claude-mem", "gitnexus", "chrome-devtools-mcp", "superpowers"]),
+  toolId: z.enum(["rtk", "claude-mem", "gitnexus", "chrome-devtools-mcp", "superpowers", "claude", "codex", "agy", "herdr"]),
   installerId: z.string().min(1), version: z.string().min(1), source: z.string().url(),
   integrity: z.string().regex(/^[0-9a-f]{64}$/),
   recipe: z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("npm"), packageName: z.enum(["claude-mem", "gitnexus", "chrome-devtools-mcp"]),
+    z.object({ kind: z.literal("npm"), packageName: z.enum(["claude-mem", "gitnexus", "chrome-devtools-mcp", "@anthropic-ai/claude-code", "@openai/codex"]),
       executable: z.string().min(1), allowBuildScripts: z.boolean() }).strict(),
     z.object({ kind: z.literal("rtk_archive"), archiveMember: z.enum(["rtk", "./rtk"]) }).strict(),
+    z.object({ kind: z.literal("binary"), executable: z.enum(["herdr"]) }).strict(),
+    z.object({ kind: z.literal("binary_archive"), archiveMember: z.literal("antigravity"), executable: z.literal("agy") }).strict(),
     z.object({ kind: z.literal("provider_plugin"), provider: z.enum(["claude", "codex", "agy"]) }).strict()
   ]),
   license: z.string().min(1)
 }).strict();
 export type ManagedToolPin = z.infer<typeof ManagedToolPinSchema>;
+
+/** Relative executable location inside an owned installation. Native plugins have no standalone executable. */
+export function managedToolExecutable(pin: ManagedToolPin): string {
+  switch (pin.recipe.kind) {
+    case "npm": return join("node_modules", ".bin", pin.recipe.executable);
+    case "rtk_archive": return "rtk";
+    case "binary": case "binary_archive": return pin.recipe.executable;
+    case "provider_plugin": return `native:${pin.recipe.provider}`;
+  }
+}
 
 export interface ProcessResult { readonly exitCode: number; readonly stdout: string; readonly stderr: string; readonly signal?: string }
 export interface ToolRunOptions {
@@ -173,6 +185,15 @@ export class ManagedToolInstaller implements ToolInstaller {
       if (pin.toolId === "gitnexus" && (pin.recipe.kind !== "npm" || pin.recipe.packageName !== "gitnexus")) throw new Error("GitNexus must use its official npm package");
       if (pin.toolId === "chrome-devtools-mcp" && (pin.recipe.kind !== "npm" || pin.recipe.packageName !== "chrome-devtools-mcp")) throw new Error("Chrome DevTools MCP must use its official npm package");
       if (pin.toolId === "superpowers" && pin.recipe.kind !== "provider_plugin") throw new Error("Superpowers must use a provider plugin route");
+      const providerPackage = pin.toolId === "claude" ? "@anthropic-ai/claude-code" : pin.toolId === "codex" ? "@openai/codex" : null;
+      if (providerPackage && (pin.recipe.kind !== "npm" || pin.recipe.packageName !== providerPackage))
+        throw new Error("Provider CLI must use its official npm package");
+      if (pin.toolId === "herdr" && (pin.recipe.kind !== "binary" || url.hostname !== "github.com" ||
+        !url.pathname.startsWith("/herdrdev/herdr/releases/download/"))) throw new Error("Herdr must use an official release binary");
+      if (pin.toolId === "agy" && (pin.recipe.kind !== "binary_archive" || url.hostname !== "storage.googleapis.com" ||
+        !url.pathname.startsWith("/antigravity-public/antigravity-cli/"))) throw new Error("Agy must use an official native archive");
+      if (pin.recipe.kind === "binary" && pin.toolId !== "herdr") throw new Error("Binary recipe is reserved for Herdr");
+      if (pin.recipe.kind === "binary_archive" && pin.toolId !== "agy") throw new Error("Native archive recipe is reserved for Agy");
       this.#pins.set(pin.toolId, pin);
     }
     this.installerId = options.pins[0]?.installerId ?? "bflow-managed-tools";
@@ -309,12 +330,12 @@ export class ManagedToolInstaller implements ToolInstaller {
       try { return (await this.#providerPlugin?.verify(pin, destination))?.ready === true; }
       catch { return false; }
     }
-    const executable = pin.recipe.kind === "rtk_archive" ? join(destination, "rtk") : join(destination, "node_modules", ".bin", pin.recipe.executable);
+    const executable = join(destination, managedToolExecutable(pin));
     try {
       const path = await realpath(executable);
       const canonicalDestination = await realpath(destination);
       if (!path.startsWith(`${canonicalDestination}${sep}`)) return false;
-      const version = await this.#host.run(executable, ["--version"], { timeoutMs: 15_000 });
+      const version = await this.#host.run(executable, ["--version"], { timeoutMs: 30_000 });
       const escapedVersion = pin.version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       if (version.exitCode !== 0 || !new RegExp(`(^|[^0-9])${escapedVersion}(?![0-9.])`).test(version.stdout + version.stderr)) return false;
       if (pin.recipe.kind === "npm") {
@@ -368,15 +389,19 @@ export class ManagedToolInstaller implements ToolInstaller {
         const manifest = JSON.parse(await readFile(join(stage, "node_modules", pin.recipe.packageName, "package.json"), "utf8")) as { name?: string; version?: string; license?: string };
         if (manifest.name !== pin.recipe.packageName || manifest.version !== pin.version) return ok(await this.#receipt(request, "failed", ["Installed package identity/version mismatch"]));
         if (manifest.license !== pin.license) return ok(await this.#receipt(request, "failed", ["Installed package license differs from reviewed pin"]));
-      } else if (pin.recipe.kind === "rtk_archive") {
-        const listing = await this.#host.run("tar", ["-tzf", artifact], { timeoutMs: 15_000 });
+      } else if (pin.recipe.kind === "binary") {
+        await copyFile(artifact, join(stage, pin.recipe.executable));
+        await chmod(join(stage, pin.recipe.executable), 0o700);
+      } else if (pin.recipe.kind === "rtk_archive" || pin.recipe.kind === "binary_archive") {
+        const listing = await this.#host.run("tar", ["-tzf", artifact], { timeoutMs: 60_000 });
         if (listing.exitCode !== 0 || !listing.stdout.split("\n").includes(pin.recipe.archiveMember)) return ok(await this.#receipt(request, "failed", ["RTK archive lacks expected binary"]));
-        const extracted = await this.#host.run("tar", ["-xzf", artifact, "-C", stage, pin.recipe.archiveMember], { timeoutMs: 15_000 });
+        const extracted = await this.#host.run("tar", ["-xzf", artifact, "-C", stage, pin.recipe.archiveMember], { timeoutMs: 60_000 });
         if (extracted.exitCode !== 0) return ok(await this.#receipt(request, "failed", ["RTK archive extraction failed"]));
-        const binary = join(stage, "rtk");
+        const binary = join(stage, pin.recipe.archiveMember);
         const info = await lstat(binary);
         if (!info.isFile() || info.isSymbolicLink()) return ok(await this.#receipt(request, "failed", ["RTK archive member is not a regular binary"]));
-        await chmod(join(stage, "rtk"), 0o700);
+        if (pin.recipe.kind === "binary_archive") await rename(binary, join(stage, pin.recipe.executable));
+        await chmod(join(stage, managedToolExecutable(pin)), 0o700);
       } else {
         const marker = await this.#marker(destination);
         const action = !marker ? "install" : marker.version !== pin.version ? "update" : "repair";
@@ -393,8 +418,7 @@ export class ManagedToolInstaller implements ToolInstaller {
         if (!observation.ready)
           return ok(await this.#receipt(request, "unknown", [observation.diagnostic], [stage, pendingPath]));
       }
-      const executable = pin.recipe.kind === "rtk_archive" ? "rtk" : pin.recipe.kind === "provider_plugin" ?
-        `native:${pin.recipe.provider}` : join("node_modules", ".bin", pin.recipe.executable);
+      const executable = managedToolExecutable(pin);
       await writeFile(join(stage, ".bflow-tool.json"), JSON.stringify({ toolId: pin.toolId, installerId: pin.installerId, version: pin.version,
         integrity: pin.integrity, source: pin.source, executable, license: pin.license,
         recipeDigest: digest(JSON.stringify(pin.recipe)) }), { mode: 0o600 });
@@ -444,7 +468,7 @@ export class ManagedToolInstaller implements ToolInstaller {
   }
 }
 
-export function createToolCapability(toolId: ManagedToolPin["toolId"], version: string, repositoryId: string): ToolCapability {
+export function createToolCapability(toolId: "rtk" | "claude-mem" | "gitnexus" | "chrome-devtools-mcp" | "superpowers", version: string, repositoryId: string): ToolCapability {
   const definitions = {
     rtk: { kind: "cli_only", operations: ["optimize_output", "gain"], resource: { sharing: "concurrent", maxConcurrency: 64 } },
     "claude-mem": { kind: "existing_shared_worker", operations: ["memory_search"], resource: { sharing: "concurrent", maxConcurrency: 8 } },

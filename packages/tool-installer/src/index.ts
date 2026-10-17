@@ -5,3 +5,5 @@ export * from "./native-runtime.js";
 export * from "./services.js";
 export * from "./mcp-probe.js";
 export * from "./rtk-config.js";
+
+export * from "./default-catalog.js";

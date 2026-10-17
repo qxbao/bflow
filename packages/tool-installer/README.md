@@ -56,3 +56,28 @@ From the repository root: `pnpm exec tsc -b packages/tool-installer --pretty fal
 - [GitNexus CLI, MCP and repository policy](https://github.com/abhigyanpatwari/GitNexus) and [license](https://github.com/abhigyanpatwari/GitNexus/blob/main/LICENSE)
 - [Chrome DevTools MCP configuration](https://github.com/ChromeDevTools/chrome-devtools-mcp/blob/main/docs/configuration.md)
 - [Superpowers provider installation](https://github.com/obra/superpowers)
+
+## Reviewed default setup catalog
+
+`defaultToolCatalog(os, arch)` selects fixed upstream artifacts without network access.
+The CLI's `createDefaultSetupConfiguration` registers those pins and preserves explicit
+operator descriptors. Linux x64 includes RTK, Herdr, Agy, Claude Code, Codex, GitNexus and
+Chrome DevTools MCP; Linux ARM64 and macOS x64/ARM64 include all except Agy. Other
+platforms return manual requirements. Installation stays under the approved machine
+`data/tools/<toolId>` directory; provider authentication remains interactive.
+
+The catalog records actual SHA-256 values computed from downloaded artifacts and checked
+against upstream GitHub/Herdr checksums, npm SHA-512 SRI, or Agy manifest SHA-512. Npm's
+transitive dependencies are not a fully pinned offline bundle. GitNexus requires Node
+`^22.18.0 || >=24.11.0` and its noncommercial license review; native dependency build scripts
+are explicit. Claude's upstream npm installer also requires its postinstall script. The
+selected RTK release includes the BUSL-1.1 engine license alongside its MIT CLI license.
+
+Agy uses the native archive linked by the [official installer](https://antigravity.google/docs/cli/install/).
+Herdr uses the raw release binary from the [official release manifest](https://herdr.dev/latest.json).
+The installer adds no shell initialization, provider permissions, hooks or credentials.
+Claude-Mem and Superpowers remain actionable manual requirements because setup lacks the
+independent provider activation/provenance/worker probes needed to certify those native
+installations. MCP launch requirements are returned separately for Runtime/Gateway scope,
+Chrome profile isolation and verified index setup; installing a server does not register
+or start it. Binary version checks do not establish live SDLC readiness.
