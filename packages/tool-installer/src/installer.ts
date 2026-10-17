@@ -138,6 +138,8 @@ export const systemToolHost: ToolHost = {
   }
 };
 
+export interface ToolInspection { status: SetupReceipt["status"]; diagnostics: string[]; ownedPaths: string[] }
+
 export interface ManagedToolInstallerOptions {
   readonly managedRoot: string;
   readonly pins: readonly ManagedToolPin[];
@@ -281,26 +283,42 @@ export class ManagedToolInstaller implements ToolInstaller {
     return ok({ request, pin });
   }
 
+  /** Read-only readiness inspection; no setup approval or synthetic authority is needed. */
+  async inspect(raw: ToolInstallRequest, _options?: OperationOptions): Promise<OperationResult<ToolInspection>> {
+    const planned = await this.plan(raw);
+    if (!planned.ok) return planned;
+    const request = planned.value.toolInstall!;
+    const pin = this.#pin(request);
+    if (!pin) return fail("Tool pin missing", "not_found");
+    return ok(await this.#observe(request.destination, pin, planned.value.desiredStateDigest));
+  }
+
   async reconcile(raw: SetupApplyRequest, _options?: OperationOptions): Promise<OperationResult<SetupReceipt>> {
     const validated = await this.#validated(raw);
     if (!validated.ok) return validated;
     const { request, pin } = validated.value;
-    const destination = request.step.toolInstall!.destination;
+    const observation = await this.#observe(request.step.toolInstall!.destination, pin, request.step.desiredStateDigest);
+    return ok(await this.#receipt(request, observation.status, observation.diagnostics, observation.ownedPaths));
+  }
+
+  async #observe(destination: string, pin: ManagedToolPin, desiredStateDigest: string): Promise<ToolInspection> {
+    const observed = (status: SetupReceipt["status"], diagnostics: string[], ownedPaths: string[] = []): ToolInspection =>
+      ({ status, diagnostics, ownedPaths });
     if (pin.recipe.kind === "provider_plugin") {
       try {
         const pendingPath = `${destination}.native-pending.json`;
         const intent = activationIntentSchema.parse(JSON.parse(await readRegular(pendingPath)));
-        if (intent.desiredStateDigest !== request.step.desiredStateDigest || intent.toolId !== pin.toolId ||
+        if (intent.desiredStateDigest !== desiredStateDigest || intent.toolId !== pin.toolId ||
           intent.installerId !== pin.installerId || !intent.stage.startsWith(`${resolve(destination)}.staging-`))
-          return ok(await this.#receipt(request, "unknown", ["Another unresolved native activation owns this destination"], [pendingPath]));
+          return observed( "unknown", ["Another unresolved native activation owns this destination"], [pendingPath]);
         let observationPath = intent.stage;
         try { await lstat(observationPath); } catch { observationPath = destination; }
         const observation = await this.#providerPlugin!.verify(pin, observationPath);
-        return ok(await this.#receipt(request, observation.ready ? "already_satisfied" : "unknown",
-          [observation.diagnostic, "Native activation intent retained; no automatic replay"], [observationPath, pendingPath]));
+        return observed( observation.ready ? "already_satisfied" : "unknown",
+          [observation.diagnostic, "Native activation intent retained; no automatic replay"], [observationPath, pendingPath]);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT")
-          return ok(await this.#receipt(request, "unknown", ["Native activation intent could not be reconciled"]));
+          return observed( "unknown", ["Native activation intent could not be reconciled"]);
       }
     }
     const marker = await this.#marker(destination);
@@ -308,18 +326,18 @@ export class ManagedToolInstaller implements ToolInstaller {
       if (pin.recipe.kind === "provider_plugin" && this.#providerPlugin) {
         try {
           const observation = await this.#providerPlugin.verify(pin, destination);
-          if (observation.ready) return ok(await this.#receipt(request, "already_satisfied",
-            [`Existing provider plugin verified without claiming ownership: ${observation.diagnostic}`]));
+          if (observation.ready) return observed( "already_satisfied",
+            [`Existing provider plugin verified without claiming ownership: ${observation.diagnostic}`]);
         } catch { /* report the missing or unowned destination below */ }
       }
-      try { await lstat(destination); return ok(await this.#receipt(request, "blocked", ["Destination exists without a valid Bflow ownership marker"])); }
-      catch { return ok(await this.#receipt(request, "blocked", ["Tool is not installed"])); }
+      try { await lstat(destination); return observed( "blocked", ["Destination exists without a valid Bflow ownership marker"]); }
+      catch { return observed( "blocked", ["Tool is not installed"]); }
     }
     if (marker.toolId !== pin.toolId || marker.installerId !== pin.installerId || marker.version !== pin.version || marker.integrity !== pin.integrity ||
       marker.source !== pin.source || marker.license !== pin.license || marker.recipeDigest !== digest(JSON.stringify(pin.recipe)))
-      return ok(await this.#receipt(request, "blocked", ["Installed tool differs from approved pin"], [destination]));
+      return observed( "blocked", ["Installed tool differs from approved pin"], [destination]);
     const probe = await this.#probe(destination, pin);
-    return ok(await this.#receipt(request, probe ? "already_satisfied" : "blocked", [probe ? "Pinned tool verified" : "Executable verification failed"], [destination]));
+    return observed( probe ? "already_satisfied" : "blocked", [probe ? "Pinned tool verified" : "Executable verification failed"], [destination]);
   }
 
   async #probe(destination: string, pin: ManagedToolPin): Promise<boolean> {

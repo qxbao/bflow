@@ -1,7 +1,7 @@
 import { delimiter, join } from "node:path";
 import { access } from "node:fs/promises";
 import { constants } from "node:fs";
-import type { ToolInstaller } from "@bflow/contracts";
+import type { OperationResult, ToolInstallRequest, ToolInstaller } from "@bflow/contracts";
 import { MachineConfigSchema, ToolInstallerRegistry, defaultMachineConfig,
   type MachineConfig, type PlatformProfile, type ToolObservation } from "@bflow/machine-setup";
 
@@ -59,12 +59,13 @@ export async function createDefaultSetupConfiguration(options: {
   const nativeHost = { ...leaf.systemToolHost,
     run: (executable: string, args: readonly string[], runOptions?: { environment?: Readonly<Record<string, string>> }) =>
       leaf.systemToolHost.run(executable, args, { ...runOptions, environment: { ...runOptions?.environment, PATH: nativePath } }) };
+  const nativeInspectors = new Map<string, { inspect(request: ToolInstallRequest): Promise<OperationResult<{ status: string; diagnostics: string[] }>> }>();
   for (const pin of nativePins) {
-    if (explicitTools.has(pin.toolId)) continue;
-    const nativeInstaller: ToolInstaller = new leaf.NativeProvidersToolInstaller({ managedRoot: join(platform.paths.data, "tools"),
+    const nativeInstaller = new leaf.NativeProvidersToolInstaller({ managedRoot: join(platform.paths.data, "tools"),
       pin, providers: config.providers, host: nativeHost,
       configuration: { homeDirectory: platform.homeDir, executables: providerExecutables,
         memory: { dataDir: join(platform.paths.data, "claude-mem"), projectRoot: process.cwd(), project: process.cwd(), startIfMissing: true } } });
+    nativeInspectors.set(nativeInstaller.installerId, nativeInstaller);
     if (!registry.get(nativeInstaller.installerId)) {
       const registration = registry.register(nativeInstaller);
       if (!registration.ok) throw Error(registration.error.message);
@@ -94,6 +95,7 @@ export async function createDefaultSetupConfiguration(options: {
   const diagnostics = manual.map(item => `${item.toolId}: ${item.diagnostic} ${item.documentation}`);
   diagnostics.push("claude/codex/agy: Complete each selected provider's own login flow; setup does not create credentials or widen permissions.");
   diagnostics.push("GitNexus 1.6.12 uses PolyForm-Noncommercial-1.0.0; review eligibility or obtain the upstream commercial license before approving installation. Its npm native dependency build scripts execute during the approved install.");
+  if (nativePins.some((pin: { toolId: string }) => pin.toolId === "claude-mem")) diagnostics.push("claude-mem: The local host observer must already be running on loopback port 37777/37778 or CLAUDE_MEM_HOST_OBSERVER_PORT. Setup installs the approved integration and shared worker; it cannot create provider credentials or substitute a hosted subscription.");
   diagnostics.push("Pinned npm entry tarballs are checksum-verified; transitive npm dependencies are resolved by npm and are not a fully locked offline dependency bundle.");
   const launchRequirements: DefaultSetupLaunchRequirement[] = [];
   for (const toolId of ["gitnexus", "chrome-devtools-mcp"] as const) {
@@ -112,13 +114,12 @@ export async function createDefaultSetupConfiguration(options: {
       const observation: ToolObservation = { toolId: pin.toolId, status: "missing", resolvedPath: null, realPath: null,
         version: null, binaryDigest: null, pathMissingDir: null, required: true, diagnostics: [] };
       if (!resolved) { observation.diagnostics.push("No native provider installer registered for this explicit pin"); observations.push(observation); continue; }
-      const planned = await resolved.installer.plan({ schemaVersion: 3, toolId: pin.toolId, installerId: pin.installerId,
+      const inspector = nativeInspectors.get(pin.installerId);
+      if (!inspector) { observation.diagnostics.push("No read-only native inspection is registered for this operator pin"); observations.push(observation); continue; }
+      const receipt = await inspector.inspect({ schemaVersion: 3, toolId: pin.toolId, installerId: pin.installerId,
         version: pin.version, source: pin.source, integrity: pin.integrity, destination: join(currentPlatform.paths.data, "tools", pin.toolId),
         scope: { kind: "machine", machineId: currentPlatform.machineId },
         idempotencyKey: `install:${currentPlatform.machineId}:${pin.toolId}:${pin.version}:${pin.integrity}` });
-      if (!planned.ok) { observation.diagnostics.push(planned.error.message); observations.push(observation); continue; }
-      const receipt = await resolved.installer.reconcile({ schemaVersion: 3, planId: "native-readiness", planDigest: planned.value.desiredStateDigest,
-        step: planned.value });
       if (!receipt.ok) observation.diagnostics.push(receipt.error.message);
       else {
         observation.diagnostics.push(...receipt.value.diagnostics);

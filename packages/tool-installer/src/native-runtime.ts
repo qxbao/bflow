@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { cp, lstat, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { createConnection } from "node:net";
@@ -72,7 +72,9 @@ export class NativePluginRuntime {
     const record = recordSchema.parse(JSON.parse(await readRegular(join(destination, ".bflow-native.json"))));
     if (record.toolId !== pin.toolId || record.provider !== this.#provider(pin) || record.version !== pin.version ||
       record.sourceIntegrity !== pin.integrity) throw new Error("Native activation receipt differs from approved pin");
-    const managed = await privateDirectory(this.#options.managedRoot);
+    const managedInfo = await lstat(this.#options.managedRoot);
+    if (!managedInfo.isDirectory() || managedInfo.isSymbolicLink()) throw Error("Native managed directory is not a regular directory");
+    const managed = await realpath(this.#options.managedRoot);
     if (!record.bundleRoot.startsWith(`${managed}/`)) throw new Error("Native bundle escaped managed storage");
     return record;
   }
@@ -233,7 +235,9 @@ export class NativePluginRuntime {
     const result = await this.#host.run(executable, ["install", "--ide", ide, "--provider", "host", "--no-auto-start"],
       { timeoutMs: options?.timeoutMs ?? 300_000, environment, ...(options?.signal ? { signal: options.signal } : {}) });
     await writeFile(join(dirname(artifact), "native-installer.log"), result.stdout + result.stderr, { mode: 0o600 });
-    if (result.exitCode !== 0) return { success: false, diagnostic: `Official Claude-Mem installer exited ${result.exitCode}; full output retained in native-installer.log` };
+    if (result.exitCode !== 0) return { success: false, diagnostic: /No OpenAI-compatible host observer is listening/.test(result.stderr)
+      ? "Claude-Mem host observer is unavailable on loopback ports 37777/37778. Start the existing OpenAI-compatible observer (or set CLAUDE_MEM_HOST_OBSERVER_PORT), inspect native-installer.log and explicitly review the retained native intent before retrying. No subscription or credentials were created."
+      : `Official Claude-Mem installer exited ${result.exitCode}; full output retained in native-installer.log` };
     if (provider === "claude") {
       const pluginRoot = join(this.#home, ".claude", "plugins", "cache", "thedotmack", "claude-mem", pin.version);
       const hooks = JSON.parse(await readRegular(join(generation, "node_modules", "claude-mem", "plugin", "hooks", "hooks.json")));

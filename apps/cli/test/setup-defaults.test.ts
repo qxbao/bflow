@@ -19,6 +19,10 @@ describe("CLI setup default inventory", () => {
     const native = await result.additionalToolObservations(platform, result.config);
     expect(native.map(item => item.toolId).sort()).toEqual(["claude-mem", "superpowers"]);
     expect(native.every(item => item.status === "missing" && item.required)).toBe(true);
+    expect(native.every(item => item.diagnostics.some(message => message.includes("not installed")))).toBe(true);
+    const persisted = await createDefaultSetupConfiguration({ platform, config: result.config });
+    const persistedNative = await persisted.additionalToolObservations(platform, persisted.config);
+    expect(persistedNative.every(item => item.diagnostics.some(message => message.includes("not installed")))).toBe(true);
   });
   it("preserves explicit operator pins, providers, services and secrets", async () => {
     const platform = detectPlatform(defaultHostEnvironment());platform.os = "linux"; platform.arch = "x64";

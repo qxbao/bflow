@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { NativeProvidersToolInstaller } from "../src/native-providers-installer.js";
+import { treeDigest } from "../src/files.js";
 import type { ManagedToolPin } from "../src/installer.js";
 
 it("plans every selected provider, preserves uncertain native delivery and does not replay it", async () => {
@@ -25,9 +26,21 @@ it("plans every selected provider, preserves uncertain native delivery and does 
       scope: { kind: "machine", machineId: "machine" }, idempotencyKey: "native-install" });
     expect(planned.ok).toBe(true); if (!planned.ok) return;
     const request = { schemaVersion: 3 as const, planId: "plan", planDigest: "a".repeat(64), step: planned.value, approvalReceiptId: "approved" };
+    const missing = await installer.inspect(planned.value.toolInstall!);
+    expect(missing.ok && missing.value.status).toBe("blocked");
+    expect(missing.ok && missing.value.diagnostics.join(" ")).toContain("not installed");
     const first = await installer.apply(request); expect(first.ok && first.value.status).toBe("unknown");
     expect(first.ok && first.value.diagnostics.join(" ")).toContain("codex");
     const repeated = await installer.apply(request); expect(repeated.ok && repeated.value.status).toBe("unknown");
+    expect(calls).toEqual(["claude", "codex"]);
+    const inspected = await installer.inspect(planned.value.toolInstall!);
+    expect(inspected.ok && inspected.value.status).toBe("unknown");
+    expect(calls).toEqual(["claude", "codex"]);
+    const snapshot = await treeDigest(root);
+    active.add("codex");
+    const installed = await installer.inspect(planned.value.toolInstall!);
+    expect(installed.ok && installed.value.status).toBe("already_satisfied");
+    expect(await treeDigest(root)).toBe(snapshot);
     expect(calls).toEqual(["claude", "codex"]);
     const forged = await installer.apply({ ...request, step: { ...planned.value, desiredStateDigest: "b".repeat(64) } });
     expect(forged.ok).toBe(false);

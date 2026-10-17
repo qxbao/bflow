@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { SetupApplyRequestSchema, SetupReceiptSchema, SetupStepSchema, ToolInstallRequestSchema,
   type OperationOptions, type OperationResult, type SetupApplyRequest, type SetupReceipt, type SetupStep,
   type ToolInstallRequest, type ToolInstaller } from "@bflow/contracts";
-import { ManagedToolInstaller, ManagedToolPinSchema, type ManagedToolPin, type ProviderPluginAdapter, type ToolHost } from "./installer.js";
+import { ManagedToolInstaller, ManagedToolPinSchema, type ManagedToolPin, type ToolInspection, type ProviderPluginAdapter, type ToolHost } from "./installer.js";
 import { OfficialProviderPluginAdapter } from "./provider-plugins.js";
 import type { NativeProvider, NativeRuntimeOptions } from "./native-runtime.js";
 import { systemToolHost } from "./installer.js";
@@ -55,6 +55,21 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
       componentId: pin.toolId, level: "machine", scope: request.scope, dependsOn: [], desiredStateDigest,
       expectedStateDigest: null, requiresApproval: true, rollback: "manual", toolInstall: request,
       idempotencyKey: request.idempotencyKey }) };
+  }
+  async inspect(raw: ToolInstallRequest, options?: OperationOptions): Promise<OperationResult<ToolInspection>> {
+    const planned = await this.plan(raw);
+    if (!planned.ok) return planned;
+    const children = await this.#childSteps(planned.value.toolInstall!);
+    if (!children.ok) return children;
+    const diagnostics: string[] = [], ownedPaths: string[] = [];
+    for (const [index, child] of this.#children.entries()) {
+      const result = await child.installer.inspect(children.value[index]!.toolInstall!, options);
+      if (!result.ok) return result;
+      diagnostics.push(...result.value.diagnostics.map(message => `${child.provider}: ${message}`));
+      ownedPaths.push(...result.value.ownedPaths);
+      if (result.value.status !== "already_satisfied") return { ok: true, value: { status: result.value.status, diagnostics, ownedPaths } };
+    }
+    return { ok: true, value: { status: "already_satisfied", diagnostics, ownedPaths } };
   }
   async #run(raw: SetupApplyRequest, apply: boolean, options?: OperationOptions): Promise<OperationResult<SetupReceipt>> {
     const parsed = SetupApplyRequestSchema.safeParse(raw);
