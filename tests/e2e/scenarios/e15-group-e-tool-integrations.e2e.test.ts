@@ -883,12 +883,20 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
     expect(cmdSkillsSyncWiredSecond.ok).toBe(true);
     expect(extractCommandOutput(cmdSkillsSyncWiredSecond).outcome).toBe("already_synced");
 
-    // 9. agent check (claude) — QA-P34-05 fixed: real claude 2.1.301 preflight is "ready"
+    // 9. agent check (claude) — QA-P34-05: real authenticated claude reports "ready"; unconfigured/unauthenticated host reports "not_ready"
     const cmdAgentCheckClaude = await runHighLevelCli(["agent", "check", "claude", "--json"], {
       cwd: hlRepo,
       services: fullServices
     });
-    expect(cmdAgentCheckClaude.ok).toBe(true);
-    expect(extractCommandOutput(cmdAgentCheckClaude).outcome).toBe("ready");
+    if (livePlatformEnabled) {
+      expect(cmdAgentCheckClaude.ok).toBe(true);
+      expect(extractCommandOutput(cmdAgentCheckClaude).outcome).toBe("ready");
+    } else {
+      expect(["ready", "not_ready"]).toContain(extractCommandOutput(cmdAgentCheckClaude).outcome);
+      expect(cmdAgentCheckClaude.ok).toBe(extractCommandOutput(cmdAgentCheckClaude).outcome === "ready");
+      if (!cmdAgentCheckClaude.ok) {
+        expect(cmdAgentCheckClaude.exitCode).toBe(3);
+      }
+    }
   }, 180_000);
 });
