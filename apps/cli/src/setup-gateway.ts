@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { z } from "zod";
 import { MCPClientRegistrationSchema, MCPServiceDefinitionSchema, MCPServiceObservationSchema, ScopedOperationSchema,
   type MCPServiceDefinition, type MCPServiceObservation } from "@bflow/contracts";
+import { startGatewayControl, type GatewayControl } from "./gateway-control.js";
 import { MachineConfigSchema, McpConfigComponent, ServicesComponent, SetupStateStore, EnvironmentManifestComponent,
   loadMachineConfig, MACHINE_CONFIG_FILE, digest, McpConfigFileSchema, SERVICE_MARKER, ToolInstallDescriptorSchema,
   type MachineConfig, type PlatformProfile, type SetupComponent, type SetupContext, type CommandRunner,
@@ -31,7 +32,7 @@ export function setupGatewayDiagnostics(input: Pick<SetupGatewayInput, "reposito
   return [
     ...(!input.repositoryRoot && input.launchRequirements.some(item => item.toolId === "gitnexus")
       ? ["GitNexus installs globally; repository indexing and its MCP activation are deferred until bflow setup --dir <repository>."] : []),
-    "The background Gateway verifies installed backends. Connecting actual agent roles to this daemon still requires a Runtime registration control endpoint; machine setup does not establish those connections."
+    "The background Gateway verifies installed backends and serves role registration through its private gateway-control.json locator in the Gateway state directory; machine setup does not establish those role connections."
   ];
 }
 
@@ -380,6 +381,7 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
   const store = new SetupStateStore(configured.paths, { uid: process.getuid?.() ?? null, now: () => new Date() });
   const observations: MCPServiceObservation[] = [];
   let timer: ReturnType<typeof setInterval> | undefined;
+  let control: GatewayControl | undefined;
   let stopped = false;
   const shutdown = new AbortController();
   const unavailable = (service: MCPServiceDefinition) => MCPServiceObservationSchema.parse({ schemaVersion: 3,
@@ -387,6 +389,7 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
     discoveredTools: [], ownership: service.connection.ownership, activeClientCount: 0,
     observedAt: new Date().toISOString(), diagnosticCode: "optional_backend_unavailable" });
   const stop = async () => {
+    await control?.stop();
     stopped = true; shutdown.abort();
     clearInterval(timer);
     await rm(configured.receiptPath, { force: true });
@@ -413,6 +416,10 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
     const readyServices = configured.services.filter(service => observations.some(item => item.serviceId === service.serviceId && item.status === "ready"));
 
     const endpoint = `${await server.start()}/mcp`;
+    const { scope } = configured.operation;
+    if (scope.kind !== "session") throw new Error("Gateway control requires a session-scoped Gateway operation");
+    control = await startGatewayControl({ gateway, stateRoot: configured.paths.state, machineId: scope.machineId,
+      configDigest: configured.definitionDigest, endpoint, workspaceRoot: scope.workspaceRoot, services: configured.services });
     if (readyServices.length) {
       const registrationId = `setup-probe-${randomUUID()}`;
       const registration = MCPClientRegistrationSchema.parse({ schemaVersion: 3, registrationId, provider: "codex", role: "reviewer",

@@ -191,7 +191,8 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
       },
       configDigest: request.configDigest,
       expiresAt: new Date(now.getTime() + this.ttlMs).toISOString(),
-      idempotencyKey: registrationId
+      // Fresh per attempt: a re-register after revoke must not be deduplicated into the revoked record.
+      idempotencyKey: `${registrationId}:${randomUUID()}`
     });
     if (!parsed.success) {
       reject("validation", "Invalid Gateway client registration", parsed.error.issues.map(issue => issue.message));
