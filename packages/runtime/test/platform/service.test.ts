@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -71,6 +71,11 @@ class FakeGatewayControl implements GatewayControlPort {
 
   tokens(): string[] {
     return [...this.registrations.values()].map(entry => entry.bearerToken);
+  }
+
+  /** Simulates a Gateway daemon restart: every registration and its bearer token is gone. */
+  restart(): void {
+    this.registrations.clear();
   }
 }
 
@@ -407,5 +412,80 @@ describe("DefaultPlatformReadinessService", () => {
     expect(JSON.stringify(service.status())).not.toContain(tokens[0] ?? "");
     const denied = await service.prepareDeveloper(identity, requirement({ taskId: "t9", permissionMode: "unattended_isolated" }));
     expect(JSON.stringify(denied)).not.toContain(tokens[0] ?? "");
+  });
+
+  describe("Gateway registration verification", () => {
+    async function activatedDeveloper(): Promise<{ service: DefaultPlatformReadinessService; launchId: string;
+      registrationId: string; journal: FileLaunchJournal }> {
+      const { service, journal } = buildService();
+      const prepared = await service.prepareSession(identity, [requirement({ mcpServiceIds: ["svc-search"] })]);
+      if (!prepared.ok) throw new Error(JSON.stringify(prepared.error));
+      const launchId = prepared.value.launches[0]?.launch.launchId ?? "";
+      const registrationId = prepared.value.launches[0]?.gateway.registrations[0]?.registrationId ?? "";
+      const activation = await service.verifyActivated({
+        launchId, paneId: PANE_ID, nativeSession: NATIVE_SESSION, observation: LIVE_READY
+      });
+      if (!activation.ok) throw new Error(JSON.stringify(activation.error));
+      return { service, launchId, registrationId, journal };
+    }
+
+    const ledgerFile = (): string => join(identity.stateDirectory, "gen-1", "gateway-registrations.json");
+
+    it("keeps an activated launch fresh while its Gateway registration is present", async () => {
+      const { service, launchId } = await activatedDeveloper();
+
+      const verified = await service.verifyGateway();
+
+      expect(verified.ok && verified.value.healthy).toBe(true);
+      expect(service.assertFresh(launchId).ok).toBe(true);
+      expect(service.status().launches[0]?.state).toBe("activated");
+    });
+
+    it("degrades the owning launch after a Gateway restart and fails closed for dispatch", async () => {
+      const { service, launchId, registrationId } = await activatedDeveloper();
+      const tokens = gatewayControl.tokens();
+      expect(tokens).toHaveLength(1);
+
+      gatewayControl.restart();
+      const verified = await service.verifyGateway();
+
+      expect(verified.ok).toBe(true);
+      if (!verified.ok) return;
+      expect(verified.value.healthy).toBe(false);
+      expect(verified.value.lost).toEqual([{ registrationId, role: "developer", taskId: "t1" }]);
+      expect(service.status().launches[0]).toEqual(expect.objectContaining({
+        launchId, state: "degraded", reason: "gateway_registration_lost"
+      }));
+
+      const fresh = service.assertFresh(launchId);
+      expect(fresh.ok).toBe(false);
+      if (fresh.ok) return;
+      expect(fresh.error.code).toBe("conflict");
+      expect(fresh.error.details).toEqual({ code: "gateway_registration_lost" });
+
+      const reactivated = await service.verifyActivated({
+        launchId, paneId: PANE_ID, nativeSession: NATIVE_SESSION, observation: LIVE_READY
+      });
+      expect(reactivated.ok).toBe(false);
+      expect(service.status().launches[0]?.state).toBe("degraded");
+
+      const serialized = JSON.stringify([service.status(), verified]) + await readFile(ledgerFile(), "utf8");
+      for (const token of tokens) expect(serialized).not.toContain(token);
+    });
+
+    it("releases a degraded launch cleanly and idempotently", async () => {
+      const { service, launchId, journal } = await activatedDeveloper();
+      gatewayControl.restart();
+      expect((await service.verifyGateway()).ok).toBe(true);
+
+      expect((await service.releaseLaunch(launchId)).ok).toBe(true);
+      expect(service.status().launches[0]?.state).toBe("released");
+      expect((await service.releaseLaunch(launchId)).ok).toBe(true);
+      expect(gatewayControl.registrations.size).toBe(0);
+
+      const kinds = await journalKinds(journal);
+      expect(kinds.filter(kind => kind === "released")).toHaveLength(1);
+      expect(kinds[kinds.length - 1]).toBe("released");
+    });
   });
 });

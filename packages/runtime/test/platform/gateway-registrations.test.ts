@@ -30,6 +30,14 @@ class FakeGatewayControl implements GatewayControlPort {
   /** Fails the next revoke with this error without touching state. */
   failNextRevoke: ContractError | undefined;
   onRegister: ((registration: MCPClientRegistration) => void) | undefined;
+  /** Fails the next list with this error without touching state. */
+  failNextList: ContractError | undefined;
+  listCalls = 0;
+
+  /** Simulates a Gateway daemon restart: every registration and its bearer token is gone. */
+  restart(): void {
+    this.registrations.clear();
+  }
 
   async register(registration: MCPClientRegistration, _options?: OperationOptions):
     Promise<OperationResult<GatewayRegistrationGrant>> {
@@ -66,6 +74,12 @@ class FakeGatewayControl implements GatewayControlPort {
   }
 
   async list(scope: TrustScope, _options?: OperationOptions): Promise<OperationResult<readonly MCPClientRegistration[]>> {
+    this.listCalls += 1;
+    if (this.failNextList) {
+      const failure = this.failNextList;
+      this.failNextList = undefined;
+      return failWith(failure);
+    }
     const listed = [...this.registrations.values()].map(entry => entry.registration)
       .filter(registration => JSON.stringify(registration.scope) === JSON.stringify(scope));
     return ok(listed);
@@ -383,5 +397,130 @@ describe("GatewayRegistrationManager", () => {
     expect(first?.idempotencyKey).toMatch(new RegExp(`^${firstId}:[0-9a-f-]{36}$`));
     expect(second?.idempotencyKey).toMatch(new RegExp(`^${firstId}:[0-9a-f-]{36}$`));
     expect(second?.idempotencyKey).not.toBe(first?.idempotencyKey);
+  });
+
+  describe("verifyRegistrations", () => {
+    const coordinatorRequest = (): GatewayRoleRequest =>
+      request({ role: "coordinator", taskId: undefined, environmentId: "env-coordinator" });
+
+    it("reports healthy without calling the Gateway when no registrations are tracked", async () => {
+      const result = await manager().verifyRegistrations(identity);
+
+      expect(result).toEqual({ ok: true, value: { checkedAt: now.toISOString(), healthy: true, lost: [], uncertain: false } });
+      expect(control.listCalls).toBe(0);
+    });
+
+    it("marks every registration lost after a Gateway restart, keeps the ledger free of tokens, and stays lost on re-read", async () => {
+      const gateway = manager();
+      const developer = await gateway.ensureForRole(identity, request());
+      const coordinator = await gateway.ensureForRole(identity, coordinatorRequest());
+      expect(developer.ok && coordinator.ok).toBe(true);
+      const ids = [...control.registrations.keys()];
+      const tokens = [...control.registrations.values()].map(entry => entry.bearerToken);
+
+      control.restart();
+      const verified = await gateway.verifyRegistrations(identity);
+
+      expect(verified.ok).toBe(true);
+      if (!verified.ok) return;
+      expect(verified.value.healthy).toBe(false);
+      expect(verified.value.uncertain).toBe(false);
+      expect(verified.value.lost).toHaveLength(2);
+      expect(verified.value.lost).toContainEqual({ registrationId: ids[0], role: "developer", taskId: "task-1" });
+      expect(verified.value.lost).toContainEqual({ registrationId: ids[1], role: "coordinator" });
+
+      const ledger = await readLedger();
+      const entries = JSON.parse(ledger).entries;
+      expect(entries[ids[0] ?? ""].state).toBe("lost");
+      expect(entries[ids[1] ?? ""].state).toBe("lost");
+      for (const token of tokens) {
+        expect(ledger).not.toContain(token);
+        expect(JSON.stringify(verified)).not.toContain(token);
+      }
+
+      // Re-reading the persisted `lost` state (backward-compatible parse) keeps reporting it.
+      const reread = await manager().verifyRegistrations(identity);
+      expect(reread.ok && reread.value.lost).toHaveLength(2);
+      expect(reread.ok && reread.value.healthy).toBe(false);
+    });
+
+    it("keeps healthy registrations cached and marks only the missing one lost", async () => {
+      const gateway = manager();
+      const developer = await gateway.ensureForRole(identity, request());
+      const coordinator = await gateway.ensureForRole(identity, coordinatorRequest());
+      if (!developer.ok || !coordinator.ok) throw new Error("setup failed");
+      const [developerId, coordinatorId] = [...control.registrations.keys()];
+      control.registrations.delete(developerId ?? "");
+
+      const verified = await gateway.verifyRegistrations(identity);
+
+      expect(verified).toEqual({
+        ok: true,
+        value: {
+          checkedAt: now.toISOString(),
+          healthy: false,
+          lost: [{ registrationId: developerId, role: "developer", taskId: "task-1" }],
+          uncertain: false
+        }
+      });
+      const entries = JSON.parse(await readLedger()).entries;
+      expect(entries[developerId ?? ""].state).toBe("lost");
+      expect(entries[coordinatorId ?? ""].state).toBe("registered");
+
+      const cached = await gateway.ensureForRole(identity, coordinatorRequest());
+      expect(cached).toEqual(coordinator);
+      expect(control.registerCalls).toBe(2);
+    });
+
+    it("leaves the ledger unchanged and reports uncertain when the Gateway listing fails", async () => {
+      const gateway = manager();
+      const first = await gateway.ensureForRole(identity, request());
+      if (!first.ok) throw new Error("setup failed");
+      const id = [...control.registrations.keys()][0] ?? "";
+      control.failNextList = { code: "timeout", retryable: true, retrySafety: "observation_only", message: "list timed out" };
+
+      const verified = await gateway.verifyRegistrations(identity);
+
+      expect(verified).toEqual({ ok: true, value: { checkedAt: now.toISOString(), healthy: false, lost: [], uncertain: true } });
+      expect(JSON.parse(await readLedger()).entries[id].state).toBe("registered");
+      expect(await gateway.ensureForRole(identity, request())).toEqual(first);
+      expect(control.registerCalls).toBe(1);
+    });
+
+    it("counts an expired registration as lost even while the Gateway still lists it", async () => {
+      const gateway = manager();
+      expect((await gateway.ensureForRole(identity, request())).ok).toBe(true);
+      const id = [...control.registrations.keys()][0] ?? "";
+      now = new Date(now.getTime() + 3_600_000 + 1_000);
+
+      const verified = await gateway.verifyRegistrations(identity);
+
+      expect(verified.ok && verified.value.lost).toEqual([{ registrationId: id, role: "developer", taskId: "task-1" }]);
+      expect(JSON.parse(await readLedger()).entries[id].state).toBe("lost");
+    });
+
+    it("registers a lost entry again on the next launch with a new token, without revoking it", async () => {
+      const gateway = manager();
+      const first = await gateway.ensureForRole(identity, request());
+      if (!first.ok) throw new Error("setup failed");
+      const id = first.value.registrations[0]?.registrationId ?? "";
+      const oldToken = first.value.tokenEnvironment[Object.keys(first.value.tokenEnvironment)[0] ?? ""];
+      control.restart();
+      expect((await gateway.verifyRegistrations(identity)).ok).toBe(true);
+
+      const relaunched = await gateway.ensureForRole(identity, request());
+
+      expect(relaunched.ok).toBe(true);
+      if (!relaunched.ok) return;
+      const newToken = relaunched.value.tokenEnvironment[Object.keys(relaunched.value.tokenEnvironment)[0] ?? ""];
+      expect(newToken).toBeDefined();
+      expect(newToken).not.toBe(oldToken);
+      expect(control.registerCalls).toBe(2);
+      expect(control.revokeCalls).toEqual([]);
+      expect(JSON.parse(await readLedger()).entries[id].state).toBe("registered");
+      expect(await gateway.verifyRegistrations(identity)).toEqual({
+        ok: true, value: { checkedAt: now.toISOString(), healthy: true, lost: [], uncertain: false }
+      });
+    });
   });
 });

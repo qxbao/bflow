@@ -11,8 +11,8 @@ import type {
 } from "@bflow/contracts";
 import { fail, failWith, ok } from "./errors.js";
 import type {
-  GatewayControlPort, GatewayRegistrationGrant, GatewayRegistrationPort, GatewayRoleRequest, PlatformSessionIdentity,
-  RoleGatewayAccess
+  GatewayControlPort, GatewayRegistrationGrant, GatewayRegistrationPort, GatewayRegistrationVerification,
+  GatewayRoleRequest, LostGatewayRegistration, PlatformSessionIdentity, RoleGatewayAccess
 } from "./ports.js";
 
 const LEDGER_FILE = "gateway-registrations.json";
@@ -22,8 +22,12 @@ const SECRET_NAMESPACE = "secret://bflow";
 const TOKEN_ENV_PREFIX = "BFLOW_MCP_TOKEN_";
 const MAX_ENV_NAME_LENGTH = 64;
 
-type LedgerState = "intent" | "registered" | "unknown" | "revoked";
-const LEDGER_STATES: readonly LedgerState[] = ["intent", "registered", "unknown", "revoked"];
+/**
+ * `lost`: a `registered` entry the Gateway no longer serves (restart, or expiry). Added without a schema bump:
+ * older files never contain it, and it is only written by `verifyRegistrations`.
+ */
+type LedgerState = "intent" | "registered" | "unknown" | "lost" | "revoked";
+const LEDGER_STATES: readonly LedgerState[] = ["intent", "registered", "unknown", "lost", "revoked"];
 
 /** Durable, token-free record of one Gateway registration attempt. */
 interface LedgerEntry {
@@ -141,6 +145,53 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
     }));
   }
 
+  /**
+   * Compares this generation's `registered` (and `lost`) entries with the Gateway listing for the session scope.
+   * A registration that is not listed, differs in registrationId/scope/serviceIds/allowedTools/expiresAt, or has
+   * expired is marked `lost` and its in-memory token dropped. A failed `list` changes nothing and reports `uncertain`.
+   * A lost registration's running provider process still holds the old token: only a new launch receives a new one.
+   */
+  async verifyRegistrations(identity: PlatformSessionIdentity, options?: OperationOptions):
+    Promise<OperationResult<GatewayRegistrationVerification>> {
+    return this.serialize(() => this.guard<GatewayRegistrationVerification>(async () => {
+      const scope = sessionScope(identity);
+      const now = this.now();
+      const checkedAt = now.toISOString();
+      const path = ledgerPath(identity);
+      const entries = (await readLedger(path)).entries;
+      const tracked = Object.values(entries).filter(entry => entry.state === "registered" || entry.state === "lost");
+      if (tracked.length === 0) return ok({ checkedAt, healthy: true, lost: [], uncertain: false });
+
+      const listed = await this.control.list(scope, options);
+      if (!listed.ok) {
+        // Any failure to ask leaves the Gateway state unknown: keep the ledger as it is and report it.
+        const lost = Object.values(entries).filter(entry => entry.state === "lost").map(lostReference);
+        return ok({ checkedAt, healthy: false, lost, uncertain: true });
+      }
+
+      const remoteById = new Map(listed.value.map(registration => [registration.registrationId, registration]));
+      const next: Record<string, LedgerEntry> = { ...entries };
+      const lost: LostGatewayRegistration[] = [];
+      let changed = false;
+      for (const entry of tracked) {
+        if (entry.state === "lost") {
+          lost.push(lostReference(entry));
+          continue;
+        }
+        const local = entry.registration;
+        if (local === undefined) continue;
+        const remote = remoteById.get(entry.registrationId);
+        if (remote !== undefined && sameRegistration(remote, local, now)) continue;
+        next[entry.registrationId] = { ...entry, state: "lost", updatedAt: checkedAt };
+        this.tokens.delete(entry.registrationId);
+        lost.push(lostReference(entry));
+        changed = true;
+      }
+      if (changed) await writeLedger(identity, path, next);
+      return ok({ checkedAt, healthy: lost.length === 0, lost, uncertain: false });
+    }));
+  }
+
   async revokeRole(identity: PlatformSessionIdentity, role: AgentRole, taskId?: string,
     options?: OperationOptions): Promise<OperationResult<void>> {
     return this.serialize(() => this.guard(async () => {
@@ -227,14 +278,15 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
   }
 
   /**
-   * Clears an earlier attempt before registering again. An `intent` or `unknown` attempt is listed first, because
-   * the Gateway may have accepted it even though the reply was lost. A `registered` entry reaching this point has
-   * no live in-memory token: its bearer cannot be recovered after a restart, so it is revoked outright.
+   * Clears an earlier attempt before registering again. An `intent`, `unknown` or `lost` attempt is listed first,
+   * because the Gateway may have accepted it even though the reply was lost. A `registered` entry reaching this point
+   * has no live in-memory token: its bearer cannot be recovered after a restart, so it is revoked outright.
+   * Re-registering only helps a NEW launch; a running provider process keeps the token it was started with.
    */
   private async reconcile(identity: PlatformSessionIdentity, path: string, entries: LedgerEntries, entry: LedgerEntry,
     scope: TrustScope, options?: OperationOptions): Promise<LedgerEntries> {
     if (entry.state === "revoked") return entries;
-    if (entry.state === "intent" || entry.state === "unknown") {
+    if (entry.state === "intent" || entry.state === "unknown" || entry.state === "lost") {
       const listed = await this.control.list(scope, options);
       if (!listed.ok) throw new GatewayPortError(listed.error);
       if (!listed.value.some(registration => registration.registrationId === entry.registrationId)) return entries;
@@ -327,6 +379,29 @@ function isUncertain(code: ContractError["code"]): boolean {
 
 function unique(values: readonly string[]): string[] {
   return [...new Set(values)];
+}
+
+function lostReference(entry: LedgerEntry): LostGatewayRegistration {
+  return {
+    registrationId: entry.registrationId,
+    role: entry.role,
+    ...(entry.taskId === undefined ? {} : { taskId: entry.taskId })
+  };
+}
+
+/** A listed registration still matches the ledger echo and has not expired (order-insensitive arrays). */
+function sameRegistration(remote: MCPClientRegistration, local: MCPClientRegistration, now: Date): boolean {
+  if (remote.registrationId !== local.registrationId) return false;
+  if (canonical(remote.scope) !== canonical(local.scope)) return false;
+  if (!sameSet(remote.serviceIds, local.serviceIds) || !sameSet(remote.allowedTools, local.allowedTools)) return false;
+  const remoteExpiry = Date.parse(remote.expiresAt);
+  return remoteExpiry === Date.parse(local.expiresAt) && remoteExpiry > now.getTime();
+}
+
+function sameSet(left: readonly string[], right: readonly string[]): boolean {
+  const a = [...left].sort();
+  const b = [...right].sort();
+  return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
 function withoutEntry(entries: LedgerEntries, registrationId: string): Record<string, LedgerEntry> {

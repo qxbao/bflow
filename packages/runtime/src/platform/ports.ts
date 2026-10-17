@@ -119,9 +119,28 @@ export interface GatewayRoleRequest {
   readonly configDigest: string;
 }
 
+/** A ledger registration Runtime holds but the Gateway no longer serves (or serves expired). */
+export interface LostGatewayRegistration {
+  readonly registrationId: string;
+  readonly role: AgentRole;
+  readonly taskId?: string;
+}
+
+export interface GatewayRegistrationVerification {
+  readonly checkedAt: string;
+  /** True only when nothing is lost and the Gateway answered. */
+  readonly healthy: boolean;
+  readonly lost: readonly LostGatewayRegistration[];
+  /** The Gateway could not be asked; nothing was changed. */
+  readonly uncertain: boolean;
+}
+
 export interface GatewayRegistrationPort {
   ensureForRole(identity: PlatformSessionIdentity, request: GatewayRoleRequest,
     options?: OperationOptions): Promise<OperationResult<RoleGatewayAccess>>;
+  /** Compares the ledger's current-generation registrations with the Gateway; marks missing or expired ones `lost`. */
+  verifyRegistrations(identity: PlatformSessionIdentity,
+    options?: OperationOptions): Promise<OperationResult<GatewayRegistrationVerification>>;
   revokeRole(identity: PlatformSessionIdentity, role: AgentRole, taskId?: string,
     options?: OperationOptions): Promise<OperationResult<void>>;
   revokeSession(identity: PlatformSessionIdentity, options?: OperationOptions): Promise<OperationResult<void>>;
@@ -251,8 +270,10 @@ export interface PlatformStatusSnapshot {
   readonly generation: number | null;
   readonly launches: readonly {
     readonly launchId: string; readonly role: AgentRole; readonly provider: AgentProviderId; readonly taskId?: string;
-    readonly state: "intent" | "attested" | "activated" | "failed" | "released";
+    /** `degraded`: a Gateway registration this launch relies on was lost; relaunch the role. */
+    readonly state: "intent" | "attested" | "activated" | "failed" | "released" | "degraded";
     readonly healthValidUntil?: string;
+    readonly reason?: "gateway_registration_lost";
   }[];
 }
 
@@ -267,6 +288,8 @@ export interface PlatformReadinessService {
   prepareDeveloper(identity: PlatformSessionIdentity, requirement: RolePlatformRequirement,
     options?: OperationOptions): Promise<OperationResult<PreparedRoleLaunch>>;
   releaseLaunch(launchId: string, options?: OperationOptions): Promise<OperationResult<void>>;
+  /** Verifies every seen session's Gateway registrations; lost ones degrade their launches (`assertFresh` then fails). */
+  verifyGateway(options?: OperationOptions): Promise<OperationResult<GatewayRegistrationVerification>>;
   /** Revokes this session's Gateway registrations; never stops shared/external services. */
   shutdown(options?: OperationOptions): Promise<OperationResult<void>>;
   status(): PlatformStatusSnapshot;
