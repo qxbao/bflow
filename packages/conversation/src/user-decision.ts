@@ -1,0 +1,122 @@
+import { wrapUntrustedRepositoryContent } from "./safety.js";
+
+/**
+ * Specialist user-decision support (P30 T8).
+ *
+ * A specialist role asks for a human decision through Runtime, which forwards an `approval.request`
+ * whose metadata carries `kind: "user_decision"`. This module renders that request for the user and
+ * maps the user's reply onto the existing human-approval path. It deliberately does not import
+ * from @bflow/runtime and never selects a default option.
+ */
+
+export const USER_DECISION_KIND = "user_decision";
+
+const REJECT_WORDS = ["reject", "decline", "từ chối", "không đồng ý", "không duyệt", "bác bỏ"] as const;
+
+export type UserDecisionReplyResolution =
+  | { readonly kind: "answer"; readonly selectedOption?: string; readonly reason?: string }
+  | { readonly kind: "reject"; readonly reason: string }
+  | { readonly kind: "ambiguous"; readonly message: string };
+
+/** True when the approval payload or request carries the user-decision metadata marker. */
+export function isUserDecisionRequest(request: { readonly metadata?: unknown } | Record<string, unknown>): boolean {
+  const metadata = (request as { metadata?: unknown }).metadata;
+  return typeof metadata === "object" && metadata !== null && !Array.isArray(metadata) &&
+    (metadata as Record<string, unknown>).kind === USER_DECISION_KIND;
+}
+
+function stringOf(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function optionsOf(request: { readonly metadata?: unknown }): readonly string[] | undefined {
+  const metadata = (request as { metadata?: unknown }).metadata;
+  if (typeof metadata !== "object" || metadata === null) return undefined;
+  const options = (metadata as Record<string, unknown>).options;
+  if (!Array.isArray(options)) return undefined;
+  const strings = options.filter((option): option is string => typeof option === "string");
+  return strings.length > 0 ? strings : undefined;
+}
+
+function normalize(text: string): string {
+  return text.normalize("NFC").trim().toLowerCase().replace(/\s+/g, " ").replace(/[.!?]+$/u, "");
+}
+
+/** Matches a reject word as the whole reply or as its leading word(s), e.g. "từ chối vì chưa rõ". */
+function isRejectWord(normalized: string): boolean {
+  return REJECT_WORDS.some((word) => normalized === word || normalized.startsWith(`${word} `));
+}
+
+/**
+ * Renders a specialist user-decision request as a user-facing question. The wording is distinct
+ * from design/task approvals and names the asking role, the question, numbered options and expiry.
+ */
+export function renderUserDecisionPrompt(payload: Record<string, unknown>): string {
+  const metadata = (typeof payload.metadata === "object" && payload.metadata !== null ? payload.metadata : {}) as Record<string, unknown>;
+  const approvalId = stringOf(payload.approvalId) ?? "apr-unknown";
+  const asker = stringOf(payload.requestedBy) ?? "specialist";
+  const target = typeof payload.target === "object" && payload.target !== null ? payload.target as Record<string, unknown> : {};
+  const taskId = stringOf(target.taskId);
+  const question = stringOf(metadata.question) ?? stringOf(payload.reason) ?? "(không có nội dung câu hỏi)";
+  const context = stringOf(metadata.context);
+  const expiresAt = stringOf(payload.expiresAt);
+  const options = optionsOf({ metadata });
+
+  const lines = [
+    `🙋 **CẦN QUYẾT ĐỊNH CỦA BẠN [${approvalId}]**`,
+    `- **Tác tử yêu cầu:** ${asker}`,
+    ...(taskId ? [`- **Tác vụ:** ${taskId}`] : []),
+    `- **Câu hỏi:** ${question}`,
+    ...(context ? [`- **Ngữ cảnh:** ${wrapUntrustedRepositoryContent(context)}`] : []),
+    ...(expiresAt ? [`- **Hết hạn:** ${expiresAt}`] : []),
+    ""
+  ];
+  if (options) {
+    lines.push("Các lựa chọn:");
+    options.forEach((option, index) => lines.push(`${index + 1}. ${option}`));
+    lines.push("", "👉 Trả lời bằng số (ví dụ `1`) hoặc đúng nội dung lựa chọn. Bạn cũng có thể trả lời `từ chối <lý do>`.");
+  } else {
+    lines.push("👉 Trả lời trực tiếp bằng nội dung quyết định của bạn, hoặc `từ chối <lý do>`.");
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Maps a free-text reply onto the pending user decision. Unknown or ambiguous replies return
+ * `ambiguous` with a re-ask message; no default option is ever chosen.
+ */
+export function resolveUserDecisionReply(
+  request: { readonly metadata?: unknown },
+  content: string
+): UserDecisionReplyResolution {
+  const trimmed = content.trim();
+  const normalized = normalize(trimmed);
+  const options = optionsOf(request);
+
+  if (!options) {
+    if (normalized.length === 0) return ambiguousReply(options);
+    if (isRejectWord(normalized)) return { kind: "reject", reason: trimmed };
+    return { kind: "answer", reason: trimmed };
+  }
+
+  const numbered = /^(?:(?:chọn|lựa chọn|option|choose)\s*)?(\d{1,2})\s*[.)]?$/u.exec(normalized);
+  if (numbered) {
+    const index = Number(numbered[1]);
+    const selected = index >= 1 && index <= options.length ? options[index - 1] : undefined;
+    return selected !== undefined ? { kind: "answer", selectedOption: selected, reason: trimmed } : ambiguousReply(options);
+  }
+
+  const matches = options.filter((option) => normalize(option) === normalized);
+  if (matches.length === 1) return { kind: "answer", selectedOption: matches[0]!, reason: trimmed };
+  if (isRejectWord(normalized)) return { kind: "reject", reason: trimmed };
+  return ambiguousReply(options);
+}
+
+function ambiguousReply(options: readonly string[] | undefined): UserDecisionReplyResolution {
+  const choices = options ? `\n${options.map((option, index) => `${index + 1}. ${option}`).join("\n")}` : "";
+  return {
+    kind: "ambiguous",
+    message: `Tôi chưa xác định được lựa chọn của bạn. Vui lòng trả lời bằng số hoặc đúng nội dung một lựa chọn.${choices}`
+  };
+}
+

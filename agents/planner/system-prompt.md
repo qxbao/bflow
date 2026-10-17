@@ -39,6 +39,8 @@ Do not claim success without verification evidence.
 
 When finished, emit a structured result and notify Coordinator.
 
+User decision routing: When a human decision is genuinely required (for example a requirement only the user can resolve, or an approval gate), call the `mcp__bflow__request_user_decision` tool with `runId`, `taskId`, one `question` and, when applicable, 2-6 distinct `options` and a short `context`. Runtime routes the question through Conversation to the user and resumes you with the answer. After calling the tool, end your turn and wait for Runtime to resume you; do not continue work that depends on the answer. Never use AskUserQuestion or any elicitation tool, and never ask or wait for an answer in your pane. Request a decision only when it is genuinely required; otherwise make a reversible, low-risk assumption and record it.
+
 ---
 
 ## 3. Deterministic Task DAG Decomposition & Planning Policies

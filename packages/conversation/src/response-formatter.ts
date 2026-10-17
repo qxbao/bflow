@@ -1,4 +1,5 @@
 import { ConversationMessageSchema } from "@bflow/contracts";
+import { isUserDecisionRequest, renderUserDecisionPrompt } from "./user-decision.js";
 
 import type {
   ConversationContextSnapshot,
@@ -170,8 +171,12 @@ export function formatCoordinatorMessageForUser(params: {
   let messageIntent: ConversationMessage["intent"] = "progress_update";
   let formattedContent = "";
 
-  // 1. Approval request
-  if (type === "approval.request") {
+  // 1. Approval request (specialist user decisions are rendered as questions)
+  if (type === "approval.request" && isUserDecisionRequest(p)) {
+    messageIntent = "approval_prompt";
+    formattedContent = renderUserDecisionPrompt(p);
+  }
+  else if (type === "approval.request") {
     messageIntent = "approval_prompt";
     const approvalId = safeString(p.approvalId) ?? "apr-unknown";
     const reason = safeString(p.reason) ?? "Yêu cầu phê duyệt từ hệ thống";
