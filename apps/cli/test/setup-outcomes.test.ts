@@ -30,7 +30,7 @@ describe("setup result reporting", () => {
     const output = await executeSetupCommand({ command: "setup", mode: "apply", yes: true, json: false, help: false }, ctx);
     expect(output).toHaveProperty("receipts", receipts);
     const formatted = formatCommandSuccess("setup", { ...output, plan: { ...plan, steps: receipts.map(r => ({ stepId: r.stepId, componentId: r.stepId.split(":")[1], action: r.stepId.split(":")[0], requiresApproval: true })) } } as any, false);
-    expect(formatted).toContain("[applied] Install agent skills");
+    expect(formatted).toContain("[1] Install agent skills [applied]");
     expect(formatted).not.toContain("[requires approval]");
   });
 

@@ -102,13 +102,13 @@ describe("Presentation & Formatting Engine", () => {
       expect(isStderrInteractive({ isTTY: true, env: { TERM: "dumb" } })).toBe(false);
     });
 
-    it("formats progress step with [..] marker and respects color", () => {
+    it("formats numbered progress steps and respects color", () => {
       const plain = formatProgressStep("Starting service", false);
-      expect(plain).toBe("[..] Starting service");
+      expect(plain).toBe("[1] Starting service");
 
-      const colored = formatProgressStep("Starting service", true);
+      const colored = formatProgressStep("Starting service", true, 3);
       expect(colored).toContain("\x1b[36m");
-      expect(stripAnsi(colored)).toBe("[..] Starting service");
+      expect(stripAnsi(colored)).toBe("[3] Starting service");
     });
   });
 
