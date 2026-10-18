@@ -93,6 +93,19 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     this.runner = options?.runner ?? createProviderProcessRunner();
   }
 
+  private effortConfigurationError(provider: AgentEnvironment["provider"]): string | undefined {
+    if (this.options.effort === undefined) return undefined;
+    const supported: Readonly<Record<AgentEnvironment["provider"], readonly string[]>> = {
+      claude: ["low", "medium", "high", "xhigh", "max"],
+      codex: ["minimal", "low", "medium", "high", "xhigh"],
+      agy: []
+    };
+    if (supported[provider].includes(this.options.effort)) return undefined;
+    return provider === "agy"
+      ? "Agy effort must be encoded in the configured model name"
+      : `Effort '${this.options.effort}' is not supported by ${provider}`;
+  }
+
   protected getExecutablePath(): string {
     return this.options.executablePath ?? this.descriptor.executableName;
   }
@@ -261,17 +274,10 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     let hasFailed = false;
 
     if (this.options.effort !== undefined) {
-      const allowedEfforts: Readonly<Record<AgentEnvironment["provider"], readonly string[]>> = {
-        claude: ["low", "medium", "high", "xhigh", "max"],
-        codex: ["minimal", "low", "medium", "high", "xhigh"],
-        agy: []
-      };
-      if (!allowedEfforts[environment.provider].includes(this.options.effort)) {
+      const effortError = this.effortConfigurationError(environment.provider);
+      if (effortError !== undefined) {
         const checkedAt = (this.options.now?.() ?? new Date()).toISOString();
         const validUntil = new Date(Date.parse(checkedAt) + 1).toISOString();
-        const message = environment.provider === "agy"
-          ? "Agy effort must be encoded in the configured model name"
-          : `Effort '${this.options.effort}' is not supported by ${environment.provider}`;
         return {
           ok: true,
           value: AgentHealthResultSchema.parse({
@@ -284,7 +290,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
             status: "unsupported",
             checkedAt,
             validUntil,
-            checks: [createHealthCheck("launch_arguments", "failed", "unsupported_effort", message,
+            checks: [createHealthCheck("launch_arguments", "failed", "unsupported_effort", effortError,
               "Select an effort level supported by the configured provider, or encode Agy effort in its model name.")]
           })
         };
@@ -1224,6 +1230,14 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
           retryable: false,
           message: `AgentEnvironment validation failed: ${parsedEnv.error.message}`
         }
+      };
+    }
+
+    const effortError = this.effortConfigurationError(environment.provider);
+    if (effortError !== undefined) {
+      return {
+        ok: false,
+        error: { code: "validation", retryable: false, message: effortError }
       };
     }
 

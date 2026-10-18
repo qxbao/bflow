@@ -355,6 +355,20 @@ describe("@bflow/agent-providers", () => {
       expect(calls).toEqual([]);
     });
 
+    it("rejects Agy effort on direct prepareLaunch before commands or launch material are created", async () => {
+      const calls: string[][] = [];
+      const runner = createFakeProviderRunner({ customHandler: invocation => {
+        calls.push([...invocation.args]);
+        return undefined;
+      } });
+      const adapter = new AgyProviderAdapter({ runner, executablePath: fakeBinaryPath, allowTestFilesystemOwnership: true,
+        effort: "high" });
+      const result = await adapter.prepareLaunch(createTestEnvironment("agy", "workspace_auto"));
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.message).toContain("encoded in the configured model name");
+      expect(calls).toEqual([]);
+    });
+
     it("Conversation role uses conversation interaction and empty tools", async () => {
       const runner = createFakeProviderRunner({ scenario: "healthy" });
       const adapter = new ClaudeProviderAdapter({
