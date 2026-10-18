@@ -26,6 +26,7 @@ import type {
   GatewayAuditEntry,
   GatewayMetricsSnapshot,
   MCPUpstreamToolCallInput,
+  MCPUpstreamToolDefinition,
   RecordedCallLedgerEntry
 } from "./types.js";
 import { err, ok } from "./types.js";
@@ -40,6 +41,7 @@ import {
 import { GatewayMetricsCollector } from "./metrics.js";
 import { MCPServiceRegistry } from "./registry.js";
 import { DefaultMCPServiceManager } from "./service-manager.js";
+import { fallbackToolDefinition } from "./tool-definitions.js";
 
 interface ResourceState {
   currentFence: number;
@@ -324,7 +326,11 @@ export class BflowSharedMCPGateway {
     registrationId: string,
     _sessionId?: string,
     options?: OperationOptions
-  ): Promise<OperationResult<readonly { serviceId: string; tool: string }[]>> {
+  ): Promise<
+    OperationResult<
+      readonly { serviceId: string; tool: string; definition: MCPUpstreamToolDefinition }[]
+    >
+  > {
     const reg = this.registrations.get(registrationId);
     if (!reg) {
       return err({ code: "not_found", retryable: false, message: "Registration not found" });
@@ -333,10 +339,13 @@ export class BflowSharedMCPGateway {
       return err({ code: "validation", retryable: false, message: "Registration has expired" });
     }
 
-    const results: { serviceId: string; tool: string }[] = [];
+    const results: { serviceId: string; tool: string; definition: MCPUpstreamToolDefinition }[] = [];
     for (const serviceId of reg.serviceIds) {
       const entry = this.registry.getService(serviceId);
       if (!entry) continue;
+
+      const partRes = computePartitionKey(entry.definition, entry.policy, reg.scope);
+      if (!partRes.ok) continue;
 
       const ensureRes = await this.serviceManager.ensure(
         entry.definition,
@@ -349,10 +358,23 @@ export class BflowSharedMCPGateway {
       );
       if (!ensureRes.ok) continue;
 
+      const state = this.serviceManager.getPartitionState(partRes.value);
+      const known = new Map((state?.toolDefinitions ?? []).map(definition => [definition.name, definition]));
+      const defaulted = new Set(state?.defaultedInputSchemaTools ?? []);
       for (const tool of ensureRes.value.discoveredTools) {
-        if (reg.allowedTools.includes(tool)) {
-          results.push({ serviceId, tool });
+        if (!reg.allowedTools.includes(tool)) continue;
+        if (defaulted.has(tool)) {
+          this.recordAudit({
+            action: "service.ensure",
+            registrationId,
+            serviceId,
+            scope: reg.scope,
+            status: "succeeded",
+            diagnosticCode: "tool_input_schema_defaulted",
+            message: `Upstream tool '${tool}' omitted inputSchema; advertised as {"type":"object"}`
+          });
         }
+        results.push({ serviceId, tool, definition: known.get(tool) ?? fallbackToolDefinition(tool) });
       }
     }
 

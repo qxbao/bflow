@@ -20,6 +20,8 @@ import type {
   MCPUpstreamReconcileResult,
   MCPUpstreamToolCallInput,
   MCPUpstreamToolCallOutput,
+  MCPUpstreamToolDefinition,
+  MCPUpstreamToolList,
   RegisteredMCPServiceEntry
 } from "./types.js";
 import { DEFAULT_MCP_PROTOCOL_VERSION, err, ok } from "./types.js";
@@ -32,6 +34,7 @@ import {
 import { GatewayMetricsCollector } from "./metrics.js";
 import { MCPServiceRegistry } from "./registry.js";
 import { SubprocessStdioDriverFactory } from "./stdio-bridge.js";
+import { normalizeUpstreamToolList } from "./tool-definitions.js";
 
 /**
  * Driver instance connecting to an external HTTP MCP worker or native remote server.
@@ -155,20 +158,16 @@ export class HttpUpstreamDriverInstance implements MCPUpstreamDriverInstance {
       const protocolVersion = initRes.result?.protocolVersion ?? DEFAULT_MCP_PROTOCOL_VERSION;
       const serverInfo = initRes.result?.serverInfo;
 
-      const listPayload = {
-        jsonrpc: "2.0",
-        id: 2,
-        method: "tools/list",
-        params: {}
-      };
-      const listRes = await this.postJsonRpc(listPayload, timeoutMs, options?.signal);
-      const tools = Array.isArray(listRes.result?.tools)
-        ? listRes.result.tools.map((t: any) => (typeof t === "string" ? t : t.name))
-        : [];
+      const listRes = await this.listToolDefinitions("init", { timeoutMs, ...(options?.signal ? { signal: options.signal } : {}) });
+      if (!listRes.ok) {
+        return err(listRes.error);
+      }
 
       return ok({
         protocolVersion,
-        discoveredTools: tools,
+        discoveredTools: listRes.value.definitions.map(definition => definition.name),
+        toolDefinitions: listRes.value.definitions,
+        defaultedInputSchemaTools: listRes.value.defaultedInputSchemaTools,
         serverInfo
       });
     } catch (e) {
@@ -180,7 +179,18 @@ export class HttpUpstreamDriverInstance implements MCPUpstreamDriverInstance {
     }
   }
 
-  async listTools(_sessionId: string, options?: OperationOptions): Promise<OperationResult<readonly string[]>> {
+  async listTools(sessionId: string, options?: OperationOptions): Promise<OperationResult<readonly string[]>> {
+    const listRes = await this.listToolDefinitions(sessionId, options);
+    if (!listRes.ok) {
+      return err(listRes.error);
+    }
+    return ok(listRes.value.definitions.map(definition => definition.name));
+  }
+
+  async listToolDefinitions(
+    _sessionId: string,
+    options?: OperationOptions
+  ): Promise<OperationResult<MCPUpstreamToolList>> {
     const timeoutMs = options?.timeoutMs ?? this.entry.definition.healthTimeoutMs;
     try {
       const payload = {
@@ -190,10 +200,14 @@ export class HttpUpstreamDriverInstance implements MCPUpstreamDriverInstance {
         params: {}
       };
       const res = await this.postJsonRpc(payload, timeoutMs, options?.signal);
-      const tools = Array.isArray(res.result?.tools)
-        ? res.result.tools.map((t: any) => (typeof t === "string" ? t : t.name))
-        : [];
-      return ok(tools);
+      if (res?.error) {
+        return err({
+          code: "validation",
+          retryable: false,
+          message: `Upstream tools/list failed: ${String(res.error.message ?? "error")}`
+        });
+      }
+      return normalizeUpstreamToolList(res?.result);
     } catch (e) {
       return err({
         code: "transport_unavailable",
@@ -294,6 +308,8 @@ export interface ManagedPartitionState {
   status: "ready" | "starting" | "blocked" | "stopped" | "unknown";
   protocolVersion?: string | undefined;
   discoveredTools: string[];
+  toolDefinitions?: readonly MCPUpstreamToolDefinition[] | undefined;
+  defaultedInputSchemaTools?: readonly string[] | undefined;
   attachedScopes: Set<string>;
   activeClients: Set<string>;
   restartCount: number;
@@ -655,6 +671,8 @@ export class DefaultMCPServiceManager implements ExtendedMCPServiceManager {
         capturedState.instanceId = driver.instanceId;
         capturedState.protocolVersion = protocolVersion;
         capturedState.discoveredTools = [...discoveredTools];
+        capturedState.toolDefinitions = initRes.value.toolDefinitions;
+        capturedState.defaultedInputSchemaTools = initRes.value.defaultedInputSchemaTools;
         capturedState.diagnosticCode = "ready";
 
         driver.onCrash(reason => {
@@ -992,6 +1010,8 @@ export class DefaultMCPServiceManager implements ExtendedMCPServiceManager {
     state.instanceId = driver.instanceId;
     state.protocolVersion = protocolVersion;
     state.discoveredTools = [...discoveredTools];
+    state.toolDefinitions = initRes.value.toolDefinitions;
+    state.defaultedInputSchemaTools = initRes.value.defaultedInputSchemaTools;
     state.diagnosticCode = "ready";
 
     const capturedEntry = entry;
