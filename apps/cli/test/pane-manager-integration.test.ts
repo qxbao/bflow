@@ -229,6 +229,25 @@ describe("P30 platform readiness in up", () => {
     expect(kinds).toEqual(["agy", "agy", "agy", "agy", "agy", "claude", "codex"]);
   });
 
+  linuxIt("keeps a configured Developer model as a dynamic template without creating a permanent pane", async () => {
+    const input = withProviders(role => role === "coordinator" ? "codex" : "claude");
+    const developer = { role: "developer", cli: "codex", required: false, model: "developer-codex", effort: "high" };
+    input.config.environment.roles.push(developer as never);
+    serverRunning(input);
+    const permanentLaunches = await roleLaunchesFor(input);
+    delete permanentLaunches["developer"];
+    const host = hostWith(permanentLaunches);
+    const result = await openPaneManagerEnvironment(input, runner, async composition => {
+      expect(composition.config.environment.roles.find(role => role.role === "developer")).toMatchObject(developer);
+      return host;
+    }).manager.up(input.repository.sessionName);
+    expect(result.ok ? "ok" : result.error.message).toBe("ok");
+    expect(starts()).toHaveLength(7);
+    const manifest = result.ok ? result.value : undefined;
+    expect(manifest?.panes).toHaveLength(7);
+    expect(manifest?.panes.some(pane => pane.role === "developer")).toBe(false);
+  });
+
   linuxIt("uses the legacy provider arguments when the host prepares no launch profile", async () => {
     const input = withProviders(() => "codex");
     serverRunning(input);
