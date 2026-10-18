@@ -26,8 +26,8 @@ import { HostDevelopment } from "./host-development.js";
 import { redactString } from "../resilience/redaction.js";
 import { createHostPlatformSession, launchMaterial, type HostAgentObservation, type HostPlatformSession } from "./host-platform.js";
 import {
-  assertRoleToolReachability, launchReceiptName, probeAllGateways, ProviderStartedPayloadSchema, publishGatewayProbes,
-  readGatewayProbeFile, removeGatewayProbes, reportedReachabilityOf, summarizeToolReachability,
+  assertRoleToolReachability, LAUNCH_REACHABILITY_DIRECTORY, launchReceiptName, probeAllGateways, ProviderStartedPayloadSchema,
+  removeLegacyRoleProbes, reportedReachabilityOf, resolveProbePlan, summarizeToolReachability, writeLaunchReachability,
   type ReachabilityExpectation, type RoleToolReachability
 } from "./tool-reachability.js";
 
@@ -277,7 +277,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       ...(configuration.manifestDirectory ? { manifestDirectory: configuration.manifestDirectory } : {}),
       ...(platformSession ? { developerLaunches: {
         allocate: request => platformSession.allocateDeveloper(request.taskId, request.worktreePath),
-        release: taskId => platformSession.releaseDeveloper(taskId)
+        release: taskId => platformSession.releaseDeveloper(taskId),
+        reachability: (launchId, paneId) => platformSession.developerReachability(launchId, paneId)
       } } : {}), maxDeveloperCapacity: configuration.policy?.concurrency.maxConcurrency ?? configuration.maxDeveloperCapacity ?? 2,
       nativeIngressSocket: nativeSocket, bindingReceiptKeys: { [issuerId]: publicKey }, roleLaunch: launch,
       roleCapabilities: capabilities, taskChecks: [...DEFAULT_HOST_CHECKS, ...verification.behavioralChecks()],
@@ -448,6 +449,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         await mkdir(directory, { recursive: true, mode: 0o700 });
         await privateFile(join(directory, digest([role, paneId]) + ".json"), JSON.stringify({ role, paneId, nativeSessionId,
           ...(receipt.launchId === undefined ? {} : { launchId: receipt.launchId, toolReachability: receipt.toolReachability }) }));
+        // Keyed by launch, not role: concurrent Developers share a role and must never overwrite each other's reachability.
+        if (receipt.launchId !== undefined && receipt.toolReachability !== undefined) {
+          await writeLaunchReachability(join(configuration.directory, LAUNCH_REACHABILITY_DIRECTORY), receipt.launchId, paneId, receipt.toolReachability);
+        }
         return { recorded: true };
       }
       if (method === "role_call") return roleCall(role, params);
@@ -489,12 +494,12 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     switch (method) {
       case "ping": return { active: !!workspace, quiesced, schedulerError: schedulerError ?? null };
       case "prepare": {
-        // H1: stale probe plans never survive a new generation; roles without registrations get none.
-        await removeGatewayProbes(configuration.directory, roles);
+        // H1: legacy per-role plans never survive a new generation; launch-keyed plans are published by the session.
+        await removeLegacyRoleProbes(configuration.directory, roles);
         toolExpectations.clear();
         if (!platformSession) return { roleLaunch: launch };
         const prepared = await platformSession.prepare();
-        for (const [role, expectation] of await publishGatewayProbes(configuration.directory, roles, prepared.launches)) toolExpectations.set(role, expectation);
+        for (const [role, expectation] of prepared.reachability) toolExpectations.set(role, expectation);
         const roleLaunch = Object.fromEntries(Object.entries(launch).map(([role, descriptor]) => {
           const ready = prepared.launches.get(role as AgentRole);
           return [role, ready ? { ...descriptor, launch: launchMaterial(ready) } : descriptor];
@@ -511,6 +516,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           const receipt = pane === undefined ? undefined : await readLaunchReceipt(role, pane.paneId);
           toolReachability.push(summarizeToolReachability(role, expectation, receipt === undefined ? undefined : reportedReachabilityOf(receipt)));
         }
+        // Dynamic Developers: one entry per active launch with Gateway registrations, keyed by its launchId.
+        toolReachability.push(...await platformSession.developerToolReachability());
         return { ...status, toolReachability };
       }
       case "activate": return activate(params);
@@ -688,8 +695,9 @@ export async function runProviderHook(configuration: RoleConfiguration, event: s
         try { record(JSON.parse(response.split("\n")[0]!)).error ? reject(new Error("Herdr rejected native provider session")) : accept(); } catch (error) { reject(error); } });
     });
     // H1: the probe runs here, inside the provider process, so it sees the launch environment Herdr passed to the provider.
+    // The plan is selected by this launch's BFLOW_LAUNCH_ID (fails closed on a malformed id); the legacy role file is a fallback only.
     const plan = event === "SessionStart" && roleConfigPath !== undefined
-      ? await readGatewayProbeFile(join(dirname(roleConfigPath), configuration.role + ".gateway.json")) : undefined;
+      ? await resolveProbePlan(dirname(roleConfigPath), configuration.role, process.env) : undefined;
     const reachability = plan === undefined ? undefined : await probeAllGateways(plan, process.env, (url, init) => fetch(url, init));
     if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "provider_started", { paneId, nativeSessionId: session,
       ...(plan === undefined || reachability === undefined ? {} : { launchId: plan.launchId, toolReachability: reachability }) });

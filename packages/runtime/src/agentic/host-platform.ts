@@ -13,7 +13,11 @@ import {
   type GatewayControlPort, type HostLaunchExtras, type PlatformPreflightReport, type PlatformReadinessService,
   type PlatformSessionIdentity, type PlatformStatusSnapshot, type PreparedRoleLaunch, type RolePlatformRequirement
 } from "../platform/index.js";
-import { RoleToolReachabilitySchema } from "./tool-reachability.js";
+import {
+  BFLOW_LAUNCH_ID_ENV, evaluateToolReachability, GATEWAY_PROBE_DIRECTORY, LAUNCH_REACHABILITY_DIRECTORY, publishLaunchProbe,
+  readLaunchReachability, removeLaunchProbe, removeLaunchReachability, RoleToolReachabilitySchema, summarizeToolReachability,
+  type ReachabilityExpectation, type ReachabilityVerdict, type RoleToolReachability
+} from "./tool-reachability.js";
 import {
   AgenticHostPlatformOptionsSchema, HostLaunchMaterialSchema, PlatformPreflightReportSchema,
   type AgenticHostPlatformOptions, type HostLaunchMaterial, type PlatformRoleOption
@@ -74,6 +78,8 @@ export type HostPlatformStatus = z.infer<typeof HostPlatformStatusSchema>;
 export interface HostPlatformLaunchResult {
   readonly report: PlatformPreflightReport;
   readonly launches: ReadonlyMap<AgentRole, PreparedRoleLaunch>;
+  /** Reachability the provider process of each permanent role must prove; only roles with Gateway registrations. */
+  readonly reachability: ReadonlyMap<AgentRole, ReachabilityExpectation>;
 }
 
 /** Structural shape of a Developer launch handed to Pane Manager (`AgentLaunchProfile`). */
@@ -129,12 +135,15 @@ export function requirementFor(
   };
 }
 
-/** Launch material for Pane Manager. The only place a bearer-bearing `env` is copied; callers must not persist it. */
+/**
+ * Launch material for Pane Manager. The only place a bearer-bearing `env` is copied; callers must not persist it.
+ * Every launch also carries its non-secret launch id, which lets the provider hook select this launch's probe plan.
+ */
 export function launchMaterial(prepared: PreparedRoleLaunch): HostLaunchMaterial {
   return HostLaunchMaterialSchema.parse({
     provider: prepared.provider,
     argv: [...prepared.launch.argv],
-    env: { ...prepared.launch.env },
+    env: { ...prepared.launch.env, [BFLOW_LAUNCH_ID_ENV]: prepared.launch.launchId },
     launchId: prepared.launch.launchId,
     launchFingerprint: prepared.launch.launchFingerprint
   });
@@ -179,6 +188,10 @@ export interface HostPlatformSessionOptions {
   readonly generationFile: string;
   /** Private launch-id index for activation. Never contains launch env, argv or tokens. */
   readonly launchesFile: string;
+  /** Directory of launch-keyed, token-free Gateway probe plans (`gateway-probes`). */
+  readonly probeDirectory: string;
+  /** Directory of launch-keyed reachability records reported by provider hooks (`launch-reachability`). */
+  readonly reachabilityDirectory: string;
   readonly hostCapabilities: Readonly<Record<string, readonly string[]>>;
   readonly gatewayDiagnostic?: string | undefined;
 }
@@ -189,10 +202,15 @@ export class HostPlatformSession {
   private report: PlatformPreflightReport | undefined;
   private readonly launches = new Map<AgentRole, { launchId: string; provider: AgentProviderId }>();
   private readonly developerLaunches = new Map<string, string>();
+  /** Active Developer launches by launch id: the reachability the launch must prove, or null without Gateway registrations. */
+  private readonly developerGates = new Map<string, ReachabilityExpectation | null>();
 
   constructor(private readonly options: HostPlatformSessionOptions) {}
 
-  /** Preflights every non-Developer role and launches the ready set only when all required roles are ready. */
+  /**
+   * Preflights every non-Developer role and launches the ready set only when all required roles are ready.
+   * Publishes the launch-keyed probe plan of every launch with Gateway registrations.
+   */
   async prepare(): Promise<HostPlatformLaunchResult> {
     await this.releasePermanentLaunches();
     const generation = await this.nextGeneration();
@@ -212,11 +230,29 @@ export class HostPlatformSession {
     if (!result.ok) throw new Error(`Platform readiness could not be prepared: ${describeFailure(result.error)}`);
     this.report = result.value.report;
     this.launches.clear();
-    for (const prepared of result.value.launches) {
-      this.launches.set(prepared.role, { launchId: prepared.launch.launchId, provider: prepared.provider });
+    const reachability = new Map<AgentRole, ReachabilityExpectation>();
+    try {
+      for (const prepared of result.value.launches) {
+        this.launches.set(prepared.role, { launchId: prepared.launch.launchId, provider: prepared.provider });
+        const expectation = await publishLaunchProbe(this.options.probeDirectory, prepared);
+        if (expectation !== undefined) reachability.set(prepared.role, expectation);
+      }
+    } catch (error) {
+      // A launch whose plan cannot be published must not stay prepared: release everything from this generation.
+      for (const prepared of result.value.launches) {
+        await this.options.service.releaseLaunch(prepared.launch.launchId).catch(() => undefined);
+        await this.removeLaunchArtifacts(prepared.launch.launchId).catch(() => undefined);
+      }
+      this.launches.clear();
+      await this.persistLaunches();
+      throw error;
     }
     await this.persistLaunches();
-    return { report: result.value.report, launches: new Map(result.value.launches.map(prepared => [prepared.role, prepared])) };
+    return {
+      report: result.value.report,
+      launches: new Map(result.value.launches.map(prepared => [prepared.role, prepared])),
+      reachability
+    };
   }
 
   /** Requires an activated, ready verdict for every required role before startup is accepted. */
@@ -255,7 +291,10 @@ export class HostPlatformSession {
     }
   }
 
-  /** Dynamic Developer launch for one task worktree. Blocked launches throw; no pane is created on failure. */
+  /**
+   * Dynamic Developer launch for one task worktree. Blocked launches throw; no pane is created on failure.
+   * Publishes the launch's own probe plan (keyed by launch id, so concurrent Developers never share a file).
+   */
   async allocateDeveloper(taskId: string, worktreePath: string): Promise<DeveloperLaunchMaterial> {
     if (this.identity === undefined) throw new Error("Platform has no prepared generation; run bflow up again");
     const template = this.options.platform.roles.find(option => option.role === "developer");
@@ -265,8 +304,44 @@ export class HostPlatformSession {
     const result = await this.options.service.prepareDeveloper(this.identity,
       requirementFor(template, this.options.hostCapabilities, worktreePath, taskId));
     if (!result.ok) throw new Error(`Developer ${taskId} launch is blocked: ${describeFailure(result.error)}`);
-    this.developerLaunches.set(taskId, result.value.launch.launchId);
+    const launchId = result.value.launch.launchId;
+    let expectation: ReachabilityExpectation | undefined;
+    try {
+      expectation = await publishLaunchProbe(this.options.probeDirectory, result.value);
+    } catch (error) {
+      // Nothing may run with a registration whose probe plan the provider cannot read. Best-effort release, then report.
+      await this.options.service.releaseLaunch(launchId).catch(() => undefined);
+      throw error;
+    }
+    this.developerLaunches.set(taskId, launchId);
+    this.developerGates.set(launchId, expectation ?? null);
     return launchMaterial(result.value);
+  }
+
+  /**
+   * Reachability verdict for one active Developer launch, bound to the pane allocated for it. Pane Manager never sees
+   * this: the Runtime-side Developer gate calls it after the pane exists.
+   */
+  async developerReachability(launchId: string, paneId: string): Promise<ReachabilityVerdict> {
+    if (!this.developerGates.has(launchId)) throw new Error(`Developer launch ${launchId} is not active`);
+    const expectation = this.developerGates.get(launchId);
+    if (expectation === null || expectation === undefined) return { state: "ready" };
+    const stored = await readLaunchReachability(this.options.reachabilityDirectory, launchId);
+    if (stored !== undefined && stored.paneId !== paneId) {
+      return { state: "pending", reason: "the published tool reachability record belongs to another pane" };
+    }
+    return evaluateToolReachability(expectation, stored?.reported);
+  }
+
+  /** Diagnostic reachability for every active Developer launch that has Gateway registrations. Carries no tokens. */
+  async developerToolReachability(): Promise<RoleToolReachability[]> {
+    const summaries: RoleToolReachability[] = [];
+    for (const [launchId, expectation] of this.developerGates) {
+      if (expectation === null) continue;
+      const stored = await readLaunchReachability(this.options.reachabilityDirectory, launchId);
+      summaries.push(summarizeToolReachability("developer", expectation, stored?.reported));
+    }
+    return summaries;
   }
 
   async releaseDeveloper(taskId: string): Promise<void> {
@@ -274,15 +349,20 @@ export class HostPlatformSession {
     if (launchId === undefined) return;
     const released = await this.options.service.releaseLaunch(launchId);
     if (!released.ok) throw new Error(`Developer ${taskId} launch release failed: ${describeFailure(released.error)}`);
+    await this.removeLaunchArtifacts(launchId);
     this.developerLaunches.delete(taskId);
+    this.developerGates.delete(launchId);
   }
 
   /** Revokes this session's Gateway registrations. Shared services are never stopped here. */
   async shutdown(): Promise<void> {
     const result = await this.options.service.shutdown();
     if (!result.ok) throw new Error(`Platform shutdown failed: ${describeFailure(result.error)}`);
+    for (const launch of this.launches.values()) await this.removeLaunchArtifacts(launch.launchId);
+    for (const launchId of this.developerLaunches.values()) await this.removeLaunchArtifacts(launchId);
     this.launches.clear();
     this.developerLaunches.clear();
+    this.developerGates.clear();
     await this.persistLaunches();
   }
 
@@ -309,8 +389,15 @@ export class HostPlatformSession {
     for (const launch of this.launches.values()) {
       const released = await this.options.service.releaseLaunch(launch.launchId);
       if (!released.ok) throw new Error(`Previous platform launch could not be released: ${describeFailure(released.error)}`);
+      await this.removeLaunchArtifacts(launch.launchId);
     }
     this.launches.clear();
+  }
+
+  /** Removes a released launch's probe plan and any reachability record. Revocation has already happened. */
+  private async removeLaunchArtifacts(launchId: string): Promise<void> {
+    await removeLaunchProbe(this.options.probeDirectory, launchId);
+    await removeLaunchReachability(this.options.reachabilityDirectory, launchId);
   }
 
   private async nextGeneration(): Promise<number> {
@@ -395,6 +482,8 @@ export async function createHostPlatformSession(options: CreateHostPlatformSessi
     stateDirectory,
     generationFile: join(options.directory, "platform-generation.json"),
     launchesFile: join(options.directory, "platform-launches.json"),
+    probeDirectory: join(options.directory, GATEWAY_PROBE_DIRECTORY),
+    reachabilityDirectory: join(options.directory, LAUNCH_REACHABILITY_DIRECTORY),
     hostCapabilities: options.hostCapabilities,
     ...(gatewayDiagnostic !== undefined ? { gatewayDiagnostic } : {})
   });

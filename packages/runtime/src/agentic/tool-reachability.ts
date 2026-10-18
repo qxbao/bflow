@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmod, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { AgentRoleSchema, MCPEndpointSchema, type AgentRole, type MCPClientRegistration } from "@bflow/contracts";
@@ -10,7 +10,7 @@ import { digest } from "./journal.js";
 /**
  * In-process MCP tool reachability (H1).
  *
- * The host writes `<role>.gateway.json` (no tokens) at prepare. The provider's native SessionStart hook runs as a
+ * The host writes `gateway-probes/<launchId>.json` (no tokens) for every launch with registrations. The provider's native SessionStart hook runs as a
  * child of the launched provider, inherits its environment, probes each Gateway registration with the bearer token
  * read from `BFLOW_MCP_TOKEN_*`, and reports only env-var names, registration ids, codes and discovered tool names.
  * Bearer token values never appear in any result, error message or persisted file written by this module.
@@ -282,8 +282,31 @@ export function summarizeToolReachability(role: AgentRole, expectation: Reachabi
 
 // ------------------------------------------------------------------ host files
 
-export function gatewayProbePath(directory: string, role: AgentRole): string {
+/** Non-secret environment variable naming the launch whose probe plan the provider hook must use. */
+export const BFLOW_LAUNCH_ID_ENV = "BFLOW_LAUNCH_ID";
+/** Launch-keyed token-free probe plans: `<host dir>/gateway-probes/<launchId>.json`. */
+export const GATEWAY_PROBE_DIRECTORY = "gateway-probes";
+/** Launch-keyed reachability records reported by the provider hook: `<host dir>/launch-reachability/<digest>.json`. */
+export const LAUNCH_REACHABILITY_DIRECTORY = "launch-reachability";
+const LAUNCH_ID_PATTERN = /^[A-Za-z0-9_-]{1,200}$/;
+
+/** A launch id becomes a file name, so only identifier characters are admissible (no separators, no dots). */
+export function assertLaunchIdentifier(launchId: string): string {
+  if (!LAUNCH_ID_PATTERN.test(launchId)) throw new Error("Launch id is not a safe identifier for a Gateway probe plan");
+  return launchId;
+}
+
+export function launchProbePath(probeDirectory: string, launchId: string): string {
+  return join(probeDirectory, `${assertLaunchIdentifier(launchId)}.json`);
+}
+
+/** Legacy per-role plan written by daemons that predate launch-keyed plans. Read only as a hook fallback. */
+export function legacyRoleProbePath(directory: string, role: AgentRole): string {
   return join(directory, `${role}.gateway.json`);
+}
+
+export function launchReachabilityPath(reachabilityDirectory: string, launchId: string): string {
+  return join(reachabilityDirectory, `${digest([launchId])}.json`);
 }
 
 /** Atomic private write (0600): temp file, then rename. */
@@ -299,48 +322,51 @@ export async function writePrivateFileAtomic(path: string, content: string): Pro
   }
 }
 
-/** Removes stale probe plans so a role without registrations cannot inherit an earlier generation's probe. */
-export async function removeGatewayProbes(directory: string, roles: readonly AgentRole[]): Promise<void> {
-  await Promise.all(roles.map(role => rm(gatewayProbePath(directory, role), { force: true })));
+/** Builds the token-free probe plan and expectation for one prepared launch; undefined when it has no registrations. */
+function probePlanOf(prepared: PreparedRoleLaunch): { readonly file: GatewayProbeFile; readonly expectation: ReachabilityExpectation } | undefined {
+  const registrations: readonly MCPClientRegistration[] = prepared.gateway.registrations;
+  if (registrations.length === 0) return undefined;
+  const endpoints = new Set<string>();
+  for (const registration of registrations) {
+    if (registration.connection.transport !== "streamable_http") {
+      throw new Error(`Gateway registration for role ${prepared.role} uses an unsupported transport for in-process probing`);
+    }
+    endpoints.add(registration.connection.endpoint);
+  }
+  if (endpoints.size !== 1) throw new Error(`Gateway registrations for role ${prepared.role} disagree on the endpoint`);
+  const entries = registrations.map(registration => GatewayProbeEntrySchema.parse({
+    registrationId: registration.registrationId,
+    envName: tokenEnvironmentName(registration.registrationId),
+    allowedTools: [...registration.allowedTools]
+  }));
+  const launchId = prepared.launch.launchId;
+  const file = GatewayProbeFileSchema.parse({ schemaVersion: GATEWAY_PROBE_SCHEMA_VERSION, launchId, endpoint: [...endpoints][0], entries });
+  return { file, expectation: { launchId, entries } };
 }
 
 /**
- * Writes `<role>.gateway.json` for every prepared launch with Gateway registrations and returns the host's expectations.
+ * Publishes the plan of one launch (permanent role at prepare, or a Developer at allocation) as `<launchId>.json`.
+ * Returns the expectation the host must see satisfied; undefined when the launch has no Gateway registrations.
  * Token values are never read here: only registration ids, derived env names, allowed tool names and the endpoint.
  */
-export async function publishGatewayProbes(directory: string, roles: readonly AgentRole[],
-  launches: ReadonlyMap<AgentRole, PreparedRoleLaunch>): Promise<Map<AgentRole, ReachabilityExpectation>> {
-  const expectations = new Map<AgentRole, ReachabilityExpectation>();
-  for (const role of roles) {
-    const prepared = launches.get(role);
-    const registrations: readonly MCPClientRegistration[] = prepared?.gateway.registrations ?? [];
-    if (prepared === undefined || registrations.length === 0) {
-      await rm(gatewayProbePath(directory, role), { force: true });
-      continue;
-    }
-    const endpoints = new Set<string>();
-    for (const registration of registrations) {
-      if (registration.connection.transport !== "streamable_http") {
-        throw new Error(`Gateway registration for role ${role} uses an unsupported transport for in-process probing`);
-      }
-      endpoints.add(registration.connection.endpoint);
-    }
-    if (endpoints.size !== 1) throw new Error(`Gateway registrations for role ${role} disagree on the endpoint`);
-    const entries = registrations.map(registration => GatewayProbeEntrySchema.parse({
-      registrationId: registration.registrationId,
-      envName: tokenEnvironmentName(registration.registrationId),
-      allowedTools: [...registration.allowedTools]
-    }));
-    const launchId = prepared.launch.launchId;
-    const file = GatewayProbeFileSchema.parse({ schemaVersion: GATEWAY_PROBE_SCHEMA_VERSION, launchId,
-      endpoint: [...endpoints][0], entries });
-    await writePrivateFileAtomic(gatewayProbePath(directory, role), `${JSON.stringify(file)}\n`);
-    expectations.set(role, { launchId, entries });
-  }
-  return expectations;
+export async function publishLaunchProbe(probeDirectory: string, prepared: PreparedRoleLaunch): Promise<ReachabilityExpectation | undefined> {
+  const planned = probePlanOf(prepared);
+  if (planned === undefined) return undefined;
+  await mkdir(probeDirectory, { recursive: true, mode: 0o700 });
+  await writePrivateFileAtomic(launchProbePath(probeDirectory, planned.file.launchId), `${JSON.stringify(planned.file)}\n`);
+  return planned.expectation;
 }
 
-/** Reads a role's probe plan; undefined when the role has none. A present but invalid plan is an error. */
+export async function removeLaunchProbe(probeDirectory: string, launchId: string): Promise<void> {
+  await rm(launchProbePath(probeDirectory, launchId), { force: true });
+}
+
+/** Removes legacy per-role plans so a new generation never inherits an earlier generation's probe. */
+export async function removeLegacyRoleProbes(directory: string, roles: readonly AgentRole[]): Promise<void> {
+  await Promise.all(roles.map(role => rm(legacyRoleProbePath(directory, role), { force: true })));
+}
+
+/** Reads a probe plan file; undefined when absent. A present but invalid plan is an error. */
 export async function readGatewayProbeFile(path: string): Promise<GatewayProbeFile | undefined> {
   let text: string;
   try {
@@ -350,6 +376,54 @@ export async function readGatewayProbeFile(path: string): Promise<GatewayProbeFi
     throw error;
   }
   return GatewayProbeFileSchema.parse(JSON.parse(text));
+}
+
+/**
+ * The provider hook's plan. A launch id in the environment selects `gateway-probes/<launchId>.json` (its validated
+ * identifier and the file's own launch id must agree). Only when the id is absent does the hook fall back to the
+ * legacy `<role>.gateway.json` written by an older daemon.
+ */
+export async function resolveProbePlan(directory: string, role: AgentRole,
+  env: Readonly<Record<string, string | undefined>>): Promise<GatewayProbeFile | undefined> {
+  const launchId = env[BFLOW_LAUNCH_ID_ENV];
+  if (launchId === undefined) return readGatewayProbeFile(legacyRoleProbePath(directory, role));
+  const plan = await readGatewayProbeFile(launchProbePath(join(directory, GATEWAY_PROBE_DIRECTORY), launchId));
+  if (plan !== undefined && plan.launchId !== launchId) throw new Error("Gateway probe plan names another launch");
+  return plan;
+}
+
+/** Reachability reported by the hook for one launch, keyed by launch id and bound to the pane it ran in. */
+export const LaunchReachabilityRecordSchema = z.object({
+  launchId: z.string().min(1),
+  paneId: z.string().min(1),
+  toolReachability: z.array(ToolReachabilityRecordSchema)
+}).strict();
+export type LaunchReachabilityRecord = z.infer<typeof LaunchReachabilityRecordSchema>;
+
+export async function writeLaunchReachability(reachabilityDirectory: string, launchId: string, paneId: string,
+  toolReachability: readonly ToolReachabilityRecord[]): Promise<void> {
+  const record = LaunchReachabilityRecordSchema.parse({ launchId, paneId, toolReachability });
+  await mkdir(reachabilityDirectory, { recursive: true, mode: 0o700 });
+  await writePrivateFileAtomic(launchReachabilityPath(reachabilityDirectory, launchId), `${JSON.stringify(record)}\n`);
+}
+
+/** Reads the reachability record of one launch; undefined when none has been reported yet. */
+export async function readLaunchReachability(reachabilityDirectory: string, launchId: string):
+  Promise<{ readonly paneId: string; readonly reported: ReportedReachability } | undefined> {
+  let text: string;
+  try {
+    text = await readFile(launchReachabilityPath(reachabilityDirectory, launchId), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  const record = LaunchReachabilityRecordSchema.parse(JSON.parse(text));
+  if (record.launchId !== launchId) throw new Error("Launch reachability record names another launch");
+  return { paneId: record.paneId, reported: { launchId: record.launchId, toolReachability: record.toolReachability } };
+}
+
+export async function removeLaunchReachability(reachabilityDirectory: string, launchId: string): Promise<void> {
+  await rm(launchReachabilityPath(reachabilityDirectory, launchId), { force: true });
 }
 
 /** Probes every entry of a plan in parallel, from the calling (provider) process environment. */
