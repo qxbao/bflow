@@ -136,6 +136,16 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
     return this.options.codexHomeDirectory || process.env["CODEX_HOME"] || join(homedir(), ".codex");
   }
 
+  /** `[mcp_servers.<name>]` table names of the user's Codex config.toml (missing file = none). */
+  private async configTableNames(home: string): Promise<{ readonly names: string[]; readonly error?: string }> {
+    try {
+      return { names: parseCodexConfigMcpServerNames(await readFile(join(home, "config.toml"), "utf8")) };
+    } catch (err) {
+      if (isNotFound(err)) return { names: [] };
+      return { names: [], error: `config.toml unreadable: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+
   /**
    * Lists the global MCP servers Codex would load (`codex mcp list --json`, read-only; falls back to the
    * `[mcp_servers.<name>]` tables of config.toml when the list cannot be read).
@@ -155,7 +165,14 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
           Array.isArray(parsed) &&
           parsed.every((entry) => typeof entry === "object" && entry !== null && typeof (entry as { name?: unknown }).name === "string")
         ) {
-          return { names: [...new Set(parsed.map((entry) => (entry as { name: string }).name))] };
+          // Only servers defined as `[mcp_servers.<name>]` tables in config.toml can be disabled with a dotted
+          // override. Plugin-provided servers (e.g. Claude-Mem's `mcp-search`, installed by approved setup) have no
+          // table: `mcp_servers.<name>.enabled=false` for them aborts Codex config loading ("invalid transport"),
+          // as observed live on codex-cli 0.162.0. They are left to the plugin and not overridden here.
+          const listed = [...new Set(parsed.map((entry) => (entry as { name: string }).name))];
+          const tables = await this.configTableNames(home);
+          if (tables.error !== undefined) return { names: [], error: tables.error };
+          return { names: listed.filter((name) => tables.names.includes(name)) };
         }
         listFailure = "codex mcp list --json returned an unexpected shape";
       } else {

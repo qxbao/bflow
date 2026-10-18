@@ -1732,7 +1732,7 @@ describe("@bflow/agent-providers", () => {
     const bflowServer = { bflow: { command: "/usr/bin/true", args: ["--serve"] } };
 
     it("disables exactly the global MCP servers after the Bflow mcp_servers table and leaves Bflow servers untouched", async () => {
-      const home = await freshCodexHome();
+      const home = await freshCodexHome({ "config.toml": "[mcp_servers.gitnexus]\ncommand = \"/usr/bin/true\"\n[mcp_servers.playwright]\ncommand = \"/usr/bin/true\"\n" });
       const adapter = codexAdapter(codexRunner({ globalServers: ["gitnexus", "playwright"] }), home, {
         hostMcpServers: bflowServer
       });
@@ -1756,6 +1756,18 @@ describe("@bflow/agent-providers", () => {
       expect(argv[tableIndex]).toContain('"bflow"');
     });
 
+    it("never overrides plugin-provided MCP servers that have no config.toml table (live: invalid transport)", async () => {
+      // Live finding (codex-cli 0.162.0): Claude-Mem's Codex plugin exposes `mcp-search` without a config table;
+      // `mcp_servers.mcp-search.enabled=false` made Codex abort loading its config.
+      const home = await freshCodexHome({ "config.toml": "[mcp_servers.gitnexus]\ncommand = \"/usr/bin/true\"\n" });
+      const adapter = codexAdapter(codexRunner({ globalServers: ["gitnexus", "mcp-search"] }), home, { hostMcpServers: bflowServer });
+      const result = await adapter.prepareLaunch(createTestEnvironment("codex", "workspace_auto"));
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.argv.filter((arg) => arg.endsWith(".enabled=false"))).toEqual(["mcp_servers.gitnexus.enabled=false"]);
+      expect(result.value.argv.some((arg) => arg.includes("mcp-search"))).toBe(false);
+    });
+
     it("adds no extra arguments when the user has no global MCP servers", async () => {
       const home = await freshCodexHome();
       const adapter = codexAdapter(codexRunner({ globalServers: [] }), home, { hostMcpServers: bflowServer });
@@ -1767,7 +1779,7 @@ describe("@bflow/agent-providers", () => {
     });
 
     it("changes the launch fingerprint when the global MCP server set changes", async () => {
-      const home = await freshCodexHome();
+      const home = await freshCodexHome({ "config.toml": "[mcp_servers.gitnexus]\ncommand = \"/usr/bin/true\"\n[mcp_servers.playwright]\ncommand = \"/usr/bin/true\"\n" });
       const env = createTestEnvironment("codex", "workspace_auto");
       const first = await codexAdapter(codexRunner({ globalServers: ["gitnexus"] }), home, {
         hostMcpServers: bflowServer
@@ -1782,7 +1794,7 @@ describe("@bflow/agent-providers", () => {
     });
 
     it("passes the same isolation arguments to the readiness probe so global servers are not started there", async () => {
-      const home = await freshCodexHome();
+      const home = await freshCodexHome({ "config.toml": "[mcp_servers.gitnexus]\ncommand = \"/usr/bin/true\"\n" });
       const invocations: Array<readonly string[]> = [];
       const adapter = codexAdapter(
         codexRunner({ globalServers: ["gitnexus"], invocations }),
@@ -1802,7 +1814,7 @@ describe("@bflow/agent-providers", () => {
     });
 
     it("fails closed with codex_global_mcp_not_isolated when a global server name cannot be disabled safely", async () => {
-      const home = await freshCodexHome();
+      const home = await freshCodexHome({ "config.toml": "[mcp_servers.\"my.server\"]\ncommand = \"/usr/bin/true\"\n" });
       const adapter = codexAdapter(codexRunner({ globalServers: ["my.server"] }), home, { hostMcpServers: bflowServer });
       const env = createTestEnvironment("codex", "workspace_auto");
 
@@ -1827,7 +1839,7 @@ describe("@bflow/agent-providers", () => {
     });
 
     it("fails closed when a global server shares a name with a Bflow launch server", async () => {
-      const home = await freshCodexHome();
+      const home = await freshCodexHome({ "config.toml": "[mcp_servers.bflow]\ncommand = \"/usr/bin/true\"\n" });
       const adapter = codexAdapter(codexRunner({ globalServers: ["bflow"] }), home, { hostMcpServers: bflowServer });
       const launch = await adapter.prepareLaunch(createTestEnvironment("codex", "workspace_auto"));
       expect(launch.ok).toBe(false);
