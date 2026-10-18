@@ -128,7 +128,7 @@ function startRequest(launch?: AgentLaunchProfile, extra: Record<string, unknown
 }
 
 describe("provider launch profile on role start", () => {
-  it("starts with --kind <provider>, a -- separator, and passes env only through the invocation", async () => {
+  it("starts with --kind <provider> and a -- separator; launch env is never passed to agent start", async () => {
     const runner = new LaunchFakeRunner();
     const manager = makeManager(runner);
     const result = await manager.startAgentInPane(startRequest(makeLaunch(), { timeoutMs: 5000 }));
@@ -139,11 +139,12 @@ describe("provider launch profile on role start", () => {
       "agent", "start", "dev-launch", "--kind", "claude", "--pane", PANE_ID,
       "--timeout", "5000", "--", "--model", "sonnet-test"
     ]);
-    expect(start!.env).toMatchObject({ BFLOW_LAUNCH_TOKEN_REF: ENV_VALUE });
-    expect(start!.args.join(" ")).not.toContain(ENV_VALUE);
+    // `agent start` types into the existing shell; env given here never reaches the provider.
+    expect(start!.env).toBeUndefined();
     for (const call of runner.calls) {
-      if (call !== start) expect(call.env).toBeUndefined();
+      expect(call.env).toBeUndefined();
     }
+    expect(JSON.stringify(runner.calls)).not.toContain(ENV_VALUE);
   });
 
   it("records launchId and launchFingerprint in binding metadata without env values", async () => {

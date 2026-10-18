@@ -267,6 +267,17 @@ export interface HerdrCommandRunner {
   run(invocation: CommandInvocation): Promise<CommandOutcome>;
 }
 
+/**
+ * Herdr socket API port. Used only for pane creation that must carry launch env
+ * (`workspace.create`, `tab.create`, `pane.split` with `env`), because the CLI
+ * `agent start` invocation env never reaches the provider process. `request`
+ * resolves to the socket response `result` object; params (which may contain
+ * env values) are never echoed in errors.
+ */
+export interface HerdrSocketPort {
+  request(method: string, params: Record<string, unknown>, options?: OperationOptions): Promise<OperationResult<unknown>>;
+}
+
 export interface WorktreeCleanlinessResult {
   readonly exists: boolean;
   readonly isClean: boolean;

@@ -20,7 +20,10 @@ import type {
   HerdrAgentInfo,
   HerdrCommandRunner,
   HerdrPaneInfo,
+  HerdrSocketPort,
+  HerdrTabCreated,
   HerdrTabInfo,
+  HerdrWorkspaceCreated,
   HerdrWorkspaceInfo,
   LaunchObservation,
   PaneMoveDestinationSpec,
@@ -171,11 +174,25 @@ export interface RolePaneManagerOptions {
   readonly runner?: HerdrCommandRunner;
   readonly store?: SessionManifestStore;
   readonly worktreeInspector?: WorktreeInspector;
+  /**
+   * Herdr socket API. Required whenever a launch carries non-empty env: env is fixed at pane
+   * creation (the `agent start` invocation env never reaches the provider), so such panes are
+   * created through `workspace.create` / `tab.create` / `pane.split` with `env`.
+   */
+  readonly socket?: HerdrSocketPort;
   readonly clock?: () => Date;
   readonly defaultTimeoutMs?: number;
 }
 
 const PROMPT_FILE_MAX_BYTES = 131_072;
+
+/** Launch env that must be applied when a pane is created; undefined when the launch has none. */
+function launchEnvOf(launch: AgentLaunchProfile | undefined): Readonly<Record<string, string>> | undefined {
+  return launch !== undefined && Object.keys(launch.env).length > 0 ? launch.env : undefined;
+}
+
+/** Validation message when an env-bearing pane creation is attempted without a configured socket port. */
+const SOCKET_REQUIRED_MESSAGE = "A Herdr socket port is required to create panes with launch env";
 
 /** True only for a regular, non-symlink file no larger than the prompt limit that contains `text`. */
 async function regularFileContains(path: string, text: string, expectedJson = false): Promise<string | false> {
@@ -246,6 +263,7 @@ export class RolePaneManager {
   readonly #runner: HerdrCommandRunner;
   readonly #store: SessionManifestStore;
   readonly #worktreeInspector: WorktreeInspector;
+  readonly #socket: HerdrSocketPort | undefined;
   readonly #clock: () => Date;
   readonly #defaultTimeoutMs: number;
 
@@ -270,19 +288,107 @@ export class RolePaneManager {
     this.#runner = options.runner ?? createProcessRunner();
     this.#store = options.store ?? new InMemorySessionManifestStore();
     this.#worktreeInspector = options.worktreeInspector ?? createGitWorktreeInspector();
+    this.#socket = options.socket;
     this.#clock = options.clock ?? (() => new Date());
     this.#defaultTimeoutMs = options.defaultTimeoutMs ?? 30_000;
   }
 
-  async #runHerdr(args: readonly string[], options?: OperationOptions, env?: NodeJS.ProcessEnv): Promise<CommandOutcome> {
+  /**
+   * Runs a Herdr CLI command. Never passes launch env: `agent start` types the provider command
+   * into an existing shell, so env given to that invocation does not reach the provider.
+   */
+  async #runHerdr(args: readonly string[], options?: OperationOptions): Promise<CommandOutcome> {
     const timeoutMs = options?.timeoutMs ?? this.#defaultTimeoutMs;
     return this.#runner.run({
       args,
       cwd: this.#config.workspaceRoot,
-      ...(env !== undefined && { env }),
       ...(options?.signal && { signal: options.signal }),
       ...(timeoutMs !== undefined && { timeoutMs })
     });
+  }
+
+  /** Validation error when any launch in the list needs env-at-creation but no socket port is configured. */
+  #requireSocketFor(launches: readonly (AgentLaunchProfile | undefined)[]): OperationResult<void> {
+    if (this.#socket === undefined && launches.some(launch => launchEnvOf(launch) !== undefined)) {
+      return validationError(SOCKET_REQUIRED_MESSAGE);
+    }
+    return ok(undefined);
+  }
+
+  /** Creates a tab whose root pane is born with the launch env (CLI when the launch has none). */
+  async #createTab(
+    workspaceId: string,
+    label: string,
+    launch: AgentLaunchProfile | undefined,
+    fallbackMessage: string,
+    options?: OperationOptions
+  ): Promise<OperationResult<HerdrTabCreated>> {
+    const root = this.#config.workspaceRoot;
+    return this.#herdrCreate<HerdrTabCreated>(
+      {
+        method: "tab.create",
+        params: { workspace_id: workspaceId, cwd: root, label, focus: false },
+        args: ["tab", "create", "--workspace", workspaceId, "--cwd", root, "--label", label, "--no-focus"]
+      },
+      launchEnvOf(launch),
+      parseTabCreatedResult,
+      fallbackMessage,
+      options
+    );
+  }
+
+  /** Splits a pane; the new pane is born with the launch env (CLI when the launch has none). */
+  async #splitPane(
+    sourcePaneId: string,
+    direction: "right" | "down",
+    cwd: string,
+    launch: AgentLaunchProfile | undefined,
+    fallbackMessage: string,
+    options?: OperationOptions
+  ): Promise<OperationResult<HerdrPaneInfo>> {
+    return this.#herdrCreate<HerdrPaneInfo>(
+      {
+        method: "pane.split",
+        params: { target_pane_id: sourcePaneId, direction, cwd, focus: false },
+        args: ["pane", "split", sourcePaneId, "--direction", direction, "--cwd", cwd, "--no-focus"]
+      },
+      launchEnvOf(launch),
+      parsePaneInfoResult,
+      fallbackMessage,
+      options
+    );
+  }
+
+  /**
+   * Creates a workspace, tab or split pane. Without env the existing CLI command is used unchanged.
+   * With env the same operation runs through the Herdr socket API so the pane is born with env.
+   * Errors never include env values: CLI failures are mapped from Herdr codes, socket failures from
+   * their codes only.
+   */
+  async #herdrCreate<T>(
+    request: { readonly method: "workspace.create" | "tab.create" | "pane.split"; readonly params: Record<string, unknown>; readonly args: readonly string[] },
+    env: Readonly<Record<string, string>> | undefined,
+    parse: (outcome: CommandOutcome) => T,
+    fallbackMessage: string,
+    options?: OperationOptions
+  ): Promise<OperationResult<T>> {
+    if (env === undefined) {
+      const outcome = await this.#runHerdr(request.args, options);
+      if (outcome.exitCode !== 0 || outcome.failure) return toCommandError(outcome, fallbackMessage);
+      try {
+        return ok(parse(outcome));
+      } catch (err) {
+        return toProtocolError(err, fallbackMessage);
+      }
+    }
+    if (this.#socket === undefined) return validationError(SOCKET_REQUIRED_MESSAGE);
+    const response = await this.#socket.request(request.method, { ...request.params, env: { ...env } }, options);
+    if (!response.ok) return { ok: false, error: response.error };
+    try {
+      return ok(parse({ exitCode: 0, stdout: JSON.stringify({ result: response.value }), stderr: "" }));
+    } catch (err) {
+      return toProtocolError(err, fallbackMessage);
+    }
   }
 
   async #closePane(paneId: string, options?: OperationOptions): Promise<void> {
@@ -392,6 +498,20 @@ export class RolePaneManager {
     _isReconcile: boolean,
     options?: OperationOptions
   ): Promise<OperationResult<SessionManifest>> {
+    // Validate env-at-creation requirements before any Herdr or store side effect.
+    const configuredRoles: readonly PermanentTopologyRole[] = this.#config.permanentRoles ?? PERMANENT_TOPOLOGY_ROLES;
+    const socketCheck = this.#requireSocketFor(configuredRoles.map(role => this.#config.roleConfigs?.[role]?.launch));
+    if (!socketCheck.ok) return socketCheck;
+    // Panes created by this run with launch env, mapped to the launchId they were created for.
+    // Env-bearing roles may only occupy a pane recorded for their own launch.
+    const envPaneLaunch = new Map<string, string>();
+    // A tab's root pane is born with the env of the first env-bearing permanent role in that tab.
+    const launchForTab = (tabKey: RoleTopologySpec["tabKey"]): AgentLaunchProfile | undefined =>
+      configuredRoles
+        .filter(role => ROLE_TOPOLOGY_SPECS[role].tabKey === tabKey)
+        .map(role => this.#config.roleConfigs?.[role]?.launch)
+        .find(launch => launchEnvOf(launch) !== undefined);
+
     const loadResult = await this.#store.load(this.#config.sessionId, options);
     if (!loadResult.ok) return loadResult;
     const savedManifest = loadResult.value;
@@ -416,17 +536,26 @@ export class RolePaneManager {
     if (matchedWorkspace) {
       herdrWorkspaceId = matchedWorkspace.workspaceId;
     } else {
-      const createWsOutcome = await this.#runHerdr(
-        ["workspace", "create", "--cwd", this.#config.workspaceRoot, "--label", this.#config.projectName, "--no-focus"],
+      // The initial root pane is created with the Conversation launch env when Conversation has one.
+      const chatLaunch = this.#config.roleConfigs?.chat?.launch;
+      const chatEnv = launchEnvOf(chatLaunch);
+      const created = await this.#herdrCreate<HerdrWorkspaceCreated>(
+        {
+          method: "workspace.create",
+          params: { cwd: this.#config.workspaceRoot, label: this.#config.projectName, focus: false },
+          args: ["workspace", "create", "--cwd", this.#config.workspaceRoot, "--label", this.#config.projectName, "--no-focus"]
+        },
+        chatEnv,
+        parseWorkspaceCreatedResult,
+        `Failed to create workspace '${this.#config.projectName}'`,
         options
       );
-      if (createWsOutcome.exitCode !== 0 || createWsOutcome.failure) {
-        return toCommandError(createWsOutcome, `Failed to create workspace '${this.#config.projectName}'`);
-      }
-      const wsCreated = parseWorkspaceCreatedResult(createWsOutcome);
+      if (!created.ok) return created;
+      const wsCreated = created.value;
       herdrWorkspaceId = wsCreated.workspace.workspaceId;
       initialConversationTabId = wsCreated.tab.tabId;
       initialConversationRootPaneId = wsCreated.rootPane.paneId;
+      if (chatLaunch !== undefined && chatEnv !== undefined) envPaneLaunch.set(wsCreated.rootPane.paneId, chatLaunch.launchId);
     }
 
     // Step 2: Tabs & Panes for Permanent Roles
@@ -472,17 +601,13 @@ export class RolePaneManager {
       }
     }
     if (!convTab) {
-      const createConvOutcome = await this.#runHerdr(
-        ["tab", "create", "--workspace", herdrWorkspaceId, "--cwd", this.#config.workspaceRoot, "--label", convLabel, "--no-focus"],
-        options
-      );
-      if (createConvOutcome.exitCode !== 0 || createConvOutcome.failure) {
-        return toCommandError(createConvOutcome, "Failed to create conversation tab");
-      }
-      const createdConv = parseTabCreatedResult(createConvOutcome);
-      convTab = createdConv.tab;
+      const convLaunch = launchForTab("conversation");
+      const createdConv = await this.#createTab(herdrWorkspaceId, convLabel, convLaunch, "Failed to create conversation tab", options);
+      if (!createdConv.ok) return createdConv;
+      convTab = createdConv.value.tab;
       liveTabs = [...liveTabs, convTab];
-      livePanes = [...livePanes, createdConv.rootPane];
+      livePanes = [...livePanes, createdConv.value.rootPane];
+      if (convLaunch !== undefined && launchEnvOf(convLaunch) !== undefined) envPaneLaunch.set(createdConv.value.rootPane.paneId, convLaunch.launchId);
     }
     const finalConversationTabId = convTab.tabId;
     if (convTab.label !== convLabel) {
@@ -502,17 +627,13 @@ export class RolePaneManager {
     if (hasCoordRoles) {
       let coordTab = liveTabs.find((t) => t.label === coordLabel || t.label === "coordination");
       if (!coordTab) {
-        const createCoordOutcome = await this.#runHerdr(
-          ["tab", "create", "--workspace", herdrWorkspaceId, "--cwd", this.#config.workspaceRoot, "--label", coordLabel, "--no-focus"],
-          options
-        );
-        if (createCoordOutcome.exitCode !== 0 || createCoordOutcome.failure) {
-          return toCommandError(createCoordOutcome, "Failed to create coordination tab");
-        }
-        const createdCoord = parseTabCreatedResult(createCoordOutcome);
-        coordTab = createdCoord.tab;
+        const coordLaunch = launchForTab("coordination");
+        const createdCoord = await this.#createTab(herdrWorkspaceId, coordLabel, coordLaunch, "Failed to create coordination tab", options);
+        if (!createdCoord.ok) return createdCoord;
+        coordTab = createdCoord.value.tab;
         liveTabs = [...liveTabs, coordTab];
-        livePanes = [...livePanes, createdCoord.rootPane];
+        livePanes = [...livePanes, createdCoord.value.rootPane];
+        if (coordLaunch !== undefined && launchEnvOf(coordLaunch) !== undefined) envPaneLaunch.set(createdCoord.value.rootPane.paneId, coordLaunch.launchId);
       }
       finalCoordinationTabId = coordTab.tabId;
     }
@@ -522,17 +643,13 @@ export class RolePaneManager {
     if (hasVerifRoles) {
       let verifTab = liveTabs.find((t) => t.label === verifLabel || t.label === "verification");
       if (!verifTab) {
-        const createVerifOutcome = await this.#runHerdr(
-          ["tab", "create", "--workspace", herdrWorkspaceId, "--cwd", this.#config.workspaceRoot, "--label", verifLabel, "--no-focus"],
-          options
-        );
-        if (createVerifOutcome.exitCode !== 0 || createVerifOutcome.failure) {
-          return toCommandError(createVerifOutcome, "Failed to create verification tab");
-        }
-        const createdVerif = parseTabCreatedResult(createVerifOutcome);
-        verifTab = createdVerif.tab;
+        const verifLaunch = launchForTab("verification");
+        const createdVerif = await this.#createTab(herdrWorkspaceId, verifLabel, verifLaunch, "Failed to create verification tab", options);
+        if (!createdVerif.ok) return createdVerif;
+        verifTab = createdVerif.value.tab;
         liveTabs = [...liveTabs, verifTab];
-        livePanes = [...livePanes, createdVerif.rootPane];
+        livePanes = [...livePanes, createdVerif.value.rootPane];
+        if (verifLaunch !== undefined && launchEnvOf(verifLaunch) !== undefined) envPaneLaunch.set(createdVerif.value.rootPane.paneId, verifLaunch.launchId);
       }
       finalVerificationTabId = verifTab.tabId;
     }
@@ -583,8 +700,14 @@ export class RolePaneManager {
         (p) => p.role === spec.contractRole && (p.metadata?.["topologyRole"] === role || p.agentId === agentName)
       );
 
+      // Env is fixed at pane creation: an env-bearing launch may only reuse a pane recorded for that exact launch.
+      const launch = roleConfig?.launch;
+      const env = launchEnvOf(launch);
+      const reusable = env === undefined || savedBinding?.metadata?.["launchId"] === launch?.launchId;
+      const staleBinding = env !== undefined && savedBinding !== undefined && !reusable ? savedBinding : undefined;
+
       let healthyOccupant: HerdrAgentInfo | null = null;
-      if (savedBinding) {
+      if (savedBinding && reusable) {
         const liveOccupant = liveAgents.find(
           (a) =>
             a.name === agentName &&
@@ -603,7 +726,7 @@ export class RolePaneManager {
         }
       }
 
-      if (!healthyOccupant) {
+      if (!healthyOccupant && reusable) {
         const match = liveAgents.find(
           (a) =>
             a.name === agentName &&
@@ -652,22 +775,32 @@ export class RolePaneManager {
       let candidatePane: HerdrPaneInfo | null = null;
       // A recorded launch intent owns its pane even if startup is blocked or its
       // acknowledgement was lost. Inspect it in place; never split a duplicate.
-      if (savedBinding) candidatePane = livePanes.find(p => p.paneId === savedBinding.paneId && p.tabId === targetTabId) ?? null;
-      if (!candidatePane && initialConversationRootPaneId && targetTabId === finalConversationTabId && !assignedPaneIds.has(initialConversationRootPaneId)) {
-        const p = livePanes.find((item) => item.paneId === initialConversationRootPaneId);
-        if (p && p.agent === null) {
-          candidatePane = p;
+      if (savedBinding && reusable) candidatePane = livePanes.find(p => p.paneId === savedBinding.paneId && p.tabId === targetTabId) ?? null;
+      if (env !== undefined) {
+        // Only a pane created by this run for this exact launch can carry its env; unbound shells cannot prove theirs.
+        if (!candidatePane) {
+          candidatePane = livePanes.find(p => envPaneLaunch.get(p.paneId) === launch?.launchId && p.tabId === targetTabId &&
+            p.agent === null && !assignedPaneIds.has(p.paneId)) ?? null;
         }
-      }
+      } else {
+        if (!candidatePane && initialConversationRootPaneId && targetTabId === finalConversationTabId && !assignedPaneIds.has(initialConversationRootPaneId) &&
+          !envPaneLaunch.has(initialConversationRootPaneId)) {
+          const p = livePanes.find((item) => item.paneId === initialConversationRootPaneId);
+          if (p && p.agent === null) {
+            candidatePane = p;
+          }
+        }
 
-      if (!candidatePane) {
-        candidatePane =
-          livePanes.find(
-            (p) =>
-              p.tabId === targetTabId &&
-              p.agent === null &&
-              !assignedPaneIds.has(p.paneId)
-          ) ?? null;
+        if (!candidatePane) {
+          candidatePane =
+            livePanes.find(
+              (p) =>
+                p.tabId === targetTabId &&
+                p.agent === null &&
+                !assignedPaneIds.has(p.paneId) &&
+                !envPaneLaunch.has(p.paneId)
+            ) ?? null;
+        }
       }
 
       let selectedPaneId: string;
@@ -682,17 +815,21 @@ export class RolePaneManager {
         }
         const depth = splitDepths.get(sourcePane.paneId) ?? 0;
         const direction = roleConfig?.splitDirection ?? (depth % 2 === 0 ? "right" : "down");
-        const splitOutcome = await this.#runHerdr(
-          ["pane", "split", sourcePane.paneId, "--direction", direction, "--cwd", this.#config.workspaceRoot, "--no-focus"],
-          options
-        );
-        if (splitOutcome.exitCode !== 0 || splitOutcome.failure) {
-          return toCommandError(splitOutcome, `Failed to split pane from '${sourcePane.paneId}'`);
-        }
-        const splitResult = parsePaneInfoResult(splitOutcome);
+        // The new pane is created before a stale pane is closed, so the tab never loses its last pane.
+        const split = await this.#splitPane(sourcePane.paneId, direction, this.#config.workspaceRoot, launch,
+          `Failed to split pane from '${sourcePane.paneId}'`, options);
+        if (!split.ok) return split;
+        const splitResult = split.value;
         selectedPaneId = splitResult.paneId;
         splitDepths.set(sourcePane.paneId, depth + 1); splitDepths.set(selectedPaneId, depth + 1);
         livePanes = [...livePanes, splitResult];
+        if (env !== undefined && launch !== undefined) envPaneLaunch.set(selectedPaneId, launch.launchId);
+      }
+
+      // Close the Bflow-owned role pane whose env belongs to a different launch; it is never reused.
+      if (staleBinding !== undefined && staleBinding.paneId !== selectedPaneId && livePanes.some(p => p.paneId === staleBinding.paneId)) {
+        await this.#closePane(staleBinding.paneId, options);
+        livePanes = livePanes.filter(p => p.paneId !== staleBinding.paneId);
       }
 
       assignedPaneIds.add(selectedPaneId);
@@ -702,7 +839,8 @@ export class RolePaneManager {
           terminalId: livePanes.find(p => p.paneId === selectedPaneId)!.terminalId,
           workspaceId: herdrWorkspaceId, tabId: targetTabId, focused: false, agentStatus: "unknown", revision: 0 },
         request: { role, paneId: selectedPaneId, workspaceId: herdrWorkspaceId, tabId: targetTabId,
-          cwd: this.#config.workspaceRoot, permanent: true, metadata: { launchIntent: true } } });
+          cwd: this.#config.workspaceRoot, permanent: true,
+          metadata: { launchIntent: true, ...(launch !== undefined ? { launchId: launch.launchId, launchFingerprint: launch.launchFingerprint } : {}) } } });
       if (!pending.ok) return pending;
       const intentSaved = await persistProgress(pending.value);
       if (!intentSaved.ok) return intentSaved;
@@ -977,12 +1115,9 @@ export class RolePaneManager {
         startArgs.push("--", ...passedArgs);
       }
 
-      // Launch env travels only in the invocation environment, never in argv or the manifest.
-      const startOutcome = await this.#runHerdr(
-        startArgs,
-        options,
-        launch !== undefined ? { ...process.env, ...launch.env } : undefined
-      );
+      // Launch env is NOT passed here: `agent start` types the command into the pane's existing shell, so
+      // invocation env never reaches the provider. Env is applied at pane creation (see #herdrCreate).
+      const startOutcome = await this.#runHerdr(startArgs, options);
       if (startOutcome.exitCode !== 0 || startOutcome.failure) {
         if (
           startOutcome.stderr.includes("agent_not_ready") ||
@@ -1441,6 +1576,11 @@ export class RolePaneManager {
 
   async recoverAfterRestart(options?: OperationOptions): Promise<OperationResult<SessionManifest>> {
     try {
+      // Env-at-creation requirements are validated before any side effect.
+      const socketCheck = this.#requireSocketFor(PERMANENT_TOPOLOGY_ROLES.map(role => this.#config.roleConfigs?.[role]?.launch));
+      if (!socketCheck.ok) return socketCheck;
+      const envPaneLaunch = new Map<string, string>();
+
       const loadResult = await this.#store.load(this.#config.sessionId, options);
       if (!loadResult.ok) return loadResult;
       const savedManifest = loadResult.value;
@@ -1467,16 +1607,22 @@ export class RolePaneManager {
       if (matchedWorkspace) {
         herdrWorkspaceId = matchedWorkspace.workspaceId;
       } else {
-        const createWsOutcome = await this.#runHerdr(
-          ["workspace", "create", "--cwd", savedManifest.workspaceRoot, "--label", savedManifest.projectName, "--no-focus"],
+        const chatLaunch = this.#config.roleConfigs?.chat?.launch;
+        const created = await this.#herdrCreate<HerdrWorkspaceCreated>(
+          {
+            method: "workspace.create",
+            params: { cwd: savedManifest.workspaceRoot, label: savedManifest.projectName, focus: false },
+            args: ["workspace", "create", "--cwd", savedManifest.workspaceRoot, "--label", savedManifest.projectName, "--no-focus"]
+          },
+          launchEnvOf(chatLaunch),
+          parseWorkspaceCreatedResult,
+          "Failed to recreate workspace during restart recovery",
           options
         );
-        if (createWsOutcome.exitCode !== 0 || createWsOutcome.failure) {
-          return toCommandError(createWsOutcome, "Failed to recreate workspace during restart recovery");
-        }
-        const created = parseWorkspaceCreatedResult(createWsOutcome);
-        herdrWorkspaceId = created.workspace.workspaceId;
-        herdrTabId = created.tab.tabId;
+        if (!created.ok) return created;
+        herdrWorkspaceId = created.value.workspace.workspaceId;
+        herdrTabId = created.value.tab.tabId;
+        if (chatLaunch !== undefined && launchEnvOf(chatLaunch) !== undefined) envPaneLaunch.set(created.value.rootPane.paneId, chatLaunch.launchId);
       }
 
       const tabListOutcome = await this.#runHerdr(["tab", "list", "--workspace", herdrWorkspaceId], options);
@@ -1506,12 +1652,17 @@ export class RolePaneManager {
           "developer") as TopologyRole;
         const spec = ROLE_TOPOLOGY_SPECS[topologyRole];
 
+        // Env is fixed at pane creation: a binding recorded for another launch (or none) is never reused for an env launch.
+        const roleLaunch = this.#config.roleConfigs?.[topologyRole]?.launch;
+        const stalePane = launchEnvOf(roleLaunch) !== undefined && binding.metadata?.["launchId"] !== roleLaunch?.launchId;
+        const roleEnvLaunchId = launchEnvOf(roleLaunch) !== undefined ? roleLaunch?.launchId : undefined;
+
         // Case A: Matching live agent found
         const matchingLiveAgent = liveAgents.find(
           (a) => a.name === binding.agentId && a.agent === binding.agentKind && !usedPaneIds.has(a.paneId)
         );
 
-        if (matchingLiveAgent) {
+        if (matchingLiveAgent && !stalePane) {
           usedPaneIds.add(matchingLiveAgent.paneId);
           const updatedBinding: PaneBinding = {
             ...binding,
@@ -1566,7 +1717,7 @@ export class RolePaneManager {
         const existingPane = livePanes.find(
           (p) => p.paneId === binding.paneId && p.agent === null && !usedPaneIds.has(p.paneId)
         );
-        if (existingPane) {
+        if (existingPane && !stalePane) {
           const startResult = await this.startAgentInPane(
             {
               role: topologyRole,
@@ -1617,22 +1768,30 @@ export class RolePaneManager {
           }
 
           if (!roleTab) {
-            const createTabOutcome = await this.#runHerdr(
-              ["tab", "create", "--workspace", herdrWorkspaceId, "--cwd", binding.cwd, "--label", desiredTabLabel, "--no-focus"],
+            const createdTab = await this.#herdrCreate<HerdrTabCreated>(
+              {
+                method: "tab.create",
+                params: { workspace_id: herdrWorkspaceId, cwd: binding.cwd, label: desiredTabLabel, focus: false },
+                args: ["tab", "create", "--workspace", herdrWorkspaceId, "--cwd", binding.cwd, "--label", desiredTabLabel, "--no-focus"]
+              },
+              launchEnvOf(roleLaunch),
+              parseTabCreatedResult,
+              `Failed to recreate tab '${desiredTabLabel}' during restart recovery`,
               options
             );
-            if (createTabOutcome.exitCode !== 0 || createTabOutcome.failure) {
-              return toCommandError(createTabOutcome, `Failed to recreate tab '${desiredTabLabel}' during restart recovery`);
-            }
-            const created = parseTabCreatedResult(createTabOutcome);
+            if (!createdTab.ok) return createdTab;
+            const created = createdTab.value;
             roleTab = created.tab;
             currentTabs = [...currentTabs, roleTab];
             livePanes = [...livePanes, created.rootPane];
+            if (roleEnvLaunchId !== undefined) envPaneLaunch.set(created.rootPane.paneId, roleEnvLaunchId);
           }
 
           let targetPaneId: string;
+          // A pane is reusable only if it was created by this run for this role's env (env roles) or carries no env (legacy roles).
           const availableShellPane = livePanes.find(
-            (p) => p.tabId === roleTab?.tabId && p.agent === null && !usedPaneIds.has(p.paneId)
+            (p) => p.tabId === roleTab?.tabId && p.agent === null && !usedPaneIds.has(p.paneId) &&
+              (roleEnvLaunchId !== undefined ? envPaneLaunch.get(p.paneId) === roleEnvLaunchId : !envPaneLaunch.has(p.paneId))
           );
 
           if (availableShellPane) {
@@ -1642,16 +1801,27 @@ export class RolePaneManager {
             if (!sourcePane) {
               return validationError(`No pane available in workspace '${herdrWorkspaceId}' to split`);
             }
-            const splitOutcome = await this.#runHerdr(
-              ["pane", "split", sourcePane.paneId, "--direction", "right", "--cwd", binding.cwd, "--no-focus"],
+            const split = await this.#herdrCreate<HerdrPaneInfo>(
+              {
+                method: "pane.split",
+                params: { target_pane_id: sourcePane.paneId, direction: "right", cwd: binding.cwd, focus: false },
+                args: ["pane", "split", sourcePane.paneId, "--direction", "right", "--cwd", binding.cwd, "--no-focus"]
+              },
+              launchEnvOf(roleLaunch),
+              parsePaneInfoResult,
+              `Failed to split pane from '${sourcePane.paneId}'`,
               options
             );
-            if (splitOutcome.exitCode !== 0 || splitOutcome.failure) {
-              return toCommandError(splitOutcome, `Failed to split pane from '${sourcePane.paneId}'`);
-            }
-            const split = parsePaneInfoResult(splitOutcome);
-            livePanes = [...livePanes, split];
-            targetPaneId = split.paneId;
+            if (!split.ok) return split;
+            livePanes = [...livePanes, split.value];
+            targetPaneId = split.value.paneId;
+            if (roleEnvLaunchId !== undefined) envPaneLaunch.set(targetPaneId, roleEnvLaunchId);
+          }
+
+          // A stale pane still runs the previous launch (and possibly its agent name): close it before starting the new one.
+          if (stalePane && binding.paneId !== targetPaneId && livePanes.some(p => p.paneId === binding.paneId)) {
+            await this.#closePane(binding.paneId, options);
+            livePanes = livePanes.filter(p => p.paneId !== binding.paneId);
           }
 
           usedPaneIds.add(targetPaneId);
@@ -1858,6 +2028,9 @@ export class RolePaneManager {
       if (!request.worktreePath || typeof request.worktreePath !== "string") {
         return validationError("DeveloperAllocationRequest.worktreePath is required");
       }
+      const socketCheck = this.#requireSocketFor([request.launch]);
+      if (!socketCheck.ok) return socketCheck;
+      const developerEnv = launchEnvOf(request.launch);
 
       const loadResult = await this.#store.load(this.#config.sessionId, options);
       if (!loadResult.ok) return loadResult;
@@ -1937,14 +2110,35 @@ export class RolePaneManager {
 
           const liveAgent = liveAgents.find((a) => a.paneId === releasedCandidate.paneId);
           const effectiveAgentName = request.agentName ?? (liveAgent ? releasedCandidate.agentId : this.#allocateUniqueDeveloperName(request.taskId, manifest, liveAgents));
+          // Env is fixed at pane creation: a released pane made for another launch is never reused.
+          const releasedEnvMismatch = developerEnv !== undefined && releasedCandidate.metadata?.["launchId"] !== request.launch?.launchId;
+          const splitReleased = () => this.#herdrCreate<HerdrPaneInfo>(
+            {
+              method: "pane.split",
+              params: { target_pane_id: releasedCandidate.paneId, direction: "right" },
+              args: ["pane", "split", releasedCandidate.paneId, "--direction", "right"]
+            },
+            developerEnv,
+            parsePaneInfoResult,
+            `Failed to split pane from '${releasedCandidate.paneId}'`,
+            options
+          );
 
           // If the live pane is already occupied by an agent with a different name than requested,
           // split a fresh pane in the same tab and close the old pane so the new agent does not conflict.
-          if (paneInfo.agent !== null && liveAgent && liveAgent.name !== effectiveAgentName) {
-            const splitOutcome = await this.#runHerdr(["pane", "split", releasedCandidate.paneId, "--direction", "right"], options);
-            if (splitOutcome.exitCode === 0 && !splitOutcome.failure) {
-              targetPane = parsePaneInfoResult(splitOutcome);
+          let oldPaneClosedEarly = false;
+          if ((paneInfo.agent !== null && liveAgent && liveAgent.name !== effectiveAgentName) || releasedEnvMismatch) {
+            const split = await splitReleased();
+            if (split.ok) {
+              targetPane = split.value;
               oldPaneToClose = releasedCandidate.paneId;
+              if (releasedEnvMismatch) {
+                // The same agent name cannot start while the old pane still owns it; the released pane carries another launch's env.
+                await this.#closePane(oldPaneToClose, options);
+                oldPaneClosedEarly = true;
+              }
+            } else if (releasedEnvMismatch) {
+              return split;
             }
           }
 
@@ -1974,9 +2168,9 @@ export class RolePaneManager {
           );
 
           if (!startResult.ok && oldPaneToClose === null && startResult.error.code === "conflict") {
-            const splitOutcome = await this.#runHerdr(["pane", "split", releasedCandidate.paneId, "--direction", "right"], options);
-            if (splitOutcome.exitCode === 0 && !splitOutcome.failure) {
-              targetPane = parsePaneInfoResult(splitOutcome);
+            const splitOutcome = await splitReleased();
+            if (splitOutcome.ok) {
+              targetPane = splitOutcome.value;
               oldPaneToClose = releasedCandidate.paneId;
               startResult = await this.startAgentInPane(
                 {
@@ -2006,7 +2200,7 @@ export class RolePaneManager {
           }
 
           if (startResult.ok) {
-            if (oldPaneToClose !== null) {
+            if (oldPaneToClose !== null && !oldPaneClosedEarly) {
               await this.#closePane(oldPaneToClose, options);
             }
             const updatedPanes = oldPaneToClose !== null
@@ -2087,6 +2281,27 @@ export class RolePaneManager {
         wtWorkspaceId = wtCreated.workspace.workspaceId;
         wtTabId = wtCreated.tab.tabId;
         wtPaneId = wtCreated.rootPane.paneId;
+      }
+
+      if (developerEnv !== undefined) {
+        // The worktree root pane was created without launch env. The Developer pane is split with env instead,
+        // and the root is closed unless the manifest still owns it.
+        const split = await this.#herdrCreate<HerdrPaneInfo>(
+          {
+            method: "pane.split",
+            params: { target_pane_id: wtPaneId, direction: "right", cwd: request.worktreePath, focus: false },
+            args: ["pane", "split", wtPaneId, "--direction", "right", "--cwd", request.worktreePath, "--no-focus"]
+          },
+          developerEnv,
+          parsePaneInfoResult,
+          `Failed to create developer pane for '${request.worktreePath}'`,
+          options
+        );
+        if (!split.ok) return split;
+        if (!manifest.panes.some(p => p.paneId === wtPaneId)) await this.#closePane(wtPaneId, options);
+        wtPaneId = split.value.paneId;
+        wtWorkspaceId = split.value.workspaceId;
+        wtTabId = split.value.tabId;
       }
 
       const startResult = await this.startAgentInPane(
