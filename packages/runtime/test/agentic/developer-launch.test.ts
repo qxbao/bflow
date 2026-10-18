@@ -108,7 +108,7 @@ const skillFiles = (name: string): BundleFiles => ({
 });
 
 type Json = Record<string, unknown>;
-interface FakePane { paneId: string; workspaceId: string; tabId: string; agent: string | null; cwd?: string }
+interface FakePane { paneId: string; workspaceId: string; tabId: string; agent: string | null; cwd?: string; env?: Record<string, string> }
 interface FakeAgent { name: string; kind: string; paneId: string; workspaceId: string; tabId: string }
 
 /**
@@ -116,14 +116,32 @@ interface FakeAgent { name: string; kind: string; paneId: string; workspaceId: s
  * get/split/rename/close/process-info, agent list/get/start. Records every invocation with its env.
  */
 class FakeHerdr {
-  readonly calls: { args: string[]; env: Readonly<Record<string, string>> | undefined }[] = [];
+  /** `launchEnv` (agent start only) is the env of the pane the provider runs in — what a real provider process sees. */
+  readonly calls: { args: string[]; env: Readonly<Record<string, string>> | undefined; launchEnv?: Readonly<Record<string, string>> | undefined }[] = [];
+  readonly socketCalls: { method: string; params: Record<string, unknown> }[] = [];
   readonly panes = new Map<string, FakePane>();
   readonly agents = new Map<string, FakeAgent>();
   /** Runs when an agent starts in a pane: stands in for the provider process and its SessionStart hook. */
   onStart: ((paneId: string, env: Readonly<Record<string, string>> | undefined) => Promise<void>) | undefined;
   private seq = 0;
 
-  startCalls(): { args: string[]; env: Readonly<Record<string, string>> | undefined }[] {
+  /** Herdr socket API over the same state. Env is fixed when the pane is created, as with real Herdr. */
+  socket(): import("@bflow/pane-manager").HerdrSocketPort {
+    return { request: async (method, params) => {
+      this.socketCalls.push({ method, params });
+      const p = params as Record<string, string | undefined> & { env?: Record<string, string> };
+      let outcome;
+      if (method === "pane.split") outcome = await this.handle(["pane", "split", p.target_pane_id ?? "", "--direction", p.direction ?? "right", ...(p.cwd ? ["--cwd", p.cwd] : []), "--no-focus"]);
+      else return { ok: false, error: { code: "validation", retryable: false, message: `unsupported fake socket method ${method}` } };
+      if (outcome.exitCode !== 0) return { ok: false, error: { code: "not_found", retryable: false, message: `${method} failed` } };
+      const result = (JSON.parse(outcome.stdout) as { result: { pane?: { pane_id: string } } }).result;
+      const pane = this.panes.get(result.pane?.pane_id ?? "");
+      if (pane && p.env) pane.env = { ...p.env };
+      return { ok: true, value: result };
+    } };
+  }
+
+  startCalls(): { args: string[]; env: Readonly<Record<string, string>> | undefined; launchEnv?: Readonly<Record<string, string>> | undefined }[] {
     return this.calls.filter(call => call.args[0] === "agent" && call.args[1] === "start");
   }
 
@@ -166,6 +184,10 @@ class FakeHerdr {
     const args = [...invocation.args];
     const env = invocation.env === undefined ? undefined : { ...(invocation.env as Record<string, string>) };
     this.calls.push({ args, env });
+    return this.handle(args, env);
+  }
+
+  private async handle(args: string[], env?: Readonly<Record<string, string>>) {
     const [domain, action] = args;
     const flag = (name: string) => { const index = args.indexOf(name); return index >= 0 ? args[index + 1] : undefined; };
 
@@ -231,7 +253,10 @@ class FakeHerdr {
       const agent: FakeAgent = { name, kind, paneId, workspaceId: pane.workspaceId, tabId: pane.tabId };
       this.agents.set(name, agent);
       pane.agent = kind;
-      await this.onStart?.(paneId, env);
+      // The provider runs in the pane's shell: it sees the env the pane was created with, never the invocation env.
+      const last = this.calls[this.calls.length - 1];
+      if (last && last.args === args) last.launchEnv = pane.env;
+      await this.onStart?.(paneId, pane.env);
       return this.okJson({ type: "agent_started", agent: this.agentJson(agent) });
     }
     return this.error("unsupported", `unsupported fake Herdr command: ${args.join(" ")}`);
@@ -376,7 +401,7 @@ describe("P30 dynamic Developer launches end to end", () => {
         sessionId: SESSION, projectName: "bflow", workspaceRoot: workspace, conversationSessionId: "conv-1",
         maxDeveloperCapacity: options.maxCapacity ?? 2, defaultAgentKind: "claude"
       },
-      runner: herdr, store, worktreeInspector: cleanInspector
+      runner: herdr, store, worktreeInspector: cleanInspector, socket: herdr.socket()
     });
     const panes = withDeveloperLaunches(rolePanes, {
       allocate: request => session.allocateDeveloper(request.taskId, request.worktreePath),
@@ -394,7 +419,7 @@ describe("P30 dynamic Developer launches end to end", () => {
 
   /** The launch id of one allocation, from its prepared launch material in the Herdr start env. */
   function startedLaunch(herdr: FakeHerdr, index: number): string {
-    return herdr.startCalls()[index]!.env![BFLOW_LAUNCH_ID_ENV]!;
+    return herdr.startCalls()[index]!.launchEnv![BFLOW_LAUNCH_ID_ENV]!;
   }
 
   /** One ok or failed record per live registration, shaped like the provider hook's report. */
@@ -408,9 +433,9 @@ describe("P30 dynamic Developer launches end to end", () => {
   }
 
   /** The launch's bearer token inside one Herdr invocation env: the value that is a live Gateway token. */
-  function tokenIn(call: { env: Readonly<Record<string, string>> | undefined } | undefined): string | undefined {
+  function tokenIn(call: { launchEnv?: Readonly<Record<string, string>> | undefined } | undefined): string | undefined {
     const live = gatewayControl.tokens();
-    return Object.values(call?.env ?? {}).find(value => live.includes(value));
+    return Object.values(call?.launchEnv ?? {}).find(value => live.includes(value));
   }
 
   function allocation(taskId: string) {
@@ -500,7 +525,7 @@ describe("P30 dynamic Developer launches end to end", () => {
     expect(host.session.status().status.launches).toEqual([]);
   });
 
-  it("passes the Gateway token only in the invocation env and keeps it out of manifest, journal and disk", async () => {
+  it("passes the Gateway token only in the pane creation env and keeps it out of argv, manifest, journal and disk", async () => {
     const host = await buildHost({ mcpServiceIds: ["svc-search"] });
 
     const result = await host.panes.allocateDeveloper(allocation("run-1-t1"));
@@ -511,8 +536,11 @@ describe("P30 dynamic Developer launches end to end", () => {
     expect(token).toBeTruthy();
 
     const start = host.herdr.startCalls()[0]!;
-    expect(Object.values(start.env ?? {})).toContain(token);
-    expect(start.args.join(" ")).not.toContain(token);
+    // Live finding: Herdr agent start never forwards invocation env, so the token must ride on the pane's creation env.
+    expect(Object.values(start.launchEnv ?? {})).toContain(token);
+    expect(JSON.stringify(start.env ?? {})).not.toContain(token);
+    expect(host.herdr.calls.some(call => call.args.join(" ").includes(token!))).toBe(false);
+    expect(host.herdr.socketCalls.some(call => call.method === "pane.split" && JSON.stringify(call.params).includes(token!))).toBe(true);
 
     const manifest = await host.rolePanes.getManifest();
     expect(JSON.stringify(manifest)).not.toContain(token);
@@ -608,6 +636,7 @@ describe("P30 dynamic Developer launches end to end", () => {
     expect(start.args).toEqual(expect.arrayContaining(["--kind", "claude", "--pane", result.value.paneId]));
     expect(start.args).not.toContain("--");
     expect(start.env).toBeUndefined();
+    expect(start.launchEnv).toBeUndefined();
     expect(result.value.metadata?.["launchId"]).toBeUndefined();
     expect(result.value.metadata?.["taskId"]).toBe("run-1-legacy");
     expect(host.session.status().status.launches).toEqual([]);
