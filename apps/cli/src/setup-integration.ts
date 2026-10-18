@@ -22,6 +22,8 @@ import {
   AssumeYesApprover,
   InteractiveApprover,
   NonInteractiveApprover,
+  isolatedPlatformProfile,
+  isolatedServiceNamespace,
   type SetupOutcome,
   type MachineDoctorReport,
   type SetupComponent,
@@ -89,17 +91,7 @@ export async function executeSetupCommand(
   progress("Checking machine platform and setup scope...");
   let platform: PlatformProfile = context?.setup?.platform ?? detectPlatform(defaultHostEnvironment());
   const isolatedRoot = context?.setup?.isolatedRoot ?? process.env.BFLOW_HOME;
-  if (isolatedRoot) {
-    platform = {
-      ...platform,
-      paths: {
-        config: join(isolatedRoot, "config"),
-        data: join(isolatedRoot, "data"),
-        state: join(isolatedRoot, "state"),
-        managedBin: join(isolatedRoot, "data", "bin")
-      }
-    };
-  }
+  if (isolatedRoot) platform = isolatedPlatformProfile(platform, isolatedRoot);
 
   // 2. Resolve Runner & Store
   progress("Checking setup state and approvals...");
@@ -127,8 +119,10 @@ export async function executeSetupCommand(
 
   // 4. Resolve Service Manager
   progress("Checking service manager capabilities...");
+  // Isolated setups namespace OS unit names so they can never collide with (or be linked into) the user's real units.
   const serviceManager: ServiceManager =
-    context?.setup?.serviceManager ?? selectServiceManager(platform, runner, store);
+    context?.setup?.serviceManager ?? selectServiceManager(platform, runner, store,
+      isolatedRoot ? { namespace: isolatedServiceNamespace(isolatedRoot) } : {});
 
   // 6. Resolve Skills Catalog & Synchronizer
   progress("Checking approved skills catalog...");
@@ -394,6 +388,7 @@ export async function executeSetupCommand(
     machineId: platform.machineId,
     os: platform.os,
     serviceManagerKind: serviceManager.kind,
+    ...(serviceManager.namespace ? { serviceUnitNamespace: serviceManager.namespace } : {}),
     plan: resolvedPlan,
     ...(receipt ? { receipt } : {}),
     receipts,

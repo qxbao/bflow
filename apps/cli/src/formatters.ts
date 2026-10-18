@@ -543,6 +543,10 @@ function formatSetupOutput(output: SetupCommandOutput, useColor = false): string
   lines.push(`${heading("Machine ID:")}         ${sanitizeIdentifier(output.machineId)}`);
   lines.push(`${heading("Operating System:")}   ${sanitizeIdentifier(output.os)}`);
   lines.push(`${heading("Service Manager:")}    ${sanitizeIdentifier(output.serviceManagerKind)}`);
+  if (output.serviceUnitNamespace) {
+    const prefix = output.serviceManagerKind === "launchd" ? "dev.bflow." : "bflow-";
+    lines.push(`${heading("Service Units:")}      ${sanitizeIdentifier(`${prefix}${output.serviceUnitNamespace}-<service>`)} (isolated namespace)`);
+  }
   if (output.outcome) lines.push(`${heading("Setup Result:")}       ${humanText(output.outcome)}`);
   if (output.plan) {
     lines.push(`${heading("Plan ID:")}            ${sanitizeIdentifier(output.plan.planId)} (revision ${output.plan.revision})`);

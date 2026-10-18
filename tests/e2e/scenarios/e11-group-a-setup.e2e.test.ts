@@ -9,8 +9,11 @@ import {
   SetupStateStore,
   defaultHostEnvironment,
   detectPlatform,
+  isolatedPlatformProfile,
+  isolatedServiceNamespace,
   probeTools,
   selectServiceManager,
+  unregisterAllServices,
   validateServiceDefinition
 } from "@bflow/machine-setup";
 import { BflowOSServiceManager } from "@bflow/mcp-services";
@@ -18,6 +21,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & OS Service Registration", () => {
   const tempDirs: string[] = [];
+  // Isolated setup roots whose OS service units must be torn down before their temp dirs are deleted.
+  const isolatedRoots: string[] = [];
   const liveHerdrEnabled = process.env.BFLOW_TEST_LIVE_PLATFORM === "1" || process.env.BFLOW_TEST_LIVE_HERDR === "1";
 
   function makeTempDir(prefix = "bflow-e11-"): string {
@@ -26,7 +31,23 @@ describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & O
     return dir;
   }
 
-  afterEach(() => {
+  /**
+   * Removes every OS service unit an isolated setup registered (systemd --user / launchd) and proves none remain.
+   * Isolated units are namespaced by the isolated root, so this only touches this test's own units.
+   */
+  async function teardownIsolatedServices(isolatedRoot: string): Promise<void> {
+    const platform = isolatedPlatformProfile(detectPlatform(defaultHostEnvironment()), isolatedRoot);
+    const store = new SetupStateStore(platform.paths, { uid: platform.uid, now: () => new Date() });
+    const manager = selectServiceManager(platform, new NodeCommandRunner(), store, {
+      namespace: isolatedServiceNamespace(isolatedRoot)
+    });
+    await unregisterAllServices(manager);
+    expect(await manager.listInstalled(), `isolated service units left behind for ${isolatedRoot}`).toEqual([]);
+  }
+
+  afterEach(async () => {
+    // Service teardown must run before the temp dir holding the unit files is deleted.
+    while (isolatedRoots.length > 0) await teardownIsolatedServices(isolatedRoots.pop()!);
     while (tempDirs.length > 0) {
       const dir = tempDirs.pop()!;
       if (existsSync(dir)) {
@@ -121,6 +142,7 @@ describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & O
 
       const skillsStoreDir = join(isolatedState, "data", "skills-store");
       const ctx = { cwd: repoDir, setup: { isolatedRoot: isolatedState } };
+      isolatedRoots.push(isolatedState);
 
       // 1st run on clean isolated state: creates 0700 skills-store (QA-P34-01 fixed) and installs all 32 skills on 1st apply (QA-P34-02 fixed)
       const firstRun = await runCli(["setup", "--yes", "--json"], ctx);
@@ -183,7 +205,9 @@ describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & O
       expect(repairDrifted.ok).toBe(true);
       expect(repairDrifted.exitCode).toBe(0);
       expect(readdirSync(bundlesDir).length).toBe(32);
-    }, 180_000);
+      // The first real apply downloads pinned tools and typically takes ~2 minutes on a normal host,
+      // so the budget covers three setup runs plus repair on a cold machine.
+    }, 600_000);
   });
 
   describe("[REAL HOST] bflow doctor & OS Service Registration (systemd --user)", () => {

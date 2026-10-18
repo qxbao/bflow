@@ -100,6 +100,8 @@ export interface SetupCommandOutput {
   readonly machineId: string;
   readonly os: string;
   readonly serviceManagerKind: "systemd-user" | "launchd" | "windows-unverified";
+  /** Isolation namespace of OS unit names (isolated setup only); units are named bflow-<namespace>-<service>. */
+  readonly serviceUnitNamespace?: string;
   readonly plan: SetupPlan;
   readonly receipt?: SetupReceipt;
   readonly receipts?: readonly SetupReceipt[];
