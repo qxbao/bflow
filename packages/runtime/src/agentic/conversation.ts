@@ -41,9 +41,11 @@ export async function createAgenticConversationHost(options: {
       return { ok: true, value: undefined };
     }
     const run = record(await runtime.inspect(decision.runId));
-    const userDecision = (run.userDecisions as Record<string, { request: unknown } | undefined> | undefined)?.[decision.approvalId];
+    const userDecision = (run.userDecisions as Record<string, { request: unknown; status?: string } | undefined> | undefined)?.[decision.approvalId];
     if (userDecision) {
       // Specialist user decisions have their own record; they never occupy the single design/task approval slot.
+      // A reply for an already answered/expired request is refused here, not queued for Runtime to reject later.
+      if (userDecision.status !== "pending") throw new Error("User decision is no longer pending");
       validateUserDecisionAnswer(ApprovalRequestSchema.parse(userDecision.request), decision, new Date().toISOString());
     } else {
       const request = ApprovalRequestSchema.parse(run.approval);
