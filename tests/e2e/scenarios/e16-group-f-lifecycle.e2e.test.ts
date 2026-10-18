@@ -614,7 +614,8 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
     const initSecond = await runCli(["init", "--json"], { cwd: repoDir });
     expect(initFirst.ok).toBe(true);
     expect(initSecond.ok).toBe(true);
-    expect(existsSync(join(repoDir, ".bflow/config.yaml"))).toBe(true);
+    expect(existsSync(join(repoDir, ".bflow/config.yml"))).toBe(true);
+    expect(existsSync(join(repoDir, ".bflow/config.yaml"))).toBe(false);
     expect(existsSync(join(repoDir, ".bflow/.gitignore"))).toBe(true);
     const bflowGitignore = readFileSync(join(repoDir, ".bflow/.gitignore"), "utf8");
     expect(bflowGitignore).toContain("state/");

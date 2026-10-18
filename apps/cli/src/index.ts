@@ -17,6 +17,7 @@ export {
   type GlobalCliFlags,
   type HelpCommandArgs,
   type InitCommandArgs,
+  type ConfigMigrateCommandArgs,
   type InitCommandOutput,
   type SetupCommandArgs,
   type SetupCommandOutput,
@@ -61,12 +62,17 @@ export {
 } from "./types.js";
 
 export { parseCliArgs } from "./parser.js";
+export { parseConfigYaml, stringifyConfigYaml, renderEnvironmentConfigYaml } from "./config-format.js";
+export { migrateRepositoryConfig, type ConfigMigrationOutput } from "./config-migration.js";
+export { executeCodexHookSetup, formatCodexHookReview, formatCodexHookSetupOutput, codexHookSetupSucceeded,
+  type CodexHookSetupOutcome, type CodexHookSetupOutput } from "./codex-hook-setup.js";
 export { getHelpText } from "./help.js";
 export {
   DEFAULT_CONFIG_RELATIVE_PATH,
   createDefaultWorkflowDefinition,
   createDefaultRepositoryConfig,
   resolveConfigPath,
+  resolveReadableConfigPath,
   loadRepositoryConfig,
   loadWorkflowDefinitionFromFile,
   initRepositoryConfig

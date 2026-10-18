@@ -18,7 +18,7 @@ import {
   initRepositoryConfig,
   loadRepositoryConfig,
   loadWorkflowDefinitionFromFile,
-  resolveConfigPath
+  resolveReadableConfigPath
 } from "./config.js";
 import {
   isStderrInteractive,
@@ -43,6 +43,8 @@ import {
 } from "./types.js";
 import { executeHighLevelCommand, isHighLevelCommand } from "./high-level-commands.js";
 import { executeSetupCommand } from "./setup-integration.js";
+import { codexHookSetupSucceeded, executeCodexHookSetup } from "./codex-hook-setup.js";
+import { migrateRepositoryConfig } from "./config-migration.js";
 import { CliProgress } from "./progress.js";
 
 function loadPackageVersion(): string {
@@ -215,6 +217,15 @@ async function executeCommandWithProgress(
     );
   }
 
+  if (parsed.command === "config-migrate") {
+    try {
+      const output = await migrateRepositoryConfig(cwd);
+      return makeResult(CLI_EXIT_CODES.SUCCESS, true, parsed.command, output, undefined, isJson, io, presentation);
+    } catch (error) {
+      return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, parsed.command, undefined, toContractError(error), isJson, io, presentation);
+    }
+  }
+
   if (["up", "down", "attach", "doctor", "recover"].includes(parsed.command) ||
     parsed.command === "status" && parsed.runId === undefined && parsed.statusFilter === undefined &&
     parsed.workflowId === undefined && parsed.limit === undefined && parsed.cursor === undefined && context?.runtime === undefined) {
@@ -270,6 +281,16 @@ async function executeCommandWithProgress(
   }
 
   if (parsed.command === "setup") {
+    if (parsed.codexHooks) {
+      try {
+        const data = await executeCodexHookSetup(parsed, context);
+        return makeResult(codexHookSetupSucceeded(data) ? CLI_EXIT_CODES.SUCCESS : CLI_EXIT_CODES.RUNTIME_ERROR,
+          true, "setup", data, undefined, isJson, io, presentation);
+      } catch (error) {
+        const contractError = toContractError(error);
+        return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "setup", undefined, contractError, isJson, io, presentation);
+      }
+    }
     try {
       const data = await executeSetupCommand(parsed, context, showProgress ? emitProgress : undefined,
         showProgress ? { detail: message => progress.detail(message),
@@ -314,7 +335,7 @@ async function executeCommandWithProgress(
         }
         definition = wfRes.value;
       } else {
-        const resolvedCfg = resolveConfigPath(cwd, parsed.configPath);
+        const resolvedCfg = resolveReadableConfigPath(cwd, parsed.configPath);
         const cfgRes = await loadRepositoryConfig(resolvedCfg);
         if (cfgRes.ok) {
           definition = cfgRes.value.defaultWorkflow;

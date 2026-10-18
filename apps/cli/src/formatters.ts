@@ -32,6 +32,7 @@ import {
   yellow
 } from "./presentation.js";
 import type { EnvironmentStatus } from "./environment.js";
+import { formatCodexHookSetupOutput } from "./codex-hook-setup.js";
 
 export interface FormatterOptions {
   readonly color?: boolean | undefined;
@@ -51,8 +52,16 @@ function isInitOutput(data: CliCommandData): data is InitCommandOutput {
   return typeof data === "object" && data !== null && "configPath" in data && "config" in data;
 }
 
+function isConfigMigrationOutput(command: CliCommandName, data: CliCommandData): data is import("./config-migration.js").ConfigMigrationOutput {
+  return command === "config-migrate" && typeof data === "object" && data !== null && "sourcePath" in data && "configPath" in data && "migrated" in data;
+}
+
 function isSetupOutput(data: CliCommandData): data is SetupCommandOutput {
   return typeof data === "object" && data !== null && "machineId" in data && "serviceManagerKind" in data && "plan" in data;
+}
+
+function isCodexHookSetupOutput(data: CliCommandData): data is import("./codex-hook-setup.js").CodexHookSetupOutput {
+  return typeof data === "object" && data !== null && "codexHooks" in data && data.codexHooks === true && "review" in data && "outcome" in data;
 }
 
 function isSnapshot(data: CliCommandData): data is WorkflowRunSnapshot {
@@ -694,8 +703,21 @@ export function formatCommandSuccess(
     return formatInitOutput(data, useColor);
   }
 
+  if (isConfigMigrationOutput(command, data)) {
+    const okMarker = useColor ? green(bold("[OK]"), true) : "[OK]";
+    return [
+      `${okMarker} ${data.migrated ? "Migrated" : "Already migrated"} repository configuration:`,
+      `  Config: ${sanitizeIdentifier(data.configPath)}`,
+      ...(data.backupPath ? [`  Backup: ${sanitizeIdentifier(data.backupPath)}`] : [])
+    ].join("\n");
+  }
+
   if (isSetupOutput(data)) {
     return formatSetupOutput(data, useColor);
+  }
+
+  if (isCodexHookSetupOutput(data)) {
+    return formatCodexHookSetupOutput(data, useColor);
   }
 
   if (isHighLevelOutput(data)) {

@@ -30,10 +30,11 @@ describe("High-Level CLI Argument Parser & Command Reference", () => {
       }
     });
 
-    it("includes all 24 required command prefixes in SUPPORTED_CLI_COMMANDS", () => {
+    it("includes all 25 required command prefixes in SUPPORTED_CLI_COMMANDS", () => {
       expect(SUPPORTED_CLI_COMMANDS).toContain("help");
       expect(SUPPORTED_CLI_COMMANDS).toContain("version");
       expect(SUPPORTED_CLI_COMMANDS).toContain("init");
+      expect(SUPPORTED_CLI_COMMANDS).toContain("config-migrate");
       expect(SUPPORTED_CLI_COMMANDS).toContain("up");
       expect(SUPPORTED_CLI_COMMANDS).toContain("down");
       expect(SUPPORTED_CLI_COMMANDS).toContain("attach");
@@ -55,7 +56,7 @@ describe("High-Level CLI Argument Parser & Command Reference", () => {
       expect(SUPPORTED_CLI_COMMANDS).toContain("skills sync");
       expect(SUPPORTED_CLI_COMMANDS).toContain("skills list");
       expect(SUPPORTED_CLI_COMMANDS).toContain("agent check");
-      expect(SUPPORTED_CLI_COMMANDS.length).toBe(24);
+      expect(SUPPORTED_CLI_COMMANDS.length).toBe(25);
     });
 
     it("has complete CLI_COMMAND_REFERENCE documentation entries", () => {

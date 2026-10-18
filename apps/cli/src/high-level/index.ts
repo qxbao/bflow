@@ -6,6 +6,7 @@ import type { SetupContext } from "@bflow/machine-setup";
 import { SUPPORTED_CLI_COMMANDS } from "../command-reference.js";
 import { loadMachineSkillCatalog } from "../skill-catalog.js";
 import { composeCliRuntime } from "../runtime.js";
+import { resolveReadableConfigPath } from "../config.js";
 import type { CliIo, PresentationOptions } from "../types.js";
 import { bold, cyan, dim, extractSafeDetails, formatProgressStep, green, humanText, readableLabel, red, resolveActionableRemediation, yellow } from "../presentation.js";
 import type { CliCommandName } from "../types.js";
@@ -333,7 +334,7 @@ function withDefaultRuntime(services: HighLevelServices): HighLevelServices {
   return {
     ...services,
     async openRuntime(root) {
-      if (!existsSync(join(root, ".bflow/config.yaml"))) return undefined;
+      if (!existsSync(resolveReadableConfigPath(root))) return undefined;
       const composed = await composeCliRuntime({ cwd: root });
       if (!composed.ok) throw composed.error;
       return { runtime: composed.value.runtime, close: () => composed.value.close() };

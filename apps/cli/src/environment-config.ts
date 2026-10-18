@@ -1,9 +1,10 @@
 import { z } from "zod";
-import { existsSync } from "node:fs";
+import { lstatSync } from "node:fs";
 import { mkdir, open, readFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { AgentRoleSchema, WorkflowDefinitionSchema } from "@bflow/contracts";
-import { createDefaultRepositoryConfig, loadRepositoryConfig } from "./config.js";
+import { createDefaultRepositoryConfig, loadRepositoryConfig, resolveReadableConfigPath } from "./config.js";
+import { parseConfigYaml, renderEnvironmentConfigYaml } from "./config-format.js";
 import { identifyRepository, type RepositoryIdentity } from "./repository.js";
 import type { BflowRepositoryConfig, InitCommandOutput } from "./types.js";
 
@@ -20,6 +21,8 @@ export const EnvironmentRoleConfigSchema = z
   .object({
     role: AgentRoleSchema,
     cli: z.string().trim().min(1),
+    model: z.string().trim().min(1).optional(),
+    effort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).optional(),
     required: z.boolean().optional(),
     permissionMode: z.enum(["restricted", "workspace_auto", "unattended_isolated"]).optional(),
     fallbackCli: EnvironmentProviderSchema.optional(),
@@ -27,7 +30,12 @@ export const EnvironmentRoleConfigSchema = z
     skills: z.array(z.string().trim().min(1)).optional(),
     unsupportedFlags: z.array(z.string().trim().min(1)).optional()
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (value.cli === "agy" && value.effort !== undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["effort"], message: "Agy configures effort in the model name; omit the effort field." });
+    }
+  });
 export type EnvironmentRoleConfig = z.infer<typeof EnvironmentRoleConfigSchema>;
 
 export const EnvironmentConfigEnvironmentSchema = z
@@ -106,7 +114,7 @@ export const EnvironmentConfigSchema = z
 export interface EnvironmentConfig extends BflowRepositoryConfig {
   readonly environment: z.infer<typeof EnvironmentConfigEnvironmentSchema>;
 }
-export const ENVIRONMENT_CONFIG_PATH = ".bflow/config.yaml";
+export const ENVIRONMENT_CONFIG_PATH = ".bflow/config.yml";
 
 export function defaultEnvironmentConfig(repository: RepositoryIdentity, name?: string, now = new Date(), provider: EnvironmentProvider = "codex"): EnvironmentConfig {
   if (provider !== "claude" && provider !== "codex" && provider !== "agy") throw new Error("Provider must be claude, codex, or agy");
@@ -131,11 +139,10 @@ function integer(value: unknown, max: number): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= max;
 }
 export async function readEnvironmentConfig(repository: RepositoryIdentity): Promise<EnvironmentConfig> {
-  const path = resolve(repository.root, ENVIRONMENT_CONFIG_PATH);
+  const path = resolveReadableConfigPath(repository.root);
   const base = await loadRepositoryConfig(path);
   if (!base.ok) throw new Error(base.error.message);
-  // JSON is the supported YAML 1.2 flow-style subset; no tags, aliases or executable loaders.
-  const raw: unknown = JSON.parse(await readFile(path, "utf8"));
+  const raw: unknown = parseConfigYaml(await readFile(path, "utf8"));
   const env = record(record(raw)["environment"]);
   if (env["repositoryId"] !== repository.id || env["workspaceRoot"] !== repository.root || env["sessionName"] !== repository.sessionName)
     throw new Error("Configuration belongs to another repository or was moved. Reconcile its repository identity before use.");
@@ -169,8 +176,23 @@ export async function initializeEnvironmentConfig(options: {
 }): Promise<InitCommandOutput> {
   const repository = await identifyRepository(resolve(options.cwd, options.dir ?? "."));
   const configPath = resolve(repository.root, ENVIRONMENT_CONFIG_PATH);
+  const configExists = (() => {
+    try {
+      const info = lstatSync(configPath);
+      if (!info.isFile()) throw new Error(`Configuration path ${configPath} must be a regular file, not a symlink or directory.`);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+  })();
   if (options.configPath !== undefined && resolve(repository.root, options.configPath) !== configPath)
-    throw new Error("Environment init writes only .bflow/config.yaml at the Git root.");
+    throw new Error("Environment init writes only .bflow/config.yml at the Git root.");
+  const legacyPath = [".bflow/config.yaml", ".bflow/config.json"].map(p => resolve(repository.root, p)).find(path => {
+    try { lstatSync(path); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+  });
+  if (!configExists && legacyPath)
+    throw new Error(`Legacy configuration exists at ${legacyPath}; preserve it and run 'bflow config-migrate' before init or up.`);
   await mkdir(dirname(configPath), { recursive: true });
   // A nested ignore file protects state without modifying the target repository's root ignore rules.
   const ignorePath = resolve(repository.root, ".bflow/.gitignore");
@@ -183,14 +205,14 @@ export async function initializeEnvironmentConfig(options: {
   }
   const config = defaultEnvironmentConfig(repository, options.projectName, options.clock?.(), options.provider);
   if (options.force) {
-    const existed = existsSync(configPath);
+    const existed = configExists;
     const file = await open(configPath, "w", 0o600);
-    try { await file.writeFile(JSON.stringify(config, null, 2) + "\n"); } finally { await file.close(); }
+    try { await file.writeFile(renderEnvironmentConfigYaml(config)); } finally { await file.close(); }
     return { configPath, config, overwritten: existed };
   }
   try {
     const file = await open(configPath, "wx", 0o600);
-    try { await file.writeFile(JSON.stringify(config, null, 2) + "\n"); } finally { await file.close(); }
+    try { await file.writeFile(renderEnvironmentConfigYaml(config)); } finally { await file.close(); }
     return { configPath, config, overwritten: false };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;

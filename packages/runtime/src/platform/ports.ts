@@ -35,6 +35,8 @@ export interface RolePlatformRequirement {
   readonly role: AgentRole;
   readonly provider: AgentProviderId;
   readonly required: boolean;
+  readonly model?: string;
+  readonly effort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   readonly permissionMode: PermissionProfile["mode"];
   /** Workspace root for permanent roles, exact task worktree for a Developer. */
   readonly cwd: string;
@@ -149,7 +151,11 @@ export interface GatewayRegistrationPort {
 // -------------------------------------------------------------- provider (T4)
 
 export interface ProviderAdapterContext {
+  /** Trusted machine process environment selectors, never sourced from repository role config. */
+  readonly launchEnvironment?: Readonly<Record<string, string>>;
   readonly rolePrompt?: string;
+  readonly model?: string;
+  readonly effort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   readonly mcpRegistrations: readonly MCPClientRegistration[];
   readonly mcpObservations: readonly MCPServiceObservation[];
   readonly skillManifest: SkillManifest;

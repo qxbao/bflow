@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { AgenticHostPlatformOptionsSchema } from "@bflow/runtime";
 import { identifyRepository, readEnvironmentConfig, runCli, type EnvironmentCompositionInput } from "../src/index.js";
-import { buildHostPlatformOptions, formatPlatformNotReady, type HostPlatformContext } from "../src/platform-options.js";
+import { buildHostPlatformOptions, formatPlatformNotReady, resolveCodexTrustPaths, type HostPlatformContext } from "../src/platform-options.js";
 import { loadMachineSkillCatalog } from "../src/skill-catalog.js";
 import { GATEWAY_CONTROL_LOCATOR_FILE } from "../src/gateway-control.js";
 
@@ -14,6 +14,8 @@ let base: EnvironmentCompositionInput;
 let context: HostPlatformContext;
 beforeAll(async () => {
   context = { machineId: "m-test-machine", stateDirectory: "/state/bflow", dataDirectory: "/data/bflow",
+    codexHomeDirectory: "/home/test/.codex", codexProcessHomeDirectory: "/home/test",
+    codexHookApprovalPath: "/state/bflow/codex-hook-approvals.json",
     skills: await loadMachineSkillCatalog() };
 });
 beforeEach(async () => {
@@ -99,12 +101,62 @@ describe("buildHostPlatformOptions", () => {
     expect(absentLocator).not.toHaveProperty("gatewayLocatorPath");
   });
 
+  it("carries the trusted Codex home and hook approval store path from machine context", async () => {
+    const trustedContext = Object.assign({}, context, {
+      codexHomeDirectory: "/isolated/providers/codex",
+      codexProcessHomeDirectory: "/isolated/providers/home",
+      codexHookApprovalPath: "/isolated/state/codex-hook-approvals.json"
+    });
+    const options = await buildHostPlatformOptions(base, { context: trustedContext, fileExists: absent });
+    expect(options).toMatchObject({
+      codexHomeDirectory: "/isolated/providers/codex",
+      codexHookApprovalPath: "/isolated/state/codex-hook-approvals.json"
+    });
+  });
+
+  it("keeps Codex hook state under BFLOW_HOME and otherwise follows CODEX_HOME", () => {
+    expect(resolveCodexTrustPaths({ environment: { BFLOW_HOME: "/isolated", CODEX_HOME: "/actual/.codex" },
+      homeDirectory: "/actual", processHomeDirectory: "/isolated/providers/home", machineStateDirectory: "/isolated/state" })).toEqual({
+      codexHomeDirectory: "/isolated/providers/codex",
+      codexProcessHomeDirectory: "/isolated/providers/home",
+      codexHookApprovalPath: "/isolated/state/codex-hook-approvals.json"
+    });
+    expect(resolveCodexTrustPaths({ environment: { CODEX_HOME: "/custom/codex" },
+      homeDirectory: "/actual", processHomeDirectory: "/actual", machineStateDirectory: "/state/bflow" })).toEqual({
+      codexHomeDirectory: "/custom/codex",
+      codexProcessHomeDirectory: "/actual",
+      codexHookApprovalPath: "/state/bflow/codex-hook-approvals.json"
+    });
+  });
+
   it("adds a Developer template using the Coordinator's provider when none is configured", async () => {
     const input = configure(environment => { environment.roles = environment.roles.map(role => ({ ...role, cli: role.role === "coordinator" ? "agy" : "claude" })); });
     const options = await buildHostPlatformOptions(input, { context, fileExists: absent });
     const developer = options.roles.find(role => role.role === "developer");
     expect(developer).toMatchObject({ provider: "agy", required: false });
     expect(options.roles.filter(role => role.role === "developer")).toHaveLength(1);
+  });
+
+  it("carries role model and effort settings and inherits them for an implicit Developer template", async () => {
+    const input = configure(environment => {
+      environment.roles = environment.roles.map(role => role.role === "coordinator"
+        ? { ...role, model: "codex-main", effort: "xhigh" as const }
+        : role);
+    });
+    const options = await buildHostPlatformOptions(input, { context, fileExists: absent });
+    expect(options.roles.find(role => role.role === "coordinator")).toMatchObject({ model: "codex-main", effort: "xhigh" });
+    expect(options.roles.find(role => role.role === "developer")).toMatchObject({ provider: "codex", model: "codex-main", effort: "xhigh", required: false });
+  });
+
+  it("uses an explicitly configured Developer model and effort instead of the Coordinator defaults", async () => {
+    const input = configure(environment => {
+      environment.roles = environment.roles.map(role => role.role === "coordinator"
+        ? { ...role, model: "coordinator-model", effort: "high" as const }
+          : role);
+      environment.roles.push({ role: "developer", cli: "claude", required: true, model: "developer-model", effort: "xhigh" });
+    });
+    const options = await buildHostPlatformOptions(input, { context, fileExists: absent });
+    expect(options.roles.find(role => role.role === "developer")).toMatchObject({ model: "developer-model", effort: "xhigh" });
   });
 
   it("requires a coordinator role", async () => {

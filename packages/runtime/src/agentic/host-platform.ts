@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { homedir } from "node:os";
 import { mkdir, open, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
@@ -9,9 +10,10 @@ import {
 import type { LiveReadinessObservation } from "@bflow/agent-providers";
 import { FileSkillStore, SkillManager } from "@bflow/skills";
 import {
-  createPlatformReadinessService, Ed25519LaunchAttestationSigner, GatewayControlClient,
+  createPlatformReadinessService, createProviderAdapterFactory, Ed25519LaunchAttestationSigner, GatewayControlClient,
   type GatewayControlPort, type HostLaunchExtras, type PlatformPreflightReport, type PlatformReadinessService,
-  type PlatformSessionIdentity, type PlatformStatusSnapshot, type PreparedRoleLaunch, type RolePlatformRequirement
+  type PlatformSessionIdentity, type PlatformStatusSnapshot, type PreparedRoleLaunch, type ProviderAdapterFactoryOptions,
+  type ProviderAdapterFactory, type RolePlatformRequirement
 } from "../platform/index.js";
 import {
   BFLOW_LAUNCH_ID_ENV, evaluateToolReachability, GATEWAY_PROBE_DIRECTORY, LAUNCH_REACHABILITY_DIRECTORY, publishLaunchProbe,
@@ -140,6 +142,8 @@ export function requirementFor(
     role: option.role,
     provider: option.provider,
     required: option.required,
+    ...(option.model !== undefined ? { model: option.model } : {}),
+    ...(option.effort !== undefined ? { effort: option.effort } : {}),
     permissionMode: option.permissionMode,
     cwd,
     ...(taskId !== undefined ? { taskId } : {}),
@@ -516,6 +520,46 @@ export interface CreateHostPlatformSessionOptions {
   readonly nativeSessionHookCommand: (role: AgentRole) => string | undefined;
 }
 
+/** Machine trust settings are provider defaults, so permanent and dynamic Developer Codex instances share them. */
+export function createHostProviderFactoryOptions(platform: AgenticHostPlatformOptions,
+  hookEnvironment: Readonly<Record<string, string | undefined>> = process.env) {
+  const codexHookEnvironment: Record<string, string> = {};
+  for (const name of ["HOME", "ORCA_AGENT_HOOK_ROOT", "ORCA_AGENT_HOOK_ENDPOINT"]) {
+    const value = name === "HOME" ? (platform.codexProcessHomeDirectory ?? hookEnvironment[name] ?? process.env.HOME ?? homedir()) : hookEnvironment[name];
+    if (value !== undefined) codexHookEnvironment[name] = value;
+  }
+  return {
+    ...(platform.codexHomeDirectory !== undefined ? { codexLaunchEnvironment: {
+      CODEX_HOME: platform.codexHomeDirectory,
+      HOME: codexHookEnvironment.HOME!,
+      ...Object.fromEntries(Object.entries(codexHookEnvironment).filter(([name]) => name !== "HOME"))
+    } } : {}),
+    perProvider: {
+      codex: {
+        ...(platform.codexHomeDirectory !== undefined ? { codexHomeDirectory: platform.codexHomeDirectory } : {}),
+        ...(platform.codexHookApprovalPath !== undefined ? { codexHookApprovalPath: platform.codexHookApprovalPath } : {}),
+        codexHookEnvironment
+      }
+    }
+  };
+}
+
+/** Applies trusted platform paths last so role and repository data cannot redirect Codex hook approvals. */
+export function createHostProviderAdapterFactory(
+  platform: AgenticHostPlatformOptions,
+  options: ProviderAdapterFactoryOptions = {},
+  hookEnvironment: Readonly<Record<string, string | undefined>> = process.env
+): ProviderAdapterFactory {
+  const trustedCodexOptions = createHostProviderFactoryOptions(platform, hookEnvironment).perProvider.codex;
+  return createProviderAdapterFactory({
+    ...options,
+    perProvider: {
+      ...options.perProvider,
+      codex: { ...options.perProvider?.codex, ...trustedCodexOptions }
+    }
+  });
+}
+
 /** Opens the real composition: skills store, Gateway control (if located), host-held signer and provider adapters. */
 export async function createHostPlatformSession(options: CreateHostPlatformSessionOptions): Promise<HostPlatformSession> {
   const platform = AgenticHostPlatformOptionsSchema.parse(options.platform);
@@ -551,6 +595,8 @@ export async function createHostPlatformSession(options: CreateHostPlatformSessi
     ...(gatewayControl !== undefined ? { gatewayControl } : {}),
     ...(gatewayEndpoint !== undefined ? { gatewayEndpoint } : {}),
     signer: new Ed25519LaunchAttestationSigner({ issuerId: options.issuerId, privateKeyPem: options.privateKeyPem, publicKeyPem: options.publicKeyPem }),
+    providerFactory: createHostProviderAdapterFactory(platform, {}, process.env),
+    ...createHostProviderFactoryOptions(platform, process.env),
     rolePrompt: options.rolePrompt,
     nativeSessionHookCommand: role => options.nativeSessionHookCommand(role),
     hostLaunch: role => options.hostLaunch(role)

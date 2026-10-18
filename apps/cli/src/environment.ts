@@ -267,13 +267,18 @@ export class EnvironmentLifecycle {
       }
     }
   }
+  private startupFailureWithCleanup(error: unknown, outcome: string): Error {
+    const message = error instanceof Error ? error.message : String(error);
+    if (error instanceof EnvironmentError) return new EnvironmentError({ ...error.contractError, message: `${message} Automatic cleanup ${outcome}.` });
+    return new Error(`${message} Automatic cleanup ${outcome}.`, { cause: error });
+  }
   private readyPane(pane: PaneBinding): boolean {
     if (["starting", "blocked", "disconnected", "cancelled", "unknown"].includes(pane.transportState)) return false;
     if (pane.metadata?.["partialStart"] === true || pane.metadata?.["startupStatus"] === "partial") return false;
     return READY_TRANSPORT_STATES.has(pane.transportState);
   }
   private ready(manifest: SessionManifest, config: EnvironmentConfig): boolean {
-    return manifest.status === "up" && config.environment.roles.filter((r) => r.required ?? true).every((r) =>
+    return manifest.status === "up" && config.environment.roles.filter((r) => r.role !== "developer" && (r.required ?? true)).every((r) =>
       manifest.panes.filter((pane) => pane.role === r.role).length === 1 &&
       manifest.panes.some((pane) => pane.role === r.role && this.readyPane(pane)));
   }
@@ -429,7 +434,7 @@ export class EnvironmentLifecycle {
 
       // Step 4: validate_permissions_and_trust
       if (config.environment.permissions?.trustedWorkspace === false) {
-        fail("Workspace trust check failed: repository workspace is not trusted. Remediation: Set environment.permissions.trustedWorkspace to true in .bflow/config.yaml or trust the workspace.", { component: "permissions" });
+        fail("Workspace trust check failed: repository workspace is not trusted. Remediation: Set environment.permissions.trustedWorkspace to true in .bflow/config.yml or trust the workspace.", { component: "permissions" });
       }
       const isUnattended = config.environment.permissions?.mode === "unattended_isolated" || rolesToRun.some((r) => r.permissionMode === "unattended_isolated");
       if (isUnattended && config.environment.permissions?.isolation !== "os_sandbox" && config.environment.permissions?.isolation !== "container") {
@@ -447,7 +452,7 @@ export class EnvironmentLifecycle {
         if (oFlags) unsupportedFlags.push(...oFlags);
       }
       if (unsupportedFlags.length > 0) {
-        fail(`Unsupported permission flags configured (${unsupportedFlags.join(", ")}). Remediation: Remove unsupported permission flags from .bflow/config.yaml or upgrade the provider CLI.`, { component: "permissions" });
+        fail(`Unsupported permission flags configured (${unsupportedFlags.join(", ")}). Remediation: Remove unsupported permission flags from .bflow/config.yml or upgrade the provider CLI.`, { component: "permissions" });
       }
       for (const role of rolesToRun) {
         for (const envKey of role.requiredEnv ?? []) {
@@ -478,7 +483,7 @@ export class EnvironmentLifecycle {
         fail(`Required skills are missing: ${skillsOverride.missingSkills.join(", ")}. Remediation: Run 'bflow skills sync' or 'bflow setup --apply' to install missing skills.`, { component: "skills" });
       }
       if (skillsOverride?.invalidReferences && skillsOverride.invalidReferences.length > 0) {
-        fail(`Invalid skill references detected: ${skillsOverride.invalidReferences.join(", ")}. Remediation: Fix role skill bindings in .bflow/config.yaml or skills/roles/bindings.json and run 'bflow skills sync'.`, { component: "skills" });
+        fail(`Invalid skill references detected: ${skillsOverride.invalidReferences.join(", ")}. Remediation: Fix role skill bindings in .bflow/config.yml or skills/roles/bindings.json and run 'bflow skills sync'.`, { component: "skills" });
       }
       if (skillsOverride?.versionIncompatible) {
         fail("Skill catalog version is incompatible with Platform v3. Remediation: Update skill bundles to schemaVersion 3 and run 'bflow skills sync'.", { component: "skills" });
@@ -558,7 +563,9 @@ export class EnvironmentLifecycle {
       const integration = await deadline.call(() => this.integration(repository, config));
       if (!integration) fail("P13 SessionLifecycleManager is not composed. Supply CliContext.environment.openIntegration or BFLOW_ENVIRONMENT_MODULE; no roles were started.");
 
-      let createdMcpRegistrationThisAttempt = false;
+      let cleanupEligible = false;
+      let startupError: unknown;
+      let outcome: SessionManifest | undefined;
       try {
         this.progress("Inspecting existing session state...");
         const previous = await this.intent(repository);
@@ -570,11 +577,13 @@ export class EnvironmentLifecycle {
         // Step 8: reconcile_herdr_session_and_panes
         let manifestRaw = unwrap(await deadline.call((opts) => integration.manager.getManifest(repository.sessionName, opts)));
         let manifest = manifestRaw === null ? null : this.validateManifest(manifestRaw, repository);
+        if (running && previous?.phase === "manager_pending" && (manifest !== null || saved !== null)) cleanupEligible = true;
         if (!running) {
           if (previous?.phase === "server_starting") {
             if (!previous.serverPid) fail("Startup was interrupted before its server acknowledgement. Run bflow recover --yes after stopping any old Bflow command, then bflow up. State is preserved.");
             if (this.processAlive(previous.serverPid)) fail(`Startup process ${previous.serverPid} is still alive; wait and rerun bflow up. Use bflow status/doctor to inspect it; no duplicate server was started.`);
           }
+          cleanupEligible = true;
           await this.writeIntent(repository, "server_starting");
           await mkdir(resolve(repository.root, ".bflow/logs"), { recursive: true, mode: 0o700 });
           this.progress("Starting Herdr headless server...");
@@ -590,7 +599,6 @@ export class EnvironmentLifecycle {
         if (this.dependencies.mcpState) {
           this.dependencies.mcpState.activeRepositories?.add(repository.id);
           this.dependencies.mcpState.sessionRegistrations?.set(repository.sessionName, [...requiredMcp]);
-          createdMcpRegistrationThisAttempt = true;
         }
 
         // Step 9: start_required_agents
@@ -598,6 +606,7 @@ export class EnvironmentLifecycle {
           if (previous?.phase === "manager_pending" && manifest === null)
             fail("Earlier role startup has no recoverable pane receipt; refusing duplicate agents. Run bflow down --yes to reconcile and stop the partial startup, then bflow up. Preserve .bflow.");
           await this.writeIntent(repository, "manager_pending");
+          cleanupEligible = true;
           this.progress("Starting agent roles...");
           manifest = this.validateManifest(unwrap(await deadline.call((opts) => integration.manager.up(repository.sessionName, opts))), repository);
         } else {
@@ -613,7 +622,7 @@ export class EnvironmentLifecycle {
           await this.saveManifest(repository, { ...manifest, status: manifest.status === "up" && (!this.ready(manifest, config) || !nativeReady) ? "initializing" : manifest.status });
 
           for (const p of manifest.panes) {
-            if (config.environment.roles.some((r) => r.role === p.role && (r.required ?? true))) {
+            if (config.environment.roles.some((r) => r.role !== "developer" && r.role === p.role && (r.required ?? true))) {
               if (p.metadata?.["partialStart"] === true || p.metadata?.["startupStatus"] === "partial") {
                 await this.saveManifest(repository, { ...manifest, status: "degraded" });
                 fail(`Agent provider for role '${p.role}' only partially started. Remediation: Inspect role pane logs via 'bflow doctor' or restart the session with 'bflow down --yes && bflow up'.`, { component: `role:${p.role}` });
@@ -621,7 +630,7 @@ export class EnvironmentLifecycle {
             }
           }
 
-          const blocked = manifest.panes.find((p) => config.environment.roles.some((r) => r.role === p.role && (r.required ?? true)) && p.transportState === "blocked");
+          const blocked = manifest.panes.find((p) => config.environment.roles.some((r) => r.role !== "developer" && r.role === p.role && (r.required ?? true)) && p.transportState === "blocked");
           if (blocked) {
             await this.saveManifest(repository, { ...manifest, status: "degraded" });
             fail(`Required role '${blocked.role}' is blocked during startup in pane '${blocked.paneId}'. Resolve it before retrying up.`);
@@ -644,7 +653,7 @@ export class EnvironmentLifecycle {
             break;
           }
 
-          const missingOrStarting = config.environment.roles.filter(r => r.required ?? true).find(r => {
+          const missingOrStarting = config.environment.roles.filter(r => r.role !== "developer" && (r.required ?? true)).find(r => {
             const p = manifest!.panes.find(pane => pane.role === r.role);
             return !p || !this.readyPane(p);
           });
@@ -691,17 +700,47 @@ export class EnvironmentLifecycle {
           ...(fallbackNotices.length > 0 ? { providerFallbacks: fallbackNotices } : {})
         };
         const finalManifest = await this.saveManifest(repository, { ...manifest, metadata: updatedMetadata });
-        await rm(this.statePath(repository, "operation.json"), { force: true });
-
         // Step 12: report_success
-        return finalManifest;
+        outcome = finalManifest;
       } catch (error) {
-        if (createdMcpRegistrationThisAttempt) {
-          this.dependencies.mcpState?.sessionRegistrations?.delete(repository.sessionName);
-          this.dependencies.mcpState?.activeRepositories?.delete(repository.id);
+        startupError = error;
+      }
+      let cleanupOutcome: string | undefined;
+      if (startupError !== undefined && cleanupEligible) {
+        try {
+          if (startupError instanceof EnvironmentError && ["timeout", "cancelled", "unknown_delivery"].includes(startupError.contractError.code)) {
+            const cleanupDeadline = new Deadline(config.environment.shutdownTimeoutMs);
+            const receipt = unwrap(await cleanupDeadline.call(opts => integration.manager.getManifest(repository.sessionName, opts)));
+            if (receipt === null) fail("Startup delivery is uncertain and the manager has no recoverable pane receipt; state was preserved for reconciliation.");
+            this.validateManifest(receipt, repository);
+          }
+          await this.downLocked(repository, config, true, undefined, undefined, integration);
+          cleanupOutcome = "completed successfully";
+        } catch (cleanupError) {
+          cleanupOutcome = `failed and preserved the operation receipt and recovery state (${String(cleanupError)})`;
         }
-        throw error;
-      } finally { await integration.close?.(); }
+      }
+      let closeError: unknown;
+      try { await new Deadline(config.environment.shutdownTimeoutMs).call(() => integration.close?.() ?? Promise.resolve()); }
+      catch (error) {
+        closeError = error;
+        if (startupError === undefined) startupError = error;
+      }
+      if (closeError !== undefined && startupError !== closeError)
+        cleanupOutcome = `${cleanupOutcome ?? "cleanup outcome is unknown"}; startup integration close also failed (${String(closeError)})`;
+      if (closeError !== undefined && cleanupEligible && cleanupOutcome === undefined) {
+        try {
+          await this.downLocked(repository, config, true);
+          cleanupOutcome = "completed after the startup integration failed to close";
+        } catch (cleanupError) {
+          cleanupOutcome = `failed after the startup integration failed to close (${String(cleanupError)})`;
+        }
+      }
+      if (startupError !== undefined) throw this.startupFailureWithCleanup(startupError,
+        cleanupOutcome ?? (cleanupEligible ? "was not completed" : "was not attempted because startup had not changed the session"));
+      if (!outcome) fail("Startup completed without a session manifest.");
+      await rm(this.statePath(repository, "operation.json"), { force: true });
+      return outcome;
     });
   }
   async attach(): Promise<SessionManifest> {
@@ -735,8 +774,12 @@ export class EnvironmentLifecycle {
     this.progress("Inspecting session state and running workflows...");
     const repository = await identifyRepository(this.cwd, this.runner);
     const config = await readEnvironmentConfig(repository);
-    return this.locked(repository, async () => {
-      const deadline = new Deadline(timeoutMs ?? config.environment.shutdownTimeoutMs, this.dependencies.signal);
+    return this.locked(repository, () => this.downLocked(repository, config, confirmed, timeoutMs, this.dependencies.signal));
+  }
+  private async downLocked(repository: RepositoryIdentity, config: EnvironmentConfig, confirmed: boolean, timeoutMs?: number, signal?: AbortSignal,
+    suppliedIntegration?: EnvironmentIntegration): Promise<SessionManifest | EnvironmentStatus> {
+      const deadline = new Deadline(timeoutMs ?? config.environment.shutdownTimeoutMs, signal);
+      const acquire = () => suppliedIntegration ? Promise.resolve(suppliedIntegration) : deadline.call(() => this.integration(repository, config));
       let saved = await this.savedManifest(repository);
       if (!saved) {
         // A blocked first role may leave only P13's durable startup receipt.
@@ -750,16 +793,16 @@ export class EnvironmentLifecycle {
           return { workspaceRoot: repository.root, sessionName: repository.sessionName, server: "stopped" as const,
             configuration: "valid" as const, manifest: null, liveObservation: true, issues: [] };
         }
-        const recovery = await deadline.call(() => this.integration(repository, config));
+        const recovery = await acquire();
         if (!recovery) fail("No role manager can reconcile the partial startup; no session was stopped.");
         try {
           const observed = unwrap(await deadline.call(opts => recovery.manager.getManifest(repository.sessionName, opts)));
           if (observed) saved = this.validateManifest(observed, repository);
-        } finally { await recovery.close?.(); }
+        } finally { if (recovery !== suppliedIntegration) await deadline.call(() => recovery.close?.() ?? Promise.resolve()); }
         if (!saved) {
           if (!confirmed) fail("Startup stopped before a pane manifest was saved. Run bflow down --yes to stop this repository's server after checking that no workflows are active. Do not delete .bflow.");
           this.progress("Stopping partial startup session...");
-          const empty = await deadline.call(() => this.integration(repository, config));
+          const empty = await acquire();
           if (!empty?.runtime || !empty.quiesce) fail("Cannot establish runtime shutdown safety; preserve state and inspect bflow doctor.");
           try {
             this.progress("Establishing runtime shutdown barrier...");
@@ -770,21 +813,22 @@ export class EnvironmentLifecycle {
             this.progress("Stopping Herdr session...");
             await this.command(repository, config.environment.herdrBinary, ["session", "stop", repository.sessionName, "--json"], deadline);
             while (await this.probe(repository, config, deadline)) await deadline.pause();
-            await this.writeIntent(repository, "down");
             this.progress("Shutting down persistent host...");
-            await empty.shutdownHost?.();
+            if (empty.shutdownHost) await deadline.call(() => empty.shutdownHost!());
+            await this.writeIntent(repository, "down");
             this.cleanupMcpSession(repository);
             return { workspaceRoot: repository.root, sessionName: repository.sessionName, server: "stopped" as const,
               configuration: "valid" as const, manifest: null, liveObservation: true, issues: [] };
-          } finally { await empty.close?.(); }
+          } finally { if (empty !== suppliedIntegration) await deadline.call(() => empty.close?.() ?? Promise.resolve()); }
         }
       }
       const running = await this.probe(repository, config, deadline);
       if (!running) {
         this.progress("Session server is stopped; reconciling state...");
-        const offline = await deadline.call(() => this.integration(repository, config));
+        const offline = await acquire();
         if (offline?.shutdownHost) try {
           if (!offline.runtime || !offline.quiesce) fail("Cannot drain the retained host safely; state was preserved.");
+          await this.writeIntent(repository, "stopping");
           this.progress("Establishing runtime shutdown barrier...");
           unwrap(await deadline.call(opts => offline.quiesce!(opts)));
           this.progress("Recollecting active workflow runs...");
@@ -807,13 +851,13 @@ export class EnvironmentLifecycle {
           }
           await this.checkpointRuns(offline, active, deadline);
           this.progress("Shutting down persistent host...");
-          await offline.shutdownHost();
-        } finally { await offline.close?.(); }
+          await deadline.call(() => offline.shutdownHost!());
+        } finally { if (offline !== suppliedIntegration) await deadline.call(() => offline.close?.() ?? Promise.resolve()); }
         await this.writeIntent(repository, "down");
         this.cleanupMcpSession(repository);
         return this.saveManifest(repository, { ...saved, status: "down", updatedAt: new Date().toISOString(), stoppedAt: new Date().toISOString() });
       }
-      const integration = await deadline.call(() => this.integration(repository, config));
+      const integration = await acquire();
       if (!integration) fail("Runtime is unavailable; cannot inspect active runs/checkpoint safely. Session remains running.");
       try {
         if (!integration.runtime) fail("Runtime is unavailable; cannot inspect active runs/checkpoint safely. Session remains running.");
@@ -866,14 +910,14 @@ export class EnvironmentLifecycle {
         this.progress("Stopping Herdr session...");
         if (await this.probe(repository, config, deadline)) await this.command(repository, config.environment.herdrBinary, ["session", "stop", repository.sessionName, "--json"], deadline);
         while (await this.probe(repository, config, deadline)) await deadline.pause();
+        await this.saveManifest(repository, { ...stopped, status: "stopping" });
+        this.progress("Shutting down persistent host...");
+        if (integration.shutdownHost) await deadline.call(() => integration.shutdownHost!());
         await this.writeIntent(repository, "down");
         const finalManifest = await this.saveManifest(repository, stopped);
-        this.progress("Shutting down persistent host...");
-        await integration.shutdownHost?.();
         this.cleanupMcpSession(repository);
         return finalManifest;
-      } finally { await integration.close?.(); }
-    });
+      } finally { if (integration !== suppliedIntegration) await deadline.call(() => integration.close?.() ?? Promise.resolve()); }
   }
   async status(): Promise<EnvironmentStatus> {
     const repository = await identifyRepository(this.cwd, this.runner);

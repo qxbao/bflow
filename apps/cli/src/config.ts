@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { ensureEnvironmentInitialized } from "./environment-config.js";
+import { parseConfigYaml } from "./config-format.js";
 import {
   WorkflowDefinitionSchema,
   type OperationResult,
@@ -10,7 +11,7 @@ import {
 } from "@bflow/contracts";
 import type { BflowRepositoryConfig, InitCommandOutput } from "./types.js";
 
-export const DEFAULT_CONFIG_RELATIVE_PATH = ".bflow/config.yaml";
+export const DEFAULT_CONFIG_RELATIVE_PATH = ".bflow/config.yml";
 
 export function createDefaultWorkflowDefinition(): WorkflowDefinition {
   const definition: WorkflowDefinition = {
@@ -148,8 +149,18 @@ export function resolveConfigPath(cwd: string, configPath?: string, dir?: string
   }
   const targetDir = dir !== undefined ? (isAbsolute(dir) ? dir : resolve(cwd, dir)) : cwd;
   const preferred = resolve(targetDir, DEFAULT_CONFIG_RELATIVE_PATH);
-  return !existsSync(preferred) && existsSync(resolve(targetDir, ".bflow/config.json"))
-    ? resolve(targetDir, ".bflow/config.json") : preferred;
+  return preferred;
+}
+
+/** Returns the canonical config when present, otherwise a readable legacy location. */
+export function resolveReadableConfigPath(cwd: string, configPath?: string, dir?: string): string {
+  if (configPath !== undefined) return resolveConfigPath(cwd, configPath, dir);
+  const targetDir = dir !== undefined ? (isAbsolute(dir) ? dir : resolve(cwd, dir)) : cwd;
+  for (const relative of [DEFAULT_CONFIG_RELATIVE_PATH, ".bflow/config.yaml", ".bflow/config.json"]) {
+    const candidate = resolve(targetDir, relative);
+    if (existsSync(candidate)) return candidate;
+  }
+  return resolve(targetDir, DEFAULT_CONFIG_RELATIVE_PATH);
 }
 
 export async function loadRepositoryConfig(
@@ -171,14 +182,14 @@ export async function loadRepositoryConfig(
 
   let raw: unknown;
   try {
-    raw = JSON.parse(content);
-  } catch {
+    raw = parseConfigYaml(content);
+  } catch (error) {
     return {
       ok: false,
       error: {
         code: "corruption",
         retryable: false,
-        message: `Configuration file at '${configPath}' contains invalid JSON.`
+        message: `Configuration file at '${configPath}' contains invalid YAML: ${error instanceof Error ? error.message : String(error)}`
       }
     };
   }
@@ -189,7 +200,7 @@ export async function loadRepositoryConfig(
       error: {
         code: "corruption",
         retryable: false,
-        message: `Configuration file at '${configPath}' must be a JSON object.`
+        message: `Configuration file at '${configPath}' must be a YAML mapping.`
       }
     };
   }
@@ -326,14 +337,14 @@ export async function loadWorkflowDefinitionFromFile(
 
   let raw: unknown;
   try {
-    raw = JSON.parse(content);
-  } catch {
+    raw = parseConfigYaml(content);
+  } catch (error) {
     return {
       ok: false,
       error: {
         code: "corruption",
         retryable: false,
-        message: `Workflow definition file at '${workflowPath}' contains invalid JSON.`
+        message: `Workflow definition file at '${workflowPath}' contains invalid YAML: ${error instanceof Error ? error.message : String(error)}`
       }
     };
   }

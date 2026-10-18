@@ -7,9 +7,10 @@ import {
   SessionManifestSchema, type SessionLifecycleManager, type SessionManifest, type RuntimeService,
   type RecoveryCheckpoint, type WorkflowRunSnapshot, type CreateCheckpointCommand
 } from "@bflow/contracts";
-import { EnvironmentError, EnvironmentLifecycle, identifyRepository, main, namedSessionEnvironment, parseCliArgs, runCli,
-  environmentProcessRunner, type EnvironmentConfig, type EnvironmentProcessRequest, type EnvironmentProcessRunner } from "../src/index.js";
-import { PaneManagerLifecycleAdapter } from "../src/pane-manager-integration.js";
+import { EnvironmentConfigSchema, EnvironmentError, EnvironmentLifecycle, identifyRepository, main, namedSessionEnvironment, parseCliArgs, parseConfigYaml,
+  renderEnvironmentConfigYaml, runCli, environmentProcessRunner, type EnvironmentProcessRequest, type EnvironmentProcessRunner } from "../src/index.js";
+import { PaneManagerLifecycleAdapter, openPaneManagerEnvironment } from "../src/pane-manager-integration.js";
+import type { LifecycleHost } from "../src/agentic-host.js";
 
 const now = "2026-10-16T00:00:00.000Z";
 const linuxIt = it.skipIf(process.platform !== "linux");
@@ -96,7 +97,7 @@ describe("P12 repository environment lifecycle", () => {
     try {
       const result = await runCli(["init"], { cwd: other });
       expect(result.ok).toBe(false); expect(result.stderr).toContain("Not a Git");
-      await expect(readFile(join(other, ".bflow/config.yaml"))).rejects.toThrow();
+      await expect(readFile(join(other, ".bflow/config.yml"))).rejects.toThrow();
     } finally { await rm(other, { recursive: true, force: true }); }
   });
   // EnvironmentLifecycle uses the production Linux flock repository guard.
@@ -110,6 +111,23 @@ describe("P12 repository environment lifecycle", () => {
     expect(report.checks.find(check => check.checkId === "auth-codex")?.status).toBe("failed");
     expect(JSON.stringify(report)).not.toContain("secret-account-information");
   });
+  linuxIt("does not shut down a healthy preexisting session when startup validation fails before mutation", async () => {
+    await lifecycle.up();
+    const invalid = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager },
+      providerOverrides: { codex: { authenticated: false } } });
+    await expect(invalid.up()).rejects.toThrow("not authenticated");
+    expect(fixture.manager.down).not.toHaveBeenCalled();
+    expect(runner.running.has(repository.sessionName)).toBe(true);
+  });
+  linuxIt("does not require a dynamic Developer template to have a permanent startup pane", async () => {
+    const path = join(dir, ".bflow/config.yml");
+    const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
+    config.environment.roles.push({ role: "developer", cli: "codex", required: true });
+    await writeFile(path, renderEnvironmentConfigYaml(config));
+    const manifest = await lifecycle.up();
+    expect(manifest.status).toBe("up");
+    expect(manifest.panes.some(pane => pane.role === "developer")).toBe(false);
+  });
   linuxIt("reconciles manager_pending only with an existing validated physical manifest", async () => {
     await lifecycle.up();
     // Health can mark an incomplete but idle topology up; the pending receipt
@@ -121,23 +139,36 @@ describe("P12 repository environment lifecycle", () => {
     expect(fixture.manager.up).toHaveBeenCalledTimes(2);
     expect(runner.requests.filter(request => request.args[0] === "server")).toHaveLength(1);
   });
+  linuxIt("cleans an owned partial startup on retry when its pane receipt is recoverable", async () => {
+    await mkdir(join(dir, ".bflow/state"), { recursive: true });
+    await writeFile(join(dir, ".bflow/state/operation.json"), JSON.stringify({ repositoryId: repository.id, sessionName: repository.sessionName, phase: "manager_pending" }));
+    fixture.set({ ...fixture.create(), status: "degraded" });
+    await writeFile(join(dir, ".bflow/state/session.json"), JSON.stringify(fixture.get()));
+    runner.running.add(repository.sessionName);
+    vi.mocked(fixture.manager.up).mockImplementation(async () => { throw new Error("retried role startup failed"); });
+    await expect(lifecycle.up()).rejects.toThrow(/retried role startup failed.*Automatic cleanup completed successfully/);
+    expect(runner.running.has(repository.sessionName)).toBe(false);
+    expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("down");
+    expect(fixture.manager.up).toHaveBeenCalledOnce();
+  });
   linuxIt("can shut down a failed first startup using the manager's durable topology receipt", async () => {
+    runner.running.add("other-repository");
     vi.mocked(fixture.manager.up).mockImplementation(async () => {
       fixture.set({ ...fixture.create(), status: "degraded" });
       throw new Error("role blocked after receipt persisted");
     });
     await expect(lifecycle.up()).rejects.toThrow("role blocked");
-    await expect(readFile(join(dir, ".bflow/state/session.json"))).rejects.toThrow();
-    const stopped = await lifecycle.down(true);
-    expect(stopped.status).toBe("down");
     expect(fixture.manager.down).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("down");
+    expect(JSON.parse(await readFile(join(dir, ".bflow/state/session.json"), "utf8")).status).toBe("down");
     expect(runner.running.has(repository.sessionName)).toBe(false);
+    expect(runner.running.has("other-repository")).toBe(true);
   });
   linuxIt("requires an authenticated Claude status payload rather than accepting exit zero alone", async () => {
-    const path = join(dir, ".bflow/config.yaml");
-    const config = JSON.parse(await readFile(path, "utf8"));
-    config.environment.roles = config.environment.roles.map((role: object) => ({ ...role, cli: "claude" }));
-    await writeFile(path, JSON.stringify(config));
+    const path = join(dir, ".bflow/config.yml");
+    const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
+    config.environment.roles = config.environment.roles.map(role => ({ ...role, cli: "claude" }));
+    await writeFile(path, renderEnvironmentConfigYaml(config));
     runner.claudeStatus = { loggedIn: false, email: "private-account@example.test" };
     await expect(lifecycle.up()).rejects.toThrow("not authenticated");
     expect(fixture.manager.up).not.toHaveBeenCalled();
@@ -147,16 +178,40 @@ describe("P12 repository environment lifecycle", () => {
   });
   linuxIt("activates the real host only after roles are ready and does not report ready when host startup fails", async () => {
     const activate = vi.fn(async () => { throw new Error("host startup failed"); });
-    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, activate } });
+    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime(),
+      quiesce: async () => ({ ok: true, value: undefined }), activate } });
     await expect(composed.up()).rejects.toThrow("host startup failed");
     expect(activate).toHaveBeenCalledWith(expect.objectContaining({ status: "up" }), expect.any(Object));
-    const state = JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8"));
-    expect(state.phase).toBe("manager_pending");
+    expect(fixture.manager.down).toHaveBeenCalledTimes(1);
+    expect(runner.running.has(repository.sessionName)).toBe(false);
+  });
+  linuxIt("automatically shuts down when the composed host readiness preflight blocks pane startup", async () => {
+    const path = join(dir, ".bflow/config.yml");
+    const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
+    const input = { repository, config, env: process.env };
+    const host: LifecycleHost = {
+      prepare: vi.fn(async () => ({ roleLaunch: {}, platform: { ready: false, generation: 1, checkedAt: now, roles: [
+        { role: "coordinator", provider: "codex", required: true, status: "blocked", message: "missing provider authentication",
+          checks: [{ check: "authentication", status: "failed", code: "auth_missing", message: "provider login missing", remediation: "login" }] }
+      ] } })),
+      activate: vi.fn(async () => ({ ok: true as const, value: undefined })),
+      runtime: mockRuntime(),
+      quiesce: vi.fn(async () => ({ ok: true as const, value: undefined })),
+      checkpoint: vi.fn(), shutdown: vi.fn(async () => {}), close: vi.fn(async () => {})
+    };
+    const composed = new EnvironmentLifecycle(dir, { runner, openIntegration: async () =>
+      openPaneManagerEnvironment(input, runner, async () => host) });
+    await expect(composed.up()).rejects.toThrow(/Provider readiness is not satisfied.*missing provider authentication.*Automatic cleanup completed successfully/s);
+    expect(host.prepare).toHaveBeenCalledOnce();
+    expect(host.shutdown).toHaveBeenCalledOnce();
+    expect(fixture.manager.up).not.toHaveBeenCalled();
+    expect(runner.running.has(repository.sessionName)).toBe(false);
   });
   linuxIt("waits for authenticated native startup receipts without resending role startup", async () => {
     const activate = vi.fn(async () => undefined).mockRejectedValueOnce(new EnvironmentError({ code: "conflict", retryable: true,
       message: "Native hook is still publishing its receipt", details: { stage: "native_startup" } }));
-    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, activate } });
+    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime(),
+      quiesce: async () => ({ ok: true, value: undefined }), activate } });
     expect((await composed.up()).status).toBe("up");
     expect(activate).toHaveBeenCalledTimes(2); expect(fixture.manager.up).toHaveBeenCalledTimes(1);
     expect(runner.requests.filter(r => r.args[0] === "server")).toHaveLength(1);
@@ -164,16 +219,80 @@ describe("P12 repository environment lifecycle", () => {
   linuxIt("retains actionable native-hook context when activation readiness times out", async () => {
     const activate = vi.fn(async () => { throw new EnvironmentError({ code: "conflict", retryable: true,
       message: "Coordinator pane pane-7 is still publishing its native receipt", details: { stage: "native_startup" } }); });
-    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, activate } });
-    await expect(composed.up(350)).rejects.toThrow("Coordinator pane pane-7");
+    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime(),
+      quiesce: async () => ({ ok: true, value: undefined }), activate } });
+    await expect(composed.up(1500)).rejects.toThrow("Coordinator pane pane-7");
     expect(fixture.manager.up).toHaveBeenCalledTimes(1);
+    expect(fixture.manager.down).toHaveBeenCalledTimes(1);
+    expect(runner.running.has(repository.sessionName)).toBe(false);
+  });
+  linuxIt("preserves the startup error and operation receipt when automatic shutdown is unsafe", async () => {
+    const activate = vi.fn(async () => { throw new Error("original activation failure"); });
+    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, activate } });
+    await expect(composed.up()).rejects.toThrow(/original activation failure.*Automatic cleanup failed.*Runtime is unavailable/);
+    expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("manager_pending");
+    expect(runner.running.has(repository.sessionName)).toBe(true);
+    expect(fixture.manager.down).not.toHaveBeenCalled();
+  });
+  linuxIt("checkpoints active work before automatically stopping a failed startup", async () => {
+    const save = vi.fn(async (command: CreateCheckpointCommand) => ({ ok: true as const, value: checkpoint(command) }));
+    const runtime = mockRuntime([activeRun]);
+    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime, checkpoint: save,
+      quiesce: async () => ({ ok: true, value: undefined }), activate: async () => { throw new Error("activation failure"); } } });
+    await expect(composed.up()).rejects.toThrow(/activation failure.*Automatic cleanup completed successfully/);
+    expect(save).toHaveBeenCalledOnce();
+    expect(save.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(fixture.manager.down).mock.invocationCallOrder[0]!);
+    expect(runner.running.has(repository.sessionName)).toBe(false);
+  });
+  linuxIt("bounds automatic host shutdown and preserves stopping state when cleanup times out", async () => {
+    const path = join(dir, ".bflow/config.yml");
+    const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
+    config.environment.shutdownTimeoutMs = 3000;
+    await writeFile(path, renderEnvironmentConfigYaml(config));
+    const shutdownHost = vi.fn(async () => new Promise<void>(() => {}));
+    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime(),
+      quiesce: async () => ({ ok: true, value: undefined }), shutdownHost,
+      activate: async () => { throw new Error("original startup failure"); } } });
+    await expect(composed.up()).rejects.toThrow(/original startup failure.*Automatic cleanup failed.*timed out/);
+    expect(runner.running.has(repository.sessionName)).toBe(false);
+    expect(shutdownHost).toHaveBeenCalledOnce();
+    expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("stopping");
+    expect(JSON.parse(await readFile(join(dir, ".bflow/state/session.json"), "utf8")).status).toBe("stopping");
+  });
+  linuxIt("uses the live startup integration for shutdown before closing it", async () => {
+    let closed = false;
+    vi.mocked(fixture.manager.up).mockImplementation(async () => {
+      fixture.set({ ...fixture.create(), status: "degraded" });
+      throw new Error("role startup failed");
+    });
+    vi.mocked(fixture.manager.down).mockImplementation(async () => {
+      if (closed) throw new Error("integration already closed");
+      fixture.set({ ...fixture.get(), status: "down" });
+      return { ok: true, value: fixture.get() };
+    });
+    const close = vi.fn(async () => { closed = true; throw new Error("integration close failed"); });
+    const withClose = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime(),
+      quiesce: async () => ({ ok: true, value: undefined }), close } });
+    await expect(withClose.up()).rejects.toThrow(/role startup failed.*Automatic cleanup completed successfully.*integration close failed/);
+    expect(fixture.manager.down).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+    expect(closed).toBe(true);
+  });
+  linuxIt("reports a close failure after successful startup and attempts safe cleanup", async () => {
+    const close = vi.fn(async () => { throw new Error("startup integration close timed out"); });
+    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime(),
+      quiesce: async () => ({ ok: true, value: undefined }), close } });
+    await expect(composed.up()).rejects.toThrow(/startup integration close timed out.*Automatic cleanup failed after the startup integration failed to close/s);
+    expect(close).toHaveBeenCalledTimes(2);
+    expect(fixture.manager.down).toHaveBeenCalledOnce();
+    expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("down");
   });
   it("resolves nested and symlink paths to the same repository", async () => {
     await mkdir(join(dir, "nested")); await symlink(dir, join(dir, "alias"));
     expect(await identifyRepository(join(dir, "nested"))).toEqual(repository);
     expect(await identifyRepository(join(dir, "alias"))).toEqual(repository);
     expect((await runCli(["init"], { cwd: join(dir, "nested") })).ok).toBe(true);
-    await expect(readFile(join(dir, "nested/.bflow/config.yaml"))).rejects.toThrow();
+    await expect(readFile(join(dir, "nested/.bflow/config.yml"))).rejects.toThrow();
   });
   it("separates two repositories with the same basename", async () => {
     const a = join(dir, "a/same"); const b = join(dir, "b/same");
@@ -182,11 +301,11 @@ describe("P12 repository environment lifecycle", () => {
     expect((await identifyRepository(a)).sessionName).not.toBe((await identifyRepository(b)).sessionName);
   });
   it("preserves config on repeat init and ignores state/log/secrets without hiding config", async () => {
-    const before = await readFile(join(dir, ".bflow/config.yaml"), "utf8");
+    const before = await readFile(join(dir, ".bflow/config.yml"), "utf8");
     await runCli(["init", "--name", "replacement"], { cwd: dir, environment: { runner } });
-    expect(await readFile(join(dir, ".bflow/config.yaml"), "utf8")).toBe(before);
+    expect(await readFile(join(dir, ".bflow/config.yml"), "utf8")).toBe(before);
     const ignore = await readFile(join(dir, ".bflow/.gitignore"), "utf8");
-    expect(ignore.match(/secrets\//g)).toHaveLength(1); expect(ignore).not.toContain("config.yaml");
+    expect(ignore.match(/secrets\//g)).toHaveLength(1); expect(ignore).not.toContain("config.yml");
     execFileSync("git", ["check-ignore", ".bflow/state/run", ".bflow/logs/log", ".bflow/secrets/token"], { cwd: dir });
     expect(runner.requests).toHaveLength(0);
   });
@@ -195,9 +314,9 @@ describe("P12 repository environment lifecycle", () => {
     try {
       execFileSync("git", ["init", "--quiet", other]);
       expect((await runCli(["init", "--provider", "claude"], { cwd: other })).ok).toBe(true);
-      const path = join(other, ".bflow/config.yaml");
+      const path = join(other, ".bflow/config.yml");
       const before = await readFile(path, "utf8");
-      expect(JSON.parse(before).environment.roles.every((role: { cli: string }) => role.cli === "claude")).toBe(true);
+      expect(EnvironmentConfigSchema.parse(parseConfigYaml(before)).environment.roles.every(role => role.cli === "claude")).toBe(true);
       expect((await runCli(["init", "--provider", "codex"], { cwd: other })).ok).toBe(true);
       expect(await readFile(path, "utf8")).toBe(before);
     } finally { await rm(other, { recursive: true, force: true }); }
@@ -208,7 +327,7 @@ describe("P12 repository environment lifecycle", () => {
       execFileSync("git", ["init", "--quiet", other]);
       expect(parseCliArgs(["init", "--provider", "arbitrary-command"]).ok).toBe(false);
       expect((await runCli(["init", "--provider", "arbitrary-command"], { cwd: other })).ok).toBe(false);
-      await expect(readFile(join(other, ".bflow/config.yaml"))).rejects.toThrow();
+      await expect(readFile(join(other, ".bflow/config.yml"))).rejects.toThrow();
     } finally { await rm(other, { recursive: true, force: true }); }
   });
   linuxIt("starts a headless server and reuses ready roles without duplicate startup", async () => {
@@ -244,7 +363,7 @@ describe("P12 repository environment lifecycle", () => {
     vi.mocked(fixture.manager.up).mockImplementation(async () => { fixture.set(manifest); return { ok: true, value: manifest }; });
     await expect(lifecycle.up()).rejects.toThrow("coordinator' is blocked");
     await expect(lifecycle.up()).rejects.toThrow("blocked"); expect(fixture.manager.up).toHaveBeenCalledTimes(2);
-    const saved = JSON.parse(await readFile(join(dir, ".bflow/state/session.json"), "utf8")); expect(saved.status).toBe("degraded");
+    const saved = JSON.parse(await readFile(join(dir, ".bflow/state/session.json"), "utf8")); expect(saved.status).toBe("down");
   });
   linuxIt("does not report success when a required role is missing", async () => {
     const partial = fixture.create(); partial.panes = partial.panes.filter((p) => p.role !== "reviewer");
@@ -254,8 +373,23 @@ describe("P12 repository environment lifecycle", () => {
   });
   linuxIt("retains uncertain startup and forbids automatic resend", async () => {
     vi.mocked(fixture.manager.up).mockImplementation(async () => new Promise(() => {}));
-    await expect(lifecycle.up(500)).rejects.toThrow("timed out");
-    await expect(lifecycle.up()).rejects.toThrow("refusing duplicate"); expect(fixture.manager.up).toHaveBeenCalledTimes(1);
+    await expect(lifecycle.up(500)).rejects.toThrow(/timed out.*no recoverable pane receipt/);
+    expect(runner.running.has(repository.sessionName)).toBe(true);
+    expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("manager_pending");
+    await expect(lifecycle.up()).rejects.toThrow("no recoverable pane receipt"); expect(fixture.manager.up).toHaveBeenCalledTimes(1);
+    await expect(lifecycle.up()).rejects.toThrow("no recoverable pane receipt");
+    expect(fixture.manager.up).toHaveBeenCalledTimes(1);
+    expect(runner.running.has(repository.sessionName)).toBe(true);
+    expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("manager_pending");
+  });
+  linuxIt("preserves unknown_delivery when the manager has no recoverable startup receipt", async () => {
+    vi.mocked(fixture.manager.up).mockResolvedValue({ ok: false, error: {
+      code: "unknown_delivery", retryable: false, manualInterventionRequired: true, message: "Startup delivery is unknown"
+    } });
+    await expect(lifecycle.up()).rejects.toThrow(/delivery is unknown.*no recoverable pane receipt/i);
+    expect(runner.running.has(repository.sessionName)).toBe(true);
+    expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("manager_pending");
+    expect(fixture.manager.up).toHaveBeenCalledOnce();
   });
   linuxIt("reports server launch failure without creating roles", async () => {
     runner.serverFails = true;
@@ -275,10 +409,10 @@ describe("P12 repository environment lifecycle", () => {
     await mkdir(join(dir, ".bflow/state/lifecycle.lock"), { recursive: true });
     await expect(lifecycle.up()).rejects.toThrow("legacy lifecycle lock");
     expect(fixture.manager.up).not.toHaveBeenCalled();
-    const config = await readFile(join(dir, ".bflow/config.yaml"), "utf8");
+    const config = await readFile(join(dir, ".bflow/config.yml"), "utf8");
     const recovered = await runCli(["recover", "--yes", "--json"], { cwd: dir, environment: { runner, integration: { manager: fixture.manager } } });
     expect(recovered.ok).toBe(true); expect(JSON.parse(recovered.stdout).command).toBe("recover");
-    expect(await readFile(join(dir, ".bflow/config.yaml"), "utf8")).toBe(config);
+    expect(await readFile(join(dir, ".bflow/config.yml"), "utf8")).toBe(config);
     expect((await lifecycle.up()).status).toBe("up");
   });
   linuxIt("requires confirmation for active runs and does not stop agents", async () => {
@@ -301,7 +435,7 @@ describe("P12 repository environment lifecycle", () => {
     expect(runner.running.has("other-repository")).toBe(true); expect(runner.running.has(repository.sessionName)).toBe(false);
     expect(runner.requests.filter((r) => r.args.includes("stop")).map((r) => r.args)).toEqual([["session", "stop", repository.sessionName, "--json"]]);
     expect((await lifecycle.down()).status).toBe("down"); expect(fixture.manager.down).toHaveBeenCalledTimes(1);
-    expect(await readFile(join(dir, ".bflow/config.yaml"), "utf8")).toContain("defaultWorkflow");
+    expect(await readFile(join(dir, ".bflow/config.yml"), "utf8")).toContain("defaultWorkflow");
   });
   linuxIt("rejects a checkpoint for a different run", async () => {
     await lifecycle.up();
@@ -348,22 +482,23 @@ describe("P12 repository environment lifecycle", () => {
       fixture.set({ ...fixture.create(), status: "initializing" });
       await new Promise(() => {}); return { ok: true, value: fixture.get() };
     });
-    const interrupted = new EnvironmentLifecycle(dir, { runner, signal: abort.signal, integration: { manager: fixture.manager } });
+    const interrupted = new EnvironmentLifecycle(dir, { runner, signal: abort.signal, integration: { manager: fixture.manager,
+      runtime: mockRuntime(), quiesce: async () => ({ ok: true, value: undefined }) } });
     const pending = interrupted.up();
     await expect.poll(() => vi.mocked(original).mock.calls.length).toBe(1); abort.abort();
     await expect(pending).rejects.toMatchObject({ contractError: { code: "cancelled" } });
     expect((await lifecycle.up()).status).toBe("up");
-    expect(runner.requests.filter(r => r.args[0] === "server")).toHaveLength(1);
+    expect(runner.requests.filter(r => r.args[0] === "server")).toHaveLength(2);
     expect(await readFile(sentinel, "utf8")).toBe("uncommitted work");
   });
   linuxIt("recovers a pre-manifest stopped startup and keeps configuration intact", async () => {
-    const config = await readFile(join(dir, ".bflow/config.yaml"), "utf8");
+    const config = await readFile(join(dir, ".bflow/config.yml"), "utf8");
     await mkdir(join(dir, ".bflow/state"), { recursive: true });
     await writeFile(join(dir, ".bflow/state/operation.json"), JSON.stringify({ repositoryId: repository.id, sessionName: repository.sessionName, phase: "server_starting" }));
     await expect(lifecycle.up()).rejects.toThrow("bflow recover --yes");
     await expect(lifecycle.recover()).rejects.toThrow("recover --yes");
     await lifecycle.recover(true); expect((await lifecycle.up()).status).toBe("up");
-    expect(await readFile(join(dir, ".bflow/config.yaml"), "utf8")).toBe(config);
+    expect(await readFile(join(dir, ".bflow/config.yml"), "utf8")).toBe(config);
   });
   linuxIt("stops a server-only partial startup after the runtime barrier and rejects active work", async () => {
     await mkdir(join(dir, ".bflow/state"), { recursive: true });
@@ -393,8 +528,8 @@ describe("P12 repository environment lifecycle", () => {
     expect(runner.requests.some((r) => r.mode === "background")).toBe(false);
   });
   it("rejects copied config identity", async () => {
-    const path = join(dir, ".bflow/config.yaml"); const config: EnvironmentConfig = JSON.parse(await readFile(path, "utf8"));
-    await writeFile(path, JSON.stringify({ ...config, environment: { ...config.environment, repositoryId: "other" } }));
+    const path = join(dir, ".bflow/config.yml"); const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
+    await writeFile(path, renderEnvironmentConfigYaml({ ...config, environment: { ...config.environment, repositoryId: "other" } }));
     await expect(lifecycle.up()).rejects.toThrow("another repository");
   });
   it("routes main status to environment without opening the workflow runtime", async () => {

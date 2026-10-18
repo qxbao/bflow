@@ -1,7 +1,7 @@
 # Bflow Platform v3 — Security Audit Report (P24–P34)
 
 - **Ngày kiểm toán**: `2026-10-18`
-- **Baseline commit**: `ee4ff7c3b91b14be83d30b5fa73f8a8af28fb82c`
+- **Baseline commit**: `da9e166d136b199c62f4b862141357180268567c`
 - **Vai trò**: Principal Security Auditor
 - **Phạm vi**: Kiến trúc và thực thi bảo mật toàn tuyến Platform v3 (`packages/agent-providers`, `packages/machine-setup`, `packages/tool-installer`, `packages/mcp-gateway`, `packages/mcp-services`, `packages/skills`, `packages/runtime`, `packages/pane-manager`, `packages/conversation`, `packages/quality-gates`, `apps/cli`, `agents/**`, `skills/**`).
 

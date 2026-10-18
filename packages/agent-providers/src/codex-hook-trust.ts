@@ -1,0 +1,566 @@
+import { constants, statSync } from "node:fs";
+import { open, lstat, mkdir, realpath, rename, unlink } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { randomBytes, createHash } from "node:crypto";
+import { z } from "zod";
+import { parseCodexTomlHooks } from "./codex-hook-toml.js";
+
+const SHA256 = z.string().regex(/^[a-f0-9]{64}$/);
+const ABSOLUTE = z.string().min(1).refine(isAbsolute, "must be an absolute path");
+const MAX_SOURCE_BYTES = 256 * 1024;
+const MAX_SCRIPT_BYTES = 2 * 1024 * 1024;
+const MAX_EXECUTABLE_BYTES = 128 * 1024 * 1024;
+const MAX_DEPENDENCIES = 64;
+const MAX_HOOKS = 128;
+const MAX_COMMAND_BYTES = 16 * 1024;
+const REVIEWED_ORCA_WRAPPER_SHA256 = "33d44c305023507bd8fc33a4c49b4343519b2f99b99295c62b695ffe13ba7e63";
+export const CODEX_HOOK_APPROVAL_FILE = "codex-hook-approvals.json";
+
+export const CodexHookDependencySchema = z.object({
+  requestedPath: ABSOLUTE,
+  resolvedPath: ABSOLUTE.nullable(),
+  sha256: SHA256.nullable(),
+  exists: z.boolean()
+}).strict();
+export type CodexHookDependency = z.infer<typeof CodexHookDependencySchema>;
+
+export const CodexHookSourceSchema = z.object({
+  kind: z.enum(["hooks_json", "config_toml", "orca_candidate", "script"]),
+  path: ABSOLUTE,
+  exists: z.boolean(),
+  sha256: SHA256.nullable()
+}).strict();
+export type CodexHookSource = z.infer<typeof CodexHookSourceSchema>;
+
+export const CodexHookInventoryEntrySchema = z.object({
+  event: z.string().min(1).max(200),
+  matcher: z.unknown().optional(),
+  command: z.string().min(1).max(MAX_COMMAND_BYTES),
+  digest: SHA256,
+  dependencies: z.array(CodexHookDependencySchema).max(MAX_DEPENDENCIES)
+}).strict();
+export type CodexHookInventoryEntry = z.infer<typeof CodexHookInventoryEntrySchema>;
+
+export const CodexHookReviewSchema = z.object({
+  schemaVersion: z.literal(1),
+  codexHomeDirectory: ABSOLUTE,
+  approvalStorePath: ABSOLUTE,
+  digest: SHA256,
+  status: z.enum(["none", "approved", "approval_required", "unsupported"]),
+  sources: z.array(CodexHookSourceSchema).max(MAX_DEPENDENCIES),
+  hooks: z.array(CodexHookInventoryEntrySchema).max(MAX_HOOKS),
+  diagnostics: z.array(z.string().max(1000)),
+  unsupportedReasons: z.array(z.string().max(1000))
+}).strict();
+export type CodexHookReview = z.infer<typeof CodexHookReviewSchema>;
+
+export const CodexHookApprovalSchema = z.object({
+  schemaVersion: z.literal(1),
+  codexHomeDirectory: ABSOLUTE,
+  approvalStorePath: ABSOLUTE,
+  digest: SHA256,
+  approvedAt: z.string().datetime({ offset: true }),
+  approvedBy: z.string().trim().min(1).max(200)
+}).strict();
+export type CodexHookApproval = z.infer<typeof CodexHookApprovalSchema>;
+
+const ApprovalStoreSchema = z.object({
+  schemaVersion: z.literal(1),
+  approvals: z.array(CodexHookApprovalSchema).max(256)
+}).strict();
+
+export interface CodexHookTrustOptions {
+  readonly codexHomeDirectory?: string;
+  readonly approvalStorePath?: string;
+  readonly environment?: Readonly<Record<string, string | undefined>>;
+}
+
+export interface CodexHookApprovalOptions extends CodexHookTrustOptions {
+  readonly expectedDigest: string;
+  readonly approvedBy: string;
+}
+
+function sha256(bytes: Uint8Array | string): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function userHomeFor(environment: Readonly<Record<string, string | undefined>>, homeDirectory?: string): string {
+  const home = homeDirectory ?? environment["HOME"] ?? homedir();
+  if (!isAbsolute(home)) throw new Error("HOME must be an absolute trusted path.");
+  return resolve(home);
+}
+
+function codexHomeFor(environment: Readonly<Record<string, string | undefined>>, codexHomeDirectory?: string): string {
+  const home = codexHomeDirectory ?? environment["CODEX_HOME"] ?? join(userHomeFor(environment), ".codex");
+  if (!isAbsolute(home)) throw new Error("CODEX_HOME must be an absolute trusted path.");
+  return resolve(home);
+}
+
+export function defaultCodexHookApprovalPath(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+  homeDirectory?: string
+): string {
+  if (environment["XDG_STATE_HOME"] !== undefined && !isAbsolute(environment["XDG_STATE_HOME"]))
+    throw new Error("XDG_STATE_HOME must be an absolute trusted path.");
+  const state = environment["XDG_STATE_HOME"]
+    ? resolve(environment["XDG_STATE_HOME"])
+    : join(userHomeFor(environment, homeDirectory), ".local", "state");
+  return join(state, "bflow", CODEX_HOOK_APPROVAL_FILE);
+}
+
+function pathOptions(options: CodexHookTrustOptions = {}): { home: string; store: string; environment: Readonly<Record<string, string | undefined>> } {
+  const environment = options.environment ?? process.env;
+  const home = codexHomeFor(environment, options.codexHomeDirectory);
+  if (options.approvalStorePath !== undefined && !isAbsolute(options.approvalStorePath))
+    throw new Error("Codex hook approval store path must be absolute.");
+  const store = resolve(options.approvalStorePath ?? defaultCodexHookApprovalPath(environment));
+  const relativeStore = relative(home, store);
+  if (relativeStore === "" || (!relativeStore.startsWith(`..${sep}`) && relativeStore !== ".." && !isAbsolute(relativeStore)))
+    throw new Error("Codex hook approval store must be outside the provider's Codex home.");
+  return { home, store, environment };
+}
+
+function notFound(error: unknown): boolean {
+  return error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT";
+}
+
+function ownedByCurrentUserOrRoot(stat: { uid?: number }): boolean {
+  if (typeof process.getuid !== "function") return true;
+  const uid = process.getuid();
+  return stat.uid === uid || stat.uid === 0;
+}
+
+async function readBoundedRegular(path: string, maxBytes: number, privateFile = false): Promise<Buffer> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stat = await handle.stat();
+    const beforePrecise = await handle.stat({ bigint: true });
+    if (!stat.isFile()) throw new Error(`Expected a regular file: ${path}`);
+    if (!ownedByCurrentUserOrRoot(stat) || (stat.mode & 0o022) !== 0)
+      throw new Error(`File has unsafe ownership or is group/world writable: ${path}`);
+    if (privateFile && ((stat.mode & 0o077) !== 0 || (typeof process.getuid === "function" && stat.uid !== process.getuid())))
+      throw new Error(`Approval state file must be current-user-owned with mode 0600 or stricter: ${path}`);
+    if (stat.size > maxBytes) throw new Error(`File exceeds the ${maxBytes} byte inspection limit: ${path}`);
+    const chunks: Buffer[] = [];
+    let total = 0;
+    const chunk = Buffer.alloc(Math.min(16 * 1024, maxBytes + 1));
+    for (;;) {
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+      if (total > maxBytes) throw new Error(`File exceeds the ${maxBytes} byte inspection limit: ${path}`);
+      chunks.push(Buffer.from(chunk.subarray(0, bytesRead)));
+    }
+    const after = await handle.stat({ bigint: true });
+    if (after.dev !== beforePrecise.dev || after.ino !== beforePrecise.ino || after.size !== beforePrecise.size || after.mtimeNs !== beforePrecise.mtimeNs || after.ctimeNs !== beforePrecise.ctimeNs)
+      throw new Error(`File changed during bounded inspection: ${path}`);
+    return Buffer.concat(chunks, total);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function inspectPath(path: string, maxBytes: number, hashContent = true): Promise<{ readonly exists: boolean; readonly resolvedPath: string | null; readonly sha256: string | null; readonly bytes?: Buffer }> {
+  let info;
+  try { info = await lstat(path); }
+  catch (error) { if (notFound(error)) return { exists: false, resolvedPath: null, sha256: null }; throw error; }
+  if (info.isSymbolicLink() || !info.isFile()) throw new Error(`Hook source is symlinked or not a regular file: ${path}`);
+  const bytes = await readBoundedRegular(path, maxBytes);
+  const after = await lstat(path);
+  if (after.isSymbolicLink() || after.dev !== info.dev || after.ino !== info.ino || after.size !== info.size || after.mtimeMs !== info.mtimeMs || after.ctimeMs !== info.ctimeMs)
+    throw new Error(`Hook source changed during inspection: ${path}`);
+  const canonical = await realpath(path);
+  if (canonical !== resolve(path)) throw new Error(`Hook source has a symlinked path component: ${path}`);
+  return { exists: true, resolvedPath: canonical, sha256: hashContent ? sha256(bytes) : null, bytes };
+}
+
+async function executableDependency(path: string): Promise<CodexHookDependency> {
+  if (!isAbsolute(path)) throw new Error(`Executable dependency must be absolute: ${path}`);
+  const canonical = await realpath(path);
+  const before = await lstat(canonical);
+  if (!before.isFile() || !ownedByCurrentUserOrRoot(before) || (before.mode & 0o022) !== 0)
+    throw new Error(`Executable dependency is not a safe user-owned regular file: ${path}`);
+  if (before.size > MAX_EXECUTABLE_BYTES) throw new Error(`Executable dependency exceeds ${MAX_EXECUTABLE_BYTES} bytes: ${path}`);
+  const digest = createHash("sha256");
+  let bytes = 0;
+  const file = await open(canonical, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const fileStat = await file.stat();
+    if (!fileStat.isFile() || fileStat.dev !== before.dev || fileStat.ino !== before.ino)
+      throw new Error(`Executable dependency changed while opening: ${path}`);
+    const stream = file.createReadStream({ autoClose: false });
+    for await (const chunk of stream) {
+      bytes += chunk.length;
+      if (bytes > MAX_EXECUTABLE_BYTES) throw new Error(`Executable dependency exceeds ${MAX_EXECUTABLE_BYTES} bytes: ${path}`);
+      digest.update(chunk);
+    }
+  } finally { await file.close(); }
+  const after = await lstat(canonical);
+  if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs)
+    throw new Error(`Executable dependency changed during hashing: ${path}`);
+  return CodexHookDependencySchema.parse({ requestedPath: path, resolvedPath: canonical, sha256: digest.digest("hex"), exists: true });
+}
+
+function resolvePathExecutable(name: string, environment: Readonly<Record<string, string | undefined>>): string | undefined {
+  if (isAbsolute(name)) return name;
+  const pathValue = environment["PATH"] ?? "";
+  for (const directory of pathValue.split(":")) {
+    if (!directory || !isAbsolute(directory)) continue;
+    const candidate = join(directory, name);
+    try { if (requireExecutable(candidate)) return candidate; } catch { /* try next PATH entry */ }
+  }
+  return undefined;
+}
+
+function requireExecutable(path: string): boolean {
+  // Read-only mode check is intentionally bounded to a path stat; the file bytes are pinned below.
+  return (statSync(path).mode & 0o111) !== 0;
+}
+
+interface TokenizedCommand { readonly tokens: readonly string[]; readonly error?: string }
+
+/** Tiny shell-word lexer. It preserves literal words but rejects every expansion/control operator. */
+function tokenizeLiteralCommand(command: string): TokenizedCommand {
+  if (Buffer.byteLength(command, "utf8") > MAX_COMMAND_BYTES || /[\0\r\n]/.test(command)) return { tokens: [], error: "command is too large or contains a line break" };
+  const tokens: string[] = [];
+  let token = "", quote: "'" | '"' | undefined, escaped = false, active = false;
+  for (const char of command) {
+    if (escaped) { token += char; escaped = false; active = true; continue; }
+    if (quote !== "'" && char === "\\") { escaped = true; active = true; continue; }
+    if (quote === undefined && (char === "'" || char === '"')) { quote = char; active = true; continue; }
+    if (quote === char) { quote = undefined; active = true; continue; }
+    if ((quote === undefined || quote === '"') && /[$`]/.test(char)) return { tokens: [], error: `shell expansion '${char}' is unsupported` };
+    if (quote === undefined && /[;&|<>*?(){}\[\]]/.test(char)) return { tokens: [], error: `shell metacharacter '${char}' is unsupported` };
+    if (quote === undefined && /\s/.test(char)) {
+      if (active) { tokens.push(token); token = ""; active = false; }
+      continue;
+    }
+    token += char; active = true;
+  }
+  if (escaped || quote !== undefined) return { tokens: [], error: "command has an unterminated quote or escape" };
+  if (active) tokens.push(token);
+  if (tokens.length === 0) return { tokens: [], error: "command is empty" };
+  return { tokens };
+}
+
+function isOrcaWrapperSource(text: string): boolean {
+  return sha256(text) === REVIEWED_ORCA_WRAPPER_SHA256;
+}
+
+const ORCA_CONDITIONAL_COMMAND = `: orca-agent-hook-form=1; if [ -n "\${ORCA_PANE_KEY-}" ] && [ -n "\${ORCA_AGENT_HOOK_ROOT-}" ] && [ -f "\${ORCA_AGENT_HOOK_ROOT-}/agent-hooks/codex-hook.sh" ]; then /bin/sh "\${ORCA_AGENT_HOOK_ROOT-}/agent-hooks/codex-hook.sh" || :; elif [ -z "\${ORCA_AGENT_HOOK_ROOT-}" ] && [ -n "\${ORCA_PANE_KEY-}" ] && [ -n "\${ORCA_AGENT_HOOK_PORT-}" ] && [ -f "\${HOME-}/.orca/agent-hooks/codex-hook.sh" ]; then /bin/sh "\${HOME-}/.orca/agent-hooks/codex-hook.sh" || :; else { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi`;
+
+function configuredOrcaCandidates(environment: Readonly<Record<string, string | undefined>>): string[] {
+  const roots = new Set<string>();
+  const selected = environment["ORCA_AGENT_HOOK_ROOT"];
+  if (selected) roots.add(resolve(selected, "agent-hooks"));
+  const home = environment["HOME"] ?? homedir();
+  roots.add(resolve(home, ".orca", "agent-hooks"));
+  return [...roots].map(root => join(root, "codex-hook.sh"));
+}
+
+async function scriptDependency(path: string): Promise<CodexHookDependency> {
+  const inspected = await inspectPath(path, MAX_SCRIPT_BYTES);
+  return CodexHookDependencySchema.parse({
+    requestedPath: path,
+    resolvedPath: inspected.resolvedPath,
+    sha256: inspected.sha256,
+    exists: inspected.exists
+  });
+}
+
+async function dependenciesForCommand(
+  command: string,
+  candidates: readonly string[],
+  environment: Readonly<Record<string, string | undefined>>,
+  unsupportedReasons: string[],
+  diagnostics: string[]
+): Promise<CodexHookDependency[]> {
+  const isOrcaCommand = command.includes("codex-hook.sh") && command.includes("ORCA_AGENT_HOOK_ROOT");
+  if (isOrcaCommand && isOrcaConditionalCommand(command)) {
+    const dependencies: CodexHookDependency[] = [];
+    for (const path of candidates) dependencies.push(await scriptDependency(path));
+    const active = environment["ORCA_AGENT_HOOK_ENDPOINT"];
+    const selectedRoot = environment["ORCA_AGENT_HOOK_ROOT"];
+    if (active) unsupportedReasons.push("ORCA_AGENT_HOOK_ENDPOINT selects a dynamically sourced endpoint script; inspect/approval cannot pin that runtime source safely.");
+    else diagnostics.push("Orca endpoint selector ORCA_AGENT_HOOK_ENDPOINT is absent; this absence is part of the snapshot.");
+    if (selectedRoot && !isAbsolute(selectedRoot)) unsupportedReasons.push("ORCA_AGENT_HOOK_ROOT must be an absolute path for Orca dependency pinning.");
+    for (const dependency of dependencies) {
+      if (!dependency.exists) continue;
+      const bytes = await readBoundedRegular(dependency.resolvedPath!, MAX_SCRIPT_BYTES);
+      if (!isOrcaWrapperSource(bytes.toString("utf8"))) unsupportedReasons.push(`Orca wrapper does not match the bounded reviewed script shape: ${dependency.resolvedPath}`);
+    }
+    return dependencies;
+  }
+  const parsed = tokenizeLiteralCommand(command);
+  if (parsed.error) { unsupportedReasons.push(`Unsupported hook command: ${parsed.error}.`); return []; }
+  const tokens = parsed.tokens;
+  const shellInterpreter = tokens[0] === "bash" || tokens[0] === "/bin/bash" || tokens[0] === "/usr/bin/bash" || tokens[0] === "sh" || tokens[0] === "/bin/sh" || tokens[0] === "/usr/bin/sh";
+  const runtimeIndex = tokens[0] && isAbsolute(tokens[0]) && /^(?:bun|node)$/.test(tokens[0].split("/").at(-1) ?? "") ? 0 : -1;
+  const supportedInterpreter = shellInterpreter || runtimeIndex === 0;
+  const scriptIndex = supportedInterpreter ? 1 : 0;
+  const possibleScript = tokens[scriptIndex];
+  if (!possibleScript || !isAbsolute(possibleScript)) {
+    unsupportedReasons.push(`Hook command must identify an absolute executable/script path: ${command}`);
+    return [];
+  }
+  if (supportedInterpreter && (tokens.length < 2 || tokens.length > 16)) {
+    unsupportedReasons.push(`Hook command must be <known-interpreter> <absolute-script> [literal arguments]: ${command}`);
+    return [];
+  }
+  if (!supportedInterpreter && tokens.length !== 1) {
+    unsupportedReasons.push(`Direct executable commands with additional arguments are not yet supported: ${command}`);
+    return [];
+  }
+  if (!supportedInterpreter && !/\.(?:sh|bash)$/.test(possibleScript)) {
+    try { return [await executableDependency(possibleScript)]; }
+    catch (error) { unsupportedReasons.push(`Cannot pin direct hook executable '${possibleScript}': ${error instanceof Error ? error.message : String(error)}`); return []; }
+  }
+  const dependencyPaths = new Set<string>([possibleScript]);
+  if (dependencyPaths.size > MAX_DEPENDENCIES) {
+    unsupportedReasons.push(`Hook dependency count exceeds ${MAX_DEPENDENCIES}.`);
+    return [];
+  }
+  const dependencies: CodexHookDependency[] = [];
+  if (supportedInterpreter) {
+    const executablePath = resolvePathExecutable(tokens[0]!, environment);
+    if (!executablePath) {
+      unsupportedReasons.push(`Cannot resolve known hook interpreter '${tokens[0]}' to an absolute executable on the trusted PATH.`);
+      return [];
+    }
+    dependencies.push(await executableDependency(executablePath));
+  }
+  for (const path of dependencyPaths) dependencies.push(await scriptDependency(path));
+  for (const dependency of dependencies) if (!dependency.exists)
+    unsupportedReasons.push(`Hook executable/script dependency is absent: ${dependency.requestedPath}`);
+  const inspectedScript = await inspectPath(possibleScript, MAX_SCRIPT_BYTES);
+  if (inspectedScript.bytes && (/\.(?:sh|bash)$/.test(possibleScript) || tokens.length === 1)) {
+    const text = inspectedScript.bytes.toString("utf8");
+    const isPinnedOrcaWrapper = candidates.includes(resolve(possibleScript)) && isOrcaWrapperSource(text);
+    const sourceLines = text.split(/\r?\n/).map(line => line.trim()).filter(line => /^(?:source\s+(?=["'/$A-Za-z])|\.\s+(?=["'/$A-Za-z]))/.test(line));
+    for (const line of sourceLines) {
+      const sourceMatch = /^(?:source|\.)\s+(['"]?)(\/[^\s'"]+)\1(?:\s|$)/.exec(line);
+      if (!sourceMatch) {
+        unsupportedReasons.push(`Hook script contains a dynamic or relative source dependency that cannot be pinned: ${possibleScript}`);
+        continue;
+      }
+      const dependency = await scriptDependency(sourceMatch[2]!);
+      dependencies.push(dependency);
+      if (!dependency.exists) unsupportedReasons.push(`Hook script source dependency is absent: ${sourceMatch[2]}`);
+      if (!isPinnedOrcaWrapper) unsupportedReasons.push(`Hook script sources another executable file outside the recognized Orca endpoint guard; transitive source closure is unsupported: ${sourceMatch[2]}`);
+    }
+    if (/^\s*eval\s+/m.test(text)) unsupportedReasons.push(`Hook script uses eval-style dynamic execution that cannot be pinned safely: ${possibleScript}`);
+  }
+  return dependencies;
+}
+
+function isOrcaConditionalCommand(command: string): boolean {
+  const normalized = command.replace(/\s+/g, " ").trim();
+  return normalized === ORCA_CONDITIONAL_COMMAND;
+}
+
+function extractHooks(raw: unknown, unsupportedReasons: string[]): Array<{ event: string; matcher?: unknown; command: string }> {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    unsupportedReasons.push("hooks.json must contain a top-level object."); return [];
+  }
+  const hooks = (raw as Record<string, unknown>)["hooks"];
+  if (hooks === undefined || hooks === null || typeof hooks !== "object" || Array.isArray(hooks)) {
+    unsupportedReasons.push("hooks.json must contain a hooks object."); return [];
+  }
+  const entries: Array<{ event: string; matcher?: unknown; command: string }> = [];
+  for (const [event, groups] of Object.entries(hooks as Record<string, unknown>)) {
+    if (!Array.isArray(groups)) { unsupportedReasons.push(`Hook event '${event}' must contain an array.`); continue; }
+    for (const group of groups) {
+      if (!group || typeof group !== "object" || Array.isArray(group)) { unsupportedReasons.push(`Hook event '${event}' has a malformed group.`); continue; }
+      const record = group as Record<string, unknown>;
+      const commands = record["hooks"];
+      if (!Array.isArray(commands)) { unsupportedReasons.push(`Hook event '${event}' is missing its hooks array.`); continue; }
+      for (const item of commands) {
+        if (!item || typeof item !== "object" || Array.isArray(item)) { unsupportedReasons.push(`Hook event '${event}' has a malformed command entry.`); continue; }
+        const commandRecord = item as Record<string, unknown>;
+        if (commandRecord["type"] !== "command" || typeof commandRecord["command"] !== "string") {
+          unsupportedReasons.push(`Hook event '${event}' uses an unsupported non-command hook form.`); continue;
+        }
+        entries.push({ event, ...(record["matcher"] !== undefined ? { matcher: record["matcher"] } : {}), command: commandRecord["command"] });
+        if (entries.length > MAX_HOOKS) unsupportedReasons.push(`Hook count exceeds ${MAX_HOOKS}.`);
+      }
+    }
+  }
+  return entries.slice(0, MAX_HOOKS);
+}
+
+async function canonicalCodexHome(home: string): Promise<string> {
+  let canonical: string;
+  try { canonical = await realpath(home); }
+  catch (error) { if (notFound(error)) return resolve(home); throw error; }
+  const stat = await lstat(canonical);
+  if (stat.isSymbolicLink() || !stat.isDirectory() || !ownedByCurrentUserOrRoot(stat) || (stat.mode & 0o022) !== 0)
+    throw new Error("Codex home must be a user-owned directory that is not group/world writable.");
+  return canonical;
+}
+
+async function ensurePrivateStoreParent(storePath: string, create: boolean): Promise<boolean> {
+  const parent = dirname(storePath);
+  const components = resolve(parent).split("/").filter(Boolean);
+  let current = "/";
+  for (let i = 0; i < components.length; i++) {
+    current = join(current, components[i]!);
+    let stat;
+    try { stat = await lstat(current); }
+    catch (error) {
+      if (!notFound(error)) throw error;
+      if (!create) return false;
+      await mkdir(current, { mode: 0o700 });
+      stat = await lstat(current);
+    }
+    const stickyTempAncestor = stat.uid === 0 && (stat.mode & 0o1000) !== 0;
+    if (stat.isSymbolicLink() || !stat.isDirectory() || !ownedByCurrentUserOrRoot(stat) || ((stat.mode & 0o022) !== 0 && !stickyTempAncestor))
+      throw new Error(`Approval state directory is symlinked, foreign-owned or group/world writable: ${current}`);
+    if (i === components.length - 1 && ((typeof process.getuid === "function" && stat.uid !== process.getuid()) || (stat.mode & 0o077) !== 0))
+      throw new Error(`Approval state parent must be private user-owned mode 0700: ${current}`);
+  }
+  return true;
+}
+
+async function readApprovalStore(storePath: string): Promise<z.infer<typeof ApprovalStoreSchema> | undefined> {
+  if (!await ensurePrivateStoreParent(storePath, false)) return undefined;
+  let bytes: Buffer;
+  try { bytes = await readBoundedRegular(storePath, 128 * 1024, true); }
+  catch (error) { if (notFound(error)) return undefined; throw error; }
+  const parsed = ApprovalStoreSchema.safeParse(JSON.parse(bytes.toString("utf8")) as unknown);
+  if (!parsed.success) throw new Error(`Codex hook approval store is malformed: ${parsed.error.message}`);
+  if (parsed.data.approvals.some(a => a.approvalStorePath !== storePath))
+    throw new Error("Codex hook approval store contains a receipt bound to a different store path.");
+  return parsed.data;
+}
+
+async function writeApprovalStore(storePath: string, value: z.infer<typeof ApprovalStoreSchema>): Promise<void> {
+  const parent = dirname(storePath);
+  await ensurePrivateStoreParent(storePath, true);
+  const tempPath = join(parent, `.${CODEX_HOOK_APPROVAL_FILE}.${randomBytes(8).toString("hex")}.tmp`);
+  let renamed = false;
+  try {
+    const handle = await open(tempPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    try { await handle.writeFile(JSON.stringify(value, null, 2) + "\n", "utf8"); await handle.sync(); }
+    finally { await handle.close(); }
+    await rename(tempPath, storePath);
+    renamed = true;
+    const dir = await open(parent, constants.O_RDONLY);
+    try { await dir.sync(); } finally { await dir.close(); }
+  } finally { if (!renamed) await unlink(tempPath).catch(() => undefined); }
+}
+
+async function buildInventory(options: CodexHookTrustOptions = {}): Promise<Omit<CodexHookReview, "status">> {
+  const paths = pathOptions(options);
+  const home = await canonicalCodexHome(paths.home);
+  const store = paths.store;
+  const sources: CodexHookSource[] = [];
+  const hooks: CodexHookInventoryEntry[] = [];
+  const diagnostics: string[] = [];
+  const unsupportedReasons: string[] = [];
+  const candidates = configuredOrcaCandidates(paths.environment);
+
+  const hooksPath = join(home, "hooks.json");
+  try {
+    const inspected = await inspectPath(hooksPath, MAX_SOURCE_BYTES);
+    sources.push({ kind: "hooks_json", path: resolve(hooksPath), exists: inspected.exists, sha256: inspected.sha256 });
+    if (inspected.bytes) {
+      let raw: unknown;
+      try { raw = JSON.parse(inspected.bytes.toString("utf8")) as unknown; }
+      catch { unsupportedReasons.push("hooks.json is malformed JSON."); raw = undefined; }
+      if (raw !== undefined) {
+        const entries = extractHooks(raw, unsupportedReasons);
+        for (const entry of entries) {
+          const dependencies = await dependenciesForCommand(entry.command, candidates, paths.environment, unsupportedReasons, diagnostics);
+          for (const dependency of dependencies) {
+            if (!sources.some(source => source.path === dependency.requestedPath))
+              sources.push(CodexHookSourceSchema.parse({ kind: candidates.includes(dependency.requestedPath) ? "orca_candidate" : "script",
+                path: dependency.requestedPath, exists: dependency.exists, sha256: dependency.sha256 }));
+          }
+          hooks.push(CodexHookInventoryEntrySchema.parse({
+            ...entry,
+            digest: sha256(JSON.stringify({ event: entry.event, matcher: entry.matcher ?? null, command: entry.command })),
+            dependencies
+          }));
+        }
+      }
+    }
+  } catch (error) {
+    unsupportedReasons.push(`Cannot safely inspect ${hooksPath}: ${error instanceof Error ? error.message : String(error)}`);
+    sources.push({ kind: "hooks_json", path: resolve(hooksPath), exists: true, sha256: null });
+  }
+
+  // config.toml can contain credentials and MCP endpoint tokens. Inspect its bounded
+  // bytes only for hook declarations; bind the declaration fact, never the contents.
+  const configPath = join(home, "config.toml");
+  try {
+    const config = await inspectPath(configPath, MAX_SOURCE_BYTES, false);
+    const tomlHooks = config.bytes ? parseCodexTomlHooks(config.bytes.toString("utf8")) : {};
+    const hasTomlHooks = Object.keys(tomlHooks).length > 0;
+    const tomlDigest = sha256(JSON.stringify(tomlHooks));
+    sources.push({ kind: "config_toml", path: resolve(configPath), exists: config.exists, sha256: tomlDigest });
+    diagnostics.push(hasTomlHooks ? "Codex executable TOML hook declarations are included in this snapshot." : "Codex executable TOML hook declarations are absent; native hooks.state metadata is excluded.");
+    const entries = extractHooks({ hooks: tomlHooks }, unsupportedReasons);
+    for (const entry of entries) {
+      const dependencies = await dependenciesForCommand(entry.command, candidates, paths.environment, unsupportedReasons, diagnostics);
+      for (const dependency of dependencies) if (!sources.some(source => source.path === dependency.requestedPath))
+        sources.push(CodexHookSourceSchema.parse({ kind: candidates.includes(dependency.requestedPath) ? "orca_candidate" : "script",
+          path: dependency.requestedPath, exists: dependency.exists, sha256: dependency.sha256 }));
+      hooks.push(CodexHookInventoryEntrySchema.parse({
+        ...entry, digest: sha256(JSON.stringify({ event: entry.event, matcher: entry.matcher ?? null, command: entry.command })), dependencies
+      }));
+    }
+  } catch (error) {
+    unsupportedReasons.push(`Cannot safely inspect Codex hook declarations in config.toml: ${error instanceof Error ? error.message : String(error)}`);
+    sources.push({ kind: "config_toml", path: resolve(configPath), exists: true, sha256: null });
+  }
+  if (sources.length > MAX_DEPENDENCIES) unsupportedReasons.push(`Hook inventory exceeds ${MAX_DEPENDENCIES} source/dependency entries.`);
+  const selectorState = { orcaAgentHookEndpointPresent: Boolean(paths.environment["ORCA_AGENT_HOOK_ENDPOINT"]),
+    orcaAgentHookRoot: paths.environment["ORCA_AGENT_HOOK_ROOT"] ?? null,
+    home: paths.environment["HOME"] ?? null };
+  const digest = sha256(JSON.stringify({ schemaVersion: 1, codexHomeDirectory: home, approvalStorePath: store, selectorState, sources, hooks, diagnostics, unsupportedReasons }));
+  return { schemaVersion: 1, codexHomeDirectory: home, approvalStorePath: store, digest, sources, hooks, diagnostics, unsupportedReasons };
+}
+
+export async function inspectCodexHooks(options: CodexHookTrustOptions = {}): Promise<CodexHookReview> {
+  try {
+    const inventory = await buildInventory(options);
+    if (inventory.unsupportedReasons.length === 0 && inventory.hooks.length === 0)
+      return CodexHookReviewSchema.parse({ ...inventory, status: "none" });
+    const store = await readApprovalStore(inventory.approvalStorePath);
+    const approved = store?.approvals.some(item => item.digest === inventory.digest && item.codexHomeDirectory === inventory.codexHomeDirectory) ?? false;
+    const status: CodexHookReview["status"] = inventory.unsupportedReasons.length > 0
+      ? "unsupported"
+      : inventory.hooks.length === 0
+        ? "none"
+        : approved ? "approved" : "approval_required";
+    return CodexHookReviewSchema.parse({ ...inventory, status });
+  } catch (error) {
+    const paths = pathOptions(options);
+    const message = error instanceof Error ? error.message : String(error);
+    const digest = sha256(JSON.stringify({ home: paths.home, store: paths.store, error: message }));
+    return CodexHookReviewSchema.parse({ schemaVersion: 1, codexHomeDirectory: paths.home, approvalStorePath: paths.store,
+      digest, status: "unsupported", sources: [], hooks: [], diagnostics: [], unsupportedReasons: [message] });
+  }
+}
+
+export async function approveCodexHooks(reviewInput: CodexHookReview, options: CodexHookApprovalOptions): Promise<CodexHookApproval> {
+  const review = CodexHookReviewSchema.parse(reviewInput);
+  if (!SHA256.safeParse(options.expectedDigest).success || options.expectedDigest !== review.digest)
+    throw new Error("Reviewed Codex hook digest does not match the expected digest.");
+  if (review.status === "unsupported") throw new Error(`Unsupported Codex hooks cannot be approved: ${review.unsupportedReasons.join("; ")}`);
+  if (review.hooks.length === 0) throw new Error("There are no Codex hooks to approve.");
+  const paths = pathOptions(options);
+  const home = await canonicalCodexHome(paths.home);
+  if (home !== review.codexHomeDirectory || paths.store !== review.approvalStorePath)
+    throw new Error("Codex hook approval home or store path changed after review.");
+  const current = await inspectCodexHooks(options);
+  if (current.digest !== options.expectedDigest || current.status === "unsupported")
+    throw new Error("Codex hook configuration changed after review; inspect and approve the new digest.");
+  const previous = await readApprovalStore(paths.store);
+  const approval = CodexHookApprovalSchema.parse({ schemaVersion: 1, codexHomeDirectory: home, approvalStorePath: paths.store,
+    digest: current.digest, approvedAt: new Date().toISOString(), approvedBy: options.approvedBy });
+  const approvals = [...(previous?.approvals ?? []).filter(item => item.digest !== approval.digest), approval];
+  await writeApprovalStore(paths.store, ApprovalStoreSchema.parse({ schemaVersion: 1, approvals }));
+  return approval;
+}

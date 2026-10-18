@@ -11,6 +11,7 @@ import type {
   AgentCheckCommandArgs,
   ApproveCommandArgs,
   CancelCommandArgs,
+  ConfigMigrateCommandArgs,
   CliCommandName,
   GitPrepareCommandArgs,
   GitPrepareTaskDependencyInput,
@@ -40,6 +41,7 @@ const VALID_COMMANDS: ReadonlySet<CliCommandName> = new Set([
   "doctor",
   "recover",
   "init",
+  "config-migrate",
   "setup",
   "run",
   "status",
@@ -1544,6 +1546,16 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
   const commandArgs = argv.slice(1);
 
   switch (command) {
+    case "config-migrate": {
+      const booleans = new Set(["--json", "-j", "--help", "-h"]);
+      const allowed = new Set(["--json", "-j", "--help", "-h"]);
+      const result = extractOptionsAndPositional(commandArgs, booleans, allowed, command, json);
+      if (!result.ok) return result.result;
+      if (result.value.positional.length) return makeValidationError("Unexpected positional argument for 'config-migrate'.", json, command);
+      const value: ConfigMigrateCommandArgs = { command, json, help: result.value.flags.has("--help") || result.value.flags.has("-h") };
+      return { ok: true, value };
+    }
+
     case "up":
     case "down":
     case "attach":
@@ -1663,6 +1675,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         "--plan",
         "--apply",
         "--repair",
+        "--codex-hooks",
         "--yes",
         "-y",
         "--json",
@@ -1676,11 +1689,13 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         "--plan",
         "--apply",
         "--repair",
+        "--codex-hooks",
         "--yes",
         "-y",
         "--dir",
         "--catalog-dir",
         "--memory-provider",
+        "--hook-digest",
         "--json",
         "-j",
         "--help",
@@ -1732,11 +1747,36 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
       }
 
       const yes = optRes.value.flags.has("--yes") || optRes.value.flags.has("-y");
+      const codexHooks = optRes.value.flags.has("--codex-hooks");
+      const hookDigest = optRes.value.flags.get("--hook-digest");
+
+      if (hookDigest !== undefined && !codexHooks) {
+        return makeValidationError("Option '--hook-digest' requires '--codex-hooks'.", json, "setup");
+      }
+      if (hookDigest !== undefined && (typeof hookDigest !== "string" || !/^[a-f0-9]{64}$/.test(hookDigest))) {
+        return makeValidationError("Option '--hook-digest' must be a 64 hexadecimal SHA-256 digest.", json, "setup");
+      }
+      if (codexHooks) {
+        if (modes.length !== 1 || mode === "repair") {
+          return makeValidationError("'--codex-hooks' requires exactly one of --check, --plan, or --apply.", json, "setup");
+        }
+        if (dir !== undefined || catalogDir !== undefined || optRes.value.flags.has("--memory-provider")) {
+          return makeValidationError("'--codex-hooks' cannot be combined with --dir, --catalog-dir, or --memory-provider.", json, "setup");
+        }
+        if (mode !== "apply" && (yes || hookDigest !== undefined)) {
+          return makeValidationError("'--yes' and '--hook-digest' are valid only with 'setup --codex-hooks --apply'.", json, "setup");
+        }
+        if (yes !== (hookDigest !== undefined)) {
+          return makeValidationError("Non-interactive Codex hook approval requires both '--yes' and '--hook-digest <sha256>'.", json, "setup");
+        }
+      }
 
       const value: SetupCommandArgs = {
         command: "setup",
         mode,
         yes,
+        ...(codexHooks ? { codexHooks: true } : {}),
+        ...(typeof hookDigest === "string" ? { hookDigest } : {}),
         dir,
         catalogDir,
         memoryProvider: memoryProvider as "auto" | "claude" | "codex" | "host",

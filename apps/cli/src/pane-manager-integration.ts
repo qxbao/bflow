@@ -56,6 +56,9 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
     const roleConfigs: Partial<Record<TopologyRole, Partial<RoleAgentConfig>>> = {};
     for (const role of input.config.environment.roles) {
       const topologyRole = resolveTopologyRole(role.role);
+      // Developer is a Runtime-launched task/worktree role. Its optional config entry
+      // supplies a dynamic launch template and never creates a permanent P13 pane.
+      if (role.role === "developer") continue;
       if (topologyRole === null || topologyRole === "developer") {
         throw new Error(`Role '${role.role}' is not a permanent P13 role. Developers must be allocated by Runtime in task worktrees.`);
       }
@@ -185,6 +188,7 @@ export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, r
         const args: Partial<Record<TopologyRole, readonly string[]>> = {};
         const launches: Partial<Record<TopologyRole, AgentLaunchProfile>> = {};
         for (const role of input.config.environment.roles) {
+          if (role.role === "developer") continue;
           const launch = descriptors.roleLaunch[role.role];
           const topology = resolveTopologyRole(role.role);
           if (!launch || !topology) return failure(`Host has no trusted launch descriptor for ${role.role}`);

@@ -74,19 +74,13 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     const observed = await environment.status();
     expect(observed.manifest?.panes.find((p) => p.role === "qa")?.transportState).toBe("disconnected");
   });
-  linuxIt("preserves failed blocked startup and refuses duplicate dispatch", async () => {
+  linuxIt("stops failed blocked startup before allowing another dispatch", async () => {
     runner.blockedAgent = "coordinator";
-    await expect(lifecycle().up()).rejects.toThrow("CLI update confirmation");
-    try { await lifecycle().up(); } catch (error) {
-      const message = String(error); expect(message).toContain(input.repository.sessionName); expect(message).toContain("pane");
-      expect(message).toContain("bflow up"); expect(message).toContain("do not delete .bflow");
-    }
+    await expect(lifecycle().up()).rejects.toThrow(/is blocked during startup.*Automatic cleanup completed successfully/s);
+    expect(runner.session(input.repository.sessionName).running).toBe(false);
     const count = starts(runner).length;
-    await expect(lifecycle().up()).rejects.toThrow("blocked");
+    expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("down");
     expect(starts(runner)).toHaveLength(count);
-    const report = await lifecycle().doctor();
-    expect(report.healthy).toBe(false);
-    expect(report.checks.find((c) => c.checkId === "operation-recovery")?.status).toBe("failed");
   });
   linuxIt("rejects a foreign durable manifest without dispatching P13 commands", async () => {
     await lifecycle().up();
@@ -235,6 +229,25 @@ describe("P30 platform readiness in up", () => {
     expect(result.ok ? "ok" : result.error.message).toBe("ok");
     const kinds = starts().map(kindOf).sort();
     expect(kinds).toEqual(["agy", "agy", "agy", "agy", "agy", "claude", "codex"]);
+  });
+
+  linuxIt("keeps a configured Developer model as a dynamic template without creating a permanent pane", async () => {
+    const input = withProviders(role => role === "coordinator" ? "codex" : "claude");
+    const developer = { role: "developer" as const, cli: "codex" as const, required: false, model: "developer-codex", effort: "high" as const };
+    input.config.environment.roles.push(developer);
+    serverRunning(input);
+    const permanentLaunches = await roleLaunchesFor(input);
+    delete permanentLaunches["developer"];
+    const host = hostWith(permanentLaunches);
+    const result = await openPaneManagerEnvironment(input, runner, async composition => {
+      expect(composition.config.environment.roles.find(role => role.role === "developer")).toMatchObject(developer);
+      return host;
+    }, undefined, socketFor).manager.up(input.repository.sessionName);
+    expect(result.ok ? "ok" : result.error.message).toBe("ok");
+    expect(starts()).toHaveLength(7);
+    const manifest = result.ok ? result.value : undefined;
+    expect(manifest?.panes).toHaveLength(7);
+    expect(manifest?.panes.some(pane => pane.role === "developer")).toBe(false);
   });
 
   linuxIt("uses the legacy provider arguments when the host prepares no launch profile", async () => {

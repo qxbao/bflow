@@ -81,6 +81,7 @@ export interface ProviderAdapterOptions {
   readonly runner?: ProviderCommandRunner;
   readonly rolePrompt?: string;
   readonly model?: string;
+  readonly effort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   readonly supportedModels?: readonly string[];
   readonly mcpRegistrations?: readonly MCPClientRegistration[];
   readonly mcpObservations?: readonly MCPServiceObservation[];
@@ -99,6 +100,10 @@ export interface ProviderAdapterOptions {
   readonly allowTestFilesystemOwnership?: boolean;
   /** Codex home used only for read-only inspection of inherited global MCP servers and hooks. Defaults to $CODEX_HOME or ~/.codex. */
   readonly codexHomeDirectory?: string;
+  /** Private machine-state approvals for Codex hooks, outside the provider's Codex home. */
+  readonly codexHookApprovalPath?: string;
+  /** Trusted launch selector environment shared with hook inspection; never derived from repository YAML. */
+  readonly codexHookEnvironment?: Readonly<Record<string, string | undefined>>;
   readonly now?: () => Date;
   readonly healthTtlMs?: number;
 }

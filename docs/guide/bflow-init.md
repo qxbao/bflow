@@ -6,13 +6,29 @@ bflow init --dir /absolute/path/to/my-project --json
 ```
 
 Thư mục đích phải ở trong Git checkout. Init xác định Git root canonical, kể cả
-khi gọi từ thư mục con, rồi tạo `.bflow/config.yaml` và `.bflow/.gitignore`.
+khi gọi từ thư mục con, rồi tạo `.bflow/config.yml` và `.bflow/.gitignore`.
 Nó không gọi Herdr, tạo pane hoặc chạy agent. `--config` chỉ chấp nhận đường dẫn
-trỏ đúng `.bflow/config.yaml` của checkout; không phải một tùy chọn đổi nơi lưu
+trỏ đúng `.bflow/config.yml` của checkout; không phải một tùy chọn đổi nơi lưu
 environment config.
 
-Định dạng file là **JSON hợp lệ**, thuộc tập con YAML 1.2. Không dùng YAML thụt
-lề, comment, alias, tag hoặc interpolation biến môi trường trong file này.
+File dùng YAML thụt lề có comment hướng dẫn. Các role, provider, model và effort
+nằm trước những trường identity/storage thường ít thay đổi. Bflow đọc YAML 1.2 an
+toàn với đúng một document và mapping key dạng chuỗi; explicit tag, merge key và
+alias vòng không được hỗ trợ. `model` và `effort` là tuỳ chọn theo role. Claude
+nhận `low|medium|high|xhigh|max`; Codex nhận `minimal|low|medium|high|xhigh`; Agy
+mã hoá effort trong tên model nên không có trường `effort` riêng.
+
+Repository cũ có thể tiếp tục đọc từ `.bflow/config.yaml` hoặc
+`.bflow/config.json`. Chuyển sang file canonical bằng lệnh:
+
+```sh
+bflow config-migrate
+```
+
+Lệnh kiểm tra config trước, ghi `.bflow/config.yml` với nguyên giá trị, sao lưu
+file gốc thành `.bflow/config.yaml.bak` hoặc `.bflow/config.json.bak`, rồi gỡ
+file cũ. Nếu có nhiều file cũ, backup sẵn, hoặc canonical và legacy cùng tồn tại,
+lệnh dừng để người vận hành giải quyết xung đột; nó không tự chọn file.
 
 Init thường giữ nguyên file đã có. **Ở implementation hiện tại, `--force`, `-f`,
 `--yes`, `-y` ghi đè cấu hình bằng defaults**, dù help text và một số tài liệu P12
@@ -34,5 +50,7 @@ node "$BFLOW_HOME/templates/node-typescript/apply.mjs" . feature
 Helper giữ runtime/storage/identity từ init, thay defaultWorkflow và các policy
 trong fragment, validate candidate bằng loader thật trước khi thay file và lưu
 backup dưới `.bflow/data/`. Fragment không được đặt identity của checkout.
-Nó từ chối nếu đã có `.bflow/state`, kể cả dangling symlink.
-Đây là helper template được chạy tường minh; CLI không tự nạp template hay policy file.
+Nó từ chối nếu đã có `.bflow/state`, kể cả dangling symlink. Nếu checkout còn
+config legacy, chạy `bflow config-migrate` trước khi helper dùng canonical
+`.bflow/config.yml`. Đây là helper template được chạy tường minh; CLI không tự
+nạp template hay policy file.

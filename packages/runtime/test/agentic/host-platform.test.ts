@@ -7,7 +7,8 @@ import type { PlatformReadinessService, PreparedRoleLaunch, RolePlatformRequirem
 import { tokenEnvironmentName } from "../../src/platform/gateway-registrations.js";
 import type { PlatformRoleOption, AgenticHostPlatformOptions } from "../../src/platform/host-options.js";
 import {
-  HostPlatformSession, skillSupportedCommands, HostPlatformStatusSchema, launchMaterial, liveObservation, requirementFor
+  HostPlatformSession, skillSupportedCommands, HostPlatformStatusSchema, launchMaterial, liveObservation, requirementFor,
+  createHostProviderFactoryOptions, createHostProviderAdapterFactory
 } from "../../src/agentic/host-platform.js";
 
 const cleanup: (() => Promise<unknown>)[] = [];
@@ -24,6 +25,54 @@ const platform: AgenticHostPlatformOptions = {
   roles: [roleOption("conversation", "codex"), roleOption("coordinator", "codex"), roleOption("developer", "codex", false)],
   skillsStoreRoot: "/var/lib/bflow/skills-store", approvedBuiltinSkillDigests: []
 };
+
+describe("Codex hook trust propagation", () => {
+  it("uses the same trusted home and approval store for permanent and dynamic Developer Codex adapters", () => {
+    const permanent = { ...platform, codexHomeDirectory: "/machine/codex", codexHookApprovalPath: "/machine/state/codex-hook-approvals.json" };
+    const withDeveloperTemplate = { ...permanent, roles: [...permanent.roles, roleOption("developer", "codex", false)] };
+    const expected = { perProvider: { codex: {
+      codexHomeDirectory: "/machine/codex", codexHookApprovalPath: "/machine/state/codex-hook-approvals.json",
+      codexHookEnvironment: { HOME: "/machine/codex" }
+    } }, codexLaunchEnvironment: { CODEX_HOME: "/machine/codex", HOME: "/machine/codex" } };
+    expect(createHostProviderFactoryOptions(permanent, { HOME: "/machine/codex" })).toEqual(expected);
+    expect(createHostProviderFactoryOptions(withDeveloperTemplate, { HOME: "/machine/codex" })).toEqual(expected);
+  });
+
+  it("builds the provider factory with trusted Codex paths for permanent and dynamic role requests", () => {
+    const trustedPlatform = { ...platform, codexHomeDirectory: "/machine/codex",
+      codexHookApprovalPath: "/machine/state/codex-hook-approvals.json" };
+    const factory = createHostProviderAdapterFactory(trustedPlatform);
+    expect(factory).toBeTypeOf("function");
+    expect(factory("codex", {
+      mcpRegistrations: [], mcpObservations: [], skillManifest: {} as never,
+      renderedSkillsContent: "", trustedIssuerKeys: {}
+    })).toMatchObject({ descriptor: { provider: "codex" } });
+    expect(factory("codex", {
+      mcpRegistrations: [], mcpObservations: [], skillManifest: {} as never,
+      renderedSkillsContent: "", trustedIssuerKeys: {}
+    })).toMatchObject({ descriptor: { provider: "codex" } });
+  });
+
+  it("keeps the operator HOME when only a Codex config home is selected", () => {
+    const configured = { ...platform, codexHomeDirectory: "/machine/codex" };
+    const options = createHostProviderFactoryOptions(configured, { HOME: "/operator/home" });
+    expect(options.perProvider.codex.codexHookEnvironment.HOME).toBe("/operator/home");
+    expect(options.codexLaunchEnvironment?.HOME).toBe("/operator/home");
+  });
+
+  it("keeps isolated Codex HOME and CODEX_HOME aligned with the inspected hook profile", () => {
+    const isolated = { ...platform, codexHomeDirectory: "/isolated/providers/codex",
+      codexProcessHomeDirectory: "/isolated/providers/home", codexHookApprovalPath: "/isolated/state/codex-hook-approvals.json" };
+    expect(createHostProviderFactoryOptions(isolated)).toMatchObject({
+      codexLaunchEnvironment: {
+        CODEX_HOME: "/isolated/providers/codex",
+        HOME: "/isolated/providers/home"
+      },
+      perProvider: { codex: { codexHomeDirectory: "/isolated/providers/codex",
+        codexHookApprovalPath: "/isolated/state/codex-hook-approvals.json" } }
+    });
+  });
+});
 function prepared(role: AgentRole, provider: "claude" | "codex" | "agy", launchId: string): PreparedRoleLaunch {
   return {
     role, provider, required: true, environment: {} as PreparedRoleLaunch["environment"], profile: {} as PreparedRoleLaunch["profile"],
@@ -34,18 +83,21 @@ function prepared(role: AgentRole, provider: "claude" | "codex" | "agy", launchI
 function failure(code: ContractError["code"], message: string, details?: Record<string, unknown>): OperationResult<never> {
   return { ok: false, error: { code, retryable: false, message, ...(details ? { details } : {}) } as ContractError };
 }
-interface FakeService extends PlatformReadinessService { calls: string[]; requirements: RolePlatformRequirement[][]; }
+interface FakeService extends PlatformReadinessService { calls: string[]; requirements: RolePlatformRequirement[][]; developerRequirements: RolePlatformRequirement[]; }
 function fakeService(overrides: Partial<PlatformReadinessService> = {}): FakeService {
-  const calls: string[] = [], requirements: RolePlatformRequirement[][] = [];
+  const calls: string[] = [], requirements: RolePlatformRequirement[][] = [], developerRequirements: RolePlatformRequirement[] = [];
   const service = {
-    calls, requirements,
+    calls, requirements, developerRequirements,
     prepareSession: async (_identity: unknown, reqs: RolePlatformRequirement[]) => {
       calls.push("prepareSession"); requirements.push(reqs);
       return { ok: true, value: { report: { ready: true, generation: 1, roles: [], checkedAt: at }, launches: [prepared("conversation", "codex", "launch-conv"), prepared("coordinator", "codex", "launch-coord")] } };
     },
     verifyActivated: async () => { calls.push("verifyActivated"); return { ok: true, value: {} as never }; },
     assertFresh: () => failure("not_found", "unused"),
-    prepareDeveloper: async () => { calls.push("prepareDeveloper"); return { ok: true, value: prepared("developer", "codex", "launch-dev") }; },
+    prepareDeveloper: async (_identity: unknown, requirement: RolePlatformRequirement) => {
+      calls.push("prepareDeveloper"); developerRequirements.push(requirement);
+      return { ok: true, value: prepared("developer", "codex", "launch-dev") };
+    },
     releaseLaunch: async (launchId: string) => { calls.push(`release:${launchId}`); return { ok: true, value: undefined }; },
     shutdown: async () => { calls.push("shutdown"); return { ok: true, value: undefined }; },
     status: () => ({ generation: 1, launches: [{ launchId: "launch-conv", role: "conversation", provider: "codex", state: "intent" }] }),
@@ -182,6 +234,21 @@ describe("P30 host platform composition", () => {
     expect(service.calls.at(-1)).toBe("release:launch-dev");
     await host.releaseDeveloper("task-1");
     expect(service.calls.filter(call => call === "release:launch-dev")).toHaveLength(1);
+  });
+
+  it("carries the configured Developer model and effort through dynamic task allocation", async () => {
+    const service = fakeService();
+    const { options } = await session(service);
+    const configuredOptions = {
+      ...options,
+      platform: { ...platform, roles: platform.roles.map(role => role.role === "developer"
+        ? { ...role, model: "developer-model", effort: "high" as const }
+        : role) }
+    };
+    const host = new HostPlatformSession(configuredOptions);
+    await host.prepare();
+    await host.allocateDeveloper("task-model", "/worktrees/task-model");
+    expect(service.developerRequirements[0]).toMatchObject({ model: "developer-model", effort: "high", taskId: "task-model" });
   });
 
   it("records Gateway registration loss and reports degraded launches by role and Developer launch", async () => {

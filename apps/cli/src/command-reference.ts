@@ -2,6 +2,7 @@ export const SUPPORTED_CLI_COMMANDS = [
   "help",
   "version",
   "init",
+  "config-migrate",
   "up",
   "down",
   "attach",
@@ -48,6 +49,18 @@ const COMMON_EXIT_CODES = [
 
 export const CLI_COMMAND_REFERENCE: readonly CliCommandReferenceEntry[] = [
   {
+    command: "config-migrate",
+    syntax: "bflow config-migrate [--json]",
+    purpose: "Validate and migrate one legacy repository config to the canonical YAML file, retaining a byte-for-byte backup.",
+    reusedEngines: ["RepositoryIdentity", "RepositoryConfigCodec"],
+    requiredFlags: [],
+    optionalFlags: ["-j, --json", "-h, --help"],
+    exitCodes: COMMON_EXIT_CODES,
+    idempotencyAndRetry: "Idempotent when the canonical target matches its migration backup. Conflicting or edited configs are left untouched.",
+    permissionRequirements: "Requires local filesystem access to the repository .bflow directory.",
+    skills: ["using-bflow"]
+  },
+  {
     command: "help",
     syntax: "bflow help [command] [options]",
     purpose: "Show global CLI usage or detailed help for a specific command.",
@@ -81,6 +94,18 @@ export const CLI_COMMAND_REFERENCE: readonly CliCommandReferenceEntry[] = [
     exitCodes: COMMON_EXIT_CODES,
     idempotencyAndRetry: "Idempotent. Re-running without --force verifies existing configuration without modifying it.",
     permissionRequirements: "Requires filesystem write access to the repository directory.",
+    skills: ["using-bflow"]
+  },
+  {
+    command: "setup",
+    syntax: "bflow setup [options] | bflow setup --codex-hooks (--check|--plan|--apply)",
+    purpose: "Review and approve Codex global hooks explicitly; hook approval authorizes only the inspected hook snapshot and never runs normal tool/service setup.",
+    reusedEngines: ["CodexHookInventory", "CodexHookApprovalStore"],
+    requiredFlags: [],
+    optionalFlags: ["--check", "--dry-run, --plan", "--apply", "--yes", "--codex-hooks", "--hook-digest <sha256>", "--dir <path>", "--catalog-dir <path>", "--memory-provider <id>", "-j, --json", "-h, --help"],
+    exitCodes: COMMON_EXIT_CODES,
+    idempotencyAndRetry: "Inspection is read-only. Approval is bound to the exact reviewed digest; changed hooks require a new review.",
+    permissionRequirements: "Approval store is private and user-owned. Only the explicit Codex hook apply path can write hook approval state.",
     skills: ["using-bflow"]
   },
   {

@@ -35,7 +35,11 @@ Tài liệu này hướng dẫn cài đặt, thiết lập cấp máy (`bflow se
 | `codex` | OpenAI Codex CLI | `>= 0.150.0` | `0.162.0` / `0.163.0` | `codex login` / `codex login status` |
 | `agy` | Google Antigravity CLI | `>= 1.0.0` | `1.4.0` | `agy models` |
 
-> **Lưu ý quan trọng cho người dùng `codex`**: Bflow tự động vô hiệu hóa các MCP server toàn cục khai báo theo bảng `[mcp_servers.<name>]` trong `~/.codex/config.toml` khi khởi chạy từng role (`-c mcp_servers.<name>.enabled=false`). Tuy nhiên, nếu máy của bạn có cấu hình **Codex hooks toàn cục** (`~/.codex/hooks.json` hoặc mục `[[hooks.*]]` trong `~/.codex/config.toml`), `CodexProviderAdapter` sẽ **fail-closed** (`codex_global_hooks_not_isolated`) để ngăn hook bên ngoài can thiệp vào phiên Bflow. Hãy di chuyển các hook cá nhân sang profile riêng trước khi gán role cho `codex`.
+> **Lưu ý quan trọng cho người dùng `codex`**: Bflow tự động vô hiệu hóa các MCP server toàn cục khai báo theo bảng `[mcp_servers.<name>]` trong `~/.codex/config.toml` khi khởi chạy từng role (`-c mcp_servers.<name>.enabled=false`). Nếu máy của bạn có cấu hình **Codex hooks toàn cục** (`~/.codex/hooks.json`), `CodexProviderAdapter` mặc định sẽ **fail-closed** (`codex_global_hooks_not_isolated`) cho tới khi bạn rà soát và phê duyệt tường minh bản chụp SHA-256 của các hook đó bằng lệnh:
+> ```bash
+> bflow setup --codex-hooks --plan
+> bflow setup --codex-hooks --apply
+> ```
 
 ---
 
@@ -93,7 +97,7 @@ bflow setup --repair --yes
 
 ---
 
-## 4. Khởi tạo Repository (`bflow init`)
+## 4. Khởi tạo Repository (`bflow init`) & Di trú cấu hình (`bflow config-migrate`)
 
 Tại thư mục gốc của Git repository (trên hệ tệp POSIX):
 
@@ -102,10 +106,10 @@ bflow init
 ```
 
 Lệnh `bflow init` tạo:
-- `.bflow/config.yaml`: Cấu hình dự án, tên session Herdr, ánh xạ role $\to$ provider (`claude`, `codex`, `agy`), chế độ quyền (`restricted`, `workspace_auto`, `unattended_isolated`) và giới hạn tài nguyên.
+- `.bflow/config.yml`: Cấu hình dự án chuẩn, tên session Herdr, ánh xạ role $\to$ provider (`claude`, `codex`, `agy`), tham số `model` / `effort` theo từng role, chế độ quyền (`restricted`, `workspace_auto`, `unattended_isolated`) và giới hạn tài nguyên.
 - `.bflow/.gitignore`: Tự động loại trừ `state/`, `logs/`, `secrets/`, `worktrees/` và `*.db` để không bao giờ commit trạng thái nhạy cảm vào Git.
 
-Lệnh `bflow init` có tính idempotent: chạy lại lần 2 sẽ giữ nguyên cấu hình hiện có (`overwritten: false`).
+Lệnh `bflow init` có tính idempotent: chạy lại lần 2 sẽ giữ nguyên cấu hình hiện có (`overwritten: false`). Nếu repository đang dùng định dạng cũ (`.bflow/config.yaml` hoặc `.bflow/config.json`), chạy `bflow config-migrate` để chuyển sang `.bflow/config.yml`.
 
 ---
 

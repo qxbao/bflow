@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { AgenticHostPlatformOptions, HostPrepareResponse, PlatformRoleOption } from "@bflow/runtime";
 import type { EnvironmentCompositionInput } from "./environment.js";
 import { EnvironmentProviderSchema, type EnvironmentRoleConfig } from "./environment-config.js";
@@ -14,6 +14,12 @@ export interface HostPlatformContext {
   readonly stateDirectory: string;
   /** Machine data directory (`platform.paths.data`), which holds the skill store. */
   readonly dataDirectory: string;
+  /** HOME selector for provider processes; under BFLOW_HOME this stays isolated from the account home. */
+  readonly codexProcessHomeDirectory: string;
+  /** Trusted Codex home read by the provider adapter; never comes from repository config. */
+  readonly codexHomeDirectory: string;
+  /** Private machine-owned approval store for Codex global hooks. */
+  readonly codexHookApprovalPath: string;
   readonly skills: MachineSkillCatalog;
 }
 
@@ -24,12 +30,42 @@ export interface HostPlatformDeps {
 
 export async function loadHostPlatformContext(): Promise<HostPlatformContext> {
   const setup = await import("@bflow/machine-setup");
-  const platform = await setup.detectPlatformWithProbe(setup.defaultHostEnvironment());
+  const host = setup.defaultHostEnvironment();
+  let platform = await setup.detectPlatformWithProbe(host);
+  if (host.env.BFLOW_HOME) platform = setup.isolatedPlatformProfile(platform, resolve(host.env.BFLOW_HOME));
+  const codexTrust = resolveCodexTrustPaths({
+    environment: host.env,
+    homeDirectory: host.homeDir,
+    processHomeDirectory: platform.homeDir,
+    machineStateDirectory: platform.paths.state
+  });
   return {
     machineId: platform.machineId,
     stateDirectory: platform.paths.state,
     dataDirectory: platform.paths.data,
+    ...codexTrust,
     skills: await loadMachineSkillCatalog()
+  };
+}
+
+/** Resolves only trusted process/machine context; repository configuration cannot redirect approvals or Codex hooks. */
+export function resolveCodexTrustPaths(input: {
+  readonly environment: Readonly<Record<string, string | undefined>>;
+  readonly homeDirectory: string;
+  readonly processHomeDirectory: string;
+  readonly machineStateDirectory: string;
+}): { readonly codexHomeDirectory: string; readonly codexProcessHomeDirectory: string; readonly codexHookApprovalPath: string } {
+  const isolatedRoot = input.environment.BFLOW_HOME;
+  const codexHomeDirectory = isolatedRoot
+    ? resolve(isolatedRoot, "providers", "codex")
+    : input.environment.CODEX_HOME
+      ? resolve(input.environment.CODEX_HOME)
+      : join(input.homeDirectory, ".codex");
+  const stateDirectory = isolatedRoot ? resolve(isolatedRoot, "state") : input.machineStateDirectory;
+  return {
+    codexHomeDirectory,
+    codexProcessHomeDirectory: input.processHomeDirectory,
+    codexHookApprovalPath: join(stateDirectory, "codex-hook-approvals.json")
   };
 }
 
@@ -48,7 +84,8 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
   const roles: PlatformRoleOption[] = environment.roles.map(role => roleOption(role, input, deps.context.skills));
   // Developers are allocated dynamically in task worktrees; without a configured Developer, the template uses the Coordinator's provider.
   if (!configured.has("developer"))
-    roles.push(roleOption({ role: "developer", cli: coordinator.cli, required: false }, input, deps.context.skills));
+    roles.push(roleOption({ role: "developer", cli: coordinator.cli, required: false,
+      ...modelSettings(coordinator) }, input, deps.context.skills));
 
   const locatorPath = join(deps.context.stateDirectory, GATEWAY_CONTROL_LOCATOR_FILE);
   const gatewayLocatorPath = (deps.fileExists ?? existsSync)(locatorPath) ? { gatewayLocatorPath: locatorPath } : {};
@@ -57,6 +94,9 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
     machineId: deps.context.machineId,
     repositoryId: input.repository.id,
     roles,
+    codexHomeDirectory: deps.context.codexHomeDirectory,
+    codexProcessHomeDirectory: deps.context.codexProcessHomeDirectory,
+    codexHookApprovalPath: deps.context.codexHookApprovalPath,
     skillsStoreRoot: join(deps.context.dataDirectory, "skills-store"),
     approvedBuiltinSkillDigests: [...deps.context.skills.approvedBuiltinSkillDigests],
     supportedCommands: [...SUPPORTED_CLI_COMMANDS],
@@ -79,11 +119,20 @@ function roleOption(role: EnvironmentRoleConfig, input: EnvironmentCompositionIn
     role: role.role,
     provider: provider.data,
     required: role.required ?? true,
+    ...modelSettings(role),
     permissionMode: role.permissionMode ?? environment.permissions?.mode ?? "workspace_auto",
     capabilityIds: [],
     mcpServiceIds: [...(environment.requiredMcpServices ?? [])],
     toolIds: [...(environment.requiredTools ?? [])],
     skillSelections: skills.resolvePins(role.role, skillIds)
+  };
+}
+
+/** Model selection and effort are role-local. */
+function modelSettings(role: EnvironmentRoleConfig): Pick<PlatformRoleOption, "model" | "effort"> {
+  return {
+    ...(role.model !== undefined ? { model: role.model } : {}),
+    ...(role.effort !== undefined ? { effort: role.effort } : {})
   };
 }
 

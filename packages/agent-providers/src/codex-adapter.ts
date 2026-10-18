@@ -1,7 +1,9 @@
-import { readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
+  AgentLaunchProfile,
   AgentEnvironment,
   AgentProviderDescriptor
 } from "@bflow/contracts";
@@ -15,6 +17,7 @@ import type {
   DetectedProviderCapabilities,
   ProviderAdapterOptions
 } from "./types.js";
+import { inspectCodexHooks } from "./codex-hook-trust.js";
 
 function tomlValue(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(tomlValue).join(",")}]`;
@@ -25,12 +28,10 @@ function tomlValue(value: unknown): string {
 }
 
 const MCP_NOT_ISOLATED_CODE = "codex_global_mcp_not_isolated";
-const HOOKS_NOT_ISOLATED_CODE = "codex_global_hooks_not_isolated";
 /** Bare TOML keys accepted verbatim in a `-c mcp_servers.<name>.enabled=false` dotted path. */
 const BARE_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
 const MCP_TABLE_PATTERN = /^\s*\[\s*mcp_servers\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\s*(?:\.[^\]]*)?\]/gm;
-const HOOKS_TABLE_PATTERN = /^\s*\[\[?\s*hooks\b/m;
-const HOOKS_KEY_PATTERN = /^\s*hooks\s*=/m;
+const CODEX_HOOK_DIGEST_METADATA_KEY = "bflowCodexHookSnapshotDigest";
 
 /** Table names of `[mcp_servers.<name>]` entries in a Codex config.toml (fallback when `codex mcp list` fails). */
 export function parseCodexConfigMcpServerNames(toml: string): string[] {
@@ -44,33 +45,6 @@ export function parseCodexConfigMcpServerNames(toml: string): string[] {
 
 function isNotFound(err: unknown): boolean {
   return err instanceof Error && (err as NodeJS.ErrnoException).code === "ENOENT";
-}
-
-function containsHookEntry(value: unknown): boolean {
-  if (Array.isArray(value)) return value.length > 0;
-  if (value !== null && typeof value === "object") return Object.values(value).some(containsHookEntry);
-  return false;
-}
-
-/** Global hook sources in the Codex home. Unreadable or malformed sources count as present (fail closed). */
-async function inspectGlobalHookSources(home: string): Promise<string[]> {
-  const sources: string[] = [];
-  const hooksPath = join(home, "hooks.json");
-  try {
-    const parsed: unknown = JSON.parse(await readFile(hooksPath, "utf8"));
-    if (containsHookEntry(parsed)) sources.push(hooksPath);
-  } catch (err) {
-    if (!isNotFound(err)) sources.push(hooksPath);
-  }
-
-  const configPath = join(home, "config.toml");
-  try {
-    const text = await readFile(configPath, "utf8");
-    if (HOOKS_TABLE_PATTERN.test(text) || HOOKS_KEY_PATTERN.test(text)) sources.push(configPath);
-  } catch (err) {
-    if (!isNotFound(err)) sources.push(configPath);
-  }
-  return sources;
 }
 
 export class CodexProviderAdapter extends BaseProviderAdapter {
@@ -115,11 +89,36 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
     return ["login", "status"];
   }
 
+  protected override getProviderCommandEnvironment(): Readonly<Record<string, string>> {
+    const selected = this.trustedHookEnvironment();
+    return {
+      BFLOW_PROVIDER: this.descriptor.provider,
+      HOME: selected["HOME"] ?? "",
+      PATH: selected["PATH"] ?? "",
+      ORCA_AGENT_HOOK_ROOT: selected["ORCA_AGENT_HOOK_ROOT"] ?? "",
+      ORCA_AGENT_HOOK_ENDPOINT: selected["ORCA_AGENT_HOOK_ENDPOINT"] ?? "",
+      ...(this.options.codexHomeDirectory ? { CODEX_HOME: this.options.codexHomeDirectory } : selected["CODEX_HOME"] !== undefined ? { CODEX_HOME: selected["CODEX_HOME"] } : {})
+    };
+  }
+
+  private trustedHookEnvironment(): Readonly<Record<string, string | undefined>> {
+    if (this.options.codexHookEnvironment === undefined) return process.env;
+    return {
+      ...this.options.codexHookEnvironment,
+      HOME: this.options.codexHookEnvironment["HOME"] ?? "",
+      PATH: this.options.codexHookEnvironment["PATH"] ?? process.env["PATH"] ?? "",
+      ORCA_AGENT_HOOK_ROOT: this.options.codexHookEnvironment["ORCA_AGENT_HOOK_ROOT"] ?? "",
+      ORCA_AGENT_HOOK_ENDPOINT: this.options.codexHookEnvironment["ORCA_AGENT_HOOK_ENDPOINT"] ?? "",
+      ...(this.options.codexHomeDirectory ? { CODEX_HOME: this.options.codexHomeDirectory } : {})
+    };
+  }
+
   protected override getProbeCommand(_environment: AgentEnvironment): readonly string[] {
     const probe = ["exec"];
     if (this.options.model) {
       probe.push("--model", this.options.model);
     }
+    if (this.options.effort) probe.push("-c", `model_reasoning_effort=${JSON.stringify(this.options.effort)}`);
     probe.push("ping");
     return probe;
   }
@@ -133,7 +132,8 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
   }
 
   private codexHome(): string {
-    return this.options.codexHomeDirectory || process.env["CODEX_HOME"] || join(homedir(), ".codex");
+    const environment = this.trustedHookEnvironment();
+    return this.options.codexHomeDirectory || environment["CODEX_HOME"] || join(environment["HOME"] ?? homedir(), ".codex");
   }
 
   /** `[mcp_servers.<name>]` table names of the user's Codex config.toml (missing file = none). */
@@ -156,7 +156,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
       const outcome = await this.runner.run({
         executable: this.getExecutablePath(),
         args: ["mcp", "list", "--json"],
-        env: { BFLOW_PROVIDER: this.descriptor.provider },
+        env: this.getProviderCommandEnvironment(),
         timeoutMs: 45_000
       });
       if (outcome.exitCode === 0 && outcome.failure === undefined) {
@@ -204,7 +204,8 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
   protected override async resolveInheritedIsolation(
     _environment: AgentEnvironment,
     _capabilities: DetectedProviderCapabilities,
-    bflowMcpServerNames: readonly string[]
+    bflowMcpServerNames: readonly string[],
+    launchProfile?: AgentLaunchProfile
   ): Promise<InheritedIsolation> {
     const home = this.codexHome();
     const globalServers = await this.enumerateGlobalMcpServers(home);
@@ -238,21 +239,56 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
       }
     }
 
-    const hookSources = await inspectGlobalHookSources(home);
-    const hookFailure: InheritedIsolationFailure | undefined =
-      hookSources.length > 0
-        ? {
-            code: HOOKS_NOT_ISOLATED_CODE,
-            message: `Global Codex hooks would run inside the Bflow role (${hookSources.join(", ")}); no per-invocation bypass keeps Bflow hooks`,
-            remediation:
-              "Move personal Codex hooks into a Codex profile that Bflow does not use, or remove them from the global Codex configuration. Bflow does not modify these files."
-          }
-        : undefined;
+    const hookReview = await inspectCodexHooks({
+      codexHomeDirectory: home,
+      ...(this.options.codexHookApprovalPath !== undefined ? { approvalStorePath: this.options.codexHookApprovalPath } : {}),
+      environment: this.trustedHookEnvironment()
+    });
+    let hookFailure: InheritedIsolationFailure | undefined;
+    if (hookReview.status === "unsupported") {
+      hookFailure = {
+        code: "codex_global_hooks_unsupported",
+        message: `Global Codex hook configuration cannot be safely reviewed: ${hookReview.unsupportedReasons.join("; ")}`,
+        remediation: "Use supported literal hook commands and inspect the reported dependencies. Dynamic sourced endpoint scripts remain blocked."
+      };
+    } else if (hookReview.status === "approval_required") {
+      hookFailure = {
+        code: "codex_global_hooks_approval_required",
+        message: `Global Codex hooks require exact snapshot approval (digest ${hookReview.digest}).`,
+        remediation: "Run `bflow setup --codex-hooks --plan`, inspect the hook sources, then apply with the reviewed digest."
+      };
+    }
+
+    const settingsMetadata = { [CODEX_HOOK_DIGEST_METADATA_KEY]: hookReview.digest };
+    if (launchProfile !== undefined && hookFailure === undefined) {
+      const settingsPath = join(_environment.stateDirectory, `${_environment.role}.settings.json`);
+      try {
+        if (!launchProfile.configFiles.some(file => file.path === settingsPath)) throw new Error("launch profile does not bind the private provider settings snapshot");
+        const handle = await open(settingsPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        let content: string;
+        try {
+          const stat = await handle.stat();
+          if (!stat.isFile() || (stat.mode & 0o077) !== 0 || stat.size > 256 * 1024)
+            throw new Error("private provider settings file is not a safe regular 0600 file");
+          content = await handle.readFile("utf8");
+        } finally { await handle.close(); }
+        const settings = JSON.parse(content) as Record<string, unknown>;
+        if (settings[CODEX_HOOK_DIGEST_METADATA_KEY] !== hookReview.digest)
+          throw new Error("Codex hook snapshot changed after the prepared launch profile");
+      } catch (error) {
+        hookFailure = {
+          code: "codex_global_hooks_snapshot_drift",
+          message: `Prepared Codex hook snapshot cannot be verified: ${error instanceof Error ? error.message : String(error)}`,
+          remediation: "Prepare a new launch and re-run provider activation after the exact hook inventory is approved."
+        };
+      }
+    }
 
     return {
       argv,
       ...(mcpFailure !== undefined ? { mcpFailure } : {}),
-      ...(hookFailure !== undefined ? { hookFailure } : {})
+      ...(hookFailure !== undefined ? { hookFailure } : {}),
+      settingsMetadata
     };
   }
 
@@ -336,6 +372,17 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
         };
       }
       argv.push("--model", this.options.model);
+    }
+
+    if (this.options.effort) {
+      if (!capabilities.supportedFlags.has("--config")) {
+        return {
+          argv: [],
+          unsupportedCode: "invalid_flag",
+          unsupportedMessage: "Codex CLI does not support --config for reasoning effort"
+        };
+      }
+      argv.push("-c", `model_reasoning_effort=${JSON.stringify(this.options.effort)}`);
     }
 
     return { argv };

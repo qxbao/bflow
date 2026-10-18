@@ -8,7 +8,7 @@ Chúng được đối chiếu với implementation tại baseline ghi trong
 | Asset | Consumer / trạng thái |
 | --- | --- |
 | `config.fragment.json` | Merge tường minh vào config do init sinh; P12 đọc role/lifecycle fields, validate policy fields |
-| `apply.mjs` | Helper cho checkout đã init và chưa có lifecycle state; giữ identity/storage/runtimeId, backup rồi thay workflow/policy |
+| `apply.mjs` | Helper cho checkout đã init và chưa có lifecycle state; giữ identity/storage/runtimeId, dùng parser/renderer YAML của CLI, backup rồi thay workflow/policy |
 | `roles.host.json` | Fragment `RolePaneManagerConfig`, đủ tám topology roles; host composition riêng, không được CLI/P19 factory tự nạp |
 | `workflows/{feature,bugfix,refactor,docs}.json` | `WorkflowDefinition` v1 với Developer-only DAG cho P19; chưa có runner/check implementation |
 | `sdd/*.assessment.json` | `ChangeAssessmentSchema` đầu vào P15 |
@@ -24,10 +24,14 @@ node "$BFLOW_HOME/templates/node-typescript/apply.mjs" . bugfix
 node "$BFLOW_HOME/apps/cli/dist/bin.js" doctor --json
 ```
 
-Thay `bugfix` bằng `feature`, `refactor`, `docs`. Helper chủ động thay
+Thay `bugfix` bằng `feature`, `refactor`, `docs`. Với repo cũ còn
+`.bflow/config.yaml` hoặc `.bflow/config.json`, chạy `bflow config-migrate` trước
+khi apply. Lệnh migrate giữ nguyên giá trị và lưu file gốc dạng `<legacy-path>.bak`.
+Helper sử dụng parser YAML và renderer chính thức của CLI thay vì parse config như
+JSON. Helper chủ động thay
 `defaultWorkflow` và toàn bộ key thuộc fragment `environment`; không phải merge
 giữ các giá trị role/policy tùy chỉnh cũ. Helper từ chối identity trong fragment
-và validate bằng loader thật trước khi thay config. Backup ở `.bflow/data/`, được init ignore.
+và validate bằng loader thật trước khi thay config. Backup YAML ở `.bflow/data/`, được init ignore.
 Không chạy helper đồng thời với thao tác lifecycle/config khác. Nếu đã có
 `.bflow/state`, helper từ chối để operator review thay đổi; không xóa state để lách.
 
@@ -59,7 +63,8 @@ node "$BFLOW_HOME/templates/node-typescript/verify.mjs"
 
 Script parse exported schemas, resolve/validate policy và gọi CLI init thật trên
 hai repo cùng basename, kiểm tra identity isolation, repeat/subdirectory init,
-template merge cho cả bốn workflow, moved config/YAML rejection và guard không sửa
+canonical `.bflow/config.yml` cùng YAML comments, template merge cho cả bốn workflow,
+moved config/YAML rejection và guard không sửa
 repo đã có state. Các probe policy sai, duplicate role và identity override xác nhận
 config/backup không bị thay đổi khi input bị từ chối.
 Nó cũng xác nhận `init --force` **ghi đè** theo code thực tế, khác help hiện tại.

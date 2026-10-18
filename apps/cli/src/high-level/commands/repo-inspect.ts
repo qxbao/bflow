@@ -21,7 +21,7 @@ const MARKERS: readonly [string, string][] = [
   ["go.mod", "go"], ["pyproject.toml", "python"], ["requirements.txt", "python"], ["pom.xml", "java-maven"],
   ["build.gradle", "java-gradle"], ["Gemfile", "ruby"], ["composer.json", "php"]
 ];
-const CONTEXT_FILES = ["AGENTS.md", "CLAUDE.md", "README.md", "CONTRIBUTING.md", ".bflow/config.yaml", ".bflow/environment.yaml"];
+const CONTEXT_FILES = ["AGENTS.md", "CLAUDE.md", "README.md", "CONTRIBUTING.md", ".bflow/config.yml", ".bflow/config.yaml", ".bflow/config.json", ".bflow/environment.yaml"];
 
 function parseStatus(z: string) {
   const entries: { status: string; path: string }[] = [];
@@ -117,7 +117,7 @@ export const repoInspect: HighLevelHandler = async (_args, ctx) => {
         scripts,
         workspacePackages: await workspacePackages(root),
         contextFiles,
-        bflow: { initialized: contextFiles.includes(".bflow/config.yaml"), plans }
+        bflow: { initialized: contextFiles.some(path => [".bflow/config.yml", ".bflow/config.yaml", ".bflow/config.json"].includes(path)), plans }
       };
     }, value => ({ markers: value.markers, bflowInitialized: value.bflow.initialized }));
 

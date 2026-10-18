@@ -8,7 +8,7 @@ là **planned/chưa triển khai**. Public contracts và ADR vẫn là nguồn a
 | --- | --- |
 | [Getting Started](getting-started.md) | Thử trên repository Node.js/TypeScript riêng |
 | [Installation](installation.md) | Source install/build, Node/pnpm/Herdr |
-| [bflow init](bflow-init.md) | JSON config.yaml, Git identity, idempotency và cờ overwrite |
+| [bflow init](bflow-init.md) | Commented config.yml, Git identity, migration, idempotency và cờ overwrite |
 | [bflow up](bflow-up.md) | Named session, permanent roles, readiness, giới hạn host boot |
 | [bflow attach](bflow-attach.md) | Chỉ attach Conversation |
 | [Recovery sau Ctrl+C](troubleshooting.md) | Kernel lock, recover --yes, native startup dialogs và pane labels |

@@ -4,9 +4,7 @@ import {
   type ConcreteRuntimeService
 } from "@bflow/runtime";
 import { identifyRepository } from "./repository.js";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
-import { loadRepositoryConfig, resolveConfigPath } from "./config.js";
+import { loadRepositoryConfig, resolveReadableConfigPath } from "./config.js";
 import type { BflowRepositoryConfig } from "./types.js";
 
 export interface ComposeCliRuntimeOptions {
@@ -32,10 +30,10 @@ export async function composeCliRuntime(
   if (options?.configPath === undefined) {
     try {
       const repository = await identifyRepository(cwd);
-      if (existsSync(resolve(repository.root, ".bflow/config.yaml"))) cwd = repository.root;
+      cwd = repository.root;
     } catch { /* Preserve the legacy explicit-directory Runtime error path. */ }
   }
-  const resolvedConfigPath = resolveConfigPath(cwd, options?.configPath);
+  const resolvedConfigPath = resolveReadableConfigPath(cwd, options?.configPath);
 
   const configRes = await loadRepositoryConfig(resolvedConfigPath);
   if (!configRes.ok) {

@@ -10,17 +10,21 @@ Up đọc config checkout, kiểm tra binary/Herdr API, khởi động server he
 tên session riêng, gọi P13 tạo hoặc reconcile topology và đợi mọi role `required`
 ở trạng thái `idle`/`done`. Mặc định có bảy permanent roles; Developer được cấp
 phát theo task/worktree bởi Runtime. Timeout là millisecond, từ 1 đến 600000;
-mặc định startup là 60000. `required: false` chỉ bỏ yêu cầu readiness, không có
-nghĩa là bỏ tạo role hay bỏ dependency executable.
+mặc định startup là 60000. `required: false` trên role permanent chỉ làm readiness
+thành tuỳ chọn; nếu có role `developer` trong config thì entry đó là template cho
+Runtime cấp phát theo task/worktree, không tạo một pane permanent khi `up` chạy.
 
 `HERDR_SESSION` được đặt theo identity repository. Caller socket/pane/remote
 overrides được loại khỏi môi trường lệnh Herdr; `HERDR_CONFIG_PATH` được giữ lại.
 Đây là phân tách session, không phải sandbox của hệ điều hành.
 
 Khi đã có manifest hợp lệ và session sống, up tái sử dụng role. Nó từ chối nhận
-một named session đang sống mà không có bằng chứng ownership của repo. Sau lỗi
-startup/timeout, đọc status/doctor và [Session Recovery](session-recovery.md);
-đừng xóa state để ép tạo thêm agent.
+một named session đang sống mà không có bằng chứng ownership của repo. Nếu startup
+thất bại sau khi đã bắt đầu thay đổi session, up chủ động thử `down` với barrier
+và checkpoint hiện hành. Khi cleanup không hoàn tất hoặc không chứng minh được an
+toàn, operation receipt và recovery state được giữ lại; thông báo ghi rõ kết quả
+cleanup. Xem `status`/`doctor`, xử lý nguyên nhân rồi reconcile bằng `bflow down
+--yes`; đừng xoá state để ép tạo thêm agent.
 
 `up` chuẩn bị persistent P19 host trước startup, cấp launch-local MCP/hooks và
 system prompts cho role, rồi đòi activation acknowledgement trước khi ghi ready.
@@ -34,10 +38,12 @@ và các giới hạn hiện tại.
 Up thành công không chứng minh một workflow đã hoàn tất. Smoke thực đã kiểm tra
 lifecycle up/down/restart; xem [release-readiness](../release-readiness.md).
 
-Ctrl+C hủy việc đợi/startup của lệnh, giữ server, partial manifest và launch receipts.
-Lock lifecycle do kernel giữ nên tự nhả khi process chết, kể cả SIGKILL. Chạy lại
-`bflow up` sẽ inspect/reuse các pane cũ, không tự resend agent assignment. Với lock
-thư mục từ phiên bản cũ: dừng lệnh cũ rồi `bflow recover --yes`; không xóa .bflow.
+Ctrl+C huỷ việc đợi/startup của lệnh và sau khi startup đã bắt đầu sẽ kích hoạt
+safe cleanup. Nếu delivery chưa rõ hoặc cleanup bị chặn, Bflow giữ operation receipt,
+partial manifest và launch receipts để reconcile. Lock lifecycle do kernel giữ
+nên tự nhả khi process chết, kể cả SIGKILL. Chạy `status`/`doctor`, rồi `bflow down
+--yes` để hoàn tất việc dọn; không xoá `.bflow`. Với lock thư mục từ phiên bản cũ:
+dừng lệnh cũ rồi `bflow recover --yes`.
 Nếu UI provider bị chặn, lỗi chỉ rõ pane/session và lệnh mở đúng session để xử lý.
 
 Chat/Coordinator nạp prompt gốc ngay từ startup. Pane được đặt tên theo role;

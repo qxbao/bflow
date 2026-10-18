@@ -13,6 +13,8 @@ export const PlatformRoleOptionSchema = z.object({
   role: AgentRoleSchema,
   provider: AgentProviderIdSchema,
   required: z.boolean(),
+  model: z.string().trim().min(1).optional(),
+  effort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).optional(),
   permissionMode: z.enum(["restricted", "workspace_auto", "unattended_isolated"]),
   capabilityIds: z.array(IdentifierSchema),
   mcpServiceIds: z.array(IdentifierSchema),
@@ -25,7 +27,10 @@ export const PlatformRoleOptionSchema = z.object({
   environmentVariables: z.record(SafeArgumentSchema).optional(),
   isolation: z.object({ kind: z.enum(["os_sandbox", "container"]), proofId: IdentifierSchema }).strict().optional(),
   network: z.object({ mode: z.enum(["deny", "allowlist"]), allowedHosts: z.array(IdentifierSchema) }).strict().optional()
-}).strict();
+}).strict().superRefine((role, ctx) => {
+  if (role.provider === "agy" && role.effort !== undefined)
+    ctx.addIssue({ code: "custom", path: ["effort"], message: "Agy effort must be encoded in the configured model name" });
+});
 export type PlatformRoleOption = z.infer<typeof PlatformRoleOptionSchema>;
 
 export const AgenticHostPlatformOptionsSchema = z.object({
@@ -36,6 +41,12 @@ export const AgenticHostPlatformOptionsSchema = z.object({
   roles: z.array(PlatformRoleOptionSchema).min(1),
   /** Root of the machine skill bundle store (`FileSkillStore`). */
   skillsStoreRoot: NonEmptyArgumentSchema,
+  /** Trusted user Codex home used to inspect inherited global hooks. */
+  codexHomeDirectory: NonEmptyArgumentSchema.optional(),
+  /** Trusted HOME for the Codex process; isolated setup derives this separately from CODEX_HOME. */
+  codexProcessHomeDirectory: NonEmptyArgumentSchema.optional(),
+  /** Private machine-owned store recording explicit approval of exact global Codex hook snapshots. */
+  codexHookApprovalPath: NonEmptyArgumentSchema.optional(),
   approvedBuiltinSkillDigests: z.array(Sha256DigestSchema),
   /**
    * Commands skills may reference, owned by the CLI command reference. Absent (older CLI) means none: skills that

@@ -23,7 +23,7 @@ TMPDIR=/tmp bflow up
 ```
 
 **Trình tự kiểm tra nghiêm ngặt khi `bflow up` chạy**:
-1. Đọc `.bflow/config.yaml` và xác minh quyền riêng tư (`0700`/`0600`) của `.bflow/state`.
+1. Đọc `.bflow/config.yml` (hoặc tương thích ngược `.bflow/config.yaml` / `.json`) và xác minh quyền riêng tư (`0700`/`0600`) của `.bflow/state`.
 2. Thực thi `PlatformReadinessService.preflight()` cho toàn bộ các role được cấu hình:
    - Kiểm tra binary SHA-256, phiên bản, đăng nhập (`auth status` / `login status` / `models` + non-interactive `ping`).
    - Đồng bộ `SkillManifest` gắn với `(sessionId, generation)`.
@@ -140,5 +140,11 @@ bflow down --yes
 
 ### 4.4 Sự cố: Lỗi `codex_global_hooks_not_isolated` khi khởi chạy role dùng Codex
 
-- **Nguyên nhân**: Máy host có file `~/.codex/hooks.json` hoặc cấu hình `[[hooks.*]]` trong `~/.codex/config.toml`.
-- **Cách xử lý**: Tạm thời di chuyển `~/.codex/hooks.json` và các khối `[[hooks.*]]` sang một thư mục backup hoặc cấu hình `CODEX_HOME` riêng cho Codex trước khi chạy `bflow up`.
+- **Nguyên nhân**: Máy host có file `~/.codex/hooks.json` chưa được phê duyệt theo SHA-256 hoặc có cấu hình `[[hooks.*]]` trong `~/.codex/config.toml`.
+- **Cách xử lý**:
+  1. Xem chi tiết các hook toàn cục và phê duyệt tường minh bằng lệnh:
+     ```bash
+     bflow setup --codex-hooks --plan
+     bflow setup --codex-hooks --apply
+     ```
+  2. Hoặc di chuyển `~/.codex/hooks.json` / cấu hình `CODEX_HOME` riêng cho Codex trước khi chạy `bflow up`.

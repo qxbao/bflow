@@ -181,6 +181,7 @@ describe("DefaultPlatformReadinessService", () => {
     runner?: ProviderCommandRunner;
     gateway?: boolean;
     now?: () => Date;
+    codexLaunchEnvironment?: Readonly<Record<string, string>>;
   } = {}): { service: DefaultPlatformReadinessService; journal: FileLaunchJournal } {
     const journal = new FileLaunchJournal(join(identity.stateDirectory, "launch-journal.jsonl"));
     const now = options.now ?? (() => new Date());
@@ -188,7 +189,12 @@ describe("DefaultPlatformReadinessService", () => {
       factory: createProviderAdapterFactory({
         runner: options.runner ?? createFakeProviderRunner({ scenario: "healthy" }),
         now,
-        perProvider: { claude: { executablePath: binaryPath, allowTestFilesystemOwnership: true } }
+        perProvider: {
+          claude: { executablePath: binaryPath, allowTestFilesystemOwnership: true },
+          codex: { executablePath: binaryPath, allowTestFilesystemOwnership: true,
+            codexHomeDirectory: join(baseDir, "test-codex-home"),
+            codexHookApprovalPath: join(identity.stateDirectory, "codex-hook-approvals.json") }
+        }
       }),
       journal,
       now
@@ -203,6 +209,7 @@ describe("DefaultPlatformReadinessService", () => {
       providers,
       journal,
       signer,
+      ...(options.codexLaunchEnvironment !== undefined ? { codexLaunchEnvironment: options.codexLaunchEnvironment } : {}),
       rolePrompt: role => `Role prompt for ${role}.`,
       now
     });
@@ -238,6 +245,28 @@ describe("DefaultPlatformReadinessService", () => {
     expect(await journalKinds(journal)).toEqual(["intent", "intent"]);
     expect(service.status().generation).toBe(1);
     expect(service.status().launches.map(launch => launch.state)).toEqual(["intent", "intent"]);
+  });
+
+  it("pins permanent and dynamic Developer launch HOME selectors to trusted Codex machine context", async () => {
+    const home = join(baseDir, "trusted-home");
+    const codexHome = join(baseDir, "isolated-codex");
+    const { service } = buildService({ gateway: false, codexLaunchEnvironment: { HOME: home, CODEX_HOME: codexHome } });
+    const launches = await service.prepareSession(identity, [requirement({ provider: "codex" })]);
+    expect(launches.ok).toBe(true);
+    if (launches.ok) expect(launches.value.launches[0]?.launch.env).toMatchObject({ HOME: home, CODEX_HOME: codexHome });
+
+    const developer = await service.prepareDeveloper(identity, requirement({ provider: "codex" }));
+    expect(developer.ok).toBe(true);
+    if (developer.ok) expect(developer.value.launch.env).toMatchObject({ HOME: home, CODEX_HOME: codexHome });
+  });
+
+  it("passes the configured role model and effort through readiness and into launch argv", async () => {
+    const { service } = buildService();
+    const result = await service.prepareSession(identity, [requirement({ model: "sonnet", effort: "high" })]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const launch = result.value.launches[0];
+    expect(launch?.launch.argv).toEqual(expect.arrayContaining(["--model", "sonnet", "--effort", "high"]));
   });
 
   it("launches nothing and revokes gateway registrations when a required role is blocked", async () => {
