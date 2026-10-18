@@ -27,6 +27,13 @@ const platform: AgenticHostPlatformOptions = {
 };
 
 describe("Codex hook trust propagation", () => {
+  it("uses one explicit managed environment for inspection and launch without the outer Orca endpoint", () => {
+    const input = { HOME: "/operator", PATH: "/trusted/bin:/usr/bin:/bin", ORCA_AGENT_HOOK_ROOT: "/outer", ORCA_AGENT_HOOK_ENDPOINT: "/outer/secret.env", ORCA_PANE_KEY: "outer-pane", ORCA_AGENT_HOOK_PORT: "4567" };
+    const result = createHostProviderFactoryOptions({ ...platform, codexHomeDirectory: "/operator/.codex" }, input);
+    expect(result.perProvider.codex.codexHookEnvironment).toMatchObject({ PATH: input.PATH, ORCA_AGENT_HOOK_ENDPOINT: "", ORCA_AGENT_HOOK_ROOT: "", ORCA_PANE_KEY: "", ORCA_AGENT_HOOK_PORT: "" });
+    expect(result.codexLaunchEnvironment).toMatchObject(result.perProvider.codex.codexHookEnvironment);
+    expect(input.ORCA_AGENT_HOOK_ENDPOINT).toBe("/outer/secret.env");
+  });
   it("uses the same trusted home and approval store for permanent and dynamic Developer Codex adapters", () => {
     const permanent = { ...platform, codexHomeDirectory: "/machine/codex", codexHookApprovalPath: "/machine/state/codex-hook-approvals.json" };
     const withDeveloperTemplate = { ...permanent, roles: [...permanent.roles, roleOption("developer", "codex", false)] };
@@ -34,8 +41,8 @@ describe("Codex hook trust propagation", () => {
       codexHomeDirectory: "/machine/codex", codexHookApprovalPath: "/machine/state/codex-hook-approvals.json",
       codexHookEnvironment: { HOME: "/machine/codex" }
     } }, codexLaunchEnvironment: { CODEX_HOME: "/machine/codex", HOME: "/machine/codex" } };
-    expect(createHostProviderFactoryOptions(permanent, { HOME: "/machine/codex" })).toEqual(expected);
-    expect(createHostProviderFactoryOptions(withDeveloperTemplate, { HOME: "/machine/codex" })).toEqual(expected);
+    expect(createHostProviderFactoryOptions(permanent, { HOME: "/machine/codex" })).toMatchObject(expected);
+    expect(createHostProviderFactoryOptions(withDeveloperTemplate, { HOME: "/machine/codex" })).toMatchObject(expected);
   });
 
   it("builds the provider factory with trusted Codex paths for permanent and dynamic role requests", () => {

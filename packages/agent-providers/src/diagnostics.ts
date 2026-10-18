@@ -8,6 +8,15 @@ export function scrubDiagnosticText(input: string): string {
   if (!input) return "";
   let text = input;
 
+  // Opaque credentials need not use a recognizable provider token prefix.
+  // Redact before whitespace folding/truncation so quoted values remain whole.
+  text = text.replace(/(--?(?:api[-_]?key|access[-_]?token|refresh[-_]?token|client[-_]?secret|token|password|passwd|secret|authorization)(?:=|\s+))(?:(?:"(?:\\[\s\S]|[^"\\])*(?:"|\\?$))|(?:'[^']*(?:'|$))|[^\s]+)/gi,
+    "$1[REDACTED]");
+  text = text.replace(/\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|AUTH)[A-Z0-9_]*)=(?:(?:"(?:\\[\s\S]|[^"\\])*(?:"|\\?$))|(?:'[^']*(?:'|$))|[^\s]+)/gi,
+    "$1=[REDACTED]");
+  text = text.replace(/((["'])[A-Z0-9_-]*(?:TOKEN|SECRET|PASSWORD|API_?KEY|AUTH)[A-Z0-9_-]*\2\s*:\s*)(?:(?:"(?:\\[\s\S]|[^"\\])*(?:"|\\?$))|(?:'[^']*(?:'|$))|[^,\s}\]]+)/gi,
+    '$1"[REDACTED]"');
+
   // Redact Bearer tokens
   text = text.replace(/Bearer\s+[A-Za-z0-9._~+/-]+/gi, "Bearer [REDACTED]");
 

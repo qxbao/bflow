@@ -136,6 +136,24 @@ describe("@bflow/agent-providers", () => {
   }
 
   describe("1. Diagnostics and Secret Scrubbing", () => {
+    it.each([
+      '--password "first credential-tail"',
+      '--password "first credential-tail',
+      "SERVICE_TOKEN='first credential-tail'",
+      'SERVICE_TOKEN="first credential-tail',
+      '--password "first credential-tail\\',
+      '{"access_token":"first credential-tail"}',
+      '{"password":"first credential-tail"}',
+      '{"client_secret":"first credential-tail"}'
+    ])("redacts quoted credential tails even in incomplete provider output: %s", (input) => {
+      expect(scrubDiagnosticText(input)).not.toContain("credential-tail");
+    });
+    it("redacts opaque flag and environment credentials before provider health crosses a package boundary", () => {
+      const values = ["synthetic-private-password", "synthetic-private-key", "synthetic-private-env"];
+      const text = 'auth failed: --password "synthetic-private-password" --api-key=synthetic-private-key SERVICE_TOKEN=synthetic-private-env';
+      const check = createHealthCheck("authentication", "failed", "auth_missing", text, text);
+      for (const value of values) expect(JSON.stringify(check)).not.toContain(value);
+    });
     it("scrubs Bearer tokens, OpenAI/Anthropic/Google/GitHub API keys, and emails", () => {
       const sensitive =
         "Error: Bearer abc.123_xyz-token failed with sk-proj-1234567890abcdef and AIzaSyD12345. " +
@@ -678,6 +696,27 @@ describe("@bflow/agent-providers", () => {
   });
 
   describe("5. All 8 Failure Scenarios", () => {
+    it("verifies Codex against the same PATH used by its child commands", async () => {
+      const bin = join(testBaseDir, "selected-bin");
+      await mkdir(bin, { mode: 0o700 });
+      await writeFile(join(bin, "codex"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+      const adapter = new CodexProviderAdapter({ runner: createFakeProviderRunner({ scenario: "success" }),
+        codexHomeDirectory: testCodexHome, codexHookEnvironment: { HOME: testBaseDir, PATH: bin } });
+      const result = await adapter.checkHealth({ schemaVersion: 3, environment: createTestEnvironment("codex"), stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value.checks.find(check => check.check === "binary")?.message).toContain(join(bin, "codex"));
+    });
+
+    it.each([0o600, 0o777])("preserves the actual binary verification failure for mode %s", async (mode) => {
+      const binary = join(testBaseDir, `unsafe-binary-${mode}`);
+      await writeFile(binary, "#!/bin/sh\nexit 0\n", { mode });
+      await chmod(binary, mode);
+      const adapter = new ClaudeProviderAdapter({ runner: createFakeProviderRunner({ scenario: "success" }), executablePath: binary });
+      const result = await adapter.checkHealth({ schemaVersion: 3, environment: createTestEnvironment("claude"), stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value.checks.find(check => check.check === "binary")?.code).toBe(mode === 0o600 ? "binary_not_executable" : "binary_untrusted");
+    });
+
     it("1. Missing binary fails with binary_missing", async () => {
       const runner = createFakeProviderRunner({ scenario: "missing_binary" });
       const adapter = new ClaudeProviderAdapter({
@@ -2001,7 +2040,7 @@ describe("@bflow/agent-providers", () => {
 
     it("fails closed when config.toml defines hooks inline", async () => {
       const home = await freshCodexHome({
-        "config.toml": '[hooks]\nInterrupt = [{ hooks = [{ type = "command", command = "/bin/true" }] }]\n'
+        "config.toml": `[hooks]\nInterrupt = [{ hooks = [{ type = "command", command = ${JSON.stringify(fakeBinaryPath)} }] }]\n`
       });
       const adapter = codexAdapter(codexRunner({ globalServers: [] }), home);
       const launch = await adapter.prepareLaunch(createTestEnvironment("codex", "workspace_auto"));

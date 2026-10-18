@@ -125,6 +125,13 @@ export function stripAnsi(text: string): string {
  */
 export function redactSensitive(text: string): string {
   let result = text;
+  // Startup reports can include CLI failure text with opaque credential values.
+  result = result.replace(/(--?(?:api[-_]?key|access[-_]?token|refresh[-_]?token|client[-_]?secret|token|password|passwd|secret|authorization)(?:=|\s+))(?:(?:"(?:\\[\s\S]|[^"\\])*(?:"|\\?$))|(?:'[^']*(?:'|$))|[^\s]+)/gi,
+    "$1[REDACTED]");
+  result = result.replace(/\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|AUTH)[A-Z0-9_]*)=(?:(?:"(?:\\[\s\S]|[^"\\])*(?:"|\\?$))|(?:'[^']*(?:'|$))|[^\s]+)/gi,
+    "$1=[REDACTED]");
+  result = result.replace(/((["'])[A-Z0-9_-]*(?:TOKEN|SECRET|PASSWORD|API_?KEY|AUTH)[A-Z0-9_-]*\2\s*:\s*)(?:(?:"(?:\\[\s\S]|[^"\\])*(?:"|\\?$))|(?:'[^']*(?:'|$))|[^,\s}\]]+)/gi,
+    '$1"[REDACTED]"');
   // Common API keys / secret tokens:
   // GitHub tokens (ghp_, gho_, ghu_, ghs_, ghr_), Anthropic/OpenAI keys (sk-, sk_...)
   result = result.replace(/\b(?:gh[pousr]|sk)[-_][A-Za-z0-9_\-]{16,}/g, "[REDACTED_SECRET]");
@@ -291,6 +298,9 @@ export function resolveActionableRemediation(
   }
 
   // 3. Check for specific authored instructions already embedded in the message
+  if (msg.startsWith("Provider readiness is not satisfied;") && msg.includes("codex_global_hooks_")) {
+    return "Run 'bflow setup --codex-hooks --plan' to inspect every hook source and blocking reason; approve only a supported, reviewed snapshot.";
+  }
   if (msg.includes("Run bflow recover --yes")) {
     return "Stop any old Bflow lifecycle commands, then run 'bflow recover --yes' to migrate the legacy lock.";
   }

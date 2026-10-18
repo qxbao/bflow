@@ -56,8 +56,16 @@ and asks for interactive approval. Non-interactive approval must pass both
 Approval is tied to the inspected Codex home and hook snapshot; any changed hook
 or dependency needs a new review. This grants approval only for the inspected
 Codex hooks; it does not widen Bflow permissions or provide an OS sandbox. The
-inventory pins direct local script dependencies, not system interpreters or
-arbitrary runtime data; unsupported dynamic shell forms remain blocked.
+inventory pins direct local scripts and resolved interpreters, not arbitrary
+transitive packages or runtime data; unsupported dynamic shell forms remain blocked.
+Explicitly enabled plugin hook sources are included when their local installation
+can be resolved unambiguously. Setup review and Runtime launches use the same
+environment with outer Orca pane selectors cleared only for Bflow child processes.
+Startup readiness errors retain the per-role diagnostic report (up to 256 lines /
+64,000 characters) after terminal sanitization and credential redaction, and direct
+hook failures point to the hook-only plan command.
+Credential redaction also covers opaque command-line flags, environment assignments and JSON credential fields,
+including quoted values whose closing quote is missing from truncated subprocess output.
 
 | Command | Behavior |
 | --- | --- |

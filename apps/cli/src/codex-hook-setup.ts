@@ -6,6 +6,7 @@ import {
   CODEX_HOOK_APPROVAL_FILE,
   CodexHookApprovalSchema,
   CodexHookReviewSchema,
+  createManagedCodexHookEnvironment,
   defaultCodexHookApprovalPath,
   inspectCodexHooks,
   type CodexHookApproval,
@@ -81,13 +82,11 @@ function trustOptions(context?: CliContext): CodexHookTrustOptions {
   const isolatedRoot = rawIsolatedRoot ? resolve(rawIsolatedRoot) : undefined;
   const platform = context?.setup?.platform ?? detectPlatform(defaultHostEnvironment());
   const values: Record<string, string | undefined> = {};
-  for (const name of ["PATH", "ORCA_AGENT_HOOK_ROOT", "ORCA_AGENT_HOOK_ENDPOINT"])
-    if (process.env[name] !== undefined) values[name] = process.env[name];
 
   if (isolatedRoot) {
     const homes = isolatedProviderHomes(isolatedRoot);
     const codexHomeDirectory = homes.codexHome ?? join(isolatedRoot, "providers", "codex");
-    values["HOME"] = homes.homeDirectory;
+    Object.assign(values, createManagedCodexHookEnvironment(process.env, homes.homeDirectory));
     values["CODEX_HOME"] = codexHomeDirectory;
     const stateDirectory = join(isolatedRoot, "state");
     values["XDG_STATE_HOME"] = stateDirectory;
@@ -99,7 +98,7 @@ function trustOptions(context?: CliContext): CodexHookTrustOptions {
   }
 
   const homeDirectory = platform.homeDir || process.env["HOME"] || homedir();
-  values["HOME"] = homeDirectory;
+  Object.assign(values, createManagedCodexHookEnvironment(process.env, homeDirectory));
   if (process.env["CODEX_HOME"] !== undefined) values["CODEX_HOME"] = process.env["CODEX_HOME"];
   if (process.env["XDG_STATE_HOME"] !== undefined) values["XDG_STATE_HOME"] = process.env["XDG_STATE_HOME"];
   const codexHomeDirectory = resolve(values["CODEX_HOME"] ?? join(homeDirectory, ".codex"));

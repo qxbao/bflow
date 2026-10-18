@@ -408,6 +408,9 @@ Guarantees implemented here, with package-local tests in `test/platform/service.
 - Launch material (`launch.env` bearer tokens) is kept in memory only. Reports, status snapshots and errors
   never contain token values. Released or shut-down launches drop their material.
 - `verifyActivated` requires a launch this instance prepared; `assertFresh` delegates to the cached preflight.
+- Codex setup review, preflight probes and permanent/dynamic role launches share the selected HOME/PATH
+  and explicitly empty outer Orca pane/root/endpoint/port selectors in child environments. Parent settings
+  and Bflow's mandatory Herdr/Runtime hooks are preserved; an unsupported hook snapshot still blocks launch.
 
 Limitations: this is source composition with local fake-runner and fake-Gateway evidence only. Live
 provider probes, a live Gateway daemon and Pane Manager/Conversation wiring are not verified here. The
