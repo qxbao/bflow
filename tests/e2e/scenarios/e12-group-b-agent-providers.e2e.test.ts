@@ -306,10 +306,15 @@ exit 0
           requiredMcpServiceIds: ["gitnexus"]
         });
 
+        const codexHomeDir = join(root, "codex-home");
+        mkdirSync(codexHomeDir, { mode: 0o700 });
+        chmodSync(codexHomeDir, 0o700);
+
         const fullRegistry = createDefaultProviderRegistry({
           [provider]: {
             executablePath: binPath,
             runner,
+            codexHomeDirectory: codexHomeDir,
             mcpRegistrations: [mcpReg],
             mcpObservations: [mcpObs],
             skillManifest,

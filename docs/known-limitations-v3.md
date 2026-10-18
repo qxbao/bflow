@@ -1,0 +1,56 @@
+# Bflow Platform v3 — Known Limitations & Open Follow-Ups (Post-P24–P34)
+
+Tài liệu này tổng hợp trung thực toàn bộ các giới hạn kỹ thuật, phạm vi chưa được chứng nhận và các mục công việc còn mở của Bflow Platform v3 tại commit baseline `ee4ff7c` (cùng các bản sửa kiểm thử release `REL-V3-01`, `REL-V3-02`).
+
+> **Nguyên tắc báo cáo**: Không che giấu giới hạn kỹ thuật; phân biệt rõ ràng giữa **kiểm thử đơn vị/harness**, **kiểm thử binary/daemon thực trên máy cục bộ**, và **nghiệm thu luồng AI SDLC đa mô hình từ đầu đến cuối (Full Live Multi-Model AI SDLC Acceptance)**.
+
+---
+
+## 1. Các giới hạn cốt lõi ngăn việc tuyên bố Production-Ready ngay lập tức
+
+| Mã giới hạn | Mức ưu tiên | Mô tả giới hạn hiện tại | Chủ sở hữu & Điều kiện đóng |
+| :--- | :---: | :--- | :--- |
+| **`PV3-01` / `RR-01` / `RR-21`** | **P1 (Blocker cho Production-Ready)** | **Chưa có lượt chạy Full Live Multi-Model AI SDLC từ đầu đến cuối**: Mặc dù toàn bộ động cơ Runtime, SQLite, ArtifactStore, Git worktrees, Bubblewrap runner, Herdr daemon (`0.9.5`) và các probe riêng lẻ của `claude`, `codex`, `agy` đều đã chạy thật và PASS, vẫn chưa có một phiên thực tế duy nhất trong đó người dùng gửi yêu cầu qua pane `conversation` và các mô hình LLM thật tự thực hiện trọn vẹn: `Clarification` $\to$ `Specification` $\to$ `TddDecision` $\to$ `Developer` viết test Red / code Green trên Git worktree $\to$ `Reviewer` & `QA` kiểm chứng $\to$ `GitOrchestrator` merge $\to$ `Human Delivery Approval`. | **Runtime + QA**: Thực hiện ít nhất 1 kịch bản feature/bugfix (`required` TDD) và 1 kịch bản tài liệu (`not_applicable` TDD) hoàn toàn bằng LLM thật trên Herdr, lưu trữ toàn bộ run/session IDs, receipts, artifacts và chi phí token. |
+| **`PV3-02`** | **P1 (QA Suite)** | **Chưa tách thư mục `tests/platform-v3/**` riêng**: Các kịch bản nghiệm thu Platform v3 hiện được tích hợp trong `tests/e2e/scenarios/e11`..`e16` và các bộ test của từng package (`packages/runtime/test/agentic/**`, `packages/agent-providers/test/**`, `packages/mcp-gateway/test/**`), chưa tách thành cây thư mục `tests/platform-v3/**` độc lập như đề xuất ban đầu của P31, và chưa có chiến dịch tiêm lỗi trực tiếp (live fault/race campaign) trên trình duyệt Chrome thật hoặc dịch vụ OS đang chạy tải thực. | **QA (P31)**: Bổ sung các bài kiểm thử tiêm lỗi trực tiếp trên Chrome lease/fencing race và OS service crash dưới tải thực. |
+| **`RR-02` / `RR-19`** | **P1 (Reliability)** | **Chưa chạy chiến dịch tiêm lỗi (`SIGKILL`) giữa chừng trên workflow LLM thật đang chạy**: Đã chứng minh khôi phục crash qua `e02`, `09-session-recovery-reliability.test.ts` và `local-fault-probe.mjs` trên SQLite/transport thực, cũng như khởi động/dừng Herdr thật khi rảnh (`idle`), nhưng chưa tiêm `SIGKILL` vào giữa một lượt sinh mã thực của LLM với worktree đang dirty và phê duyệt đang chờ. | **Lifecycle + QA**: Chạy chiến dịch active recovery trên phiên LLM thật, xác nhận không mất trạng thái phê duyệt và không nhân bản worktree/prompt. |
+
+---
+
+## 2. Giới hạn theo Thành phần Kỹ thuật (Component-Specific Limitations)
+
+### 2.1 Agent Providers & Host Isolation (`packages/agent-providers`, `packages/runtime`)
+
+| Mã giới hạn | Trạng thái | Chi tiết giới hạn | Hướng xử lý / Workaround |
+| :--- | :---: | :--- | :--- |
+| **`PV3-03` (Agy Capabilities)** | **By Design (Fail-Closed)** | `AgyProviderAdapter` (`agy 1.4.0`) đạt `preflight: ready` và `prepareLaunch: ok` cho chế độ `restricted` và `workspace_auto`, nhưng **không hỗ trợ** `unattended_isolated` (`agy_unattended_unsupported`) và chưa hỗ trợ chứng thực `activated` native session binding (`native_binding_unsupported`). | Chỉ sử dụng `claude` hoặc `codex` cho các role đòi hỏi `activated` native binding hoặc chế độ `unattended_isolated` có Bubblewrap sandbox. |
+| **`PV3-01-CODEX-HOOKS`** | **By Design (Fail-Closed)** | Nếu máy người dùng có cấu hình hook toàn cục của Codex (`~/.codex/hooks.json` hoặc `[[hooks.*]]` trong `~/.codex/config.toml`), `CodexProviderAdapter` sẽ chặn khởi chạy (`codex_global_hooks_not_isolated`) vì Codex CLI hiện chưa có cờ tắt riêng hook toàn cục mà vẫn giữ được hook của Bflow. | Di chuyển `~/.codex/hooks.json` sang profile cá nhân không dùng cho Bflow hoặc đặt `CODEX_HOME` riêng trước khi chạy role bằng `codex`. |
+| **`PV3-01-DAEMON-RESTART`** | **By Design (Fail-Closed)** | Khi daemon `AgenticHost` khởi động lại sau khi chết, các launch và registration của daemon cũ (vốn giữ khóa/token trong RAM của tiến trình cũ) sẽ bị thu hồi (`restartRecovery.releasedLaunchIds`) thay vì tự động nhận lại. | Chạy lại `bflow up` để thiết lập lại launch profile và registration mới cho các role panes. |
+| **`RR-13` & `PV3-09` (Same-UID Threat Model)** | **Accepted Risk cho Single-Operator** | Các tiến trình provider chạy cùng UID với người vận hành. Dù biến môi trường đã được truyền qua Herdr socket lúc tạo pane (`33ca7ab`) thay vì dòng lệnh `herdr agent start`, một tiến trình độc hại chạy cùng UID vẫn có thể đọc `/proc/<pid>/environ` để thấy `BFLOW_MCP_TOKEN_*`. | Token có phạm vi hẹp, thời hạn ngắn (`<= 1 giờ`) và bị thu hồi khi `down`/restart. Để chống lại tiến trình cùng UID bị chiếm quyền, cần nâng cấp lên cơ chế cô lập từng role bằng OS user/container riêng. |
+
+### 2.2 Machine Setup, OS Services & Filesystem (`packages/machine-setup`, `packages/tool-installer`)
+
+| Mã giới hạn | Trạng thái | Chi tiết giới hạn | Hướng xử lý / Workaround |
+| :--- | :---: | :--- | :--- |
+| **`RR-26` (`fuseblk` / NTFS Mount)** | **Verified Environment Constraint** | Trên phân vùng `fuseblk` (NTFS mount trên Linux), lệnh `chmod 0700` / `0600` không có tác dụng (file vẫn mang quyền `0777` và `uid=0`). Bflow từ chối lưu khóa/state riêng tư trên hệ tệp này. | Luôn đặt repository/worktree hoặc thư mục trạng thái runtime trên hệ tệp POSIX thực (`ext4`, `xfs`, `btrfs`, `apfs`, `/tmp`). |
+| **`RR-25` (Độ dài Unix Socket Path)** | **Verified Environment Constraint** | Đường dẫn Unix domain socket trên Linux bị giới hạn bởi `sockaddr_un.sun_path` (`108` bytes). Nếu `TMPDIR` hoặc `XDG_RUNTIME_DIR` quá dài, `herdr server` sẽ báo lỗi `local socket name length exceeds capacity of sun_path`. | Đặt `TMPDIR=/tmp` và giữ `XDG_RUNTIME_DIR` ngắn gọn (ví dụ `/run/user/<uid>` hoặc `/tmp/bf-<id>`). |
+| **`PV3-04` (Windows & Third-Party Tools)** | **Partial Platform Support** | - Windows đang ở trạng thái `designed_unverified` (mọi bước ghi hệ thống trả `blocked`).<br>- Khi cài đặt native plugins (`claude-mem`, `superpowers`) ở chế độ thường (không phải `isolatedRoot`), plugin có thể ghi vào thư mục cấu hình provider chung, nên nếu lỗi giữa chừng cần rollback thủ công.<br>- Giấy phép của GitNexus (noncommercial) cần được rà soát pháp lý trước khi đóng gói thương mại. | Chỉ vận hành chính thức trên Linux `x86_64` (và macOS cho CLI/setup); kiểm tra kỹ chính sách giấy phép của GitNexus trong môi trường doanh nghiệp. |
+
+### 2.3 Behavioral Test Runners, CLI & Legacy Paths (`packages/runtime`, `apps/cli`)
+
+| Mã giới hạn | Trạng thái | Chi tiết giới hạn | Hướng xử lý / Workaround |
+| :--- | :---: | :--- | :--- |
+| **`RR-22` & `RR-23` (Behavioral Runner Scope)** | **Scoped Support** | Sandbox kiểm thử hành vi yêu cầu Linux + `/usr/bin/bwrap` và chỉ hỗ trợ `node_tap` (Node flat TAP) cùng `vitest_json` (Vitest 2.1 JSON) với `node_modules` chuẩn (read-only). Chưa hỗ trợ tiêu chí hỗn hợp thủ công/tự động, ngưỡng coverage, symlink ra ngoài workspace hoặc bước tự động build `dist/` bên trong sandbox. | Chuẩn bị sẵn dependencies và cấu hình lệnh test tất định trong cấu hình owner trước khi chạy workflow. |
+| **`RR-24` (Resource Quotas)** | **Open P2** | Đã có giới hạn thời gian chạy (`timeoutMs`), dung lượng đầu ra và số vòng lặp (`maxIterations`), nhưng Bubblewrap sandbox chưa gắn `cgroups v2` để giới hạn cứng CPU/RAM/Disk I/O cho từng tiến trình con. | Cấu hình giới hạn tài nguyên thông qua `systemd --user` slice hoặc container ở tầng hạ tầng nếu chạy tải nặng. |
+| **`PV3-07` (Unified Commands vs. Workflow Acceptance)** | **By Design** | 9 lệnh cấp cao của P29 (`repo inspect`, `task plan`, `task implement`, `verify`, `git prepare`, `mcp status`, `tool status`, `skills sync`, `agent check`) là mặt phẳng điều khiển UX; kết quả `succeeded` của một lệnh CLI đơn lẻ **không** đồng nghĩa với việc toàn bộ workflow SDLC đã được nghiệm thu. Các lệnh tắt `feature`, `bugfix`, `refactor`, `review` chưa được mở trong parser. | Sử dụng luồng chuẩn `bflow up` + `bflow attach` (qua Conversation Agent) để thực thi trọn vẹn quy trình SDLC có kiểm chứng. |
+| **Legacy CLI Commands** | **Deprecated / Isolated** | Các lệnh thế hệ cũ (`bflow run`, `bflow approve`, `bflow resume`, `bflow cancel`) dùng Runtime v1 và kho lưu trữ riêng, không tự động kích hoạt kiến trúc điều phối P19/P30. | Không dùng các lệnh legacy để nghiệm thu hoặc khôi phục phiên Agentic v2/v3; sử dụng `bflow up`, `bflow attach`, `bflow down`, `bflow recover`. |
+
+---
+
+## 3. Các mục nợ kỹ thuật cấp Package từ các фа trước (`P02-RA01`, `P03-RA01`)
+
+| Mã theo dõi | Package sở hữu | Mô tả chi tiết | Trạng thái |
+| :--- | :--- | :--- | :---: |
+| **`P02-RA01`** | `packages/herdr-adapter` | Tràn số (timeout overflow) khi truyền giá trị `timeoutMs` cực lớn vượt ngưỡng 32-bit signed integer của `setTimeout` trong runner của Herdr Adapter. (Ở tầng Runtime/Quality-Gates đã chặn biên, nhưng package `herdr-adapter` gốc vẫn giữ mục theo dõi riêng). | **OPEN (P2)** |
+| **`P03-RA01`** | `packages/artifact-store` | Xử lý chunk cuối cùng đến muộn (`late final get chunk`) ngay sau khi tín hiệu `deadline`/`abort` vừa kích hoạt trong luồng đọc của `ArtifactStore`. | **OPEN (P2)** |
+| **`RR-16`** | `packages/runtime` | Các helper ghi log có cấu trúc, che mật khẩu và đo lường (`metrics`) đã hoạt động trên kênh relay/diagnostics, nhưng chưa được gắn thành một đường ống telemetry/backup-restore tập trung xuyên suốt mọi tiến trình. | **OPEN (P2)** |
+| **`RR-20`** | Release Engineering | Quy trình phát hành cục bộ đã kiểm tra đầy đủ, nhưng cấu hình bảo vệ nhánh (branch protection), chữ ký tag và cổng phê duyệt GitHub Actions trên kho lưu trữ từ xa (remote hosted governance) cần được quản trị viên kho lưu trữ xác minh riêng trước khi publish bản phát hành công khai. | **OPEN (Release Gate)** |

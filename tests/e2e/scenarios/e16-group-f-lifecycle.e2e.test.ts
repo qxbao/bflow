@@ -395,7 +395,7 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
   const liveHerdrEnabled = process.env.BFLOW_TEST_LIVE_PLATFORM === "1" || process.env.BFLOW_TEST_LIVE_HERDR === "1";
 
   beforeAll(() => {
-    tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "bflow-e2e-group-f-")));
+    tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "bf16-")));
   });
 
   afterAll(() => {
@@ -404,8 +404,8 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
 
   it.skipIf(process.platform !== "linux" || !liveHerdrEnabled)("[LIVE HERDR DAEMON] starts named session, creates 3 Bflow tabs, focuses Conversation agent, stops on down, and restarts on resume", async () => {
     execFileSync("herdr", ["--version"], { stdio: "ignore", timeout: 5_000 });
-    const liveDir = join(tmpRoot, "live-herdr-repo");
-    mkdirSync(liveDir, { recursive: true });
+    const liveDir = join(tmpRoot, "r");
+    mkdirSync(liveDir, { recursive: true, mode: 0o700 });
     git(liveDir, "init", "-b", "main");
     writeFileSync(join(liveDir, "README.md"), "# Live Herdr Repo\n");
     git(liveDir, "add", ".");
@@ -414,7 +414,7 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
     const liveInitRes = await runCli(["init", "--json"], { cwd: liveDir });
     expect(liveInitRes.ok).toBe(true);
 
-    const liveSessionName = `bflow-e2e-f-${process.pid}`;
+    const liveSessionName = `bf16-${process.pid}`;
     const liveBaseEnv: Record<string, string | undefined> = {
       ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("HERDR_"))),
       XDG_CONFIG_HOME: join(liveDir, ".herdr-cfg"),
