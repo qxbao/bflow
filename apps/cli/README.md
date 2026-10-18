@@ -47,10 +47,23 @@ Applied steps display their receipt status instead of a pending approval label.
 Partial application, failed health checks and missing approval return a nonzero
 exit status. A dry run with planned changes remains a successful preview.
 
+Codex global hooks have a separate review flow and are not approved by normal
+`setup --yes`. Use `bflow setup --codex-hooks --plan` or `--check` to inspect the
+current hooks, commands, dependency file digests, and snapshot digest without
+writing approval state. `bflow setup --codex-hooks --apply` shows that inventory
+and asks for interactive approval. Non-interactive approval must pass both
+`--yes` and the exact `--hook-digest <sha256>` printed by the current review.
+Approval is tied to the inspected Codex home and hook snapshot; any changed hook
+or dependency needs a new review. This grants approval only for the inspected
+Codex hooks; it does not widen Bflow permissions or provide an OS sandbox. The
+inventory pins direct local script dependencies, not system interpreters or
+arbitrary runtime data; unsupported dynamic shell forms remain blocked.
+
 | Command | Behavior |
 | --- | --- |
 | `bflow init [--provider claude\|codex\|agy]` | Creates `.bflow/config.yml` and `.bflow/.gitignore` at the canonical Git root. Default provider is Codex. Repeat init preserves configuration; explicit `--force`/`--yes` replaces it. Does not invoke Herdr. |
 | `bflow config-migrate` | Validates one legacy `.bflow/config.yaml` or `.bflow/config.json`, writes `.bflow/config.yml`, saves the original bytes as `<legacy-path>.bak`, then removes the active legacy file. Conflicting sources or targets fail without overwriting. |
+| `bflow setup --codex-hooks --plan\|--check\|--apply` | Inspects the selected Codex home and reviews only global hooks. Plan/check are read-only; apply requires an interactive decision or `--yes --hook-digest <sha256>`. Never installs tools or services. |
 | `bflow up [--timeout <ms>]` | Checks executables, provider authentication and Herdr protocol; starts a named server, prepares the persistent P19 host with platform readiness (refusing to start panes when a required role is blocked), then calls P13. Waits for every required role and host activation acknowledgement before recording ready. Persists validated bindings and reuses live roles. |
 | `bflow attach` | Requires an existing manifest and a running matching session. Calls P13 to focus/validate Conversation, then runs `herdr session attach <name>` with inherited terminal I/O. |
 | `bflow down [--yes] [--timeout <ms>]` | Inspects active runs and dirty files. Refuses unsafe shutdown without confirmation. Quiesces Runtime intake/dispatch, recollects runs, requires durable aggregate checkpoints, calls P13 graceful shutdown, then stops only the named session. Deletes no worktree, database, artifact, commit or source file. |

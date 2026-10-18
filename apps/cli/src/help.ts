@@ -91,15 +91,18 @@ Options:
 const SETUP_HELP = `Usage: bflow setup [options]
 
 Plan and apply machine-wide and local setup prerequisites, agent tools, and role skills.
+The --codex-hooks option selects a separate hook-only review flow; it never installs tools or services.
 
 Modes:
   --check               Audit prerequisites and diagnose drift without modifying state
   --dry-run, --plan     Generate and preview the setup plan without applying changes
   --apply               Apply planned changes (default mode)
   --repair              Repair invalid machine configuration and restore state
+  --codex-hooks         Review Codex global hooks only; combine with --check, --plan, or --apply
+  --hook-digest <sha256> Exact reviewed hook snapshot for non-interactive hook approval (requires --yes)
 
 Options:
-  -y, --yes             Assume yes for required approvals (non-interactive)
+  -y, --yes             Assume yes for standard setup; hook approval also needs --hook-digest
   --dir <path>          Repository to prepare (machine installation stays user-global)
   --catalog-dir <path>  Custom skills catalog directory
   --memory-provider <id> Claude-Mem observer: auto, claude, codex, host (default: auto)
@@ -110,6 +113,7 @@ Examples:
   bflow setup
   bflow setup --check
   bflow setup --dry-run
+  bflow setup --codex-hooks --plan
   bflow setup --apply --yes
   bflow setup --repair --yes`;
 

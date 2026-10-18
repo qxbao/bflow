@@ -97,6 +97,18 @@ export const CLI_COMMAND_REFERENCE: readonly CliCommandReferenceEntry[] = [
     skills: ["using-bflow"]
   },
   {
+    command: "setup",
+    syntax: "bflow setup [options] | bflow setup --codex-hooks (--check|--plan|--apply)",
+    purpose: "Review and approve Codex global hooks explicitly; hook approval authorizes only the inspected hook snapshot and never runs normal tool/service setup.",
+    reusedEngines: ["CodexHookInventory", "CodexHookApprovalStore"],
+    requiredFlags: [],
+    optionalFlags: ["--check", "--dry-run, --plan", "--apply", "--yes", "--codex-hooks", "--hook-digest <sha256>", "--dir <path>", "--catalog-dir <path>", "--memory-provider <id>", "-j, --json", "-h, --help"],
+    exitCodes: COMMON_EXIT_CODES,
+    idempotencyAndRetry: "Inspection is read-only. Approval is bound to the exact reviewed digest; changed hooks require a new review.",
+    permissionRequirements: "Approval store is private and user-owned. Only the explicit Codex hook apply path can write hook approval state.",
+    skills: ["using-bflow"]
+  },
+  {
     command: "up",
     syntax: "bflow up [options]",
     purpose: "Start or reconcile the repository headless named session and wait for required role panes.",

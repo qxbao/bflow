@@ -43,6 +43,7 @@ import {
 } from "./types.js";
 import { executeHighLevelCommand, isHighLevelCommand } from "./high-level-commands.js";
 import { executeSetupCommand } from "./setup-integration.js";
+import { codexHookSetupSucceeded, executeCodexHookSetup } from "./codex-hook-setup.js";
 import { migrateRepositoryConfig } from "./config-migration.js";
 import { CliProgress } from "./progress.js";
 
@@ -280,6 +281,16 @@ async function executeCommandWithProgress(
   }
 
   if (parsed.command === "setup") {
+    if (parsed.codexHooks) {
+      try {
+        const data = await executeCodexHookSetup(parsed, context);
+        return makeResult(codexHookSetupSucceeded(data) ? CLI_EXIT_CODES.SUCCESS : CLI_EXIT_CODES.RUNTIME_ERROR,
+          true, "setup", data, undefined, isJson, io, presentation);
+      } catch (error) {
+        const contractError = toContractError(error);
+        return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "setup", undefined, contractError, isJson, io, presentation);
+      }
+    }
     try {
       const data = await executeSetupCommand(parsed, context, showProgress ? emitProgress : undefined,
         showProgress ? { detail: message => progress.detail(message),

@@ -96,6 +96,10 @@ export interface SetupCommandArgs extends GlobalCliFlags {
   readonly command: "setup";
   readonly mode: "check" | "dry_run" | "apply" | "repair";
   readonly yes: boolean;
+  /** Explicit Codex global-hook review/apply mode; never invokes normal machine setup. */
+  readonly codexHooks?: boolean | undefined;
+  /** Exact SHA-256 reviewed snapshot required with --yes for hook approval. */
+  readonly hookDigest?: string | undefined;
   readonly dir?: string | undefined;
   readonly catalogDir?: string | undefined;
   readonly memoryProvider?: "auto" | "claude" | "codex" | "host" | undefined;
@@ -396,6 +400,7 @@ export type CliCommandData =
   | InitCommandOutput
   | import("./config-migration.js").ConfigMigrationOutput
   | SetupCommandOutput
+  | import("./codex-hook-setup.js").CodexHookSetupOutput
   | WorkflowRunSnapshot
   | Page<WorkflowRunSnapshot>
   | { readonly helpText: string; readonly topic?: string | undefined }

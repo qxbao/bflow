@@ -32,6 +32,7 @@ import {
   yellow
 } from "./presentation.js";
 import type { EnvironmentStatus } from "./environment.js";
+import { formatCodexHookSetupOutput } from "./codex-hook-setup.js";
 
 export interface FormatterOptions {
   readonly color?: boolean | undefined;
@@ -57,6 +58,10 @@ function isConfigMigrationOutput(command: CliCommandName, data: CliCommandData):
 
 function isSetupOutput(data: CliCommandData): data is SetupCommandOutput {
   return typeof data === "object" && data !== null && "machineId" in data && "serviceManagerKind" in data && "plan" in data;
+}
+
+function isCodexHookSetupOutput(data: CliCommandData): data is import("./codex-hook-setup.js").CodexHookSetupOutput {
+  return typeof data === "object" && data !== null && "codexHooks" in data && data.codexHooks === true && "review" in data && "outcome" in data;
 }
 
 function isSnapshot(data: CliCommandData): data is WorkflowRunSnapshot {
@@ -709,6 +714,10 @@ export function formatCommandSuccess(
 
   if (isSetupOutput(data)) {
     return formatSetupOutput(data, useColor);
+  }
+
+  if (isCodexHookSetupOutput(data)) {
+    return formatCodexHookSetupOutput(data, useColor);
   }
 
   if (isHighLevelOutput(data)) {
