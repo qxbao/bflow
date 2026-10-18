@@ -413,21 +413,31 @@ Limitations: this is source composition with local fake-runner and fake-Gateway 
 provider probes, a live Gateway daemon and Pane Manager/Conversation wiring are not verified here. The
 service creates each role's private `gen-<n>/roles/<role>` state directory before preflight.
 
-### In-process MCP tool reachability (H1)
+### In-process MCP tool reachability, Developer gate and Gateway loss (P30 hardening)
 
 `src/agentic/tool-reachability.ts` proves Gateway tool reachability from inside the launched provider process,
-not only from config digests. At `prepare`, the host writes a private `<role>.gateway.json` (0600, atomic) for
-each prepared role with Gateway registrations: launch id, Gateway endpoint, registration ids, the derived
-`BFLOW_MCP_TOKEN_*` variable names and allowed tools. It never contains token values, and it is removed for roles
-without registrations. The provider's native `SessionStart` hook reads that plan, probes each registration with the
-bearer token from its own environment (`initialize`, then `tools/list` with the session id, 5 s per request,
-`redirect: "error"`), and sends `provider_started` with `launchId` and `toolReachability`. Each record holds only
-the registration id, env var name, `ok`, discovered tool names and a code (`token_env_missing`, `unauthorized`,
-`http_error`, `timeout`, `unreachable`, `protocol_error`, `missing_tools`).
+not only from config digests. For every launch with Gateway registrations (permanent roles at `prepare`, dynamic
+Developers at allocation) the host writes a private, token-free plan `gateway-probes/<launchId>.json` (dir 0700,
+file 0600, atomic): launch id, Gateway endpoint, registration ids, the derived `BFLOW_MCP_TOKEN_*` variable names
+and allowed tools. Launch material carries the non-secret `BFLOW_LAUNCH_ID`, so the provider's native
+`SessionStart` hook finds its own plan even when several Developers run concurrently (a legacy `<role>.gateway.json`
+is read only as a fallback and removed at `prepare`). The hook probes each registration with the bearer token from
+its own environment (`initialize`, then `tools/list` with the session id, 5 s per request, `redirect: "error"`) and
+reports only the registration id, env var name, `ok`, discovered tools and a code (`token_env_missing`,
+`unauthorized`, `http_error`, `timeout`, `unreachable`, `protocol_error`, `missing_tools`). Records are stored per
+launch and pane.
 
-`activate` requires, for each required role with registrations, a record for the exact prepared launch in which every
-registration is `ok` with all allowed tools. A missing record is `[bflow:native-startup-pending]`; a failed record
-throws a named error (role, registration, env var, code). `platform_status` reports a per-role `toolReachability`
-summary without tokens. Limitations: this relies on the provider passing the launch environment to its SessionStart
-hook, which is verified only in the local spawned-hook test (`test/agentic/tool-reachability.test.ts`). Dynamic
-Developer launches are not covered by this check, and live provider and Herdr runs are not verified.
+- `activate` requires, for each required permanent role with registrations, an `ok` record for the exact prepared
+  launch; a missing record is `[bflow:native-startup-pending]`, a failed one throws a named error.
+- A dynamic Developer's allocation returns a retryable `conflict` (`details.stage: "developer_startup"`) until its
+  record is `ok`; a failed proof or no proof within 30 s releases its launch and pane (non-retryable `validation`).
+- Every 30 s the host reconciles Gateway registrations with the Gateway control. A registration missing after a
+  Gateway daemon restart (or expired/changed) marks its launch `degraded`; degraded roles report `readyForPrompt:
+  false`, so the outbox keeps their messages queued until `bflow up` relaunches them (running providers keep a
+  revoked token; it cannot be hot-swapped). Uncertain checks change nothing.
+- A restarted host daemon retires the previous daemon's launches: it revokes the session's registrations, journals
+  `released` for open intents and removes their plans/records; activation then needs a fresh `bflow up`.
+- `platform_status` reports per-launch reachability, the last Gateway check and any restart recovery, without tokens.
+
+Limitations: the hook-environment inheritance, Claude's `${VAR}` header expansion and Codex's
+`bearer_token_env_var` are verified only with local spawned hooks and rendered config, not live providers or Herdr.
