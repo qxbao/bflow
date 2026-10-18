@@ -19,6 +19,7 @@ import {
   type OperationOptions,
   type OperationResult,
   PlatformSchemaVersionSchema,
+  canonicalReceiptJson,
   SkillManifestSchema
 } from "@bflow/contracts";
 import {
@@ -98,6 +99,8 @@ export interface InheritedIsolation {
   readonly argv: readonly string[];
   readonly mcpFailure?: InheritedIsolationFailure;
   readonly hookFailure?: InheritedIsolationFailure;
+  /** Private, non-provider-executed metadata included in the settings-file launch digest. */
+  readonly settingsMetadata?: Readonly<Record<string, string>>;
 }
 
 export abstract class BaseProviderAdapter implements AgentProviderAdapter {
@@ -128,6 +131,10 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     return this.options.executablePath ?? this.descriptor.executableName;
   }
 
+  protected getProviderCommandEnvironment(): Readonly<Record<string, string>> {
+    return { BFLOW_PROVIDER: this.descriptor.provider };
+  }
+
   /**
    * Renders a streamable_http MCP entry that references the bearer token by environment variable name.
    * Adapters without a verified header/env-reference form keep the default and fail closed.
@@ -145,7 +152,8 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
   protected async resolveInheritedIsolation(
     _environment: AgentEnvironment,
     _capabilities: DetectedProviderCapabilities,
-    _bflowMcpServerNames: readonly string[]
+    _bflowMcpServerNames: readonly string[],
+    _launchProfile?: AgentLaunchProfile
   ): Promise<InheritedIsolation> {
     return { argv: [] };
   }
@@ -174,7 +182,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     const versionOutcome = await this.runner.run({
       executable,
       args: ["--version"],
-      env: { BFLOW_PROVIDER: this.descriptor.provider }
+      env: this.getProviderCommandEnvironment()
     });
 
     const rawVersion = versionOutcome.stdout.trim() || versionOutcome.stderr.trim();
@@ -184,7 +192,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     const helpOutcome = await this.runner.run({
       executable,
       args: ["--help"],
-      env: { BFLOW_PROVIDER: this.descriptor.provider }
+      env: this.getProviderCommandEnvironment()
     });
     const helpText = `${helpOutcome.stdout}\n${helpOutcome.stderr}`;
 
@@ -446,17 +454,24 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     const inherited = await this.resolveInheritedIsolation(
       environment,
       capabilities,
-      Object.keys(this.resolveHostLaunchMaterial(capabilities).mcpServers)
+      Object.keys(this.resolveHostLaunchMaterial(capabilities).mcpServers),
+      request.launchProfile
     );
 
-    // C. Check: authentication & execution probe
+    // C. Check: authentication & execution probe. Never invoke the provider while
+    // inherited global hooks/MCP state is not approved or isolated.
     let authPassed = false;
-    try {
+    if (inherited.hookFailure !== undefined || inherited.mcpFailure !== undefined) {
+      hasFailed = true;
+      const failure = inherited.hookFailure ?? inherited.mcpFailure!;
+      checks.push(createHealthCheck("authentication", "failed", failure.code,
+        `Provider execution probe was skipped because inherited state is blocked: ${failure.message}`, failure.remediation));
+    } else try {
       const authArgs = this.getAuthCommand();
       const authOutcome = await this.runner.run({
         executable,
         args: authArgs,
-        env: { BFLOW_PROVIDER: this.descriptor.provider },
+        env: this.getProviderCommandEnvironment(),
         timeoutMs: 45_000
       });
 
@@ -488,7 +503,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
           args: [...inherited.argv, ...probeArgs],
           cwd: environment.cwd,
           env: {
-            BFLOW_PROVIDER: this.descriptor.provider,
+            ...this.getProviderCommandEnvironment(),
             ...(agyProbeHome ? { HOME: agyProbeHome } : {})
           },
           timeoutMs: 45_000
@@ -1480,6 +1495,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
 
     // Write settings file (with native session hooks and provider-specific permissions/trust)
     const settingsObj: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(inherited.settingsMetadata ?? {})) settingsObj[key] = value;
     if (Object.keys(material.hooks).length > 0) {
       settingsObj["hooks"] = material.hooks;
     }
@@ -1548,6 +1564,21 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
           retryable: false,
           message: compiled.unsupportedMessage ?? "Unsupported launch configuration"
         }
+      };
+    }
+
+    if (inherited.settingsMetadata !== undefined) {
+      const current = await this.resolveInheritedIsolation(environment, capabilities, Object.keys(material.mcpServers));
+      const failure = current.hookFailure ?? current.mcpFailure;
+      if (failure !== undefined) return {
+        ok: false,
+        error: { code: "validation", retryable: false, message: `${failure.code}: ${failure.message}` }
+      };
+      if (canonicalReceiptJson(current.settingsMetadata ?? {}) !== canonicalReceiptJson(inherited.settingsMetadata) ||
+          canonicalReceiptJson(current.argv) !== canonicalReceiptJson(inherited.argv)) return {
+        ok: false,
+        error: { code: "conflict", retryable: true,
+          message: "Provider inherited configuration changed during launch preparation; review the current snapshot and prepare again." }
       };
     }
 

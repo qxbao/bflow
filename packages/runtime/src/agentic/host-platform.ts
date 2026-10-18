@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { homedir } from "node:os";
 import { mkdir, open, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
@@ -524,13 +525,13 @@ export function createHostProviderFactoryOptions(platform: AgenticHostPlatformOp
   hookEnvironment: Readonly<Record<string, string | undefined>> = process.env) {
   const codexHookEnvironment: Record<string, string> = {};
   for (const name of ["HOME", "ORCA_AGENT_HOOK_ROOT", "ORCA_AGENT_HOOK_ENDPOINT"]) {
-    const value = name === "HOME" ? (platform.codexProcessHomeDirectory ?? hookEnvironment[name]) : hookEnvironment[name];
+    const value = name === "HOME" ? (platform.codexProcessHomeDirectory ?? hookEnvironment[name] ?? process.env.HOME ?? homedir()) : hookEnvironment[name];
     if (value !== undefined) codexHookEnvironment[name] = value;
   }
   return {
     ...(platform.codexHomeDirectory !== undefined ? { codexLaunchEnvironment: {
       CODEX_HOME: platform.codexHomeDirectory,
-      HOME: platform.codexProcessHomeDirectory ?? platform.codexHomeDirectory,
+      HOME: codexHookEnvironment.HOME!,
       ...Object.fromEntries(Object.entries(codexHookEnvironment).filter(([name]) => name !== "HOME"))
     } } : {}),
     perProvider: {

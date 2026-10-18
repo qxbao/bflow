@@ -53,6 +53,13 @@ describe("Codex hook trust propagation", () => {
     })).toMatchObject({ descriptor: { provider: "codex" } });
   });
 
+  it("keeps the operator HOME when only a Codex config home is selected", () => {
+    const configured = { ...platform, codexHomeDirectory: "/machine/codex" };
+    const options = createHostProviderFactoryOptions(configured, { HOME: "/operator/home" });
+    expect(options.perProvider.codex.codexHookEnvironment.HOME).toBe("/operator/home");
+    expect(options.codexLaunchEnvironment?.HOME).toBe("/operator/home");
+  });
+
   it("keeps isolated Codex HOME and CODEX_HOME aligned with the inspected hook profile", () => {
     const isolated = { ...platform, codexHomeDirectory: "/isolated/providers/codex",
       codexProcessHomeDirectory: "/isolated/providers/home", codexHookApprovalPath: "/isolated/state/codex-hook-approvals.json" };
