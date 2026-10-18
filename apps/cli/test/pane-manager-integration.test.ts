@@ -74,19 +74,13 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     const observed = await environment.status();
     expect(observed.manifest?.panes.find((p) => p.role === "qa")?.transportState).toBe("disconnected");
   });
-  linuxIt("preserves failed blocked startup and refuses duplicate dispatch", async () => {
+  linuxIt("stops failed blocked startup before allowing another dispatch", async () => {
     runner.blockedAgent = "coordinator";
-    await expect(lifecycle().up()).rejects.toThrow("CLI update confirmation");
-    try { await lifecycle().up(); } catch (error) {
-      const message = String(error); expect(message).toContain(input.repository.sessionName); expect(message).toContain("pane");
-      expect(message).toContain("bflow up"); expect(message).toContain("do not delete .bflow");
-    }
+    await expect(lifecycle().up()).rejects.toThrow(/is blocked during startup.*Automatic cleanup completed successfully/s);
+    expect(runner.session(input.repository.sessionName).running).toBe(false);
     const count = starts(runner).length;
-    await expect(lifecycle().up()).rejects.toThrow("blocked");
+    expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("down");
     expect(starts(runner)).toHaveLength(count);
-    const report = await lifecycle().doctor();
-    expect(report.healthy).toBe(false);
-    expect(report.checks.find((c) => c.checkId === "operation-recovery")?.status).toBe("failed");
   });
   linuxIt("rejects a foreign durable manifest without dispatching P13 commands", async () => {
     await lifecycle().up();

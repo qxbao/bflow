@@ -598,7 +598,7 @@ describe("Task 3: Full 11-Scenario Integration Test Suite & Platform v3 Lifecycl
   // Scenario 7: Provider partially starts
   // ==========================================
   linuxDescribe("Scenario 7: Provider partially starts", () => {
-    it("fails immediately on partialStart role and persists manifest as degraded", async () => {
+    it("fails immediately on partialStart role and automatically stops the partial startup", async () => {
       await writeFile(join(dir, ".bflow/config.yaml"), makeConfig(repository, "claude"));
       const { integration } = createMockIntegration(repository, { partialStartRole: "reviewer" });
 
@@ -611,18 +611,18 @@ describe("Task 3: Full 11-Scenario Integration Test Suite & Platform v3 Lifecycl
       expect(humanRes.stderr).toContain("Agent provider for role 'reviewer' only partially started");
       expect(humanRes.stderr).toContain("bflow doctor");
 
-      // Verify persisted manifest reflects "degraded" and NOT "up"
+      // The role error remains visible, but the repository-owned partial startup is stopped.
       const sessionPath = join(dir, ".bflow/state/session.json");
       expect(existsSync(sessionPath)).toBe(true);
       const savedManifest = JSON.parse(await readFile(sessionPath, "utf8"));
-      expect(savedManifest.status).toBe("degraded");
+      expect(savedManifest.status).toBe("down");
       expect(savedManifest.status).not.toBe("up");
     });
 
-    it("times out on role staying in starting state and persists manifest as initializing", async () => {
+    it("times out on role staying in starting state and automatically stops the partial startup", async () => {
       await writeFile(
         join(dir, ".bflow/config.yaml"),
-        makeConfig(repository, "claude", { startupTimeoutMs: 300 })
+        makeConfig(repository, "claude", { startupTimeoutMs: 1000 })
       );
       const { integration } = createMockIntegration(repository, { startingRole: "reviewer" });
 
@@ -633,11 +633,11 @@ describe("Task 3: Full 11-Scenario Integration Test Suite & Platform v3 Lifecycl
       expect(humanRes.ok).toBe(false);
       expect(humanRes.exitCode).not.toBe(0);
 
-      // Verify persisted manifest reflects "initializing" and NOT "up"
+      // The startup timeout remains visible, and shutdown leaves a terminal manifest.
       const sessionPath = join(dir, ".bflow/state/session.json");
       expect(existsSync(sessionPath)).toBe(true);
       const savedManifest = JSON.parse(await readFile(sessionPath, "utf8"));
-      expect(savedManifest.status).toBe("initializing");
+      expect(savedManifest.status).toBe("down");
       expect(savedManifest.status).not.toBe("up");
     });
   });
@@ -751,8 +751,8 @@ describe("Task 3: Full 11-Scenario Integration Test Suite & Platform v3 Lifecycl
 
       expect(secondRes.ok).toBe(true);
       expect(secondRes.exitCode).toBe(0);
-      // No duplicate server started (already running from first attempt)
-      expect(runner.serverStarts).toBe(serverStartsBefore);
+      // The failed attempt stopped its server, so retry starts a fresh repository session.
+      expect(runner.serverStarts).toBe(serverStartsBefore + 1);
     });
   });
 
