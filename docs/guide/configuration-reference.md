@@ -1,10 +1,13 @@
 # Configuration Reference
 
-Bflow đọc `.bflow/config.yaml` bằng `JSON.parse`. Tên đuôi YAML không có nghĩa
-parser hỗ trợ YAML tổng quát. File phải có `schemaVersion: "1"`, `projectName`,
-`runtimeId`, `createdAt`, `storage`, `defaultWorkflow`; lifecycle commands còn cần
-`environment`. CLI legacy có thể fallback `.bflow/config.json`, nhưng up/attach/
-down/doctor cần config.yaml mới. Không đổi schemaVersion tùy ý.
+Bflow dùng `.bflow/config.yml` làm config canonical. Đây là YAML thụt lề có
+comment hướng dẫn, parse theo YAML 1.2 giới hạn an toàn; mỗi file có đúng một
+document, mapping keys là chuỗi, và explicit tags, merge keys, alias vòng bị từ
+chối. File cần `schemaVersion: "1"`, `projectName`, `runtimeId`, `createdAt`,
+`storage`, `defaultWorkflow`; lifecycle commands còn cần `environment`. Các lệnh
+đọc tương thích với `.bflow/config.yaml` và `.bflow/config.json` cũ. Chạy
+`bflow config-migrate` để sao lưu config cũ và chuyển giá trị sang `.bflow/config.yml`.
+Không đổi schemaVersion tùy ý.
 
 | Trường | Dạng/default | Consumer và giới hạn thực tế |
 | --- | --- | --- |
@@ -19,7 +22,7 @@ down/doctor cần config.yaml mới. Không đổi schemaVersion tùy ý.
 | `environment.workspaceRoot` | Canonical absolute path | Kiểm tra đúng checkout |
 | `environment.sessionName` | `bf-` + 20 ký tự hex | Named Herdr session riêng cho checkout |
 | `environment.herdrBinary` | `"herdr"` | Binary cho lifecycle commands |
-| `environment.roles` | Mảng `{role, cli, required}` | Role duy nhất; conversation/coordinator phải required |
+| `environment.roles` | Mảng `{role, cli, model?, effort?, required}` | Role duy nhất; conversation/coordinator phải required. Model/effort tuỳ chọn theo role; Agy chỉ nhận effort gắn trong model name |
 | `environment.sdd.minimumLevel` | `"lightweight"` hoặc `"full"` | P12 lưu/validate; chưa tự truyền sang P19 |
 | `environment.sdd.approvalRequired` | `true` | P12 lưu/validate; host phải cấu hình approval policy riêng |
 | `environment.tdd.policy` | Chỉ `"conditional"` | Không có config toàn cục `always`/`disabled`; P16 đọc assessment từng spec |
@@ -66,15 +69,21 @@ CLI `bflow run "requirement" --workflow /absolute/workflow.json` đã có loader
 
 | Cấu hình | Bflow hay Herdr? |
 | --- | --- |
-| Repository identity, policies, workflow, storage paths | Bflow config.yaml |
-| Provider/model, agent integration, terminal/UI, credentials | Herdr/provider configuration ngoài Bflow config |
+| Repository identity, policies, workflow, storage paths, role/provider/model/effort choices | Bflow config.yml |
+| Provider authentication, terminal/UI integration and credentials | Herdr/provider configuration ngoài Bflow config |
 | `roles.host.json` | Fragment API `RolePaneManagerConfig`; host nạp tường minh, CLI không đọc |
-| Spec assessment, TestStrategy, verification checks, approval authentication | Dossier/host inputs, không phải trường tùy ý trong config.yaml |
+| Spec assessment, TestStrategy, verification checks, approval authentication | Dossier/host inputs, không phải trường tùy ý trong config.yml |
 
 `BFLOW_HERDR_BIN`/`HERDR_BIN` được legacy Runtime factory đọc; lifecycle dùng
 `environment.herdrBinary`. `BFLOW_ENVIRONMENT_MODULE` chọn host ESM có quyền chạy
 code, chỉ operator đáng tin đặt trong environment. `HERDR_CONFIG_PATH` chọn config
 Herdr; các file Bflow mẫu không chứa TOML Herdr hoặc API key.
+
+Effort được validate theo provider khi preflight. Claude hỗ trợ `low`, `medium`,
+`high`, `xhigh`, `max`; Codex hỗ trợ `minimal`, `low`, `medium`, `high`, `xhigh`.
+Agy không có trường `effort`; encode mức đó trong tên model. Nếu provider không
+hỗ trợ lựa chọn model/effort hoặc CLI thiếu cờ cần thiết, preflight chặn launch
+thay vì bỏ qua cấu hình.
 
 Implementation tham chiếu:
 [config loader](../../apps/cli/src/config.ts),

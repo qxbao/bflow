@@ -62,9 +62,20 @@ node "$BFLOW_HOME/apps/cli/dist/bin.js" up --timeout 60000
 node "$BFLOW_HOME/apps/cli/dist/bin.js" attach
 ```
 
-Init writes **JSON-formatted `.bflow/config.yaml`** with checkout-specific identity;
-run it separately in each repository/worktree. Plain repeated init preserves the
-file; explicit `--force`/`--yes` overwrites it. Track portable templates rather than copying a bound config across clones.
+Init writes commented, traditional YAML in **`.bflow/config.yml`** with
+checkout-specific identity. `bflow config-migrate` converts one legacy
+`.bflow/config.yaml` or `.bflow/config.json`, keeps its values, and saves the
+original as a `.bak` file. Run init separately in each repository/worktree.
+Plain repeated init preserves the file; explicit `--force`/`--yes` overwrites it.
+Track portable templates rather than copying a bound config across clones.
+For repositories created by older Bflow versions, run
+`node "$BFLOW_HOME/apps/cli/dist/bin.js" config-migrate` before using the YAML file.
+
+If `bflow up` fails after changing session state, it attempts a safe `down`.
+When cleanup cannot be proven safe, the error reports that outcome and preserves
+the operation receipt and recovery state for `status`, `doctor`, or a later
+`bflow down --yes` reconciliation. A failed start is not evidence that all panes
+were stopped.
 
 `up` now starts a persistent P19 host, registers scoped Claude MCP tools and
 launch-local native session/user-input hooks, then requires host activation before

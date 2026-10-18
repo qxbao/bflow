@@ -8,12 +8,13 @@ Doctor có thể trả envelope `ok: true` nhưng exit 1 và `data.healthy: fals
 | Triệu chứng | Nguyên nhân / hướng xử lý |
 | --- | --- |
 | `Not a Git working repository` | Chọn checkout thật hoặc `git init` repo mới trước init |
-| Invalid JSON trong config.yaml | Dùng JSON hợp lệ; parser không đọc YAML thụt lề/comment/tag |
+| Invalid YAML trong config.yml | Kiểm tra indentation, duplicate key và đúng một document. Tags, merge keys và alias vòng bị từ chối. Với file cũ, chạy `bflow config-migrate`; giữ `.bak` nếu cần rollback |
 | Config belongs to another repository | Không copy identity; xem recovery cho clone/moved checkout |
 | Role không phải permanent P13 role | Dùng contract names đúng; Developer phải được Runtime allocate |
-| Custom executable/model config không được nhận | P12 chỉ hỗ trợ `{role, cli, required}`; model/provider thuộc Herdr hoặc P13 host API |
+| Model/effort bị preflight chặn | Chọn model phù hợp account/provider; Claude dùng `low|medium|high|xhigh|max`, Codex dùng `minimal|low|medium|high|xhigh`. Agy đặt mức effort trong tên model và không có trường `effort` |
 | Agent missing/blocked lúc up | Lỗi chứa role, provider, pane/session và hướng xử lý. `pane read` nếu cần xem UI nhưng tránh chia sẻ raw output có secret; resolve dialog trước retry, không gửi lại assignment |
-| Ctrl+C trong lúc up / startup timeout | State được giữ. Chạy `bflow up` để reconcile pane cũ; nếu chưa có receipt hoặc muốn dừng thì `bflow down --yes`. Không xóa `.bflow` |
+| `bflow up` thất bại sau khi bắt đầu startup | Up thử cleanup bằng safe down. Nếu cleanup không an toàn hoặc không hoàn tất, thông báo giữ operation receipt/recovery state; đọc `status`/`doctor`, xử lý nguyên nhân rồi chạy `bflow down --yes` để reconcile. Không xoá `.bflow` |
+| Ctrl+C trong lúc up / startup timeout | Up thử safe cleanup nếu startup đã đổi session. Nếu delivery còn uncertain hoặc barrier chặn cleanup, state/receipt được giữ. Đọc `status`/`doctor`, rồi `bflow down --yes` để reconcile. Không xóa `.bflow` |
 | Named session exists without ownership evidence | Không adopt/xóa session đó; kiểm tra đúng checkout và manifest |
 | Legacy lifecycle lock từ phiên bản cũ | Dừng lệnh up/down cũ trước, rồi `bflow recover --yes`. Chỉ thư mục lock cũ rỗng được loại bỏ; state, worktree và agent không bị xóa |
 | Another up/down is still running | Kernel lock vẫn có owner thật. Đợi hoặc Ctrl+C lệnh đó; không xóa file `lifecycle.guard` vì có thể phá serialisation |

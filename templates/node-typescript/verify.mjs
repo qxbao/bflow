@@ -11,7 +11,7 @@ import { TestStrategyResolver, AssessmentSchema } from '../../packages/test-stra
 import { TOPOLOGY_ROLES, resolveTopologyRole, isSupportedAgentKind } from '../../packages/pane-manager/dist/index.js';
 import { identifyRepository } from '../../apps/cli/dist/repository.js';
 import { readEnvironmentConfig } from '../../apps/cli/dist/environment-config.js';
-import { loadWorkflowDefinitionFromFile } from '../../apps/cli/dist/config.js';
+import { DEFAULT_CONFIG_RELATIVE_PATH, loadWorkflowDefinitionFromFile, resolveReadableConfigPath } from '../../apps/cli/dist/config.js';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const directory = fileURLToPath(new URL('.', import.meta.url));
@@ -62,7 +62,9 @@ try {
   const identityA = await identifyRepository(a), identityB = await identifyRepository(b);
   const configA = await readEnvironmentConfig(identityA), configB = await readEnvironmentConfig(identityB);
   assert.notEqual(configA.environment.sessionName, configB.environment.sessionName);
-  const path = join(a, '.bflow/config.yaml');
+  const path = resolveReadableConfigPath(a);
+  assert.equal(path, join(a, DEFAULT_CONFIG_RELATIVE_PATH));
+  assert.equal(path.endsWith('.yml'), true);
   const original = await readFile(path, 'utf8');
   const nested = join(a, 'src'); await mkdir(nested);
   call(nested, ['init', '--name', 'ignored-on-repeat']);
@@ -76,12 +78,13 @@ try {
   assert.deepEqual(applied.storage, configA.storage);
   assert.equal(applied.runtimeId, configA.runtimeId);
   assert.equal(applied.defaultWorkflow.id, 'portable-bugfix');
-  const bPath = join(b, '.bflow/config.yaml');
+  const bPath = resolveReadableConfigPath(b);
+  assert.equal(bPath, join(b, DEFAULT_CONFIG_RELATIVE_PATH));
   const bOriginal = await readFile(bPath, 'utf8');
   await writeFile(bPath, await readFile(path));
   await assert.rejects(readEnvironmentConfig(identityB), /another repository/);
-  await writeFile(bPath, 'environment:\n  herdrBinary: herdr\n');
-  await assert.rejects(readEnvironmentConfig(identityB), /invalid JSON/);
+  await writeFile(bPath, 'environment: [\n');
+  await assert.rejects(readEnvironmentConfig(identityB), /invalid YAML/);
   await writeFile(bPath, bOriginal);
   // Exercise altered local templates without changing the real checkout assets.
   const toolsRoot = join(temporary, 'tools');

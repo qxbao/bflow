@@ -8,8 +8,8 @@ liệu và không gỡ secret đã từng commit. Artifact và logs cũng có th
 
 Chỉ dùng template/agent/host module đáng tin. `BFLOW_ENVIRONMENT_MODULE` là ESM
 có quyền thực thi code, do operator chọn qua environment, không lấy từ repo
-config. `HERDR_CONFIG_PATH` là config Herdr riêng; Bflow không quản lý credential
-provider trong config.yaml. Prompt có thể đi qua argv/process inspection; không
+config. `HERDR_CONFIG_PATH` là config Herdr riêng; Bflow config.yml cho phép chọn
+provider/model/effort theo role nhưng không quản lý credential provider. Prompt có thể đi qua argv/process inspection; không
 nhúng bí mật vào requirement/instruction.
 
 Các gate độc lập và danh tính human phải do trusted host thực thi. Không thay
