@@ -12,12 +12,46 @@ import { ClaudeMemProjectReader, observeClaudeMemWorker, readClaudeMemWorkerIden
 import { resolveMemoryProvider, type MemoryProviderMode } from "./memory-provider.js";
 
 export type NativeProvider = "claude" | "codex" | "agy";
+/** Isolated provider configuration supplied explicitly by the composition root. Only providers with a
+ * documented configuration-directory variable can be isolated; every other provider is refused (fail closed). */
+export interface NativeProviderIsolation {
+  /** HOME for every provider child process, so CLIs that resolve `~` stay inside the isolated root. */
+  readonly homeDirectory: string;
+  /** CLAUDE_CONFIG_DIR for Claude Code child processes and plugin/cache reads. */
+  readonly claudeConfigDir?: string;
+  /** CODEX_HOME for Codex child processes and auth/plugin reads. */
+  readonly codexHome?: string;
+}
 export interface NativeRuntimeOptions {
   managedRoot: string;
   homeDirectory?: string;
+  /** When present, provider child processes and provider config reads are confined to these directories. */
+  isolation?: NativeProviderIsolation;
   executables?: Partial<Record<NativeProvider, string>>;
   memory?: { provider?: MemoryProviderMode; dataDir: string; projectRoot: string; project: string; port?: number; address?: string; startIfMissing?: boolean };
   bflowSkillIds?: readonly string[];
+}
+
+/** Whether a provider's native configuration can be confined. Real (non-isolated) mode supports every provider. */
+export function isolationSupports(isolation: NativeProviderIsolation | undefined, provider: NativeProvider): boolean {
+  if (!isolation) return true;
+  if (provider === "claude") return isolation.claudeConfigDir !== undefined;
+  if (provider === "codex") return isolation.codexHome !== undefined;
+  return false;
+}
+
+/** Environment for provider child processes. Real mode returns undefined so the caller's environment is unchanged. */
+export function isolatedProviderEnvironment(isolation: NativeProviderIsolation | undefined, provider?: NativeProvider):
+  Record<string, string> | undefined {
+  if (!isolation) return undefined;
+  if (provider !== undefined && !isolationSupports(isolation, provider))
+    throw new Error(`${provider} native configuration cannot be isolated; owner action is required`);
+  const environment: Record<string, string> = { HOME: isolation.homeDirectory };
+  if (isolation.claudeConfigDir !== undefined && (provider === undefined || provider === "claude"))
+    environment.CLAUDE_CONFIG_DIR = isolation.claudeConfigDir;
+  if (isolation.codexHome !== undefined && (provider === undefined || provider === "codex"))
+    environment.CODEX_HOME = isolation.codexHome;
+  return environment;
 }
 
 const recordSchema = z.object({ schemaVersion: z.literal(3), toolId: z.string(), provider: z.enum(["claude", "codex", "agy"]),
@@ -57,15 +91,26 @@ export class NativePluginRuntime {
   readonly #host: ToolHost;
   readonly #home: string;
   constructor(options: NativeRuntimeOptions, host: ToolHost) {
-    this.#options = options; this.#host = host; this.#home = options.homeDirectory ?? homedir();
+    this.#options = options; this.#host = host; this.#home = options.isolation?.homeDirectory ?? options.homeDirectory ?? homedir();
   }
   #binary(provider: NativeProvider) { return this.#options.executables?.[provider] ?? provider; }
+  /** Real mode adds nothing; isolated mode confines the child to its provider's isolated configuration. */
+  #scope(provider?: NativeProvider): { environment?: Readonly<Record<string, string>> } {
+    const environment = isolatedProviderEnvironment(this.#options.isolation, provider);
+    return environment ? { environment } : {};
+  }
+  #configRoot(provider: NativeProvider): string {
+    const isolation = this.#options.isolation;
+    if (!isolation) return join(this.#home, provider === "claude" ? ".claude" : provider === "codex" ? ".codex" : ".gemini");
+    if (!isolationSupports(isolation, provider)) throw new Error(`${provider} configuration is not isolated`);
+    return provider === "claude" ? isolation.claudeConfigDir ?? "" : isolation.codexHome ?? "";
+  }
   #provider(pin: ManagedToolPin): NativeProvider {
     if (pin.recipe.kind !== "provider_plugin") throw new Error("Native plugin recipe required");
     return pin.recipe.provider;
   }
   async #inventory(provider: NativeProvider) {
-    const result = await this.#host.run(this.#binary(provider), ["plugin", "list", "--json"], { timeoutMs: 20_000 });
+    const result = await this.#host.run(this.#binary(provider), ["plugin", "list", "--json"], { timeoutMs: 20_000, ...this.#scope(provider) });
     if (result.exitCode !== 0) throw new Error("Provider plugin inventory failed");
     const value = installedSchema.parse(JSON.parse(result.stdout));
     return Array.isArray(value) ? value : value.installed ?? value.plugins ?? [];
@@ -88,7 +133,7 @@ export class NativePluginRuntime {
       const entry = entries.find(item => [item.pluginId, item.id, item.name].includes(record.pluginId) ||
         (provider === "agy" && item.name === "bflow-superpowers"));
       if (!entry || entry.enabled !== true || entry.installed === false) throw new Error("Bflow plugin is not enabled in provider inventory");
-      const configRoot = join(this.#home, provider === "claude" ? ".claude" : provider === "codex" ? ".codex" : ".gemini");
+      const configRoot = this.#configRoot(provider);
       const candidates = [entry.installPath, entry.path, entry.dir,
         typeof entry.source === "object" ? entry.source.path : undefined,
         join(configRoot, "plugins", "cache", "bflow-superpowers", "bflow-superpowers", pin.version),
@@ -176,22 +221,22 @@ export class NativePluginRuntime {
       const inventory = await this.#inventory(provider);
       const existing = inventory.find(item => [item.pluginId, item.id, item.name].includes(selector));
       if (existing && action !== "install") {
-        const removed = await this.#host.run(executable, ["plugin", provider === "codex" ? "remove" : "uninstall", selector], { timeoutMs: 30_000 });
+        const removed = await this.#host.run(executable, ["plugin", provider === "codex" ? "remove" : "uninstall", selector], { timeoutMs: 30_000, ...this.#scope(provider) });
         if (removed.exitCode !== 0) throw new Error("Could not remove the previous Bflow-owned plugin registration");
       }
       if (provider !== "agy") {
         // Only this Bflow namespace is replaced; personal marketplaces are outside this receipt.
-        await this.#host.run(executable, ["plugin", "marketplace", "remove", "bflow-superpowers"], { timeoutMs: 30_000 });
-        const registered = await this.#host.run(executable, ["plugin", "marketplace", "add", bundle.marketplace], { timeoutMs: 30_000 });
+        await this.#host.run(executable, ["plugin", "marketplace", "remove", "bflow-superpowers"], { timeoutMs: 30_000, ...this.#scope(provider) });
+        const registered = await this.#host.run(executable, ["plugin", "marketplace", "add", bundle.marketplace], { timeoutMs: 30_000, ...this.#scope(provider) });
         if (registered.exitCode !== 0) throw new Error("Native local marketplace registration failed");
       } else {
-        const validation = await this.#host.run(executable, ["plugin", "validate", bundle.root, "--strict", "--json"], { timeoutMs: 30_000 });
+        const validation = await this.#host.run(executable, ["plugin", "validate", bundle.root, "--strict", "--json"], { timeoutMs: 30_000, ...this.#scope(provider) });
         if (validation.exitCode !== 0) throw new Error("Agy rejected the local plugin manifest");
       }
       const argv = provider === "codex" ? ["plugin", "add", selector, "--json"] :
         provider === "claude" ? ["plugin", "install", selector] : ["plugin", "install", bundle.root];
       const result = await this.#host.run(executable, argv, { timeoutMs: options?.timeoutMs ?? 90_000,
-        ...(options?.signal ? { signal: options.signal } : {}) });
+        ...(options?.signal ? { signal: options.signal } : {}), ...this.#scope(provider) });
       if (result.exitCode !== 0) return { success: false, diagnostic: "Native plugin installation failed; reconcile its receipt before retrying" };
       await atomicJson(join(dirname(artifact), ".bflow-native.json"), { schemaVersion: 3, toolId: pin.toolId, provider,
         version: pin.version, sourceIntegrity: pin.integrity, bundleRoot: bundle.root, bundleDigest: await treeDigest(bundle.root),
@@ -202,6 +247,12 @@ export class NativePluginRuntime {
     });
   }
 
+  /** Real mode forwards only an inherited CODEX_HOME; isolated mode forces the isolated provider homes. */
+  #memoryEnvironment(): { environment?: Readonly<Record<string, string>> } {
+    const isolated = isolatedProviderEnvironment(this.#options.isolation);
+    if (isolated) return { environment: isolated };
+    return process.env.CODEX_HOME ? { environment: { CODEX_HOME: process.env.CODEX_HOME } } : {};
+  }
   #memory() {
     const dataDir = this.#options.memory?.dataDir ?? join(this.#home, ".claude-mem");
     const projectRoot = this.#options.memory?.projectRoot ?? process.cwd();
@@ -212,10 +263,10 @@ export class NativePluginRuntime {
     const memory = this.#memory();
     const selected = await resolveMemoryProvider({ provider: memory.provider ?? "auto", homeDirectory: this.#home, dataDir: memory.dataDir,
       host: this.#host, executables: { claude: this.#binary("claude"), codex: this.#binary("codex") },
-      ...(process.env.CODEX_HOME ? { environment: { CODEX_HOME: process.env.CODEX_HOME } } : {}) });
+      ...this.#memoryEnvironment() });
     const managed = await privateDirectory(this.#options.managedRoot);
     const generation = join(managed, `claude-mem-${pin.integrity}`);
-    const environment = { CI: "1", CLAUDE_MEM_DATA_DIR: memory.dataDir,
+    const environment = { CI: "1", CLAUDE_MEM_DATA_DIR: memory.dataDir, ...isolatedProviderEnvironment(this.#options.isolation),
       ...(selected.provider === "claude" ? { CLAUDE_MEM_PROVIDER: "claude", CLAUDE_MEM_CLAUDE_AUTH_METHOD: "subscription",
         ANTHROPIC_API_KEY: "", ANTHROPIC_AUTH_TOKEN: "", ANTHROPIC_BASE_URL: "" } :
         selected.provider === "codex" ? { CLAUDE_MEM_PROVIDER: "codex", CLAUDE_MEM_CODEX_PATH: this.#binary("codex"), OPENAI_API_KEY: "" } : {}),
@@ -246,7 +297,7 @@ export class NativePluginRuntime {
       ? "Claude-Mem host observer is unavailable on loopback ports 37777/37778. Start the existing OpenAI-compatible observer (or set CLAUDE_MEM_HOST_OBSERVER_PORT), inspect native-installer.log and explicitly review the retained native intent before retrying. No subscription or credentials were created."
       : `Official Claude-Mem installer exited ${result.exitCode}; full output retained in native-installer.log` };
     if (provider === "claude") {
-      const pluginRoot = join(this.#home, ".claude", "plugins", "cache", "thedotmack", "claude-mem", pin.version);
+      const pluginRoot = join(this.#configRoot("claude"), "plugins", "cache", "thedotmack", "claude-mem", pin.version);
       const hooks = JSON.parse(await readRegular(join(generation, "node_modules", "claude-mem", "plugin", "hooks", "hooks.json")));
       const launcher = join(this.#home, ".local", "bin", "claude-mem");
       absoluteMemoryHooks(hooks, launcher);
@@ -277,12 +328,13 @@ export class NativePluginRuntime {
     const memory = this.#memory();
     const selected = await resolveMemoryProvider({ provider: memory.provider ?? "auto", homeDirectory: this.#home, dataDir: memory.dataDir,
       host: this.#host, executables: { claude: this.#binary("claude"), codex: this.#binary("codex") },
-      ...(process.env.CODEX_HOME ? { environment: { CODEX_HOME: process.env.CODEX_HOME } } : {}) });
+      ...this.#memoryEnvironment() });
     const settings = z.record(z.unknown()).parse(JSON.parse(await readRegular(join(memory.dataDir, "settings.json"))));
     const expected = selected.provider === "host" ? "openai-compatible" : selected.provider;
     if (settings.CLAUDE_MEM_PROVIDER !== expected || (expected === "claude" && settings.CLAUDE_MEM_CLAUDE_AUTH_METHOD && settings.CLAUDE_MEM_CLAUDE_AUTH_METHOD !== "subscription"))
       throw Error("Active Claude-Mem provider differs from the approved subscription route");
     const environment = { CLAUDE_MEM_DATA_DIR: memory.dataDir, PATH: [join(this.#home, ".local", "bin"), process.env.PATH ?? ""].join(delimiter),
+      ...isolatedProviderEnvironment(this.#options.isolation),
       ...(memory.port ? { CLAUDE_MEM_WORKER_PORT: String(memory.port) } : {}) };
     const executable = join(generation, "node_modules", ".bin", "claude-mem");
     const doctor = await this.#host.run(executable, ["doctor"], { timeoutMs: 30_000, environment });
@@ -302,8 +354,8 @@ export class NativePluginRuntime {
       if (!events) throw new Error("Agy native memory adapter is missing");
     }
     // Exercise the specific platform formatter against the adopted worker without starting an agent.
-    const pluginRoot = join(this.#home, ".claude", "plugins", "cache", "thedotmack", "claude-mem", pin.version);
-    const runner = join(pluginRoot, "scripts", "bun-runner.js");
+    const pluginRoot = join(this.#configRoot("claude"), "plugins", "cache", "thedotmack", "claude-mem", pin.version);
+    const runner =join(pluginRoot, "scripts", "bun-runner.js");
     const service = join(pluginRoot, "scripts", "worker-service.cjs");
     await readRegular(runner);
     const sourceRoot = join(generation, "node_modules", "claude-mem", "plugin");

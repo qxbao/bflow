@@ -41,7 +41,7 @@ import {
 import { wrapSetupComponents, setupGatewayDiagnostics } from "./setup-gateway.js";
 import { humanText } from "./presentation.js";
 import { identifyRepository } from "./repository.js";
-import { createDefaultSetupConfiguration } from "./setup-defaults.js";
+import { createDefaultSetupConfiguration, isolatedProviderHomes } from "./setup-defaults.js";
 import { SUPPORTED_CLI_COMMANDS } from "./command-reference.js";
 import type { CliContext, SetupCommandArgs, SetupCommandOutput } from "./types.js";
 
@@ -216,6 +216,8 @@ export async function executeSetupCommand(
     catch (error) { if (args.dir) throw error; }
     const defaults = await createDefaultSetupConfiguration({ platform, memoryProvider: args.memoryProvider ?? "auto",
       projectRoot: repositoryRoot ?? target,
+      // Isolated setup must never write the real provider homes; the isolation is passed explicitly, not via global state.
+      ...(isolatedRoot ? { isolation: isolatedProviderHomes(isolatedRoot) } : {}),
       ...(context?.setup?.machineConfig || existsSync(configPath) ? { config: machineConfig } : {}),
       registry: installerRegistry });
     machineConfig = defaults.config;

@@ -1,4 +1,4 @@
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { realpath } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
@@ -23,12 +23,25 @@ export interface DefaultSetupLaunchRequirement {
 
 /** Read-only composition of the reviewed catalog and machine preferences.
  * Does not install software, start services, connect MCP, write native provider settings or log in. */
+/** Provider configuration confined under an isolated root (BFLOW_HOME / setup isolatedRoot). Agy has no
+ * documented configuration-directory variable, so it is intentionally absent and native activation is deferred. */
+export interface IsolatedProviderHomes {
+  homeDirectory: string;
+  claudeConfigDir?: string;
+  codexHome?: string;
+}
+export function isolatedProviderHomes(isolatedRoot: string): IsolatedProviderHomes {
+  const providers = resolve(isolatedRoot, "providers");
+  return { homeDirectory: join(providers, "home"), claudeConfigDir: join(providers, "claude"), codexHome: join(providers, "codex") };
+}
+
 export async function createDefaultSetupConfiguration(options: {
   platform: PlatformProfile;
   config?: MachineConfig;
   registry?: ToolInstallerRegistry;
   memoryProvider?: "auto" | "claude" | "codex" | "host";
   projectRoot?: string;
+  isolation?: IsolatedProviderHomes;
 }): Promise<{ config: MachineConfig; registry: ToolInstallerRegistry; diagnostics: string[];
   inventory: DefaultSetupInventory[]; launchRequirements: DefaultSetupLaunchRequirement[];
   additionalToolObservations: (platform: PlatformProfile, config: MachineConfig) => Promise<ToolObservation[]> }> {
@@ -67,7 +80,8 @@ export async function createDefaultSetupConfiguration(options: {
   for (const pin of nativePins) {
     const nativeInstaller = new leaf.NativeProvidersToolInstaller({ managedRoot: join(platform.paths.data, "tools"),
       pin, providers: config.providers, host: nativeHost,
-      configuration: { homeDirectory: platform.homeDir, executables: providerExecutables,
+      configuration: { homeDirectory: options.isolation?.homeDirectory ?? platform.homeDir,
+        ...(options.isolation ? { isolation: { ...options.isolation } } : {}), executables: providerExecutables,
         memory: { provider: options.memoryProvider ?? "auto", dataDir: join(platform.paths.data, "claude-mem"), projectRoot: options.projectRoot ?? process.cwd(), project: options.projectRoot ?? process.cwd(), startIfMissing: true } } });
     nativeInspectors.set(nativeInstaller.installerId, nativeInstaller);
     if (!registry.get(nativeInstaller.installerId)) {
