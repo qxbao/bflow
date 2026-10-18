@@ -97,6 +97,8 @@ export interface ProviderAdapterOptions {
   readonly liveObservation?: LiveReadinessObservation;
   readonly osSandboxPath?: string;
   readonly allowTestFilesystemOwnership?: boolean;
+  /** Codex home used only for read-only inspection of inherited global MCP servers and hooks. Defaults to $CODEX_HOME or ~/.codex. */
+  readonly codexHomeDirectory?: string;
   readonly now?: () => Date;
   readonly healthTtlMs?: number;
 }

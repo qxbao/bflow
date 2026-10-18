@@ -339,6 +339,11 @@ export function createFakeProviderRunner(config?: FakeRunnerConfig): ProviderCom
         return { exitCode: 0, stdout: "1.4.0\n", stderr: "", started: true };
       }
 
+      // Global MCP enumeration (read-only; codex mcp list --json)
+      if (providerName === "codex" && argsStr === "mcp list --json") {
+        return { exitCode: 0, stdout: "[]\n", stderr: "", started: true };
+      }
+
       // Help check (capability discovery)
       if (invocation.args.includes("--help") || invocation.args.includes("-h")) {
         if (scenario === "invalid_flag") {

@@ -82,6 +82,24 @@ export function compareSemver(a: string, b: string): number {
   return pa.patch - pb.patch;
 }
 
+export interface InheritedIsolationFailure {
+  readonly code: string;
+  readonly message: string;
+  readonly remediation: string;
+}
+
+/**
+ * Per-invocation isolation from state the provider CLI would otherwise inherit from the user's global
+ * configuration (for example global MCP servers or hooks). Adapters without such inheritance return the
+ * empty default. `argv` is placed before the provider subcommand in probes and after Bflow MCP overrides in
+ * launches. A failure fails closed for the corresponding health check and prepareLaunch.
+ */
+export interface InheritedIsolation {
+  readonly argv: readonly string[];
+  readonly mcpFailure?: InheritedIsolationFailure;
+  readonly hookFailure?: InheritedIsolationFailure;
+}
+
 export abstract class BaseProviderAdapter implements AgentProviderAdapter {
   abstract readonly descriptor: AgentProviderDescriptor;
 
@@ -110,6 +128,15 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     return true;
   }
 
+  /** Provider-specific per-invocation isolation from inherited global MCP servers and hooks. */
+  protected async resolveInheritedIsolation(
+    _environment: AgentEnvironment,
+    _capabilities: DetectedProviderCapabilities,
+    _bflowMcpServerNames: readonly string[]
+  ): Promise<InheritedIsolation> {
+    return { argv: [] };
+  }
+
   private resolveHostLaunchMaterial(capabilities: DetectedProviderCapabilities): ResolvedLaunchMaterial {
     return resolveLaunchMaterial({
       options: this.options,
@@ -125,7 +152,8 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
   protected abstract compileArgv(
     environment: AgentEnvironment,
     configFiles: { promptFile: string; mcpConfigFile: string; settingsFile: string },
-    capabilities: DetectedProviderCapabilities
+    capabilities: DetectedProviderCapabilities,
+    inherited: InheritedIsolation
   ): Promise<{ readonly argv: readonly string[]; readonly unsupportedCode?: string; readonly unsupportedMessage?: string }>;
 
   public async detectCapabilities(): Promise<DetectedProviderCapabilities> {
@@ -377,6 +405,13 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
 
     if (!versionPassed) hasFailed = true;
 
+    // B2. Inherited global MCP/hook isolation (read-only inspection; no launch side effects)
+    const inherited = await this.resolveInheritedIsolation(
+      environment,
+      capabilities,
+      Object.keys(this.resolveHostLaunchMaterial(capabilities).mcpServers)
+    );
+
     // C. Check: authentication & execution probe
     let authPassed = false;
     try {
@@ -413,7 +448,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
             : undefined;
         const probeOutcome = await this.runner.run({
           executable,
-          args: probeArgs,
+          args: [...inherited.argv, ...probeArgs],
           cwd: environment.cwd,
           env: {
             BFLOW_PROVIDER: this.descriptor.provider,
@@ -623,6 +658,20 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       }
     }
 
+    if (!mcpCheckHandled && inherited.mcpFailure !== undefined) {
+      hasFailed = true;
+      mcpCheckHandled = true;
+      checks.push(
+        createHealthCheck(
+          "mcp",
+          "failed",
+          inherited.mcpFailure.code,
+          inherited.mcpFailure.message,
+          inherited.mcpFailure.remediation
+        )
+      );
+    }
+
     if (!mcpCheckHandled) {
       if (environment.requiredMcpServiceIds.length > 0) {
         const regServiceIds = new Set(registrations.flatMap((r) => r.serviceIds));
@@ -712,6 +761,26 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
           permResult.code === "invalid_flag" ? "invalid_flag" : "launch_arguments_invalid",
           `Cannot compile launch arguments: ${permResult.message}`,
           permResult.remediation ?? "Review permission configuration."
+        )
+      );
+    } else if (inherited.hookFailure !== undefined) {
+      hasFailed = true;
+      checks.push(
+        createHealthCheck(
+          "permissions",
+          "failed",
+          inherited.hookFailure.code,
+          inherited.hookFailure.message,
+          inherited.hookFailure.remediation
+        )
+      );
+      checks.push(
+        createHealthCheck(
+          "launch_arguments",
+          "failed",
+          inherited.hookFailure.code,
+          inherited.hookFailure.message,
+          inherited.hookFailure.remediation
         )
       );
     } else if (modelIncompatible) {
@@ -1309,6 +1378,23 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       };
     }
 
+    const inherited = await this.resolveInheritedIsolation(
+      environment,
+      capabilities,
+      Object.keys(material.mcpServers)
+    );
+    const inheritedFailure = inherited.mcpFailure ?? inherited.hookFailure;
+    if (inheritedFailure !== undefined) {
+      return {
+        ok: false,
+        error: {
+          code: "validation",
+          retryable: false,
+          message: `${inheritedFailure.code}: ${inheritedFailure.message}`
+        }
+      };
+    }
+
     const rolePrompt =
       this.options.rolePrompt ??
       DEFAULT_ROLE_PROMPTS[environment.role] ??
@@ -1405,7 +1491,8 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     const compiled = await this.compileArgv(
       environment,
       { promptFile: promptPath, mcpConfigFile: mcpConfigPath, settingsFile: settingsPath },
-      capabilities
+      capabilities,
+      inherited
     );
 
     if (compiled.unsupportedCode) {

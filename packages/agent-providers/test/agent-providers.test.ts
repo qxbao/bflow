@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -36,6 +36,7 @@ describe("@bflow/agent-providers", () => {
   let testBaseDir: string;
   let testCwd: string;
   let testStateDir: string;
+  let testCodexHome: string;
   let fakeBinaryPath: string;
   let testIssuerId: string;
   let testPrivateKeyPem: string;
@@ -45,9 +46,11 @@ describe("@bflow/agent-providers", () => {
     testBaseDir = await realpath(await mkdtemp(join(tmpdir(), "bflow-provider-tests-")));
     testCwd = join(testBaseDir, "workspace");
     testStateDir = join(testBaseDir, "state");
+    testCodexHome = join(testBaseDir, "codex-home");
 
     await mkdir(testCwd, { recursive: true, mode: 0o700 });
     await mkdir(testStateDir, { recursive: true, mode: 0o700 });
+    await mkdir(testCodexHome, { recursive: true, mode: 0o700 });
 
     fakeBinaryPath = join(testBaseDir, "mock-binary");
     await writeFile(fakeBinaryPath, "#!/bin/sh\necho ok\n", { mode: 0o700 });
@@ -461,6 +464,7 @@ describe("@bflow/agent-providers", () => {
     it("Codex passes preflight and produces deterministic prepareLaunch profile", async () => {
       const runner = createFakeProviderRunner({ scenario: "healthy" });
       const adapter = new CodexProviderAdapter({
+        codexHomeDirectory: testCodexHome,
         runner,
         executablePath: fakeBinaryPath,
         allowTestFilesystemOwnership: true,
@@ -879,6 +883,7 @@ describe("@bflow/agent-providers", () => {
     it("Codex strictly separates approval policy from sandbox and forbids danger-full-access", async () => {
       const runner = createFakeProviderRunner({ scenario: "healthy" });
       const adapter = new CodexProviderAdapter({
+        codexHomeDirectory: testCodexHome,
         runner,
         executablePath: fakeBinaryPath,
         allowTestFilesystemOwnership: true
@@ -1399,6 +1404,7 @@ describe("@bflow/agent-providers", () => {
     it("Codex renders host and Gateway entries as TOML with bearer_token_env_var and all four hooks", async () => {
       const env = createTestEnvironment("codex");
       const adapter = new CodexProviderAdapter({
+        codexHomeDirectory: testCodexHome,
         runner: createFakeProviderRunner({ scenario: "healthy" }),
         executablePath: fakeBinaryPath,
         allowTestFilesystemOwnership: true,
@@ -1457,6 +1463,7 @@ describe("@bflow/agent-providers", () => {
                   mcpTokenEnvironmentNames: tokenEnvironmentNames
                 })
               : new CodexProviderAdapter({
+        codexHomeDirectory: testCodexHome,
                   runner: createFakeProviderRunner({ scenario: "healthy" }),
                   executablePath: fakeBinaryPath,
                   allowTestFilesystemOwnership: true,
@@ -1489,6 +1496,7 @@ describe("@bflow/agent-providers", () => {
                 mcpRegistrations: [gatewayRegistration(env, provider)]
               })
             : new CodexProviderAdapter({
+        codexHomeDirectory: testCodexHome,
                 runner: createFakeProviderRunner({ scenario: "healthy" }),
                 executablePath: fakeBinaryPath,
                 allowTestFilesystemOwnership: true,
@@ -1661,6 +1669,286 @@ describe("@bflow/agent-providers", () => {
       expect(second.value.configFiles[2]!.digest).not.toBe(firstDigest);
       expect(second.value.configFiles[2]!.digest).toBe(await computeFileSha256(firstSettings.path));
       expect(second.value.launchFingerprint).not.toBe(firstFingerprint);
+    });
+  });
+
+  describe("10. Codex inherited global MCP servers and hooks (L3 isolation)", () => {
+    const LIST_MCP = (names: readonly string[]): string =>
+      JSON.stringify(
+        names.map((name) => ({
+          name,
+          enabled: true,
+          disabled_reason: null,
+          transport: { type: "stdio", command: "/usr/bin/true", args: [], env: null, env_vars: [], cwd: null },
+          startup_timeout_sec: null,
+          tool_timeout_sec: null,
+          auth_status: "unsupported"
+        }))
+      );
+
+    function codexRunner(options: {
+      readonly globalServers?: readonly string[];
+      readonly listExit?: number;
+      readonly invocations?: Array<readonly string[]>;
+    }) {
+      return createFakeProviderRunner({
+        scenario: "healthy",
+        customHandler: (invocation) => {
+          options.invocations?.push([...invocation.args]);
+          if (invocation.args.join(" ") === "mcp list --json") {
+            if ((options.listExit ?? 0) !== 0) {
+              return { exitCode: options.listExit ?? 1, stdout: "", stderr: "list failed", started: true };
+            }
+            return { exitCode: 0, stdout: LIST_MCP(options.globalServers ?? []), stderr: "", started: true };
+          }
+          return undefined;
+        }
+      });
+    }
+
+    async function freshCodexHome(files: Record<string, string> = {}): Promise<string> {
+      const home = join(testBaseDir, `codex-home-${Math.random().toString(36).slice(2)}`);
+      await mkdir(home, { recursive: true, mode: 0o700 });
+      for (const [name, content] of Object.entries(files)) {
+        await writeFile(join(home, name), content, { mode: 0o600 });
+      }
+      return home;
+    }
+
+    function codexAdapter(
+      runner: ReturnType<typeof createFakeProviderRunner>,
+      codexHomeDirectory: string,
+      extra?: { hostMcpServers?: Record<string, { command: string; args: string[] }> }
+    ): CodexProviderAdapter {
+      return new CodexProviderAdapter({
+        runner,
+        executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true,
+        codexHomeDirectory,
+        ...(extra?.hostMcpServers ? { hostMcpServers: extra.hostMcpServers } : {})
+      });
+    }
+
+    const bflowServer = { bflow: { command: "/usr/bin/true", args: ["--serve"] } };
+
+    it("disables exactly the global MCP servers after the Bflow mcp_servers table and leaves Bflow servers untouched", async () => {
+      const home = await freshCodexHome();
+      const adapter = codexAdapter(codexRunner({ globalServers: ["gitnexus", "playwright"] }), home, {
+        hostMcpServers: bflowServer
+      });
+      const env = createTestEnvironment("codex", "workspace_auto");
+      const result = await adapter.prepareLaunch(env);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+
+      const argv = result.value.argv;
+      const tableIndex = argv.findIndex((arg) => arg.startsWith("mcp_servers="));
+      const gitnexusIndex = argv.indexOf("mcp_servers.gitnexus.enabled=false");
+      const playwrightIndex = argv.indexOf("mcp_servers.playwright.enabled=false");
+      expect(tableIndex).toBeGreaterThanOrEqual(0);
+      expect(gitnexusIndex).toBeGreaterThan(tableIndex);
+      expect(playwrightIndex).toBeGreaterThan(tableIndex);
+      expect(argv.filter((arg) => arg.endsWith(".enabled=false"))).toEqual([
+        "mcp_servers.gitnexus.enabled=false",
+        "mcp_servers.playwright.enabled=false"
+      ]);
+      expect(argv.some((arg) => arg.includes("mcp_servers.bflow.enabled"))).toBe(false);
+      expect(argv[tableIndex]).toContain('"bflow"');
+    });
+
+    it("adds no extra arguments when the user has no global MCP servers", async () => {
+      const home = await freshCodexHome();
+      const adapter = codexAdapter(codexRunner({ globalServers: [] }), home, { hostMcpServers: bflowServer });
+      const result = await adapter.prepareLaunch(createTestEnvironment("codex", "workspace_auto"));
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value.argv.some((arg) => arg.includes(".enabled=false"))).toBe(false);
+      }
+    });
+
+    it("changes the launch fingerprint when the global MCP server set changes", async () => {
+      const home = await freshCodexHome();
+      const env = createTestEnvironment("codex", "workspace_auto");
+      const first = await codexAdapter(codexRunner({ globalServers: ["gitnexus"] }), home, {
+        hostMcpServers: bflowServer
+      }).prepareLaunch(env);
+      const second = await codexAdapter(codexRunner({ globalServers: ["gitnexus", "playwright"] }), home, {
+        hostMcpServers: bflowServer
+      }).prepareLaunch(env);
+      expect(first.ok && second.ok).toBe(true);
+      if (first.ok && second.ok) {
+        expect(second.value.launchFingerprint).not.toBe(first.value.launchFingerprint);
+      }
+    });
+
+    it("passes the same isolation arguments to the readiness probe so global servers are not started there", async () => {
+      const home = await freshCodexHome();
+      const invocations: Array<readonly string[]> = [];
+      const adapter = codexAdapter(
+        codexRunner({ globalServers: ["gitnexus"], invocations }),
+        home,
+        { hostMcpServers: bflowServer }
+      );
+      const health = await adapter.checkHealth({
+        schemaVersion: 3,
+        environment: createTestEnvironment("codex", "workspace_auto"),
+        stage: "preflight",
+        requestedAt: new Date().toISOString()
+      });
+      expect(health.ok).toBe(true);
+      if (health.ok) expect(health.value.status).toBe("ready");
+      const probe = invocations.find((args) => args.includes("ping"));
+      expect(probe).toEqual(["-c", "mcp_servers.gitnexus.enabled=false", "exec", "ping"]);
+    });
+
+    it("fails closed with codex_global_mcp_not_isolated when a global server name cannot be disabled safely", async () => {
+      const home = await freshCodexHome();
+      const adapter = codexAdapter(codexRunner({ globalServers: ["my.server"] }), home, { hostMcpServers: bflowServer });
+      const env = createTestEnvironment("codex", "workspace_auto");
+
+      const launch = await adapter.prepareLaunch(env);
+      expect(launch.ok).toBe(false);
+      if (!launch.ok) expect(launch.error.message).toContain("codex_global_mcp_not_isolated");
+
+      const health = await adapter.checkHealth({
+        schemaVersion: 3,
+        environment: env,
+        stage: "preflight",
+        requestedAt: new Date().toISOString()
+      });
+      expect(health.ok).toBe(true);
+      if (health.ok) {
+        expect(health.value.status).toBe("blocked");
+        const mcp = health.value.checks.find((check) => check.check === "mcp");
+        expect(mcp?.status).toBe("failed");
+        expect(mcp?.code).toBe("codex_global_mcp_not_isolated");
+        expect(mcp?.remediation).toBeTruthy();
+      }
+    });
+
+    it("fails closed when a global server shares a name with a Bflow launch server", async () => {
+      const home = await freshCodexHome();
+      const adapter = codexAdapter(codexRunner({ globalServers: ["bflow"] }), home, { hostMcpServers: bflowServer });
+      const launch = await adapter.prepareLaunch(createTestEnvironment("codex", "workspace_auto"));
+      expect(launch.ok).toBe(false);
+      if (!launch.ok) expect(launch.error.message).toContain("codex_global_mcp_not_isolated");
+    });
+
+    it("fails closed when the global MCP servers cannot be enumerated at all", async () => {
+      // config.toml exists but is unreadable as a file, so neither the list nor the fallback can establish the set.
+      const home = await freshCodexHome();
+      await mkdir(join(home, "config.toml"), { recursive: true });
+      const adapter = codexAdapter(codexRunner({ listExit: 1 }), home, { hostMcpServers: bflowServer });
+      const launch = await adapter.prepareLaunch(createTestEnvironment("codex", "workspace_auto"));
+      expect(launch.ok).toBe(false);
+      if (!launch.ok) expect(launch.error.message).toContain("codex_global_mcp_not_isolated");
+    });
+
+    it("falls back to config.toml table names when codex mcp list fails and disables them", async () => {
+      const home = await freshCodexHome({
+        "config.toml": [
+          'model = "gpt-5"',
+          "[mcp_servers.gitnexus]",
+          'url = "http://127.0.0.1:8932/mcp"',
+          '[mcp_servers."chrome.devtools".env]',
+          'FOO = "bar"',
+          "[mcp_servers.playwright]",
+          'command = "npx"'
+        ].join("\n")
+      });
+      const adapter = codexAdapter(codexRunner({ listExit: 1 }), home, { hostMcpServers: bflowServer });
+      const launch = await adapter.prepareLaunch(createTestEnvironment("codex", "workspace_auto"));
+      expect(launch.ok).toBe(false);
+      // The quoted dotted name cannot be disabled through the dotted override, so the fallback fails closed for it.
+      if (!launch.ok) expect(launch.error.message).toContain("codex_global_mcp_not_isolated");
+
+      const homeOk = await freshCodexHome({
+        "config.toml": "[mcp_servers.gitnexus]\nurl = \"http://127.0.0.1:8932/mcp\"\n\n[mcp_servers.playwright]\ncommand = \"npx\"\n"
+      });
+      const okLaunch = await codexAdapter(codexRunner({ listExit: 1 }), homeOk, {
+        hostMcpServers: bflowServer
+      }).prepareLaunch(createTestEnvironment("codex", "workspace_auto"));
+      expect(okLaunch.ok).toBe(true);
+      if (okLaunch.ok) {
+        expect(okLaunch.value.argv).toEqual(
+          expect.arrayContaining(["mcp_servers.gitnexus.enabled=false", "mcp_servers.playwright.enabled=false"])
+        );
+      }
+    });
+
+    it("fails closed with codex_global_hooks_not_isolated when hooks.json defines global hooks", async () => {
+      const home = await freshCodexHome({
+        "hooks.json": JSON.stringify({
+          hooks: { Stop: [{ hooks: [{ type: "command", command: "/home/user/personal-hook.sh" }] }] }
+        })
+      });
+      const adapter = codexAdapter(codexRunner({ globalServers: [] }), home);
+      const env = createTestEnvironment("codex", "workspace_auto");
+
+      const launch = await adapter.prepareLaunch(env);
+      expect(launch.ok).toBe(false);
+      if (!launch.ok) expect(launch.error.message).toContain("codex_global_hooks_not_isolated");
+
+      const health = await adapter.checkHealth({
+        schemaVersion: 3,
+        environment: env,
+        stage: "preflight",
+        requestedAt: new Date().toISOString()
+      });
+      expect(health.ok).toBe(true);
+      if (health.ok) {
+        expect(health.value.status).toBe("blocked");
+        const permissions = health.value.checks.find((check) => check.check === "permissions");
+        expect(permissions?.status).toBe("failed");
+        expect(permissions?.code).toBe("codex_global_hooks_not_isolated");
+        expect(permissions?.remediation).toContain("profile");
+      }
+    });
+
+    it("fails closed when config.toml defines hooks inline", async () => {
+      const home = await freshCodexHome({
+        "config.toml": "[hooks]\nstate = {}\n"
+      });
+      const adapter = codexAdapter(codexRunner({ globalServers: [] }), home);
+      const launch = await adapter.prepareLaunch(createTestEnvironment("codex", "workspace_auto"));
+      expect(launch.ok).toBe(false);
+      if (!launch.ok) expect(launch.error.message).toContain("codex_global_hooks_not_isolated");
+    });
+
+    it("treats an empty hooks.json as no global hooks", async () => {
+      const home = await freshCodexHome({ "hooks.json": JSON.stringify({ hooks: {} }) });
+      const adapter = codexAdapter(codexRunner({ globalServers: [] }), home, { hostMcpServers: bflowServer });
+      const launch = await adapter.prepareLaunch(createTestEnvironment("codex", "workspace_auto"));
+      expect(launch.ok).toBe(true);
+    });
+
+    it("writes nothing into the user Codex home (only the adapter state directory is written)", async () => {
+      const home = await freshCodexHome({
+        "config.toml": "[mcp_servers.gitnexus]\nurl = \"http://127.0.0.1:8932/mcp\"\n"
+      });
+      const listFiles = async (dir: string): Promise<string[]> => {
+        const out: string[] = [];
+        for (const entry of await readdir(dir, { withFileTypes: true, recursive: true })) {
+          if (entry.isFile()) out.push(join(entry.parentPath, entry.name));
+        }
+        return out.sort();
+      };
+      const before = await listFiles(home);
+      const beforeContent = await readFile(join(home, "config.toml"), "utf8");
+
+      const adapter = codexAdapter(codexRunner({ globalServers: ["gitnexus"] }), home, { hostMcpServers: bflowServer });
+      const env = createTestEnvironment("codex", "workspace_auto");
+      await adapter.checkHealth({
+        schemaVersion: 3,
+        environment: env,
+        stage: "preflight",
+        requestedAt: new Date().toISOString()
+      });
+      const launch = await adapter.prepareLaunch(env);
+      expect(launch.ok).toBe(true);
+
+      expect(await listFiles(home)).toEqual(before);
+      expect(await readFile(join(home, "config.toml"), "utf8")).toBe(beforeContent);
     });
   });
 });
