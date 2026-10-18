@@ -48,4 +48,16 @@ unknown = "value"
   it("bounds TOML input size", () => {
     expect(() => parseCodexTomlHooks("#" + "x".repeat(256 * 1024))).toThrow(/size|limit/i);
   });
+
+  it("does not include credential-bearing source text in parse errors", () => {
+    const secret = "fixture-private-credential-value";
+    try {
+      parseCodexTomlHooks(`api_key = "${secret}" invalid\n`);
+      throw new Error("Expected invalid TOML to be rejected");
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).not.toContain(secret);
+      expect((error as Error).message).toMatch(/malformed/i);
+    }
+  });
 });

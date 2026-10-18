@@ -63,7 +63,9 @@ function validateExecutableEvent(event: string, value: unknown): boolean {
 export function parseCodexTomlHooks(text: string): Record<string, unknown> {
   if (Buffer.byteLength(text, "utf8") > MAX_CODEX_CONFIG_BYTES)
     throw new Error("Codex config.toml exceeds the " + MAX_CODEX_CONFIG_BYTES + " byte parsing limit");
-  const parsed = parse(text, { unsafeKeyBehaviour: "throw" });
+  let parsed: unknown;
+  try { parsed = parse(text, { unsafeKeyBehaviour: "throw" }); }
+  catch { throw new Error("Codex config.toml contains malformed TOML; inspect its syntax locally."); }
   const config = record(parsed, "Codex config.toml");
   if (config.hooks === undefined) return {};
   const hooks = record(config.hooks, "Codex hooks");
