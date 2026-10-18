@@ -11,9 +11,10 @@ import type { PreparedRoleLaunch } from "../../src/platform/index.js";
 import { tokenEnvironmentName } from "../../src/platform/gateway-registrations.js";
 import {
   assertRoleToolReachability, BFLOW_LAUNCH_ID_ENV, evaluateToolReachability, GATEWAY_PROBE_DIRECTORY, GatewayProbeFileSchema,
-  launchProbePath, legacyRoleProbePath, probeGatewayTools, ProviderStartedPayloadSchema, publishLaunchProbe, readLaunchReachability,
-  removeLaunchProbe, removeLegacyRoleProbes, reportedReachabilityOf, resolveProbePlan, summarizeToolReachability, writeLaunchReachability,
-  type GatewayProbeTarget, type ProbeFetch, type ReachabilityExpectation, type ToolReachabilityRecord
+  launchProbePath, launchReachabilityPath, legacyRoleProbePath, probeGatewayTools, ProviderBootstrapPayloadSchema, ProviderStartedPayloadSchema,
+  publishLaunchProbe, readLaunchReachability, readLaunchReachabilityFact, removeLaunchProbe, removeLegacyRoleProbes, reportedReachabilityOf, resolveProbePlan, selectReachabilityFact,
+  summarizeToolReachability, writeLaunchReachability, type GatewayProbeTarget, type ProbeFetch, type ReachabilityExpectation,
+  type ReachabilityFact, type ToolReachabilityCode, type ToolReachabilityRecord
 } from "../../src/agentic/tool-reachability.js";
 
 const cleanup: (() => Promise<unknown>)[] = [];
@@ -441,3 +442,127 @@ function listen(path: string, onLine: (socket: Socket, line: string) => void): P
 function closeServer(server: Server): Promise<void> {
   return new Promise(accept => server.close(() => accept()));
 }
+
+describe("H1 reachability precedence and source (unit)", () => {
+  const okRecord: ToolReachabilityRecord = { registrationId: REGISTRATION_ID, envName: ENV_NAME, ok: true, discoveredTools: ["query"], code: null };
+  const failing = (code: ToolReachabilityCode): ToolReachabilityRecord => ({ ...okRecord, ok: false, discoveredTools: [], code });
+  const fact = (toolReachability: ToolReachabilityRecord[], source: "hook" | "mcp_bootstrap", paneId = "pane-1", launchId = "launch-p"): ReachabilityFact =>
+    ({ launchId, paneId, toolReachability, source });
+
+  it("keeps the first all-ok proof of a launch against later failures, except an unauthorized rejection", () => {
+    const stored = fact([okRecord], "hook");
+    expect(selectReachabilityFact(stored, fact([okRecord], "mcp_bootstrap"))).toBe(stored);
+    expect(selectReachabilityFact(stored, fact([failing("token_env_missing")], "mcp_bootstrap"))).toBe(stored);
+    expect(selectReachabilityFact(stored, fact([failing("timeout")], "mcp_bootstrap"))).toBe(stored);
+    const revoked = fact([failing("unauthorized")], "mcp_bootstrap");
+    expect(selectReachabilityFact(stored, revoked)).toBe(revoked);
+  });
+
+  it("lets any incoming fact replace a partially failing one, and a different launch or pane replace everything", () => {
+    const failed = fact([failing("token_env_missing")], "hook");
+    expect(selectReachabilityFact(failed, fact([okRecord], "mcp_bootstrap"))).toEqual(fact([okRecord], "mcp_bootstrap"));
+    expect(selectReachabilityFact(failed, fact([failing("timeout")], "mcp_bootstrap")).toolReachability).toEqual([failing("timeout")]);
+    const allOk = fact([okRecord], "hook");
+    const other = fact([failing("unauthorized")], "mcp_bootstrap", "pane-2");
+    expect(selectReachabilityFact(allOk, other)).toBe(other);
+    expect(selectReachabilityFact(undefined, other)).toBe(other);
+  });
+
+  it("persists the reporting path with the launch record and treats older records as hook proofs", async () => {
+    const directory = await tempDirectory();
+    await writeLaunchReachability(directory, "launch-src", "pane-1", [okRecord], "mcp_bootstrap");
+    expect(await readLaunchReachabilityFact(directory, "launch-src")).toEqual({ launchId: "launch-src", paneId: "pane-1",
+      toolReachability: [okRecord], source: "mcp_bootstrap" });
+    expect(await readLaunchReachability(directory, "launch-src")).toEqual({ paneId: "pane-1", reported: { launchId: "launch-src", toolReachability: [okRecord] } });
+    // A record written before the source field existed is a hook proof.
+    await writeFile(launchReachabilityPath(directory, "launch-old"), JSON.stringify({ launchId: "launch-old", paneId: "pane-1", toolReachability: [okRecord] }));
+    expect((await readLaunchReachabilityFact(directory, "launch-old"))?.source).toBe("hook");
+  });
+
+  it("rejects a bootstrap payload that is not the strict launch-bound shape", () => {
+    expect(ProviderBootstrapPayloadSchema.safeParse({ launchId: "l", paneId: "p", toolReachability: [okRecord], source: "mcp_bootstrap" }).success).toBe(true);
+    expect(ProviderBootstrapPayloadSchema.safeParse({ launchId: "l", toolReachability: [okRecord], source: "hook" }).success).toBe(false);
+    expect(ProviderBootstrapPayloadSchema.safeParse({ launchId: "l", toolReachability: [], source: "mcp_bootstrap" }).success).toBe(false);
+    expect(ProviderBootstrapPayloadSchema.safeParse({ launchId: "l", toolReachability: [okRecord], source: "mcp_bootstrap", token: "x" }).success).toBe(false);
+  });
+});
+
+describe.skipIf(process.platform !== "linux")("H1 MCP bootstrap probe (spawned role MCP child)", () => {
+  const hostBuild = fileURLToPath(new URL("../../dist/agentic/host.js", import.meta.url));
+
+  /** Fake host socket that records every request and acknowledges it; returns the role file path. */
+  async function bootstrapHost(root: string) {
+    const hostSocket = join(root, "h.sock"), herdrSocket = join(root, "x.sock");
+    const requests: { method: string; params: Record<string, unknown> }[] = [];
+    const hostServer = await listen(hostSocket, (socket, line) => {
+      const request = JSON.parse(line) as { method: string; params: Record<string, unknown>; token: string };
+      if (request.token !== "host-role-token") { socket.end(JSON.stringify({ ok: false, error: "auth" }) + "\n"); return; }
+      requests.push({ method: request.method, params: request.params });
+      socket.end(JSON.stringify({ ok: true, value: null }) + "\n");
+    });
+    const herdrServer = await listen(herdrSocket, socket => socket.end(JSON.stringify({ id: "n", result: {} }) + "\n"));
+    cleanup.push(() => closeServer(hostServer), () => closeServer(herdrServer));
+    const rolePath = join(root, "reviewer.json");
+    await writeFile(rolePath, JSON.stringify({ socketPath: hostSocket, token: "host-role-token", role: "reviewer", provider: "codex", herdrBinary: "herdr", sessionId: "s1" }), { mode: 0o600 });
+    await chmod(rolePath, 0o600);
+    return { rolePath, requests };
+  }
+
+  /** Runs the role MCP child with one initialize request; resolves when the child (and its bootstrap) has exited. */
+  function runMcpChild(rolePath: string, env: Record<string, string>) {
+    return new Promise<{ code: number | null; stdout: string; stderr: string }>((accept, reject) => {
+      const child = spawn(process.execPath, [hostBuild, "mcp", rolePath], { env: { PATH: process.env.PATH ?? "", ...env }, stdio: ["pipe", "pipe", "pipe"] });
+      let stdout = "", stderr = "";
+      child.stdout.on("data", chunk => { stdout += String(chunk); });
+      child.stderr.on("data", chunk => { stderr += String(chunk); });
+      child.once("error", reject);
+      child.once("exit", code => accept({ code, stdout, stderr }));
+      child.stdin.end(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize" }) + "\n");
+    });
+  }
+
+  it("sends one authenticated provider_bootstrap with the probe records, from the provider environment, and never a token", async () => {
+    const real = await startRealGateway();
+    const envName = tokenEnvironmentName(real.registrationId);
+    const root = await tempDirectory();
+    const { rolePath, requests } = await bootstrapHost(root);
+    await publishLaunchProbe(join(root, GATEWAY_PROBE_DIRECTORY), preparedGateway("reviewer", "launch-mcp", real));
+
+    const child = await runMcpChild(rolePath, { HERDR_PANE_ID: "pane-mcp", BFLOW_LAUNCH_ID: "launch-mcp", [envName]: real.token });
+    expect(child.code).toBe(0);
+    expect(child.stdout).toContain('"protocolVersion"');
+    const bootstrap = requests.filter(request => request.method === "provider_bootstrap");
+    expect(bootstrap).toHaveLength(1);
+    expect(bootstrap[0]!.params).toEqual({ launchId: "launch-mcp", paneId: "pane-mcp", source: "mcp_bootstrap",
+      toolReachability: [{ registrationId: real.registrationId, envName, ok: true, discoveredTools: ["query"], code: null }] });
+    expect(requests.some(request => request.method === "provider_started" || request.method === "native_session")).toBe(false);
+    expect(JSON.stringify(requests) + child.stdout + child.stderr).not.toContain(real.token);
+  });
+
+  it("reports token_env_missing when the provider environment lacks the launch token, without any network call", async () => {
+    const real = await startRealGateway();
+    const envName = tokenEnvironmentName(real.registrationId);
+    const root = await tempDirectory();
+    const { rolePath, requests } = await bootstrapHost(root);
+    await publishLaunchProbe(join(root, GATEWAY_PROBE_DIRECTORY), preparedGateway("reviewer", "launch-mcp", real));
+
+    const child = await runMcpChild(rolePath, { HERDR_PANE_ID: "pane-mcp", BFLOW_LAUNCH_ID: "launch-mcp" });
+    expect(child.code).toBe(0);
+    expect(requests).toEqual([{ method: "provider_bootstrap", params: { launchId: "launch-mcp", paneId: "pane-mcp", source: "mcp_bootstrap",
+      toolReachability: [{ registrationId: real.registrationId, envName, ok: false, discoveredTools: [], code: "token_env_missing" }] } }]);
+  });
+
+  it("sends nothing when the launch has no probe plan or the launch id is absent", async () => {
+    const real = await startRealGateway();
+    const envName = tokenEnvironmentName(real.registrationId);
+    const root = await tempDirectory();
+    const { rolePath, requests } = await bootstrapHost(root);
+
+    const noPlan = await runMcpChild(rolePath, { HERDR_PANE_ID: "pane-mcp", BFLOW_LAUNCH_ID: "launch-missing", [envName]: real.token });
+    expect(noPlan.code).toBe(0);
+    await publishLaunchProbe(join(root, GATEWAY_PROBE_DIRECTORY), preparedGateway("reviewer", "launch-mcp", real));
+    const noLaunchId = await runMcpChild(rolePath, { HERDR_PANE_ID: "pane-mcp", [envName]: real.token });
+    expect(noLaunchId.code).toBe(0);
+    expect(requests).toEqual([]);
+  });
+});
