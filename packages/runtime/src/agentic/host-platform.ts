@@ -53,8 +53,9 @@ const PlatformStatusLaunchSchema = z.object({
   role: AgentRoleSchema,
   provider: AgentProviderIdSchema,
   taskId: z.string().min(1).optional(),
-  state: z.enum(["intent", "attested", "activated", "failed", "released"]),
-  healthValidUntil: z.string().optional()
+  state: z.enum(["intent", "attested", "activated", "failed", "released", "degraded"]),
+  healthValidUntil: z.string().optional(),
+  reason: z.literal("gateway_registration_lost").optional()
 }).strict();
 
 /** `platform_status` RPC result. Carries no launch environment, bearer token or argv. */

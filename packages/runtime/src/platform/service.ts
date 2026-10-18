@@ -18,9 +18,11 @@ import { sha256Hex } from "./environment.js";
 import { fail, failWith, ok } from "./errors.js";
 import type {
   GatewayRegistrationPort,
+  GatewayRegistrationVerification,
   HostLaunchExtras,
   LaunchAttestationSigner,
   LaunchJournalPort,
+  LostGatewayRegistration,
   PlatformPreflightReport,
   PlatformReadinessService,
   PlatformSessionIdentity,
@@ -72,8 +74,11 @@ interface LaunchRecord {
   readonly taskId?: string;
   state: LaunchState;
   healthValidUntil?: string;
+  reason?: "gateway_registration_lost";
   material?: LaunchMaterial;
 }
+
+const GATEWAY_LOST_CODE = "gateway_registration_lost";
 
 interface RoleAttemptBase {
   readonly identity: PlatformSessionIdentity;
@@ -137,6 +142,10 @@ function summaryOf(
     ...(requirement.taskId !== undefined ? { taskId: requirement.taskId } : {}),
     ...(message !== undefined ? { message } : {})
   };
+}
+
+function degradedFailure(): OperationResult<never> {
+  return fail("conflict", "launch Gateway registration was lost; relaunch the role", { code: GATEWAY_LOST_CODE });
 }
 
 function withMessage(summary: RolePreflightSummary, extra: string): RolePreflightSummary {
@@ -224,6 +233,7 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
   ): Promise<OperationResult<AgentHealthResult>> {
     const record = this.launches.get(input.launchId);
     if (!record) return fail("not_found", "launch is not known to this readiness service");
+    if (record.state === "degraded") return degradedFailure();
     const material = record.material;
     if (!material) return fail("conflict", "launch was released");
 
@@ -249,6 +259,7 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
   assertFresh(launchId: string, now?: Date): OperationResult<AgentHealthResult> {
     const record = this.launches.get(launchId);
     if (!record) return fail("not_found", "launch is not known to this readiness service");
+    if (record.state === "degraded") return degradedFailure();
     const material = record.material;
     if (!material) return fail("conflict", "launch was released");
     return this.deps.providers.assertFresh(material.environment.environmentId,
@@ -292,6 +303,35 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     return ok(undefined);
   }
 
+  /**
+   * Verifies the Gateway registrations of every session seen by this service. A lost registration degrades the
+   * launch that owns it (same session, role and task). Degraded launches keep their material so release still revokes.
+   */
+  async verifyGateway(options?: OperationOptions): Promise<OperationResult<GatewayRegistrationVerification>> {
+    const checkedAt = this.now().toISOString();
+    const gateway = this.deps.gateway;
+    if (!gateway) return ok({ checkedAt, healthy: true, lost: [], uncertain: false });
+
+    const lost: LostGatewayRegistration[] = [];
+    let uncertain = false;
+    let failure: ContractError | undefined;
+    for (const identity of this.identities.values()) {
+      const verified = await gateway.verifyRegistrations(identity, options);
+      if (!verified.ok) {
+        uncertain = true;
+        failure ??= verified.error;
+        continue;
+      }
+      uncertain ||= verified.value.uncertain;
+      for (const registration of verified.value.lost) {
+        lost.push(registration);
+        this.degradeOwners(identity, registration);
+      }
+    }
+    if (failure) return failWith(failure);
+    return ok({ checkedAt, healthy: lost.length === 0 && !uncertain, lost, uncertain });
+  }
+
   async shutdown(options?: OperationOptions): Promise<OperationResult<void>> {
     const gateway = this.deps.gateway;
     const failures: ContractError[] = [];
@@ -325,9 +365,21 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
         provider: record.provider,
         state: record.state,
         ...(record.taskId !== undefined ? { taskId: record.taskId } : {}),
-        ...(record.healthValidUntil !== undefined ? { healthValidUntil: record.healthValidUntil } : {})
+        ...(record.healthValidUntil !== undefined ? { healthValidUntil: record.healthValidUntil } : {}),
+        ...(record.reason !== undefined ? { reason: record.reason } : {})
       }))
     };
+  }
+
+  /** Marks the live launch(es) that own a lost registration as degraded; released launches are not touched. */
+  private degradeOwners(identity: PlatformSessionIdentity, lost: LostGatewayRegistration): void {
+    for (const record of this.launches.values()) {
+      if (record.material === undefined || record.state === "released") continue;
+      if (record.material.identity.stateDirectory !== identity.stateDirectory) continue;
+      if (record.role !== lost.role || record.taskId !== lost.taskId) continue;
+      record.state = "degraded";
+      record.reason = GATEWAY_LOST_CODE;
+    }
   }
 
   private track(identity: PlatformSessionIdentity): void {
