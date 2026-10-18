@@ -22,6 +22,8 @@ import {
 
 export const USER_DECISION_TOOL = "request_user_decision";
 export const USER_DECISION_METADATA_KIND = "user_decision";
+/** `conversation.progress` payload kind telling Conversation that a user decision expired (Runtime-owned). */
+export const USER_DECISION_EXPIRED_KIND = "user_decision_expired";
 
 const MAX_OPTIONS = 6;
 const MAX_EXPIRES_MINUTES = 1440;

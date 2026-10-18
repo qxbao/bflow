@@ -10,13 +10,14 @@ import {
 } from "@bflow/contracts";
 import { AgenticJournal, digest, json, record, strings, textField, type JournalState,
   type Outbound, type RunRecord, type SpecRecord, type TaskRecord, type UserDecisionRecord } from "./journal.js";
-import { buildDecisionRequestMessage, buildUserDecisionRequest, validateUserDecisionAnswer, type UserDecisionToolInput } from "./decision-routing.js";
+import { buildDecisionRequestMessage, buildUserDecisionRequest, USER_DECISION_EXPIRED_KIND, validateUserDecisionAnswer, type UserDecisionToolInput } from "./decision-routing.js";
 import { captureIntegratedChange } from "./integration-change.js";
 import { CoreSession } from "./core-session.js";
 import { HerdrOutbox, unwrap } from "./outbox.js";
 import type { AgenticRuntimePorts, Integration, VerificationPlan } from "./ports.js";
 
 const VERIFICATION_GATE = "p19-independent-task-verification";
+const TERMINAL_RUN_STATUSES: readonly string[] = ["completed", "failed", "cancelled", "escalated"];
 const FINAL_TASK = "workflow-verification";
 
 /** Durable single-writer orchestration. No LLM calls, polling artifacts, or synchronous inter-agent waits. */
@@ -195,7 +196,7 @@ export class AgenticWorkflowRuntime {
         if (message.type === "approval.decision") {
           if (message.sender.role !== "conversation") throw new Error("Approval must return via Conversation");
           const decision = ApprovalDecisionSchema.parse(message.payload);
-          if (run.userDecisions?.[decision.approvalId] !== undefined) await this.answerUserDecision(save, outbox, run, decision);
+          if (run.userDecisions?.[decision.approvalId] !== undefined) await this.answerUserDecision(state, save, outbox, run, decision);
           else await this.applyDecision(state, save, core, outbox, run, decision);
         } else if (message.type === "execution.receipt") {
           const receipt = AgentBindingReceiptSchema.parse(message.payload);
@@ -441,13 +442,13 @@ export class AgenticWorkflowRuntime {
   private userDecisionReceipt(approvalId: string) {
     return { approvalId, status: "pending", instruction: "End your turn; Runtime resumes you with the answer." };
   }
-  private async answerUserDecision(save: () => Promise<void>, outbox: HerdrOutbox, run: RunRecord, decision: ApprovalDecision): Promise<void> {
+  private async answerUserDecision(state: JournalState, save: () => Promise<void>, outbox: HerdrOutbox, run: RunRecord, decision: ApprovalDecision): Promise<void> {
     const entry = run.userDecisions?.[decision.approvalId];
     if (!entry || entry.status !== "pending") throw new Error("User decision is not pending");
     if (!await this.ports.authorizeHuman(decision)) throw new Error("Human approval is not authenticated");
     const now = this.now();
     if (entry.request.expiresAt !== undefined && Date.parse(now) >= Date.parse(entry.request.expiresAt)) {
-      this.expireUserDecision(outbox, run, entry); await save(); return;
+      this.expireUserDecision(state, outbox, run, entry); await save(); return;
     }
     // Throws on any approvalId, revision, generation, target, option or timing mismatch; nothing is mutated before this.
     const answer = validateUserDecisionAnswer(entry.request, decision, now);
@@ -458,16 +459,24 @@ export class AgenticWorkflowRuntime {
       ...(answer.reason !== undefined ? { reason: answer.reason } : {}) });
     await save();
   }
-  private expireUserDecision(outbox: HerdrOutbox, run: RunRecord, entry: UserDecisionRecord): void {
+  private expireUserDecision(state: JournalState, outbox: HerdrOutbox, run: RunRecord, entry: UserDecisionRecord): void {
     entry.status = "expired";
+    // Conversation must drop the prompt, otherwise the user keeps answering a question Runtime no longer accepts.
+    this.emit(state, outbox, run, "conversation.progress", { kind: USER_DECISION_EXPIRED_KIND, approvalId: entry.request.approvalId,
+      requestedByRole: entry.role, taskId: entry.taskId, headline: `User decision expired [${entry.request.approvalId}]` },
+    `user-decision-expired:${entry.request.approvalId}`, "conversation");
     this.resumeUserDecisionAsker(outbox, run, entry, { kind: "user_decision_answer", approvalId: entry.request.approvalId, outcome: "expired" });
   }
   private expireUserDecisions(state: JournalState, outbox: HerdrOutbox): boolean {
     const now = Date.parse(this.now());
     let changed = false;
     for (const run of state.runs) for (const entry of Object.values(run.userDecisions ?? {})) {
-      if (entry.status === "pending" && entry.request.expiresAt !== undefined && now >= Date.parse(entry.request.expiresAt)) {
-        this.expireUserDecision(outbox, run, entry); changed = true;
+      if (entry.status !== "pending") continue;
+      if (run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) {
+        // A terminal run never resumes its askers or notifies Conversation; its decisions close silently.
+        entry.status = run.cancelled ? "cancelled" : "expired"; changed = true;
+      } else if (entry.request.expiresAt !== undefined && now >= Date.parse(entry.request.expiresAt)) {
+        this.expireUserDecision(state, outbox, run, entry); changed = true;
       }
     }
     return changed;

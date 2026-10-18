@@ -21,7 +21,7 @@ import {
 } from "./delegation-builder.js";
 import { HerdrConversationBridge } from "./herdr-bridge.js";
 import { classifyUserIntent } from "./intent-classifier.js";
-import { isUserDecisionRequest } from "./user-decision.js";
+import { isUserDecisionRequest, userDecisionExpiredApprovalId } from "./user-decision.js";
 import {
   formatCoordinatorMessageForUser,
   formatStatusSummaryForUser
@@ -856,9 +856,14 @@ export class ConversationGateway {
           if (approvalInput.approvalId && this.snapshot!.pendingApprovals[approvalInput.approvalId]) {
             targetApproval = this.snapshot!.pendingApprovals[approvalInput.approvalId];
           } else {
+            // Without an explicit id, a design/task approval is preferred over a specialist user decision.
             const pendingList = Object.values(this.snapshot!.pendingApprovals);
-            if (pendingList.length > 0) {
-              targetApproval = pendingList[0];
+            const orderedPending = [
+              ...pendingList.filter((request) => !isUserDecisionRequest(request)),
+              ...pendingList.filter((request) => isUserDecisionRequest(request))
+            ];
+            if (orderedPending.length > 0) {
+              targetApproval = orderedPending[0];
             }
           }
 
@@ -1381,7 +1386,7 @@ export class ConversationGateway {
         updatedWorkflows[correlationId] = workflow;
       }
       const updatedPendingApprovals = { ...this.snapshot!.pendingApprovals };
-      const updatedActiveApprovalIds = [...this.snapshot!.session.activeApprovalIds];
+      let updatedActiveApprovalIds = [...this.snapshot!.session.activeApprovalIds];
       let nextSessionStatus = this.snapshot!.session.status;
       let turnCount = this.snapshot!.session.turnCount;
       const messages = [...this.snapshot!.messages];
@@ -1471,6 +1476,29 @@ export class ConversationGateway {
             sdlcStatus: "escalated",
             updatedAt: now
           };
+        }
+      }
+
+      // Runtime closed a specialist question: drop the prompt so it no longer counts as pending.
+      // Only user-decision entries are removed; a design/task approval is never touched here.
+      const expiredApprovalId = userDecisionExpiredApprovalId(message.type, message.payload);
+      if (expiredApprovalId !== undefined) {
+        const expired = updatedPendingApprovals[expiredApprovalId];
+        if (expired !== undefined && isUserDecisionRequest(expired)) {
+          delete updatedPendingApprovals[expiredApprovalId];
+          updatedActiveApprovalIds = updatedActiveApprovalIds.filter((id) => id !== expiredApprovalId);
+          for (const [id, workflowContext] of Object.entries(updatedWorkflows)) {
+            if (workflowContext.activeApprovalIds.includes(expiredApprovalId)) {
+              updatedWorkflows[id] = {
+                ...workflowContext,
+                activeApprovalIds: workflowContext.activeApprovalIds.filter((value) => value !== expiredApprovalId),
+                updatedAt: now
+              };
+            }
+          }
+          if (nextSessionStatus === "awaiting_user_approval" && updatedActiveApprovalIds.length === 0) {
+            nextSessionStatus = "reporting_progress";
+          }
         }
       }
 

@@ -10,6 +10,8 @@ import { wrapUntrustedRepositoryContent } from "./safety.js";
  */
 
 export const USER_DECISION_KIND = "user_decision";
+/** `conversation.progress` payload kind sent by Runtime when a user decision expires (matches Runtime's constant). */
+export const USER_DECISION_EXPIRED_KIND = "user_decision_expired";
 
 const REJECT_WORDS = ["reject", "decline", "từ chối", "không đồng ý", "không duyệt", "bác bỏ"] as const;
 
@@ -23,6 +25,31 @@ export function isUserDecisionRequest(request: { readonly metadata?: unknown } |
   const metadata = (request as { metadata?: unknown }).metadata;
   return typeof metadata === "object" && metadata !== null && !Array.isArray(metadata) &&
     (metadata as Record<string, unknown>).kind === USER_DECISION_KIND;
+}
+
+/** True when the request has an expiry that has passed at `nowMs`. Requests without expiry never expire here. */
+export function isExpiredUserDecision(request: { readonly expiresAt?: string | undefined }, nowMs: number): boolean {
+  return request.expiresAt !== undefined && nowMs >= Date.parse(request.expiresAt);
+}
+
+/**
+ * Returns the approvalId when a Runtime `conversation.progress` payload announces an expired user decision.
+ * Ignores every other payload, so it can never remove a design/task approval.
+ */
+export function userDecisionExpiredApprovalId(messageType: string, payload: unknown): string | undefined {
+  if (messageType !== "conversation.progress") return undefined;
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return undefined;
+  const record = payload as Record<string, unknown>;
+  if (record.kind !== USER_DECISION_EXPIRED_KIND) return undefined;
+  return typeof record.approvalId === "string" && record.approvalId.trim().length > 0 ? record.approvalId : undefined;
+}
+
+/** User-facing notice that a specialist question is closed and will not be accepted any more. */
+export function renderUserDecisionExpiredNotice(approvalId: string): string {
+  return [
+    `⌛ **CÂU HỎI QUYẾT ĐỊNH ĐÃ HẾT HẠN [${approvalId}]**`,
+    "Câu hỏi này không còn nhận trả lời. Tác tử đã được thông báo và sẽ không tiếp tục theo lựa chọn nào của câu hỏi này."
+  ].join("\n");
 }
 
 function stringOf(value: unknown): string | undefined {
