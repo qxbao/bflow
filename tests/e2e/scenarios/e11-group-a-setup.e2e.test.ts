@@ -7,6 +7,8 @@ import { runCli } from "@bflow/cli";
 import {
   NodeCommandRunner,
   SetupStateStore,
+  ToolInstallerRegistry,
+  defaultMachineConfig,
   defaultHostEnvironment,
   detectPlatform,
   isolatedPlatformProfile,
@@ -132,30 +134,59 @@ describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & O
     });
   });
 
-  describe("[REAL HOST] Isolated bflow setup (1st run, 2nd run idempotency, --check, --repair) & QA-P34-01 / QA-P34-02 Fix Verification", () => {
+  describe("[ISOLATED HOST] Setup and real skills storage with a fixture Herdr binary — QA-P34-01 / QA-P34-02", () => {
     it("verifies QA-P34-01 (automatic 0700 skills-store creation) and QA-P34-02 (1st apply installs all 32 skills) plus idempotency, --check, and --repair", async () => {
       const root = makeTempDir("bflow-e11-setup-");
       const repoDir = join(root, "repo");
       const isolatedState = join(root, "isolated");
+      const hostHome = join(root, "home");
+      const fixtureBin = join(root, "fixture-bin");
       mkdirSync(repoDir, { recursive: true });
+      mkdirSync(hostHome);
+      mkdirSync(fixtureBin);
+      // Setup needs a discoverable Herdr binary; live protocol/readiness has its own opt-in tests.
+      writeFileSync(join(fixtureBin, "herdr"), [
+        "#!/bin/sh",
+        'if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then',
+        "  printf '%s\\n' 'herdr fixture-e11'",
+        "else",
+        "  echo 'E11 fixture supports --version only' >&2",
+        "  exit 64",
+        "fi", ""
+      ].join("\n"), { mode: 0o755 });
       execFileSync("git", ["init", "-q", repoDir]);
 
       const skillsStoreDir = join(isolatedState, "data", "skills-store");
-      const ctx = { cwd: repoDir, setup: { isolatedRoot: isolatedState } };
+      const host = defaultHostEnvironment();
+      const platform = detectPlatform({ ...host, homeDir: hostHome,
+        env: { ...host.env, SHELL: "/bin/bash" } });
+      platform.pathEntries = [fixtureBin, ...platform.pathEntries];
+      const ctx = { cwd: repoDir, setup: {
+        isolatedRoot: isolatedState, platform,
+        // Exercise the real setup engine, launcher and skills without provisioning providers,
+        // downloading third-party tools or configuring a Gateway in the CI account.
+        machineConfig: defaultMachineConfig(), toolInstaller: new ToolInstallerRegistry()
+      } };
       isolatedRoots.push(isolatedState);
 
       // 1st run on clean isolated state: creates 0700 skills-store (QA-P34-01 fixed) and installs all 32 skills on 1st apply (QA-P34-02 fixed)
       const firstRun = await runCli(["setup", "--yes", "--json"], ctx);
       expect(firstRun.ok, JSON.stringify(firstRun.data ?? firstRun)).toBe(true);
-      expect(firstRun.exitCode).toBe(0);
+      expect(firstRun.exitCode, firstRun.stdout || firstRun.stderr).toBe(0);
       expect(statSync(skillsStoreDir).mode & 0o777).toBe(0o700);
       const firstData = firstRun.data as unknown as {
         mode: string;
+        plan: { steps: Array<{ action: string }> };
+        inventory: unknown[];
+        receipts: Array<{ ownedPaths: string[] }>;
         receipt?: { status: string };
         skills: { catalogLoaded: boolean; skillCount: number; syncedManifests: number };
         diagnostics: string[];
       };
       expect(firstData.mode).toBe("apply");
+      expect(firstData.inventory).toEqual([]);
+      expect(firstData.plan.steps.some(step => step.action === "install_tool")).toBe(false);
+      expect(firstData.receipts.flatMap(receipt => receipt.ownedPaths).every(path => path.startsWith(`${root}/`))).toBe(true);
       expect(firstData.skills.catalogLoaded).toBe(true);
       expect(firstData.skills.skillCount).toBe(32);
       expect(firstData.diagnostics.some((d) => d.includes("role-skills requires --repair"))).toBe(false);
@@ -164,7 +195,7 @@ describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & O
       // 2nd run (idempotency): bflow setup --yes --json after skills are synchronized
       const secondRun = await runCli(["setup", "--yes", "--json"], ctx);
       expect(secondRun.ok).toBe(true);
-      expect(secondRun.exitCode).toBe(0);
+      expect(secondRun.exitCode, secondRun.stdout || secondRun.stderr).toBe(0);
       const secondData = secondRun.data as unknown as {
         mode: string;
         receipt?: { status: string };
@@ -180,7 +211,7 @@ describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & O
       // Check run: bflow setup --check --json
       const checkRun = await runCli(["setup", "--check", "--json"], ctx);
       expect(checkRun.ok).toBe(true);
-      expect(checkRun.exitCode).toBe(0);
+      expect(checkRun.exitCode, checkRun.stdout || checkRun.stderr).toBe(0);
       const checkData = checkRun.data as unknown as {
         mode: string;
         skills: { catalogLoaded: boolean; skillCount: number };
@@ -199,11 +230,12 @@ describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & O
 
       const checkDrifted = await runCli(["setup", "--check", "--json"], ctx);
       expect(checkDrifted.ok).toBe(true);
+      expect(checkDrifted.exitCode).toBe(1);
       expect(readdirSync(bundlesDir).length).toBe(31);
 
       const repairDrifted = await runCli(["setup", "--repair", "--yes", "--json"], ctx);
       expect(repairDrifted.ok).toBe(true);
-      expect(repairDrifted.exitCode).toBe(0);
+      expect(repairDrifted.exitCode, repairDrifted.stdout || repairDrifted.stderr).toBe(0);
       expect(readdirSync(bundlesDir).length).toBe(32);
       // The first real apply downloads pinned tools and typically takes ~2 minutes on a normal host,
       // so the budget covers three setup runs plus repair on a cold machine.

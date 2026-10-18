@@ -6,7 +6,7 @@ import { resolvePresentation, runCli } from "./commands.js";
 import { isHighLevelInvocation } from "./high-level/index.js";
 import { formatCommandError } from "./formatters.js";
 import { parseCliArgs } from "./parser.js";
-import { stripAnsi, toContractError } from "./presentation.js";
+import { toContractError } from "./presentation.js";
 import { composeCliRuntime } from "./runtime.js";
 import {
   CLI_EXIT_CODES,
@@ -68,12 +68,13 @@ export async function main(
       bufferedStdout = msg;
     },
     stderr: (msg) => {
-      if (stripAnsi(msg).startsWith("[..]")) {
-        realIo.stderr(msg);
-      } else {
-        bufferedStderr = msg;
-      }
-    }
+      bufferedStderr = msg;
+    },
+    progress: msg => {
+      if (realIo.progress) realIo.progress(msg);
+      else realIo.stderr(msg);
+    },
+    stderrRaw: realIo.stderrRaw?.bind(realIo) ?? (isDefaultIo ? chunk => { process.stderr.write(chunk); } : undefined)
   };
 
   const runtimeContext: CliContext = {

@@ -388,7 +388,42 @@ export function resolveActionableRemediation(
 /**
  * Formats a progress step for interactive stderr.
  */
-export function formatProgressStep(step: string, useColor = false): string {
-  const marker = useColor ? cyan(bold("[..]")) : "[..]";
-  return `${marker} ${step}`;
+export function formatProgressStep(step: string, useColor = false, number = 1): string {
+  const marker = `[${number}]`;
+  return `${useColor ? cyan(bold(marker)) : marker} ${humanLine(step)}`;
+}
+
+/** Single-line terminal text, including redaction before truncation. */
+export function humanLine(value: unknown, maxLength = 180): string {
+  return humanText(value, maxLength).replace(/\s+/g, " ").trim();
+}
+
+export function readableLabel(value: unknown): string {
+  return humanLine(value).replace(/[_-]+/g, " ");
+}
+
+export const SETUP_COMPONENT_LABELS: Readonly<Record<string, string>> = {
+  path: "Make bflow and installed tools available in the terminal",
+  "role-skills": "Install agent skills",
+  "mcp-config": "Configure MCP tools",
+  services: "Start and verify the MCP Gateway",
+  "environment-manifest": "Save verified machine configuration",
+  doctor: "Check the completed setup"
+};
+
+/** Keep the complete approval scope/targets while presenting numbered steps. */
+export function formatSetupPreview(text: string, useColor = false): string {
+  let number = 0;
+  const clean = redactSensitive(stripAnsi(text));
+  return clean.split("\n").map(line => {
+    const match = /^- (\S+:\S+) (\[[^\]]*\]) (.*)$/.exec(line);
+    if (match) {
+      const [, id, flags, summary] = match;
+      const component = id!.slice(id!.indexOf(":") + 1);
+      const label = SETUP_COMPONENT_LABELS[component] ?? humanLine(summary);
+      return `${formatProgressStep(label, useColor, ++number)} ${humanLine(flags)}\n${dim(`    ${humanLine(id)}: ${humanLine(summary, 2000)}`, useColor)}`;
+    }
+    const bounded = humanText(line, 2000);
+    return /^\s+(target|command):/.test(line) ? dim(`    ${bounded}`, useColor) : bounded;
+  }).join("\n");
 }

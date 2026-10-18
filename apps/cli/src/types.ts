@@ -411,6 +411,10 @@ export type CliJsonEnvelope<T = CliCommandData> = CliJsonSuccessEnvelope<T> | Cl
 export interface CliIo {
   stdout(message: string): void;
   stderr(message: string): void;
+  /** Transient human progress, separate from the final command envelope. */
+  progress?: ((message: string) => void) | undefined;
+  /** Raw interactive stderr chunks; omit for line-oriented collectors. */
+  stderrRaw?: ((chunk: string) => void) | undefined;
 }
 
 export interface PresentationOptions {

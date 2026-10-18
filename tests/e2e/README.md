@@ -69,6 +69,14 @@ Expected output:
 
 ### Optional live platform acceptance
 
+E11's setup/skills lifecycle uses the real setup engine, launcher and content-addressed
+skills store in a temporary account home. It supplies an explicit empty machine
+configuration/installer registry and a version-only Herdr fixture, while Node, Git and
+pnpm run from the host. This checks first apply, `0700` permissions, all 32 skill
+bundles, idempotency, read-only checks and repair without downloading tools, changing
+provider accounts or starting a Gateway. Live Herdr compatibility and provider
+readiness remain separate opt-in checks.
+
 The default suite does not require a developer's provider credentials, Herdr binary, or private RTK/GitNexus installations. To run live provider authentication and the live provider/Herdr checks, opt in explicitly:
 
 ```bash
