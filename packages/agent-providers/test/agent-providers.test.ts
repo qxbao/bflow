@@ -16,6 +16,7 @@ import {
 } from "@bflow/contracts";
 import {
   AgyProviderAdapter,
+  approveCodexHooks,
   ClaudeProviderAdapter,
   CodexProviderAdapter,
   createDefaultProviderRegistry,
@@ -25,6 +26,7 @@ import {
   computeFileSha256,
   createSignedLaunchAttestation,
   formatProviderDiagnosticReport,
+  inspectCodexHooks,
   resolveAndVerifyExecutable,
   scrubDiagnosticText,
   validateProviderEnvironment,
@@ -1756,11 +1758,13 @@ describe("@bflow/agent-providers", () => {
       readonly globalServers?: readonly string[];
       readonly listExit?: number;
       readonly invocations?: Array<readonly string[]>;
+      readonly invocationEnvs?: Array<Readonly<Record<string, string | undefined>>>;
     }) {
       return createFakeProviderRunner({
         scenario: "healthy",
         customHandler: (invocation) => {
           options.invocations?.push([...invocation.args]);
+          options.invocationEnvs?.push({ ...(invocation.env ?? {}) });
           if (invocation.args.join(" ") === "mcp list --json") {
             if ((options.listExit ?? 0) !== 0) {
               return { exitCode: options.listExit ?? 1, stdout: "", stderr: "list failed", started: true };
@@ -1784,14 +1788,21 @@ describe("@bflow/agent-providers", () => {
     function codexAdapter(
       runner: ReturnType<typeof createFakeProviderRunner>,
       codexHomeDirectory: string,
-      extra?: { hostMcpServers?: Record<string, { command: string; args: string[] }> }
+      extra?: {
+        hostMcpServers?: Record<string, { command: string; args: string[] }>;
+        trustedIssuerKeys?: Readonly<Record<string, string>>;
+        liveObservation?: import("../src/types.js").LiveReadinessObservation;
+      }
     ): CodexProviderAdapter {
       return new CodexProviderAdapter({
         runner,
         executablePath: fakeBinaryPath,
         allowTestFilesystemOwnership: true,
         codexHomeDirectory,
-        ...(extra?.hostMcpServers ? { hostMcpServers: extra.hostMcpServers } : {})
+        codexHookApprovalPath: join(testStateDir, "codex-hook-approvals.json"),
+        ...(extra?.hostMcpServers ? { hostMcpServers: extra.hostMcpServers } : {}),
+        ...(extra?.trustedIssuerKeys ? { trustedIssuerKeys: extra.trustedIssuerKeys } : {}),
+        ...(extra?.liveObservation ? { liveObservation: extra.liveObservation } : {})
       });
     }
 
@@ -1955,17 +1966,20 @@ describe("@bflow/agent-providers", () => {
     });
 
     it("fails closed with codex_global_hooks_not_isolated when hooks.json defines global hooks", async () => {
+      const script = join(testBaseDir, "personal-hook.sh");
+      await writeFile(script, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
       const home = await freshCodexHome({
         "hooks.json": JSON.stringify({
-          hooks: { Stop: [{ hooks: [{ type: "command", command: "/home/user/personal-hook.sh" }] }] }
+          hooks: { Stop: [{ hooks: [{ type: "command", command: script }] }] }
         })
       });
-      const adapter = codexAdapter(codexRunner({ globalServers: [] }), home);
+      const invocations: Array<readonly string[]> = [];
+      const adapter = codexAdapter(codexRunner({ globalServers: [], invocations }), home);
       const env = createTestEnvironment("codex", "workspace_auto");
 
       const launch = await adapter.prepareLaunch(env);
       expect(launch.ok).toBe(false);
-      if (!launch.ok) expect(launch.error.message).toContain("codex_global_hooks_not_isolated");
+      if (!launch.ok) expect(launch.error.message).toContain("codex_global_hooks_approval_required");
 
       const health = await adapter.checkHealth({
         schemaVersion: 3,
@@ -1976,21 +1990,21 @@ describe("@bflow/agent-providers", () => {
       expect(health.ok).toBe(true);
       if (health.ok) {
         expect(health.value.status).toBe("blocked");
-        const permissions = health.value.checks.find((check) => check.check === "permissions");
-        expect(permissions?.status).toBe("failed");
-        expect(permissions?.code).toBe("codex_global_hooks_not_isolated");
-        expect(permissions?.remediation).toContain("profile");
+        const auth = health.value.checks.find((check) => check.check === "authentication");
+        expect(auth?.code).toBe("codex_global_hooks_approval_required");
       }
+      expect(invocations.some(args => args.includes("ping"))).toBe(false);
+      expect(invocations.some(args => args[0] === "login")).toBe(false);
     });
 
     it("fails closed when config.toml defines hooks inline", async () => {
       const home = await freshCodexHome({
-        "config.toml": "[hooks]\nstate = {}\n"
+        "config.toml": '[hooks]\nInterrupt = [{ hooks = [{ type = "command", command = "/bin/true" }] }]\n'
       });
       const adapter = codexAdapter(codexRunner({ globalServers: [] }), home);
       const launch = await adapter.prepareLaunch(createTestEnvironment("codex", "workspace_auto"));
       expect(launch.ok).toBe(false);
-      if (!launch.ok) expect(launch.error.message).toContain("codex_global_hooks_not_isolated");
+      if (!launch.ok) expect(launch.error.message).toContain("codex_global_hooks_approval_required");
     });
 
     it("treats an empty hooks.json as no global hooks", async () => {
@@ -1998,6 +2012,50 @@ describe("@bflow/agent-providers", () => {
       const adapter = codexAdapter(codexRunner({ globalServers: [] }), home, { hostMcpServers: bflowServer });
       const launch = await adapter.prepareLaunch(createTestEnvironment("codex", "workspace_auto"));
       expect(launch.ok).toBe(true);
+    });
+
+    it("runs probes only after exact approval and blocks activation when an approved snapshot drifts", async () => {
+      const script = join(testBaseDir, "approved-hook.sh");
+      await writeFile(script, "#!/bin/sh\nprintf 'first\\n'\n", { mode: 0o700 });
+      const home = await freshCodexHome({
+        "hooks.json": JSON.stringify({ hooks: { SessionStart: [{ matcher: "codex", hooks: [{ type: "command", command: script }] }] } })
+      });
+      const hookEnvironment = { HOME: testBaseDir, PATH: process.env["PATH"] ?? "/usr/bin:/bin", ORCA_AGENT_HOOK_ROOT: "", ORCA_AGENT_HOOK_ENDPOINT: "" };
+      const options = { codexHomeDirectory: home, approvalStorePath: join(testStateDir, "codex-hook-approvals.json"), environment: hookEnvironment };
+      const before = await inspectCodexHooks(options);
+      await approveCodexHooks(before, { ...options, expectedDigest: before.digest, approvedBy: "test-operator" });
+      const invocations: Array<readonly string[]> = [];
+      const invocationEnvs: Array<Readonly<Record<string, string | undefined>>> = [];
+      const runner = codexRunner({ globalServers: [], invocations, invocationEnvs });
+      const observation = { paneId: "pane-hook-test", transportState: "idle" as const, interactiveReady: true };
+      const adapter = new CodexProviderAdapter({ runner, executablePath: fakeBinaryPath, allowTestFilesystemOwnership: true,
+        codexHomeDirectory: home, codexHookApprovalPath: options.approvalStorePath, trustedIssuerKeys: { [testIssuerId]: testPublicKeyPem },
+        codexHookEnvironment: hookEnvironment,
+        liveObservation: observation });
+      const env = createTestEnvironment("codex", "workspace_auto");
+      const health = await adapter.checkHealth({ schemaVersion: 3, environment: env, stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(health.ok && health.value.status).toBe("ready");
+      expect(invocations.some(args => args.includes("ping"))).toBe(true);
+      expect(invocationEnvs.find((env, index) => invocations[index]?.includes("ping"))).toMatchObject({ CODEX_HOME: home });
+      expect(invocationEnvs.find((env, index) => invocations[index]?.includes("ping"))).toMatchObject({ HOME: testBaseDir, ORCA_AGENT_HOOK_ROOT: "", ORCA_AGENT_HOOK_ENDPOINT: "" });
+      const prepared = await adapter.prepareLaunch(env);
+      expect(prepared.ok).toBe(true);
+      if (!prepared.ok) return;
+      const attestation = createSignedLaunchAttestation({ receiptId: "hook-trust-receipt", issuerId: testIssuerId,
+        launchId: prepared.value.launchId, launchFingerprint: prepared.value.launchFingerprint, sessionId: env.scope.sessionId,
+        paneId: observation.paneId, nativeSession: { source: "codex", kind: "id", value: "codex-native-session" },
+        observedAt: new Date().toISOString(), privateKeyPem: testPrivateKeyPem });
+
+      await writeFile(script, "#!/bin/sh\nprintf 'second\\n'\n", { mode: 0o700 });
+      const changed = await inspectCodexHooks(options);
+      await approveCodexHooks(changed, { ...options, expectedDigest: changed.digest, approvedBy: "test-operator" });
+      const activated = await adapter.checkHealth({ schemaVersion: 3, environment: env, stage: "activated",
+        launchProfile: prepared.value, launchAttestation: attestation, requestedAt: new Date().toISOString() });
+      expect(activated.ok).toBe(true);
+      if (activated.ok) {
+        expect(activated.value.status).toBe("blocked");
+        expect(activated.value.checks.find(check => check.code === "codex_global_hooks_snapshot_drift")).toBeDefined();
+      }
     });
 
     it("writes nothing into the user Codex home (only the adapter state directory is written)", async () => {
