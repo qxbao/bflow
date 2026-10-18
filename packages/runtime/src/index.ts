@@ -104,7 +104,7 @@ export * from "./session-recovery/index.js";
 export { parseBehavioralCommands } from "./agentic/behavioral-runner.js";
 export type { BehavioralCommand } from "./agentic/behavioral-runner.js";
 
-export { ensureAgenticHost } from "./agentic/host-controller.js";
+export { ensureAgenticHost, openPersistedAgenticHost } from "./agentic/host-controller.js";
 export type { AgenticHostController, AgenticHostOptions, RoleLaunchDescriptor } from "./agentic/host-controller.js";
 
 // P30: platform readiness composition (no concrete provider adapter classes are exported).

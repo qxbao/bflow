@@ -26,7 +26,7 @@ export interface AgenticHostOptions {
 }
 export interface RoleLaunchDescriptor { systemPrompt: string; mcpConfigFile: string; hooksSettingsFile: string }
 export interface AgenticHostController {
-  prepare(): Promise<HostPrepareResponse>;
+  prepare(options?: OperationOptions): Promise<HostPrepareResponse>;
   /** Readiness report and launch-index status. Never includes launch env, tokens or argv. */
   platformStatus(): Promise<HostPlatformStatus>;
   activate(manifest: SessionManifest, options?: OperationOptions): Promise<OperationResult<void>>;
@@ -54,6 +54,23 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
         !Number.isInteger(concurrency.maxConcurrency) || Number(concurrency.maxConcurrency) < 1 || Number(concurrency.maxConcurrency) > 32) throw new Error("Invalid persisted host policy");
   }
   return value as unknown as HostConfiguration;
+}
+
+/** Reopen the owned host for recovery using its persisted authority, without requesting a platform change. */
+export async function openPersistedAgenticHost(options: Pick<AgenticHostOptions, "repositoryPath" | "sessionId">): Promise<AgenticHostController> {
+  const repositoryPath = await realpath(options.repositoryPath);
+  if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Unsafe host session ID");
+  const directory = resolve(repositoryPath, ".bflow/state/host", options.sessionId);
+  const persisted = await readHostConfiguration(join(directory, "host.json"));
+  if (persisted.repositoryPath !== repositoryPath || persisted.sessionId !== options.sessionId || persisted.directory !== directory)
+    throw new Error("Foreign host configuration");
+  return ensureAgenticHost({ repositoryPath, sessionId: options.sessionId,
+    ...(persisted.herdrBinary !== undefined ? { herdrBinary: persisted.herdrBinary } : {}),
+    ...(persisted.manifestDirectory !== undefined ? { manifestDirectory: persisted.manifestDirectory } : {}),
+    ...(persisted.maxDeveloperCapacity !== undefined ? { maxDeveloperCapacity: persisted.maxDeveloperCapacity } : {}),
+    ...(persisted.behavioralCommands !== undefined ? { behavioralCommands: persisted.behavioralCommands } : {}),
+    ...(persisted.policy !== undefined ? { policy: persisted.policy } : {}),
+    ...(persisted.platform !== undefined ? { platform: persisted.platform } : {}) });
 }
 function failure<T>(error: unknown): OperationResult<T> {
   if (String(error).includes("[bflow:native-startup-pending]")) return { ok: false, error: { code: "conflict", retryable: true,
@@ -106,7 +123,11 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
   // Platform changes are only admissible while no host process owns the endpoint.
   const requestedPlatform = options.platform === undefined ? undefined : AgenticHostPlatformOptionsSchema.parse(options.platform);
   const platformChanged = digest(configuration.platform ?? null) !== digest(requestedPlatform ?? null);
-  const request = (method: string, params: unknown = {}) => callHost(configuration.socketPath, configuration.token, method, params);
+  const request = (method: string, params: unknown = {}, op?: OperationOptions) => {
+    const timeoutMs = Math.min(op?.timeoutMs ?? (method === "prepare" ? 600_000 : 30_000),
+      op?.deadline === undefined ? Infinity : Math.max(1, Date.parse(op.deadline) - Date.now()));
+    return callHost(configuration.socketPath, configuration.token, method, params, timeoutMs, op?.signal);
+  };
   let alive = true;
   try { await request("ping"); }
   catch (error) {
@@ -146,10 +167,14 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
   }
   const result = async <T>(method: string, params: unknown, parse: (value: unknown) => T, op?: OperationOptions): Promise<OperationResult<T>> => {
     if (op?.signal?.aborted) return { ok: false, error: { code: "cancelled", retryable: false, message: "Operation aborted" } };
-    try { return { ok: true, value: parse(await request(method, params)) }; } catch (error) { return failure(error); }
+    try { return { ok: true, value: parse(await request(method, params, op)) }; } catch (error) { return failure(error); }
   };
   return {
-    async prepare() { return HostPrepareResponseSchema.parse(await request("prepare")); },
+    async prepare(op) {
+      const deadline = new Date(Math.min(Date.now() + (op?.timeoutMs ?? 600_000),
+        op?.deadline === undefined ? Infinity : Date.parse(op.deadline))).toISOString();
+      return HostPrepareResponseSchema.parse(await request("prepare", { deadline }, op));
+    },
     async platformStatus() { return HostPlatformStatusSchema.parse(await request("platform_status")); },
     activate: (manifest, op) => result("activate", SessionManifestSchema.parse(manifest), () => undefined, op),
     runtime: {

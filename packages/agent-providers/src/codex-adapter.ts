@@ -17,7 +17,7 @@ import type {
   DetectedProviderCapabilities,
   ProviderAdapterOptions
 } from "./types.js";
-import { inspectCodexHooks } from "./codex-hook-trust.js";
+import { CODEX_MEMORY_HOOK_ENVIRONMENT_KEYS, inspectCodexHooks } from "./codex-hook-trust.js";
 
 function tomlValue(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(tomlValue).join(",")}]`;
@@ -95,6 +95,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
       BFLOW_PROVIDER: this.descriptor.provider,
       HOME: selected["HOME"] ?? "",
       PATH: selected["PATH"] ?? "",
+      ...Object.fromEntries(CODEX_MEMORY_HOOK_ENVIRONMENT_KEYS.map(key => [key, selected[key] ?? ""])),
       ORCA_AGENT_HOOK_ROOT: selected["ORCA_AGENT_HOOK_ROOT"] ?? "",
       ORCA_AGENT_HOOK_ENDPOINT: selected["ORCA_AGENT_HOOK_ENDPOINT"] ?? "",
       ORCA_PANE_KEY: selected["ORCA_PANE_KEY"] ?? "",
@@ -386,6 +387,8 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
       }
       argv.push("-c", `model_reasoning_effort=${JSON.stringify(this.options.effort)}`);
     }
+
+    argv.push("ping");
 
     return { argv };
   }

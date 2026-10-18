@@ -343,13 +343,16 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     }
 
     // A. Check: binary
-    const executable = this.getExecutablePath();
+    let executable = this.getExecutablePath();
     let binaryPassed = false;
     let actualBinaryDigest = "0".repeat(64);
 
     try {
       const resolvedExec = await resolveAndVerifyExecutable(executable, this.executableVerificationOptions());
       actualBinaryDigest = resolvedExec.digest;
+      // The execution probe changes cwd; a relative path or PATH lookup there
+      // can otherwise run a different binary from the one just verified.
+      executable = resolvedExec.canonicalPath;
       if (this.options.pinnedExecutableDigest !== undefined) {
         if (actualBinaryDigest !== this.options.pinnedExecutableDigest) {
           checks.push(
@@ -515,7 +518,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
             ...this.getProviderCommandEnvironment(),
             ...(agyProbeHome ? { HOME: agyProbeHome } : {})
           },
-          timeoutMs: 45_000
+          timeoutMs: 75_000
         });
 
         const combinedProbe = `${probeOutcome.stdout}\n${probeOutcome.stderr}`;
@@ -524,10 +527,23 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
           let probeCode = "probe_failed";
           let probeRemediation = "Verify account quotas, network connectivity, and provider permissions.";
 
-          if (lower.includes("permission") || lower.includes("untrusted")) {
+          if (probeOutcome.failure === "timeout" || lower.includes("timed out") || lower.includes("timeout")) {
+            probeCode = "timeout";
+            probeRemediation = "Increase startupTimeoutMs in .bflow/config.yml or verify provider network latency.";
+          } else if (lower.includes("permission") || lower.includes("untrusted")) {
             probeCode = "permission_denied";
             probeRemediation = "Grant workspace trust or adjust permission profile.";
-          } else if (lower.includes("model")) {
+          } else if (
+            lower.includes("model is incompatible") ||
+            lower.includes("incompatible model") ||
+            lower.includes("model not found") ||
+            lower.includes("model_not_found") ||
+            lower.includes("not authorized for your organization") ||
+            lower.includes("does not exist") ||
+            lower.includes("unsupported model") ||
+            lower.includes("invalid model") ||
+            lower.includes("unknown model")
+          ) {
             probeCode = "incompatible_model";
             probeRemediation = "Select a model supported by your provider account tier.";
           } else if (lower.includes("blocked") || lower.includes("approval") || lower.includes("dialog")) {

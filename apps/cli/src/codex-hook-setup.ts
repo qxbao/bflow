@@ -183,9 +183,9 @@ async function askForApproval(review: CodexHookReview, context?: CliContext): Pr
     context.io?.stderr(text);
     return context.setup.confirm(text);
   }
-  process.stderr.write(text + "\n\nApprove these exact Codex hooks? [y/N] ");
+  process.stderr.write(text + "\n\n");
   const terminal = createInterface({ input: process.stdin, output: process.stderr });
-  try { return /^(y|yes)$/i.test((await terminal.question("")).trim()); }
+  try { return /^(y|yes)$/i.test((await terminal.question("Approve these exact Codex hooks? [y/N] ")).trim()); }
   finally { terminal.close(); }
 }
 

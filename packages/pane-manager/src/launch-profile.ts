@@ -3,10 +3,10 @@ import { AGENT_LAUNCH_PROVIDERS } from "./types.js";
 
 const ENV_KEY_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 const SECRET_PATTERNS: readonly RegExp[] = [
-  /sk-[A-Za-z0-9_-]{8,}/,
+  /(?:^|[^A-Za-z0-9_])sk-[A-Za-z0-9_-]{8,}/,
   /Bearer\s+\S+/i,
-  /ghp_[A-Za-z0-9_]{8,}/,
-  /AIza[0-9A-Za-z_-]{8,}/,
+  /(?:^|[^A-Za-z0-9_])ghp_[A-Za-z0-9_]{8,}/,
+  /(?:^|[^A-Za-z0-9_])AIza[0-9A-Za-z_-]{8,}/,
   /secret:\/\//i
 ];
 const CONTROL_PATTERN = /[\0\r\n]/;

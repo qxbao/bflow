@@ -1,6 +1,6 @@
 import { generateKeyPairSync } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -696,6 +696,19 @@ describe("@bflow/agent-providers", () => {
   });
 
   describe("5. All 8 Failure Scenarios", () => {
+    it("uses the verified canonical executable for probes whose cwd differs from the host", async () => {
+      const probes: Array<{ executable: string; cwd?: string }> = [];
+      const runner = createFakeProviderRunner({ customHandler(invocation) {
+        if (invocation.args.includes("exec")) probes.push({ executable: invocation.executable, cwd: invocation.cwd });
+        return undefined;
+      } });
+      const adapter = new CodexProviderAdapter({ runner, executablePath: relative(process.cwd(), fakeBinaryPath),
+        codexHomeDirectory: testCodexHome });
+      const result = await adapter.checkHealth({ schemaVersion: 3, environment: createTestEnvironment("codex"), stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(result.ok).toBe(true);
+      expect(probes).toEqual([expect.objectContaining({ executable: fakeBinaryPath, cwd: testCwd })]);
+    });
+
     it("verifies Codex against the same PATH used by its child commands", async () => {
       const bin = join(testBaseDir, "selected-bin");
       await mkdir(bin, { mode: 0o700 });

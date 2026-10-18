@@ -20,6 +20,8 @@ import { runDoctorDiagnostics } from "./doctor-integration.js";
 /** CLI composition seam. The provider owns P13 bootstrap/reconciliation and Runtime checkpoint persistence. */
 export interface EnvironmentIntegration {
   readonly requiresNativeSession?: boolean;
+  /** Provider checks and launch material only. Must not create panes or dispatch roles. */
+  readonly prepareRoles?: (options: OperationOptions) => Promise<void>;
   readonly manager: SessionLifecycleManager;
   readonly runtime?: Pick<RuntimeService, "findRuns" | "getRun">;
   /** Establish a shutdown barrier: stop intake/dispatch and drain in-flight state writes. */
@@ -564,6 +566,7 @@ export class EnvironmentLifecycle {
       if (!integration) fail("P13 SessionLifecycleManager is not composed. Supply CliContext.environment.openIntegration or BFLOW_ENVIRONMENT_MODULE; no roles were started.");
 
       let cleanupEligible = false;
+      let roleDispatchAttempted = false;
       let startupError: unknown;
       let outcome: SessionManifest | undefined;
       try {
@@ -605,8 +608,13 @@ export class EnvironmentLifecycle {
         if (!running || manifest === null || manifest.status === "down" || manifest.status === "degraded" || manifest.metadata?.["panePresentationVersion"] !== 1 || previous?.phase === "manager_pending") {
           if (previous?.phase === "manager_pending" && manifest === null)
             fail("Earlier role startup has no recoverable pane receipt; refusing duplicate agents. Run bflow down --yes to reconcile and stop the partial startup, then bflow up. Preserve .bflow.");
+          if (integration.prepareRoles) {
+            this.progress("Preparing provider environments and readiness...");
+            await deadline.call(opts => integration.prepareRoles!(opts));
+          }
           await this.writeIntent(repository, "manager_pending");
           cleanupEligible = true;
+          roleDispatchAttempted = true;
           this.progress("Starting agent roles...");
           manifest = this.validateManifest(unwrap(await deadline.call((opts) => integration.manager.up(repository.sessionName, opts))), repository);
         } else {
@@ -708,7 +716,7 @@ export class EnvironmentLifecycle {
       let cleanupOutcome: string | undefined;
       if (startupError !== undefined && cleanupEligible) {
         try {
-          if (startupError instanceof EnvironmentError && ["timeout", "cancelled", "unknown_delivery"].includes(startupError.contractError.code)) {
+          if (roleDispatchAttempted && startupError instanceof EnvironmentError && ["timeout", "cancelled", "unknown_delivery"].includes(startupError.contractError.code)) {
             const cleanupDeadline = new Deadline(config.environment.shutdownTimeoutMs);
             const receipt = unwrap(await cleanupDeadline.call(opts => integration.manager.getManifest(repository.sessionName, opts)));
             if (receipt === null) fail("Startup delivery is uncertain and the manager has no recoverable pane receipt; state was preserved for reconciliation.");

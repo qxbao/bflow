@@ -1,7 +1,7 @@
 import { constants } from "node:fs";
-import { open, realpath } from "node:fs/promises";
+import { access, open, realpath, stat } from "node:fs/promises";
 import { createHash, createPrivateKey, createPublicKey, sign, verify } from "node:crypto";
-import { delimiter, isAbsolute, join, resolve } from "node:path";
+import { delimiter, sep } from "node:path";
 import {
   type AgentEnvironment,
   type AgentLaunchAttestation,
@@ -146,7 +146,8 @@ export function verifyLaunchAttestation(
   }
 
   if (expected?.provider !== undefined) {
-    if (attestation.nativeSession.source !== expected.provider) {
+    const validSources = [expected.provider, `herdr:${expected.provider}`];
+    if (!validSources.includes(attestation.nativeSession.source)) {
       return {
         valid: false,
         code: "provider_mismatch",
@@ -228,14 +229,22 @@ export async function resolveAndVerifyExecutable(
 
   let candidatePath: string | undefined;
   if (executableOrName.includes("/")) {
-    candidatePath = isAbsolute(executableOrName) ? executableOrName : resolve(executableOrName);
+    // Let realpath resolve relative and parent components physically. Lexical
+    // normalization before following symlinks can select a different executable.
+    candidatePath = executableOrName;
   } else {
     const pathEnv = options?.searchPath ?? process.env["PATH"] ?? "/usr/local/bin:/usr/bin:/bin";
     for (const dir of pathEnv.split(delimiter)) {
-      if (!dir) continue;
-      const full = join(dir, executableOrName);
+      // An empty PATH component means the process's current directory.
+      const full = dir ? `${dir}${sep}${executableOrName}` : executableOrName;
       try {
         const real = await realpath(full);
+        // PATH lookup must mirror process spawning: a same-named directory or
+        // data file is not a command and must not shadow a later executable.
+        // Trust checks still apply to the first executable selected below.
+        const info = await stat(real);
+        if (!info.isFile() || (info.mode & 0o111) === 0) continue;
+        await access(real, constants.X_OK);
         candidatePath = real;
         break;
       } catch {
