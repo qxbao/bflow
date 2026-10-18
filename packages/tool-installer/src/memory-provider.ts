@@ -6,6 +6,11 @@ import type { ToolHost } from "./installer.js";
 export type MemoryProviderMode = "auto" | "claude" | "codex" | "host";
 export type SelectedMemoryProvider = Exclude<MemoryProviderMode, "auto">;
 export interface MemoryProviderSelection { provider: SelectedMemoryProvider; settingsDigest: string }
+/** The owner must complete a provider login; setup defers Claude-Mem instead of failing the machine. */
+export const SUBSCRIPTION_LOGIN_REQUIRED = "subscription_login_required";
+export class SubscriptionLoginRequiredError extends Error {
+  readonly ownerAction = SUBSCRIPTION_LOGIN_REQUIRED;
+}
 /** Subscription discovery reads status/configuration only. It never logs in, refreshes tokens,
  * opens a model session, copies credentials, or falls back to an API key/subscription signup. */
 export async function resolveMemoryProvider(options: { provider?: MemoryProviderMode; homeDirectory: string; dataDir: string;
@@ -53,14 +58,14 @@ export async function resolveMemoryProvider(options: { provider?: MemoryProvider
     } catch { return false; }
   };
   if (selected === "claude") {
-    if (!(await claudeReady())) throw Error("Claude-Mem requires an existing Claude subscription login. Run claude auth login, then rerun setup; API-key/gateway authentication is not selected automatically.");
+    if (!(await claudeReady())) throw new SubscriptionLoginRequiredError("Claude-Mem requires an existing Claude subscription login. Run claude auth login, then rerun setup; API-key/gateway authentication is not selected automatically.");
     return { provider: "claude", settingsDigest };
   }
   if (selected === "codex") {
-    if (!(await codexReady())) throw Error("Claude-Mem requires a file-backed ChatGPT login. Run codex login, then rerun setup; API-key/keychain-only authentication is not accepted.");
+    if (!(await codexReady())) throw new SubscriptionLoginRequiredError("Claude-Mem requires a file-backed ChatGPT login. Run codex login, then rerun setup; API-key/keychain-only authentication is not accepted.");
     return { provider: "codex", settingsDigest };
   }
   if (await claudeReady()) return { provider: "claude", settingsDigest };
   if (await codexReady()) return { provider: "codex", settingsDigest };
-  throw Error("Claude-Mem needs an existing subscription login: run claude auth login or codex login, then rerun setup. No host observer, new subscription or API key is created.");
+  throw new SubscriptionLoginRequiredError("Claude-Mem needs an existing subscription login: run claude auth login or codex login, then rerun setup. No host observer, new subscription or API key is created.");
 }

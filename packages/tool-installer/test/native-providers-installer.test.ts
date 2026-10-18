@@ -6,6 +6,7 @@ import { expect, it } from "vitest";
 import { NativeProvidersToolInstaller } from "../src/native-providers-installer.js";
 import { treeDigest } from "../src/files.js";
 import type { ManagedToolPin } from "../src/installer.js";
+import { SUBSCRIPTION_LOGIN_REQUIRED } from "../src/memory-provider.js";
 
 it("plans every selected provider, preserves uncertain native delivery and does not replay it", async () => {
   const root = await mkdtemp(join(tmpdir(), "bflow-native-default-"));
@@ -44,5 +45,25 @@ it("plans every selected provider, preserves uncertain native delivery and does 
     expect(calls).toEqual(["claude", "codex"]);
     const forged = await installer.apply({ ...request, step: { ...planned.value, desiredStateDigest: "b".repeat(64) } });
     expect(forged.ok).toBe(false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it("plans Claude-Mem without a subscription login as an owner action in error details, not a machine failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "bflow-native-memory-login-"));
+  try {
+    const pin: ManagedToolPin = { toolId: "claude-mem", installerId: "native-memory", version: "14.0.1",
+      source: "https://registry.npmjs.org/claude-mem/-/claude-mem-14.0.1.tgz",
+      integrity: createHash("sha256").update("archive").digest("hex"), license: "AGPL-3.0", recipe: { kind: "provider_plugin", provider: "claude" } };
+    const home = join(root, "home"), dataDir = join(root, "memory");
+    const installer = new NativeProvidersToolInstaller({ managedRoot: join(root, "tools"), pin, providers: ["claude"],
+      configuration: { homeDirectory: home, memory: { dataDir, projectRoot: root, project: root } },
+      host: { async download() { throw Error("no download"); }, async run() { return { exitCode: 1, stdout: "", stderr: "not logged in" }; } } });
+    const planned = await installer.plan({ schemaVersion: 3, toolId: pin.toolId, installerId: pin.installerId,
+      version: pin.version, source: pin.source, integrity: pin.integrity, destination: join(root, "tools", "claude-mem"),
+      scope: { kind: "machine", machineId: "machine" }, idempotencyKey: "claude-mem-login" });
+    expect(planned.ok).toBe(false);
+    if (planned.ok) return;
+    expect(planned.error.message).toContain("subscription login");
+    expect(planned.error.details).toEqual({ ownerAction: SUBSCRIPTION_LOGIN_REQUIRED });
   } finally { await rm(root, { recursive: true, force: true }); }
 });

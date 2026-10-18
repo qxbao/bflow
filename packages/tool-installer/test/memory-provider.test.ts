@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { resolveMemoryProvider } from "../src/memory-provider.js";
+import { resolveMemoryProvider, SUBSCRIPTION_LOGIN_REQUIRED, SubscriptionLoginRequiredError } from "../src/memory-provider.js";
 import type { ToolHost } from "../src/installer.js";
 
 it("auto selects an authenticated Claude subscription without inference or changing settings", async () => {
@@ -110,5 +110,21 @@ it.each(["claude", "codex"] as const)("passes the selected %s route and subscrip
       memory: { provider, dataDir: join(root, "memory"), projectRoot: root, project: root, startIfMissing: false } }, host);
     const result = await runtime.activate(pin, artifact, "install");
     expect(installed).toBe(true); expect(result.success).toBe(false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it("reports a missing subscription login as an owner action while keeping invalid settings a hard failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "bflow-memory-owner-"));
+  try {
+    const dataDir = join(root, "memory"); await mkdir(dataDir);
+    const host: ToolHost = { async download() { throw Error("no download"); }, async run() { return { exitCode: 1, stdout: "", stderr: "not logged in" }; } };
+    const options = { homeDirectory: root, dataDir, provider: "auto" as const, host, environment: { CODEX_HOME: join(root, ".codex") } };
+    const missing = await resolveMemoryProvider(options).catch((error: unknown) => error);
+    expect(missing).toBeInstanceOf(SubscriptionLoginRequiredError);
+    expect((missing as SubscriptionLoginRequiredError).ownerAction).toBe(SUBSCRIPTION_LOGIN_REQUIRED);
+    await writeFile(join(dataDir, "settings.json"), "{not json");
+    const invalid = await resolveMemoryProvider(options).catch((error: unknown) => error);
+    expect(invalid).toBeInstanceOf(Error);
+    expect(invalid).not.toBeInstanceOf(SubscriptionLoginRequiredError);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

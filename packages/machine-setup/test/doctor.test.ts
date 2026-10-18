@@ -54,6 +54,18 @@ describe("BuiltinSetupDoctor", () => {
     expect(r.checks.find((c) => c.checkId === "tool-git")!.status).toBe("warning");
   });
 
+  it("a required tool with an owner action is a warning carrying that remediation; a plain missing required tool still fails", async () => {
+    const login = "Claude-Mem needs an existing subscription login: run claude auth login or codex login, then rerun setup.";
+    const deferred = await doctor.run(ctx, { ...base, observations: [{ ...tool("claude-mem", "missing", true), diagnostics: [login], ownerAction: login }] });
+    const check = deferred.checks.find((c) => c.checkId === "tool-claude-mem")!;
+    expect(check.status).toBe("warning");
+    expect(check.remediation).toBe(login);
+    expect(deferred.healthy).toBe(true);
+    const failing = await doctor.run(ctx, { ...base, observations: [tool("claude-mem", "missing", true)] });
+    expect(failing.checks.find((c) => c.checkId === "tool-claude-mem")!.status).toBe("failed");
+    expect(failing.healthy).toBe(false);
+  });
+
   it("invalid components and config fail; absent config is a warning; missing skills is skipped", async () => {
     const r = await doctor.run(ctx, {
       ...base, configStatus: "invalid",
