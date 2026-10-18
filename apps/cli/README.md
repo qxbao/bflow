@@ -49,7 +49,8 @@ exit status. A dry run with planned changes remains a successful preview.
 
 | Command | Behavior |
 | --- | --- |
-| `bflow init [--provider claude\|codex]` | Creates `.bflow/config.yaml` and `.bflow/.gitignore` at the canonical Git root. Default provider is Codex. Repeat init preserves configuration; explicit `--force`/`--yes` replaces it. Does not invoke Herdr. |
+| `bflow init [--provider claude\|codex\|agy]` | Creates `.bflow/config.yml` and `.bflow/.gitignore` at the canonical Git root. Default provider is Codex. Repeat init preserves configuration; explicit `--force`/`--yes` replaces it. Does not invoke Herdr. |
+| `bflow config-migrate` | Validates one legacy `.bflow/config.yaml` or `.bflow/config.json`, writes `.bflow/config.yml`, saves the original bytes as `<legacy-path>.bak`, then removes the active legacy file. Conflicting sources or targets fail without overwriting. |
 | `bflow up [--timeout <ms>]` | Checks executables, provider authentication and Herdr protocol; starts a named server, prepares the persistent P19 host with platform readiness (refusing to start panes when a required role is blocked), then calls P13. Waits for every required role and host activation acknowledgement before recording ready. Persists validated bindings and reuses live roles. |
 | `bflow attach` | Requires an existing manifest and a running matching session. Calls P13 to focus/validate Conversation, then runs `herdr session attach <name>` with inherited terminal I/O. |
 | `bflow down [--yes] [--timeout <ms>]` | Inspects active runs and dirty files. Refuses unsafe shutdown without confirmation. Quiesces Runtime intake/dispatch, recollects runs, requires durable aggregate checkpoints, calls P13 graceful shutdown, then stops only the named session. Deletes no worktree, database, artifact, commit or source file. |
@@ -62,16 +63,24 @@ a diagnostic report even when unhealthy; the JSON envelope's `ok: true` means th
 report was produced, while `data.healthy` and exit code indicate environment health.
 `status` similarly returns exit 1 for invalid configuration. `status <run-id>` or
 status filters retain the existing workflow-run commands. Existing explicit
-`.bflow/config.json` remains readable by legacy Runtime commands; environment
-commands require the new configuration.
+`.bflow/config.yaml` and `.bflow/config.json` remain readable for compatibility when
+`.bflow/config.yml` is absent. Run `bflow config-migrate` to move one legacy config
+to the canonical path. `bflow init` will preserve and reject a legacy file until it
+has been migrated.
 
-Configuration uses the JSON flow-style subset of YAML 1.2. Edit it as JSON;
-indentation-style YAML, custom tags and aliases are not supported. This avoids a
-new dependency/lockfile change in the shared P11 baseline. Defaults cover roles,
-the existing workflow, SDD approval, conditional TDD, bounded verification and
-concurrency. The default composition passes these policies to the persistent P19
-host; P12 does not implement Coordinator or workflow policy logic. A config copied/moved to another checkout
-fails identity validation instead of attaching to the original repository.
+Configuration uses ordinary YAML 1.2 block style with comments. Agent roles are
+at the top; set each role's `cli`, optional `model`, and optional `effort` there.
+Omitting `model` uses the provider default. `effort` accepts `minimal`, `low`,
+`medium`, `high`, `xhigh`, or `max`, subject to the selected provider's support;
+Agy encodes effort in the model name and therefore rejects a separate `effort`.
+Defaults cover the existing workflow, SDD approval, conditional TDD, bounded
+verification and concurrency. The default composition passes these policies to
+the persistent P19 host; P12 does not implement Coordinator or workflow policy
+logic. Duplicate keys, multiple documents, non-string mapping keys, explicit tags,
+merge keys and cyclic or excessive aliases are rejected. A config copied/moved to
+another checkout fails identity validation instead of attaching to the original
+repository. A dynamically spawned Developer role without its own role entry
+inherits the Coordinator's provider, model and effort.
 
 Session identity is `bf-` plus 20 hexadecimal characters of SHA-256 over the
 canonical checkout root and absolute Git directory. Equal repository basenames

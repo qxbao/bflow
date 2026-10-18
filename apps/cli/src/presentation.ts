@@ -332,8 +332,8 @@ export function resolveActionableRemediation(
   }
 
   // 7. Malformed config
-  if (msg.includes("config.yaml") || msg.includes("Invalid configuration") || msg.includes("identity mismatch")) {
-    return "Inspect .bflow/config.yaml and run 'bflow doctor'. Preserve existing configuration.";
+  if (msg.includes("config.yaml") || msg.includes("config.yml") || msg.includes("Invalid configuration") || msg.includes("identity mismatch")) {
+    return "Inspect .bflow/config.yml and run 'bflow doctor'. Preserve existing configuration.";
   }
 
   // 8. Missing executable (do not match broad 'not found')

@@ -400,8 +400,8 @@ export async function runDoctorDiagnostics(
     status: configValid ? "pass" : "fail",
     detected_version: config ? (config.schemaVersion ?? "1") : null,
     reason: configValid
-      ? "Valid .bflow/config.yaml and repository identity"
-      : "Invalid or missing .bflow/config.yaml or mismatched repository identity",
+      ? "Valid .bflow/config.yml and repository identity"
+      : "Invalid or missing .bflow/config.yml or mismatched repository identity",
     remediation: configValid ? "" : "Run 'bflow init' to initialize repository configuration."
   });
   legacyChecks.push({
@@ -409,8 +409,8 @@ export async function runDoctorDiagnostics(
     name: "configuration",
     status: configValid ? "passed" : "failed",
     message: configValid
-      ? "Valid .bflow/config.yaml and repository identity"
-      : "Invalid .bflow/config.yaml"
+      ? "Valid .bflow/config.yml and repository identity"
+      : "Invalid .bflow/config.yml"
   });
 
   // legacy flock & permissions
@@ -786,7 +786,7 @@ export async function runDoctorDiagnostics(
     if (unsupportedFlags.length > 0) {
       permStatus = "fail";
       permReason = `Unsupported permission flags configured (${unsupportedFlags.join(", ")}).`;
-      permRemediation = "Remove unsupported permission flags from .bflow/config.yaml or upgrade the provider CLI.";
+      permRemediation = "Remove unsupported permission flags from .bflow/config.yml or upgrade the provider CLI.";
     }
   }
 
@@ -807,7 +807,7 @@ export async function runDoctorDiagnostics(
   if (permConfig?.trustedWorkspace === false) {
     trustStatus = "fail";
     trustReason = "Workspace trust check failed: repository workspace is not trusted.";
-    trustRemediation = "Set environment.permissions.trustedWorkspace to true in .bflow/config.yaml or trust the workspace.";
+    trustRemediation = "Set environment.permissions.trustedWorkspace to true in .bflow/config.yml or trust the workspace.";
   }
   agentProviderChecks.push({
     checkId: "provider-trusted-workspace",
@@ -1183,7 +1183,7 @@ export async function runDoctorDiagnostics(
   if (skillsOverride?.invalidReferences && skillsOverride.invalidReferences.length > 0) {
     bindingsStatus = "fail";
     bindingsReason = `Invalid skill references detected: ${skillsOverride.invalidReferences.join(", ")}.`;
-    bindingsRemediation = "Fix role skill bindings in .bflow/config.yaml or skills/roles/bindings.json and run 'bflow skills sync'.";
+    bindingsRemediation = "Fix role skill bindings in .bflow/config.yml or skills/roles/bindings.json and run 'bflow skills sync'.";
     bindingsRepair = "bflow skills sync";
   }
 
@@ -1231,7 +1231,7 @@ export async function runDoctorDiagnostics(
   if (skillsOverride?.invalidReferences && skillsOverride.invalidReferences.length > 0) {
     refStatus = "fail";
     refReason = `Invalid skill references: ${skillsOverride.invalidReferences.join(", ")}.`;
-    refRemediation = "Fix skill references in .bflow/config.yaml or bindings.json and run 'bflow skills sync'.";
+    refRemediation = "Fix skill references in .bflow/config.yml or bindings.json and run 'bflow skills sync'.";
     refRepair = "bflow skills sync";
   }
 

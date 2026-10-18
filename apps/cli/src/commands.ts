@@ -18,7 +18,7 @@ import {
   initRepositoryConfig,
   loadRepositoryConfig,
   loadWorkflowDefinitionFromFile,
-  resolveConfigPath
+  resolveReadableConfigPath
 } from "./config.js";
 import {
   formatProgressStep,
@@ -44,6 +44,7 @@ import {
 } from "./types.js";
 import { executeHighLevelCommand, isHighLevelCommand } from "./high-level-commands.js";
 import { executeSetupCommand } from "./setup-integration.js";
+import { migrateRepositoryConfig } from "./config-migration.js";
 
 function loadPackageVersion(): string {
   try {
@@ -197,6 +198,15 @@ export async function executeCommand(
     );
   }
 
+  if (parsed.command === "config-migrate") {
+    try {
+      const output = await migrateRepositoryConfig(cwd);
+      return makeResult(CLI_EXIT_CODES.SUCCESS, true, parsed.command, output, undefined, isJson, io, presentation);
+    } catch (error) {
+      return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, parsed.command, undefined, toContractError(error), isJson, io, presentation);
+    }
+  }
+
   if (["up", "down", "attach", "doctor", "recover"].includes(parsed.command) ||
     parsed.command === "status" && parsed.runId === undefined && parsed.statusFilter === undefined &&
     parsed.workflowId === undefined && parsed.limit === undefined && parsed.cursor === undefined && context?.runtime === undefined) {
@@ -294,7 +304,7 @@ export async function executeCommand(
         }
         definition = wfRes.value;
       } else {
-        const resolvedCfg = resolveConfigPath(cwd, parsed.configPath);
+        const resolvedCfg = resolveReadableConfigPath(cwd, parsed.configPath);
         const cfgRes = await loadRepositoryConfig(resolvedCfg);
         if (cfgRes.ok) {
           definition = cfgRes.value.defaultWorkflow;

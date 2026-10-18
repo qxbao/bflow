@@ -344,7 +344,7 @@ describe("Presentation & Formatting Engine", () => {
 
     it("formats init output without falsely claiming created when overwritten is false", () => {
       const initOutput: InitCommandOutput = {
-        configPath: "/workspace/.bflow/config.yaml",
+        configPath: "/workspace/.bflow/config.yml",
         overwritten: false,
         config: {
           projectName: "my-project",

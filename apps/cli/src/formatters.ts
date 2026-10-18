@@ -48,6 +48,10 @@ function isInitOutput(data: CliCommandData): data is InitCommandOutput {
   return typeof data === "object" && data !== null && "configPath" in data && "config" in data;
 }
 
+function isConfigMigrationOutput(command: CliCommandName, data: CliCommandData): data is import("./config-migration.js").ConfigMigrationOutput {
+  return command === "config-migrate" && typeof data === "object" && data !== null && "sourcePath" in data && "configPath" in data && "migrated" in data;
+}
+
 function isSetupOutput(data: CliCommandData): data is SetupCommandOutput {
   return typeof data === "object" && data !== null && "machineId" in data && "serviceManagerKind" in data && "plan" in data;
 }
@@ -689,6 +693,15 @@ export function formatCommandSuccess(
 
   if (isInitOutput(data)) {
     return formatInitOutput(data, useColor);
+  }
+
+  if (isConfigMigrationOutput(command, data)) {
+    const okMarker = useColor ? green(bold("[OK]"), true) : "[OK]";
+    return [
+      `${okMarker} ${data.migrated ? "Migrated" : "Already migrated"} repository configuration:`,
+      `  Config: ${sanitizeIdentifier(data.configPath)}`,
+      ...(data.backupPath ? [`  Backup: ${sanitizeIdentifier(data.backupPath)}`] : [])
+    ].join("\n");
   }
 
   if (isSetupOutput(data)) {

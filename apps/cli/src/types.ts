@@ -36,6 +36,7 @@ export const CLI_COMMAND_NAMES = [
   "recover",
   "doctor",
   "init",
+  "config-migrate",
   "setup",
   "run",
   "status",
@@ -53,6 +54,7 @@ export type CliCommandName =
   | "recover"
   | "doctor"
   | "init"
+  | "config-migrate"
   | "setup"
   | "run"
   | "status"
@@ -84,6 +86,10 @@ export interface InitCommandArgs extends GlobalCliFlags {
   readonly projectName?: string | undefined;
   readonly provider?: "claude" | "codex" | "agy" | undefined;
   readonly force: boolean;
+}
+
+export interface ConfigMigrateCommandArgs extends GlobalCliFlags {
+  readonly command: "config-migrate";
 }
 
 export interface SetupCommandArgs extends GlobalCliFlags {
@@ -306,6 +312,7 @@ export type HighLevelParsedCliCommand =
 export type CoreParsedCliCommand =
   | EnvironmentCommandArgs
   | InitCommandArgs
+  | ConfigMigrateCommandArgs
   | SetupCommandArgs
   | RunCommandArgs
   | StatusCommandArgs
@@ -385,6 +392,7 @@ export type CliCommandData =
   | EnvironmentDoctorReport
   | SessionManifest
   | InitCommandOutput
+  | import("./config-migration.js").ConfigMigrationOutput
   | SetupCommandOutput
   | WorkflowRunSnapshot
   | Page<WorkflowRunSnapshot>

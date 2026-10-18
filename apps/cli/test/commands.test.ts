@@ -19,7 +19,9 @@ import {
   main,
   parseCliArgs,
   runCli,
-  CLI_EXIT_CODES
+  CLI_EXIT_CODES,
+  parseConfigYaml,
+  stringifyConfigYaml
 } from "../src/index.js";
 import type { CliContext } from "../src/index.js";
 
@@ -193,15 +195,18 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
   });
 
   describe("2. bflow init execution & overwrite protection", () => {
-    it("creates .bflow/config.yaml with valid defaultWorkflow in fresh directory", async () => {
+    it("creates readable .bflow/config.yml with valid defaultWorkflow in fresh directory", async () => {
       const result = await runCli(["init"], { cwd: tempDir });
       expect(result.exitCode).toBe(0);
       expect(result.ok).toBe(true);
       expect(result.stdout).toContain("bflow repository configuration");
 
-      const configFilePath = join(tempDir, ".bflow", "config.yaml");
+      const configFilePath = join(tempDir, ".bflow", "config.yml");
       const content = await readFile(configFilePath, "utf-8");
-      const parsed = JSON.parse(content);
+      const parsed = parseConfigYaml(content) as Record<string, any>;
+      expect(content).toContain("# Bflow repository configuration");
+      expect(content).toContain("  roles:");
+      expect(content).not.toContain("{\n");
 
       expect(parsed.schemaVersion).toBe("1");
       expect(parsed.projectName).toBeDefined();
@@ -213,7 +218,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
 
     it("preserves existing configuration across repeat init, and overwrites when --force is specified", async () => {
       await runCli(["init", "--name", "initial-project"], { cwd: tempDir });
-      const path = join(tempDir, ".bflow", "config.yaml");
+      const path = join(tempDir, ".bflow", "config.yml");
       const original = await readFile(path, "utf8");
       const confirmOverwrite = vi.fn().mockResolvedValue(true);
       const result = await runCli(["init", "--name", "changed"], { cwd: tempDir, confirmOverwrite });
@@ -226,7 +231,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(forceResult.ok).toBe(true);
       const updated = await readFile(path, "utf8");
       expect(updated).not.toBe(original);
-      const parsed = JSON.parse(updated);
+      const parsed = parseConfigYaml(updated) as Record<string, any>;
       expect(parsed.projectName).toBe("changed");
     });
 
@@ -239,9 +244,9 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(result.exitCode).toBe(0);
       expect(result.ok).toBe(true);
 
-      const subConfigPath = join(tempDir, ".bflow", "config.yaml");
+      const subConfigPath = join(tempDir, ".bflow", "config.yml");
       const content = await readFile(subConfigPath, "utf-8");
-      const parsed = JSON.parse(content);
+      const parsed = parseConfigYaml(content) as Record<string, any>;
       expect(parsed.projectName).toBe("auth-service");
     });
 
@@ -256,7 +261,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(envelope.ok).toBe(true);
       expect(envelope.command).toBe("init");
       expect(envelope.data.config.projectName).toBe("json-test");
-      expect(envelope.data.configPath).toContain("config.yaml");
+      expect(envelope.data.configPath).toContain("config.yml");
     });
   });
 
@@ -302,9 +307,9 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(result.stdout).toContain("WAITING");
     });
 
-    it("fails closed when .bflow/config.yaml in cwd contains malformed JSON", async () => {
+    it("fails closed when .bflow/config.yml in cwd contains malformed YAML", async () => {
       await runCli(["init"], { cwd: tempDir });
-      const configPath = join(tempDir, ".bflow", "config.yaml");
+      const configPath = join(tempDir, ".bflow", "config.yml");
       await writeFile(configPath, "{ invalid json content: 123", "utf-8");
 
       const runtime = createMockRuntime();
@@ -317,13 +322,13 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(runtime.start).not.toHaveBeenCalled();
     });
 
-    it("fails closed when .bflow/config.yaml has unsupported schemaVersion", async () => {
+    it("fails closed when .bflow/config.yml has unsupported schemaVersion", async () => {
       await runCli(["init"], { cwd: tempDir });
-      const configPath = join(tempDir, ".bflow", "config.yaml");
-      const original = JSON.parse(await readFile(configPath, "utf-8"));
+      const configPath = join(tempDir, ".bflow", "config.yml");
+      const original = parseConfigYaml(await readFile(configPath, "utf-8")) as Record<string, any>;
 
       const corruptVersion = { ...original, schemaVersion: "2" };
-      await writeFile(configPath, JSON.stringify(corruptVersion, null, 2), "utf-8");
+      await writeFile(configPath, stringifyConfigYaml(corruptVersion), "utf-8");
 
       const runtime = createMockRuntime();
       const result = await runCli(["run", "Build feature"], { cwd: tempDir, runtime });
@@ -335,9 +340,9 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(runtime.start).not.toHaveBeenCalled();
     });
 
-    it("fails closed when .bflow/config.yaml is missing required fields", async () => {
+    it("fails closed when .bflow/config.yml is missing required fields", async () => {
       await runCli(["init"], { cwd: tempDir });
-      const configPath = join(tempDir, ".bflow", "config.yaml");
+      const configPath = join(tempDir, ".bflow", "config.yml");
       await writeFile(configPath, JSON.stringify({ schemaVersion: "1" }), "utf-8");
 
       const runtime = createMockRuntime();
@@ -364,8 +369,8 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
 
     it("supports custom --workflow definition JSON file", async () => {
       await runCli(["init"], { cwd: tempDir });
-      const configPath = join(tempDir, ".bflow", "config.yaml");
-      const configContent = JSON.parse(await readFile(configPath, "utf-8"));
+      const configPath = join(tempDir, ".bflow", "config.yml");
+      const configContent = parseConfigYaml(await readFile(configPath, "utf-8")) as Record<string, any>;
       const customWf: WorkflowDefinition = {
         ...configContent.defaultWorkflow,
         id: "custom-pipeline-wf",
@@ -1123,7 +1128,7 @@ process.exit(0);
           ["run", "Implement authentication flow", "--run-id", "run-composed-1", "--json"],
           { cwd: tempDir, io }
         );
-        expect(runRes.exitCode).toBe(0);
+        expect(runRes.exitCode, runRes.stderr + runRes.stdout).toBe(0);
         expect(runRes.ok).toBe(true);
         const runEnvelope = JSON.parse(runRes.stdout);
         expect(runEnvelope.ok).toBe(true);
@@ -1160,7 +1165,7 @@ process.exit(0);
       }
     });
 
-    it("fails closed in main() when .bflow/config.yaml is missing or malformed", async () => {
+    it("fails closed in main() when .bflow/config.yml is missing or malformed", async () => {
       const prevExitCode = process.exitCode;
       try {
         const io = { stdout: () => {}, stderr: () => {} };
@@ -1171,7 +1176,7 @@ process.exit(0);
         expect(missingRes.error?.code).toBe("not_found");
 
         await main(["init"], { cwd: tempDir, io });
-        await writeFile(join(tempDir, ".bflow", "config.yaml"), "{ invalid json", "utf8");
+        await writeFile(join(tempDir, ".bflow", "config.yml"), "{ invalid yaml", "utf8");
 
         const malformedRes = await main(["run", "Test malformed config", "--json"], {
           cwd: tempDir,

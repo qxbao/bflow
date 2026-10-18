@@ -7,6 +7,7 @@ Autonomous SDLC workflow orchestration CLI.
 
 Commands:
   init            Initialize bflow repository configuration and default workflow
+  config-migrate  Migrate a legacy repository config to .bflow/config.yml
   setup           Plan and apply host environment and platform prerequisites
   up              Start/reconcile the repository environment
   down            Checkpoint and stop the repository environment
@@ -61,11 +62,11 @@ Run 'bflow help <command>' or 'bflow <command> --help' for command-specific opti
 
 const INIT_HELP = `Usage: bflow init [options]
 
-Initialize .bflow/config.yaml at the canonical Git repository root. Safe to repeat.
+Initialize .bflow/config.yml at the canonical Git repository root. Safe to repeat.
 
 Options:
   --dir <path>          Target directory for initialization (default: current directory)
-  --config <path>       Custom configuration file path (default: .bflow/config.yaml)
+  --config <path>       Custom configuration file path (default: .bflow/config.yml)
   --name <name>         Project name
   --provider <kind>     Role provider: claude, codex, or agy (default: codex)
   -f, --force, -y, --yes  Explicitly replace existing configuration
@@ -77,6 +78,15 @@ Examples:
   bflow init --name my-project
   bflow init --provider claude
   bflow init --dir ./subproject --force`;
+
+const CONFIG_MIGRATE_HELP = `Usage: bflow config-migrate [--json]
+
+Safely migrate one legacy .bflow/config.yaml or .bflow/config.json to .bflow/config.yml.
+Validates before writing, saves the original as <legacy-path>.bak, and removes the active legacy file after the new config is safely written. Repeating the command reports an unchanged migration; edited targets are preserved.
+
+Options:
+  -j, --json  Output response in JSON envelope format
+  -h, --help  Show help for config-migrate`;
 
 const SETUP_HELP = `Usage: bflow setup [options]
 
@@ -113,7 +123,7 @@ Arguments:
 Options:
   --run-id <id>         Explicit run identifier
   -w, --workflow <path> Path to custom workflow definition JSON file
-  --config <path>       Path to configuration file (default: .bflow/config.yaml)
+  --config <path>       Path to configuration file (default: .bflow/config.yml)
   --idempotency-key <key> Idempotency key for run creation
   -j, --json            Output response in JSON envelope format
   -h, --help            Show help for run command
@@ -458,6 +468,7 @@ const HELP_MAP: Record<CliCommandName, string> = {
   recover: "Usage: bflow recover --yes [--json]\nStop old Bflow commands first. Migrates only an empty legacy lock; preserves project state, agents and worktrees. Then run bflow up or bflow down --yes.",
   doctor: "Usage: bflow doctor [--json]\nCheck configuration, dependencies, named session and P13 integration.",
   init: INIT_HELP,
+  "config-migrate": CONFIG_MIGRATE_HELP,
   setup: SETUP_HELP,
   run: RUN_HELP,
   status: STATUS_HELP,

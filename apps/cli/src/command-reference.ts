@@ -2,6 +2,7 @@ export const SUPPORTED_CLI_COMMANDS = [
   "help",
   "version",
   "init",
+  "config-migrate",
   "up",
   "down",
   "attach",
@@ -47,6 +48,18 @@ const COMMON_EXIT_CODES = [
 ] as const;
 
 export const CLI_COMMAND_REFERENCE: readonly CliCommandReferenceEntry[] = [
+  {
+    command: "config-migrate",
+    syntax: "bflow config-migrate [--json]",
+    purpose: "Validate and migrate one legacy repository config to the canonical YAML file, retaining a byte-for-byte backup.",
+    reusedEngines: ["RepositoryIdentity", "RepositoryConfigCodec"],
+    requiredFlags: [],
+    optionalFlags: ["-j, --json", "-h, --help"],
+    exitCodes: COMMON_EXIT_CODES,
+    idempotencyAndRetry: "Idempotent when the canonical target matches its migration backup. Conflicting or edited configs are left untouched.",
+    permissionRequirements: "Requires local filesystem access to the repository .bflow directory.",
+    skills: ["using-bflow"]
+  },
   {
     command: "help",
     syntax: "bflow help [command] [options]",

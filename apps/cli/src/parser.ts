@@ -11,6 +11,7 @@ import type {
   AgentCheckCommandArgs,
   ApproveCommandArgs,
   CancelCommandArgs,
+  ConfigMigrateCommandArgs,
   CliCommandName,
   GitPrepareCommandArgs,
   GitPrepareTaskDependencyInput,
@@ -40,6 +41,7 @@ const VALID_COMMANDS: ReadonlySet<CliCommandName> = new Set([
   "doctor",
   "recover",
   "init",
+  "config-migrate",
   "setup",
   "run",
   "status",
@@ -1544,6 +1546,16 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
   const commandArgs = argv.slice(1);
 
   switch (command) {
+    case "config-migrate": {
+      const booleans = new Set(["--json", "-j", "--help", "-h"]);
+      const allowed = new Set(["--json", "-j", "--help", "-h"]);
+      const result = extractOptionsAndPositional(commandArgs, booleans, allowed, command, json);
+      if (!result.ok) return result.result;
+      if (result.value.positional.length) return makeValidationError("Unexpected positional argument for 'config-migrate'.", json, command);
+      const value: ConfigMigrateCommandArgs = { command, json, help: result.value.flags.has("--help") || result.value.flags.has("-h") };
+      return { ok: true, value };
+    }
+
     case "up":
     case "down":
     case "attach":
