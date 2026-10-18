@@ -320,6 +320,41 @@ describe("@bflow/agent-providers", () => {
       }
     });
 
+    it("Claude applies configured model and effort to both readiness probe and launch", async () => {
+      const calls: string[][] = [];
+      const runner = createFakeProviderRunner({ scenario: "healthy", customHandler: invocation => {
+        calls.push([...invocation.args]);
+        return undefined;
+      } });
+      const adapter = new ClaudeProviderAdapter({ runner, executablePath: fakeBinaryPath, allowTestFilesystemOwnership: true,
+        model: "sonnet", effort: "high" });
+      const env = createTestEnvironment("claude", "workspace_auto");
+      const health = await adapter.checkHealth({ schemaVersion: 3, environment: env, stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(health.ok && health.value.status).toBe("ready");
+      const launch = await adapter.prepareLaunch(env);
+      expect(launch.ok).toBe(true);
+      if (launch.ok) expect(launch.value.argv).toEqual(expect.arrayContaining(["--model", "sonnet", "--effort", "high"]));
+      expect(calls.some(args => args.includes("sonnet") && args.includes("--effort") && args.includes("high"))).toBe(true);
+    });
+
+    it("rejects an effort level unsupported by the selected provider before running provider commands", async () => {
+      const calls: string[][] = [];
+      const runner = createFakeProviderRunner({ customHandler: invocation => {
+        calls.push([...invocation.args]);
+        return undefined;
+      } });
+      const adapter = new ClaudeProviderAdapter({ runner, executablePath: fakeBinaryPath, allowTestFilesystemOwnership: true,
+        effort: "minimal" });
+      const health = await adapter.checkHealth({ schemaVersion: 3, environment: createTestEnvironment("claude", "workspace_auto"),
+        stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(health.ok).toBe(true);
+      if (health.ok) {
+        expect(health.value.status).toBe("unsupported");
+        expect(health.value.checks[0]?.code).toBe("unsupported_effort");
+      }
+      expect(calls).toEqual([]);
+    });
+
     it("Conversation role uses conversation interaction and empty tools", async () => {
       const runner = createFakeProviderRunner({ scenario: "healthy" });
       const adapter = new ClaudeProviderAdapter({
@@ -493,6 +528,23 @@ describe("@bflow/agent-providers", () => {
         expect(profile.argv).toContain("--model");
         expect(profile.argv).toContain("o3-mini");
       }
+    });
+
+    it("Codex applies configured model and reasoning effort to both readiness probe and launch", async () => {
+      const calls: string[][] = [];
+      const runner = createFakeProviderRunner({ scenario: "healthy", customHandler: invocation => {
+        calls.push([...invocation.args]);
+        return undefined;
+      } });
+      const adapter = new CodexProviderAdapter({ runner, executablePath: fakeBinaryPath, allowTestFilesystemOwnership: true,
+        model: "o3-mini", effort: "high" });
+      const env = createTestEnvironment("codex", "workspace_auto");
+      const health = await adapter.checkHealth({ schemaVersion: 3, environment: env, stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(health.ok && health.value.status).toBe("ready");
+      const launch = await adapter.prepareLaunch(env);
+      expect(launch.ok).toBe(true);
+      if (launch.ok) expect(launch.value.argv).toEqual(expect.arrayContaining(["--model", "o3-mini", "model_reasoning_effort=\"high\""]));
+      expect(calls.some(args => args.includes("o3-mini") && args.some(arg => arg.includes("model_reasoning_effort=\"high\"")))).toBe(true);
     });
 
     it("Agy passes preflight and produces deterministic prepareLaunch profile in plan mode", async () => {

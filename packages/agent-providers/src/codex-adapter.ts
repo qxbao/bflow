@@ -65,6 +65,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
     if (this.options.model) {
       probe.push("--model", this.options.model);
     }
+    if (this.options.effort) probe.push("-c", `model_reasoning_effort=${JSON.stringify(this.options.effort)}`);
     probe.push("ping");
     return probe;
   }
@@ -153,6 +154,17 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
         };
       }
       argv.push("--model", this.options.model);
+    }
+
+    if (this.options.effort) {
+      if (!capabilities.supportedFlags.has("--config")) {
+        return {
+          argv: [],
+          unsupportedCode: "invalid_flag",
+          unsupportedMessage: "Codex CLI does not support --config for reasoning effort"
+        };
+      }
+      argv.push("-c", `model_reasoning_effort=${JSON.stringify(this.options.effort)}`);
     }
 
     return { argv };

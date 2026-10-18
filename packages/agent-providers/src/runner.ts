@@ -371,6 +371,7 @@ export function createFakeProviderRunner(config?: FakeRunnerConfig): ProviderCom
               "  --append-system-prompt\n" +
               "  --append-system-prompt-file\n" +
               "  --model\n" +
+              "  --effort\n" +
               "  --print\n" +
               "  --dangerously-skip-permissions\n" +
               "Commands:\n" +

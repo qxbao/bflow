@@ -81,6 +81,7 @@ export interface ProviderAdapterOptions {
   readonly runner?: ProviderCommandRunner;
   readonly rolePrompt?: string;
   readonly model?: string;
+  readonly effort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   readonly supportedModels?: readonly string[];
   readonly mcpRegistrations?: readonly MCPClientRegistration[];
   readonly mcpObservations?: readonly MCPServiceObservation[];

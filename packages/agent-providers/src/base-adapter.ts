@@ -260,6 +260,37 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     let hasUnsupported = false;
     let hasFailed = false;
 
+    if (this.options.effort !== undefined) {
+      const allowedEfforts: Readonly<Record<AgentEnvironment["provider"], readonly string[]>> = {
+        claude: ["low", "medium", "high", "xhigh", "max"],
+        codex: ["minimal", "low", "medium", "high", "xhigh"],
+        agy: []
+      };
+      if (!allowedEfforts[environment.provider].includes(this.options.effort)) {
+        const checkedAt = (this.options.now?.() ?? new Date()).toISOString();
+        const validUntil = new Date(Date.parse(checkedAt) + 1).toISOString();
+        const message = environment.provider === "agy"
+          ? "Agy effort must be encoded in the configured model name"
+          : `Effort '${this.options.effort}' is not supported by ${environment.provider}`;
+        return {
+          ok: true,
+          value: AgentHealthResultSchema.parse({
+            schemaVersion: PlatformSchemaVersionSchema.parse(3),
+            environmentId: environment.environmentId,
+            provider: environment.provider,
+            role: environment.role,
+            configFingerprint: environment.configFingerprint,
+            stage: request.stage,
+            status: "unsupported",
+            checkedAt,
+            validUntil,
+            checks: [createHealthCheck("launch_arguments", "failed", "unsupported_effort", message,
+              "Select an effort level supported by the configured provider, or encode Agy effort in its model name.")]
+          })
+        };
+      }
+    }
+
     // A. Check: binary
     const executable = this.getExecutablePath();
     let binaryPassed = false;

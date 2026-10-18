@@ -56,6 +56,7 @@ export class ClaudeProviderAdapter extends BaseProviderAdapter {
     if (this.options.model) {
       probe.push("--model", this.options.model);
     }
+    if (this.options.effort) probe.push("--effort", this.options.effort);
     probe.push("ping");
     return probe;
   }
@@ -101,7 +102,8 @@ export class ClaudeProviderAdapter extends BaseProviderAdapter {
       "--settings",
       "--mcp-config",
       "--append-system-prompt-file",
-      ...(this.options.model ? ["--model"] : [])
+      ...(this.options.model ? ["--model"] : []),
+      ...(this.options.effort ? ["--effort"] : [])
     ];
     const missingLaunchFlags = requiredLaunchFlags.filter(
       (flag) => !capabilities.supportedFlags.has(flag)
@@ -127,6 +129,7 @@ export class ClaudeProviderAdapter extends BaseProviderAdapter {
     if (this.options.model) {
       argv.push("--model", this.options.model);
     }
+    if (this.options.effort) argv.push("--effort", this.options.effort);
 
     return { argv };
   }

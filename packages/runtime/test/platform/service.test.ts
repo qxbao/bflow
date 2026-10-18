@@ -240,6 +240,15 @@ describe("DefaultPlatformReadinessService", () => {
     expect(service.status().launches.map(launch => launch.state)).toEqual(["intent", "intent"]);
   });
 
+  it("passes the configured role model and effort through readiness and into launch argv", async () => {
+    const { service } = buildService();
+    const result = await service.prepareSession(identity, [requirement({ model: "sonnet", effort: "high" })]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const launch = result.value.launches[0];
+    expect(launch?.launch.argv).toEqual(expect.arrayContaining(["--model", "sonnet", "--effort", "high"]));
+  });
+
   it("launches nothing and revokes gateway registrations when a required role is blocked", async () => {
     const { service, journal } = buildService();
     const result = await service.prepareSession(identity, [

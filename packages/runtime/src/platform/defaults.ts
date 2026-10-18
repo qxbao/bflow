@@ -40,6 +40,8 @@ export function createProviderAdapterFactory(options: ProviderAdapterFactoryOpti
       ...(options.now !== undefined ? { now: options.now } : {}),
       ...options.perProvider?.[provider],
       ...(context.rolePrompt !== undefined ? { rolePrompt: context.rolePrompt } : {}),
+      ...(context.model !== undefined ? { model: context.model } : {}),
+      ...(context.effort !== undefined ? { effort: context.effort } : {}),
       mcpRegistrations: [...context.mcpRegistrations],
       mcpObservations: [...context.mcpObservations],
       skillManifest: context.skillManifest,

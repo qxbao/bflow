@@ -13,6 +13,8 @@ export const PlatformRoleOptionSchema = z.object({
   role: AgentRoleSchema,
   provider: AgentProviderIdSchema,
   required: z.boolean(),
+  model: z.string().trim().min(1).optional(),
+  effort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).optional(),
   permissionMode: z.enum(["restricted", "workspace_auto", "unattended_isolated"]),
   capabilityIds: z.array(IdentifierSchema),
   mcpServiceIds: z.array(IdentifierSchema),
@@ -25,7 +27,10 @@ export const PlatformRoleOptionSchema = z.object({
   environmentVariables: z.record(SafeArgumentSchema).optional(),
   isolation: z.object({ kind: z.enum(["os_sandbox", "container"]), proofId: IdentifierSchema }).strict().optional(),
   network: z.object({ mode: z.enum(["deny", "allowlist"]), allowedHosts: z.array(IdentifierSchema) }).strict().optional()
-}).strict();
+}).strict().superRefine((role, ctx) => {
+  if (role.provider === "agy" && role.effort !== undefined)
+    ctx.addIssue({ code: "custom", path: ["effort"], message: "Agy effort must be encoded in the configured model name" });
+});
 export type PlatformRoleOption = z.infer<typeof PlatformRoleOptionSchema>;
 
 export const AgenticHostPlatformOptionsSchema = z.object({

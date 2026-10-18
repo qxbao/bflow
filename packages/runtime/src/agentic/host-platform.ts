@@ -127,6 +127,8 @@ export function requirementFor(
     role: option.role,
     provider: option.provider,
     required: option.required,
+    ...(option.model !== undefined ? { model: option.model } : {}),
+    ...(option.effort !== undefined ? { effort: option.effort } : {}),
     permissionMode: option.permissionMode,
     cwd,
     ...(taskId !== undefined ? { taskId } : {}),

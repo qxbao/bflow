@@ -34,18 +34,21 @@ function prepared(role: AgentRole, provider: "claude" | "codex" | "agy", launchI
 function failure(code: ContractError["code"], message: string, details?: Record<string, unknown>): OperationResult<never> {
   return { ok: false, error: { code, retryable: false, message, ...(details ? { details } : {}) } as ContractError };
 }
-interface FakeService extends PlatformReadinessService { calls: string[]; requirements: RolePlatformRequirement[][]; }
+interface FakeService extends PlatformReadinessService { calls: string[]; requirements: RolePlatformRequirement[][]; developerRequirements: RolePlatformRequirement[]; }
 function fakeService(overrides: Partial<PlatformReadinessService> = {}): FakeService {
-  const calls: string[] = [], requirements: RolePlatformRequirement[][] = [];
+  const calls: string[] = [], requirements: RolePlatformRequirement[][] = [], developerRequirements: RolePlatformRequirement[] = [];
   const service = {
-    calls, requirements,
+    calls, requirements, developerRequirements,
     prepareSession: async (_identity: unknown, reqs: RolePlatformRequirement[]) => {
       calls.push("prepareSession"); requirements.push(reqs);
       return { ok: true, value: { report: { ready: true, generation: 1, roles: [], checkedAt: at }, launches: [prepared("conversation", "codex", "launch-conv"), prepared("coordinator", "codex", "launch-coord")] } };
     },
     verifyActivated: async () => { calls.push("verifyActivated"); return { ok: true, value: {} as never }; },
     assertFresh: () => failure("not_found", "unused"),
-    prepareDeveloper: async () => { calls.push("prepareDeveloper"); return { ok: true, value: prepared("developer", "codex", "launch-dev") }; },
+    prepareDeveloper: async (_identity: unknown, requirement: RolePlatformRequirement) => {
+      calls.push("prepareDeveloper"); developerRequirements.push(requirement);
+      return { ok: true, value: prepared("developer", "codex", "launch-dev") };
+    },
     releaseLaunch: async (launchId: string) => { calls.push(`release:${launchId}`); return { ok: true, value: undefined }; },
     shutdown: async () => { calls.push("shutdown"); return { ok: true, value: undefined }; },
     status: () => ({ generation: 1, launches: [{ launchId: "launch-conv", role: "conversation", provider: "codex", state: "intent" }] }),
@@ -182,6 +185,21 @@ describe("P30 host platform composition", () => {
     expect(service.calls.at(-1)).toBe("release:launch-dev");
     await host.releaseDeveloper("task-1");
     expect(service.calls.filter(call => call === "release:launch-dev")).toHaveLength(1);
+  });
+
+  it("carries the configured Developer model and effort through dynamic task allocation", async () => {
+    const service = fakeService();
+    const { options } = await session(service);
+    const configuredOptions = {
+      ...options,
+      platform: { ...platform, roles: platform.roles.map(role => role.role === "developer"
+        ? { ...role, model: "developer-model", effort: "high" as const }
+        : role) }
+    };
+    const host = new HostPlatformSession(configuredOptions);
+    await host.prepare();
+    await host.allocateDeveloper("task-model", "/worktrees/task-model");
+    expect(service.developerRequirements[0]).toMatchObject({ model: "developer-model", effort: "high", taskId: "task-model" });
   });
 
   it("records Gateway registration loss and reports degraded launches by role and Developer launch", async () => {

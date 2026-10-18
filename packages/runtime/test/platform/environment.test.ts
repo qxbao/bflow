@@ -98,6 +98,14 @@ describe("RoleEnvironmentResolver", () => {
     expect(generationChanged.stateDirectory).toBe("/repo/.bflow/state/platform/gen-3/roles/developer-t1");
   });
 
+  it("binds model and effort selections into the role configuration fingerprint", () => {
+    const base = expectOk(resolver.resolve(identity, requirement(), { skillManifestDigest: digest }));
+    const modelChanged = expectOk(resolver.resolve(identity, requirement({ model: "sonnet" }), { skillManifestDigest: digest }));
+    const effortChanged = expectOk(resolver.resolve(identity, requirement({ effort: "high" }), { skillManifestDigest: digest }));
+    expect(modelChanged.configFingerprint).not.toBe(base.configFingerprint);
+    expect(effortChanged.configFingerprint).not.toBe(base.configFingerprint);
+  });
+
   it("nests the state directory by generation, role and task without creating it", () => {
     const env = expectOk(resolver.resolve(identity, requirement(), { skillManifestDigest: digest }));
     expect(env.stateDirectory).toBe("/repo/.bflow/state/platform/gen-2/roles/developer-t1");

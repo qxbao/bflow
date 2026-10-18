@@ -488,6 +488,8 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       [registration.registrationId, tokenEnvironmentName(registration.registrationId)]));
     const context: ProviderAdapterContext = {
       ...(rolePrompt !== undefined ? { rolePrompt } : {}),
+      ...(requirement.model !== undefined ? { model: requirement.model } : {}),
+      ...(requirement.effort !== undefined ? { effort: requirement.effort } : {}),
       mcpRegistrations: gateway.registrations,
       mcpObservations: gateway.observations,
       skillManifest: skills.value.manifest,

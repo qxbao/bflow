@@ -48,7 +48,8 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
   const roles: PlatformRoleOption[] = environment.roles.map(role => roleOption(role, input, deps.context.skills));
   // Developers are allocated dynamically in task worktrees; without a configured Developer, the template uses the Coordinator's provider.
   if (!configured.has("developer"))
-    roles.push(roleOption({ role: "developer", cli: coordinator.cli, required: false }, input, deps.context.skills));
+    roles.push(roleOption({ role: "developer", cli: coordinator.cli, required: false,
+      ...modelSettings(coordinator) }, input, deps.context.skills));
 
   const locatorPath = join(deps.context.stateDirectory, GATEWAY_CONTROL_LOCATOR_FILE);
   const gatewayLocatorPath = (deps.fileExists ?? existsSync)(locatorPath) ? { gatewayLocatorPath: locatorPath } : {};
@@ -79,11 +80,21 @@ function roleOption(role: EnvironmentRoleConfig, input: EnvironmentCompositionIn
     role: role.role,
     provider: provider.data,
     required: role.required ?? true,
+    ...modelSettings(role),
     permissionMode: role.permissionMode ?? environment.permissions?.mode ?? "workspace_auto",
     capabilityIds: [],
     mcpServiceIds: [...(environment.requiredMcpServices ?? [])],
     toolIds: [...(environment.requiredTools ?? [])],
     skillSelections: skills.resolvePins(role.role, skillIds)
+  };
+}
+
+/** Model selection and effort are role-local; this shape stays additive while the config owner updates its schema. */
+function modelSettings(role: EnvironmentRoleConfig): Pick<PlatformRoleOption, "model" | "effort"> {
+  const settings = role as EnvironmentRoleConfig & { readonly model?: string; readonly effort?: PlatformRoleOption["effort"] };
+  return {
+    ...(settings.model !== undefined ? { model: settings.model } : {}),
+    ...(settings.effort !== undefined ? { effort: settings.effort } : {})
   };
 }
 
