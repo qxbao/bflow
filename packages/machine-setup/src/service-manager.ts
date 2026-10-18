@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { SecretReferenceSchema } from "@bflow/contracts";
@@ -30,8 +31,25 @@ export interface ServiceInstallResult {
   changed: boolean;
 }
 
+export interface ServiceManagerOptions {
+  /**
+   * Isolation namespace for OS unit names. When set, every unit is named
+   * `bflow-<namespace>-<serviceId>` (systemd) or `dev.bflow.<namespace>-<serviceId>` (launchd)
+   * so an isolated setup can never collide with the user's real units. Undefined keeps the real names.
+   */
+  namespace?: string;
+}
+
+export interface ServiceUnregisterResult {
+  /** Unit files removed by this call (empty when nothing was registered). */
+  ownedPaths: string[];
+  diagnostics: string[];
+}
+
 export interface ServiceManager {
   readonly kind: "systemd-user" | "launchd" | "windows-unverified";
+  /** Isolation namespace in effect, or undefined for real (non-isolated) unit names. */
+  readonly namespace: string | undefined;
   unitPath(serviceId: string): string;
   render(def: ServiceDefinition): string;
   inspect(serviceId: string): Promise<ServiceInspection>;
@@ -40,9 +58,37 @@ export interface ServiceManager {
   listInstalled(): Promise<string[]>;
   /** Stops and deletes a bflow-marked unit; only used in repair mode. */
   remove(serviceId: string): Promise<{ ownedPaths: string[]; diagnostics: string[] }>;
+  /**
+   * Teardown: disables/stops the unit, removes its bflow-marked unit file and reloads the manager.
+   * Idempotent: unregistering an absent service succeeds with no owned paths.
+   */
+  unregister(serviceId: string): Promise<ServiceUnregisterResult>;
 }
 
 const ID = /^[a-z0-9-]+$/;
+const NAMESPACE = /^[a-z0-9]{1,16}$/;
+
+/**
+ * Stable, short namespace derived from an isolated root directory (sha256 of the resolved path).
+ * Used as `ServiceManagerOptions.namespace` so isolated unit names differ from real ones.
+ */
+export function isolatedServiceNamespace(isolatedRoot: string): string {
+  return createHash("sha256").update(path.resolve(isolatedRoot), "utf8").digest("hex").slice(0, 12);
+}
+
+/** Tears down every bflow-marked unit visible to the manager (used by isolated test/teardown flows). */
+export async function unregisterAllServices(
+  manager: ServiceManager
+): Promise<{ serviceIds: string[]; diagnostics: string[] }> {
+  const serviceIds: string[] = [];
+  const diagnostics: string[] = [];
+  for (const id of await manager.listInstalled()) {
+    const r = await manager.unregister(id);
+    if (r.ownedPaths.length > 0) serviceIds.push(id);
+    diagnostics.push(...r.diagnostics);
+  }
+  return { serviceIds, diagnostics };
+}
 const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const BAD_CHARS = /[\n\r\0]/;
 
@@ -85,18 +131,40 @@ function errMsg(e: unknown): string {
 abstract class FileServiceManager implements ServiceManager {
   abstract readonly kind: "systemd-user" | "launchd";
   protected abstract readonly dir: string;
-  protected abstract idOf(fileName: string): string | null;
-  abstract unitPath(serviceId: string): string;
+  /** Unit-name prefix before the service id: `bflow-` or `bflow-<namespace>-`. */
+  protected abstract readonly prefix: string;
+  /** Unit-name suffix after the service id (`.service`, `.plist`). */
+  protected abstract readonly suffix: string;
   abstract render(def: ServiceDefinition): string;
   protected abstract isActive(serviceId: string): Promise<boolean>;
   protected abstract activate(def: ServiceDefinition, unit: string, replaced: boolean): Promise<string[]>;
-  protected abstract deactivate(serviceId: string, unit: string): Promise<string[]>;
+  /** Disables/stops by unit name. `ignoreFailure` is used when nothing was registered (idempotent teardown). */
+  protected abstract deactivate(serviceId: string, ignoreFailure?: boolean): Promise<string[]>;
+  /** Post-removal manager reload; `ignoreFailure` as above. */
+  protected abstract reloadAfterRemoval(ignoreFailure: boolean): Promise<string[]>;
 
   constructor(
     protected readonly platform: PlatformProfile,
     protected readonly runner: CommandRunner,
-    protected readonly store: SetupStateStore
-  ) {}
+    protected readonly store: SetupStateStore,
+    readonly namespace: string | undefined = undefined
+  ) {
+    if (namespace !== undefined && !NAMESPACE.test(namespace)) throw new Error(`invalid service namespace: ${namespace}`);
+  }
+
+  /** Service id embedded in a unit file name, or null when the file is not a unit of this manager. */
+  protected idOf(fileName: string): string | null {
+    if (!fileName.startsWith(this.prefix) || !fileName.endsWith(this.suffix)) return null;
+    const id = fileName.slice(this.prefix.length, fileName.length - this.suffix.length);
+    return id === "" ? null : id;
+  }
+
+  unitPath(serviceId: string): string {
+    return path.join(this.dir, `${this.prefix}${serviceId}${this.suffix}`);
+  }
+
+  /** Name the OS manager knows the unit by (systemd `<name>.service`, launchd label). */
+  protected abstract labelOf(serviceId: string): string;
 
   /** Runs one argv; returns a diagnostic on failure, null on success. */
   protected async exec(argv: string[], ignoreFailure = false): Promise<string | null> {
@@ -182,7 +250,7 @@ abstract class FileServiceManager implements ServiceManager {
     }
     const b = await this.store.backupFile(unit);
     if (!b.ok) return { ownedPaths: [], diagnostics: [`backup failed: ${b.error.message}`] };
-    const diagnostics = await this.deactivate(serviceId, unit);
+    const diagnostics = await this.deactivate(serviceId);
     try {
       await rm(unit, { force: true });
     } catch (e) {
@@ -190,25 +258,46 @@ abstract class FileServiceManager implements ServiceManager {
     }
     return { ownedPaths: [unit], diagnostics };
   }
+
+  async unregister(serviceId: string): Promise<ServiceUnregisterResult> {
+    if (!ID.test(serviceId)) return { ownedPaths: [], diagnostics: [`invalid service id: ${serviceId}`] };
+    const unit = this.unitPath(serviceId);
+    const existing = await this.read(unit);
+    if (existing !== null && !existing.includes(SERVICE_MARKER)) {
+      return { ownedPaths: [], diagnostics: [`${unit} is not marked as bflow-managed; not removed`] };
+    }
+    const owned = existing !== null;
+    // Disable by name first, while the unit file still exists. When nothing is registered the
+    // manager's "unknown unit" failure is the expected idempotent outcome, so it is not reported.
+    const diagnostics = await this.deactivate(serviceId, !owned);
+    if (owned) {
+      try {
+        await rm(unit, { force: true });
+      } catch (e) {
+        diagnostics.push(`cannot remove ${unit}: ${errMsg(e)}`);
+      }
+    }
+    diagnostics.push(...(await this.reloadAfterRemoval(!owned)));
+    return { ownedPaths: owned ? [unit] : [], diagnostics };
+  }
 }
 
 export class SystemdUserServiceManager extends FileServiceManager {
   readonly kind = "systemd-user" as const;
   protected readonly dir: string;
 
-  constructor(platform: PlatformProfile, runner: CommandRunner, store: SetupStateStore) {
-    super(platform, runner, store);
+  protected readonly prefix: string;
+  protected readonly suffix = ".service";
+
+  constructor(platform: PlatformProfile, runner: CommandRunner, store: SetupStateStore, options: ServiceManagerOptions = {}) {
+    super(platform, runner, store, options.namespace);
     // paths.config is $XDG_CONFIG_HOME/bflow, so its parent is the XDG config home.
     this.dir = path.join(path.dirname(platform.paths.config), "systemd", "user");
+    this.prefix = options.namespace === undefined ? "bflow-" : `bflow-${options.namespace}-`;
   }
 
-  protected idOf(fileName: string): string | null {
-    const m = /^bflow-(.+)\.service$/.exec(fileName);
-    return m ? m[1]! : null;
-  }
-
-  unitPath(serviceId: string): string {
-    return path.join(this.dir, `bflow-${serviceId}.service`);
+  protected labelOf(serviceId: string): string {
+    return `${this.prefix}${serviceId}${this.suffix}`;
   }
 
   render(def: ServiceDefinition): string {
@@ -232,7 +321,7 @@ export class SystemdUserServiceManager extends FileServiceManager {
 
   protected async isActive(serviceId: string): Promise<boolean> {
     try {
-      const r = await this.runner.run(["systemctl", "--user", "is-active", `bflow-${serviceId}.service`], {
+      const r = await this.runner.run(["systemctl", "--user", "is-active", this.labelOf(serviceId)], {
         timeoutMs: 10_000
       });
       return r.exitCode === 0 && r.stdout.trim() === "active";
@@ -246,7 +335,7 @@ export class SystemdUserServiceManager extends FileServiceManager {
       ["systemctl", "--user", "daemon-reload"],
       ["systemctl", "--user", "enable", "--now", unit]
     ];
-    if (replaced) argvs.push(["systemctl", "--user", "try-restart", `bflow-${def.serviceId}.service`]);
+    if (replaced) argvs.push(["systemctl", "--user", "try-restart", this.labelOf(def.serviceId)]);
     for (const argv of argvs) {
       const d = await this.exec(argv);
       if (d !== null) return [d];
@@ -254,11 +343,14 @@ export class SystemdUserServiceManager extends FileServiceManager {
     return [];
   }
 
-  protected async deactivate(serviceId: string): Promise<string[]> {
-    const out: string[] = [];
-    const d = await this.exec(["systemctl", "--user", "disable", "--now", `bflow-${serviceId}.service`]);
-    if (d !== null) out.push(d);
-    return out;
+  protected async deactivate(serviceId: string, ignoreFailure = false): Promise<string[]> {
+    const d = await this.exec(["systemctl", "--user", "disable", "--now", this.labelOf(serviceId)], ignoreFailure);
+    return d === null ? [] : [d];
+  }
+
+  protected async reloadAfterRemoval(ignoreFailure: boolean): Promise<string[]> {
+    const d = await this.exec(["systemctl", "--user", "daemon-reload"], ignoreFailure);
+    return d === null ? [] : [d];
   }
 }
 
@@ -266,18 +358,17 @@ export class LaunchdServiceManager extends FileServiceManager {
   readonly kind = "launchd" as const;
   protected readonly dir: string;
 
-  constructor(platform: PlatformProfile, runner: CommandRunner, store: SetupStateStore) {
-    super(platform, runner, store);
+  protected readonly prefix: string;
+  protected readonly suffix = ".plist";
+
+  constructor(platform: PlatformProfile, runner: CommandRunner, store: SetupStateStore, options: ServiceManagerOptions = {}) {
+    super(platform, runner, store, options.namespace);
     this.dir = path.join(platform.homeDir, "Library", "LaunchAgents");
+    this.prefix = options.namespace === undefined ? "dev.bflow." : `dev.bflow.${options.namespace}-`;
   }
 
-  protected idOf(fileName: string): string | null {
-    const m = /^dev\.bflow\.(.+)\.plist$/.exec(fileName);
-    return m ? m[1]! : null;
-  }
-
-  unitPath(serviceId: string): string {
-    return path.join(this.dir, `dev.bflow.${serviceId}.plist`);
+  protected labelOf(serviceId: string): string {
+    return `${this.prefix}${serviceId}`;
   }
 
   private get domain(): string | null {
@@ -293,7 +384,7 @@ export class LaunchdServiceManager extends FileServiceManager {
       '<plist version="1.0">',
       "<dict>",
       "  <key>Label</key>",
-      `  <string>dev.bflow.${xml(def.serviceId)}</string>`,
+      `  <string>${xml(this.labelOf(def.serviceId))}</string>`,
       "  <key>ProgramArguments</key>",
       "  <array>",
       ...[def.program, ...def.args].map((a) => `    <string>${xml(a)}</string>`),
@@ -319,7 +410,7 @@ export class LaunchdServiceManager extends FileServiceManager {
   protected async isActive(serviceId: string): Promise<boolean> {
     if (this.domain === null) return false;
     try {
-      const r = await this.runner.run(["launchctl", "print", `${this.domain}/dev.bflow.${serviceId}`], {
+      const r = await this.runner.run(["launchctl", "print", `${this.domain}/${this.labelOf(serviceId)}`], {
         timeoutMs: 10_000
       });
       return r.exitCode === 0;
@@ -336,7 +427,7 @@ export class LaunchdServiceManager extends FileServiceManager {
   }
 
   protected async activate(def: ServiceDefinition, unit: string): Promise<string[]> {
-    const target = `${this.domain}/dev.bflow.${def.serviceId}`;
+    const target = `${this.domain}/${this.labelOf(def.serviceId)}`;
     await this.exec(["launchctl", "bootout", target], true);
     const d = await this.exec(["launchctl", "bootstrap", this.domain!, unit]);
     return d === null ? [] : [d];
@@ -344,13 +435,18 @@ export class LaunchdServiceManager extends FileServiceManager {
 
   protected async deactivate(serviceId: string): Promise<string[]> {
     if (this.domain === null) return [];
-    await this.exec(["launchctl", "bootout", `${this.domain}/dev.bflow.${serviceId}`], true);
+    await this.exec(["launchctl", "bootout", `${this.domain}/${this.labelOf(serviceId)}`], true);
+    return [];
+  }
+
+  protected async reloadAfterRemoval(): Promise<string[]> {
     return [];
   }
 }
 
 export class WindowsUnverifiedServiceManager implements ServiceManager {
   readonly kind = "windows-unverified" as const;
+  readonly namespace = undefined;
   unitPath(): string {
     return "";
   }
@@ -369,15 +465,19 @@ export class WindowsUnverifiedServiceManager implements ServiceManager {
   async remove(): Promise<{ ownedPaths: string[]; diagnostics: string[] }> {
     return { ownedPaths: [], diagnostics: [WINDOWS_UNVERIFIED] };
   }
+  async unregister(): Promise<ServiceUnregisterResult> {
+    return { ownedPaths: [], diagnostics: [WINDOWS_UNVERIFIED] };
+  }
 }
 
 export function selectServiceManager(
   platform: PlatformProfile,
   runner: CommandRunner,
-  store: SetupStateStore
+  store: SetupStateStore,
+  options: ServiceManagerOptions = {}
 ): ServiceManager {
-  if (platform.os === "linux") return new SystemdUserServiceManager(platform, runner, store);
-  if (platform.os === "darwin") return new LaunchdServiceManager(platform, runner, store);
+  if (platform.os === "linux") return new SystemdUserServiceManager(platform, runner, store, options);
+  if (platform.os === "darwin") return new LaunchdServiceManager(platform, runner, store, options);
   return new WindowsUnverifiedServiceManager();
 }
 
@@ -437,7 +537,7 @@ export class ServicesComponent implements SetupComponent {
       const i = await this.manager.inspect(s.serviceId);
       if (!i.installed || i.digest === null) continue;
       installed[s.serviceId] = { content: i.digest, active: i.active };
-      if (!i.active) diagnostics.push(`service ${s.serviceId} is installed but not active`);
+      if (!i.active) diagnostics.push(`service ${s.serviceId} (${this.manager.unitPath(s.serviceId)}) is installed but not active`);
     }
     for (const id of await this.stale()) {
       diagnostics.push(`stale bflow unit not in desired set: ${this.manager.unitPath(id)} (reported, not removed)`);
@@ -467,7 +567,8 @@ export class ServicesComponent implements SetupComponent {
       summary:
         errs.length > 0
           ? `Invalid service definitions: ${errs.join("; ")}`
-          : `Install ${this.services.length} user-scope ${this.manager.kind} service unit(s)`,
+          : `Install ${this.services.length} user-scope ${this.manager.kind} service unit(s)` +
+            (this.manager.namespace === undefined ? "" : ` in isolated namespace ${this.manager.namespace}`),
       targets: this.valid().map((s) => this.manager.unitPath(s.serviceId)),
       machineWide: false,
       repairNeeded: false
