@@ -947,7 +947,9 @@ describe("Resilience & Observability Module", () => {
     });
 
     it("is 100% idempotent when ingestDomainEvents is called repeatedly with the same events", () => {
-      const tracker = new ObservabilityTracker();
+      // A fixed clock: an unfinished run's duration is measured against "now", which otherwise moves between reports.
+      const nowTime = new Date("2026-10-16T12:10:00.000Z");
+      const tracker = new ObservabilityTracker({ clock: () => nowTime });
       const runId = "run-idempotent";
 
       const events: DomainEvent[] = [
