@@ -4,6 +4,7 @@ import type { AgenticHostPlatformOptions, HostPrepareResponse, PlatformRoleOptio
 import type { EnvironmentCompositionInput } from "./environment.js";
 import { EnvironmentProviderSchema, type EnvironmentRoleConfig } from "./environment-config.js";
 import { GATEWAY_CONTROL_LOCATOR_FILE } from "./gateway-control.js";
+import { SUPPORTED_CLI_COMMANDS } from "./command-reference.js";
 import { loadMachineSkillCatalog, type MachineSkillCatalog } from "./skill-catalog.js";
 
 /** Machine facts the host needs. Loaded once per startup; no provider is probed here. */
@@ -58,6 +59,7 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
     roles,
     skillsStoreRoot: join(deps.context.dataDirectory, "skills-store"),
     approvedBuiltinSkillDigests: [...deps.context.skills.approvedBuiltinSkillDigests],
+    supportedCommands: [...SUPPORTED_CLI_COMMANDS],
     ...gatewayLocatorPath
   });
 }

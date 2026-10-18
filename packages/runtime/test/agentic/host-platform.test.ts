@@ -7,7 +7,7 @@ import type { PlatformReadinessService, PreparedRoleLaunch, RolePlatformRequirem
 import { tokenEnvironmentName } from "../../src/platform/gateway-registrations.js";
 import type { PlatformRoleOption, AgenticHostPlatformOptions } from "../../src/platform/host-options.js";
 import {
-  HostPlatformSession, PLATFORM_SUPPORTED_COMMANDS, HostPlatformStatusSchema, launchMaterial, liveObservation, requirementFor
+  HostPlatformSession, skillSupportedCommands, HostPlatformStatusSchema, launchMaterial, liveObservation, requirementFor
 } from "../../src/agentic/host-platform.js";
 
 const cleanup: (() => Promise<unknown>)[] = [];
@@ -276,6 +276,7 @@ describe("P30 host platform composition", () => {
       .toEqual({ paneId: "p1", agentName: "coordinator", transportState: "idle", interactiveReady: true, nativeSession: { source: "herdr:codex", kind: "id", value: "n" } });
     expect(liveObservation("p1", { status: "starting" }).interactiveReady).toBe(false);
     expect(liveObservation("p1", { status: "exotic" }).transportState).toBe("unknown");
-    expect(PLATFORM_SUPPORTED_COMMANDS).toContain("skills sync");
+    expect(skillSupportedCommands({ ...platform, supportedCommands: ["skills sync"] })).toEqual(["skills sync"]);
+    expect(skillSupportedCommands(platform)).toEqual([]);
   });
 });

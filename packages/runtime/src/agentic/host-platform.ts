@@ -29,11 +29,10 @@ import {
  */
 
 /** Mirrors the CLI command inventory. Runtime cannot import apps/cli; keep these lists in step. */
-export const PLATFORM_SUPPORTED_COMMANDS = [
-  "help", "version", "init", "up", "down", "attach", "status", "doctor", "recover", "run", "approve", "resume", "cancel",
-  "repo inspect", "task plan", "task implement", "verify", "git prepare", "mcp status", "tool status", "tools status",
-  "skills sync", "skills list", "agent check"
-] as const;
+/** Skill-referenceable commands come from the CLI's command reference via platform options; never a local copy. */
+export function skillSupportedCommands(platform: AgenticHostPlatformOptions): string[] {
+  return [...(platform.supportedCommands ?? [])];
+}
 
 const LIVE_TRANSPORT_STATES = ["starting", "accepted", "idle", "working", "blocked", "done", "unknown", "disconnected", "cancelled"] as const;
 const INTERACTIVE_STATES: readonly string[] = ["idle", "working", "done"];
@@ -504,7 +503,7 @@ export async function createHostPlatformSession(options: CreateHostPlatformSessi
   const platform = AgenticHostPlatformOptionsSchema.parse(options.platform);
   const skillManager = new SkillManager({
     store: new FileSkillStore(platform.skillsStoreRoot),
-    supportedCommands: [...PLATFORM_SUPPORTED_COMMANDS],
+    supportedCommands: skillSupportedCommands(platform),
     approvedBuiltinDigests: [...platform.approvedBuiltinSkillDigests]
   });
 

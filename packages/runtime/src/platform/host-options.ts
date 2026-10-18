@@ -37,6 +37,11 @@ export const AgenticHostPlatformOptionsSchema = z.object({
   /** Root of the machine skill bundle store (`FileSkillStore`). */
   skillsStoreRoot: NonEmptyArgumentSchema,
   approvedBuiltinSkillDigests: z.array(Sha256DigestSchema),
+  /**
+   * Commands skills may reference, owned by the CLI command reference. Absent (older CLI) means none: skills that
+   * reference a command then fail validation instead of being accepted against a guessed list.
+   */
+  supportedCommands: z.array(NonEmptyArgumentSchema).optional(),
   /** Private locator written by the Gateway daemon; absent means no Gateway (roles needing MCP are blocked). */
   gatewayLocatorPath: NonEmptyArgumentSchema.optional()
 }).strict().superRefine((options, ctx) => {
