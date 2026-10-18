@@ -182,6 +182,9 @@ All CLI commands are executed via argv-based `spawn` with `shell: false`. Stderr
 | Create Worktree | `herdr worktree create --workspace <ws_id> --branch <br> --path <path> --label <lbl> --no-focus` | `worktree_created` | `.result.workspace`, `.result.tab`, `.result.root_pane`, `.result.worktree` | Allocate developer in new worktree |
 | Open Worktree | `herdr worktree open --workspace <ws_id> --path <path> --label <lbl> --no-focus` | `worktree_opened` | `.result.workspace`, `.result.tab`, `.result.root_pane`, `.result.worktree` | Allocate developer in existing worktree |
 | Remove Worktree | `herdr worktree remove --workspace <ws_id>` | `worktree_removed` | `.result.workspace_id`, `.result.path` | Clean up developer worktree |
+| Socket: Create Workspace | socket `workspace.create` `{ cwd, label, focus: false, env }` | `workspace_created` result | `.result.workspace`, `.result.tab`, `.result.root_pane` | Env-bearing Conversation workspace (`herdr status server --json` resolves the socket) |
+| Socket: Create Tab | socket `tab.create` `{ workspace_id, cwd, label, focus: false, env }` | `tab_created` result | `.result.tab`, `.result.root_pane` | Env-bearing tab root |
+| Socket: Split Pane | socket `pane.split` `{ target_pane_id, direction, cwd?, focus: false, env }` | `pane_info` result | `.result.pane` | Env-bearing role or Developer pane |
 
 ---
 
@@ -205,10 +208,35 @@ pnpm test
 starts a role from a validated provider launch profile:
 `{ argv, env, launchId, launchFingerprint, provider: "claude" | "codex" | "agy" }`.
 The Herdr command becomes `agent start <name> --kind <provider> --pane <id> [--timeout N] -- <argv...>`.
-`env` is passed only as the spawned invocation environment (`process.env` merged with
-`launch.env`); it is never placed in argv and never persisted. `launchId` and
+`env` is applied at pane creation, never on `agent start`. Live finding (Herdr 0.9.5):
+`herdr agent start` types the provider command into the pane's existing shell, so variables
+passed on the `agent start` invocation do not reach the provider, while env set when a pane is
+created is inherited by its shell. Therefore, a role or Developer whose launch has non-empty
+`env` gets its pane through the Herdr socket API with `env` (`workspace.create` for the
+Conversation root, `tab.create` for a new tab root, `pane.split` for other panes, and
+`pane.split` on the worktree root for Developers, after which that root is closed). The
+`agent start` invocation carries no env. The CLI is never given env, so no token reaches argv
+or CLI env. Env values are never persisted, logged or echoed in errors. `launchId` and
 `launchFingerprint` are recorded in `PaneBinding.metadata` and preserved by reconciliation
-and health refresh. Without `launch`, the legacy `args` path is unchanged.
+and health refresh. Without `launch` or with empty `env`, the existing CLI path is unchanged.
+
+Because env is fixed at creation, a launch never starts in a pane recorded for a different
+launch. For an env-bearing launch, a pane whose `launchId` differs from the new launch (or has
+none) is never reused: it is replaced by a new pane created with the new env, and the old
+Bflow-owned role pane is closed after the replacement exists and before the new agent starts.
+A released Developer pane with another launch's `launchId` is replaced the same way. Panes
+created by this run for a launch may only be taken by that launch; unbound empty shells are
+never adopted by an env-bearing role.
+
+Env-bearing creation requires `RolePaneManagerOptions.socket` (a `HerdrSocketPort`).
+Without it, `initializeTopology`, `reconcileTopology`, `recoverAfterRestart` and
+`allocateDeveloper` return `validation` before any side effect. `createHerdrSocketPort({ runner,
+sessionId })` is the default implementation: it resolves the socket path with
+`herdr status server --json` through the same repository-scoped runner, rejects a socket whose
+`session` differs or which is not `running`, sends one newline-delimited `{ id, method, params }`
+request per call, enforces a 30 s default timeout and a 1 MiB response limit, and maps Herdr
+error codes to `not_found` or `validation` without echoing params or Herdr's message. A timeout
+or lost response is `transport_unavailable` (retryable only after reconciliation).
 
 Validation runs before any Herdr call and returns `validation` on failure: provider must
 equal the configured agent kind; argv items must not contain NUL/newline or look like
@@ -223,8 +251,11 @@ rewritten), and that file is verified as before.
 `inspectRoleHealth` agent/pane inspection. Herdr `done` is turn completion only and is never
 reported as task success.
 
-Limitations: the process-level env delivery to the agent depends on Herdr forwarding the
-`herdr` process environment, which has not been verified against a live Herdr. Reusing an
+Limitations: the pane-creation env delivery (socket `env` is inherited by the pane shell) is
+verified against Herdr 0.9.5 by live finding only; it is not yet covered by a live acceptance
+test. Restart recovery cannot re-create a Developer pane's env because the Developer launch
+profile is not persisted; a recovered Developer is started with the launch supplied to that
+call (none, from recovery). Reusing an
 already-running agent in a pane does not re-record launch metadata (the fingerprint of an
 existing occupant cannot be verified). No live Herdr or provider evidence exists for this
 path; tests use a fake runner (`packages/pane-manager/test/launch-profile.test.ts`).
