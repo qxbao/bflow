@@ -289,6 +289,9 @@ export interface PlatformReadinessService {
     options?: OperationOptions): Promise<OperationResult<PreparedRoleLaunch>>;
   releaseLaunch(launchId: string, options?: OperationOptions): Promise<OperationResult<void>>;
   /** Verifies every seen session's Gateway registrations; lost ones degrade their launches (`assertFresh` then fails). */
+  /** Revoke this session's registrations and release journal intents left by a previous host daemon. */
+  reconcileAfterRestart(identity: PlatformSessionIdentity,
+    options?: OperationOptions): Promise<OperationResult<{ readonly releasedLaunchIds: readonly string[] }>>;
   verifyGateway(options?: OperationOptions): Promise<OperationResult<GatewayRegistrationVerification>>;
   /** Revokes this session's Gateway registrations; never stops shared/external services. */
   shutdown(options?: OperationOptions): Promise<OperationResult<void>>;

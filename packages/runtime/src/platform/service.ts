@@ -332,6 +332,40 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     return ok({ checkedAt, healthy: lost.length === 0 && !uncertain, lost, uncertain });
   }
 
+  /**
+   * After a host daemon restart nothing from the previous daemon is in memory: revoke every Gateway registration of
+   * this session (all generations) and journal `released` for every launch intent left open, so neither a registration
+   * nor a pending intent outlives its daemon. Shared services are never stopped.
+   */
+  async reconcileAfterRestart(identity: PlatformSessionIdentity,
+    options?: OperationOptions): Promise<OperationResult<{ readonly releasedLaunchIds: readonly string[] }>> {
+    if (this.deps.gateway) {
+      const revoked = await this.deps.gateway.revokeSession(identity, options);
+      if (!revoked.ok) return failWith(revoked.error);
+    }
+    const releasedLaunchIds: string[] = [];
+    if (this.deps.journal) {
+      let entries;
+      try { entries = await this.deps.journal.entries(); }
+      catch (error) { return fail("corruption", `launch journal could not be read: ${error instanceof Error ? error.message : String(error)}`); }
+      const open = new Set<string>();
+      for (const entry of entries) {
+        if (entry.kind === "intent") open.add(entry.launchId);
+        else if (entry.kind === "released") open.delete(entry.launchId);
+      }
+      for (const launchId of open) {
+        if (this.launches.get(launchId)?.material !== undefined) continue; // live in this daemon
+        try {
+          await this.deps.journal.append({ kind: "released", launchId, recordedAt: (this.deps.now?.() ?? new Date()).toISOString() });
+        } catch (error) {
+          return fail("corruption", `stale launch ${launchId} could not be journaled released: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        releasedLaunchIds.push(launchId);
+      }
+    }
+    return ok({ releasedLaunchIds });
+  }
+
   async shutdown(options?: OperationOptions): Promise<OperationResult<void>> {
     const gateway = this.deps.gateway;
     const failures: ContractError[] = [];

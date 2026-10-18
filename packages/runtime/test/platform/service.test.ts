@@ -390,6 +390,24 @@ describe("DefaultPlatformReadinessService", () => {
     expect(await journalKinds(journal)).toEqual(["intent", "released"]);
   });
 
+  it("retires a previous daemon's launches and registrations after restart", async () => {
+    const before = buildService();
+    const prepared = await before.service.prepareSession(identity, [requirement({ mcpServiceIds: ["svc-search"] })]);
+    if (!prepared.ok) throw new Error(JSON.stringify(prepared.error));
+    expect(gatewayControl.registrations.size).toBe(1);
+
+    // A new daemon: fresh in-memory service over the same journal, ledger and Gateway.
+    const after = buildService();
+    const recovered = await after.service.reconcileAfterRestart(identity);
+    if (!recovered.ok) throw new Error(JSON.stringify(recovered.error));
+    expect(recovered.value.releasedLaunchIds).toEqual([prepared.value.launches[0]?.launch.launchId]);
+    expect(gatewayControl.registrations.size).toBe(0);
+    expect(await journalKinds(after.journal)).toEqual(["intent", "released"]);
+    // Idempotent: nothing left to retire.
+    const again = await after.service.reconcileAfterRestart(identity);
+    expect(again.ok && again.value.releasedLaunchIds).toEqual([]);
+  });
+
   it("revokes every session registration on shutdown", async () => {
     const { service, journal } = buildService();
     const prepared = await service.prepareSession(identity, [requirement({ mcpServiceIds: ["svc-search"] })]);

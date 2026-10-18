@@ -70,6 +70,8 @@ export const HostPlatformStatusSchema = z.object({
     launches: z.array(PlatformStatusLaunchSchema)
   }).strict(),
   gatewayDiagnostic: z.string().nullable(),
+  /** Launches retired because the host daemon restarted (their material was in the previous daemon's memory). */
+  restartRecovery: z.object({ recoveredAt: z.string(), releasedLaunchIds: z.array(z.string().min(1)) }).strict().optional(),
   /** Last Gateway registration reconciliation (F5); lost registrations degrade their launches until relaunch. */
   gateway: z.object({
     checkedAt: z.string(),
@@ -213,6 +215,7 @@ export class HostPlatformSession {
   /** Active Developer launches by launch id: the reachability the launch must prove, or null without Gateway registrations. */
   private readonly developerGates = new Map<string, ReachabilityExpectation | null>();
   private gatewayCheck: NonNullable<HostPlatformStatus["gateway"]> | undefined;
+  private restartRecovery: { readonly recoveredAt: string; readonly releasedLaunchIds: readonly string[] } | undefined;
 
   constructor(private readonly options: HostPlatformSessionOptions) {}
 
@@ -389,6 +392,32 @@ export class HostPlatformSession {
     return this.gatewayCheck;
   }
 
+  /**
+   * Called once when a daemon starts. A previous daemon's launches cannot be re-proven (their profiles and tokens were
+   * in memory), so they are retired: Gateway registrations revoked, open intents journaled released, probe plans and
+   * reachability records removed. Activation then requires a fresh `bflow up`, which says so explicitly.
+   */
+  async recoverPreviousDaemon(): Promise<void> {
+    let previous: z.infer<typeof LaunchesFileSchema> = {};
+    try { previous = LaunchesFileSchema.parse(JSON.parse(await readFile(this.options.launchesFile, "utf8"))); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    let generation = 0;
+    try { generation = GenerationSchema.parse(JSON.parse(await readFile(this.options.generationFile, "utf8"))).generation; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    if (generation === 0) return; // never prepared: nothing to retire
+    const identity: PlatformSessionIdentity = {
+      machineId: this.options.platform.machineId, repositoryId: this.options.platform.repositoryId,
+      workspaceRoot: this.options.repositoryPath, sessionId: this.options.sessionId, generation,
+      stateDirectory: this.options.stateDirectory
+    };
+    const result = await this.options.service.reconcileAfterRestart(identity);
+    if (!result.ok) throw new Error(`Previous host daemon's platform launches could not be retired: ${describeFailure(result.error)}`);
+    const launchIds = new Set([...Object.values(previous).map(launch => launch.launchId), ...result.value.releasedLaunchIds]);
+    for (const launchId of launchIds) await this.removeLaunchArtifacts(launchId);
+    if (Object.keys(previous).length) await writePrivateAtomic(this.options.launchesFile, JSON.stringify({}));
+    this.restartRecovery = { recoveredAt: new Date().toISOString(), releasedLaunchIds: [...launchIds] };
+  }
+
   /** Launches that must not receive new prompts: permanent roles by name, Developers by launch id. */
   degradation(): { readonly roles: readonly string[]; readonly launchIds: readonly string[] } {
     const degraded = this.options.service.status().launches.filter(launch => launch.state === "degraded");
@@ -414,7 +443,9 @@ export class HostPlatformSession {
         }))
       },
       gatewayDiagnostic: this.options.gatewayDiagnostic ?? null,
-      ...(this.gatewayCheck !== undefined ? { gateway: this.gatewayCheck } : {})
+      ...(this.gatewayCheck !== undefined ? { gateway: this.gatewayCheck } : {}),
+      ...(this.restartRecovery !== undefined
+        ? { restartRecovery: { recoveredAt: this.restartRecovery.recoveredAt, releasedLaunchIds: [...this.restartRecovery.releasedLaunchIds] } } : {})
     };
   }
 
@@ -507,7 +538,7 @@ export async function createHostPlatformSession(options: CreateHostPlatformSessi
     nativeSessionHookCommand: role => options.nativeSessionHookCommand(role),
     hostLaunch: role => options.hostLaunch(role)
   });
-  return new HostPlatformSession({
+  const session = new HostPlatformSession({
     service,
     platform,
     repositoryPath: options.repositoryPath,
@@ -520,6 +551,8 @@ export async function createHostPlatformSession(options: CreateHostPlatformSessi
     hostCapabilities: options.hostCapabilities,
     ...(gatewayDiagnostic !== undefined ? { gatewayDiagnostic } : {})
   });
+  await session.recoverPreviousDaemon();
+  return session;
 }
 
 /** Writes `host.json` with a new platform block, keeping socket, token and directory. Caller holds the boot lock. */

@@ -207,6 +207,29 @@ describe("P30 host platform composition", () => {
     expect(host.degradation()).toEqual({ roles: [], launchIds: [] });
   });
 
+  it("retires a previous daemon's launches on startup and reports it", async () => {
+    const retired: string[] = [];
+    const service = fakeService({ reconcileAfterRestart: async () => { retired.push("reconcile");
+      return { ok: true, value: { releasedLaunchIds: ["launch-old-dev"] } }; } });
+    const first = await session(service);
+    await first.host.prepare();
+    // A new daemon over the same files.
+    const second = new HostPlatformSession(first.options);
+    await second.recoverPreviousDaemon();
+    expect(retired).toEqual(["reconcile"]);
+    expect(JSON.parse(await readFile(first.options.launchesFile, "utf8"))).toEqual({});
+    expect(second.status().restartRecovery?.releasedLaunchIds.sort()).toEqual(["launch-conv", "launch-coord", "launch-old-dev"]);
+  });
+
+  it("does nothing on startup when the platform was never prepared", async () => {
+    const retired: string[] = [];
+    const service = fakeService({ reconcileAfterRestart: async () => { retired.push("reconcile"); return { ok: true, value: { releasedLaunchIds: [] } }; } });
+    const { host } = await session(service);
+    await host.recoverPreviousDaemon();
+    expect(retired).toEqual([]);
+    expect(host.status().restartRecovery).toBeUndefined();
+  });
+
   it("releases the previous launch when the same task is allocated again", async () => {
     const service = fakeService();
     const { host } = await session(service);
