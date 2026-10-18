@@ -459,12 +459,15 @@ export class AgenticWorkflowRuntime {
       ...(answer.reason !== undefined ? { reason: answer.reason } : {}) });
     await save();
   }
-  private expireUserDecision(state: JournalState, outbox: HerdrOutbox, run: RunRecord, entry: UserDecisionRecord): void {
-    entry.status = "expired";
-    // Conversation must drop the prompt, otherwise the user keeps answering a question Runtime no longer accepts.
+  /** Conversation must drop the prompt, otherwise the user keeps answering a question Runtime no longer accepts. */
+  private notifyUserDecisionClosed(state: JournalState, outbox: HerdrOutbox, run: RunRecord, entry: UserDecisionRecord): void {
     this.emit(state, outbox, run, "conversation.progress", { kind: USER_DECISION_EXPIRED_KIND, approvalId: entry.request.approvalId,
       requestedByRole: entry.role, taskId: entry.taskId, headline: `User decision expired [${entry.request.approvalId}]` },
     `user-decision-expired:${entry.request.approvalId}`, "conversation");
+  }
+  private expireUserDecision(state: JournalState, outbox: HerdrOutbox, run: RunRecord, entry: UserDecisionRecord): void {
+    entry.status = "expired";
+    this.notifyUserDecisionClosed(state, outbox, run, entry);
     this.resumeUserDecisionAsker(outbox, run, entry, { kind: "user_decision_answer", approvalId: entry.request.approvalId, outcome: "expired" });
   }
   private expireUserDecisions(state: JournalState, outbox: HerdrOutbox): boolean {
@@ -473,8 +476,9 @@ export class AgenticWorkflowRuntime {
     for (const run of state.runs) for (const entry of Object.values(run.userDecisions ?? {})) {
       if (entry.status !== "pending") continue;
       if (run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) {
-        // A terminal run never resumes its askers or notifies Conversation; its decisions close silently.
+        // A terminal run never resumes its askers, but Conversation still drops the now-unanswerable prompt.
         entry.status = run.cancelled ? "cancelled" : "expired"; changed = true;
+        this.notifyUserDecisionClosed(state, outbox, run, entry);
       } else if (entry.request.expiresAt !== undefined && now >= Date.parse(entry.request.expiresAt)) {
         this.expireUserDecision(state, outbox, run, entry); changed = true;
       }

@@ -352,7 +352,7 @@ describe.skipIf(process.platform !== "linux")("P30 user decisions end to end", (
     expect((await outbound(runtime)).some(entry => entry.message.type === "approval.decision")).toBe(false);
   });
 
-  it("closes the decisions of a completed or cancelled run silently without resuming askers", async () => {
+  it("closes the decisions of a completed or cancelled run without resuming askers and tells Conversation", async () => {
     const f = await fixture(); const runtime = f.runtime();
     const completedId = await request(runtime, f.developer);
     await runtime.flushOutbound();
@@ -360,10 +360,12 @@ describe.skipIf(process.platform !== "linux")("P30 user decisions end to end", (
     await runtime.tick(); await runtime.flushOutbound();
     expect(await userDecisions(runtime, completedId)).toMatchObject({ status: "expired" });
     expect(sentTo(f.transport, "developer", "task.status")).toHaveLength(0);
-    expect((await outbound(runtime)).some(entry => (entry.message.payload as { kind?: string }).kind === "user_decision_expired")).toBe(false);
+    // Askers of a dead run are never resumed, but Conversation must drop the now-unanswerable prompt.
+    expect((await outbound(runtime)).filter(entry => (entry.message.payload as { kind?: string }).kind === "user_decision_expired" &&
+      entry.message.recipient.role === "conversation")).toHaveLength(1);
   });
 
-  it("marks decisions of a cancelled run as cancelled without a Conversation notice", async () => {
+  it("marks decisions of a cancelled run as cancelled and tells Conversation to drop the prompt", async () => {
     const f = await fixture(); const runtime = f.runtime();
     const approvalId = await request(runtime, f.developer);
     await runtime.flushOutbound();
@@ -371,6 +373,8 @@ describe.skipIf(process.platform !== "linux")("P30 user decisions end to end", (
     await runtime.tick(); await runtime.flushOutbound();
     expect(await userDecisions(runtime, approvalId)).toMatchObject({ status: "cancelled" });
     expect(sentTo(f.transport, "developer", "task.status")).toHaveLength(0);
-    expect((await outbound(runtime)).some(entry => (entry.message.payload as { kind?: string }).kind === "user_decision_expired")).toBe(false);
+    // Askers of a dead run are never resumed, but Conversation must drop the now-unanswerable prompt.
+    expect((await outbound(runtime)).filter(entry => (entry.message.payload as { kind?: string }).kind === "user_decision_expired" &&
+      entry.message.recipient.role === "conversation")).toHaveLength(1);
   });
 });
