@@ -6,7 +6,7 @@ import { SetupApplyRequestSchema, SetupReceiptSchema, SetupStepSchema, ToolInsta
   type ToolInstallRequest, type ToolInstaller } from "@bflow/contracts";
 import { ManagedToolInstaller, ManagedToolPinSchema, type ManagedToolPin, type ToolInspection, type ProviderPluginAdapter, type ToolHost } from "./installer.js";
 import { OfficialProviderPluginAdapter } from "./provider-plugins.js";
-import type { NativeProvider, NativeRuntimeOptions } from "./native-runtime.js";
+import { isolatedProviderEnvironment, isolationSupports, type NativeProvider, type NativeRuntimeOptions } from "./native-runtime.js";
 import { resolveMemoryProvider, SubscriptionLoginRequiredError, SUBSCRIPTION_LOGIN_REQUIRED } from "./memory-provider.js";
 import { systemToolHost } from "./installer.js";
 
@@ -21,6 +21,8 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
   readonly #configuration: Omit<NativeRuntimeOptions, "managedRoot"> | undefined;
   readonly #providerPlugin: ProviderPluginAdapter | undefined;
   readonly #children: { provider: NativeProvider; pin: ManagedToolPin; installer: ManagedToolInstaller }[];
+  /** Providers that isolated setup cannot confine; they are never activated and keep the step blocked. */
+  readonly #deferred: readonly NativeProvider[];
   constructor(options: { managedRoot: string; pin: ManagedToolPin; providers: readonly NativeProvider[];
     host?: ToolHost; configuration?: Omit<NativeRuntimeOptions, "managedRoot">; providerPlugin?: ProviderPluginAdapter }) {
     const pin = ManagedToolPinSchema.parse(options.pin);
@@ -29,7 +31,9 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
     if (!options.providers.length || new Set(options.providers).size !== options.providers.length) throw Error("Unique selected providers required");
     const host = options.host ?? systemToolHost;
     this.#host = host; this.#configuration = options.configuration; this.#providerPlugin = options.providerPlugin;
-    this.#children = options.providers.map(provider => {
+    const isolation = options.configuration?.isolation;
+    this.#deferred = options.providers.filter(provider => !isolationSupports(isolation, provider));
+    this.#children = options.providers.filter(provider => isolationSupports(isolation, provider)).map(provider => {
       const childPin = ManagedToolPinSchema.parse({ ...pin, installerId: `${pin.installerId}-${provider}`, recipe: { kind: "provider_plugin", provider } });
       return { provider, pin: childPin, installer: new ManagedToolInstaller({ managedRoot: this.#root, pins: [childPin], host,
         providerPlugin: options.providerPlugin ?? new OfficialProviderPluginAdapter({ host,
@@ -37,6 +41,15 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
     });
   }
   #fail<T>(message: string): OperationResult<T> { return { ok: false, error: { code: "validation", retryable: false, message } }; }
+  #deferredDiagnostics(): string[] {
+    return this.#deferred.map(provider => `${provider}: native plugin activation is deferred because isolated setup cannot confine this provider's configuration; owner action is required outside isolation`);
+  }
+  /** Real mode forwards only an inherited CODEX_HOME; isolated mode forces the isolated provider homes. */
+  #memoryEnvironment(): { environment?: Readonly<Record<string, string>> } {
+    const isolated = isolatedProviderEnvironment(this.#configuration?.isolation);
+    if (isolated) return { environment: isolated };
+    return process.env.CODEX_HOME ? { environment: { CODEX_HOME: process.env.CODEX_HOME } } : {};
+  }
   /** A missing subscription login is an owner action carried in error details, not a machine failure. */
   #ownerAction<T>(message: string): OperationResult<T> {
     return { ok: false, error: { code: "validation", retryable: false, message, details: { ownerAction: SUBSCRIPTION_LOGIN_REQUIRED } } };
@@ -44,12 +57,12 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
   async #childSteps(request: ToolInstallRequest): Promise<OperationResult<{ provider: NativeProvider; installer: ManagedToolInstaller; step: SetupStep }[]>> {
     const plans: { provider: NativeProvider; installer: ManagedToolInstaller; step: SetupStep }[] = [];
     let selected: Awaited<ReturnType<typeof resolveMemoryProvider>> | undefined;
-    const home = this.#configuration?.homeDirectory ?? homedir();
+    const home = this.#configuration?.isolation?.homeDirectory ?? this.#configuration?.homeDirectory ?? homedir();
     const memory = this.#configuration?.memory ?? { dataDir: join(home, ".claude-mem"), projectRoot: process.cwd(), project: process.cwd() };
     if (this.#pin.toolId === "claude-mem") {
       try { selected = await resolveMemoryProvider({ provider: memory.provider ?? "auto", homeDirectory: home, dataDir: memory.dataDir,
         host: this.#host, ...(this.#configuration?.executables ? { executables: this.#configuration.executables } : {}),
-        ...(process.env.CODEX_HOME ? { environment: { CODEX_HOME: process.env.CODEX_HOME } } : {}) }); }
+        ...this.#memoryEnvironment() }); }
       catch (error) {
         if (error instanceof SubscriptionLoginRequiredError) return this.#ownerAction(error.message);
         return this.#fail(error instanceof Error ? error.message : "Claude-Mem subscription login could not be verified");
@@ -87,7 +100,7 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
     if (!planned.ok) return planned;
     const children = await this.#childSteps(planned.value.toolInstall!);
     if (!children.ok) return children;
-    const diagnostics: string[] = [], ownedPaths: string[] = [];
+    const diagnostics: string[] = [...this.#deferredDiagnostics()], ownedPaths: string[] = [];
     for (const child of children.value) {
       const result = await child.installer.inspect(child.step.toolInstall!, options);
       if (!result.ok) return result;
@@ -95,7 +108,8 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
       ownedPaths.push(...result.value.ownedPaths);
       if (result.value.status !== "already_satisfied") return { ok: true, value: { status: result.value.status, diagnostics, ownedPaths } };
     }
-    return { ok: true, value: { status: "already_satisfied", diagnostics, ownedPaths } };
+    // A deferred provider is never satisfied; reporting it as satisfied would make doctor pass unverified native state.
+    return { ok: true, value: { status: this.#deferred.length ? "blocked" : "already_satisfied", diagnostics, ownedPaths } };
   }
   async #run(raw: SetupApplyRequest, apply: boolean, options?: OperationOptions): Promise<OperationResult<SetupReceipt>> {
     const parsed = SetupApplyRequestSchema.safeParse(raw);
@@ -110,7 +124,7 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
     if (!childSteps.ok) return childSteps;
     const currentDigest = createHash("sha256").update(JSON.stringify(childSteps.value.map(child => child.step))).digest("hex");
     if (currentDigest !== request.step.desiredStateDigest) return this.#fail("Native subscription route changed after plan validation; create a new approved plan");
-    const receipts: SetupReceipt[] = [], diagnostics: string[] = [];
+    const receipts: SetupReceipt[] = [], diagnostics: string[] = [...this.#deferredDiagnostics()];
     let status: SetupReceipt["status"] = "already_satisfied";
     for (const child of childSteps.value) {
       const input = SetupApplyRequestSchema.parse({ ...request, step: child.step });
@@ -121,6 +135,7 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
       if (result.value.status === "applied") status = "applied";
       else if (result.value.status !== "already_satisfied") { status = result.value.status; break; }
     }
+    if (this.#deferred.length && (status === "applied" || status === "already_satisfied")) status = "blocked";
     return { ok: true, value: SetupReceiptSchema.parse({ schemaVersion: 3, receiptId: randomUUID(), planId: request.planId,
       planDigest: request.planDigest, stepId: request.step.stepId, scope: request.step.scope, status,
       desiredStateDigest: request.step.desiredStateDigest,

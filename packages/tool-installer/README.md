@@ -88,7 +88,11 @@ bound to the approved native desired-state digest; account-route drift invalidat
 plan before installation. Models already saved in memory settings are preserved. Host
 mode requires an existing external loopback observer only when explicitly selected. Unknown native delivery remains retained
 and is never automatically replayed. Native provider config changes require the machine
-setup approval. `additionalToolObservations` supplies functional native readiness to the
+setup approval. Isolated setup passes `NativeRuntimeOptions.isolation` (HOME plus
+`CLAUDE_CONFIG_DIR` for Claude and `CODEX_HOME` for Codex) to every provider child process, and
+reads provider config only from those directories. Agy has no documented isolation variable, so
+isolated setup defers its native activation and reports the step as `blocked` (fail closed).
+Real setup passes no isolation and keeps the caller environment unchanged. `additionalToolObservations` supplies functional native readiness to the
 machine setup doctor without pretending that plugin files are standalone executables. MCP launch requirements are returned separately for Runtime/Gateway scope,
 Chrome profile isolation and verified index setup; installing a server does not register
 or start it. Binary version checks do not establish live SDLC readiness.
