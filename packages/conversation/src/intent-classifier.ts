@@ -10,7 +10,7 @@ import type {
   WorkflowRequestContext,
   WorkflowRequestKind
 } from "./types.js";
-import { isUserDecisionRequest, resolveUserDecisionReply } from "./user-decision.js";
+import { isExpiredUserDecision, isUserDecisionRequest, resolveUserDecisionReply } from "./user-decision.js";
 
 const ZERO_WIDTH_STRIP_REGEX = /[\u200B-\u200D\uFEFF\u00AD]/g;
 
@@ -99,8 +99,14 @@ function detectApproval(
 ): { matched: boolean; result?: IntentClassificationResult } {
   const norm = normalizeForMatching(rawContent);
 
-  const pendingApprovalKeys = Object.keys(context.pendingApprovals);
-  const activeApprovalIds = context.session.activeApprovalIds ?? [];
+  // Specialist user decisions are answered through detectUserDecision; they must never become the
+  // implicit target of a design/task approval ("approve" without an id).
+  const isUserDecisionId = (id: string): boolean => {
+    const request = context.pendingApprovals[id];
+    return request !== undefined && isUserDecisionRequest(request);
+  };
+  const pendingApprovalKeys = Object.keys(context.pendingApprovals).filter((id) => !isUserDecisionId(id));
+  const activeApprovalIds = (context.session.activeApprovalIds ?? []).filter((id) => !isUserDecisionId(id));
   const hasPendingApprovals =
     pendingApprovalKeys.length > 0 ||
     activeApprovalIds.length > 0 ||
@@ -177,8 +183,13 @@ function detectUserDecision(
   rawContent: string,
   context: ConversationContextSnapshot
 ): { matched: boolean; result?: IntentClassificationResult } {
-  const pending = Object.values(context.pendingApprovals).filter((request) => isUserDecisionRequest(request));
-  if (pending.length === 0) return { matched: false };
+  const userDecisions = Object.values(context.pendingApprovals).filter((request) => isUserDecisionRequest(request));
+  if (userDecisions.length === 0) return { matched: false };
+  // Expired requests do not count. When all of them have expired, keep them so the gateway refuses the reply with its expiry error.
+  const now = Date.now();
+  const live = userDecisions.filter((request) => !isExpiredUserDecision(request, now));
+  const pending = live.length > 0 ? live : userDecisions;
+  const designApprovalPending = Object.values(context.pendingApprovals).some((request) => !isUserDecisionRequest(request));
 
   const explicitId = extractExplicitId(rawContent, "apr-");
   if (explicitId !== undefined && !pending.some((request) => request.approvalId === explicitId)) {
@@ -188,6 +199,8 @@ function detectUserDecision(
 
   const target = pending.length === 1 ? pending[0] : pending.find((request) => request.approvalId === explicitId);
   if (!target) {
+    // A design/task approval is also waiting and the reply names no request: it belongs to that approval path.
+    if (designApprovalPending) return { matched: false };
     return {
       matched: true,
       result: {
@@ -212,6 +225,12 @@ function detectUserDecision(
     ? rawContent.replace(explicitId, "").replace(/^[\s:,-]+|[\s:,-]+$/g, "")
     : rawContent;
   const resolution = resolveUserDecisionReply(target, answerText);
+  // While a design/task approval is also pending, only an explicit id or an exact option claims the reply.
+  // Anything else (reject words, free text, ambiguous numbers) is left to the approval path.
+  const matchesOption = resolution.kind === "answer" && resolution.selectedOption !== undefined;
+  if (designApprovalPending && explicitId === undefined && !matchesOption) {
+    return { matched: false };
+  }
   if (resolution.kind === "ambiguous") {
     return {
       matched: true,

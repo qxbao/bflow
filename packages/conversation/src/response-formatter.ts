@@ -1,5 +1,5 @@
 import { ConversationMessageSchema } from "@bflow/contracts";
-import { isUserDecisionRequest, renderUserDecisionPrompt } from "./user-decision.js";
+import { isUserDecisionRequest, renderUserDecisionExpiredNotice, renderUserDecisionPrompt, userDecisionExpiredApprovalId } from "./user-decision.js";
 
 import type {
   ConversationContextSnapshot,
@@ -145,7 +145,9 @@ export function formatCoordinatorMessageForUser(params: {
   const type = params.roleMessage.type;
   const runId = params.roleMessage.run_id;
 
-  const substantive = isSubstantiveCoordinatorUpdate(
+  // An expired user decision always reaches the user, whatever the progress fingerprint says.
+  const expiredApprovalId = userDecisionExpiredApprovalId(params.roleMessage.type, params.roleMessage.payload);
+  const substantive = expiredApprovalId !== undefined || isSubstantiveCoordinatorUpdate(
     params.roleMessage,
     params.workflow?.lastProgress
   );
@@ -171,8 +173,13 @@ export function formatCoordinatorMessageForUser(params: {
   let messageIntent: ConversationMessage["intent"] = "progress_update";
   let formattedContent = "";
 
+  // 0. Expired user decision notice from Runtime
+  if (expiredApprovalId !== undefined) {
+    messageIntent = "progress_update";
+    formattedContent = renderUserDecisionExpiredNotice(expiredApprovalId);
+  }
   // 1. Approval request (specialist user decisions are rendered as questions)
-  if (type === "approval.request" && isUserDecisionRequest(p)) {
+  else if (type === "approval.request" && isUserDecisionRequest(p)) {
     messageIntent = "approval_prompt";
     formattedContent = renderUserDecisionPrompt(p);
   }

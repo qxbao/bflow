@@ -327,4 +327,50 @@ describe.skipIf(process.platform !== "linux")("P30 user decisions end to end", (
     expect(await runtime.inspect(RUN)).toMatchObject({ status: "failed", error: "Not this design" });
     expect(sentTo(f.transport, "developer", "task.status")).toHaveLength(0);
   });
+
+  it("tells Conversation about an expired decision, which then drops the prompt and says so", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.now(); vi.setSystemTime(start);
+    const f = await fixture(); const runtime = f.runtime();
+    const approvalId = await request(runtime, f.developer, { expiresInMinutes: 1 });
+    await runtime.flushOutbound();
+    const host = await f.chat(runtime);
+    await host.receiveHerdr(await promptOf(runtime));
+    vi.setSystemTime(start + 2 * 60_000);
+    await runtime.tick(); await runtime.flushOutbound();
+
+    const notice = sentTo(f.transport, "conversation", "conversation.progress")
+      .map(request => JSON.parse(request.instruction) as RoleMessage)
+      .find(message => (message.payload as { kind?: string }).kind === "user_decision_expired");
+    expect(notice).toMatchObject({ type: "conversation.progress", recipient: { role: "conversation" },
+      payload: { kind: "user_decision_expired", approvalId } });
+
+    const result = await host.receiveHerdr(notice) as { value: { userNotification?: { content: string } } };
+    expect(result.value.userNotification?.content).toContain("HẾT HẠN");
+    const late = await reply(host, "1", "reply-after-notice");
+    expect(late.value?.approvalDecision).toBeUndefined();
+    expect((await outbound(runtime)).some(entry => entry.message.type === "approval.decision")).toBe(false);
+  });
+
+  it("closes the decisions of a completed or cancelled run silently without resuming askers", async () => {
+    const f = await fixture(); const runtime = f.runtime();
+    const completedId = await request(runtime, f.developer);
+    await runtime.flushOutbound();
+    await f.journal.exclusive(async (state, save) => { state.runs[0]!.status = "completed"; await save(); });
+    await runtime.tick(); await runtime.flushOutbound();
+    expect(await userDecisions(runtime, completedId)).toMatchObject({ status: "expired" });
+    expect(sentTo(f.transport, "developer", "task.status")).toHaveLength(0);
+    expect((await outbound(runtime)).some(entry => (entry.message.payload as { kind?: string }).kind === "user_decision_expired")).toBe(false);
+  });
+
+  it("marks decisions of a cancelled run as cancelled without a Conversation notice", async () => {
+    const f = await fixture(); const runtime = f.runtime();
+    const approvalId = await request(runtime, f.developer);
+    await runtime.flushOutbound();
+    await f.journal.exclusive(async (state, save) => { state.runs[0]!.status = "cancelled"; state.runs[0]!.cancelled = true; await save(); });
+    await runtime.tick(); await runtime.flushOutbound();
+    expect(await userDecisions(runtime, approvalId)).toMatchObject({ status: "cancelled" });
+    expect(sentTo(f.transport, "developer", "task.status")).toHaveLength(0);
+    expect((await outbound(runtime)).some(entry => (entry.message.payload as { kind?: string }).kind === "user_decision_expired")).toBe(false);
+  });
 });

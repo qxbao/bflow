@@ -267,7 +267,7 @@ describe("P30 T8 conversation user-decision relay", () => {
       } as RoleMessage;
       const prompted = await gateway.handleCoordinatorRoleMessage(runtimeMessage);
       if (!prompted.ok) throw new Error(prompted.error.message);
-      return { gateway, transport };
+      return { gateway, transport, correlationId: start.value.correlationId };
     }
 
     it("sends the user's option reply to Coordinator as a user-scoped approval.decision", async () => {
@@ -309,6 +309,144 @@ describe("P30 T8 conversation user-decision relay", () => {
       expect(late.ok).toBe(false);
       if (late.ok) return;
       expect(late.error.message).toContain("expired");
+    });
+
+    it("drops an expired prompt on Runtime's expiry notice and tells the user", async () => {
+      const request = userDecisionRequest({ runId: "run-gw-4" });
+      const { gateway, correlationId } = await openGatewayWithDecision(request);
+      expect(gateway.getContextSnapshot().pendingApprovals[request.approvalId]).toBeDefined();
+
+      const notice = await gateway.handleCoordinatorRoleMessage({
+        schema_version: 2,
+        message_id: `p19-expired-${request.approvalId}`,
+        correlation_id: correlationId,
+        run_id: request.runId,
+        sender: { role: "coordinator" },
+        recipient: { role: "conversation", agent_id: "chat", pane_id: "pane-chat" },
+        type: "conversation.progress",
+        payload: { kind: "user_decision_expired", approvalId: request.approvalId, requestedByRole: "developer", taskId: "task-7" },
+        artifact_references: []
+      } as RoleMessage);
+      expect(notice.ok).toBe(true);
+      if (!notice.ok) return;
+      expect(notice.value.userNotification?.content).toContain("HẾT HẠN");
+      expect(gateway.getContextSnapshot().pendingApprovals[request.approvalId]).toBeUndefined();
+      expect(gateway.getContextSnapshot().session.activeApprovalIds).not.toContain(request.approvalId);
+
+      const late = await gateway.handleUserTurn(turn("1"));
+      expect(late.ok && late.value.approvalDecision).toBeFalsy();
+    });
+
+    it("never drops a design approval on an expiry notice that names a non-user request", async () => {
+      const request = userDecisionRequest({ runId: "run-gw-5" });
+      const { gateway, correlationId } = await openGatewayWithDecision(request);
+      await gateway.handleCoordinatorRoleMessage({
+        schema_version: 2,
+        message_id: "p19-expired-design",
+        correlation_id: correlationId,
+        run_id: request.runId,
+        sender: { role: "coordinator" },
+        recipient: { role: "conversation", agent_id: "chat", pane_id: "pane-chat" },
+        type: "conversation.progress",
+        payload: { kind: "user_decision_expired", approvalId: "apr-design-1" },
+        artifact_references: []
+      } as RoleMessage);
+      expect(gateway.getContextSnapshot().pendingApprovals[request.approvalId]).toBeDefined();
+    });
+  });
+
+  describe("expired entries and design approvals sharing the queue", () => {
+    function expiredRequest(overrides: Partial<ApprovalRequest> = {}, metadataOverrides: Record<string, unknown> = {}): ApprovalRequest {
+      return userDecisionRequest({
+        approvalId: "apr-user-decision-expired",
+        runId: "run-ud-old",
+        expiresAt: new Date(Date.now() - 60_000).toISOString(),
+        ...overrides
+      }, metadataOverrides);
+    }
+
+    function designApproval(): ApprovalRequest {
+      return {
+        schemaVersion: 2,
+        approvalId: "apr-design-1",
+        runId: "run-ud-1",
+        sessionId: SESSION_ID,
+        status: "pending",
+        target: { type: "task", taskId: "task-7" },
+        revision: 1,
+        generation: 0,
+        requestedBy: "runtime",
+        requestedAt: new Date(Date.now() - 60_000).toISOString(),
+        reason: "Approve the design",
+        evidence: [],
+        idempotencyKey: "design-approval-1",
+        metadata: {}
+      } as ApprovalRequest;
+    }
+
+    it("does not count an expired user decision as one of several pending questions", () => {
+      const live = userDecisionRequest();
+      const expired = expiredRequest({}, { question: "Which cache?", options: ["Redis", "Memory"] });
+      const context = {
+        ...contextWith(live),
+        pendingApprovals: { [live.approvalId]: live, [expired.approvalId]: expired }
+      } as unknown as ConversationContextSnapshot;
+
+      const result = classifyUserIntent(turn("2"), context);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.intent).toBe("approval_response");
+      expect(result.value.approvalInput).toMatchObject({ approvalId: live.approvalId, selectedOption: "Postgres" });
+    });
+
+    it("lets a design approval receive 'approve' while a user decision is also pending", () => {
+      const question = userDecisionRequest();
+      const design = designApproval();
+      const context = {
+        ...contextWith(question),
+        session: { ...contextWith(question).session, activeApprovalIds: [question.approvalId, design.approvalId] },
+        pendingApprovals: { [question.approvalId]: question, [design.approvalId]: design }
+      } as unknown as ConversationContextSnapshot;
+
+      const result = classifyUserIntent(turn("approve"), context);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.intent).toBe("approval_response");
+      expect(result.value.approvalInput).toMatchObject({ approvalId: design.approvalId, decision: "approved" });
+    });
+
+    it("keeps answering the user decision by option number or exact option text while a design approval is pending", () => {
+      const question = userDecisionRequest();
+      const design = designApproval();
+      const context = {
+        ...contextWith(question),
+        session: { ...contextWith(question).session, activeApprovalIds: [question.approvalId, design.approvalId] },
+        pendingApprovals: { [question.approvalId]: question, [design.approvalId]: design }
+      } as unknown as ConversationContextSnapshot;
+
+      for (const reply of ["1", "Postgres"]) {
+        const result = classifyUserIntent(turn(reply), context);
+        expect(result.ok, reply).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.approvalInput, reply).toMatchObject({ approvalId: question.approvalId });
+        expect(result.value.approvalInput?.selectedOption, reply).toBe(reply === "1" ? "SQLite" : "Postgres");
+      }
+    });
+
+    it("does not let an unmatched reply answer the user decision while a design approval is pending", () => {
+      const question = userDecisionRequest();
+      const design = designApproval();
+      const context = {
+        ...contextWith(question),
+        session: { ...contextWith(question).session, activeApprovalIds: [question.approvalId, design.approvalId] },
+        pendingApprovals: { [question.approvalId]: question, [design.approvalId]: design }
+      } as unknown as ConversationContextSnapshot;
+
+      const result = classifyUserIntent(turn("maybe, not sure"), { ...context, workflows: {} } as ConversationContextSnapshot);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.approvalInput?.approvalId).not.toBe(question.approvalId);
+      expect(result.value.intent).not.toBe("conversation_only");
     });
   });
 });

@@ -55,7 +55,7 @@ export interface RunRecord {
 }
 export interface UserDecisionRecord {
   request: ApprovalRequest; role: AgentRole; agentId: string; paneId: string; taskId: string;
-  status: "pending" | "answered" | "rejected" | "expired"; answer?: UserDecisionAnswer;
+  status: "pending" | "answered" | "rejected" | "expired" | "cancelled"; answer?: UserDecisionAnswer;
 }
 function parseUserDecisions(value: unknown, runId: string): void {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Invalid user decision journal");
@@ -64,8 +64,12 @@ function parseUserDecisions(value: unknown, runId: string): void {
     const request = ApprovalRequestSchema.parse(item.request);
     if (request.approvalId !== approvalId || request.runId !== runId || !isUserDecisionRequest(request)) throw new Error("Invalid user decision request");
     AgentRoleSchema.parse(item.role); textField(item.agentId); textField(item.paneId); textField(item.taskId);
-    if (!["pending", "answered", "rejected", "expired"].includes(String(item.status))) throw new Error("Invalid user decision status");
-    if (item.status === "pending" ? item.answer !== undefined : item.answer === undefined && item.status !== "expired") throw new Error("Invalid user decision answer state");
+    // "cancelled" is additive (run cancellation); older journals never contain it, so existing states parse unchanged.
+    const status = String(item.status);
+    if (!["pending", "answered", "rejected", "expired", "cancelled"].includes(status)) throw new Error("Invalid user decision status");
+    const mustBeUnanswered = status === "pending" || status === "cancelled";
+    const mustBeAnswered = status === "answered" || status === "rejected";
+    if ((mustBeUnanswered && item.answer !== undefined) || (mustBeAnswered && item.answer === undefined)) throw new Error("Invalid user decision answer state");
     if (item.answer !== undefined) {
       const answer = record(item.answer); textField(answer.outcome);
       if (answer.selectedOption !== undefined) textField(answer.selectedOption);
