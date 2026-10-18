@@ -1,7 +1,8 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { defaultEnvironmentConfig, identifyRepository, parseConfigYaml, readEnvironmentConfig, runCli } from "../src/index.js";
 
@@ -128,7 +129,7 @@ describe("config-migrate", () => {
 
   it("exposes command help and JSON formatting through the built executable", async () => {
     const { root } = await repository();
-    const executable = resolve("apps/cli/dist/bin.js");
+    const executable = fileURLToPath(new URL("../dist/bin.js", import.meta.url));
     const help = spawnSync(process.execPath, [executable, "config-migrate", "--help"], { cwd: root, encoding: "utf8" });
     expect(help.status).toBe(0);
     expect(help.stdout).toContain("Usage: bflow config-migrate");

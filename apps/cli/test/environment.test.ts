@@ -7,8 +7,8 @@ import {
   SessionManifestSchema, type SessionLifecycleManager, type SessionManifest, type RuntimeService,
   type RecoveryCheckpoint, type WorkflowRunSnapshot, type CreateCheckpointCommand
 } from "@bflow/contracts";
-import { EnvironmentError, EnvironmentLifecycle, identifyRepository, main, namedSessionEnvironment, parseCliArgs, runCli,
-  environmentProcessRunner, type EnvironmentConfig, type EnvironmentProcessRequest, type EnvironmentProcessRunner } from "../src/index.js";
+import { EnvironmentConfigSchema, EnvironmentError, EnvironmentLifecycle, identifyRepository, main, namedSessionEnvironment, parseCliArgs, parseConfigYaml,
+  renderEnvironmentConfigYaml, runCli, environmentProcessRunner, type EnvironmentProcessRequest, type EnvironmentProcessRunner } from "../src/index.js";
 import { PaneManagerLifecycleAdapter, openPaneManagerEnvironment } from "../src/pane-manager-integration.js";
 import type { LifecycleHost } from "../src/agentic-host.js";
 
@@ -97,7 +97,7 @@ describe("P12 repository environment lifecycle", () => {
     try {
       const result = await runCli(["init"], { cwd: other });
       expect(result.ok).toBe(false); expect(result.stderr).toContain("Not a Git");
-      await expect(readFile(join(other, ".bflow/config.yaml"))).rejects.toThrow();
+      await expect(readFile(join(other, ".bflow/config.yml"))).rejects.toThrow();
     } finally { await rm(other, { recursive: true, force: true }); }
   });
   // EnvironmentLifecycle uses the production Linux flock repository guard.
@@ -120,10 +120,10 @@ describe("P12 repository environment lifecycle", () => {
     expect(runner.running.has(repository.sessionName)).toBe(true);
   });
   linuxIt("does not require a dynamic Developer template to have a permanent startup pane", async () => {
-    const path = join(dir, ".bflow/config.yaml");
-    const config = JSON.parse(await readFile(path, "utf8"));
+    const path = join(dir, ".bflow/config.yml");
+    const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
     config.environment.roles.push({ role: "developer", cli: "codex", required: true });
-    await writeFile(path, JSON.stringify(config));
+    await writeFile(path, renderEnvironmentConfigYaml(config));
     const manifest = await lifecycle.up();
     expect(manifest.status).toBe("up");
     expect(manifest.panes.some(pane => pane.role === "developer")).toBe(false);
@@ -165,10 +165,10 @@ describe("P12 repository environment lifecycle", () => {
     expect(runner.running.has("other-repository")).toBe(true);
   });
   linuxIt("requires an authenticated Claude status payload rather than accepting exit zero alone", async () => {
-    const path = join(dir, ".bflow/config.yaml");
-    const config = JSON.parse(await readFile(path, "utf8"));
-    config.environment.roles = config.environment.roles.map((role: object) => ({ ...role, cli: "claude" }));
-    await writeFile(path, JSON.stringify(config));
+    const path = join(dir, ".bflow/config.yml");
+    const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
+    config.environment.roles = config.environment.roles.map(role => ({ ...role, cli: "claude" }));
+    await writeFile(path, renderEnvironmentConfigYaml(config));
     runner.claudeStatus = { loggedIn: false, email: "private-account@example.test" };
     await expect(lifecycle.up()).rejects.toThrow("not authenticated");
     expect(fixture.manager.up).not.toHaveBeenCalled();
@@ -186,8 +186,8 @@ describe("P12 repository environment lifecycle", () => {
     expect(runner.running.has(repository.sessionName)).toBe(false);
   });
   linuxIt("automatically shuts down when the composed host readiness preflight blocks pane startup", async () => {
-    const path = join(dir, ".bflow/config.yaml");
-    const config = JSON.parse(await readFile(path, "utf8")) as EnvironmentConfig;
+    const path = join(dir, ".bflow/config.yml");
+    const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
     const input = { repository, config, env: process.env };
     const host: LifecycleHost = {
       prepare: vi.fn(async () => ({ roleLaunch: {}, platform: { ready: false, generation: 1, checkedAt: now, roles: [
@@ -245,10 +245,10 @@ describe("P12 repository environment lifecycle", () => {
     expect(runner.running.has(repository.sessionName)).toBe(false);
   });
   linuxIt("bounds automatic host shutdown and preserves stopping state when cleanup times out", async () => {
-    const path = join(dir, ".bflow/config.yaml");
-    const config = JSON.parse(await readFile(path, "utf8"));
+    const path = join(dir, ".bflow/config.yml");
+    const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
     config.environment.shutdownTimeoutMs = 3000;
-    await writeFile(path, JSON.stringify(config));
+    await writeFile(path, renderEnvironmentConfigYaml(config));
     const shutdownHost = vi.fn(async () => new Promise<void>(() => {}));
     const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime(),
       quiesce: async () => ({ ok: true, value: undefined }), shutdownHost,
@@ -292,7 +292,7 @@ describe("P12 repository environment lifecycle", () => {
     expect(await identifyRepository(join(dir, "nested"))).toEqual(repository);
     expect(await identifyRepository(join(dir, "alias"))).toEqual(repository);
     expect((await runCli(["init"], { cwd: join(dir, "nested") })).ok).toBe(true);
-    await expect(readFile(join(dir, "nested/.bflow/config.yaml"))).rejects.toThrow();
+    await expect(readFile(join(dir, "nested/.bflow/config.yml"))).rejects.toThrow();
   });
   it("separates two repositories with the same basename", async () => {
     const a = join(dir, "a/same"); const b = join(dir, "b/same");
@@ -301,11 +301,11 @@ describe("P12 repository environment lifecycle", () => {
     expect((await identifyRepository(a)).sessionName).not.toBe((await identifyRepository(b)).sessionName);
   });
   it("preserves config on repeat init and ignores state/log/secrets without hiding config", async () => {
-    const before = await readFile(join(dir, ".bflow/config.yaml"), "utf8");
+    const before = await readFile(join(dir, ".bflow/config.yml"), "utf8");
     await runCli(["init", "--name", "replacement"], { cwd: dir, environment: { runner } });
-    expect(await readFile(join(dir, ".bflow/config.yaml"), "utf8")).toBe(before);
+    expect(await readFile(join(dir, ".bflow/config.yml"), "utf8")).toBe(before);
     const ignore = await readFile(join(dir, ".bflow/.gitignore"), "utf8");
-    expect(ignore.match(/secrets\//g)).toHaveLength(1); expect(ignore).not.toContain("config.yaml");
+    expect(ignore.match(/secrets\//g)).toHaveLength(1); expect(ignore).not.toContain("config.yml");
     execFileSync("git", ["check-ignore", ".bflow/state/run", ".bflow/logs/log", ".bflow/secrets/token"], { cwd: dir });
     expect(runner.requests).toHaveLength(0);
   });
@@ -314,9 +314,9 @@ describe("P12 repository environment lifecycle", () => {
     try {
       execFileSync("git", ["init", "--quiet", other]);
       expect((await runCli(["init", "--provider", "claude"], { cwd: other })).ok).toBe(true);
-      const path = join(other, ".bflow/config.yaml");
+      const path = join(other, ".bflow/config.yml");
       const before = await readFile(path, "utf8");
-      expect(JSON.parse(before).environment.roles.every((role: { cli: string }) => role.cli === "claude")).toBe(true);
+      expect(EnvironmentConfigSchema.parse(parseConfigYaml(before)).environment.roles.every(role => role.cli === "claude")).toBe(true);
       expect((await runCli(["init", "--provider", "codex"], { cwd: other })).ok).toBe(true);
       expect(await readFile(path, "utf8")).toBe(before);
     } finally { await rm(other, { recursive: true, force: true }); }
@@ -327,7 +327,7 @@ describe("P12 repository environment lifecycle", () => {
       execFileSync("git", ["init", "--quiet", other]);
       expect(parseCliArgs(["init", "--provider", "arbitrary-command"]).ok).toBe(false);
       expect((await runCli(["init", "--provider", "arbitrary-command"], { cwd: other })).ok).toBe(false);
-      await expect(readFile(join(other, ".bflow/config.yaml"))).rejects.toThrow();
+      await expect(readFile(join(other, ".bflow/config.yml"))).rejects.toThrow();
     } finally { await rm(other, { recursive: true, force: true }); }
   });
   linuxIt("starts a headless server and reuses ready roles without duplicate startup", async () => {
@@ -409,10 +409,10 @@ describe("P12 repository environment lifecycle", () => {
     await mkdir(join(dir, ".bflow/state/lifecycle.lock"), { recursive: true });
     await expect(lifecycle.up()).rejects.toThrow("legacy lifecycle lock");
     expect(fixture.manager.up).not.toHaveBeenCalled();
-    const config = await readFile(join(dir, ".bflow/config.yaml"), "utf8");
+    const config = await readFile(join(dir, ".bflow/config.yml"), "utf8");
     const recovered = await runCli(["recover", "--yes", "--json"], { cwd: dir, environment: { runner, integration: { manager: fixture.manager } } });
     expect(recovered.ok).toBe(true); expect(JSON.parse(recovered.stdout).command).toBe("recover");
-    expect(await readFile(join(dir, ".bflow/config.yaml"), "utf8")).toBe(config);
+    expect(await readFile(join(dir, ".bflow/config.yml"), "utf8")).toBe(config);
     expect((await lifecycle.up()).status).toBe("up");
   });
   linuxIt("requires confirmation for active runs and does not stop agents", async () => {
@@ -435,7 +435,7 @@ describe("P12 repository environment lifecycle", () => {
     expect(runner.running.has("other-repository")).toBe(true); expect(runner.running.has(repository.sessionName)).toBe(false);
     expect(runner.requests.filter((r) => r.args.includes("stop")).map((r) => r.args)).toEqual([["session", "stop", repository.sessionName, "--json"]]);
     expect((await lifecycle.down()).status).toBe("down"); expect(fixture.manager.down).toHaveBeenCalledTimes(1);
-    expect(await readFile(join(dir, ".bflow/config.yaml"), "utf8")).toContain("defaultWorkflow");
+    expect(await readFile(join(dir, ".bflow/config.yml"), "utf8")).toContain("defaultWorkflow");
   });
   linuxIt("rejects a checkpoint for a different run", async () => {
     await lifecycle.up();
@@ -492,13 +492,13 @@ describe("P12 repository environment lifecycle", () => {
     expect(await readFile(sentinel, "utf8")).toBe("uncommitted work");
   });
   linuxIt("recovers a pre-manifest stopped startup and keeps configuration intact", async () => {
-    const config = await readFile(join(dir, ".bflow/config.yaml"), "utf8");
+    const config = await readFile(join(dir, ".bflow/config.yml"), "utf8");
     await mkdir(join(dir, ".bflow/state"), { recursive: true });
     await writeFile(join(dir, ".bflow/state/operation.json"), JSON.stringify({ repositoryId: repository.id, sessionName: repository.sessionName, phase: "server_starting" }));
     await expect(lifecycle.up()).rejects.toThrow("bflow recover --yes");
     await expect(lifecycle.recover()).rejects.toThrow("recover --yes");
     await lifecycle.recover(true); expect((await lifecycle.up()).status).toBe("up");
-    expect(await readFile(join(dir, ".bflow/config.yaml"), "utf8")).toBe(config);
+    expect(await readFile(join(dir, ".bflow/config.yml"), "utf8")).toBe(config);
   });
   linuxIt("stops a server-only partial startup after the runtime barrier and rejects active work", async () => {
     await mkdir(join(dir, ".bflow/state"), { recursive: true });
@@ -528,8 +528,8 @@ describe("P12 repository environment lifecycle", () => {
     expect(runner.requests.some((r) => r.mode === "background")).toBe(false);
   });
   it("rejects copied config identity", async () => {
-    const path = join(dir, ".bflow/config.yaml"); const config: EnvironmentConfig = JSON.parse(await readFile(path, "utf8"));
-    await writeFile(path, JSON.stringify({ ...config, environment: { ...config.environment, repositoryId: "other" } }));
+    const path = join(dir, ".bflow/config.yml"); const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
+    await writeFile(path, renderEnvironmentConfigYaml({ ...config, environment: { ...config.environment, repositoryId: "other" } }));
     await expect(lifecycle.up()).rejects.toThrow("another repository");
   });
   it("routes main status to environment without opening the workflow runtime", async () => {

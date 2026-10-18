@@ -9,6 +9,10 @@ chối. File cần `schemaVersion: "1"`, `projectName`, `runtimeId`, `createdAt`
 `bflow config-migrate` để sao lưu config cũ và chuyển giá trị sang `.bflow/config.yml`.
 Không đổi schemaVersion tùy ý.
 
+## Compatibility decision
+
+Theo yêu cầu được project owner phê duyệt, config canonical chuyển sang YAML có comment và thêm hai trường role tuỳ chọn `model`/`effort`; không đổi shape hay schema version của `@bflow/contracts`. Bflow CLI, Runtime/provider adapters và templates cùng đọc các trường mới; bỏ trống vẫn dùng provider defaults. Chuyển tên file và format cũ chỉ xảy ra khi người dùng chạy `bflow config-migrate`, lệnh này giữ bản sao bytes gốc. Khi áp dụng lựa chọn provider/model/effort mới cho host đang chạy, chạy `bflow down` trước rồi build/cập nhật các package liên quan cùng nhau.
+
 | Trường | Dạng/default | Consumer và giới hạn thực tế |
 | --- | --- | --- |
 | `projectName` | Chuỗi không rỗng | Tên hiển thị; không quyết định session identity |

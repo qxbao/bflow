@@ -110,7 +110,7 @@ describe("buildHostPlatformOptions", () => {
   it("carries role model and effort settings and inherits them for an implicit Developer template", async () => {
     const input = configure(environment => {
       environment.roles = environment.roles.map(role => role.role === "coordinator"
-        ? Object.assign(role, { model: "codex-main", effort: "xhigh" })
+        ? { ...role, model: "codex-main", effort: "xhigh" as const }
         : role);
     });
     const options = await buildHostPlatformOptions(input, { context, fileExists: absent });
@@ -121,9 +121,9 @@ describe("buildHostPlatformOptions", () => {
   it("uses an explicitly configured Developer model and effort instead of the Coordinator defaults", async () => {
     const input = configure(environment => {
       environment.roles = environment.roles.map(role => role.role === "coordinator"
-        ? Object.assign(role, { model: "coordinator-model", effort: "high" })
+        ? { ...role, model: "coordinator-model", effort: "high" as const }
           : role);
-      environment.roles.push({ role: "developer", cli: "claude", required: true, model: "developer-model", effort: "xhigh" } as never);
+      environment.roles.push({ role: "developer", cli: "claude", required: true, model: "developer-model", effort: "xhigh" });
     });
     const options = await buildHostPlatformOptions(input, { context, fileExists: absent });
     expect(options.roles.find(role => role.role === "developer")).toMatchObject({ model: "developer-model", effort: "xhigh" });

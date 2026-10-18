@@ -225,8 +225,8 @@ describe("P30 platform readiness in up", () => {
 
   linuxIt("keeps a configured Developer model as a dynamic template without creating a permanent pane", async () => {
     const input = withProviders(role => role === "coordinator" ? "codex" : "claude");
-    const developer = { role: "developer", cli: "codex", required: false, model: "developer-codex", effort: "high" };
-    input.config.environment.roles.push(developer as never);
+    const developer = { role: "developer" as const, cli: "codex" as const, required: false, model: "developer-codex", effort: "high" as const };
+    input.config.environment.roles.push(developer);
     serverRunning(input);
     const permanentLaunches = await roleLaunchesFor(input);
     delete permanentLaunches["developer"];

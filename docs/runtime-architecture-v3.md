@@ -116,7 +116,7 @@ Giữ TaskStatus/RunStatus, event ordering, command receipts và aggregate recov
 | Tầng | Nội dung | Authority / vòng đời |
 | --- | --- | --- |
 | Machine | Tool inventory/verified binary, provider discovery, approved service definitions, shared skill catalog, secret references | Operator-owned, private XDG config/data/state; machine lock. Không có wildcard repo trust hoặc global permission bypass |
-| Repository | Provider/role selection, required tools/MCP/skills, verification policy, acceptance/approval requirements | `.bflow/config.yaml` hiện có giữ nguyên; future v3 extension cần explicit parse/migration, không overwrite bound repo/session identity |
+| Repository | Provider/role selection, optional model/effort, required tools/MCP/skills, verification policy, acceptance/approval requirements | Canonical `.bflow/config.yml`; `bflow config-migrate` explicitly converts legacy `.yaml`/`.json` with a byte-exact backup while preserving bound repository identity. Omitted model/effort keep provider defaults. This is an application config change with no `@bflow/contracts` shape or schema-version change. |
 | Session/runtime | Resolved environment, permission profile, generated MCP config, scoped tokens, launch files/receipts, leases, expiry | Private POSIX state, session identity và launch generation; revoke khi down hoặc configuration drift |
 
 Vị trí future: `$XDG_CONFIG_HOME/bflow/` cho machine desired config,

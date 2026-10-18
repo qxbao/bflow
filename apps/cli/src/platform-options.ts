@@ -89,12 +89,11 @@ function roleOption(role: EnvironmentRoleConfig, input: EnvironmentCompositionIn
   };
 }
 
-/** Model selection and effort are role-local; this shape stays additive while the config owner updates its schema. */
+/** Model selection and effort are role-local. */
 function modelSettings(role: EnvironmentRoleConfig): Pick<PlatformRoleOption, "model" | "effort"> {
-  const settings = role as EnvironmentRoleConfig & { readonly model?: string; readonly effort?: PlatformRoleOption["effort"] };
   return {
-    ...(settings.model !== undefined ? { model: settings.model } : {}),
-    ...(settings.effort !== undefined ? { effort: settings.effort } : {})
+    ...(role.model !== undefined ? { model: role.model } : {}),
+    ...(role.effort !== undefined ? { effort: role.effort } : {})
   };
 }
 
