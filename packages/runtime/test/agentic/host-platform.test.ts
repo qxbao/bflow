@@ -184,6 +184,29 @@ describe("P30 host platform composition", () => {
     expect(service.calls.filter(call => call === "release:launch-dev")).toHaveLength(1);
   });
 
+  it("records Gateway registration loss and reports degraded launches by role and Developer launch", async () => {
+    const service = fakeService({
+      verifyGateway: async () => ({ ok: true, value: { checkedAt: at, healthy: false, uncertain: false,
+        lost: [{ registrationId: "reg-1", role: "coordinator" }] } }),
+      status: () => ({ generation: 1, launches: [
+        { launchId: "launch-coord", role: "coordinator", provider: "codex", state: "degraded", reason: "gateway_registration_lost" },
+        { launchId: "launch-dev", role: "developer", provider: "codex", taskId: "task-1", state: "degraded", reason: "gateway_registration_lost" },
+        { launchId: "launch-conv", role: "conversation", provider: "codex", state: "activated" }] })
+    });
+    const { host } = await session(service);
+    const check = await host.verifyGateway();
+    expect(check).toMatchObject({ healthy: false, uncertain: false, lost: [{ registrationId: "reg-1", role: "coordinator" }] });
+    expect(host.degradation()).toEqual({ roles: ["coordinator"], launchIds: ["launch-dev"] });
+    expect(host.status().gateway).toMatchObject({ healthy: false });
+  });
+
+  it("treats a failed Gateway check as uncertain without degrading anything", async () => {
+    const service = fakeService({ verifyGateway: async () => failure("transport_unavailable", "control down") as never });
+    const { host } = await session(service);
+    expect(await host.verifyGateway()).toMatchObject({ healthy: false, uncertain: true, lost: [] });
+    expect(host.degradation()).toEqual({ roles: [], launchIds: [] });
+  });
+
   it("releases the previous launch when the same task is allocated again", async () => {
     const service = fakeService();
     const { host } = await session(service);

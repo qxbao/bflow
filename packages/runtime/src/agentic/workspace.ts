@@ -45,6 +45,8 @@ export interface DeveloperLaunchPort {
    * that is not active. Pane Manager stays unaware of Gateway: the verdict is computed by the host session.
    */
   reachability(launchId: string, paneId: string): Promise<ReachabilityVerdict>;
+  /** Launches whose Gateway registration was lost (permanent roles by name, Developers by launch id). */
+  degradation?(): { readonly roles: readonly string[]; readonly launchIds: readonly string[] };
 }
 /** Bound on waiting for a new Developer's provider process to prove Gateway reachability (Pane Manager's default operation timeout). */
 export const DEVELOPER_STARTUP_TIMEOUT_MS = 30_000;
@@ -69,9 +71,11 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
   const timeoutMs = launchOptions.startupTimeoutMs ?? DEVELOPER_STARTUP_TIMEOUT_MS;
   const now = launchOptions.now ?? Date.now;
   const pending = new Map<string, PendingDeveloper>();
+  /** Proven Developers by task: their pane and launch, so a degraded launch can be held back from new prompts. */
+  const ready = new Map<string, { readonly paneId: string; readonly launchId: string }>();
   /** Releases a Developer that failed its gate: pane closed, launch and registrations revoked. Reports a release failure too. */
   const retire = async (taskId: string, callOptions: OperationOptions | undefined): Promise<string | undefined> => {
-    pending.delete(taskId);
+    pending.delete(taskId); ready.delete(taskId);
     await base.releaseDeveloper({ taskId, closePane: true, removeWorktree: false }, callOptions);
     try { await launches.release(taskId); return undefined; }
     catch (error) { return String(error); }
@@ -84,7 +88,16 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
   return {
     getManifest: options => base.getManifest(options),
     getRoleBinding: (role, options) => base.getRoleBinding(role, options),
-    inspectRoleHealth: (role, options) => base.inspectRoleHealth(role, options),
+    // A degraded launch (Gateway registration lost) stays unready: the outbox keeps its messages queued, never drops them.
+    async inspectRoleHealth(role, options) {
+      const health = await base.inspectRoleHealth(role, options);
+      if (!health.ok || !health.value.readyForPrompt || launches.degradation === undefined) return health;
+      const degraded = launches.degradation();
+      const developer = [...ready.values()].find(item => item.paneId === health.value.paneId);
+      if (degraded.roles.includes(role) || (developer !== undefined && degraded.launchIds.includes(developer.launchId)))
+        return { ok: true, value: { ...health.value, readyForPrompt: false } };
+      return health;
+    },
     async allocateDeveloper(request, callOptions) {
       let entry = pending.get(request.taskId);
       if (entry === undefined) {
@@ -106,6 +119,7 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
       catch (error) { return failClosed(entry, `has no readable reachability record: ${String(error)}`, callOptions); }
       if (verdict.state === "ready") {
         pending.delete(entry.taskId);
+        ready.set(entry.taskId, { paneId: entry.allocated.paneId, launchId: entry.launchId });
         return { ok: true, value: entry.allocated };
       }
       if (verdict.state === "pending") {
@@ -120,7 +134,7 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
         `(${verdict.envName}: ${verdict.code}; ${verdict.reason})`, callOptions);
     },
     async releaseDeveloper(request, callOptions) {
-      pending.delete(request.taskId);
+      pending.delete(request.taskId); ready.delete(request.taskId);
       const released = await base.releaseDeveloper({ ...request, closePane: true }, callOptions);
       // Already released: the binding is gone, so the launch is already dropped as well.
       if (!released.ok && released.error.code !== "not_found") return released;

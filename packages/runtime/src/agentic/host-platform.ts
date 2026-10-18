@@ -70,6 +70,14 @@ export const HostPlatformStatusSchema = z.object({
     launches: z.array(PlatformStatusLaunchSchema)
   }).strict(),
   gatewayDiagnostic: z.string().nullable(),
+  /** Last Gateway registration reconciliation (F5); lost registrations degrade their launches until relaunch. */
+  gateway: z.object({
+    checkedAt: z.string(),
+    healthy: z.boolean(),
+    uncertain: z.boolean(),
+    lost: z.array(z.object({ registrationId: z.string().min(1), role: z.string().min(1), taskId: z.string().min(1).optional() }).strict()),
+    error: z.string().optional()
+  }).strict().nullable().optional(),
   /** In-process MCP tool reachability per prepared role with Gateway registrations. Carries no tokens. */
   toolReachability: z.array(RoleToolReachabilitySchema).optional()
 }).strict();
@@ -204,6 +212,7 @@ export class HostPlatformSession {
   private readonly developerLaunches = new Map<string, string>();
   /** Active Developer launches by launch id: the reachability the launch must prove, or null without Gateway registrations. */
   private readonly developerGates = new Map<string, ReachabilityExpectation | null>();
+  private gatewayCheck: NonNullable<HostPlatformStatus["gateway"]> | undefined;
 
   constructor(private readonly options: HostPlatformSessionOptions) {}
 
@@ -366,6 +375,29 @@ export class HostPlatformSession {
     await this.persistLaunches();
   }
 
+  /**
+   * Reconciles Gateway registrations with the Gateway control (F5). A lost registration degrades its launch:
+   * running providers keep a revoked token, so only a relaunch (`bflow up`) recovers. Uncertain checks change nothing.
+   */
+  async verifyGateway(): Promise<NonNullable<HostPlatformStatus["gateway"]>> {
+    const result = await this.options.service.verifyGateway();
+    const checkedAt = new Date().toISOString();
+    this.gatewayCheck = result.ok
+      ? { checkedAt: result.value.checkedAt, healthy: result.value.healthy, uncertain: result.value.uncertain,
+          lost: result.value.lost.map(item => ({ registrationId: item.registrationId, role: item.role, ...(item.taskId !== undefined ? { taskId: item.taskId } : {}) })) }
+      : { checkedAt, healthy: false, uncertain: true, lost: [], error: describeFailure(result.error) };
+    return this.gatewayCheck;
+  }
+
+  /** Launches that must not receive new prompts: permanent roles by name, Developers by launch id. */
+  degradation(): { readonly roles: readonly string[]; readonly launchIds: readonly string[] } {
+    const degraded = this.options.service.status().launches.filter(launch => launch.state === "degraded");
+    return {
+      roles: degraded.filter(launch => launch.taskId === undefined).map(launch => launch.role),
+      launchIds: degraded.filter(launch => launch.taskId !== undefined).map(launch => launch.launchId)
+    };
+  }
+
   status(): HostPlatformStatus {
     const snapshot: PlatformStatusSnapshot = this.options.service.status();
     return {
@@ -381,7 +413,8 @@ export class HostPlatformSession {
           ...(launch.healthValidUntil !== undefined ? { healthValidUntil: launch.healthValidUntil } : {})
         }))
       },
-      gatewayDiagnostic: this.options.gatewayDiagnostic ?? null
+      gatewayDiagnostic: this.options.gatewayDiagnostic ?? null,
+      ...(this.gatewayCheck !== undefined ? { gateway: this.gatewayCheck } : {})
     };
   }
 

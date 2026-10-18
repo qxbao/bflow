@@ -278,7 +278,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       ...(platformSession ? { developerLaunches: {
         allocate: request => platformSession.allocateDeveloper(request.taskId, request.worktreePath),
         release: taskId => platformSession.releaseDeveloper(taskId),
-        reachability: (launchId, paneId) => platformSession.developerReachability(launchId, paneId)
+        reachability: (launchId, paneId) => platformSession.developerReachability(launchId, paneId),
+        degradation: () => platformSession.degradation()
       } } : {}), maxDeveloperCapacity: configuration.policy?.concurrency.maxConcurrency ?? configuration.maxDeveloperCapacity ?? 2,
       nativeIngressSocket: nativeSocket, bindingReceiptKeys: { [issuerId]: publicKey }, roleLaunch: launch,
       roleCapabilities: capabilities, taskChecks: [...DEFAULT_HOST_CHECKS, ...verification.behavioralChecks()],
@@ -600,8 +601,18 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const task = workspace.runtime.tick(); scheduler = task;
     void task.then(() => { schedulerError = undefined; }, error => { schedulerError = redactString(String(error)); process.stderr.write(`Bflow scheduler: ${schedulerError}\n`); }).finally(() => { if (scheduler === task) scheduler = undefined; });
   }, 500);
+  // F5: reconcile Gateway registrations periodically; lost ones degrade their launches until `bflow up` relaunches them.
+  let verifyingGateway = false;
+  const gatewayTimer = setInterval(() => {
+    if (!workspace || !platformSession || quiesced || closing || verifyingGateway) return;
+    verifyingGateway = true;
+    void platformSession.verifyGateway().then(check => {
+      if (check.lost.length) process.stderr.write(`Bflow Gateway: ${check.lost.length} registration(s) lost; affected roles are held until bflow up relaunches them\n`);
+    }, error => { process.stderr.write(`Bflow Gateway check: ${redactString(String(error))}\n`); }).finally(() => { verifyingGateway = false; });
+  }, 30_000);
+  gatewayTimer.unref();
   const close = async () => {
-    closing = true; clearInterval(timer); clearInterval(pump); if (workspace) { await workspace.runtime.quiesce(); await scheduler; await workspace.close(); }
+    closing = true; clearInterval(timer); clearInterval(pump); clearInterval(gatewayTimer); if (workspace) { await workspace.runtime.quiesce(); await scheduler; await workspace.close(); }
     queryStore?.close();
     for (const socket of sockets) socket.destroy();
     await new Promise<void>(accept => server.close(() => accept())); await unlink(configuration.socketPath);
