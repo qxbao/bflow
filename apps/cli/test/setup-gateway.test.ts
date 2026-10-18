@@ -1,7 +1,7 @@
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -328,6 +328,10 @@ it("composes the full setup service without overwriting generated gateway config
   expect(result.outcome).toBe("applied");
   const machine = JSON.parse(await readFile(join(account.paths.config, "machine.json"), "utf8"));
   expect(machine.services.map((service: { serviceId: string }) => service.serviceId)).toContain("mcp-gateway");
+  // OS service managers do not inherit the shell PATH: the unit must find the exact Node running setup.
+  const gatewayService = machine.services.find((service: { serviceId: string }) => service.serviceId === "mcp-gateway");
+  expect(gatewayService.env.PATH.split(delimiter)[0]).toBe(dirname(process.execPath));
+  expect(gatewayService.env.PATH.split(delimiter)).toContain(account.paths.managedBin);
   const manifest = JSON.parse(await readFile(join(account.paths.state, "environment.json"), "utf8"));
   expect(manifest.serviceIds).toContain("mcp-gateway");
   expect(manifest.lastPlan.planId).toBe(result.plan?.planId);

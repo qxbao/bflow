@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { join, resolve } from "node:path";
@@ -91,7 +91,11 @@ export async function executeSetupCommand(
   progress("Checking machine platform and setup scope...");
   let platform: PlatformProfile = context?.setup?.platform ?? detectPlatform(defaultHostEnvironment());
   const isolatedRoot = context?.setup?.isolatedRoot ?? process.env.BFLOW_HOME;
-  if (isolatedRoot) platform = isolatedPlatformProfile(platform, isolatedRoot);
+  if (isolatedRoot) {
+    platform = isolatedPlatformProfile(platform, isolatedRoot);
+    // Provider CLIs (Codex) refuse a missing CODEX_HOME and PathManager writes rc files under homeDir: create the
+    // isolated provider homes up front so nothing falls back to, or fails instead of, the real user's home.
+  }
 
   // 2. Resolve Runner & Store
   progress("Checking setup state and approvals...");
@@ -287,6 +291,16 @@ export async function executeSetupCommand(
       now: () => new Date()
     });
 
+  // Isolated provider homes are created only when changes may apply (never in check/dry-run), after validation:
+  // Codex refuses a missing CODEX_HOME and PathManager writes rc files under homeDir, so nothing may fall back to
+  // the real user's home.
+  const ensureIsolatedHomes = () => {
+    if (!isolatedRoot || args.mode === "check" || args.mode === "dry_run") return;
+    const providerHomes = isolatedProviderHomes(isolatedRoot);
+    for (const directory of [platform.homeDir, providerHomes.homeDirectory, providerHomes.claudeConfigDir, providerHomes.codexHome])
+      if (directory) mkdirSync(directory, { recursive: true, mode: 0o700 });
+  };
+
   let plan: SetupPlan | undefined;
   let receipt: SetupReceipt | undefined;
   let toolObservations: ToolObservation[] = [];
@@ -309,6 +323,7 @@ export async function executeSetupCommand(
         await store.writeApproval(approval);
       }
       if (typeof machineSetup.apply === "function") {
+        ensureIsolatedHomes();
         progress("Applying approved setup steps...");
         const applyRes = await machineSetup.apply({ mode: args.mode, config: machineConfig, approval });
         if (applyRes) {
@@ -326,6 +341,7 @@ export async function executeSetupCommand(
       }
     }
   } else if (typeof machineSetup.run === "function") {
+    ensureIsolatedHomes();
     // Standard MachineSetupService execution
     progress(`Running ${args.mode} setup checks...`);
     const report = await machineSetup.run({

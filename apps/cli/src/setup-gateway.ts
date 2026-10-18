@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { accessSync, constants, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { lstat, readFile, realpath, rm } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { z } from "zod";
 import { MCPClientRegistrationSchema, MCPServiceDefinitionSchema, MCPServiceObservationSchema, ScopedOperationSchema,
@@ -204,11 +204,18 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
   const desiredDigest = digest({ setupPolicyVersion: 2, machineId: platform.machineId, repositoryRoot,
     paths: platform.paths,
     repositorySelected: approval.repositorySelected, browserExecutable: approval.browserExecutable, requirements: approval.requirements, services: operatorServices });
+  // OS service managers (systemd --user, launchd) do not inherit the shell PATH. Backends launched through
+  // `#!/usr/bin/env node` shims (chrome-devtools-mcp, GitNexus) then never start, so the unit carries the directory
+  // of the exact Node running setup, the managed bin and the system defaults.
+  const gatewayEnv: Record<string, string> = { PATH: [dirname(process.execPath), platform.paths.managedBin,
+    ...(process.platform === "win32" ? [] : ["/usr/local/bin", "/usr/bin", "/bin"])].join(delimiter) };
   const service: ServiceDefinition = { serviceId: "mcp-gateway", program: process.execPath,
-    args: [fileURLToPath(new URL("../dist/setup-gateway.js", import.meta.url)), "--serve", configPath, desiredDigest], env: {}, keepAlive: true };
+    args: [fileURLToPath(new URL("../dist/setup-gateway.js", import.meta.url)), "--serve", configPath, desiredDigest], env: gatewayEnv, keepAlive: true };
+  // A generated definition from before the PATH fix carries an empty env; anything else is operator-defined.
+  const generatedEnv = (env: Record<string, string>) => Object.keys(env).length === 0 || digest(env) === digest(gatewayEnv);
   if (config.services.some(item => item.serviceId === service.serviceId &&
     (item.program !== service.program || digest(item.args.slice(0, 3)) !== digest(service.args.slice(0, 3)) ||
-      item.args.length !== 4 || !/^[a-f0-9]{64}$/.test(item.args[3]!) || Object.keys(item.env).length || !item.keepAlive))) {
+      item.args.length !== 4 || !/^[a-f0-9]{64}$/.test(item.args[3]!) || !generatedEnv(item.env) || !item.keepAlive))) {
     throw new Error("An operator-defined mcp-gateway service already exists; preserve it and reconcile its definition explicitly");
   }
   const desiredServices = [...config.services.filter(item => item.serviceId !== service.serviceId), service];

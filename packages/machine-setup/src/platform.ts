@@ -10,6 +10,8 @@ import type { HostEnvironment, PlatformProfile, SupportStatus } from "./types.js
 export function isolatedPlatformProfile(platform: PlatformProfile, isolatedRoot: string): PlatformProfile {
   return {
     ...platform,
+    // Shell rc files and ~/.local/bin launchers follow homeDir: an isolated setup must never edit the real user's.
+    homeDir: path.join(isolatedRoot, "providers", "home"),
     paths: {
       config: path.join(isolatedRoot, "config"),
       data: path.join(isolatedRoot, "data"),

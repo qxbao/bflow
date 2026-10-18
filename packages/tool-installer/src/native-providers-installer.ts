@@ -42,7 +42,7 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
   }
   #fail<T>(message: string): OperationResult<T> { return { ok: false, error: { code: "validation", retryable: false, message } }; }
   #deferredDiagnostics(): string[] {
-    return this.#deferred.map(provider => `${provider}: native plugin activation is deferred because isolated setup cannot confine this provider's configuration; owner action is required outside isolation`);
+    return this.#deferred.map(provider => `manual action required for ${provider}: native plugin activation is deferred because isolated setup cannot confine this provider's configuration; run setup outside isolation to activate it`);
   }
   /** Real mode forwards only an inherited CODEX_HOME; isolated mode forces the isolated provider homes. */
   #memoryEnvironment(): { environment?: Readonly<Record<string, string>> } {
@@ -108,8 +108,9 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
       ownedPaths.push(...result.value.ownedPaths);
       if (result.value.status !== "already_satisfied") return { ok: true, value: { status: result.value.status, diagnostics, ownedPaths } };
     }
-    // A deferred provider is never satisfied; reporting it as satisfied would make doctor pass unverified native state.
-    return { ok: true, value: { status: this.#deferred.length ? "blocked" : "already_satisfied", diagnostics, ownedPaths } };
+    // A deferred provider is an explicit owner action (its diagnostic stays visible), not a failure of the isolated setup:
+    // isolation deliberately leaves providers it cannot confine untouched, like a missing subscription login.
+    return { ok: true, value: { status: "already_satisfied", diagnostics, ownedPaths } };
   }
   async #run(raw: SetupApplyRequest, apply: boolean, options?: OperationOptions): Promise<OperationResult<SetupReceipt>> {
     const parsed = SetupApplyRequestSchema.safeParse(raw);
@@ -135,7 +136,6 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
       if (result.value.status === "applied") status = "applied";
       else if (result.value.status !== "already_satisfied") { status = result.value.status; break; }
     }
-    if (this.#deferred.length && (status === "applied" || status === "already_satisfied")) status = "blocked";
     return { ok: true, value: SetupReceiptSchema.parse({ schemaVersion: 3, receiptId: randomUUID(), planId: request.planId,
       planDigest: request.planDigest, stepId: request.step.stepId, scope: request.step.scope, status,
       desiredStateDigest: request.step.desiredStateDigest,

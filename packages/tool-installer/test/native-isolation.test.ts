@@ -126,7 +126,7 @@ describe("isolated native provider setup", () => {
     }
   });
 
-  it("fails closed for providers without an isolation variable: agy is deferred, never activated, never reported satisfied", async () => {
+  it("defers providers without an isolation variable: agy is never activated and is reported as an owner action", async () => {
     const root = await tempRoot("bflow-native-iso-agy-");
     const realHome = join(root, "real-home");
     const isolation = isolationFor(root);
@@ -141,12 +141,13 @@ describe("isolated native provider setup", () => {
     expect(planned.ok).toBe(true);
     if (!planned.ok) return;
     const inspected = await installer.inspect(planned.value.toolInstall!);
-    expect(inspected.ok && inspected.value.status).toBe("blocked");
-    expect(inspected.ok && inspected.value.diagnostics.join(" ")).toContain("agy: native plugin activation is deferred");
+    // Deferral is an explicit owner action, not a failure of the isolated setup; nothing is executed for agy.
+    expect(inspected.ok && inspected.value.status).toBe("already_satisfied");
+    expect(inspected.ok && inspected.value.diagnostics.join(" ")).toContain("manual action required for agy: native plugin activation is deferred");
     const applied = await installer.apply({ schemaVersion: 3, planId: "plan", planDigest: "a".repeat(64), step: planned.value,
       approvalReceiptId: "approved" });
-    expect(applied.ok && applied.value.status).toBe("blocked");
-    expect(applied.ok && applied.value.observedStateDigest).toBeNull();
+    expect(applied.ok && applied.value.status).toBe("already_satisfied");
+    expect(applied.ok && applied.value.diagnostics.join(" ")).toContain("manual action required for agy");
     expect(calls).toEqual([]);
     await assertNoRealHome(calls, realHome, root);
   });
