@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { inspectCodexHooks, type CodexHookTrustOptions } from "@bflow/agent-providers";
+import { createManagedCodexHookEnvironment, inspectCodexHooks, type CodexHookTrustOptions } from "@bflow/agent-providers";
 import { executeCodexHookSetup, runCli } from "../src/index.js";
 
 const roots: string[] = [];
@@ -12,7 +12,7 @@ afterEach(async () => {
 });
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "bflow-hook-setup-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-hook-setup-")));
   roots.push(root);
   const isolatedRoot = join(root, "isolated");
   const home = join(isolatedRoot, "providers", "codex");
@@ -22,7 +22,7 @@ async function fixture() {
   await mkdir(baseHome, { recursive: true, mode: 0o700 });
   const script = join(home, "hooks", "approved.sh");
   await mkdir(join(home, "hooks"), { mode: 0o700 });
-  await writeFile(script, "#!/bin/sh\nprintf 'reviewed hook\\n'\n", { mode: 0o600 });
+  await writeFile(script, "#!/bin/sh\nprintf 'reviewed hook\\n'\n", { mode: 0o700 });
   const config = join(home, "hooks.json");
   await writeFile(config, JSON.stringify({ hooks: {
     SessionStart: [{ matcher: { role: "developer" }, hooks: [{ type: "command", command: script }] }]
@@ -31,9 +31,7 @@ async function fixture() {
   const trust: CodexHookTrustOptions = {
     codexHomeDirectory: home,
     approvalStorePath: store,
-    environment: { HOME: baseHome, CODEX_HOME: home, XDG_STATE_HOME: state, PATH: "/usr/bin:/bin",
-      ...(process.env["ORCA_AGENT_HOOK_ROOT"] !== undefined ? { ORCA_AGENT_HOOK_ROOT: process.env["ORCA_AGENT_HOOK_ROOT"] } : {}),
-      ...(process.env["ORCA_AGENT_HOOK_ENDPOINT"] !== undefined ? { ORCA_AGENT_HOOK_ENDPOINT: process.env["ORCA_AGENT_HOOK_ENDPOINT"] } : {}) }
+    environment: { ...createManagedCodexHookEnvironment(process.env, baseHome), CODEX_HOME: home, XDG_STATE_HOME: state }
   };
   const context = {
     cwd: root,

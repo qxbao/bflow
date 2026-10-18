@@ -4,6 +4,14 @@ import { parse } from "smol-toml";
 const MAX_CODEX_CONFIG_BYTES = 256 * 1024;
 const EVENT_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,127}$/;
 const HOOK_STATE_KEY = /^(.*):([^:]+):([0-9]+):([0-9]+)$/;
+const PLUGIN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
+function pluginStateSource(source: string): boolean {
+  const separator = source.indexOf(":");
+  if (separator < 0 || !PLUGIN_ID.test(source.slice(0, separator))) return false;
+  const path = source.slice(separator + 1);
+  return path.length > 0 && !/[\\\0\r\n:]/.test(path) && path.split("/").every(part => part !== "" && part !== "." && part !== "..");
+}
 
 function record(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value))
@@ -15,7 +23,7 @@ function validateNativeHookState(value: unknown): void {
   const state = record(value, "hooks.state");
   for (const [key, entry] of Object.entries(state)) {
     const match = HOOK_STATE_KEY.exec(key);
-    if (!match || !isAbsolute(match[1]!) || !EVENT_NAME.test(match[2]!))
+    if (!match || (!isAbsolute(match[1]!) && !pluginStateSource(match[1]!)) || !EVENT_NAME.test(match[2]!))
       throw new Error("hooks.state contains an unknown or unsafe metadata key");
     const metadata = record(entry, "hooks.state entry");
     if (Object.keys(metadata).some(name => name !== "enabled" && name !== "trusted_hash"))
@@ -26,6 +34,24 @@ function validateNativeHookState(value: unknown): void {
       (typeof metadata.trusted_hash !== "string" || metadata.trusted_hash.length > 256))
       throw new Error("hooks.state trusted_hash metadata is invalid");
   }
+}
+
+/** Only explicit enablement selectors are returned; credentials and native trust state are excluded. */
+export function parseCodexEnabledPlugins(text: string): string[] {
+  if (Buffer.byteLength(text, "utf8") > MAX_CODEX_CONFIG_BYTES) throw new Error("Codex config.toml exceeds the parsing limit");
+  let parsed: unknown;
+  try { parsed = parse(text, { unsafeKeyBehaviour: "throw" }); }
+  catch { throw new Error("Codex config.toml contains malformed TOML; inspect its syntax locally."); }
+  const config = record(parsed, "Codex config.toml");
+  if (config.plugins === undefined) return [];
+  const plugins = record(config.plugins, "Codex plugins");
+  if (Object.keys(plugins).length > 64) throw new Error("Codex plugin count exceeds the inspection limit");
+  return Object.entries(plugins).flatMap(([id, value]) => {
+    if (!PLUGIN_ID.test(id)) throw new Error("Codex plugin identifier has an unsupported shape");
+    const settings = record(value, "Codex plugin settings");
+    if (typeof settings.enabled !== "boolean") throw new Error("Codex plugin enablement must be explicit for hook inspection");
+    return settings.enabled ? [id] : [];
+  }).sort();
 }
 
 function validateExecutableEvent(event: string, value: unknown): boolean {

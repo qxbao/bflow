@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -13,7 +13,7 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 
 async function setup(): Promise<{ root: string; home: string; store: string; options: CodexHookTrustOptions }> {
-  const root = await mkdtemp(join(tmpdir(), "bflow-codex-hooks-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-codex-hooks-")));
   roots.push(root);
   const home = join(root, "codex-home");
   await mkdir(home, { mode: 0o700 });
@@ -23,7 +23,7 @@ async function setup(): Promise<{ root: string; home: string; store: string; opt
 
 async function writeHook(home: string, script: string): Promise<string> {
   const hookPath = join(home, "hook.sh");
-  await writeFile(hookPath, script, { mode: 0o600 });
+  await writeFile(hookPath, script, { mode: 0o700 });
   await writeFile(join(home, "hooks.json"), JSON.stringify({ hooks: {
     SessionStart: [{ matcher: { role: "developer" }, hooks: [{ type: "command", command: hookPath }] }]
   } }), { mode: 0o600 });

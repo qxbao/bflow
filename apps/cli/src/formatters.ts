@@ -802,7 +802,15 @@ export function formatCommandError(
   const useColor = resolveColor(options, "stderr");
 
   // Clean, redact sensitive credentials, and bound untrusted messages
-  const cleanMessage = boundMessage(redactSensitive(stripAnsi(error.message)));
+  const redactedMessage = redactSensitive(stripAnsi(error.message));
+  // Startup reports contain independently useful failures for every role. Keep the
+  // report bounded, but do not apply the generic five-line/350-character summary.
+  const isReadinessReport = redactedMessage.startsWith("Provider readiness is not satisfied; no panes were started.\n");
+  const report = redactedMessage.split("\n").filter(line => !/^\s+at\s+/.test(line));
+  const cleanMessage = isReadinessReport
+    ? report.slice(0, 256).join("\n").slice(0, 64_000).trimEnd() +
+      (report.length > 256 || redactedMessage.length > 64_000 ? "\n... [truncated; inspect the JSON error report]" : "")
+    : boundMessage(redactedMessage);
 
   const errorTag = useColor ? red(bold(`Error [${error.code}]:`), true) : `Error [${error.code}]:`;
   let out = `${errorTag} ${cleanMessage}`;

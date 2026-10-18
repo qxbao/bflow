@@ -135,6 +135,15 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     return { BFLOW_PROVIDER: this.descriptor.provider };
   }
 
+  private executableVerificationOptions() {
+    const searchPath = this.getProviderCommandEnvironment()["PATH"];
+    return {
+      ...(searchPath !== undefined ? { searchPath } : {}),
+      ...(this.options.allowTestFilesystemOwnership !== undefined
+        ? { allowTestFilesystemOwnership: this.options.allowTestFilesystemOwnership } : {})
+    };
+  }
+
   /**
    * Renders a streamable_http MCP entry that references the bearer token by environment variable name.
    * Adapters without a verified header/env-reference form keep the default and fail closed.
@@ -339,11 +348,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     let actualBinaryDigest = "0".repeat(64);
 
     try {
-      const resolvedExec = await resolveAndVerifyExecutable(executable, {
-        ...(this.options.allowTestFilesystemOwnership !== undefined
-          ? { allowTestFilesystemOwnership: this.options.allowTestFilesystemOwnership }
-          : {})
-      });
+      const resolvedExec = await resolveAndVerifyExecutable(executable, this.executableVerificationOptions());
       actualBinaryDigest = resolvedExec.digest;
       if (this.options.pinnedExecutableDigest !== undefined) {
         if (actualBinaryDigest !== this.options.pinnedExecutableDigest) {
@@ -379,13 +384,17 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
         );
       }
     } catch (err) {
+      const causeCode = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+      const code = causeCode === "binary_missing" || causeCode === "binary_not_executable" || causeCode === "binary_untrusted"
+        ? causeCode : causeCode === "EACCES" || causeCode === "EPERM" ? "binary_inaccessible" : "binary_verification_failed";
       checks.push(
         createHealthCheck(
           "binary",
           "failed",
-          "binary_missing",
-          `Binary missing or inaccessible at '${executable}': ${err instanceof Error ? err.message : String(err)}`,
-          `Install '${this.descriptor.executableName}' or verify PATH configuration.`
+          code,
+          `Executable verification failed: ${err instanceof Error ? err.message : String(err)} (requested '${executable}').`,
+          code === "binary_missing" ? `Install '${this.descriptor.executableName}' or verify the host PATH configuration.`
+            : "Review the reported executable path, ownership, permissions and verification cause."
         )
       );
     }
@@ -1370,11 +1379,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     let canonicalExecutable: string;
     let executableDigest: string;
     try {
-      const resolvedExec = await resolveAndVerifyExecutable(executable, {
-        ...(this.options.allowTestFilesystemOwnership !== undefined
-          ? { allowTestFilesystemOwnership: this.options.allowTestFilesystemOwnership }
-          : {})
-      });
+      const resolvedExec = await resolveAndVerifyExecutable(executable, this.executableVerificationOptions());
       canonicalExecutable = resolvedExec.canonicalPath;
       executableDigest = resolvedExec.digest;
     } catch (err) {

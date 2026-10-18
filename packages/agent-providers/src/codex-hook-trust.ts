@@ -1,10 +1,10 @@
 import { constants, statSync } from "node:fs";
-import { open, lstat, mkdir, realpath, rename, unlink } from "node:fs/promises";
+import { open, lstat, mkdir, opendir, realpath, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
 import { z } from "zod";
-import { parseCodexTomlHooks } from "./codex-hook-toml.js";
+import { parseCodexEnabledPlugins, parseCodexTomlHooks } from "./codex-hook-toml.js";
 
 const SHA256 = z.string().regex(/^[a-f0-9]{64}$/);
 const ABSOLUTE = z.string().min(1).refine(isAbsolute, "must be an absolute path");
@@ -26,7 +26,7 @@ export const CodexHookDependencySchema = z.object({
 export type CodexHookDependency = z.infer<typeof CodexHookDependencySchema>;
 
 export const CodexHookSourceSchema = z.object({
-  kind: z.enum(["hooks_json", "config_toml", "orca_candidate", "script"]),
+  kind: z.enum(["hooks_json", "config_toml", "orca_candidate", "script", "plugin_manifest", "plugin_hooks"]),
   path: ABSOLUTE,
   exists: z.boolean(),
   sha256: SHA256.nullable()
@@ -79,6 +79,21 @@ export interface CodexHookTrustOptions {
 export interface CodexHookApprovalOptions extends CodexHookTrustOptions {
   readonly expectedDigest: string;
   readonly approvedBy: string;
+}
+
+/** Bflow owns its child panes; outer Orca pane selectors must not attach those panes to the parent session. */
+export function createManagedCodexHookEnvironment(
+  environment: Readonly<Record<string, string | undefined>>,
+  homeDirectory: string
+): Record<string, string> {
+  return {
+    HOME: homeDirectory,
+    PATH: environment["PATH"] ?? "",
+    ORCA_AGENT_HOOK_ROOT: "",
+    ORCA_AGENT_HOOK_ENDPOINT: "",
+    ORCA_PANE_KEY: "",
+    ORCA_AGENT_HOOK_PORT: ""
+  };
 }
 
 function sha256(bytes: Uint8Array | string): string {
@@ -175,11 +190,11 @@ async function inspectPath(path: string, maxBytes: number, hashContent = true): 
   return { exists: true, resolvedPath: canonical, sha256: hashContent ? sha256(bytes) : null, bytes };
 }
 
-async function executableDependency(path: string): Promise<CodexHookDependency> {
+async function executableDependency(path: string, capturePrefix?: (bytes: Buffer) => void): Promise<CodexHookDependency> {
   if (!isAbsolute(path)) throw new Error(`Executable dependency must be absolute: ${path}`);
   const canonical = await realpath(path);
   const before = await lstat(canonical);
-  if (!before.isFile() || !ownedByCurrentUserOrRoot(before) || (before.mode & 0o022) !== 0)
+  if (!before.isFile() || !ownedByCurrentUserOrRoot(before) || (before.mode & 0o022) !== 0 || (before.mode & 0o111) === 0)
     throw new Error(`Executable dependency is not a safe user-owned regular file: ${path}`);
   if (before.size > MAX_EXECUTABLE_BYTES) throw new Error(`Executable dependency exceeds ${MAX_EXECUTABLE_BYTES} bytes: ${path}`);
   const digest = createHash("sha256");
@@ -191,6 +206,7 @@ async function executableDependency(path: string): Promise<CodexHookDependency> 
       throw new Error(`Executable dependency changed while opening: ${path}`);
     const stream = file.createReadStream({ autoClose: false });
     for await (const chunk of stream) {
+      if (bytes === 0 && capturePrefix) capturePrefix(Buffer.from(chunk.subarray(0, 4096)));
       bytes += chunk.length;
       if (bytes > MAX_EXECUTABLE_BYTES) throw new Error(`Executable dependency exceeds ${MAX_EXECUTABLE_BYTES} bytes: ${path}`);
       digest.update(chunk);
@@ -226,13 +242,18 @@ function tokenizeLiteralCommand(command: string): TokenizedCommand {
   const tokens: string[] = [];
   let token = "", quote: "'" | '"' | undefined, escaped = false, active = false;
   for (const char of command) {
-    if (escaped) { token += char; escaped = false; active = true; continue; }
+    if (escaped) {
+      // In POSIX double quotes a backslash only escapes $, `, ", or another backslash.
+      if (quote === '"' && !/[\$`"\\]/.test(char)) token += "\\";
+      token += char; escaped = false; active = true; continue;
+    }
     if (quote !== "'" && char === "\\") { escaped = true; active = true; continue; }
     if (quote === undefined && (char === "'" || char === '"')) { quote = char; active = true; continue; }
     if (quote === char) { quote = undefined; active = true; continue; }
     if ((quote === undefined || quote === '"') && /[$`]/.test(char)) return { tokens: [], error: `shell expansion '${char}' is unsupported` };
+    if (quote === undefined && !active && (char === "~" || char === "#")) return { tokens: [], error: "shell tilde expansion and comments are unsupported" };
     if (quote === undefined && /[;&|<>*?(){}\[\]]/.test(char)) return { tokens: [], error: `shell metacharacter '${char}' is unsupported` };
-    if (quote === undefined && /\s/.test(char)) {
+    if (quote === undefined && /[ \t]/.test(char)) {
       if (active) { tokens.push(token); token = ""; active = false; }
       continue;
     }
@@ -269,6 +290,24 @@ async function scriptDependency(path: string): Promise<CodexHookDependency> {
   });
 }
 
+async function directExecutableDependencies(path: string): Promise<CodexHookDependency[]> {
+  let prefix: Buffer = Buffer.alloc(0);
+  const executable = await executableDependency(path, bytes => { prefix = bytes; });
+  if (prefix[0] !== 35 || prefix[1] !== 33) return [executable];
+  const line = prefix.subarray(2).toString("utf8").split("\n", 1)[0]!.trim();
+  // An env shebang can select a different program through runtime PATH; inline
+  // interpreter flags can execute additional code. Only an absolute interpreter is supported.
+  if (!/^\/[A-Za-z0-9_./+-]+$/.test(line) || /\/(?:env)$/.test(line))
+    throw new Error("Direct hook shebang must select one absolute interpreter without flags or env lookup");
+  if (/\/(?:ba)?sh$/.test(line)) {
+    const bytes = await readBoundedRegular(executable.resolvedPath!, MAX_SCRIPT_BYTES);
+    if (sha256(bytes) !== executable.sha256) throw new Error("Direct hook script changed during inspection");
+    if (/^\s*(?:source\s|\.\s|eval\s)/m.test(bytes.toString("utf8")))
+      throw new Error("Direct shell hook has an unsupported source or eval dependency");
+  }
+  return [executable, await executableDependency(line)];
+}
+
 async function dependenciesForCommand(
   command: string,
   candidates: readonly string[],
@@ -295,25 +334,24 @@ async function dependenciesForCommand(
   const parsed = tokenizeLiteralCommand(command);
   if (parsed.error) { unsupportedReasons.push(`Unsupported hook command: ${parsed.error}.`); return []; }
   const tokens = parsed.tokens;
-  const shellInterpreter = tokens[0] === "bash" || tokens[0] === "/bin/bash" || tokens[0] === "/usr/bin/bash" || tokens[0] === "sh" || tokens[0] === "/bin/sh" || tokens[0] === "/usr/bin/sh";
-  const runtimeIndex = tokens[0] && isAbsolute(tokens[0]) && /^(?:bun|node)$/.test(tokens[0].split("/").at(-1) ?? "") ? 0 : -1;
+  if (tokens.length > 16) { unsupportedReasons.push("Hook command exceeds the 16 literal argument limit."); return []; }
+  const executableName = tokens[0]?.split("/").at(-1);
+  const shellInterpreter = (tokens[0] === "bash" || tokens[0] === "sh" || (tokens[0] !== undefined && isAbsolute(tokens[0]))) &&
+    (executableName === "bash" || executableName === "sh");
+  const runtimeIndex = tokens[0] && isAbsolute(tokens[0]) && /^(?:bun|node|python(?:3(?:\.[0-9]+)?)?)$/.test(tokens[0].split("/").at(-1) ?? "") ? 0 : -1;
   const supportedInterpreter = shellInterpreter || runtimeIndex === 0;
   const scriptIndex = supportedInterpreter ? 1 : 0;
   const possibleScript = tokens[scriptIndex];
   if (!possibleScript || !isAbsolute(possibleScript)) {
-    unsupportedReasons.push(`Hook command must identify an absolute executable/script path: ${command}`);
+    unsupportedReasons.push("Hook command must identify an absolute executable/script path; inspect the command in the hook inventory.");
     return [];
   }
   if (supportedInterpreter && (tokens.length < 2 || tokens.length > 16)) {
-    unsupportedReasons.push(`Hook command must be <known-interpreter> <absolute-script> [literal arguments]: ${command}`);
+    unsupportedReasons.push("Hook command must be <known-interpreter> <absolute-script> [literal arguments]; inspect the command in the hook inventory.");
     return [];
   }
-  if (!supportedInterpreter && tokens.length !== 1) {
-    unsupportedReasons.push(`Direct executable commands with additional arguments are not yet supported: ${command}`);
-    return [];
-  }
-  if (!supportedInterpreter && !/\.(?:sh|bash)$/.test(possibleScript)) {
-    try { return [await executableDependency(possibleScript)]; }
+  if (!supportedInterpreter) {
+    try { return await directExecutableDependencies(possibleScript); }
     catch (error) { unsupportedReasons.push(`Cannot pin direct hook executable '${possibleScript}': ${error instanceof Error ? error.message : String(error)}`); return []; }
   }
   const dependencyPaths = new Set<string>([possibleScript]);
@@ -334,7 +372,7 @@ async function dependenciesForCommand(
   for (const dependency of dependencies) if (!dependency.exists)
     unsupportedReasons.push(`Hook executable/script dependency is absent: ${dependency.requestedPath}`);
   const inspectedScript = await inspectPath(possibleScript, MAX_SCRIPT_BYTES);
-  if (inspectedScript.bytes && (/\.(?:sh|bash)$/.test(possibleScript) || tokens.length === 1)) {
+  if (inspectedScript.bytes && shellInterpreter) {
     const text = inspectedScript.bytes.toString("utf8");
     const isPinnedOrcaWrapper = candidates.includes(resolve(possibleScript)) && isOrcaWrapperSource(text);
     const sourceLines = text.split(/\r?\n/).map(line => line.trim()).filter(line => /^(?:source\s+(?=["'/$A-Za-z])|\.\s+(?=["'/$A-Za-z]))/.test(line));
@@ -450,6 +488,76 @@ async function writeApprovalStore(storePath: string, value: z.infer<typeof Appro
   } finally { if (!renamed) await unlink(tempPath).catch(() => undefined); }
 }
 
+function jsonObject(bytes: Buffer, label: string): Record<string, unknown> {
+  let value: unknown;
+  try { value = JSON.parse(bytes.toString("utf8")); }
+  catch { throw new Error(`${label} contains malformed JSON`); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
+  return value as Record<string, unknown>;
+}
+
+/** Resolve only an unambiguous, local cache installation; never guess the newest version. */
+async function pluginHookInputs(home: string, id: string, sources: CodexHookSource[]): Promise<unknown[]> {
+  const [name, marketplace] = id.split("@");
+  const cache = join(home, "plugins", "cache", marketplace!, name!);
+  const versions: string[] = [];
+  const directory = await opendir(cache);
+  let entryCount = 0;
+  for await (const entry of directory) {
+    if (++entryCount > MAX_DEPENDENCIES) throw new Error("Plugin cache exceeds the bounded entry limit");
+    if (entry.name.startsWith(".")) continue;
+    if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error("Plugin cache contains an unsupported version entry");
+    versions.push(entry.name);
+    if (versions.length > 1) throw new Error("Plugin cache has multiple versions; the active version cannot be proven");
+  }
+  if (versions.length !== 1) throw new Error("Plugin has no installed version");
+  const root = join(cache, versions[0]!);
+  if (await realpath(root) !== resolve(root)) throw new Error("Plugin installation has a symlinked path component");
+  const stat = await lstat(root);
+  if (!ownedByCurrentUserOrRoot(stat) || (stat.mode & 0o022) !== 0) throw new Error("Plugin installation has unsafe ownership or permissions");
+  const manifests = [join(root, "plugin.json"), join(root, ".codex-plugin", "plugin.json"), join(root, ".claude-plugin", "plugin.json")];
+  let declaration: unknown;
+  let selected = false;
+  const trackSource = (source: CodexHookSource): void => {
+    if (sources.length >= MAX_DEPENDENCIES) throw new Error("Plugin source count exceeds the inspection limit");
+    sources.push(source);
+  };
+  for (const [index, path] of manifests.entries()) {
+    const inspected = await inspectPath(path, MAX_SOURCE_BYTES);
+    trackSource({ kind: "plugin_manifest", path, exists: inspected.exists, sha256: inspected.sha256 });
+    if (!inspected.bytes || selected) continue;
+    const manifest = jsonObject(inspected.bytes, "Plugin manifest");
+    if (index === 0) {
+      const extensions = manifest["extensions"];
+      const openai = extensions && typeof extensions === "object" && !Array.isArray(extensions)
+        ? (extensions as Record<string, unknown>)["com.openai"] : undefined;
+      if (!openai || typeof openai !== "object" || Array.isArray(openai)) continue;
+      declaration = (openai as Record<string, unknown>)["hooks"];
+    } else declaration = manifest["hooks"];
+    selected = true;
+  }
+  if (!selected) throw new Error("Plugin has no supported manifest");
+  const inputs: unknown[] = [];
+  const append = async (value: unknown, required: boolean): Promise<void> => {
+    if (Array.isArray(value)) {
+      if (value.length > 16 || value.some(Array.isArray)) throw new Error("Plugin hook declaration array exceeds the supported bounds");
+      for (const item of value) await append(item, true);
+    } else if (typeof value === "string") {
+      if (!value.startsWith("./") || value.includes("\\") || value.includes("\0") || value.slice(2).split("/").some(part => !part || part === "." || part === ".."))
+        throw new Error("Plugin hook path must stay inside the plugin installation");
+      const path = join(root, value);
+      const inspected = await inspectPath(path, MAX_SOURCE_BYTES);
+      trackSource({ kind: "plugin_hooks", path, exists: inspected.exists, sha256: inspected.sha256 });
+      if (inspected.bytes) inputs.push(jsonObject(inspected.bytes, "Plugin hooks"));
+      else if (required) throw new Error("Declared plugin hook file is absent");
+    } else if (value && typeof value === "object") {
+      inputs.push(value);
+    } else throw new Error("Plugin hooks have an unsupported declaration shape");
+  };
+  await append(declaration === undefined ? "./hooks/hooks.json" : declaration, declaration !== undefined);
+  return inputs;
+}
+
 async function buildInventory(options: CodexHookTrustOptions = {}): Promise<Omit<CodexHookReview, "status">> {
   const paths = pathOptions(options);
   const home = await canonicalCodexHome(paths.home);
@@ -496,13 +604,33 @@ async function buildInventory(options: CodexHookTrustOptions = {}): Promise<Omit
   try {
     const config = await inspectPath(configPath, MAX_SOURCE_BYTES, false);
     const tomlHooks = config.bytes ? parseCodexTomlHooks(config.bytes.toString("utf8")) : {};
+    const enabledPlugins = config.bytes ? parseCodexEnabledPlugins(config.bytes.toString("utf8")) : [];
     const hasTomlHooks = Object.keys(tomlHooks).length > 0;
-    const tomlDigest = sha256(JSON.stringify(tomlHooks));
+    const tomlDigest = sha256(JSON.stringify({ hooks: tomlHooks, enabledPlugins }));
     sources.push({ kind: "config_toml", path: resolve(configPath), exists: config.exists, sha256: tomlDigest });
     diagnostics.push(hasTomlHooks ? "Codex executable TOML hook declarations are included in this snapshot." : "Codex executable TOML hook declarations are absent; native hooks.state metadata is excluded.");
     const entries = extractHooks({ hooks: tomlHooks }, unsupportedReasons);
+    const pluginOrigins = new Map<(typeof entries)[number], string>();
+    for (const id of enabledPlugins) {
+      try {
+        const inputs = await pluginHookInputs(home, id, sources);
+        for (const input of inputs) {
+          const pluginEntries = extractHooks(input, unsupportedReasons);
+          for (const entry of pluginEntries) pluginOrigins.set(entry, id);
+          entries.push(...pluginEntries);
+          if (entries.length > MAX_HOOKS) throw new Error("Combined hook count exceeds the inspection limit");
+        }
+        diagnostics.push(`Enabled plugin ${id} hook sources are included in the snapshot.`);
+      } catch (error) {
+        unsupportedReasons.push(`Cannot inspect enabled plugin ${id}: ${error instanceof Error ? error.message : "inspection failed"}`);
+      }
+    }
     for (const entry of entries) {
+      const previousReasons = unsupportedReasons.length;
       const dependencies = await dependenciesForCommand(entry.command, candidates, paths.environment, unsupportedReasons, diagnostics);
+      const origin = pluginOrigins.get(entry);
+      if (origin) for (let index = previousReasons; index < unsupportedReasons.length; index++)
+        unsupportedReasons[index] = `Plugin ${origin}, event ${entry.event}: ${unsupportedReasons[index]}`;
       for (const dependency of dependencies) if (!sources.some(source => source.path === dependency.requestedPath))
         sources.push(CodexHookSourceSchema.parse({ kind: candidates.includes(dependency.requestedPath) ? "orca_candidate" : "script",
           path: dependency.requestedPath, exists: dependency.exists, sha256: dependency.sha256 }));
@@ -518,8 +646,10 @@ async function buildInventory(options: CodexHookTrustOptions = {}): Promise<Omit
   const selectorState = { orcaAgentHookEndpointPresent: Boolean(paths.environment["ORCA_AGENT_HOOK_ENDPOINT"]),
     orcaAgentHookRoot: paths.environment["ORCA_AGENT_HOOK_ROOT"] ?? null,
     home: paths.environment["HOME"] ?? null };
-  const digest = sha256(JSON.stringify({ schemaVersion: 1, codexHomeDirectory: home, approvalStorePath: store, selectorState, sources, hooks, diagnostics, unsupportedReasons }));
-  return { schemaVersion: 1, codexHomeDirectory: home, approvalStorePath: store, digest, sources, hooks, diagnostics, unsupportedReasons };
+  const uniqueDiagnostics = [...new Set(diagnostics)];
+  const uniqueReasons = [...new Set(unsupportedReasons)];
+  const digest = sha256(JSON.stringify({ schemaVersion: 1, codexHomeDirectory: home, approvalStorePath: store, selectorState, sources, hooks, diagnostics: uniqueDiagnostics, unsupportedReasons: uniqueReasons }));
+  return { schemaVersion: 1, codexHomeDirectory: home, approvalStorePath: store, digest, sources, hooks, diagnostics: uniqueDiagnostics, unsupportedReasons: uniqueReasons };
 }
 
 export async function inspectCodexHooks(options: CodexHookTrustOptions = {}): Promise<CodexHookReview> {

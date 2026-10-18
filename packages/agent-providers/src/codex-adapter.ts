@@ -97,6 +97,8 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
       PATH: selected["PATH"] ?? "",
       ORCA_AGENT_HOOK_ROOT: selected["ORCA_AGENT_HOOK_ROOT"] ?? "",
       ORCA_AGENT_HOOK_ENDPOINT: selected["ORCA_AGENT_HOOK_ENDPOINT"] ?? "",
+      ORCA_PANE_KEY: selected["ORCA_PANE_KEY"] ?? "",
+      ORCA_AGENT_HOOK_PORT: selected["ORCA_AGENT_HOOK_PORT"] ?? "",
       ...(this.options.codexHomeDirectory ? { CODEX_HOME: this.options.codexHomeDirectory } : selected["CODEX_HOME"] !== undefined ? { CODEX_HOME: selected["CODEX_HOME"] } : {})
     };
   }

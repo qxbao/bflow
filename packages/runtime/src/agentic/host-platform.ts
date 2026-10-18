@@ -7,7 +7,7 @@ import {
   AgentProviderIdSchema, AgentRoleSchema,
   type AgentProviderId, type AgentRole, type ContractError
 } from "@bflow/contracts";
-import type { LiveReadinessObservation } from "@bflow/agent-providers";
+import { createManagedCodexHookEnvironment, type LiveReadinessObservation } from "@bflow/agent-providers";
 import { FileSkillStore, SkillManager } from "@bflow/skills";
 import {
   createPlatformReadinessService, createProviderAdapterFactory, Ed25519LaunchAttestationSigner, GatewayControlClient,
@@ -523,17 +523,13 @@ export interface CreateHostPlatformSessionOptions {
 /** Machine trust settings are provider defaults, so permanent and dynamic Developer Codex instances share them. */
 export function createHostProviderFactoryOptions(platform: AgenticHostPlatformOptions,
   hookEnvironment: Readonly<Record<string, string | undefined>> = process.env) {
-  const codexHookEnvironment: Record<string, string> = {};
-  for (const name of ["HOME", "ORCA_AGENT_HOOK_ROOT", "ORCA_AGENT_HOOK_ENDPOINT"]) {
-    const value = name === "HOME" ? (platform.codexProcessHomeDirectory ?? hookEnvironment[name] ?? process.env.HOME ?? homedir()) : hookEnvironment[name];
-    if (value !== undefined) codexHookEnvironment[name] = value;
-  }
+  const codexHookEnvironment = createManagedCodexHookEnvironment({ ...hookEnvironment,
+    PATH: hookEnvironment.PATH ?? process.env.PATH }, platform.codexProcessHomeDirectory ?? hookEnvironment.HOME ?? process.env.HOME ?? homedir());
   return {
-    ...(platform.codexHomeDirectory !== undefined ? { codexLaunchEnvironment: {
-      CODEX_HOME: platform.codexHomeDirectory,
-      HOME: codexHookEnvironment.HOME!,
-      ...Object.fromEntries(Object.entries(codexHookEnvironment).filter(([name]) => name !== "HOME"))
-    } } : {}),
+    codexLaunchEnvironment: {
+      ...codexHookEnvironment,
+      ...(platform.codexHomeDirectory !== undefined ? { CODEX_HOME: platform.codexHomeDirectory } : {})
+    },
     perProvider: {
       codex: {
         ...(platform.codexHomeDirectory !== undefined ? { codexHomeDirectory: platform.codexHomeDirectory } : {}),
