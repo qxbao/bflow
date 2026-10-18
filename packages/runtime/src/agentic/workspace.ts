@@ -1,6 +1,8 @@
 import { mkdir, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
-import { ApprovalDecisionSchema, SessionManifestSchema, type ApprovalDecision, type QualityGate, type RoleMessage } from "@bflow/contracts";
+import {
+  ApprovalDecisionSchema, SessionManifestSchema, type ApprovalDecision, type OperationOptions, type OperationResult, type QualityGate, type RoleMessage
+} from "@bflow/contracts";
 import { AgenticWorkflowRuntime } from "./runtime.js";
 import { loadAgenticPolicies, type AgenticRuntimePorts, type PanePolicy } from "./ports.js";
 import { createAgenticConversationHost, type AgenticConversationHost } from "./conversation.js";
@@ -8,6 +10,7 @@ import { startHerdrReceiptIngress, authenticateNativeHerdrMessage } from "./herd
 import { CoordinatorTools } from "./tools.js";
 import { record } from "./journal.js";
 import { unwrap } from "./outbox.js";
+import type { ReachabilityVerdict } from "./tool-reachability.js";
 
 export interface OpenAgenticWorkspaceOptions {
   repositoryPath: string; sessionId: string; herdrBinary?: string;
@@ -37,32 +40,88 @@ export interface OpenAgenticWorkspaceOptions {
 export interface DeveloperLaunchPort {
   allocate(request: { taskId: string; worktreePath: string }): Promise<{ provider: string; argv: readonly string[]; env: Readonly<Record<string, string>>; launchId: string; launchFingerprint: string }>;
   release(taskId: string): Promise<void>;
+  /**
+   * Reachability verdict of one launch's in-process Gateway probes, for the pane allocated to it. Throws for a launch
+   * that is not active. Pane Manager stays unaware of Gateway: the verdict is computed by the host session.
+   */
+  reachability(launchId: string, paneId: string): Promise<ReachabilityVerdict>;
 }
+/** Bound on waiting for a new Developer's provider process to prove Gateway reachability (Pane Manager's default operation timeout). */
+export const DEVELOPER_STARTUP_TIMEOUT_MS = 30_000;
+export interface DeveloperLaunchOptions {
+  readonly startupTimeoutMs?: number;
+  readonly now?: () => number;
+}
+type AllocatedPane = Extract<Awaited<ReturnType<PanePolicy["allocateDeveloper"]>>, { ok: true }>["value"];
+interface PendingDeveloper { readonly taskId: string; readonly launchId: string; readonly allocated: AllocatedPane; readonly since: number }
 /**
  * Pane policy whose Developer allocation carries a readiness-approved launch and whose release drops it.
  * A refused allocation releases its prepared launch so no Gateway registration or intent is leaked, and a
  * launched Developer pane is closed on release: its bearer token is revoked with the launch, so the running
  * agent must not be reused with a later launch.
+ *
+ * Dispatch gate: after the pane exists, the Developer must prove in-process Gateway reachability before its binding
+ * is returned. While unproven the allocation is a retryable conflict; the allocated pane and launch are kept, so a
+ * retry resumes the same launch instead of preparing another. A failed proof, or no proof within the startup
+ * timeout, releases the launch and pane and is a non-retryable validation error.
  */
-export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunchPort): PanePolicy {
+export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunchPort, launchOptions: DeveloperLaunchOptions = {}): PanePolicy {
+  const timeoutMs = launchOptions.startupTimeoutMs ?? DEVELOPER_STARTUP_TIMEOUT_MS;
+  const now = launchOptions.now ?? Date.now;
+  const pending = new Map<string, PendingDeveloper>();
+  /** Releases a Developer that failed its gate: pane closed, launch and registrations revoked. Reports a release failure too. */
+  const retire = async (taskId: string, callOptions: OperationOptions | undefined): Promise<string | undefined> => {
+    pending.delete(taskId);
+    await base.releaseDeveloper({ taskId, closePane: true, removeWorktree: false }, callOptions);
+    try { await launches.release(taskId); return undefined; }
+    catch (error) { return String(error); }
+  };
+  const failClosed = async (entry: PendingDeveloper, reason: string, callOptions: OperationOptions | undefined): Promise<OperationResult<AllocatedPane>> => {
+    const releaseFailure = await retire(entry.taskId, callOptions);
+    return { ok: false, error: { code: "validation", retryable: false,
+      message: `Developer ${entry.taskId} ${reason}; its pane and launch were released${releaseFailure === undefined ? "" : `, but the launch release failed: ${releaseFailure}`}` } };
+  };
   return {
     getManifest: options => base.getManifest(options),
     getRoleBinding: (role, options) => base.getRoleBinding(role, options),
     inspectRoleHealth: (role, options) => base.inspectRoleHealth(role, options),
-    async allocateDeveloper(request, options) {
-      let launch;
-      try { launch = await launches.allocate({ taskId: request.taskId, worktreePath: request.worktreePath }); }
-      catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
-      // Carried as a widened value: the PanePolicy request type predates the launch fields Pane Manager accepts.
-      const allocation = { ...request, agentKind: launch.provider, launch };
-      const allocated = await base.allocateDeveloper(allocation, options);
-      if (!allocated.ok) {
-        try { await launches.release(request.taskId); } catch { /* the refused allocation's error is the one to report */ }
+    async allocateDeveloper(request, callOptions) {
+      let entry = pending.get(request.taskId);
+      if (entry === undefined) {
+        let launch;
+        try { launch = await launches.allocate({ taskId: request.taskId, worktreePath: request.worktreePath }); }
+        catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
+        // Carried as a widened value: the PanePolicy request type predates the launch fields Pane Manager accepts.
+        const allocation = { ...request, agentKind: launch.provider, launch };
+        const allocated = await base.allocateDeveloper(allocation, callOptions);
+        if (!allocated.ok) {
+          try { await launches.release(request.taskId); } catch { /* the refused allocation's error is the one to report */ }
+          return allocated;
+        }
+        entry = { taskId: request.taskId, launchId: launch.launchId, allocated: allocated.value, since: now() };
+        pending.set(request.taskId, entry);
       }
-      return allocated;
+      let verdict: ReachabilityVerdict;
+      try { verdict = await launches.reachability(entry.launchId, entry.allocated.paneId); }
+      catch (error) { return failClosed(entry, `has no readable reachability record: ${String(error)}`, callOptions); }
+      if (verdict.state === "ready") {
+        pending.delete(entry.taskId);
+        return { ok: true, value: entry.allocated };
+      }
+      if (verdict.state === "pending") {
+        if (now() - entry.since < timeoutMs) {
+          return { ok: false, error: { code: "conflict", retryable: true,
+            message: `Developer ${entry.taskId} has not proven Gateway tool reachability from its provider process yet: ${verdict.reason}`,
+            details: { stage: "developer_startup" } } };
+        }
+        return failClosed(entry, `did not prove Gateway tool reachability within ${timeoutMs} ms (${verdict.reason})`, callOptions);
+      }
+      return failClosed(entry, `cannot reach Gateway registration ${verdict.registrationId} from its provider process ` +
+        `(${verdict.envName}: ${verdict.code}; ${verdict.reason})`, callOptions);
     },
-    async releaseDeveloper(request, options) {
-      const released = await base.releaseDeveloper({ ...request, closePane: true }, options);
+    async releaseDeveloper(request, callOptions) {
+      pending.delete(request.taskId);
+      const released = await base.releaseDeveloper({ ...request, closePane: true }, callOptions);
       // Already released: the binding is gone, so the launch is already dropped as well.
       if (!released.ok && released.error.code !== "not_found") return released;
       try { await launches.release(request.taskId); }

@@ -1,9 +1,10 @@
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { AgentRole, ContractError, OperationResult } from "@bflow/contracts";
+import type { AgentRole, ContractError, MCPClientRegistration, OperationResult } from "@bflow/contracts";
 import type { PlatformReadinessService, PreparedRoleLaunch, RolePlatformRequirement } from "../../src/platform/index.js";
+import { tokenEnvironmentName } from "../../src/platform/gateway-registrations.js";
 import type { PlatformRoleOption, AgenticHostPlatformOptions } from "../../src/platform/host-options.js";
 import {
   HostPlatformSession, PLATFORM_SUPPORTED_COMMANDS, HostPlatformStatusSchema, launchMaterial, liveObservation, requirementFor
@@ -58,6 +59,7 @@ async function session(service: PlatformReadinessService, extra: Partial<{ gener
   const options = {
     service, platform, repositoryPath: root, sessionId: "s1", stateDirectory: join(root, "state"),
     generationFile: join(root, "platform-generation.json"), launchesFile: join(root, "platform-launches.json"),
+    probeDirectory: join(root, "probes"), reachabilityDirectory: join(root, "reachability"),
     hostCapabilities: { conversation: ["conversation"], coordinator: ["coordination"], developer: ["implementation"] },
     ...extra
   };
@@ -73,7 +75,8 @@ describe("P30 host platform composition", () => {
     expect(service.requirements[0]!.map(requirement => requirement.role)).toEqual(["conversation", "coordinator"]);
     expect(service.requirements[0]!.every(requirement => requirement.provider === "codex" && requirement.cwd === root)).toBe(true);
     const material = launchMaterial(result.launches.get("conversation")!);
-    expect(material).toEqual({ provider: "codex", argv: ["--kind-independent", "--provider=codex"], env: { BFLOW_MCP_TOKEN_CHAT: token }, launchId: "launch-conv", launchFingerprint: "a".repeat(64) });
+    expect(material).toEqual({ provider: "codex", argv: ["--kind-independent", "--provider=codex"],
+      env: { BFLOW_MCP_TOKEN_CHAT: token, BFLOW_LAUNCH_ID: "launch-conv" }, launchId: "launch-conv", launchFingerprint: "a".repeat(64) });
     expect(JSON.parse(await readFile(join(root, "platform-generation.json"), "utf8"))).toEqual({ generation: 1 });
     expect((await host.prepare()).report.ready).toBe(true);
     expect(JSON.parse(await readFile(join(root, "platform-generation.json"), "utf8"))).toEqual({ generation: 2 });
@@ -97,6 +100,33 @@ describe("P30 host platform composition", () => {
     expect(index).not.toContain(token);
     expect(index).not.toContain("env");
     expect((await readdir(root)).sort()).toEqual(["platform-generation.json", "platform-launches.json"]);
+  });
+
+  it("publishes a launch-keyed, token-free probe plan for a permanent role with registrations and removes it with its generation", async () => {
+    const registration = {
+      schemaVersion: 3, registrationId: "reg-conv0001", provider: "codex", role: "conversation", scope: { kind: "session" }, environmentId: "env-1",
+      serviceIds: ["svc-1"], allowedTools: ["query"], connection: { transport: "streamable_http", endpoint: "http://127.0.0.1:7777/mcp", token: "secret://runtime/reg-conv0001" },
+      configDigest: "a".repeat(64), expiresAt: at, idempotencyKey: "key-conv"
+    } as unknown as MCPClientRegistration;
+    let launches: PreparedRoleLaunch[] = [{ ...prepared("conversation", "codex", "launch-conv"), gateway: { registrations: [registration], observations: [], tokenEnvironment: {} } } as unknown as PreparedRoleLaunch];
+    const service = fakeService({
+      prepareSession: async () => ({ ok: true, value: { report: { ready: true, generation: 1, roles: [], checkedAt: at }, launches } }) as never
+    });
+    const { host, root } = await session(service);
+    const result = await host.prepare();
+    expect(result.reachability.get("conversation")).toEqual({ launchId: "launch-conv",
+      entries: [{ registrationId: "reg-conv0001", envName: tokenEnvironmentName("reg-conv0001"), allowedTools: ["query"] }] });
+    expect(result.reachability.has("coordinator" as AgentRole)).toBe(false);
+
+    const planPath = join(root, "probes", "launch-conv.json");
+    const plan = await readFile(planPath, "utf8");
+    expect(plan).not.toContain(token);
+    expect(JSON.parse(plan)).toMatchObject({ schemaVersion: 3, launchId: "launch-conv", endpoint: "http://127.0.0.1:7777/mcp" });
+    expect((await stat(planPath)).mode & 0o777).toBe(0o600);
+
+    launches = [];
+    await host.prepare();
+    await expect(stat(planPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("releases the previous generation's permanent launches before issuing a new set", async () => {

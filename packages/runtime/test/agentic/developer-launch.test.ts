@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -28,6 +28,11 @@ import { HostPlatformSession } from "../../src/agentic/host-platform.js";
 import type { AgenticHostPlatformOptions } from "../../src/platform/host-options.js";
 import type { GatewayControlPort, GatewayRegistrationGrant, PlatformSessionIdentity } from "../../src/platform/ports.js";
 import { withDeveloperLaunches } from "../../src/agentic/workspace.js";
+import { tokenEnvironmentName } from "../../src/platform/gateway-registrations.js";
+import {
+  BFLOW_LAUNCH_ID_ENV, GATEWAY_PROBE_DIRECTORY, LAUNCH_REACHABILITY_DIRECTORY, launchProbePath, launchReachabilityPath,
+  readLaunchReachability, writeLaunchReachability, type ToolReachabilityRecord
+} from "../../src/agentic/tool-reachability.js";
 
 // Pane Manager is consumed through its built dist, as the Agentic host does (runtime has no static dependency on it).
 const paneModule: any = await import(new URL("../../../pane-manager/dist/index.js", import.meta.url).href);
@@ -114,6 +119,8 @@ class FakeHerdr {
   readonly calls: { args: string[]; env: Readonly<Record<string, string>> | undefined }[] = [];
   readonly panes = new Map<string, FakePane>();
   readonly agents = new Map<string, FakeAgent>();
+  /** Runs when an agent starts in a pane: stands in for the provider process and its SessionStart hook. */
+  onStart: ((paneId: string, env: Readonly<Record<string, string>> | undefined) => Promise<void>) | undefined;
   private seq = 0;
 
   startCalls(): { args: string[]; env: Readonly<Record<string, string>> | undefined }[] {
@@ -224,6 +231,7 @@ class FakeHerdr {
       const agent: FakeAgent = { name, kind, paneId, workspaceId: pane.workspaceId, tabId: pane.tabId };
       this.agents.set(name, agent);
       pane.agent = kind;
+      await this.onStart?.(paneId, env);
       return this.okJson({ type: "agent_started", agent: this.agentJson(agent) });
     }
     return this.error("unsupported", `unsupported fake Herdr command: ${args.join(" ")}`);
@@ -285,9 +293,15 @@ describe("P30 dynamic Developer launches end to end", () => {
   }
 
   /** Builds the real host composition: readiness service, HostPlatformSession, RolePaneManager and the launch wrapper. */
-  async function buildHost(options: { runner?: ProviderCommandRunner; gateway?: boolean; maxCapacity?: number; mcpServiceIds?: string[] } = {}) {
+  async function buildHost(options: { runner?: ProviderCommandRunner; gateway?: boolean; maxCapacity?: number; mcpServiceIds?: string[];
+    /** When true (default) the started provider reports every registration reachable, as its SessionStart hook would. */
+    reportReachability?: boolean; startupTimeoutMs?: number } = {}) {
     // The runtime prepares the task worktree before allocating its Developer; preflight requires it to exist.
     for (const taskId of ["run-1-t1", "run-1-t2", "run-1-legacy"]) await mkdir(worktree(taskId), { recursive: true, mode: 0o700 });
+    const hostDirectory = join(baseDir, "host");
+    const probeDirectory = join(hostDirectory, GATEWAY_PROBE_DIRECTORY);
+    const reachabilityDirectory = join(hostDirectory, LAUNCH_REACHABILITY_DIRECTORY);
+    const clock = { t: 0, now: () => clock.t };
     const journal = new FileLaunchJournal(join(stateDirectory, "launch-journal.jsonl"));
     const providers = new ProviderReadiness({
       factory: createProviderAdapterFactory({
@@ -322,11 +336,26 @@ describe("P30 dynamic Developer launches end to end", () => {
       service, platform, repositoryPath: workspace, sessionId: SESSION, stateDirectory,
       generationFile: join(stateDirectory, "generation.json"),
       launchesFile: join(stateDirectory, "launches.json"),
+      probeDirectory, reachabilityDirectory,
       hostCapabilities: {}
     });
     await session.prepare();
 
     const herdr = new FakeHerdr();
+    // The provider process of each started Developer proves its registrations from its own environment (H1 hook).
+    herdr.onStart = async (paneId, env) => {
+      const launchId = env?.[BFLOW_LAUNCH_ID_ENV];
+      if (launchId === undefined || options.reportReachability === false) return;
+      const records: ToolReachabilityRecord[] = [];
+      for (const { registration, bearerToken } of gatewayControl.registrations.values()) {
+        const envName = tokenEnvironmentName(registration.registrationId);
+        const presented = env?.[envName];
+        records.push(presented === bearerToken
+          ? { registrationId: registration.registrationId, envName, ok: true, discoveredTools: [...registration.allowedTools], code: null }
+          : { registrationId: registration.registrationId, envName, ok: false, discoveredTools: [], code: "token_env_missing" });
+      }
+      await writeLaunchReachability(reachabilityDirectory, launchId, paneId, records);
+    };
     const store = new manifestModule.InMemorySessionManifestStore();
     const chatPane = {
       schemaVersion: 2, bindingId: "binding-chat", sessionId: SESSION, role: "conversation", agentId: "chat",
@@ -351,9 +380,31 @@ describe("P30 dynamic Developer launches end to end", () => {
     });
     const panes = withDeveloperLaunches(rolePanes, {
       allocate: request => session.allocateDeveloper(request.taskId, request.worktreePath),
-      release: taskId => session.releaseDeveloper(taskId)
+      release: taskId => session.releaseDeveloper(taskId),
+      reachability: (launchId, paneId) => session.developerReachability(launchId, paneId)
+    }, { startupTimeoutMs: options.startupTimeoutMs ?? 30_000, now: clock.now });
+    return { service, session, journal, herdr, store, rolePanes, panes, clock, probeDirectory, reachabilityDirectory };
+  }
+
+  /** The pane Pane Manager started the agent in for one allocation (the `--pane` of its `agent start`). */
+  function startedPane(herdr: FakeHerdr, index: number): string {
+    const start = herdr.startCalls()[index]!;
+    return start.args[start.args.indexOf("--pane") + 1]!;
+  }
+
+  /** The launch id of one allocation, from its prepared launch material in the Herdr start env. */
+  function startedLaunch(herdr: FakeHerdr, index: number): string {
+    return herdr.startCalls()[index]!.env![BFLOW_LAUNCH_ID_ENV]!;
+  }
+
+  /** One ok or failed record per live registration, shaped like the provider hook's report. */
+  function reportFor(outcome: "ok" | "unauthorized"): ToolReachabilityRecord[] {
+    return [...gatewayControl.registrations.values()].map(({ registration }) => {
+      const envName = tokenEnvironmentName(registration.registrationId);
+      return outcome === "ok"
+        ? { registrationId: registration.registrationId, envName, ok: true, discoveredTools: [...registration.allowedTools], code: null }
+        : { registrationId: registration.registrationId, envName, ok: false, discoveredTools: [], code: "unauthorized" };
     });
-    return { service, session, journal, herdr, store, rolePanes, panes };
   }
 
   /** The launch's bearer token inside one Herdr invocation env: the value that is a live Gateway token. */
@@ -601,5 +652,122 @@ describe("P30 dynamic Developer launches end to end", () => {
     expect(second.value.metadata?.["launchId"]).toBeTruthy();
     expect(host.herdr.panes.has(first.value.paneId)).toBe(false);
     expect(gatewayControl.tokens()).toEqual([secondToken]);
+  });
+
+  it("gives two concurrent Developers their own probe plans and reachability records, which do not collide", async () => {
+    const host = await buildHost({ mcpServiceIds: ["svc-search"], reportReachability: false });
+    expect((await host.panes.allocateDeveloper(allocation("run-1-t1"))).ok).toBe(false);
+    expect((await host.panes.allocateDeveloper(allocation("run-1-t2"))).ok).toBe(false);
+    const [launchA, launchB] = [startedLaunch(host.herdr, 0), startedLaunch(host.herdr, 1)];
+    const [paneA, paneB] = [startedPane(host.herdr, 0), startedPane(host.herdr, 1)];
+    expect(launchA).not.toBe(launchB);
+    expect((await readdir(host.probeDirectory)).sort()).toEqual([`${launchA}.json`, `${launchB}.json`].sort());
+    expect(JSON.parse(await readFile(launchProbePath(host.probeDirectory, launchA), "utf8")).launchId).toBe(launchA);
+
+    await writeLaunchReachability(host.reachabilityDirectory, launchA, paneA, reportFor("ok"));
+    await writeLaunchReachability(host.reachabilityDirectory, launchB, paneB, reportFor("unauthorized"));
+    expect(await readLaunchReachability(host.reachabilityDirectory, launchA)).toMatchObject({ paneId: paneA, reported: { launchId: launchA } });
+    expect(await readLaunchReachability(host.reachabilityDirectory, launchB)).toMatchObject({ paneId: paneB, reported: { launchId: launchB } });
+
+    expect((await host.panes.allocateDeveloper(allocation("run-1-t1"))).ok).toBe(true);
+    const refused = await host.panes.allocateDeveloper(allocation("run-1-t2"));
+    expect(refused.ok).toBe(false);
+    if (refused.ok) return;
+    expect(refused.error).toMatchObject({ code: "validation", retryable: false });
+    expect(refused.error.message).toContain("unauthorized");
+    // Only the admitted Developer keeps its registration; the refused one is released with its pane.
+    expect(gatewayControl.registrations.size).toBe(1);
+    expect(host.herdr.panes.has(paneB)).toBe(false);
+  });
+
+  it("returns a retryable conflict until the provider reports reachability, then admits the same launch without re-preparing it", async () => {
+    const host = await buildHost({ mcpServiceIds: ["svc-search"], reportReachability: false });
+    const prepareSpy = vi.spyOn(host.service, "prepareDeveloper");
+    const pending = await host.panes.allocateDeveloper(allocation("run-1-t1"));
+    expect(pending.ok).toBe(false);
+    if (pending.ok) return;
+    expect(pending.error).toMatchObject({ code: "conflict", retryable: true, details: { stage: "developer_startup" } });
+    const paneId = startedPane(host.herdr, 0), launchId = startedLaunch(host.herdr, 0);
+    expect(host.herdr.panes.has(paneId)).toBe(true);
+    expect(await host.session.developerToolReachability()).toEqual([expect.objectContaining({ role: "developer", launchId, state: "pending" })]);
+
+    host.clock.t = 500;
+    expect((await host.panes.allocateDeveloper(allocation("run-1-t1"))).ok).toBe(false);
+    await writeLaunchReachability(host.reachabilityDirectory, launchId, paneId, reportFor("ok"));
+
+    const admitted = await host.panes.allocateDeveloper(allocation("run-1-t1"));
+    expect(admitted.ok).toBe(true);
+    if (!admitted.ok) return;
+    expect(admitted.value.paneId).toBe(paneId);
+    expect(admitted.value.metadata?.["launchId"]).toBe(launchId);
+    expect(prepareSpy).toHaveBeenCalledTimes(1);
+    expect(host.herdr.startCalls()).toHaveLength(1);
+    expect(host.session.status().status.launches).toEqual([expect.objectContaining({ launchId, state: "intent" })]);
+    expect(await host.session.developerToolReachability()).toEqual([expect.objectContaining({ launchId, state: "ready" })]);
+  });
+
+  it("does not accept a reachability record that names another pane", async () => {
+    const host = await buildHost({ mcpServiceIds: ["svc-search"], reportReachability: false });
+    expect((await host.panes.allocateDeveloper(allocation("run-1-t1"))).ok).toBe(false);
+    const launchId = startedLaunch(host.herdr, 0);
+    await writeLaunchReachability(host.reachabilityDirectory, launchId, "pane-elsewhere", reportFor("ok"));
+    const stillPending = await host.panes.allocateDeveloper(allocation("run-1-t1"));
+    expect(stillPending).toMatchObject({ ok: false, error: { code: "conflict", retryable: true, message: expect.stringContaining("another pane") } });
+  });
+
+  it("releases the launch and pane and revokes registrations when the provider's probe fails", async () => {
+    const host = await buildHost({ mcpServiceIds: ["svc-search"], reportReachability: false });
+    expect((await host.panes.allocateDeveloper(allocation("run-1-t1"))).ok).toBe(false);
+    const paneId = startedPane(host.herdr, 0), launchId = startedLaunch(host.herdr, 0);
+    await writeLaunchReachability(host.reachabilityDirectory, launchId, paneId, reportFor("unauthorized"));
+    const [record] = (await readLaunchReachability(host.reachabilityDirectory, launchId))!.reported.toolReachability;
+
+    const failed = await host.panes.allocateDeveloper(allocation("run-1-t1"));
+    expect(failed.ok).toBe(false);
+    if (failed.ok) return;
+    expect(failed.error).toMatchObject({ code: "validation", retryable: false });
+    expect(failed.error.message).toContain(record!.registrationId);
+    expect(failed.error.message).toContain(record!.envName);
+    expect(failed.error.message).toContain("unauthorized");
+    expect(gatewayControl.registrations.size).toBe(0);
+    expect(host.herdr.panes.has(paneId)).toBe(false);
+    expect(host.session.status().status.launches).toEqual([expect.objectContaining({ launchId, state: "released" })]);
+    await expect(stat(launchProbePath(host.probeDirectory, launchId))).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await journalEntries(host.journal)).map(entry => entry.kind)).toEqual(["intent", "released"]);
+  });
+
+  it("fails a Developer that never proves reachability within the startup timeout, releasing its launch and pane", async () => {
+    const host = await buildHost({ mcpServiceIds: ["svc-search"], reportReachability: false, startupTimeoutMs: 1000 });
+    host.clock.t = 0;
+    expect((await host.panes.allocateDeveloper(allocation("run-1-t1"))).ok).toBe(false);
+    const paneId = startedPane(host.herdr, 0), launchId = startedLaunch(host.herdr, 0);
+
+    host.clock.t = 999;
+    const waiting = await host.panes.allocateDeveloper(allocation("run-1-t1"));
+    expect(waiting).toMatchObject({ ok: false, error: { code: "conflict", retryable: true } });
+
+    host.clock.t = 1000;
+    const timedOut = await host.panes.allocateDeveloper(allocation("run-1-t1"));
+    expect(timedOut.ok).toBe(false);
+    if (timedOut.ok) return;
+    expect(timedOut.error).toMatchObject({ code: "validation", retryable: false });
+    expect(timedOut.error.message).toContain("within 1000 ms");
+    expect(gatewayControl.registrations.size).toBe(0);
+    expect(host.herdr.panes.has(paneId)).toBe(false);
+    expect(host.session.status().status.launches).toEqual([expect.objectContaining({ launchId, state: "released" })]);
+  });
+
+  it("removes a released Developer's probe plan and reachability record", async () => {
+    const host = await buildHost({ mcpServiceIds: ["svc-search"] });
+    const allocated = await host.panes.allocateDeveloper(allocation("run-1-t1"));
+    expect(allocated.ok).toBe(true);
+    if (!allocated.ok) return;
+    const launchId = allocated.value.metadata?.["launchId"] as string;
+    await expect(stat(launchProbePath(host.probeDirectory, launchId))).resolves.toBeDefined();
+    await expect(stat(launchReachabilityPath(host.reachabilityDirectory, launchId))).resolves.toBeDefined();
+
+    expect((await host.panes.releaseDeveloper({ taskId: "run-1-t1", closePane: false, removeWorktree: false })).ok).toBe(true);
+    await expect(stat(launchProbePath(host.probeDirectory, launchId))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(launchReachabilityPath(host.reachabilityDirectory, launchId))).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

@@ -10,9 +10,10 @@ import { MCPClientRegistrationSchema, MCPServiceDefinitionSchema, type AgentRole
 import type { PreparedRoleLaunch } from "../../src/platform/index.js";
 import { tokenEnvironmentName } from "../../src/platform/gateway-registrations.js";
 import {
-  assertRoleToolReachability, evaluateToolReachability, GatewayProbeFileSchema, gatewayProbePath, probeGatewayTools, ProviderStartedPayloadSchema,
-  publishGatewayProbes, readGatewayProbeFile, reportedReachabilityOf, removeGatewayProbes, summarizeToolReachability,
-  type GatewayProbeTarget, type ProbeFetch, type ReachabilityExpectation
+  assertRoleToolReachability, BFLOW_LAUNCH_ID_ENV, evaluateToolReachability, GATEWAY_PROBE_DIRECTORY, GatewayProbeFileSchema,
+  launchProbePath, legacyRoleProbePath, probeGatewayTools, ProviderStartedPayloadSchema, publishLaunchProbe, readLaunchReachability,
+  removeLaunchProbe, removeLegacyRoleProbes, reportedReachabilityOf, resolveProbePlan, summarizeToolReachability, writeLaunchReachability,
+  type GatewayProbeTarget, type ProbeFetch, type ReachabilityExpectation, type ToolReachabilityRecord
 } from "../../src/agentic/tool-reachability.js";
 
 const cleanup: (() => Promise<unknown>)[] = [];
@@ -172,38 +173,92 @@ function preparedWithRegistration(role: AgentRole, launchId: string, registratio
   } as unknown as PreparedRoleLaunch;
 }
 
-describe("H1 host-written probe plans", () => {
-  it("writes a private token-free plan per role with registrations and removes stale plans for the rest", async () => {
-    const directory = await tempDirectory();
-    await writeFile(gatewayProbePath(directory, "qa"), "{\"stale\":true}");
-    const launches = new Map<AgentRole, PreparedRoleLaunch>([["reviewer" as AgentRole, preparedWithRegistration("reviewer" as AgentRole, "launch-h1", REGISTRATION_ID)]]);
-    const expectations = await publishGatewayProbes(directory, ["reviewer" as AgentRole, "qa" as AgentRole], launches);
+describe("H1 launch-keyed probe plans", () => {
+  it("writes a private token-free plan per launch and removes it when the launch is released", async () => {
+    const root = await tempDirectory();
+    const probes = join(root, GATEWAY_PROBE_DIRECTORY);
+    const expectation = await publishLaunchProbe(probes, preparedWithRegistration("reviewer" as AgentRole, "launch-h1", REGISTRATION_ID));
+    expect(expectation).toEqual({ launchId: "launch-h1", entries: [{ registrationId: REGISTRATION_ID, envName: ENV_NAME, allowedTools: ["query"] }] });
 
-    expect(expectations.get("reviewer" as AgentRole)).toEqual({ launchId: "launch-h1",
-      entries: [{ registrationId: REGISTRATION_ID, envName: ENV_NAME, allowedTools: ["query"] }] });
-    expect(expectations.has("qa" as AgentRole)).toBe(false);
-    await expect(stat(gatewayProbePath(directory, "qa"))).rejects.toMatchObject({ code: "ENOENT" });
-
-    const path = gatewayProbePath(directory, "reviewer" as AgentRole);
+    const path = launchProbePath(probes, "launch-h1");
+    expect((await stat(probes)).mode & 0o777).toBe(0o700);
     expect((await stat(path)).mode & 0o777).toBe(0o600);
     const text = await readFile(path, "utf8");
     expect(text).not.toContain(TOKEN);
     expect(text).not.toContain("secret://");
     expect(GatewayProbeFileSchema.parse(JSON.parse(text))).toEqual({ schemaVersion: 3, launchId: "launch-h1", endpoint: "http://127.0.0.1:9/mcp",
       entries: [{ registrationId: REGISTRATION_ID, envName: ENV_NAME, allowedTools: ["query"] }] });
-    expect((await readdir(directory)).filter(name => name.endsWith(".tmp"))).toEqual([]);
-    expect(await readGatewayProbeFile(join(directory, "missing.gateway.json"))).toBeUndefined();
+    expect((await readdir(probes)).filter(name => name.endsWith(".tmp"))).toEqual([]);
 
-    await removeGatewayProbes(directory, ["reviewer" as AgentRole]);
+    await removeLaunchProbe(probes, "launch-h1");
     await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("refuses a plan whose endpoint is not a loopback or HTTPS MCP endpoint", async () => {
-    const directory = await tempDirectory();
-    const bad = { schemaVersion: 3, launchId: "l", endpoint: "http://example.com/mcp", entries: [{ registrationId: "r", envName: ENV_NAME, allowedTools: ["query"] }] };
-    await mkdir(directory, { recursive: true });
-    await writeFile(join(directory, "reviewer.gateway.json"), JSON.stringify(bad));
-    await expect(readGatewayProbeFile(join(directory, "reviewer.gateway.json"))).rejects.toThrow();
+  it("publishes no plan and creates no directory for a launch without Gateway registrations", async () => {
+    const root = await tempDirectory();
+    const plain = { ...preparedWithRegistration("developer" as AgentRole, "launch-plain", REGISTRATION_ID),
+      gateway: { registrations: [], observations: [], tokenEnvironment: {} } } as unknown as PreparedRoleLaunch;
+    expect(await publishLaunchProbe(join(root, GATEWAY_PROBE_DIRECTORY), plain)).toBeUndefined();
+    await expect(stat(join(root, GATEWAY_PROBE_DIRECTORY))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("keeps concurrent launches of one role in distinct plan files", async () => {
+    const root = await tempDirectory();
+    const probes = join(root, GATEWAY_PROBE_DIRECTORY);
+    await publishLaunchProbe(probes, preparedWithRegistration("developer" as AgentRole, "launch-dev-1", "reg-dev1aaaa0001"));
+    await publishLaunchProbe(probes, preparedWithRegistration("developer" as AgentRole, "launch-dev-2", "reg-dev2aaaa0001"));
+    expect((await readdir(probes)).sort()).toEqual(["launch-dev-1.json", "launch-dev-2.json"]);
+    const first = GatewayProbeFileSchema.parse(JSON.parse(await readFile(launchProbePath(probes, "launch-dev-1"), "utf8")));
+    const second = GatewayProbeFileSchema.parse(JSON.parse(await readFile(launchProbePath(probes, "launch-dev-2"), "utf8")));
+    expect(first.entries.map(entry => entry.registrationId)).toEqual(["reg-dev1aaaa0001"]);
+    expect(second.entries.map(entry => entry.registrationId)).toEqual(["reg-dev2aaaa0001"]);
+  });
+
+  it("accepts only identifier launch ids as plan file names", () => {
+    expect(() => launchProbePath("/host/gateway-probes", "../reviewer")).toThrow("not a safe identifier");
+    expect(() => launchProbePath("/host/gateway-probes", "a/b")).toThrow("not a safe identifier");
+    expect(() => launchProbePath("/host/gateway-probes", "")).toThrow("not a safe identifier");
+    expect(launchProbePath("/host/gateway-probes", "launch-claude-developer-0a1b2c")).toBe("/host/gateway-probes/launch-claude-developer-0a1b2c.json");
+  });
+
+  it("resolves the hook plan from BFLOW_LAUNCH_ID, returns nothing for an unknown launch and rejects a traversal value", async () => {
+    const root = await tempDirectory();
+    await publishLaunchProbe(join(root, GATEWAY_PROBE_DIRECTORY), preparedWithRegistration("developer" as AgentRole, "launch-dev-1", REGISTRATION_ID));
+    expect((await resolveProbePlan(root, "developer" as AgentRole, { [BFLOW_LAUNCH_ID_ENV]: "launch-dev-1" }))?.launchId).toBe("launch-dev-1");
+    expect(await resolveProbePlan(root, "developer" as AgentRole, { [BFLOW_LAUNCH_ID_ENV]: "launch-other" })).toBeUndefined();
+    await expect(resolveProbePlan(root, "developer" as AgentRole, { [BFLOW_LAUNCH_ID_ENV]: "../../etc/passwd" })).rejects.toThrow("not a safe identifier");
+    await expect(resolveProbePlan(root, "developer" as AgentRole, { [BFLOW_LAUNCH_ID_ENV]: "" })).rejects.toThrow("not a safe identifier");
+  });
+
+  it("refuses a plan file whose content names another launch than its file name", async () => {
+    const root = await tempDirectory();
+    const probes = join(root, GATEWAY_PROBE_DIRECTORY);
+    await mkdir(probes, { recursive: true });
+    const misfiled = { schemaVersion: 3, launchId: "launch-b", endpoint: "http://127.0.0.1:9/mcp", entries: [{ registrationId: REGISTRATION_ID, envName: ENV_NAME, allowedTools: ["query"] }] };
+    await writeFile(launchProbePath(probes, "launch-a"), JSON.stringify(misfiled));
+    await expect(resolveProbePlan(root, "developer" as AgentRole, { [BFLOW_LAUNCH_ID_ENV]: "launch-a" })).rejects.toThrow("another launch");
+  });
+
+  it("falls back to the legacy role plan only when no launch id is in the environment, and removes it on prepare", async () => {
+    const root = await tempDirectory();
+    const legacy = { schemaVersion: 3, launchId: "launch-old", endpoint: "http://127.0.0.1:9/mcp", entries: [{ registrationId: REGISTRATION_ID, envName: ENV_NAME, allowedTools: ["query"] }] };
+    await writeFile(legacyRoleProbePath(root, "reviewer" as AgentRole), JSON.stringify(legacy));
+    expect((await resolveProbePlan(root, "reviewer" as AgentRole, {}))?.launchId).toBe("launch-old");
+    expect(await resolveProbePlan(root, "reviewer" as AgentRole, { [BFLOW_LAUNCH_ID_ENV]: "launch-new" })).toBeUndefined();
+    await removeLegacyRoleProbes(root, ["reviewer" as AgentRole]);
+    expect(await resolveProbePlan(root, "reviewer" as AgentRole, {})).toBeUndefined();
+  });
+
+  it("stores reachability per launch with its pane, so concurrent Developers of one role never overwrite each other", async () => {
+    const root = await tempDirectory();
+    const okRecord: ToolReachabilityRecord = { registrationId: "reg-a", envName: ENV_NAME, ok: true, discoveredTools: ["query"], code: null };
+    const failedRecord: ToolReachabilityRecord = { registrationId: "reg-b", envName: ENV_NAME, ok: false, discoveredTools: [], code: "unauthorized" };
+    await writeLaunchReachability(root, "launch-a", "pane-a", [okRecord]);
+    await writeLaunchReachability(root, "launch-b", "pane-b", [failedRecord]);
+    expect(await readLaunchReachability(root, "launch-a")).toEqual({ paneId: "pane-a", reported: { launchId: "launch-a", toolReachability: [okRecord] } });
+    expect(await readLaunchReachability(root, "launch-b")).toEqual({ paneId: "pane-b", reported: { launchId: "launch-b", toolReachability: [failedRecord] } });
+    expect(await readLaunchReachability(root, "launch-c")).toBeUndefined();
+    expect((await readdir(root)).filter(name => name.endsWith(".tmp"))).toEqual([]);
   });
 });
 
@@ -283,13 +338,13 @@ describe("H1 SessionStart hook in a separate provider-like process", () => {
     const rolePath = join(root, "reviewer.json");
     await writeFile(rolePath, JSON.stringify({ socketPath: hostSocket, token: "host-role-token", role: "reviewer", provider: "codex", herdrBinary: "herdr", sessionId: "s1" }), { mode: 0o600 });
     await chmod(rolePath, 0o600);
-    const launches = new Map<AgentRole, PreparedRoleLaunch>([["reviewer" as AgentRole, preparedGateway("reviewer", "launch-hook", real)]]);
-    await publishGatewayProbes(root, ["reviewer" as AgentRole], launches);
+    await publishLaunchProbe(join(root, GATEWAY_PROBE_DIRECTORY), preparedGateway("reviewer", "launch-hook", real));
 
     const hostBuild = fileURLToPath(new URL("../../dist/agentic/host.js", import.meta.url));
-    const runHook = (token: string | undefined) => new Promise<number>((accept, reject) => {
+    const runHook = (token: string | undefined, launchId: string | undefined = "launch-hook") => new Promise<number>((accept, reject) => {
       const child = spawn(process.execPath, [hostBuild, "hook", rolePath, "SessionStart"], {
-        env: { PATH: process.env.PATH ?? "", HERDR_PANE_ID: "pane-1", HERDR_SOCKET_PATH: herdrSocket, ...(token === undefined ? {} : { [envName]: token }) },
+        env: { PATH: process.env.PATH ?? "", HERDR_PANE_ID: "pane-1", HERDR_SOCKET_PATH: herdrSocket,
+          ...(launchId === undefined ? {} : { [BFLOW_LAUNCH_ID_ENV]: launchId }), ...(token === undefined ? {} : { [envName]: token }) },
         stdio: ["pipe", "ignore", "pipe"]
       });
       let errors = "";
@@ -317,6 +372,46 @@ describe("H1 SessionStart hook in a separate provider-like process", () => {
     await runHook(real.token);
     const revoked = requests.find(request => request.method === "provider_started")!;
     expect(revoked.params.toolReachability).toEqual([expect.objectContaining({ ok: false, code: "unauthorized" })]);
+    expect(JSON.stringify(requests)).not.toContain(real.token);
+
+    // A traversal launch id is refused before any probe or report: the hook fails and nothing reaches the host.
+    requests.length = 0;
+    await expect(runHook(real.token, "../reviewer")).rejects.toThrow("not a safe identifier");
+    expect(requests.some(request => request.method === "provider_started")).toBe(false);
+  });
+
+  it("falls back to the legacy per-role plan only when the launch id is absent from the environment", async () => {
+    const real = await startRealGateway();
+    const envName = tokenEnvironmentName(real.registrationId);
+    const root = await tempDirectory();
+    const hostSocket = join(root, "h.sock"), herdrSocket = join(root, "x.sock");
+    const requests: { method: string; params: Record<string, unknown> }[] = [];
+    const hostServer = await listen(hostSocket, (socket, line) => {
+      const request = JSON.parse(line) as { method: string; params: Record<string, unknown>; token: string };
+      if (request.token !== "host-role-token") { socket.end(JSON.stringify({ ok: false, error: "auth" }) + "\n"); return; }
+      requests.push({ method: request.method, params: request.params });
+      socket.end(JSON.stringify({ ok: true, value: null }) + "\n");
+    });
+    const herdrServer = await listen(herdrSocket, socket => socket.end(JSON.stringify({ id: "n", result: {} }) + "\n"));
+    cleanup.push(() => closeServer(hostServer), () => closeServer(herdrServer));
+    const rolePath = join(root, "reviewer.json");
+    await writeFile(rolePath, JSON.stringify({ socketPath: hostSocket, token: "host-role-token", role: "reviewer", provider: "codex", herdrBinary: "herdr", sessionId: "s1" }), { mode: 0o600 });
+    await chmod(rolePath, 0o600);
+    await writeFile(legacyRoleProbePath(root, "reviewer" as AgentRole), JSON.stringify({ schemaVersion: 3, launchId: "launch-legacy", endpoint: real.endpoint,
+      entries: [{ registrationId: real.registrationId, envName, allowedTools: ["query"] }] }));
+
+    const hostBuild = fileURLToPath(new URL("../../dist/agentic/host.js", import.meta.url));
+    await new Promise<void>((accept, reject) => {
+      const child = spawn(process.execPath, [hostBuild, "hook", rolePath, "SessionStart"], {
+        env: { PATH: process.env.PATH ?? "", HERDR_PANE_ID: "pane-1", HERDR_SOCKET_PATH: herdrSocket, [envName]: real.token },
+        stdio: ["pipe", "ignore", "pipe"]
+      });
+      child.once("error", reject);
+      child.once("exit", code => code === 0 ? accept() : reject(new Error(`hook exited ${code}`)));
+      child.stdin.end(JSON.stringify({ hook_event_name: "SessionStart", session_id: "native-session-2", source: "startup" }));
+    });
+    const started = requests.find(request => request.method === "provider_started")!;
+    expect(started.params).toMatchObject({ launchId: "launch-legacy", toolReachability: [expect.objectContaining({ ok: true, code: null })] });
     expect(JSON.stringify(requests)).not.toContain(real.token);
   });
 });
