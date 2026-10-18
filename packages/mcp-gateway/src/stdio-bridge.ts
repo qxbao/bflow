@@ -18,10 +18,12 @@ import type {
   MCPUpstreamReconcileResult,
   MCPUpstreamToolCallInput,
   MCPUpstreamToolCallOutput,
+  MCPUpstreamToolList,
   RegisteredMCPServiceEntry
 } from "./types.js";
 import { DEFAULT_MCP_PROTOCOL_VERSION, err, ok } from "./types.js";
 import { isInteractiveMethodForbidden } from "./security.js";
+import { normalizeUpstreamToolList } from "./tool-definitions.js";
 import type { GatewaySecretStore } from "./security.js";
 import { readLinuxProcessRssBytes } from "./metrics.js";
 
@@ -535,7 +537,7 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
       });
     }
 
-    const listRes = await this.listTools("init", options);
+    const listRes = await this.listToolDefinitions("init", options);
     if (!listRes.ok) {
       return err(listRes.error);
     }
@@ -554,7 +556,9 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
 
     return ok({
       protocolVersion: negotiatedVersion,
-      discoveredTools: listRes.value,
+      discoveredTools: listRes.value.definitions.map(definition => definition.name),
+      toolDefinitions: listRes.value.definitions,
+      defaultedInputSchemaTools: listRes.value.defaultedInputSchemaTools,
       ...(resultObj?.serverInfo ? { serverInfo: resultObj.serverInfo } : {})
     });
   }
@@ -563,6 +567,17 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
     sessionId: string,
     options?: OperationOptions
   ): Promise<OperationResult<readonly string[]>> {
+    const listRes = await this.listToolDefinitions(sessionId, options);
+    if (!listRes.ok) {
+      return err(listRes.error);
+    }
+    return ok(listRes.value.definitions.map(definition => definition.name));
+  }
+
+  async listToolDefinitions(
+    sessionId: string,
+    options?: OperationOptions
+  ): Promise<OperationResult<MCPUpstreamToolList>> {
     const res = await this.sendJsonRpcRequest(sessionId, "tools/list", {}, {
       timeoutMs: options?.timeoutMs
     });
@@ -580,17 +595,7 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
       });
     }
 
-    const resultObj = res.value.result as
-      | {
-          tools?: Array<{ name?: string }>;
-        }
-      | undefined;
-
-    const tools = Array.isArray(resultObj?.tools)
-      ? resultObj.tools.map((t) => t.name).filter((n): n is string => typeof n === "string")
-      : [];
-
-    return ok(tools);
+    return normalizeUpstreamToolList(res.value.result);
   }
 
   async callTool(

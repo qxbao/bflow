@@ -62,6 +62,26 @@ export const ProviderStartedPayloadSchema = z.object({
   "launchId and toolReachability must be sent together");
 export type ProviderStartedPayload = z.infer<typeof ProviderStartedPayloadSchema>;
 
+/**
+ * Which path reported a reachability fact: the provider's native SessionStart hook (`hook`) or the bootstrap probe that
+ * the bflow MCP child runs at provider startup (`mcp_bootstrap`). Both probe from the same provider environment.
+ */
+export const REACHABILITY_SOURCES = ["hook", "mcp_bootstrap"] as const;
+export type ReachabilitySource = (typeof REACHABILITY_SOURCES)[number];
+export const ReachabilitySourceSchema = z.enum(REACHABILITY_SOURCES);
+
+/**
+ * `provider_bootstrap` payload, sent by the bflow MCP child (`host.js mcp <role.json>`) once per process at startup.
+ * It carries reachability only: the native session comes from Herdr's own observation, never from this message.
+ */
+export const ProviderBootstrapPayloadSchema = z.object({
+  launchId: z.string().min(1),
+  paneId: z.string().min(1).optional(),
+  toolReachability: z.array(ToolReachabilityRecordSchema).min(1),
+  source: z.literal("mcp_bootstrap")
+}).strict();
+export type ProviderBootstrapPayload = z.infer<typeof ProviderBootstrapPayloadSchema>;
+
 /** Reachability fields persisted in a launch receipt; other receipt fields are ignored here. */
 const ReachabilityReceiptSchema = z.object({
   launchId: z.string().min(1).optional(),
@@ -396,13 +416,41 @@ export async function resolveProbePlan(directory: string, role: AgentRole,
 export const LaunchReachabilityRecordSchema = z.object({
   launchId: z.string().min(1),
   paneId: z.string().min(1),
-  toolReachability: z.array(ToolReachabilityRecordSchema)
+  toolReachability: z.array(ToolReachabilityRecordSchema),
+  /** Absent in records written before the bootstrap path existed; those were all hook proofs. */
+  source: ReachabilitySourceSchema.optional()
 }).strict();
 export type LaunchReachabilityRecord = z.infer<typeof LaunchReachabilityRecordSchema>;
 
+/** One launch's reachability proof: which launch and pane, the probe records and the path that reported them. */
+export interface ReachabilityFact {
+  readonly launchId: string;
+  readonly paneId: string;
+  readonly toolReachability: readonly ToolReachabilityRecord[];
+  readonly source: ReachabilitySource;
+}
+
+const allProbesOk = (records: readonly ToolReachabilityRecord[]): boolean => records.every(record => record.ok);
+
+/**
+ * Precedence between a stored and an incoming reachability fact for the same launch (hook and bootstrap both report it):
+ * - a different launch or pane replaces the stored fact (the launch was bound to another pane);
+ * - the first all-ok fact of a launch and pane is kept; a later all-ok fact does not replace it;
+ * - an incoming fact never downgrades a stored all-ok fact, except one failing with `unauthorized`: the Gateway
+ *   rejecting a token it accepted earlier is a newer, real revocation;
+ * - a stored fact with any failure is replaced by the incoming one (latest diagnostics, or recovery to ok).
+ * Pure: callers serialize the read-select-write sequence.
+ */
+export function selectReachabilityFact(stored: ReachabilityFact | undefined, incoming: ReachabilityFact): ReachabilityFact {
+  if (stored === undefined || stored.launchId !== incoming.launchId || stored.paneId !== incoming.paneId) return incoming;
+  if (!allProbesOk(stored.toolReachability)) return incoming;
+  if (allProbesOk(incoming.toolReachability)) return stored;
+  return incoming.toolReachability.some(record => record.code === "unauthorized") ? incoming : stored;
+}
+
 export async function writeLaunchReachability(reachabilityDirectory: string, launchId: string, paneId: string,
-  toolReachability: readonly ToolReachabilityRecord[]): Promise<void> {
-  const record = LaunchReachabilityRecordSchema.parse({ launchId, paneId, toolReachability });
+  toolReachability: readonly ToolReachabilityRecord[], source: ReachabilitySource = "hook"): Promise<void> {
+  const record = LaunchReachabilityRecordSchema.parse({ launchId, paneId, toolReachability, source });
   await mkdir(reachabilityDirectory, { recursive: true, mode: 0o700 });
   await writePrivateFileAtomic(launchReachabilityPath(reachabilityDirectory, launchId), `${JSON.stringify(record)}\n`);
 }
@@ -410,6 +458,12 @@ export async function writeLaunchReachability(reachabilityDirectory: string, lau
 /** Reads the reachability record of one launch; undefined when none has been reported yet. */
 export async function readLaunchReachability(reachabilityDirectory: string, launchId: string):
   Promise<{ readonly paneId: string; readonly reported: ReportedReachability } | undefined> {
+  const fact = await readLaunchReachabilityFact(reachabilityDirectory, launchId);
+  return fact === undefined ? undefined : { paneId: fact.paneId, reported: { launchId: fact.launchId, toolReachability: [...fact.toolReachability] } };
+}
+
+/** Reads one launch's reachability proof together with the path that reported it; undefined when none has been reported. */
+export async function readLaunchReachabilityFact(reachabilityDirectory: string, launchId: string): Promise<ReachabilityFact | undefined> {
   let text: string;
   try {
     text = await readFile(launchReachabilityPath(reachabilityDirectory, launchId), "utf8");
@@ -419,7 +473,7 @@ export async function readLaunchReachability(reachabilityDirectory: string, laun
   }
   const record = LaunchReachabilityRecordSchema.parse(JSON.parse(text));
   if (record.launchId !== launchId) throw new Error("Launch reachability record names another launch");
-  return { paneId: record.paneId, reported: { launchId: record.launchId, toolReachability: record.toolReachability } };
+  return { launchId: record.launchId, paneId: record.paneId, toolReachability: record.toolReachability, source: record.source ?? "hook" };
 }
 
 export async function removeLaunchReachability(reachabilityDirectory: string, launchId: string): Promise<void> {

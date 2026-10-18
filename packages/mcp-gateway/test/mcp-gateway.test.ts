@@ -40,7 +40,9 @@ import {
   type MCPUpstreamReconcileResult,
   type MCPUpstreamToolCallInput,
   type MCPUpstreamToolCallOutput,
-  type RegisteredMCPServiceEntry
+  type RegisteredMCPServiceEntry,
+  normalizeUpstreamToolList,
+  MCP_TOOL_DEFINITION_LIMITS
 } from "../src/index.js";
 
 // ============================================================================
@@ -2081,5 +2083,193 @@ rl.on('line', (line) => {
         await server.stop();
       }
     });
+  });
+});
+
+describe("Scenario 13: Upstream tool definitions propagate to Gateway tools/list", () => {
+  const toolDefinitionWorker = `
+const fs = require('fs');
+const readline = require('readline');
+const payload = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const rl = readline.createInterface({ input: process.stdin, terminal: false });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-11-25', capabilities: { tools: {} }, serverInfo: { name: 'defs-worker', version: '1.0.0' } } }) + '\\n');
+  } else if (msg.method === 'tools/list') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { tools: payload } }) + '\\n');
+  }
+});
+`;
+
+  function setupStdioWorker(tools: unknown) {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-defs-test-"));
+    const scriptPath = path.join(tmpDir, "worker.cjs");
+    const payloadPath = path.join(tmpDir, "tools.json");
+    fs.writeFileSync(scriptPath, toolDefinitionWorker, { mode: 0o644 });
+    fs.writeFileSync(payloadPath, JSON.stringify(tools), { mode: 0o644 });
+    const serviceId = `svc-defs-${randomUUID().slice(0, 8)}`;
+    const service = makeServiceDefinition(serviceId, {
+      healthTimeoutMs: 30_000,
+      connection: {
+        kind: "stdio_mcp",
+        executable: process.execPath,
+        argv: [scriptPath, payloadPath],
+        environmentBindings: {},
+        executableDigest: "0".repeat(64),
+        ownership: "bflow",
+        bridgeRequired: true
+      } as any,
+      tool: {
+        schemaVersion: CURRENT_PLATFORM_SCHEMA_VERSION,
+        toolId: serviceId,
+        kind: "stdio_mcp",
+        version: "1.0.0",
+        operations: ["query"],
+        resource: { sharing: "concurrent", maxConcurrency: 4 },
+        required: true
+      } as any
+    });
+    const secretStore = new GatewaySecretStore();
+    const serviceManager = new DefaultMCPServiceManager({
+      driverFactory: new SubprocessStdioDriverFactory({ secretStore, defaultTimeoutMs: 30_000 }),
+      secretStore
+    });
+    const gateway = new BflowSharedMCPGateway({ serviceManager, secretStore });
+    gateway.registry.registerService(service);
+    return {
+      serviceId,
+      gateway,
+      cleanup: async () => {
+        await serviceManager.stop(serviceId, makeScopedOp(makeScope("machine"))).catch(() => undefined);
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    };
+  }
+
+  it("normalizes upstream definitions, defaults missing inputSchema, and strips unknown fields", () => {
+    const res = normalizeUpstreamToolList({
+      tools: [
+        {
+          name: "query",
+          title: "Query",
+          description: "Run a query",
+          inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] },
+          outputSchema: { type: "object" },
+          annotations: { readOnlyHint: true },
+          _meta: { internal: true }
+        },
+        { name: "bare" }
+      ]
+    });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.value.definitions).toEqual([
+      {
+        name: "query",
+        title: "Query",
+        description: "Run a query",
+        inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] },
+        outputSchema: { type: "object" },
+        annotations: { readOnlyHint: true }
+      },
+      { name: "bare", inputSchema: { type: "object" } }
+    ]);
+    expect(res.value.defaultedInputSchemaTools).toEqual(["bare"]);
+  });
+
+  it("rejects malformed, duplicate, non-object-typed, oversized and over-count upstream lists", () => {
+    const cases: unknown[] = [
+      undefined,
+      { tools: "nope" },
+      { tools: ["query"] },
+      { tools: [{ description: "no name" }] },
+      { tools: [{ name: "a", inputSchema: "not-object" }] },
+      { tools: [{ name: "a", inputSchema: { type: "array" } }] },
+      { tools: [{ name: "a" }, { name: "a" }] },
+      { tools: [{ name: "a", description: "x".repeat(MCP_TOOL_DEFINITION_LIMITS.maxDefinitionBytes) }] },
+      {
+        tools: Array.from({ length: MCP_TOOL_DEFINITION_LIMITS.maxTools + 1 }, (_, i) => ({ name: `t${i}` }))
+      }
+    ];
+    for (const raw of cases) {
+      const res = normalizeUpstreamToolList(raw);
+      expect(res.ok, String(JSON.stringify(raw)).slice(0, 80)).toBe(false);
+    }
+  });
+
+  it("advertises upstream definitions over HTTP tools/list with serviceId, honouring allowedTools", async () => {
+    const tools = [
+      {
+        name: "query",
+        title: "Query",
+        description: "Run a query",
+        inputSchema: { type: "object", properties: { q: { type: "string" } } },
+        outputSchema: { type: "object" },
+        annotations: { readOnlyHint: true },
+        _meta: { internal: true }
+      },
+      { name: "bare" },
+      { name: "hidden", inputSchema: { type: "object" } }
+    ];
+    const { serviceId, gateway, cleanup } = setupStdioWorker(tools);
+    const server = new StreamableHttpGatewayServer({ gateway, host: "127.0.0.1", port: 0 });
+    try {
+      const serverUrl = await server.start();
+      const client = makeClientRegistration(`client-defs-${randomUUID().slice(0, 6)}`, serviceId, {
+        allowedTools: ["query", "bare"]
+      });
+      await gateway.register(client);
+      const token = gateway.secretStore.getClientTokenByRegistration(client.registrationId)!;
+
+      const res = await fetch(`${serverUrl}/mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" })
+      });
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      const listed = data.result.tools as any[];
+      expect(listed.map(t => t.name).sort()).toEqual(["bare", "query"]);
+
+      const query = listed.find(t => t.name === "query");
+      expect(query).toEqual({
+        name: "query",
+        title: "Query",
+        description: "Run a query",
+        inputSchema: { type: "object", properties: { q: { type: "string" } } },
+        outputSchema: { type: "object" },
+        annotations: { readOnlyHint: true },
+        serviceId
+      });
+      expect(query).not.toHaveProperty("_meta");
+
+      const bare = listed.find(t => t.name === "bare");
+      expect(bare).toEqual({ name: "bare", inputSchema: { type: "object" }, serviceId });
+
+      expect(
+        gateway
+          .getAuditLog()
+          .some(e => e.diagnosticCode === "tool_input_schema_defaulted" && e.message.includes("bare"))
+      ).toBe(true);
+    } finally {
+      await server.stop();
+      await cleanup();
+    }
+  });
+
+  it("fails the service when the upstream returns a malformed tool definition", async () => {
+    const { serviceId, gateway, cleanup } = setupStdioWorker([{ name: "query", inputSchema: "broken" }]);
+    try {
+      const scope = makeScope("machine");
+      const res = await gateway.serviceManager.ensure(
+        gateway.registry.getService(serviceId)!.definition,
+        makeScopedOp(scope)
+      );
+      expect(res.ok).toBe(false);
+    } finally {
+      await cleanup();
+    }
   });
 });

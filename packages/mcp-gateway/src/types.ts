@@ -103,9 +103,29 @@ export interface JsonRpcResponse {
 
 export type JsonRpcMessage = JsonRpcRequest | JsonRpcResponse;
 
+export type MCPUpstreamJsonObject = Readonly<Record<string, JsonValue>>;
+
+/** MCP Tool definition as advertised by an upstream server, restricted to MCP Tool fields. */
+export interface MCPUpstreamToolDefinition {
+  readonly name: string;
+  readonly title?: string;
+  readonly description?: string;
+  readonly inputSchema: MCPUpstreamJsonObject;
+  readonly outputSchema?: MCPUpstreamJsonObject;
+  readonly annotations?: MCPUpstreamJsonObject;
+}
+
+export interface MCPUpstreamToolList {
+  readonly definitions: readonly MCPUpstreamToolDefinition[];
+  /** Names whose upstream definition omitted inputSchema (gateway substituted an empty object schema). */
+  readonly defaultedInputSchemaTools: readonly string[];
+}
+
 export interface MCPUpstreamInitializeResult {
   readonly protocolVersion: string;
   readonly discoveredTools: readonly string[];
+  readonly toolDefinitions?: readonly MCPUpstreamToolDefinition[];
+  readonly defaultedInputSchemaTools?: readonly string[];
   readonly serverInfo?: {
     readonly name: string;
     readonly version: string;
@@ -142,6 +162,7 @@ export interface MCPUpstreamDriverInstance {
   readonly ownership: "bflow" | "external";
   initialize(options?: OperationOptions): Promise<OperationResult<MCPUpstreamInitializeResult>>;
   listTools(sessionId: string, options?: OperationOptions): Promise<OperationResult<readonly string[]>>;
+  listToolDefinitions?(sessionId: string, options?: OperationOptions): Promise<OperationResult<MCPUpstreamToolList>>;
   callTool(input: MCPUpstreamToolCallInput): Promise<OperationResult<MCPUpstreamToolCallOutput>>;
   cancelRequest?(requestId: string, reason?: string): Promise<void>;
   reconcileRequest?(callId: string, requestId: string): Promise<MCPUpstreamReconcileResult>;

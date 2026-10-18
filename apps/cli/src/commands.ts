@@ -21,7 +21,6 @@ import {
   resolveReadableConfigPath
 } from "./config.js";
 import {
-  formatProgressStep,
   isStderrInteractive,
   resolveStreamColor,
   toContractError
@@ -45,6 +44,7 @@ import {
 import { executeHighLevelCommand, isHighLevelCommand } from "./high-level-commands.js";
 import { executeSetupCommand } from "./setup-integration.js";
 import { migrateRepositoryConfig } from "./config-migration.js";
+import { CliProgress } from "./progress.js";
 
 function loadPackageVersion(): string {
   try {
@@ -151,18 +151,35 @@ export async function executeCommand(
   parsed: ParsedCliCommand,
   context?: CliContext | undefined
 ): Promise<CliExecutionResult> {
+  const presentation = resolvePresentation(context, Boolean(parsed.json));
+  const progress = new CliProgress({
+    enabled: Boolean(presentation.interactive) && !presentation.json && parsed.command !== "help" && parsed.command !== "version",
+    color: presentation.stderrColor,
+    io: context?.io,
+    // Herdr owns the terminal during attach.
+    animate: parsed.command !== "attach"
+  });
+  const io = context?.io;
+  const executionContext = io ? { ...context, io: { ...io,
+    stdout: (message: string) => { progress.stop(); io.stdout(message); },
+    stderr: (message: string) => { progress.stop(); io.stderr(message); }
+  } } : context;
+  try { return await executeCommandWithProgress(parsed, executionContext, progress); }
+  finally { progress.stop(); }
+}
+
+async function executeCommandWithProgress(
+  parsed: ParsedCliCommand,
+  context: CliContext | undefined,
+  progress: CliProgress
+): Promise<CliExecutionResult> {
   const cwd = context?.cwd ?? process.cwd();
   const io = context?.io;
   const isJson = Boolean(parsed.json) || Boolean(context?.presentation?.json);
   const presentation = resolvePresentation(context, isJson);
   const showProgress = presentation.interactive && !isJson && parsed.command !== "help" && parsed.command !== "version";
   const emitProgress = (step: string) => {
-    const formatted = formatProgressStep(step, presentation.stderrColor);
-    if (io !== undefined) {
-      io.stderr(formatted);
-    } else {
-      process.stderr.write(formatted + "\n");
-    }
+    progress.step(step);
   };
 
   if (parsed.command === "help") {
@@ -182,6 +199,7 @@ export async function executeCommand(
   }
 
   if (isHighLevelCommand(parsed.command)) {
+    if (showProgress) emitProgress(`Executing ${parsed.command} command...`);
     const hlResult = await executeHighLevelCommand(
       parsed as HighLevelParsedCliCommand,
       context
@@ -263,7 +281,9 @@ export async function executeCommand(
 
   if (parsed.command === "setup") {
     try {
-      const data = await executeSetupCommand(parsed, context, showProgress ? emitProgress : undefined);
+      const data = await executeSetupCommand(parsed, context, showProgress ? emitProgress : undefined,
+        showProgress ? { detail: message => progress.detail(message),
+          confirm: action => progress.confirmation(action) } : undefined);
       const successful = data.outcome === undefined || ["healthy", "applied"].includes(data.outcome) ||
         parsed.mode === "dry_run" && data.outcome === "changes_pending";
       return makeResult(successful ? CLI_EXIT_CODES.SUCCESS : CLI_EXIT_CODES.RUNTIME_ERROR, true, "setup", data, undefined, isJson, io, presentation);

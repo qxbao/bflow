@@ -3,6 +3,24 @@ import os from "node:os";
 import path from "node:path";
 import type { HostEnvironment, PlatformProfile, SupportStatus } from "./types.js";
 
+/**
+ * Returns a copy of `platform` whose bflow state lives under `isolatedRoot` (config/data/state/bin).
+ * Callers pair it with `isolatedServiceNamespace(isolatedRoot)` so OS service names are isolated too.
+ */
+export function isolatedPlatformProfile(platform: PlatformProfile, isolatedRoot: string): PlatformProfile {
+  return {
+    ...platform,
+    // Shell rc files and ~/.local/bin launchers follow homeDir: an isolated setup must never edit the real user's.
+    homeDir: path.join(isolatedRoot, "providers", "home"),
+    paths: {
+      config: path.join(isolatedRoot, "config"),
+      data: path.join(isolatedRoot, "data"),
+      state: path.join(isolatedRoot, "state"),
+      managedBin: path.join(isolatedRoot, "data", "bin")
+    }
+  };
+}
+
 export function defaultHostEnvironment(): HostEnvironment {
   const posix = process.platform !== "win32";
   return {

@@ -21,11 +21,14 @@ export function isMvpRole(value: unknown): value is MvpRole {
   return typeof value === "string" && (MVP_ROLES as readonly string[]).includes(value);
 }
 
+type MvpRoleParseResult = { success: true; data: MvpRole } | { success: false; error: { message: string } };
+
 export const MvpRoleSchema: {
-  safeParse(value: unknown): { success: true; data: MvpRole } | { success: false; error: { message: string } };
+  safeParse(value: unknown): MvpRoleParseResult;
   parse(value: unknown): MvpRole;
 } = Object.freeze({
-  safeParse(value: unknown) {
+  // Explicit result type: without it the literal `success` widens to boolean under the E2E tsconfig.
+  safeParse(value: unknown): MvpRoleParseResult {
     if (isMvpRole(value)) {
       return { success: true, data: value };
     }

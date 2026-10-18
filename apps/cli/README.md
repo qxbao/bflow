@@ -103,7 +103,10 @@ Bflow CLI formats human terminal output using a dedicated presentation engine wi
 
 ### Real-Time Observational Progress
 - Lifecycle and long-running commands (`up`, `down`, `attach`, `init`, etc.) stream real-time progress steps to human interactive `stderr` only.
-- Progress steps are emitted with `[..]` markers (styled in bold cyan when color is active) at truthful boundaries.
+- Progress steps use sequential `[1]`, `[2]`, … markers (bold cyan when color is active). Setup plan summaries and both high-level command formatters use the same numbered layout and readable component labels.
+- Indented, dim detail logs stream beneath the active step. Setup reports process start/exit/timing and component diagnostics; command arguments and raw provider output are excluded from these process observations.
+- Interactive executable output shows an animated loading skeleton while work is pending. Before setup confirmation, it clears the animation and shows an awaiting-input skeleton above the prompt; redraws pause while the user types. Late progress observations are buffered until input finishes (the latest 50, with an omission count when exceeded). Timers and mutable lines are cleared on completion or error, and animations are disabled during Herdr attach.
+- Pipes, JSON, help/version and default custom collectors remain static. Embedders can provide `CliIo.progress` for transient lines and `CliIo.stderrRaw` for raw animated chunks when explicitly opting into interactive presentation.
 - Progress reporting is strictly informational (emitting in-flight phase transitions only) and never emits premature conclusive success claims (e.g. `Environment ready` or `Environment stopped`). Conclusive success is reported exclusively by command formatters after underlying operations, state persistence, and resource cleanup succeed.
 - `FORCE_COLOR` never enables progress streaming; progress strictly requires an interactive `stderr` stream (`isTTY: true && TERM !== "dumb"`).
 - Help and version commands never emit progress.

@@ -8,9 +8,10 @@ import { loadMachineSkillCatalog } from "../skill-catalog.js";
 import { composeCliRuntime } from "../runtime.js";
 import { resolveReadableConfigPath } from "../config.js";
 import type { CliIo, PresentationOptions } from "../types.js";
-import { bold, cyan, dim, extractSafeDetails, green, humanText, red, resolveActionableRemediation, yellow } from "../presentation.js";
+import { bold, cyan, dim, extractSafeDetails, formatProgressStep, green, humanText, readableLabel, red, resolveActionableRemediation, yellow } from "../presentation.js";
 import type { CliCommandName } from "../types.js";
-import { formatProgressStep, isStderrInteractive, resolveStreamColor } from "../presentation.js";
+import { isStderrInteractive, resolveStreamColor } from "../presentation.js";
+import { CliProgress } from "../progress.js";
 import { parseCommandArgs, type CommandSpec } from "./args.js";
 import {
   buildEnvelope,
@@ -252,10 +253,11 @@ function formatHuman(envelope: HighLevelEnvelope, useColor = false): string {
   lines.push(`  ${useColor ? dim(ids.join(" "), true) : ids.join(" ")}${output.replayed ? " (replayed; no work repeated)" : ""}`);
   if (output.steps.length > 0) {
     lines.push("  Steps:");
-    for (const step of output.steps.slice(0, 20)) {
+    for (const [index, step] of output.steps.slice(0, 20).entries()) {
       const status = step.status.toUpperCase();
       const paint = step.status === "succeeded" || step.status === "reused" ? green : step.status === "failed" ? red : yellow;
-      lines.push(`    ${useColor ? paint(`[${status}]`, true) : `[${status}]`} ${humanText(step.id, 100)}${step.message ? ` — ${humanText(step.message, 220)}` : ""}`);
+      lines.push(`    ${formatProgressStep(readableLabel(step.id), useColor, index + 1)} ${useColor ? paint(`[${status}]`, true) : `[${status}]`}`);
+      if (step.message) lines.push(dim(`        ${humanText(step.message, 220)}`, useColor));
     }
     if (output.steps.length > 20) lines.push(`    … ${output.steps.length - 20} more steps`);
   }
@@ -384,6 +386,7 @@ export async function runHighLevelCli(argv: readonly string[], options: HighLeve
 
   const name = entry.spec.name;
   const clock = options.clock ?? (() => new Date());
+  const renderer = new CliProgress({ enabled: emitProgress, color: stderrColor, io: options.io });
   let identity = newCommandIdentity();
   let report;
   try {
@@ -393,7 +396,7 @@ export async function runHighLevelCli(argv: readonly string[], options: HighLeve
     const baseServices = options.services ?? withDefaultSkillsPort(await createDefaultHighLevelServices());
     const services = withDefaultRuntime(baseServices);
     const progress = emitProgress ? (step: string) => {
-      try { write("stderr", formatProgressStep(humanText(step, 160), stderrColor)); } catch { /* progress cannot affect command execution */ }
+      renderer.event(step);
     } : undefined;
     if (progress) progress(`bflow ${entry.spec.words.join(" ")}: starting`);
     const context: HighLevelContext = {
@@ -403,6 +406,8 @@ export async function runHighLevelCli(argv: readonly string[], options: HighLeve
     report = await entry.handler(parsed, context, identity);
   } catch (error) {
     report = errorReport(name, error);
+  } finally {
+    renderer.stop();
   }
 
   const envelope = buildEnvelope(identity, report, clock().toISOString());

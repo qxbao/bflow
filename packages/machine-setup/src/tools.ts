@@ -44,6 +44,8 @@ export interface ToolObservation {
   pathMissingDir: string | null;
   required: boolean;
   diagnostics: string[];
+  /** Owner-only action (for example a provider login) that setup cannot perform; reported as deferred, not failed. */
+  ownerAction?: string | undefined;
 }
 
 export const ToolObservationSchema = z.object({
@@ -51,7 +53,7 @@ export const ToolObservationSchema = z.object({
   status: z.enum(["present", "missing", "version_mismatch", "path_missing", "unparseable_version", "probe_failed"]),
   resolvedPath: z.string().nullable(), realPath: z.string().nullable(), version: z.string().nullable(),
   binaryDigest: Sha256DigestSchema.nullable(), pathMissingDir: z.string().nullable(),
-  required: z.boolean(), diagnostics: z.array(z.string())
+  required: z.boolean(), diagnostics: z.array(z.string()), ownerAction: z.string().min(1).optional()
 }).strict();
 
 const SEMVER = String.raw`(\d+\.\d+\.\d+)`;

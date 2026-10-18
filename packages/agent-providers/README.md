@@ -152,6 +152,58 @@ The launched process must receive each token in the environment variable named i
 
 ---
 
+## Codex Inherited Global MCP Servers and Hooks (L3)
+
+Codex merges the user's `~/.codex/config.toml` and `~/.codex/hooks.json` (or `$CODEX_HOME`) into every
+invocation. The Bflow `-c mcp_servers={...}` table therefore does not isolate a role on its own: live probing
+with codex-cli 0.162.0 showed `gitnexus` and `playwright` starting inside a Bflow role, plus the warning
+"loading hooks from both .../hooks.json and .../config.toml".
+
+Research (codex-cli 0.162.0, read-only commands only):
+
+- `codex mcp list --help`: `--json` "Output the configured servers as JSON"; `-c, --config <key=value>`
+  "Override a configuration value ... Use a dotted path (`foo.bar.baz`) to override nested values".
+- `codex mcp list --json -c 'mcp_servers.gitnexus.enabled=false'` reports `gitnexus` with `"enabled": false`,
+  so the dotted per-invocation override is resolved by the same config loader that Codex uses for the role.
+- Override ordering is verified: `-c mcp_servers.<name>.enabled=false` placed before `-c mcp_servers={...}`
+  is reset by the table override (the server reports `enabled: true`); placed after it, it is kept. The
+  adapter therefore appends the disables after the Bflow table.
+- Table override semantics are verified: `-c mcp_servers={"bflow-gw"={command=...}}` merges with the global
+  servers (they are still listed), so the global entries must be disabled explicitly.
+- An `enabled=false` override for a name that is not in the config aborts config loading
+  (`invalid transport in mcp_servers.<name>`). Only names enumerated from the config are passed.
+- Dotted-key quoting (`mcp_servers."a.b".enabled`) could not be verified against a real server name; names
+  outside `^[A-Za-z0-9_-]+$` therefore fail closed.
+- Hooks: `codex --help` lists `--dangerously-bypass-hook-trust` ("Run enabled hooks without requiring persisted
+  hook trust"), which bypasses trust only and does not skip hook sources. `codex features list` shows
+  `hooks  stable  true`, and `--disable hooks` would also disable Bflow's own native hooks (SessionStart
+  receipts, PreToolUse). `--profile` layers `$CODEX_HOME/<name>.config.toml` on top of the base config and
+  does not skip it. `CODEX_HOME` would hide the user login and is not used. The binary identifies hook sources
+  as `hooks.json` and `config.toml` (`[hooks]`) next to the config layers. No per-invocation switch was found
+  that ignores user hook sources while keeping Bflow hooks, so global hooks are not isolated by mechanism.
+- Not verified: runtime start behaviour of an `enabled=false` server during `codex exec` (the adapter did not
+  run an interactive or model-backed session). The `codex mcp list` evidence is config-level.
+
+Adapter behaviour (`src/codex-adapter.ts`, `resolveInheritedIsolation`):
+
+1. Global MCP servers are enumerated with `codex mcp list --json` through the runner. If that fails, the
+   `[mcp_servers.<name>]` tables of `<codexHome>/config.toml` are used (missing file = none). An unreadable
+   or unparseable source fails closed.
+2. Every global server not named by the Bflow launch is disabled with `-c mcp_servers.<name>.enabled=false`
+   after the Bflow `mcp_servers=` override. The same arguments are prepended to the readiness probe so global
+   servers are not started there either. Adding or removing a global server changes the argv and therefore the
+   launch fingerprint.
+3. Fail-closed MCP cases, reported as `mcp` check `codex_global_mcp_not_isolated`: the global set cannot be
+   enumerated; a global name collides with a Bflow launch server (it would inherit the global `enabled` state);
+   or a global name is outside `^[A-Za-z0-9_-]+$`.
+4. Global hooks (`<codexHome>/hooks.json` with any non-empty entry, or `hooks`/`[hooks]` in `config.toml`) are
+   reported as `permissions` check `codex_global_hooks_not_isolated` with remediation: move personal hooks into a
+   Codex profile that Bflow does not use. Bflow does not modify these files. Plugin-bundled hooks are not
+   inspected.
+
+The Codex home is `codexHomeDirectory` (option), then `$CODEX_HOME`, then `~/.codex`. It is only read.
+Claude and Agy behaviour is unchanged (`resolveInheritedIsolation` returns no arguments and no failures).
+
 ## Herdr Launch Integration
 
 Launch execution commands are built with `buildHerdrAgentStartCommand`:

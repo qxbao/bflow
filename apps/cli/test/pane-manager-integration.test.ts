@@ -180,6 +180,8 @@ describe("P30 platform readiness in up", () => {
   } as unknown as LifecycleHost);
   /** The Herdr server is started by `up` through the lifecycle; these tests drive the manager directly. */
   const serverRunning = (input: EnvironmentCompositionInput) => { runner.session(input.repository.sessionName).running = true; };
+  /** Env-bearing panes are created through the Herdr socket API; the fixture models it over the same state. */
+  const socketFor = (input: EnvironmentCompositionInput) => runner.socket(input.repository.sessionName);
   const roleLaunchesFor = async (input: EnvironmentCompositionInput) => Object.fromEntries(await Promise.all(
     input.config.environment.roles.map(async role => [role.role, await launchFor(role.role, role.cli as Provider)])));
 
@@ -187,10 +189,16 @@ describe("P30 platform readiness in up", () => {
     const input = withProviders(() => "codex");
     serverRunning(input);
     const host = hostWith(await roleLaunchesFor(input));
-    const result = await openPaneManagerEnvironment(input, runner, async () => host).manager.up(input.repository.sessionName);
+    const result = await openPaneManagerEnvironment(input, runner, async () => host, undefined, socketFor).manager.up(input.repository.sessionName);
     expect(result.ok ? "ok" : result.error.message).toBe("ok");
     expect(starts()).toHaveLength(7);
     expect(starts().every(call => kindOf(call) === "codex")).toBe(true);
+    // Live finding: Herdr agent start never forwards invocation env, so the launch env must be set at pane creation.
+    expect(starts().every(call => !JSON.stringify(call.env ?? {}).includes("must-not-leak") && !call.args.join(" ").includes("must-not-leak"))).toBe(true);
+    expect(runner.calls.some(call => call.args.join(" ").includes("must-not-leak"))).toBe(false);
+    const started = runner.session(input.repository.sessionName).panes.filter(pane => pane.agent !== null);
+    expect(started).toHaveLength(7);
+    expect(started.every(pane => pane.env?.["BFLOW_TEST_SECRET"] === "must-not-leak")).toBe(true);
     expect(host.prepare).toHaveBeenCalledTimes(1);
   });
 
@@ -217,7 +225,7 @@ describe("P30 platform readiness in up", () => {
   linuxIt("starts a mixed Claude, Codex and Agy configuration with each role's own provider", async () => {
     const input = withProviders(role => role === "conversation" ? "claude" : role === "coordinator" ? "codex" : "agy");
     serverRunning(input);
-    const result = await openPaneManagerEnvironment(input, runner, async () => hostWith(await roleLaunchesFor(input))).manager.up(input.repository.sessionName);
+    const result = await openPaneManagerEnvironment(input, runner, async () => hostWith(await roleLaunchesFor(input)), undefined, socketFor).manager.up(input.repository.sessionName);
     expect(result.ok ? "ok" : result.error.message).toBe("ok");
     const kinds = starts().map(kindOf).sort();
     expect(kinds).toEqual(["agy", "agy", "agy", "agy", "agy", "claude", "codex"]);
@@ -234,7 +242,7 @@ describe("P30 platform readiness in up", () => {
     const result = await openPaneManagerEnvironment(input, runner, async composition => {
       expect(composition.config.environment.roles.find(role => role.role === "developer")).toMatchObject(developer);
       return host;
-    }).manager.up(input.repository.sessionName);
+    }, undefined, socketFor).manager.up(input.repository.sessionName);
     expect(result.ok ? "ok" : result.error.message).toBe("ok");
     expect(starts()).toHaveLength(7);
     const manifest = result.ok ? result.value : undefined;

@@ -6,3 +6,4 @@ export * from "./stdio-bridge.js";
 export * from "./service-manager.js";
 export * from "./gateway.js";
 export * from "./http-server.js";
+export * from "./tool-definitions.js";

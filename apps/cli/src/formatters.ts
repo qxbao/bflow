@@ -19,12 +19,15 @@ import {
   cyan,
   dim,
   extractSafeDetails,
+  formatProgressStep,
   green,
   humanText,
+  readableLabel,
   red,
   redactSensitive,
   resolveActionableRemediation,
   sanitizeIdentifier,
+  SETUP_COMPONENT_LABELS,
   stripAnsi,
   yellow
 } from "./presentation.js";
@@ -109,11 +112,12 @@ function formatHighLevelOutput(output: HighLevelCommandOutput, useColor = false)
   if (output.steps && output.steps.length > 0) {
     lines.push("");
     lines.push("Steps:");
-    for (const step of output.steps) {
-      const stepStatus = step.status.toUpperCase().padEnd(9);
+    for (const [index, step] of output.steps.entries()) {
+      const stepStatus = step.status.toUpperCase();
       const mutating = step.mutating ? " [mutating]" : "";
       const paint = step.status === "succeeded" ? green : step.status === "failed" ? red : yellow;
-      lines.push(`  - [${useColor ? paint(stepStatus, true) : stepStatus}] ${humanText(step.stepId, 100)}: ${humanText(step.name, 180)}${mutating}`);
+      lines.push(`  ${formatProgressStep(readableLabel(step.name || step.stepId), useColor, index + 1)} [${useColor ? paint(stepStatus, true) : stepStatus}]${mutating}`);
+      lines.push(dim(`      ${humanText(step.stepId, 100)}`, useColor));
       if (step.error) {
         lines.push(`      ${useColor ? red("Error:", true) : "Error:"} [${humanText(step.error.code, 60)}] ${humanText(step.error.message, 220)}`);
       }
@@ -543,30 +547,29 @@ function formatSetupOutput(output: SetupCommandOutput, useColor = false): string
   const positive = (value: string) => useColor ? green(value, true) : value;
   const warning = (value: string) => useColor ? yellow(value, true) : value;
   const heading = (value: string) => useColor ? cyan(value, true) : value;
-  lines.push(`${heading("Setup Mode:")}         ${humanText(output.mode.toUpperCase())}`);
+  lines.push(`${heading("Setup Mode:")}         ${readableLabel(output.mode).toUpperCase()}`);
   lines.push(`${heading("Machine ID:")}         ${sanitizeIdentifier(output.machineId)}`);
   lines.push(`${heading("Operating System:")}   ${sanitizeIdentifier(output.os)}`);
   lines.push(`${heading("Service Manager:")}    ${sanitizeIdentifier(output.serviceManagerKind)}`);
-  if (output.outcome) lines.push(`${heading("Setup Result:")}       ${humanText(output.outcome)}`);
+  if (output.serviceUnitNamespace) {
+    const prefix = output.serviceManagerKind === "launchd" ? "dev.bflow." : "bflow-";
+    lines.push(`${heading("Service Units:")}      ${sanitizeIdentifier(`${prefix}${output.serviceUnitNamespace}-<service>`)} (isolated namespace)`);
+  }
+  if (output.outcome) lines.push(`${heading("Setup Result:")}       ${readableLabel(output.outcome)}`);
   if (output.plan) {
     lines.push(`${heading("Plan ID:")}            ${sanitizeIdentifier(output.plan.planId)} (revision ${output.plan.revision})`);
     lines.push(`${heading("Plan Steps:")}         ${output.plan.steps.length}`);
-    for (const step of output.plan.steps) {
+    for (const [index, step] of output.plan.steps.entries()) {
       const receipt = output.receipts?.find(r => r.stepId === step.stepId) ??
         (output.receipt?.stepId === step.stepId ? output.receipt : undefined);
       const approval = !receipt && step.requiresApproval ? ` ${warning("[requires approval]")}` : "";
-      const status = receipt ? sanitizeIdentifier(receipt.status) : sanitizeIdentifier(step.action);
-      const labels: Record<string, string> = {
-        path: "Make bflow and installed tools available in the terminal",
-        "role-skills": "Install agent skills",
-        "mcp-config": "Configure MCP tools",
-        services: "Start and verify the MCP Gateway",
-        "environment-manifest": "Save verified machine configuration",
-        doctor: "Check the completed setup"
-      };
+      const status = receipt ? readableLabel(receipt.status) : "planned";
       const label = step.action === "install_tool" ? `Install ${sanitizeIdentifier(step.componentId)}`
-        : labels[step.componentId] ?? sanitizeIdentifier(step.componentId);
-      lines.push(`  - [${status}] ${label}${approval}`);
+        : SETUP_COMPONENT_LABELS[step.componentId] ?? readableLabel(step.componentId);
+      const paintedStatus = receipt?.status === "applied" || receipt?.status === "already_satisfied" ? positive(status)
+        : receipt?.status === "failed" ? (useColor ? red(status) : status) : warning(status);
+      lines.push(`  ${formatProgressStep(label, useColor, index + 1)} [${paintedStatus}]${approval}`);
+      for (const diagnostic of receipt?.diagnostics ?? []) lines.push(dim(`      ${humanText(diagnostic, 250)}`, useColor));
     }
   }
   if (output.receipt) {
@@ -581,10 +584,10 @@ function formatSetupOutput(output: SetupCommandOutput, useColor = false): string
     for (const tool of output.tools) {
       const ver = tool.version ? ` (${sanitizeIdentifier(tool.version)})` : "";
       const status = ["present", "installed", "ready", "healthy", "available"].includes(tool.status.toLowerCase())
-        ? positive(sanitizeIdentifier(tool.status))
+        ? positive(readableLabel(tool.status))
         : ["failed", "missing", "unavailable", "error"].includes(tool.status.toLowerCase())
-          ? (useColor ? red(sanitizeIdentifier(tool.status), true) : sanitizeIdentifier(tool.status))
-          : warning(sanitizeIdentifier(tool.status));
+          ? (useColor ? red(readableLabel(tool.status), true) : readableLabel(tool.status))
+          : warning(readableLabel(tool.status));
       lines.push(`  - ${sanitizeIdentifier(tool.toolId)}: ${status}${ver}`);
     }
   }
@@ -609,7 +612,7 @@ function formatSetupOutput(output: SetupCommandOutput, useColor = false): string
     lines.push("");
     lines.push("Diagnostics:");
     for (const diag of output.diagnostics) {
-      lines.push(`  - ${humanText(diag, 250)}`);
+      lines.push(dim(`  - ${humanText(diag, 250)}`, useColor));
     }
   }
   return lines.join("\n");

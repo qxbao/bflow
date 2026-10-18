@@ -5,8 +5,8 @@ import {
   type PaneBinding, type SessionLifecycleManager, type SessionManifest
 } from "@bflow/contracts";
 import {
-  FileSessionManifestStore, RolePaneManager, isSupportedAgentKind, resolveTopologyRole,
-  type AgentLaunchProfile, type HerdrCommandRunner, type PermanentTopologyRole, type RoleAgentConfig,
+  FileSessionManifestStore, RolePaneManager, createHerdrSocketPort, isSupportedAgentKind, resolveTopologyRole,
+  type AgentLaunchProfile, type HerdrCommandRunner, type HerdrSocketPort, type PermanentTopologyRole, type RoleAgentConfig,
   type SessionManifestStore, type TopologyRole
 } from "@bflow/pane-manager";
 import type { HostPrepareResponse } from "@bflow/runtime";
@@ -39,13 +39,19 @@ export function createNamedPaneRunner(input: EnvironmentCompositionInput, runner
   } };
 }
 
+/** Socket API port used to create env-bearing panes; injectable so tests can model Herdr without a Unix socket. */
+export type PaneSocketFactory = (input: EnvironmentCompositionInput, runner: EnvironmentProcessRunner) => HerdrSocketPort;
+export const defaultPaneSocket: PaneSocketFactory = (input, runner) =>
+  createHerdrSocketPort({ runner: createNamedPaneRunner(input, runner), sessionId: input.repository.sessionName });
+
 /** Adapt P13's topology API to the frozen lifecycle port; no topology implementation lives here. */
 export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
   private readonly store: SessionManifestStore;
   private readonly panes: RolePaneManager;
   private persistenceFailure: ContractError | undefined;
   constructor(private readonly input: EnvironmentCompositionInput, private readonly runner = environmentProcessRunner,
-    roleArguments: Partial<Record<TopologyRole, readonly string[]>> = {}, roleLaunches: Partial<Record<TopologyRole, AgentLaunchProfile>> = {}) {
+    roleArguments: Partial<Record<TopologyRole, readonly string[]>> = {}, roleLaunches: Partial<Record<TopologyRole, AgentLaunchProfile>> = {},
+    socketFactory: PaneSocketFactory = defaultPaneSocket) {
     const roles: PermanentTopologyRole[] = [];
     const roleConfigs: Partial<Record<TopologyRole, Partial<RoleAgentConfig>>> = {};
     for (const role of input.config.environment.roles) {
@@ -85,7 +91,9 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
     this.panes = new RolePaneManager({ config: {
       sessionId: input.repository.sessionName, workspaceRoot: input.repository.root, projectName: input.config.projectName,
       permanentRoles: roles, roleConfigs, maxDeveloperCapacity: input.config.environment.concurrency.maxConcurrency
-    }, runner: createNamedPaneRunner(input, runner), store: this.store, defaultTimeoutMs: input.config.environment.startupTimeoutMs });
+    }, runner: createNamedPaneRunner(input, runner), store: this.store, defaultTimeoutMs: input.config.environment.startupTimeoutMs,
+      // Launch env (Gateway tokens) must be set when a pane is created: Herdr agent start never forwards invocation env.
+      socket: socketFactory(input, runner) });
   }
   private validate(raw: unknown): OperationResult<SessionManifest> {
     const result = SessionManifestSchema.safeParse(raw);
@@ -159,12 +167,12 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
 
 export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, runner: EnvironmentProcessRunner = environmentProcessRunner,
   hostFactory: LifecycleHostFactory = openLifecycleHost,
-  launchArguments = providerRoleArguments): EnvironmentIntegration {
+  launchArguments = providerRoleArguments, socketFactory: PaneSocketFactory = defaultPaneSocket): EnvironmentIntegration {
   // Read-only commands do not start a daemon. It is opened only for startup or
   // authoritative shutdown queries, and survives the invoking CLI's exit.
   let host: Promise<LifecycleHost> | undefined;
   const connect = () => host ??= hostFactory(input);
-  let manager = new PaneManagerLifecycleAdapter(input, runner);
+  let manager = new PaneManagerLifecycleAdapter(input, runner, {}, {}, socketFactory);
   // Latest platform preflight from this process; doctor reports it only when present.
   let lastPlatform: HostPrepareResponse["platform"];
   return {
@@ -192,7 +200,7 @@ export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, r
             args[topology] = await launchArguments(role.cli, role.role, launch);
           }
         }
-        manager = new PaneManagerLifecycleAdapter(input, runner, args, launches);
+        manager = new PaneManagerLifecycleAdapter(input, runner, args, launches, socketFactory);
         return manager.up(sessionId, options);
       },
       getManifest: (sessionId, options) => manager.getManifest(sessionId, options),

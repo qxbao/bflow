@@ -24,11 +24,12 @@ import { HostReceiptJournal, type HumanHookProvenance } from "./host-receipts.js
 import { parseBehavioralCommands } from "./behavioral-runner.js";
 import { HostDevelopment } from "./host-development.js";
 import { redactString } from "../resilience/redaction.js";
-import { createHostPlatformSession, launchMaterial, type HostAgentObservation, type HostPlatformSession } from "./host-platform.js";
+import { createHostPlatformSession, launchMaterial, type HostAgentObservation, type HostPlatformSession, type StartupProof } from "./host-platform.js";
 import {
-  assertRoleToolReachability, LAUNCH_REACHABILITY_DIRECTORY, launchReceiptName, probeAllGateways, ProviderStartedPayloadSchema,
-  removeLegacyRoleProbes, reportedReachabilityOf, resolveProbePlan, summarizeToolReachability, writeLaunchReachability,
-  type ReachabilityExpectation, type RoleToolReachability
+  assertRoleToolReachability, BFLOW_LAUNCH_ID_ENV, LAUNCH_REACHABILITY_DIRECTORY, launchReceiptName, probeAllGateways, ProviderBootstrapPayloadSchema,
+  ProviderStartedPayloadSchema, readLaunchReachabilityFact, removeLegacyRoleProbes, reportedReachabilityOf, resolveProbePlan, selectReachabilityFact,
+  summarizeToolReachability, writeLaunchReachability, type ReachabilityExpectation, type ReachabilityFact, type ReachabilitySource,
+  type RoleToolReachability, type ToolReachabilityRecord
 } from "./tool-reachability.js";
 
 const execute = promisify(execFile);
@@ -76,6 +77,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   let workspace: AgenticWorkspaceHandle | undefined;
   let queryStore: (RunStore & {close(): void}) | undefined;
   let manifest: SessionManifest | undefined;
+  // The manifest of the latest activation attempt: diagnostics (`platform_status`) report its proofs even when it was refused.
+  let attemptedManifest: SessionManifest | undefined;
   let quiesced = false, quiesceCompleted = false, closing = false;
   let scheduler: Promise<unknown> | undefined, schedulerError: string | undefined;
   const receipts = new HostReceiptJournal(join(configuration.directory, "authentication-receipts"), configuration.repositoryPath, configuration.sessionId);
@@ -218,42 +221,101 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
     return queryStore!;
   };
+  const receiptPathOf = (role: AgentRole, paneId: string) => join(configuration.directory, "launch-receipts", launchReceiptName(role, paneId));
   const readLaunchReceipt = async (role: AgentRole, paneId: string): Promise<Record<string, unknown> | undefined> => {
-    try { return record(JSON.parse(await readFile(join(configuration.directory, "launch-receipts", launchReceiptName(role, paneId)), "utf8"))); }
+    try { return record(JSON.parse(await readFile(receiptPathOf(role, paneId), "utf8"))); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  };
+  // Startup receipts (one per role and pane) have two writers: the provider SessionStart hook (`provider_started`, which
+  // carries the native session id) and the MCP bootstrap (`provider_bootstrap`, reachability only). Both reach the
+  // reachability precedence through this single serialized writer, so the first all-ok proof of a launch is kept.
+  let startupWrites: Promise<unknown> = Promise.resolve();
+  const writeStartupReceipt = (role: AgentRole, paneId: string, input: { readonly nativeSessionId?: string;
+    readonly reachability?: { readonly launchId: string; readonly toolReachability: readonly ToolReachabilityRecord[]; readonly source: ReachabilitySource } }): Promise<void> => {
+    const work = async (): Promise<void> => {
+      const path = receiptPathOf(role, paneId);
+      const stored = await readLaunchReceipt(role, paneId);
+      const storedReported = stored === undefined ? undefined : reportedReachabilityOf(stored);
+      const storedFact: ReachabilityFact | undefined = storedReported === undefined ? undefined : { launchId: storedReported.launchId, paneId,
+        toolReachability: storedReported.toolReachability, source: stored?.reachabilitySource === "mcp_bootstrap" ? "mcp_bootstrap" : "hook" };
+      const incoming = input.reachability === undefined ? undefined : { paneId, ...input.reachability };
+      const chosen = incoming === undefined ? storedFact : selectReachabilityFact(storedFact, incoming);
+      // A native session is only ever reported by the hook; without one the startup proof is the MCP bootstrap.
+      const nativeSessionId = input.nativeSessionId ?? (typeof stored?.nativeSessionId === "string" ? stored.nativeSessionId : undefined);
+      await mkdir(join(configuration.directory, "launch-receipts"), { recursive: true, mode: 0o700 });
+      await privateFile(path, JSON.stringify({ role, paneId, source: nativeSessionId === undefined ? "mcp_bootstrap" : "hook",
+        ...(nativeSessionId === undefined ? {} : { nativeSessionId }),
+        ...(chosen === undefined ? {} : { launchId: chosen.launchId, toolReachability: chosen.toolReachability, reachabilitySource: chosen.source }) }));
+      if (incoming !== undefined) {
+        const directory = join(configuration.directory, LAUNCH_REACHABILITY_DIRECTORY);
+        const winner = selectReachabilityFact(await readLaunchReachabilityFact(directory, incoming.launchId), incoming);
+        await writeLaunchReachability(directory, winner.launchId, winner.paneId, winner.toolReachability, winner.source);
+      }
+    };
+    const run = startupWrites.then(work, work);
+    startupWrites = run.catch(() => undefined);
+    return run;
   };
   const activate = async (input: unknown) => {
     const accepted = SessionManifestSchema.parse(input);
+    attemptedManifest = accepted;
     if (accepted.sessionId !== configuration.sessionId || accepted.workspaceRoot !== configuration.repositoryPath || accepted.status !== "up") throw new Error("Foreign or unready session manifest");
     if (workspace) { if (quiesced) throw new Error("Host is quiesced; reconcile and restart after shutdown"); return null; }
     // Launch receipts retained for this activation, keyed by role (H1 reads their reachability fields).
     const launchReceipts = new Map<AgentRole, Record<string, unknown>>();
+    // Startup proof per role: `hook` (SessionStart receipt with the native session id) or `mcp_bootstrap` (the MCP child's
+    // reachability receipt for this exact launch; its native session is Herdr's own observation, checked below).
+    const startupPaths = new Map<AgentRole, "hook" | "mcp_bootstrap">();
     // An older pane may have a valid Herdr session but no Bflow tools/hooks.
-    // Require the launch-local hook receipt for this exact native session.
+    // Require a launch-local startup receipt for this exact pane: the hook's native session or the MCP bootstrap.
     for (const pane of accepted.panes) {
       if (!pane.permanent || pane.role === "developer") continue;
-      const path = join(configuration.directory, "launch-receipts", digest([pane.role, pane.paneId]) + ".json");
+      const path = receiptPathOf(pane.role, pane.paneId);
       let receipt: Record<string, unknown>;
       try { receipt = record(JSON.parse(await readFile(path, "utf8"))); }
       catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`[bflow:native-startup-pending] ${pane.role} pane ${pane.paneId} is still publishing ${path}; wait for its native Bflow SessionStart hook.`);
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`[bflow:native-startup-pending] ${pane.role} pane ${pane.paneId} is still publishing ${path}; wait for its Bflow startup proof (SessionStart hook or MCP bootstrap).`);
         throw error;
       }
-      if (!pane.session || receipt.role !== pane.role || receipt.paneId !== pane.paneId || receipt.nativeSessionId !== pane.session.value) {
-        throw new Error(`Pane '${pane.paneId}' has no matching native Bflow launch receipt; preserve it and reconcile provider startup`);
+      const mismatch = () => new Error(`Pane '${pane.paneId}' has no matching native Bflow launch receipt; preserve it and reconcile provider startup`);
+      if (receipt.role !== pane.role || receipt.paneId !== pane.paneId) throw mismatch();
+      if (typeof receipt.nativeSessionId === "string") {
+        if (!pane.session || receipt.nativeSessionId !== pane.session.value) throw mismatch();
+        startupPaths.set(pane.role, "hook");
+      } else {
+        // The bootstrap receipt must name the launch this host prepared for the role (when one is prepared).
+        const prepared = platformSession?.launchIdOf(pane.role);
+        if (receipt.source !== "mcp_bootstrap" || typeof receipt.launchId !== "string" || (prepared !== undefined && receipt.launchId !== prepared)) throw mismatch();
+        startupPaths.set(pane.role, "mcp_bootstrap");
       }
       launchReceipts.set(pane.role, receipt);
     }
+    let nativeSessionsChanged = false;
     for (const pane of accepted.panes) {
-      const receipt = nativeSessions.get(pane.paneId);
       const actual = record(record(record(JSON.parse(await herdr(["agent", "get", pane.paneId]))).result).agent);
       const native = actual.agent_session ? record(actual.agent_session) : undefined;
+      if (startupPaths.get(pane.role) === "mcp_bootstrap") {
+        // No SessionStart hook registered this pane: Herdr's observed native session is the proof, registered here.
+        if (!native) throw new Error(`[bflow:native-startup-pending] ${pane.role} pane ${pane.paneId} has bootstrap reachability but Herdr reports no native session yet.`);
+        if (native.source !== `herdr:${pane.provider}` || native.kind !== "id" || (actual.name ?? actual.agent) !== pane.agentId)
+          throw new Error(`Role ${pane.role} has no matching Bflow provider startup/native-session receipt; stop and recreate legacy bare panes`);
+        if (!pane.session || pane.session.source !== native.source || pane.session.kind !== native.kind || pane.session.value !== native.value)
+          throw new Error(`[bflow:native-startup-pending] ${pane.role} pane ${pane.paneId}: the manifest has not recorded Herdr's observed native session yet.`);
+        const registered = nativeSessions.get(pane.paneId);
+        if (registered?.role !== pane.role || registered.sessionId !== native.value) {
+          nativeSessions.set(pane.paneId, { role: pane.role, sessionId: String(native.value) });
+          nativeSessionsChanged = true;
+        }
+        continue;
+      }
+      const receipt = nativeSessions.get(pane.paneId);
       if (native && pane.session?.value === native.value && (!receipt || receipt.sessionId !== native.value))
         throw new Error(`[bflow:native-startup-pending] ${pane.role} pane ${pane.paneId} is still publishing its Bflow native-session receipt.`);
       if (!receipt || receipt.role !== pane.role || !native || native.source !== `herdr:${pane.provider}` || native.kind !== "id" || native.value !== receipt.sessionId ||
           pane.session?.value !== receipt.sessionId || (actual.name ?? actual.agent) !== pane.agentId)
         throw new Error(`Role ${pane.role} has no matching Bflow provider startup/native-session receipt; stop and recreate legacy bare panes`);
     }
+    if (nativeSessionsChanged) await privateFile(join(configuration.directory, "native-sessions.json"), JSON.stringify(Object.fromEntries(nativeSessions)));
     // Native sessions are proven above. H1: each required role with Gateway registrations must prove, from inside its
     // launched provider process, that every registration reaches its allowed tools; only then is platform readiness checked.
     if (platformSession) {
@@ -445,15 +507,18 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         await development.authorizeFileEdit(binding, hook); return { permitted: true };
       }
       if (method === "provider_started") {
-        const receipt = ProviderStartedPayloadSchema.parse(params), paneId = receipt.paneId, nativeSessionId = receipt.nativeSessionId;
-        const directory = join(configuration.directory, "launch-receipts");
-        await mkdir(directory, { recursive: true, mode: 0o700 });
-        await privateFile(join(directory, digest([role, paneId]) + ".json"), JSON.stringify({ role, paneId, nativeSessionId,
-          ...(receipt.launchId === undefined ? {} : { launchId: receipt.launchId, toolReachability: receipt.toolReachability }) }));
-        // Keyed by launch, not role: concurrent Developers share a role and must never overwrite each other's reachability.
-        if (receipt.launchId !== undefined && receipt.toolReachability !== undefined) {
-          await writeLaunchReachability(join(configuration.directory, LAUNCH_REACHABILITY_DIRECTORY), receipt.launchId, paneId, receipt.toolReachability);
-        }
+        const receipt = ProviderStartedPayloadSchema.parse(params);
+        // Reachability is keyed by launch, not role: concurrent Developers share a role and never overwrite each other's proof.
+        await writeStartupReceipt(role, receipt.paneId, { nativeSessionId: receipt.nativeSessionId,
+          ...(receipt.launchId === undefined || receipt.toolReachability === undefined ? {} :
+            { reachability: { launchId: receipt.launchId, toolReachability: receipt.toolReachability, source: "hook" as const } }) });
+        return { recorded: true };
+      }
+      if (method === "provider_bootstrap") {
+        // Sent by the MCP child at provider startup, from the provider environment (no SessionStart hook needed).
+        const payload = ProviderBootstrapPayloadSchema.parse(params);
+        if (payload.paneId === undefined) throw new Error("provider_bootstrap requires the provider pane id");
+        await writeStartupReceipt(role, payload.paneId, { reachability: { launchId: payload.launchId, toolReachability: payload.toolReachability, source: "mcp_bootstrap" } });
         return { recorded: true };
       }
       if (method === "role_call") return roleCall(role, params);
@@ -513,13 +578,23 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         const status = platformSession.status();
         const toolReachability: RoleToolReachability[] = [];
         for (const [role, expectation] of toolExpectations) {
-          const pane = manifest?.panes.find(candidate => candidate.role === role);
+          const pane = (attemptedManifest ?? manifest)?.panes.find(candidate => candidate.role === role);
           const receipt = pane === undefined ? undefined : await readLaunchReceipt(role, pane.paneId);
           toolReachability.push(summarizeToolReachability(role, expectation, receipt === undefined ? undefined : reportedReachabilityOf(receipt)));
         }
         // Dynamic Developers: one entry per active launch with Gateway registrations, keyed by its launchId.
         toolReachability.push(...await platformSession.developerToolReachability());
-        return { ...status, toolReachability };
+        // Proof source per permanent launch (no tokens): the SessionStart hook, the MCP bootstrap, or none yet.
+        const startupProof: StartupProof[] = [];
+        for (const pane of (attemptedManifest ?? manifest)?.panes ?? []) {
+          if (!pane.permanent || pane.role === "developer") continue;
+          const receipt = await readLaunchReceipt(pane.role, pane.paneId);
+          const launchId = typeof receipt?.launchId === "string" ? receipt.launchId : undefined;
+          startupProof.push({ role: pane.role, paneId: pane.paneId, ...(launchId === undefined ? {} : { launchId }),
+            startupSource: receipt === undefined ? "none" : typeof receipt.nativeSessionId === "string" ? "hook" : "mcp_bootstrap",
+            reachabilitySource: receipt?.toolReachability === undefined ? "none" : receipt.reachabilitySource === "mcp_bootstrap" ? "mcp_bootstrap" : "hook" });
+        }
+        return { ...status, toolReachability, startupProof };
       }
       case "activate": return activate(params);
       case "get_run": { const stored = unwrap(await (await getQueryStore()).get(textField(record(params).runId))); return stored?.snapshot ?? null; }
@@ -664,7 +739,26 @@ export function availableTools(role: AgentRole) {
   };
   return tools.map(tool => ({ ...tool, inputSchema: { type: "object", ...(argumentsByName[tool.name] ?? {properties:{},required:[]}), additionalProperties:false } }));
 }
-export async function runRoleMcp(configuration: RoleConfiguration): Promise<void> {
+/**
+ * Startup reachability bootstrap. The provider spawns this MCP child at startup, inside its launch environment, so the
+ * child can probe the launch's Gateway registrations without a SessionStart hook (Codex does not fire one at startup).
+ * Runs once per process, in the background: MCP serving is never blocked, and the probes are individually time-bounded.
+ * Only the token-free probe records and the pane id are sent, authenticated with the role token.
+ */
+function bootstrapProviderReachability(configuration: RoleConfiguration, roleConfigPath: string | undefined): void {
+  if (process.env[BFLOW_LAUNCH_ID_ENV] === undefined || roleConfigPath === undefined) return;
+  void (async () => {
+    const plan = await resolveProbePlan(dirname(roleConfigPath), configuration.role, process.env);
+    if (plan === undefined) return;
+    const toolReachability = await probeAllGateways(plan, process.env, (url, init) => fetch(url, init));
+    const paneId = process.env.HERDR_PANE_ID;
+    await callHost(configuration.socketPath, configuration.token, "provider_bootstrap", { launchId: plan.launchId,
+      ...(paneId === undefined || paneId.length === 0 ? {} : { paneId }), toolReachability, source: "mcp_bootstrap" }, 30_000);
+  })().catch(error => { process.stderr.write(`Bflow provider bootstrap not recorded: ${redactString(String(error))}\n`); });
+}
+
+export async function runRoleMcp(configuration: RoleConfiguration, roleConfigPath?: string): Promise<void> {
+  bootstrapProviderReachability(configuration, roleConfigPath);
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
   for await (const line of input) {
     if (Buffer.byteLength(line) > 4 * 1024 * 1024) throw new Error("Oversized MCP request");
@@ -737,6 +831,6 @@ export async function runProviderHook(configuration: RoleConfiguration, event: s
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const mode = process.argv[2], path = process.argv[3];
   const task = !path ? Promise.reject(new Error("Host configuration path required")) : mode === "daemon" ? readHostConfiguration(path).then(runAgenticHost)
-    : readRoleConfiguration(path).then(configuration => mode === "mcp" ? runRoleMcp(configuration) : mode === "hook" ? runProviderHook(configuration, textField(process.argv[4]), path) : Promise.reject(new Error("Unknown host mode")));
+    : readRoleConfiguration(path).then(configuration => mode === "mcp" ? runRoleMcp(configuration, path) :mode === "hook" ? runProviderHook(configuration, textField(process.argv[4]), path) : Promise.reject(new Error("Unknown host mode")));
   task.catch(error => { process.stderr.write(redactString(String(error)) + "\n"); process.exitCode = 1; });
 }

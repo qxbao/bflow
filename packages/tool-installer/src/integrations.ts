@@ -393,7 +393,10 @@ export async function ensureGitNexusIndex(input: {
   const root = await realpath(input.repositoryRoot);
   const head = await host.run("git", ["rev-parse", "HEAD"], { cwd: root, timeoutMs: 15_000 });
   const dirty = await host.run("git", ["status", "--porcelain"], { cwd: root, timeoutMs: 15_000 });
-  if (head.exitCode !== 0 || dirty.exitCode !== 0) throw new Error("Repository fingerprint unavailable");
+  if (head.exitCode !== 0)
+    return { status: "failed", repositoryRoot: root, fingerprint: sha("unborn-head"),
+      diagnostic: "GitNexus indexing needs a repository with at least one commit; create the first commit and rerun bflow setup" };
+  if (dirty.exitCode !== 0) throw new Error("Repository fingerprint unavailable");
   const fingerprint = sha(head.stdout.trim() + "\n" + dirty.stdout);
   await privateDirectory(input.stateRoot);
   const home = await privateDirectory(join(input.stateRoot, "gitnexus-home"));

@@ -1,7 +1,7 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import type {
@@ -22,6 +22,8 @@ import {
   AssumeYesApprover,
   InteractiveApprover,
   NonInteractiveApprover,
+  isolatedPlatformProfile,
+  isolatedServiceNamespace,
   type SetupOutcome,
   type MachineDoctorReport,
   type SetupComponent,
@@ -39,9 +41,9 @@ import {
   AgentProviderRegistry
 } from "@bflow/agent-providers";
 import { wrapSetupComponents, setupGatewayDiagnostics } from "./setup-gateway.js";
-import { humanText } from "./presentation.js";
+import { formatSetupPreview, readableLabel, SETUP_COMPONENT_LABELS } from "./presentation.js";
 import { identifyRepository } from "./repository.js";
-import { createDefaultSetupConfiguration } from "./setup-defaults.js";
+import { createDefaultSetupConfiguration, isolatedProviderHomes } from "./setup-defaults.js";
 import { SUPPORTED_CLI_COMMANDS } from "./command-reference.js";
 import type { CliContext, SetupCommandArgs, SetupCommandOutput } from "./types.js";
 
@@ -80,30 +82,37 @@ export function issueSetupApproval(
 export async function executeSetupCommand(
   args: SetupCommandArgs,
   context?: CliContext,
-  onProgress?: ((step: string) => void) | undefined
+  onProgress?: ((step: string) => void) | undefined,
+  observer?: { detail(message: string): void; confirm<T>(action: () => Promise<T>): Promise<T> } | undefined
 ): Promise<SetupCommandOutput> {
   const diagnostics: string[] = [];
   const progress = (step: string) => { try { onProgress?.(step); } catch { /* presentation must not affect setup */ } };
+  const detail = (message: string) => { try { observer?.detail(message); } catch { /* observational only */ } };
 
   // 1. Resolve Platform
   progress("Checking machine platform and setup scope...");
   let platform: PlatformProfile = context?.setup?.platform ?? detectPlatform(defaultHostEnvironment());
   const isolatedRoot = context?.setup?.isolatedRoot ?? process.env.BFLOW_HOME;
   if (isolatedRoot) {
-    platform = {
-      ...platform,
-      paths: {
-        config: join(isolatedRoot, "config"),
-        data: join(isolatedRoot, "data"),
-        state: join(isolatedRoot, "state"),
-        managedBin: join(isolatedRoot, "data", "bin")
-      }
-    };
+    platform = isolatedPlatformProfile(platform, isolatedRoot);
+    // Provider CLIs (Codex) refuse a missing CODEX_HOME and PathManager writes rc files under homeDir: create the
+    // isolated provider homes up front so nothing falls back to, or fails instead of, the real user's home.
   }
 
   // 2. Resolve Runner & Store
   progress("Checking setup state and approvals...");
-  const runner: CommandRunner = context?.setup?.runner ?? new NodeCommandRunner();
+  const baseRunner: CommandRunner = context?.setup?.runner ?? new NodeCommandRunner();
+  const runner: CommandRunner = !observer ? baseRunner : { run: async (argv, options) => {
+    const command = basename(argv[0] ?? "command");
+    const startedAt = Date.now();
+    // Arguments/output can contain account data or secrets; show process boundaries only.
+    detail(`Running ${command}`);
+    try {
+      const result = await baseRunner.run(argv, options);
+      detail(`${command}: ${result.timedOut ? "timed out" : `exit ${result.exitCode ?? "unknown"}`} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
+      return result;
+    } catch (error) { detail(`${command}: interrupted or failed`); throw error; }
+  } };
   const readOnly = args.mode === "check" || args.mode === "dry_run";
   const store = new SetupStateStore(platform.paths, {
     uid: platform.uid,
@@ -127,8 +136,10 @@ export async function executeSetupCommand(
 
   // 4. Resolve Service Manager
   progress("Checking service manager capabilities...");
+  // Isolated setups namespace OS unit names so they can never collide with (or be linked into) the user's real units.
   const serviceManager: ServiceManager =
-    context?.setup?.serviceManager ?? selectServiceManager(platform, runner, store);
+    context?.setup?.serviceManager ?? selectServiceManager(platform, runner, store,
+      isolatedRoot ? { namespace: isolatedServiceNamespace(isolatedRoot) } : {});
 
   // 6. Resolve Skills Catalog & Synchronizer
   progress("Checking approved skills catalog...");
@@ -216,6 +227,8 @@ export async function executeSetupCommand(
     catch (error) { if (args.dir) throw error; }
     const defaults = await createDefaultSetupConfiguration({ platform, memoryProvider: args.memoryProvider ?? "auto",
       projectRoot: repositoryRoot ?? target,
+      // Isolated setup must never write the real provider homes; the isolation is passed explicitly, not via global state.
+      ...(isolatedRoot ? { isolation: isolatedProviderHomes(isolatedRoot) } : {}),
       ...(context?.setup?.machineConfig || existsSync(configPath) ? { config: machineConfig } : {}),
       registry: installerRegistry });
     machineConfig = defaults.config;
@@ -236,11 +249,14 @@ export async function executeSetupCommand(
       const installer = installerRegistry.get(installerId);
       if (!installer) continue;
       observedRegistry.register({ installerId, plan: (request, options) => installer.plan(request, options),
-        reconcile: (request, options) => installer.reconcile(request, options),
+        reconcile: (request, options) => {
+          progress(`Checking installation of ${request.step.componentId}...`);
+          return installer.reconcile(request, options);
+        },
         apply: async (request, options) => {
           progress(`Installing ${request.step.componentId}...`);
           const result = await installer.apply(request, options);
-          progress(`Checking installation of ${request.step.componentId}...`);
+          detail(`${request.step.componentId}: ${result.ok ? "installation receipt received" : "installation failed"}`);
           return result;
         } });
     }
@@ -253,8 +269,10 @@ export async function executeSetupCommand(
     return !onProgress ? composed : composed.map(component => ({ componentId: component.componentId, action: component.action,
       rollback: component.rollback, observe: component.observe.bind(component), desired: component.desired.bind(component),
       apply: async (ctx: Parameters<SetupComponent["apply"]>[0]) => {
-        progress(`Applying ${component.componentId}...`);
-        return component.apply(ctx);
+        progress(`${SETUP_COMPONENT_LABELS[component.componentId] ?? readableLabel(component.componentId)}...`);
+        const result = await component.apply(ctx);
+        for (const diagnostic of result.diagnostics) detail(diagnostic);
+        return result;
       } }));
   };
 
@@ -281,15 +299,30 @@ export async function executeSetupCommand(
             const notes = diagnostics.filter(note => /license|PolyForm|build scripts/i.test(note));
             if (inventory.some(item => item.toolId === "claude-mem" || item.toolId === "superpowers"))
               notes.push(`Native plugins update the ${machineConfig.providers.join(", ")} configuration folders in this account. Claude-Mem uses the selected account's quota.`);
-            const prompt = [...notes, text].join("\n\n").split("\n").map(line => humanText(line, 2000)).join("\n");
-            if (context?.setup?.confirm) return context.setup.confirm(prompt);
-            if (args.json || !process.stdin.isTTY || !process.stderr.isTTY) return false;
-            const terminal = createInterface({ input: process.stdin, output: process.stderr });
-            try { return /^(y|yes)$/i.test((await terminal.question(`${prompt} [y/N] `)).trim()); }
-            finally { terminal.close(); }
+            const preview = [...notes, text].join("\n\n");
+            // Keep injected approval callbacks plain for programmatic consumers.
+            const prompt = formatSetupPreview(preview, !context?.setup?.confirm && Boolean(context?.presentation?.stderrColor) && !args.json);
+            const ask = async () => {
+              if (context?.setup?.confirm) return context.setup.confirm(prompt);
+              if (args.json || !process.stdin.isTTY || !process.stderr.isTTY) return false;
+              const terminal = createInterface({ input: process.stdin, output: process.stderr });
+              try { return /^(y|yes)$/i.test((await terminal.question(`${prompt} [y/N] `)).trim()); }
+              finally { terminal.close(); }
+            };
+            return observer ? observer.confirm(ask) : ask();
           }, store, () => new Date()),
       now: () => new Date()
     });
+
+  // Isolated provider homes are created only when changes may apply (never in check/dry-run), after validation:
+  // Codex refuses a missing CODEX_HOME and PathManager writes rc files under homeDir, so nothing may fall back to
+  // the real user's home.
+  const ensureIsolatedHomes = () => {
+    if (!isolatedRoot || args.mode === "check" || args.mode === "dry_run") return;
+    const providerHomes = isolatedProviderHomes(isolatedRoot);
+    for (const directory of [platform.homeDir, providerHomes.homeDirectory, providerHomes.claudeConfigDir, providerHomes.codexHome])
+      if (directory) mkdirSync(directory, { recursive: true, mode: 0o700 });
+  };
 
   let plan: SetupPlan | undefined;
   let receipt: SetupReceipt | undefined;
@@ -313,6 +346,7 @@ export async function executeSetupCommand(
         await store.writeApproval(approval);
       }
       if (typeof machineSetup.apply === "function") {
+        ensureIsolatedHomes();
         progress("Applying approved setup steps...");
         const applyRes = await machineSetup.apply({ mode: args.mode, config: machineConfig, approval });
         if (applyRes) {
@@ -330,6 +364,7 @@ export async function executeSetupCommand(
       }
     }
   } else if (typeof machineSetup.run === "function") {
+    ensureIsolatedHomes();
     // Standard MachineSetupService execution
     progress(`Running ${args.mode} setup checks...`);
     const report = await machineSetup.run({
@@ -394,6 +429,7 @@ export async function executeSetupCommand(
     machineId: platform.machineId,
     os: platform.os,
     serviceManagerKind: serviceManager.kind,
+    ...(serviceManager.namespace ? { serviceUnitNamespace: serviceManager.namespace } : {}),
     plan: resolvedPlan,
     ...(receipt ? { receipt } : {}),
     receipts,

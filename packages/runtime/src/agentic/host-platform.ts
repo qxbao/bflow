@@ -61,6 +61,17 @@ const PlatformStatusLaunchSchema = z.object({
   reason: z.literal("gateway_registration_lost").optional()
 }).strict();
 
+/** Which path proved a permanent role's startup and its Gateway reachability. `none` until that path has reported. */
+export const StartupProofSourceSchema = z.enum(["hook", "mcp_bootstrap", "none"]);
+export const StartupProofSchema = z.object({
+  role: AgentRoleSchema,
+  paneId: z.string().min(1),
+  launchId: z.string().min(1).optional(),
+  startupSource: StartupProofSourceSchema,
+  reachabilitySource: StartupProofSourceSchema
+}).strict();
+export type StartupProof = z.infer<typeof StartupProofSchema>;
+
 /** `platform_status` RPC result. Carries no launch environment, bearer token or argv. */
 export const HostPlatformStatusSchema = z.object({
   report: PlatformPreflightReportSchema.nullable(),
@@ -80,7 +91,9 @@ export const HostPlatformStatusSchema = z.object({
     error: z.string().optional()
   }).strict().nullable().optional(),
   /** In-process MCP tool reachability per prepared role with Gateway registrations. Carries no tokens. */
-  toolReachability: z.array(RoleToolReachabilitySchema).optional()
+  toolReachability: z.array(RoleToolReachabilitySchema).optional(),
+  /** Per permanent non-Developer role: which proof path (SessionStart hook or MCP bootstrap) established startup. */
+  startupProof: z.array(StartupProofSchema).optional()
 }).strict();
 export type HostPlatformStatus = z.infer<typeof HostPlatformStatusSchema>;
 
@@ -302,6 +315,11 @@ export class HostPlatformSession {
         throw new Error(`Required platform role ${option.role} is not activated-ready: ${describeFailure(result.error)}`);
       }
     }
+  }
+
+  /** Launch id of the prepared permanent role launch of this generation; undefined when none is prepared. */
+  launchIdOf(role: AgentRole): string | undefined {
+    return this.launches.get(role)?.launchId;
   }
 
   /**

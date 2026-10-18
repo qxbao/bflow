@@ -375,7 +375,10 @@ export class StreamableHttpGatewayServer {
             );
             return;
           }
+          // MCP Tool shape: name, title?, description?, inputSchema, outputSchema?, annotations?.
+          // definitions are normalized upstream data (only MCP Tool fields); serviceId is a gateway extension.
           const tools = listRes.value.map(t => ({
+            ...t.definition,
             name: t.tool,
             serviceId: t.serviceId
           }));
