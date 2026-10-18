@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { accessSync, constants, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { lstat, readFile, realpath, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -28,11 +29,23 @@ export interface SetupGatewayInput {
   repositoryRoot?: string;
 }
 
+/** GitNexus indexes a commit; an unborn HEAD (no commits yet) has nothing to index. */
+export function repositoryHasCommits(repositoryRoot: string): boolean {
+  try {
+    execFileSync("git", ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], { cwd: repositoryRoot,
+      stdio: ["ignore", "ignore", "ignore"], timeout: 15_000 });
+    return true;
+  } catch { return false; }
+}
+
 export function setupGatewayDiagnostics(input: Pick<SetupGatewayInput, "repositoryRoot" | "launchRequirements"> & { gatewayStateDirectory?: string | undefined }): string[] {
   const locator = input.gatewayStateDirectory ? ` at ${join(input.gatewayStateDirectory, GATEWAY_CONTROL_LOCATOR_FILE)}` : "";
+  const gitNexusRequested = input.launchRequirements.some(item => item.toolId === "gitnexus");
   return [
-    ...(!input.repositoryRoot && input.launchRequirements.some(item => item.toolId === "gitnexus")
+    ...(!input.repositoryRoot && gitNexusRequested
       ? ["GitNexus installs globally; repository indexing and its MCP activation are deferred until bflow setup --dir <repository>."] : []),
+    ...(input.repositoryRoot && gitNexusRequested && !repositoryHasCommits(input.repositoryRoot)
+      ? ["GitNexus indexing deferred: the repository has no commits yet; rerun bflow setup after the first commit."] : []),
     `The background Gateway verifies installed backends and serves role registration through its private ${GATEWAY_CONTROL_LOCATOR_FILE} locator${locator}; machine setup does not establish those role connections.`
   ];
 }
@@ -176,7 +189,9 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
     const pin = config.toolPins.find(candidate => candidate.toolId === item.toolId);
     return { ...item, pin, version: pin?.version ?? "" };
   });
-  const activeRequirements = requirements.filter(item => item.toolId !== "gitnexus" || input.repositoryRoot);
+  // An unborn HEAD defers GitNexus (no commit to index) while the other managed services still configure.
+  const selectedHasCommits = input.repositoryRoot ? repositoryHasCommits(repositoryRoot) : false;
+  const activeRequirements = requirements.filter(item => item.toolId !== "gitnexus" || selectedHasCommits);
   for (const item of requirements) {
     if (!isAbsolute(item.executable) || !item.version) throw new Error(`Missing pinned managed executable/version for ${item.toolId}`);
   }
@@ -185,10 +200,10 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
     config.mcpServices.some(current => current.serviceId === id && priorConfiguration!.services.some(previous => previous.serviceId === id && digest(previous) === digest(current)))));
   const operatorServices = config.mcpServices.filter(item => !priorOwnedIds.has(item.serviceId));
   const approval = ApprovalSchema.parse({ policyVersion: 2, repositorySelected: Boolean(input.repositoryRoot),
-    browserExecutable: approvedBrowser(platform), requirements });
+    browserExecutable: approvedBrowser(platform), requirements: activeRequirements });
   const desiredDigest = digest({ setupPolicyVersion: 2, machineId: platform.machineId, repositoryRoot,
     paths: platform.paths,
-    repositorySelected: approval.repositorySelected, browserExecutable: approval.browserExecutable, requirements, services: operatorServices });
+    repositorySelected: approval.repositorySelected, browserExecutable: approval.browserExecutable, requirements: approval.requirements, services: operatorServices });
   const service: ServiceDefinition = { serviceId: "mcp-gateway", program: process.execPath,
     args: [fileURLToPath(new URL("../dist/setup-gateway.js", import.meta.url)), "--serve", configPath, desiredDigest], env: {}, keepAlive: true };
   if (config.services.some(item => item.serviceId === service.serviceId &&
@@ -233,7 +248,7 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
     desired: async () => ({ digest: desiredDigest,
       summary: "Configure pinned shared MCP services and a loopback Gateway; verify actual MCP protocol and required tools after installation",
       targets: [configPath, join(platform.paths.config, "mcp.json"), join(platform.paths.config, MACHINE_CONFIG_FILE),
-        ...(input.repositoryRoot && requirements.some(item => item.toolId === "gitnexus")
+        ...(input.repositoryRoot && activeRequirements.some(item => item.toolId === "gitnexus")
           ? [join(repositoryRoot, ".gitnexus"), join(repositoryRoot, ".git", "info", "exclude")] : [])], machineWide: true, repairNeeded: false }),
     observe: async ctx => {
       try {

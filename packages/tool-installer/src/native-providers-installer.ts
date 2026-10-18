@@ -7,7 +7,7 @@ import { SetupApplyRequestSchema, SetupReceiptSchema, SetupStepSchema, ToolInsta
 import { ManagedToolInstaller, ManagedToolPinSchema, type ManagedToolPin, type ToolInspection, type ProviderPluginAdapter, type ToolHost } from "./installer.js";
 import { OfficialProviderPluginAdapter } from "./provider-plugins.js";
 import type { NativeProvider, NativeRuntimeOptions } from "./native-runtime.js";
-import { resolveMemoryProvider } from "./memory-provider.js";
+import { resolveMemoryProvider, SubscriptionLoginRequiredError, SUBSCRIPTION_LOGIN_REQUIRED } from "./memory-provider.js";
 import { systemToolHost } from "./installer.js";
 
 /** One machine-approved tool step composes provider-specific native activations.
@@ -37,6 +37,10 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
     });
   }
   #fail<T>(message: string): OperationResult<T> { return { ok: false, error: { code: "validation", retryable: false, message } }; }
+  /** A missing subscription login is an owner action carried in error details, not a machine failure. */
+  #ownerAction<T>(message: string): OperationResult<T> {
+    return { ok: false, error: { code: "validation", retryable: false, message, details: { ownerAction: SUBSCRIPTION_LOGIN_REQUIRED } } };
+  }
   async #childSteps(request: ToolInstallRequest): Promise<OperationResult<{ provider: NativeProvider; installer: ManagedToolInstaller; step: SetupStep }[]>> {
     const plans: { provider: NativeProvider; installer: ManagedToolInstaller; step: SetupStep }[] = [];
     let selected: Awaited<ReturnType<typeof resolveMemoryProvider>> | undefined;
@@ -46,7 +50,10 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
       try { selected = await resolveMemoryProvider({ provider: memory.provider ?? "auto", homeDirectory: home, dataDir: memory.dataDir,
         host: this.#host, ...(this.#configuration?.executables ? { executables: this.#configuration.executables } : {}),
         ...(process.env.CODEX_HOME ? { environment: { CODEX_HOME: process.env.CODEX_HOME } } : {}) }); }
-      catch (error) { return this.#fail(error instanceof Error ? error.message : "Claude-Mem subscription login could not be verified"); }
+      catch (error) {
+        if (error instanceof SubscriptionLoginRequiredError) return this.#ownerAction(error.message);
+        return this.#fail(error instanceof Error ? error.message : "Claude-Mem subscription login could not be verified");
+      }
     }
     for (const child of this.#children) {
       const installer = selected ? new ManagedToolInstaller({ managedRoot: this.#root, pins: [child.pin], host: this.#host,

@@ -65,14 +65,16 @@ export class BuiltinSetupDoctor implements SetupDoctor {
     for (const o of input.observations) {
       const managedPath = o.status === "path_missing" && o.pathMissingDir !== null && ownedPathDirs.includes(o.pathMissingDir);
       const ok = o.status === "present" || managedPath;
-      const status: DoctorCheck["status"] = managedPath ? "warning" : ok ? "passed" : o.required ? "failed" : "warning";
+      // An owner action (e.g. provider login) cannot be completed by setup; it stays a warning until the owner completes it.
+      const deferred = !ok && o.ownerAction !== undefined;
+      const status: DoctorCheck["status"] = managedPath || deferred ? "warning" : ok ? "passed" : o.required ? "failed" : "warning";
       checks.push({
         checkId: `tool-${o.toolId}`,
         status,
         summary: ok
           ? `${o.toolId} ${o.version ?? "present"}${managedPath ? "; managed PATH configured; reload your shell" : ""}`
           : `${o.toolId} ${o.status.replace(/_/g, " ")}${o.diagnostics.length > 0 ? `: ${o.diagnostics.join("; ")}` : ""}`,
-        ...(ok ? {} : { remediation: `Install or fix ${o.toolId} manually, then rerun setup.` })
+        ...(ok ? {} : { remediation: deferred ? o.ownerAction! : `Install or fix ${o.toolId} manually, then rerun setup.` })
       });
       if (PROVIDER_TOOLS.includes(o.toolId) && ok) {
         checks.push({

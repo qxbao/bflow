@@ -304,6 +304,13 @@ describe("tool integrations", () => {
       return { exitCode: 0, stdout: "Index up to date", stderr: "" };
     } };
     expect((await ensureGitNexusIndex({ repositoryRoot: root, stateRoot, executable: "gitnexus", host: malformed })).status).toBe("failed");
+    const unborn: ToolHost = { async download() {}, async run(executable, args) {
+      if (executable === "git") return { exitCode: 128, stdout: "", stderr: "fatal: ambiguous argument 'HEAD'" };
+      throw new Error("GitNexus must not run for an unborn HEAD");
+    } };
+    const deferred = await ensureGitNexusIndex({ repositoryRoot: root, stateRoot, executable: "gitnexus", host: unborn });
+    expect(deferred.status).toBe("failed");
+    expect(deferred.diagnostic).toMatch(/at least one commit/);
   });
 
   it("uses task-owned Chrome profiles and blocks a locked profile", async () => {

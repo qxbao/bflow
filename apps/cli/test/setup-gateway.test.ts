@@ -18,7 +18,9 @@ afterEach(async () => {
   else await rm(root, { recursive: true, force: true });
 });
 
-function fixture(mode: SetupContext["mode"] = "apply") {
+function fixture(mode: SetupContext["mode"] = "apply", options: { initialize?: boolean } = {}) {
+  // Setup runs against an existing repository, so components are wrapped after the repository exists.
+  if (options.initialize !== false) initializeGitRepository();
   const platform = { ...detectPlatform(defaultHostEnvironment()),
     paths: { config: join(root, "config"), data: join(root, "data"), state: join(root, "state"), managedBin: join(root, "bin") } };
   const store = new SetupStateStore(platform.paths, { uid: platform.uid, now: () => new Date(), readOnly: mode === "check" || mode === "dry_run" });
@@ -46,8 +48,8 @@ function fixture(mode: SetupContext["mode"] = "apply") {
   return { platform, store, config, components, ctx, input };
 }
 
-async function installFixtureTools(tools: string[]) {
-  initializeGitRepository();
+async function installFixtureTools(tools: string[], options: { initialize?: boolean } = {}) {
+  if (options.initialize !== false) initializeGitRepository();
   await writeFile(join(root, "gitnexus"), `#!${process.execPath}
 if (process.argv[2] === '--version') { console.log('fixture 1.0.0'); process.exit(0); }
 if (process.argv[2] === 'status') { console.log(JSON.stringify({schemaVersion:1,repository:process.cwd(),status:require('node:fs').existsSync(${JSON.stringify(join(root, "stale-index"))})?'stale':'up-to-date'})); process.exit(0); }
@@ -78,7 +80,7 @@ it("plans gateway and managed MCP setup without installing tools or creating sta
     expect((await component.observe(ctx)).stateDigest).toBeNull();
     expect((await component.apply(ctx)).ownedPaths).toEqual([]);
   }
-  expect(await readdir(root)).toEqual([]);
+  expect((await readdir(root)).filter(entry => entry !== ".git")).toEqual([]);
 });
 
 it("configures after installation and verifies actual MCP negotiation and tools through the gateway", async () => {
@@ -330,4 +332,27 @@ it("composes the full setup service without overwriting generated gateway config
   expect(manifest.serviceIds).toContain("mcp-gateway");
   expect(manifest.lastPlan.planId).toBe(result.plan?.planId);
   expect((await setup.run({ mode: "apply", assumeYes: true })).outcome).toBe("healthy");
+});
+
+it("defers GitNexus in a repository without commits, keeps the other services configured, and activates it after the first commit", async () => {
+  const { input, ctx, platform } = fixture("apply", { initialize: false });
+  execFileSync("git", ["init", "--quiet", root]);
+  await installFixtureTools(["query", "context", "impact"], { initialize: false });
+  const configPath = join(platform.paths.config, "setup-gateway.json");
+  const unborn = wrapSetupComponents([], input);
+  expect(setupGatewayDiagnostics(input).join(" ")).toContain("GitNexus indexing deferred: the repository has no commits yet; rerun bflow setup after the first commit");
+  const deferred = unborn.find(component => component.componentId === "mcp-config")!;
+  expect((await deferred.apply(ctx)).diagnostics).toEqual([]);
+  expect((await deferred.observe(ctx)).valid).toBe(true);
+  const before = JSON.parse(await readFile(configPath, "utf8"));
+  expect(before.services).toEqual([]);
+  expect(before.approval.requirements).toEqual([]);
+  execFileSync("git", ["-C", root, "-c", "user.name=Gateway Test", "-c", "user.email=gateway@example.test", "commit", "--quiet", "--allow-empty", "-m", "First commit"]);
+  const committed = wrapSetupComponents([], input);
+  expect(setupGatewayDiagnostics(input).join(" ")).not.toContain("no commits yet");
+  const activated = committed.find(component => component.componentId === "mcp-config")!;
+  expect((await activated.apply(ctx)).diagnostics).toEqual([]);
+  const after = JSON.parse(await readFile(configPath, "utf8"));
+  expect(after.services.map((service: { tool: { toolId: string } }) => service.tool.toolId)).toEqual(["gitnexus"]);
+  expect(after.desiredDigest).not.toBe(before.desiredDigest);
 });

@@ -136,7 +136,13 @@ export async function createDefaultSetupConfiguration(options: {
         version: pin.version, source: pin.source, integrity: pin.integrity, destination: join(currentPlatform.paths.data, "tools", pin.toolId),
         scope: { kind: "machine", machineId: currentPlatform.machineId },
         idempotencyKey: `install:${currentPlatform.machineId}:${pin.toolId}:${pin.version}:${pin.integrity}` });
-      if (!receipt.ok) observation.diagnostics.push(receipt.error.message);
+      if (!receipt.ok) {
+        observation.diagnostics.push(receipt.error.message);
+        // A missing provider login is deferred to the owner; the message stays visible as the remediation.
+        const details = receipt.error.details;
+        if (typeof details === "object" && details !== null && !Array.isArray(details) && details.ownerAction === "subscription_login_required")
+          observation.ownerAction = receipt.error.message;
+      }
       else {
         observation.diagnostics.push(...receipt.value.diagnostics);
         if (receipt.value.status === "already_satisfied") {
