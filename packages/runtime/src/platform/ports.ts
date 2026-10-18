@@ -151,6 +151,8 @@ export interface GatewayRegistrationPort {
 // -------------------------------------------------------------- provider (T4)
 
 export interface ProviderAdapterContext {
+  /** Trusted machine process environment selectors, never sourced from repository role config. */
+  readonly launchEnvironment?: Readonly<Record<string, string>>;
   readonly rolePrompt?: string;
   readonly model?: string;
   readonly effort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";

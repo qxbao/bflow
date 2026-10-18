@@ -84,6 +84,8 @@ export interface PlatformReadinessServiceOptions {
   readonly gatewayControl?: GatewayControlPort | undefined;
   readonly gatewayEndpoint?: string | undefined;
   readonly signer: LaunchAttestationSigner;
+  /** Trusted Codex process-home selectors propagated to every launch, including dynamic Developers. */
+  readonly codexLaunchEnvironment?: Readonly<Record<string, string>>;
   readonly providerFactory?: ProviderAdapterFactory | undefined;
   readonly now?: (() => Date) | undefined;
   readonly rolePrompt?: ((role: AgentRole) => string | undefined) | undefined;
@@ -117,6 +119,7 @@ export function createPlatformReadinessService(options: PlatformReadinessService
     rolePrompt: options.rolePrompt,
     nativeSessionHookCommand: options.nativeSessionHookCommand,
     hostLaunch: options.hostLaunch,
+    codexLaunchEnvironment: options.codexLaunchEnvironment,
     now
   });
 }

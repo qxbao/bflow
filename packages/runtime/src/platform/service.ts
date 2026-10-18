@@ -47,6 +47,7 @@ export interface DefaultPlatformReadinessServiceDeps {
   /** Same journal the providers record intents in; receives `released` so restart recovery never sees a dropped launch as pending. */
   readonly journal?: LaunchJournalPort | undefined;
   readonly signer: LaunchAttestationSigner;
+  readonly codexLaunchEnvironment?: Readonly<Record<string, string>> | undefined;
   readonly rolePrompt?: ((role: AgentRole) => string | undefined) | undefined;
   readonly nativeSessionHookCommand?: ((role: AgentRole, taskId?: string) => string | undefined) | undefined;
   /** Trusted host MCP servers and hooks for a role launch (provider-neutral; adapters render them). */
@@ -490,6 +491,8 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       ...(rolePrompt !== undefined ? { rolePrompt } : {}),
       ...(requirement.model !== undefined ? { model: requirement.model } : {}),
       ...(requirement.effort !== undefined ? { effort: requirement.effort } : {}),
+      ...(requirement.provider === "codex" && this.deps.codexLaunchEnvironment !== undefined
+        ? { launchEnvironment: { ...this.deps.codexLaunchEnvironment } } : {}),
       mcpRegistrations: gateway.registrations,
       mcpObservations: gateway.observations,
       skillManifest: skills.value.manifest,
@@ -536,7 +539,7 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       gateway: attempt.gateway,
       launch: {
         argv: profile.value.argv,
-        env: { ...attempt.gateway.tokenEnvironment },
+        env: { ...(attempt.context.launchEnvironment ?? {}), ...attempt.gateway.tokenEnvironment },
         launchId: profile.value.launchId,
         launchFingerprint: profile.value.launchFingerprint
       }

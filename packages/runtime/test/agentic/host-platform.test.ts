@@ -7,7 +7,8 @@ import type { PlatformReadinessService, PreparedRoleLaunch, RolePlatformRequirem
 import { tokenEnvironmentName } from "../../src/platform/gateway-registrations.js";
 import type { PlatformRoleOption, AgenticHostPlatformOptions } from "../../src/platform/host-options.js";
 import {
-  HostPlatformSession, skillSupportedCommands, HostPlatformStatusSchema, launchMaterial, liveObservation, requirementFor
+  HostPlatformSession, skillSupportedCommands, HostPlatformStatusSchema, launchMaterial, liveObservation, requirementFor,
+  createHostProviderFactoryOptions, createHostProviderAdapterFactory
 } from "../../src/agentic/host-platform.js";
 
 const cleanup: (() => Promise<unknown>)[] = [];
@@ -24,6 +25,47 @@ const platform: AgenticHostPlatformOptions = {
   roles: [roleOption("conversation", "codex"), roleOption("coordinator", "codex"), roleOption("developer", "codex", false)],
   skillsStoreRoot: "/var/lib/bflow/skills-store", approvedBuiltinSkillDigests: []
 };
+
+describe("Codex hook trust propagation", () => {
+  it("uses the same trusted home and approval store for permanent and dynamic Developer Codex adapters", () => {
+    const permanent = { ...platform, codexHomeDirectory: "/machine/codex", codexHookApprovalPath: "/machine/state/codex-hook-approvals.json" };
+    const withDeveloperTemplate = { ...permanent, roles: [...permanent.roles, roleOption("developer", "codex", false)] };
+    const expected = { perProvider: { codex: {
+      codexHomeDirectory: "/machine/codex", codexHookApprovalPath: "/machine/state/codex-hook-approvals.json",
+      codexHookEnvironment: { HOME: "/machine/codex" }
+    } }, codexLaunchEnvironment: { CODEX_HOME: "/machine/codex", HOME: "/machine/codex" } };
+    expect(createHostProviderFactoryOptions(permanent, { HOME: "/machine/codex" })).toEqual(expected);
+    expect(createHostProviderFactoryOptions(withDeveloperTemplate, { HOME: "/machine/codex" })).toEqual(expected);
+  });
+
+  it("builds the provider factory with trusted Codex paths for permanent and dynamic role requests", () => {
+    const trustedPlatform = { ...platform, codexHomeDirectory: "/machine/codex",
+      codexHookApprovalPath: "/machine/state/codex-hook-approvals.json" };
+    const factory = createHostProviderAdapterFactory(trustedPlatform);
+    expect(factory).toBeTypeOf("function");
+    expect(factory("codex", {
+      mcpRegistrations: [], mcpObservations: [], skillManifest: {} as never,
+      renderedSkillsContent: "", trustedIssuerKeys: {}
+    })).toMatchObject({ descriptor: { provider: "codex" } });
+    expect(factory("codex", {
+      mcpRegistrations: [], mcpObservations: [], skillManifest: {} as never,
+      renderedSkillsContent: "", trustedIssuerKeys: {}
+    })).toMatchObject({ descriptor: { provider: "codex" } });
+  });
+
+  it("keeps isolated Codex HOME and CODEX_HOME aligned with the inspected hook profile", () => {
+    const isolated = { ...platform, codexHomeDirectory: "/isolated/providers/codex",
+      codexProcessHomeDirectory: "/isolated/providers/home", codexHookApprovalPath: "/isolated/state/codex-hook-approvals.json" };
+    expect(createHostProviderFactoryOptions(isolated)).toMatchObject({
+      codexLaunchEnvironment: {
+        CODEX_HOME: "/isolated/providers/codex",
+        HOME: "/isolated/providers/home"
+      },
+      perProvider: { codex: { codexHomeDirectory: "/isolated/providers/codex",
+        codexHookApprovalPath: "/isolated/state/codex-hook-approvals.json" } }
+    });
+  });
+});
 function prepared(role: AgentRole, provider: "claude" | "codex" | "agy", launchId: string): PreparedRoleLaunch {
   return {
     role, provider, required: true, environment: {} as PreparedRoleLaunch["environment"], profile: {} as PreparedRoleLaunch["profile"],

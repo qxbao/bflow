@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { AgenticHostPlatformOptionsSchema } from "@bflow/runtime";
 import { identifyRepository, readEnvironmentConfig, runCli, type EnvironmentCompositionInput } from "../src/index.js";
-import { buildHostPlatformOptions, formatPlatformNotReady, type HostPlatformContext } from "../src/platform-options.js";
+import { buildHostPlatformOptions, formatPlatformNotReady, resolveCodexTrustPaths, type HostPlatformContext } from "../src/platform-options.js";
 import { loadMachineSkillCatalog } from "../src/skill-catalog.js";
 import { GATEWAY_CONTROL_LOCATOR_FILE } from "../src/gateway-control.js";
 
@@ -14,6 +14,8 @@ let base: EnvironmentCompositionInput;
 let context: HostPlatformContext;
 beforeAll(async () => {
   context = { machineId: "m-test-machine", stateDirectory: "/state/bflow", dataDirectory: "/data/bflow",
+    codexHomeDirectory: "/home/test/.codex", codexProcessHomeDirectory: "/home/test",
+    codexHookApprovalPath: "/state/bflow/codex-hook-approvals.json",
     skills: await loadMachineSkillCatalog() };
 });
 beforeEach(async () => {
@@ -97,6 +99,34 @@ describe("buildHostPlatformOptions", () => {
     expect(present.gatewayLocatorPath).toBe(expected);
     const absentLocator = await buildHostPlatformOptions(base, { context, fileExists: absent });
     expect(absentLocator).not.toHaveProperty("gatewayLocatorPath");
+  });
+
+  it("carries the trusted Codex home and hook approval store path from machine context", async () => {
+    const trustedContext = Object.assign({}, context, {
+      codexHomeDirectory: "/isolated/providers/codex",
+      codexProcessHomeDirectory: "/isolated/providers/home",
+      codexHookApprovalPath: "/isolated/state/codex-hook-approvals.json"
+    });
+    const options = await buildHostPlatformOptions(base, { context: trustedContext, fileExists: absent });
+    expect(options).toMatchObject({
+      codexHomeDirectory: "/isolated/providers/codex",
+      codexHookApprovalPath: "/isolated/state/codex-hook-approvals.json"
+    });
+  });
+
+  it("keeps Codex hook state under BFLOW_HOME and otherwise follows CODEX_HOME", () => {
+    expect(resolveCodexTrustPaths({ environment: { BFLOW_HOME: "/isolated", CODEX_HOME: "/actual/.codex" },
+      homeDirectory: "/actual", processHomeDirectory: "/isolated/providers/home", machineStateDirectory: "/isolated/state" })).toEqual({
+      codexHomeDirectory: "/isolated/providers/codex",
+      codexProcessHomeDirectory: "/isolated/providers/home",
+      codexHookApprovalPath: "/isolated/state/codex-hook-approvals.json"
+    });
+    expect(resolveCodexTrustPaths({ environment: { CODEX_HOME: "/custom/codex" },
+      homeDirectory: "/actual", processHomeDirectory: "/actual", machineStateDirectory: "/state/bflow" })).toEqual({
+      codexHomeDirectory: "/custom/codex",
+      codexProcessHomeDirectory: "/actual",
+      codexHookApprovalPath: "/state/bflow/codex-hook-approvals.json"
+    });
   });
 
   it("adds a Developer template using the Coordinator's provider when none is configured", async () => {

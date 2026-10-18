@@ -41,6 +41,12 @@ export const AgenticHostPlatformOptionsSchema = z.object({
   roles: z.array(PlatformRoleOptionSchema).min(1),
   /** Root of the machine skill bundle store (`FileSkillStore`). */
   skillsStoreRoot: NonEmptyArgumentSchema,
+  /** Trusted user Codex home used to inspect inherited global hooks. */
+  codexHomeDirectory: NonEmptyArgumentSchema.optional(),
+  /** Trusted HOME for the Codex process; isolated setup derives this separately from CODEX_HOME. */
+  codexProcessHomeDirectory: NonEmptyArgumentSchema.optional(),
+  /** Private machine-owned store recording explicit approval of exact global Codex hook snapshots. */
+  codexHookApprovalPath: NonEmptyArgumentSchema.optional(),
   approvedBuiltinSkillDigests: z.array(Sha256DigestSchema),
   /**
    * Commands skills may reference, owned by the CLI command reference. Absent (older CLI) means none: skills that
