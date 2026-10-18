@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { ensureAgenticHost } from "../../dist/agentic/host-controller.js";
 import { callHost } from "../../src/agentic/host-protocol.js";
+import { LAUNCH_REACHABILITY_DIRECTORY, readLaunchReachability } from "../../src/agentic/tool-reachability.js";
 import { openSqliteRunStore } from "@bflow/persistence";
 import { workflow } from "../../../specification/test/fixtures.js";
 import { SessionManifestSchema } from "@bflow/contracts";
@@ -305,5 +306,85 @@ describe.skipIf(process.platform !== "linux")("P30 platform host", () => {
     const unprepared = await f.controller.activate(manifest());
     expect(unprepared.ok).toBe(false);
     if (!unprepared.ok) expect(unprepared.error.message).toContain("has no prepared launch in this host process");
+  });
+
+  // Codex does not fire SessionStart at startup: the MCP bootstrap receipt plus Herdr's observed native session prove startup.
+  const codexRoles = ["conversation", "coordinator"] as const;
+  const bootstrapReachability = [{ registrationId: "reg-bootstrap0001", envName: "BFLOW_MCP_TOKEN_REG_BOOTSTRAP0001", ok: true, discoveredTools: ["query"], code: null }];
+  const codexManifest = (root: string, sessionId: string) => {
+    const at = new Date().toISOString();
+    return SessionManifestSchema.parse({ schemaVersion: 2, sessionId, workspaceRoot: root, projectName: "platform", herdrWorkspaceId: "w1", herdrTabId: "t1",
+      status: "up", conversationSessionId: "chat-session", activeRunIds: [], attachTarget: { role: "conversation", paneId: "p1" },
+      panes: codexRoles.map((role, index) => ({ schemaVersion: 2, bindingId: `b${index}`, sessionId, role, agentId: `${role}-agent`, paneId: `p${index + 1}`,
+        workspaceId: "w1", tabId: "t1", provider: "codex", agentKind: "codex", cwd: root, readOnlyWorkspace: true, permanent: true,
+        session: { source: "herdr:codex", kind: "id", value: `native-${role}` }, isolationMode: "dedicated_pane", transportState: "idle", boundAt: at })),
+      createdAt: at, updatedAt: at });
+  };
+  const observeCodexPanes = async (root: string) => {
+    await mkdir(join(root, "agents"), { recursive: true });
+    for (const [index, role] of codexRoles.entries()) {
+      await writeFile(join(root, "agents", `p${index + 1}.json`), JSON.stringify({ name: `${role}-agent`, agent_status: "idle",
+        agent_session: { source: "herdr:codex", kind: "id", value: `native-${role}` } }));
+    }
+  };
+
+  it("accepts a Codex pane proven by the MCP bootstrap and Herdr's observed native session, with no SessionStart receipt", async () => {
+    const f = await fixture(root => platformFor(root));
+    await observeCodexPanes(f.root);
+    for (const [index, role] of codexRoles.entries()) {
+      const token = JSON.parse(await readFile(join(f.directory, role + ".json"), "utf8"));
+      await callHost(token.socketPath, token.token, "provider_bootstrap", { launchId: `launch-${role}`, paneId: `p${index + 1}`,
+        toolReachability: bootstrapReachability, source: "mcp_bootstrap" });
+    }
+    const result = await f.controller.activate(codexManifest(f.root, f.config.sessionId));
+    // Startup proof and native session are accepted; the refusal comes from the platform launch, which this fixture never prepares.
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.message).toContain("has no prepared launch in this host process");
+    expect(JSON.parse(await readFile(join(f.directory, "native-sessions.json"), "utf8"))).toMatchObject({
+      p1: { role: "conversation", sessionId: "native-conversation" }, p2: { role: "coordinator", sessionId: "native-coordinator" } });
+    expect((await f.controller.platformStatus()).startupProof).toEqual([
+      { role: "conversation", paneId: "p1", launchId: "launch-conversation", startupSource: "mcp_bootstrap", reachabilitySource: "mcp_bootstrap" },
+      { role: "coordinator", paneId: "p2", launchId: "launch-coordinator", startupSource: "mcp_bootstrap", reachabilitySource: "mcp_bootstrap" }]);
+  });
+
+  it("keeps a Codex pane pending when neither the SessionStart hook nor the MCP bootstrap has reported", async () => {
+    const f = await fixture(root => platformFor(root));
+    await observeCodexPanes(f.root);
+    const result = await f.controller.activate(codexManifest(f.root, f.config.sessionId));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.message).toContain("[bflow:native-startup-pending]");
+    expect((await f.controller.platformStatus()).startupProof).toEqual([
+      { role: "conversation", paneId: "p1", startupSource: "none", reachabilitySource: "none" },
+      { role: "coordinator", paneId: "p2", startupSource: "none", reachabilitySource: "none" }]);
+  });
+
+  it("refuses a bootstrap receipt whose native session Herdr does not report as the manifest's Herdr session", async () => {
+    const f = await fixture(root => platformFor(root));
+    await observeCodexPanes(f.root);
+    for (const [index, role] of codexRoles.entries()) {
+      const token = JSON.parse(await readFile(join(f.directory, role + ".json"), "utf8"));
+      await callHost(token.socketPath, token.token, "provider_bootstrap", { launchId: `launch-${role}`, paneId: `p${index + 1}`,
+        toolReachability: bootstrapReachability, source: "mcp_bootstrap" });
+    }
+    const agentFile = join(f.root, "agents", "p1.json");
+    const reported = JSON.parse(await readFile(agentFile, "utf8"));
+    await writeFile(agentFile, JSON.stringify({ ...reported, agent_session: { source: "herdr:claude", kind: "id", value: "native-conversation" } }));
+    const result = await f.controller.activate(codexManifest(f.root, f.config.sessionId));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.message).toContain("has no matching Bflow provider startup/native-session receipt");
+  });
+
+  it("keeps the first all-ok reachability proof of a launch and records a later token revocation", async () => {
+    const f = await fixture(root => platformFor(root));
+    const token = JSON.parse(await readFile(join(f.directory, "conversation.json"), "utf8"));
+    const send = (toolReachability: unknown) => callHost(token.socketPath, token.token, "provider_bootstrap",
+      { launchId: "launch-precedence", paneId: "p1", toolReachability, source: "mcp_bootstrap" });
+    const reachabilityDirectory = join(f.directory, LAUNCH_REACHABILITY_DIRECTORY);
+    await send(bootstrapReachability);
+    await send([{ ...bootstrapReachability[0], ok: false, discoveredTools: [], code: "token_env_missing" }]);
+    expect((await readLaunchReachability(reachabilityDirectory, "launch-precedence"))?.reported.toolReachability).toEqual(bootstrapReachability);
+    const revoked = [{ ...bootstrapReachability[0], ok: false, discoveredTools: [], code: "unauthorized" }];
+    await send(revoked);
+    expect((await readLaunchReachability(reachabilityDirectory, "launch-precedence"))?.reported.toolReachability).toEqual(revoked);
   });
 });
