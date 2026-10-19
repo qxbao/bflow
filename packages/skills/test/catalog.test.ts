@@ -36,6 +36,7 @@ const shared = [
   "use-gitnexus",
   "use-rtk",
   "use-mempalace",
+  "use-context7",
   "browser-inspection",
   "mcp-tool-discovery",
   "report-task-result",
@@ -49,7 +50,7 @@ describe("canonical role catalog", () => {
       source: "builtin",
       supportedCommands: BASELINE_COMMANDS,
     });
-    expect(loaded).toHaveLength(32);
+    expect(loaded).toHaveLength(33);
     expect(loaded.map((s) => s.definition.skillId)).toEqual(
       expect.arrayContaining(shared),
     );

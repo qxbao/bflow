@@ -152,7 +152,9 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
             statusCalls += 1;
             return {
               exitCode: 0,
-              stdout: statusCalls === 1
+              // Status is read three times: first observation, the re-check after the writer locks are held (another writer may have
+              // refreshed the index meanwhile), and the post-analysis verification. The index is only current for the last one.
+              stdout: statusCalls <= 2
                 ? JSON.stringify({ schemaVersion: 1, repository: canonicalRtkRepo, error: "not-indexed" })
                 : `Partial index found...\n${JSON.stringify({ schemaVersion: 1, repository: canonicalRtkRepo, status: "registered" })}`,
               stderr: ""
@@ -163,6 +165,7 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
       }
     });
     expect(harnessObservation.status).toBe("indexed");
+    expect(statusCalls).toBe(3);
   });
 
   it.skipIf(!livePlatformEnabled)("[LIVE TOOL] verifies GitNexus 1.6.12 repository indexing, status schema, and live stdio MCP tools", async () => {
@@ -330,7 +333,7 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
     }
   });
 
-  it("[HARNESS / REAL CATALOG] verifies Superpowers routes, 32 catalog skills across 10 roles x 3 providers, and fail-closed missing tool enforcement", async () => {
+  it("[HARNESS / REAL CATALOG] verifies Superpowers routes, 33 catalog skills across 10 roles x 3 providers, and fail-closed missing tool enforcement", async () => {
     expect(superpowersInstallRoute("claude").command).toContain("plugin install superpowers");
     expect(superpowersInstallRoute("codex").command).toContain("codex plugin add superpowers");
     expect(superpowersInstallRoute("agy").command).toContain("agy plugin install https://github.com/obra/superpowers");
@@ -340,7 +343,7 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
       source: "builtin",
       supportedCommands: SUPPORTED_CLI_COMMANDS
     });
-    expect(catalogSkills).toHaveLength(32);
+    expect(catalogSkills).toHaveLength(33);
 
     const bflowSkillIds = catalogSkills.map((s) => s.definition.skillId);
     const spValid = verifySuperpowersSkills(
@@ -368,7 +371,7 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
       });
     }
     const installedList = await skillManager.list();
-    expect(installedList).toHaveLength(32);
+    expect(installedList).toHaveLength(33);
 
     const bindingsRaw = JSON.parse(readFileSync(join(skillsCatalogRoot, "roles/bindings.json"), "utf8")) as unknown;
     const parsedBindings = RoleSkillBindingsSchema.parse(bindingsRaw);

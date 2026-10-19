@@ -81,6 +81,24 @@ export const EnvironmentConfigEnvironmentSchema = z
       .optional(),
     requiredMcpServices: z.array(z.string().trim().min(1)).optional(),
     requiredTools: z.array(z.string().trim().min(1)).optional(),
+    /** Context7 documentation lookups through the shared Gateway. Absent means off: nothing leaves the machine unless a repository opts in. */
+    context7: z
+      .object({
+        enabled: z.boolean().optional(),
+        /** True: `bflow up` fails and `doctor` fails when Context7 is not ready. False (default): a warning, and roles start without it. */
+        required: z.boolean().optional(),
+        cache: z
+          .object({
+            enabled: z.boolean().optional(),
+            ttlSeconds: z.number().int().min(60).max(604_800).optional(),
+            /** Cache answers obtained with an API key. Off by default: such answers can come from libraries only the key's owner may read. */
+            allowAuthenticated: z.boolean().optional()
+          })
+          .strict()
+          .optional()
+      })
+      .strict()
+      .optional(),
     skills: z
       .object({
         required: z.boolean().optional(),
@@ -126,7 +144,8 @@ export function defaultEnvironmentConfig(repository: RepositoryIdentity, name?: 
       roles: ["conversation", "coordinator", "planner", "architect", "specifier", "reviewer", "qa"].map((role) => ({ role: AgentRoleSchema.parse(role), cli: provider, required: true })),
       sdd: { minimumLevel: "lightweight", approvalRequired: true }, tdd: { policy: "conditional" },
       verification: { maxIterations: 3, onExhausted: "require_human" }, concurrency: { maxConcurrency: 2 },
-      startupTimeoutMs: 60_000, shutdownTimeoutMs: 30_000
+      startupTimeoutMs: 60_000, shutdownTimeoutMs: 30_000,
+      context7: { enabled: true, required: false }
     }
   };
 }

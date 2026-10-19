@@ -135,7 +135,7 @@ describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & O
   });
 
   describe("[ISOLATED HOST] Setup and real skills storage with a fixture Herdr binary — QA-P34-01 / QA-P34-02", () => {
-    it("verifies QA-P34-01 (automatic 0700 skills-store creation) and QA-P34-02 (1st apply installs all 32 skills) plus idempotency, --check, and --repair", async () => {
+    it("verifies QA-P34-01 (automatic 0700 skills-store creation) and QA-P34-02 (1st apply installs all 33 skills) plus idempotency, --check, and --repair", async () => {
       const root = makeTempDir("bflow-e11-setup-");
       const repoDir = join(root, "repo");
       const isolatedState = join(root, "isolated");
@@ -169,7 +169,7 @@ describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & O
       } };
       isolatedRoots.push(isolatedState);
 
-      // 1st run on clean isolated state: creates 0700 skills-store (QA-P34-01 fixed) and installs all 32 skills on 1st apply (QA-P34-02 fixed)
+      // 1st run on clean isolated state: creates 0700 skills-store (QA-P34-01 fixed) and installs all 33 skills on 1st apply (QA-P34-02 fixed)
       const firstRun = await runCli(["setup", "--yes", "--json"], ctx);
       expect(firstRun.ok, JSON.stringify(firstRun.data ?? firstRun)).toBe(true);
       expect(firstRun.exitCode, firstRun.stdout || firstRun.stderr).toBe(0);
@@ -188,9 +188,9 @@ describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & O
       expect(firstData.plan.steps.some(step => step.action === "install_tool")).toBe(false);
       expect(firstData.receipts.flatMap(receipt => receipt.ownedPaths).every(path => path.startsWith(`${root}/`))).toBe(true);
       expect(firstData.skills.catalogLoaded).toBe(true);
-      expect(firstData.skills.skillCount).toBe(32);
+      expect(firstData.skills.skillCount).toBe(33);
       expect(firstData.diagnostics.some((d) => d.includes("role-skills requires --repair"))).toBe(false);
-      expect(readdirSync(join(skillsStoreDir, "bundles")).length).toBe(32);
+      expect(readdirSync(join(skillsStoreDir, "bundles")).length).toBe(33);
 
       // 2nd run (idempotency): bflow setup --yes --json after skills are synchronized
       const secondRun = await runCli(["setup", "--yes", "--json"], ctx);
@@ -204,9 +204,9 @@ describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & O
       };
       expect(secondData.mode).toBe("apply");
       expect(secondData.skills.catalogLoaded).toBe(true);
-      expect(secondData.skills.skillCount).toBe(32);
+      expect(secondData.skills.skillCount).toBe(33);
       expect(secondData.diagnostics.some((d) => d.includes("role-skills requires --repair"))).toBe(false);
-      expect(readdirSync(join(skillsStoreDir, "bundles")).length).toBe(32);
+      expect(readdirSync(join(skillsStoreDir, "bundles")).length).toBe(33);
 
       // Check run: bflow setup --check --json
       const checkRun = await runCli(["setup", "--check", "--json"], ctx);
@@ -219,24 +219,24 @@ describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & O
       };
       expect(checkData.mode).toBe("check");
       expect(checkData.skills.catalogLoaded).toBe(true);
-      expect(checkData.skills.skillCount).toBe(32);
-      expect(readdirSync(join(skillsStoreDir, "bundles")).length).toBe(32);
+      expect(checkData.skills.skillCount).toBe(33);
+      expect(readdirSync(join(skillsStoreDir, "bundles")).length).toBe(33);
 
-      // Remove one skill bundle and verify setup --check is read-only (31 bundles) and setup --repair restores all 32 bundles
+      // Remove one skill bundle and verify setup --check is read-only (32 bundles) and setup --repair restores all 33 bundles
       const bundlesDir = join(skillsStoreDir, "bundles");
       const firstBundle = readdirSync(bundlesDir)[0]!;
       rmSync(join(bundlesDir, firstBundle), { recursive: true, force: true });
-      expect(readdirSync(bundlesDir).length).toBe(31);
+      expect(readdirSync(bundlesDir).length).toBe(32);
 
       const checkDrifted = await runCli(["setup", "--check", "--json"], ctx);
       expect(checkDrifted.ok).toBe(true);
       expect(checkDrifted.exitCode).toBe(1);
-      expect(readdirSync(bundlesDir).length).toBe(31);
+      expect(readdirSync(bundlesDir).length).toBe(32);
 
       const repairDrifted = await runCli(["setup", "--repair", "--yes", "--json"], ctx);
       expect(repairDrifted.ok).toBe(true);
       expect(repairDrifted.exitCode, repairDrifted.stdout || repairDrifted.stderr).toBe(0);
-      expect(readdirSync(bundlesDir).length).toBe(32);
+      expect(readdirSync(bundlesDir).length).toBe(33);
       // The first real apply downloads pinned tools and typically takes ~2 minutes on a normal host,
       // so the budget covers three setup runs plus repair on a cold machine.
     }, 600_000);

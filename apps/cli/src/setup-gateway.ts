@@ -8,6 +8,7 @@ import { z } from "zod";
 import { MCPClientRegistrationSchema, MCPServiceDefinitionSchema, MCPServiceObservationSchema, ScopedOperationSchema,
   type MCPServiceDefinition, type MCPServiceObservation } from "@bflow/contracts";
 import { GATEWAY_CONTROL_LOCATOR_FILE, startGatewayControl, type GatewayControl } from "./gateway-control.js";
+import { readStoredContext7Key, writeStoredContext7Key } from "./context7-secret.js";
 import { MachineConfigSchema, McpConfigComponent, ServicesComponent, SetupStateStore, EnvironmentManifestComponent,
   loadMachineConfig, MACHINE_CONFIG_FILE, digest, McpConfigFileSchema, SERVICE_MARKER, ToolInstallDescriptorSchema,
   type MachineConfig, type PlatformProfile, type SetupComponent, type SetupContext, type CommandRunner,
@@ -19,11 +20,23 @@ export interface SetupGatewayLaunchRequirement {
   args: string[];
   requirements: string[];
 }
+/** A hosted MCP service reached over HTTPS and shared through the Gateway. No local process, nothing to install. */
+export interface SetupGatewayRemoteRequirement {
+  toolId: "context7";
+  /** True when an API key is available, so the Gateway authenticates with a bearer credential. */
+  authenticated: boolean;
+  /** Digest that changes when the key changes, so a rotated key restarts the Gateway. Never the key. */
+  keyFingerprint: string | null;
+}
 export interface SetupGatewayInput {
   platform: PlatformProfile;
   store: SetupStateStore;
   config: MachineConfig;
   launchRequirements: readonly SetupGatewayLaunchRequirement[];
+  /** Hosted MCP services to configure in addition to the managed local ones. */
+  remoteServices?: readonly SetupGatewayRemoteRequirement[] | undefined;
+  /** A key to store for the Gateway; held only for the duration of apply and never written to the plan. */
+  context7ApiKey?: string | undefined;
   runner: CommandRunner;
   serviceManager: ServiceManager;
   repositoryRoot?: string;
@@ -56,6 +69,8 @@ const requiredOperations = {
   mempalace: ["mempalace_status", "mempalace_search"]
 };
 const ApprovalSchema = z.object({ policyVersion: z.literal(2), repositorySelected: z.boolean(), browserExecutable: z.string().nullable(),
+  remoteServices: z.array(z.object({ toolId: z.literal("context7"), authenticated: z.boolean(),
+    keyFingerprint: z.string().regex(/^[a-f0-9]{16}$/).nullable() }).strict()).default([]),
   requirements: z.array(z.object({ toolId: z.enum(["gitnexus", "chrome-devtools-mcp", "mempalace"]), executable: z.string(),
     args: z.array(z.string()), requirements: z.array(z.string()), version: z.string().min(1), pin: ToolInstallDescriptorSchema }).strict()) }).strict();
 const GatewayConfigSchema = z.object({
@@ -113,7 +128,10 @@ function configurationDigest(saved: z.infer<typeof GatewayConfigSchema>): string
     repositoryRoot: saved.operation.scope.kind === "machine" ? "" : saved.operation.scope.workspaceRoot,
     paths: saved.paths,
     repositorySelected: saved.approval.repositorySelected, browserExecutable: saved.approval.browserExecutable,
-    requirements: saved.approval.requirements, services: saved.services.filter(item => !saved.generatedIds.includes(item.serviceId)) });
+    requirements: saved.approval.requirements,
+    // Omitted when empty so a Gateway installed before remote services existed keeps the digest it was approved with.
+    ...(saved.approval.remoteServices.length > 0 ? { remoteServices: saved.approval.remoteServices } : {}),
+    services: saved.services.filter(item => !saved.generatedIds.includes(item.serviceId)) });
 }
 
 /** Reconstruct boundaries from the unit-bound approval, never from a spec's self-checksums alone. */
@@ -127,7 +145,7 @@ async function validateLaunches(saved: z.infer<typeof GatewayConfigSchema>) {
   if (digest(saved.operation) !== digest(expectedOperation) || saved.receiptPath !== join(saved.paths.state, "setup-gateway-ready.json"))
     throw new Error("Gateway session identity or readiness path differs from the approved boundary");
   const active = saved.approval.requirements.filter(item => item.toolId !== "gitnexus" || saved.approval!.repositorySelected);
-  if (new Set(saved.generatedIds).size !== active.length) throw new Error("Managed MCP service inventory does not match setup");
+  if (new Set(saved.generatedIds).size !== active.length + saved.approval.remoteServices.length) throw new Error("Managed MCP service inventory does not match setup");
   const tools = await leaf("tool-installer");
   for (const item of active) {
     const definition = saved.services.find(candidate => saved.generatedIds.includes(candidate.serviceId) && candidate.tool.toolId === item.toolId);
@@ -179,6 +197,12 @@ async function validateLaunches(saved: z.infer<typeof GatewayConfigSchema>) {
       authentication: { mode: "none" }, healthTimeoutMs: 15_000, idleTimeoutMs: 60_000, restartLimit: 2 });
     if (digest(definition) !== digest(expectedDefinition)) throw new Error(`Managed ${item.toolId} service policy changed`);
   }
+  for (const remote of saved.approval.remoteServices) {
+    const expected = tools.createContext7RemoteService({ authenticated: remote.authenticated,
+      operation: { ...saved.operation, scope: { kind: "machine", machineId: saved.operation.scope.machineId } } });
+    const definition = saved.services.find(candidate => saved.generatedIds.includes(candidate.serviceId) && candidate.tool.toolId === remote.toolId);
+    if (!definition || digest(definition) !== digest(expected)) throw new Error(`Remote ${remote.toolId} service differs from its approved definition`);
+  }
 }
 
 /** Replaces only the two existing components; planning never loads or launches a managed tool. */
@@ -205,11 +229,14 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
   const priorOwnedIds = new Set((priorConfiguration?.generatedIds ?? []).filter(id =>
     config.mcpServices.some(current => current.serviceId === id && priorConfiguration!.services.some(previous => previous.serviceId === id && digest(previous) === digest(current)))));
   const operatorServices = config.mcpServices.filter(item => !priorOwnedIds.has(item.serviceId));
+  const remoteServices = (input.remoteServices ?? []).map(item => ({ toolId: item.toolId, authenticated: item.authenticated,
+    keyFingerprint: item.authenticated ? item.keyFingerprint : null }));
   const approval = ApprovalSchema.parse({ policyVersion: 2, repositorySelected: Boolean(input.repositoryRoot),
-    browserExecutable: approvedBrowser(platform), requirements: activeRequirements });
+    browserExecutable: approvedBrowser(platform), requirements: activeRequirements, remoteServices });
   const desiredDigest = digest({ setupPolicyVersion: 2, machineId: platform.machineId, repositoryRoot,
     paths: platform.paths,
-    repositorySelected: approval.repositorySelected, browserExecutable: approval.browserExecutable, requirements: approval.requirements, services: operatorServices });
+    repositorySelected: approval.repositorySelected, browserExecutable: approval.browserExecutable, requirements: approval.requirements,
+    ...(approval.remoteServices.length > 0 ? { remoteServices: approval.remoteServices } : {}), services: operatorServices });
   // OS service managers (systemd --user, launchd) do not inherit the shell PATH. Backends launched through
   // `#!/usr/bin/env node` shims (chrome-devtools-mcp, GitNexus) then never start, so the unit carries the directory
   // of the exact Node running setup, the managed bin and the system defaults.
@@ -229,6 +256,7 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
     item.toolId === "gitnexus" ? `gitnexus-${sha(repositoryRoot).slice(0, 24)}` :
       item.toolId === "mempalace" ? `mempalace-${sha(platform.machineId).slice(0, 24)}` :
       `chrome-${sha(join(platform.paths.data, "browser-profiles", "chrome", repositoryId, "setup-browser-probe")).slice(0, 24)}`)];
+  for (const remote of remoteServices) plannedMcpIds.push(`${remote.toolId}`);
   for (const component of components) if (component instanceof EnvironmentManifestComponent)
     component.bindServiceInventory(plannedMcpIds, desiredServices.map(item => item.serviceId));
   const servicesBase = new ServicesComponent({ platform, store, manager: input.serviceManager, services: desiredServices });
@@ -314,6 +342,15 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
             }
           }
           definition = MCPServiceDefinitionSchema.parse({ ...definition, tool: { ...definition.tool, required: true, operations: requiredOperations[item.toolId] } });
+          if (config.mcpServices.some(existing => existing.serviceId === definition.serviceId && digest(existing) !== digest(definition) &&
+            (!prior?.generatedIds.includes(existing.serviceId) || !prior.services.some(old => old.serviceId === existing.serviceId && digest(old) === digest(existing)))))
+            throw new Error(`MCP service ${definition.serviceId} already has an operator definition; preserve it and reconcile explicitly`);
+          generated.push(definition);
+        }
+        for (const remote of remoteServices) {
+          if (remote.authenticated && input.context7ApiKey !== undefined) await writeStoredContext7Key(platform.paths, input.context7ApiKey);
+          const definition = tools.createContext7RemoteService({ authenticated: remote.authenticated,
+            operation: { ...operation, scope: { kind: "machine", machineId: platform.machineId } } });
           if (config.mcpServices.some(existing => existing.serviceId === definition.serviceId && digest(existing) !== digest(definition) &&
             (!prior?.generatedIds.includes(existing.serviceId) || !prior.services.some(old => old.serviceId === existing.serviceId && digest(old) === digest(existing)))))
             throw new Error(`MCP service ${definition.serviceId} already has an operator definition; preserve it and reconcile explicitly`);
@@ -409,7 +446,16 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
   if (expectedDesiredDigest && configured.desiredDigest !== expectedDesiredDigest) throw new Error("Gateway service configuration differs from its installed setup plan");
   await validateLaunches(configured);
   const module = await leaf("mcp-gateway");
-  const gateway = new module.BflowSharedMCPGateway();
+  const tools = await leaf("tool-installer");
+  const gateway = new module.BflowSharedMCPGateway({ policyOverrides: (service: MCPServiceDefinition) => tools.trustedGatewayPolicy(service) });
+  // The Context7 key reaches the Gateway only through its in-memory secret store, from a private file or the environment.
+  if (configured.approval?.remoteServices.some(item => item.authenticated)) {
+    const stored = await readStoredContext7Key(configured.paths);
+    const environmentKey = process.env.CONTEXT7_API_KEY?.trim();
+    const key = stored.status === "ok" ? stored.key : environmentKey;
+    if (key) gateway.secretStore.setSecret(tools.CONTEXT7_API_KEY_SECRET_REF, key);
+    else process.stderr.write(`Context7 is configured with an API key but none is available (${stored.status === "ok" ? "key missing" : stored.status}); it will report an authentication problem.\n`);
+  }
   const server = new module.StreamableHttpGatewayServer({ gateway, host: "127.0.0.1", port: 0 });
   const store = new SetupStateStore(configured.paths, { uid: process.getuid?.() ?? null, now: () => new Date() });
   const observations: MCPServiceObservation[] = [];
@@ -432,7 +478,6 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
 
   };
   try {
-    const tools = await leaf("tool-installer");
     for (const service of configured.services) {
       try {
         if (service.tool.toolId === "chrome-devtools-mcp") await tools.verifyChromeStartup(service);
@@ -516,7 +561,7 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
       void publish().catch(async error => {
         if (stopped) return;
         await rm(configured.receiptPath, { force: true });
-        process.stderr.write(`Gateway protocol health failed: ${module.scrubSecrets(why(error))}\n`);
+        process.stderr.write(`Gateway protocol health failed: ${module.scrubSecrets(why(error), gateway.secretStore.getAllSecrets())}\n`);
       }).finally(() => { publishing = false; });
     }, 10_000);
     timer.unref();

@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type {
   MCPServiceDefinition,
   MCPServiceObservation,
@@ -16,15 +15,11 @@ import type {
   ExtendedMCPServiceManager,
   MCPUpstreamDriverFactory,
   MCPUpstreamDriverInstance,
-  MCPUpstreamInitializeResult,
-  MCPUpstreamReconcileResult,
-  MCPUpstreamToolCallInput,
-  MCPUpstreamToolCallOutput,
   MCPUpstreamToolDefinition,
-  MCPUpstreamToolList,
+  MCPBackendSharingPolicy,
   RegisteredMCPServiceEntry
 } from "./types.js";
-import { DEFAULT_MCP_PROTOCOL_VERSION, err, ok } from "./types.js";
+import { err, ok } from "./types.js";
 import {
   checkSchemaVersion,
   computePartitionKey,
@@ -34,237 +29,13 @@ import {
 import { GatewayMetricsCollector } from "./metrics.js";
 import { MCPServiceRegistry } from "./registry.js";
 import { SubprocessStdioDriverFactory } from "./stdio-bridge.js";
-import { normalizeUpstreamToolList } from "./tool-definitions.js";
-
-/**
- * Driver instance connecting to an external HTTP MCP worker or native remote server.
- */
-export class HttpUpstreamDriverInstance implements MCPUpstreamDriverInstance {
-  readonly instanceId: string;
-  readonly pid?: number;
-  readonly startGeneration: number;
-  readonly ownership: "bflow" | "external";
-  private stopped = false;
-  private readonly crashListeners = new Set<(reason: string) => void>();
-
-  constructor(
-    readonly entry: RegisteredMCPServiceEntry,
-    readonly partitionKey: string,
-    startGeneration: number,
-    private readonly secretStore: GatewaySecretStore
-  ) {
-    this.startGeneration = startGeneration;
-    this.ownership = entry.definition.connection.ownership;
-    this.instanceId = `${entry.definition.serviceId}-http-${startGeneration}-${randomUUID().slice(0, 8)}`;
-  }
-
-  isAlive(): boolean {
-    return !this.stopped;
-  }
-
-  async stop(reason?: string): Promise<void> {
-    this.stopped = true;
-    if (reason && reason.includes("crash")) {
-      for (const listener of this.crashListeners) {
-        try {
-          listener(reason);
-        } catch {
-          // ignore listener errors
-        }
-      }
-    }
-  }
-
-  onCrash(listener: (reason: string) => void): () => void {
-    this.crashListeners.add(listener);
-    return () => {
-      this.crashListeners.delete(listener);
-    };
-  }
-
-  async getMemoryRssBytes(): Promise<number> {
-    return 0;
-  }
-
-  private resolveAuthHeaders(): Record<string, string> {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      Accept: "application/json"
-    };
-    const auth = this.entry.definition.authentication;
-    if (auth.mode === "bearer" || auth.mode === "oauth") {
-      const token = this.secretStore.getSecret(auth.credential);
-      if (token) {
-        headers["Authorization"] = `Bearer ${token}`;
-      }
-    }
-    return headers;
-  }
-
-  private getEndpointUrl(): string {
-    const conn = this.entry.definition.connection;
-    if (conn.kind === "existing_shared_worker" || conn.kind === "native_remote_mcp") {
-      return conn.endpoint;
-    }
-    throw new Error(`Invalid connection kind for HTTP driver: ${conn.kind}`);
-  }
-
-  private async postJsonRpc(body: unknown, timeoutMs: number, signal?: AbortSignal): Promise<any> {
-    const url = this.getEndpointUrl();
-    const headers = this.resolveAuthHeaders();
-    const abortCtrl = new AbortController();
-    const timer = setTimeout(() => abortCtrl.abort(new Error("Timeout")), timeoutMs);
-    if (signal) {
-      signal.addEventListener("abort", () => abortCtrl.abort(signal.reason), { once: true });
-    }
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal: abortCtrl.signal,
-        redirect: "error"
-      });
-      if (!res.ok) {
-        throw new Error(`HTTP error ${res.status} ${res.statusText}`);
-      }
-      return await res.json();
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  async initialize(options?: OperationOptions): Promise<OperationResult<MCPUpstreamInitializeResult>> {
-    const timeoutMs = options?.timeoutMs ?? this.entry.definition.healthTimeoutMs;
-    try {
-      const initPayload = {
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: DEFAULT_MCP_PROTOCOL_VERSION,
-          capabilities: {},
-          clientInfo: { name: "bflow-gateway", version: "0.1.0" }
-        }
-      };
-      const initRes = await this.postJsonRpc(initPayload, timeoutMs, options?.signal);
-      if (initRes.error) {
-        return err({
-          code: "transport_unavailable",
-          retryable: true,
-          message: initRes.error.message ?? "Upstream initialize error"
-        });
-      }
-      const protocolVersion = initRes.result?.protocolVersion ?? DEFAULT_MCP_PROTOCOL_VERSION;
-      const serverInfo = initRes.result?.serverInfo;
-
-      const listRes = await this.listToolDefinitions("init", { timeoutMs, ...(options?.signal ? { signal: options.signal } : {}) });
-      if (!listRes.ok) {
-        return err(listRes.error);
-      }
-
-      return ok({
-        protocolVersion,
-        discoveredTools: listRes.value.definitions.map(definition => definition.name),
-        toolDefinitions: listRes.value.definitions,
-        defaultedInputSchemaTools: listRes.value.defaultedInputSchemaTools,
-        serverInfo
-      });
-    } catch (e) {
-      return err({
-        code: "transport_unavailable",
-        retryable: true,
-        message: e instanceof Error ? e.message : String(e)
-      });
-    }
-  }
-
-  async listTools(sessionId: string, options?: OperationOptions): Promise<OperationResult<readonly string[]>> {
-    const listRes = await this.listToolDefinitions(sessionId, options);
-    if (!listRes.ok) {
-      return err(listRes.error);
-    }
-    return ok(listRes.value.definitions.map(definition => definition.name));
-  }
-
-  async listToolDefinitions(
-    _sessionId: string,
-    options?: OperationOptions
-  ): Promise<OperationResult<MCPUpstreamToolList>> {
-    const timeoutMs = options?.timeoutMs ?? this.entry.definition.healthTimeoutMs;
-    try {
-      const payload = {
-        jsonrpc: "2.0",
-        id: randomUUID(),
-        method: "tools/list",
-        params: {}
-      };
-      const res = await this.postJsonRpc(payload, timeoutMs, options?.signal);
-      if (res?.error) {
-        return err({
-          code: "validation",
-          retryable: false,
-          message: `Upstream tools/list failed: ${String(res.error.message ?? "error")}`
-        });
-      }
-      return normalizeUpstreamToolList(res?.result);
-    } catch (e) {
-      return err({
-        code: "transport_unavailable",
-        retryable: true,
-        message: e instanceof Error ? e.message : String(e)
-      });
-    }
-  }
-
-  async callTool(input: MCPUpstreamToolCallInput): Promise<OperationResult<MCPUpstreamToolCallOutput>> {
-    const timeoutMs = input.timeoutMs ?? this.entry.policy.callTimeoutMs ?? 60_000;
-    try {
-      const payload = {
-        jsonrpc: "2.0",
-        id: input.requestId,
-        method: "tools/call",
-        params: {
-          name: input.tool,
-          arguments: input.arguments
-        }
-      };
-      const res = await this.postJsonRpc(payload, timeoutMs, input.signal);
-      if (res.error) {
-        return ok({
-          isError: true,
-          content: res.error.message ?? res.error
-        });
-      }
-      return ok({
-        isError: Boolean(res.result?.isError),
-        content: res.result?.content ?? res.result ?? null
-      });
-    } catch (e) {
-      return err({
-        code: "transport_unavailable",
-        retryable: true,
-        message: e instanceof Error ? e.message : String(e)
-      });
-    }
-  }
-
-  async cancelRequest(_requestId: string, _reason?: string): Promise<void> {
-    // Best-effort HTTP notification
-  }
-
-  async reconcileRequest(_callId: string, _requestId: string): Promise<MCPUpstreamReconcileResult> {
-    return {
-      status: "unknown"
-    };
-  }
-}
+import { HttpUpstreamDriverInstance } from "./http-upstream.js";
 
 class DefaultUpstreamDriverFactory implements MCPUpstreamDriverFactory {
   private readonly stdioFactory: SubprocessStdioDriverFactory;
 
   constructor(
-    _metrics: GatewayMetricsCollector,
+    private readonly metrics: GatewayMetricsCollector,
     private readonly secretStore: GatewaySecretStore
   ) {
     this.stdioFactory = new SubprocessStdioDriverFactory({
@@ -288,7 +59,8 @@ class DefaultUpstreamDriverFactory implements MCPUpstreamDriverFactory {
         entry,
         partitionKey,
         startGeneration,
-        this.secretStore
+        this.secretStore,
+        { metrics: this.metrics }
       );
       return ok(instance);
     }
@@ -319,6 +91,12 @@ export interface ManagedPartitionState {
 }
 
 export interface DefaultMCPServiceManagerOptions {
+  /**
+   * Trusted sharing-policy overrides decided by the host (never by a service or a client), for example the tools a
+   * known service provides read-only. Without a declaration the Gateway treats every tool as potentially mutating,
+   * so a failed call is reported as `unknown` instead of its cause and is never replayed.
+   */
+  readonly policyOverrides?: ((service: MCPServiceDefinition) => Partial<MCPBackendSharingPolicy> | undefined) | undefined;
   readonly registry?: MCPServiceRegistry | undefined;
   readonly metrics?: GatewayMetricsCollector | undefined;
   readonly secretStore?: GatewaySecretStore | undefined;
@@ -337,8 +115,10 @@ export class DefaultMCPServiceManager implements ExtendedMCPServiceManager {
   private readonly partitions = new Map<string, ManagedPartitionState>();
   private readonly crashListeners = new Set<(partitionKey: string, reason: string) => void>();
   private hasUncertainCalls?: ((partitionKey: string) => boolean) | undefined;
+  private readonly policyOverrides: DefaultMCPServiceManagerOptions["policyOverrides"];
 
   constructor(options?: DefaultMCPServiceManagerOptions) {
+    this.policyOverrides = options?.policyOverrides;
     this.registry = options?.registry ?? new MCPServiceRegistry();
     this.metrics = options?.metrics ?? new GatewayMetricsCollector();
     this.secretStore = options?.secretStore ?? new GatewaySecretStore();
@@ -483,7 +263,7 @@ export class DefaultMCPServiceManager implements ExtendedMCPServiceManager {
 
     let entry = this.registry.getService(service.serviceId);
     if (!entry) {
-      const regRes = this.registry.registerService(service);
+      const regRes = this.registry.registerService(service, this.policyOverrides?.(service));
       if (!regRes.ok) return regRes;
       entry = regRes.value;
     }

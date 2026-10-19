@@ -176,3 +176,65 @@ describe("formatPlatformNotReady", () => {
     expect(text).not.toContain("qa [codex]");
   });
 });
+
+describe("Context7 role grants", () => {
+  const roleMap = (options: Awaited<ReturnType<typeof buildHostPlatformOptions>>) => Object.fromEntries(options.roles.map(role => [role.role, role]));
+  const enabled = (extra: Record<string, unknown> = {}) => configure(environment => { environment.context7 = { enabled: true, ...extra }; });
+
+  it("is on in a repository created by init, as an optional service", () => {
+    expect(base.config.environment.context7).toEqual({ enabled: true, required: false });
+  });
+
+  it("grants the service and its two tools only to the roles whose approved skill allows documentation lookup", async () => {
+    const options = await buildHostPlatformOptions(enabled(), { context, fileExists: absent, context7Ready: true });
+    const roles = roleMap(options);
+    for (const role of ["specifier", "architect", "planner", "developer", "reviewer", "qa"]) {
+      expect(roles[role]?.mcpServiceIds, role).toEqual(["context7"]);
+      expect(roles[role]?.toolIds, role).toEqual(["resolve-library-id", "query-docs"]);
+    }
+    for (const role of ["conversation", "coordinator"]) {
+      expect(roles[role]?.mcpServiceIds, role).toEqual([]);
+      expect(roles[role]?.toolIds, role).toEqual([]);
+    }
+    expect(AgenticHostPlatformOptionsSchema.parse(options)).toEqual(options);
+  });
+
+  it("adds to the repository's own MCP services and tools without duplicating them", async () => {
+    const input = configure(environment => {
+      environment.context7 = { enabled: true };
+      environment.requiredMcpServices = ["gitnexus", "context7"];
+      environment.requiredTools = ["query", "query-docs"];
+    });
+    const developer = roleMap(await buildHostPlatformOptions(input, { context, fileExists: absent, context7Ready: true }))["developer"]!;
+    expect(developer.mcpServiceIds).toEqual(["gitnexus", "context7"]);
+    expect(developer.toolIds).toEqual(["query", "query-docs", "resolve-library-id"]);
+  });
+
+  it("starts roles without it, and warns once, when it is optional and the Gateway does not report it ready", async () => {
+    const warnings: string[] = [];
+    const options = await buildHostPlatformOptions(enabled({ required: false }), { context, fileExists: absent, context7Ready: false, warn: message => warnings.push(message) });
+    expect(options.roles.every(role => role.mcpServiceIds.length === 0 && role.toolIds.length === 0)).toBe(true);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/degraded/);
+    const unknown = await buildHostPlatformOptions(enabled(), { context, fileExists: absent, warn: message => warnings.push(message) });
+    expect(roleMap(unknown)["developer"]?.mcpServiceIds).toEqual([]);
+    expect(warnings).toHaveLength(2);
+  });
+
+  it("still requests it for every allowed role when required, so a missing service blocks startup instead of degrading", async () => {
+    const warnings: string[] = [];
+    const options = await buildHostPlatformOptions(enabled({ required: true }), { context, fileExists: absent, context7Ready: false, warn: message => warnings.push(message) });
+    expect(roleMap(options)["developer"]?.mcpServiceIds).toEqual(["context7"]);
+    expect(warnings).toEqual([]);
+  });
+
+  it("changes nothing for a repository that has not enabled it", async () => {
+    for (const edit of [(environment: EnvironmentCompositionInput["config"]["environment"]) => { delete environment.context7; },
+      (environment: EnvironmentCompositionInput["config"]["environment"]) => { environment.context7 = { enabled: false, required: true }; }]) {
+      const warnings: string[] = [];
+      const options = await buildHostPlatformOptions(configure(edit), { context, fileExists: absent, context7Ready: true, warn: message => warnings.push(message) });
+      expect(options.roles.every(role => role.mcpServiceIds.length === 0)).toBe(true);
+      expect(warnings).toEqual([]);
+    }
+  });
+});

@@ -138,6 +138,38 @@ timeouts are host-enforced. Cancellation attempts do not prove that upstream mut
 stopped. Reconcile or quarantine affected resources before reassignment. Do not restart
 a browser mid-call and tell the next client its old action definitely failed.
 
+## Remote upstream example: hosted Context7
+
+A `native_remote_mcp` service has no Bflow-owned process: every agent shares one upstream, and the Gateway is the only
+HTTP client of it. Implemented in `packages/mcp-gateway/src/http-upstream.ts`; configured by `bflow setup`
+(`createContext7RemoteService`) for `https://mcp.context7.com/mcp`.
+
+- **Protocol.** `Accept` lists `application/json` and `text/event-stream` (the hosted server answers HTTP 406 otherwise and
+  replies in SSE even for a single message). The negotiated `MCP-Protocol-Version` is echoed, `notifications/initialized`
+  is sent, and an `Mcp-Session-Id` issued by the server is kept and replayed. A server that issues none (Context7 does
+  not) is stateless. A dropped session (HTTP 404) is re-established once and the request replayed, because the server
+  rejected it before processing. Concurrent callers share one handshake.
+- **Sharing.** One upstream session serves all agents; this is valid only because the service is stateless and its tools
+  read documentation. Per-agent authorization stays in the Gateway: a registration needs the service id *and* the tool
+  names, and the Conversation role is never registered. A stateful upstream with per-client state would need per-client
+  sessions and must not reuse this policy.
+- **Retry.** Exponential backoff with jitter (base 250 ms, cap 4 s, 3 attempts), honouring `Retry-After` up to 10 s;
+  longer waits are reported as `rate_limited` with `retryAfterMs` instead of being slept through. Only the handshake,
+  discovery and tools the **host's** policy lists read-only are replayed. A server's own `readOnlyHint` is advice from the
+  party being called and is never trusted for this. Everything else runs once; an ambiguous failure is reported as
+  `unknown`, never replayed. The host declares Context7's two tools read-only by exact endpoint (`trustedGatewayPolicy`).
+  Without that declaration the Gateway treats every tool as a possible write and discards the failure cause.
+- **Errors** are structured in `ContractError.details` (`kind`: `auth_missing`, `auth_rejected`, `rate_limited`, `network`,
+  `timeout`, `protocol`, `upstream_http`, `session_lost`, `cancelled`; plus `status`, `retryAfterMs`, `attempts`). A tool-level
+  failure (`isError`, HTTP 200) is returned as tool output; the documentation layer classifies it from the text
+  (`library_not_found`, `version_not_found`, `auth_invalid`, `invalid_arguments`).
+- **Metrics** (`perService[id].upstreamHttp`): `request`, `retry`, `rate_limited`, `auth_failure`, `network_error`, `timeout`,
+  `protocol_error`, `upstream_error`, `session_started`, `session_reinitialized`. No payload or credential is recorded.
+- **Credentials.** `authentication.mode: "bearer"` names a `secret://` reference the Gateway resolves from memory. A configured
+  credential that is unavailable fails the request before it is sent (`auth_missing`); it is never silently dropped.
+- **Health.** `ready` means the Gateway completed initialize and `tools/list`. `bflow docs status` / `doctor` additionally
+  make a real `resolve-library-id` and `query-docs` call under a real registration, because an invalid key still yields HTTP 200.
+
 ## Exclusive resource example: Chrome
 
 Use a stable resourceKey identifying the actual Chrome instance/profile, not a random

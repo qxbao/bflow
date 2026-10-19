@@ -63,6 +63,11 @@ Detailed specifications can be found in [PROTOCOL.md](PROTOCOL.md).
 
 ## Sharing & Isolation Policy Matrix
 
+Remote upstreams (`native_remote_mcp`, `existing_shared_worker`) use `HttpUpstreamDriverInstance` (`src/http-upstream.ts`):
+Streamable HTTP with JSON or SSE responses, optional `Mcp-Session-Id`, one handshake shared by all callers, bounded retry with
+backoff for tools the host declares read-only (`DefaultMCPServiceManagerOptions.policyOverrides`), structured errors and
+`upstreamHttp` metrics. See `docs/shared-mcp-architecture.md` for the rules.
+
 | Policy Dimension | `stdio_mcp` | `existing_shared_worker` | `native_remote_mcp` | Exclusive / Browser |
 |---|---|---|---|---|
 | `transportCapabilities` | `stdio: true` | `streamableHttp: true, sse: true` | `streamableHttp: true, sse: true` | Inherits connection |

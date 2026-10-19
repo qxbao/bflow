@@ -1,0 +1,45 @@
+Available Libraries:
+
+- Title: React
+- Context7-compatible library ID: /reactjs/react.dev
+- Description: React.dev is the official documentation website for React, a JavaScript library for building user interfaces, providing guides, API references, and tutorials.
+- Code Snippets: 4342
+- Source Reputation: High
+- Benchmark Score: 86.51
+- Versions: __branch__v18
+----------
+- Title: React
+- Context7-compatible library ID: /react/react
+- Description: React is a JavaScript library for building user interfaces.
+- Code Snippets: 5457
+- Source Reputation: High
+- Benchmark Score: 66.88
+- Versions: v19.2.7, v18.2.0, v19.2.8
+----------
+- Title: React
+- Context7-compatible library ID: /websites/react_dev_reference
+- Description: React is a JavaScript library for building user interfaces with reusable components, hooks, and APIs for managing state and side effects.
+- Code Snippets: 2673
+- Source Reputation: High
+- Benchmark Score: 85.91
+----------
+- Title: React
+- Context7-compatible library ID: /websites/es_react_dev_reference
+- Description: React is a JavaScript library for building user interfaces with reusable components, hooks, and APIs for creating interactive web applications.
+- Code Snippets: 1286
+- Source Reputation: High
+- Benchmark Score: 82.93
+----------
+- Title: React
+- Context7-compatible library ID: /websites/react_dev
+- Description: React is a JavaScript library for building user interfaces. It allows developers to create interactive web and native applications using reusable components, enabling efficient and scalable UI development.
+- Code Snippets: 5159
+- Source Reputation: High
+- Benchmark Score: 85.4
+----------
+- Title: React
+- Context7-compatible library ID: /websites/react_dev_reference_react
+- Description: React is a JavaScript library for building user interfaces using reusable components with reactive data binding and server-side rendering capabilities.
+- Code Snippets: 1039
+- Source Reputation: High
+- Benchmark Score: 87.8

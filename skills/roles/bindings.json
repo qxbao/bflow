@@ -19,19 +19,22 @@
       "using-bflow",
       "inspect-repository",
       "requirements-analysis",
-      "specification-driven-development"
+      "specification-driven-development",
+      "use-context7"
     ],
     "architect": [
       "using-bflow",
       "architecture-analysis",
       "use-gitnexus",
-      "design-review"
+      "design-review",
+      "use-context7"
     ],
     "planner": [
       "using-bflow",
       "task-decomposition",
       "dependency-planning",
-      "conditional-tdd"
+      "conditional-tdd",
+      "use-context7"
     ],
     "developer": [
       "using-bflow",
@@ -41,14 +44,16 @@
       "use-rtk",
       "use-gitnexus",
       "use-git-worktree",
-      "run-verification"
+      "run-verification",
+      "use-context7"
     ],
     "reviewer": [
       "using-bflow",
       "review-code",
       "security-review",
       "use-gitnexus",
-      "run-verification"
+      "run-verification",
+      "use-context7"
     ],
     "tester": [
       "using-bflow",
@@ -62,7 +67,8 @@
       "test-planning",
       "run-verification",
       "browser-inspection",
-      "analyze-failure"
+      "analyze-failure",
+      "use-context7"
     ],
     "security": [
       "using-bflow",

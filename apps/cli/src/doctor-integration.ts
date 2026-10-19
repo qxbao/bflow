@@ -1024,6 +1024,35 @@ export async function runDoctorDiagnostics(
     remediation: ""
   });
 
+  // context7: the shared documentation service. Required: failures fail the doctor. Optional: failures are warnings (degraded).
+  if (config?.environment?.context7?.enabled === true || dependencies?.context7Health !== undefined) {
+    const required = config?.environment?.context7?.required === true;
+    try {
+      const { collectContext7Health } = await import("./docs-command.js");
+      const health = await (dependencies?.context7Health?.() ?? collectContext7Health({ repository, config: config ?? undefined, env: options.env ?? process.env, probe: true, timeoutMs: 8000 }));
+      for (const check of health.checks) {
+        mcpChecks.push({
+          checkId: `context7-${check.id}`,
+          group: "mcp",
+          component: "context7",
+          status: check.status === "pass" ? "pass" : check.status === "skipped" ? "skipped" : check.status === "warn" ? "warning" : required ? "fail" : "warning",
+          detected_version: null,
+          reason: check.message,
+          remediation: check.remediation ?? "",
+          ...(check.status === "fail" && (check.id === "gateway" || check.id === "service") ? { repair_command: "bflow setup --apply" } : {})
+        });
+      }
+      if (health.state === "degraded") {
+        mcpChecks.push({ checkId: "context7-degraded", group: "mcp", component: "context7", status: "warning", detected_version: null,
+          reason: "Context7 is optional and not healthy: roles run without documentation lookup (degraded mode).",
+          remediation: "Fix the failing Context7 checks above, or set environment.context7.required to refuse to start without it." });
+      }
+    } catch (error) {
+      mcpChecks.push({ checkId: "context7-evaluation", group: "mcp", component: "context7", status: required ? "fail" : "warning", detected_version: null,
+        reason: `Context7 health could not be evaluated: ${error instanceof Error ? error.message : String(error)}`, remediation: "Run 'bflow docs status' for details." });
+    }
+  }
+
   // ==========================================
   // Group 4: tools
   // ==========================================

@@ -43,6 +43,7 @@ const VALID_COMMANDS: ReadonlySet<CliCommandName> = new Set([
   "init",
   "config-migrate",
   "setup",
+  "docs",
   "run",
   "status",
   "approve",
@@ -1290,6 +1291,73 @@ function parseAgentCheck(args: readonly string[], json: boolean): ParseCliResult
   return { ok: true, value };
 }
 
+const DOCS_ROLES: ReadonlySet<string> = new Set(["coordinator", "planner", "architect", "specifier", "developer", "tester", "reviewer", "qa", "security"]);
+const DOCS_LIBRARY = /^[A-Za-z0-9@][A-Za-z0-9@/._+-]{0,99}$/;
+const DOCS_LIBRARY_ID = /^\/[A-Za-z0-9._-]+\/[A-Za-z0-9._~+-]+(?:\/[A-Za-z0-9._~+-]+)*$/;
+const DOCS_VERSION = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
+const DOCS_LANGUAGE = /^[A-Za-z0-9+#._-]{1,40}$/;
+
+function parseDocs(args: readonly string[], json: boolean): ParseCliResult {
+  const subIndex = args.findIndex(item => !isFlag(item));
+  const wantsHelp = args.includes("--help") || args.includes("-h");
+  if (subIndex === -1 && !wantsHelp)
+    return makeValidationError("Missing subcommand for 'bflow docs'. Expected 'search', 'lookup' or 'status'.", json, "docs");
+  const action = subIndex === -1 ? "status" : args[subIndex]!;
+  if (action !== "search" && action !== "lookup" && action !== "status")
+    return makeValidationError(`Unknown subcommand '${action}' for 'bflow docs'. Expected 'search', 'lookup' or 'status'.`, json, "docs");
+  const rest = subIndex === -1 ? args : [...args.slice(0, subIndex), ...args.slice(subIndex + 1)];
+  const booleans = new Set(["--json", "-j", "--help", "-h", "--no-cache"]);
+  const allowed = new Set(["--json", "-j", "--help", "-h", "--role", "--timeout",
+    ...(action === "search" ? ["--query", "--version"] : []),
+    ...(action === "lookup" ? ["--query", "--library-id", "--language", "--version", "--no-cache"] : [])]);
+  const options = extractOptionsAndPositional(rest, booleans, allowed, "docs", json);
+  if (!options.ok) return options.result;
+  const flags = options.value.flags;
+  const help = flags.has("--help") || flags.has("-h");
+  const text = (name: string): string | undefined => { const value = flags.get(name); return typeof value === "string" ? value.trim() : undefined; };
+  const invalid = (message: string) => makeValidationError(message, json, "docs");
+
+  const role = text("--role");
+  if (role !== undefined && !DOCS_ROLES.has(role)) return invalid(`Option '--role' must be one of: ${[...DOCS_ROLES].join(", ")}.`);
+  const rawTimeout = text("--timeout");
+  let timeoutMs: number | undefined;
+  if (rawTimeout !== undefined) {
+    timeoutMs = Number(rawTimeout);
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120_000) return invalid("Option '--timeout' must be a whole number of milliseconds between 1000 and 120000.");
+  }
+  const version = text("--version");
+  if (version !== undefined && !DOCS_VERSION.test(version)) return invalid("Option '--version' must be a version such as 18.2.0 or v18.2.0.");
+  const common = { json, help, ...(role !== undefined ? { role } : {}), ...(timeoutMs !== undefined ? { timeoutMs } : {}) };
+  const positional = options.value.positional;
+
+  if (action === "status") {
+    if (positional.length > 0) return invalid(`Unexpected positional argument '${positional[0]}' for 'bflow docs status'.`);
+    return { ok: true, value: { command: "docs", action: "status", ...common } };
+  }
+  if (action === "search") {
+    if (!help && positional.length !== 1) return invalid("'bflow docs search' takes exactly one library name.");
+    const library = positional[0] ?? "";
+    if (!help && !DOCS_LIBRARY.test(library)) return invalid("The library name must be 1-100 characters: letters, digits and @ / . _ + -.");
+    const query = text("--query");
+    if (query !== undefined && (query.length === 0 || query.length > 2000)) return invalid("Option '--query' must be 1-2000 characters.");
+    return { ok: true, value: { command: "docs", action: "search", library, ...(query !== undefined ? { query } : {}), ...(version !== undefined ? { version } : {}), ...common } };
+  }
+  const libraryId = text("--library-id");
+  if (libraryId !== undefined && !DOCS_LIBRARY_ID.test(libraryId)) return invalid("Option '--library-id' must look like /org/project (optionally /org/project/version).");
+  if (!help && positional.length > 1) return invalid("'bflow docs lookup' takes at most one library name.");
+  const library = positional[0];
+  if (library !== undefined && !DOCS_LIBRARY.test(library)) return invalid("The library name must be 1-100 characters: letters, digits and @ / . _ + -.");
+  if (!help && library === undefined && libraryId === undefined) return invalid("'bflow docs lookup' needs a library name or --library-id.");
+  if (library !== undefined && libraryId !== undefined) return invalid("Give either a library name or --library-id, not both.");
+  const query = text("--query");
+  if (!help && (query === undefined || query.length === 0)) return invalid("'bflow docs lookup' requires --query \"...\".");
+  if (query !== undefined && query.length > 2000) return invalid("Option '--query' must be 1-2000 characters.");
+  const language = text("--language");
+  if (language !== undefined && !DOCS_LANGUAGE.test(language)) return invalid("Option '--language' must be a short language name such as typescript.");
+  return { ok: true, value: { command: "docs", action: "lookup", query: query ?? "", ...(library !== undefined ? { library } : {}), ...(libraryId !== undefined ? { libraryId } : {}),
+    ...(language !== undefined ? { language } : {}), ...(version !== undefined ? { version } : {}), ...(flags.has("--no-cache") ? { noCache: true } : {}), ...common } };
+}
+
 export function parseCliArgs(argv: readonly string[]): ParseCliResult {
   const json = argv.some((a) => a === "--json" || a === "-j");
 
@@ -1546,6 +1614,9 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
   const commandArgs = argv.slice(1);
 
   switch (command) {
+    case "docs":
+      return parseDocs(commandArgs, json);
+
     case "config-migrate": {
       const booleans = new Set(["--json", "-j", "--help", "-h"]);
       const allowed = new Set(["--json", "-j", "--help", "-h"]);
@@ -1680,6 +1751,8 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         "--codex-hooks",
         "--trust-all",
         "--revoke-trust-all",
+        "--context7-api-key-stdin",
+        "--no-context7",
         "--yes",
         "-y",
         "--json",
@@ -1696,6 +1769,8 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         "--codex-hooks",
         "--trust-all",
         "--revoke-trust-all",
+        "--context7-api-key-stdin",
+        "--no-context7",
         "--yes",
         "-y",
         "--dir",
@@ -1751,6 +1826,14 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
       const trustAllHooks = optRes.value.flags.has("--trust-all");
       const revokeAllHookTrust = optRes.value.flags.has("--revoke-trust-all");
       const hookDigest = optRes.value.flags.get("--hook-digest");
+      const context7ApiKeyStdin = optRes.value.flags.has("--context7-api-key-stdin");
+      const noContext7 = optRes.value.flags.has("--no-context7");
+      if (context7ApiKeyStdin && noContext7)
+        return makeValidationError("'--context7-api-key-stdin' and '--no-context7' cannot be combined.", json, "setup");
+      if ((context7ApiKeyStdin || noContext7) && codexHooks)
+        return makeValidationError("Context7 options cannot be combined with '--codex-hooks'.", json, "setup");
+      if (context7ApiKeyStdin && mode !== "apply" && mode !== "repair")
+        return makeValidationError("'--context7-api-key-stdin' stores a credential and is valid only with --apply or --repair.", json, "setup");
 
       if ((trustAllHooks || revokeAllHookTrust) && !codexHooks)
         return makeValidationError("Hook policy flags require '--codex-hooks'.", json, "setup");
@@ -1788,6 +1871,8 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         ...(trustAllHooks ? { trustAllHooks: true } : {}),
         ...(revokeAllHookTrust ? { revokeAllHookTrust: true } : {}),
         ...(typeof hookDigest === "string" ? { hookDigest } : {}),
+        ...(context7ApiKeyStdin ? { context7ApiKeyStdin: true } : {}),
+        ...(noContext7 ? { noContext7: true } : {}),
         dir,
         catalogDir,
         json,

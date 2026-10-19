@@ -322,6 +322,41 @@ describe("Task 2: Platform v3 Lifecycle & Doctor Integration", () => {
       expect(unsupported?.remediation).not.toContain("Run 'bflow setup --apply'");
     });
 
+    describe("Context7", () => {
+      const health = (state: "healthy" | "degraded" | "unavailable", failing: boolean) => async () => ({
+        enabled: true, required: state === "unavailable", state, probe: { mode: "agent" as const }, providers: [],
+        serviceReadiness: { gateway: "running" as const, status: "ready" as const, discoveredTools: ["resolve-library-id", "query-docs"] },
+        checks: [
+          { id: "gateway" as const, status: "pass" as const, message: "The Gateway is running." },
+          { id: "service" as const, status: failing ? "fail" as const : "pass" as const, message: failing ? "The Gateway reports Context7 blocked." : "ready", ...(failing ? { remediation: "Run 'bflow setup --repair'." } : {}) },
+          { id: "query-docs" as const, status: failing ? "skipped" as const : "pass" as const, message: "query-docs works." }
+        ] });
+      const run = (required: boolean, state: "healthy" | "degraded" | "unavailable", failing: boolean) => runDoctorDiagnostics({
+        repository, config: JSON.parse(makeConfig(repository, { context7: { enabled: true, required } })), runner, env: process.env,
+        dependencies: { context7Health: health(state, failing) }, probeSession: async () => false, intent: async () => null, statePath: (n) => resolve(dir, ".bflow/state", n) });
+
+      it("reports every Context7 check, and a failing optional service as a warning with a degraded notice", async () => {
+        const report = await run(false, "degraded", true);
+        const service = report.checks.find((check) => check.checkId === "context7-service");
+        expect(service?.status).toBe("warn");
+        expect(service?.remediation).toContain("bflow setup --repair");
+        expect(report.checks.find((check) => check.checkId === "context7-degraded")?.message).toMatch(/degraded mode/);
+        expect(report.checks.filter((check) => check.checkId.startsWith("context7-") && check.status === "failed")).toEqual([]);
+      });
+
+      it("fails the doctor when Context7 is required and not ready", async () => {
+        const report = await run(true, "unavailable", true);
+        expect(report.checks.find((check) => check.checkId === "context7-service")?.status).toBe("failed");
+        expect(report.healthy).toBe(false);
+      });
+
+      it("adds nothing when Context7 is not enabled", async () => {
+        const report = await runDoctorDiagnostics({ repository, config: JSON.parse(makeConfig(repository, { context7: { enabled: false } })), runner, env: process.env, dependencies: {},
+          probeSession: async () => false, intent: async () => null, statePath: (n) => resolve(dir, ".bflow/state", n) });
+        expect(report.checks.some((check) => check.checkId.startsWith("context7-"))).toBe(false);
+      });
+    });
+
     it("evaluates tools and skills via toolOverrides and skillsOverride", async () => {
       const cfg: EnvironmentConfig = JSON.parse(makeConfig(repository, { requiredTools: ["rtk"] }));
       const report = await runDoctorDiagnostics({
@@ -494,6 +529,20 @@ describe("Task 2: Platform v3 Lifecycle & Doctor Integration", () => {
       });
 
       await expect(lifecycle.up()).rejects.toThrow("MCP Gateway service is unavailable");
+    });
+
+    it("refuses to start when Context7 is required and not ready, but starts when it is optional", async () => {
+      const unhealthy = async () => ({ enabled: true, required: true, state: "unavailable" as const, probe: { mode: "none" as const }, providers: [],
+        serviceReadiness: { gateway: "absent" as const, status: "unknown" as const, discoveredTools: [] },
+        checks: [{ id: "gateway" as const, status: "fail" as const, message: "The Gateway has never published readiness.", remediation: "Run 'bflow setup --apply'." }] });
+      await writeFile(join(dir, ".bflow/config.yaml"), makeConfig(repository, { context7: { enabled: true, required: true } }));
+      const required = new EnvironmentLifecycle(dir, { runner, context7Health: unhealthy, providerOverrides: { claude: { available: true, authenticated: true } } });
+      await expect(required.up()).rejects.toThrow("Required Context7 documentation service is not ready");
+      await writeFile(join(dir, ".bflow/config.yaml"), makeConfig(repository, { context7: { enabled: true, required: false } }));
+      const fixture = createMockManager(repository);
+      const optional = new EnvironmentLifecycle(dir, { runner, context7Health: unhealthy, providerOverrides: { claude: { available: true, authenticated: true } },
+        openIntegration: async () => ({ manager: fixture.manager }) });
+      await expect(optional.up()).resolves.toBeDefined();
     });
 
     it("records completed steps in manifest metadata after successful up", async () => {

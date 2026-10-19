@@ -30,6 +30,7 @@ export type HighLevelCommandName =
   | "agent check";
 
 export const CLI_COMMAND_NAMES = [
+  "docs",
   "up",
   "down",
   "attach",
@@ -48,6 +49,7 @@ export const CLI_COMMAND_NAMES = [
 ] as const;
 
 export type CliCommandName =
+  | "docs"
   | "up"
   | "down"
   | "attach"
@@ -104,7 +106,38 @@ export interface SetupCommandArgs extends GlobalCliFlags {
   readonly revokeAllHookTrust?: boolean | undefined;
   readonly dir?: string | undefined;
   readonly catalogDir?: string | undefined;
+  /** Read the Context7 API key from standard input and store it privately; never accepted on the command line. */
+  readonly context7ApiKeyStdin?: boolean | undefined;
+  /** Leave Context7 out of the Gateway configuration. */
+  readonly noContext7?: boolean | undefined;
 }
+
+/** `bflow docs <search|lookup|status>`: documentation lookups through the shared Gateway's Context7 service. Read-only. */
+export interface DocsCommonArgs extends GlobalCliFlags {
+  readonly command: "docs";
+  /** Role whose Gateway grant an operator-run command acts under. Agents use their own registration and ignore it. */
+  readonly role?: string | undefined;
+  readonly timeoutMs?: number | undefined;
+}
+export interface DocsSearchArgs extends DocsCommonArgs {
+  readonly action: "search";
+  readonly library: string;
+  readonly query?: string | undefined;
+  readonly version?: string | undefined;
+}
+export interface DocsLookupArgs extends DocsCommonArgs {
+  readonly action: "lookup";
+  readonly library?: string | undefined;
+  readonly libraryId?: string | undefined;
+  readonly query: string;
+  readonly language?: string | undefined;
+  readonly version?: string | undefined;
+  readonly noCache?: boolean | undefined;
+}
+export interface DocsStatusArgs extends DocsCommonArgs {
+  readonly action: "status";
+}
+export type DocsCommandArgs = DocsSearchArgs | DocsLookupArgs | DocsStatusArgs;
 
 export interface SetupCommandOutput {
   readonly mode: "check" | "dry_run" | "apply" | "repair";
@@ -144,6 +177,8 @@ export interface SetupIntegrationOptions {
   readonly skillManager?: any;
   readonly machineSetup?: any;
   readonly isolatedRoot?: string | undefined;
+  /** A Context7 API key supplied by the caller instead of standard input or the environment. */
+  readonly context7ApiKey?: string | undefined;
 }
 
 export interface EnvironmentCommandArgs extends GlobalCliFlags {
@@ -320,6 +355,7 @@ export type HighLevelParsedCliCommand =
   | AgentCheckCommandArgs;
 
 export type CoreParsedCliCommand =
+  | DocsCommandArgs
   | EnvironmentCommandArgs
   | InitCommandArgs
   | ConfigMigrateCommandArgs
@@ -405,6 +441,7 @@ export type CliCommandData =
   | import("./config-migration.js").ConfigMigrationOutput
   | SetupCommandOutput
   | import("./codex-hook-setup.js").CodexHookSetupOutput
+  | import("./docs-command.js").DocsCommandOutput
   | WorkflowRunSnapshot
   | Page<WorkflowRunSnapshot>
   | { readonly helpText: string; readonly topic?: string | undefined }
@@ -454,6 +491,7 @@ export interface CliContext {
   /** Engine facades for high-level commands; defaults compose the reviewed packages. */
   readonly highLevelServices?: HighLevelServices | undefined;
   readonly setup?: SetupIntegrationOptions | undefined;
+  readonly docs?: import("./docs-command.js").DocsCommandDependencies | undefined;
   readonly presentation?: PresentationOptions | undefined;
 }
 

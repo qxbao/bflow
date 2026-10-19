@@ -19,6 +19,7 @@ Commands:
   approve         Record human approval, rejection, or rework request for a task
   resume          Resume an active or waiting workflow run
   cancel          Cancel an active workflow run or task
+  docs            Look up current library documentation through the shared Context7 service
   help            Show help for a command
 
 ${HIGH_LEVEL_SUMMARY}
@@ -98,6 +99,9 @@ Options:
   -y, --yes             Confirm setup, exact snapshot approval (--hook-digest), or explicit --trust-all
   --dir <path>          Repository to prepare (machine installation stays user-global)
   --catalog-dir <path>  Custom skills catalog directory
+  --context7-api-key-stdin  Read a Context7 API key from standard input and store it privately (--apply/--repair).
+                        CONTEXT7_API_KEY in the environment is used the same way. Without a key Context7 runs anonymously.
+  --no-context7         Leave Context7 out of the shared MCP Gateway
   -j, --json            Output response in JSON envelope format
   -h, --help            Show help for setup command
 
@@ -106,6 +110,7 @@ Examples:
   bflow setup --check
   bflow setup --dry-run
   bflow setup --codex-hooks --plan
+  printf %s "$KEY" | bflow setup --apply --context7-api-key-stdin
   bflow setup --codex-hooks --apply --trust-all --yes
   bflow setup --codex-hooks --apply --revoke-trust-all
   bflow setup --apply --yes
@@ -459,7 +464,40 @@ Examples:
   bflow agent check claude
   bflow agent check --provider codex --stage activated`;
 
+const DOCS_HELP = `Usage: bflow docs <search|lookup|status> [options]
+
+Look up current, version-specific documentation of an external library through Context7, a hosted
+documentation service reached through the shared MCP Gateway. Commands are read-only. They use your own
+Gateway registration when run inside an agent pane, and never start a documentation server of their own.
+Queries (library names and documentation questions) leave the machine: never put source code or secrets in them.
+
+Subcommands:
+  search <library>             Resolve a library and show candidates, ids and the version choice for this project
+  lookup [<library>] --query   Return documentation for a question, with the version used and any warnings
+  status                       Report whether Context7 is enabled, reachable, authenticated and usable
+
+Options:
+  --query <text>        Search: optional phrasing for ranking. Lookup: the specific question (required)
+  --library-id <id>     Lookup: a Context7 id such as /org/project or /org/project/v1.2.3 instead of a name
+  --version <version>   Override the version detected from package.json, lockfiles or other dependency metadata
+  --language <name>     Lookup: language hint for libraries with several
+  --no-cache            Lookup: bypass the local documentation cache
+  --role <role>         When run by an operator outside an agent pane, act under this role's grant (default developer)
+  --timeout <ms>        Per-request timeout, 1000-120000 (default 30000)
+  -j, --json            Output a JSON envelope
+  -h, --help            Show help for docs
+
+Exit codes: 0 succeeded, 1 the lookup failed or Context7 is not healthy, 2 invalid usage.
+Failures are classified (network, timeout, auth_invalid, rate_limited, library_not_found, version_not_found, no_documentation, permission_denied, ...).
+
+Examples:
+  bflow docs search react
+  bflow docs lookup react --query "how do I clean up a subscription in useEffect" --json
+  bflow docs lookup --library-id /vercel/next.js --version v15.1.8 --query "route handlers"
+  bflow docs status --json`;
+
 const HELP_MAP: Record<CliCommandName, string> = {
+  docs: DOCS_HELP,
   up: "Usage: bflow up [--timeout <milliseconds>] [--json]\nStart/reconcile this repository's headless named session and wait for required roles.",
   down: "Usage: bflow down [--yes] [--force] [--timeout <milliseconds>] [--json]\nCheckpoint active work and gracefully stop only this repository session. --yes confirms unsafe work. --force includes confirmation and stops the owned named session directly when pane cleanup is stuck. Both modes require the Runtime shutdown barrier and valid checkpoints; state and worktrees are preserved.",
   attach: "Usage: bflow attach [--json]\nFocus Conversation and attach to an existing repository session. Run up first.",

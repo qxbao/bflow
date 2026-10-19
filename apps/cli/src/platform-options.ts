@@ -4,6 +4,7 @@ import type { AgenticHostPlatformOptions, HostPrepareResponse, PlatformRoleOptio
 import type { EnvironmentCompositionInput } from "./environment.js";
 import { EnvironmentProviderSchema, type EnvironmentRoleConfig } from "./environment-config.js";
 import { GATEWAY_CONTROL_LOCATOR_FILE } from "./gateway-control.js";
+import { CONTEXT7_SERVICE_ID, CONTEXT7_TOOLS } from "./context7-constants.js";
 import { SUPPORTED_CLI_COMMANDS } from "./command-reference.js";
 import { loadMachineSkillCatalog, type MachineSkillCatalog } from "./skill-catalog.js";
 
@@ -26,7 +27,13 @@ export interface HostPlatformContext {
 export interface HostPlatformDeps {
   readonly context: HostPlatformContext;
   readonly fileExists?: ((path: string) => boolean) | undefined;
+  /** Whether the Gateway reports Context7 ready right now. Unknown counts as not ready. */
+  readonly context7Ready?: boolean | undefined;
+  /** Receives operator-visible warnings (degraded mode). */
+  readonly warn?: ((message: string) => void) | undefined;
 }
+
+const CONTEXT7_SKILL_ID = "use-context7";
 
 export async function loadHostPlatformContext(): Promise<HostPlatformContext> {
   const setup = await import("@bflow/machine-setup");
@@ -81,11 +88,15 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
   const coordinator = configured.get("coordinator");
   if (!coordinator) throw new Error("Configuration must include a coordinator role");
 
-  const roles: PlatformRoleOption[] = environment.roles.map(role => roleOption(role, input, deps.context.skills));
+  const context7 = environment.context7;
+  const context7Active = context7?.enabled === true && (context7.required === true || deps.context7Ready === true);
+  if (context7?.enabled === true && !context7Active)
+    deps.warn?.("Context7 is enabled but the Gateway does not report it ready; roles start without documentation lookup (degraded). Run 'bflow doctor' for the cause, or set environment.context7.required to refuse to start without it.");
+  const roles: PlatformRoleOption[] = environment.roles.map(role => roleOption(role, input, deps.context.skills, context7Active));
   // Developers are allocated dynamically in task worktrees; without a configured Developer, the template uses the Coordinator's provider.
   if (!configured.has("developer"))
     roles.push(roleOption({ role: "developer", cli: coordinator.cli, required: false,
-      ...modelSettings(coordinator) }, input, deps.context.skills));
+      ...modelSettings(coordinator) }, input, deps.context.skills, context7Active));
 
   const locatorPath = join(deps.context.stateDirectory, GATEWAY_CONTROL_LOCATOR_FILE);
   const gatewayLocatorPath = (deps.fileExists ?? existsSync)(locatorPath) ? { gatewayLocatorPath: locatorPath } : {};
@@ -104,7 +115,7 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
   });
 }
 
-function roleOption(role: EnvironmentRoleConfig, input: EnvironmentCompositionInput, skills: MachineSkillCatalog): PlatformRoleOption {
+function roleOption(role: EnvironmentRoleConfig, input: EnvironmentCompositionInput, skills: MachineSkillCatalog, context7Active = false): PlatformRoleOption {
   const environment = input.config.environment;
   const provider = EnvironmentProviderSchema.safeParse(role.cli);
   if (!provider.success) throw new Error(`Role '${role.role}' uses unsupported provider '${role.cli}'; select claude, codex or agy.`);
@@ -115,6 +126,10 @@ function roleOption(role: EnvironmentRoleConfig, input: EnvironmentCompositionIn
     return definitions.length === 0 || definitions.some(definition => definition.allowedRoles.includes(role.role));
   });
   const skillIds = [...new Set([...environmentSkills, ...(role.skills ?? [])])];
+  // Per-role authorization: the Gateway grants Context7 only to roles whose approved skill definition allows them to use it.
+  // The Conversation role never receives Gateway tool access.
+  const context7Role = context7Active && role.role !== "conversation" &&
+    skills.definitions.some(definition => definition.skillId === CONTEXT7_SKILL_ID && definition.allowedRoles.includes(role.role));
   return {
     role: role.role,
     provider: provider.data,
@@ -122,8 +137,8 @@ function roleOption(role: EnvironmentRoleConfig, input: EnvironmentCompositionIn
     ...modelSettings(role),
     permissionMode: role.permissionMode ?? environment.permissions?.mode ?? "workspace_auto",
     capabilityIds: [],
-    mcpServiceIds: [...(environment.requiredMcpServices ?? [])],
-    toolIds: [...(environment.requiredTools ?? [])],
+    mcpServiceIds: [...new Set([...(environment.requiredMcpServices ?? []), ...(context7Role ? [CONTEXT7_SERVICE_ID] : [])])],
+    toolIds: [...new Set([...(environment.requiredTools ?? []), ...(context7Role ? CONTEXT7_TOOLS : [])])],
     skillSelections: skills.resolvePins(role.role, skillIds)
   };
 }
