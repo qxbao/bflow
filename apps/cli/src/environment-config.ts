@@ -144,7 +144,7 @@ export function defaultEnvironmentConfig(repository: RepositoryIdentity, name?: 
       roles: ["conversation", "coordinator", "planner", "architect", "specifier", "reviewer", "qa"].map((role) => ({ role: AgentRoleSchema.parse(role), cli: provider, required: true })),
       sdd: { minimumLevel: "lightweight", approvalRequired: true }, tdd: { policy: "conditional" },
       verification: { maxIterations: 3, onExhausted: "require_human" }, concurrency: { maxConcurrency: 2 },
-      startupTimeoutMs: 60_000, shutdownTimeoutMs: 30_000,
+      startupTimeoutMs: 300_000, shutdownTimeoutMs: 30_000,
       context7: { enabled: true, required: false }
     }
   };

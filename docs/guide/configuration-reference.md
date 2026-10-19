@@ -33,7 +33,7 @@ Theo yêu cầu được project owner phê duyệt, config canonical chuyển s
 | `environment.verification.maxIterations` | 3, integer 1–100 | P12 validate; P19 `propose_workflow` nhận giới hạn riêng 1–10, default 3 |
 | `environment.verification.onExhausted` | Chỉ `"require_human"` | Không có retry vô hạn |
 | `environment.concurrency.maxConcurrency` | 2, integer 1–64 | P12 truyền làm capacity cho P13; P19 host có `maxDeveloperCapacity` riêng |
-| `environment.startupTimeoutMs` | 60000, integer 1–600000 | Deadline lifecycle up |
+| `environment.startupTimeoutMs` | 300000, integer 1–600000 | Deadline lifecycle up |
 | `environment.shutdownTimeoutMs` | 30000, integer 1–600000 | Deadline lifecycle down |
 
 P19 `openAgenticWorkspace` mặc định lưu dữ liệu riêng tại
