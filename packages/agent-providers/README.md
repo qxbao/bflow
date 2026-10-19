@@ -91,6 +91,12 @@ Every check returns `status: "passed" | "failed" | "unknown"`. Overall status is
 
 ## Permission Modes
 
+MCP permission patterns are derived from the same validated launch material as
+the MCP configuration, including host-provided `bflow` and selected Gateway
+registrations. Claude Conversation and Coordinator roles have no native repository
+tools; their configured MCP tools are explicitly allowed under `dontAsk` in both
+launch arguments and session settings. Unconfigured MCP servers receive no grant.
+
 1. **`restricted`**:
    - Read-only filesystem (`filesystem: "read_only"`, `writableRoots: []`).
    - Claude: `--restricted`, `--tools "Read,Glob,Grep"`, `--permission-mode dontAsk`.

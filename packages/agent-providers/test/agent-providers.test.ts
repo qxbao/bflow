@@ -1503,6 +1503,25 @@ describe("@bflow/agent-providers", () => {
 
     const quote = (value: string): string => JSON.stringify(value);
 
+    it.each(["conversation", "coordinator"] as const)("permits the configured host MCP for Claude %s without Gateway registrations", async role => {
+      const env = createTestEnvironment("claude", "restricted", { role });
+      const adapter = new ClaudeProviderAdapter({
+        runner: createFakeProviderRunner({ scenario: "healthy" }),
+        executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true,
+        hostMcpServers: hostServers
+      });
+      const result = await adapter.prepareLaunch(env);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const argv = result.value.argv;
+      expect(argv[argv.indexOf("--permission-mode") + 1]).toBe("dontAsk");
+      expect(argv[argv.indexOf("--tools") + 1]).toBe("");
+      expect(argv[argv.indexOf("--allowedTools") + 1]).toBe("mcp__bflow__*");
+      const settings = JSON.parse(await readFile(result.value.configFiles[2]!.path, "utf8"));
+      expect(settings.permissions.allow).toEqual(["mcp__bflow__*"]);
+    });
+
     it("Claude renders host bflow stdio, streamable_http Gateway entry and all four native hooks", async () => {
       const env = createTestEnvironment("claude");
       const adapter = new ClaudeProviderAdapter({
@@ -1529,6 +1548,11 @@ describe("@bflow/agent-providers", () => {
           }
         }
       });
+
+      const permitted = res.value.argv[res.value.argv.indexOf("--allowedTools") + 1]!.split(",");
+      expect(permitted).toEqual(["Read", "Glob", "Grep", "Edit", "Write", "mcp__bflow__*", "mcp__gateway-dev__*"]);
+      const permissions = JSON.parse(await readFile(res.value.configFiles[2]!.path, "utf8")).permissions;
+      expect(permissions.allow).toEqual(["Read,Glob,Grep,Edit,Write", "mcp__bflow__*", "mcp__gateway-dev__*"]);
 
       const settings = JSON.parse(await readFile(res.value.configFiles[2]!.path, "utf8")) as { hooks: unknown };
       const hook = (command: string) => [{ hooks: [{ type: "command", command, timeout: 30 }] }];

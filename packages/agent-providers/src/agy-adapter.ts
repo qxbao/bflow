@@ -69,7 +69,7 @@ export class AgyProviderAdapter extends BaseProviderAdapter {
       capabilities,
       {
         cwd: environment.cwd,
-        mcpServerNames: (this.options.mcpRegistrations ?? []).map((r) => r.registrationId),
+        mcpServerNames: Object.keys(this.resolveHostLaunchMaterial(capabilities).mcpServers),
         ...(this.options.osSandboxPath !== undefined ? { osSandboxPath: this.options.osSandboxPath } : {})
       }
     );
