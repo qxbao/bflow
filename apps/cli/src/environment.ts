@@ -574,7 +574,7 @@ export class EnvironmentLifecycle {
         const previous = await this.intent(repository);
         const saved = await this.savedManifest(repository);
         const running = await this.probe(repository, config, deadline);
-        if (previous?.phase === "stopping" && running) fail("An interrupted shutdown must finish first. Run bflow down --yes, then bflow up. State and worktrees are preserved.");
+        if (previous?.phase === "stopping" && running) fail("An interrupted shutdown must finish first. Run bflow down --yes, then bflow up. If pane cleanup is stuck, run bflow down --force. State and worktrees are preserved.");
         if (running && previous === null && saved === null) fail("Named session already exists without repository ownership evidence; refusing to adopt it");
 
         // Step 8: reconcile_herdr_session_and_panes
@@ -778,14 +778,14 @@ export class EnvironmentLifecycle {
       return current;
     } finally { await integration.close?.(); }
   }
-  async down(confirmed = false, timeoutMs?: number): Promise<SessionManifest | EnvironmentStatus> {
+  async down(confirmed = false, timeoutMs?: number, force = false): Promise<SessionManifest | EnvironmentStatus> {
     this.progress("Inspecting session state and running workflows...");
     const repository = await identifyRepository(this.cwd, this.runner);
     const config = await readEnvironmentConfig(repository);
-    return this.locked(repository, () => this.downLocked(repository, config, confirmed, timeoutMs, this.dependencies.signal));
+    return this.locked(repository, () => this.downLocked(repository, config, confirmed || force, timeoutMs, this.dependencies.signal, undefined, force));
   }
   private async downLocked(repository: RepositoryIdentity, config: EnvironmentConfig, confirmed: boolean, timeoutMs?: number, signal?: AbortSignal,
-    suppliedIntegration?: EnvironmentIntegration): Promise<SessionManifest | EnvironmentStatus> {
+    suppliedIntegration?: EnvironmentIntegration, force = false): Promise<SessionManifest | EnvironmentStatus> {
       const deadline = new Deadline(timeoutMs ?? config.environment.shutdownTimeoutMs, signal);
       const acquire = () => suppliedIntegration ? Promise.resolve(suppliedIntegration) : deadline.call(() => this.integration(repository, config));
       let saved = await this.savedManifest(repository);
@@ -869,9 +869,14 @@ export class EnvironmentLifecycle {
       if (!integration) fail("Runtime is unavailable; cannot inspect active runs/checkpoint safely. Session remains running.");
       try {
         if (!integration.runtime) fail("Runtime is unavailable; cannot inspect active runs/checkpoint safely. Session remains running.");
-        const live = unwrap(await deadline.call((opts) => integration.manager.getManifest(repository.sessionName, opts)));
-        if (live === null) fail("Role manager cannot reconcile the live session; refusing shutdown");
-        const manifest = this.validateManifest(live, repository);
+        // Force uses the validated durable ownership receipt. A stale/unavailable pane
+        // lookup must not prevent the Runtime barrier and authoritative session stop.
+        let manifest = saved;
+        if (!force) {
+          const live = unwrap(await deadline.call((opts) => integration.manager.getManifest(repository.sessionName, opts)));
+          if (live === null) fail("Role manager cannot reconcile the live session; refusing shutdown");
+          manifest = this.validateManifest(live, repository);
+        }
         const activeRuns = new Map<string, { version: number }>();
         const collectActiveRuns = async () => {
           activeRuns.clear();
@@ -912,12 +917,37 @@ export class EnvironmentLifecycle {
         }
         await this.checkpointRuns(integration, activeRuns, deadline);
         await this.saveManifest(repository, { ...manifest, status: "stopping" });
-        this.progress("Stopping agent roles gracefully...");
-        const stopped = this.validateManifest(unwrap(await deadline.call((opts) => integration.manager.down(repository.sessionName, opts))), repository);
-        if (stopped.status !== "down") fail("Role manager did not confirm graceful shutdown; session was not force-stopped");
-        this.progress("Stopping Herdr session...");
-        if (await this.probe(repository, config, deadline)) await this.command(repository, config.environment.herdrBinary, ["session", "stop", repository.sessionName, "--json"], deadline);
+        let stopped: SessionManifest | undefined;
+        if (!force) {
+          this.progress("Stopping agent roles gracefully...");
+          try {
+            stopped = this.validateManifest(unwrap(await deadline.call((opts) => integration.manager.down(repository.sessionName, opts))), repository);
+            if (stopped.status !== "down") fail("Role manager did not confirm graceful shutdown; session was not force-stopped");
+          } catch (error) {
+            if (error instanceof EnvironmentError) throw new EnvironmentError({ ...error.contractError,
+              message: error.message + " Run bflow down --force to finish stopping this repository session after checkpointing; state and worktrees are preserved." });
+            throw error;
+          }
+        } else {
+          deadline.context = "Force shutdown has not been confirmed. State/checkpoints are preserved; run bflow status, then bflow down --force to reconcile.";
+        }
+        this.progress(force ? "Force-stopping this repository's Herdr session..." : "Stopping Herdr session...");
+        if (await this.probe(repository, config, deadline)) {
+          try {
+            await this.command(repository, config.environment.herdrBinary, ["session", "stop", repository.sessionName, "--json"], deadline);
+          } catch (error) {
+            // A lost acknowledgement is conclusive only after a fresh correlated
+            // observation proves the server stopped. Never resend an uncertain stop.
+            if (!force || await this.probe(repository, config, deadline)) throw error;
+          }
+        }
         while (await this.probe(repository, config, deadline)) await deadline.pause();
+        if (!stopped) {
+          const at = new Date().toISOString();
+          stopped = this.validateManifest({ ...manifest, status: "down", updatedAt: at, stoppedAt: at,
+            panes: manifest.panes.map(pane => ({ ...pane, transportState: "cancelled", lastHeartbeatAt: at })),
+            metadata: { ...manifest.metadata, shutdownMode: "force" } }, repository);
+        }
         await this.saveManifest(repository, { ...stopped, status: "stopping" });
         this.progress("Shutting down persistent host...");
         if (integration.shutdownHost) await deadline.call(() => integration.shutdownHost!());

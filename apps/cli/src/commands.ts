@@ -244,7 +244,7 @@ async function executeCommandWithProgress(
       let data: CliCommandData;
       switch (parsed.command) {
         case "up": data = await lifecycle.up(parsed.timeoutMs); break;
-        case "down": data = await lifecycle.down(parsed.yes, parsed.timeoutMs); break;
+        case "down": data = await lifecycle.down(parsed.yes, parsed.timeoutMs, parsed.force); break;
         case "attach": data = await lifecycle.attach(); break;
         case "recover": data = await lifecycle.recover(parsed.yes); break;
         case "doctor": data = await lifecycle.doctor(); break;

@@ -30,6 +30,8 @@ function fixture(mode: SetupContext["mode"] = "apply", options: { initialize?: b
     kind: "systemd-user", unitPath: id => join(root, `${id}.service`), render: def => JSON.stringify(def),
     inspect: async () => ({ installed: active, digest: installedDigest, active }),
     install: async def => {
+      await runtime?.stop();
+      runtime = undefined;
       runtime = await startSetupGatewayRuntime(def.args[2]!);
       installedDigest = digest(JSON.stringify(def));
       active = true;
@@ -48,9 +50,10 @@ function fixture(mode: SetupContext["mode"] = "apply", options: { initialize?: b
   return { platform, store, config, components, ctx, input };
 }
 
-async function installFixtureTools(tools: string[], options: { initialize?: boolean } = {}) {
+async function installFixtureTools(tools: string[], options: { initialize?: boolean; executableName?: string } = {}) {
   if (options.initialize !== false) initializeGitRepository();
-  await writeFile(join(root, "gitnexus"), `#!${process.execPath}
+  const executable = join(root, options.executableName ?? "gitnexus");
+  await writeFile(executable, `#!${process.execPath}
 if (process.argv[2] === '--version') { console.log('fixture 1.0.0'); process.exit(0); }
 if (process.argv[2] === 'status') { console.log(JSON.stringify({schemaVersion:1,repository:process.cwd(),status:require('node:fs').existsSync(${JSON.stringify(join(root, "stale-index"))})?'stale':'up-to-date'})); process.exit(0); }
 require('node:fs').appendFileSync(${JSON.stringify(join(root, "launch-count"))}, 'started\\n');
@@ -64,7 +67,7 @@ process.stdin.on('data', chunk => { pending += chunk; while (pending.includes('\
   process.stdout.write(JSON.stringify({jsonrpc:'2.0', id:message.id, result})+'\\n');
 }});
 `);
-  await chmod(join(root, "gitnexus"), 0o700);
+  await chmod(executable, 0o700);
 }
 
 function initializeGitRepository(directory = root) {
@@ -111,6 +114,60 @@ it("fails the service postcheck when a real upstream omits required tools", asyn
   const applied = await components[1]!.apply(ctx);
   expect(applied.diagnostics.join(" ")).toMatch(/required|ready|tools/i);
   expect((await components[1]!.observe(ctx)).valid).toBe(false);
+});
+
+it("adds MemPalace to an active Gateway while retaining its current GitNexus reader lock", async () => {
+  const { components, ctx, input, platform } = fixture();
+  await installFixtureTools(["query", "context", "impact"]);
+  for (const component of components) expect((await component.apply(ctx)).diagnostics).toEqual([]);
+  const lock = join(platform.paths.state, "gitnexus", `gitnexus-storage-${createHash("sha256").update(root).digest("hex")}.lock`);
+  const reader = await readFile(lock, "utf8");
+  const machine = JSON.parse(await readFile(join(platform.paths.config, "machine.json"), "utf8"));
+  await installFixtureTools(["mempalace_status", "mempalace_search"], { initialize: false, executableName: "mempalace-mcp" });
+  machine.toolPins.push({ ...machine.toolPins[0], toolId: "mempalace", version: "1.14.1" });
+  const updated = wrapSetupComponents([], { ...input, config: machine, launchRequirements: [...input.launchRequirements,
+    { toolId: "mempalace", executable: join(root, "mempalace-mcp"), args: [], requirements: [] }] });
+
+  expect((await updated[0]!.apply(ctx)).diagnostics).toEqual([]);
+  expect(await readFile(lock, "utf8")).toBe(reader);
+  expect((await updated[0]!.observe(ctx)).valid).toBe(true);
+  expect((await updated[1]!.apply(ctx)).diagnostics).toEqual([]);
+  expect((await updated[1]!.observe(ctx)).valid).toBe(true);
+  expect(runtime?.observations.map(item => item.serviceId)).toHaveLength(2);
+});
+
+it("blocks Gateway startup after stale GitNexus configuration fails and preserves the running reader", async () => {
+  const { components, ctx, input, platform } = fixture();
+  await installFixtureTools(["query", "context", "impact"]);
+  for (const component of components) expect((await component.apply(ctx)).diagnostics).toEqual([]);
+  const lock = join(platform.paths.state, "gitnexus", `gitnexus-storage-${createHash("sha256").update(root).digest("hex")}.lock`);
+  const reader = await readFile(lock, "utf8");
+  const machineFile = join(platform.paths.config, "machine.json");
+  const machineBytes = await readFile(machineFile, "utf8");
+  const account = { ...platform, homeDir: root, shell: "bash" as const, pathEntries: [join(root, "fixtures")] };
+  await mkdir(account.pathEntries[0]!);
+  for (const name of ["node", "pnpm", "git", "herdr", "gitnexus"]) {
+    const file = join(account.pathEntries[0]!, name); await writeFile(file, "#!/bin/sh\nexit 0\n"); await chmod(file, 0o700);
+  }
+  const runner = { run: async (argv: readonly string[]) => ({ exitCode: 0, timedOut: false, stderr: "", stdout:
+    argv[0]!.endsWith("/pnpm") ? "12.5.1" : argv[0]!.endsWith("/git") ? "git version 2.45.0" :
+      argv[0]!.endsWith("/herdr") ? "herdr 0.9.5" : argv[0]!.endsWith("/gitnexus") ? "gitnexus 1.6.12" : "v24.16.0" }) };
+  const install = vi.spyOn(input.serviceManager, "install");
+  const setup = new MachineSetupService({ platform: account, runner, config: JSON.parse(machineBytes),
+    approver: new NonInteractiveApprover(), persistMachineConfig: false,
+    decorateComponents: (base, factory) => wrapSetupComponents(base, { ...input, ...factory }) });
+  await writeFile(join(root, "stale-index"), "stale");
+
+  const result = await setup.run({ mode: "apply", assumeYes: true });
+  expect(result.receipts.find(item => item.stepId === "register_mcp:mcp-config")).toMatchObject({ status: "failed" });
+  expect(result.receipts.find(item => item.stepId === "configure:services")).toMatchObject({
+    status: "blocked", diagnostics: ["dependency register_mcp:mcp-config is failed"]
+  });
+  expect(result.receipts.some(item => item.stepId === "verify:doctor")).toBe(true);
+  expect(install).not.toHaveBeenCalled();
+  expect(await readFile(lock, "utf8")).toBe(reader);
+  expect(await readFile(machineFile, "utf8")).toBe(machineBytes);
+  expect(runtime?.observations[0]?.status).toBe("ready");
 });
 
 it("does not configure a missing managed executable or record it as ready", async () => {

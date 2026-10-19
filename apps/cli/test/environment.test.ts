@@ -471,6 +471,122 @@ describe("P12 repository environment lifecycle", () => {
     expect(fixture.manager.down).toHaveBeenCalledTimes(2);
     expect(runner.running.has(repository.sessionName)).toBe(false);
   });
+  linuxIt("force down checkpoints before stopping the owned session despite unavailable pane topology", async () => {
+    await lifecycle.up(); runner.running.add("other-repository");
+    const worktree = join(dir, "worktrees", "task", "keep.txt");
+    await mkdir(join(dir, "worktrees", "task"), { recursive: true });
+    await writeFile(worktree, "uncommitted developer work");
+    const config = await readFile(join(dir, ".bflow/config.yml"), "utf8");
+    const events: string[] = [];
+    const run = runner.run.bind(runner);
+    vi.spyOn(runner, "run").mockImplementation(async request => {
+      if (request.args[0] === "session" && request.args[1] === "stop") events.push("session-stop");
+      return run(request);
+    });
+    vi.mocked(fixture.manager.getManifest).mockClear().mockResolvedValue({ ok: false, error: { code: "not_found", retryable: false, message: "workspace w1 not found" } });
+    const save = vi.fn(async (command: CreateCheckpointCommand) => {
+      events.push("checkpoint"); return { ok: true as const, value: checkpoint(command) };
+    });
+    const forced = new EnvironmentLifecycle(dir, { runner, integration: {
+      manager: fixture.manager, runtime: mockRuntime([activeRun]), checkpoint: save,
+      quiesce: async () => { events.push("quiesce"); return { ok: true, value: undefined }; },
+      shutdownHost: async () => { events.push("host-shutdown"); }
+    } });
+    const stopped = await forced.down(false, 3000, true);
+    expect(stopped.status).toBe("down");
+    expect(events).toEqual(["quiesce", "checkpoint", "session-stop", "host-shutdown"]);
+    expect(fixture.manager.getManifest).not.toHaveBeenCalled();
+    expect(fixture.manager.down).not.toHaveBeenCalled();
+    expect(runner.running.has("other-repository")).toBe(true);
+    expect(runner.running.has(repository.sessionName)).toBe(false);
+    expect(await readFile(worktree, "utf8")).toBe("uncommitted developer work");
+    expect(await readFile(join(dir, ".bflow/config.yml"), "utf8")).toBe(config);
+    expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("down");
+    expect((await forced.down(false, 3000, true)).status).toBe("down");
+    expect(runner.requests.filter(r => r.args[0] === "session" && r.args[1] === "stop")).toHaveLength(1);
+  });
+  linuxIt("force down escapes an interrupted workspace shutdown and allows the next up", async () => {
+    await lifecycle.up();
+    vi.mocked(fixture.manager.down).mockResolvedValue({ ok: false, error: { code: "not_found", retryable: false, message: "workspace w1 not found" } });
+    await expect(lifecycle.down(true)).rejects.toThrow("workspace w1 not found");
+    await expect(lifecycle.up()).rejects.toThrow("interrupted shutdown");
+    expect((await lifecycle.down(false, 3000, true)).status).toBe("down");
+    expect((await lifecycle.up()).status).toBe("up");
+    expect(fixture.manager.up).toHaveBeenCalledTimes(2);
+    expect(fixture.manager.down).toHaveBeenCalledTimes(1);
+  });
+  linuxIt("force down skips an unresponsive graceful role stop", async () => {
+    await lifecycle.up();
+    vi.mocked(fixture.manager.down).mockImplementation(() => new Promise(() => {}));
+    expect((await lifecycle.down(false, 3000, true)).status).toBe("down");
+    expect(fixture.manager.down).not.toHaveBeenCalled();
+  });
+  linuxIt("force down cannot bypass a failed Runtime barrier", async () => {
+    await lifecycle.up();
+    const forced = new EnvironmentLifecycle(dir, { runner, integration: {
+      manager: fixture.manager, runtime: mockRuntime(),
+      quiesce: async () => ({ ok: false, error: { code: "conflict", retryable: true, message: "dispatch still in flight" } })
+    } });
+    await expect(forced.down(true, 3000, true)).rejects.toThrow("dispatch still in flight");
+    expect(runner.running.has(repository.sessionName)).toBe(true);
+    expect(runner.requests.some(r => r.args[0] === "session" && r.args[1] === "stop")).toBe(false);
+  });
+  linuxIt("force down cannot bypass failed aggregate checkpoint persistence", async () => {
+    await lifecycle.up();
+    const forced = new EnvironmentLifecycle(dir, { runner, integration: {
+      manager: fixture.manager, runtime: mockRuntime([activeRun]),
+      quiesce: async () => ({ ok: true, value: undefined }),
+      checkpoint: async () => ({ ok: false, error: { code: "corruption", retryable: false, message: "checkpoint disk failure" } })
+    } });
+    await expect(forced.down(true, 3000, true)).rejects.toThrow("checkpoint disk failure");
+    expect(runner.running.has(repository.sessionName)).toBe(true);
+    expect(runner.requests.some(r => r.args[0] === "session" && r.args[1] === "stop")).toBe(false);
+  });
+  linuxIt("force down preserves stopping state until a fresh probe confirms the server is gone", async () => {
+    await lifecycle.up();
+    const run = runner.run.bind(runner);
+    vi.spyOn(runner, "run").mockImplementation(async request => {
+      if (request.args[0] === "session" && request.args[1] === "stop") return { exitCode: 0, stdout: "{}", stderr: "" };
+      return run(request);
+    });
+    await expect(lifecycle.down(true, 500, true)).rejects.toMatchObject({ contractError: { code: "timeout" } });
+    expect(runner.running.has(repository.sessionName)).toBe(true);
+    expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("stopping");
+    expect(JSON.parse(await readFile(join(dir, ".bflow/state/session.json"), "utf8")).status).toBe("stopping");
+  });
+  linuxIt("force down reconciles a lost stop acknowledgement without resending shutdown", async () => {
+    await lifecycle.up();
+    const run = runner.run.bind(runner);
+    const stop = vi.fn();
+    vi.spyOn(runner, "run").mockImplementation(async request => {
+      if (request.args[0] === "session" && request.args[1] === "stop") {
+        stop(); runner.running.delete(repository.sessionName);
+        return { exitCode: 1, stdout: "", stderr: "socket closed after stopping" };
+      }
+      return run(request);
+    });
+    expect((await lifecycle.down(false, 3000, true)).status).toBe("down");
+    expect(stop).toHaveBeenCalledOnce();
+  });
+  linuxIt("force down refuses to stop a session using a foreign saved manifest", async () => {
+    await lifecycle.up();
+    const path = join(dir, ".bflow/state/session.json");
+    const saved = JSON.parse(await readFile(path, "utf8"));
+    await writeFile(path, JSON.stringify({ ...saved, workspaceRoot: "/foreign-repository" }));
+    await expect(lifecycle.down(true, 3000, true)).rejects.toThrow("another repository");
+    expect(runner.running.has(repository.sessionName)).toBe(true);
+    expect(runner.requests.some(r => r.args[0] === "session" && r.args[1] === "stop")).toBe(false);
+  });
+  linuxIt("routes down --force from the CLI to the checkpointed session stop", async () => {
+    await lifecycle.up();
+    vi.mocked(fixture.manager.getManifest).mockResolvedValue({ ok: false, error: { code: "not_found", retryable: false, message: "workspace w1 not found" } });
+    const result = await runCli(["down", "--force", "--json"], { cwd: dir, environment: {
+      runner, integration: { manager: fixture.manager, runtime: mockRuntime(), quiesce: async () => ({ ok: true, value: undefined }) }
+    } });
+    expect(result.exitCode).toBe(0);
+    expect(runner.running.has(repository.sessionName)).toBe(false);
+    expect(fixture.manager.down).not.toHaveBeenCalled();
+  });
   linuxIt("reports live server, panes and agent state", async () => {
     await lifecycle.up(); const status = await lifecycle.status();
     expect(status.server).toBe("running"); expect(status.liveObservation).toBe(true); expect(status.manifest?.panes).toHaveLength(7);
