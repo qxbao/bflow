@@ -4,7 +4,7 @@ import {
   type AgentExecutionHandle, type OperationResult, type RoleMessage, type PaneBinding
 } from "@bflow/contracts";
 import type { AgenticRuntimePorts } from "./ports.js";
-import { digest, json, type JournalState, type Outbound } from "./journal.js";
+import { digest, isConversationDelivery, json, type JournalState, type Outbound } from "./journal.js";
 
 export function unwrap<T>(result: OperationResult<T>): T {
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
@@ -111,7 +111,8 @@ export class HerdrOutbox {
     // One bounded pass. No waits for turns or reciprocal ACKs while holding a mailbox/runtime lock.
     for (const out of this.state.outbound) {
       if (out.leaseRelease) { await this.release(out); continue; }
-      if (out.status === "sending") { out.status = "unknown_delivery"; await this.save(); }
+      // A Conversation inbox write-ahead stays "sending": Runtime applies it after this locked pass.
+      if (out.status === "sending" && !isConversationDelivery(out)) { out.status = "unknown_delivery"; await this.save(); }
       if (out.status === "accepted" && out.handle) {
         if (!out.parentAssignmentId) await onBound(out, out.handle);
         if (out.message.type === "task.assignment") {
@@ -129,6 +130,8 @@ export class HerdrOutbox {
         continue;
       }
       if (out.status !== "queued") continue;
+      // Never call the Gateway here: it may drain a queued user turn that enqueues back into this locked journal.
+      if (isConversationDelivery(out)) { out.status = "sending"; await this.save(); continue; }
       if (out.parentAssignmentId) {
         try { this.noticeParent(out); } catch (error) { out.status = "cancelled"; out.error = String(error); await this.save(); continue; }
       }

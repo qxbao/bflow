@@ -31,9 +31,11 @@ async function fixture(options: { humanId?: string } = {}) {
   cleanup.push(root);
   const repository = join(root, "repo"), journalDirectory = join(root, "journal");
   let now = T0;
+  const conversationInbox: unknown[] = [];
   const ports = {
     clock: () => new Date(now),
     authenticateMessage: async () => true,
+    deliverToConversation: async (message: unknown) => { conversationInbox.push(message); },
     authorizeHuman: async (decision: ApprovalDecision) => decision.decidedBy === (options.humanId ?? "human-1")
   } as unknown as AgenticRuntimePorts;
   const journal = new AgenticJournal(journalDirectory, repository);

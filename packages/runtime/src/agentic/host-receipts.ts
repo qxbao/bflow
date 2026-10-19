@@ -10,7 +10,7 @@ import {
 } from "@bflow/contracts";
 import { digest, json, record, strings, textField } from "./journal.js";
 
-type Kind = "conversation-turn" | "conversation-intent" | "conversation-result" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled";
+type Kind = "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled";
 export interface HumanHookProvenance {
   origin: "UserPromptSubmit"; binding: PaneBinding; nativeSessionId: string;
   conversationSessionId: string; userId: string; messageId: string; promptDigest: string;
@@ -20,6 +20,13 @@ export const TrustedConversationTurnSchema = z.object({
   content: z.string().min(1), occurredAt: z.string().datetime(), userId: z.string().min(1), sequence: z.number().int().positive()
 }).strict();
 export type TrustedConversationTurn = z.infer<typeof TrustedConversationTurnSchema>;
+/** Durable, sanitised inbox entry for a RoleMessage applied by Conversation; a notice is delivery evidence, never task success. */
+const NOTICE_SUMMARY_LIMIT = 4096;
+export const ConversationNoticeSchema = z.object({ messageId: z.string().min(1), type: z.string().min(1), senderRole: z.string().min(1),
+  runId: z.string().min(1).optional(), correlationId: z.string().min(1), receivedAt: z.string().datetime(),
+  summary: z.string(), truncated: z.boolean() }).strict();
+export type ConversationNotice = z.infer<typeof ConversationNoticeSchema>;
+const NoticeSurfacedSchema = z.object({ messageId: z.string().min(1) }).strict();
 const ConversationDecisionReceiptSchema = z.object({ messageId: z.string().min(1), decision: JsonValueSchema,
   result: JsonValueSchema.optional() }).strict();
 export interface HostObservation {
@@ -72,6 +79,8 @@ export class HostReceiptJournal {
       if (baseline !== undefined && (!Array.isArray(baseline) || baseline.some(id => typeof id !== "string" || !id))) throw new Error("Invalid native response baseline");
       return json({ binding, message, sequence: raw.sequence, ...(baseline === undefined ? {} : { nativeResponseBaseline: baseline }) });
     }
+    if (kind === "conversation-notice") return json(ConversationNoticeSchema.parse(input));
+    if (kind === "notice-surfaced") return json(NoticeSurfacedSchema.parse(input));
     if (kind === "native-intent" || kind === "native-ack") return json(RoleMessageSchema.parse(input));
     if (kind === "gate") return json(QualityGateResultSchema.parse(input));
     if (kind === "evidence") return json(VerificationResultSchema.parse(input));
@@ -104,6 +113,7 @@ export class HostReceiptJournal {
         kind === "human" && ApprovalDecisionSchema.parse(record(payload).decision).approvalId !== id ||
         kind === "gate" && QualityGateResultSchema.parse(payload).evaluationId !== id ||
         kind === "evidence" && VerificationResultSchema.parse(payload).verificationId !== id ||
+        kind === "notice-surfaced" && record(payload).messageId !== id ||
         kind === "native-ack" && RoleMessageSchema.parse(payload).message_id !== id)
       throw new Error("Host receipt identity mismatch");
     return { ...envelope, checksum: textField(value.checksum) };
@@ -263,6 +273,30 @@ export class HostReceiptJournal {
     const intent = await this.read("conversation-intent", messageId);
     if (intent === undefined || digest(record(intent).decision) !== digest(decision)) throw new Error("Conversation result lacks matching intent");
     await this.write("conversation-result", messageId, { messageId, decision, result });
+  }
+  /** Idempotent by message ID: a replayed acknowledgement never creates a second notice. */
+  async appendConversationNotice(message: RoleMessage): Promise<boolean> {
+    const parsed = RoleMessageSchema.parse(message);
+    if (await this.read("conversation-notice", parsed.message_id) !== undefined) return false;
+    const text = JSON.stringify(parsed.payload) ?? "null", truncated = text.length > NOTICE_SUMMARY_LIMIT;
+    return this.write("conversation-notice", parsed.message_id, { messageId: parsed.message_id, type: parsed.type, senderRole: parsed.sender.role,
+      ...(parsed.run_id === undefined ? {} : { runId: parsed.run_id }), correlationId: parsed.correlation_id, receivedAt: new Date().toISOString(),
+      summary: truncated ? text.slice(0, NOTICE_SUMMARY_LIMIT) : text, truncated });
+  }
+  /** Notices not yet shown to the model, oldest first. A surfaced marker is a separate immutable receipt. */
+  async unsurfacedConversationNotices(): Promise<ConversationNotice[]> {
+    const notices: ConversationNotice[] = [];
+    for (const id of await this.receiptIds("conversation-notice")) {
+      if (await this.read("notice-surfaced", id) !== undefined) continue;
+      notices.push(ConversationNoticeSchema.parse(await this.read("conversation-notice", id)));
+    }
+    return notices.sort((a, b) => a.receivedAt.localeCompare(b.receivedAt) || a.messageId.localeCompare(b.messageId));
+  }
+  async markConversationNoticesSurfaced(messageIds: readonly string[]): Promise<void> {
+    for (const id of new Set(messageIds.map(value => textField(value)))) {
+      if (await this.read("conversation-notice", id) === undefined) throw new Error("Unknown Conversation notice");
+      await this.write("notice-surfaced", id, { messageId: id });
+    }
   }
   async recordGate(result: QualityGateResult): Promise<void> { const parsed = QualityGateResultSchema.parse(result); await this.write("gate", parsed.evaluationId, parsed); }
   async authenticateGate(input: QualityGateResult): Promise<boolean> { const result = QualityGateResultSchema.parse(input); return digest(await this.read("gate", result.evaluationId)) === digest(result); }

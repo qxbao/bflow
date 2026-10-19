@@ -13,6 +13,8 @@ export interface AgenticConversationHost {
   validateDecision(input: unknown): Promise<void>;
   handleTrustedApproval(input: unknown): Promise<unknown | undefined>;
   receiveHerdr(input: unknown): Promise<unknown>;
+  /** Runtime's own outbox only: the message was validated at its ingress, so no Herdr signature is required. */
+  receiveRuntime(input: unknown): Promise<unknown>;
   setBusy(busy: boolean): Promise<unknown>;
   flush(): Promise<unknown>;
 }
@@ -170,6 +172,14 @@ export async function createAgenticConversationHost(options: {
     async receiveHerdr(input) {
       const message = RoleMessageSchema.parse(input);
       if (!await runtime.ports.authenticateMessage(message) || message.recipient.role !== "conversation") throw new Error("Unauthenticated Conversation delivery");
+      const result = await gateway.handleCoordinatorRoleMessage(message);
+      if (!result.ok) throw new Error(result.error.message);
+      return result;
+    },
+    async receiveRuntime(input) {
+      const message = RoleMessageSchema.parse(input);
+      if (message.recipient.role !== "conversation") throw new Error("Wrong Conversation inbox recipient");
+      // Gateway drops an already processed message_id, so a redelivery after a crash is harmless.
       const result = await gateway.handleCoordinatorRoleMessage(message);
       if (!result.ok) throw new Error(result.error.message);
       return result;

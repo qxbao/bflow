@@ -5,11 +5,12 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { RoleMessageSchema } from "@bflow/contracts";
+import { BFLOW_INBOX_NUDGE } from "../../dist/agentic/conversation-inbox.js";
 
 const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const action of cleanup.splice(0).reverse()) await action(); });
 
-async function fixture(role = "conversation", provider = "codex") {
+async function fixture(role = "conversation", provider = "codex", replies: Record<string, unknown> = {}) {
   const root = await mkdtemp("/tmp/bf-hook-test-");
   cleanup.push(() => rm(root, { recursive: true, force: true }));
   const socketPath = join(root, "host.sock"), calls: { method: string; params: unknown }[] = [];
@@ -18,8 +19,9 @@ async function fixture(role = "conversation", provider = "codex") {
     socket.on("data", chunk => {
       input += String(chunk);
       if (!input.includes("\n")) return;
-      calls.push(JSON.parse(input.split("\n")[0]!));
-      socket.end('{"ok":true,"value":{"accepted":true}}\n');
+      const call = JSON.parse(input.split("\n")[0]!);
+      calls.push(call);
+      socket.end(JSON.stringify({ ok: true, value: replies[call.method] ?? { accepted: true } }) + "\n");
     });
   });
   await new Promise<void>(accept => server.listen(socketPath, accept));
@@ -127,4 +129,44 @@ it("marks ordinary Coordinator dialogue as a new non-delegation turn boundary", 
   const f = await fixture("coordinator");
   expect((await f.invoke("UserPromptSubmit", JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "ordinary dialogue" }))).code).toBe(0);
   expect(f.calls).toEqual([expect.objectContaining({ method: "provider_prompt_boundary", params: { paneId: "pane-1", nativeSessionId: "native-1" } })]);
+});
+
+describe.skipIf(process.platform === "win32")("Conversation inbox hooks", () => {
+  const notice = { messageId: "notice-1" };
+  it("blocks Stop once for unsurfaced Runtime notices, then marks them surfaced", async () => {
+    const f = await fixture("conversation", "claude", { conversation_notices: { notices: [notice] } });
+    const result = await f.invoke("Stop", JSON.stringify({ hook_event_name: "Stop", session_id: "native-1", stop_hook_active: false }));
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ decision: "block", reason: expect.stringContaining("Bflow Runtime updates") });
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_notices", "conversation_notices_surfaced"]);
+    expect(f.calls[1]!.params).toMatchObject({ messageIds: ["notice-1"], nativeSessionId: "native-1" });
+  });
+  it("stays silent on Stop with no unsurfaced notices, even when stop_hook_active is set", async () => {
+    const f = await fixture("conversation", "claude", { conversation_notices: { notices: [] } });
+    const result = await f.invoke("Stop", JSON.stringify({ hook_event_name: "Stop", session_id: "native-1", stop_hook_active: true }));
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_notices"]);
+  });
+  it("never blocks a non-Claude Stop, leaving notices for the next user turn", async () => {
+    const f = await fixture("conversation", "codex", { conversation_notices: { notices: [notice] } });
+    const result = await f.invoke("Stop", JSON.stringify({ hook_event_name: "Stop", session_id: "native-1" }));
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(f.calls.map(call => call.method)).not.toContain("conversation_notices_surfaced");
+  });
+  it("answers the inbox nudge without creating a user turn", async () => {
+    const f = await fixture("conversation", "claude", { conversation_notices: { notices: [notice] } });
+    const result = await f.invoke("UserPromptSubmit", JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: BFLOW_INBOX_NUDGE }));
+    expect(result.code).toBe(0);
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_notices", "conversation_notices_surfaced"]);
+    expect(JSON.parse(result.stdout).hookSpecificOutput.additionalContext).toContain("not a user message and not an approval");
+  });
+  it("surfaces notices with a real user turn only after its context is emitted", async () => {
+    const f = await fixture("conversation", "claude", { user_prompt: { messageId: "user-1", notices: [notice] } });
+    const result = await f.invoke("UserPromptSubmit", JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "hello" }));
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout).hookSpecificOutput.additionalContext).toContain("notice-1");
+    expect(f.calls.map(call => call.method)).toEqual(["user_prompt", "conversation_notices_surfaced"]);
+  });
 });

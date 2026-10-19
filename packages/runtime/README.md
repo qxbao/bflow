@@ -87,6 +87,20 @@ it does not create/replay ingress, resend uncertain delivery, or complete/fail a
 These paths have local subprocess/fake-transport and real Gateway tests, not live
 provider/Herdr acceptance evidence.
 
+Conversation-bound outbox messages are never typed into the Conversation input box. The
+locked outbox pass only writes them ahead as `sending` (no lease or transport send); Runtime
+then applies them in-process to the Conversation Gateway (`deliverToConversation`) after
+releasing the journal lock, because the Gateway may drain a queued user turn that enqueues back
+into Runtime. The Gateway deduplicates by `message_id`, so a failed or interrupted delivery is
+requeued and retried, ending in the terminal `delivered` status. Each applied
+message is kept as a durable notice (summary capped at 4096 characters) until the model has
+seen it: in the next user turn's hook context, in a Stop-hook `block` reason, or after a
+host-typed `[bflow]` inbox nudge. A 30-second reminder shows a Herdr notification and sends
+the nudge only when the Conversation agent is idle and its Claude input box is verifiably
+empty; other providers and unrecognised layouts fail closed. Notices are delivery evidence
+only, never task success, and the nudge never creates a user turn or approval. The empty-input
+detection, notification and Stop-hook continuation are not live-verified.
+
 ## Policies and lifecycle
 
 The Coordinator can assess requirements, request only useful specialists, prepare a

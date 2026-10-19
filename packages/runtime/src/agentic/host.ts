@@ -14,6 +14,7 @@ import {
   type AgentProviderId, type AgentRole, type PaneBinding, type RoleMessage, type SessionManifest, type RunStore, type OperationOptions
 } from "@bflow/contracts";
 import { authenticateNativeHerdrMessage } from "./herdr-ingress.js";
+import { BFLOW_INBOX_NUDGE, isProviderInputEmpty } from "./conversation-inbox.js";
 import { callHost } from "./host-protocol.js";
 import { readHostConfiguration, type HostConfiguration, type RoleLaunchDescriptor } from "./host-controller.js";
 import { digest, json, record, textField } from "./journal.js";
@@ -161,7 +162,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     } else if (role !== "conversation") {
       systemPrompt += "\n\n" + NON_USER_FACING_AUTONOMOUS_POLICY + "\n\n" + NON_USER_FACING_STRUCTURED_RESULT_REQUIREMENT + "\n\nTrusted host integration instructions:\n";
     }
-    if (role === "conversation") systemPrompt += "You are the sole user interface. You decide user intent and clarification in context. The trusted UserPromptSubmit hook records the actual user turn and supplies messageId, requiresConversationDecision, and Conversation context. For each ordinary user turn, call conversation_decide with that messageId and your structured decision; use workflow_request for authorized implementation or read-only spikes, clarify only for material missing details, conversation_only for direct answers, status_query or cancellation_request as appropriate. Record your exact clarification questions/options using that tool before asking so later short answers can be resolved. Never fabricate the raw user turn, provenance, pending choices, or workflow success. Never use send_role_message for delegation.request; conversation_decide owns the handoff. Never call coordination tools or edit source. Human approval is handled exclusively by the trusted hook; conversation_decide cannot approve. If requiresConversationDecision is false, explain the trusted result.";
+    if (role === "conversation") systemPrompt += "You are the sole user interface. You decide user intent and clarification in context. The trusted UserPromptSubmit hook records the actual user turn and supplies messageId, requiresConversationDecision, and Conversation context. For each ordinary user turn, call conversation_decide with that messageId and your structured decision; use workflow_request for authorized implementation or read-only spikes, clarify only for material missing details, conversation_only for direct answers, status_query or cancellation_request as appropriate. Record your exact clarification questions/options using that tool before asking so later short answers can be resolved. Never fabricate the raw user turn, provenance, pending choices, or workflow success. Never use send_role_message for delegation.request; conversation_decide owns the handoff. Never call coordination tools or edit source. Human approval is handled exclusively by the trusted hook; conversation_decide cannot approve. If requiresConversationDecision is false, explain the trusted result. Runtime updates arrive as `notices` in hook context or as a Stop-hook reason: report them to the user concisely and never ask the user to repeat. A `[bflow] ...` inbox nudge is not a user message and never counts as an approval.";
     else if (role === "coordinator") {
       systemPrompt += "Inspect the durable inbox, assess the spec and propose a schema-valid workflow. Runtime controls dispatch and quality/approval gates. Never edit source or approve human-required gates.";
     } else if (role === "developer") systemPrompt += "Read assignment_context and workspace_status for the exact accepted specification, owned paths and worktree. Native shell is disabled: use commit_changes with expectedHead for scoped commits and check_work for untrusted feedback. Required TDD: first edit/commit only configured testPaths, request_verification(red), then END YOUR TURN. Runtime sends a phase outcome to resume you. After independent Red, tests are frozen: authorize_implementation, edit source, commit, check_work, then request_verification(green) and yield. On Green receipt, refactor source if appropriate without editing Red tests, commit, request_verification(refactor) and yield. For non-required automated work, request_verification(verification) after a clean commit and yield. Submit implementation only when all required automated phase receipts exist. Manual docs evidence is requested after submission. Never modify accepted criteria/specification or claim your own feedback is independent acceptance.";
@@ -451,13 +452,18 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       roleCapabilities: capabilities, taskChecks: [...DEFAULT_HOST_CHECKS, ...verification.behavioralChecks()],
       workflowChecks: [...DEFAULT_HOST_CHECKS, ...verification.behavioralChecks()], deterministicGates: [verification.deterministicGate(), ...verification.behavioralGates()],
       authenticateMessage: authenticateNativeHerdrMessage,
+      // Runtime outbox messages reach Conversation in-process; the model learns of them only through hook notices.
+      onConversationNotice: async message => { await receipts.appendConversationNotice(message); },
       authenticateResult: async (result, handle, message) => await authenticateNativeHerdrMessage(message) && result.requestId === handle.requestId && result.executionId === handle.executionId,
       authenticateEvidence: async (result, message) => await authenticateNativeHerdrMessage(message) && verification.authenticateEvidence(result),
       authenticateGateResult: async (result, message) => await authenticateNativeHerdrMessage(message) && verification.authenticateGate(result),
       projectApprovalRequired: () => configuration.policy?.sdd.approvalRequired === true,
       authorizeHuman: decision => receipts.authenticateHuman(decision),
       recoveredHumanDecisions: await receipts.humanDecisions(),
-      onNativeDelivery: async message => { await receipts.recordNativeAcknowledgement(message); deliveredMessageIds.add(message.message_id); },
+      onNativeDelivery: async message => { await receipts.recordNativeAcknowledgement(message);
+        // Recorded only after Conversation applied the message: a durable notice, not task-success evidence.
+        if (message.recipient.role === "conversation") await receipts.appendConversationNotice(message);
+        deliveredMessageIds.add(message.message_id); },
       onHumanDecision: async decision => { if (!humanHookProvenance) throw new Error("Human approval requires physical user input hook");
         await receipts.recordHuman(ApprovalDecisionSchema.parse(decision), humanHookProvenance); }
     });
@@ -663,6 +669,17 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (role === "coordinator" && await receipts.stopCoordinatorTurn(binding)) coordinatorStopGeneration++;
         return { recorded: true };
       }
+      if (method === "conversation_notices" || method === "conversation_notices_surfaced") {
+        if (role !== "conversation") throw new Error("Only Conversation reads inbox notices");
+        const input = record(params);
+        // Like provider_stopped: before activation there is no authenticated pane, so there are no notices to read or mark.
+        if (!workspace) return method === "conversation_notices" ? { notices: [] } : { recorded: false };
+        const binding = await principal(role, textField(input.paneId));
+        if (!binding.session || binding.session.value !== textField(input.nativeSessionId)) throw new Error("Conversation notice native session mismatch");
+        if (method === "conversation_notices") return { notices: await receipts.unsurfacedConversationNotices() };
+        await receipts.markConversationNoticesSurfaced(z.array(z.string().min(1)).parse(input.messageIds));
+        return { recorded: true };
+      }
       if (method === "user_prompt") {
         if (role !== "conversation" || quiesced) throw new Error("Only active Conversation accepts user input");
         const input = record(params); const binding = await principal(role, textField(input.paneId));
@@ -679,8 +696,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           const userId = `local-user-${process.getuid?.() ?? "local"}`;
           humanHookProvenance = { origin: "UserPromptSubmit", binding, nativeSessionId, userId, messageId,
             conversationSessionId: manifest!.conversationSessionId, promptDigest: digest(prompt) };
-          try { return await conversationIntake.receive(binding, { conversationSessionId: manifest!.conversationSessionId,
-            messageId, content: prompt, userId }); }
+          try { const received = record(await conversationIntake.receive(binding, { conversationSessionId: manifest!.conversationSessionId,
+            messageId, content: prompt, userId }));
+            return json({ ...received, notices: await receipts.unsurfacedConversationNotices() }); }
           finally { humanHookProvenance = undefined; }
         }); userQueue = work; return work;
       }
@@ -855,8 +873,34 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }, error => { process.stderr.write(`Bflow Gateway check: ${redactString(String(error))}\n`); }).finally(() => { verifyingGateway = false; });
   }, 30_000);
   gatewayTimer.unref();
+  // Inbox reminder: one Herdr notification per new notice; the nudge is typed only into a verifiably idle, empty input box.
+  const remindedNotices = new Set<string>();
+  let remindingInbox = false;
+  const conversationProvider = platformRoles.find(option => option.role === "conversation")?.provider ?? "claude";
+  const inboxTimer = setInterval(() => {
+    if (!workspace || quiesced || closing || remindingInbox) return;
+    remindingInbox = true;
+    void (async () => {
+      const unsurfaced = await receipts.unsurfacedConversationNotices();
+      if (!unsurfaced.length) return;
+      const fresh = unsurfaced.filter(notice => !remindedNotices.has(notice.messageId));
+      if (fresh.length) {
+        for (const notice of fresh) remindedNotices.add(notice.messageId);
+        try { await herdr(["notification", "show", `Bflow: ${fresh.length} cập nhật mới`, "--body", fresh.map(notice => notice.type).join(", "), "--sound", "request"]); }
+        catch (error) { process.stderr.write(`Bflow inbox notification: ${redactString(String(error))}\n`); }
+      }
+      const pane = unwrap(await requireWorkspace().runtime.ports.panes.getRoleBinding("conversation"));
+      if (!pane) return;
+      // Re-checked immediately before submission; any doubt (busy, draft, unknown layout) skips the nudge.
+      const agent = await observeAgent(pane.paneId);
+      if (agent.status !== "idle" || !isProviderInputEmpty(conversationProvider, await herdr(["pane", "read", pane.paneId, "--source", "visible", "--format", "text"]))) return;
+      await herdr(["agent", "prompt", pane.paneId, BFLOW_INBOX_NUDGE]);
+    })().catch(error => { process.stderr.write(`Bflow inbox: ${redactString(String(error))}\n`); })
+      .finally(() => { remindingInbox = false; });
+  }, 30_000);
+  inboxTimer.unref();
   const close = async () => {
-    closing = true; clearInterval(timer); clearInterval(pump); clearInterval(gatewayTimer);
+    closing = true; clearInterval(timer); clearInterval(pump); clearInterval(gatewayTimer); clearInterval(inboxTimer);
     await drainRoleStartup(true);
     await activation?.catch(() => undefined);
     await nativeSessionWrites;
@@ -1096,6 +1140,12 @@ export async function runProviderHook(configuration: RoleConfiguration, event: s
   }
 }
 
+/** Notice identities from a host reply; hooks never treat notice text as authority, only as identities to mark surfaced. */
+function noticeIds(reply: unknown): string[] {
+  return (z.object({ notices: z.array(z.object({ messageId: z.string().min(1) }).passthrough()).optional() }).passthrough().parse(reply).notices ?? [])
+    .map(notice => notice.messageId);
+}
+
 async function handleProviderHook(configuration: RoleConfiguration, event: string, roleConfigPath?: string): Promise<void> {
   const chunks: Buffer[] = []; let size = 0;
   for await (const chunk of process.stdin) { size += Buffer.byteLength(chunk); if (size > 1024 * 1024) throw new Error("Oversized provider hook"); chunks.push(Buffer.from(chunk)); }
@@ -1130,6 +1180,25 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
       ...(plan === undefined || reachability === undefined ? {} : { launchId: plan.launchId, toolReachability: reachability }) });
     if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "native_session", {paneId, sessionId:session});
     if (event === "Stop" && configuration.role === "coordinator") await callHost(configuration.socketPath, configuration.token, "provider_stopped", { paneId, nativeSessionId: session });
+    // Only Claude's Stop `block` continuation is relied on; elsewhere notices wait for the next user turn instead of being lost.
+    if (event === "Stop" && configuration.role === "conversation" && configuration.provider === "claude") {
+      // Each notice blocks at most one Stop: it is marked surfaced once its reason has been emitted, so no loop is possible.
+      const reply = await callHost(configuration.socketPath, configuration.token, "conversation_notices", { paneId, nativeSessionId: session });
+      const ids = noticeIds(reply);
+      if (ids.length) {
+        process.stdout.write(JSON.stringify({ decision: "block", reason: "Bflow Runtime updates (report them to the user, do not ask the user to repeat): " + JSON.stringify(record(reply).notices) }) + "\n");
+        await callHost(configuration.socketPath, configuration.token, "conversation_notices_surfaced", { paneId, nativeSessionId: session, messageIds: ids });
+      }
+    }
+  }
+  if (event === "UserPromptSubmit" && configuration.role === "conversation" && textField(hook.prompt).trim() === BFLOW_INBOX_NUDGE) {
+    // A host-typed nudge is not human input: it never reaches user_prompt, so it cannot create a trusted turn or approval.
+    const reply = await callHost(configuration.socketPath, configuration.token, "conversation_notices", { paneId, nativeSessionId: textField(hook.session_id) });
+    const ids = noticeIds(reply);
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: "Trusted Bflow inbox nudge, not a user message and not an approval. " +
+      (ids.length ? "Runtime updates: " + JSON.stringify(record(reply).notices) : "No new Runtime updates.") } }) + "\n");
+    if (ids.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_surfaced", { paneId, nativeSessionId: textField(hook.session_id), messageIds: ids });
+    return;
   }
   if (event === "UserPromptSubmit") {
     const environmentId = process.env.BFLOW_ENVIRONMENT_ID;
@@ -1150,6 +1219,9 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
   if (event === "UserPromptSubmit" && configuration.role === "conversation") {
     const result = await callHost(configuration.socketPath, configuration.token, "user_prompt", { paneId, hook });
     process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: "Trusted Bflow user turn and Conversation context: " + JSON.stringify(result) } }) + "\n");
+    // Marked only after the context reached the provider; a crash before this line re-surfaces the notices.
+    const ids = noticeIds(result);
+    if (ids.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_surfaced", { paneId, nativeSessionId: textField(hook.session_id), messageIds: ids });
   }
   if (event === "PreToolUse") {
     try { await callHost(configuration.socketPath, configuration.token, "tool_guard", { paneId, hook }); }

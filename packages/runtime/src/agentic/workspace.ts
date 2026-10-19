@@ -24,6 +24,8 @@ export interface OpenAgenticWorkspaceOptions {
   /** Deterministic host runners. Review checks are always routed through Herdr. */
   deterministicGates: readonly QualityGate[];
   authenticateMessage: AgenticRuntimePorts["authenticateMessage"];
+  /** Called after Conversation applied a Runtime outbox message; the host records it as a durable notice for the model. */
+  onConversationNotice?: (message: RoleMessage) => Promise<void>;
   authenticateResult: AgenticRuntimePorts["authenticateResult"];
   authenticateEvidence: AgenticRuntimePorts["authenticateEvidence"];
   authenticateGateResult: AgenticRuntimePorts["authenticateGateResult"];
@@ -191,6 +193,7 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
   try {
     artifactStore = unwrap(await artifactsModule.openFilesystemArtifactStore({ root: resolve(directory, "artifacts"), storeId: options.sessionId }));
     let runtime: AgenticWorkflowRuntime;
+    let conversation: AgenticConversationHost | undefined;
     const approvedBundles = new Map<string, ApprovalDecision>();
     for (const decision of options.recoveredHumanDecisions ?? []) {
       const parsed = ApprovalDecisionSchema.parse(decision);
@@ -213,20 +216,24 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
     runtime = new AgenticWorkflowRuntime({ engine: new coreModule.DeterministicWorkflowEngine({ bindingReceiptKeys: options.bindingReceiptKeys }), runStore, artifactStore,
       registry: new registryModule.FileAgentRegistry({ stateFile: resolve(directory, "registry.json") }), transport, panes, policies,
       automaticAlternativeEvidence: true, roleCapabilities: options.roleCapabilities, maxConcurrency: options.maxDeveloperCapacity ?? 2, taskChecks: options.taskChecks, workflowChecks: options.workflowChecks,
-      authenticateMessage: async message => await authenticateNativeHerdrMessage(message) || await options.authenticateMessage(message), authenticateResult: options.authenticateResult,
+      authenticateMessage: async message => await authenticateNativeHerdrMessage(message) || await options.authenticateMessage(message),
+      deliverToConversation: async message => {
+        if (!conversation) throw new Error("Conversation host is not ready");
+        await conversation.receiveRuntime(message); await options.onConversationNotice?.(message);
+      }, authenticateResult: options.authenticateResult,
       authenticateEvidence: options.authenticateEvidence, authenticateGateResult: options.authenticateGateResult,
       authorizeHuman: async decision => { const authorized = await options.authorizeHuman(decision);
         if (authorized) approvedBundles.set(decision.approvalId, decision); return authorized; },
       ...(options.projectApprovalRequired ? { projectApprovalRequired: options.projectApprovalRequired } : {})
     }, { journalDirectory: resolve(directory, "journal"), repositoryPath: repository });
     await runtime.initialize();
-    const conversation = await createAgenticConversationHost({ runtime, manifest, contextDirectory: resolve(directory, "conversation"),
+    conversation = await createAgenticConversationHost({ runtime, manifest, contextDirectory: resolve(directory, "conversation"),
       ...(options.onHumanDecision ? { onHumanDecision: options.onHumanDecision } : {}),
       ...(options.recoveredHumanDecisions ? { recoveredHumanDecisions: options.recoveredHumanDecisions } : {}) });
     const tools = new CoordinatorTools(runtime);
     const ingress = options.nativeIngressSocket ? await startHerdrReceiptIngress({ socketPath: options.nativeIngressSocket,
       publicKeys: options.bindingReceiptKeys ?? {}, receive: async message => {
-        const result = message.recipient.role === "conversation" ? await conversation.receiveHerdr(message) : await runtime.receiveHerdr(message);
+        const result = message.recipient.role === "conversation" ? await conversation!.receiveHerdr(message) : await runtime.receiveHerdr(message);
         await options.onNativeDelivery?.(message); return result;
       } }) : undefined;
     return { runtime, conversation, tools, async close() { await tools.drain(); await ingress?.close(); artifactStore.close(); runStore.close(); } };

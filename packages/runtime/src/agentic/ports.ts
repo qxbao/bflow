@@ -82,6 +82,11 @@ export interface AgenticRuntimePorts {
   panes: PanePolicy; policies: AgenticPolicies;
   /** Trusted host authentication of a Herdr-originated envelope, never an agent-supplied flag. */
   authenticateMessage(message: RoleMessage): Promise<boolean>;
+  /**
+   * Applies a Conversation-bound outbox RoleMessage to the Conversation Gateway, never by typing into the user's input box.
+   * Must be idempotent per message_id: the outbox retries a failed or interrupted delivery.
+   */
+  deliverToConversation(message: RoleMessage): Promise<void>;
   /** Host validates remote correlation/runner identity. Herdr terminal `done` is insufficient. */
   authenticateResult(result: AgentResult, handle: AgentExecutionHandle, message: RoleMessage): Promise<boolean>;
   authenticateGateResult(result: QualityGateResult, message: RoleMessage): Promise<boolean>;
