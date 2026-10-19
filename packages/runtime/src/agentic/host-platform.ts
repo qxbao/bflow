@@ -39,6 +39,7 @@ export function skillSupportedCommands(platform: AgenticHostPlatformOptions): st
 const LIVE_TRANSPORT_STATES = ["starting", "accepted", "idle", "working", "blocked", "done", "unknown", "disconnected", "cancelled"] as const;
 const INTERACTIVE_STATES: readonly string[] = ["idle", "working", "done"];
 const PENDING_STATES: readonly string[] = ["starting", "accepted"];
+const MAX_ACTIVATION_CONCURRENCY = 3;
 
 export const HostNativeSessionSchema = z.object({
   source: z.string().min(1),
@@ -288,14 +289,18 @@ export class HostPlatformSession {
     panes: readonly { readonly role: AgentRole; readonly paneId: string }[],
     observe: (paneId: string) => Promise<HostAgentObservation>
   ): Promise<void> {
-    for (const option of this.options.platform.roles) {
-      if (!option.required || option.role === "developer") continue;
+    // Snapshot every required binding before probes. Missing launch material must not
+    // leave a partially checked set of roles running while startup is rejected.
+    const checks = this.options.platform.roles.filter(option => option.required && option.role !== "developer").map(option => {
       const pane = panes.find(candidate => candidate.role === option.role);
       if (!pane) throw new Error(`Required platform role ${option.role} has no pane in the SessionManifest`);
       const launch = this.launches.get(option.role);
       if (launch === undefined) {
         throw new Error(`Required platform role ${option.role} has no prepared launch in this host process; run bflow up again`);
       }
+      return { option, pane, launch };
+    });
+    const verifyRole = async ({ option, pane, launch }: (typeof checks)[number]): Promise<void> => {
       const observed = await observe(pane.paneId);
       const observation = liveObservation(pane.paneId, observed);
       if (observation.nativeSession === undefined) {
@@ -316,6 +321,21 @@ export class HostPlatformSession {
         }
         throw new Error(`Required platform role ${option.role} is not activated-ready: ${describeFailure(result.error)}`);
       }
+    };
+
+    let next = 0;
+    const failures = new Map<number, unknown>();
+    await Promise.all(Array.from({ length: Math.min(MAX_ACTIVATION_CONCURRENCY, checks.length) }, async () => {
+      while (failures.size === 0 && next < checks.length) {
+        const index = next++;
+        try { await verifyRole(checks[index]!); }
+        catch (error) { failures.set(index, error); }
+      }
+    }));
+    // Never race cleanup with an in-flight health probe or journal append. Report
+    // failures in configured role order, regardless of their completion order.
+    for (let index = 0; index < checks.length; index++) {
+      if (failures.has(index)) throw failures.get(index);
     }
   }
 

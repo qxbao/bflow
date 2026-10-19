@@ -156,6 +156,17 @@ The launched process must receive each token in the environment variable named i
 
 Codex loads user `config.toml` and `hooks.json` in every invocation. Bflow keeps its existing L3 MCP isolation: it enumerates configured global MCP servers and disables those servers only after its own MCP table, in both launch arguments and the read-only readiness probe. Unenumerable, colliding or unsafe MCP names remain blocked.
 
+The inventory describes Bflow-managed Codex execution. The retired plugin IDs
+`claude-mem@claude-mem-local` and `claude-mem@thedotmack` are always disabled
+with per-invocation `-c plugins.<id>.enabled=false` overrides
+in MCP enumeration, readiness execution probes and launch profiles. Their hooks
+are excluded with an explicit inventory diagnostic; global config and plugin
+files are preserved. Other plugin IDs and global hooks remain subject to review.
+Both overrides are sent even if the plugin is absent, so enabling it during
+enumeration cannot run hooks that were excluded from the snapshot.
+An empty inline plugin `hooks: {}` declaration means no hooks; malformed hook
+envelopes, including a file-backed `hooks.json` without a `hooks` object, stay blocked.
+
 Global hooks use a separate explicit operator review flow. The package exports:
 
 - `inspectCodexHooks(options?)` and the strict `CodexHookReviewSchema` for a read-only inventory.

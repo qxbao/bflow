@@ -452,6 +452,12 @@ Guarantees implemented here, with package-local tests in `test/platform/service.
 - Launch material (`launch.env` bearer tokens) is kept in memory only. Reports, status snapshots and errors
   never contain token values. Released or shut-down launches drop their material.
 - `verifyActivated` requires a launch this instance prepared; `assertFresh` delegates to the cached preflight.
+- The persistent host checks activated health for up to three required permanent roles at once,
+  including their pane observations. Every role retains its own prepared launch, native-session
+  observation and signed attestation; startup waits for all required checks to pass. Missing pane
+  or launch references are rejected before probes start. A failed check stops queued checks and
+  drains those already running before returning the first failure in configured role order.
+  This scheduling is covered by local tests; a reduction in live startup time has not been measured.
 - Codex setup review, preflight probes and permanent/dynamic role launches share the selected HOME/PATH
   and explicitly empty outer Orca pane/root/endpoint/port selectors in child environments. Parent settings
   and Bflow's mandatory Herdr/Runtime hooks are preserved; an unsupported hook snapshot still blocks launch.
