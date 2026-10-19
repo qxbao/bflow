@@ -83,7 +83,7 @@ Khi chạy `bflow setup`, hệ thống thực hiện theo đúng thứ tự ph�
 2. Cài đặt và kiểm tra SHA-256 cho **32 builtin skills** vào kho lưu trữ bất biến (`skills-store`).
 3. Khởi tạo cấu hình Shared MCP Gateway (`mcp-config`) và đăng ký dịch vụ nền cấp người dùng (`bflow-mcp-gateway.service` trên `systemd --user` hoặc `launchd` agent trên macOS) kèm dấu sở hữu `.bflow-owner`.
 4. Cập nhật khối `PATH` có đánh dấu quản lý trong file cấu hình shell (`~/.bashrc` / `~/.zshrc`) và cài đặt script khởi chạy `bflow` vào thư mục `managedBin`.
-5. Cấu hình các tích hợp công cụ (`rtk`, `gitnexus`, `superpowers`; `mempalace` chỉ được liệt kê là yêu cầu thủ công) nếu có mặt và đủ điều kiện (ví dụ: hoãn đánh chỉ mục GitNexus trên repo chưa có commit đầu tiên).
+5. Cấu hình các tích hợp công cụ (`rtk`, `gitnexus`, `mempalace`, `superpowers`; MemPalace được cài từ wheel đã pin vào virtualenv riêng của Bflow và đăng ký qua Gateway) nếu có mặt và đủ điều kiện (ví dụ: hoãn đánh chỉ mục GitNexus trên repo chưa có commit đầu tiên).
 
 Chạy lại `bflow setup --yes` lần thứ hai trên môi trường đã hội tụ sẽ trả về `outcome: "noop"` (`already_satisfied`) mà không ghi thừa.
 

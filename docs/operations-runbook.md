@@ -55,7 +55,6 @@ bflow mcp status --json
 bflow tool status --json
 ```
 
-> `mempalace` là yêu cầu cài thủ công và không được `bflow setup --apply` cài. Nếu `bflow doctor` báo thiếu, cài bằng `uv tool install mempalace`, đăng ký MCP `mempalace-mcp` với provider, rồi chạy lại `bflow doctor`. Doctor không đưa ra lệnh tự sửa cho công cụ này.
 
 ### 2.4 Dừng phiên an toàn (`bflow down`)
 

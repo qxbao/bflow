@@ -171,7 +171,7 @@ export const TOOL_CATALOG: readonly ToolCatalogEntry[] = [
     knownInstallDirs: commonDirs,
     manualGuidance: providerGuidance("Agy", "the provider's official documentation")
   },
-  ...["rtk", "gitnexus", "chrome-devtools-mcp"].map((toolId): ToolCatalogEntry => ({
+  ...["rtk", "gitnexus", "chrome-devtools-mcp", "mempalace"].map((toolId): ToolCatalogEntry => ({
     toolId, kind: "tool_cli", executables: { posix: [toolId], win32: [toolId] },
     versionArgs: ["--version"], versionPattern: SEMVER, requirement: { type: "present" },
     defaultRequired: false, knownInstallDirs: commonDirs,

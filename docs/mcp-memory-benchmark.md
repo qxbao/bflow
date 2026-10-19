@@ -1,7 +1,5 @@
 # Bflow Platform v3 — Shared MCP Gateway Architecture & Real Linux Memory Benchmark
 
-> **Ghi chú (lịch sử):** Tài liệu này ghi lại bằng chứng đo tại thời điểm đó, trong đó có Claude-Mem. Bflow không còn hỗ trợ Claude-Mem (thay bằng MemPalace cài thủ công); các số liệu và đường dẫn liên quan đến `claude-mem` chỉ còn giá trị lịch sử và không thể tái tạo từ mã hiện tại.
-
 **Tested Baseline Commit**: `7133b02` (`main`, post P24–P33 integration)
 **Measurement Timestamp**: `2026-10-17T14:43:39.461Z`
 **Host Kernel & OS**: Linux `x86_64` (`/proc/<pid>/status` `VmRSS` & `/proc/<pid>/smaps_rollup` `Pss`)
@@ -15,11 +13,11 @@
 Bflow Platform v3 ([`@bflow/mcp-gateway`](../packages/mcp-gateway/src/index.ts) and [`@bflow/mcp-services`](../packages/mcp-services/src/index.ts)) replaces per-agent stdio MCP server duplication with a shared `BflowMcpGateway` + `GatewayHttpServer` (`http://127.0.0.1:<port>/mcp`). Multiple concurrent agent sessions across heterogeneous providers (`claude`, `codex`, `agy`) connect to a single shared MCP backend process per repository/machine scope while preserving per-client authentication tokens, capability-scoped tool visibility, exclusive resource leases, automatic crash recovery, and strict cross-project isolation.
 
 Across a **6-agent SDLC session** (`1 Claude` Conversation Agent, `1 Codex` Coordinator Agent, `1 Agy` Reviewer Agent, and `3 Developer` instances across `claude`, `codex`, and `agy`):
-- **Process Count Reduction**: **83.33% fewer MCP backend processes** (`1` shared process per service instead of `6` per-agent processes; `2` processes instead of `12` for a 2-service stack).
-- **Combined Real Memory Savings (`claude-mem 12.1.3` + `gitnexus 1.6.12`)**:
-  - **Shared Gateway (2 backend processes)**: **`195,384 kB` (`190.80 MiB`) RSS** / **`125,266 kB` (`122.33 MiB`) PSS**.
-  - **Per-Agent Isolated (12 backend processes)**: **`1,156,344 kB` (`1,129.24 MiB`) RSS** / **`589,283 kB` (`575.47 MiB`) PSS**.
-  - **Measured Net Savings**: **`960,960 kB` (`938.44 MiB`, `83.10%`) RSS saved** and **`464,017 kB` (`453.14 MiB`, `78.74%`) PSS saved**.
+- **Process Count Reduction**: **83.33% fewer MCP backend processes** (`1` shared process per service instead of `6` per-agent processes).
+- **Real Memory Savings (`gitnexus 1.6.12`)**:
+  - **Shared Gateway (1 backend process)**: **`117,704 kB` (`114.95 MiB`) RSS** / **`78,380 kB` (`76.54 MiB`) PSS**.
+  - **Per-Agent Isolated (6 backend processes)**: **`691,968 kB` (`675.75 MiB`) RSS** / **`398,584 kB` (`389.24 MiB`) PSS**.
+  - **Measured Net Savings**: **`574,264 kB` (`560.80 MiB`, `82.99%`) RSS saved** and **`320,204 kB` (`312.70 MiB`, `80.34%`) PSS saved**.
 
 ---
 
@@ -46,12 +44,8 @@ All measurements were collected from real OS child processes on Linux using:
 | :--- | :--- | :---: | :---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | **1. Node.js MCP Server (`shared-code-index`)** | **Shared Gateway** | `1` | `6` | `47,204` | `46.10` | `17,454` | `17.04` | **`220,360 kB` (`82.36%`)** | **`30,916 kB` (`63.92%`)** |
 | | Per-Agent Isolated | `6` | `6` | `267,564` | `261.29` | `48,370` | `47.24` | — | — |
-| **2. `claude-mem` (`12.1.3` `memory-mcp.js`)** | **Shared Gateway** | `1` | `6` | `77,680` | `75.86` | `46,886` | `45.79` | **`386,696 kB` (`83.27%`)** | **`143,813 kB` (`75.41%`)** |
-| | Per-Agent Isolated | `6` | `6` | `464,376` | `453.49` | `190,699` | `186.23` | — | — |
-| **3. `gitnexus mcp` (`1.6.12` `dist/cli/index.js mcp`)** | **Shared Gateway** | `1` | `6` | `117,704` | `114.95` | `78,380` | `76.54` | **`574,264 kB` (`82.99%`)** | **`320,204 kB` (`80.34%`)** |
+| **2. `gitnexus mcp` (`1.6.12` `dist/cli/index.js mcp`)** | **Shared Gateway** | `1` | `6` | `117,704` | `114.95` | `78,380` | `76.54` | **`574,264 kB` (`82.99%`)** | **`320,204 kB` (`80.34%`)** |
 | | Per-Agent Isolated | `6` | `6` | `691,968` | `675.75` | `398,584` | `389.24` | — | — |
-| **4. Combined Production Stack (`claude-mem` + `gitnexus`)** | **Shared Gateway** | **`2`** | **`12`** (`6 × 2`) | **`195,384`** | **`190.80`** | **`125,266`** | **`122.33`** | **`960,960 kB` (`83.10%`)** | **`464,017 kB` (`78.74%`)** |
-| | Per-Agent Isolated | `12` | `12` (`6 × 2`) | `1,156,344` | `1,129.24` | `589,283` | `575.47` | — | — |
 
 ---
 
@@ -69,19 +63,7 @@ All measurements were collected from real OS child processes on Linux using:
   - Agent 6 (`PID 2576391`): `VmRSS = 44,668 kB`, `Pss = 8,064 kB`
   - **Total (6 isolated)**: `VmRSS = 267,564 kB`, `Pss = 48,370 kB`
 
-#### B. `claude-mem` (`12.1.3` — `/home/baodq/.claude/plugins/cache/thedotmack/claude-mem/12.1.3/scripts/memory-mcp.js`)
-- **Shared Backend (`1` process)**:
-  - `PID 2576398`: `VmRSS = 77,680 kB`, `Pss = 46,886 kB`, `Private_Dirty = 26,644 kB`
-- **Per-Agent Isolated Backends (`6` stdio processes)**:
-  - Agent 1 (`PID 2576410`): `VmRSS = 76,656 kB`, `Pss = 31,419 kB`
-  - Agent 2 (`PID 2576418`): `VmRSS = 76,696 kB`, `Pss = 31,375 kB`
-  - Agent 3 (`PID 2576424`): `VmRSS = 77,900 kB`, `Pss = 32,202 kB`
-  - Agent 4 (`PID 2576430`): `VmRSS = 77,744 kB`, `Pss = 32,020 kB`
-  - Agent 5 (`PID 2576437`): `VmRSS = 77,676 kB`, `Pss = 31,847 kB`
-  - Agent 6 (`PID 2576443`): `VmRSS = 77,704 kB`, `Pss = 31,836 kB`
-  - **Total (6 isolated)**: `VmRSS = 464,376 kB`, `Pss = 190,699 kB`
-
-#### C. `gitnexus mcp` (`1.6.12` — `/home/baodq/.nvm/versions/node/v24.10.0/lib/node_modules/gitnexus/dist/cli/index.js mcp`)
+#### B. `gitnexus mcp` (`1.6.12` — `/home/baodq/.nvm/versions/node/v24.10.0/lib/node_modules/gitnexus/dist/cli/index.js mcp`)
 - **Shared Backend (`1` process)**:
   - `PID 2576450`: `VmRSS = 117,704 kB`, `Pss = 78,380 kB`, `Private_Dirty = 49,332 kB`
 - **Per-Agent Isolated Backends (`6` stdio processes)**:

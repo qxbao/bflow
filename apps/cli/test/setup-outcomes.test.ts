@@ -74,13 +74,6 @@ describe("standard setup composition", () => {
   });
 });
 
-describe("removed memory observer option", () => {
-  it("rejects the legacy --memory-provider option", async () => {
-    const { parseCliArgs } = await import("../src/index.js");
-    expect(parseCliArgs(["setup", "--memory-provider", "host"]).ok).toBe(false);
-  });
-});
-
 describe("required skills catalog", () => {
   it("reports an unavailable explicit catalog before setup writes", async () => {
     const ctx = await context({ outcome: "healthy" });

@@ -296,6 +296,32 @@ describe("Task 2: Platform v3 Lifecycle & Doctor Integration", () => {
       expect(agyCheck?.message).toContain("not authenticated");
     });
 
+    it("offers setup as the repair only when the catalog can install the tool on this platform", async () => {
+      const run = async (platform: string, arch: string) => {
+        const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+        const originalArch = Object.getOwnPropertyDescriptor(process, "arch")!;
+        Object.defineProperty(process, "platform", { value: platform });
+        Object.defineProperty(process, "arch", { value: arch });
+        try {
+          const cfg: EnvironmentConfig = JSON.parse(makeConfig(repository, { requiredTools: ["mempalace"] }));
+          const report = await runDoctorDiagnostics({ repository, config: cfg, runner, env: process.env,
+            dependencies: { toolOverrides: { mempalace: { installed: false } } },
+            probeSession: async () => false, intent: async () => null, statePath: (n) => resolve(dir, ".bflow/state", n) });
+          return report.checks.find((c) => c.checkId === "tool-mempalace");
+        } finally {
+          Object.defineProperty(process, "platform", originalPlatform);
+          Object.defineProperty(process, "arch", originalArch);
+        }
+      };
+      const supported = await run("linux", "x64");
+      expect(supported?.status).toBe("failed");
+      expect(supported?.remediation).toContain("bflow setup --apply");
+      const unsupported = await run("win32", "x64");
+      expect(unsupported?.status).toBe("failed");
+      expect(unsupported?.remediation).toContain("cannot install 'mempalace' on win32/x64");
+      expect(unsupported?.remediation).not.toContain("Run 'bflow setup --apply'");
+    });
+
     it("evaluates tools and skills via toolOverrides and skillsOverride", async () => {
       const cfg: EnvironmentConfig = JSON.parse(makeConfig(repository, { requiredTools: ["rtk"] }));
       const report = await runDoctorDiagnostics({

@@ -29,7 +29,7 @@ export type ToolLaunchSpec = z.infer<typeof ToolLaunchSpecSchema>;
 
 /** The Gateway launches this pinned shim; the shim validates its spec and upstream binary before spawning. */
 export async function createManagedMcpService(input: {
-  toolId: "gitnexus" | "chrome-devtools-mcp"; version: string;
+  toolId: "gitnexus" | "chrome-devtools-mcp" | "mempalace"; version: string;
   serviceId: string; revision?: number; operation: ScopedOperation; configRoot: string; launch: ToolLaunchSpec;
   resourceKey?: string;
 }): Promise<MCPServiceDefinition> {
@@ -66,6 +66,19 @@ export async function createGitNexusService(input: {
       executableDigest: await fileDigest(input.executable), argv: ["mcp"], cwd: root,
       environment: { GITNEXUS_HOME: home, GITNEXUS_MCP_ALLOWED_REPOS: root, GITNEXUS_MCP_READ_ONLY: "1", GITNEXUS_SHARED_STORE: "off" },
       lockPath: join(state, `gitnexus-storage-${sha256(root)}.lock`) } });
+}
+
+/** MemPalace uses its own palace configuration (MEMPALACE_* and ~/.mempalace); setup never relocates or
+ * overrides it. Its stdio proxy shares a hub across sessions, so the service is concurrent, not exclusive. */
+export async function createMemPalaceService(input: {
+  executable: string; version: string; stateRoot: string; configRoot: string; operation: ScopedOperation;
+}): Promise<MCPServiceDefinition> {
+  const state = await privateDirectory(input.stateRoot);
+  const operation = ScopedOperationSchema.parse(input.operation);
+  return createManagedMcpService({ toolId: "mempalace", version: input.version,
+    serviceId: `mempalace-${sha256(operation.scope.machineId).slice(0, 24)}`, operation, configRoot: input.configRoot,
+    launch: { schemaVersion: 3, executable: input.executable, executableDigest: await fileDigest(input.executable),
+      argv: [], cwd: state, environment: {} } });
 }
 
 export async function createChromeService(input: {

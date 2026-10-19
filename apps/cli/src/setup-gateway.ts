@@ -14,7 +14,7 @@ import { MachineConfigSchema, McpConfigComponent, ServicesComponent, SetupStateS
   type ServiceDefinition, type ServiceManager } from "@bflow/machine-setup";
 
 export interface SetupGatewayLaunchRequirement {
-  toolId: "gitnexus" | "chrome-devtools-mcp";
+  toolId: "gitnexus" | "chrome-devtools-mcp" | "mempalace";
   executable: string;
   args: string[];
   requirements: string[];
@@ -52,10 +52,11 @@ export function setupGatewayDiagnostics(input: Pick<SetupGatewayInput, "reposito
 
 const requiredOperations = {
   gitnexus: ["query", "context", "impact"],
-  "chrome-devtools-mcp": ["list_pages", "new_page", "navigate_page"]
+  "chrome-devtools-mcp": ["list_pages", "new_page", "navigate_page"],
+  mempalace: ["mempalace_status", "mempalace_search"]
 };
 const ApprovalSchema = z.object({ policyVersion: z.literal(2), repositorySelected: z.boolean(), browserExecutable: z.string().nullable(),
-  requirements: z.array(z.object({ toolId: z.enum(["gitnexus", "chrome-devtools-mcp"]), executable: z.string(),
+  requirements: z.array(z.object({ toolId: z.enum(["gitnexus", "chrome-devtools-mcp", "mempalace"]), executable: z.string(),
     args: z.array(z.string()), requirements: z.array(z.string()), version: z.string().min(1), pin: ToolInstallDescriptorSchema }).strict()) }).strict();
 const GatewayConfigSchema = z.object({
   schemaVersion: z.literal(3), desiredDigest: z.string().regex(/^[a-f0-9]{64}$/),
@@ -147,6 +148,10 @@ async function validateLaunches(saved: z.infer<typeof GatewayConfigSchema>) {
       expectedSpec = { schemaVersion: 3, executable: item.executable, executableDigest: spec.executableDigest, argv: ["mcp"], cwd: canonicalRoot,
         environment: { GITNEXUS_HOME: join(state, "gitnexus-home"), GITNEXUS_MCP_ALLOWED_REPOS: canonicalRoot,
           GITNEXUS_MCP_READ_ONLY: "1", GITNEXUS_SHARED_STORE: "off" }, lockPath: join(state, `gitnexus-storage-${sha(canonicalRoot)}.lock`) };
+    } else if (item.toolId === "mempalace") {
+      const state = await realpath(join(saved.paths.state, "mempalace"));
+      serviceId = `mempalace-${sha(saved.operation.scope.machineId).slice(0, 24)}`;
+      expectedSpec = { schemaVersion: 3, executable: item.executable, executableDigest: spec.executableDigest, argv: [], cwd: state, environment: {} };
     } else {
       const profileRoot = await realpath(join(saved.paths.data, "browser-profiles"));
       const profile = join(profileRoot, "chrome", repositoryId, "setup-browser-probe");
@@ -167,7 +172,8 @@ async function validateLaunches(saved: z.infer<typeof GatewayConfigSchema>) {
     const expectedDefinition = MCPServiceDefinitionSchema.parse({ schemaVersion: 3, serviceId, revision: 1,
       scope: { kind: "machine", machineId: saved.operation.scope.machineId },
       tool: { ...tools.createToolCapability(item.toolId, item.version, saved.operation.scope.machineId), required: true,
-        operations: requiredOperations[item.toolId], resource: { sharing: "exclusive", resourceKey: serviceId } },
+        operations: requiredOperations[item.toolId],
+        resource: item.toolId === "mempalace" ? { sharing: "concurrent", maxConcurrency: 16 } : { sharing: "exclusive", resourceKey: serviceId } },
       connection: { kind: "stdio_mcp", executable: process.execPath, executableDigest: sha(await readFile(process.execPath)),
         argv: [launcher, specPath, specDigest, launcherDigest], environmentBindings: {}, ownership: "bflow", bridgeRequired: true },
       authentication: { mode: "none" }, healthTimeoutMs: 15_000, idleTimeoutMs: 60_000, restartLimit: 2 });
@@ -221,6 +227,7 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
   const desiredServices = [...config.services.filter(item => item.serviceId !== service.serviceId), service];
   const plannedMcpIds = [...operatorServices.map(item => item.serviceId), ...activeRequirements.map(item =>
     item.toolId === "gitnexus" ? `gitnexus-${sha(repositoryRoot).slice(0, 24)}` :
+      item.toolId === "mempalace" ? `mempalace-${sha(platform.machineId).slice(0, 24)}` :
       `chrome-${sha(join(platform.paths.data, "browser-profiles", "chrome", repositoryId, "setup-browser-probe")).slice(0, 24)}`)];
   for (const component of components) if (component instanceof EnvironmentManifestComponent)
     component.bindServiceInventory(plannedMcpIds, desiredServices.map(item => item.serviceId));
@@ -282,6 +289,9 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
             if (!["fresh", "indexed"].includes(indexed.status)) throw new Error(indexed.diagnostic);
             definition = await tools.createGitNexusService({ executable: item.executable, version: item.version, repositoryRoot,
               stateRoot: join(platform.paths.state, "gitnexus"), configRoot: join(platform.paths.config, "tool-launches"), operation: machineOperation });
+          } else if (item.toolId === "mempalace") {
+            definition = await tools.createMemPalaceService({ executable: item.executable, version: item.version,
+              stateRoot: join(platform.paths.state, "mempalace"), configRoot: join(platform.paths.config, "tool-launches"), operation: machineOperation });
           } else {
             const browserExecutable = approval.browserExecutable;
             if (!browserExecutable) throw new Error("Chrome/Chromium is unavailable; install a supported browser before Gateway browser verification");

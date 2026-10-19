@@ -1030,12 +1030,18 @@ export async function runDoctorDiagnostics(
 
   const toolsList = ["rtk", "mempalace", "gitnexus", "chrome-devtools-mcp", "superpowers"] as const;
   const requiredTools = config?.environment?.requiredTools ?? [];
+  // `bflow setup --apply` can only fix a tool that the reviewed catalog pins for this OS/architecture.
+  // When the catalog cannot be loaded, keep the setup hint rather than guessing.
+  const catalog = (await loadToolInstallerModule())?.defaultToolCatalog?.(process.platform, process.arch) as
+    { pins: { toolId: string }[]; manual: { toolId: string; diagnostic: string; documentation: string }[] } | undefined;
 
   for (const tool of toolsList) {
     const isRequired = requiredTools.includes(tool);
-    // MemPalace is a manual prerequisite: `bflow setup --apply` never installs it.
-    const installHint = tool === "mempalace"
-      ? "Install MemPalace manually (uv tool install mempalace) and register its MCP server; 'bflow setup --apply' does not install it."
+    const manualGuidance = catalog && !catalog.pins.some(pin => pin.toolId === tool)
+      ? catalog.manual.find(item => item.toolId === tool) : undefined;
+    const setupRepair = manualGuidance ? undefined : "bflow setup --apply";
+    const installHint = manualGuidance
+      ? `Bflow setup cannot install '${tool}' on ${process.platform}/${process.arch}: ${manualGuidance.diagnostic} ${manualGuidance.documentation}`
       : `Run 'bflow setup --apply' to install '${tool}'.`;
     const override = dependencies?.toolOverrides?.[tool];
 
@@ -1055,7 +1061,7 @@ export async function runDoctorDiagnostics(
           tStatus = "fail";
           tReason = `Required tool '${tool}' is missing or unavailable.`;
           tRemediation = installHint;
-          tRepair = tool === "mempalace" ? undefined : "bflow setup --apply";
+          tRepair = setupRepair;
         } else {
           tStatus = "skipped";
           tReason = `Tool '${tool}' is optional and not installed.`;
@@ -1079,7 +1085,7 @@ export async function runDoctorDiagnostics(
             tStatus = "fail";
             tReason = `Required tool '${tool}' failed with exit code ${tRes.exitCode}.`;
             tRemediation = installHint;
-            tRepair = tool === "mempalace" ? undefined : "bflow setup --apply";
+            tRepair = setupRepair;
           } else {
             tStatus = "skipped";
             tReason = `Tool '${tool}' is optional and not installed.`;
@@ -1090,7 +1096,7 @@ export async function runDoctorDiagnostics(
           tStatus = "fail";
           tReason = `Required tool '${tool}' is missing or unavailable.`;
           tRemediation = installHint;
-          tRepair = tool === "mempalace" ? undefined : "bflow setup --apply";
+          tRepair = setupRepair;
         } else {
           tStatus = "skipped";
           tReason = `Tool '${tool}' is optional and not installed.`;

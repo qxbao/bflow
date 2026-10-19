@@ -15,7 +15,7 @@ export interface DefaultSetupInventory {
   documentation?: string;
 }
 export interface DefaultSetupLaunchRequirement {
-  toolId: "gitnexus" | "chrome-devtools-mcp";
+  toolId: "gitnexus" | "chrome-devtools-mcp" | "mempalace";
   executable: string;
   args: string[];
   requirements: string[];
@@ -114,10 +114,22 @@ export async function createDefaultSetupConfiguration(options: {
   diagnostics.push("claude/codex/agy: Complete each selected provider's own login flow; setup does not create credentials or widen permissions.");
   diagnostics.push("GitNexus 1.6.12 uses PolyForm-Noncommercial-1.0.0; review eligibility or obtain the upstream commercial license before approving installation. Its npm native dependency build scripts execute during the approved install.");
   diagnostics.push("Pinned npm entry tarballs are checksum-verified; transitive npm dependencies are resolved by npm and are not a fully locked offline dependency bundle.");
+  diagnostics.push("The MemPalace wheel is checksum-verified and installed into a Bflow-owned virtualenv; its Python dependencies are resolved by uv/pip and are not a fully locked offline bundle.");
   const launchRequirements: DefaultSetupLaunchRequirement[] = [];
-  for (const toolId of ["gitnexus", "chrome-devtools-mcp"] as const) {
+  for (const toolId of ["gitnexus", "chrome-devtools-mcp", "mempalace"] as const) {
     const entry = inventory.find(item => item.toolId === toolId);
     if (!entry?.executable) continue;
+    if (toolId === "mempalace") {
+      // The Gateway launches the MCP stdio entry point, not the `mempalace` CLI.
+      const pin = catalog.pins.find((candidate: { toolId: string }) => candidate.toolId === "mempalace");
+      const mcpExecutable = pin ? leaf.managedToolMcpExecutable(pin) : null;
+      if (!mcpExecutable) continue;
+      launchRequirements.push({ toolId, executable: join(platform.paths.data, "tools", "mempalace", mcpExecutable), args: [],
+        requirements: ["Gateway scoped registration and MCP initialize/tools/list verification",
+          "Python runtime (uv or python3 >= 3.9) available to build the Bflow-owned virtualenv",
+          "Palace location and backend stay under MemPalace's own configuration; setup never overrides them"] });
+      continue;
+    }
     launchRequirements.push({ toolId, executable: entry.executable,
       args: toolId === "gitnexus" ? ["mcp"] : ["--no-usage-statistics", "--no-performance-crux"],
       requirements: toolId === "gitnexus"
@@ -128,7 +140,7 @@ export async function createDefaultSetupConfiguration(options: {
     const observations: ToolObservation[] = [];
     for (const pin of currentConfig.toolPins) {
       const native = pin.toolId === "superpowers";
-      const managedMcpPin = (pin.toolId === "gitnexus" || pin.toolId === "chrome-devtools-mcp")
+      const managedMcpPin = (pin.toolId === "gitnexus" || pin.toolId === "chrome-devtools-mcp" || pin.toolId === "mempalace")
         ? catalog.pins.find((candidate: { toolId: string; installerId: string; version: string; source: string; integrity: string }) =>
           candidate.toolId === pin.toolId && candidate.installerId === pin.installerId && candidate.version === pin.version &&
           candidate.source === pin.source && candidate.integrity === pin.integrity) : undefined;

@@ -70,7 +70,7 @@ const byId = (obs: Awaited<ReturnType<typeof probeTools>>, id: string) => obs.fi
 
 describe("catalog", () => {
   it("covers runtime, provider and auxiliary CLIs without shell installers", () => {
-    expect(TOOL_CATALOG.map((t) => t.toolId)).toEqual(["node", "pnpm", "git", "herdr", "claude", "codex", "agy", "rtk", "gitnexus", "chrome-devtools-mcp"]);
+    expect(TOOL_CATALOG.map((t) => t.toolId)).toEqual(["node", "pnpm", "git", "herdr", "claude", "codex", "agy", "rtk", "gitnexus", "chrome-devtools-mcp", "mempalace"]);
     for (const t of TOOL_CATALOG)
       for (const g of Object.values(t.manualGuidance)) expect(g).not.toMatch(/curl|\|\s*(ba)?sh/);
   });

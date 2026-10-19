@@ -24,7 +24,9 @@ to load the managed PATH when needed.
 
 Default setup uses the reviewed, exact-version tool catalog for the supported
 platform: Herdr, Claude Code, Codex, Agy, RTK, GitNexus, Chrome DevTools MCP,
-Superpowers. MemPalace is listed as a manual requirement and is never installed by setup.
+MemPalace, Superpowers. MemPalace is installed from a checksum-pinned PyPI wheel into a
+Bflow-owned virtualenv (uv, or python3 >= 3.9 as fallback) and registered with the Gateway;
+your palace location and configuration are left untouched.
 Explicit machine pins are preserved. Provider login remains the account owner's
 interactive action; installing a CLI does not establish authentication. Upstream
 license conditions are shown in the installation diagnostics.
