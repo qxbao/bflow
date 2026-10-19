@@ -88,6 +88,7 @@ No skill starts duplicate workers, mutates global provider settings or installs 
 | sdlc | [specification-driven-development](sdlc/specification-driven-development/SKILL.md) | specifier, architect, coordinator, planner |
 | sdlc | [task-decomposition](sdlc/task-decomposition/SKILL.md) | coordinator, planner |
 | tooling | [mcp-tool-discovery](tooling/mcp-tool-discovery/SKILL.md) | conversation, coordinator, planner, architect, specifier, developer, tester, reviewer, qa, security |
+| tooling | [use-context7](tooling/use-context7/SKILL.md) | specifier, architect, planner, developer, reviewer, qa |
 | tooling | [use-mempalace](tooling/use-mempalace/SKILL.md) | coordinator, planner, architect, specifier, developer, tester, reviewer, qa, security |
 | tooling | [use-gitnexus](tooling/use-gitnexus/SKILL.md) | specifier, architect, planner, developer, reviewer, security |
 | tooling | [use-rtk](tooling/use-rtk/SKILL.md) | developer, tester, qa, reviewer |
