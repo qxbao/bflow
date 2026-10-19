@@ -27,6 +27,20 @@ describe("CLI setup default inventory", () => {
     const persistedNative = (await persisted.additionalToolObservations(platform, persisted.config)).filter(item => ["superpowers"].includes(item.toolId));
     expect(persistedNative.every(item => item.diagnostics.some(message => message.includes("not installed")))).toBe(true);
   });
+  it("drops pins for tools that earlier releases supported but Bflow no longer does", async () => {
+    const platform = detectPlatform(defaultHostEnvironment());
+    platform.os = "linux"; platform.arch = "x64";
+    platform.paths.data = "/tmp/bflow-default-config/data";
+    const retired = { schemaVersion: 3 as const, toolId: "claude-mem", installerId: "bflow-native-claude-mem-v1", method: "verified_archive" as const,
+      version: "12.1.3", source: "https://registry.npmjs.org/claude-mem/-/claude-mem-12.1.3.tgz", integrity: "a".repeat(64),
+      platforms: ["linux" as const], requiresElevation: false };
+    const result = await createDefaultSetupConfiguration({ platform,
+      config: { ...defaultMachineConfig(), providers: ["claude"], toolPins: [retired] } });
+    expect(result.config.toolPins.map(pin => pin.toolId)).not.toContain("claude-mem");
+    expect(result.config.toolPins.map(pin => pin.toolId)).toContain("mempalace");
+    expect(result.inventory.some(item => item.toolId === "claude-mem")).toBe(false);
+    expect(result.diagnostics.some(message => message.startsWith("claude-mem: no longer supported"))).toBe(true);
+  });
   it("preserves explicit operator pins, providers, services and secrets", async () => {
     const platform = detectPlatform(defaultHostEnvironment());platform.os = "linux"; platform.arch = "x64";
     const config = defaultMachineConfig(); config.providers = ["codex"];

@@ -6,6 +6,9 @@ import type { OperationResult, ToolInstallRequest, ToolInstaller } from "@bflow/
 import { MachineConfigSchema, TOOL_CATALOG, ToolInstallerRegistry, defaultMachineConfig, findExecutable,
   type MachineConfig, type PlatformProfile, type ToolObservation } from "@bflow/machine-setup";
 
+/** Tool ids from earlier releases that are no longer supported; their persisted pins are dropped on load. */
+const RETIRED_TOOL_IDS: ReadonlySet<string> = new Set(["claude-mem"]);
+
 export interface DefaultSetupInventory {
   toolId: string;
   status: "pinned" | "operator_configured" | "manual";
@@ -45,9 +48,14 @@ export async function createDefaultSetupConfiguration(options: {
   inventory: DefaultSetupInventory[]; launchRequirements: DefaultSetupLaunchRequirement[];
   additionalToolObservations: (platform: PlatformProfile, config: MachineConfig) => Promise<ToolObservation[]> }> {
   const { platform } = options;
-  const config = MachineConfigSchema.parse(options.config ?? {
+  const loaded = MachineConfigSchema.parse(options.config ?? {
     ...defaultMachineConfig(), providers: ["claude", "codex", "agy"]
   });
+  // Machine configs written by earlier releases can still pin tools Bflow no longer supports. Such a pin has no
+  // installer or probe, so it would be reported as a required tool that can only be installed by hand.
+  const retiredPins = loaded.toolPins.filter(pin => RETIRED_TOOL_IDS.has(pin.toolId));
+  const config = retiredPins.length === 0 ? loaded
+    : MachineConfigSchema.parse({ ...loaded, toolPins: loaded.toolPins.filter(pin => !RETIRED_TOOL_IDS.has(pin.toolId)) });
   const registry = options.registry ?? new ToolInstallerRegistry();
   const leaf = await import(new URL("../../../packages/tool-installer/dist/index.js", import.meta.url).href);
   const catalog = leaf.defaultToolCatalog(platform.os, platform.arch);
@@ -111,6 +119,7 @@ export async function createDefaultSetupConfiguration(options: {
   }
   inventory.push(...manual.map(item => ({ ...item, status: "manual" as const })));
   const diagnostics = manual.map(item => `${item.toolId}: ${item.diagnostic} ${item.documentation}`);
+  for (const pin of retiredPins) diagnostics.push(`${pin.toolId}: no longer supported; its saved pin was ignored and is removed from the machine configuration on the next setup apply.`);
   diagnostics.push("claude/codex/agy: Complete each selected provider's own login flow; setup does not create credentials or widen permissions.");
   diagnostics.push("GitNexus 1.6.12 uses PolyForm-Noncommercial-1.0.0; review eligibility or obtain the upstream commercial license before approving installation. Its npm native dependency build scripts execute during the approved install.");
   diagnostics.push("Pinned npm entry tarballs are checksum-verified; transitive npm dependencies are resolved by npm and are not a fully locked offline dependency bundle.");
