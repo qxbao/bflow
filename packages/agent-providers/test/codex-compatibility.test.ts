@@ -21,6 +21,60 @@ async function fixture() {
 }
 
 describe("installed Codex compatibility", () => {
+  async function pluginFixture(id: string, declaration: unknown) {
+    const fixtureValue = await fixture();
+    const [name, marketplace] = id.split("@");
+    const plugin = join(fixtureValue.home, "plugins/cache", marketplace!, name!, "1.0.0");
+    await mkdir(join(plugin, ".codex-plugin"), { recursive: true, mode: 0o700 });
+    await writeFile(join(plugin, ".codex-plugin/plugin.json"), JSON.stringify({ name, hooks: declaration }), { mode: 0o600 });
+    const config = `[plugins.${JSON.stringify(id)}]\nenabled=true\n`;
+    await writeFile(join(fixtureValue.home, "config.toml"), config, { mode: 0o600 });
+    return { ...fixtureValue, plugin, config };
+  }
+
+  it("accepts an empty inline plugin hook declaration without reading fallback hooks", async () => {
+    const { plugin, options } = await pluginFixture("empty@local", {});
+    await mkdir(join(plugin, "hooks"), { mode: 0o700 });
+    await writeFile(join(plugin, "hooks/hooks.json"), "malformed fallback", { mode: 0o600 });
+    const review = await inspectCodexHooks(options);
+    expect(review.status).toBe("none");
+    expect(review.unsupportedReasons).toEqual([]);
+    expect(review.sources.some(source => source.kind === "plugin_manifest")).toBe(true);
+  });
+
+  it.each([null, { unexpected: true }, { hooks: null }, [[{}]]])("rejects malformed inline plugin hooks %j", async declaration => {
+    const { options } = await pluginFixture("malformed@local", declaration);
+    expect((await inspectCodexHooks(options)).status).toBe("unsupported");
+  });
+
+  it("still rejects a global hooks.json with no hooks object", async () => {
+    const { home, options } = await fixture();
+    await writeFile(join(home, "hooks.json"), "{}", { mode: 0o600 });
+    expect((await inspectCodexHooks(options)).status).toBe("unsupported");
+  });
+
+  it.each(["claude-mem@claude-mem-local", "claude-mem@thedotmack"])("excludes %s only under the managed child disable policy", async id => {
+    const { home, plugin, options, config } = await pluginFixture(id, { hooks: {
+      Stop: [{ hooks: [{ type: "command", command: "$(touch /tmp/must-never-execute)" }] }]
+    } });
+    const review = await inspectCodexHooks(options);
+    expect(review.status).toBe("none");
+    expect(review.diagnostics.join(" ")).toContain(`plugins.${id}.enabled=false`);
+    expect(review.sources.some(source => source.path.startsWith(plugin))).toBe(false);
+    expect(await readFile(join(home, "config.toml"), "utf8")).toBe(config);
+    await writeFile(join(home, "hooks.json"), JSON.stringify({ hooks: {
+      Stop: [{ hooks: [{ type: "command", command: "$(touch /tmp/must-never-execute)" }] }]
+    } }), { mode: 0o600 });
+    expect((await inspectCodexHooks(options)).status).toBe("unsupported");
+  });
+
+  it("keeps dynamic hooks blocked for the same plugin name in another marketplace", async () => {
+    const { options } = await pluginFixture("claude-mem@unrelated", { hooks: {
+      Stop: [{ hooks: [{ type: "command", command: "$(touch /tmp/must-never-execute)" }] }]
+    } });
+    expect((await inspectCodexHooks(options)).status).toBe("unsupported");
+  });
+
   it("requires execute permission for a direct script while allowing explicit shell reads", async () => {
     const { home, options, hook } = await fixture();
     const script = join(home, "readable.sh");

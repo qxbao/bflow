@@ -82,6 +82,11 @@ export class OfficialProviderPluginAdapter implements ProviderPluginAdapter {
     } catch (error) { return { ready: false, diagnostic: `Provider plugin verification failed: ${String(error)}` }; }
   }
 
+  /** Proves absence only when the provider's own inventory was read; otherwise null (unknown). */
+  async registered(raw: ManagedToolPin): Promise<boolean | null> {
+    return this.#runtime ? this.#runtime.registered(raw) : null;
+  }
+
   async activate(raw: ManagedToolPin, artifact: string, _action: "install" | "update" | "repair", options?: OperationOptions):
     Promise<{ success: boolean; diagnostic: string }> {
     if (this.#runtime) return this.#runtime.activate(raw, artifact, _action, options);

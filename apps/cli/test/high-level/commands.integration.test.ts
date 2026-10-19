@@ -442,7 +442,7 @@ describe("bflow verify", () => {
     const human = captureIo();
     await runCli(["verify", TASK_ID, "--run", RUN_ID, "--plan", planPath, "--change-set", changePath],
       { cwd: root, highLevelServices: svc, io: human });
-    expect(human.out.join("\n")).toContain("not_passed");
+    expect(human.out.join("\n")).toContain("not passed [FAIL]");
     expect(human.out.join("\n")).toContain("Findings");
     expect(human.out.join("\n")).toContain("Next:");
   });

@@ -1503,6 +1503,25 @@ describe("@bflow/agent-providers", () => {
 
     const quote = (value: string): string => JSON.stringify(value);
 
+    it.each(["conversation", "coordinator"] as const)("permits the configured host MCP for Claude %s without Gateway registrations", async role => {
+      const env = createTestEnvironment("claude", "restricted", { role });
+      const adapter = new ClaudeProviderAdapter({
+        runner: createFakeProviderRunner({ scenario: "healthy" }),
+        executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true,
+        hostMcpServers: hostServers
+      });
+      const result = await adapter.prepareLaunch(env);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const argv = result.value.argv;
+      expect(argv[argv.indexOf("--permission-mode") + 1]).toBe("dontAsk");
+      expect(argv[argv.indexOf("--tools") + 1]).toBe("");
+      expect(argv[argv.indexOf("--allowedTools") + 1]).toBe("mcp__bflow__*");
+      const settings = JSON.parse(await readFile(result.value.configFiles[2]!.path, "utf8"));
+      expect(settings.permissions.allow).toEqual(["mcp__bflow__*"]);
+    });
+
     it("Claude renders host bflow stdio, streamable_http Gateway entry and all four native hooks", async () => {
       const env = createTestEnvironment("claude");
       const adapter = new ClaudeProviderAdapter({
@@ -1529,6 +1548,11 @@ describe("@bflow/agent-providers", () => {
           }
         }
       });
+
+      const permitted = res.value.argv[res.value.argv.indexOf("--allowedTools") + 1]!.split(",");
+      expect(permitted).toEqual(["Read", "Glob", "Grep", "Edit", "Write", "mcp__bflow__*", "mcp__gateway-dev__*"]);
+      const permissions = JSON.parse(await readFile(res.value.configFiles[2]!.path, "utf8")).permissions;
+      expect(permissions.allow).toEqual(["Read,Glob,Grep,Edit,Write", "mcp__bflow__*", "mcp__gateway-dev__*"]);
 
       const settings = JSON.parse(await readFile(res.value.configFiles[2]!.path, "utf8")) as { hooks: unknown };
       const hook = (command: string) => [{ hooks: [{ type: "command", command, timeout: 30 }] }];
@@ -1836,7 +1860,7 @@ describe("@bflow/agent-providers", () => {
         customHandler: (invocation) => {
           options.invocations?.push([...invocation.args]);
           options.invocationEnvs?.push({ ...(invocation.env ?? {}) });
-          if (invocation.args.join(" ") === "mcp list --json") {
+          if (invocation.args.slice(-3).join(" ") === "mcp list --json") {
             if ((options.listExit ?? 0) !== 0) {
               return { exitCode: options.listExit ?? 1, stdout: "", stderr: "list failed", started: true };
             }
@@ -1879,6 +1903,45 @@ describe("@bflow/agent-providers", () => {
 
     const bflowServer = { bflow: { command: "/usr/bin/true", args: ["--serve"] } };
 
+    it("disables the reviewed retired plugin in MCP enumeration, probes and launches without changing global config", async () => {
+      const config = '[plugins."claude-mem@claude-mem-local"]\nenabled=true\n';
+      const home = await freshCodexHome({ "config.toml": config });
+      // A missing cache must not block when the exact plugin is disabled in every execution path.
+      const invocations: Array<readonly string[]> = [];
+      const adapter = codexAdapter(codexRunner({ globalServers: [], invocations }), home, { hostMcpServers: bflowServer });
+      const env = createTestEnvironment("codex", "workspace_auto");
+      const health = await adapter.checkHealth({ schemaVersion: 3, environment: env, stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(health.ok && health.value.status).toBe("ready");
+      const disabled = "plugins.claude-mem@claude-mem-local.enabled=false";
+      expect(invocations.find(args => args.includes("ping"))).toContain(disabled);
+      expect(invocations.find(args => args.includes("mcp"))).toContain(disabled);
+      const launch = await adapter.prepareLaunch(env);
+      expect(launch.ok).toBe(true);
+      if (launch.ok) {
+        expect(launch.value.argv).toContain(disabled);
+        expect(launch.value.argv).not.toContain('plugins."claude-mem@claude-mem-local".enabled=false');
+      }
+      expect(await readFile(join(home, "config.toml"), "utf8")).toBe(config);
+    });
+
+    it("keeps a retired plugin disabled when it is enabled during MCP enumeration", async () => {
+      const home = await freshCodexHome();
+      const invocations: Array<readonly string[]> = [];
+      const fallback = createFakeProviderRunner({ scenario: "healthy" });
+      const runner = { async run(invocation: Parameters<typeof fallback.run>[0]) {
+        invocations.push([...invocation.args]);
+        if (invocation.args.slice(-3).join(" ") === "mcp list --json") {
+          await writeFile(join(home, "config.toml"), '[plugins."claude-mem@claude-mem-local"]\nenabled=true\n', { mode: 0o600 });
+          return { exitCode: 0, stdout: "[]", stderr: "", started: true };
+        }
+        return fallback.run(invocation);
+      } };
+      const health = await codexAdapter(runner, home).checkHealth({ schemaVersion: 3,
+        environment: createTestEnvironment("codex", "workspace_auto"), stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(health.ok && health.value.status).toBe("ready");
+      expect(invocations.find(args => args.includes("ping"))).toContain("plugins.claude-mem@claude-mem-local.enabled=false");
+    });
+
     it("disables exactly the global MCP servers after the Bflow mcp_servers table and leaves Bflow servers untouched", async () => {
       const home = await freshCodexHome({ "config.toml": "[mcp_servers.gitnexus]\ncommand = \"/usr/bin/true\"\n[mcp_servers.playwright]\ncommand = \"/usr/bin/true\"\n" });
       const adapter = codexAdapter(codexRunner({ globalServers: ["gitnexus", "playwright"] }), home, {
@@ -1896,7 +1959,7 @@ describe("@bflow/agent-providers", () => {
       expect(tableIndex).toBeGreaterThanOrEqual(0);
       expect(gitnexusIndex).toBeGreaterThan(tableIndex);
       expect(playwrightIndex).toBeGreaterThan(tableIndex);
-      expect(argv.filter((arg) => arg.endsWith(".enabled=false"))).toEqual([
+      expect(argv.filter((arg) => arg.startsWith("mcp_servers.") && arg.endsWith(".enabled=false"))).toEqual([
         "mcp_servers.gitnexus.enabled=false",
         "mcp_servers.playwright.enabled=false"
       ]);
@@ -1912,17 +1975,19 @@ describe("@bflow/agent-providers", () => {
       const result = await adapter.prepareLaunch(createTestEnvironment("codex", "workspace_auto"));
       expect(result.ok).toBe(true);
       if (!result.ok) return;
-      expect(result.value.argv.filter((arg) => arg.endsWith(".enabled=false"))).toEqual(["mcp_servers.gitnexus.enabled=false"]);
+      expect(result.value.argv.filter((arg) => arg.startsWith("mcp_servers.") && arg.endsWith(".enabled=false"))).toEqual(["mcp_servers.gitnexus.enabled=false"]);
       expect(result.value.argv.some((arg) => arg.includes("mcp-search"))).toBe(false);
     });
 
-    it("adds no extra arguments when the user has no global MCP servers", async () => {
+    it("adds no MCP disables when the user has no global MCP servers, while keeping retired plugins disabled", async () => {
       const home = await freshCodexHome();
       const adapter = codexAdapter(codexRunner({ globalServers: [] }), home, { hostMcpServers: bflowServer });
       const result = await adapter.prepareLaunch(createTestEnvironment("codex", "workspace_auto"));
       expect(result.ok).toBe(true);
       if (result.ok) {
-        expect(result.value.argv.some((arg) => arg.includes(".enabled=false"))).toBe(false);
+        expect(result.value.argv.some((arg) => arg.startsWith("mcp_servers.") && arg.endsWith(".enabled=false"))).toBe(false);
+        expect(result.value.argv).toContain("plugins.claude-mem@claude-mem-local.enabled=false");
+        expect(result.value.argv).toContain("plugins.claude-mem@thedotmack.enabled=false");
       }
     });
 
@@ -1958,7 +2023,8 @@ describe("@bflow/agent-providers", () => {
       expect(health.ok).toBe(true);
       if (health.ok) expect(health.value.status).toBe("ready");
       const probe = invocations.find((args) => args.includes("ping"));
-      expect(probe).toEqual(["-c", "mcp_servers.gitnexus.enabled=false", "exec", "ping"]);
+      expect(probe).toEqual(["-c", "plugins.claude-mem@claude-mem-local.enabled=false",
+        "-c", "plugins.claude-mem@thedotmack.enabled=false", "-c", "mcp_servers.gitnexus.enabled=false", "exec", "ping"]);
     });
 
     it("fails closed with codex_global_mcp_not_isolated when a global server name cannot be disabled safely", async () => {

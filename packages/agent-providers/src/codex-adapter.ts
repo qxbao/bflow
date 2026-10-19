@@ -18,6 +18,7 @@ import type {
   ProviderAdapterOptions
 } from "./types.js";
 import { inspectCodexHooks } from "./codex-hook-trust.js";
+import { managedCodexPluginArgs } from "./codex-plugin-policy.js";
 
 function tomlValue(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(tomlValue).join(",")}]`;
@@ -157,12 +158,12 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
    * Lists the global MCP servers Codex would load (`codex mcp list --json`, read-only; falls back to the
    * `[mcp_servers.<name>]` tables of config.toml when the list cannot be read).
    */
-  private async enumerateGlobalMcpServers(home: string): Promise<{ readonly names: string[]; readonly error?: string }> {
+  private async enumerateGlobalMcpServers(home: string, pluginArgs: readonly string[]): Promise<{ readonly names: string[]; readonly error?: string }> {
     let listFailure: string;
     try {
       const outcome = await this.runner.run({
         executable: this.getExecutablePath(),
-        args: ["mcp", "list", "--json"],
+        args: [...pluginArgs, "mcp", "list", "--json"],
         env: this.getProviderCommandEnvironment(),
         timeoutMs: 45_000
       });
@@ -215,10 +216,11 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
     launchProfile?: AgentLaunchProfile
   ): Promise<InheritedIsolation> {
     const home = this.codexHome();
-    const globalServers = await this.enumerateGlobalMcpServers(home);
+    const pluginArgs = managedCodexPluginArgs();
+    const globalServers = await this.enumerateGlobalMcpServers(home, pluginArgs);
 
     let mcpFailure: InheritedIsolationFailure | undefined;
-    let argv: string[] = [];
+    const argv: string[] = [...pluginArgs];
     if (globalServers.error !== undefined) {
       mcpFailure = {
         code: MCP_NOT_ISOLATED_CODE,
@@ -242,7 +244,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
           remediation: "Rename the global Codex MCP server to use only letters, digits, '_' and '-'."
         };
       } else {
-        argv = globalServers.names.flatMap((name) => ["-c", `mcp_servers.${name}.enabled=false`]);
+        argv.push(...globalServers.names.flatMap((name) => ["-c", `mcp_servers.${name}.enabled=false`]));
       }
     }
 
@@ -312,7 +314,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
       capabilities,
       {
         cwd: environment.cwd,
-        mcpServerNames: (this.options.mcpRegistrations ?? []).map((r) => r.registrationId),
+        mcpServerNames: Object.keys(this.resolveHostLaunchMaterial(capabilities).mcpServers),
         ...(this.options.osSandboxPath !== undefined ? { osSandboxPath: this.options.osSandboxPath } : {})
       }
     );

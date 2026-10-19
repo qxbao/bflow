@@ -162,9 +162,18 @@ export async function buildSetupPlan(input: BuildSetupPlanInput): Promise<Operat
   }
 
   // 2. component steps in known order
+  const componentSteps = new Map<string, SetupStep>();
   for (const id of COMPONENT_ORDER) {
     const c = byId.get(id);
     if (!c) continue;
+    // MCP may be omitted because it is satisfied, absent, or could not be planned.
+    // Only the latter prevents services from safely using the configuration.
+    if (id === "services" && (needsRepair.includes("mcp-config") || componentFailures.some((f) => f.componentId === "mcp-config"))) {
+      const message = "component services not planned: mcp-config requires repair or could not be evaluated";
+      diagnostics.push(message);
+      componentFailures.push({ componentId: id, message });
+      continue;
+    }
     let observed, desired;
     try {
       observed = await c.observe(ctx);
@@ -184,7 +193,8 @@ export async function buildSetupPlan(input: BuildSetupPlanInput): Promise<Operat
       continue;
     }
     const stepId = `${c.action}:${id}`;
-    const dependsOn = id === "environment-manifest" ? [...stepIds] : [];
+    const mcpStep = id === "services" ? componentSteps.get("mcp-config") : undefined;
+    const dependsOn = id === "environment-manifest" ? [...stepIds] : mcpStep ? [mcpStep.stepId] : [];
     const step = SetupStepSchema.safeParse({
       schemaVersion: 3, stepId, action: c.action, componentId: id, level: "machine", scope, dependsOn,
       desiredStateDigest: desired.digest, expectedStateDigest: observed.stateDigest,
@@ -192,6 +202,7 @@ export async function buildSetupPlan(input: BuildSetupPlanInput): Promise<Operat
       idempotencyKey: mkIdempotencyKey(platform.machineId, stepId, desired.digest)
     });
     if (!step.success) return fail(`invalid step for component ${id}: ${step.error.message}`);
+    componentSteps.set(id, step.data);
     push(step.data, {
       summary: desired.summary, targets: [...desired.targets], machineWide: desired.machineWide, requiresElevation: false
     });

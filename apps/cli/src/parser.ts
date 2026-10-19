@@ -1632,9 +1632,10 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
     case "attach":
     case "recover":
     case "doctor": {
-      const booleans = new Set(["--json", "-j", "--yes", "-y"]);
+      const booleans = new Set(["--json", "-j", "--yes", "-y", "--force"]);
       const allowed = new Set(["--json", "-j"]);
       if (command === "down" || command === "recover") { allowed.add("--yes"); allowed.add("-y"); }
+      if (command === "down") allowed.add("--force");
       if (command === "up" || command === "down") allowed.add("--timeout");
       const result = extractOptionsAndPositional(commandArgs, booleans, allowed, command, json);
       if (!result.ok) return result.result;
@@ -1643,7 +1644,8 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
       const timeoutMs = timeout === undefined ? undefined : Number(timeout);
       if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600000))
         return makeValidationError("--timeout must be an integer from 1 to 600000 milliseconds.", json, command);
-      return { ok: true, value: { command, json, help: false, yes: result.value.flags.has("--yes") || result.value.flags.has("-y"), timeoutMs } };
+      return { ok: true, value: { command, json, help: false, yes: result.value.flags.has("--yes") || result.value.flags.has("-y"), timeoutMs,
+        ...(command === "down" ? { force: result.value.flags.has("--force") } : {}) } };
     }
 
     case "version": {

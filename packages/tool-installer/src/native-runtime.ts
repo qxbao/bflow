@@ -134,6 +134,17 @@ export class NativePluginRuntime {
     } catch (error) { return { ready: false, diagnostic: `Native plugin verification failed: ${String(error)}` }; }
   }
 
+  /** true: the provider inventory has no Bflow plugin; false: it is registered; null: the inventory could not be read. */
+  async registered(pin: ManagedToolPin): Promise<boolean | null> {
+    try {
+      const provider = this.#provider(pin);
+      const selector = provider === "agy" ? "bflow-superpowers" : "bflow-superpowers@bflow-superpowers";
+      const entries = await this.#inventory(provider);
+      return entries.some(item => [item.pluginId, item.id, item.name].includes(selector) ||
+        (provider === "agy" && item.name === "bflow-superpowers"));
+    } catch { return null; }
+  }
+
   async #superpowersBundle(pin: ManagedToolPin, artifact: string): Promise<{ root: string; marketplace: string }> {
     const provider = this.#provider(pin);
     const managed = await privateDirectory(this.#options.managedRoot);
@@ -197,6 +208,14 @@ export class NativePluginRuntime {
       const executable = this.#binary(provider);
       const selector = provider === "agy" ? "bflow-superpowers" : "bflow-superpowers@bflow-superpowers";
       const inventory = await this.#inventory(provider);
+      // Record the approved bundle before any provider mutation. A timed-out command may have
+      // installed it; reconciliation must still be able to verify the active cache independently.
+      // This metadata alone never proves readiness: verify also requires the provider inventory/cache.
+      await atomicJson(join(dirname(artifact), ".bflow-native.json"), { schemaVersion: 3, toolId: pin.toolId, provider,
+        version: pin.version, sourceIntegrity: pin.integrity, bundleRoot: bundle.root, bundleDigest: await treeDigest(bundle.root),
+        pluginId: selector, marketplaceRoot: bundle.marketplace,
+        uninstall: [[executable, "plugin", provider === "codex" ? "remove" : "uninstall", selector],
+          ...(provider === "agy" ? [] : [[executable, "plugin", "marketplace", "remove", "bflow-superpowers"]])] });
       const existing = inventory.find(item => [item.pluginId, item.id, item.name].includes(selector));
       if (existing && action !== "install") {
         const removed = await this.#host.run(executable, ["plugin", provider === "codex" ? "remove" : "uninstall", selector], { timeoutMs: 30_000, ...this.#scope(provider) });
@@ -208,7 +227,9 @@ export class NativePluginRuntime {
         const registered = await this.#host.run(executable, ["plugin", "marketplace", "add", bundle.marketplace], { timeoutMs: 30_000, ...this.#scope(provider) });
         if (registered.exitCode !== 0) throw new Error("Native local marketplace registration failed");
       } else {
-        const validation = await this.#host.run(executable, ["plugin", "validate", bundle.root, "--strict", "--json"], { timeoutMs: 30_000, ...this.#scope(provider) });
+        // Not --strict: upstream Superpowers ships warnings (root AGENTS.md/GEMINI.md, SKILL.md bodies over Agy's
+        // 24000-byte load limit) that strict mode turns into a failure. Real manifest errors still exit non-zero.
+        const validation = await this.#host.run(executable, ["plugin", "validate", bundle.root, "--json"], { timeoutMs: 30_000, ...this.#scope(provider) });
         if (validation.exitCode !== 0) throw new Error("Agy rejected the local plugin manifest");
       }
       const argv = provider === "codex" ? ["plugin", "add", selector, "--json"] :
@@ -216,11 +237,6 @@ export class NativePluginRuntime {
       const result = await this.#host.run(executable, argv, { timeoutMs: options?.timeoutMs ?? 90_000,
         ...(options?.signal ? { signal: options.signal } : {}), ...this.#scope(provider) });
       if (result.exitCode !== 0) return { success: false, diagnostic: "Native plugin installation failed; reconcile its receipt before retrying" };
-      await atomicJson(join(dirname(artifact), ".bflow-native.json"), { schemaVersion: 3, toolId: pin.toolId, provider,
-        version: pin.version, sourceIntegrity: pin.integrity, bundleRoot: bundle.root, bundleDigest: await treeDigest(bundle.root),
-        pluginId: selector, marketplaceRoot: bundle.marketplace,
-        uninstall: [[executable, "plugin", provider === "codex" ? "remove" : "uninstall", selector],
-          ...(provider === "agy" ? [] : [[executable, "plugin", "marketplace", "remove", "bflow-superpowers"]])] });
       return { success: true, diagnostic: "Installed the pinned local plugin through the provider's native mechanism" };
     });
   }

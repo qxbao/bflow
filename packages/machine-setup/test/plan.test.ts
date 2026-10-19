@@ -130,6 +130,42 @@ describe("buildSetupPlan", () => {
     expect(preview.steps.find((s) => s.stepId === "install_tool:pnpm")!.commandPreview).toBeUndefined();
   });
 
+  it.each(["register_mcp", "configure"] as const)("services depend on the actual %s MCP step", async (action) => {
+    const { plan } = await okBuilt({
+      observations: [], components: [{ ...comp("mcp-config"), action }, comp("services")]
+    });
+    expect(plan.steps.find((s) => s.componentId === "services")!.dependsOn).toEqual([`${action}:mcp-config`]);
+  });
+
+  it.each(["absent", "satisfied"])("services have no synthetic MCP dependency when MCP is %s", async (status) => {
+    const { plan } = await okBuilt({
+      observations: [], components: [comp("services"), ...(status === "satisfied" ? [comp("mcp-config", { observed: "same" })] : [])]
+    });
+    expect(plan.steps.find((s) => s.componentId === "services")!.dependsOn).toEqual([]);
+  });
+
+  it("repair mode plans MCP repair before services", async () => {
+    const { plan, componentFailures } = await okBuilt({
+      mode: "repair", observations: [], components: [comp("mcp-config", { repair: true, valid: false }), comp("services")]
+    });
+    expect(plan.steps.find((s) => s.componentId === "services")!.dependsOn).toEqual(["register_mcp:mcp-config"]);
+    expect(componentFailures).toEqual([]);
+  });
+
+  it.each(["observe", "desired", "needs-repair"])("does not plan services against MCP %s failure", async (failure) => {
+    const mcp = comp("mcp-config", { repair: failure === "needs-repair", valid: false });
+    if (failure === "observe") mcp.observe = async () => { throw new Error("MCP unavailable"); };
+    if (failure === "desired") mcp.desired = async () => { throw new Error("MCP unavailable"); };
+    const { plan, preview, componentFailures } = await okBuilt({
+      mode: "apply", observations: [], components: [mcp, comp("services"), comp("path")]
+    });
+    expect(plan.steps.map((s) => s.componentId)).toEqual(["path", "doctor"]);
+    expect(componentFailures).toContainEqual(expect.objectContaining({
+      componentId: "services", message: expect.stringContaining("mcp-config")
+    }));
+    expect(preview.needsRepair).toEqual(failure === "needs-repair" ? ["mcp-config"] : []);
+  });
+
   it("satisfied machine yields only verify:doctor", async () => {
     const comps = ["path", "role-skills", "mcp-config", "services", "environment-manifest"].map((id) => comp(id, { observed: "same" }));
     const { plan, preview } = await okBuilt({ observations: [obs("node", "present")], components: comps, previousRevision: 4 });

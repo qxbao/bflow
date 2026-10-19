@@ -523,7 +523,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
     return host.tools.invoke(name, parameters, { role });
   };
-  const physicalPrompts: {role: AgentRole; paneId: string; message: RoleMessage}[] = [];
+  const physicalPrompts: {role: AgentRole; paneId: string; nativeSessionId: string; message: RoleMessage}[] = [];
+  let coordinatorStopGeneration = 1, reconciledCoordinatorStopGeneration = 0; // First pump recovers durable stops after restart.
   const dispatch = async (token: string, method: string, params: unknown, operation?: OperationOptions): Promise<unknown> => {
     if (token !== configuration.token) {
       const role = roleTokens.get(token); if (!role) throw new Error("Host authentication failed");
@@ -562,8 +563,28 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (method === "transport_prompt") {
         const input = record(params), message = RoleMessageSchema.parse(input.message);
         // Enqueue only: agent.prompt may still own Runtime's journal while this hook runs.
-        physicalPrompts.push({ role, paneId: textField(input.paneId), message });
+        const binding = await principal(role, textField(input.paneId));
+        if (!binding.session || binding.session.value !== textField(input.nativeSessionId)) throw new Error("Provider prompt native session mismatch");
+        if (role === "coordinator" && message.type === "delegation.request" && message.sender.role === "conversation")
+          await receipts.startCoordinatorTurn(binding, message);
+        physicalPrompts.push({ role, paneId: binding.paneId, nativeSessionId: binding.session.value, message });
         return { queued: true };
+      }
+      if (method === "provider_prompt_boundary") {
+        // Startup probes can run before activation; there is no live Runtime turn to stop at that point.
+        if (!workspace) return { recorded: false };
+        const input = record(params), binding = await principal(role, textField(input.paneId));
+        if (!binding.session || binding.session.value !== textField(input.nativeSessionId)) throw new Error("Provider prompt boundary native session mismatch");
+        if (role === "coordinator") await receipts.recordCoordinatorBoundary(binding);
+        return { recorded: true };
+      }
+      if (method === "provider_stopped") {
+        // The provider's bootstrap turn can finish before its Runtime is activated.
+        if (!workspace) return { recorded: false };
+        const input = record(params), binding = await principal(role, textField(input.paneId));
+        if (!binding.session || binding.session.value !== textField(input.nativeSessionId)) throw new Error("Provider Stop native session mismatch");
+        if (role === "coordinator" && await receipts.stopCoordinatorTurn(binding)) coordinatorStopGeneration++;
+        return { recorded: true };
       }
       if (method === "user_prompt") {
         if (role !== "conversation" || quiesced) throw new Error("Only active Conversation accepts user input");
@@ -571,7 +592,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         const hook = record(input.hook); if (hook.hook_event_name !== "UserPromptSubmit") throw new Error("Physical user input hook required");
         const prompt = textField(hook.prompt), nativeSessionId = textField(hook.session_id);
         if (!binding.session || binding.session.value !== nativeSessionId) throw new Error("Physical user input native session mismatch");
-        try { const candidate = JSON.parse(prompt); if (candidate && typeof candidate === "object" && ("schema_version" in candidate || "sender" in candidate || "type" in candidate)) throw new Error("Role envelopes cannot become authenticated human input"); }
+        try { const candidate = JSON.parse(normalizeProviderPrompt(prompt)); if (candidate && typeof candidate === "object" && ("schema_version" in candidate || "sender" in candidate || "type" in candidate)) throw new Error("Role envelopes cannot become authenticated human input"); }
         catch (error) { if (!(error instanceof SyntaxError)) throw error; }
         const work = userQueue.catch(() => undefined).then(async () => {
           const current = await principal(role, textField(input.paneId));
@@ -701,16 +722,15 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   await privateFile(join(configuration.directory,"owner.json"), JSON.stringify({pid:process.pid,startedAt:new Date().toISOString()}));
   let pumping = false;
   const pump = setInterval(() => {
-    if (!workspace || pumping || !physicalPrompts.length) return;
+    if (!workspace || pumping || quiesced || closing || (!physicalPrompts.length && coordinatorStopGeneration === reconciledCoordinatorStopGeneration)) return;
     pumping = true;
+    const stopGeneration = coordinatorStopGeneration;
     void (async () => {
       while (physicalPrompts.length) {
         const incoming = physicalPrompts.shift()!;
         const binding = await principal(incoming.role, incoming.paneId);
-        const state = record(await requireWorkspace().runtime.inspect());
-        const outbound = (state.outbound as Record<string, unknown>[]).find(item => item.request &&
-          record(record(item.request).target).paneId === binding.paneId && digest(record(item.request).context) === digest(incoming.message));
-        if (!outbound) throw new Error("Inbound provider prompt is not an exact Runtime outbox delivery");
+        if (binding.session?.value !== incoming.nativeSessionId) throw new Error("Queued provider prompt native session changed");
+        await requireWorkspace().runtime.validateProviderDelivery(incoming.message, binding);
         const message = incoming.message;
         const current = SessionManifestSchema.parse(unwrap(await requireWorkspace().runtime.ports.panes.getManifest()));
         const sender = current.panes.find(pane => pane.role === message.sender.role && (!message.sender.pane_id || pane.paneId === message.sender.pane_id));
@@ -719,6 +739,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (["coordinator", "runtime", "conversation"].includes(message.recipient.role))
           await nativeDeliver(RoleMessageSchema.parse({ ...message, sender: { ...message.sender, pane_id: sender.paneId, agent_id: sender.agentId } }));
       }
+      for (const stopped of await receipts.pendingCoordinatorStops()) {
+        const binding = await principal("coordinator", stopped.binding.paneId);
+        if (digest({ ...binding, transportState: undefined }) !== digest({ ...stopped.binding, transportState: undefined }))
+          throw new Error("Stopped Coordinator pane/native session changed; reconcile its original turn");
+        if (!await receipts.hasCoordinatorResponse(stopped)) await requireWorkspace().runtime.coordinatorTurnStopped(stopped.message, binding);
+        await receipts.completeCoordinatorStop(stopped);
+      }
+      reconciledCoordinatorStopGeneration = stopGeneration;
     })().catch(error => { schedulerError = redactString(String(error)); process.stderr.write(`Bflow inbound: ${schedulerError}\n`); }).finally(() => { pumping = false; });
   }, 100);
   const timer = setInterval(() => {
@@ -927,6 +955,21 @@ function parseHookJson(raw: string, event: string): Record<string, unknown> {
   return selected;
 }
 
+/** Only one whole provider-generated paste wrapper is accepted; surrounding prose never becomes a role envelope. */
+function normalizeProviderPrompt(prompt: string): string {
+  try { JSON.parse(prompt); return prompt; } catch { /* Whole JSON may itself contain literal paste tags. */ }
+  if (!prompt.includes("<pasted_content") && !prompt.includes("</pasted_content")) return prompt;
+  const wrapped = /^\s*<pasted_content id="([A-Za-z0-9_-]{1,128})">\s*([\s\S]*?)\s*<\/pasted_content id="\1">\s*$/.exec(prompt);
+  if (!wrapped) throw new Error("Ambiguous provider paste wrapper");
+  // JSON must occupy the complete wrapper to become a transport candidate.
+  // Ordinary pasted human text/code stays dialogue; multiple/nested wrappers remain ambiguous.
+  try { return JSON.stringify(JSON.parse(wrapped[2]!)); }
+  catch {
+    if (wrapped[2]!.includes("<pasted_content") || wrapped[2]!.includes("</pasted_content")) throw new Error("Ambiguous provider paste wrapper");
+    return prompt;
+  }
+}
+
 export async function runProviderHook(configuration: RoleConfiguration, event: string, roleConfigPath?: string): Promise<void> {
   try { await handleProviderHook(configuration, event, roleConfigPath); }
   catch (error) {
@@ -971,16 +1014,23 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
     if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "provider_started", { paneId, nativeSessionId: session,
       ...(plan === undefined || reachability === undefined ? {} : { launchId: plan.launchId, toolReachability: reachability }) });
     if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "native_session", {paneId, sessionId:session});
+    if (event === "Stop" && configuration.role === "coordinator") await callHost(configuration.socketPath, configuration.token, "provider_stopped", { paneId, nativeSessionId: session });
   }
   if (event === "UserPromptSubmit") {
     const environmentId = process.env.BFLOW_ENVIRONMENT_ID;
-    if (configuration.provider === "codex" && environmentId && hook.prompt === codexStartupPrompt(environmentId)) return;
-    let message: RoleMessage | undefined;
-    try { message = RoleMessageSchema.parse(JSON.parse(textField(hook.prompt))); } catch { /* ordinary user dialogue */ }
+    const markBoundary = async () => {
+      if (configuration.role === "coordinator") await callHost(configuration.socketPath, configuration.token, "provider_prompt_boundary", { paneId, nativeSessionId: textField(hook.session_id) });
+    };
+    if (configuration.provider === "codex" && environmentId && hook.prompt === codexStartupPrompt(environmentId)) { await markBoundary(); return; }
+    let message: RoleMessage | undefined, prompt: string;
+    try { prompt = normalizeProviderPrompt(textField(hook.prompt)); }
+    catch (error) { await markBoundary(); throw error; }
+    try { message = RoleMessageSchema.parse(JSON.parse(prompt)); } catch { /* ordinary user dialogue */ }
     if (message) {
-      await callHost(configuration.socketPath, configuration.token, "transport_prompt", { paneId, message });
+      await callHost(configuration.socketPath, configuration.token, "transport_prompt", { paneId, nativeSessionId: textField(hook.session_id), message });
       return;
     }
+    await markBoundary();
   }
   if (event === "UserPromptSubmit" && configuration.role === "conversation") {
     const result = await callHost(configuration.socketPath, configuration.token, "user_prompt", { paneId, hook });

@@ -39,6 +39,14 @@ profile. Workflow roles connect to the background Gateway through its private
 `gateway-control.json` locator in the Gateway state directory. `bflow up` passes that
 locator to the host when it exists; setup does not establish those role connections.
 
+Rerunning setup can add or update Gateway configuration while its GitNexus reader is
+active when `status --json` confirms a current index. Rebuilding a stale index still
+requires exclusive storage access; setup preserves a busy reader or writer lock.
+If that rebuild is blocked, the receipt identifies the retained lock and the Gateway
+startup step is blocked by its MCP configuration dependency. The final doctor still
+reports the incomplete setup. Release the reader or writer during maintenance before
+rerunning setup; setup does not stop an existing Gateway or reclaim retained locks.
+
 The result includes every step receipt and the final machine doctor report.
 Applied steps display their receipt status instead of a pending approval label.
 Partial application, failed health checks and missing approval return a nonzero
@@ -82,6 +90,10 @@ of a separate 30-second limit. Cancellation or deadline expiry prevents pane
 creation; cleanup drains pending preparation before revoking session resources.
 Preparation completes before the CLI records a pane dispatch intent. A timeout
 at that stage can therefore use the host shutdown barrier without a pane receipt.
+Each native Herdr agent-start wait is capped at 300000ms and bounded by the
+remaining lifecycle deadline, even when the repository config allows a 600000ms
+session startup. Insufficient launch budget fails locally before dispatch. Startup
+errors and automatic-cleanup outcomes are printed on separate lines.
 `down` reopens the existing host with its persisted platform and policy, even if
 the desired configuration has changed since startup.
 Startup readiness errors retain the per-role diagnostic report (up to 256 lines /
@@ -97,10 +109,17 @@ including quoted values whose closing quote is missing from truncated subprocess
 | `bflow setup --codex-hooks --plan\|--check\|--apply` | Inspects the selected Codex home and reviews only global hooks. Plan/check are read-only; apply requires an interactive decision or `--yes --hook-digest <sha256>`. Never installs tools or services. |
 | `bflow up [--timeout <ms>]` | Checks executables, provider authentication and Herdr protocol; starts a named server, prepares the persistent P19 host with platform readiness (refusing to start panes when a required role is blocked), then calls P13. Waits for every required role and host activation acknowledgement before recording ready. Persists validated bindings and reuses live roles. |
 | `bflow attach` | Requires an existing manifest and a running matching session. Calls P13 to focus/validate Conversation, then runs `herdr session attach <name>` with inherited terminal I/O. |
-| `bflow down [--yes] [--timeout <ms>]` | Inspects active runs and dirty files. Refuses unsafe shutdown without confirmation. Quiesces Runtime intake/dispatch, recollects runs, requires durable aggregate checkpoints, calls P13 graceful shutdown, then stops only the named session. Deletes no worktree, database, artifact, commit or source file. |
+| `bflow down [--yes] [--force] [--timeout <ms>]` | Inspects active runs and dirty files. Quiesces Runtime intake/dispatch, recollects runs and requires durable aggregate checkpoints. Normal shutdown calls P13 graceful cleanup. `--force` includes confirmation and stops only the repository's owned named session directly, allowing recovery when pane/workspace lookup is stuck. Deletes no worktree, database, artifact, commit or source file. |
 | `bflow status` | Reports configuration, named server, panes/agents and missing executables. Labels persisted observations as potentially stale. Does not open the legacy workflow Runtime. |
 | `bflow recover --yes` | After stopping old CLI commands, migrates only an empty legacy lifecycle lock. Preserves state, panes, source and worktrees. |
 | `bflow doctor` | Reports Node/Git/pnpm/Herdr/agent dependencies, configuration/identity, permissions, lifecycle lock and P13 doctor findings. Returns exit 1 when checks fail. |
+
+If an interrupted shutdown blocks both normal `down` and `up`, run
+`bflow down --force`, then `bflow up`. Force uses the validated saved ownership
+manifest, skips live pane lookup/closure and verifies that the named Herdr server
+has stopped before finalizing `down`. Failed Runtime barriers or checkpoint writes
+remain errors. A timeout retains `stopping` state for reconciliation; force never
+means deleting `.bflow` or declaring active workflow tasks successful.
 
 All commands support `--json`. Timeouts are milliseconds, 1–600000. `doctor` returns
 a diagnostic report even when unhealthy; the JSON envelope's `ok: true` means the
@@ -148,6 +167,8 @@ Bflow CLI formats human terminal output using a dedicated presentation engine wi
 ### Real-Time Observational Progress
 - Lifecycle and long-running commands (`up`, `down`, `attach`, `init`, etc.) stream real-time progress steps to human interactive `stderr` only.
 - Progress steps use sequential `[1]`, `[2]`, … markers (bold cyan when color is active). Setup plan summaries and both high-level command formatters use the same numbered layout and readable component labels.
+- Setup approval and dry-run previews group content-addressed skill bundles by store directory and count. Other targets retain their directory and file names, including repository changes; approval, elevation, blocked-platform flags, manual actions and command previews remain visible. `bflow setup --plan --json` includes the complete `data.preview` inventory with every bundle digest and exact target path.
+- `skills sync` uses the same target grouping. High-level commands show labeled identifiers and readable verdicts; tool/provider/backend checks put diagnostics and remediation on separate lines. Empty inventories are explicit. Human formatting does not change JSON verdicts, exit codes or approval requirements.
 - Indented, dim detail logs stream beneath the active step. Setup reports process start/exit/timing and component diagnostics; command arguments and raw provider output are excluded from these process observations.
 - Interactive executable output shows an animated loading skeleton while work is pending. Before setup confirmation, it clears the animation and shows an awaiting-input skeleton above the prompt; redraws pause while the user types. Late progress observations are buffered until input finishes (the latest 50, with an omission count when exceeded). Timers and mutable lines are cleared on completion or error, and animations are disabled during Herdr attach.
 - Pipes, JSON, help/version and default custom collectors remain static. Embedders can provide `CliIo.progress` for transient lines and `CliIo.stderrRaw` for raw animated chunks when explicitly opting into interactive presentation.

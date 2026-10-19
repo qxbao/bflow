@@ -69,6 +69,22 @@ Its outbound delegation/approval methods queue through P19. The old bridge's loc
 progress/approval callback shortcut is disabled in this composition. A persisted
 queue entry acknowledges local enqueue, not remote prompt receipt.
 
+Provider prompt ingress accepts one complete provider `pasted_content` wrapper around
+an exported-schema RoleMessage. It still requires the exact pinned Runtime outbox
+message, recipient pane and native session before signed Herdr ingress; surrounding
+prose, multiple wrappers and altered envelopes cannot create a trusted handoff.
+
+The host durably correlates Coordinator prompt/Stop observations with that exact
+delegation. A turn that ends without a subsequent structured response queues one
+correlated blockage notice to Conversation through the existing Herdr outbox. This
+also covers a delivered prompt whose signed Runtime ingress was never applied.
+Private response baselines distinguish earlier turns; queued progress, pending native
+responses and mandatory human decisions retain their existing waiting state. The
+notice reports only the missing response, never a provider diagnosis or task result;
+it does not create/replay ingress, resend uncertain delivery, or complete/fail a run.
+These paths have local subprocess/fake-transport and real Gateway tests, not live
+provider/Herdr acceptance evidence.
+
 ## Policies and lifecycle
 
 The Coordinator can assess requirements, request only useful specialists, prepare a
@@ -452,6 +468,12 @@ Guarantees implemented here, with package-local tests in `test/platform/service.
 - Launch material (`launch.env` bearer tokens) is kept in memory only. Reports, status snapshots and errors
   never contain token values. Released or shut-down launches drop their material.
 - `verifyActivated` requires a launch this instance prepared; `assertFresh` delegates to the cached preflight.
+- The persistent host checks activated health for up to three required permanent roles at once,
+  including their pane observations. Every role retains its own prepared launch, native-session
+  observation and signed attestation; startup waits for all required checks to pass. Missing pane
+  or launch references are rejected before probes start. A failed check stops queued checks and
+  drains those already running before returning the first failure in configured role order.
+  This scheduling is covered by local tests; a reduction in live startup time has not been measured.
 - Codex setup review, preflight probes and permanent/dynamic role launches share the selected HOME/PATH
   and explicitly empty outer Orca pane/root/endpoint/port selectors in child environments. Parent settings
   and Bflow's mandatory Herdr/Runtime hooks are preserved; an unsupported hook snapshot still blocks launch.

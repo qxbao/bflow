@@ -19,9 +19,9 @@ describe("interactive progress", () => {
   it("formats approval plans without losing targets, commands or manual approval flags", () => {
     const text = "Planned steps (1):\n- configure:path [approval, machine-wide] configure managed PATH\n    target: /home/user/.bashrc\n    command: installer --token=secret\nManual action required:\n- codex: Run codex login";
     const formatted = formatSetupPreview(text, true);
-    expect(stripAnsi(formatted)).toContain("[1] Make bflow and installed tools available in the terminal [approval, machine-wide]");
+    expect(stripAnsi(formatted)).toContain("[1] Make bflow and installed tools available in the terminal [requires approval; this account]");
     expect(stripAnsi(formatted)).toContain("configure:path");
-    expect(stripAnsi(formatted)).toContain("target: /home/user/.bashrc");
+    expect(stripAnsi(formatted)).toContain("- /home/user/.bashrc");
     expect(stripAnsi(formatted)).toContain("Run codex login");
     expect(formatted).toContain("\x1b[2m");
     expect(formatted).not.toContain("token=secret");

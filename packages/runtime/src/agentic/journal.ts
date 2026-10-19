@@ -85,6 +85,8 @@ export interface Outbound {
   phaseFailure?: { summary: string; repairable: boolean; applied: boolean };
   /** A control notice borrows its task assignment's lease; it never owns capacity. */
   parentAssignmentId?: string;
+  /** Private outbox position captured before this Coordinator turn is physically dispatched. */
+  coordinatorResponseBaseline?: number;
   leaseRenewal?: RenewAgentLeaseRequest;
   leaseRelease?: ReleaseAgentLeaseRequest;
 }
@@ -127,6 +129,8 @@ function parseState(input: unknown, repository: string): JournalState {
   for (const out of state.outbound) {
     out.message = RoleMessageSchema.parse(out.message); textField(out.selector); textField(out.taskId); textField(out.attemptId); strings(out.capabilities);
     if (!["queued", "sending", "unknown_delivery", "accepted", "released", "cancelled"].includes(out.status)) throw new Error("Invalid outbound status");
+    if (out.coordinatorResponseBaseline !== undefined && (!Number.isSafeInteger(out.coordinatorResponseBaseline) || out.coordinatorResponseBaseline < 0 || out.coordinatorResponseBaseline > state.outbound.length))
+      throw new Error("Invalid Coordinator response baseline");
     if (out.assignment) out.assignment = AgentAssignmentSchema.parse(out.assignment);
     if (out.request) out.request = AgentRequestSchema.parse(out.request);
     if (out.lease) out.lease = AgentLeaseSchema.parse(out.lease);

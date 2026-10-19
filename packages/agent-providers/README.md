@@ -91,6 +91,12 @@ Every check returns `status: "passed" | "failed" | "unknown"`. Overall status is
 
 ## Permission Modes
 
+MCP permission patterns are derived from the same validated launch material as
+the MCP configuration, including host-provided `bflow` and selected Gateway
+registrations. Claude Conversation and Coordinator roles have no native repository
+tools; their configured MCP tools are explicitly allowed under `dontAsk` in both
+launch arguments and session settings. Unconfigured MCP servers receive no grant.
+
 1. **`restricted`**:
    - Read-only filesystem (`filesystem: "read_only"`, `writableRoots: []`).
    - Claude: `--restricted`, `--tools "Read,Glob,Grep"`, `--permission-mode dontAsk`.
@@ -155,6 +161,17 @@ The launched process must receive each token in the environment variable named i
 ## Codex Inherited Global MCP Servers and Hooks (L3)
 
 Codex loads user `config.toml` and `hooks.json` in every invocation. Bflow keeps its existing L3 MCP isolation: it enumerates configured global MCP servers and disables those servers only after its own MCP table, in both launch arguments and the read-only readiness probe. Unenumerable, colliding or unsafe MCP names remain blocked.
+
+The inventory describes Bflow-managed Codex execution. The retired plugin IDs
+`claude-mem@claude-mem-local` and `claude-mem@thedotmack` are always disabled
+with per-invocation `-c plugins.<id>.enabled=false` overrides
+in MCP enumeration, readiness execution probes and launch profiles. Their hooks
+are excluded with an explicit inventory diagnostic; global config and plugin
+files are preserved. Other plugin IDs and global hooks remain subject to review.
+Both overrides are sent even if the plugin is absent, so enabling it during
+enumeration cannot run hooks that were excluded from the snapshot.
+An empty inline plugin `hooks: {}` declaration means no hooks; malformed hook
+envelopes, including a file-backed `hooks.json` without a `hooks` object, stay blocked.
 
 Global hooks use a separate explicit operator review flow. The package exports:
 

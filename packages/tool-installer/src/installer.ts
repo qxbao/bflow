@@ -183,6 +183,8 @@ export interface ProviderPluginAdapter {
   verify(pin: ManagedToolPin, destination: string): Promise<{ ready: boolean; diagnostic: string }>;
   activate(pin: ManagedToolPin, artifact: string, action: "install" | "update" | "repair",
     options?: OperationOptions): Promise<{ success: boolean; diagnostic: string }>;
+  /** true: registered with the provider; false: proven absent; null: could not be determined. */
+  registered?(pin: ManagedToolPin): Promise<boolean | null>;
 }
 
 interface OwnedMarker { toolId: string; installerId: string; version: string; integrity: string; source: string; executable: string; license: string; recipeDigest: string; }
@@ -349,7 +351,16 @@ export class ManagedToolInstaller implements ToolInstaller {
           return observed( "unknown", ["Another unresolved native activation owns this destination"], [pendingPath]);
         let observationPath = intent.stage;
         try { await lstat(observationPath); } catch { observationPath = destination; }
-        const observation = await this.#providerPlugin!.verify(pin, observationPath);
+        let observation = await this.#providerPlugin!.verify(pin, observationPath);
+        // Older interrupted activations wrote native metadata only after the command returned.
+        // The retained installation may still prove this exact desired pin in the active cache.
+        if (!observation.ready && observationPath !== destination) {
+          const existing = await this.#providerPlugin!.verify(pin, destination);
+          if (existing.ready) { observation = existing; observationPath = destination; }
+        }
+        if (!observation.ready && await this.#providerPlugin!.registered?.(pin) === false)
+          return observed( "blocked", [observation.diagnostic, "Interrupted native activation left nothing registered with the provider; the next apply discards it and retries"],
+            [observationPath, pendingPath]);
         return observed( observation.ready ? "already_satisfied" : "unknown",
           [observation.diagnostic, "Native activation intent retained; no automatic replay"], [observationPath, pendingPath]);
       } catch (error) {
@@ -421,6 +432,7 @@ export class ManagedToolInstaller implements ToolInstaller {
     let preserveStage = false;
     let backup: string | null = null;
     try {
+      if (pin.recipe.kind === "provider_plugin") await this.#discardUndelivered(destination, pin, request.step.desiredStateDigest);
       const current = await this.reconcile(request);
       if (current.ok && current.value.status === "already_satisfied") return current;
       if (current.ok && current.value.status === "unknown") return current;
@@ -538,6 +550,24 @@ export class ManagedToolInstaller implements ToolInstaller {
     await writeFile(join(bin, pin.recipe.executable), pythonWheelWrapper("mempalace.cli", "main", pin.recipe.executable), { mode: 0o700 });
     await writeFile(join(bin, pin.recipe.mcpExecutable), pythonWheelWrapper("mempalace.mcp_proxy", "main", pin.recipe.mcpExecutable), { mode: 0o700 });
     return null;
+  }
+
+  /** An interrupted native activation is retained as unknown, because replaying a mutation that may have happened is unsafe.
+   * When the provider's own inventory proves nothing was registered, there is nothing to replay: archive the intent and
+   * drop its stage so the install can run again. Callers hold the destination lock. */
+  async #discardUndelivered(destination: string, pin: ManagedToolPin, desiredStateDigest: string): Promise<void> {
+    const pendingPath = `${destination}.native-pending.json`;
+    let intent;
+    try { intent = activationIntentSchema.parse(JSON.parse(await readRegular(pendingPath))); }
+    catch { return; }
+    if (intent.desiredStateDigest !== desiredStateDigest || intent.toolId !== pin.toolId ||
+      intent.installerId !== pin.installerId || !intent.stage.startsWith(`${destination}.staging-`)) return;
+    let observationPath = intent.stage;
+    try { await lstat(observationPath); } catch { observationPath = destination; }
+    const observation = await this.#providerPlugin!.verify(pin, observationPath);
+    if (observation.ready || await this.#providerPlugin!.registered?.(pin) !== false) return;
+    await rename(pendingPath, `${pendingPath}.reviewed-${randomUUID()}`);
+    await rm(intent.stage, { recursive: true, force: true });
   }
 
   /** Explicit operator recovery after inspecting an uncertain native mutation; never called by apply/reconcile. */

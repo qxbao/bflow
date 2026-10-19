@@ -1,12 +1,15 @@
 import { mkdtemp, mkdir, realpath, rm, writeFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   SkillManager,
   SkillFileStore,
   SkillsSetupSynchronizer,
   bundleDigest,
+  readBundle,
+  BASELINE_COMMANDS,
 } from "../src/index.js";
 import { files } from "./fixtures.js";
 const roots: string[] = [];
@@ -16,6 +19,69 @@ afterEach(async () => {
   );
 });
 describe("P26 setup bridge and repository init data", () => {
+  it("upgrades the published MemPalace catalog without replacing the installed generation", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "skills-upgrade-")));
+    roots.push(root);
+    // Published 1.0.0 bytes from 111c40d, also retained by existing machine catalogs.
+    const previousFiles = await readBundle(
+      fileURLToPath(new URL("./fixtures/use-mempalace-1.0.0", import.meta.url)),
+    );
+    const previousDigest =
+      "83c6764caecd61f922764765d5ad945dd362aa2bd326d4a8ed3dc6b9a62e120c";
+    expect(bundleDigest(previousFiles)).toBe(previousDigest);
+    const source = fileURLToPath(
+      new URL("../../../skills/tooling/use-mempalace", import.meta.url),
+    );
+    const currentDigest = bundleDigest(await readBundle(source));
+    const store = new SkillFileStore(join(root, "store"));
+    const manager = new SkillManager({
+      store,
+      supportedCommands: BASELINE_COMMANDS,
+      approvedBuiltinDigests: [previousDigest, currentDigest],
+    });
+    const previous = await manager.installBundle(previousFiles, {
+      source: "builtin",
+      expectedDigest: previousDigest,
+    });
+    const generation = await manager.sync({
+      manifestId: "existing-generation",
+      environmentId: "existing-environment",
+      scope: {
+        kind: "session",
+        machineId: "machine",
+        repositoryId: "repository",
+        workspaceRoot: "/repository",
+        sessionId: "existing-session",
+      },
+      role: "developer",
+      provider: "codex",
+      selections: [
+        {
+          skill: {
+            skillId: previous.skillId,
+            version: previous.version,
+            digest: previous.digest,
+          },
+          required: true,
+        },
+      ],
+      capabilityIds: [],
+      toolIds: ["mempalace"],
+    });
+    const setup = new SkillsSetupSynchronizer(manager, store, [
+      { root: source, source: "builtin", expectedDigest: currentDigest },
+    ]);
+    const result = await setup.sync({ mode: "apply" });
+    expect(await setup.sync({ mode: "apply" })).toEqual(result);
+    expect((await setup.observe({ mode: "check" })).valid).toBe(true);
+    expect(await manager.list()).toEqual([
+      previous,
+      await manager.validate(source, "builtin"),
+    ]);
+    expect(await manager.recover(generation.manifest.digest)).toEqual(
+      generation.manifest,
+    );
+  });
   it("plans without writes, applies pinned skills idempotently and observes content drift", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "skills-setup-")));
     roots.push(root);

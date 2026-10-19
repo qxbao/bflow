@@ -126,12 +126,12 @@ export const CLI_COMMAND_REFERENCE: readonly CliCommandReferenceEntry[] = [
   {
     command: "down",
     syntax: "bflow down [options]",
-    purpose: "Checkpoint active workflow runs and gracefully stop this repository's named session.",
+    purpose: "Checkpoint active workflow runs and stop this repository's named session; --force bypasses stuck pane cleanup after the Runtime barrier.",
     reusedEngines: ["PaneManager", "RuntimeService", "LifecycleLock"],
     requiredFlags: [],
-    optionalFlags: ["-y, --yes", "--timeout <ms>", "-j, --json", "-h, --help"],
+    optionalFlags: ["-y, --yes", "--force", "--timeout <ms>", "-j, --json", "-h, --help"],
     exitCodes: COMMON_EXIT_CODES,
-    idempotencyAndRetry: "Idempotent. Safely stops only the owned named session; no-op if session already stopped.",
+    idempotencyAndRetry: "Idempotent. Stops only the owned named session; --force includes confirmation but still requires checkpoints and a fresh stopped-server observation. A lost stop acknowledgement is reconciled without automatic resend.",
     permissionRequirements: "Requires repository lifecycle lock ownership.",
     skills: ["using-bflow"]
   },

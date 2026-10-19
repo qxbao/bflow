@@ -147,6 +147,8 @@ export interface SetupCommandOutput {
   /** Isolation namespace of OS unit names (isolated setup only); units are named bflow-<namespace>-<service>. */
   readonly serviceUnitNamespace?: string;
   readonly plan: SetupPlan;
+  /** Complete target inventory for scripts; human output groups content-addressed bundles. */
+  readonly preview?: import("@bflow/machine-setup").SetupPreview;
   readonly receipt?: SetupReceipt;
   readonly receipts?: readonly SetupReceipt[];
   readonly inventory?: readonly import("./setup-defaults.js").DefaultSetupInventory[];
@@ -183,6 +185,7 @@ export interface EnvironmentCommandArgs extends GlobalCliFlags {
   readonly command: "up" | "down" | "attach" | "doctor" | "recover";
   readonly timeoutMs?: number | undefined;
   readonly yes: boolean;
+  readonly force?: boolean | undefined;
 }
 
 export interface RunCommandArgs extends GlobalCliFlags {

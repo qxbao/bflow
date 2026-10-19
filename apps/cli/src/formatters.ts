@@ -20,6 +20,7 @@ import {
   dim,
   extractSafeDetails,
   formatProgressStep,
+  formatSetupPreview,
   green,
   humanText,
   readableLabel,
@@ -33,6 +34,7 @@ import {
 } from "./presentation.js";
 import type { EnvironmentStatus } from "./environment.js";
 import { formatCodexHookSetupOutput } from "./codex-hook-setup.js";
+import { renderPreview } from "@bflow/machine-setup";
 
 export interface FormatterOptions {
   readonly color?: boolean | undefined;
@@ -153,8 +155,8 @@ function formatHighLevelOutput(output: HighLevelCommandOutput, useColor = false)
   const statusPaint = output.status === "succeeded" ? green : output.status === "failed" || output.status === "unknown" ? red : yellow;
   lines.push(`${useColor ? cyan(bold("Command:"), true) : "Command:"}   ${humanText(output.command, 100)}`);
   lines.push(`${useColor ? cyan(bold("Status:"), true) : "Status:"}    ${useColor ? statusPaint(statusStr, true) : statusStr}`);
-  lines.push(`CommandId: ${humanText(output.commandId, 100)}`);
-  lines.push(`CorrId:    ${humanText(output.correlationId, 100)}`);
+  lines.push(`Command ID: ${humanText(output.commandId, 100)}`);
+  lines.push(`Correlation ID:    ${humanText(output.correlationId, 100)}`);
   if (output.runId) {
     lines.push(`Run ID:    ${humanText(output.runId, 100)}`);
   }
@@ -244,7 +246,7 @@ function formatHighLevelOutput(output: HighLevelCommandOutput, useColor = false)
         lines.push("");
         const services = Array.isArray(details.services) ? details.services : [];
         const healthy = details.healthy;
-        lines.push(`MCP Services (${services.length}) - Healthy: ${healthy === false ? "NO" : "YES"}:`);
+        lines.push(`MCP Services (${services.length}) - Healthy: ${healthy === true ? "YES" : healthy === false ? "NO" : "UNKNOWN"}:`);
         for (const s of services) {
           const sName = s.serviceId ?? s.name ?? "unknown";
           const sStatus = String(s.status ?? (s.healthy !== undefined ? (s.healthy ? "healthy" : "unhealthy") : "unknown")).toUpperCase();
@@ -256,7 +258,7 @@ function formatHighLevelOutput(output: HighLevelCommandOutput, useColor = false)
         lines.push("");
         const tools = Array.isArray(details.tools) ? details.tools : [];
         const healthy = details.healthy;
-        lines.push(`Pinned Tools (${tools.length}) - Healthy: ${healthy === false ? "NO" : "YES"}:`);
+        lines.push(`Pinned Tools (${tools.length}) - Healthy: ${healthy === true ? "YES" : healthy === false ? "NO" : "UNKNOWN"}:`);
         for (const t of tools) {
           const tName = t.toolId ?? t.name ?? "unknown";
           const tStatus = String(t.status ?? (t.available !== undefined ? (t.available ? "available" : "missing") : "unknown")).toUpperCase();
@@ -292,7 +294,7 @@ function formatHighLevelOutput(output: HighLevelCommandOutput, useColor = false)
           ? details.providers
           : [];
         const healthy = details.healthy;
-        lines.push(`Agent Providers (${providers.length}) - Healthy: ${healthy === false ? "NO" : "YES"}:`);
+        lines.push(`Agent Providers (${providers.length}) - Healthy: ${healthy === true ? "YES" : healthy === false ? "NO" : "UNKNOWN"}:`);
         for (const p of providers) {
           const pName = p.provider ?? p.providerId ?? p.name ?? "unknown";
           const pStatus = String(p.status ?? (p.healthy !== undefined ? (p.healthy ? "ready" : "blocked") : "unknown")).toUpperCase();
@@ -618,7 +620,8 @@ function formatSetupOutput(output: SetupCommandOutput, useColor = false): string
   if (output.plan) {
     lines.push(`${heading("Plan ID:")}            ${sanitizeIdentifier(output.plan.planId)} (revision ${output.plan.revision})`);
     lines.push(`${heading("Plan Steps:")}         ${output.plan.steps.length}`);
-    for (const [index, step] of output.plan.steps.entries()) {
+    const showPreview = output.preview && (output.mode === "dry_run" || output.outcome === "approval_declined");
+    for (const [index, step] of (showPreview ? [] : output.plan.steps).entries()) {
       const receipt = output.receipts?.find(r => r.stepId === step.stepId) ??
         (output.receipt?.stepId === step.stepId ? output.receipt : undefined);
       const approval = !receipt && step.requiresApproval ? ` ${warning("[requires approval]")}` : "";
@@ -631,10 +634,14 @@ function formatSetupOutput(output: SetupCommandOutput, useColor = false): string
       for (const diagnostic of receipt?.diagnostics ?? []) lines.push(dim(`      ${humanText(diagnostic, 250)}`, useColor));
     }
   }
+  if (output.preview && (output.mode === "dry_run" || output.outcome === "approval_declined")) {
+    // The same grouped scope is visible in a dry run and at the approval prompt.
+    lines.push("", formatSetupPreview(renderPreview(output.preview), useColor));
+  }
   if (output.receipt) {
     const receiptStatus = output.receipt.status === "applied" || output.receipt.status === "already_satisfied"
-      ? positive(output.receipt.status) : output.receipt.status === "failed"
-        ? (useColor ? red(output.receipt.status, true) : output.receipt.status) : warning(output.receipt.status);
+        ? positive(readableLabel(output.receipt.status)) : output.receipt.status === "failed"
+        ? (useColor ? red(readableLabel(output.receipt.status), true) : readableLabel(output.receipt.status)) : warning(readableLabel(output.receipt.status));
     lines.push(`${heading("Receipt ID:")}         ${sanitizeIdentifier(output.receipt.receiptId)} (status: ${receiptStatus})`);
   }
   if (output.tools && output.tools.length > 0) {
@@ -834,7 +841,7 @@ export function formatCommandSuccess(
     return formatRunPage(data, useColor);
   }
 
-  return JSON.stringify(data, null, 2);
+  return "Command completed. Run with --json to inspect the full result.";
 }
 
 export function formatCommandError(
