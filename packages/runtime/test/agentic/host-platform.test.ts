@@ -112,6 +112,42 @@ function fakeService(overrides: Partial<PlatformReadinessService> = {}): FakeSer
   } as unknown as FakeService;
   return service;
 }
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+const permanentRoles: AgentRole[] = ["conversation", "coordinator", "planner", "architect", "specifier", "reviewer", "qa"];
+type ActivatedHealth = Awaited<ReturnType<PlatformReadinessService["verifyActivated"]>>;
+const readyHealth: ActivatedHealth = { ok: true, value: {} as never };
+const flushActivation = () => new Promise<void>(resolve => setImmediate(resolve));
+
+async function activationSession(roles = permanentRoles.map(role => roleOption(role, "codex")), omittedLaunches: readonly AgentRole[] = []) {
+  const gates = new Map(roles.map(role => [`launch-${role.role}`, deferred<ActivatedHealth>()]));
+  const inputs: Parameters<PlatformReadinessService["verifyActivated"]>[0][] = [];
+  const service = fakeService({
+    prepareSession: async () => ({ ok: true, value: {
+      report: { ready: true, generation: 1, roles: [], checkedAt: at },
+      launches: roles.filter(role => role.role !== "developer" && !omittedLaunches.includes(role.role))
+        .map(role => prepared(role.role, role.provider, `launch-${role.role}`))
+    } }),
+    verifyActivated: async input => { inputs.push(input); return gates.get(input.launchId)!.promise; }
+  });
+  const { options } = await session(service);
+  const host = new HostPlatformSession({ ...options, platform: { ...platform, roles } });
+  await host.prepare();
+  const panes = roles.map(role => ({ role: role.role, paneId: `pane-${role.role}` }));
+  const observed: string[] = [];
+  const observe = async (paneId: string) => {
+    observed.push(paneId);
+    return { status: "idle", nativeSession: { source: "herdr:codex", kind: "id" as const, value: `native-${paneId}` } };
+  };
+  const drain = () => { for (const gate of gates.values()) gate.resolve(readyHealth); };
+  return { host, inputs, gates, panes, observed, observe, drain };
+}
+
 async function session(service: PlatformReadinessService, extra: Partial<{ generationFile: string; launchesFile: string; gatewayDiagnostic: string }> = {}) {
   const root = await mkdtemp(join(tmpdir(), "bflow-host-platform-"));
   cleanup.push(() => rm(root, { recursive: true, force: true }));
@@ -126,6 +162,123 @@ async function session(service: PlatformReadinessService, extra: Partial<{ gener
 }
 
 describe("P30 host platform composition", () => {
+  it("overlaps at most three activation checks, refills free slots and waits for every required role", async () => {
+    const fixture = await activationSession();
+    let settled = false;
+    const outcome = fixture.host.verifyActivation(fixture.panes, fixture.observe).finally(() => { settled = true; });
+    try {
+      await flushActivation();
+      expect(fixture.inputs.map(input => input.launchId)).toEqual(["launch-conversation", "launch-coordinator", "launch-planner"]);
+      expect(fixture.observed).toHaveLength(3);
+      // A later check frees a slot even while the first two are still pending.
+      for (const [done, next] of [["planner", "architect"], ["architect", "specifier"], ["specifier", "reviewer"], ["reviewer", "qa"]]) {
+        fixture.gates.get(`launch-${done}`)!.resolve(readyHealth);
+        await flushActivation();
+        expect(fixture.inputs.at(-1)?.launchId).toBe(`launch-${next}`);
+      }
+      fixture.gates.get("launch-conversation")!.resolve(readyHealth);
+      fixture.gates.get("launch-coordinator")!.resolve(readyHealth);
+      await flushActivation();
+      expect(settled).toBe(false);
+      fixture.gates.get("launch-qa")!.resolve(readyHealth);
+      await outcome;
+      expect(fixture.inputs).toHaveLength(7);
+      for (const input of fixture.inputs) {
+        const role = input.launchId.slice("launch-".length);
+        expect(input).toMatchObject({ paneId: `pane-${role}`, nativeSession: { value: `native-pane-${role}` },
+          observation: { paneId: `pane-${role}`, transportState: "idle", nativeSession: { value: `native-pane-${role}` } } });
+      }
+    } finally { fixture.drain(); await outcome; }
+  });
+
+  it.each(["health", "throw", "undefined"] as const)("drains in-flight checks and stops queued roles after a %s failure", async kind => {
+    const fixture = await activationSession();
+    let settled = false;
+    const outcome = fixture.host.verifyActivation(fixture.panes, fixture.observe).then(
+      () => { settled = true; return { ok: true as const }; },
+      error => { settled = true; return { ok: false as const, error }; }
+    );
+    try {
+      await flushActivation();
+      expect(fixture.inputs).toHaveLength(3);
+      const failed = fixture.gates.get("launch-coordinator")!;
+      if (kind === "health") failed.resolve(failure("validation", "blocked-coordinator"));
+      else failed.reject(kind === "throw" ? new Error("blocked-coordinator") : undefined);
+      await flushActivation();
+      expect(settled).toBe(false);
+      expect(fixture.inputs).toHaveLength(3);
+      fixture.drain();
+      const result = await outcome;
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        if (kind === "undefined") expect(result.error).toBeUndefined();
+        else expect(String(result.error)).toContain("blocked-coordinator");
+      }
+      expect(fixture.inputs).toHaveLength(3);
+    } finally { fixture.drain(); await outcome; }
+  });
+
+  it("reports the first configured role failure after out-of-order failures have drained", async () => {
+    const fixture = await activationSession();
+    const outcome = fixture.host.verifyActivation(fixture.panes, fixture.observe).catch(error => error);
+    try {
+      await flushActivation();
+      fixture.gates.get("launch-planner")!.resolve(failure("validation", "planner-failure"));
+      await flushActivation();
+      fixture.gates.get("launch-conversation")!.resolve(failure("validation", "conversation-failure"));
+      fixture.drain();
+      expect(String(await outcome)).toContain("conversation-failure");
+      expect(fixture.inputs).toHaveLength(3);
+    } finally { fixture.drain(); await outcome; }
+  });
+
+  it("bounds pane observations and drains them when one observation rejects", async () => {
+    const fixture = await activationSession();
+    const observations = new Map(fixture.panes.map(pane => [pane.paneId, deferred<Awaited<ReturnType<typeof fixture.observe>>>()]));
+    const started: string[] = [];
+    let settled = false;
+    const outcome = fixture.host.verifyActivation(fixture.panes, paneId => {
+      started.push(paneId); return observations.get(paneId)!.promise;
+    }).then(() => { settled = true; }, error => { settled = true; return error; });
+    try {
+      await flushActivation();
+      expect(started).toHaveLength(3);
+      observations.get("pane-coordinator")!.reject(new Error("observation unavailable"));
+      await flushActivation();
+      expect(settled).toBe(false);
+      for (const [paneId, gate] of observations) gate.resolve(await fixture.observe(paneId));
+      fixture.drain();
+      expect(String(await outcome)).toContain("observation unavailable");
+      expect(started).toHaveLength(3);
+    } finally {
+      for (const [paneId, gate] of observations) gate.resolve(await fixture.observe(paneId));
+      fixture.drain(); await outcome;
+    }
+  });
+
+  it.each(["pane", "launch"] as const)("validates every required %s reference before starting any activation probe", async missing => {
+    const fixture = await activationSession(undefined, missing === "launch" ? ["qa"] : []);
+    fixture.drain();
+    await expect(fixture.host.verifyActivation(missing === "pane" ? fixture.panes.slice(0, -1) : fixture.panes, fixture.observe))
+      .rejects.toThrow(missing === "pane" ? "qa has no pane" : "qa has no prepared launch");
+    expect(fixture.observed).toEqual([]);
+    expect(fixture.inputs).toEqual([]);
+  });
+
+  it("excludes optional roles and the Developer template from activation", async () => {
+    const fixture = await activationSession([roleOption("conversation", "codex"), roleOption("coordinator", "codex", false), roleOption("developer", "codex")]);
+    fixture.drain();
+    await fixture.host.verifyActivation(fixture.panes.slice(0, 1), fixture.observe);
+    expect(fixture.inputs.map(input => input.launchId)).toEqual(["launch-conversation"]);
+  });
+
+  it("accepts an empty set of required permanent roles without observing or checking optional roles", async () => {
+    const fixture = await activationSession([roleOption("conversation", "codex", false), roleOption("developer", "codex")]);
+    await fixture.host.verifyActivation([], fixture.observe);
+    expect(fixture.observed).toEqual([]);
+    expect(fixture.inputs).toEqual([]);
+  });
+
   it("prepares an all-Codex configuration into provider-neutral launch material with a ready report", async () => {
     const service = fakeService();
     const { host, root } = await session(service);
