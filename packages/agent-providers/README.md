@@ -89,6 +89,32 @@ Every check returns `status: "passed" | "failed" | "unknown"`. Overall status is
 
 ---
 
+## Optional overlapping Codex execution probes
+
+A host adapter factory may create `createProviderExecutionProbeCoalescer({ runner })` once per
+underlying **raw** `ProviderCommandRunner`, then pass it as `executionProbeCoalescer` to its adapters.
+Keep the normal operation-bound runner for every other command. The coalescer owns independent
+waiter cancellation/timeouts and aborts its bounded subprocess when every waiter has left.
+It stores only in-flight entries; sequential checks always execute a new ping.
+
+Only Codex opts in. Sharing requires matching session/repository/machine scope, canonical binary
+and digest, ping arguments (including model/effort and inherited isolation), cwd, effective process
+environment, environment variables/secret references and freshly observed account output. Keys are
+SHA-256 digests. Codex config/auth file identity and nanosecond change metadata, ancestor project
+config/instructions, approved hook sources/dependencies and approval receipts must stay unchanged.
+Credential contents are never read by the snapshotter. Missing required `config.toml`/`auth.json`,
+symlinks, special files, inaccessible inputs or trust-all hook policies use individual probes.
+Changes during an eligible probe block that observation and require a fresh health check.
+
+Every role still checks authentication, capabilities, environment, permission policy, skills,
+MCP, hook trust/drift and native launch attestation separately. A shared ping failure is never
+reused as the follower's proof; an unchanged follower executes its own ping within its original
+budget. There is no completed-result cache or global/static state, and no launch/task proof is
+shared. Tests cover local command reduction for overlapping matching roles; this is not live
+provider/Herdr startup evidence or a same-UID filesystem isolation guarantee.
+
+---
+
 ## Permission Modes
 
 1. **`restricted`**:

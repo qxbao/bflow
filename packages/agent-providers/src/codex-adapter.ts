@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { open, readFile } from "node:fs/promises";
+import { lstat, open, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type {
   AgentLaunchProfile,
   AgentEnvironment,
@@ -17,8 +18,39 @@ import type {
   DetectedProviderCapabilities,
   ProviderAdapterOptions
 } from "./types.js";
-import { inspectCodexHooks } from "./codex-hook-trust.js";
+import { codexHookPolicyPath, inspectCodexHooks } from "./codex-hook-trust.js";
 import { managedCodexPluginArgs } from "./codex-plugin-policy.js";
+
+/** Observe metadata only: no credential bytes are read or retained. Symlinks/special files and
+ * inaccessible/required-missing inputs are ineligible, so the adapter runs its own normal ping. */
+async function probeFileSnapshot(paths: readonly string[], required: ReadonlySet<string>): Promise<string | undefined> {
+  const hash = createHash("sha256");
+  try {
+    for (const path of [...new Set(paths)].sort()) {
+      hash.update(path);
+      try {
+        const observed = await lstat(path, { bigint: true });
+        if ((!observed.isFile() && !observed.isDirectory()) || await realpath(path) !== resolve(path)) return undefined;
+        hash.update([observed.dev, observed.ino, observed.mode, observed.uid, observed.gid].join(":"));
+        // The provider writes unrelated logs/session state into its home during a normal ping.
+        // Directory timestamps are not configuration proof; observed config files below are.
+        if (observed.isFile()) {
+          const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+          try {
+            const opened = await handle.stat({ bigint: true });
+            if (!opened.isFile() || opened.dev !== observed.dev || opened.ino !== observed.ino ||
+                opened.size !== observed.size || opened.mtimeNs !== observed.mtimeNs || opened.ctimeNs !== observed.ctimeNs) return undefined;
+          } finally { await handle.close(); }
+          hash.update([observed.size, observed.mtimeNs, observed.ctimeNs].join(":"));
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT" || required.has(path)) return undefined;
+        hash.update("absent");
+      }
+    }
+    return hash.digest("hex");
+  } catch { return undefined; }
+}
 
 function tomlValue(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(tomlValue).join(",")}]`;
@@ -293,8 +325,35 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
       }
     }
 
+    // A trust-all policy deliberately omits the hook inventory; there is no exact dependency
+    // observation to share in that mode. Every role still performs the normal trust/drift review.
+    const requiredProbeFiles = new Set([join(home, "config.toml"), join(home, "auth.json")]);
+    const probeFiles = [...requiredProbeFiles, home, hookReview.approvalStorePath,
+      codexHookPolicyPath(hookReview.approvalStorePath), join(home, "hooks.json"),
+      join(home, "AGENTS.md"), join(home, "AGENTS.override.md"),
+      ...hookReview.sources.map(source => source.path),
+      ...hookReview.hooks.flatMap(hook => hook.dependencies.flatMap(dependency =>
+        dependency.resolvedPath === null ? [dependency.requestedPath] : [dependency.requestedPath, dependency.resolvedPath]))];
+    // Codex may discover repository configuration and instructions from any cwd ancestor.
+    for (let directory = resolve(_environment.cwd); ; directory = dirname(directory)) {
+      probeFiles.push(join(directory, ".codex", "config.toml"), join(directory, "AGENTS.md"), join(directory, "AGENTS.override.md"));
+      if (dirname(directory) === directory) break;
+    }
+    const executionProbeSnapshot = hookReview.approvalMode === "trust_all" ? undefined : async () => {
+      const files = await probeFileSnapshot(probeFiles, requiredProbeFiles);
+      if (files === undefined) return undefined;
+      const currentHooks = await inspectCodexHooks({ codexHomeDirectory: home,
+        ...(this.options.codexHookApprovalPath !== undefined ? { approvalStorePath: this.options.codexHookApprovalPath } : {}),
+        environment: this.trustedHookEnvironment() });
+      if (currentHooks.digest !== hookReview.digest || currentHooks.status !== hookReview.status ||
+          currentHooks.approvalMode !== hookReview.approvalMode ||
+          await probeFileSnapshot(probeFiles, requiredProbeFiles) !== files) return undefined;
+      return createHash("sha256").update(hookReview.digest).update(files).digest("hex");
+    };
+
     return {
       argv,
+      ...(executionProbeSnapshot !== undefined ? { executionProbeSnapshot } : {}),
       ...(mcpFailure !== undefined ? { mcpFailure } : {}),
       ...(hookFailure !== undefined ? { hookFailure } : {}),
       settingsMetadata
