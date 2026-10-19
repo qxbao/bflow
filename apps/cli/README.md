@@ -76,6 +76,14 @@ the selected canonical Codex home and private approval store. Revoke it with
 `--check`/`--plan` print warnings, without blocking, when the Codex home, `hooks.json`
 or `config.toml` is group/world-writable or not owned by the current user.
 
+After a successful manifest publication, `up` may start up to three preparatory host role
+checks while later panes launch. It waits for every required role and repeats the full fresh
+health/attestation gate at final activation. Only the equivalent Codex model execution probe
+can reuse a successful observation, for at most 30 seconds; native/tool/permission/skill proofs
+and role health are freshly checked. Startup cancellation and failure drain started checks
+and daemon proof writes before cleanup, including when a role RPC disconnected. The extra
+local checks add overhead, so this overlap has no measured live latency guarantee.
+
 `up --timeout <ms>` controls the complete startup budget, including host provider
 preparation. The host control call uses the remaining lifecycle deadline instead
 of a separate 30-second limit. Cancellation or deadline expiry prevents pane

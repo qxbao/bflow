@@ -229,13 +229,14 @@ describe.skipIf(process.platform !== "linux")("P30 platform host", () => {
     'else process.stdout.write(JSON.stringify({ running: false, socket: join(root, "herdr.sock") }) + "\\n");',
     ""
   ].join("\n");
-  const fixture = async (platform?: (root: string) => Record<string, unknown>) => {
+  const fixture = async (platform?: (root: string) => Record<string, unknown>, beforeEnsure?: (root: string) => Promise<void>) => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-host-platform-")));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
     const binary = join(root, "herdr-fixture.mjs");
     await writeFile(binary, fakeHerdr, { mode: 0o700 });
     const base = { repositoryPath: root, sessionId: "platform-host", herdrBinary: binary };
     const config = platform === undefined ? base : { ...base, platform: platform(root) as never };
+    await beforeEnsure?.(root);
     const controller = await ensureAgenticHost(config);
     cleanup.push(() => controller.shutdown().catch(() => undefined));
     return { root, controller, config, directory: join(root, ".bflow/state/host", base.sessionId) };
@@ -248,6 +249,56 @@ describe.skipIf(process.platform !== "linux")("P30 platform host", () => {
     const prepared = await f.controller.prepare();
     expect(prepared.platform).toBeUndefined();
     expect(Object.values(prepared.roleLaunch).every(launch => launch.launch === undefined)).toBe(true);
+  });
+
+  it("drains a disconnected progressive check on the real daemon before cleanup and rejects later checks", async () => {
+    const previousPath = process.env.PATH;
+    const providerModule = new URL("../../../agent-providers/dist/index.js", import.meta.url).href;
+    let f: Awaited<ReturnType<typeof fixture>>;
+    try {
+      f = await fixture(root => platformFor(root, { codexHomeDirectory: join(root, "codex-home"),
+        codexProcessHomeDirectory: join(root, "process-home"), codexHookApprovalPath: join(root, "approvals.json") }), async root => {
+        await mkdir(join(root, "codex-home"), { mode: 0o700 });
+        await mkdir(join(root, "process-home"), { mode: 0o700 });
+        await writeFile(join(root, "codex-home", "config.toml"), "", { mode: 0o600 });
+        await writeFile(join(root, "codex-home", "auth.json"), '{"account":"synthetic"}', { mode: 0o600 });
+        await writeFile(join(root, "codex"), `#!${process.execPath}\nconst { createFakeProviderRunner } = await import(${JSON.stringify(providerModule)});\nconst result = await createFakeProviderRunner().run({ executable: process.argv[1], args: process.argv.slice(2) });\nprocess.stdout.write(result.stdout); process.stderr.write(result.stderr); process.exitCode = result.exitCode ?? 1;\n`, { mode: 0o700 });
+        // Delays the native observation, before its serialized native-session journal write.
+        await writeFile(join(root, "herdr-fixture.mjs"), fakeHerdr.replace('import { readFileSync }', 'import { readFileSync, existsSync, writeFileSync }').replace(
+          'if (rest[0] === "agent" && rest[1] === "get")',
+          'if (rest[0] === "agent" && rest[1] === "get") { writeFileSync(join(root, "observation-started"), ""); while (existsSync(join(root, "hold-observation"))) await new Promise(resolve => setTimeout(resolve, 10)); }\nif (rest[0] === "agent" && rest[1] === "get")'), { mode: 0o700 });
+        process.env.PATH = root + ":" + previousPath;
+      });
+    } finally { process.env.PATH = previousPath; }
+    const prepared = await f.controller.prepare();
+    expect(prepared.platform?.ready, JSON.stringify(prepared.platform)).toBe(true);
+    await observeCodexPanes(f.root);
+    const token = JSON.parse(await readFile(join(f.directory, "conversation.json"), "utf8"));
+    await callHost(token.socketPath, token.token, "provider_bootstrap", { launchId: prepared.roleLaunch.conversation!.launch!.launchId,
+      paneId: "p1", toolReachability: bootstrapReachability, source: "mcp_bootstrap" });
+    const manifest = codexManifest(f.root, f.config.sessionId);
+    manifest.status = "initializing"; manifest.panes = [manifest.panes[0]!];
+    const hold = join(f.root, "hold-observation");
+    await writeFile(hold, "");
+    const cancelled = new AbortController();
+    const pending = f.controller.verifyRoleStartup!(manifest, "conversation", { signal: cancelled.signal });
+    await expect.poll(async () => readFile(join(f.root, "observation-started"), "utf8").then(() => true, () => false)).toBe(true);
+    cancelled.abort();
+    expect((await pending).ok).toBe(false);
+    let drained = false;
+    const drain = f.controller.drainRoleStartup!().then(result => { drained = true; return result; });
+    try {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(drained).toBe(false);
+    } finally { await rm(hold, { force: true }); }
+    expect((await drain).ok).toBe(true);
+    const journal = await readFile(join(f.directory, "native-sessions.json"), "utf8");
+    expect(JSON.parse(journal)).toEqual({ p1: { role: "conversation", sessionId: "native-conversation" } });
+    const closed = await f.controller.verifyRoleStartup!(manifest, "conversation");
+    expect(closed).toMatchObject({ ok: false, error: { message: expect.stringContaining("lifecycle transition") } });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(await readFile(join(f.directory, "native-sessions.json"), "utf8")).toBe(journal);
+    expect((await f.controller.platformStatus()).status.launches.every(launch => launch.state !== "activated")).toBe(true);
   });
 
   it("blocks prepare without launch material when a required provider is not ready, and persists codex role providers", async () => {

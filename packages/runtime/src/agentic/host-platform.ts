@@ -7,7 +7,7 @@ import {
   AgentProviderIdSchema, AgentRoleSchema,
   type AgentProviderId, type AgentRole, type ContractError, type OperationOptions
 } from "@bflow/contracts";
-import { createManagedCodexHookEnvironment, type LiveReadinessObservation } from "@bflow/agent-providers";
+import { createManagedCodexHookEnvironment, createProviderExecutionProbeCoalescer, createProviderProcessRunner, type LiveReadinessObservation } from "@bflow/agent-providers";
 import { FileSkillStore, SkillManager } from "@bflow/skills";
 import {
   createPlatformReadinessService, createProviderAdapterFactory, Ed25519LaunchAttestationSigner, GatewayControlClient,
@@ -300,35 +300,13 @@ export class HostPlatformSession {
       }
       return { option, pane, launch };
     });
-    const verifyRole = async ({ option, pane, launch }: (typeof checks)[number]): Promise<void> => {
-      const observed = await observe(pane.paneId);
-      const observation = liveObservation(pane.paneId, observed);
-      if (observation.nativeSession === undefined) {
-        if (PENDING_STATES.includes(observation.transportState)) {
-          throw new Error(`[bflow:native-startup-pending] ${option.role} pane ${pane.paneId} has no native session yet`);
-        }
-        throw new Error(`Required platform role ${option.role} has no native session (transport ${observation.transportState})`);
-      }
-      const result = await this.options.service.verifyActivated({
-        launchId: launch.launchId,
-        paneId: pane.paneId,
-        nativeSession: observation.nativeSession,
-        observation
-      });
-      if (!result.ok) {
-        if (PENDING_STATES.includes(observation.transportState)) {
-          throw new Error(`[bflow:native-startup-pending] ${option.role} pane ${pane.paneId} is ${observation.transportState}; ${describeFailure(result.error)}`);
-        }
-        throw new Error(`Required platform role ${option.role} is not activated-ready: ${describeFailure(result.error)}`);
-      }
-    };
 
     let next = 0;
     const failures = new Map<number, unknown>();
     await Promise.all(Array.from({ length: Math.min(MAX_ACTIVATION_CONCURRENCY, checks.length) }, async () => {
       while (failures.size === 0 && next < checks.length) {
         const index = next++;
-        try { await verifyRole(checks[index]!); }
+        try { await this.verifyRoleActivation(checks[index]!.pane, observe); }
         catch (error) { failures.set(index, error); }
       }
     }));
@@ -336,6 +314,34 @@ export class HostPlatformSession {
     // failures in configured role order, regardless of their completion order.
     for (let index = 0; index < checks.length; index++) {
       if (failures.has(index)) throw failures.get(index);
+    }
+  }
+
+  /** Preparatory health only; never activates the workspace or substitutes for the complete manifest barrier. */
+  async verifyRoleActivation(
+    pane: { readonly role: AgentRole; readonly paneId: string },
+    observe: (paneId: string) => Promise<HostAgentObservation>,
+    options?: OperationOptions
+  ): Promise<void> {
+    options?.signal?.throwIfAborted();
+    const option = this.options.platform.roles.find(candidate => candidate.role === pane.role && candidate.required && candidate.role !== "developer");
+    if (!option || !this.report?.ready) throw new Error("Role activation requires a ready required-role preflight");
+    const launch = this.launches.get(pane.role);
+    if (!launch) throw new Error(`Required platform role ${pane.role} has no prepared launch in this host process; run bflow up again`);
+    const observation = liveObservation(pane.paneId, await observe(pane.paneId));
+    if (observation.nativeSession === undefined) {
+      if (PENDING_STATES.includes(observation.transportState))
+        throw new Error(`[bflow:native-startup-pending] ${pane.role} pane ${pane.paneId} has no native session yet`);
+      throw new Error(`Required platform role ${pane.role} has no native session (transport ${observation.transportState})`);
+    }
+    const native = observation.nativeSession;
+    options?.signal?.throwIfAborted();
+    const result = await this.options.service.verifyActivated({ launchId: launch.launchId, paneId: pane.paneId,
+      nativeSession: native, observation }, options);
+    if (!result.ok) {
+      if (PENDING_STATES.includes(observation.transportState))
+        throw new Error(`[bflow:native-startup-pending] ${pane.role} pane ${pane.paneId} is ${observation.transportState}; ${describeFailure(result.error)}`);
+      throw new Error(`Required platform role ${pane.role} is not activated-ready: ${describeFailure(result.error)}`);
     }
   }
 
@@ -567,11 +573,13 @@ export function createHostProviderAdapterFactory(
   hookEnvironment: Readonly<Record<string, string | undefined>> = process.env
 ): ProviderAdapterFactory {
   const trustedCodexOptions = createHostProviderFactoryOptions(platform, hookEnvironment).perProvider.codex;
+  const runner = options.perProvider?.codex?.runner ?? options.runner ?? createProviderProcessRunner();
+  const executionProbeCoalescer = createProviderExecutionProbeCoalescer({ runner, successfulResultTtlMs: 30_000 });
   return createProviderAdapterFactory({
     ...options,
     perProvider: {
       ...options.perProvider,
-      codex: { ...options.perProvider?.codex, ...trustedCodexOptions }
+      codex: { ...options.perProvider?.codex, ...trustedCodexOptions, runner, executionProbeCoalescer }
     }
   });
 }

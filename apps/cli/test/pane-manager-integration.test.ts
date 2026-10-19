@@ -37,6 +37,61 @@ describe("P12 composition with real P13 RolePaneManager", () => {
   afterEach(async () => { vi.restoreAllMocks(); await rm(dir, { recursive: true, force: true }); });
   const starts = (runner: HerdrProcesses) => runner.calls.filter((r) => r.args[0] === "agent" && r.args[1] === "start");
   // EnvironmentLifecycle startup/shutdown uses the Linux flock guard.
+  linuxIt("pipelines health after durable role publication without holding later launches, and drains before up returns", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const checked: string[] = [];
+    let firstCheckStartCount = 0;
+    host.verifyRoleStartup = async (manifest, role) => {
+      const persisted = SessionManifestSchema.parse(JSON.parse(await readFile(join(dir, `.bflow/state/panes/${input.repository.sessionName}.manifest.json`), "utf8")));
+      expect(persisted.panes.some(pane => pane.role === role && pane.session)).toBe(true);
+      if (checked.length === 0) firstCheckStartCount = starts(runner).length;
+      checked.push(role);
+      await gate;
+      return { ok: true, value: undefined };
+    };
+    let settled = false;
+    const pending = lifecycle().up().finally(() => { settled = true; });
+    try {
+      await expect.poll(() => starts(runner).length, { timeout: 15_000 }).toBe(7);
+      await expect.poll(() => checked.length).toBe(3);
+      expect(firstCheckStartCount).toBeLessThan(7);
+      expect(settled).toBe(false);
+      expect(host.activate).not.toHaveBeenCalled();
+    } finally { release(); }
+    const manifest = await pending;
+    expect(manifest.panes).toHaveLength(7);
+    expect(checked).toHaveLength(7);
+  });
+
+  linuxIt.each(["quiesce", "close"] as const)("waits for remote startup drain before %s after a disconnected check", async transition => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const remoteDrain = vi.fn(async () => { await gate; return { ok: true as const, value: undefined }; });
+    Object.assign(host, { drainRoleStartup: remoteDrain });
+    host.verifyRoleStartup = async () => ({ ok: false, error: { code: "transport_unavailable", retryable: true, message: "startup RPC disconnected" } });
+    const integration = openPaneManagerEnvironment(input, runner, async () => host, async () => ["--test-host-role-config"]);
+    const started = await integration.manager.up(input.repository.sessionName);
+    expect(started.ok).toBe(false);
+    let settled = false;
+    const pending = (transition === "quiesce" ? integration.quiesce!({}) : integration.close!()).finally(() => { settled = true; });
+    try {
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(remoteDrain).toHaveBeenCalledTimes(1);
+      expect(settled).toBe(false);
+      expect(host[transition]).not.toHaveBeenCalled();
+    } finally { release(); }
+    await pending;
+    expect(host[transition]).toHaveBeenCalledTimes(1);
+  });
+
+  linuxIt("does not schedule health from a failed manifest write", async () => {
+    host.verifyRoleStartup = vi.fn(async () => ({ ok: true, value: undefined }));
+    vi.spyOn(FileSessionManifestStore.prototype, "save").mockResolvedValue({ ok: false, error: { code: "corruption", retryable: false, message: "disk write failed" } });
+    await expect(lifecycle().up()).rejects.toThrow("disk write failed");
+    expect(host.verifyRoleStartup).not.toHaveBeenCalled();
+  });
+
   linuxIt("starts all seven P13 roles with trusted host arguments and persists returned IDs", async () => {
     const environment = lifecycle();
     const manifest = await environment.up();

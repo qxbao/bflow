@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  CreateCheckpointCommandSchema, RecoveryCheckpointSchema, RunQuerySchema, SessionManifestSchema, WorkflowRunSnapshotSchema,
-  type CreateCheckpointCommand, type OperationOptions, type OperationResult, type RecoveryCheckpoint,
+  AgentRoleSchema, CreateCheckpointCommandSchema, RecoveryCheckpointSchema, RunQuerySchema, SessionManifestSchema, WorkflowRunSnapshotSchema,
+  type AgentRole, type CreateCheckpointCommand, type OperationOptions, type OperationResult, type RecoveryCheckpoint,
   type RuntimeService, type SessionManifest
 } from "@bflow/contracts";
 import { callHost } from "./host-protocol.js";
@@ -31,6 +31,10 @@ export interface AgenticHostController {
   /** Readiness report and launch-index status. Never includes launch env, tokens or argv. */
   platformStatus(): Promise<HostPlatformStatus>;
   activate(manifest: SessionManifest, options?: OperationOptions): Promise<OperationResult<void>>;
+  /** Private preparatory health; never starts the workspace or scheduler. */
+  verifyRoleStartup?(manifest: SessionManifest, role: AgentRole, options?: OperationOptions): Promise<OperationResult<void>>;
+  /** Wait for daemon-side startup work even after a role RPC disconnects. */
+  drainRoleStartup?(): Promise<OperationResult<void>>;
   runtime: Pick<RuntimeService, "findRuns" | "getRun">;
   quiesce(options?: OperationOptions): Promise<OperationResult<void>>;
   checkpoint(command: CreateCheckpointCommand, options?: OperationOptions): Promise<OperationResult<RecoveryCheckpoint>>;
@@ -189,6 +193,8 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
     },
     async platformStatus() { return HostPlatformStatusSchema.parse(await request("platform_status")); },
     activate: (manifest, op) => result("activate", SessionManifestSchema.parse(manifest), () => undefined, op),
+    verifyRoleStartup: (manifest, role, op) => result("verify_role_startup", { manifest: SessionManifestSchema.parse(manifest), role: AgentRoleSchema.parse(role) }, () => undefined, op),
+    drainRoleStartup: () => result("drain_role_startup", {}, () => undefined, { timeoutMs: 600_000 }),
     runtime: {
       getRun: (runId, op) => result("get_run", { runId }, value => value === null ? null : WorkflowRunSnapshotSchema.parse(value), op),
       findRuns: (query, op) => result("find_runs", RunQuerySchema.parse(query), value => {
