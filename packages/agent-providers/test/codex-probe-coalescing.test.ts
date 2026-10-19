@@ -1,10 +1,11 @@
+import { generateKeyPairSync } from "node:crypto";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentEnvironmentSchema, type AgentEnvironment } from "@bflow/contracts";
 import {
-  CodexProviderAdapter, createFakeProviderRunner, createProviderExecutionProbeCoalescer,
+  CodexProviderAdapter, createFakeProviderRunner, createProviderExecutionProbeCoalescer, createSignedLaunchAttestation,
   type ProviderAdapterOptions, trustAllCodexHooks, type ProviderCommandInvocation, type ProviderCommandOutcome, type ProviderCommandRunner
 } from "../src/index.js";
 
@@ -24,7 +25,7 @@ beforeEach(async () => {
   await writeFile(join(home, "config.toml"), 'model = "gpt-6-luna"\n', { mode: 0o600 });
   await writeFile(join(home, "auth.json"), '{"account":"synthetic-account"}\n', { mode: 0o600 });
 });
-afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+afterEach(async () => { vi.restoreAllMocks(); await rm(root, { recursive: true, force: true }); });
 
 function environment(role: "conversation" | "reviewer" = "conversation"): AgentEnvironment {
   const scope = { kind: "session", machineId: "machine", repositoryId: "repo", workspaceRoot: workspace, sessionId: "session" };
@@ -40,7 +41,7 @@ function environment(role: "conversation" | "reviewer" = "conversation"): AgentE
   });
 }
 
-function harness(settings: { probeOutcome?: ProviderCommandOutcome; differentAccounts?: boolean } = {}) {
+function harness(settings: { probeOutcome?: ProviderCommandOutcome; differentAccounts?: boolean; successfulResultTtlMs?: number } = {}) {
   let probes = 0;
   let authentications = 0;
   const commands: ProviderCommandInvocation[] = [];
@@ -59,7 +60,7 @@ function harness(settings: { probeOutcome?: ProviderCommandOutcome; differentAcc
     }
     return fake.run(invocation);
   } };
-  const coalescer = createProviderExecutionProbeCoalescer({ runner });
+  const coalescer = createProviderExecutionProbeCoalescer({ runner, ...(settings.successfulResultTtlMs !== undefined ? { successfulResultTtlMs: settings.successfulResultTtlMs } : {}) });
   const adapter = (options: ProviderAdapterOptions = {}) => new CodexProviderAdapter({
     runner, executablePath: binary, codexHomeDirectory: home,
     codexHookEnvironment: { HOME: root, PATH: process.env["PATH"] ?? "" },
@@ -69,7 +70,7 @@ function harness(settings: { probeOutcome?: ProviderCommandOutcome; differentAcc
   const health = (role: "conversation" | "reviewer", options: ProviderAdapterOptions = {}, env = environment(role)) => adapter(options).checkHealth({
     schemaVersion: 3, environment: env, stage: "preflight", requestedAt: new Date().toISOString()
   });
-  return { health, commands, get probes() { return probes; }, get authentications() { return authentications; } };
+  return { adapter, health, commands, get probes() { return probes; }, get authentications() { return authentications; } };
 }
 
 describe("Codex readiness execution ping sharing", () => {
@@ -164,4 +165,84 @@ describe("Codex readiness execution ping sharing", () => {
     expect(h.probes).toBe(2);
   });
 
+});
+
+
+describe("Codex successful completed model ping reuse", () => {
+  it("reuses only the execution probe while checking authentication and each role's permissions freshly", async () => {
+    const h = harness({ successfulResultTtlMs: 30_000 });
+    const first = await h.health("conversation");
+    expect(first.ok && first.value.status).toBe("ready");
+    const second = await h.health("reviewer");
+    expect(second.ok && second.value.status).toBe("ready");
+    expect(second.ok && second.value.role).toBe("reviewer");
+    expect(h.authentications).toBe(2);
+    expect(h.probes).toBe(1);
+    await chmod(state, 0o755);
+    const blocked = await h.health("reviewer");
+    expect(blocked.ok && blocked.value.status).toBe("blocked");
+    expect(blocked.ok && blocked.value.checks.some(check => check.code === "environment_insecure")).toBe(true);
+    expect(h.authentications).toBe(3);
+    expect(h.probes).toBe(1);
+  });
+
+  it("checks native launch readiness again after successful activated health while reusing only the model ping", async () => {
+    const h = harness({ successfulResultTtlMs: 30_000 });
+    await h.health("conversation");
+    const keys = generateKeyPairSync("ed25519");
+    const nativeSession = { source: "codex", kind: "id" as const, value: "native-session" };
+    const live = { paneId: "pane", nativeSession, transportState: "idle" as const, interactiveReady: true };
+    const adapter = h.adapter({ liveObservation: live,
+      trustedIssuerKeys: { test: keys.publicKey.export({ type: "spki", format: "pem" }).toString() } });
+    const env = environment();
+    const launch = await adapter.prepareLaunch(env);
+    expect(launch.ok, JSON.stringify(launch)).toBe(true);
+    if (!launch.ok) throw new Error("launch preparation failed");
+    const attestation = createSignedLaunchAttestation({ receiptId: "receipt", issuerId: "test",
+      launchId: launch.value.launchId, launchFingerprint: launch.value.launchFingerprint, sessionId: "session", paneId: "pane", nativeSession,
+      observedAt: new Date().toISOString(), privateKeyPem: keys.privateKey.export({ type: "pkcs8", format: "pem" }).toString() });
+    const request = { schemaVersion: 3 as const, environment: env, stage: "activated" as const,
+      launchProfile: launch.value, launchAttestation: attestation, requestedAt: new Date().toISOString() };
+    const ready = await adapter.checkHealth(request);
+    expect(ready.ok && ready.value.status, JSON.stringify(ready)).toBe("ready");
+    live.interactiveReady = false;
+    const blocked = await adapter.checkHealth(request);
+    expect(blocked.ok && blocked.value.status).toBe("blocked");
+    expect(blocked.ok && blocked.value.checks.some(check => check.code === "native_binding_not_interactive_ready")).toBe(true);
+    expect(h.authentications).toBe(3);
+    expect(h.probes).toBe(1);
+  });
+
+  it.each(["config.toml", "auth.json", "hooks.json", "binary", "instructions", "session", "environment", "account"])(
+    "runs a fresh execution probe after completed %s snapshot changes", async field => {
+      const h = harness({ successfulResultTtlMs: 30_000, differentAccounts: field === "account" });
+      const first = await h.health("conversation");
+      expect(first.ok && first.value.status).toBe("ready");
+      const changed = environment("reviewer");
+      if (field === "binary") await writeFile(binary, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+      else if (field === "instructions") await writeFile(join(workspace, "AGENTS.md"), "new instructions\n");
+      else if (field === "session") {
+        changed.scope = { ...changed.scope, sessionId: "second-session" };
+        changed.permissionProfile.scope = changed.scope;
+      } else if (field === "environment") changed.environmentVariables = { BUILD_ENV: "new" };
+      else if (field !== "account") await writeFile(join(home, field), field === "config.toml" ? 'model = "changed"\n' : field === "hooks.json" ? '{"hooks":{}}\n' : '{"account":"changed"}\n', { mode: 0o600 });
+      const second = await h.health("reviewer", {}, changed);
+      expect(second.ok && second.value.status, JSON.stringify(second)).toBe("ready");
+      expect(h.probes).toBe(2);
+    }
+  );
+
+  it("expires completed execution reuse after 30 seconds without caching full health", async () => {
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const h = harness({ successfulResultTtlMs: 30_000 });
+    await h.health("conversation");
+    now = 29_999;
+    await h.health("reviewer");
+    expect(h.probes).toBe(1);
+    now = 30_000;
+    await h.health("reviewer");
+    expect(h.probes).toBe(2);
+    expect(h.authentications).toBe(3);
+  });
 });

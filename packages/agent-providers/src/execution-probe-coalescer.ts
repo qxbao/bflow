@@ -19,6 +19,7 @@ interface InFlightProbe {
   readonly controller: AbortController;
   readonly outcome: Promise<ProviderCommandOutcome>;
   waiters: number;
+  completedAt?: number;
 }
 
 function interrupted(failure: "aborted" | "timeout"): ProviderCommandOutcome {
@@ -36,15 +37,31 @@ function successful(outcome: ProviderCommandOutcome): boolean {
 }
 
 /**
- * One host factory owns this object and its raw runner. Only overlapping pings may share success;
- * completed observations are immediately evicted. Authentication and role/native readiness never
- * pass through this object. Each waiter has its own cancellation/deadline; the shared process is
- * cancelled only when no waiters remain, and always has the normal bounded probe timeout.
+ * One host factory owns this object and its raw runner. Overlapping pings may share success;
+ * completed successes require an explicit bounded TTL and fresh snapshot verification.
+ * Authentication and role/native readiness never pass through this object. Each waiter has its
+ * own cancellation/deadline; the shared process is cancelled only when no waiters remain,
+ * and always has the normal bounded probe timeout.
  */
 export function createProviderExecutionProbeCoalescer(options: {
   readonly runner: ProviderCommandRunner;
+  /** Opt-in model execution success reuse only, 0 (default) through 30,000 ms. */
+  readonly successfulResultTtlMs?: number;
 }): ProviderExecutionProbeCoalescer {
+  const ttl = options.successfulResultTtlMs ?? 0;
+  if (!Number.isFinite(ttl) || ttl < 0 || ttl > 30_000) throw new RangeError("Successful execution probe TTL must be between 0 and 30000 ms");
   const running = new Map<string, InFlightProbe>();
+  const completed = new Map<string, { outcome: ProviderCommandOutcome; completedAt: number }>();
+  const prune = () => {
+    const now = performance.now();
+    for (const [key, entry] of completed) if (now - entry.completedAt >= ttl) completed.delete(key);
+  };
+  const remember = (key: string, outcome: ProviderCommandOutcome, completedAt: number) => {
+    if (ttl === 0 || !successful(outcome) || performance.now() - completedAt >= ttl) return;
+    prune();
+    completed.set(key, { outcome: { ...outcome }, completedAt });
+    while (completed.size > 128) completed.delete(completed.keys().next().value!);
+  };
   return {
     async probe(request, operation) {
       const signal = operation?.signal;
@@ -64,8 +81,13 @@ export function createProviderExecutionProbeCoalescer(options: {
         maxOutputBytes: request.invocation.maxOutputBytes ?? null
       })).digest("hex");
       const key = observationKey();
+      prune();
+      const cached = completed.get(key);
       let entry = running.get(key);
-      const follower = entry !== undefined;
+      const follower = entry !== undefined || cached !== undefined;
+      if (entry === undefined && cached !== undefined) entry = {
+        controller: new AbortController(), outcome: Promise.resolve(cached.outcome), waiters: 0, completedAt: cached.completedAt
+      };
       if (entry === undefined) {
         const controller = new AbortController();
         const outcome = Promise.resolve().then(() => options.runner.run({
@@ -74,8 +96,11 @@ export function createProviderExecutionProbeCoalescer(options: {
         entry = { controller, outcome, waiters: 0 };
         running.set(key, entry);
         const current = entry;
-        // Both fulfillment and rejection evict immediately; do not retain failed/cancelled probes.
-        void outcome.then(() => { if (running.get(key) === current) running.delete(key); },
+        // Evict the in-flight entry immediately. Only a live waiter with a verified snapshot may retain success below.
+        void outcome.then(() => {
+          current.completedAt = performance.now();
+          if (running.get(key) === current) running.delete(key);
+        },
           () => { if (running.get(key) === current) running.delete(key); });
       }
       const current = entry;
@@ -100,17 +125,25 @@ export function createProviderExecutionProbeCoalescer(options: {
           }
           if (waiter.signal.aborted) return outcome;
           const isCurrent = async (): Promise<boolean> => {
-            try { return observationKey() === key && await request.isCurrent(); }
+            try { return observationKey() === key && await request.isCurrent() && observationKey() === key; }
             catch { return false; /* Uncertain configuration cannot establish proof. */ }
           };
-          if (!await isCurrent()) return changedContext();
+          if (!await isCurrent()) { completed.delete(key); return changedContext(); }
           if (waiter.signal.aborted) return outcome;
-          if (!follower || successful(outcome)) return outcome;
-          // A failed shared observation is never the follower's own proof. This is a new
+          const expiredReuse = follower && ttl > 0 && current.completedAt !== undefined && performance.now() - current.completedAt >= ttl;
+          if (!expiredReuse && (!follower || successful(outcome))) {
+            if (current.completedAt !== undefined) remember(key, outcome, current.completedAt);
+            return { ...outcome };
+          }
+          completed.delete(key);
+          // A failed or expired shared observation is never the follower's own proof. This is a new
           // readiness ping, not a replay of a workflow mutation. It remains inside the waiter's budget.
           const ownOutcome = await options.runner.run({ ...request.invocation, signal: waiter.signal,
             timeoutMs: request.invocation.timeoutMs ?? 75_000 });
-          return await isCurrent() ? ownOutcome : changedContext();
+          const completedAt = performance.now();
+          if (!await isCurrent()) { completed.delete(key); return changedContext(); }
+          if (!waiter.signal.aborted) remember(key, ownOutcome, completedAt);
+          return { ...ownOutcome };
         };
         return await Promise.race([observation(), cancellation]);
       } finally {

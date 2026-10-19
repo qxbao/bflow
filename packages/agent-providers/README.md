@@ -89,13 +89,19 @@ Every check returns `status: "passed" | "failed" | "unknown"`. Overall status is
 
 ---
 
-## Optional overlapping Codex execution probes
+## Optional Codex model execution probe reuse
 
 A host adapter factory may create `createProviderExecutionProbeCoalescer({ runner })` once per
 underlying **raw** `ProviderCommandRunner`, then pass it as `executionProbeCoalescer` to its adapters.
 Keep the normal operation-bound runner for every other command. The coalescer owns independent
 waiter cancellation/timeouts and aborts its bounded subprocess when every waiter has left.
-It stores only in-flight entries; sequential checks always execute a new ping.
+By default it stores only in-flight entries. To opt into completed successful **model execution
+probe** reuse, pass `successfulResultTtlMs: 30_000` (or a shorter nonnegative duration) when
+creating the coalescer. Values above 30 seconds, negative or nonfinite values are rejected.
+The monotonic age starts at subprocess completion and is never extended by a cache hit.
+Expired successes require a new execution, including when they expire during snapshot validation.
+Retention is bounded to 128 successful observations per factory; expired entries are pruned on use.
+Omitted or zero TTL preserves overlapping-only behavior.
 
 Only Codex opts in. Sharing requires matching session/repository/machine scope, canonical binary
 and digest, ping arguments (including model/effort and inherited isolation), cwd, effective process
@@ -109,9 +115,12 @@ Changes during an eligible probe block that observation and require a fresh heal
 Every role still checks authentication, capabilities, environment, permission policy, skills,
 MCP, hook trust/drift and native launch attestation separately. A shared ping failure is never
 reused as the follower's proof; an unchanged follower executes its own ping within its original
-budget. There is no completed-result cache or global/static state, and no launch/task proof is
-shared. Tests cover local command reduction for overlapping matching roles; this is not live
-provider/Herdr startup evidence or a same-UID filesystem isolation guarantee.
+budget. Every completed hit revalidates the mutable snapshot before accepting it; drift or uncertainty
+blocks the observation and evicts it. Failed, rejected, aborted and timed-out executions are never
+retained. Each caller receives its own outcome object. There is no persistent or global/static
+cache, and no health, native launch, attestation or task proof is shared. Tests cover local command
+reduction for overlapping and sequential matching roles; this is not live provider/Herdr startup
+evidence or a same-UID filesystem isolation guarantee.
 
 ---
 

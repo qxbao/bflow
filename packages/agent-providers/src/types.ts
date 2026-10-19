@@ -75,7 +75,7 @@ export interface HostMcpServer {
 }
 
 export interface ProviderAdapterOptions {
-  /** Host-factory-owned, raw-runner-bound sharing of overlapping eligible readiness pings only. */
+  /** Host-factory-owned, raw-runner-bound sharing/reuse of eligible model execution pings only. */
   readonly executionProbeCoalescer?: import("./execution-probe-coalescer.js").ProviderExecutionProbeCoalescer;
   readonly executablePath?: string;
   readonly pinnedExecutableDigest?: string;
