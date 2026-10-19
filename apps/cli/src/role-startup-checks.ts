@@ -9,13 +9,21 @@ export class RoleStartupChecks {
   private accepting = true;
 
   constructor(private readonly roles: readonly AgentRole[], private readonly verify:
-    (manifest: SessionManifest, role: AgentRole, options?: OperationOptions) => Promise<OperationResult<void>>) {}
+    (manifest: SessionManifest, role: AgentRole, options?: OperationOptions) => Promise<OperationResult<void>>,
+    private readonly preparedLaunches: Readonly<Partial<Record<AgentRole, { readonly launchId: string; readonly launchFingerprint: string }>>> = {}) {}
 
   published(manifest: SessionManifest, options?: OperationOptions): void {
     if (!this.accepting || this.failures.size || options?.signal?.aborted) return;
     for (const role of this.roles) {
       const pane = manifest.panes.find(binding => binding.role === role && binding.permanent);
       if (!pane?.session || !["idle", "done", "working", "accepted"].includes(pane.transportState)) continue;
+      // Initializing manifests retain unvisited bindings from the preceding
+      // generation. Only this prepare's launch can warm its role health.
+      const launch = this.preparedLaunches[role];
+      if (launch && (pane.metadata?.["launchId"] !== launch.launchId || pane.metadata?.["launchFingerprint"] !== launch.launchFingerprint)) {
+        this.queued.delete(role);
+        continue;
+      }
       const key = JSON.stringify([pane.paneId, pane.agentId, pane.session, pane.metadata?.["launchId"], pane.metadata?.["launchFingerprint"]]);
       if (this.seen.get(role) === key) { this.queued.delete(role); continue; }
       this.queued.set(role, { manifest, key, ...(options ? { options } : {}) });

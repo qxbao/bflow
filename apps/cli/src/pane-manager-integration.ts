@@ -227,7 +227,8 @@ export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, r
       async (manifest, role, operation) => {
         const active = await connect();
         return active.verifyRoleStartup ? active.verifyRoleStartup(manifest, role, operation) : { ok: true, value: undefined };
-      });
+      }, Object.fromEntries(Object.entries(descriptors.roleLaunch).flatMap(([role, descriptor]) =>
+        descriptor.launch ? [[role, { launchId: descriptor.launch.launchId, launchFingerprint: descriptor.launch.launchFingerprint }]] : [])));
     manager = new PaneManagerLifecycleAdapter(input, runner, args, launches, socketFactory, (manifest, operation) => startupChecks!.published(manifest, operation));
     prepared = true;
     return { ok: true, value: undefined };

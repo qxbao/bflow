@@ -77,7 +77,9 @@ the selected canonical Codex home and private approval store. Revoke it with
 or `config.toml` is group/world-writable or not owned by the current user.
 
 After a successful manifest publication, `up` may start up to three preparatory host role
-checks while later panes launch. It waits for every required role and repeats the full fresh
+checks while later panes launch. Only bindings matching the current prepared launch ID and
+fingerprint enter these checks; saved bindings from a previous generation wait for replacement.
+It waits for every required role and repeats the full fresh
 health/attestation gate at final activation. Only the equivalent Codex model execution probe
 can reuse a successful observation, for at most 30 seconds; native/tool/permission/skill proofs
 and role health are freshly checked. Startup cancellation and failure drain started checks

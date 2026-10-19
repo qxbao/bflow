@@ -41,6 +41,25 @@ describe("progressive role health publication queue", () => {
     expect(started).toHaveLength(5);
   });
 
+  it.each(["launchId", "launchFingerprint"] as const)("ignores a superseded %s and accepts its current binding later", async field => {
+    const checked: string[] = [];
+    const current = { launchId: "current", launchFingerprint: "b".repeat(64) };
+    const checks = new RoleStartupChecks(["conversation"], async (published, role) => {
+      checked.push(String(published.panes.find(pane => pane.role === role)?.metadata?.["launchId"]));
+      return ready;
+    }, { conversation: current });
+    const old = manifest();
+    old.panes[0]!.metadata = { ...current, [field]: "superseded" };
+    checks.published(old);
+    expect(await checks.drain()).toEqual(ready);
+    expect(checked).toEqual([]);
+    const latest = manifest();
+    latest.panes[0]!.metadata = current;
+    checks.published(latest);
+    expect(await checks.drain()).toEqual(ready);
+    expect(checked).toEqual(["current"]);
+  });
+
   it("stops queued checks after terminal failure, drains started work and reports configured-order failures", async () => {
     const gates = roles.map(() => deferred<OperationResult<void>>());
     const started: AgentRole[] = [];

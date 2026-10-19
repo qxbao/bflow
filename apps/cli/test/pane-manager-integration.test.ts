@@ -281,6 +281,34 @@ describe("P30 platform readiness in up", () => {
     expect(host.prepare).toHaveBeenCalledTimes(1);
   });
 
+  linuxIt("checks only current prepared launches while reconciling a saved prior generation", async () => {
+    const input = withProviders(() => "codex");
+    serverRunning(input);
+    const previous = await roleLaunchesFor(input);
+    const initial = await openPaneManagerEnvironment(input, runner, async () => hostWith(previous), undefined, socketFor)
+      .manager.up(input.repository.sessionName);
+    expect(initial.ok).toBe(true);
+    const current = Object.fromEntries(Object.entries(previous).map(([role, descriptor]) => [role, { ...descriptor,
+      launch: { ...descriptor.launch!, launchId: `new-${role}`, launchFingerprint: "b".repeat(64) } }]));
+    const checked: string[] = [];
+    const host = hostWith(current);
+    host.verifyRoleStartup = async (manifest, role) => {
+      const pane = manifest.panes.find(binding => binding.role === role)!;
+      const launchId = pane.metadata?.["launchId"];
+      checked.push(String(launchId));
+      // The real daemon refuses receipts from a superseded prepared launch.
+      return launchId === current[role]?.launch?.launchId
+        ? { ok: true, value: undefined }
+        : { ok: false, error: { code: "conflict", retryable: false, message: "Prior-generation launch was checked" } };
+    };
+    const result = await openPaneManagerEnvironment(input, runner, async () => host, undefined, socketFor)
+      .manager.up(input.repository.sessionName);
+    expect(result.ok ? "ok" : result.error.message).toBe("ok");
+    expect(checked).toHaveLength(7);
+    expect(checked.every(id => id.startsWith("new-"))).toBe(true);
+    if (result.ok) expect(result.value.panes.every(pane => pane.metadata?.["launchId"] === `new-${pane.role}`)).toBe(true);
+  });
+
   linuxIt("fails up with the readiness report before any agent start when a required role is blocked", async () => {
     const input = withProviders(role => role === "coordinator" ? "codex" : "claude");
     serverRunning(input);
