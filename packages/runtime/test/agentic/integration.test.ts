@@ -922,3 +922,65 @@ describe("Coordinator Stop delivery to Conversation", () => {
     expect((await f.runtime.inspect() as any).outbound.filter((out: any) => out.message.payload.kind === "coordinator_no_response")).toEqual([]);
   });
 });
+
+describe("Specialist reply wake-up and failure visibility", () => {
+  const specialistReply = (f: Awaited<ReturnType<typeof fixture>>, request: any, extra: Record<string, unknown> = {}) =>
+    f.envelope("spec.draft", { status: "completed", summary: "Impact analysis" }, { causation_id: request.message_id,
+      sender: { role: "architect", agent_id: "architect", pane_id: "pane-architect" }, recipient: { role: "coordinator" }, ...extra });
+  async function delegated() {
+    const f = await fixture();
+    const queued = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", ["architecture"]) as any;
+    await f.runtime.flushOutbound();
+    expect(f.transport.sentRequests.some(request => request.role === "architect")).toBe(true);
+    return { f, queued };
+  }
+  const sentTo = (f: Awaited<ReturnType<typeof fixture>>, role: string) => f.transport.sentRequests.filter(request => request.role === role).map(request => JSON.parse(request.instruction));
+
+  it("wakes the Coordinator through Herdr once the Architect reply is applied (run no longer stalls in specifying)", async () => {
+    const { f, queued } = await delegated();
+    expect(sentTo(f, "coordinator")).toEqual([]);
+    const reply = specialistReply(f, queued);
+    await f.runtime.receiveHerdr(reply);
+    expect((await f.inspect()).status).toBe("specifying");
+    await f.runtime.flushOutbound();
+    const notices = sentTo(f, "coordinator");
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({ type: "task.status", sender: { role: "runtime" }, recipient: { role: "coordinator" }, causation_id: expect.any(String),
+      payload: { kind: "specialist_result_ready", fromRole: "architect", messageType: "spec.draft", result: { summary: "Impact analysis" } } });
+    await f.runtime.receiveHerdr(reply); // duplicate ingress never duplicates the wake-up
+    await f.runtime.flushOutbound();
+    expect(sentTo(f, "coordinator")).toHaveLength(1);
+  });
+
+  it("keeps the wake-up queued while the Coordinator is busy instead of dropping it", async () => {
+    const { f, queued } = await delegated();
+    f.panes.busy.add("coordinator");
+    await f.runtime.receiveHerdr(specialistReply(f, queued)); await f.runtime.flushOutbound();
+    expect(sentTo(f, "coordinator")).toEqual([]);
+    f.panes.busy.delete("coordinator"); await f.runtime.flushOutbound();
+    expect(sentTo(f, "coordinator")).toHaveLength(1);
+  });
+
+  it("reports a rejected inbound specialist message to Conversation with a concrete reason", async () => {
+    const { f, queued } = await delegated();
+    const reply = specialistReply(f, queued);
+    await f.runtime.reportInboundFailure(reply, "Transport sender binding unavailable");
+    await f.runtime.reportInboundFailure(reply, "Transport sender binding unavailable"); // idempotent
+    await f.runtime.flushOutbound();
+    const notices = sentTo(f, "conversation").filter(message => message.payload.kind === "delivery_failure");
+    expect(notices).toHaveLength(1);
+    expect(notices[0].payload.blockageReason).toContain("Transport sender binding unavailable");
+    expect(notices[0].payload.blockageReason).toContain("architect");
+    expect(notices[0].run_id).toBe("run-1");
+  });
+
+  it("surfaces a stuck outbound delivery (no recipient pane) to Conversation instead of staying silent", async () => {
+    const { f } = await delegated();
+    f.panes.bindings.splice(f.panes.bindings.findIndex(p => p.role === "planner"), 1);
+    const out = f.envelope("task.status", { kind: "probe" }, { sender: { role: "runtime" }, recipient: { role: "planner" } });
+    await f.runtime.queueHerdr(out); await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
+    const notices = sentTo(f, "conversation").filter(message => message.payload.kind === "delivery_failure");
+    expect(notices).toHaveLength(1);
+    expect(notices[0].payload.blockageReason).toContain("Recipient pane unavailable");
+  });
+});

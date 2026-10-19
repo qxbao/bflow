@@ -27,6 +27,7 @@ describe.skipIf(process.platform !== "linux")("Conversation decisions through th
       'else if(rest[0]==="api") console.log("protocol: 22\\nschema_version: 1");',
       'else if(rest[0]==="plugin" && rest[1]==="config-dir") console.log(join(root,"plugin"));',
       'else if(rest[0]==="agent" && rest[1]==="get") { const conversation=rest[2]==="pane-chat"; console.log(JSON.stringify({result:{agent:{name:conversation?"chat":"coordinator",pane_id:rest[2],workspace_id:"workspace",tab_id:"tab",agent_status:"working",agent_session:{source:"herdr:claude",kind:"id",value:conversation?"native-chat":"native-coordinator"}}}})); }',
+      'else if(rest[0]==="pane" && rest[1]==="read") console.log("coordinator waiting for architect reply token=sk-ant-abcdefghijklmnopqrstuvwxyz0123456789");',
       'else if(rest[0]==="pane") process.exitCode=1;',
       'else console.log(JSON.stringify({running:false,socket:join(root,"herdr.sock")}));'
     ].join("\n"), { mode: 0o700 });
@@ -70,6 +71,13 @@ describe.skipIf(process.platform !== "linux")("Conversation decisions through th
       sender: { role: "conversation", agent_id: "chat", pane_id: "pane-chat" }, recipient: { role: "coordinator" }, type: "delegation.request",
       payload: {}, artifact_references: [], occurred_at: at, idempotency_key: "model-delegation" });
     await expect(invoke("send_role_message", { message: direct })).rejects.toThrow("conversation_decide");
+    // Conversation may read other panes (read-only, redacted); nobody else may, and it cannot read itself.
+    const pane = await invoke("read_role_pane", { role: "coordinator", lines: 20 }) as { content: string; paneId: string };
+    expect(pane.paneId).toBe("pane-coordinator"); expect(pane.content).toContain("waiting for architect reply"); expect(pane.content).not.toContain("sk-ant-abcdefghijklmnopqrstuvwxyz0123456789");
+    await expect(invoke("read_role_pane", { role: "conversation" })).rejects.toThrow("already owns");
+    await expect(invoke("read_role_pane", { role: "coordinator", lines: 5000 })).rejects.toThrow("lines");
+    await expect(invoke("read_role_pane", { role: "architect" })).rejects.toThrow("No architect pane");
+    await expect(callHost(coordinator.socketPath, coordinator.token, "role_call", { paneId: "pane-coordinator", name: "read_role_pane", arguments: { role: "conversation" } })).rejects.toThrow("Only Conversation");
     const decision = { intent: "workflow_request", requirementDraft: { title: "Khảo sát quyền MCP", objective: "Liệt kê quyền MCP theo từng role",
       kind: "spike", sddLevel: "lightweight", priority: "normal", scopeDefined: true, isLargeTask: false, affectedPaths: [],
       acceptanceCriteriaDescriptions: ["Bảng role/server/nơi cấu hình/cơ chế chặn, chỉ đọc"], isRequirementChange: false } };

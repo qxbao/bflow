@@ -14,6 +14,8 @@ export async function authenticateNativeHerdrMessage(message: RoleMessage): Prom
 export async function startHerdrReceiptIngress(options: {
   socketPath: string; publicKeys: Readonly<Record<string, string>>;
   receive(message: RoleMessage): Promise<unknown>;
+  /** Called only for a signature-verified message whose processing failed, so the failure can be surfaced instead of vanishing. */
+  failed?(message: RoleMessage, error: unknown): Promise<void>;
 }): Promise<{ close(): Promise<void> }> {
   // Refuse to steal an existing socket, including a potentially live host's endpoint.
   try { await lstat(options.socketPath); throw new Error("Herdr receipt endpoint already exists; reconcile its owner"); }
@@ -39,7 +41,8 @@ export async function startHerdrReceiptIngress(options: {
         const publicKey = createPublicKey(key);
         if (publicKey.asymmetricKeyType !== "ed25519" || !verify(null, Buffer.from(canonicalReceiptJson(message)), publicKey, Buffer.from(signature, "base64")))
           throw new Error("Invalid native Herdr message signature");
-        await authenticated.run(canonicalReceiptJson(message), () => options.receive(message));
+        try { await authenticated.run(canonicalReceiptJson(message), () => options.receive(message)); }
+        catch (error) { await options.failed?.(message, error).catch(() => undefined); throw error; }
         socket.end(JSON.stringify({ ok: true, messageId: message.message_id }) + "\n");
       })().catch(() => { socket.end(JSON.stringify({ ok: false, error: "Herdr message authentication or processing failed" }) + "\n"); });
     });

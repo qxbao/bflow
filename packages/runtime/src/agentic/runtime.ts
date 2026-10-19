@@ -13,9 +13,11 @@ import { AgenticJournal, digest, json, record, strings, textField, type JournalS
 import { buildDecisionRequestMessage, buildUserDecisionRequest, USER_DECISION_EXPIRED_KIND, validateUserDecisionAnswer, type UserDecisionToolInput } from "./decision-routing.js";
 import { captureIntegratedChange } from "./integration-change.js";
 import { CoreSession } from "./core-session.js";
+import { redactString } from "../resilience/redaction.js";
 import { HerdrOutbox, unwrap } from "./outbox.js";
 import type { AgenticRuntimePorts, Integration, VerificationPlan } from "./ports.js";
 
+const STRUCTURAL_DELIVERY_BLOCKERS = /^(Recipient pane unavailable|No capable agent in recipient pane|Pinned request or recipient changed)/;
 const VERIFICATION_GATE = "p19-independent-task-verification";
 const TERMINAL_RUN_STATUSES: readonly string[] = ["completed", "failed", "cancelled", "escalated"];
 const FINAL_TASK = "workflow-verification";
@@ -85,6 +87,54 @@ export class AgenticWorkflowRuntime {
       ...(run.status === "completed" ? { verified: true, completedVerified: true } : {}) }, `progress:${run.status}:${headline}`,
       "conversation", run.status === "completed" ? run.workflowCycle?.history.at(-1)?.evidenceArtifacts ?? [] : []);
   }
+  /**
+   * A specialist reply is recorded in the inbox, but the Coordinator yielded its turn after requesting it and nothing else
+   * prompts that pane. Runtime therefore queues a Herdr notice (never a file/SQLite mailbox) carrying the reply. It is a wake-up
+   * only: it grants no approval and the Coordinator must still go through Runtime tools and gates.
+   */
+  private wakeCoordinator(state: JournalState, outbox: HerdrOutbox, run: RunRecord, message: RoleMessage): void {
+    const messageId = `p19-wake-${digest([run.runId, message.message_id])}`;
+    if (state.outbound.some(out => out.message.message_id === messageId)) return;
+    outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: messageId, correlation_id: run.delegation.correlationId,
+      causation_id: message.message_id, run_id: run.runId, sender: { role: "runtime" }, recipient: { role: "coordinator" }, type: "task.status",
+      payload: { kind: "specialist_result_ready", fromRole: message.sender.role, messageType: message.type, sourceMessageId: message.message_id,
+        sdlcStatus: run.status, result: message.payload, next: "Call inspect to read the durable inbox, then continue the workflow or report a blocker." },
+      artifact_references: message.artifact_references, occurred_at: this.now(), idempotency_key: messageId }), "coordinator");
+  }
+  /** Surfaces a delivery failure to the user through Conversation. Idempotent per (run, message, reason). */
+  private surfaceFailure(state: JournalState, outbox: HerdrOutbox, run: RunRecord, subject: string, reason: string): void {
+    this.emit(state, outbox, run, "conversation.progress", { kind: "delivery_failure", sdlcStatus: run.status,
+      headline: `Herdr delivery failed: ${subject}`, blockageReason: `${subject}: ${reason}. The run is waiting and will not continue until this is resolved.` },
+      `delivery-failure:${digest([subject, reason])}`);
+  }
+  /** Called by the host when an authenticated inbound message could not be applied; the failure must not stay silent. */
+  async reportInboundFailure(input: unknown, reason: string): Promise<void> {
+    const message = RoleMessageSchema.safeParse(input);
+    if (!message.success || !message.data.run_id) return;
+    const data = message.data;
+    await this.transaction(async (state, save, _core, outbox) => {
+      const run = state.runs.find(item => item.runId === data.run_id);
+      if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) return;
+      this.surfaceFailure(state, outbox, run, `${data.type} from ${data.sender.role} to ${data.recipient.role} (${data.message_id})`, redactString(reason));
+      await save();
+    });
+  }
+  /** Each stuck outbound handoff is reported once per distinct error; reports about reports are never created. */
+  private surfaceOutboundFailures(state: JournalState, outbox: HerdrOutbox): boolean {
+    let changed = false;
+    for (const out of [...state.outbound]) {
+      if (!out.error || !["queued", "unknown_delivery"].includes(out.status) || !out.message.run_id) continue;
+      // Capacity/lease backpressure retries by itself; only an uncertain delivery or a structural blocker is a failure the user must hear about.
+      if (out.status !== "unknown_delivery" && !STRUCTURAL_DELIVERY_BLOCKERS.test(out.error)) continue;
+      if (out.message.type === "conversation.progress" && record(out.message.payload).kind === "delivery_failure") continue;
+      const run = state.runs.find(item => item.runId === out.message.run_id);
+      if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) continue;
+      const before = state.outbound.length;
+      this.surfaceFailure(state, outbox, run, `${out.message.type} to ${out.message.recipient.role} (${out.message.message_id})`, redactString(out.error));
+      changed ||= state.outbound.length !== before;
+    }
+    return changed;
+  }
   /** Trusted local host enqueues a message; actual inter-agent delivery always uses Herdr. */
   async queueHerdr(input: unknown): Promise<JsonValue> {
     if (this.quiesced) throw new Error("Runtime is quiesced");
@@ -97,7 +147,8 @@ export class AgenticWorkflowRuntime {
     await this.initialize();
     if (this.quiesced) return;
     await this.transaction(async (state, save, core, outbox) => {
-      await outbox.flush((out, handle) => this.bind(state, core, out, handle)); await save();
+      await outbox.flush((out, handle) => this.bind(state, core, out, handle));
+      this.surfaceOutboundFailures(state, outbox); await save();
     });
   }
   private readonly gateWaiters = new Map<string, { runId: string; accept(result: QualityGateResult): void; reject(error: Error): void }>();
@@ -264,6 +315,8 @@ export class AgenticWorkflowRuntime {
           await this.cancelRun(state, save, core, outbox, run, textField(record(message.payload).reason));
         } else if (!["spec.draft", "task.status", "review.verdict", "verification.escalation"].includes(message.type)) {
           throw new Error(`Unsupported inbound message ${message.type}`);
+        } else if (message.recipient.role === "coordinator") {
+          this.wakeCoordinator(state, outbox, run, message);
         }
       }
       inbox.status = "applied"; await save();
@@ -297,7 +350,8 @@ export class AgenticWorkflowRuntime {
       const baseline = delivery.coordinatorResponseBaseline ?? state.outbound.indexOf(delivery) + 1;
       const response = state.outbound.slice(baseline).some(out => out.message.run_id === message.run_id && out.message.correlation_id === message.correlation_id &&
         out.message.sender.role === "coordinator" && out.message.type !== "delegation.accepted" &&
-        !(out.message.type === "conversation.progress" && typeof out.message.payload === "object" && out.message.payload !== null && !Array.isArray(out.message.payload) && out.message.payload.kind === "coordinator_no_response"));
+        !(out.message.type === "conversation.progress" && typeof out.message.payload === "object" && out.message.payload !== null && !Array.isArray(out.message.payload) &&
+          (out.message.payload.kind === "coordinator_no_response" || out.message.payload.kind === "delivery_failure"))); // Runtime-authored notices are not a Coordinator answer.
       if (response) return; // Includes queued progress/clarifications/approvals, before physical transport.
       const applied = state.inbox.some(item => item.status === "applied" && item.message.message_id === message.message_id);
       const messageId = `coordinator-no-response-${digest(message.message_id)}`;
@@ -913,7 +967,7 @@ export class AgenticWorkflowRuntime {
           }
           await core.checkpoint(run.runId);
         }
-        if (!this.quiesced) await outbox.flush((out, handle) => this.bind(state, core, out, handle));
+        if (!this.quiesced) { await outbox.flush((out, handle) => this.bind(state, core, out, handle)); this.surfaceOutboundFailures(state, outbox); }
         await save(); return jobs;
       } finally { this.activeState = undefined; }
     });
