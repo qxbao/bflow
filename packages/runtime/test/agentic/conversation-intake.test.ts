@@ -82,6 +82,59 @@ describe("trusted raw turns and model decision receipts", () => {
     await f.reopen().decide(f.binding, { messageId: "user-1", decision });
     expect(f.applied).toMatchObject([{ messageId: "user-1", conversationDecision: decision }]);
   });
+  it("accepts a heartbeat refresh without treating the native occupant as replaced", async () => {
+    const f = await fixture(); await f.intake.receive(f.binding, f.turn("user-heartbeat"));
+    const refreshed = { ...f.binding, transportState: "working" as const, lastHeartbeatAt: new Date().toISOString() };
+    await expect(f.reopen().receive(refreshed, f.turn("user-heartbeat"))).resolves.toMatchObject({ requiresConversationDecision: true });
+    await expect(f.intake.decide(refreshed, { messageId: "user-heartbeat", decision: { intent: "conversation_only", directReply: "Hello" } }))
+      .resolves.toMatchObject({ ok: true });
+    expect(f.applied).toHaveLength(1);
+    await expect(f.reopen().receive(refreshed, f.turn("user-heartbeat", "different raw input"))).rejects.toThrow("Conflicting trusted");
+  });
+  it("does not reinterpret a received retry with a durable model intent as a fresh approval", async () => {
+    const f = await fixture(); await f.intake.receive(f.binding, f.turn("user-resume", "approve parser token"));
+    const decision = { intent: "conversation_only", directReply: "An explanation" };
+    await f.journal().recordConversationIntent("user-resume", decision);
+    let approvalCalls = 0;
+    f.port.handleTrustedApproval = async () => { approvalCalls++; throw new Error("Must not reinterpret the recorded intent"); };
+    await expect(f.reopen().receive(f.binding, f.turn("user-resume", "approve parser token"))).resolves.toMatchObject({
+      requiresConversationDecision: true, decision
+    });
+    expect(approvalCalls).toBe(0);
+    await expect(f.reopen().decide(f.binding, { messageId: "user-resume", decision })).resolves.toMatchObject({ ok: true });
+  });
+  it("journals no final result for a failed trusted approval, so the same turn can be retried", async () => {
+    const f = await fixture(); let calls = 0;
+    f.port.handleTrustedApproval = async () => ++calls === 1
+      ? { ok: false, error: { code: "transport", retryable: true, message: "Herdr unavailable" } }
+      : { ok: true, value: { recognizedIntent: "approval_response", queuedBecauseBusy: false } };
+    await expect(f.intake.receive(f.binding, f.turn("user-approve", "approve"))).rejects.toThrow("Trusted approval failed");
+    expect(await f.journal().conversationDecision("user-approve")).toBeUndefined();
+    await expect(f.reopen().receive(f.binding, f.turn("user-approve", "approve"))).resolves.toMatchObject({
+      requiresConversationDecision: false, result: { ok: true } });
+    expect(await f.journal().conversationDecision("user-approve")).toMatchObject({ decision: { intent: "trusted_approval" }, result: { ok: true } });
+    expect(calls).toBe(2);
+  });
+  it("keeps a queued trusted approval pending and resumes it through the port instead of Chat", async () => {
+    const f = await fixture(); let state: "queued" | "committed" = "queued";
+    f.port.handleTrustedApproval = async () => ({ ok: true, value: { recognizedIntent: "approval_response", queuedBecauseBusy: state === "queued" } });
+    await expect(f.intake.receive(f.binding, f.turn("user-queued", "approve"))).resolves.toMatchObject({
+      requiresConversationDecision: false, result: { value: { queuedBecauseBusy: true } } });
+    expect(await f.journal().conversationDecision("user-queued")).toEqual({ decision: { intent: "trusted_approval" } });
+    state = "committed";
+    await expect(f.reopen().receive(f.binding, f.turn("user-queued", "approve"))).resolves.toMatchObject({
+      requiresConversationDecision: false, result: { value: { queuedBecauseBusy: false } } });
+    expect(await f.journal().conversationDecision("user-queued")).toMatchObject({ result: { value: { queuedBecauseBusy: false } } });
+    await expect(f.reopen().decide(f.binding, { messageId: "user-queued", decision: { intent: "conversation_only", directReply: "x" } }))
+      .rejects.toThrow();
+    expect(f.applied).toEqual([]);
+  });
+  it("fails closed when a recorded trusted approval intent no longer resolves after a crash", async () => {
+    const f = await fixture(); await f.intake.receive(f.binding, f.turn("user-crash", "approve"));
+    await f.journal().recordConversationIntent("user-crash", { intent: "trusted_approval" });
+    await expect(f.reopen().receive(f.binding, f.turn("user-crash", "approve"))).rejects.toThrow("Recorded trusted approval");
+    expect(f.applied).toEqual([]);
+  });
   it("allows correcting a state-invalid decision before an execution intent is written", async () => {
     const f = await fixture(); await f.intake.receive(f.binding, f.turn("user-1"));
     f.port.validateDecision = async input => { if ((input as { directReply: string }).directReply === "invalid") throw new Error("Invalid scope"); };

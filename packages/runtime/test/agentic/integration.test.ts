@@ -495,6 +495,28 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
     await restarted.receiveHerdr(original.message);
     expect((await restarted.inspect("run-1") as any).status).toBe("implementing");
   });
+  it("replays a committed trusted approval for the same hook message instead of reapplying or routing it to Chat", async () => {
+    const f = await fixture({ humanApproval: true });
+    const receipts = new HostReceiptJournal(join(f.root, "host-receipts"), f.repository, "session-1");
+    f.ports.authorizeHuman = decision => receipts.authenticateHuman(decision);
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    const manifest = unwrap(await f.panes.getManifest()), binding = f.panes.bindings.find(pane => pane.role === "conversation")!;
+    const chat = await createAgenticConversationHost({ runtime: f.runtime, manifest, contextDirectory: join(f.root, "conversation"),
+      onHumanDecision: decision => receipts.recordHuman(decision, { origin: "UserPromptSubmit", binding, nativeSessionId: binding.session!.value,
+        conversationSessionId: "session-1", userId: "human-1", messageId: "user-approve", promptDigest: createHash("sha256").update("approve").digest("hex") }) });
+    const approval = (await f.runtime.inspect() as any).outbound.find((out: any) => out.message.type === "approval.request").message;
+    await chat.receiveHerdr({ ...approval, sender: { role: "coordinator", agent_id: "coordinator" }, recipient: { role: "conversation" } });
+    const input = { sessionId: "session-1", messageId: "user-approve", content: "approve",
+      provenance: { origin: "user", authenticatedUser: true, userId: "human-1", paneId: binding.paneId, channel: "herdr_attach" } };
+    const first = await chat.handleTrustedApproval(input) as any;
+    expect(first).toMatchObject({ ok: true, value: { recognizedIntent: "approval_response", queuedBecauseBusy: false } });
+    const decisions = () => f.runtime.inspect().then((state: any) => state.outbound.filter((out: any) => out.message.type === "approval.decision"));
+    const before = await decisions();
+    expect(await chat.handleTrustedApproval(input)).toMatchObject({ ok: true, value: { recognizedIntent: "approval_response",
+      correlationId: first.value.correlationId, userMessage: { messageId: "user-approve" }, agentReply: first.value.agentReply } });
+    expect(await decisions()).toEqual(before);
+    await expect(chat.handleTrustedApproval({ ...input, content: "reject" })).rejects.toThrow("conflicts");
+  });
   it("recovers a trusted approval when the host dies before outbox and Gateway context writes", async () => {
     const f = await fixture({ humanApproval: true });
     let receipts = new HostReceiptJournal(join(f.root, "host-receipts"), f.repository, "session-1");

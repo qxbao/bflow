@@ -13,7 +13,10 @@ interface ConversationIntakePort {
 const DecisionCallSchema = z.object({ messageId: z.string().min(1), decision: JsonValueSchema }).strict();
 const ReceivedTurnSchema = z.object({ messageId: z.string().min(1), conversationSessionId: z.string().min(1),
   content: z.string().min(1), userId: z.string().min(1) }).strict();
-function identity(binding: PaneBinding): string { return digest({ ...binding, transportState: undefined }); }
+const TRUSTED_APPROVAL = json({ intent: "trusted_approval" });
+function identity(binding: PaneBinding): string {
+  return digest({ ...binding, transportState: undefined, lastHeartbeatAt: undefined });
+}
 
 /** Host-owned user receipts are the only source of content/provenance for Chat's structured decisions. */
 export class HostConversationIntake {
@@ -34,21 +37,35 @@ export class HostConversationIntake {
       if (binding.role !== "conversation" || !binding.session) throw new Error("Only authenticated Conversation receives user turns");
       const turns = await this.receipts.conversationTurns();
       const previous = turns.find(value => value.messageId === turn.messageId);
-      const trusted = { binding, ...turn, occurredAt: previous?.occurredAt ?? new Date().toISOString(), sequence: previous?.sequence ?? (turns.at(-1)?.sequence ?? 0) + 1 };
+      if (previous && (identity(previous.binding) !== identity(binding) || previous.content !== turn.content ||
+          previous.conversationSessionId !== turn.conversationSessionId || previous.userId !== turn.userId)) {
+        throw new Error("Conflicting trusted user turn");
+      }
+      const trusted = previous ?? { binding, ...turn, occurredAt: new Date().toISOString(), sequence: (turns.at(-1)?.sequence ?? 0) + 1 };
       await this.receipts.recordConversationTurn(trusted);
       const saved = await this.receipts.conversationDecision(turn.messageId);
       if (saved?.result !== undefined) return json({ messageId: turn.messageId, requiresConversationDecision: false,
         result: saved.result, context: await this.conversation().getContext() });
+      const trustedApproval = saved !== undefined && digest(saved.decision) === digest(TRUSTED_APPROVAL);
+      if (saved && !trustedApproval) return json({ messageId: turn.messageId, requiresConversationDecision: true,
+        decision: saved.decision, context: await this.conversation().getContext() });
       // This callback is executed only inside the authenticated physical-user hook. Models cannot invoke it.
+      // The port replays a committed or queued approval for the same messageId instead of reapplying it.
       const approval = await this.conversation().handleTrustedApproval(this.userInput(trusted));
-      if (approval !== undefined) {
-        const decision = json({ intent: "trusted_approval" });
-        await this.receipts.recordConversationIntent(turn.messageId, decision);
-        await this.receipts.recordConversationResult(turn.messageId, decision, json(approval));
-        return json({ messageId: turn.messageId, requiresConversationDecision: false, result: approval,
-          context: await this.conversation().getContext() });
+      if (approval === undefined) {
+        // A recorded approval never falls back to Chat, which cannot complete a trusted_approval intent.
+        if (trustedApproval) throw new Error("Recorded trusted approval no longer matches a pending or committed approval");
+        return json({ messageId: turn.messageId, requiresConversationDecision: true, context: await this.conversation().getContext() });
       }
-      return json({ messageId: turn.messageId, requiresConversationDecision: true, context: await this.conversation().getContext() });
+      const result = json(approval);
+      if (record(result).ok !== true) throw new Error(`Trusted approval failed: ${JSON.stringify(record(result).error)}`);
+      await this.receipts.recordConversationIntent(turn.messageId, TRUSTED_APPROVAL);
+      // A durable FIFO acknowledgement is pending work; the next receive resumes it through the port.
+      if (record(record(result).value).queuedBecauseBusy !== true) {
+        await this.receipts.recordConversationResult(turn.messageId, TRUSTED_APPROVAL, result);
+      }
+      return json({ messageId: turn.messageId, requiresConversationDecision: false, result,
+        context: await this.conversation().getContext() });
     });
   }
   decide(principal: PaneBinding, input: unknown): Promise<JsonValue> {

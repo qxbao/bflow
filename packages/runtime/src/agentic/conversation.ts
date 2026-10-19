@@ -145,8 +145,24 @@ export async function createAgenticConversationHost(options: {
     },
     async handleTrustedApproval(input) {
       const context = gateway.getContextSnapshot();
-      if (Object.keys(context.pendingApprovals).length === 0) return undefined;
       const parsed = module.UserTurnInputSchema.parse(input);
+      // Resume the same hook turn from Gateway state; reapplying could misroute an already-decided approval.
+      const committed = parsed.messageId === undefined ? -1 : context.messages.findIndex((message: { sender: string; messageId: string }) =>
+        message.sender === "user" && message.messageId === parsed.messageId);
+      if (committed >= 0) {
+        const userMessage = ConversationMessageSchema.parse(context.messages[committed]);
+        const agentReply = context.messages[committed + 1] ? ConversationMessageSchema.parse(context.messages[committed + 1]) : undefined;
+        if (userMessage.intent !== "approval_response" || userMessage.content !== parsed.content || agentReply?.sender !== "conversation")
+          throw new Error("Trusted approval message ID conflicts with a committed Conversation turn");
+        return { ok: true, value: { sessionId: context.session.sessionId, correlationId: userMessage.correlationId,
+          ...(userMessage.runId ? { runId: userMessage.runId } : {}), recognizedIntent: "approval_response",
+          sessionStatus: context.session.status, userMessage, agentReply, queuedBecauseBusy: false, substantiveUpdate: true } };
+      }
+      const queued = parsed.messageId !== undefined && context.pendingInboundQueue.some((item: { kind: string; input?: { messageId?: string } }) =>
+        item.kind === "user_turn" && item.input?.messageId === parsed.messageId);
+      if (queued) return { ok: true, value: { sessionId: context.session.sessionId, recognizedIntent: "approval_response",
+        sessionStatus: context.session.status, queuedBecauseBusy: true, substantiveUpdate: false } };
+      if (Object.keys(context.pendingApprovals).length === 0) return undefined;
       const classified = module.classifyTrustedApprovalReply(parsed, context);
       if (!classified?.ok) return undefined;
       return gateway.handleUserTurn(parsed);
