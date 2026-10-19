@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
-import type { GatewayMetricsSnapshot, ServiceMetricsSnapshot } from "./types.js";
+import type { GatewayMetricsSnapshot, ServiceMetricsSnapshot, UpstreamHttpEvent } from "./types.js";
+import { UPSTREAM_HTTP_EVENTS } from "./types.js";
 
 /**
  * Reads Resident Set Size (RSS) in bytes for a Linux process using /proc/<pid>/status or /proc/<pid>/statm.
@@ -42,6 +43,7 @@ interface MutableServiceMetrics {
   backpressureRejections: number;
   restartCount: number;
   latencies: number[];
+  upstreamHttp: Map<UpstreamHttpEvent, number>;
 }
 
 export interface GatewayMetricsCollectorOptions {
@@ -143,7 +145,8 @@ export class GatewayMetricsCollector {
         unknownCalls: 0,
         backpressureRejections: 0,
         restartCount: 0,
-        latencies: []
+        latencies: [],
+        upstreamHttp: new Map()
       };
       this.services.set(serviceId, service);
     }
@@ -286,6 +289,12 @@ export class GatewayMetricsCollector {
     }
   }
 
+  /** Counts one HTTP client event for a remote upstream; see `UpstreamHttpEvent`. */
+  recordUpstreamHttp(serviceId: string, event: UpstreamHttpEvent): void {
+    const service = this.getOrCreateService(serviceId);
+    service.upstreamHttp.set(event, (service.upstreamHttp.get(event) ?? 0) + 1);
+  }
+
   recordRestart(serviceId: string): void {
     const service = this.getOrCreateService(serviceId);
     service.restartCount++;
@@ -325,7 +334,10 @@ export class GatewayMetricsCollector {
         unknownCalls: s.unknownCalls,
         backpressureRejections: s.backpressureRejections,
         restartCount: s.restartCount,
-        latency: computeLatencyStats(s.latencies)
+        latency: computeLatencyStats(s.latencies),
+        ...(s.upstreamHttp.size > 0
+          ? { upstreamHttp: Object.fromEntries(UPSTREAM_HTTP_EVENTS.map(event => [event, s.upstreamHttp.get(event) ?? 0])) as Record<UpstreamHttpEvent, number> }
+          : {})
       };
     }
 
