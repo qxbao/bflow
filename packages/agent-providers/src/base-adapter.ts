@@ -530,23 +530,13 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
           if (probeOutcome.failure === "timeout" || lower.includes("timed out") || lower.includes("timeout")) {
             probeCode = "timeout";
             probeRemediation = "Increase startupTimeoutMs in .bflow/config.yml or verify provider network latency.";
-          } else if (lower.includes("permission") || lower.includes("untrusted")) {
+          } else if (/\b(?:permission denied|untrusted|insufficient permissions)\b/.test(lower)) {
             probeCode = "permission_denied";
             probeRemediation = "Grant workspace trust or adjust permission profile.";
-          } else if (
-            lower.includes("model is incompatible") ||
-            lower.includes("incompatible model") ||
-            lower.includes("model not found") ||
-            lower.includes("model_not_found") ||
-            lower.includes("not authorized for your organization") ||
-            lower.includes("does not exist") ||
-            lower.includes("unsupported model") ||
-            lower.includes("invalid model") ||
-            lower.includes("unknown model")
-          ) {
+          } else if (/\b(?:model(?:\s+[`'\"][^`'\"\n]+[`'\"])?\s+(?:is\s+)?(?:incompatible|unsupported|unavailable|not\s+(?:found|supported|available)|does\s+not\s+exist)|(?:incompatible|unsupported|invalid|unknown)\s+model|model_not_found)\b/.test(lower)) {
             probeCode = "incompatible_model";
             probeRemediation = "Select a model supported by your provider account tier.";
-          } else if (lower.includes("blocked") || lower.includes("approval") || lower.includes("dialog")) {
+          } else if (/\b(?:blocked|approval (?:is )?required|requires? (?:interactive )?approval|(?:approval|confirmation) dialog)\b/.test(lower)) {
             probeCode = "agent_blocked";
             probeRemediation = "Complete interactive approvals outside automated flow.";
           } else if (lower.includes("auth") || lower.includes("expired") || lower.includes("token")) {

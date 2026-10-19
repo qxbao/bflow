@@ -19,6 +19,7 @@ import {
   approveCodexHooks,
   ClaudeProviderAdapter,
   CodexProviderAdapter,
+  codexStartupPrompt,
   type DetectedProviderCapabilities,
   type InheritedIsolation,
   createDefaultProviderRegistry,
@@ -567,6 +568,7 @@ describe("@bflow/agent-providers", () => {
         expect(profile.argv).toContain("never");
         expect(profile.argv).toContain("--model");
         expect(profile.argv).toContain("o3-mini");
+        expect(profile.argv.at(-1)).toBe(codexStartupPrompt(env.environmentId));
       }
     });
 
@@ -696,6 +698,19 @@ describe("@bflow/agent-providers", () => {
   });
 
   describe("5. All 8 Failure Scenarios", () => {
+    it.each([
+      ["pong\nOpenAI Codex\nmodel: supported-model\nsandbox: workspace-write\napproval: never", "probe_failed"],
+      ["OpenAI Codex\nmodel: supported-model\nError: directory does not exist", "probe_failed"],
+      ["OpenAI Codex\nmodel: supported-model\nError: The model `missing-model` does not exist", "incompatible_model"]
+    ])("classifies failed probes from explicit errors: %s", async (stderr, code) => {
+      const runner = createFakeProviderRunner({ customHandler: invocation => invocation.args.includes("exec")
+        ? { exitCode: 1, stdout: "", stderr } : undefined });
+      const adapter = new CodexProviderAdapter({ runner, executablePath: fakeBinaryPath, codexHomeDirectory: testCodexHome });
+      const result = await adapter.checkHealth({ schemaVersion: 3, environment: createTestEnvironment("codex"), stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value.checks.find(check => check.check === "authentication")?.code).toBe(code);
+    });
+
     it("uses the verified canonical executable for probes whose cwd differs from the host", async () => {
       const probes: Array<{ executable: string; cwd?: string }> = [];
       const runner = createFakeProviderRunner({ customHandler(invocation) {

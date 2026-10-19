@@ -27,6 +27,11 @@ function tomlValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
+/** Reserved, environment-bound startup turn; ordinary user prompts must still reach Conversation. */
+export function codexStartupPrompt(environmentId: string): string {
+  return `[bflow startup ${environmentId}] Reply only pong. Do not use tools or start a workflow.`;
+}
+
 const MCP_NOT_ISOLATED_CODE = "codex_global_mcp_not_isolated";
 /** Bare TOML keys accepted verbatim in a `-c mcp_servers.<name>.enabled=false` dotted path. */
 const BARE_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -388,7 +393,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
       argv.push("-c", `model_reasoning_effort=${JSON.stringify(this.options.effort)}`);
     }
 
-    argv.push("ping");
+    argv.push(codexStartupPrompt(environment.environmentId));
 
     return { argv };
   }

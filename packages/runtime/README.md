@@ -424,6 +424,14 @@ Guarantees implemented here, with package-local tests in `test/platform/service.
 - Codex setup review, preflight probes and permanent/dynamic role launches share the selected HOME/PATH
   and explicitly empty outer Orca pane/root/endpoint/port selectors in child environments. Parent settings
   and Bflow's mandatory Herdr/Runtime hooks are preserved; an unsupported hook snapshot still blocks launch.
+- Short hook runner paths bind the full repository/session host directory and remain stable across
+  host recovery. Separate repositories cannot overwrite or remove each other's runners. A pre-existing
+  unsafe or symlinked temporary directory is never chmodded or adopted.
+- Hook ingress validates the event/session and required prompt/tool fields. Banner-wrapped input must
+  contain exactly one matching hook object; ambiguous input is rejected. Invalid `PreToolUse` input
+  emits an explicit deny decision. Only the reserved environment-bound Codex startup turn is skipped.
+- Native session sources must identify the configured provider (`codex` or `herdr:codex`, for example).
+  Herdr as a transport does not make generic `herdr`/`herdr:herdr` sources valid provider proof.
 
 Limitations: this is source composition with local fake-runner and fake-Gateway evidence only. Live
 provider probes, a live Gateway daemon and Pane Manager/Conversation wiring are not verified here. The

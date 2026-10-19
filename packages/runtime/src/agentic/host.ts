@@ -7,6 +7,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { z } from "zod";
+import { codexStartupPrompt } from "@bflow/agent-providers";
 import {
   AgentBindingReceiptSchema, AgentExecutionHandleSchema, AgentProviderIdSchema, AgentResultSchema, AgentRoleSchema, ApprovalDecisionSchema,
   JsonValueSchema, RoleMessageSchema, RunQuerySchema, SessionManifestSchema,
@@ -106,11 +107,13 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const promptAssets = await import(new URL("../../../pane-manager/dist/index.js", import.meta.url).href);
   const platformRoles = configuration.platform?.roles ?? [];
   const hookRunners = new Map<string, string>();
-  const shortHookDir = join("/tmp", `bf-h-${process.getuid?.() ?? "0"}`);
+  // Bind short paths to the full host directory (repository + complete session ID).
+  // Keep them stable over host recovery, without sharing scripts across hosts.
+  const shortHookDir = join("/tmp", `bf-h-${createHash("sha256").update(configuration.directory).digest("hex").slice(0, 32)}`);
   let useShortHook = false;
   try {
-    await mkdir(shortHookDir, { recursive: true, mode: 0o700 });
-    await chmod(shortHookDir, 0o700);
+    try { await mkdir(shortHookDir, { mode: 0o700 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
     const stat = await lstat(shortHookDir);
     if (stat.isDirectory() && (stat.mode & 0o077) === 0 && (!process.getuid || stat.uid === process.getuid())) {
       useShortHook = true;
@@ -121,7 +124,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   for (const role of roles) {
     const path = join(configuration.directory, role + ".json");
     const hookRunnerPath = useShortHook
-      ? join(shortHookDir, `${configuration.sessionId.slice(0, 8)}-${role}.sh`)
+      ? join(shortHookDir, `${role}.sh`)
       : join(configuration.directory, `${role}.hook.sh`);
     const hookScriptContent = `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(executable)} hook ${shellQuote(path)} "$@"\n`;
     await privateFile(hookRunnerPath, hookScriptContent, 0o700);
@@ -319,8 +322,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     for (const pane of accepted.panes) {
       const actual = record(record(record(JSON.parse(await herdr(["agent", "get", pane.paneId]))).result).agent);
       const native = actual.agent_session ? record(actual.agent_session) : undefined;
+      const expectedProvider = platformRoles.find(option => option.role === pane.role)?.provider ??
+        AgentProviderIdSchema.parse(pane.agentKind ?? pane.provider);
       const validSource = (source: unknown) =>
-        source === `herdr:${pane.provider}` || source === `herdr:${pane.agentKind}` || source === pane.agentKind || source === pane.provider;
+        source === `herdr:${expectedProvider}` || source === expectedProvider;
       if (startupPaths.get(pane.role) === "mcp_bootstrap") {
         // No SessionStart hook registered this pane: Herdr's observed native session is the proof, registered here.
         if (!native) throw new Error(`[bflow:native-startup-pending] ${pane.role} pane ${pane.paneId} has bootstrap reachability but Herdr reports no native session yet.`);
@@ -736,6 +741,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     for (const runner of hookRunners.values()) {
       await rm(runner, { force: true }).catch(() => undefined);
     }
+    if (useShortHook) await rm(shortHookDir, { recursive: true, force: true });
     if (workspace) { await workspace.runtime.quiesce(); await scheduler; await workspace.close(); }
     await preparation?.catch(() => undefined);
     queryStore?.close();
@@ -878,60 +884,65 @@ export async function runRoleMcp(configuration: RoleConfiguration, roleConfigPat
   }
 }
 
-function parseHookJson(raw: string): Record<string, unknown> {
-  const trimmed = raw.trim();
-  try {
-    return record(JSON.parse(trimmed));
-  } catch (initialError) {
-    let startIndex = trimmed.indexOf("{");
-    while (startIndex !== -1) {
-      let depth = 0;
-      let inString = false;
-      let escape = false;
-      for (let i = startIndex; i < trimmed.length; i++) {
-        const char = trimmed[i];
-        if (escape) {
-          escape = false;
-          continue;
-        }
-        if (char === "\\") {
-          escape = true;
-          continue;
-        }
-        if (char === '"') {
-          inString = !inString;
-          continue;
-        }
-        if (!inString) {
-          if (char === "{") depth++;
-          else if (char === "}") {
-            depth--;
-            if (depth === 0) {
-              try {
-                const parsed = JSON.parse(trimmed.slice(startIndex, i + 1));
-                if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-                  return record(parsed);
-                }
-              } catch {
-                // continue searching next '{'
-              }
-              break;
-            }
-          }
-        }
-      }
-      startIndex = trimmed.indexOf("{", startIndex + 1);
+function parseHookJson(raw: string, event: string): Record<string, unknown> {
+  z.enum(NATIVE_HOOK_EVENTS).parse(event);
+  const base = z.object({ hook_event_name: z.literal(event), session_id: z.string().min(1) }).passthrough();
+  const schema = event === "UserPromptSubmit" ? base.extend({ prompt: z.string().min(1) })
+    : event === "PreToolUse" ? base.extend({ tool_name: z.string().min(1) }) : base;
+  let whole: unknown;
+  let complete = false;
+  try { whole = JSON.parse(raw); complete = true; } catch { /* Inspect banner-wrapped JSON below. */ }
+  if (complete) return schema.parse(whole);
+
+  // Scan complete top-level values once. Never reinterpret a nested object as
+  // the hook, select unrelated metadata, or choose between two human prompts.
+  let selected: Record<string, unknown> | undefined;
+  let start = -1, depth = 0, inString = false, escaped = false;
+  for (let index = 0; index < raw.length; index++) {
+    const char = raw[index];
+    if (start === -1) {
+      if (char !== "{" && char !== "[") continue;
+      start = index; depth = 1; inString = false; escaped = false;
+      continue;
     }
-    throw initialError;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') { inString = true; continue; }
+    if (char === "{" || char === "[") depth++;
+    else if (char === "}" || char === "]") depth--;
+    if (depth !== 0) continue;
+    let candidate: unknown;
+    try { candidate = JSON.parse(raw.slice(start, index + 1)); } catch { /* Ignore unrelated banner text. */ }
+    start = -1;
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate) ||
+        !("hook_event_name" in candidate) || candidate.hook_event_name !== event) continue;
+    if (selected) throw new Error("Ambiguous provider hook payload");
+    selected = schema.parse(candidate);
   }
+  if (!selected) throw new Error("No matching provider hook payload");
+  return selected;
 }
 
 export async function runProviderHook(configuration: RoleConfiguration, event: string, roleConfigPath?: string): Promise<void> {
+  try { await handleProviderHook(configuration, event, roleConfigPath); }
+  catch (error) {
+    if (event !== "PreToolUse") throw error;
+    // A malformed hook must deny explicitly; providers can treat a plain hook
+    // process failure as nonblocking and otherwise execute an unguarded tool.
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny",
+      permissionDecisionReason: redactString(String(error)) } }) + "\n");
+  }
+}
+
+async function handleProviderHook(configuration: RoleConfiguration, event: string, roleConfigPath?: string): Promise<void> {
   const chunks: Buffer[] = []; let size = 0;
   for await (const chunk of process.stdin) { size += Buffer.byteLength(chunk); if (size > 1024 * 1024) throw new Error("Oversized provider hook"); chunks.push(Buffer.from(chunk)); }
   const rawInput = Buffer.concat(chunks).toString("utf8");
-  if (!rawInput.trim()) return;
-  const hook = parseHookJson(rawInput);
+  const hook = parseHookJson(rawInput, event);
   const paneId = textField(process.env.HERDR_PANE_ID);
   if (event === "SessionStart" || event === "Stop") {
     const session = textField(hook.session_id);
@@ -962,6 +973,8 @@ export async function runProviderHook(configuration: RoleConfiguration, event: s
     if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "native_session", {paneId, sessionId:session});
   }
   if (event === "UserPromptSubmit") {
+    const environmentId = process.env.BFLOW_ENVIRONMENT_ID;
+    if (configuration.provider === "codex" && environmentId && hook.prompt === codexStartupPrompt(environmentId)) return;
     let message: RoleMessage | undefined;
     try { message = RoleMessageSchema.parse(JSON.parse(textField(hook.prompt))); } catch { /* ordinary user dialogue */ }
     if (message) {
@@ -970,7 +983,6 @@ export async function runProviderHook(configuration: RoleConfiguration, event: s
     }
   }
   if (event === "UserPromptSubmit" && configuration.role === "conversation") {
-    if (typeof hook.prompt === "string" && hook.prompt.trim() === "ping") return;
     const result = await callHost(configuration.socketPath, configuration.token, "user_prompt", { paneId, hook });
     process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: "Trusted Bflow Conversation Gateway result: " + JSON.stringify(result) } }) + "\n");
   }

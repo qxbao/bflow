@@ -236,7 +236,10 @@ describe("DefaultPlatformReadinessService", () => {
     const { service, journal } = buildService({ runner });
     const pending = service.prepareSession(identity, Array.from({ length: 7 }, (_, index) => requirement({ taskId: `t${index}` })));
     try {
-      await expect.poll(() => started, { timeout: 1000 }).toBe(3);
+      // Seven real role directories and executable inventories are prepared
+      // before probes start. Allow filesystem work under full-suite load;
+      // the unreleased gate still proves the exact concurrency limit.
+      await expect.poll(() => started, { timeout: 10_000 }).toBe(3);
       expect(await journalKinds(journal)).toEqual([]);
     } finally { release(); }
     const result = await pending;

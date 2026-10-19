@@ -1072,7 +1072,7 @@ export class RolePaneManager {
       }
 
       const startArgs = ["agent", "start", agentName, "--kind", agentKind, "--pane", request.paneId];
-      const timeout = request.timeoutMs ?? Math.min(roleConfig?.startupTimeoutMs ?? 60000, 60000);
+      const timeout = request.timeoutMs ?? roleConfig?.startupTimeoutMs ?? 60000;
       if (timeout !== undefined) {
         startArgs.push("--timeout", String(timeout));
       }
@@ -1126,11 +1126,16 @@ export class RolePaneManager {
       // Launch env is NOT passed here: `agent start` types the command into the pane's existing shell, so
       // invocation env never reaches the provider. Env is applied at pane creation (see #herdrCreate).
       let startOutcome = await this.#runHerdr(startArgs, options);
-      const isBusyError = (outcome: CommandOutcome) =>
-        outcome.stderr.includes("agent_pane_busy") ||
-        outcome.stdout.includes("agent_pane_busy") ||
-        outcome.stderr.includes("is not an available shell") ||
-        outcome.stdout.includes("is not an available shell");
+      const isBusyError = (outcome: CommandOutcome): boolean => {
+        // Only an acknowledged pre-dispatch rejection proves that retry cannot
+        // duplicate a launch. Timeouts/partial output require reconciliation.
+        if (outcome.failure || outcome.exitCode === null || outcome.exitCode === 0) return false;
+        try { parseAgentInfoResult(outcome, "agent_started"); }
+        catch (error) {
+          return error instanceof HerdrProtocolError && error.kind === "remote" && error.code === "agent_pane_busy";
+        }
+        return false;
+      };
 
       for (let busyRetry = 0; busyRetry < 20 && isBusyError(startOutcome); busyRetry++) {
         if (options?.signal?.aborted) return { ok: false, error: { code: "cancelled", retryable: false, message: "Agent startup wait interrupted; state preserved." } };

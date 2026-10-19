@@ -173,6 +173,13 @@ The six complete POSIX Claude-Mem bootstrap commands reviewed from its 14.0.1 Co
 `createManagedCodexHookEnvironment` supplies the shared setup/host inspection environment. It preserves the chosen HOME and PATH and the Claude-Mem root/Bun selectors (`CLAUDE_CONFIG_DIR`, `CLAUDE_PLUGIN_ROOT`, `PLUGIN_ROOT`, `BUN`, `BUN_PATH`, `BUN_INSTALL`), explicitly binding absent selectors to empty values in child processes. It explicitly empties the outer Orca pane/root/endpoint/port selectors in Bflow child processes. It does not change the parent environment or user configuration and does not remove Bflow's native Herdr/Runtime hooks. Direct inspection with an explicitly supplied Orca endpoint still fails closed.
 
 Binary health and launch preparation resolve against the same PATH used by provider child commands. Health preserves `binary_missing`, `binary_not_executable`, `binary_untrusted` and inaccessible/other verification failures separately. A failed ownership or mode check is not reported as a missing installation.
+
+Failed execution probes classify model errors from explicit model failure text. Normal `model:` and
+`approval: never` banner lines, or an unrelated missing directory, do not establish model incompatibility.
+Codex interactive launch includes a reserved startup prompt bound to `BFLOW_ENVIRONMENT_ID`, asking only
+for `pong` without tool calls or workflow work. Runtime consumes that exact startup turn; ordinary
+user input such as `ping` still passes through the Conversation Gateway.
+
 PATH lookup skips directories, dangling entries and files without execute access, so a plugin's `codex/` directory cannot shadow the actual CLI. It preserves physical symlink/parent traversal and treats an empty PATH component as the current directory, matching process spawning. The first executable candidate still must pass ownership and permission verification; an unsafe executable is not silently replaced by a later candidate. Explicit executable paths remain strict. Authentication and execution probes use the verified canonical executable, including when the execution probe changes its working directory.
 
 Reviewed Claude-Mem hooks require an explicit absolute HOME and reject dot/parent components in HOME or root/runtime selectors before constructing dependency paths. Interpreter PATH lookup preserves physical symlink traversal. Bun fallback lookup follows symlinks and skips dangling overrides, matching the reviewed runner's existence checks; it still rejects unsafe selected executables.
