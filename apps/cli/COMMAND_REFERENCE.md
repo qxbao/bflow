@@ -26,7 +26,7 @@ All commands listed below comply with `@bflow/skills` `SupportedCommandsSchema` 
 | `task implement` | `bflow task implement <task-id> [options]` | Execute implementation for a task in an isolated worktree with conditional TDD enforcement. | DeveloperAgent, TestStrategyResolver, GitOrchestrator, OperationLedger | implement-task, conditional-tdd, using-bflow |
 | `verify` | `bflow verify [task-id] [options]` | Execute task-level or workflow-level verification against specification acceptance criteria. | VerificationEngine, QualityGates, OperationLedger | run-verification, conditional-tdd, using-bflow |
 | `git prepare` | `bflow git prepare [options]` | Reconcile Git branches, prepare dependency-ordered integration, and validate worktrees. | GitOrchestrator, OperationLedger | implement-task, using-bflow |
-| `mcp status` | `bflow mcp status [options]` | Inspect status and health of registered Model Context Protocol (MCP) services and bridges. | McpGateway, OperationLedger | use-gitnexus, use-claude-mem, browser-inspection, using-bflow |
+| `mcp status` | `bflow mcp status [options]` | Inspect status and health of registered Model Context Protocol (MCP) services and bridges. | McpGateway, OperationLedger | use-gitnexus, use-mempalace, browser-inspection, using-bflow |
 | `tool status` | `bflow tool status [options] / bflow tools status [options]` | Inspect availability, version, and health of pinned machine and repo tools (e.g. RTK). | ToolInstaller, OperationLedger | use-rtk, using-bflow |
 | `tools status` | `bflow tools status [options]` | Alias for 'bflow tool status'. Inspect availability and health of pinned tools. | ToolInstaller, OperationLedger | use-rtk, using-bflow |
 | `skills sync` | `bflow skills sync [options]` | Synchronize approved skills from catalog to agent provider storage environments. | SkillManager, OperationLedger | using-bflow |
@@ -314,7 +314,7 @@ All commands listed below comply with `@bflow/skills` `SupportedCommandsSchema` 
 - **Optional Flags**: `--service <id>`, `--correlation-id <id>`, `--idempotency-key <key>`, `--resume`, `--actor <id>`, `--role <role>`, `--permission-mode <mode>`, `--session-id <id>`, `--isolation <kind>`, `-j, --json`, `-h, --help`
 - **Idempotency & Retry**: Read-only probe. Safe to execute periodically without side effects.
 - **Permission Requirements**: MCP gateway inspection privilege.
-- **Associated Skills**: `use-gitnexus`, `use-claude-mem`, `browser-inspection`, `using-bflow`
+- **Associated Skills**: `use-gitnexus`, `use-mempalace`, `browser-inspection`, `using-bflow`
 - **Exit Codes**:
   - `0`: Command succeeded without errors.
   - `1`: Runtime or execution failure.

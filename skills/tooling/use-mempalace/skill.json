@@ -19,6 +19,6 @@
   "dependencies": [],
   "requiredCapabilityIds": [],
   "requiredToolIds": [
-    "claude-mem"
+    "mempalace"
   ]
 }

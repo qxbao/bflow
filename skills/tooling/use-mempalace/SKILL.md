@@ -1,6 +1,6 @@
 ---
-name: use-claude-mem
-description: "Use approved scoped memory retrieval to recover engineering context without treating remembered text as current authority."
+name: use-mempalace
+description: "Use approved MemPalace retrieval to recover engineering context without treating remembered text as current authority."
 ---
 
 ## Supported roles
@@ -11,7 +11,7 @@ Skills are instruction-only and model-neutral. They do not grant tools, permissi
 
 ## Prerequisites
 
-- An approved claude-mem service and role-scoped access.
+- A MemPalace MCP server (`mempalace`) registered by the operator and available to the role.
 - A repository/session memory policy excluding secrets.
 
 ## Trigger conditions
@@ -31,7 +31,7 @@ Skills are instruction-only and model-neutral. They do not grant tools, permissi
 
 ## Procedure
 
-1. Discover authorized memory operations and scope before reading. Do not assume a provider name grants cross-repository access or that an existing worker should be restarted.
+1. Discover the authorized MemPalace tools and the wing that belongs to this repository before reading. Do not assume the server grants access to other wings or repositories, and do not mine, repair or modify the palace unless the assignment permits it.
 2. Retrieve only relevant notes and check provenance, timestamp and repository. Validate any claimed specification, approval, contract or command against current authoritative records.
 3. Write only when explicitly permitted, using concise non-secret engineering facts and revision context. Memory is not Runtime transport, an approval ledger or ArtifactStore.
 

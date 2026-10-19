@@ -35,7 +35,7 @@ const shared = [
   "integrate-changes",
   "use-gitnexus",
   "use-rtk",
-  "use-claude-mem",
+  "use-mempalace",
   "browser-inspection",
   "mcp-tool-discovery",
   "report-task-result",
@@ -93,7 +93,7 @@ describe("canonical role catalog", () => {
           provider,
           selections,
           capabilityIds: [],
-          toolIds: ["rtk", "gitnexus", "claude-mem", "browser"],
+          toolIds: ["rtk", "gitnexus", "mempalace", "browser"],
         });
         const ids = manifest.skills.map((s) => s.skillId);
         if (prior) expect(ids).toEqual(prior);
