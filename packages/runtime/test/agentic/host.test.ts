@@ -30,6 +30,16 @@ async function fixture(beforeEnsure?: () => void) {
 }
 // Agentic host startup uses Linux flock; one recovery case also inspects /proc.
 describe.skipIf(process.platform !== "linux")("default durable host lifecycle and role MCP", () => {
+  it("accepts a startup Coordinator Stop before Runtime activation without creating a work result", async () => {
+    const f = await fixture(), launches = await f.controller.prepare();
+    const mcp = JSON.parse(await readFile(launches.roleLaunch.coordinator!.mcpConfigFile, "utf8"));
+    const role = JSON.parse(await readFile(mcp.mcpServers.bflow.args[2], "utf8"));
+    await expect(callHost(role.socketPath, role.token, "provider_stopped", {
+      paneId: "startup-pane", nativeSessionId: "startup-session"
+    })).resolves.toEqual({ recorded: false });
+    expect((await f.controller.runtime.findRuns({ limit: 1 })).ok).toBe(true);
+  });
+
   it("keeps hook runners isolated between repositories sharing a session name", async () => {
     const first = await fixture(), second = await fixture();
     const runnerOf = async (controller: typeof first.controller) => {

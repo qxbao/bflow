@@ -579,6 +579,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         return { recorded: true };
       }
       if (method === "provider_stopped") {
+        // The provider's bootstrap turn can finish before its Runtime is activated.
+        if (!workspace) return { recorded: false };
         const input = record(params), binding = await principal(role, textField(input.paneId));
         if (!binding.session || binding.session.value !== textField(input.nativeSessionId)) throw new Error("Provider Stop native session mismatch");
         if (role === "coordinator" && await receipts.stopCoordinatorTurn(binding)) coordinatorStopGeneration++;
