@@ -33,8 +33,11 @@ and a shell-reload warning. Native plugins have no synthetic CLI executable: the
 supply `additionalToolObservations(platform, config)` for validated, read-only native probes.
 Unsupported required pins remain visible and unhealthy.
 
-Independent component configuration continues after unrelated installer failures. The
-manifest retains its predecessor dependencies; failed or unknown predecessors block it.
+Independent component configuration continues after unrelated installer failures. Services
+require the actual planned MCP configuration step to succeed before activation. Satisfied or
+absent MCP components add no dependency. When MCP configuration cannot be observed or planned,
+or requires repair outside repair mode, services are omitted from the plan and doctor reports
+the planning failure. The manifest retains its predecessor dependencies; failed or unknown predecessors block it.
 Doctor still runs and planning failures remain failed health checks.
 
 The saved environment manifest labels its original, approval-covered `tools` inventory as
