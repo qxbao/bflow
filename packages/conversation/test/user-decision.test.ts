@@ -6,6 +6,7 @@ import {
   InMemoryConversationContextStore,
   MockHerdrAgentTransport,
   classifyUserIntent,
+  classifyTrustedApprovalReply,
   formatCoordinatorMessageForUser,
   isUserDecisionRequest,
   renderUserDecisionPrompt,
@@ -62,6 +63,32 @@ function contextWith(request: ApprovalRequest): ConversationContextSnapshot {
 function turn(content: string): UserTurnInput {
   return { sessionId: SESSION_ID, content, provenance: { origin: "user", authenticatedUser: true } };
 }
+
+describe("trusted hook approval routing", () => {
+  const designContext = () => contextWith(userDecisionRequest({ metadata: {}, requestedBy: "coordinator" }));
+  it.each([
+    "Yêu cầu workflow loại spike: khảo sát cơ chế phê duyệt, chỉ đọc.",
+    'Yêu cầu workflow: kiểm tra token "approve" trong parser',
+    "apr-user-decision-abc123: Yêu cầu workflow khảo sát token approve"
+  ])("does not approve a pending design because a new request mentions approval: %s", content => {
+    expect(classifyTrustedApprovalReply(turn(content), designContext())).toBeUndefined();
+  });
+  it.each(["approve", "Phê duyệt apr-user-decision-abc123", "apr-user-decision-abc123: approve", "reject", "Cần sửa thêm tiêu chí"])("retains an explicit governance reply: %s", content => {
+    const result = classifyTrustedApprovalReply(turn(content), designContext());
+    expect(result?.ok).toBe(true);
+    if (result?.ok) expect(result.value.intent).toBe("approval_response");
+  });
+  it("retains exact specialist option replies", () => {
+    const result = classifyTrustedApprovalReply(turn("2"), contextWith(userDecisionRequest()));
+    expect(result?.ok).toBe(true);
+    if (result?.ok) expect(result.value.approvalInput?.selectedOption).toBe("Postgres");
+  });
+  it("requires a named request for free-text specialist answers", () => {
+    const context = contextWith(userDecisionRequest({ metadata: { kind: "user_decision", question: "Choose the storage backend" } }));
+    expect(classifyTrustedApprovalReply(turn("Tạo spike: khảo sát quyền MCP của từng role"), context)).toBeUndefined();
+    expect(classifyTrustedApprovalReply(turn("apr-user-decision-abc123: chọn PostgreSQL vì cần giao dịch"), context)?.ok).toBe(true);
+  });
+});
 
 describe("P30 T8 conversation user-decision relay", () => {
   describe("rendering", () => {
@@ -147,7 +174,7 @@ describe("P30 T8 conversation user-decision relay", () => {
     });
 
     it("accepts a free-text answer when the question offers no options", () => {
-      const request = userDecisionRequest({}, { options: undefined });
+      const request = userDecisionRequest({ metadata: { kind: "user_decision", question: "Choose the storage backend" } });
       expect(resolveUserDecisionReply(request, "Use the existing module")).toEqual({
         kind: "answer",
         reason: "Use the existing module"

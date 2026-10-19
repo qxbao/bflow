@@ -87,6 +87,7 @@ export const UserTurnInputSchema = z
     inputArtifacts: z.array(ArtifactReferenceSchema).optional(),
     provenance: MessageProvenanceSchema.optional(),
     repositoryContext: z.string().optional(),
+    conversationDecision: z.lazy(() => ChatDecisionSchema).optional(),
     metadata: MetadataSchema.optional()
   })
   .strict();
@@ -101,6 +102,8 @@ export interface UserTurnInput {
   readonly provenance?: MessageProvenance | undefined;
   readonly repositoryContext?: string | undefined;
   readonly inputArtifacts?: readonly ArtifactReference[] | undefined;
+  /** Supplied by the authenticated Chat tool, never by the raw user hook. */
+  readonly conversationDecision?: ChatDecision | undefined;
   readonly metadata?: Metadata | undefined;
 }
 
@@ -116,6 +119,7 @@ export const ExtractedRequirementDraftSchema = z
     affectedPaths: z.array(z.string()),
     acceptanceCriteriaDescriptions: z.array(z.string()),
     isRequirementChange: z.boolean(),
+    codeChangesAuthorized: z.boolean().optional(),
     targetRunId: IdentifierSchema.optional(),
     targetCorrelationId: IdentifierSchema.optional(),
     investigationTasks: z.array(z.object({ objective: z.string().min(1), affectedPaths: z.array(z.string()), codeChangesAuthorized: z.literal(false) }).strict()).optional()
@@ -134,9 +138,25 @@ export interface ExtractedRequirementDraft {
   readonly affectedPaths: readonly string[];
   readonly acceptanceCriteriaDescriptions: readonly string[];
   readonly isRequirementChange: boolean;
+  readonly codeChangesAuthorized?: boolean | undefined;
   readonly targetRunId?: string | undefined;
   readonly targetCorrelationId?: string | undefined;
 }
+
+/** Private Chat/host intake protocol. Governance approvals are deliberately absent. */
+export const ChatDecisionSchema = z.discriminatedUnion("intent", [
+  z.object({ intent: z.literal("conversation_only"), directReply: z.string().trim().min(1) }).strict(),
+  z.object({ intent: z.literal("clarify"), clarifyingQuestions: z.array(z.string().trim().min(1)).min(1).max(3),
+    requirementDraft: ExtractedRequirementDraftSchema.optional(), targetCorrelationId: IdentifierSchema.optional() }).strict(),
+  z.object({ intent: z.literal("workflow_request"), requirementDraft: ExtractedRequirementDraftSchema,
+    targetCorrelationId: IdentifierSchema.optional(), targetRunId: IdentifierSchema.optional() }).strict(),
+  z.object({ intent: z.literal("status_query"), targetCorrelationId: IdentifierSchema.optional(), targetRunId: IdentifierSchema.optional() }).strict(),
+  z.object({ intent: z.literal("cancellation_request"), cancellationInput: z.object({ runId: IdentifierSchema,
+    taskId: IdentifierSchema.optional(), reason: z.string().trim().min(1).optional() }).strict(),
+    targetCorrelationId: IdentifierSchema.optional(), targetRunId: IdentifierSchema.optional() }).strict()
+]);
+
+export type ChatDecision = z.infer<typeof ChatDecisionSchema>;
 
 export interface ExtractedApprovalInput {
   readonly approvalId?: string;

@@ -52,8 +52,8 @@ In Bflow Agentic SDLC v2, `@bflow/conversation` implements the **Conversation Ag
 
 1. **Authoritative System Prompt & Role Profile** (`agents/chat/` & `src/prompts.ts`):
    Định nghĩa rõ ràng vai trò `chat`, 5 nguyên tắc ứng xử cốt lõi, 6 ý định người dùng và 8 ranh giới bất biến.
-2. **Deterministic Intent Classification** (`src/intent-classifier.ts`):
-   Nhận diện chính xác 6 loại ý định bằng cả tiếng Việt và tiếng Anh.
+2. **Chat-owned intent decisions** (`src/chat-decision.ts`):
+   Chat hiểu ý định và gửi quyết định có cấu trúc qua `conversation_decide`. Gateway kiểm tra schema và mục tiêu trạng thái; classifier deterministic chỉ còn là API tương thích cho caller cũ và đường phê duyệt từ hook đáng tin cậy.
 3. **Structured `DelegationRequest` Generation** (`src/delegation-builder.ts`):
    Đóng gói yêu cầu người dùng thành hợp đồng `DelegationRequest` chuẩn v2 (`schemaVersion: 2`) với danh sách tiêu chí nghiệm thu `acceptanceCriteria` có thể kiểm chứng.
 4. **Handoff to Coordinator via Herdr** (`src/herdr-bridge.ts`):
@@ -201,35 +201,48 @@ console.log("Phản hồi của Chat:", response.value.agentReply.content);
 - **Prompt hệ thống (`prompts.ts`, `agents/chat/system-prompt.md`)**: mục "User Interaction & Autonomous Specialist Delegation Boundary" nêu rõ Conversation là điểm tương tác người dùng duy nhất; `coordinator`, `analyst`, `architect`, `planner`, `developer`, `reviewer`, `verifier`/`qa` là tác tử thực thi tự trị, không đối thoại với người dùng. Chỉ Conversation được hỏi làm rõ và trung chuyển `approval.request` / `approval.decision`. Prompt của Conversation không được chứa khối chính sách "non-user-facing execution agent" của các vai trò khác (xem `validateAutonomousRolePrompt` trong `@bflow/agent-registry`).
 - Thông điệp từ vai trò chuyên môn tới `user` không được chấp nhận ở tầng Herdr; mọi yêu cầu làm rõ hoặc phê duyệt phải đi qua Coordinator tới Conversation.
 
-## Intent routing guarantees and limits
+## Hosted Chat intent routing
 
-Workflow creation requires an affirmative implementation request and explicit path scope.
-Informational questions and prompt drafting stay in Conversation. Investigation-only requests
-retain a private `spike` requirement draft without dispatching an implementation workflow.
-For a mixed bugfix and investigation request, separate spike sections become
-`metadata.investigationTasks` with `codeChangesAuthorized: false`; their paths are excluded
-from mutation scope. Negative acceptance examples do not revoke the bugfix instruction.
-Scope extraction records paths supplied by the user; it does not inspect repository existence
-and never substitutes `packages/app` for missing scope. Unknown scope is clarified.
+The trusted provider hook records the actual user turn before Chat acts and returns its
+`messageId` plus persisted Conversation context. Chat calls the Conversation-only
+`conversation_decide` MCP tool with that ID and a `ChatDecisionSchema` decision. The host
+binds the proposal to the recorded pane/native session and injects user content/provenance;
+model parameters cannot supply human authority. Gateway uses that validated decision directly.
+It does not run the natural-language classifier on a supplied decision.
 
-A new imperative starts a separate request, including when the caller supplies an existing
-clarification correlation. Short choices without a pending specialist option mapping cannot
-create a run. Ambiguous clarification replies preserve the original request. Existing strict
-specialist decision matching and authenticated approval checks still apply.
+Decisions cover direct replies, clarification, workflow handoff, status and targeted
+cancellation. Clarification questions include the exact options Chat asks the user, so the
+saved questions and Chat transcript support short answers such as “A, giữ cả 5 tiêu chí”.
+The resulting draft explicitly targets the pending clarification. Independent requests get
+separate run/correlation IDs even while another request is delegated.
 
-Cancellation is recognized as a command outside quoted text and examples. Explicit run IDs
-in the message take precedence over the caller's active-run hints. Descriptive targets must
-resolve to exactly one known unfinished workflow; unknown, multiple, or ambiguous targets
-require clarification before any cancellation. A code request and cancellation in either clear order persist the remaining content through
-the existing FIFO as an independent user turn. All cancellation targets are validated before
-the first action; unknown targets prevent both side effects.
-The reply identifies the follow-up as queued; transport handoff remains distinct from
-Runtime/Coordinator acceptance. Ambiguous action ordering requires clarification. Plural old-run requests require explicit
-target selection and never fall back to the active run.
+A workflow draft requires defined scope and non-empty acceptance criteria. Named modules or
+roles can define scope without literal paths: `affectedPaths: []` is valid. A read-only
+investigation can be delegated as `kind: "spike"`; delegation metadata preserves
+`workflowKind` and `codeChangesAuthorized` (false by default for spikes), with manual review
+criteria. The objective and criteria must retain the user's scope and no-edit constraint.
+This metadata does not replace downstream Runtime policies or independent acceptance.
 
-Paste wrapper tags are removed from delegated objectives and acceptance criteria. Numbered
-and bulleted requested cases become separate criteria; prose clauses remain user-supplied
-criteria without invented typecheck/test boilerplate. Explicit `full` SDD is preserved.
+`approval_response` is excluded from the model decision schema. Pending human approvals and
+specialist decisions still use the authenticated user hook and existing exact option checks.
+Free-text specialist answers without offered options must start with the pending `apr-...`
+request ID. An explicit governance reply or exact offered option can commit a decision;
+incidental approval words in a new workflow request cannot.
+Conversation cannot approve through MCP, assign specialists directly, edit code, or claim
+transport completion proves workflow success.
 
-These are deterministic local routing guarantees verified with package tests and the fake
-transport. They do not establish live provider/Herdr acceptance or full SDLC completion.
+Structured decisions survive the existing busy FIFO and context recovery. Committed retries
+return the saved response without another handoff; conflicting decisions for the same user
+message are rejected. Model-path delegation identities are stable per trusted user message.
+State validation rejects unknown clarification/cancellation targets and requires an explicit
+existing run for requirement changes. Snapshot format v2 remains compatible; decision
+receipts use the existing ConversationMessage metadata field.
+
+Direct `handleUserTurn` callers without `conversationDecision` retain the legacy deterministic
+classifier. That API still requires implementation wording/path scope and keeps investigations
+in Conversation; it is not the ordinary hosted Chat route. It remains for compatibility and
+authenticated approval extraction, not as a second semantic veto over Chat.
+
+These guarantees have local package/integration tests. They do not establish live provider,
+Herdr transport, or full SDLC acceptance. Running hosts need a rebuild and restart to load the
+new MCP tool and prompt.

@@ -1,5 +1,8 @@
+import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import {
   ApprovalRequestSchema,
+  CancellationRequestSchema,
   ConversationMessageSchema,
   DelegationRequestSchema,
   type AgentTransportState,
@@ -21,6 +24,7 @@ import {
 } from "./delegation-builder.js";
 import { HerdrConversationBridge } from "./herdr-bridge.js";
 import { classifyUserIntent } from "./intent-classifier.js";
+import { resolveChatDecision } from "./chat-decision.js";
 import { isUserDecisionRequest, userDecisionExpiredApprovalId } from "./user-decision.js";
 import {
   formatCoordinatorMessageForUser,
@@ -157,6 +161,12 @@ export class ConversationGateway {
     return `${prefix}-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
   }
 
+  private generateTurnId(input: UserTurnInput, prefix: string): string {
+    return input.conversationDecision && input.messageId
+      ? `${prefix}-${createHash("sha256").update(JSON.stringify([this.config.sessionId, input.messageId, prefix])).digest("hex")}`
+      : this.generateId(prefix);
+  }
+
   private validateConversationMessages(...messages: readonly ConversationMessage[]): OperationResult<void> {
     for (const msg of messages) {
       const parsed = ConversationMessageSchema.safeParse(msg);
@@ -274,7 +284,8 @@ export class ConversationGateway {
     }
 
     if (!busy && this.snapshot!.pendingInboundQueue.length > 0) {
-      await this.flushPendingInboundQueue();
+      const flushed = await this.flushPendingInboundQueue();
+      if (!flushed.ok) return flushed;
     }
 
     return { ok: true, value: this.snapshot! };
@@ -299,6 +310,11 @@ export class ConversationGateway {
         }
       };
     }
+    input = parsedInput.data;
+    if (input.sessionId !== this.config.sessionId || (input.conversationDecision && !input.messageId)) {
+      return { ok: false, error: { code: "validation", retryable: false,
+        message: "Chat decisions require a user message ID in the current Conversation session" } };
+    }
 
     if (!this.snapshot) {
       const initResult = await this.initializeOrRecoverSession();
@@ -308,6 +324,33 @@ export class ConversationGateway {
     }
 
     const now = this.getNow();
+    const requestedAt = input.conversationDecision ? input.occurredAt ?? now : now;
+    const decisionReceipt = input.conversationDecision
+      ? { metadata: { conversationDecision: JSON.parse(JSON.stringify(input.conversationDecision)) } } : {};
+
+    // Recover an already committed decision after a lost MCP response or host restart.
+    if (input.conversationDecision && input.messageId) {
+      const userMessage = this.snapshot!.messages.find(message => message.sender === "user" && message.messageId === input.messageId);
+      if (userMessage) {
+        if (userMessage.content !== input.content || !isDeepStrictEqual(userMessage.metadata?.conversationDecision, input.conversationDecision)) {
+          return { ok: false, error: { code: "validation", retryable: false, message: "Conflicting Chat decision for an already processed user turn" } };
+        }
+        const agentReply = this.snapshot!.messages.find(message => message.sender === "conversation" && message.turnSequence === userMessage.turnSequence + 1);
+        if (!agentReply) return { ok: false, error: { code: "corruption", retryable: false, message: "Committed user turn is missing its Conversation reply" } };
+        // A failed save can leave an optimistic in-memory candidate. Repair it before
+        // the host is allowed to journal a final result for this retry.
+        const repaired = await this.persistUpdatedSnapshot(this.snapshot!);
+        if (!repaired.ok) return repaired;
+        const delegation = agentReply.metadata?.delegationRequest;
+        const cancellation = agentReply.metadata?.cancellationRequest;
+        return { ok: true, value: { sessionId: this.config.sessionId, correlationId: userMessage.correlationId,
+          ...(userMessage.runId ? { runId: userMessage.runId } : {}), recognizedIntent: input.conversationDecision.intent,
+          sessionStatus: this.snapshot!.session.status, userMessage, agentReply, queuedBecauseBusy: false,
+          substantiveUpdate: input.conversationDecision.intent !== "conversation_only",
+          ...(delegation ? { delegationRequest: DelegationRequestSchema.parse(delegation) } : {}),
+          ...(cancellation ? { cancellationRequest: CancellationRequestSchema.parse(cancellation) } : {}) } };
+      }
+    }
 
     // 1. Busy-State Queueing (Requirement 10): Zero message loss
     const shouldQueue =
@@ -315,14 +358,21 @@ export class ConversationGateway {
       !this.isDrainingSingleQueueItem;
 
     if (shouldQueue) {
-      const queueItem: PendingInboundItem = {
+      const pending = input.conversationDecision && input.messageId
+        ? this.snapshot!.pendingInboundQueue.find(item => item.kind === "user_turn" && item.input.messageId === input.messageId)
+        : undefined;
+      if (pending?.kind === "user_turn" && (pending.input.content !== input.content ||
+          !isDeepStrictEqual(pending.input.conversationDecision, input.conversationDecision))) {
+        return { ok: false, error: { code: "validation", retryable: false, message: "Conflicting Chat decision for a queued user turn" } };
+      }
+      const queueItem: PendingInboundItem = pending ?? {
         queueId: this.generateId("queue-user"),
         kind: "user_turn",
         enqueuedAt: now,
         input
       };
 
-      const updatedQueue = [...this.snapshot!.pendingInboundQueue, queueItem];
+      const updatedQueue = pending ? this.snapshot!.pendingInboundQueue : [...this.snapshot!.pendingInboundQueue, queueItem];
       const queuedSnapshot: ConversationContextSnapshot = {
         ...this.snapshot!,
         pendingInboundQueue: updatedQueue
@@ -346,6 +396,7 @@ export class ConversationGateway {
         correlationId: userCorrelationId,
         turnSequence: this.snapshot!.session.turnCount + 1,
         sender: "user",
+        ...decisionReceipt,
         recipient: "conversation",
         intent: "user_request",
         content: input.content,
@@ -407,8 +458,11 @@ export class ConversationGateway {
         }
       }
 
-      // 4. Safety inspection of user turn content (all 7 categories)
-      const contentSafety = inspectRepositoryContentSafety(input.content);
+      // Authenticated human dialogue may quote unsafe strings for analysis. Keep repository
+      // scanning and the legacy ingress policy; enforce Chat's actions through schema/role gates.
+      const trustedChatTurn = input.conversationDecision !== undefined &&
+        input.provenance?.origin === "user" && input.provenance.authenticatedUser === true;
+      const contentSafety = trustedChatTurn ? { safe: true, findings: [] } : inspectRepositoryContentSafety(input.content);
       if (!contentSafety.safe) {
         return {
           ok: false,
@@ -421,7 +475,9 @@ export class ConversationGateway {
       }
 
       // 4. Classify user intent
-      const classificationResult = classifyUserIntent(input, this.snapshot!);
+      const classificationResult = input.conversationDecision
+        ? resolveChatDecision(input.conversationDecision, this.snapshot!)
+        : classifyUserIntent(input, this.snapshot!);
       if (!classificationResult.ok) {
         return classificationResult;
       }
@@ -444,7 +500,7 @@ export class ConversationGateway {
         correlationId = this.snapshot!.runIdToCorrelationId[this.snapshot!.session.activeRunId];
       }
       if (!correlationId) {
-        correlationId = this.generateId("corr");
+        correlationId = this.generateTurnId(input, "corr");
       }
 
       const turnSeq = this.snapshot!.session.turnCount;
@@ -461,6 +517,7 @@ export class ConversationGateway {
             correlationId,
             turnSequence: userTurnSequence,
             sender: "user",
+            ...decisionReceipt,
             recipient: "conversation",
             intent: "user_request",
             content: input.content,
@@ -525,6 +582,7 @@ export class ConversationGateway {
             correlationId,
             turnSequence: userTurnSequence,
             sender: "user",
+            ...decisionReceipt,
             recipient: "conversation",
             intent: "user_request",
             content: input.content,
@@ -619,8 +677,8 @@ export class ConversationGateway {
 
         case "workflow_request": {
           const draft = classification.requirementDraft!;
-          const messageId = this.generateId("msg-delegation");
-          const runId = classification.targetRunId ?? this.generateId("run");
+          const messageId = this.generateTurnId(input, "msg-delegation");
+          const runId = classification.targetRunId ?? this.generateTurnId(input, "run");
           const isRequirementChange = draft.isRequirementChange;
 
           const existingWorkflow = this.snapshot!.workflows[correlationId];
@@ -633,8 +691,12 @@ export class ConversationGateway {
             runId,
             draft,
             ...(input.inputArtifacts ? { inputArtifacts: input.inputArtifacts } : {}),
-            requestedAt: now,
-            revision
+            requestedAt,
+            revision,
+            ...(input.conversationDecision ? {
+              previousDelegationId: this.generateTurnId(input, "del"),
+              idempotencyKey: this.generateTurnId(input, "idemp-del")
+            } : {})
           });
 
           if (!delegationResult.ok) {
@@ -651,6 +713,7 @@ export class ConversationGateway {
             runId,
             turnSequence: userTurnSequence,
             sender: "user",
+            ...decisionReceipt,
             recipient: "conversation",
             intent: isRequirementChange ? "clarification_answer" : "user_request",
             content: input.content,
@@ -668,6 +731,7 @@ export class ConversationGateway {
             sender: "conversation",
             recipient: "user",
             intent: "delegation_handoff",
+            ...(input.conversationDecision ? { metadata: { delegationRequest: JSON.parse(JSON.stringify(delegationRequest)) } } : {}),
             content: (isRequirementChange
               ? `Tôi đã gửi bản cập nhật yêu cầu (phiên bản ${revision}) qua Herdr; đang chờ Runtime/Coordinator xác nhận tiếp nhận.`
               : `Yêu cầu "${draft.title}" đã được gửi qua Herdr; đang chờ Runtime/Coordinator xác nhận tiếp nhận. Tôi sẽ cập nhật tiến độ khi có thông báo.`) +
@@ -781,6 +845,7 @@ export class ConversationGateway {
             correlationId,
             turnSequence: userTurnSequence,
             sender: "user",
+            ...decisionReceipt,
             recipient: "conversation",
             intent: "user_request",
             content: input.content,
@@ -944,6 +1009,7 @@ export class ConversationGateway {
             runId: targetApproval.runId,
             turnSequence: userTurnSequence,
             sender: "user",
+            ...decisionReceipt,
             recipient: "conversation",
             intent: "approval_response",
             content: input.content,
@@ -1073,9 +1139,11 @@ export class ConversationGateway {
             runId: targetRunId,
             ...(cancelInput?.taskId ? { taskId: cancelInput.taskId } : {}),
             requestedBy: "conversation",
-            requestedAt: now,
+            requestedAt,
             expectedVersion: targetWorkflow ? targetWorkflow.revision : 1,
-            reason: cancelInput?.reason ?? "User requested workflow cancellation"
+            reason: cancelInput?.reason ?? "User requested workflow cancellation",
+            ...(input.conversationDecision ? { cancellationId: this.generateTurnId(input, "canc"),
+              idempotencyKey: this.generateTurnId(input, "idemp-canc") } : {})
           });
 
           if (!cancelResult.ok) {
@@ -1086,8 +1154,8 @@ export class ConversationGateway {
 
           const cancelDelegationRaw = {
             schemaVersion: 2 as const,
-            delegationId: this.generateId("del-cancel"),
-            messageId: this.generateId("msg-cancel"),
+            delegationId: this.generateTurnId(input, "del-cancel"),
+            messageId: this.generateTurnId(input, "msg-cancel"),
             correlationId,
             sessionId: this.config.sessionId,
             runId: targetRunId,
@@ -1110,7 +1178,7 @@ export class ConversationGateway {
             ],
             inputArtifacts: [],
             priority: "critical" as const,
-            requestedAt: now,
+            requestedAt,
             idempotencyKey: cancellationRequest.idempotencyKey,
             metadata: {
               action: "cancel",
@@ -1144,6 +1212,7 @@ export class ConversationGateway {
             runId: targetRunId,
             turnSequence: userTurnSequence,
             sender: "user",
+            ...decisionReceipt,
             recipient: "conversation",
             intent: "user_request",
             content: input.content,
@@ -1162,6 +1231,7 @@ export class ConversationGateway {
             recipient: "user",
             intent: "progress_update",
             content: `Yêu cầu hủy workflow run ${targetRunId} đã được gửi qua Herdr; đang chờ Runtime/Coordinator xác nhận kết quả hủy.${classification.followUpContents?.length ? " Yêu cầu tiếp theo được lưu vào hàng đợi để xử lý riêng: " + classification.followUpContents.join("; ") : ""}`,
+            ...(input.conversationDecision ? { metadata: { cancellationRequest: JSON.parse(JSON.stringify(cancellationRequest)) } } : {}),
             artifactReferences: [],
             createdAt: now
           };
@@ -1593,16 +1663,13 @@ export class ConversationGateway {
           break;
         }
 
-        const remainingQueue = this.snapshot.pendingInboundQueue.slice(1);
-        const candidate: ConversationContextSnapshot = {
-          ...this.snapshot,
-          pendingInboundQueue: remainingQueue
-        };
-
-        const removedIds = new Set([nextItem.queueId]);
-        const saveRes = await this.persistUpdatedSnapshot(candidate, removedIds);
-        if (!saveRes.ok) {
-          return saveRes;
+        // Structured turns have durable identities: retain them until their result is saved.
+        // A crash after execution then replays the committed message instead of losing work.
+        const retainUntilProcessed = nextItem.kind === "user_turn" && nextItem.input.conversationDecision !== undefined;
+        if (!retainUntilProcessed) {
+          const saveRes = await this.persistUpdatedSnapshot({ ...this.snapshot,
+            pendingInboundQueue: this.snapshot.pendingInboundQueue.slice(1) }, new Set([nextItem.queueId]));
+          if (!saveRes.ok) return saveRes;
         }
 
         this.isDrainingSingleQueueItem = true;
@@ -1611,6 +1678,8 @@ export class ConversationGateway {
             const turnResult = await this.handleUserTurn(nextItem.input, options);
             if (turnResult.ok) {
               processedUserTurns.push(turnResult.value);
+            } else if (retainUntilProcessed) {
+              return turnResult;
             }
           } else if (nextItem.kind === "coordinator_message") {
             const updateResult = await this.handleCoordinatorRoleMessage(nextItem.message, options);
@@ -1620,6 +1689,12 @@ export class ConversationGateway {
           }
         } finally {
           this.isDrainingSingleQueueItem = false;
+        }
+        if (retainUntilProcessed) {
+          const saveRes = await this.persistUpdatedSnapshot({ ...this.snapshot,
+            pendingInboundQueue: this.snapshot.pendingInboundQueue.filter(item => item.queueId !== nextItem.queueId) },
+            new Set([nextItem.queueId]));
+          if (!saveRes.ok) return saveRes;
         }
       }
 

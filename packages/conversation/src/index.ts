@@ -11,6 +11,7 @@ export * from "./types.js";
 export * from "./safety.js";
 export * from "./prompts.js";
 export * from "./intent-classifier.js";
+export * from "./chat-decision.js";
 export * from "./delegation-builder.js";
 export * from "./response-formatter.js";
 export * from "./user-decision.js";

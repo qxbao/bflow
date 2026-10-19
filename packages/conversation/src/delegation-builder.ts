@@ -79,7 +79,7 @@ export function buildDelegationRequest(params: {
       id: `ac-${idx + 1}`,
       description: desc.trim().length > 0 ? desc.trim() : `Tiêu chí nghiệm thu ${idx + 1}`,
       category: "functional" as const,
-      verificationMethod: "unit_test" as const,
+      verificationMethod: params.draft.kind === "spike" ? "manual_review" as const : "unit_test" as const,
       required: true,
       status: "pending" as const,
       evidenceArtifactIds: []
@@ -107,6 +107,8 @@ export function buildDelegationRequest(params: {
   const metadata: Metadata = {
     revision: params.revision ?? 1,
     isRequirementChange: params.draft.isRequirementChange,
+    workflowKind: params.draft.kind,
+    codeChangesAuthorized: params.draft.codeChangesAuthorized ?? params.draft.kind !== "spike",
     ...(params.draft.investigationTasks ? { investigationTasks: params.draft.investigationTasks.map(task => ({ objective: task.objective, affectedPaths: [...task.affectedPaths], codeChangesAuthorized: false })) } : {}),
     ...(params.draft.affectedPaths.length > 0
       ? { affectedPaths: [...params.draft.affectedPaths] }
@@ -221,6 +223,7 @@ export function buildApprovalDecision(params: {
  * Builds and validates a CancellationRequest for a workflow run or task.
  */
 export function buildCancellationRequest(params: {
+  readonly cancellationId?: string | undefined;
   readonly runId: string;
   readonly taskId?: string | undefined;
   readonly requestedBy: string;
@@ -230,7 +233,7 @@ export function buildCancellationRequest(params: {
   readonly executionId?: string | undefined;
   readonly idempotencyKey?: string | undefined;
 }): OperationResult<CancellationRequest> {
-  const cancellationId = `canc-${params.runId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 24)}-${generateRandomSuffix()}`;
+  const cancellationId = params.cancellationId ?? `canc-${params.runId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 24)}-${generateRandomSuffix()}`;
   const idempotencyKey =
     params.idempotencyKey ??
     `idemp-canc-${params.runId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 24)}-${generateRandomSuffix()}`;

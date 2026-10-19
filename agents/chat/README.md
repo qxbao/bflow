@@ -105,3 +105,14 @@ In Bflow's terminal topology, `bflow attach` connects exclusively to the dedicat
 - `system-prompt.md`: The complete prompt template loaded by the agent runner.
 - `role-profile.json`: Contract-validated role profile (`AgentRoleProfileSchema`).
 - `@bflow/conversation`: Supporting library providing types, safety scanners, and prompt renderers (`packages/conversation`).
+
+## Hosted intent ownership
+
+Chat makes semantic intent and clarification decisions through `conversation_decide`, using
+the actual user `messageId` recorded by the trusted hook. Gateway validates and persists the
+structured decision, then uses the existing Coordinator bridge. Read-only investigations
+can be workflow spikes; named role/module scope does not require invented file paths.
+Record the exact questions/options before asking so short replies can be interpreted in
+context. Human approval remains hook-only; MCP cannot submit `approval_response`.
+See [the prompt](system-prompt.md) and [Conversation package](../../packages/conversation/README.md)
+for the decision fields, retry behavior, and local-test evidence limits.

@@ -707,6 +707,29 @@ export function classifyUserIntent(
 }
 
 /**
+ * The physical-user hook may commit governance replies, never ordinary intent.
+ * Incidental approval words in a new request are not human approval evidence.
+ */
+export function classifyTrustedApprovalReply(
+  input: UserTurnInput,
+  context: ConversationContextSnapshot
+): OperationResult<IntentClassificationResult> | undefined {
+  if (Object.keys(context.pendingApprovals).length === 0) return undefined;
+  const classified = classifyUserIntent(input, context);
+  if (!classified.ok || classified.value.intent !== "approval_response") return undefined;
+  const approval = classified.value.approvalInput;
+  if (approval?.selectedOption !== undefined) return classified;
+  const content = normalizeForMatching(input.content);
+  const namedId = extractExplicitId(content, "apr-");
+  const namesPendingRequest = namedId !== undefined && context.pendingApprovals[namedId] !== undefined && content.startsWith(namedId);
+  const reply = namesPendingRequest ? content.slice(namedId!.length).replace(/^[\s:,-]+/, "") : content;
+  const explicitDecision = /^(?:(?:tôi|i)\s+)?(?:approve(?:d)?|lgtm|phê duyệt|đồng ý(?: duyệt)?|duyệt|chấp thuận|chấp nhận|ok duyệt|xác nhận duyệt|reject(?:ed)?|decline|từ chối|không đồng ý|không duyệt|bác bỏ|request changes|changes requested|changes_requested|cần sửa|yêu cầu chỉnh sửa|chỉnh sửa lại|cần thay đổi)(?!\p{L})/iu.test(reply);
+  const pendingRequest = approval?.approvalId ? context.pendingApprovals[approval.approvalId] : undefined;
+  const targetedSpecialistAnswer = namesPendingRequest && pendingRequest !== undefined && isUserDecisionRequest(pendingRequest);
+  return explicitDecision || targetedSpecialistAnswer ? classified : undefined;
+}
+
+/**
  * IntentClassifier engine class providing intent detection and delegation analysis.
  */
 export class IntentClassifier {
