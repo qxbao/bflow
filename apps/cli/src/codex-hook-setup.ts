@@ -19,7 +19,7 @@ import {
   type CodexHookTrustOptions
 } from "@bflow/agent-providers";
 import { detectPlatform, defaultHostEnvironment } from "@bflow/machine-setup";
-import { humanText, sanitizeIdentifier } from "./presentation.js";
+import { bold, cyan, humanText, readableLabel, sanitizeIdentifier, statusTag } from "./presentation.js";
 import { isolatedProviderHomes } from "./setup-defaults.js";
 import type { CliContext, SetupCommandArgs } from "./types.js";
 
@@ -123,7 +123,7 @@ function trustOptions(context?: CliContext): CodexHookTrustOptions {
 export function formatCodexHookReview(reviewInput: CodexHookReview): string {
   const review = safeReview(reviewInput);
   if (review.approvalMode === "trust_all") return [
-    "Codex global hook review", "Status: approved", "Hook policy: trust_all",
+    "Codex global hook review", "Status: approved", "Hook policy: trust all current and future global hooks",
     "Codex home: " + review.codexHomeDirectory,
     "Private policy store: " + codexHookPolicyPath(review.approvalStorePath),
     "Policy digest: " + review.digest,
@@ -133,7 +133,7 @@ export function formatCodexHookReview(reviewInput: CodexHookReview): string {
   ].join("\n");
   const lines = [
     "Codex global hook review",
-    "Status: " + review.status,
+    "Status: " + readableLabel(review.status),
     "Codex home: " + review.codexHomeDirectory,
     "Private approval store: " + review.approvalStorePath,
     "Snapshot digest: " + review.digest,
@@ -163,8 +163,12 @@ export function formatCodexHookReview(reviewInput: CodexHookReview): string {
   return lines.join("\n");
 }
 
-export function formatCodexHookSetupOutput(output: CodexHookSetupOutput, _useColor = false): string {
-  const lines = [formatCodexHookReview(output.review), "", "Result: " + output.outcome];
+export function formatCodexHookSetupOutput(output: CodexHookSetupOutput, useColor = false): string {
+  const review = formatCodexHookReview(output.review).split("\n");
+  review[0] = useColor ? cyan(bold(review[0]!), true) : review[0]!;
+  const state = ["no_hooks", "already_approved", "approved", "trust_revoked"].includes(output.outcome) ? "passed"
+    : ["approval_required", "approval_declined"].includes(output.outcome) ? "waiting" : "failed";
+  const lines = [review.join("\n"), "", "Result: " + readableLabel(output.outcome) + " " + statusTag(state, useColor)];
   if (output.message) lines.push(privateReviewText(output.message));
   if (output.approval) lines.push("Approval receipt: " + output.approval.approvalStorePath + " (digest " + output.approval.digest + ")");
   return lines.join("\n");

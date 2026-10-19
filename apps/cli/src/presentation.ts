@@ -1,5 +1,6 @@
 import { ContractErrorSchema, type ContractError } from "@bflow/contracts";
 import type { CliCommandName } from "./types.js";
+import { posix, win32 } from "node:path";
 
 export const ANSI = {
   reset: "\x1b[0m",
@@ -412,6 +413,25 @@ export function readableLabel(value: unknown): string {
   return humanLine(value).replace(/[_-]+/g, " ");
 }
 
+/** Labels only; identifiers and copyable commands must keep their original spelling. */
+export function fieldLabel(value: string): string {
+  const known: Record<string, string> = {
+    commandId: "Command ID", correlationId: "Correlation ID", runId: "Run ID",
+    taskId: "Task ID", idempotencyKey: "Idempotency key"
+  };
+  return known[value] ?? readableLabel(value.replace(/([a-z0-9])([A-Z])/g, "$1 $2"));
+}
+
+export function statusTag(value: unknown, useColor = false): string {
+  const status = humanLine(value || "unknown", 80).toLowerCase();
+  const label = readableLabel(status).toUpperCase();
+  const paint = ["passed", "pass", "succeeded", "ready", "healthy", "present", "approved", "applied", "already_satisfied", "reused", "up", "valid"].includes(status) ? green
+    : ["failed", "fail", "not_ready", "unhealthy", "invalid", "missing", "unavailable", "unsupported", "error"].includes(status) ? red
+    : ["skipped", "stopped", "down", "cancelled", "not_applicable"].includes(status) ? dim
+    : yellow;
+  return paint(`[${label}]`, useColor);
+}
+
 export const SETUP_COMPONENT_LABELS: Readonly<Record<string, string>> = {
   path: "Make bflow and installed tools available in the terminal",
   "role-skills": "Install agent skills",
@@ -421,19 +441,102 @@ export const SETUP_COMPONENT_LABELS: Readonly<Record<string, string>> = {
   doctor: "Check the completed setup"
 };
 
-/** Keep the complete approval scope/targets while presenting numbered steps. */
+function targetPathApi(path: string): typeof posix {
+  // Backslashes are valid filename characters on POSIX; a Windows root is unambiguous.
+  return !posix.isAbsolute(path) && win32.isAbsolute(path) ? win32 : posix;
+}
+
+/** Collapse bundles only for known skill targets; retain every other target by name. */
+export function formatTargetPaths(paths: readonly string[], indent = "    ", options: { skillBundles?: boolean } = {}): string[] {
+  const groups = new Map<string, { bundles: number; files: string[] }>();
+  for (const raw of paths) {
+    const path = sanitizeIdentifier(raw);
+    const api = targetPathApi(path);
+    const parent = api.dirname(path);
+    const name = api.basename(path);
+    const bundle = options.skillBundles === true && api.basename(parent) === "bundles" && /^[a-f0-9]{64}$/i.test(name);
+    const key = `${bundle ? "bundles" : "files"}:${parent}`;
+    const group = groups.get(key) ?? { bundles: 0, files: [] };
+    if (bundle) group.bundles++;
+    else group.files.push(path);
+    groups.set(key, group);
+  }
+  const lines: string[] = [];
+  for (const [key, group] of groups) {
+    if (group.bundles) {
+      lines.push(`${indent}- ${group.bundles} pinned skill ${group.bundles === 1 ? "bundle" : "bundles"}`);
+      lines.push(`${indent}  Store: ${key.slice("bundles:".length)}`);
+    } else if (group.files.length > 1 && group.files.every(path => {
+      const api = targetPathApi(path);
+      return api.extname(path) !== "";
+    })) {
+      lines.push(`${indent}- ${key.slice("files:".length)}`);
+      for (const path of group.files) {
+        const api = targetPathApi(path);
+        lines.push(`${indent}  - ${api.basename(path)}`);
+      }
+    } else for (const path of group.files) lines.push(`${indent}- ${path}`);
+  }
+  return lines;
+}
+
+/** Readable approval scope, with repeated machine-wide target lists grouped by component. */
 export function formatSetupPreview(text: string, useColor = false): string {
   let number = 0;
+  let component: string | undefined;
+  let groupedBundles = false;
   const clean = redactSensitive(stripAnsi(text));
-  return clean.split("\n").map(line => {
+  const input = clean.split("\n");
+  const lines: string[] = [];
+  for (let index = 0; index < input.length; index++) {
+    const line = input[index]!;
     const match = /^- (\S+:\S+) (\[[^\]]*\]) (.*)$/.exec(line);
     if (match) {
       const [, id, flags, summary] = match;
-      const component = id!.slice(id!.indexOf(":") + 1);
+      component = id!.slice(id!.indexOf(":") + 1);
       const label = SETUP_COMPONENT_LABELS[component] ?? humanLine(summary);
-      return `${formatProgressStep(label, useColor, ++number)} ${humanLine(flags)}\n${dim(`    ${humanLine(id)}: ${humanLine(summary, 2000)}`, useColor)}`;
+      const readableFlags = flags!.slice(1, -1).split(", ").map(flag => flag === "approval" ? "requires approval"
+        : flag === "no-approval" ? "no approval needed" : flag === "machine-wide" ? "this account" : readableLabel(flag)).join("; ");
+      lines.push("", `${formatProgressStep(label, useColor, ++number)} [${readableFlags}]`);
+      lines.push(dim(`    ${humanLine(id)}: ${humanLine(summary, 2000)}`, useColor));
+      continue;
+    }
+    if (/^\s+target: /.test(line)) {
+      const paths: string[] = [];
+      do { paths.push(input[index]!.replace(/^\s+target: /, "")); index++; }
+      while (index < input.length && /^\s+target: /.test(input[index]!));
+      index--;
+      const targets = formatTargetPaths(paths, "    ", { skillBundles: component === "role-skills" });
+      groupedBundles ||= targets.some(value => /^\s*- \d+ pinned skill bundles?$/.test(value));
+      lines.push(...targets.map(value => dim(value, useColor)));
+      continue;
+    }
+    if (line === "Machine-wide changes:") {
+      const groups = new Map<string, string[]>();
+      while (index + 1 < input.length) {
+        const change = /^- (\S+:\S+): (.*)$/.exec(input[index + 1]!);
+        if (!change) break;
+        index++;
+        const paths = groups.get(change[1]!) ?? [];
+        paths.push(change[2]!);
+        groups.set(change[1]!, paths);
+      }
+      lines.push("", useColor ? cyan(bold("Changes in this account:"), true) : "Changes in this account:");
+      for (const [step, paths] of groups) {
+        const component = step.slice(step.indexOf(":") + 1);
+        lines.push(`  ${SETUP_COMPONENT_LABELS[component] ?? readableLabel(component)} (${paths.length} ${paths.length === 1 ? "target" : "targets"})`);
+        const targets = formatTargetPaths(paths, "    ", { skillBundles: component === "role-skills" });
+        groupedBundles ||= targets.some(value => /^\s*- \d+ pinned skill bundles?$/.test(value));
+        lines.push(...targets);
+      }
+      continue;
     }
     const bounded = humanText(line, 2000);
-    return /^\s+(target|command):/.test(line) ? dim(`    ${bounded}`, useColor) : bounded;
-  }).join("\n");
+    if (/^Apply plan /.test(line) && groupedBundles) {
+      lines.push("Bundle hashes are grouped above. Full target inventory: bflow setup --plan --json", "");
+    }
+    lines.push(/^\s+command:/.test(line) ? dim(`    ${bounded.trimStart()}`, useColor)
+      : line.endsWith(":") ? (useColor ? cyan(bold(bounded), true) : bounded) : bounded);
+  }
+  return lines.join("\n");
 }

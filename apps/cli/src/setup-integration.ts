@@ -25,6 +25,7 @@ import {
   isolatedPlatformProfile,
   isolatedServiceNamespace,
   type SetupOutcome,
+  type SetupPreview,
   type MachineDoctorReport,
   type SetupComponent,
   type ComponentFactoryInput,
@@ -329,12 +330,14 @@ export async function executeSetupCommand(
   let toolsReported = false;
   let receipts: SetupReceipt[] = [];
   let outcome: SetupOutcome | undefined;
+  let setupPreview: SetupPreview | undefined;
   let doctor: MachineDoctorReport | undefined;
 
   if (typeof machineSetup.plan === "function") {
     // Custom machineSetup engine supporting explicit plan / apply
     const planRes = await machineSetup.plan({ mode: args.mode, config: machineConfig });
     plan = planRes.plan ?? planRes;
+    setupPreview = planRes.preview;
     if (Array.isArray(planRes.diagnostics)) diagnostics.push(...planRes.diagnostics);
     if (Array.isArray(planRes.tools)) toolObservations = planRes.tools;
 
@@ -372,6 +375,7 @@ export async function executeSetupCommand(
     });
     diagnostics.push(...(report.diagnostics ?? []));
     outcome = report.outcome;
+    setupPreview = report.preview ?? undefined;
     doctor = report.doctor ?? undefined;
     receipts = report.receipts ?? [];
     toolsReported = Array.isArray(report.observations);
@@ -430,6 +434,7 @@ export async function executeSetupCommand(
     serviceManagerKind: serviceManager.kind,
     ...(serviceManager.namespace ? { serviceUnitNamespace: serviceManager.namespace } : {}),
     plan: resolvedPlan,
+    ...(setupPreview ? { preview: setupPreview } : {}),
     ...(receipt ? { receipt } : {}),
     receipts,
     inventory,
