@@ -78,7 +78,12 @@ The installer adds no shell initialization, provider permissions, hooks or crede
 Superpowers uses `NativeProvidersToolInstaller`, composing an approved
 provider-specific installation for every selected provider. The existing native runtime
 verifies active-cache provenance and Bflow policy overlays. Unknown native delivery remains retained
-and is never automatically replayed. Native provider config changes require the machine
+and is never automatically replayed, with one exception: when the provider's own plugin inventory is
+readable and proves nothing of the plugin is registered, the next apply archives the interrupted
+intent (`<destination>.native-pending.json.reviewed-<id>`), drops its staging directory and installs
+again. An unreadable inventory or a registered plugin keeps the step `unknown`. Agy plugin validation
+runs without `--strict` because upstream Superpowers ships warnings that strict mode rejects; real
+manifest errors still fail. Native provider config changes require the machine
 setup approval. Isolated setup passes `NativeRuntimeOptions.isolation` (HOME plus
 `CLAUDE_CONFIG_DIR` for Claude and `CODEX_HOME` for Codex) to every provider child process, and
 reads provider config only from those directories. Agy has no documented isolation variable, so

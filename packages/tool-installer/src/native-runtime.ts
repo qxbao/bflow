@@ -134,6 +134,17 @@ export class NativePluginRuntime {
     } catch (error) { return { ready: false, diagnostic: `Native plugin verification failed: ${String(error)}` }; }
   }
 
+  /** true: the provider inventory has no Bflow plugin; false: it is registered; null: the inventory could not be read. */
+  async registered(pin: ManagedToolPin): Promise<boolean | null> {
+    try {
+      const provider = this.#provider(pin);
+      const selector = provider === "agy" ? "bflow-superpowers" : "bflow-superpowers@bflow-superpowers";
+      const entries = await this.#inventory(provider);
+      return entries.some(item => [item.pluginId, item.id, item.name].includes(selector) ||
+        (provider === "agy" && item.name === "bflow-superpowers"));
+    } catch { return null; }
+  }
+
   async #superpowersBundle(pin: ManagedToolPin, artifact: string): Promise<{ root: string; marketplace: string }> {
     const provider = this.#provider(pin);
     const managed = await privateDirectory(this.#options.managedRoot);
@@ -208,7 +219,9 @@ export class NativePluginRuntime {
         const registered = await this.#host.run(executable, ["plugin", "marketplace", "add", bundle.marketplace], { timeoutMs: 30_000, ...this.#scope(provider) });
         if (registered.exitCode !== 0) throw new Error("Native local marketplace registration failed");
       } else {
-        const validation = await this.#host.run(executable, ["plugin", "validate", bundle.root, "--strict", "--json"], { timeoutMs: 30_000, ...this.#scope(provider) });
+        // Not --strict: upstream Superpowers ships warnings (root AGENTS.md/GEMINI.md, SKILL.md bodies over Agy's
+        // 24000-byte load limit) that strict mode turns into a failure. Real manifest errors still exit non-zero.
+        const validation = await this.#host.run(executable, ["plugin", "validate", bundle.root, "--json"], { timeoutMs: 30_000, ...this.#scope(provider) });
         if (validation.exitCode !== 0) throw new Error("Agy rejected the local plugin manifest");
       }
       const argv = provider === "codex" ? ["plugin", "add", selector, "--json"] :
