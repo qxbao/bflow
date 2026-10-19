@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { mkdir, open, readFile, rename } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { z } from "zod";
 import {
   AgentProviderIdSchema, AgentRoleSchema,
@@ -583,7 +583,7 @@ export async function createHostPlatformSession(options: CreateHostPlatformSessi
     }
   }
 
-  const stateDirectory = join(options.repositoryPath, ".bflow/state/platform", options.sessionId);
+  const stateDirectory = resolve(options.directory, "../../platform", options.sessionId);
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
   const service = createPlatformReadinessService({
     stateDirectory,

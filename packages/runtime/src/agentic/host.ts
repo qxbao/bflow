@@ -244,7 +244,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     if (workspace) return workspace.runtime.ports.runStore;
     if (!queryStore) {
       const module = await import(new URL("../../../persistence/dist/index.js", import.meta.url).href);
-      const storage = resolve(configuration.repositoryPath, ".bflow/state/agentic"); await mkdir(storage, {recursive:true, mode:0o700});
+      const storage = resolve(configuration.directory, "../../agentic"); await mkdir(storage, {recursive:true, mode:0o700});
       queryStore = unwrap(module.openSqliteRunStore({ filename: join(storage, "runs.db") })) as RunStore & {close():void};
     }
     return queryStore!;
@@ -367,7 +367,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const manifestFile = join(configuration.manifestDirectory ?? resolve(configuration.repositoryPath, ".bflow/state/panes"), configuration.sessionId + ".manifest.json");
     await privateFile(join(pluginDirectory, "hosts", configuration.sessionId + ".json"), JSON.stringify({ issuerId, privateKeyFile: keyPath, runtimeSocket: nativeSocket, manifestFile,
       herdrSocketPath: textField(record(JSON.parse(await herdr(["status", "server", "--json"]))).socket) }));
-    workspace = await openAgenticWorkspace({ repositoryPath: configuration.repositoryPath, sessionId: configuration.sessionId, herdrBinary: binary,
+    workspace = await openAgenticWorkspace({ storageDirectory: resolve(configuration.directory, "../../agentic"), repositoryPath: configuration.repositoryPath, sessionId: configuration.sessionId, herdrBinary: binary,
       ...(configuration.manifestDirectory ? { manifestDirectory: configuration.manifestDirectory } : {}),
       ...(platformSession ? { developerLaunches: {
         allocate: request => platformSession.allocateDeveloper(request.taskId, request.worktreePath),
@@ -655,7 +655,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
             cursor = page.nextCursor;
           } while (cursor);
           const journalModule = await import("./journal.js");
-          const journal = new journalModule.AgenticJournal(resolve(configuration.repositoryPath, ".bflow/state/agentic/journal"), configuration.repositoryPath);
+          const journal = new journalModule.AgenticJournal(resolve(configuration.directory, "../../agentic/journal"), configuration.repositoryPath);
           await journal.exclusive(async state => {
             if (state.pendingCore.length || state.pendingVerifications.length || state.runs.some(run => !["completed", "cancelled", "failed"].includes(run.status)))
               throw new Error("Persisted agentic work requires activation/reconciliation before safe shutdown");

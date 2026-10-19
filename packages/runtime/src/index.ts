@@ -109,3 +109,6 @@ export type { AgenticHostController, AgenticHostOptions, RoleLaunchDescriptor } 
 
 // P30: platform readiness composition (no concrete provider adapter classes are exported).
 export * from "./platform/index.js";
+
+// Private state placement for the host and CLI recovery composition.
+export { resolvePrivateRuntimeStateDirectory } from "./private-state.js";

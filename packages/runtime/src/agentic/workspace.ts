@@ -1,3 +1,4 @@
+import { resolvePrivateRuntimeStateDirectory } from "../private-state.js";
 import { mkdir, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
@@ -183,7 +184,7 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
     defaultAgentKind: manifest.panes.find(p => p.role === "coordinator")!.agentKind,
     roleConfigs }, runner, store: manifestStore });
   const panes: PanePolicy = options.developerLaunches ? withDeveloperLaunches(rolePanes, options.developerLaunches) : rolePanes;
-  const directory = options.storageDirectory ?? resolve(repository, ".bflow/state/agentic");
+  const directory = options.storageDirectory ?? resolve(resolvePrivateRuntimeStateDirectory(repository), "agentic");
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const runStore = unwrap<any>(persistenceModule.openSqliteRunStore({ filename: resolve(directory, "runs.db") }));
   let artifactStore: any;

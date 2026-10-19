@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ensureAgenticHost, type AgenticHostPlatformOptions } from "@bflow/runtime";
+import { ensureAgenticHost, resolvePrivateRuntimeStateDirectory, type AgenticHostPlatformOptions } from "@bflow/runtime";
 import { openLifecycleHost } from "../src/agentic-host.js";
 import { EnvironmentLifecycle, identifyRepository, readEnvironmentConfig, runCli } from "../src/index.js";
 import { HerdrProcesses } from "./fixtures/herdr-processes.js";
@@ -42,6 +43,40 @@ describe.skipIf(process.platform === "win32")("persistent host recovery", () => 
     await host.shutdown();
     await host.close();
     expect(await readFile(path, "utf8")).toBe(before);
+  });
+
+  it("finds external private authority for status, quiesce and shutdown after a non-POSIX startup", async () => {
+    const input = await repository();
+    const stateHome = await mkdtemp("/tmp/bflow-private-recovery-");
+    cleanup.push(() => rm(stateHome, { recursive: true, force: true }));
+    const oldStateHome = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = stateHome;
+    cleanup.push(async () => { if (oldStateHome === undefined) delete process.env.XDG_STATE_HOME; else process.env.XDG_STATE_HOME = oldStateHome; });
+    const observe = fs.fstatSync;
+    const probe = vi.spyOn(fs, "fstatSync").mockImplementation(((fd: number, ...args: unknown[]) => {
+      const stat = Reflect.apply(observe, fs, [fd, ...args]);
+      return fs.readlinkSync(`/proc/self/fd/${fd}`).startsWith(input.repository.root + "/.bflow/.private-state-probe-")
+        ? Object.assign(stat, { mode: 0o100777 }) : stat;
+    }) as typeof fs.fstatSync);
+    cleanup.push(async () => { probe.mockRestore(); });
+    const binary = join(stateHome, "herdr.mjs");
+    await writeFile(binary, '#!/usr/bin/env node\nconsole.log(JSON.stringify({running:false}));\n', { mode: 0o700 });
+    const existing = await ensureAgenticHost({ repositoryPath: input.repository.root, sessionId: input.repository.sessionName, herdrBinary: binary });
+    cleanup.push(() => existing.shutdown().catch(() => undefined));
+    const path = join(resolvePrivateRuntimeStateDirectory(input.repository.root), "host", input.repository.sessionName, "host.json");
+    const before = await readFile(path, "utf8");
+    const report = await new EnvironmentLifecycle(input.repository.root, { runner: new HerdrProcesses(),
+      providerOverrides: { codex: { available: true, authenticated: true } } }).doctor();
+    expect(report.checks.find(check => check.checkId === "private-runtime-state")).toMatchObject({
+      status: "passed", message: expect.stringContaining(stateHome)
+    });
+    const host = await openLifecycleHost(input);
+    expect(await host.runtime.findRuns({ limit: 1 })).toEqual({ ok: true, value: { items: [] } });
+    expect((await host.quiesce({ timeoutMs: 5000 })).ok).toBe(true);
+    await host.shutdown();
+    await host.close();
+    expect(await readFile(path, "utf8")).toBe(before);
+    expect(fs.existsSync(join(input.repository.root, ".bflow/state/host"))).toBe(false);
   });
 
   it("cleans up a preparation timeout with no pane receipt before any role dispatch", async () => {

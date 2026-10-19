@@ -149,7 +149,33 @@ The final Conversation progress envelope carries verified completion and evidenc
 
 ## Durability and recovery
 
-The private P19 journal lives under `.bflow/state/agentic/journal` by default. It
+Private host/provider/runtime state normally lives under `.bflow/state`.
+Before creating credentials, Runtime probes whether that repository filesystem can
+actually enforce `0600` files and `0700` directories. On mounts that cannot (for
+example NTFS/FUSE with fixed `0777` permissions), it automatically uses
+`$XDG_STATE_HOME/bflow/repositories/<sha256(canonical-repository-path)>/state`, or
+`~/.local/state/bflow/repositories/<hash>/state` when `XDG_STATE_HOME` is unset or
+relative. The user state location and its ancestors must pass ownership, symlink
+and permission checks. Runtime never weakens private-file validation.
+
+Host credentials, signing keys, provider launch material, platform state, SQLite,
+artifacts and the P19 journal use the selected location consistently through
+startup, activation, queries and shutdown/recovery. A nonsecret, schema-validated
+`.bflow/state/private-runtime-state.json` locator pins external authority before
+credentials are created, including across XDG changes and changes to repository
+permission support. Missing/invalid pinned storage blocks startup instead of
+creating replacement state. Locator and initial host config publication are atomic
+and exclusive; concurrent startup readers never consume partial JSON. Repository configuration,
+lifecycle locks/receipts and P13 pane manifests retain their existing paths and
+session identities. `bflow doctor` reports the selected private Runtime location.
+An unused old `host.json` left by the original privacy failure is preserved and
+its exposed token is never copied or reused. Existing host ownership/other host
+files, endpoints, agentic storage or platform state block automatic relocation and
+require reconciliation; Runtime does not silently migrate recovery authority.
+This behavior does not relocate explicit legacy Runtime storage configuration or
+claim provider/Herdr acceptance on every filesystem.
+
+The private P19 journal lives under `<selected-state>/agentic/journal`. It
 uses same-process serialization plus Linux `flock`, file fsync, atomic rename and
 directory fsync. It is repository bound and rejects corrupt/unsupported state.
 It is not an ArtifactStore communication channel. All actual agent delivery uses

@@ -353,3 +353,18 @@ observation; a configured MCP file alone does not establish backend health.
 pnpm --filter @bflow/cli build
 pnpm exec vitest run apps/cli/test/high-level
 ```
+
+### Repositories on filesystems without private permissions
+
+`bflow up` automatically places private host/provider/runtime state in an owned,
+private per-repository directory under `$XDG_STATE_HOME/bflow/repositories` (default
+`~/.local/state/bflow/repositories`) when the repository filesystem cannot enforce
+private file/directory permissions. The source repository stays in place; no copy,
+manual chmod or symlink is needed. `bflow doctor` reports the effective location.
+A nonsecret repository-bound locator pins that location across environment changes;
+recovery and `down` reopen the same authority. Missing or invalid pinned storage
+blocks startup instead of replacing it. Existing lifecycle receipts
+and pane manifests remain repository-local. An old host config from an unstarted
+privacy-check failure is retained without reusing its token; prior host/run/platform
+authority requires reconciliation before relocation. Explicit legacy storage paths
+and other commands' independently configured stores are not rewritten.

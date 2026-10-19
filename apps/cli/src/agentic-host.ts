@@ -1,5 +1,5 @@
 import type { OperationOptions, OperationResult, SessionManifest } from "@bflow/contracts";
-import type { HostPrepareResponse, HostRoleLaunch } from "@bflow/runtime";
+import { resolvePrivateRuntimeStateDirectory, type HostPrepareResponse, type HostRoleLaunch } from "@bflow/runtime";
 import { resolve } from "node:path";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import type { EnvironmentCompositionInput, EnvironmentIntegration } from "./environment.js";
@@ -74,8 +74,9 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
 
   const openExistingIfPresent = async (): Promise<LifecycleHost | null> => {
     if (activeHost) return activeHost;
-    const hostConfigPath = resolve(input.repository.root, ".bflow/state/host", input.repository.sessionName, "host.json");
-    const runStorePath = resolve(input.repository.root, ".bflow/state/agentic/runs.db");
+    const privateState = resolvePrivateRuntimeStateDirectory(input.repository.root);
+    const hostConfigPath = resolve(privateState, "host", input.repository.sessionName, "host.json");
+    const runStorePath = resolve(privateState, "agentic/runs.db");
     const hasHostConfig = await lstat(hostConfigPath).then(stat => stat.isFile(), () => false);
     const hasRunStore = await lstat(runStorePath).then(stat => stat.isFile(), () => false);
     if (!hasHostConfig && !hasRunStore) return null;

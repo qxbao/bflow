@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmod, lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +10,7 @@ import {
   type RuntimeService, type SessionManifest
 } from "@bflow/contracts";
 import { callHost } from "./host-protocol.js";
+import { resolvePrivateRuntimeStateDirectory } from "../private-state.js";
 import { digest, record, textField } from "./journal.js";
 import { parseBehavioralCommands, type BehavioralCommand } from "./behavioral-runner.js";
 import { AgenticHostPlatformOptionsSchema, HostPrepareResponseSchema, type AgenticHostPlatformOptions, type HostPrepareResponse } from "../platform/host-options.js";
@@ -60,7 +61,7 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
 export async function openPersistedAgenticHost(options: Pick<AgenticHostOptions, "repositoryPath" | "sessionId">): Promise<AgenticHostController> {
   const repositoryPath = await realpath(options.repositoryPath);
   if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Unsafe host session ID");
-  const directory = resolve(repositoryPath, ".bflow/state/host", options.sessionId);
+  const directory = resolve(resolvePrivateRuntimeStateDirectory(repositoryPath), "host", options.sessionId);
   const persisted = await readHostConfiguration(join(directory, "host.json"));
   if (persisted.repositoryPath !== repositoryPath || persisted.sessionId !== options.sessionId || persisted.directory !== directory)
     throw new Error("Foreign host configuration");
@@ -82,8 +83,9 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
   const repositoryPath = await realpath(options.repositoryPath);
   if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Unsafe host session ID");
   const identity = createHash("sha256").update(repositoryPath + "\0" + options.sessionId).digest("hex").slice(0, 24);
-  const directory = resolve(repositoryPath, ".bflow/state/host", options.sessionId);
-  for (const parent of [resolve(repositoryPath,".bflow"),resolve(repositoryPath,".bflow/state"),resolve(repositoryPath,".bflow/state/host"),directory]) {
+  const directory = resolve(resolvePrivateRuntimeStateDirectory(repositoryPath), "host", options.sessionId);
+  const stateRoot = resolve(directory, "../..");
+  for (const parent of [stateRoot,resolve(stateRoot,"host"),directory]) {
     try { await mkdir(parent,{mode:0o700}); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
     const observed = await lstat(parent);
     if (!observed.isDirectory() || observed.isSymbolicLink()) throw new Error("Host state directories must not be symlinks or special files");
@@ -110,11 +112,21 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
       await new Promise(accept=>setTimeout(accept,50));
     }
   const configPath = join(directory, "host.json");
-  try {
-    const file = await open(configPath, "wx", 0o600);
-    try { await file.writeFile(JSON.stringify({ ...options, repositoryPath, directory, socketPath: join(socketRoot, identity + ".sock"), token: randomBytes(32).toString("hex") })); await file.sync(); }
-    finally { await file.close(); }
-  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  let hasConfiguration = true;
+  try { await lstat(configPath); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") hasConfiguration = false; else throw error; }
+  if (!hasConfiguration) {
+    const temporaryConfig = `${configPath}.${randomBytes(8).toString("hex")}.tmp`;
+    try {
+      const file = await open(temporaryConfig, "wx", 0o600);
+      try { await file.writeFile(JSON.stringify({ ...options, repositoryPath, directory, socketPath: join(socketRoot, identity + ".sock"), token: randomBytes(32).toString("hex") })); await file.sync(); }
+      finally { await file.close(); }
+      // Location/recovery readers may inspect the config before acquiring boot.lock.
+      // Publish complete bytes exclusively; retain an existing host's exact token.
+      try { await link(temporaryConfig, configPath); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+    } finally { await unlink(temporaryConfig).catch(error => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }); }
+  }
   let configuration = await readHostConfiguration(configPath);
   if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory) throw new Error("Foreign host configuration");
   if (options.policy && JSON.stringify(configuration.policy) !== JSON.stringify(options.policy)) throw new Error("Persisted host policy differs from project policy; quiesce and reconcile the existing host before changing it");
