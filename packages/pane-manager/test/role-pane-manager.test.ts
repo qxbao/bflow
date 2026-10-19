@@ -945,6 +945,27 @@ describe("RolePaneManager Verification Suite", () => {
     expect((await manager.initializeTopology()).ok).toBe(true);
     expect(runner.calls.filter(c => c.args[0] === "agent" && c.args[1] === "start")).toHaveLength(7);
   });
+  it("does not resend an uncertain agent start even if its output mentions a busy pane", async () => {
+    runner.onCommand = invocation => invocation.args[0] === "agent" && invocation.args[1] === "start"
+      ? { exitCode: null, failure: "timeout", stdout: "agent_pane_busy", stderr: "acknowledgement timed out" } : undefined;
+    const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+    expect((await manager.initializeTopology()).ok).toBe(false);
+    expect(runner.calls.filter(call => call.args[0] === "agent" && call.args[1] === "start")).toHaveLength(1);
+  });
+  it("retries an acknowledged busy rejection and preserves the configured provider timeout", async () => {
+    let rejected = false;
+    runner.onCommand = invocation => {
+      if (!rejected && invocation.args[0] === "agent" && invocation.args[1] === "start") {
+        rejected = true;
+        return { exitCode: 1, stdout: "", stderr: JSON.stringify({ id: "1", error: { code: "agent_pane_busy", message: "Pane is not an available shell" } }) };
+      }
+    };
+    const manager = createRolePaneManager({ config: { ...config, roleConfigs: { chat: { startupTimeoutMs: 90_000 } } }, runner, store, worktreeInspector: inspector });
+    expect((await manager.initializeTopology()).ok).toBe(true);
+    const starts = runner.calls.filter(call => call.args[0] === "agent" && call.args[1] === "start");
+    expect(starts).toHaveLength(8);
+    expect(starts[0]!.args[starts[0]!.args.indexOf("--timeout") + 1]).toBe("90000");
+  });
   it("explains Codex update blocking with exact targets and never echoes raw screen secrets or accepts the dialog", async () => {
     const secret = "SCREEN_SECRET_CANARY_DO_NOT_ECHO";
     runner.onCommand = invocation => {

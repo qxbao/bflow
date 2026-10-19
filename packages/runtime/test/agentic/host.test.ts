@@ -23,11 +23,28 @@ async function fixture(beforeEnsure?: () => void) {
   const options = { repositoryPath: root, sessionId: "test-host", herdrBinary: binary };
   beforeEnsure?.();
   const controller = await ensureAgenticHost(options);
-  cleanup.push(() => controller.shutdown());
-  return {root, controller, options};
+  let stopped = false;
+  const shutdown = async () => { if (!stopped) { await controller.shutdown(); stopped = true; } };
+  cleanup.push(shutdown);
+  return {root, controller, options, shutdown};
 }
 // Agentic host startup uses Linux flock; one recovery case also inspects /proc.
 describe.skipIf(process.platform !== "linux")("default durable host lifecycle and role MCP", () => {
+  it("keeps hook runners isolated between repositories sharing a session name", async () => {
+    const first = await fixture(), second = await fixture();
+    const runnerOf = async (controller: typeof first.controller) => {
+      const launch = await controller.prepare();
+      const hooks = JSON.parse(await readFile(launch.roleLaunch.conversation!.hooksSettingsFile, "utf8"));
+      return hooks.hooks.SessionStart[0].hooks[0].command.match(/^'([^']+)'/)[1] as string;
+    };
+    const firstRunner = await runnerOf(first.controller), secondRunner = await runnerOf(second.controller);
+    expect(firstRunner).not.toBe(secondRunner);
+    expect(await readFile(firstRunner, "utf8")).toContain(first.root);
+    expect(await readFile(secondRunner, "utf8")).toContain(second.root);
+    await first.shutdown();
+    expect(await readFile(secondRunner, "utf8")).toContain(second.root);
+  });
+
   it("pins owner verification authority and installs a fail-closed native edit hook", async () => {
     const f = await fixture(), launch = await f.controller.prepare();
     const hooks = JSON.parse(await readFile(launch.roleLaunch.developer!.hooksSettingsFile, "utf8"));
@@ -327,6 +344,25 @@ describe.skipIf(process.platform !== "linux")("P30 platform host", () => {
         agent_session: { source: "herdr:codex", kind: "id", value: `native-${role}` } }));
     }
   };
+
+  it.each(["herdr", "herdr:herdr", "herdr:claude"])("rejects native source %s for a Herdr-transported Codex pane", async source => {
+    const f = await fixture(root => platformFor(root));
+    await observeCodexPanes(f.root);
+    for (const [index, role] of codexRoles.entries()) {
+      const paneId = `p${index + 1}`, sessionId = `native-${role}`;
+      const token = JSON.parse(await readFile(join(f.directory, role + ".json"), "utf8"));
+      await callHost(token.socketPath, token.token, "provider_started", { paneId, nativeSessionId: sessionId });
+      await callHost(token.socketPath, token.token, "native_session", { paneId, sessionId });
+      const file = join(f.root, "agents", paneId + ".json");
+      const agent = JSON.parse(await readFile(file, "utf8"));
+      await writeFile(file, JSON.stringify({ ...agent, agent_session: { source, kind: "id", value: sessionId } }));
+    }
+    const manifest = codexManifest(f.root, f.config.sessionId);
+    for (const pane of manifest.panes) { pane.provider = "herdr"; pane.session!.source = source; }
+    const result = await f.controller.activate(manifest);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.message).toContain("has no matching Bflow provider startup/native-session receipt");
+  });
 
   it("accepts a Codex pane proven by the MCP bootstrap and Herdr's observed native session, with no SessionStart receipt", async () => {
     const f = await fixture(root => platformFor(root));

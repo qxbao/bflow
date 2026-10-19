@@ -1,11 +1,11 @@
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { mkdir, open, readFile, rename } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { z } from "zod";
 import {
   AgentProviderIdSchema, AgentRoleSchema,
-  type AgentProviderId, type AgentRole, type ContractError
+  type AgentProviderId, type AgentRole, type ContractError, type OperationOptions
 } from "@bflow/contracts";
 import { createManagedCodexHookEnvironment, type LiveReadinessObservation } from "@bflow/agent-providers";
 import { FileSkillStore, SkillManager } from "@bflow/skills";
@@ -239,7 +239,7 @@ export class HostPlatformSession {
    * Preflights every non-Developer role and launches the ready set only when all required roles are ready.
    * Publishes the launch-keyed probe plan of every launch with Gateway registrations.
    */
-  async prepare(): Promise<HostPlatformLaunchResult> {
+  async prepare(options?: OperationOptions): Promise<HostPlatformLaunchResult> {
     await this.releasePermanentLaunches();
     const generation = await this.nextGeneration();
     const identity: PlatformSessionIdentity = {
@@ -254,7 +254,7 @@ export class HostPlatformSession {
     const requirements = this.options.platform.roles
       .filter(option => option.role !== "developer")
       .map(option => requirementFor(option, this.options.hostCapabilities, this.options.repositoryPath));
-    const result = await this.options.service.prepareSession(identity, requirements);
+    const result = await this.options.service.prepareSession(identity, requirements, options);
     if (!result.ok) throw new Error(`Platform readiness could not be prepared: ${describeFailure(result.error)}`);
     this.report = result.value.report;
     this.launches.clear();
@@ -583,7 +583,7 @@ export async function createHostPlatformSession(options: CreateHostPlatformSessi
     }
   }
 
-  const stateDirectory = join(options.repositoryPath, ".bflow/state/platform", options.sessionId);
+  const stateDirectory = resolve(options.directory, "../../platform", options.sessionId);
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
   const service = createPlatformReadinessService({
     stateDirectory,

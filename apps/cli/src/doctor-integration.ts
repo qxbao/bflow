@@ -1,6 +1,7 @@
 import { access, readFile } from "node:fs/promises";
 import { constants, existsSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
+import { resolvePrivateRuntimeStateDirectory } from "@bflow/runtime";
 import {
   detectPlatform,
   defaultHostEnvironment,
@@ -446,6 +447,17 @@ export async function runDoctorDiagnostics(
       status: "failed",
       message: `Repository permissions check failed: ${String(error)}`
     });
+  }
+
+  // Resolve exactly the same private authority used by host startup and recovery.
+  try {
+    const privateState = resolvePrivateRuntimeStateDirectory(repository.root);
+    runtimeChecks.push({ checkId: "private-runtime-state", group: "runtime", component: "storage", status: "pass",
+      detected_version: null, reason: `Private Runtime state: ${privateState}`, remediation: "" });
+  } catch (error) {
+    runtimeChecks.push({ checkId: "private-runtime-state", group: "runtime", component: "storage", status: "fail",
+      detected_version: null, reason: `Private Runtime state unavailable: ${String(error)}`,
+      remediation: "Preserve existing state and reconcile the reported authority or storage permissions before startup." });
   }
 
   // lifecycle-lock

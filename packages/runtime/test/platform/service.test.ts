@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ContractError, MCPClientRegistration, MCPServiceObservation, OperationOptions,
   OperationResult, ScopedOperation, TrustScope
@@ -219,6 +219,79 @@ describe("DefaultPlatformReadinessService", () => {
   async function journalKinds(journal: FileLaunchJournal): Promise<string[]> {
     return (await journal.entries()).map(entry => entry.kind);
   }
+
+  it("bounds concurrent provider probes and waits for all verdicts before preparing launches", async () => {
+    const runner = createFakeProviderRunner({ scenario: "healthy" });
+    const run = runner.run.bind(runner);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let active = 0, peak = 0, started = 0;
+    vi.spyOn(runner, "run").mockImplementation(async invocation => {
+      if (!invocation.args.includes("ping")) return run(invocation);
+      started++; active++; peak = Math.max(peak, active);
+      await gate;
+      active--;
+      return run(invocation);
+    });
+    const { service, journal } = buildService({ runner });
+    const pending = service.prepareSession(identity, Array.from({ length: 7 }, (_, index) => requirement({ taskId: `t${index}` })));
+    try {
+      // Seven real role directories and executable inventories are prepared
+      // before probes start. Allow filesystem work under full-suite load;
+      // the unreleased gate still proves the exact concurrency limit.
+      await expect.poll(() => started, { timeout: 10_000 }).toBe(3);
+      expect(await journalKinds(journal)).toEqual([]);
+    } finally { release(); }
+    const result = await pending;
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(peak).toBe(3);
+    expect(started).toBe(7);
+    expect(result.value.launches.map(launch => launch.taskId)).toEqual(["t0", "t1", "t2", "t3", "t4", "t5", "t6"]);
+  });
+
+  it("forwards cancellation and the remaining deadline to every provider subprocess", async () => {
+    const runner = createFakeProviderRunner({ scenario: "healthy" });
+    const run = vi.spyOn(runner, "run");
+    const { service } = buildService({ runner });
+    const signal = new AbortController().signal;
+    const result = await service.prepareSession(identity, [requirement()], { signal, timeoutMs: 5000, deadline: new Date(Date.now() + 5000).toISOString() });
+    expect(result.ok).toBe(true);
+    expect(run.mock.calls.length).toBeGreaterThan(4);
+    for (const [invocation] of run.mock.calls) {
+      expect(invocation.signal).toBe(signal);
+      expect(invocation.timeoutMs).toBeGreaterThan(0);
+      expect(invocation.timeoutMs).toBeLessThanOrEqual(5000);
+    }
+  });
+
+  it.each(["cancelled", "expired"])("refuses %s preparation before provider or Gateway work", async kind => {
+    const runner = createFakeProviderRunner({ scenario: "healthy" });
+    const run = vi.spyOn(runner, "run");
+    const { service, journal } = buildService({ runner });
+    const options = kind === "cancelled" ? { signal: AbortSignal.abort() } : { deadline: new Date(Date.now() - 1000).toISOString() };
+    const result = await service.prepareSession(identity, [requirement({ mcpServiceIds: ["svc-search"] })], options);
+    expect(result).toMatchObject({ ok: false, error: { code: kind === "cancelled" ? "cancelled" : "timeout" } });
+    expect(run).not.toHaveBeenCalled();
+    expect(gatewayControl.registrations.size).toBe(0);
+    expect(await journalKinds(journal)).toEqual([]);
+  });
+
+  it("revokes Gateway access and creates no launch if cancelled during preflight", async () => {
+    const controller = new AbortController();
+    const runner = createFakeProviderRunner({ scenario: "healthy" });
+    const run = runner.run.bind(runner);
+    vi.spyOn(runner, "run").mockImplementation(async invocation => {
+      const result = await run(invocation);
+      controller.abort();
+      return result;
+    });
+    const { service, journal } = buildService({ runner });
+    const result = await service.prepareSession(identity, [requirement({ mcpServiceIds: ["svc-search"] })], { signal: controller.signal });
+    expect(result).toMatchObject({ ok: false, error: { code: "cancelled" } });
+    expect(gatewayControl.registrations.size).toBe(0);
+    expect(await journalKinds(journal)).toEqual([]);
+  });
 
   it("launches every ready role with argv and token env, journaling intents", async () => {
     const { service, journal } = buildService();

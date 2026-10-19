@@ -343,13 +343,16 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     }
 
     // A. Check: binary
-    const executable = this.getExecutablePath();
+    let executable = this.getExecutablePath();
     let binaryPassed = false;
     let actualBinaryDigest = "0".repeat(64);
 
     try {
       const resolvedExec = await resolveAndVerifyExecutable(executable, this.executableVerificationOptions());
       actualBinaryDigest = resolvedExec.digest;
+      // The execution probe changes cwd; a relative path or PATH lookup there
+      // can otherwise run a different binary from the one just verified.
+      executable = resolvedExec.canonicalPath;
       if (this.options.pinnedExecutableDigest !== undefined) {
         if (actualBinaryDigest !== this.options.pinnedExecutableDigest) {
           checks.push(
@@ -515,7 +518,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
             ...this.getProviderCommandEnvironment(),
             ...(agyProbeHome ? { HOME: agyProbeHome } : {})
           },
-          timeoutMs: 45_000
+          timeoutMs: 75_000
         });
 
         const combinedProbe = `${probeOutcome.stdout}\n${probeOutcome.stderr}`;
@@ -524,13 +527,16 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
           let probeCode = "probe_failed";
           let probeRemediation = "Verify account quotas, network connectivity, and provider permissions.";
 
-          if (lower.includes("permission") || lower.includes("untrusted")) {
+          if (probeOutcome.failure === "timeout" || lower.includes("timed out") || lower.includes("timeout")) {
+            probeCode = "timeout";
+            probeRemediation = "Increase startupTimeoutMs in .bflow/config.yml or verify provider network latency.";
+          } else if (/\b(?:permission denied|untrusted|insufficient permissions)\b/.test(lower)) {
             probeCode = "permission_denied";
             probeRemediation = "Grant workspace trust or adjust permission profile.";
-          } else if (lower.includes("model")) {
+          } else if (/\b(?:model(?:\s+[`'\"][^`'\"\n]+[`'\"])?\s+(?:is\s+)?(?:incompatible|unsupported|unavailable|not\s+(?:found|supported|available)|does\s+not\s+exist)|(?:incompatible|unsupported|invalid|unknown)\s+model|model_not_found)\b/.test(lower)) {
             probeCode = "incompatible_model";
             probeRemediation = "Select a model supported by your provider account tier.";
-          } else if (lower.includes("blocked") || lower.includes("approval") || lower.includes("dialog")) {
+          } else if (/\b(?:blocked|approval (?:is )?required|requires? (?:interactive )?approval|(?:approval|confirmation) dialog)\b/.test(lower)) {
             probeCode = "agent_blocked";
             probeRemediation = "Complete interactive approvals outside automated flow.";
           } else if (lower.includes("auth") || lower.includes("expired") || lower.includes("token")) {

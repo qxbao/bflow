@@ -149,7 +149,33 @@ The final Conversation progress envelope carries verified completion and evidenc
 
 ## Durability and recovery
 
-The private P19 journal lives under `.bflow/state/agentic/journal` by default. It
+Private host/provider/runtime state normally lives under `.bflow/state`.
+Before creating credentials, Runtime probes whether that repository filesystem can
+actually enforce `0600` files and `0700` directories. On mounts that cannot (for
+example NTFS/FUSE with fixed `0777` permissions), it automatically uses
+`$XDG_STATE_HOME/bflow/repositories/<sha256(canonical-repository-path)>/state`, or
+`~/.local/state/bflow/repositories/<hash>/state` when `XDG_STATE_HOME` is unset or
+relative. The user state location and its ancestors must pass ownership, symlink
+and permission checks. Runtime never weakens private-file validation.
+
+Host credentials, signing keys, provider launch material, platform state, SQLite,
+artifacts and the P19 journal use the selected location consistently through
+startup, activation, queries and shutdown/recovery. A nonsecret, schema-validated
+`.bflow/state/private-runtime-state.json` locator pins external authority before
+credentials are created, including across XDG changes and changes to repository
+permission support. Missing/invalid pinned storage blocks startup instead of
+creating replacement state. Locator and initial host config publication are atomic
+and exclusive; concurrent startup readers never consume partial JSON. Repository configuration,
+lifecycle locks/receipts and P13 pane manifests retain their existing paths and
+session identities. `bflow doctor` reports the selected private Runtime location.
+An unused old `host.json` left by the original privacy failure is preserved and
+its exposed token is never copied or reused. Existing host ownership/other host
+files, endpoints, agentic storage or platform state block automatic relocation and
+require reconciliation; Runtime does not silently migrate recovery authority.
+This behavior does not relocate explicit legacy Runtime storage configuration or
+claim provider/Herdr acceptance on every filesystem.
+
+The private P19 journal lives under `<selected-state>/agentic/journal`. It
 uses same-process serialization plus Linux `flock`, file fsync, atomic rename and
 directory fsync. It is repository bound and rejects corrupt/unsupported state.
 It is not an ArtifactStore communication channel. All actual agent delivery uses
@@ -261,6 +287,19 @@ pump run independently of model turns. `close()` disconnects a CLI client;
 `quiesce()`, aggregate `checkpoint()`, and `shutdown()` are separate lifecycle
 operations. Shutdown requires the named Herdr server to have stopped. Failed or
 uncertain work keeps its worktrees and requires reconciliation.
+
+Host `prepare(options)` accepts the lifecycle deadline, timeout and cancellation
+signal. Provider preparation uses that deadline instead of the short default
+control RPC timeout. A disconnected preparation is cancelled; quiesce and shutdown
+wait for it to drain before releasing launch registrations. No expired or cancelled
+preparation authorizes a pane launch. Standalone preparation without options is
+bounded to ten minutes; CLI startup supplies its remaining configured budget.
+`openPersistedAgenticHost` reopens a host for shutdown/recovery using the stored
+platform, policy and behavioral authority; it does not request a configuration
+change. Permanent-role provider observations run at most three at a time, after
+ordered environment/skills/Gateway preparation. Every provider subprocess receives
+the operation's cancellation signal and remaining deadline; launch preparation
+still waits for all required preflight verdicts.
 
 The stdio MCP entrypoint exposes orchestration tools only to Coordinator, and
 implementation authorization/submission only to Developer. Tester/QA alternative
@@ -411,6 +450,14 @@ Guarantees implemented here, with package-local tests in `test/platform/service.
 - Codex setup review, preflight probes and permanent/dynamic role launches share the selected HOME/PATH
   and explicitly empty outer Orca pane/root/endpoint/port selectors in child environments. Parent settings
   and Bflow's mandatory Herdr/Runtime hooks are preserved; an unsupported hook snapshot still blocks launch.
+- Short hook runner paths bind the full repository/session host directory and remain stable across
+  host recovery. Separate repositories cannot overwrite or remove each other's runners. A pre-existing
+  unsafe or symlinked temporary directory is never chmodded or adopted.
+- Hook ingress validates the event/session and required prompt/tool fields. Banner-wrapped input must
+  contain exactly one matching hook object; ambiguous input is rejected. Invalid `PreToolUse` input
+  emits an explicit deny decision. Only the reserved environment-bound Codex startup turn is skipped.
+- Native session sources must identify the configured provider (`codex` or `herdr:codex`, for example).
+  Herdr as a transport does not make generic `herdr`/`herdr:herdr` sources valid provider proof.
 
 Limitations: this is source composition with local fake-runner and fake-Gateway evidence only. Live
 provider probes, a live Gateway daemon and Pane Manager/Conversation wiring are not verified here. The

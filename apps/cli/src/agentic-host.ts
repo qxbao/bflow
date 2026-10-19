@@ -1,5 +1,5 @@
 import type { OperationOptions, OperationResult, SessionManifest } from "@bflow/contracts";
-import type { HostPrepareResponse, HostRoleLaunch } from "@bflow/runtime";
+import { resolvePrivateRuntimeStateDirectory, type HostPrepareResponse, type HostRoleLaunch } from "@bflow/runtime";
 import { resolve } from "node:path";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import type { EnvironmentCompositionInput, EnvironmentIntegration } from "./environment.js";
@@ -10,7 +10,7 @@ export type { HostPrepareResponse, HostRoleLaunch };
 /** The persistent P19 host owns its scheduler, authenticated ingress and stores. */
 export interface LifecycleHost {
   /** Parsed with `HostPrepareResponseSchema`; `platform.ready === false` means no pane may be started. */
-  prepare(): Promise<HostPrepareResponse>;
+  prepare(options?: OperationOptions): Promise<HostPrepareResponse>;
   activate(manifest: SessionManifest, options?: OperationOptions): Promise<OperationResult<void>>;
   readonly runtime: NonNullable<EnvironmentIntegration["runtime"]>;
   readonly quiesce: NonNullable<EnvironmentIntegration["quiesce"]>;
@@ -74,27 +74,19 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
 
   const openExistingIfPresent = async (): Promise<LifecycleHost | null> => {
     if (activeHost) return activeHost;
-    const hostConfigPath = resolve(input.repository.root, ".bflow/state/host", input.repository.sessionName, "host.json");
-    const runStorePath = resolve(input.repository.root, ".bflow/state/agentic/runs.db");
+    const privateState = resolvePrivateRuntimeStateDirectory(input.repository.root);
+    const hostConfigPath = resolve(privateState, "host", input.repository.sessionName, "host.json");
+    const runStorePath = resolve(privateState, "agentic/runs.db");
     const hasHostConfig = await lstat(hostConfigPath).then(stat => stat.isFile(), () => false);
     const hasRunStore = await lstat(runStorePath).then(stat => stat.isFile(), () => false);
     if (!hasHostConfig && !hasRunStore) return null;
 
     activeHost = (async () => {
       const runtime = await loadRuntime();
-      let behavioralCommands = [];
       if (hasHostConfig) {
-        try {
-          const persisted: unknown = JSON.parse(await readFile(hostConfigPath, "utf8"));
-          if (persisted !== null && typeof persisted === "object" && !Array.isArray(persisted) && "behavioralCommands" in persisted) {
-            behavioralCommands = runtime.parseBehavioralCommands(persisted.behavioralCommands);
-          }
-        } catch {
-          behavioralCommands = await readOwnerBehavioralCommands(runtime);
-        }
-      } else {
-        behavioralCommands = await readOwnerBehavioralCommands(runtime);
+        return runtime.openPersistedAgenticHost({ repositoryPath: input.repository.root, sessionId: input.repository.sessionName });
       }
+      const behavioralCommands = await readOwnerBehavioralCommands(runtime);
       return runtime.ensureAgenticHost({
         repositoryPath: input.repository.root,
         sessionId: input.repository.sessionName,
@@ -102,22 +94,20 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
         manifestDirectory: resolve(input.repository.root, ".bflow/state/panes"),
         maxDeveloperCapacity: input.config.environment.concurrency.maxConcurrency,
         behavioralCommands,
-        ...(hasHostConfig ? {} : {
-          policy: {
-            sdd: input.config.environment.sdd,
-            tdd: input.config.environment.tdd,
-            verification: input.config.environment.verification,
-            concurrency: input.config.environment.concurrency
-          }
-        })
+        policy: {
+          sdd: input.config.environment.sdd,
+          tdd: input.config.environment.tdd,
+          verification: input.config.environment.verification,
+          concurrency: input.config.environment.concurrency
+        }
       });
     })();
     return activeHost;
   };
 
   return {
-    prepare: async () => {
-      const prepared: unknown = await (await openForStartup()).prepare();
+    prepare: async options => {
+      const prepared: unknown = await (await openForStartup()).prepare(options);
       const { HostPrepareResponseSchema } = await loadRuntime();
       return HostPrepareResponseSchema.parse(prepared);
     },

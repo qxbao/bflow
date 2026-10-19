@@ -61,6 +61,15 @@ transitive packages or runtime data; unsupported dynamic shell forms remain bloc
 Explicitly enabled plugin hook sources are included when their local installation
 can be resolved unambiguously. Setup review and Runtime launches use the same
 environment with outer Orca pane selectors cleared only for Bflow child processes.
+
+`up --timeout <ms>` controls the complete startup budget, including host provider
+preparation. The host control call uses the remaining lifecycle deadline instead
+of a separate 30-second limit. Cancellation or deadline expiry prevents pane
+creation; cleanup drains pending preparation before revoking session resources.
+Preparation completes before the CLI records a pane dispatch intent. A timeout
+at that stage can therefore use the host shutdown barrier without a pane receipt.
+`down` reopens the existing host with its persisted platform and policy, even if
+the desired configuration has changed since startup.
 Startup readiness errors retain the per-role diagnostic report (up to 256 lines /
 64,000 characters) after terminal sanitization and credential redaction, and direct
 hook failures point to the hook-only plan command.
@@ -344,3 +353,18 @@ observation; a configured MCP file alone does not establish backend health.
 pnpm --filter @bflow/cli build
 pnpm exec vitest run apps/cli/test/high-level
 ```
+
+### Repositories on filesystems without private permissions
+
+`bflow up` automatically places private host/provider/runtime state in an owned,
+private per-repository directory under `$XDG_STATE_HOME/bflow/repositories` (default
+`~/.local/state/bflow/repositories`) when the repository filesystem cannot enforce
+private file/directory permissions. The source repository stays in place; no copy,
+manual chmod or symlink is needed. `bflow doctor` reports the effective location.
+A nonsecret repository-bound locator pins that location across environment changes;
+recovery and `down` reopen the same authority. Missing or invalid pinned storage
+blocks startup instead of replacing it. Existing lifecycle receipts
+and pane manifests remain repository-local. An old host config from an unstarted
+privacy-check failure is retained without reusing its token; prior host/run/platform
+authority requires reconciliation before relocation. Explicit legacy storage paths
+and other commands' independently configured stores are not rewritten.

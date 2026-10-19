@@ -1051,9 +1051,17 @@ export class RolePaneManager {
         return toCommandError(procOutcome, `Failed to inspect process info for pane '${request.paneId}'`);
       }
       let processInfo = parsePaneProcessInfoResult(procOutcome);
-      for (let attempt = 0; attempt < 40 && (processInfo.foregroundSnapshotPending || processInfo.shellPid === null || processInfo.foregroundProcessGroupId === null); attempt++) {
+      let stableReadyCount = 0;
+      for (let attempt = 0; attempt < 60; attempt++) {
         if (options?.signal?.aborted) return { ok: false, error: { code: "cancelled", retryable: false, message: "Shell startup wait interrupted; state preserved." } };
-        await new Promise(resolve => setTimeout(resolve, 50));
+        const readiness = isShellReadyForAgent(pane, processInfo);
+        if (readiness.ready) {
+          stableReadyCount++;
+          if (stableReadyCount >= 4) break;
+        } else {
+          stableReadyCount = 0;
+        }
+        await new Promise(resolve => setTimeout(resolve, 300));
         procOutcome = await this.#runHerdr(["pane", "process-info", "--pane", request.paneId], options);
         if (procOutcome.exitCode !== 0 || procOutcome.failure) return toCommandError(procOutcome, `Cannot observe startup shell in pane '${request.paneId}'`);
         processInfo = parsePaneProcessInfoResult(procOutcome);
@@ -1064,7 +1072,7 @@ export class RolePaneManager {
       }
 
       const startArgs = ["agent", "start", agentName, "--kind", agentKind, "--pane", request.paneId];
-      const timeout = request.timeoutMs ?? roleConfig?.startupTimeoutMs;
+      const timeout = request.timeoutMs ?? roleConfig?.startupTimeoutMs ?? 60000;
       if (timeout !== undefined) {
         startArgs.push("--timeout", String(timeout));
       }
@@ -1117,7 +1125,24 @@ export class RolePaneManager {
 
       // Launch env is NOT passed here: `agent start` types the command into the pane's existing shell, so
       // invocation env never reaches the provider. Env is applied at pane creation (see #herdrCreate).
-      const startOutcome = await this.#runHerdr(startArgs, options);
+      let startOutcome = await this.#runHerdr(startArgs, options);
+      const isBusyError = (outcome: CommandOutcome): boolean => {
+        // Only an acknowledged pre-dispatch rejection proves that retry cannot
+        // duplicate a launch. Timeouts/partial output require reconciliation.
+        if (outcome.failure || outcome.exitCode === null || outcome.exitCode === 0) return false;
+        try { parseAgentInfoResult(outcome, "agent_started"); }
+        catch (error) {
+          return error instanceof HerdrProtocolError && error.kind === "remote" && error.code === "agent_pane_busy";
+        }
+        return false;
+      };
+
+      for (let busyRetry = 0; busyRetry < 20 && isBusyError(startOutcome); busyRetry++) {
+        if (options?.signal?.aborted) return { ok: false, error: { code: "cancelled", retryable: false, message: "Agent startup wait interrupted; state preserved." } };
+        await new Promise(resolve => setTimeout(resolve, 500));
+        startOutcome = await this.#runHerdr(startArgs, options);
+      }
+
       if (startOutcome.exitCode !== 0 || startOutcome.failure) {
         if (
           startOutcome.stderr.includes("agent_not_ready") ||

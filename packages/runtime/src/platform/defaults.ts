@@ -4,6 +4,7 @@ import {
   AgyProviderAdapter,
   ClaudeProviderAdapter,
   CodexProviderAdapter,
+  createProviderProcessRunner,
   type ProviderAdapterOptions,
   type ProviderCommandRunner
 } from "@bflow/agent-providers";
@@ -34,11 +35,22 @@ export interface ProviderAdapterFactoryOptions {
  * per-provider defaults so a launch cannot inherit another role's prompt, Gateway access or skills.
  */
 export function createProviderAdapterFactory(options: ProviderAdapterFactoryOptions = {}): ProviderAdapterFactory {
-  return (provider, context) => {
+  const processRunner = createProviderProcessRunner();
+  return (provider, context, operation) => {
+    const runner = options.perProvider?.[provider]?.runner ?? options.runner ?? processRunner;
     const adapterOptions: ProviderAdapterOptions = {
       ...(options.runner !== undefined ? { runner: options.runner } : {}),
       ...(options.now !== undefined ? { now: options.now } : {}),
       ...options.perProvider?.[provider],
+      // Bind all capability/auth/isolation/probe subprocesses to this operation,
+      // including adapter paths that otherwise use their own fixed timeout.
+      runner: operation === undefined ? runner : { run: invocation => {
+        const remaining = Math.min(operation.timeoutMs ?? 45_000,
+          operation.deadline === undefined ? Infinity : Math.max(1, Date.parse(operation.deadline) - Date.now()));
+        const signals = [operation.signal, invocation.signal].filter((signal): signal is AbortSignal => signal !== undefined);
+        return runner.run({ ...invocation, timeoutMs: Math.min(invocation.timeoutMs ?? 30_000, remaining),
+          ...(signals.length > 0 ? { signal: signals.length === 1 ? signals[0]! : AbortSignal.any(signals) } : {}) });
+      } },
       ...(context.rolePrompt !== undefined ? { rolePrompt: context.rolePrompt } : {}),
       ...(context.model !== undefined ? { model: context.model } : {}),
       ...(context.effort !== undefined ? { effort: context.effort } : {}),

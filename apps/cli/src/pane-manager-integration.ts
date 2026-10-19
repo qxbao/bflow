@@ -175,32 +175,55 @@ export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, r
   let manager = new PaneManagerLifecycleAdapter(input, runner, {}, {}, socketFactory);
   // Latest platform preflight from this process; doctor reports it only when present.
   let lastPlatform: HostPrepareResponse["platform"];
+  let prepared = false;
+  const assertPreparationCurrent = (options?: OperationOptions) => {
+    if (options?.signal?.aborted) throw new EnvironmentError({ code: "cancelled", retryable: false,
+      message: "Role preparation was interrupted; reconcile the host before retrying." });
+    if (options?.deadline !== undefined && Date.parse(options.deadline) <= Date.now())
+      throw new EnvironmentError({ code: "timeout", retryable: true, retrySafety: "observation_only",
+        message: "Role preparation exceeded the startup deadline; reconcile the host before retrying." });
+  };
+  const prepare = async (options?: OperationOptions): Promise<OperationResult<void>> => {
+    assertPreparationCurrent(options);
+    const descriptors = await (await connect()).prepare(options);
+    assertPreparationCurrent(options);
+    lastPlatform = descriptors.platform;
+    // Readiness is the host's verdict; a blocked report stops before any pane is created.
+    if (descriptors.platform && !descriptors.platform.ready) return failure(formatPlatformNotReady(descriptors.platform));
+    const args: Partial<Record<TopologyRole, readonly string[]>> = {};
+    const launches: Partial<Record<TopologyRole, AgentLaunchProfile>> = {};
+    for (const role of input.config.environment.roles) {
+      if (role.role === "developer") continue;
+      const launch = descriptors.roleLaunch[role.role];
+      const topology = resolveTopologyRole(role.role);
+      if (!launch || !topology) return failure(`Host has no trusted launch descriptor for ${role.role}`);
+      if (launch.launch) {
+        if (launch.launch.provider !== role.cli)
+          return failure(`Host prepared provider '${launch.launch.provider}' for role ${role.role}, but configuration selects '${role.cli}'.`);
+        launches[topology] = launch.launch;
+      } else {
+        args[topology] = await launchArguments(role.cli, role.role, launch);
+      }
+    }
+    manager = new PaneManagerLifecycleAdapter(input, runner, args, launches, socketFactory);
+    prepared = true;
+    return { ok: true, value: undefined };
+  };
   return {
     requiresNativeSession: true,
+    prepareRoles: async options => {
+      const result = await prepare(options);
+      if (!result.ok) throw new EnvironmentError(result.error);
+    },
     manager: {
       init: (manifest, options) => manager.init(manifest, options),
       async up(sessionId, options) {
         if (sessionId !== input.repository.sessionName) return failure("Cannot start another repository's session");
-        const descriptors = await (await connect()).prepare();
-        lastPlatform = descriptors.platform;
-        // Readiness is the host's verdict; a blocked report stops before any pane is created.
-        if (descriptors.platform && !descriptors.platform.ready) return failure(formatPlatformNotReady(descriptors.platform));
-        const args: Partial<Record<TopologyRole, readonly string[]>> = {};
-        const launches: Partial<Record<TopologyRole, AgentLaunchProfile>> = {};
-        for (const role of input.config.environment.roles) {
-          if (role.role === "developer") continue;
-          const launch = descriptors.roleLaunch[role.role];
-          const topology = resolveTopologyRole(role.role);
-          if (!launch || !topology) return failure(`Host has no trusted launch descriptor for ${role.role}`);
-          if (launch.launch) {
-            if (launch.launch.provider !== role.cli)
-              return failure(`Host prepared provider '${launch.launch.provider}' for role ${role.role}, but configuration selects '${role.cli}'.`);
-            launches[topology] = launch.launch;
-          } else {
-            args[topology] = await launchArguments(role.cli, role.role, launch);
-          }
+        if (!prepared) {
+          const readiness = await prepare(options);
+          if (!readiness.ok) return readiness;
         }
-        manager = new PaneManagerLifecycleAdapter(input, runner, args, launches, socketFactory);
+        assertPreparationCurrent(options);
         return manager.up(sessionId, options);
       },
       getManifest: (sessionId, options) => manager.getManifest(sessionId, options),
