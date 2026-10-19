@@ -107,7 +107,6 @@ Options:
   -y, --yes             Confirm setup, exact snapshot approval (--hook-digest), or explicit --trust-all
   --dir <path>          Repository to prepare (machine installation stays user-global)
   --catalog-dir <path>  Custom skills catalog directory
-  --memory-provider <id> Claude-Mem observer: auto, claude, codex, host (default: auto)
   -j, --json            Output response in JSON envelope format
   -h, --help            Show help for setup command
 

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ManagedToolInstaller, createToolCapability, type ManagedToolPin, type ToolHost } from "../src/installer.js";
-import { ClaudeMemProjectReader, FileToolCapabilityRegistry, ToolCapabilityRegistry, ensureGitNexusIndex, observeClaudeMemGrowth, observeClaudeMemWorker,
+import { FileToolCapabilityRegistry, ToolCapabilityRegistry, ensureGitNexusIndex,
   planChromeSession, rtkProviderIntegration, runWithRtk, superpowersInstallRoute, verifyMcpStartup, verifyRtk,
   verifySuperpowersSkills, writeOwnedToolConfig } from "../src/integrations.js";
 import { OfficialProviderPluginAdapter } from "../src/provider-plugins.js";
@@ -170,7 +170,7 @@ describe("tool integrations", () => {
           pluginId: "superpowers@openai-curated-remote", name: "superpowers", version: "6.4.2",
           enabled: true, installed: true }] }), stderr: "" };
         return { exitCode: 0, stdout: "{}", stderr: "" };
-      } }, discoverSkills: async () => skills, verifyProvenance: async () => provenanceReady, probeMemory: async () => false
+      } }, discoverSkills: async () => skills, verifyProvenance: async () => provenanceReady
     });
     expect((await adapter.verify(pin, "/unused")).ready).toBe(false);
     expect((await adapter.activate(pin, "/verified/archive", "install")).success).toBe(true);
@@ -193,38 +193,10 @@ describe("tool integrations", () => {
       calls.push(`${executable} ${args.join(" ")}`);
       return { exitCode: 0, stdout: JSON.stringify([{ id: provider === "claude" ?
         "superpowers@claude-plugins-official" : "superpowers", version: pin.version, enabled: true }]), stderr: "" };
-    } }, discoverSkills: async () => ["using-superpowers"], verifyProvenance: async () => true, probeMemory: async () => false });
+    } }, discoverSkills: async () => ["using-superpowers"], verifyProvenance: async () => true });
     expect((await adapter.activate(pin, "/verified/archive", "install")).success).toBe(true);
     expect(calls).toContain(expected);
     expect((await adapter.verify(pin, "/unused")).ready).toBe(true);
-  });
-
-  it("installs pinned Claude-Mem dependencies and verifies the adopted worker adapter", async () => {
-    const root = await mkdtemp(join(tmpdir(), "bflow-memory-plugin-")); roots.push(root);
-    const artifact = join(root, "artifact.tgz"); await writeFile(artifact, "archive");
-    const pin: ManagedToolPin = { toolId: "claude-mem", installerId: "bflow-tools", version: "13.11.0",
-      source: "https://registry.npmjs.org/claude-mem/-/claude-mem-13.11.0.tgz", integrity: hash("archive"),
-      recipe: { kind: "provider_plugin", provider: "codex" }, license: "Apache-2.0" };
-    const calls: string[] = [];
-    let workerReady = false;
-    const adapter = new OfficialProviderPluginAdapter({
-      host: { async download() {}, async run(executable, args) {
-        calls.push(`${executable} ${args.join(" ")}`);
-        if (executable === "npm") {
-          await mkdir(join(root, "node_modules", "claude-mem"), { recursive: true });
-          await mkdir(join(root, "node_modules", ".bin"), { recursive: true });
-          await writeFile(join(root, "node_modules", "claude-mem", "package.json"),
-            JSON.stringify({ name: "claude-mem", version: pin.version, license: pin.license }));
-          await writeFile(join(root, "node_modules", ".bin", "claude-mem"), "cli");
-        }
-        return { exitCode: 0, stdout: "ok", stderr: "" };
-      } }, discoverSkills: async () => [], verifyProvenance: async () => false, probeMemory: async () => workerReady
-    });
-    expect((await adapter.activate(pin, artifact, "install")).success).toBe(true);
-    expect(calls.some(call => call.includes("install --ide codex-cli --provider host --no-auto-start"))).toBe(true);
-    expect((await adapter.verify(pin, root)).ready).toBe(false);
-    workerReady = true;
-    expect((await adapter.verify(pin, root)).ready).toBe(true);
   });
 
   it("requires functional evidence before publishing a capability", () => {
@@ -247,33 +219,6 @@ describe("tool integrations", () => {
     expect(await new FileToolCapabilityRegistry(file).list("repo-b")).toHaveLength(0);
     await registry.revoke("repo-a", "rtk");
     expect(await registry.list("repo-a")).toHaveLength(0);
-  });
-
-  it("adopts one configured Claude-Mem worker through loopback health only", async () => {
-    const root = await mkdtemp(join(tmpdir(), "bflow-memory-")); roots.push(root);
-    await writeFile(join(root, ".worker.port"), "37777");
-    const ready = await observeClaudeMemWorker({ dataDir: root, projectRoot: root, version: "9.0.0",
-      fetcher: async (url) => { expect(String(url)).toBe("http://127.0.0.1:37777/api/health"); return new Response('{"status":"ok","version":"9.0.0"}'); } });
-    expect(ready.status).toBe("ready");
-    const wrongVersion = await observeClaudeMemWorker({ dataDir: root, projectRoot: root, version: "9.0.0",
-      fetcher: async () => new Response('{"status":"ok","version":"8.0.0"}') });
-    expect(wrongVersion.status).toBe("blocked");
-    const unrelatedService = await observeClaudeMemWorker({ dataDir: root, projectRoot: root, version: "9.0.0",
-      fetcher: async () => new Response("hello") });
-    expect(unrelatedService.status).toBe("blocked");
-    const failed = await observeClaudeMemWorker({ dataDir: root, projectRoot: root, version: "9.0.0", fetcher: async () => { throw new Error("offline"); } });
-    expect(failed.capability).toBeNull();
-  });
-
-  it("limits Claude-Mem reads to the configured project", async () => {
-    const reader = new ClaudeMemProjectReader("http://127.0.0.1:37777", "repo-a", async (_url, init) => {
-      expect(JSON.parse(String(init?.body)).project).toBe("repo-a");
-      return new Response(JSON.stringify([{ id: 5, project: "repo-a", title: "safe" }]));
-    });
-    expect((await reader.getObservations([5]))[0]?.id).toBe(5);
-    const leaking = new ClaudeMemProjectReader("http://127.0.0.1:37777", "repo-a", async () => new Response(JSON.stringify([{ id: 5, project: "repo-b" }])));
-    await expect(leaking.getObservations([5])).rejects.toThrow("Cross-project");
-    expect(() => new ClaudeMemProjectReader("http://example.com", "repo-a")).toThrow();
   });
 
   it("serializes GitNexus writers and tracks repository fingerprint", async () => {
@@ -357,17 +302,11 @@ describe("tool integrations", () => {
     expect((await writeOwnedToolConfig(orphan, "new", null)).status).toBe("blocked");
   });
 
-  it("blocks failed MCP startup and identifies memory growth", async () => {
+  it("blocks failed MCP startup", async () => {
     const failed = await verifyMcpStartup({ toolId: "gitnexus", version: "1.0.0", repositoryId: "r",
       negotiate: async () => { throw new Error("crash"); } });
     expect(failed.status).toBe("blocked");
     expect(failed.capability).toBeNull();
-    const root = await mkdtemp(join(tmpdir(), "bflow-memory-growth-")); roots.push(root);
-    await writeFile(join(root, ".worker.pid"), "123");
-    let rss = 100;
-    const host: ToolHost = { async download() {}, async run() { return { exitCode: 0, stdout: String(rss += 100), stderr: "" }; } };
-    const growth = await observeClaudeMemGrowth({ dataDir: root, host, intervalMs: 0, maxGrowthBytes: 50_000 });
-    expect(growth.status).toBe("growing");
   });
 
   it("checks RTK gain and preserves the proxied command exit code", async () => {

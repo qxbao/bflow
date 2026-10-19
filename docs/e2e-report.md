@@ -1,5 +1,7 @@
 # Bflow Platform v3 (Post-P24–P33 Integration) End-to-End QA Report
 
+> **Ghi chú (lịch sử):** Tài liệu này ghi lại bằng chứng đo tại thời điểm đó, trong đó có Claude-Mem. Bflow không còn hỗ trợ Claude-Mem (thay bằng MemPalace cài thủ công); các số liệu và đường dẫn liên quan đến `claude-mem` chỉ còn giá trị lịch sử và không thể tái tạo từ mã hiện tại.
+
 - **Tested Commit**: `7133b02` (`main`)
 - **Execution Date**: `2026-10-17`
 - **Role**: Principal QA Automation Engineer

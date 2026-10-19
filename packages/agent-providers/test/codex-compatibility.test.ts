@@ -77,7 +77,7 @@ describe("installed Codex compatibility", () => {
   });
 
   it("accepts plugin-scoped native trust metadata without making it executable or approved", () => {
-    expect(parseCodexTomlHooks('[hooks.state."claude-mem@claude-mem-local:hooks/codex-hooks.json:pre_tool_use:0:0"]\nenabled=true\ntrusted_hash="abc"')).toEqual({});
+    expect(parseCodexTomlHooks('[hooks.state."example-plugin@example-marketplace:hooks/codex-hooks.json:pre_tool_use:0:0"]\nenabled=true\ntrusted_hash="abc"')).toEqual({});
     expect(() => parseCodexTomlHooks('[hooks.state."mem@local:../escape.json:Stop:0:0"]\nenabled=true')).toThrow();
   });
 

@@ -1698,7 +1698,6 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         "-y",
         "--dir",
         "--catalog-dir",
-        "--memory-provider",
         "--hook-digest",
         "--json",
         "-j",
@@ -1745,11 +1744,6 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
       }
       const catalogDir = rawCatalogDir?.trim();
 
-      const memoryProvider = optRes.value.flags.get("--memory-provider") ?? "auto";
-      if (!["auto", "claude", "codex", "host"].includes(String(memoryProvider))) {
-        return makeValidationError("Option '--memory-provider' must be auto, claude, codex, or host.", json, "setup");
-      }
-
       const yes = optRes.value.flags.has("--yes") || optRes.value.flags.has("-y");
       const codexHooks = optRes.value.flags.has("--codex-hooks");
       const trustAllHooks = optRes.value.flags.has("--trust-all");
@@ -1770,8 +1764,8 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         if (modes.length !== 1 || mode === "repair") {
           return makeValidationError("'--codex-hooks' requires exactly one of --check, --plan, or --apply.", json, "setup");
         }
-        if (dir !== undefined || catalogDir !== undefined || optRes.value.flags.has("--memory-provider")) {
-          return makeValidationError("'--codex-hooks' cannot be combined with --dir, --catalog-dir, or --memory-provider.", json, "setup");
+        if (dir !== undefined || catalogDir !== undefined) {
+          return makeValidationError("'--codex-hooks' cannot be combined with --dir or --catalog-dir.", json, "setup");
         }
         if (mode !== "apply" && (trustAllHooks || revokeAllHookTrust)) {
           return makeValidationError(`'${trustAllHooks ? "--trust-all" : "--revoke-trust-all"}' is valid only with 'setup --codex-hooks --apply'.`, json, "setup");
@@ -1794,7 +1788,6 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         ...(typeof hookDigest === "string" ? { hookDigest } : {}),
         dir,
         catalogDir,
-        memoryProvider: memoryProvider as "auto" | "claude" | "codex" | "host",
         json,
         help: false
       };

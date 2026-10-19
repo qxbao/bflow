@@ -585,11 +585,11 @@ describe("High-Level CLI Argument Parser & Command Reference", () => {
     });
 
     it("parses mcp status with repeatable and comma-separated services", () => {
-      const res = parseCliArgs(["mcp", "status", "--service", "gitnexus,rtk", "--service", "claude-mem"]);
+      const res = parseCliArgs(["mcp", "status", "--service", "gitnexus,rtk", "--service", "mempalace"]);
       expect(res.ok).toBe(true);
       if (res.ok) {
         const cmd = res.value as McpStatusCommandArgs;
-        expect(cmd.serviceIds).toEqual(["gitnexus", "rtk", "claude-mem"]);
+        expect(cmd.serviceIds).toEqual(["gitnexus", "rtk", "mempalace"]);
       }
     });
 

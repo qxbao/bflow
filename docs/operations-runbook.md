@@ -9,7 +9,7 @@ Sổ tay vận hành này cung cấp quy trình chuẩn để khởi chạy, gi�
 Một phiên làm việc Bflow v3 đang hoạt động bao gồm 4 lớp tiến trình độc lập:
 1. **Herdr Session Daemon (`herdr --session <session-name> server`)**: Quản lý workspace, 3 tabs (`Conversation`, `Coordination`, `Verification`), 7 permanent role panes (`conversation`, `coordinator`, `specifier`, `architect`, `planner`, `reviewer`, `qa`) và các pane `developer` sinh động theo task.
 2. **Bflow Persistent Agentic Host (`packages/runtime/src/agentic/host.ts`)**: Tiến trình điều phối trung tâm giữ `SqliteRunStore`, `FilesystemArtifactStore`, `FileAgentRegistry`, `HostPlatformSession`, đối soát MCP Gateway mỗi 30 giây và xác thực chữ ký Ed25519.
-3. **Bflow Shared MCP Gateway (`@bflow/mcp-gateway`)**: Chạy dưới dạng dịch vụ người dùng (`systemd --user` `bflow-mcp-gateway.service` hoặc daemon cục bộ) lắng nghe duy nhất trên `127.0.0.1:<port>/mcp`, chia sẻ một tiến trình backend duy nhất cho mỗi dịch vụ (`gitnexus`, `claude-mem`, v.v.) across nhiều agents.
+3. **Bflow Shared MCP Gateway (`@bflow/mcp-gateway`)**: Chạy dưới dạng dịch vụ người dùng (`systemd --user` `bflow-mcp-gateway.service` hoặc daemon cục bộ) lắng nghe duy nhất trên `127.0.0.1:<port>/mcp`, chia sẻ một tiến trình backend duy nhất cho mỗi dịch vụ (`gitnexus`, `chrome-devtools-mcp`, v.v.) across nhiều agents.
 4. **Dedicated Browser Runtime (`@bflow/mcp-services`)**: Quản lý các phiên Chrome cô lập theo từng task (`<stateRoot>/chrome/<repoId>/<taskId>`) với lease độc quyền.
 
 ---
@@ -51,7 +51,7 @@ bflow status --json
 # Trạng thái kết nối Shared MCP Gateway và các dịch vụ backend:
 bflow mcp status --json
 
-# Trạng thái các công cụ đã cài đặt (rtk, gitnexus, claude-mem, chrome):
+# Trạng thái các công cụ đã cài đặt (rtk, gitnexus, mempalace, chrome):
 bflow tool status --json
 ```
 
@@ -68,7 +68,7 @@ bflow down --yes
 **Bảo đảm khi chạy `bflow down`**:
 - Nếu có run đang ở trạng thái active và không truyền `--yes`, lệnh trả lỗi `Unsafe shutdown: N active runs` và không tắt bất kỳ thành phần nào.
 - Khi dừng hợp lệ, host thực hiện: `quiesce` $\to$ ghi `bflow.workflow-aggregate+json` checkpoint xuống SQLite $\to$ thu hồi toàn bộ MCP Gateway registrations của session $\to$ đóng các role panes $\to$ dừng Herdr session server (`herdr session stop`) $\to$ bảo toàn các Git worktree có thay đổi chưa commit (`dirty`/`ignored`).
-- Không bao giờ tự ý tắt worker bên ngoài không do Bflow sở hữu (ví dụ worker `claude-mem` của host được nhận diện ở chế độ `adopted`).
+- Không bao giờ tự ý tắt worker bên ngoài không do Bflow sở hữu (ví dụ một worker do host cung cấp được nhận diện ở chế độ `adopted`).
 
 ---
 
@@ -117,7 +117,7 @@ bflow down --yes
 
 ### 4.2 Sự cố: Shared MCP Gateway hoặc Stdio Backend bị treo / khởi động lại
 
-- **Hiện tượng**: Tiến trình backend (`gitnexus mcp` hoặc `claude-mem`) bị crash, hoặc dịch vụ `bflow-mcp-gateway.service` bị `systemd` khởi động lại.
+- **Hiện tượng**: Tiến trình backend (ví dụ `gitnexus mcp`) bị crash, hoặc dịch vụ `bflow-mcp-gateway.service` bị `systemd` khởi động lại.
 - **Cơ chế tự động của Bflow**:
   - Nếu một child backend stdio chết (`SIGKILL`), `BflowMcpGateway` tự động khởi chạy lại tiến trình mới ở lệnh `tools/call` kế tiếp và tăng `revision` của dịch vụ mà không làm đứt các registration của agent.
   - Nếu toàn bộ `GatewayHttpServer` khởi động lại (làm mất bảng registration trong RAM), vòng lặp đối soát 30 giây của `AgenticHost` (`reconcileGatewayRegistrations`) sẽ phát hiện các `lost` registrations, chuyển trạng thái launch của role đó sang `degraded` (`reason: "gateway_registration_lost"`), và **giữ các thông điệp mới trong outbox** thay vì giao việc cho một agent đã mất kết nối MCP.

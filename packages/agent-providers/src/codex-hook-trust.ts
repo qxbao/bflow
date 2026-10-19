@@ -16,20 +16,6 @@ const MAX_DEPENDENCIES = 64;
 const MAX_HOOKS = 128;
 const MAX_COMMAND_BYTES = 16 * 1024;
 const REVIEWED_ORCA_WRAPPER_SHA256 = "33d44c305023507bd8fc33a4c49b4343519b2f99b99295c62b695ffe13ba7e63";
-// Complete POSIX commands from claude-mem's reviewed Codex hook source (14.0.1).
-// These identify code shapes, not trusted releases: every selected local source
-// and interpreter still enters the operator-approved snapshot below.
-const REVIEWED_CLAUDE_MEM_COMMANDS = new Set([
-  "295049188c2e5edd47cb510ce93962325e8177367e79c2969bbe28bec610e6b0",
-  "302330aa49bde21ad6368061fd1d4de8b57dc44b0bd3caa9b5cde4601f8533d8",
-  "260ae9a15fce7d392a4365d29bbc66ad8184a2effd0668aeb0c7041c823b8620",
-  "f3c96dc17c87484606de03a60b66a31147ca5531b7d1268e5cba465000d88b37",
-  "3f4a3e4cb60d57ebe804c3a4fc91eca456d28154c9b947d29d361f2aa924e42d",
-  "3054055aad813f0f4ae3da2037dd5a67455683f3809843d5769db6b2da7d917d"
-]);
-export const CODEX_MEMORY_HOOK_ENVIRONMENT_KEYS = [
-  "CLAUDE_CONFIG_DIR", "CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT", "BUN", "BUN_PATH", "BUN_INSTALL"
-] as const;
 export const CODEX_HOOK_APPROVAL_FILE = "codex-hook-approvals.json";
 
 export const CodexHookDependencySchema = z.object({
@@ -118,7 +104,6 @@ export function createManagedCodexHookEnvironment(
   return {
     HOME: homeDirectory,
     PATH: environment["PATH"] ?? "",
-    ...Object.fromEntries(CODEX_MEMORY_HOOK_ENVIRONMENT_KEYS.map(key => [key, environment[key] ?? ""])),
     ORCA_AGENT_HOOK_ROOT: "",
     ORCA_AGENT_HOOK_ENDPOINT: "",
     ORCA_PANE_KEY: "",
@@ -342,134 +327,13 @@ async function directExecutableDependencies(path: string): Promise<CodexHookDepe
   return [executable, await executableDependency(line)];
 }
 
-async function safeOptionalDirectory(path: string): Promise<boolean> {
-  if (/[\0\r\n]/.test(path)) throw new Error("Claude-Mem dependency paths must not contain control characters");
-  let info;
-  try { info = await lstat(path); }
-  catch (error) { if (notFound(error)) return false; throw error; }
-  if (!info.isDirectory() || info.isSymbolicLink() || !ownedByCurrentUserOrRoot(info) || (info.mode & 0o022) !== 0 || await realpath(path) !== resolve(path))
-    throw new Error(`Claude-Mem dependency directory is unsafe or symlinked: ${path}`);
-  return true;
-}
-
-/** Inspect the bounded union of roots selected by the exact reviewed bootstrap;
- * never evaluate its shell, choose a newest plugin, or execute hook code. */
-async function claudeMemCommandDependencies(
-  environment: Readonly<Record<string, string | undefined>>,
-  pluginRoot?: string
-): Promise<CodexHookDependency[]> {
-  if (process.platform === "win32") throw new Error("The reviewed Claude-Mem command requires a POSIX host");
-  // The bootstrap replaces spaces in PATH and can invoke a login shell when it
-  // is empty. Neither a changed search path nor sourced login code is approved.
-  const searchPath = environment["PATH"] ?? "";
-  if (!searchPath || searchPath.split(":").some(part => !isAbsolute(part) || /[\s\0]/.test(part)))
-    throw new Error("Claude-Mem hooks require a nonempty absolute PATH without whitespace or empty entries");
-  if (!environment["HOME"]) throw new Error("Claude-Mem hooks require an explicit absolute HOME");
-  for (const key of ["HOME", ...CODEX_MEMORY_HOOK_ENVIRONMENT_KEYS]) {
-    const value = environment[key];
-    if (value && (!isAbsolute(value) || /[\0\r\n]/.test(value)))
-      throw new Error(`Claude-Mem selector ${key} must be an absolute literal path`);
-    // These selectors are joined with script suffixes below. Reject parent/dot
-    // components instead of accidentally approving a lexically different root.
-    if (value?.split("/").some(part => part === "." || part === ".."))
-      throw new Error(`Claude-Mem selector ${key} must not contain dot or parent path components`);
-    if (key.startsWith("BUN") && value && value !== value.trim())
-      throw new Error(`Claude-Mem selector ${key} must not depend on runtime whitespace trimming`);
-  }
-  if (resolvePathExecutable("cygpath", environment)) throw new Error("Claude-Mem cygpath conversion is not supported by POSIX hook review");
-  const dependencies: CodexHookDependency[] = [];
-  for (const name of ["/bin/sh", "printenv", "tr", "sort", "sed", "node", "which"]) {
-    const path = resolvePathExecutable(name, environment);
-    if (!path) throw new Error(`Cannot resolve Claude-Mem hook dependency '${name}'`);
-    // Native macOS Node builds can exceed the generic 128 MiB hook limit.
-    dependencies.push(await executableDependency(path, undefined, name === "node" ? 256 * 1024 * 1024 : MAX_EXECUTABLE_BYTES));
-  }
-
-  const home = userHomeFor(environment);
-  const configRoot = environment["CLAUDE_CONFIG_DIR"] || join(home, ".claude");
-  const roots = new Set<string>();
-  if (pluginRoot) roots.add(pluginRoot);
-  for (const key of ["CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT"] as const) {
-    if (environment[key]) roots.add(environment[key]!);
-  }
-  const cache = join(configRoot, "plugins/cache/thedotmack/claude-mem");
-  if (await safeOptionalDirectory(cache)) {
-    const directory = await opendir(cache);
-    let count = 0;
-    for await (const entry of directory) {
-      if (++count > MAX_DEPENDENCIES) throw new Error("Claude-Mem fallback cache exceeds the inspection limit");
-      if (/^[0-9]/.test(entry.name)) {
-        const path = join(cache, entry.name);
-        await safeOptionalDirectory(path);
-        // Include orphaned/older candidates too: changing selection metadata
-        // cannot introduce code outside this union without changing the digest.
-        roots.add(path);
-      }
-    }
-  }
-  roots.add(join(configRoot, "plugins/marketplaces/thedotmack/plugin"));
-  if (roots.size > 16) throw new Error("Claude-Mem candidate roots exceed the inspection limit");
-  let complete = false;
-  for (const root of [...roots].sort()) {
-    const nested = join(root, "plugin");
-    // Snapshot both forms, including absent-file facts, so a newly appearing
-    // plugin/scripts directory cannot change the bootstrap's selected code.
-    for (const candidate of [root, nested]) {
-      await safeOptionalDirectory(candidate);
-      const runner = await scriptDependency(join(candidate, "scripts/bun-runner.js"));
-      // The bundled worker is about 4 MiB; retain a bounded compiled-code limit.
-      const worker = await scriptDependency(join(candidate, "scripts/worker-service.cjs"), 8 * 1024 * 1024);
-      dependencies.push(runner, worker);
-      complete ||= runner.exists && worker.exists;
-    }
-  }
-  if (!complete) throw new Error("No complete Claude-Mem hook script installation can be pinned");
-
-  let bun = resolvePathExecutable("bun", environment);
-  if (!bun) {
-    const install = environment["BUN_INSTALL"];
-    const candidates = [environment["BUN"], environment["BUN_PATH"],
-      ...(install ? [join(install, "bin/bun"), join(install, "bun")] : []),
-      join(home, ".bun/bin/bun"), "/usr/local/bin/bun", "/opt/homebrew/bin/bun", "/home/linuxbrew/.linuxbrew/bin/bun"];
-    for (const candidate of candidates) {
-      if (!candidate) continue;
-      // The runner uses existsSync, which follows symlinks and skips dangling
-      // overrides. lstat would select the broken link and block a valid fallback.
-      try { await stat(candidate); bun = candidate; break; }
-      catch (error) { if (!notFound(error)) throw error; }
-    }
-  }
-  if (!bun) throw new Error("Cannot pin the Bun runtime used by Claude-Mem hooks; install Bun explicitly");
-  dependencies.push(await executableDependency(bun, undefined, 256 * 1024 * 1024));
-  if (dependencies.length > MAX_DEPENDENCIES) throw new Error("Claude-Mem hook dependency count exceeds the inspection limit");
-  return dependencies;
-}
-
 async function dependenciesForCommand(
   command: string,
   candidates: readonly string[],
   environment: Readonly<Record<string, string | undefined>>,
   unsupportedReasons: string[],
-  diagnostics: string[],
-  pluginRoot?: string,
-  memoryDependencies = new Map<string, Promise<CodexHookDependency[]>>()
+  diagnostics: string[]
 ): Promise<CodexHookDependency[]> {
-  if (REVIEWED_CLAUDE_MEM_COMMANDS.has(sha256(command))) {
-    const key = pluginRoot ?? "";
-    let pending = memoryDependencies.get(key);
-    if (!pending) {
-      pending = claudeMemCommandDependencies(environment, pluginRoot);
-      memoryDependencies.set(key, pending);
-    }
-    try {
-      const dependencies = await pending;
-      diagnostics.push("Reviewed Claude-Mem POSIX hook bootstrap: candidate script roots and resolved shell, utilities, Node and Bun are pinned; exact snapshot approval is still required.");
-      return dependencies;
-    } catch (error) {
-      unsupportedReasons.push(`Cannot pin reviewed Claude-Mem hook dependencies: ${error instanceof Error ? error.message : "inspection failed"}`);
-      return [];
-    }
-  }
   const isOrcaCommand = command.includes("codex-hook.sh") && command.includes("ORCA_AGENT_HOOK_ROOT");
   if (isOrcaCommand && isOrcaConditionalCommand(command)) {
     const dependencies: CodexHookDependency[] = [];
@@ -723,7 +587,6 @@ async function buildInventory(options: CodexHookTrustOptions = {}): Promise<Omit
   const diagnostics: string[] = [];
   const unsupportedReasons: string[] = [];
   const candidates = configuredOrcaCandidates(paths.environment);
-  const memoryDependencies = new Map<string, Promise<CodexHookDependency[]>>();
 
   const hooksPath = join(home, "hooks.json");
   try {
@@ -736,7 +599,7 @@ async function buildInventory(options: CodexHookTrustOptions = {}): Promise<Omit
       if (raw !== undefined) {
         const entries = extractHooks(raw, unsupportedReasons);
         for (const entry of entries) {
-          const dependencies = await dependenciesForCommand(entry.command, candidates, paths.environment, unsupportedReasons, diagnostics, undefined, memoryDependencies);
+          const dependencies = await dependenciesForCommand(entry.command, candidates, paths.environment, unsupportedReasons, diagnostics);
           for (const dependency of dependencies) {
             if (!sources.some(source => source.path === dependency.requestedPath))
               sources.push(CodexHookSourceSchema.parse({ kind: candidates.includes(dependency.requestedPath) ? "orca_candidate" : "script",
@@ -768,13 +631,12 @@ async function buildInventory(options: CodexHookTrustOptions = {}): Promise<Omit
     diagnostics.push(hasTomlHooks ? "Codex executable TOML hook declarations are included in this snapshot." : "Codex executable TOML hook declarations are absent; native hooks.state metadata is excluded.");
     const entries = extractHooks({ hooks: tomlHooks }, unsupportedReasons);
     const pluginOrigins = new Map<(typeof entries)[number], string>();
-    const pluginRoots = new Map<(typeof entries)[number], string>();
     for (const id of enabledPlugins) {
       try {
-        const { root, inputs } = await pluginHookInputs(home, id, sources);
+        const { inputs } = await pluginHookInputs(home, id, sources);
         for (const input of inputs) {
           const pluginEntries = extractHooks(input, unsupportedReasons);
-          for (const entry of pluginEntries) { pluginOrigins.set(entry, id); pluginRoots.set(entry, root); }
+          for (const entry of pluginEntries) { pluginOrigins.set(entry, id); }
           entries.push(...pluginEntries);
           if (entries.length > MAX_HOOKS) throw new Error("Combined hook count exceeds the inspection limit");
         }
@@ -785,7 +647,7 @@ async function buildInventory(options: CodexHookTrustOptions = {}): Promise<Omit
     }
     for (const entry of entries) {
       const previousReasons = unsupportedReasons.length;
-      const dependencies = await dependenciesForCommand(entry.command, candidates, paths.environment, unsupportedReasons, diagnostics, pluginRoots.get(entry), memoryDependencies);
+      const dependencies = await dependenciesForCommand(entry.command, candidates, paths.environment, unsupportedReasons, diagnostics);
       const origin = pluginOrigins.get(entry);
       if (origin) for (let index = previousReasons; index < unsupportedReasons.length; index++)
         unsupportedReasons[index] = `Plugin ${origin}, event ${entry.event}: ${unsupportedReasons[index]}`;
@@ -803,10 +665,7 @@ async function buildInventory(options: CodexHookTrustOptions = {}): Promise<Omit
   if (sources.length > MAX_DEPENDENCIES) unsupportedReasons.push(`Hook inventory exceeds ${MAX_DEPENDENCIES} source/dependency entries.`);
   const selectorState = { orcaAgentHookEndpointPresent: Boolean(paths.environment["ORCA_AGENT_HOOK_ENDPOINT"]),
     orcaAgentHookRoot: paths.environment["ORCA_AGENT_HOOK_ROOT"] ?? null,
-    home: paths.environment["HOME"] ?? null,
-    ...(hooks.some(hook => REVIEWED_CLAUDE_MEM_COMMANDS.has(sha256(hook.command))) ? {
-      memory: Object.fromEntries(["PATH", ...CODEX_MEMORY_HOOK_ENVIRONMENT_KEYS].map(key => [key, paths.environment[key] ?? ""]))
-    } : {}) };
+    home: paths.environment["HOME"] ?? null };
   const uniqueDiagnostics = [...new Set(diagnostics)];
   const uniqueReasons = [...new Set(unsupportedReasons)];
   const digest = sha256(JSON.stringify({ schemaVersion: 1, codexHomeDirectory: home, approvalStorePath: store, selectorState, sources, hooks, diagnostics: uniqueDiagnostics, unsupportedReasons: uniqueReasons }));

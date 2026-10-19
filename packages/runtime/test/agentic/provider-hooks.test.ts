@@ -57,7 +57,7 @@ describe.skipIf(process.platform === "win32")("provider hook ingress", () => {
   });
   it("selects the matching hook after unrelated plugin JSON", async () => {
     const f = await fixture();
-    const result = await f.invoke("UserPromptSubmit", 'Plugin metadata: {"plugin":"claude-mem"}\n' + JSON.stringify({ ...prompt, prompt: "hello" }) + "\nfinished");
+    const result = await f.invoke("UserPromptSubmit", 'Plugin metadata: {"plugin":"example-plugin"}\n' + JSON.stringify({ ...prompt, prompt: "hello" }) + "\nfinished");
     expect(result.code).toBe(0);
     expect(f.calls).toEqual([expect.objectContaining({ method: "user_prompt", params: { paneId: "pane-1", hook: { ...prompt, prompt: "hello" } } })]);
   });

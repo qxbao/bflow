@@ -10,4 +10,3 @@ export * from "./default-catalog.js";
 
 export * from "./native-providers-installer.js";
 
-export * from "./memory-provider.js";

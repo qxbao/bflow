@@ -1,13 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { SetupApplyRequestSchema, SetupReceiptSchema, SetupStepSchema, ToolInstallRequestSchema,
   type OperationOptions, type OperationResult, type SetupApplyRequest, type SetupReceipt, type SetupStep,
   type ToolInstallRequest, type ToolInstaller } from "@bflow/contracts";
 import { ManagedToolInstaller, ManagedToolPinSchema, type ManagedToolPin, type ToolInspection, type ProviderPluginAdapter, type ToolHost } from "./installer.js";
 import { OfficialProviderPluginAdapter } from "./provider-plugins.js";
-import { isolatedProviderEnvironment, isolationSupports, type NativeProvider, type NativeRuntimeOptions } from "./native-runtime.js";
-import { resolveMemoryProvider, SubscriptionLoginRequiredError, SUBSCRIPTION_LOGIN_REQUIRED } from "./memory-provider.js";
+import { isolationSupports, type NativeProvider, type NativeRuntimeOptions } from "./native-runtime.js";
 import { systemToolHost } from "./installer.js";
 
 /** One machine-approved tool step composes provider-specific native activations.
@@ -17,20 +15,16 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
   readonly installerId: string;
   readonly #root: string;
   readonly #pin: ManagedToolPin;
-  readonly #host: ToolHost;
-  readonly #configuration: Omit<NativeRuntimeOptions, "managedRoot"> | undefined;
-  readonly #providerPlugin: ProviderPluginAdapter | undefined;
   readonly #children: { provider: NativeProvider; pin: ManagedToolPin; installer: ManagedToolInstaller }[];
   /** Providers that isolated setup cannot confine; they are never activated and keep the step blocked. */
   readonly #deferred: readonly NativeProvider[];
   constructor(options: { managedRoot: string; pin: ManagedToolPin; providers: readonly NativeProvider[];
     host?: ToolHost; configuration?: Omit<NativeRuntimeOptions, "managedRoot">; providerPlugin?: ProviderPluginAdapter }) {
     const pin = ManagedToolPinSchema.parse(options.pin);
-    if (pin.recipe.kind !== "provider_plugin" || !["superpowers", "claude-mem"].includes(pin.toolId)) throw Error("Native plugin pin required");
+    if (pin.recipe.kind !== "provider_plugin" || pin.toolId !== "superpowers") throw Error("Native plugin pin required");
     this.#root = resolve(options.managedRoot); this.#pin = pin; this.installerId = pin.installerId;
     if (!options.providers.length || new Set(options.providers).size !== options.providers.length) throw Error("Unique selected providers required");
     const host = options.host ?? systemToolHost;
-    this.#host = host; this.#configuration = options.configuration; this.#providerPlugin = options.providerPlugin;
     const isolation = options.configuration?.isolation;
     this.#deferred = options.providers.filter(provider => !isolationSupports(isolation, provider));
     this.#children = options.providers.filter(provider => isolationSupports(isolation, provider)).map(provider => {
@@ -44,35 +38,10 @@ export class NativeProvidersToolInstaller implements ToolInstaller {
   #deferredDiagnostics(): string[] {
     return this.#deferred.map(provider => `manual action required for ${provider}: native plugin activation is deferred because isolated setup cannot confine this provider's configuration; run setup outside isolation to activate it`);
   }
-  /** Real mode forwards only an inherited CODEX_HOME; isolated mode forces the isolated provider homes. */
-  #memoryEnvironment(): { environment?: Readonly<Record<string, string>> } {
-    const isolated = isolatedProviderEnvironment(this.#configuration?.isolation);
-    if (isolated) return { environment: isolated };
-    return process.env.CODEX_HOME ? { environment: { CODEX_HOME: process.env.CODEX_HOME } } : {};
-  }
-  /** A missing subscription login is an owner action carried in error details, not a machine failure. */
-  #ownerAction<T>(message: string): OperationResult<T> {
-    return { ok: false, error: { code: "validation", retryable: false, message, details: { ownerAction: SUBSCRIPTION_LOGIN_REQUIRED } } };
-  }
   async #childSteps(request: ToolInstallRequest): Promise<OperationResult<{ provider: NativeProvider; installer: ManagedToolInstaller; step: SetupStep }[]>> {
     const plans: { provider: NativeProvider; installer: ManagedToolInstaller; step: SetupStep }[] = [];
-    let selected: Awaited<ReturnType<typeof resolveMemoryProvider>> | undefined;
-    const home = this.#configuration?.isolation?.homeDirectory ?? this.#configuration?.homeDirectory ?? homedir();
-    const memory = this.#configuration?.memory ?? { dataDir: join(home, ".claude-mem"), projectRoot: process.cwd(), project: process.cwd() };
-    if (this.#pin.toolId === "claude-mem") {
-      try { selected = await resolveMemoryProvider({ provider: memory.provider ?? "auto", homeDirectory: home, dataDir: memory.dataDir,
-        host: this.#host, ...(this.#configuration?.executables ? { executables: this.#configuration.executables } : {}),
-        ...this.#memoryEnvironment() }); }
-      catch (error) {
-        if (error instanceof SubscriptionLoginRequiredError) return this.#ownerAction(error.message);
-        return this.#fail(error instanceof Error ? error.message : "Claude-Mem subscription login could not be verified");
-      }
-    }
     for (const child of this.#children) {
-      const installer = selected ? new ManagedToolInstaller({ managedRoot: this.#root, pins: [child.pin], host: this.#host,
-        desiredStateContext: { memoryProvider: selected.provider, memoryDataDir: memory.dataDir },
-        providerPlugin: this.#providerPlugin ?? new OfficialProviderPluginAdapter({ host: this.#host,
-          configuration: { ...this.#configuration, managedRoot: join(this.#root, ".native"), memory: { ...memory, provider: selected.provider } } }) }) : child.installer;
+      const installer = child.installer;
       const planned = await installer.plan({ ...request, installerId: child.pin.installerId,
         destination: join(request.destination, child.provider), idempotencyKey: `${request.idempotencyKey}:${child.provider}` });
       if (!planned.ok) return planned;

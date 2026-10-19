@@ -72,7 +72,7 @@ persists the exact session manifest and composes rendered instructions through P
 Detailed port usage is in README. CLI `skills`/`setup` and automatic init activation remain
 unwired on this baseline; this handoff does not represent command acceptance.
 
-No contract amendment is requested. Tool requirement IDs (`gitnexus`, `rtk`, `claude-mem`,
+No contract amendment is requested. Tool requirement IDs (`gitnexus`, `rtk`, `mempalace`,
 `browser`) need mapping to actual approved/probed inventory. The host must supply trusted
 builtin digest pins and authenticate source/dependency/scope/role/provider/expiry approvals.
 Original role prompts remain mandatory. Storage is local POSIX, with no power-loss,

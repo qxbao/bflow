@@ -10,21 +10,21 @@ describe("CLI setup default inventory", () => {
     const platform = detectPlatform(defaultHostEnvironment());
     platform.os = "linux"; platform.arch = "x64";
     platform.paths.data = "/tmp/bflow-default-config/data";
-    const result = await createDefaultSetupConfiguration({ platform, memoryProvider: "host" });
+    const result = await createDefaultSetupConfiguration({ platform });
     expect(result.config.toolPins.map(pin => pin.toolId)).toContain("rtk");
     expect(result.config.toolPins.map(pin => pin.toolId)).toContain("claude");
     expect(result.config.providers).toEqual(["claude", "codex", "agy"]);
     expect(result.config.mcpServices).toEqual([]);
     expect(result.config.services).toEqual([]);
     expect(result.registry.resolve("rtk", "linux", result.config.toolPins)).not.toBeNull();
-    expect(result.inventory.find(item => item.toolId === "claude-mem")?.status).toBe("pinned");
+    expect(result.inventory.find(item => item.toolId === "mempalace")?.status).toBe("manual");
     expect(result.launchRequirements.map(item => item.toolId)).toEqual(["gitnexus", "chrome-devtools-mcp"]);
-    const native = (await result.additionalToolObservations(platform, result.config)).filter(item => ["superpowers", "claude-mem"].includes(item.toolId));
-    expect(native.map(item => item.toolId).sort()).toEqual(["claude-mem", "superpowers"]);
+    const native = (await result.additionalToolObservations(platform, result.config)).filter(item => ["superpowers"].includes(item.toolId));
+    expect(native.map(item => item.toolId).sort()).toEqual(["superpowers"]);
     expect(native.every(item => item.status === "missing" && item.required)).toBe(true);
     expect(native.every(item => item.diagnostics.some(message => message.includes("not installed")))).toBe(true);
-    const persisted = await createDefaultSetupConfiguration({ platform, config: result.config, memoryProvider: "host" });
-    const persistedNative = (await persisted.additionalToolObservations(platform, persisted.config)).filter(item => ["superpowers", "claude-mem"].includes(item.toolId));
+    const persisted = await createDefaultSetupConfiguration({ platform, config: result.config });
+    const persistedNative = (await persisted.additionalToolObservations(platform, persisted.config)).filter(item => ["superpowers"].includes(item.toolId));
     expect(persistedNative.every(item => item.diagnostics.some(message => message.includes("not installed")))).toBe(true);
   });
   it("preserves explicit operator pins, providers, services and secrets", async () => {

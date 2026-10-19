@@ -1,4 +1,4 @@
-# use-claude-mem worked example
+# use-mempalace worked example
 
 ## Input
 
@@ -6,7 +6,7 @@ Developer remembers an earlier timeout design.
 
 ## Authorized steps
 
-Retrieve the repository-scoped note, then inspect the current accepted specification and source before applying the rationale.
+Search the repository wing in MemPalace for the note, then inspect the current accepted specification and source before applying the rationale.
 
 ## Expected output and evidence
 

@@ -10,7 +10,6 @@ import { planRtkConfiguration, applyRtkConfiguration } from "../src/rtk-config.j
 import {
   createGitNexusService,
   createChromeService,
-  createClaudeMemService,
   ensureGatewayTool,
   BrowserPageSession
 } from "../src/services.js";

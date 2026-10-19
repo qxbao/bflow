@@ -17,8 +17,7 @@ import { MCPServiceDefinitionSchema, MCPServiceObservationSchema, MCPResourceLea
   type ScopedOperation, type MCPResourceLease, type MCPToolCall, type MCPToolCallResult } from "@bflow/contracts";
 import { atomicJson, fileDigest, privateDirectory, readRegular, sha256 } from "./files.js";
 import { createToolCapability } from "./installer.js";
-import { ClaudeMemProjectReader, FileToolCapabilityRegistry, observeClaudeMemWorker, planChromeSession } from "./integrations.js";
-import { ProjectMemoryConfigSchema } from "./memory-config.js";
+import { FileToolCapabilityRegistry, planChromeSession } from "./integrations.js";
 import { probeStdioMcp } from "./mcp-probe.js";
 
 export const ToolLaunchSpecSchema = z.object({ schemaVersion: z.literal(3), executable: z.string().min(1),
@@ -30,7 +29,7 @@ export type ToolLaunchSpec = z.infer<typeof ToolLaunchSpecSchema>;
 
 /** The Gateway launches this pinned shim; the shim validates its spec and upstream binary before spawning. */
 export async function createManagedMcpService(input: {
-  toolId: "gitnexus" | "chrome-devtools-mcp" | "claude-mem-adapter"; version: string;
+  toolId: "gitnexus" | "chrome-devtools-mcp"; version: string;
   serviceId: string; revision?: number; operation: ScopedOperation; configRoot: string; launch: ToolLaunchSpec;
   resourceKey?: string;
 }): Promise<MCPServiceDefinition> {
@@ -39,18 +38,14 @@ export async function createManagedMcpService(input: {
   if (!isAbsolute(spec.executable) || !isAbsolute(spec.cwd) || (spec.lockPath && !isAbsolute(spec.lockPath)))
     throw new Error("Tool launch paths must be absolute");
   if (Object.keys(spec.environment).some(key => !["GITNEXUS_HOME", "GITNEXUS_MCP_ALLOWED_REPOS", "GITNEXUS_MCP_READ_ONLY",
-    "GITNEXUS_SHARED_STORE", "CLAUDE_MEM_DATA_DIR"].includes(key))) throw new Error("Unapproved tool launch environment key");
+    "GITNEXUS_SHARED_STORE"].includes(key))) throw new Error("Unapproved tool launch environment key");
   if (await fileDigest(spec.executable) !== spec.executableDigest) throw new Error("Tool binary changed before service configuration");
   const root = await privateDirectory(input.configRoot);
   const specDigest = sha256(JSON.stringify(spec));
   const specPath = join(root, `${input.serviceId}-${specDigest}.json`);
   await atomicJson(specPath, spec);
   const launcher = resolveLocalOrDist("./service-launcher.js");
-  const base = input.toolId === "claude-mem-adapter" ? {
-    schemaVersion: 3, toolId: "claude-mem-adapter", kind: "stdio_mcp", version: input.version,
-    operations: ["memory_recent", "memory_search", "memory_get"], required: false,
-    resource: { sharing: "concurrent", maxConcurrency: 8 }
-  } : createToolCapability(input.toolId, input.version, operation.scope.kind === "machine" ? operation.scope.machineId : operation.scope.repositoryId);
+  const base = createToolCapability(input.toolId, input.version, operation.scope.kind === "machine" ? operation.scope.machineId : operation.scope.repositoryId);
   return MCPServiceDefinitionSchema.parse({ schemaVersion: 3, serviceId: input.serviceId, revision: input.revision ?? 1,
     scope: operation.scope, tool: { ...base, kind: "stdio_mcp", ...(input.resourceKey ? {
       resource: { sharing: "exclusive", resourceKey: input.resourceKey } } : {}) },
@@ -85,26 +80,6 @@ export async function createChromeService(input: {
       argv: [...profile.argv, "--headless", "--no-usage-statistics"], cwd: dirname(profile.profileDir), environment: {},
       lockPath: join(profile.profileDir, ".bflow-profile.lock"),
       browserOwner: { taskId: input.taskId, repositoryId: input.repositoryId, profileDir: profile.profileDir } } });
-}
-
-export async function createClaudeMemService(input: {
-  dataDir: string; projectRoot: string; project: string; port?: number; address?: string; version: string;
-  configRoot: string; operation: ScopedOperation;
-}): Promise<MCPServiceDefinition> {
-  const worker = await observeClaudeMemWorker(input);
-  if (worker.status !== "ready" || !worker.endpoint) throw new Error(worker.diagnostic);
-  await new ClaudeMemProjectReader(worker.endpoint, input.project).recent(1);
-  const server = resolveLocalOrDist("./memory-mcp.js");
-  const config = ProjectMemoryConfigSchema.parse({ schemaVersion: 3, endpoint: worker.endpoint,
-    project: input.project, projectRoot: worker.projectRoot, serverDigest: await fileDigest(server) });
-  const configRoot = await privateDirectory(input.configRoot);
-  const digest = sha256(JSON.stringify(config));
-  const path = join(configRoot, `project-memory-${digest}.json`);
-  await atomicJson(path, config);
-  return createManagedMcpService({ toolId: "claude-mem-adapter", version: input.version,
-    serviceId: `memory-${sha256(worker.projectRoot).slice(0, 24)}`, operation: input.operation, configRoot,
-    launch: { schemaVersion: 3, executable: process.execPath, executableDigest: await fileDigest(process.execPath),
-      argv: [server, path, digest], cwd: worker.projectRoot, environment: {}, verifiedFiles: [{ path: server, digest: config.serverDigest }] } });
 }
 
 /** Parses real service-manager evidence. An ensure call without readiness never registers a capability. */

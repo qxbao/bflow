@@ -74,18 +74,10 @@ describe("standard setup composition", () => {
   });
 });
 
-describe("memory observer selection", () => {
-  it.each(["auto", "claude", "codex", "host"])("parses --memory-provider %s", async memoryProvider => {
+describe("removed memory observer option", () => {
+  it("rejects the legacy --memory-provider option", async () => {
     const { parseCliArgs } = await import("../src/index.js");
-    const parsed = parseCliArgs(["setup", "--memory-provider", memoryProvider]);
-    expect(parsed.ok).toBe(true);
-    if (parsed.ok) expect(parsed.value).toHaveProperty("memoryProvider", memoryProvider);
-  });
-  it("rejects an unknown observer provider", async () => {
-    const { parseCliArgs } = await import("../src/index.js");
-    const parsed = parseCliArgs(["setup", "--memory-provider", "unexpected"]);
-    expect(parsed.ok).toBe(false);
-    if (!parsed.ok) expect(parsed.error.message).toContain("auto, claude, codex, or host");
+    expect(parseCliArgs(["setup", "--memory-provider", "host"]).ok).toBe(false);
   });
 });
 

@@ -1,5 +1,7 @@
 # Bflow Platform v3 — Release Readiness & Audit Report (P24–P34)
 
+> **Ghi chú (lịch sử):** Tài liệu này ghi lại bằng chứng đo tại thời điểm đó, trong đó có Claude-Mem. Bflow không còn hỗ trợ Claude-Mem (thay bằng MemPalace cài thủ công); các số liệu và đường dẫn liên quan đến `claude-mem` chỉ còn giá trị lịch sử và không thể tái tạo từ mã hiện tại.
+
 - **Ngày kiểm toán**: `2026-10-18`
 - **Baseline commit (`main`)**: `da9e166d136b199c62f4b862141357180268567c` (gồm cả `ee4ff7c`..`da9e166`)
 - **Worktree kiểm toán**: `/tmp/bflow-v3-release-review` (branch `integration/v3-release-review` trên hệ tệp POSIX `ext4`)

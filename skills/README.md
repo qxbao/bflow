@@ -53,7 +53,7 @@ P26/P29/P30 owners must integrate setup/init/Runtime composition separately.
 
 ## Optional tool prerequisites
 
-The specialized skill requirement IDs `gitnexus`, `rtk`, `claude-mem` and `browser` must
+The specialized skill requirement IDs `gitnexus`, `rtk`, `mempalace` and `browser` must
 resolve against an operator-approved actual tool inventory. They are catalog requirement
 names, not proof that a service is installed or healthy, and not guessed MCP method names.
 GitNexus and memory use discovered authorized schemas; RTK remains CLI-only. Browser work
@@ -88,7 +88,7 @@ No skill starts duplicate workers, mutates global provider settings or installs 
 | sdlc | [specification-driven-development](sdlc/specification-driven-development/SKILL.md) | specifier, architect, coordinator, planner |
 | sdlc | [task-decomposition](sdlc/task-decomposition/SKILL.md) | coordinator, planner |
 | tooling | [mcp-tool-discovery](tooling/mcp-tool-discovery/SKILL.md) | conversation, coordinator, planner, architect, specifier, developer, tester, reviewer, qa, security |
-| tooling | [use-claude-mem](tooling/use-claude-mem/SKILL.md) | coordinator, planner, architect, specifier, developer, tester, reviewer, qa, security |
+| tooling | [use-mempalace](tooling/use-mempalace/SKILL.md) | coordinator, planner, architect, specifier, developer, tester, reviewer, qa, security |
 | tooling | [use-gitnexus](tooling/use-gitnexus/SKILL.md) | specifier, architect, planner, developer, reviewer, security |
 | tooling | [use-rtk](tooling/use-rtk/SKILL.md) | developer, tester, qa, reviewer |
 | verification | [analyze-failure](verification/analyze-failure/SKILL.md) | developer, tester, reviewer, qa, security, coordinator |

@@ -17,7 +17,7 @@ import type {
   DetectedProviderCapabilities,
   ProviderAdapterOptions
 } from "./types.js";
-import { CODEX_MEMORY_HOOK_ENVIRONMENT_KEYS, inspectCodexHooks } from "./codex-hook-trust.js";
+import { inspectCodexHooks } from "./codex-hook-trust.js";
 
 function tomlValue(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(tomlValue).join(",")}]`;
@@ -100,7 +100,6 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
       BFLOW_PROVIDER: this.descriptor.provider,
       HOME: selected["HOME"] ?? "",
       PATH: selected["PATH"] ?? "",
-      ...Object.fromEntries(CODEX_MEMORY_HOOK_ENVIRONMENT_KEYS.map(key => [key, selected[key] ?? ""])),
       ORCA_AGENT_HOOK_ROOT: selected["ORCA_AGENT_HOOK_ROOT"] ?? "",
       ORCA_AGENT_HOOK_ENDPOINT: selected["ORCA_AGENT_HOOK_ENDPOINT"] ?? "",
       ORCA_PANE_KEY: selected["ORCA_PANE_KEY"] ?? "",
@@ -174,7 +173,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
           parsed.every((entry) => typeof entry === "object" && entry !== null && typeof (entry as { name?: unknown }).name === "string")
         ) {
           // Only servers defined as `[mcp_servers.<name>]` tables in config.toml can be disabled with a dotted
-          // override. Plugin-provided servers (e.g. Claude-Mem's `mcp-search`, installed by approved setup) have no
+          // override. Plugin-provided servers (e.g. an `mcp-search` server installed by a provider plugin) have no
           // table: `mcp_servers.<name>.enabled=false` for them aborts Codex config loading ("invalid transport"),
           // as observed live on codex-cli 0.162.0. They are left to the plugin and not overridden here.
           const listed = [...new Set(parsed.map((entry) => (entry as { name: string }).name))];
