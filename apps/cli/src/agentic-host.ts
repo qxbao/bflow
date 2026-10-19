@@ -2,6 +2,7 @@ import type { AgentRole, OperationOptions, OperationResult, SessionManifest } fr
 import { resolvePrivateRuntimeStateDirectory, type HostPrepareResponse, type HostRoleLaunch } from "@bflow/runtime";
 import { resolve } from "node:path";
 import { lstat, readFile, realpath } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import type { EnvironmentCompositionInput, EnvironmentIntegration } from "./environment.js";
 import { buildHostPlatformOptions, loadHostPlatformContext } from "./platform-options.js";
 import { readGatewayReadiness } from "./gateway-readiness.js";
@@ -20,6 +21,11 @@ export interface LifecycleHost {
   readonly quiesce: NonNullable<EnvironmentIntegration["quiesce"]>;
   readonly checkpoint: NonNullable<EnvironmentIntegration["checkpoint"]>;
   shutdown(): Promise<void>;
+  /**
+   * Force-only: stop the recorded host daemon when it cannot speak this CLI's protocol (for example a daemon
+   * started from an older build). Durable stores are untouched, so the next `up` recovers from them.
+   */
+  terminateOwner?(): Promise<void>;
   close(): Promise<void>;
 }
 export type LifecycleHostFactory = (input: EnvironmentCompositionInput) => Promise<LifecycleHost>;
@@ -159,11 +165,42 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
       const existing = await openExistingIfPresent();
       if (existing) await existing.shutdown();
     },
+    terminateOwner: async () => {
+      const directory = resolve(resolvePrivateRuntimeStateDirectory(input.repository.root), "host", input.repository.sessionName);
+      await terminateHostOwner(directory);
+    },
     close: async () => {
       if (activeHost) await (await activeHost).close();
     }
   };
 };
+
+const sleep = (ms: number) => new Promise(accept => setTimeout(accept, ms));
+const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") return false; throw error; } };
+const commandLine = (pid: number) => new Promise<string>(accept => execFile("ps", ["-p", String(pid), "-o", "command="], (error, stdout) => accept(error ? "" : stdout.trim())));
+
+/**
+ * Stops the daemon recorded in `owner.json`. The pid is only signalled when its live command line is this
+ * repository session's `host.js daemon <host.json>`, so a recycled pid is never killed.
+ */
+export async function terminateHostOwner(directory: string): Promise<void> {
+  let pid: unknown;
+  try { pid = (JSON.parse(await readFile(resolve(directory, "owner.json"), "utf8")) as { pid?: unknown }).pid; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+  if (!Number.isSafeInteger(pid) || Number(pid) <= 1) throw new Error("Host owner receipt has no valid pid; preserve state and inspect bflow doctor");
+  const target = Number(pid);
+  if (!alive(target)) return;
+  const command = await commandLine(target);
+  if (!command.includes("host.js") || !command.includes("daemon") || !command.includes(resolve(directory, "host.json")))
+    throw new Error(`Process ${target} is not this session's Bflow host; refusing to signal it`);
+  process.kill(target, "SIGTERM");
+  for (let waited = 0; waited < 5000 && alive(target); waited += 100) await sleep(100);
+  if (alive(target)) {
+    process.kill(target, "SIGKILL");
+    for (let waited = 0; waited < 2000 && alive(target); waited += 100) await sleep(100);
+    if (alive(target)) throw new Error(`Host process ${target} did not exit; state was preserved`);
+  }
+}
 
 /** Legacy prompt-injection path for hosts that return no v3 `launch` profile. Platform-prepared roles never reach it. */
 export async function providerRoleArguments(kind: string, role: string, launch: HostRoleLaunch): Promise<readonly string[]> {

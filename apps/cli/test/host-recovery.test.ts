@@ -123,3 +123,20 @@ describe.skipIf(process.platform === "win32")("persistent host recovery", () => 
     expect(JSON.parse(await readFile(join(input.repository.root, ".bflow/state/operation.json"), "utf8")).phase).toBe("manager_pending");
   });
 });
+
+describe("terminateHostOwner", () => {
+  it("refuses to signal a process that is not this session's host daemon", async () => {
+    const { terminateHostOwner } = await import("../src/agentic-host.js");
+    const dir = await realpath(await mkdtemp("/tmp/bflow-owner-"));
+    cleanup.push(() => rm(dir, { recursive: true, force: true }));
+    await writeFile(join(dir, "owner.json"), JSON.stringify({ pid: process.pid }));
+    await expect(terminateHostOwner(dir)).rejects.toThrow("refusing to signal");
+    expect(() => process.kill(process.pid, 0)).not.toThrow();
+  });
+  it("is a no-op without an owner receipt", async () => {
+    const { terminateHostOwner } = await import("../src/agentic-host.js");
+    const dir = await realpath(await mkdtemp("/tmp/bflow-owner-"));
+    cleanup.push(() => rm(dir, { recursive: true, force: true }));
+    await expect(terminateHostOwner(dir)).resolves.toBeUndefined();
+  });
+});
