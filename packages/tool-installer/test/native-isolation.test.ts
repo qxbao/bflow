@@ -52,7 +52,8 @@ async function superpowersArchive(root: string): Promise<{ archive: string; inte
   await writeFile(join(source, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "superpowers", version: "7.0.0", license: "MIT" }));
   await writeFile(join(source, "skills", "using-superpowers", "SKILL.md"), "---\nname: using-superpowers\ndescription: test\n---\n# Using\n");
   const archive = join(root, "superpowers.tgz");
-  execFileSync("tar", ["-czf", archive, "-C", join(root, "source"), "superpowers-7.0.0"]);
+  // COPYFILE_DISABLE stops macOS bsdtar from adding AppleDouble (._*) entries that the safe extractor correctly rejects.
+  execFileSync("tar", ["-czf", archive, "-C", join(root, "source"), "superpowers-7.0.0"], { env: { ...process.env, COPYFILE_DISABLE: "1" } });
   const integrity = createHash("sha256").update(await readFile(archive)).digest("hex");
   return { archive, integrity };
 }
