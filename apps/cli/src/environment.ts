@@ -271,8 +271,8 @@ export class EnvironmentLifecycle {
   }
   private startupFailureWithCleanup(error: unknown, outcome: string): Error {
     const message = error instanceof Error ? error.message : String(error);
-    if (error instanceof EnvironmentError) return new EnvironmentError({ ...error.contractError, message: `${message} Automatic cleanup ${outcome}.` });
-    return new Error(`${message} Automatic cleanup ${outcome}.`, { cause: error });
+    if (error instanceof EnvironmentError) return new EnvironmentError({ ...error.contractError, message: `${message}\nAutomatic cleanup ${outcome}.` });
+    return new Error(`${message}\nAutomatic cleanup ${outcome}.`, { cause: error });
   }
   private readyPane(pane: PaneBinding): boolean {
     if (["starting", "blocked", "disconnected", "cancelled", "unknown"].includes(pane.transportState)) return false;

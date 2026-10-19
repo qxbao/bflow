@@ -8,7 +8,7 @@ import {
   type RecoveryCheckpoint, type WorkflowRunSnapshot, type CreateCheckpointCommand
 } from "@bflow/contracts";
 import { EnvironmentConfigSchema, EnvironmentError, EnvironmentLifecycle, identifyRepository, main, namedSessionEnvironment, parseCliArgs, parseConfigYaml,
-  renderEnvironmentConfigYaml, runCli, environmentProcessRunner, type EnvironmentProcessRequest, type EnvironmentProcessRunner } from "../src/index.js";
+  renderEnvironmentConfigYaml, runCli, environmentProcessRunner, formatCommandError, type EnvironmentProcessRequest, type EnvironmentProcessRunner } from "../src/index.js";
 import { PaneManagerLifecycleAdapter, openPaneManagerEnvironment } from "../src/pane-manager-integration.js";
 import type { LifecycleHost } from "../src/agentic-host.js";
 
@@ -146,7 +146,7 @@ describe("P12 repository environment lifecycle", () => {
     await writeFile(join(dir, ".bflow/state/session.json"), JSON.stringify(fixture.get()));
     runner.running.add(repository.sessionName);
     vi.mocked(fixture.manager.up).mockImplementation(async () => { throw new Error("retried role startup failed"); });
-    await expect(lifecycle.up()).rejects.toThrow(/retried role startup failed.*Automatic cleanup completed successfully/);
+    await expect(lifecycle.up()).rejects.toThrow(/retried role startup failed\nAutomatic cleanup completed successfully\./);
     expect(runner.running.has(repository.sessionName)).toBe(false);
     expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("down");
     expect(fixture.manager.up).toHaveBeenCalledOnce();
@@ -184,6 +184,23 @@ describe("P12 repository environment lifecycle", () => {
     expect(activate).toHaveBeenCalledWith(expect.objectContaining({ status: "up" }), expect.any(Object));
     expect(fixture.manager.down).toHaveBeenCalledTimes(1);
     expect(runner.running.has(repository.sessionName)).toBe(false);
+  });
+  linuxIt("prints the cleanup outcome on its own line while retaining the typed startup error", async () => {
+    const message = "agent start timeout must be greater than 3000ms and at most 300000ms";
+    const original = new EnvironmentError({ code: "transport_unavailable", retryable: true, message, details: { role: "conversation" } });
+    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime(),
+      quiesce: async () => ({ ok: true, value: undefined }), activate: async () => { throw original; } } });
+    const failure = await composed.up().catch(error => error);
+    expect(failure).toBeInstanceOf(EnvironmentError);
+    if (!(failure instanceof EnvironmentError)) throw failure;
+    expect(failure.contractError).toMatchObject({ code: "transport_unavailable", details: { role: "conversation" } });
+    expect(failure.message).toBe(message + "\nAutomatic cleanup completed successfully.");
+    const human = formatCommandError(failure.contractError, "up", false).split("\n");
+    expect(human[0]).toBe("Error [transport_unavailable]: " + message);
+    expect(human[1]).toBe("Automatic cleanup completed successfully.");
+    const json = JSON.parse(formatCommandError(failure.contractError, "up", true));
+    expect(json.error.message).toBe(failure.message);
+    expect(original.message).toBe(message);
   });
   linuxIt("automatically shuts down when the composed host readiness preflight blocks pane startup", async () => {
     const path = join(dir, ".bflow/config.yml");
@@ -229,7 +246,7 @@ describe("P12 repository environment lifecycle", () => {
   linuxIt("preserves the startup error and operation receipt when automatic shutdown is unsafe", async () => {
     const activate = vi.fn(async () => { throw new Error("original activation failure"); });
     const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, activate } });
-    await expect(composed.up()).rejects.toThrow(/original activation failure.*Automatic cleanup failed.*Runtime is unavailable/);
+    await expect(composed.up()).rejects.toThrow(/original activation failure.*Automatic cleanup failed.*Runtime is unavailable/s);
     expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("manager_pending");
     expect(runner.running.has(repository.sessionName)).toBe(true);
     expect(fixture.manager.down).not.toHaveBeenCalled();
@@ -239,7 +256,7 @@ describe("P12 repository environment lifecycle", () => {
     const runtime = mockRuntime([activeRun]);
     const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime, checkpoint: save,
       quiesce: async () => ({ ok: true, value: undefined }), activate: async () => { throw new Error("activation failure"); } } });
-    await expect(composed.up()).rejects.toThrow(/activation failure.*Automatic cleanup completed successfully/);
+    await expect(composed.up()).rejects.toThrow(/activation failure.*Automatic cleanup completed successfully/s);
     expect(save).toHaveBeenCalledOnce();
     expect(save.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(fixture.manager.down).mock.invocationCallOrder[0]!);
     expect(runner.running.has(repository.sessionName)).toBe(false);
@@ -253,7 +270,7 @@ describe("P12 repository environment lifecycle", () => {
     const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime(),
       quiesce: async () => ({ ok: true, value: undefined }), shutdownHost,
       activate: async () => { throw new Error("original startup failure"); } } });
-    await expect(composed.up()).rejects.toThrow(/original startup failure.*Automatic cleanup failed.*timed out/);
+    await expect(composed.up()).rejects.toThrow(/original startup failure.*Automatic cleanup failed.*timed out/s);
     expect(runner.running.has(repository.sessionName)).toBe(false);
     expect(shutdownHost).toHaveBeenCalledOnce();
     expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("stopping");
@@ -273,7 +290,7 @@ describe("P12 repository environment lifecycle", () => {
     const close = vi.fn(async () => { closed = true; throw new Error("integration close failed"); });
     const withClose = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime(),
       quiesce: async () => ({ ok: true, value: undefined }), close } });
-    await expect(withClose.up()).rejects.toThrow(/role startup failed.*Automatic cleanup completed successfully.*integration close failed/);
+    await expect(withClose.up()).rejects.toThrow(/role startup failed.*Automatic cleanup completed successfully.*integration close failed/s);
     expect(fixture.manager.down).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
     expect(closed).toBe(true);
@@ -373,7 +390,7 @@ describe("P12 repository environment lifecycle", () => {
   });
   linuxIt("retains uncertain startup and forbids automatic resend", async () => {
     vi.mocked(fixture.manager.up).mockImplementation(async () => new Promise(() => {}));
-    await expect(lifecycle.up(500)).rejects.toThrow(/timed out.*no recoverable pane receipt/);
+    await expect(lifecycle.up(500)).rejects.toThrow(/timed out.*\nAutomatic cleanup failed.*no recoverable pane receipt/s);
     expect(runner.running.has(repository.sessionName)).toBe(true);
     expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("manager_pending");
     await expect(lifecycle.up()).rejects.toThrow("no recoverable pane receipt"); expect(fixture.manager.up).toHaveBeenCalledTimes(1);
@@ -386,7 +403,7 @@ describe("P12 repository environment lifecycle", () => {
     vi.mocked(fixture.manager.up).mockResolvedValue({ ok: false, error: {
       code: "unknown_delivery", retryable: false, manualInterventionRequired: true, message: "Startup delivery is unknown"
     } });
-    await expect(lifecycle.up()).rejects.toThrow(/delivery is unknown.*no recoverable pane receipt/i);
+    await expect(lifecycle.up()).rejects.toThrow(/delivery is unknown\nAutomatic cleanup failed.*no recoverable pane receipt/is);
     expect(runner.running.has(repository.sessionName)).toBe(true);
     expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("manager_pending");
     expect(fixture.manager.up).toHaveBeenCalledOnce();

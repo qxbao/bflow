@@ -90,6 +90,10 @@ of a separate 30-second limit. Cancellation or deadline expiry prevents pane
 creation; cleanup drains pending preparation before revoking session resources.
 Preparation completes before the CLI records a pane dispatch intent. A timeout
 at that stage can therefore use the host shutdown barrier without a pane receipt.
+Each native Herdr agent-start wait is capped at 300000ms and bounded by the
+remaining lifecycle deadline, even when the repository config allows a 600000ms
+session startup. Insufficient launch budget fails locally before dispatch. Startup
+errors and automatic-cleanup outcomes are printed on separate lines.
 `down` reopens the existing host with its persisted platform and policy, even if
 the desired configuration has changed since startup.
 Startup readiness errors retain the per-role diagnostic report (up to 256 lines /
