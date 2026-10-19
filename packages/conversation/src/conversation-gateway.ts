@@ -428,18 +428,19 @@ export class ConversationGateway {
       const classification = classificationResult.value;
 
       // 5. Determine stable correlationId
-      let correlationId = input.correlationId;
-      if (!correlationId && classification.targetCorrelationId) {
-        correlationId = classification.targetCorrelationId;
-      }
-      if (!correlationId && classification.intent !== "workflow_request") {
-        // Look up active pending clarification if user is answering
+      const isIndependentRequest = (classification.intent === "workflow_request" || classification.intent === "clarify") && !classification.targetCorrelationId;
+      const inputCorrelationInUse = input.correlationId !== undefined &&
+        (this.snapshot!.pendingClarifications[input.correlationId] !== undefined || this.snapshot!.workflows[input.correlationId] !== undefined);
+      let correlationId = classification.targetCorrelationId ??
+        (isIndependentRequest && inputCorrelationInUse ? undefined : input.correlationId);
+      if (!correlationId && classification.intent !== "workflow_request" && classification.intent !== "clarify") {
+        // Replies may use current conversation context; fresh clarifications get their own id.
         const activeClarifications = Object.keys(this.snapshot!.pendingClarifications);
         if (activeClarifications.length > 0) {
           correlationId = activeClarifications[0];
         }
       }
-      if (!correlationId && classification.intent !== "workflow_request" && this.snapshot!.session.activeRunId) {
+      if (!correlationId && classification.intent !== "workflow_request" && classification.intent !== "clarify" && this.snapshot!.session.activeRunId) {
         correlationId = this.snapshot!.runIdToCorrelationId[this.snapshot!.session.activeRunId];
       }
       if (!correlationId) {
@@ -567,10 +568,11 @@ export class ConversationGateway {
             isRequirementChange: false
           };
 
+          const previousClarification = this.snapshot!.pendingClarifications[correlationId];
           const pendingClarification: PendingClarificationContext = {
             correlationId,
-            originalRequestText: input.content,
-            accumulatedDetails: [input.content],
+            originalRequestText: previousClarification?.originalRequestText ?? input.content,
+            accumulatedDetails: [...(previousClarification?.accumulatedDetails ?? []), input.content],
             unresolvedQuestions: questions.length > 0 ? [...questions] : ["Vui lòng xác định phạm vi"],
             draft,
             createdAt: now,
@@ -666,9 +668,10 @@ export class ConversationGateway {
             sender: "conversation",
             recipient: "user",
             intent: "delegation_handoff",
-            content: isRequirementChange
-              ? `Tôi đã cập nhật yêu cầu (phiên bản ${revision}) và chuyển tiếp bản sửa đổi sang Coordinator Agent.`
-              : `Yêu cầu "${draft.title}" đã được đóng gói thành DelegationRequest và bàn giao thành công cho Coordinator Agent. Tôi sẽ theo dõi và cập nhật tiến độ thực chất cho bạn.`,
+            content: (isRequirementChange
+              ? `Tôi đã gửi bản cập nhật yêu cầu (phiên bản ${revision}) qua Herdr; đang chờ Runtime/Coordinator xác nhận tiếp nhận.`
+              : `Yêu cầu "${draft.title}" đã được gửi qua Herdr; đang chờ Runtime/Coordinator xác nhận tiếp nhận. Tôi sẽ cập nhật tiến độ khi có thông báo.`) +
+              (classification.followUpContents?.length ? ` Yêu cầu tiếp theo được lưu vào hàng đợi để xử lý riêng: ${classification.followUpContents.join("; ")}` : ""),
             artifactReferences: [],
             createdAt: now
           };
@@ -738,6 +741,10 @@ export class ConversationGateway {
             workflows: updatedWorkflows,
             runIdToCorrelationId: updatedRunIdToCorrelationId,
             pendingClarifications: updatedPendingClarifications,
+            pendingInboundQueue: [...this.snapshot!.pendingInboundQueue, ...(classification.followUpContents ?? []).map(content => ({
+              queueId: this.generateId("queue-followup"), kind: "user_turn" as const, enqueuedAt: now,
+              input: { sessionId: input.sessionId, content, provenance: input.provenance, inputArtifacts: input.inputArtifacts }
+            }))],
             deliveryRecords: this.config.bridge.getAllDeliveryRecords()
           };
 
@@ -954,7 +961,7 @@ export class ConversationGateway {
             sender: "conversation",
             recipient: "user",
             intent: "progress_update",
-            content: `Quyết định phê duyệt [${approvalDecision.decision.toUpperCase()}] cho "${targetApproval.reason}" đã được chuyển tiếp thành công đến Coordinator.`,
+            content: `Quyết định phê duyệt [${approvalDecision.decision.toUpperCase()}] cho "${targetApproval.reason}" đã được gửi qua Herdr; đang chờ Runtime/Coordinator xác nhận.`,
             artifactReferences: [],
             createdAt: now
           };
@@ -1154,7 +1161,7 @@ export class ConversationGateway {
             sender: "conversation",
             recipient: "user",
             intent: "progress_update",
-            content: `Yêu cầu hủy workflow run ${targetRunId} đã được gửi đến Coordinator Agent. Quá trình hủy đang được thực thi an toàn.`,
+            content: `Yêu cầu hủy workflow run ${targetRunId} đã được gửi qua Herdr; đang chờ Runtime/Coordinator xác nhận kết quả hủy.${classification.followUpContents?.length ? " Yêu cầu tiếp theo được lưu vào hàng đợi để xử lý riêng: " + classification.followUpContents.join("; ") : ""}`,
             artifactReferences: [],
             createdAt: now
           };
@@ -1190,6 +1197,10 @@ export class ConversationGateway {
             session: updatedSession,
             messages: [...this.snapshot!.messages, userMsg, agentReply],
             workflows: updatedWorkflows,
+            pendingInboundQueue: [...this.snapshot!.pendingInboundQueue, ...(classification.followUpContents ?? []).map(content => ({
+              queueId: this.generateId("queue-followup"), kind: "user_turn" as const, enqueuedAt: now,
+              input: { sessionId: input.sessionId, content, provenance: input.provenance, inputArtifacts: input.inputArtifacts }
+            }))],
             deliveryRecords: this.config.bridge.getAllDeliveryRecords()
           };
 

@@ -200,3 +200,36 @@ console.log("Phản hồi của Chat:", response.value.agentReply.content);
 - **Xác thực dữ liệu đầu vào**: `UserTurnInputSchema` (strict Zod) được áp dụng cho mọi `UserTurnInput` trong `ConversationGateway`; đầu vào sai trả về lỗi `validation`. Mỗi `ConversationMessage` được kiểm tra bằng `ConversationMessageSchema` trước khi lưu. `ConversationContextSnapshotSchema` kiểm tra nghiêm ngặt snapshot khi nạp lại ngữ cảnh. Các schema khác (`MessageProvenanceSchema`, `ExtractedRequirementDraftSchema`, `PendingClarificationContextSchema`) được xuất từ `types.ts`.
 - **Prompt hệ thống (`prompts.ts`, `agents/chat/system-prompt.md`)**: mục "User Interaction & Autonomous Specialist Delegation Boundary" nêu rõ Conversation là điểm tương tác người dùng duy nhất; `coordinator`, `analyst`, `architect`, `planner`, `developer`, `reviewer`, `verifier`/`qa` là tác tử thực thi tự trị, không đối thoại với người dùng. Chỉ Conversation được hỏi làm rõ và trung chuyển `approval.request` / `approval.decision`. Prompt của Conversation không được chứa khối chính sách "non-user-facing execution agent" của các vai trò khác (xem `validateAutonomousRolePrompt` trong `@bflow/agent-registry`).
 - Thông điệp từ vai trò chuyên môn tới `user` không được chấp nhận ở tầng Herdr; mọi yêu cầu làm rõ hoặc phê duyệt phải đi qua Coordinator tới Conversation.
+
+## Intent routing guarantees and limits
+
+Workflow creation requires an affirmative implementation request and explicit path scope.
+Informational questions and prompt drafting stay in Conversation. Investigation-only requests
+retain a private `spike` requirement draft without dispatching an implementation workflow.
+For a mixed bugfix and investigation request, separate spike sections become
+`metadata.investigationTasks` with `codeChangesAuthorized: false`; their paths are excluded
+from mutation scope. Negative acceptance examples do not revoke the bugfix instruction.
+Scope extraction records paths supplied by the user; it does not inspect repository existence
+and never substitutes `packages/app` for missing scope. Unknown scope is clarified.
+
+A new imperative starts a separate request, including when the caller supplies an existing
+clarification correlation. Short choices without a pending specialist option mapping cannot
+create a run. Ambiguous clarification replies preserve the original request. Existing strict
+specialist decision matching and authenticated approval checks still apply.
+
+Cancellation is recognized as a command outside quoted text and examples. Explicit run IDs
+in the message take precedence over the caller's active-run hints. Descriptive targets must
+resolve to exactly one known unfinished workflow; unknown, multiple, or ambiguous targets
+require clarification before any cancellation. A code request and cancellation in either clear order persist the remaining content through
+the existing FIFO as an independent user turn. All cancellation targets are validated before
+the first action; unknown targets prevent both side effects.
+The reply identifies the follow-up as queued; transport handoff remains distinct from
+Runtime/Coordinator acceptance. Ambiguous action ordering requires clarification. Plural old-run requests require explicit
+target selection and never fall back to the active run.
+
+Paste wrapper tags are removed from delegated objectives and acceptance criteria. Numbered
+and bulleted requested cases become separate criteria; prose clauses remain user-supplied
+criteria without invented typecheck/test boilerplate. Explicit `full` SDD is preserved.
+
+These are deterministic local routing guarantees verified with package tests and the fake
+transport. They do not establish live provider/Herdr acceptance or full SDLC completion.

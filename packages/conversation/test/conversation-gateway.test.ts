@@ -1363,7 +1363,7 @@ describe("P14 Conversation Agent & Delegation Gateway Test Suite", () => {
       // Spike + low priority
       const spikeTurn = await gateway.handleUserTurn({
         sessionId,
-        content: "Khi nào rảnh thử nghiệm benchmark trong packages/core",
+        content: "Khi nào rảnh triển khai prototype benchmark trong packages/core",
         provenance: { origin: "user", authenticatedUser: true }
       });
       expect(spikeTurn.ok).toBe(true);

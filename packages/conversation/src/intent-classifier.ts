@@ -1,7 +1,6 @@
 import type {
   ConversationContextSnapshot,
   ExtractedApprovalInput,
-  ExtractedCancellationInput,
   ExtractedRequirementDraft,
   IntentClassificationResult,
   OperationResult,
@@ -15,7 +14,7 @@ import { isExpiredUserDecision, isUserDecisionRequest, resolveUserDecisionReply 
 const ZERO_WIDTH_STRIP_REGEX = /[\u200B-\u200D\uFEFF\u00AD]/g;
 
 function sanitizeInputText(raw: string): string {
-  return raw.replace(ZERO_WIDTH_STRIP_REGEX, "").trim();
+  return raw.replace(ZERO_WIDTH_STRIP_REGEX, "").replace(/<\/?pasted_content\b[^>]*>/gi, "").trim();
 }
 
 function normalizeForMatching(text: string): string {
@@ -31,8 +30,12 @@ function extractExplicitId(text: string, prefix: string): string | undefined {
 }
 
 function extractFilePaths(text: string): readonly string[] {
-  const pathRegex = /\b(?:packages\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|src\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|apps\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|[a-zA-Z0-9_.-]+\.(?:ts|js|json|md|yaml|yml))\b/g;
-  const matches = text.match(pathRegex);
+  const pathRegex = /(?<![\w/])(?:(?:packages|src|apps|tests|test|scripts|lib|components|skills|agents|docs)\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|[a-zA-Z0-9_.-]+\.(?:ts|tsx|js|jsx|json|md|yaml|yml))\b/g;
+  // A path in an exclusion, example or prohibited default is not affirmative scope.
+  const scopedText = text.split(/\n+|;\s*|(?<=[.!?])\s+/u).map(clause =>
+    clause.split(/(?<!\p{L})(?:không mặc định|không(?: được)? (?:sửa|thay đổi|dùng)|đừng (?:sửa|dùng)|ngoại trừ|out of scope|do not (?:edit|change|use)|never (?:default|use)|not (?:default|in)|ví dụ|for example)(?!\p{L})/iu)[0] ?? ""
+  ).join("\n");
+  const matches = scopedText.match(pathRegex);
   if (!matches || matches.length === 0) {
     return [];
   }
@@ -40,57 +43,100 @@ function extractFilePaths(text: string): readonly string[] {
   return unique;
 }
 
+// Commands are recognized outside quotations/examples, never by a keyword buried in data.
+function commandText(text: string): string {
+  return text.replace(/```[\s\S]*?```|`[^`]*`|"[^"\n]*"|'[^'\n]*'|“[^”]*”|‘[^’]*’/g, match => " ".repeat(match.length));
+}
+
+function requestBody(text: string): string {
+  return normalizeForMatching(commandText(text)).replace(/^(?:(?:hãy|vui lòng|làm ơn|please|tôi muốn|tôi cần|giúp tôi|bạn hãy|can you|could you|khẩn cấp|ưu tiên cao|khi nào rảnh)\s+)+/u, "");
+}
+
+/** Keep investigation-only sections as separate task details, not mutation scope. */
+function separateInvestigations(text: string): { changeText: string; investigations: readonly { objective: string; affectedPaths: readonly string[]; codeChangesAuthorized: false }[] } {
+  const changeLines: string[] = [];
+  const investigationSections: string[] = [];
+  let section: string[] | undefined;
+  for (const line of text.split(/\n/u)) {
+    const heading = line.replace(/^\s*(?:#{1,6}\s*|(?:\d+[.)]|[-*•])\s*)?/, "");
+    const isInvestigation = /^(?:spike|khảo sát|điều tra|investigate|research)(?!\p{L})/iu.test(heading);
+    const nextTask = /^\s*(?:#{1,6}\s*|\d+[.)]\s*)/.test(line) && !isInvestigation;
+    if (section && nextTask) {
+      investigationSections.push(section.join("\n"));
+      section = undefined;
+    }
+    if (isInvestigation) {
+      if (section) investigationSections.push(section.join("\n"));
+      section = [heading];
+    } else if (section) section.push(line);
+    else changeLines.push(line);
+  }
+  if (section) investigationSections.push(section.join("\n"));
+  return { changeText: changeLines.join("\n"), investigations: investigationSections.map(objective => ({ objective, affectedPaths: extractFilePaths(objective), codeChangesAuthorized: false })) };
+}
+
+function hasChangeAuthority(text: string): boolean {
+  const changeText = separateInvestigations(text).changeText;
+  // Negative acceptance examples and scoped exclusions do not revoke the top-level request.
+  const authorityLines = changeText.split(/\n/u).filter(line => !/^\s*(?:[-*•]|\d+[.)])\s+/.test(line)).join("\n");
+  return /^(?:bugfix|triển khai|viết|sửa|tạo|xây dựng|thêm|cập nhật|xóa|tối ưu|tái cấu trúc|build|implement|refactor|fix|add|update|remove|delete|change requirement|thay đổi yêu cầu)(?!\p{L})/iu.test(requestBody(changeText)) &&
+    !/(?:chưa|không|đừng)\s+(?:sửa|viết|triển khai|thay đổi)|(?:do not|don't)\s+(?:edit|change|implement)/iu.test(commandText(authorityLines));
+}
+
+function clarification(question: string): IntentClassificationResult {
+  return { intent: "clarify", confidence: 0.9, rationale: "Explicit scope or target is needed before side effects.", clarifyingQuestions: [question] };
+}
+
 function detectCancellation(
   input: UserTurnInput,
   context: ConversationContextSnapshot
 ): { matched: boolean; result?: IntentClassificationResult } {
-  const rawContent = input.content ?? "";
-  const norm = normalizeForMatching(rawContent);
-
-  // Guard: If it is an approval rejection, do NOT classify as cancellation
-  const isApprovalReject =
-    /(?<!\p{L})(?:từ chối phê duyệt|từ chối approval|không duyệt|bác bỏ phê duyệt|reject approval|reject apr-)(?!\p{L})/iu.test(
-      norm
-    );
-  if (isApprovalReject) {
-    return { matched: false };
+  const raw = sanitizeInputText(input.content);
+  // Split at command boundaries only. Keep acceptance lists and quoted punctuation intact.
+  const masked = commandText(raw);
+  const boundary = /[;\n]+|[.!?]\s+|\s+(?:và|rồi|sau đó|and|then)\s+(?=(?:hãy\s+)?(?:sửa|triển khai|thêm|tạo|fix|implement|add|hủy|cancel|stop|abort)\b)/giu;
+  const spans: string[] = [];
+  let start = 0;
+  for (const match of masked.matchAll(boundary)) {
+    spans.push(raw.slice(start, match.index).trim());
+    start = match.index + match[0].length;
   }
-
-  const cancelRegex =
-    /(?<!\p{L})(?:cancel|cancel workflow|stop run|stop workflow|abort|abort workflow|terminate run|kill workflow|hủy|hủy bỏ|hủy yêu cầu|hủy workflow|hủy run|dừng workflow|dừng chạy|ngừng chạy|dừng task|ngừng workflow)(?!\p{L})/iu;
-
-  if (cancelRegex.test(norm)) {
-    const explicitRunId =
-      input.runId ?? extractExplicitId(rawContent, "run-") ?? context.session.activeRunId;
-    const explicitTaskId = extractExplicitId(rawContent, "task-");
-
-    const reason = rawContent.trim();
-    const cancellationInput: ExtractedCancellationInput = {
-      ...(explicitRunId !== undefined ? { runId: explicitRunId } : {}),
-      ...(explicitTaskId !== undefined ? { taskId: explicitTaskId } : {}),
-      reason
-    };
-
-    const targetCorrelationId =
-      explicitRunId !== undefined
-        ? context.runIdToCorrelationId[explicitRunId] ?? context.session.metadata?.correlationId?.toString()
-        : undefined;
-
-    return {
-      matched: true,
-      result: {
-        intent: "cancellation_request",
-        confidence: 0.95,
-        rationale: "User explicitly requested cancellation or abort of active run/task.",
-        clarifyingQuestions: [],
-        cancellationInput,
-        ...(targetCorrelationId !== undefined ? { targetCorrelationId } : {}),
-        ...(explicitRunId !== undefined ? { targetRunId: explicitRunId } : {})
-      }
-    };
+  spans.push(raw.slice(start).trim());
+  const cancelCommand = /^(?:cancel|stop|abort|terminate|kill|hủy(?: bỏ)?|dừng|ngừng)(?!\p{L})/iu;
+  const cancelIndex = spans.findIndex(part => cancelCommand.test(requestBody(part)));
+  if (cancelIndex < 0 || /(?:ví dụ|example|e\.g\.)\s*(?:như sau)?\s*:/iu.test(masked.slice(0, masked.indexOf(spans[cancelIndex]!)))) return { matched: false };
+  const command = spans[cancelIndex]!;
+  const ids = [...new Set(command.match(/\brun-[a-zA-Z0-9_-]+\b/g) ?? [])];
+  const workflows = Object.values(context.workflows).filter(w => !["completed", "failed", "cancelled"].includes(w.sdlcStatus));
+  let runId: string | undefined;
+  if (ids.length === 1) runId = ids[0];
+  else if (ids.length > 1) return { matched: true, result: clarification("Vui lòng xác nhận từng runId cần hủy; chưa hủy run nào.") };
+  else {
+    const description = requestBody(command).replace(cancelCommand, "").replace(/(?<!\p{L})(?:đang chạy|hiện tại|workflow|run|task|yêu cầu|chạy|the|active|current)(?!\p{L})/giu, " ").trim();
+    if (!description) runId = input.runId ?? context.session.activeRunId;
+    else {
+      const old = /^(?:cũ|trước|trước đó|old|previous)$/iu.test(description);
+      const candidates = old ? workflows.filter(w => w.runId !== context.session.activeRunId) :
+        workflows.filter(w => normalizeForMatching(w.title).includes(description));
+      if (candidates.length === 1) runId = candidates[0]!.runId;
+    }
   }
-
-  return { matched: false };
+  const target = workflows.find(w => w.runId === runId);
+  if (!target) return { matched: true, result: clarification("Bạn muốn hủy workflow nào? Vui lòng cung cấp runId chính xác; chưa hủy run nào.") };
+  if (cancelIndex > 0) {
+    const preceding = spans.slice(0, cancelIndex).filter(Boolean).join("; ");
+    if (!hasChangeAuthority(preceding)) return { matched: true, result: clarification("Vui lòng nêu rõ yêu cầu cần xử lý trước khi hủy workflow.") };
+    const primary = classifyWorkflowOrClarify(preceding);
+    if (primary.intent !== "workflow_request") return { matched: true, result: primary };
+    return { matched: true, result: { ...primary, followUpContents: [spans.slice(cancelIndex).join("; ")] } };
+  }
+  const remaining = spans.slice(1).filter(Boolean).join("; ");
+  return { matched: true, result: {
+    intent: "cancellation_request", confidence: 0.95, rationale: "An explicit cancellation command resolved to one known workflow.", clarifyingQuestions: [],
+    cancellationInput: { runId: target.runId, reason: command, ...(extractExplicitId(command, "task-") ? { taskId: extractExplicitId(command, "task-")! } : {}) },
+    targetRunId: target.runId, targetCorrelationId: target.correlationId,
+    ...(remaining ? { followUpContents: [remaining] } : {})
+  } };
 }
 
 function detectApproval(
@@ -368,7 +414,7 @@ function detectActiveRequirementChange(
   input: UserTurnInput,
   context: ConversationContextSnapshot
 ): { matched: boolean; result?: IntentClassificationResult } {
-  const rawContent = input.content ?? "";
+  const rawContent = sanitizeInputText(input.content ?? "");
   const norm = normalizeForMatching(rawContent);
 
   // Check if there is an active workflow
@@ -386,17 +432,22 @@ function detectActiveRequirementChange(
   if (changeRequirementRegex.test(norm)) {
     // Resolve target active workflow in priority order:
     // 1. Explicit run-... or corr-... mentioned in input.content or input.runId / input.correlationId
-    const explicitRunId = input.runId ?? extractExplicitId(rawContent, "run-");
-    const explicitCorrId = input.correlationId ?? extractExplicitId(rawContent, "corr-");
+    const explicitRunId = extractExplicitId(rawContent, "run-") ?? input.runId;
+    const explicitCorrId = extractExplicitId(rawContent, "corr-") ?? input.correlationId;
 
     let activeWf: WorkflowRequestContext | undefined;
 
     if (explicitRunId) {
       activeWf = activeWorkflows.find((w) => w.runId === explicitRunId);
     }
+    if (explicitRunId && !activeWf) {
+      return { matched: true, result: clarification("Không tìm thấy runId được chỉ định. Vui lòng xác nhận mục tiêu.") };
+    }
     if (!activeWf && explicitCorrId) {
       activeWf = activeWorkflows.find((w) => w.correlationId === explicitCorrId);
     }
+
+    if ((explicitRunId || explicitCorrId) && !activeWf) return { matched: true, result: clarification("Không tìm thấy workflow được chỉ định. Vui lòng xác nhận runId.") };
 
     // 2. Active workflow matching context.session.activeRunId
     if (!activeWf && context.session.activeRunId) {
@@ -413,21 +464,19 @@ function detectActiveRequirementChange(
     }
 
     const paths = extractFilePaths(rawContent);
-    const affectedPaths = paths.length > 0 ? paths : ["packages/app"];
+    const affectedPaths = paths.length > 0 ? paths : extractFilePaths(activeWf.objective);
+    if (affectedPaths.length === 0) return { matched: true, result: clarification("Vui lòng xác định đường dẫn bị ảnh hưởng của yêu cầu thay đổi.") };
 
     const draft: ExtractedRequirementDraft = {
       title: `Cập nhật yêu cầu: ${rawContent.slice(0, 50).trim()}`,
       objective: rawContent.trim(),
       kind: activeWf.kind,
-      sddLevel: activeWf.sddLevel,
+      sddLevel: /\bfull\b/iu.test(norm) ? "full" : activeWf.sddLevel,
       priority: activeWf.priority,
       scopeDefined: true,
       isLargeTask: false,
       affectedPaths,
-      acceptanceCriteriaDescriptions: [
-        `Yêu cầu cập nhật từ người dùng: ${rawContent.trim()}`,
-        "Đảm bảo tương thích và vượt qua kiểm thử hiện tại"
-      ],
+      acceptanceCriteriaDescriptions: rawContent.split(/;\s*|\n+/).map(line => line.replace(/^[-*•]\s+/, "").trim()).filter(Boolean),
       isRequirementChange: true,
       targetRunId: activeWf.runId,
       targetCorrelationId: activeWf.correlationId
@@ -451,83 +500,28 @@ function detectActiveRequirementChange(
 }
 
 function resolvePendingClarification(
-  rawContent: string,
+  input: UserTurnInput,
   context: ConversationContextSnapshot
 ): IntentClassificationResult | undefined {
-  const pendingKeys = Object.keys(context.pendingClarifications);
-  const isAwaiting =
-    context.session.status === "awaiting_user_clarification" || pendingKeys.length > 0;
-
-  if (!isAwaiting) {
-    return undefined;
+  const content = sanitizeInputText(input.content);
+  const pending = input.correlationId ? context.pendingClarifications[input.correlationId] :
+    Object.values(context.pendingClarifications).length === 1 ? Object.values(context.pendingClarifications)[0] : undefined;
+  if (!pending) return undefined;
+  if (!hasChangeAuthority(pending.originalRequestText)) return undefined;
+  // A fresh imperative is a new request. Only a correlated reply or explicit scope answer
+  // continues the old request; choices without a defined option mapping confer no authority.
+  if (hasChangeAuthority(content)) return undefined;
+  const paths = extractFilePaths(content);
+  const isScopeAnswer = /^(?:phạm vi|scope|module|package|trong|tại|in |within )/iu.test(content);
+  if ((!isScopeAnswer && input.correlationId !== pending.correlationId) || paths.length === 0 || content.length < 20) {
+    return { ...clarification("Vui lòng nêu phạm vi và kết quả mong muốn, hoặc gửi một yêu cầu mới đầy đủ."), requirementDraft: pending.draft, targetCorrelationId: pending.correlationId };
   }
-
-  const pending =
-    (context.session.metadata?.activeCorrelationId
-      ? context.pendingClarifications[context.session.metadata.activeCorrelationId.toString()]
-      : undefined) ?? Object.values(context.pendingClarifications)[0];
-
-  if (!pending) {
-    return undefined;
-  }
-
-  const norm = normalizeForMatching(rawContent);
-
-  // If user says "tùy bạn", "idk", "chưa rõ", "sao cũng được", still ambiguous
-  const stillAmbiguous =
-    /^(?:tùy bạn|sao cũng được|idk|chưa rõ|không biết|whatever|tùy chọn|chưa xác định)$/i.test(
-      norm
-    );
-
-  if (stillAmbiguous) {
-    return {
-      intent: "clarify",
-      confidence: 0.85,
-      rationale:
-        "User responded without concrete scope details to pending clarification.",
-      clarifyingQuestions: [
-        "Vui lòng chỉ định rõ module hoặc thư mục mục tiêu cần thực hiện (ví dụ: packages/auth hoặc src/pricing.ts).",
-        "Tiêu chí nghiệm thu cốt lõi bạn mong muốn là gì?"
-      ],
-      targetCorrelationId: pending.correlationId
-    };
-  }
-
-  // User provided concrete details to answer clarification
-  const combinedText = `${pending.originalRequestText} | Bổ sung: ${rawContent.trim()}`;
-  const extractedPaths = extractFilePaths(rawContent);
-  const affectedPaths =
-    extractedPaths.length > 0
-      ? extractedPaths
-      : pending.draft.affectedPaths.length > 0
-      ? pending.draft.affectedPaths
-      : ["packages/app"];
-
-  const draft: ExtractedRequirementDraft = {
-    title: pending.draft.title,
-    objective: combinedText,
-    kind: pending.draft.kind,
-    sddLevel: pending.draft.sddLevel,
-    priority: pending.draft.priority,
-    scopeDefined: true,
-    isLargeTask: false,
-    affectedPaths,
-    acceptanceCriteriaDescriptions: [
-      ...pending.draft.acceptanceCriteriaDescriptions,
-      `Bổ sung chi tiết: ${rawContent.trim()}`
-    ],
-    isRequirementChange: false,
-    targetCorrelationId: pending.correlationId
-  };
-
-  return {
-    intent: "workflow_request",
-    confidence: 0.9,
-    rationale: "Clarification resolved with actionable user scope details.",
-    clarifyingQuestions: [],
-    requirementDraft: draft,
-    targetCorrelationId: pending.correlationId
-  };
+  const combined = `${sanitizeInputText(pending.originalRequestText)}\n${content}`;
+  const result = classifyWorkflowOrClarify(combined);
+  if (!result.requirementDraft) return { ...result, targetCorrelationId: pending.correlationId };
+  return { ...result, requirementDraft: { ...result.requirementDraft, title: pending.draft.title,
+    sddLevel: pending.draft.sddLevel === "full" ? "full" : result.requirementDraft.sddLevel,
+    targetCorrelationId: pending.correlationId }, targetCorrelationId: pending.correlationId };
 }
 
 function classifyWorkflowOrClarify(
@@ -535,23 +529,9 @@ function classifyWorkflowOrClarify(
 ): IntentClassificationResult {
   const norm = normalizeForMatching(rawContent);
 
-  // Large unscoped task indicators
-  const veryVaguePatterns = [
-    /^(?:thêm tính năng mới|thêm tính năng|sửa lỗi|sửa bug|fix bug|tối ưu hệ thống|làm lại toàn bộ hệ thống|xây dựng hệ thống|refactor toàn bộ project|refactor project|build authentication|cải thiện hiệu năng)$/i,
-    /^(?:tạo app|viết ứng dụng|làm website|làm website bán hàng|build full app)$/i
-  ];
-
-  const hasVeryVague = veryVaguePatterns.some((pattern) => pattern.test(norm));
-  const broadSystemKeywords =
-    /(?<!\p{L})(?:toàn bộ|entire system|all modules|hệ thống lớn|kiến trúc mới|toàn bộ project|hệ thống thanh toán)(?!\p{L})/iu.test(
-      norm
-    );
-
-  const extractedPaths = extractFilePaths(rawContent);
-  const hasConcretePaths = extractedPaths.length > 0;
-  const isShortWithoutScope = norm.length < 35 && !hasConcretePaths;
-
-  if (hasVeryVague || (broadSystemKeywords && !hasConcretePaths) || (isShortWithoutScope && !norm.includes("tại") && !norm.includes("trong"))) {
+  const { changeText, investigations } = separateInvestigations(rawContent);
+  const extractedPaths = extractFilePaths(changeText.trim() ? changeText : rawContent);
+  if (extractedPaths.length === 0) {
     // Large unscoped task -> Ask only for critical information
     return {
       intent: "clarify",
@@ -567,7 +547,7 @@ function classifyWorkflowOrClarify(
 
   // Actionable workflow request: extract kind
   let kind: WorkflowRequestKind = "feature";
-  if (/(?<!\p{L})(?:sửa lỗi|fix|bug|error|issue|vấn đề|sửa)(?!\p{L})/iu.test(norm)) {
+  if (/(?<!\p{L})(?:sửa lỗi|bugfix|fix|bug|error|issue|vấn đề|sửa)(?!\p{L})/iu.test(norm)) {
     kind = "bugfix";
   } else if (/(?<!\p{L})(?:refactor|tái cấu trúc|cleanup|tối ưu cấu trúc)(?!\p{L})/iu.test(norm)) {
     kind = "refactor";
@@ -595,18 +575,13 @@ function classifyWorkflowOrClarify(
     priority = "low";
   }
 
-  const affectedPaths = extractedPaths.length > 0 ? extractedPaths : ["packages/app"];
+  const affectedPaths = extractedPaths;
 
-  const criteria: string[] = [
-    `Triển khai đúng mục tiêu: ${rawContent.trim()}`,
-    "Đảm bảo typecheck và các bài test liên quan pass 100%"
-  ];
-
-  if (kind === "bugfix") {
-    criteria.push("Không gây regression cho các trường hợp biên hiện tại");
-  } else if (kind === "feature") {
-    criteria.push("Cung cấp đầy đủ unit/integration tests bao phủ logic mới");
-  }
+  // Preserve individual supplied cases. A single prose request remains one criterion;
+  // never manufacture a generic test/typecheck criterion as a substitute for user intent.
+  const cases = changeText.split(/\n+/).map(line => line.trim()).filter(line => /^(?:[-*•]|\d+[.)])\s+/.test(line))
+    .map(line => line.replace(/^(?:[-*•]|\d+[.)])\s+/, "").trim());
+  const criteria = cases.length > 0 ? cases : changeText.split(/;\s*|\n+/).map(line => line.trim()).filter(Boolean);
 
   const titlePrefix =
     kind === "bugfix"
@@ -627,7 +602,8 @@ function classifyWorkflowOrClarify(
     isLargeTask: false,
     affectedPaths,
     acceptanceCriteriaDescriptions: criteria,
-    isRequirementChange: false
+    isRequirementChange: false,
+    ...(investigations.length > 0 ? { investigationTasks: investigations } : {})
   };
 
   return {
@@ -658,26 +634,40 @@ export function classifyUserIntent(
     };
   }
 
+  // Preserve exact specialist options and user-decision authority before generic language routing.
+  if (!/^(?:cancel|stop|abort|hủy|dừng|ngừng)(?!\p{L})/iu.test(requestBody(content))) {
+    const userDecisionCheck = detectUserDecision(content, context);
+    if (userDecisionCheck.matched && userDecisionCheck.result) {
+      return { ok: true, value: userDecisionCheck.result };
+    }
+  }
+
+  // Informational/drafting language cannot authorize a mutation even when it quotes commands.
+  const body = requestBody(content);
+  const drafting = /^(?:soạn|draft|compose|prepare|viết(?: sẵn)?)\s+(?:(?:sẵn|a|the|một)\s+)?(?:prompt|câu lệnh|tin nhắn|message)/iu.test(body);
+  const investigating = /^(?:spike|khảo sát|điều tra|phân tích|investigate|research|thử nghiệm|benchmark)(?!\p{L})/iu.test(body);
+  const informational = /^(?:giải thích|explain|bạn có những|bạn có các|what|which|how|why|liệt kê|list|show me)(?!\p{L})/iu.test(body);
+  if (drafting || investigating || (informational && !detectStatusQuery(content, context).matched)) {
+    const draft = investigating ? classifyWorkflowOrClarify(content).requirementDraft : undefined;
+    return { ok: true, value: { intent: "conversation_only", confidence: 0.95, rationale: "Conversation or investigation request carries no implementation authority.", clarifyingQuestions: [],
+      directReply: investigating ? `Ghi nhận yêu cầu khảo sát: ${content}. Chưa có yêu cầu triển khai mã nguồn.` : `Yêu cầu hội thoại/khái niệm: ${content}`,
+      ...(draft ? { requirementDraft: { ...draft, kind: "spike" } } : {}) } };
+  }
+
   // 1. Cancellation request
-  const cancellationCheck = detectCancellation(input, context);
+  const cancellationCheck = detectCancellation({ ...input, content }, context);
   if (cancellationCheck.matched && cancellationCheck.result) {
     return { ok: true, value: cancellationCheck.result };
   }
 
-  // 2a. Specialist user decision (options are matched strictly; never defaults)
-  const userDecisionCheck = detectUserDecision(content, context);
-  if (userDecisionCheck.matched && userDecisionCheck.result) {
-    return { ok: true, value: userDecisionCheck.result };
-  }
-
   // 2. Approval response
-  const approvalCheck = detectApproval(content, context);
+  const approvalCheck = hasChangeAuthority(content) ? { matched: false } : detectApproval(content, context);
   if (approvalCheck.matched && approvalCheck.result) {
     return { ok: true, value: approvalCheck.result };
   }
 
   // 3. Status query
-  const statusCheck = detectStatusQuery(content, context);
+  const statusCheck = hasChangeAuthority(content) ? { matched: false } : detectStatusQuery(content, context);
   if (statusCheck.matched && statusCheck.result) {
     return { ok: true, value: statusCheck.result };
   }
@@ -689,16 +679,23 @@ export function classifyUserIntent(
   }
 
   // 5. Case A: Resolving pending clarification
-  const pendingClarificationResult = resolvePendingClarification(content, context);
+  const pendingClarificationResult = resolvePendingClarification({ ...input, content }, context);
   if (pendingClarificationResult) {
     return { ok: true, value: pendingClarificationResult };
   }
 
   // 6. Case B: Mid-workflow requirement change
-  const activeChangeCheck = detectActiveRequirementChange(input, context);
+  const activeChangeCheck = hasChangeAuthority(content) ? detectActiveRequirementChange({ ...input, content }, context) : { matched: false };
   if (activeChangeCheck.matched && activeChangeCheck.result) {
     return { ok: true, value: activeChangeCheck.result };
   }
+
+  if (!hasChangeAuthority(content) && Object.keys(context.pendingApprovals).length > 0) return { ok: true, value: clarification("Vui lòng nêu quyết định phê duyệt hoặc lựa chọn chính xác.") };
+
+  if (!hasChangeAuthority(content)) return { ok: true, value: {
+    intent: "conversation_only", confidence: 0.8, rationale: "No affirmative implementation request detected.", clarifyingQuestions: [],
+    directReply: "Vui lòng nêu yêu cầu hoặc lựa chọn đầy đủ; tôi chưa khởi tạo workflow mới."
+  } };
 
   // 7. Case C: New workflow request or ambiguous clarify
   const workflowOrClarify = classifyWorkflowOrClarify(content);
