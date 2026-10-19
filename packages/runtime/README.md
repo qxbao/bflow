@@ -69,6 +69,22 @@ Its outbound delegation/approval methods queue through P19. The old bridge's loc
 progress/approval callback shortcut is disabled in this composition. A persisted
 queue entry acknowledges local enqueue, not remote prompt receipt.
 
+Provider prompt ingress accepts one complete provider `pasted_content` wrapper around
+an exported-schema RoleMessage. It still requires the exact pinned Runtime outbox
+message, recipient pane and native session before signed Herdr ingress; surrounding
+prose, multiple wrappers and altered envelopes cannot create a trusted handoff.
+
+The host durably correlates Coordinator prompt/Stop observations with that exact
+delegation. A turn that ends without a subsequent structured response queues one
+correlated blockage notice to Conversation through the existing Herdr outbox. This
+also covers a delivered prompt whose signed Runtime ingress was never applied.
+Private response baselines distinguish earlier turns; queued progress, pending native
+responses and mandatory human decisions retain their existing waiting state. The
+notice reports only the missing response, never a provider diagnosis or task result;
+it does not create/replay ingress, resend uncertain delivery, or complete/fail a run.
+These paths have local subprocess/fake-transport and real Gateway tests, not live
+provider/Herdr acceptance evidence.
+
 ## Policies and lifecycle
 
 The Coordinator can assess requirements, request only useful specialists, prepare a

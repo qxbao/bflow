@@ -816,3 +816,87 @@ it.skipIf(process.platform !== "linux")("recovers the exact failed phase after a
   expect(again.outbound.filter((out: any) => out.parentAssignmentId === assignment.message.message_id)).toHaveLength(1);
   await expect(reopened.recordPhaseFailure(qa, queued.messageId, "Different result", true)).rejects.toThrow("Conflicting");
 });
+
+
+describe("Coordinator no-response host observations", () => {
+  async function delivered(intake = false) {
+    const f = await fixture({ intake });
+    const message = f.envelope("delegation.request", { schemaVersion: 2, delegationId: "delegation-1", messageId: "intake-1", correlationId: "correlation-1",
+      sessionId: "session-1", runId: "run-1", requestedBy: "conversation", targetRole: "coordinator", title: "Plan change", objective: "Plan change",
+      sddLevel: "lightweight", specificationId: f.spec.specId, acceptanceCriteria: f.spec.acceptanceCriteria, inputArtifacts: [], priority: "normal", requestedAt: new Date().toISOString(), idempotencyKey: "intake-1" },
+      { message_id: "intake-1", idempotency_key: "intake-1" });
+    await f.runtime.queueHerdr(message); await f.runtime.flushOutbound();
+    return { ...f, message, binding: f.panes.bindings.find(p => p.role === "coordinator")! };
+  }
+  it("queues correlated blockage even when native Runtime ingress never created a run", async () => {
+    const f = await delivered();
+    await f.runtime.coordinatorTurnStopped(f.message, f.binding);
+    const state = await f.runtime.inspect() as any;
+    expect(state.runs).toEqual([]); expect(state.inbox).toEqual([]);
+    const feedback = state.outbound.find((out: any) => out.message.type === "conversation.progress");
+    expect(feedback.message).toMatchObject({ correlation_id: "correlation-1", causation_id: "intake-1", run_id: "run-1", recipient: { role: "conversation" },
+      payload: { kind: "coordinator_no_response", headline: "Coordinator turn ended without a structured response", blockageReason: expect.stringContaining("no durable ingress") } });
+    expect(feedback.message.payload).not.toHaveProperty("verified");
+    await f.restart().coordinatorTurnStopped(f.message, f.binding);
+    expect((await f.runtime.inspect() as any).outbound.filter((out: any) => out.message.type === "conversation.progress")).toHaveLength(1);
+    await f.runtime.flushOutbound();
+    expect(f.transport.sentRequests.some(call => JSON.parse(call.instruction).payload.kind === "coordinator_no_response")).toBe(true);
+  });
+  it("rejects untrusted envelopes and foreign pane/native sessions", async () => {
+    const f = await delivered();
+    for (const message of [{ ...f.message, payload: { forged: true } }, { ...f.message, message_id: "forged" }])
+      await expect(f.runtime.coordinatorTurnStopped(message, f.binding)).rejects.toThrow("exact Runtime outbox");
+    for (const binding of [{ ...f.binding, paneId: "other" }, { ...f.binding, session: { ...f.binding.session!, value: "other" } }])
+      await expect(f.runtime.coordinatorTurnStopped(f.message, binding)).rejects.toThrow("exact Runtime outbox");
+  });
+  it("preserves intake status when only automatic delegation acceptance exists", async () => {
+    const f = await delivered(); await f.runtime.receiveHerdr(f.message);
+    await f.runtime.coordinatorTurnStopped(f.message, f.binding);
+    expect((await f.runtime.inspect("run-1") as any)).toMatchObject({ status: "intake", coreCreated: false });
+    expect((await f.runtime.inspect() as any).outbound.filter((out: any) => out.message.payload.kind === "coordinator_no_response")).toHaveLength(1);
+  });
+  it("recognizes queued structured progress before Stop even before transport flush", async () => {
+    const f = await delivered(); await f.runtime.receiveHerdr(f.message);
+    const reporting = f.runtime.reportProgress("run-1", "Planning the objective");
+    await f.runtime.coordinatorTurnStopped(f.message, f.binding); await reporting;
+    expect((await f.runtime.inspect() as any).outbound.filter((out: any) => out.message.payload.kind === "coordinator_no_response")).toEqual([]);
+  });
+});
+
+
+describe("Coordinator Stop delivery to Conversation", () => {
+  it("presents host blockage to the real Conversation Gateway without completing a workflow", async () => {
+    const f = await fixture({ intake: false }), contextDirectory = join(f.root, "stopped-conversation");
+    const chat = await createAgenticConversationHost({ runtime: f.runtime, manifest: unwrap(await f.panes.getManifest()), contextDirectory });
+    const turn = await chat.handleUserTurn({ sessionId: "session-1", content: "Triển khai tính năng xác thực JWT HS256 trong packages/auth với thời hạn token 15 phút và unit test", provenance: { origin: "user", authenticatedUser: true } }) as any;
+    expect(turn.value.recognizedIntent).toBe("workflow_request");
+    await f.runtime.flushOutbound();
+    const delegation = JSON.parse(f.transport.sentRequests.find(request => request.role === "coordinator")!.instruction);
+    await f.runtime.coordinatorTurnStopped(delegation, f.panes.bindings.find(p => p.role === "coordinator")!);
+    await f.runtime.flushOutbound();
+    const notice = JSON.parse(f.transport.sentRequests.find(request => JSON.parse(request.instruction).payload.kind === "coordinator_no_response")!.instruction);
+    expect((await chat.receiveHerdr(notice) as any).ok).toBe(true);
+    const module = await import("../../../conversation/dist/index.js");
+    const context = unwrap(await new module.FileConversationContextStore(contextDirectory).load("session-1"))!;
+    expect(Object.values(context.workflows)[0]).toMatchObject({ completedVerified: false, blockedReason: expect.stringContaining("no durable ingress") });
+    expect(context.session.status).toBe("reporting_progress");
+    expect((await f.runtime.inspect() as any).runs).toEqual([]);
+  });
+  it("does not let progress from an earlier delegation hide an unanswered later turn", async () => {
+    const f = await fixture(); await f.runtime.reportProgress("run-1", "Previous turn progress");
+    const message = f.envelope("delegation.request", (await f.inspect()).delegation, { message_id: "later-turn", idempotency_key: "later-turn" });
+    await f.runtime.queueHerdr(message); await f.runtime.flushOutbound();
+    await f.runtime.coordinatorTurnStopped(message, f.panes.bindings.find(p => p.role === "coordinator")!);
+    expect((await f.runtime.inspect() as any).outbound.filter((out: any) => out.message.payload.kind === "coordinator_no_response")).toHaveLength(1);
+  });
+  it("preserves pending user decisions at Stop", async () => {
+    const f = await fixture();
+    const message = f.envelope("delegation.request", (await f.inspect()).delegation, { message_id: "intake-1", idempotency_key: "intake-1" });
+    await f.runtime.queueHerdr(message); await f.runtime.flushOutbound();
+    const binding = f.panes.bindings.find(p => p.role === "coordinator")!;
+    await f.runtime.requestUserDecision(binding, "coordinator", { runId: "run-1", taskId: "planning", question: "Which design?", options: ["A", "B"] });
+    const before = await f.inspect(); await f.runtime.coordinatorTurnStopped(message, binding);
+    expect(await f.inspect()).toEqual(before);
+    expect((await f.runtime.inspect() as any).outbound.filter((out: any) => out.message.payload.kind === "coordinator_no_response")).toEqual([]);
+  });
+});

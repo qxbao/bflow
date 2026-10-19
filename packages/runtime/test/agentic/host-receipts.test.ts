@@ -135,3 +135,60 @@ describe("private durable host authentication receipts", () => {
     } finally { await ingress.close(); }
   });
 });
+
+describe("durable Coordinator turn observations", () => {
+  it("ignores startup/foreign stops and recovers one exact stopped delegation after reopen", async () => {
+    const f = await fixture();
+    const binding = { ...f.binding, role: "coordinator" as const, agentId: "coordinator", paneId: "coordinator-pane" };
+    const message = RoleMessageSchema.parse({ schema_version: 2, message_id: "turn", correlation_id: "correlation", run_id: "run",
+      sender: { role: "conversation" }, recipient: { role: "coordinator" }, type: "delegation.request", payload: {}, artifact_references: [], idempotency_key: "turn" });
+    expect(await f.journal.stopCoordinatorTurn(binding)).toBe(false);
+    await f.journal.startCoordinatorTurn(binding, message);
+    expect(await f.reopen().stopCoordinatorTurn({ ...binding, session: { ...binding.session!, value: "other" } })).toBe(false);
+    expect(await f.reopen().stopCoordinatorTurn({ ...binding, paneId: "other" })).toBe(false);
+    expect(await f.reopen().stopCoordinatorTurn(binding)).toBe(true);
+    await f.reopen().stopCoordinatorTurn(binding);
+    const pending = await f.reopen().pendingCoordinatorStops();
+    expect(pending).toHaveLength(1); expect(pending[0]).toMatchObject({ binding, message });
+    await f.reopen().completeCoordinatorStop(pending[0]!);
+    expect(await f.reopen().pendingCoordinatorStops()).toEqual([]);
+    // A new turn replaces the current turn identity; a duplicate old Stop cannot create another notification.
+    await f.reopen().startCoordinatorTurn(binding, { ...message, message_id: "turn-2", idempotency_key: "turn-2" });
+    await f.reopen().stopCoordinatorTurn(binding);
+    expect((await f.reopen().pendingCoordinatorStops()).map(item => item.message.message_id)).toEqual(["turn-2"]);
+  });
+});
+
+describe("Coordinator Stop response correlation", () => {
+  it("retains turn identity across transport observations and recognizes pending native structured replies", async () => {
+    const f = await fixture();
+    const binding = { ...f.binding, role: "coordinator" as const, agentId: "coordinator", paneId: "coordinator-pane" };
+    const message = RoleMessageSchema.parse({ schema_version: 2, message_id: "turn", correlation_id: "correlation", run_id: "run",
+      sender: { role: "conversation" }, recipient: { role: "coordinator" }, type: "delegation.request", payload: {}, artifact_references: [], idempotency_key: "turn" });
+    await f.journal.startCoordinatorTurn(binding, message);
+    expect(await f.journal.stopCoordinatorTurn({ ...binding, transportState: "done" })).toBe(true);
+    const stopped = (await f.journal.pendingCoordinatorStops())[0]!;
+    expect(await f.journal.hasCoordinatorResponse(stopped)).toBe(false);
+    const response = { ...message, message_id: "reply", idempotency_key: "reply", sender: { role: "coordinator" as const },
+      recipient: { role: "conversation" as const }, type: "conversation.progress" as const, payload: { headline: "Waiting for clarification" } };
+    await f.journal.recordNativeIntent("native-response", { ...response, correlation_id: "unrelated" });
+    expect(await f.journal.hasCoordinatorResponse(stopped)).toBe(false);
+    await f.journal.recordNativeIntent("matching-native-response", response);
+    expect(await f.reopen().hasCoordinatorResponse(stopped)).toBe(true);
+    expect((await f.reopen().nativeDelivery("matching-native-response"))?.status).toBe("unknown_delivery");
+  });
+});
+
+
+it("never attributes a later ordinary/startup Stop to an earlier unanswered delegation", async () => {
+  const f = await fixture(), binding = { ...f.binding, role: "coordinator" as const };
+  const message = RoleMessageSchema.parse({ schema_version: 2, message_id: "old-turn", correlation_id: "correlation", run_id: "run",
+    sender: { role: "conversation" }, recipient: { role: "coordinator" }, type: "delegation.request", payload: {}, artifact_references: [], idempotency_key: "old-turn" });
+  await f.journal.startCoordinatorTurn(binding, message);
+  await f.reopen().recordCoordinatorBoundary(binding);
+  expect(await f.reopen().stopCoordinatorTurn(binding)).toBe(false);
+  expect(await f.reopen().pendingCoordinatorStops()).toEqual([]);
+  await f.reopen().startCoordinatorTurn(binding, { ...message, message_id: "new-turn", idempotency_key: "new-turn" });
+  expect(await f.reopen().stopCoordinatorTurn(binding)).toBe(true);
+  expect((await f.reopen().pendingCoordinatorStops()).map(item => item.message.message_id)).toEqual(["new-turn"]);
+});
