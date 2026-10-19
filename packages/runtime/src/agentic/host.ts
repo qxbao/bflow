@@ -24,6 +24,7 @@ import { unwrap } from "./outbox.js";
 import { HostVerification, HostBehavioralFailure, DEFAULT_HOST_CHECKS } from "./host-verification.js";
 import { HostReceiptJournal, type HumanHookProvenance } from "./host-receipts.js";
 import { parseBehavioralCommands } from "./behavioral-runner.js";
+import { HostConversationIntake } from "./host-conversation.js";
 import { HostDevelopment } from "./host-development.js";
 import { redactString } from "../resilience/redaction.js";
 import { createHostPlatformSession, launchMaterial, type HostAgentObservation, type HostPlatformSession, type StartupProof } from "./host-platform.js";
@@ -144,7 +145,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     await privateFile(mcpConfigFile, JSON.stringify({ mcpServers: { bflow: { type: "stdio", command: process.execPath, args: [executable, "mcp", path] } } }));
     const hooks = Object.fromEntries(NATIVE_HOOK_EVENTS.map(event => [event, [{ hooks: [{ type: "command", command: hookCommandFor(path, event, hookRunnerPath), timeout: 30 }] }]]));
     await privateFile(hooksSettingsFile, JSON.stringify({ hooks }));
-    let systemPrompt = `You are Bflow's ${role} in a dedicated Herdr pane. Use the bflow MCP tools. All cross-role messages must use send_role_message through native Herdr; never use files as a mailbox. Never fabricate evidence or approvals. `;
+    let systemPrompt = `You are Bflow's ${role} in a dedicated Herdr pane. Use the bflow MCP tools. Cross-role delivery uses native Herdr through the dedicated Bflow host tools; never use files as a mailbox. Never fabricate evidence or approvals. `;
     const promptInput = await promptAssets.readBuiltinRolePrompt(role);
     const original = promptInput === null ? null : record(JsonValueSchema.parse(promptInput));
     if (["conversation", "coordinator"].includes(role) && !original) throw new Error(`The required original ${role} agent prompt is missing; reinstall the complete Bflow distribution.`);
@@ -159,7 +160,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     } else if (role !== "conversation") {
       systemPrompt += "\n\n" + NON_USER_FACING_AUTONOMOUS_POLICY + "\n\n" + NON_USER_FACING_STRUCTURED_RESULT_REQUIREMENT + "\n\nTrusted host integration instructions:\n";
     }
-    if (role === "conversation") systemPrompt += "You are the sole user interface. The trusted UserPromptSubmit hook supplies the Conversation Gateway result as additional context. Greetings and questions need no workflow. Explain Gateway clarifications and forward the user's actual intent through that Gateway. Never call coordination tools or edit source. User approval comes exclusively from the trusted hook; an MCP call cannot approve.";
+    if (role === "conversation") systemPrompt += "You are the sole user interface. You decide user intent and clarification in context. The trusted UserPromptSubmit hook records the actual user turn and supplies messageId, requiresConversationDecision, and Conversation context. For each ordinary user turn, call conversation_decide with that messageId and your structured decision; use workflow_request for authorized implementation or read-only spikes, clarify only for material missing details, conversation_only for direct answers, status_query or cancellation_request as appropriate. Record your exact clarification questions/options using that tool before asking so later short answers can be resolved. Never fabricate the raw user turn, provenance, pending choices, or workflow success. Never use send_role_message for delegation.request; conversation_decide owns the handoff. Never call coordination tools or edit source. Human approval is handled exclusively by the trusted hook; conversation_decide cannot approve. If requiresConversationDecision is false, explain the trusted result.";
     else if (role === "coordinator") {
       systemPrompt += "Inspect the durable inbox, assess the spec and propose a schema-valid workflow. Runtime controls dispatch and quality/approval gates. Never edit source or approve human-required gates.";
     } else if (role === "developer") systemPrompt += "Read assignment_context and workspace_status for the exact accepted specification, owned paths and worktree. Native shell is disabled: use commit_changes with expectedHead for scoped commits and check_work for untrusted feedback. Required TDD: first edit/commit only configured testPaths, request_verification(red), then END YOUR TURN. Runtime sends a phase outcome to resume you. After independent Red, tests are frozen: authorize_implementation, edit source, commit, check_work, then request_verification(green) and yield. On Green receipt, refactor source if appropriate without editing Red tests, commit, request_verification(refactor) and yield. For non-required automated work, request_verification(verification) after a clean commit and yield. Submit implementation only when all required automated phase receipts exist. Manual docs evidence is requested after submission. Never modify accepted criteria/specification or claim your own feedback is independent acceptance.";
@@ -236,6 +237,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const behavioralCommands = parseBehavioralCommands(configuration.behavioralCommands);
   const verification = new HostVerification(() => requireWorkspace().runtime, () => requireWorkspace().runtime.ports.artifactStore, receipts, behavioralCommands);
   const development = new HostDevelopment(() => requireWorkspace().runtime, behavioralCommands);
+  const conversationIntake = new HostConversationIntake(receipts, () => requireWorkspace().conversation);
   const nativeSessions = new Map<string, {role: AgentRole; sessionId: string}>();
   try { for (const [pane, value] of Object.entries(record(JSON.parse(await readFile(join(configuration.directory, "native-sessions.json"), "utf8"))))) {
     const session = record(value); nativeSessions.set(pane, { role: AgentRoleSchema.parse(session.role), sessionId: textField(session.sessionId) });
@@ -411,9 +413,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           ({ id, command, method, levels, testNames, testPaths, reporter: reporter ?? "node_tap" })) });
     }
     if (name === "host_status") return json({ active: !!workspace, quiesced, schedulerRunning: !!scheduler, schedulerError: schedulerError ?? null });
+    if (name === "conversation_decide") {
+      if (role !== "conversation") throw new Error("Only Conversation decides user intent");
+      return conversationIntake.decide(binding, parameters);
+    }
     if (name === "send_role_message") {
       const message = RoleMessageSchema.parse(parameters.message);
       if (message.sender.role !== role || message.sender.agent_id !== binding.agentId || message.sender.pane_id !== binding.paneId) throw new Error("Cannot impersonate another role");
+      if (role === "conversation" && message.type === "delegation.request") throw new Error("Use conversation_decide for Conversation delegation");
       if (["approval.decision", "execution.receipt", "implementation.submitted", "verification.result", "review.verdict"].includes(message.type)) throw new Error("Use the dedicated authenticated host tool for this message type");
       return nativeDeliver(message);
     }
@@ -602,9 +609,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           const userId = `local-user-${process.getuid?.() ?? "local"}`;
           humanHookProvenance = { origin: "UserPromptSubmit", binding, nativeSessionId, userId, messageId,
             conversationSessionId: manifest!.conversationSessionId, promptDigest: digest(prompt) };
-          try { return await requireWorkspace().conversation.handleUserTurn({ sessionId: manifest!.conversationSessionId,
-            messageId, content: prompt,
-            provenance: { origin: "user", authenticatedUser: true, userId, paneId: input.paneId, channel: "herdr_attach" } }); }
+          try { return await conversationIntake.receive(binding, { conversationSessionId: manifest!.conversationSessionId,
+            messageId, content: prompt, userId }); }
           finally { humanHookProvenance = undefined; }
         }); userQueue = work; return work;
       }
@@ -785,6 +791,7 @@ export function availableTools(role: AgentRole) {
   const tools = [{ name: "host_status", description: "Read the durable host scheduler status" },
     { name: "assignment_context", description: "Read assignments addressed to this authenticated pane and the accepted specification" },
     { name: "send_role_message", description: "Send a schema-valid RoleMessage through the signed native Herdr plugin; parameters: {message: RoleMessage}" }];
+  if (role === "conversation") tools.push({ name: "conversation_decide", description: "Apply your structured intent/clarification decision to the trusted user messageId from the hook. Never supplies human approval. Parameters: messageId, decision (workflow_request/clarify/conversation_only/status_query/cancellation_request)." });
   if (role !== "conversation") tools.push({ name: USER_DECISION_TOOL, description: "Ask the user a decision through Runtime and Conversation, then end your turn; parameters: runId, taskId, question, options?, context?, expiresInMinutes?" });
   if (role === "coordinator") tools.push(...COORDINATOR_TOOLS, {name:"planning_reference",description:"Read canonical shipped examples and exact metadata/contract definitions; section: specification, test_strategy, workflow"});
   if (role === "developer") tools.push({ name: "authorize_implementation", description: "Verify accepted spec and Red evidence; parameters: runId, taskId" }, { name: "submit_implementation", description: "Submit committed implementation under your exact native assignment binding; parameters: runId, taskId" });
@@ -799,7 +806,26 @@ export function availableTools(role: AgentRole) {
   if (["qa", "tester"].includes(role)) tools.push({ name: "inspect_alternative_verification", description: "Capture exact committed diff and accepted dossier before evaluating criteria; parameters: runId,taskId" }, { name: "record_alternative_verification", description: "Capture actual committed documentation diff and independent manual acceptance evidence; parameters: observationId,runId,taskId,criteria:[{criterionId,passed,summary}]" });
   if (["qa", "tester"].includes(role)) tools.push({ name: "record_behavioral_verification", description: "Execute an assigned phase using the owner's argv, exact committed tests and real output; runId,taskId,phase. Never supply test output yourself." });
   const string = { type:"string", minLength:1 }, array = {type:"array",items:string}, object = {type:"object"};
+  const strictObject = (properties: Record<string, unknown>, required: string[]) => ({ type: "object", properties, required, additionalProperties: false });
+  const targets = { targetRunId: string, targetCorrelationId: string };
+  const draft = strictObject({ title: string, objective: string, kind: { type: "string", enum: ["feature", "bugfix", "refactor", "spike"] },
+    sddLevel: { type: "string", enum: ["lightweight", "full"] }, priority: { type: "string", enum: ["low", "normal", "high", "critical"] },
+    scopeDefined: { type: "boolean" }, isLargeTask: { type: "boolean" }, affectedPaths: array, acceptanceCriteriaDescriptions: array,
+    isRequirementChange: { type: "boolean" }, codeChangesAuthorized: { type: "boolean" }, ...targets,
+    investigationTasks: { type: "array", items: strictObject({ objective: string, affectedPaths: array,
+      codeChangesAuthorized: { type: "boolean", const: false } }, ["objective", "affectedPaths", "codeChangesAuthorized"]) }
+  }, ["title", "objective", "kind", "sddLevel", "priority", "scopeDefined", "isLargeTask", "affectedPaths", "acceptanceCriteriaDescriptions", "isRequirementChange"]);
+  const chatDecision = { oneOf: [
+    strictObject({ intent: { const: "conversation_only", type: "string" }, directReply: string }, ["intent", "directReply"]),
+    strictObject({ intent: { const: "clarify", type: "string" }, clarifyingQuestions: { type: "array", items: string, minItems: 1, maxItems: 3 },
+      requirementDraft: draft, targetCorrelationId: string }, ["intent", "clarifyingQuestions"]),
+    strictObject({ intent: { const: "workflow_request", type: "string" }, requirementDraft: draft, ...targets }, ["intent", "requirementDraft"]),
+    strictObject({ intent: { const: "status_query", type: "string" }, ...targets }, ["intent"]),
+    strictObject({ intent: { const: "cancellation_request", type: "string" }, cancellationInput: strictObject({ runId: string, taskId: string, reason: string }, ["runId"]),
+      ...targets }, ["intent", "cancellationInput"])
+  ] };
   const argumentsByName: Record<string, {properties: Record<string, unknown>; required: string[]}> = {
+    conversation_decide:{properties:{messageId:string,decision:chatDecision},required:["messageId","decision"]},
     planning_reference:{properties:{section:{type:"string",enum:["specification","test_strategy","workflow"]}},required:["section"]},
     [USER_DECISION_TOOL]:{properties:{runId:string,taskId:string,question:{type:"string",minLength:1,maxLength:2000},
       options:{type:"array",items:{type:"string",minLength:1,maxLength:200},minItems:2,maxItems:6},
@@ -1034,7 +1060,7 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
   }
   if (event === "UserPromptSubmit" && configuration.role === "conversation") {
     const result = await callHost(configuration.socketPath, configuration.token, "user_prompt", { paneId, hook });
-    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: "Trusted Bflow Conversation Gateway result: " + JSON.stringify(result) } }) + "\n");
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: "Trusted Bflow user turn and Conversation context: " + JSON.stringify(result) } }) + "\n");
   }
   if (event === "PreToolUse") {
     try { await callHost(configuration.socketPath, configuration.token, "tool_guard", { paneId, hook }); }

@@ -63,8 +63,10 @@ host operations before `host.close()` closes storage handles. Native provider pr
 and tool registration belongs to the trusted agent host; load
 `agents/coordinator/system-prompt.md` into its Coordinator pane.
 
-The Conversation composition retains P14's intent recognition, context persistence,
-correlation IDs, busy inbound queue, approval provenance and cancellation delegation.
+The Conversation composition retains P14's context persistence, correlation IDs,
+busy inbound queue, approval provenance and cancellation delegation. In the persistent
+host, Chat determines ordinary intent through `conversation_decide`; the Gateway
+validates the structured decision and manages durable state and delivery.
 Its outbound delegation/approval methods queue through P19. The old bridge's local
 progress/approval callback shortcut is disabled in this composition. A persisted
 queue entry acknowledges local enqueue, not remote prompt receipt.
@@ -339,9 +341,20 @@ changes and required TDD need configured measurement runners and fail closed in
 the default host. Delivery and project-mandated approvals remain human decisions;
 the approved low-risk specification policy may accept a lightweight spec.
 
-Only Conversation's launch-local UserPromptSubmit hook feeds authenticated user
-turns to the Gateway; exact Runtime RoleMessage deliveries are handled as
-transport, and role envelopes cannot be promoted into human approval text. No
+Only Conversation's launch-local UserPromptSubmit hook records authenticated raw
+user turns, bound to their exact pane/native session and a durable message ID. The
+hook returns that ID and bounded Conversation context (session, pending decisions, workflows and the latest 20 messages without metadata) to Chat. Chat submits a structured
+`conversation_decide` decision; Runtime injects the stored original content and
+provenance, validates state references, and calls the Gateway. Unknown/stale turns,
+changed principals and conflicting decisions are rejected. Completed decisions replay
+their durable result; FIFO acknowledgements remain pending until the Gateway processes
+the turn. Interrupted decisions retain stable timestamps and IDs for Gateway/outbox
+reconciliation, including when a newer ordinary user turn has arrived. Conversation cannot bypass this via a direct
+`delegation.request` through `send_role_message`.
+
+Actual pending human approval replies remain on the trusted hook path. The Chat
+decision schema excludes approval responses. Exact Runtime RoleMessage deliveries
+are handled as transport, and role envelopes cannot become human approval text. No
 MCP tool approves on behalf of a user. Private host keys/configuration and Unix
 sockets have owner-only permissions. Activation requires an exact native Bflow
 launch receipt; older panes without host hooks are not silently adopted. These are local host trust controls, not

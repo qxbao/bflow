@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import { link, lstat, mkdir, open, readdir, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import { join, resolve } from "node:path";
 import {
   AgentBindingReceiptSchema, ApprovalDecisionSchema, JsonValueSchema, PaneBindingSchema, QualityGateContextSchema,
@@ -9,11 +10,18 @@ import {
 } from "@bflow/contracts";
 import { digest, json, record, strings, textField } from "./journal.js";
 
-type Kind = "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled";
+type Kind = "conversation-turn" | "conversation-intent" | "conversation-result" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled";
 export interface HumanHookProvenance {
   origin: "UserPromptSubmit"; binding: PaneBinding; nativeSessionId: string;
   conversationSessionId: string; userId: string; messageId: string; promptDigest: string;
 }
+export const TrustedConversationTurnSchema = z.object({
+  binding: PaneBindingSchema, messageId: z.string().min(1), conversationSessionId: z.string().min(1),
+  content: z.string().min(1), occurredAt: z.string().datetime(), userId: z.string().min(1), sequence: z.number().int().positive()
+}).strict();
+export type TrustedConversationTurn = z.infer<typeof TrustedConversationTurnSchema>;
+const ConversationDecisionReceiptSchema = z.object({ messageId: z.string().min(1), decision: JsonValueSchema,
+  result: JsonValueSchema.optional() }).strict();
 export interface HostObservation {
   binding: PaneBinding; observation: JsonValue; context?: unknown; runId?: string; taskId?: string;
 }
@@ -38,6 +46,17 @@ export class HostReceiptJournal {
   }
   private filename(kind: Kind, id: string): string { return `${kind}-${digest(textField(id))}.json`; }
   private parsePayload(kind: Kind, input: unknown): JsonValue {
+    if (kind === "conversation-turn") {
+      const turn = TrustedConversationTurnSchema.parse(input);
+      if (turn.binding.role !== "conversation" || turn.binding.sessionId !== this.sessionId || !turn.binding.session)
+        throw new Error("Conversation turn has mismatched trusted hook provenance");
+      return json(turn);
+    }
+    if (kind === "conversation-intent" || kind === "conversation-result") {
+      const receipt = ConversationDecisionReceiptSchema.parse(input);
+      if ((kind === "conversation-result") !== (receipt.result !== undefined)) throw new Error("Invalid Conversation decision receipt");
+      return json(receipt);
+    }
     if (kind === "coordinator-boundary") {
       const raw = record(input), binding = PaneBindingSchema.parse(raw.binding);
       if (binding.sessionId !== this.sessionId || binding.role !== "coordinator" || !binding.session || !Number.isSafeInteger(raw.sequence) || Number(raw.sequence) < 1)
@@ -81,7 +100,8 @@ export class HostReceiptJournal {
     const payload = this.parsePayload(kind, value.payload);
     const envelope = { version: 1 as const, repository: this.repository, sessionId: this.sessionId, kind, id, payload };
     if (value.checksum !== digest(envelope)) throw new Error("Host receipt integrity mismatch");
-    if (kind === "human" && ApprovalDecisionSchema.parse(record(payload).decision).approvalId !== id ||
+    if (kind.startsWith("conversation-") && record(payload).messageId !== id ||
+        kind === "human" && ApprovalDecisionSchema.parse(record(payload).decision).approvalId !== id ||
         kind === "gate" && QualityGateResultSchema.parse(payload).evaluationId !== id ||
         kind === "evidence" && VerificationResultSchema.parse(payload).verificationId !== id ||
         kind === "native-ack" && RoleMessageSchema.parse(payload).message_id !== id)
@@ -223,6 +243,26 @@ export class HostReceiptJournal {
       decisions.push(ApprovalDecisionSchema.parse(record(receipt).decision));
     }
     return decisions;
+  }
+  async conversationTurns(): Promise<TrustedConversationTurn[]> {
+    const turns: TrustedConversationTurn[] = [];
+    for (const id of await this.receiptIds("conversation-turn")) turns.push(TrustedConversationTurnSchema.parse(await this.read("conversation-turn", id)));
+    return turns.sort((a, b) => a.sequence - b.sequence);
+  }
+  async recordConversationTurn(turn: TrustedConversationTurn): Promise<void> { await this.write("conversation-turn", turn.messageId, turn); }
+  async conversationDecision(messageId: string): Promise<{ decision: JsonValue; result?: JsonValue } | undefined> {
+    const value = await this.read("conversation-result", messageId) ?? await this.read("conversation-intent", messageId);
+    if (value === undefined) return undefined;
+    const receipt = ConversationDecisionReceiptSchema.parse(value);
+    return { decision: receipt.decision, ...(receipt.result === undefined ? {} : { result: receipt.result }) };
+  }
+  async recordConversationIntent(messageId: string, decision: JsonValue): Promise<void> {
+    await this.write("conversation-intent", messageId, { messageId, decision });
+  }
+  async recordConversationResult(messageId: string, decision: JsonValue, result: JsonValue): Promise<void> {
+    const intent = await this.read("conversation-intent", messageId);
+    if (intent === undefined || digest(record(intent).decision) !== digest(decision)) throw new Error("Conversation result lacks matching intent");
+    await this.write("conversation-result", messageId, { messageId, decision, result });
   }
   async recordGate(result: QualityGateResult): Promise<void> { const parsed = QualityGateResultSchema.parse(result); await this.write("gate", parsed.evaluationId, parsed); }
   async authenticateGate(input: QualityGateResult): Promise<boolean> { const result = QualityGateResultSchema.parse(input); return digest(await this.read("gate", result.evaluationId)) === digest(result); }

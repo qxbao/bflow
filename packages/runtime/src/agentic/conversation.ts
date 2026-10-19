@@ -1,5 +1,5 @@
 import {
-  ApprovalDecisionSchema, ApprovalRequestSchema, DelegationRequestSchema, RoleMessageSchema, SessionManifestSchema,
+  ApprovalDecisionSchema, ApprovalRequestSchema, ConversationMessageSchema, DelegationRequestSchema, RoleMessageSchema, SessionManifestSchema,
   type JsonValue, type OperationResult, type RoleMessage, type SessionManifest
 } from "@bflow/contracts";
 import { digest, json, record, textField } from "./journal.js";
@@ -8,6 +8,10 @@ import type { AgenticWorkflowRuntime } from "./runtime.js";
 
 export interface AgenticConversationHost {
   handleUserTurn(input: unknown): Promise<unknown>;
+  getContext(): Promise<unknown>;
+  parseDecision(input: unknown): Promise<unknown>;
+  validateDecision(input: unknown): Promise<void>;
+  handleTrustedApproval(input: unknown): Promise<unknown | undefined>;
   receiveHerdr(input: unknown): Promise<unknown>;
   setBusy(busy: boolean): Promise<unknown>;
   flush(): Promise<unknown>;
@@ -125,6 +129,28 @@ export async function createAgenticConversationHost(options: {
   }
   return {
     handleUserTurn: input => gateway.handleUserTurn(input),
+    async getContext() {
+      const context = gateway.getContextSnapshot();
+      return json({ session: context.session, pendingClarifications: context.pendingClarifications,
+        pendingApprovals: context.pendingApprovals, workflows: context.workflows,
+        runIdToCorrelationId: context.runIdToCorrelationId, agentBusy: context.agentBusy,
+        messages: context.messages.slice(-20).map((input: unknown) => {
+          const { metadata: _metadata, ...message } = ConversationMessageSchema.parse(input); return message;
+        }) });
+    },
+    async parseDecision(input) { return module.ChatDecisionSchema.parse(input); },
+    async validateDecision(input) {
+      const result = module.resolveChatDecision(module.ChatDecisionSchema.parse(input), gateway.getContextSnapshot());
+      if (!result.ok) throw new Error(result.error.message);
+    },
+    async handleTrustedApproval(input) {
+      const context = gateway.getContextSnapshot();
+      if (Object.keys(context.pendingApprovals).length === 0) return undefined;
+      const parsed = module.UserTurnInputSchema.parse(input);
+      const classified = module.classifyTrustedApprovalReply(parsed, context);
+      if (!classified?.ok) return undefined;
+      return gateway.handleUserTurn(parsed);
+    },
     async receiveHerdr(input) {
       const message = RoleMessageSchema.parse(input);
       if (!await runtime.ports.authenticateMessage(message) || message.recipient.role !== "conversation") throw new Error("Unauthenticated Conversation delivery");
