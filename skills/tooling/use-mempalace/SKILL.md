@@ -11,7 +11,7 @@ Skills are instruction-only and model-neutral. They do not grant tools, permissi
 
 ## Prerequisites
 
-- A MemPalace MCP server (`mempalace`) registered by the operator and available to the role.
+- A MemPalace MCP server (`mempalace`) installed by Bflow setup, registered through the Gateway and available to the role.
 - A repository/session memory policy excluding secrets.
 
 ## Trigger conditions
