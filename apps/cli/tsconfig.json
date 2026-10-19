@@ -26,6 +26,9 @@
       "path": "../../packages/artifact-store"
     },
     {
+      "path": "../../packages/docs-retrieval"
+    },
+    {
       "path": "../../packages/git-orchestrator"
     },
     {

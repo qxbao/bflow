@@ -41,7 +41,9 @@ import {
 import {
   AgentProviderRegistry
 } from "@bflow/agent-providers";
-import { wrapSetupComponents, setupGatewayDiagnostics } from "./setup-gateway.js";
+import { wrapSetupComponents, setupGatewayDiagnostics, type SetupGatewayRemoteRequirement } from "./setup-gateway.js";
+import { context7KeyFingerprint, readKeyFromStream, readStoredContext7Key, validateContext7ApiKey } from "./context7-secret.js";
+import { describeExistingContext7, detectExistingContext7 } from "./context7-detect.js";
 import { formatSetupPreview, readableLabel, SETUP_COMPONENT_LABELS } from "./presentation.js";
 import { identifyRepository } from "./repository.js";
 import { createDefaultSetupConfiguration, isolatedProviderHomes } from "./setup-defaults.js";
@@ -239,6 +241,36 @@ export async function executeSetupCommand(
     diagnostics.push(...defaults.diagnostics);
   }
 
+  // Context7 is a hosted MCP service shared through the Gateway: nothing to install, one optional API key.
+  const remoteServices: SetupGatewayRemoteRequirement[] = [];
+  let context7ApiKey: string | undefined;
+  if (!context?.setup?.machineSetup && !context?.setup?.toolInstaller && !args.noContext7 && (platform.os === "linux" || platform.os === "darwin")) {
+    const injected = context?.setup?.context7ApiKey;
+    if (args.context7ApiKeyStdin && injected === undefined && process.stdin.isTTY)
+      throw new Error("--context7-api-key-stdin reads the key from standard input; pipe it in, for example: printf %s \"$KEY\" | bflow setup --apply --context7-api-key-stdin");
+    // A key the caller handed over explicitly (stdin or injection) must be valid. One merely present in the environment is advisory:
+    // a stale value must not abort an unrelated read-only `--check`.
+    const explicit = args.context7ApiKeyStdin ? (injected ?? await readKeyFromStream(process.stdin)) : injected;
+    if (args.context7ApiKeyStdin && (explicit === undefined || explicit.trim() === "")) throw new Error("The Context7 API key read from standard input is empty.");
+    const supplied = explicit ?? process.env.CONTEXT7_API_KEY;
+    if (supplied !== undefined && supplied.trim() !== "") {
+      const validated = validateContext7ApiKey(supplied);
+      if (validated.ok) context7ApiKey = validated.key;
+      else if (explicit !== undefined) throw new Error(validated.reason);
+      else diagnostics.push(`CONTEXT7_API_KEY in the environment is ignored: ${validated.reason}`);
+    }
+    const stored = await readStoredContext7Key(platform.paths);
+    if (stored.status === "unsafe" || stored.status === "invalid") diagnostics.push(`Context7: the stored API key is ignored (${stored.reason}) and Context7 runs anonymously until it is stored again.`);
+    const activeKey = context7ApiKey ?? (stored.status === "ok" ? stored.key : undefined);
+    remoteServices.push({ toolId: "context7", authenticated: activeKey !== undefined, keyFingerprint: activeKey !== undefined ? context7KeyFingerprint(activeKey) : null });
+    diagnostics.push(`Context7 (https://mcp.context7.com/mcp) is shared through the Gateway and sends library names and documentation questions to that service. It runs ${activeKey !== undefined ? "with an API key" : "anonymously with lower rate limits; store a key with --context7-api-key-stdin or CONTEXT7_API_KEY"}. Disable it with --no-context7.`);
+    if (!isolatedRoot) {
+      const host = defaultHostEnvironment();
+      diagnostics.push(...describeExistingContext7(await detectExistingContext7({ homeDirectory: host.homeDir,
+        codexHome: host.env.CODEX_HOME ? resolve(host.env.CODEX_HOME) : join(host.homeDir, ".codex"), runner: { run: (command, options) => runner.run([...command], options) } })));
+    }
+  }
+
   if (launchRequirements.length) {
     diagnostics.push(...setupGatewayDiagnostics({ launchRequirements, ...(repositoryRoot ? { repositoryRoot } : {}), gatewayStateDirectory: platform.paths.state }));
   }
@@ -264,7 +296,8 @@ export async function executeSetupCommand(
   }
 
   const decorateComponents = (components: readonly SetupComponent[], input: ComponentFactoryInput) => {
-    const composed = launchRequirements.length ? wrapSetupComponents(components, { ...input, serviceManager, launchRequirements,
+    const composed = launchRequirements.length || remoteServices.length ? wrapSetupComponents(components, { ...input, serviceManager, launchRequirements,
+      remoteServices, ...(context7ApiKey !== undefined && (args.mode === "apply" || args.mode === "repair") ? { context7ApiKey } : {}),
       ...(repositoryRoot ? { repositoryRoot } : {}) }) : components;
     return !onProgress ? composed : composed.map(component => ({ componentId: component.componentId, action: component.action,
       rollback: component.rollback, observe: component.observe.bind(component), desired: component.desired.bind(component),
@@ -289,7 +322,7 @@ export async function executeSetupCommand(
       skills: synchronizer,
       ...(additionalToolObservations ? { additionalToolObservations } : {}),
       serviceManager,
-      persistMachineConfig: launchRequirements.length === 0,
+      persistMachineConfig: launchRequirements.length === 0 && remoteServices.length === 0,
       decorateComponents,
       approver: args.yes
         ? new AssumeYesApprover(store, () => new Date())

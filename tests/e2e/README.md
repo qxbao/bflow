@@ -72,7 +72,7 @@ Expected output:
 E11's setup/skills lifecycle uses the real setup engine, launcher and content-addressed
 skills store in a temporary account home. It supplies an explicit empty machine
 configuration/installer registry and a version-only Herdr fixture, while Node, Git and
-pnpm run from the host. This checks first apply, `0700` permissions, all 32 skill
+pnpm run from the host. This checks first apply, `0700` permissions, all 33 skill
 bundles, idempotency, read-only checks and repair without downloading tools, changing
 provider accounts or starting a Gateway. Live Herdr compatibility and provider
 readiness remain separate opt-in checks.

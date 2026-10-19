@@ -23,7 +23,10 @@ export const SUPPORTED_CLI_COMMANDS = [
   "tools status",
   "skills sync",
   "skills list",
-  "agent check"
+  "agent check",
+  "docs search",
+  "docs lookup",
+  "docs status"
 ] as const;
 
 export type SupportedCliCommand = (typeof SUPPORTED_CLI_COMMANDS)[number];
@@ -374,6 +377,18 @@ export const CLI_COMMAND_REFERENCE: readonly CliCommandReferenceEntry[] = [
     idempotencyAndRetry: "Atomic branch preparation and merge dry-run. Idempotent under integration receipt.",
     permissionRequirements: "Git repository branch management permissions.",
     skills: ["implement-task", "using-bflow"]
+  },
+  {
+    command: "docs",
+    syntax: "bflow docs search <library> [options] | bflow docs lookup [<library>] --query <text> [options] | bflow docs status [options]",
+    purpose: "Look up current, version-specific library documentation through the shared Gateway's Context7 service; status reports whether it is reachable, authenticated and usable.",
+    reusedEngines: ["DocsClient", "McpGateway"],
+    requiredFlags: ["--query <text> (lookup)"],
+    optionalFlags: ["--library-id <id>", "--version <version>", "--language <name>", "--no-cache", "--role <role>", "--timeout <ms>", "-j, --json", "-h, --help"],
+    exitCodes: COMMON_EXIT_CODES,
+    idempotencyAndRetry: "Read-only and safe to repeat. Transient failures (network, timeout, rate limit) are retried by the Gateway only for read-only calls; results may be served from an optional local cache.",
+    permissionRequirements: "Needs a Gateway registration that grants the context7 service. Inside an agent pane the agent's own registration is used; an operator outside a pane acts under the role given by --role. Queries are sent to the hosted Context7 service.",
+    skills: ["use-context7", "using-bflow"]
   },
   {
     command: "mcp status",

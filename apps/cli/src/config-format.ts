@@ -62,7 +62,7 @@ export function stringifyConfigYaml(value: unknown): string {
   if (env) {
     const envOrdered: Record<string, unknown> = {};
     if (Array.isArray(env["roles"])) envOrdered["roles"] = env["roles"];
-    const envOrder = ["sdd", "tdd", "verification", "concurrency", "startupTimeoutMs", "shutdownTimeoutMs", "allowProviderFallback", "permissions", "requiredMcpServices", "requiredTools", "skills", "repositoryId", "workspaceRoot", "sessionName", "herdrBinary"];
+    const envOrder = ["sdd", "tdd", "verification", "concurrency", "startupTimeoutMs", "shutdownTimeoutMs", "allowProviderFallback", "permissions", "requiredMcpServices", "requiredTools", "context7", "skills", "repositoryId", "workspaceRoot", "sessionName", "herdrBinary"];
     for (const key of envOrder) if (key in env) envOrdered[key] = env[key];
     for (const [key, item] of Object.entries(env)) if (!(key in envOrdered) && key !== "roles") envOrdered[key] = item;
     ordered["environment"] = envOrdered;

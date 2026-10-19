@@ -3,6 +3,7 @@ export * from "./security.js";
 export * from "./metrics.js";
 export * from "./registry.js";
 export * from "./stdio-bridge.js";
+export * from "./http-upstream.js";
 export * from "./service-manager.js";
 export * from "./gateway.js";
 export * from "./http-server.js";

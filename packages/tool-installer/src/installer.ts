@@ -597,12 +597,13 @@ export class ManagedToolInstaller implements ToolInstaller {
   }
 }
 
-export function createToolCapability(toolId: "rtk" | "gitnexus" | "chrome-devtools-mcp" | "mempalace" | "superpowers", version: string, repositoryId: string): ToolCapability {
+export function createToolCapability(toolId: "rtk" | "gitnexus" | "chrome-devtools-mcp" | "mempalace" | "context7" | "superpowers", version: string, repositoryId: string): ToolCapability {
   const definitions = {
     rtk: { kind: "cli_only", operations: ["optimize_output", "gain"], resource: { sharing: "concurrent", maxConcurrency: 64 } },
     gitnexus: { kind: "stdio_mcp", operations: ["code_query", "code_context", "impact"], resource: { sharing: "exclusive", resourceKey: `gitnexus-${repositoryId}` } },
     "chrome-devtools-mcp": { kind: "stdio_mcp", operations: ["browser_debug", "page_navigate"], resource: { sharing: "exclusive", resourceKey: `chrome-${repositoryId}` } },
     mempalace: { kind: "stdio_mcp", operations: ["mempalace_status", "mempalace_search"], resource: { sharing: "concurrent", maxConcurrency: 16 } },
+    context7: { kind: "native_remote_mcp", operations: ["resolve-library-id", "query-docs"], resource: { sharing: "concurrent", maxConcurrency: 16 } },
     superpowers: { kind: "cli_only", operations: ["skills_instruction"], resource: { sharing: "concurrent", maxConcurrency: 64 } }
   } as const;
   return ToolCapabilitySchema.parse({ schemaVersion: 3, toolId, version, ...definitions[toolId], required: false });

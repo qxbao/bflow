@@ -180,8 +180,28 @@ export interface MCPUpstreamDriverFactory {
   ): Promise<OperationResult<MCPUpstreamDriverInstance>>;
 }
 
+/** Events of the Gateway's HTTP client to a remote upstream (never carries credentials or payloads). */
+export type UpstreamHttpEvent =
+  | "request"
+  | "retry"
+  | "rate_limited"
+  | "auth_failure"
+  | "network_error"
+  | "timeout"
+  | "protocol_error"
+  | "upstream_error"
+  | "session_started"
+  | "session_reinitialized";
+export type UpstreamHttpCounters = Readonly<Record<UpstreamHttpEvent, number>>;
+export const UPSTREAM_HTTP_EVENTS: readonly UpstreamHttpEvent[] = [
+  "request", "retry", "rate_limited", "auth_failure", "network_error", "timeout", "protocol_error",
+  "upstream_error", "session_started", "session_reinitialized"
+];
+
 export interface ServiceMetricsSnapshot {
   readonly serviceId: string;
+  /** Present only for services that made remote HTTP requests. */
+  readonly upstreamHttp?: UpstreamHttpCounters;
   readonly activeInstances: number;
   readonly activeProcesses: number;
   readonly memoryRssBytes: number;

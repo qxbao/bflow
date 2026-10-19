@@ -10,6 +10,7 @@
     { "path": "./packages/pane-manager" },
     { "path": "./packages/conversation" },
     { "path": "./packages/specification" },
+    { "path": "./packages/docs-retrieval" },
     { "path": "./packages/test-strategy" },
     { "path": "./packages/verification" },
     { "path": "./packages/git-orchestrator" },

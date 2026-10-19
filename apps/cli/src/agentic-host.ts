@@ -1,9 +1,10 @@
-import type { OperationOptions, OperationResult, SessionManifest } from "@bflow/contracts";
+import type { AgentRole, OperationOptions, OperationResult, SessionManifest } from "@bflow/contracts";
 import { resolvePrivateRuntimeStateDirectory, type HostPrepareResponse, type HostRoleLaunch } from "@bflow/runtime";
 import { resolve } from "node:path";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import type { EnvironmentCompositionInput, EnvironmentIntegration } from "./environment.js";
 import { buildHostPlatformOptions, loadHostPlatformContext } from "./platform-options.js";
+import { readGatewayReadiness } from "./gateway-readiness.js";
 
 export type { HostPrepareResponse, HostRoleLaunch };
 
@@ -12,6 +13,9 @@ export interface LifecycleHost {
   /** Parsed with `HostPrepareResponseSchema`; `platform.ready === false` means no pane may be started. */
   prepare(options?: OperationOptions): Promise<HostPrepareResponse>;
   activate(manifest: SessionManifest, options?: OperationOptions): Promise<OperationResult<void>>;
+  /** Optional private progressive check; older/mock hosts retain final activation only. */
+  verifyRoleStartup?(manifest: SessionManifest, role: AgentRole, options?: OperationOptions): Promise<OperationResult<void>>;
+  drainRoleStartup?(): Promise<OperationResult<void>>;
   readonly runtime: NonNullable<EnvironmentIntegration["runtime"]>;
   readonly quiesce: NonNullable<EnvironmentIntegration["quiesce"]>;
   readonly checkpoint: NonNullable<EnvironmentIntegration["checkpoint"]>;
@@ -53,7 +57,11 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
     return activeHost ??= (async () => {
       const runtime = await loadRuntime();
       const behavioralCommands = await readOwnerBehavioralCommands(runtime);
-      const platform = await buildHostPlatformOptions(input, { context: await loadHostPlatformContext() });
+      const context = await loadHostPlatformContext();
+      const context7Ready = input.config.environment.context7?.enabled === true
+        ? (await readGatewayReadiness(context.stateDirectory, "context7")).status === "ready" : undefined;
+      const platform = await buildHostPlatformOptions(input, { context, context7Ready,
+        warn: message => process.stderr.write(`Warning: ${message}\n`) });
       return runtime.ensureAgenticHost({
         repositoryPath: input.repository.root,
         sessionId: input.repository.sessionName,
@@ -112,6 +120,14 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
       return HostPrepareResponseSchema.parse(prepared);
     },
     activate: async (manifest, options) => (await openForStartup()).activate(manifest, options),
+    verifyRoleStartup: async (manifest, role, options) => {
+      const host = await openForStartup();
+      return host.verifyRoleStartup ? host.verifyRoleStartup(manifest, role, options) : { ok: true, value: undefined };
+    },
+    drainRoleStartup: async () => {
+      const host = await openExistingIfPresent();
+      return host?.drainRoleStartup ? host.drainRoleStartup() : { ok: true, value: undefined };
+    },
     runtime: {
       findRuns: async (query, options) => {
         const existing = await openExistingIfPresent();

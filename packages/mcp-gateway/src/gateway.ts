@@ -40,7 +40,7 @@ import {
 } from "./security.js";
 import { GatewayMetricsCollector } from "./metrics.js";
 import { MCPServiceRegistry } from "./registry.js";
-import { DefaultMCPServiceManager } from "./service-manager.js";
+import { DefaultMCPServiceManager, type DefaultMCPServiceManagerOptions } from "./service-manager.js";
 import { fallbackToolDefinition } from "./tool-definitions.js";
 
 interface ResourceState {
@@ -63,6 +63,8 @@ export interface BflowSharedMCPGatewayOptions {
   readonly serviceManager?: DefaultMCPServiceManager | undefined;
   readonly metrics?: GatewayMetricsCollector | undefined;
   readonly secretStore?: GatewaySecretStore | undefined;
+  /** Trusted host decisions about known services; see `DefaultMCPServiceManagerOptions.policyOverrides`. */
+  readonly policyOverrides?: DefaultMCPServiceManagerOptions["policyOverrides"];
   readonly now?: (() => Date) | undefined;
 }
 
@@ -91,6 +93,7 @@ export class BflowSharedMCPGateway {
         registry: this.registry,
         metrics: this.metrics,
         secretStore: this.secretStore,
+        ...(options?.policyOverrides !== undefined ? { policyOverrides: options.policyOverrides } : {}),
         ...(options?.now !== undefined ? { now: options.now } : {})
       });
     this.now = options?.now ?? (() => new Date());

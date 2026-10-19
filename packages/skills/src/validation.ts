@@ -42,6 +42,9 @@ export const BASELINE_COMMANDS = [
   "approve",
   "resume",
   "cancel",
+  "docs search",
+  "docs lookup",
+  "docs status",
 ] as const;
 const MetadataSchema = z
   .object({

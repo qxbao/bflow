@@ -89,6 +89,47 @@ Every check returns `status: "passed" | "failed" | "unknown"`. Overall status is
 
 ---
 
+## Optional Codex model execution probe reuse
+
+A host adapter factory may create `createProviderExecutionProbeCoalescer({ runner })` once per
+underlying **raw** `ProviderCommandRunner`, then pass it as `executionProbeCoalescer` to its adapters.
+Keep the normal operation-bound runner for every other command. The coalescer owns independent
+waiter cancellation/timeouts and aborts its bounded subprocess when every waiter has left.
+By default it stores only in-flight entries. To opt into completed successful **model execution
+probe** reuse, pass `successfulResultTtlMs: 30_000` (or a shorter nonnegative duration) when
+creating the coalescer. Values above 30 seconds, negative or nonfinite values are rejected.
+The monotonic age starts at subprocess completion and is never extended by a cache hit.
+Expired successes require a new execution, including when they expire during snapshot validation.
+Retention is bounded to 128 successful observations per factory; expired entries are pruned on use.
+Omitted or zero TTL preserves overlapping-only behavior.
+
+Only Codex opts in. Sharing requires matching session/repository/machine scope, canonical binary
+and digest, ping arguments (including model/effort and inherited isolation), cwd, effective process
+environment, environment variables/secret references and freshly observed account output. Keys are
+SHA-256 digests. Codex config/auth file identity and nanosecond change metadata, ancestor project
+config/instructions, approved hook sources/dependencies and approval receipts must stay unchanged.
+Bounded TOML inspection observes global and ancestor project config, including all profiles. Literal
+absolute `model_instructions_file` dependencies must remain safe regular files; simple basename
+`project_doc_fallback_filenames` are observed across cwd ancestors, including absence. Relative or
+ambiguous paths, unsupported values, unfamiliar file/path/directory selectors (including legacy
+instruction-file settings and `model_catalog_json`), or exceeded inspection limits disable reuse
+and coalescing and run individual probes. Config inspection retains dependency paths only; the
+snapshotter does not read `auth.json` credential bytes. Missing required `config.toml`/`auth.json`,
+symlinks, special files, inaccessible inputs or trust-all hook policies use individual probes.
+Changes during an eligible probe block that observation and require a fresh health check.
+
+Every role still checks authentication, capabilities, environment, permission policy, skills,
+MCP, hook trust/drift and native launch attestation separately. A shared ping failure is never
+reused as the follower's proof; an unchanged follower executes its own ping within its original
+budget. Every completed hit revalidates the mutable snapshot before accepting it; drift or uncertainty
+blocks the observation and evicts it. Failed, rejected, aborted and timed-out executions are never
+retained. Each caller receives its own outcome object. There is no persistent or global/static
+cache, and no health, native launch, attestation or task proof is shared. Tests cover local command
+reduction for overlapping and sequential matching roles; this is not live provider/Herdr startup
+evidence or a same-UID filesystem isolation guarantee.
+
+---
+
 ## Permission Modes
 
 MCP permission patterns are derived from the same validated launch material as
