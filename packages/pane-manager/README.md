@@ -107,6 +107,17 @@ does not start a duplicate or split another pane for that launch. Manifest load
 errors and failed intent writes stop startup. Workspace/tab creation before the
 first role intent remains reconciled from live Herdr topology.
 
+Topology reconciliation allocates panes and persists queued bindings in configured
+role order before starting agents. Up to four independent permanent-role startups
+then overlap. Configured permanent agent names must be unique before topology
+side effects begin. Each worker clears `launchQueued` in a durable intent before calling
+`agent start`; the same serialized publication queue records successful bindings
+without dropping another worker's progress. A failure stops queued startups and
+prevents undispatched workers from proceeding after an intent-write failure or
+cancellation, and drains workers and writes before returning the first error in configured role
+order. Final `up` status still waits for every required role. These guarantees have
+local fake-runner coverage; live provider startup latency is not established here.
+
 `readOnlyWorkspace` describes a role's policy in the manifest. Agent startup does
 not install an OS sandbox or filesystem access controls. Dedicated panes and Git
 worktrees isolate routing and ordinary edits, but processes under the same user

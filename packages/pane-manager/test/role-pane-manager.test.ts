@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -950,7 +950,9 @@ describe("RolePaneManager Verification Suite", () => {
       ? { exitCode: null, failure: "timeout", stdout: "agent_pane_busy", stderr: "acknowledgement timed out" } : undefined;
     const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
     expect((await manager.initializeTopology()).ok).toBe(false);
-    expect(runner.calls.filter(call => call.args[0] === "agent" && call.args[1] === "start")).toHaveLength(1);
+    const starts = runner.calls.filter(call => call.args[0] === "agent" && call.args[1] === "start");
+    expect(starts).toHaveLength(4);
+    expect(new Set(starts.map(call => call.args[2])).size).toBe(starts.length);
   });
   it("retries an acknowledged busy rejection and preserves the configured provider timeout", async () => {
     let rejected = false;
@@ -964,7 +966,9 @@ describe("RolePaneManager Verification Suite", () => {
     expect((await manager.initializeTopology()).ok).toBe(true);
     const starts = runner.calls.filter(call => call.args[0] === "agent" && call.args[1] === "start");
     expect(starts).toHaveLength(8);
-    expect(starts[0]!.args[starts[0]!.args.indexOf("--timeout") + 1]).toBe("90000");
+    const chatStarts = starts.filter(call => call.args[2] === "chat");
+    expect(chatStarts.length).toBeGreaterThan(0);
+    expect(chatStarts.every(call => call.args[call.args.indexOf("--timeout") + 1] === "90000")).toBe(true);
   });
   it("explains Codex update blocking with exact targets and never echoes raw screen secrets or accepts the dialog", async () => {
     const secret = "SCREEN_SECRET_CANARY_DO_NOT_ECHO";
@@ -996,6 +1000,192 @@ describe("RolePaneManager Verification Suite", () => {
 
   // Scenario 1: Khởi tạo topology (Initialize full topology)
   describe("Scenario 1: Initialize full topology", () => {
+    function deferred() {
+      let resolve!: () => void;
+      const promise = new Promise<void>(accept => { resolve = accept; });
+      return { promise, resolve };
+    }
+
+    function delayedStartup(failedRole?: string, failureKind = "timeout") {
+      const gates = new Map(PERMANENT_TOPOLOGY_ROLES.map(role => [role as string, deferred()]));
+      const started: string[] = [];
+      const snapshots: Awaited<ReturnType<SessionManifestStore["load"]>>[] = [];
+      let active = 0, maximum = 0;
+      const delayedRunner: HerdrCommandRunner = { run: async invocation => {
+        if (invocation.args[0] !== "agent" || invocation.args[1] !== "start") return runner.run(invocation);
+        const role = invocation.args[2]!;
+        snapshots.push(await store.load(config.sessionId));
+        started.push(role); active++; maximum = Math.max(maximum, active);
+        try {
+          await gates.get(role)!.promise;
+          if (role === failedRole) {
+            if (failureKind === "throw") throw new Error("Injected runner failure");
+            return failureKind === "blocked"
+              ? { exitCode: 1, stdout: "", stderr: "agent_blocked" }
+              : { exitCode: null, failure: "timeout" as const, stdout: "agent_pane_busy", stderr: "uncertain acknowledgement" };
+          }
+          return await runner.run(invocation);
+        } finally { active--; }
+      } };
+      return { gates, started, snapshots, runner: delayedRunner,
+        get active() { return active; }, get maximum() { return maximum; },
+        drain: () => { for (const gate of gates.values()) gate.resolve(); } };
+    }
+
+    it("overlaps at most four role starts after durable intents and retains every binding in configured order", async () => {
+      const delayed = delayedStartup();
+      const saved: number[] = [];
+      let writing = 0, concurrentWrites = 0;
+      const serializedStore: SessionManifestStore = { load: (...args) => store.load(...args), save: async (manifest, options) => {
+        writing++; concurrentWrites = Math.max(concurrentWrites, writing);
+        try {
+          await new Promise<void>(accept => setImmediate(accept));
+          saved.push(manifest.panes.length);
+          return await store.save(manifest, options);
+        } finally { writing--; }
+      } };
+      const manager = createRolePaneManager({ config, runner: delayed.runner, store: serializedStore, worktreeInspector: inspector });
+      let settled = false;
+      const outcome = manager.initializeTopology().then(result => { settled = true; return result; });
+      try {
+        await vi.waitFor(() => expect(delayed.started).toHaveLength(4), { timeout: 5000 });
+        expect(new Set(delayed.started)).toEqual(new Set(["chat", "coordinator", "planner", "analyst"]));
+        for (const snapshot of delayed.snapshots) {
+          expect(snapshot.ok && snapshot.value?.panes).toHaveLength(7);
+          expect(snapshot.ok && snapshot.value?.status).toBe("initializing");
+        }
+        for (const [finished, next] of [["planner", "architect"], ["architect", "reviewer"], ["reviewer", "qa-verifier"]]) {
+          delayed.gates.get(finished!)!.resolve();
+          await vi.waitFor(() => expect(delayed.started.at(-1)).toBe(next), { timeout: 5000 });
+        }
+        expect(settled).toBe(false);
+        delayed.drain();
+        const result = await outcome;
+        expect(result.ok).toBe(true);
+        if (result.ok) expect(result.value.panes.map(pane => pane.role))
+          .toEqual(["conversation", "coordinator", "planner", "specifier", "architect", "reviewer", "qa"]);
+        expect(delayed.maximum).toBe(4);
+        expect(concurrentWrites).toBe(1);
+        expect(saved.every((count, index) => index === 0 || count >= saved[index - 1]!)).toBe(true);
+        const final = await store.load(config.sessionId);
+        expect(final.ok && final.value?.panes).toHaveLength(7);
+      } finally { delayed.drain(); await outcome; }
+    });
+
+    it.each(["timeout", "throw", "blocked"])("drains started roles and leaves queued intents intact after a %s", async failureKind => {
+      const delayed = delayedStartup("planner", failureKind);
+      const manager = createRolePaneManager({ config, runner: delayed.runner, store, worktreeInspector: inspector });
+      let settled = false;
+      const outcome = manager.initializeTopology().then(result => { settled = true; return result; });
+      try {
+        await vi.waitFor(() => expect(delayed.started).toHaveLength(4), { timeout: 5000 });
+        delayed.gates.get("planner")!.resolve();
+        await vi.waitFor(() => expect(delayed.active).toBe(3));
+        expect(settled).toBe(false);
+        expect(delayed.started).toHaveLength(4);
+        delayed.drain();
+        expect((await outcome).ok).toBe(false);
+        expect(delayed.started).toHaveLength(4);
+        const saved = await store.load(config.sessionId);
+        expect(saved.ok && saved.value?.status).toBe("initializing");
+        expect(saved.ok && saved.value?.panes).toHaveLength(7);
+        if (saved.ok) {
+          expect(saved.value?.panes.find(pane => pane.role === "planner")?.metadata?.["launchIntent"]).toBe(true);
+          expect(saved.value?.panes.find(pane => pane.role === "architect")?.metadata?.["launchQueued"]).toBe(true);
+        }
+      } finally { delayed.drain(); await outcome; }
+    });
+
+    it("does not launch queued roles after cancellation and drains starts already in flight", async () => {
+      const delayed = delayedStartup();
+      const controller = new AbortController();
+      const manager = createRolePaneManager({ config, runner: delayed.runner, store, worktreeInspector: inspector });
+      let settled = false;
+      const outcome = manager.initializeTopology({ signal: controller.signal }).then(result => { settled = true; return result; });
+      try {
+        await vi.waitFor(() => expect(delayed.started).toHaveLength(4), { timeout: 5000 });
+        controller.abort();
+        expect(settled).toBe(false);
+        delayed.drain();
+        expect((await outcome).ok).toBe(false);
+        expect(delayed.started).toHaveLength(4);
+        const saved = await store.load(config.sessionId);
+        expect(saved.ok && saved.value?.panes).toHaveLength(7);
+      } finally { delayed.drain(); await outcome; }
+    });
+
+    it("stops undispatched workers when an attempted-launch intent fails to persist", async () => {
+      const delayed = delayedStartup();
+      let denied = false;
+      const failingStore: SessionManifestStore = { load: (...args) => store.load(...args), save: async (manifest, options) => {
+        const planner = manifest.panes.find(pane => pane.role === "planner");
+        if (!denied && planner?.metadata?.["launchQueued"] === false) {
+          denied = true;
+          return { ok: false, error: { code: "corruption", retryable: false, message: "dispatch intent write denied" } };
+        }
+        return store.save(manifest, options);
+      } };
+      const manager = createRolePaneManager({ config, runner: delayed.runner, store: failingStore, worktreeInspector: inspector });
+      let settled = false;
+      const outcome = manager.initializeTopology().then(result => { settled = true; return result; });
+      try {
+        await vi.waitFor(() => expect(delayed.started).toHaveLength(2), { timeout: 5000 });
+        expect(delayed.started).not.toContain("planner");
+        expect(delayed.started).not.toContain("analyst");
+        expect(settled).toBe(false);
+        delayed.drain();
+        const result = await outcome;
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.error.message).toBe("dispatch intent write denied");
+        expect(delayed.started).toHaveLength(2);
+        const saved = await store.load(config.sessionId);
+        expect(saved.ok && saved.value?.panes).toHaveLength(7);
+      } finally { delayed.drain(); await outcome; }
+    });
+
+    it("rejects colliding permanent agent names before concurrent launch side effects", async () => {
+      const manager = createRolePaneManager({ config: { ...config, permanentRoles: ["chat", "coordinator"],
+        roleConfigs: { ...config.roleConfigs, coordinator: { agentName: "chat" } } }, runner, store, worktreeInspector: inspector });
+      const result = await manager.initializeTopology();
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe("conflict");
+      expect(runner.calls.filter(call => call.args[0] === "agent" && call.args[1] === "start")).toHaveLength(0);
+    });
+
+    it("does not dispatch workers cancelled while their intent writes are pending", async () => {
+      const controller = new AbortController();
+      const cancellingStore: SessionManifestStore = { load: (...args) => store.load(...args), save: async (manifest, options) => {
+        const saved = await store.save(manifest, options);
+        if (manifest.panes.some(pane => pane.metadata?.["launchQueued"] === false)) controller.abort();
+        return saved;
+      } };
+      const manager = createRolePaneManager({ config, runner, store: cancellingStore, worktreeInspector: inspector });
+      const result = await manager.initializeTopology({ signal: controller.signal });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe("cancelled");
+      expect(runner.calls.filter(call => call.args[0] === "agent" && call.args[1] === "start")).toHaveLength(0);
+      const saved = await store.load(config.sessionId);
+      expect(saved.ok && saved.value?.panes).toHaveLength(7);
+    });
+
+    it("returns failures by configured role order after out-of-order failures have drained", async () => {
+      const delayed = delayedStartup("planner");
+      runner.onCommand = invocation => invocation.args[0] === "agent" && invocation.args[1] === "start" && invocation.args[2] === "chat"
+        ? { exitCode: 1, stdout: "", stderr: "agent_blocked" } : undefined;
+      const manager = createRolePaneManager({ config, runner: delayed.runner, store, worktreeInspector: inspector });
+      const outcome = manager.initializeTopology();
+      try {
+        await vi.waitFor(() => expect(delayed.started).toHaveLength(4), { timeout: 5000 });
+        delayed.gates.get("planner")!.resolve();
+        await vi.waitFor(() => expect(delayed.active).toBe(3));
+        delayed.drain();
+        const result = await outcome;
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.error.message).toContain("chat");
+        expect(delayed.started).toHaveLength(4);
+      } finally { delayed.drain(); await outcome; }
+    });
+
     it("persists launch intent before startup and reconciles blocked partial startup in its original pane", async () => {
       const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
       let failedPane = "";
