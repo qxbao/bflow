@@ -1,6 +1,7 @@
 import type {
   AgentSessionLocator,
   AgentTransportState,
+  ContractError,
   OperationOptions,
   OperationResult,
   PaneBinding,
@@ -84,6 +85,8 @@ import { InMemorySessionManifestStore } from "./manifest-store.js";
 function ok<T>(value: T): OperationResult<T> {
   return { ok: true, value };
 }
+
+const MAX_PERMANENT_STARTUP_CONCURRENCY = 4;
 
 function validationError<T = never>(message: string, details?: unknown): OperationResult<T> {
   return {
@@ -404,7 +407,7 @@ export class RolePaneManager {
     if (outcome.exitCode !== 0 || outcome.failure) return toCommandError(outcome, `Could not label ${role} pane '${paneId}'`);
     parsePaneInfoResult(outcome); return ok(undefined);
   }
-  async #startupBlocked(role: TopologyRole, agentName: string, kind: string, paneId: string, state: string, options?: OperationOptions): Promise<OperationResult<PaneBinding>> {
+  async #startupBlocked(role: TopologyRole, agentName: string, kind: string, paneId: string, state: string, options?: OperationOptions): Promise<OperationResult<never>> {
     // Classify locally. Terminal snapshots can contain secrets; do not return or
     // log raw screens and never answer an update/trust/permission dialog here.
     const session = this.#config.sessionId;
@@ -524,6 +527,14 @@ export class RolePaneManager {
   ): Promise<OperationResult<SessionManifest>> {
     // Validate env-at-creation requirements before any Herdr or store side effect.
     const configuredRoles: readonly PermanentTopologyRole[] = this.#config.permanentRoles ?? PERMANENT_TOPOLOGY_ROLES;
+    // Concurrent uniqueness checks cannot reserve a name. Reject configured
+    // collisions before topology side effects rather than racing two starts.
+    const configuredNames = new Set<string>();
+    for (const role of configuredRoles) {
+      const name = this.#config.roleConfigs?.[role]?.agentName ?? ROLE_TOPOLOGY_SPECS[role].defaultAgentName;
+      if (configuredNames.has(name)) return conflictError(`Permanent agent name '${name}' is configured for multiple roles`);
+      configuredNames.add(name);
+    }
     const socketCheck = this.#requireSocketFor(configuredRoles.map(role => this.#config.roleConfigs?.[role]?.launch));
     if (!socketCheck.ok) return socketCheck;
     // Panes created by this run with launch env, mapped to the launchId they were created for.
@@ -681,6 +692,7 @@ export class RolePaneManager {
     const assignedPaneIds = new Set<string>();
     const splitDepths = new Map(livePanes.map(pane => [pane.paneId, 0]));
     const manifestPanes: PaneBinding[] = [];
+    const startups: { readonly role: PermanentTopologyRole; readonly pending: PaneBinding }[] = [];
     const persistProgress = async (binding: PaneBinding): Promise<OperationResult<SessionManifest>> => {
       const panes = [...manifestPanes.filter(p => p.paneId !== binding.paneId), binding];
       for (const previous of savedManifest?.panes ?? []) {
@@ -795,6 +807,17 @@ export class RolePaneManager {
         continue;
       }
 
+      // A known pending/blocked occupant is a recovery boundary, not queued new
+      // work. Refuse it before dispatching any of the other reserved role panes.
+      const pendingOccupant = savedBinding && reusable
+        ? liveAgents.find(agent => agent.paneId === savedBinding.paneId && agent.name === agentName && agent.agent === agentKind)
+        : undefined;
+      if (pendingOccupant && (pendingOccupant.agentStatus === "blocked" || pendingOccupant.agentStatus === "unknown" ||
+          pendingOccupant.launchPending === true || pendingOccupant.interactiveReady === false)) {
+        return this.#startupBlocked(spec.topologyRole, agentName, agentKind, pendingOccupant.paneId,
+          "launch pending or interactive not ready", options);
+      }
+
       // Otherwise, obtain an available shell pane in targetTabId
       let candidatePane: HerdrPaneInfo | null = null;
       // A recorded launch intent owns its pane even if startup is blocked or its
@@ -864,30 +887,68 @@ export class RolePaneManager {
           workspaceId: herdrWorkspaceId, tabId: targetTabId, focused: false, agentStatus: "unknown", revision: 0 },
         request: { role, paneId: selectedPaneId, workspaceId: herdrWorkspaceId, tabId: targetTabId,
           cwd: this.#config.workspaceRoot, permanent: true,
-          metadata: { launchIntent: true, ...(launch !== undefined ? { launchId: launch.launchId, launchFingerprint: launch.launchFingerprint } : {}) } } });
+          metadata: { launchIntent: true, launchQueued: true, ...(launch !== undefined ? { launchId: launch.launchId, launchFingerprint: launch.launchFingerprint } : {}) } } });
       if (!pending.ok) return pending;
+      manifestPanes.push(pending.value);
       const intentSaved = await persistProgress(pending.value);
       if (!intentSaved.ok) return intentSaved;
+      startups.push({ role, pending: pending.value });
+    }
 
-      const startResult = await this.startAgentInPane(
-        {
-          role,
-          paneId: selectedPaneId,
-          workspaceId: herdrWorkspaceId,
-          tabId: targetTabId,
-          cwd: this.#config.workspaceRoot,
-          agentName,
-          agentKind,
-          permanent: true
-        },
-        options
-      );
-      if (!startResult.ok) {
-        return startResult;
+    // Pane allocation is ordered. Only independent startup observations and agent
+    // launches overlap; every queued role is already represented in durable state.
+    // Serialize binding replacement and the corresponding snapshot write together.
+    let publications: Promise<void> = Promise.resolve();
+    const publish = (binding: PaneBinding): Promise<OperationResult<SessionManifest>> => {
+      const write = publications.then(async () => {
+        const index = manifestPanes.findIndex(pane => pane.paneId === binding.paneId);
+        manifestPanes[index] = binding;
+        return persistProgress(binding);
+      });
+      publications = write.then(() => undefined, () => undefined);
+      return write;
+    };
+    let nextStartup = 0;
+    const failures = new Map<number, ContractError>();
+    await Promise.all(Array.from({ length: Math.min(MAX_PERMANENT_STARTUP_CONCURRENCY, startups.length) }, async () => {
+      while (failures.size === 0 && nextStartup < startups.length) {
+        const index = nextStartup++;
+        if (options?.signal?.aborted) {
+          failures.set(index, { code: "cancelled", retryable: false, message: "Role startup interrupted; queued launch intents preserved" });
+          break;
+        }
+        const { role, pending } = startups[index]!;
+        try {
+          // Distinguish untouched queued work from an attempted dispatch. A lost
+          // agent.start acknowledgement keeps this exact intent for reconciliation.
+          const intent = await publish({ ...pending, metadata: { ...pending.metadata, launchQueued: false } });
+          if (!intent.ok) { failures.set(index, intent.error); break; }
+          // This worker may have waited behind a failed publication. Its grant
+          // does not permit a new launch after failure or cancellation is known.
+          if (failures.size > 0) break;
+          if (options?.signal?.aborted) {
+            failures.set(index, { code: "cancelled", retryable: false, message: "Role startup interrupted; queued launch intents preserved" });
+            break;
+          }
+          const started = await this.startAgentInPane({
+            role, paneId: pending.paneId, workspaceId: pending.workspaceId, tabId: pending.tabId,
+            cwd: this.#config.workspaceRoot, agentName: pending.agentId, agentKind: pending.agentKind!, permanent: true
+          }, options);
+          if (!started.ok) { failures.set(index, started.error); break; }
+          const saved = await publish(started.value);
+          if (!saved.ok) { failures.set(index, saved.error); break; }
+        } catch (error) {
+          const failed = toProtocolError(error, `Failed to start permanent role '${role}'`);
+          if (!failed.ok) failures.set(index, failed.error);
+        }
       }
-      manifestPanes.push(startResult.value);
-      const progress = await persistProgress(startResult.value);
-      if (!progress.ok) return progress;
+    }));
+    await publications;
+    // Returning only after all workers/publications drain prevents cleanup from
+    // racing a late launch or manifest write. Failure priority is role order.
+    for (let index = 0; index < startups.length; index++) {
+      const error = failures.get(index);
+      if (error) return { ok: false, error };
     }
 
     // Preserve any existing active/released developer panes

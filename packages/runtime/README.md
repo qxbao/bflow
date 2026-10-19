@@ -474,6 +474,20 @@ Guarantees implemented here, with package-local tests in `test/platform/service.
   or launch references are rejected before probes start. A failed check stops queued checks and
   drains those already running before returning the first failure in configured role order.
   This scheduling is covered by local tests; a reduction in live startup time has not been measured.
+- The CLI may submit a private preparatory role check after that role's native binding is durably
+  published, overlapping at most three checks with later pane launches. Every check validates the
+  exact startup/native/tool receipts and performs role health. Final activation still repeats the
+  complete required-role gate with fresh health and a newly verified signed attestation for each role;
+  preparatory results never substitute for it or start the workspace/scheduler.
+- One host provider factory shares only the Codex model execution ping across equivalent snapshots,
+  retaining successful results for at most 30 seconds. Binary/config/account/session/cwd/model/permission
+  and environment changes invalidate equivalence; authentication, role health, native bindings, MCP,
+  skills and attestations remain fresh. Progressive work may warm this narrow observation, while
+  repeated local checks add overhead; these local tests do not establish a live startup speedup.
+- Preparatory checks stop queued work on failure and drain started work. A separate private control
+  acknowledgement drains daemon work and serialized native-session/startup journals after a client
+  disconnect, before CLI quiesce/shutdown/cleanup. Prepare drains the preceding generation before
+  replacing launches, and final activation drains preparatory work before its fresh gate.
 - Codex setup review, preflight probes and permanent/dynamic role launches share the selected HOME/PATH
   and explicitly empty outer Orca pane/root/endpoint/port selectors in child environments. Parent settings
   and Bflow's mandatory Herdr/Runtime hooks are preserved; an unsupported hook snapshot still blocks launch.

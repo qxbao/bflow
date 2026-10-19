@@ -11,7 +11,7 @@ import { codexStartupPrompt } from "@bflow/agent-providers";
 import {
   AgentBindingReceiptSchema, AgentExecutionHandleSchema, AgentProviderIdSchema, AgentResultSchema, AgentRoleSchema, ApprovalDecisionSchema,
   JsonValueSchema, RoleMessageSchema, RunQuerySchema, SessionManifestSchema,
-  type AgentProviderId, type AgentRole, type RoleMessage, type SessionManifest, type RunStore, type OperationOptions
+  type AgentProviderId, type AgentRole, type PaneBinding, type RoleMessage, type SessionManifest, type RunStore, type OperationOptions
 } from "@bflow/contracts";
 import { authenticateNativeHerdrMessage } from "./herdr-ingress.js";
 import { callHost } from "./host-protocol.js";
@@ -86,6 +86,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   let attemptedManifest: SessionManifest | undefined;
   let quiesced = false, quiesceCompleted = false, closing = false;
   let preparation: Promise<unknown> | undefined;
+  let activation: Promise<unknown> | undefined;
   let scheduler: Promise<unknown> | undefined, schedulerError: string | undefined;
   const receipts = new HostReceiptJournal(join(configuration.directory, "authentication-receipts"), configuration.repositoryPath, configuration.sessionId);
   const roleTokens = new Map<string, AgentRole>();
@@ -187,7 +188,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const agent = record(record(record(JSON.parse(await herdr(["agent", "get", paneId]))).result).agent);
     const native = agent.agent_session ? record(agent.agent_session) : undefined;
     const status = agent.agent_status ?? agent.agentStatus;
-    return { ...(typeof agent.name === "string" ? { name: agent.name } : {}), status: typeof status === "string" ? status : "unknown",
+    return { ...(typeof (agent.name ?? agent.agent) === "string" ? { name: String(agent.name ?? agent.agent) } : {}), status: typeof status === "string" ? status : "unknown",
       ...(native ? { nativeSession: { source: String(native.source), kind: native.kind as "id" | "path" | "opaque", value: String(native.value) } } : {}) };
   };
   const requireWorkspace = () => { if (!workspace) throw new Error("Bflow host awaits an up SessionManifest; retry only after bflow up completes"); return workspace; };
@@ -284,11 +285,13 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     startupWrites = run.catch(() => undefined);
     return run;
   };
-  const activate = async (input: unknown) => {
-    const accepted = SessionManifestSchema.parse(input);
-    attemptedManifest = accepted;
-    if (accepted.sessionId !== configuration.sessionId || accepted.workspaceRoot !== configuration.repositoryPath || accepted.status !== "up") throw new Error("Foreign or unready session manifest");
-    if (workspace) { if (quiesced) throw new Error("Host is quiesced; reconcile and restart after shutdown"); return null; }
+  let nativeSessionWrites: Promise<void> = Promise.resolve();
+  const persistNativeSessions = () => {
+    const run = nativeSessionWrites.then(() => privateFile(join(configuration.directory, "native-sessions.json"), JSON.stringify(Object.fromEntries(nativeSessions))));
+    nativeSessionWrites = run.catch(() => undefined);
+    return run;
+  };
+  const verifyStartupBindings = async (panes: readonly PaneBinding[]) => {
     // Launch receipts retained for this activation, keyed by role (H1 reads their reachability fields).
     const launchReceipts = new Map<AgentRole, Record<string, unknown>>();
     // Startup proof per role: `hook` (SessionStart receipt with the native session id) or `mcp_bootstrap` (the MCP child's
@@ -296,7 +299,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const startupPaths = new Map<AgentRole, "hook" | "mcp_bootstrap">();
     // An older pane may have a valid Herdr session but no Bflow tools/hooks.
     // Require a launch-local startup receipt for this exact pane: the hook's native session or the MCP bootstrap.
-    for (const pane of accepted.panes) {
+    for (const pane of panes) {
       if (!pane.permanent || pane.role === "developer") continue;
       const path = receiptPathOf(pane.role, pane.paneId);
       let receipt: Record<string, unknown>;
@@ -319,7 +322,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       launchReceipts.set(pane.role, receipt);
     }
     let nativeSessionsChanged = false;
-    for (const pane of accepted.panes) {
+    for (const pane of panes) {
       const actual = record(record(record(JSON.parse(await herdr(["agent", "get", pane.paneId]))).result).agent);
       const native = actual.agent_session ? record(actual.agent_session) : undefined;
       const expectedProvider = platformRoles.find(option => option.role === pane.role)?.provider ??
@@ -347,18 +350,85 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           pane.session?.value !== receipt.sessionId || (actual.name ?? actual.agent) !== pane.agentId)
         throw new Error(`Role ${pane.role} has no matching Bflow provider startup/native-session receipt; stop and recreate legacy bare panes`);
     }
-    if (nativeSessionsChanged) await privateFile(join(configuration.directory, "native-sessions.json"), JSON.stringify(Object.fromEntries(nativeSessions)));
+    if (nativeSessionsChanged) await persistNativeSessions();
     // Native sessions are proven above. H1: each required role with Gateway registrations must prove, from inside its
     // launched provider process, that every registration reaches its allowed tools; only then is platform readiness checked.
     if (platformSession) {
       for (const [role, expectation] of toolExpectations) {
-        const pane = accepted.panes.find(candidate => candidate.role === role);
+        const pane = panes.find(candidate => candidate.role === role);
         const required = platformRoles.find(option => option.role === role)?.required === true;
         if (!pane || !required) continue;
         assertRoleToolReachability(role, expectation, reportedReachabilityOf(launchReceipts.get(role) ?? {}));
       }
-      await platformSession.verifyActivation(accepted.panes, observeAgent);
     }
+    return launchReceipts;
+  };
+  const observeBoundAgent = (panes: readonly PaneBinding[]) => async (paneId: string) => {
+    const binding = panes.find(pane => pane.paneId === paneId);
+    const observed = await observeAgent(paneId);
+    if (!binding?.session || observed.name !== binding.agentId || !observed.nativeSession ||
+        observed.nativeSession.source !== binding.session.source || observed.nativeSession.kind !== binding.session.kind || observed.nativeSession.value !== binding.session.value)
+      throw new Error(`Role pane ${paneId} changed its agent/native session during activation`);
+    return observed;
+  };
+  // Private role requests share the same proofs as final activation and are bounded independently of pane launch workers.
+  const roleStartupJobs = new Map<AgentRole, { key: string; promise: Promise<void> }>();
+  const roleStartupFailures = new Map<AgentRole, unknown>();
+  const roleStartupWaiters: (() => void)[] = [];
+  let roleStartupActive = 0, startupDraining = false;
+  const drainRoleStartup = async (ignoreFailures = false) => {
+    startupDraining = true;
+    await Promise.allSettled([...roleStartupJobs.values()].map(job => job.promise));
+    if (!ignoreFailures) for (const option of platformRoles) if (roleStartupFailures.has(option.role)) throw roleStartupFailures.get(option.role);
+  };
+  const verifyRoleStartup = (input: unknown, operation?: OperationOptions): Promise<void> => {
+    const request = z.object({ manifest: SessionManifestSchema, role: AgentRoleSchema }).strict().parse(input);
+    const accepted = request.manifest;
+    if (accepted.sessionId !== configuration.sessionId || accepted.workspaceRoot !== configuration.repositoryPath || !["initializing", "up"].includes(accepted.status))
+      throw new Error("Foreign or unready progressive session manifest");
+    if (!platformSession) return Promise.resolve(); // Legacy hosts keep final activation only.
+    const pane = accepted.panes.find(binding => binding.role === request.role && binding.permanent);
+    const required = platformRoles.some(option => option.role === request.role && option.required && option.role !== "developer");
+    if (!pane || !required || !platformSession.launchIdOf(request.role)) throw new Error("Progressive role check requires a prepared required-role binding");
+    const key = digest(pane);
+    const existing = roleStartupJobs.get(request.role);
+    if (existing) {
+      if (existing.key !== key) throw new Error("Role startup binding changed during an in-flight check; reconcile before retry");
+      return existing.promise;
+    }
+    if (startupDraining || quiesced || closing || preparation || workspace) throw new Error("Role startup checks are closed during a host lifecycle transition");
+    const promise = (async () => {
+      await new Promise<void>(accept => {
+        const acquire = () => { roleStartupActive++; accept(); };
+        if (roleStartupActive < 3) acquire(); else roleStartupWaiters.push(acquire);
+      });
+      const stopped = new Error("Role startup check stopped before acquiring its health slot");
+      try {
+        operation?.signal?.throwIfAborted();
+        if (startupDraining || roleStartupFailures.size || quiesced || closing) throw stopped;
+        await verifyStartupBindings([pane]);
+        await platformSession.verifyRoleActivation(pane, observeBoundAgent([pane]), operation);
+      } catch (error) {
+        if (error !== stopped && !String(error).includes("[bflow:native-startup-pending]")) roleStartupFailures.set(request.role, error);
+        throw error;
+      } finally {
+        roleStartupActive--;
+        roleStartupWaiters.shift()?.();
+        roleStartupJobs.delete(request.role);
+      }
+    })();
+    roleStartupJobs.set(request.role, { key, promise });
+    return promise;
+  };
+  const activate = async (input: unknown) => {
+    const accepted = SessionManifestSchema.parse(input);
+    attemptedManifest = accepted;
+    if (accepted.sessionId !== configuration.sessionId || accepted.workspaceRoot !== configuration.repositoryPath || accepted.status !== "up") throw new Error("Foreign or unready session manifest");
+    if (workspace) { if (quiesced) throw new Error("Host is quiesced; reconcile and restart after shutdown"); return null; }
+    if (preparation || quiesced || closing) throw new Error("Host lifecycle transition prevents activation");
+    await drainRoleStartup();
+    await verifyStartupBindings(accepted.panes);
+    await platformSession?.verifyActivation(accepted.panes, observeBoundAgent(accepted.panes));
     queryStore?.close(); queryStore = undefined;
     const pluginRoot = fileURLToPath(new URL("../../../../agents/coordinator/herdr-receipts", import.meta.url));
     await herdr(["plugin", "link", pluginRoot]);
@@ -557,7 +627,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (method === "role_call") return roleCall(role, params);
       if (method === "native_session") {
         const input = record(params); nativeSessions.set(textField(input.paneId), {role, sessionId:textField(input.sessionId)});
-        await privateFile(join(configuration.directory, "native-sessions.json"), JSON.stringify(Object.fromEntries(nativeSessions)));
+        await persistNativeSessions();
         return {registered:true};
       }
       if (method === "transport_prompt") {
@@ -614,7 +684,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       case "ping": return { active: !!workspace, quiesced, schedulerError: schedulerError ?? null };
       case "prepare": {
         if (quiesced || closing) throw new Error("Host is shutting down; reconcile before preparing roles");
-        if (preparation) throw new Error("Host role preparation is already in progress; reconcile before retrying");
+        if (preparation || activation) throw new Error("Host role preparation or activation is already in progress; reconcile before retrying");
         const request = z.object({ deadline: z.string().datetime().optional() }).strict().parse(params);
         const deadline = request.deadline ?? new Date(Date.now() + 600_000).toISOString();
         const remaining = Date.parse(deadline) - Date.now();
@@ -623,6 +693,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           ...(operation?.signal ? [operation.signal] : [])]);
         const options: OperationOptions = { deadline, signal, timeoutMs: Math.min(remaining, 600_000) };
         preparation = (async () => {
+          await drainRoleStartup(true);
+          roleStartupFailures.clear();
           // H1: legacy per-role plans never survive a new generation; launch-keyed plans are published by the session.
           await removeLegacyRoleProbes(configuration.directory, roles);
           toolExpectations.clear();
@@ -636,7 +708,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           return { roleLaunch, platform: prepared.report };
         })();
         try { return await preparation; }
-        finally { preparation = undefined; }
+        finally { preparation = undefined; startupDraining = false; }
       }
       case "platform_status": {
         // Legacy hosts (no platform) keep the original response shape exactly.
@@ -662,11 +734,20 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         }
         return { ...status, toolReachability, startupProof };
       }
-      case "activate": return activate(params);
+      case "drain_role_startup": await drainRoleStartup(true); await nativeSessionWrites; await startupWrites; return null;
+      case "verify_role_startup": return verifyRoleStartup(params, operation);
+      case "activate": {
+        if (activation) throw new Error("Host activation is already in progress; reconcile before retrying");
+        activation = activate(params);
+        try { return await activation; }
+        finally { activation = undefined; }
+      }
       case "get_run": { const stored = unwrap(await (await getQueryStore()).get(textField(record(params).runId))); return stored?.snapshot ?? null; }
       case "find_runs": { const page = unwrap(await (await getQueryStore()).find(RunQuerySchema.parse(params))); return { ...page, items: page.items.map(item => item.snapshot) }; }
       case "quiesce": {
         quiesced = true;
+        await drainRoleStartup(true);
+        await activation?.catch(() => undefined);
         await preparation?.catch(() => undefined);
         if (!workspace) {
           let cursor: string | undefined;
@@ -693,10 +774,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       }
       case "checkpoint": return requireWorkspace().runtime.checkpoint(params);
       case "shutdown": {
+        await activation?.catch(() => undefined);
         if (workspace && !quiesceCompleted) throw new Error("Quiesce and checkpoint before stopping the host");
         const status = record(JSON.parse(await herdr(["status", "server", "--json"])));
         if (status.running === true) throw new Error("Stop the named Herdr session before stopping its host");
         closing = true;
+        await drainRoleStartup(true);
+        await nativeSessionWrites;
+        await startupWrites;
         await preparation?.catch(() => undefined);
         await platformSession?.shutdown();
         setImmediate(() => { void close(); }); return null;
@@ -766,6 +851,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   gatewayTimer.unref();
   const close = async () => {
     closing = true; clearInterval(timer); clearInterval(pump); clearInterval(gatewayTimer);
+    await drainRoleStartup(true);
+    await activation?.catch(() => undefined);
+    await nativeSessionWrites;
+    await startupWrites;
     for (const runner of hookRunners.values()) {
       await rm(runner, { force: true }).catch(() => undefined);
     }

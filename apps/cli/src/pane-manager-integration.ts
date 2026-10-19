@@ -14,6 +14,7 @@ import type { EnvironmentCompositionInput, EnvironmentIntegration } from "./envi
 import { EnvironmentError } from "./environment.js";
 import { environmentProcessRunner, namedSessionEnvironment, type EnvironmentProcessRunner } from "./environment-process.js";
 import { openLifecycleHost, providerRoleArguments, type LifecycleHost, type LifecycleHostFactory } from "./agentic-host.js";
+import { RoleStartupChecks } from "./role-startup-checks.js";
 import { formatPlatformNotReady } from "./platform-options.js";
 
 function failure<T>(message: string): OperationResult<T> {
@@ -51,7 +52,8 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
   private persistenceFailure: ContractError | undefined;
   constructor(private readonly input: EnvironmentCompositionInput, private readonly runner = environmentProcessRunner,
     roleArguments: Partial<Record<TopologyRole, readonly string[]>> = {}, roleLaunches: Partial<Record<TopologyRole, AgentLaunchProfile>> = {},
-    socketFactory: PaneSocketFactory = defaultPaneSocket) {
+    socketFactory: PaneSocketFactory = defaultPaneSocket,
+    onPublished?: (manifest: SessionManifest, options?: OperationOptions) => void) {
     const roles: PermanentTopologyRole[] = [];
     const roleConfigs: Partial<Record<TopologyRole, Partial<RoleAgentConfig>>> = {};
     for (const role of input.config.environment.roles) {
@@ -83,6 +85,7 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
         const validated = this.validate(manifest);
         const saved = validated.ok ? await diskStore.save(validated.value, options) : validated;
         if (!saved.ok) this.persistenceFailure = saved.error;
+        else onPublished?.(saved.value, options);
         return saved;
       },
       delete: (sessionId, options) => sessionId === input.repository.sessionName
@@ -176,6 +179,18 @@ export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, r
   // Latest platform preflight from this process; doctor reports it only when present.
   let lastPlatform: HostPrepareResponse["platform"];
   let prepared = false;
+  let startupChecks: RoleStartupChecks | undefined;
+  // Client cancellation closes its socket before the daemon necessarily finishes writing proofs.
+  // A separate uncancelled control barrier must acknowledge drainage before destructive cleanup.
+  let startupDrain: Promise<void> | undefined;
+  const stopStartupChecks = () => startupDrain ??= (async () => {
+    await startupChecks?.drain(true);
+    if (host) {
+      const active = await host;
+      const drained = await active.drainRoleStartup?.();
+      if (drained && !drained.ok) throw new EnvironmentError(drained.error);
+    }
+  })();
   const assertPreparationCurrent = (options?: OperationOptions) => {
     if (options?.signal?.aborted) throw new EnvironmentError({ code: "cancelled", retryable: false,
       message: "Role preparation was interrupted; reconcile the host before retrying." });
@@ -184,8 +199,11 @@ export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, r
         message: "Role preparation exceeded the startup deadline; reconcile the host before retrying." });
   };
   const prepare = async (options?: OperationOptions): Promise<OperationResult<void>> => {
+    const drained = await startupChecks?.drain(true);
+    if (drained && !drained.ok) return drained;
     assertPreparationCurrent(options);
     const descriptors = await (await connect()).prepare(options);
+    startupDrain = undefined;
     assertPreparationCurrent(options);
     lastPlatform = descriptors.platform;
     // Readiness is the host's verdict; a blocked report stops before any pane is created.
@@ -205,7 +223,13 @@ export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, r
         args[topology] = await launchArguments(role.cli, role.role, launch);
       }
     }
-    manager = new PaneManagerLifecycleAdapter(input, runner, args, launches, socketFactory);
+    startupChecks = new RoleStartupChecks(input.config.environment.roles.filter(role => role.role !== "developer" && (role.required ?? true)).map(role => role.role),
+      async (manifest, role, operation) => {
+        const active = await connect();
+        return active.verifyRoleStartup ? active.verifyRoleStartup(manifest, role, operation) : { ok: true, value: undefined };
+      }, Object.fromEntries(Object.entries(descriptors.roleLaunch).flatMap(([role, descriptor]) =>
+        descriptor.launch ? [[role, { launchId: descriptor.launch.launchId, launchFingerprint: descriptor.launch.launchFingerprint }]] : [])));
+    manager = new PaneManagerLifecycleAdapter(input, runner, args, launches, socketFactory, (manifest, operation) => startupChecks!.published(manifest, operation));
     prepared = true;
     return { ok: true, value: undefined };
   };
@@ -224,7 +248,11 @@ export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, r
           if (!readiness.ok) return readiness;
         }
         assertPreparationCurrent(options);
-        return manager.up(sessionId, options);
+        let result: OperationResult<SessionManifest>;
+        try { result = await manager.up(sessionId, options); }
+        catch (error) { await startupChecks?.drain(true); throw error; }
+        const health = await startupChecks?.drain(!result.ok);
+        return result.ok && health && !health.ok ? health : result;
       },
       getManifest: (sessionId, options) => manager.getManifest(sessionId, options),
       attach: (sessionId, options) => manager.attach(sessionId, options),
@@ -245,12 +273,14 @@ export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, r
       getRun: async (runId, options) => (await connect()).runtime.getRun(runId, options)
     },
     async activate(manifest, options) {
+      const health = await startupChecks?.drain(true);
+      if (health && !health.ok) throw new EnvironmentError(health.error);
       const result = await (await connect()).activate(manifest, options);
       if (!result.ok) throw new EnvironmentError(result.error);
     },
-    quiesce: async options => (await connect()).quiesce(options),
+    quiesce: async options => { await stopStartupChecks(); return (await connect()).quiesce(options); },
     checkpoint: async (command, options) => (await connect()).checkpoint(command, options),
-    shutdownHost: async () => (await connect()).shutdown(),
-    async close() { if (host) await (await host).close(); }
+    shutdownHost: async () => { await stopStartupChecks(); await (await connect()).shutdown(); },
+    async close() { await stopStartupChecks(); if (host) await (await host).close(); }
   };
 }

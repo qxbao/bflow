@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, mkdir, open, readdir, readFile, stat, symlink } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -36,6 +37,7 @@ import { createProviderProcessRunner } from "./runner.js";
 import type {
   DetectedProviderCapabilities,
   ProviderAdapterOptions,
+  ProviderCommandInvocation,
   ProviderCommandRunner
 } from "./types.js";
 
@@ -101,6 +103,8 @@ export interface InheritedIsolation {
   readonly hookFailure?: InheritedIsolationFailure;
   /** Private, non-provider-executed metadata included in the settings-file launch digest. */
   readonly settingsMetadata?: Readonly<Record<string, string>>;
+  /** Private observation of all known provider configuration/account inputs. Undefined disables sharing. */
+  readonly executionProbeSnapshot?: () => Promise<string | undefined>;
 }
 
 export abstract class BaseProviderAdapter implements AgentProviderAdapter {
@@ -510,7 +514,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
           this.descriptor.provider === "agy"
             ? await this.prepareAgySessionHome(environment)
             : undefined;
-        const probeOutcome = await this.runner.run({
+        const probeInvocation: ProviderCommandInvocation = {
           executable,
           args: [...inherited.argv, ...probeArgs],
           cwd: environment.cwd,
@@ -519,10 +523,24 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
             ...(agyProbeHome ? { HOME: agyProbeHome } : {})
           },
           timeoutMs: 75_000
-        });
+        };
+        const snapshot = this.options.executionProbeCoalescer && binaryPassed && versionPassed
+          ? await inherited.executionProbeSnapshot?.() : undefined;
+        const probeOutcome = snapshot !== undefined && this.options.executionProbeCoalescer !== undefined
+          ? await this.options.executionProbeCoalescer.probe({
+              identity: createHash("sha256").update(canonicalReceiptJson({ scope: environment.scope, binaryDigest: actualBinaryDigest,
+                provider: environment.provider, snapshot, auth: [authOutcome.stdout, authOutcome.stderr],
+                environmentVariables: environment.environmentVariables, secretBindings: environment.secretBindings })).digest("hex"),
+              invocation: probeInvocation,
+              isCurrent: async () => {
+                const currentExecutable = await resolveAndVerifyExecutable(executable, this.executableVerificationOptions());
+                return currentExecutable.digest === actualBinaryDigest && await inherited.executionProbeSnapshot?.() === snapshot;
+              }
+            }, options)
+          : await this.runner.run(probeInvocation);
 
         const combinedProbe = `${probeOutcome.stdout}\n${probeOutcome.stderr}`;
-        if (probeOutcome.exitCode !== 0) {
+        if (probeOutcome.exitCode !== 0 || probeOutcome.failure !== undefined || !probeOutcome.started) {
           const lower = combinedProbe.toLowerCase();
           let probeCode = "probe_failed";
           let probeRemediation = "Verify account quotas, network connectivity, and provider permissions.";

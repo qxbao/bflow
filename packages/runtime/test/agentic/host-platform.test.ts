@@ -1,7 +1,9 @@
-import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { AgentEnvironmentSchema, SkillManifestSchema } from "@bflow/contracts";
+import { createFakeProviderRunner, type ProviderCommandRunner } from "@bflow/agent-providers";
 import type { AgentRole, ContractError, MCPClientRegistration, OperationResult } from "@bflow/contracts";
 import type { PlatformReadinessService, PreparedRoleLaunch, RolePlatformRequirement } from "../../src/platform/index.js";
 import { tokenEnvironmentName } from "../../src/platform/gateway-registrations.js";
@@ -60,6 +62,46 @@ describe("Codex hook trust propagation", () => {
     })).toMatchObject({ descriptor: { provider: "codex" } });
   });
 
+  it("shares execution probes across adapters from one host factory while each role checks authentication", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bflow-host-coalescer-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const home = join(root, "home"), state = join(root, "state"), binary = join(root, "codex");
+    await mkdir(home, { mode: 0o700 }); await mkdir(state, { mode: 0o700 });
+    await writeFile(binary, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    await writeFile(join(home, "config.toml"), 'model = "gpt-6-luna"\n', { mode: 0o600 });
+    await writeFile(join(home, "auth.json"), '{"account":"synthetic"}\n', { mode: 0o600 });
+    let probes = 0, authentications = 0;
+    const fake = createFakeProviderRunner();
+    const runner: ProviderCommandRunner = { run: async invocation => {
+      if (invocation.args.includes("ping")) { probes++; await new Promise(resolve => setTimeout(resolve, 100)); }
+      if (invocation.args.join(" ") === "login status") authentications++;
+      return fake.run(invocation);
+    } };
+    const factory = createHostProviderAdapterFactory({ ...platform, codexHomeDirectory: home,
+      codexHookApprovalPath: join(root, "approvals.json") }, { runner, perProvider: { codex: { executablePath: binary } } },
+      { HOME: root, PATH: process.env.PATH });
+    const health = (role: "conversation" | "reviewer") => {
+      const scope = { kind: "session", machineId: "machine", repositoryId: "repo", workspaceRoot: root, sessionId: "session" };
+      const environment = AgentEnvironmentSchema.parse({ schemaVersion: 3, environmentId: `env-${role}`, provider: "codex", role, scope,
+        cwd: root, stateDirectory: state, configFingerprint: "a".repeat(64),
+        permissionProfile: { schemaVersion: 3, profileId: "permission", mode: "workspace_auto", scope, filesystem: "workspace_write",
+          readableRoots: [root], writableRoots: [root], deniedRoots: [], isolation: "provider_policy", network: { mode: "deny", allowedHosts: [] },
+          allowedTools: [], deniedAction: "request_via_conversation", allowGlobalPermissionBypass: false },
+        environmentVariables: {}, secretBindings: {}, requiredCapabilityIds: [], requiredMcpServiceIds: [], skillManifestDigest: "0".repeat(64) });
+      return factory("codex", { mcpRegistrations: [], mcpObservations: [], skillManifest: SkillManifestSchema.parse({ schemaVersion: 3, manifestId: `skills-${role}`,
+        environmentId: environment.environmentId, scope, role, provider: "codex", digest: environment.skillManifestDigest, skills: [], bindings: [] }), renderedSkillsContent: "", trustedIssuerKeys: {},
+        model: "gpt-6-luna", effort: "low" }).checkHealth({ schemaVersion: 3, environment, stage: "preflight", requestedAt: new Date().toISOString() });
+    };
+    const results = await Promise.all([health("conversation"), health("reviewer")]);
+    expect(results.map(result => result.ok && result.value.status), JSON.stringify(results)).toEqual(["ready", "ready"]);
+    expect(authentications).toBe(2);
+    expect(probes).toBe(1);
+    const final = await health("conversation");
+    expect(final.ok && final.value.status).toBe("ready");
+    expect(authentications).toBe(3);
+    expect(probes).toBe(1);
+  });
+
   it("keeps the operator HOME when only a Codex config home is selected", () => {
     const configured = { ...platform, codexHomeDirectory: "/machine/codex" };
     const options = createHostProviderFactoryOptions(configured, { HOME: "/operator/home" });
@@ -82,7 +124,8 @@ describe("Codex hook trust propagation", () => {
 });
 function prepared(role: AgentRole, provider: "claude" | "codex" | "agy", launchId: string): PreparedRoleLaunch {
   return {
-    role, provider, required: true, environment: {} as PreparedRoleLaunch["environment"], profile: {} as PreparedRoleLaunch["profile"],
+    role, provider, required: true, environment: { environmentId: `env-${role}`, configFingerprint: "b".repeat(64) } as PreparedRoleLaunch["environment"],
+    profile: { expiresAt: new Date(Date.now() + 60_000).toISOString(), configFiles: [] } as unknown as PreparedRoleLaunch["profile"],
     preflight: {} as PreparedRoleLaunch["preflight"], skills: {} as PreparedRoleLaunch["skills"], gateway: { registrations: [], observations: [], tokenEnvironment: {} },
     launch: { argv: ["--kind-independent", `--provider=${provider}`], env: { BFLOW_MCP_TOKEN_CHAT: token }, launchId, launchFingerprint: "a".repeat(64) }
   } as unknown as PreparedRoleLaunch;
@@ -127,11 +170,12 @@ const flushActivation = () => new Promise<void>(resolve => setImmediate(resolve)
 async function activationSession(roles = permanentRoles.map(role => roleOption(role, "codex")), omittedLaunches: readonly AgentRole[] = []) {
   const gates = new Map(roles.map(role => [`launch-${role.role}`, deferred<ActivatedHealth>()]));
   const inputs: Parameters<PlatformReadinessService["verifyActivated"]>[0][] = [];
+  const preparedLaunches = roles.filter(role => role.role !== "developer" && !omittedLaunches.includes(role.role))
+    .map(role => prepared(role.role, role.provider, `launch-${role.role}`));
   const service = fakeService({
     prepareSession: async () => ({ ok: true, value: {
       report: { ready: true, generation: 1, roles: [], checkedAt: at },
-      launches: roles.filter(role => role.role !== "developer" && !omittedLaunches.includes(role.role))
-        .map(role => prepared(role.role, role.provider, `launch-${role.role}`))
+      launches: preparedLaunches
     } }),
     verifyActivated: async input => { inputs.push(input); return gates.get(input.launchId)!.promise; }
   });
@@ -145,7 +189,7 @@ async function activationSession(roles = permanentRoles.map(role => roleOption(r
     return { status: "idle", nativeSession: { source: "herdr:codex", kind: "id" as const, value: `native-${paneId}` } };
   };
   const drain = () => { for (const gate of gates.values()) gate.resolve(readyHealth); };
-  return { host, inputs, gates, panes, observed, observe, drain };
+  return { host, inputs, gates, panes, observed, observe, drain, options, preparedLaunches };
 }
 
 async function session(service: PlatformReadinessService, extra: Partial<{ generationFile: string; launchesFile: string; gatewayDiagnostic: string }> = {}) {
@@ -162,6 +206,35 @@ async function session(service: PlatformReadinessService, extra: Partial<{ gener
 }
 
 describe("P30 host platform composition", () => {
+  it("checks a completed role early but requires fresh health and attestation at the full manifest barrier", async () => {
+    const fixture = await activationSession();
+    const pane = fixture.panes[0]!;
+    fixture.drain();
+    await fixture.host.verifyRoleActivation(pane, fixture.observe);
+    expect(fixture.inputs.map(input => input.launchId)).toEqual(["launch-conversation"]);
+    await expect(fixture.host.verifyActivation([pane], fixture.observe)).rejects.toThrow("coordinator has no pane");
+    await fixture.host.verifyActivation(fixture.panes, fixture.observe);
+    expect(fixture.inputs.filter(input => input.launchId === "launch-conversation")).toHaveLength(2);
+    expect(fixture.observed.filter(id => id === pane.paneId)).toHaveLength(2);
+  });
+
+  it("never substitutes cached activated health for the final fresh health check", async () => {
+    const fixture = await activationSession();
+    const pane = fixture.panes[0]!;
+    const proof = { environmentId: "env-conversation", configFingerprint: "b".repeat(64), provider: "codex", role: "conversation", stage: "activated", status: "ready", validUntil: new Date(Date.now() + 60_000).toISOString(),
+      launchAttestation: { sessionId: "s1", launchId: "launch-conversation", launchFingerprint: "a".repeat(64), paneId: pane.paneId,
+        nativeSession: { source: "herdr:codex", kind: "id", value: `native-${pane.paneId}` } } };
+    fixture.options.service.assertFresh = () => ({ ok: true, value: proof } as never);
+    fixture.gates.get("launch-conversation")!.resolve({ ok: true, value: proof } as never);
+    await fixture.host.verifyRoleActivation(pane, fixture.observe);
+    fixture.options.service.verifyActivated = async input => {
+      fixture.inputs.push(input);
+      return failure("conflict", "permission changed since progressive check");
+    };
+    await expect(fixture.host.verifyActivation(fixture.panes, fixture.observe)).rejects.toThrow("permission changed since progressive check");
+    expect(fixture.inputs.filter(input => input.launchId === "launch-conversation")).toHaveLength(2);
+  });
+
   it("overlaps at most three activation checks, refills free slots and waits for every required role", async () => {
     const fixture = await activationSession();
     let settled = false;
