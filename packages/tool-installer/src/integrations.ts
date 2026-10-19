@@ -244,6 +244,21 @@ export async function ensureGitNexusIndex(input: {
   await privateDirectory(input.stateRoot);
   const home = await privateDirectory(join(input.stateRoot, "gitnexus-home"));
   const environment = { GITNEXUS_HOME: home, GITNEXUS_SHARED_STORE: "off" };
+  const observe = async () => {
+    const result = await host.run(input.executable, ["status", "--json"], { cwd: root, timeoutMs: input.timeoutMs ?? 30_000, environment });
+    let status: z.infer<typeof gitNexusStatusSchema> | null = null;
+    try { status = parseGitNexusStatus(result); } catch { /* unsupported/malformed status */ }
+    return status && await realpath(status.repository).catch(() => null) === root ? status : null;
+  };
+  const current = (status: z.infer<typeof gitNexusStatusSchema> | null) =>
+    status && "status" in status && (status.status === "up-to-date" || status.status === "registered");
+  const initial = await observe();
+  if (!initial) return { status: "failed", repositoryRoot: root, fingerprint,
+    diagnostic: "GitNexus status JSON is unsupported, invalid or identifies another repository" };
+  // Status reads metadata only. A current index needs no write access, even while Gateway holds
+  // a database reader lease. Stale indexes still require both locks before analysis can mutate it.
+  if (current(initial)) return { status: "fresh", repositoryRoot: root, fingerprint,
+    diagnostic: "GitNexus status --json confirms a current index" };
   const storageLockPath = join(input.stateRoot, `gitnexus-storage-${sha(root)}.lock`);
   let storageLock;
   try { storageLock = await open(storageLockPath, "wx", 0o600); }
@@ -257,13 +272,11 @@ export async function ensureGitNexusIndex(input: {
   }
   const receiptPath = join(input.stateRoot, `gitnexus-${sha(root)}.json`);
   try {
-    const statusResult = await host.run(input.executable, ["status", "--json"], { cwd: root, timeoutMs: input.timeoutMs ?? 30_000, environment });
-    let status: z.infer<typeof gitNexusStatusSchema> | null = null;
-    try { status = parseGitNexusStatus(statusResult); } catch { /* unsupported/malformed status */ }
-    const statusRepo = status ? await realpath(status.repository).catch(() => null) : null;
-    if (!status || statusResult.exitCode !== 0 || statusRepo !== root)
+    // Another writer may have refreshed the index between the first observation and lock acquisition.
+    const status = await observe();
+    if (!status)
       return { status: "failed", repositoryRoot: root, fingerprint, diagnostic: "GitNexus status JSON is unsupported, invalid or identifies another repository" };
-    if ("status" in status && (status.status === "up-to-date" || status.status === "registered"))
+    if (current(status))
       return { status: "fresh", repositoryRoot: root, fingerprint, diagnostic: "GitNexus status --json confirms a current index" };
     const analyzed = await host.run(input.executable, ["analyze", root, "--index-only"], { cwd: root, timeoutMs: input.timeoutMs ?? 300_000, environment });
     if (analyzed.exitCode !== 0)

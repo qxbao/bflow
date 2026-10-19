@@ -208,6 +208,14 @@ export class NativePluginRuntime {
       const executable = this.#binary(provider);
       const selector = provider === "agy" ? "bflow-superpowers" : "bflow-superpowers@bflow-superpowers";
       const inventory = await this.#inventory(provider);
+      // Record the approved bundle before any provider mutation. A timed-out command may have
+      // installed it; reconciliation must still be able to verify the active cache independently.
+      // This metadata alone never proves readiness: verify also requires the provider inventory/cache.
+      await atomicJson(join(dirname(artifact), ".bflow-native.json"), { schemaVersion: 3, toolId: pin.toolId, provider,
+        version: pin.version, sourceIntegrity: pin.integrity, bundleRoot: bundle.root, bundleDigest: await treeDigest(bundle.root),
+        pluginId: selector, marketplaceRoot: bundle.marketplace,
+        uninstall: [[executable, "plugin", provider === "codex" ? "remove" : "uninstall", selector],
+          ...(provider === "agy" ? [] : [[executable, "plugin", "marketplace", "remove", "bflow-superpowers"]])] });
       const existing = inventory.find(item => [item.pluginId, item.id, item.name].includes(selector));
       if (existing && action !== "install") {
         const removed = await this.#host.run(executable, ["plugin", provider === "codex" ? "remove" : "uninstall", selector], { timeoutMs: 30_000, ...this.#scope(provider) });
@@ -229,11 +237,6 @@ export class NativePluginRuntime {
       const result = await this.#host.run(executable, argv, { timeoutMs: options?.timeoutMs ?? 90_000,
         ...(options?.signal ? { signal: options.signal } : {}), ...this.#scope(provider) });
       if (result.exitCode !== 0) return { success: false, diagnostic: "Native plugin installation failed; reconcile its receipt before retrying" };
-      await atomicJson(join(dirname(artifact), ".bflow-native.json"), { schemaVersion: 3, toolId: pin.toolId, provider,
-        version: pin.version, sourceIntegrity: pin.integrity, bundleRoot: bundle.root, bundleDigest: await treeDigest(bundle.root),
-        pluginId: selector, marketplaceRoot: bundle.marketplace,
-        uninstall: [[executable, "plugin", provider === "codex" ? "remove" : "uninstall", selector],
-          ...(provider === "agy" ? [] : [[executable, "plugin", "marketplace", "remove", "bflow-superpowers"]])] });
       return { success: true, diagnostic: "Installed the pinned local plugin through the provider's native mechanism" };
     });
   }
