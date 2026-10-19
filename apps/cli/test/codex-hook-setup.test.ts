@@ -187,7 +187,7 @@ describe("Codex hook-only setup", () => {
       setup: { ...f.context.setup, confirm }
     });
     expect(result.exitCode).toBe(1);
-    expect(result.stdout).toContain("Result: approval_declined");
+    expect(result.stdout).toContain("Result: approval declined");
     await expect(readFile(f.store)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
@@ -215,7 +215,7 @@ describe("Codex hook-only setup", () => {
       setup: { ...f.context.setup, confirm }
     });
     expect(result.exitCode).toBe(1);
-    expect(result.stdout).toContain("Result: stale_review");
+    expect(result.stdout).toContain("Result: stale review");
     await expect(readFile(f.store)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
@@ -259,9 +259,9 @@ describe("Codex hook-only setup", () => {
     await chmod(f.config, 0o777);
     const checked = await runCli(["setup", "--codex-hooks", "--check"], f.context);
     expect(checked.exitCode, checked.stdout + checked.stderr).toBe(0);
-    expect(checked.stdout).toContain("Hook policy: trust_all");
+    expect(checked.stdout).toContain("Hook policy: trust all current and future global hooks");
     expect(checked.stdout).toMatch(/^Warning: hooks\.json is group\/world-writable or not owned by the current user/m);
-    expect(checked.stdout).toContain("Result: already_approved");
+    expect(checked.stdout).toContain("Result: already approved");
   });
 
   it("does not grant all-hook trust from a noninteractive request without --yes", async () => {
@@ -281,7 +281,7 @@ describe("Codex hook-only setup", () => {
     });
     expect(confirm.mock.calls[0]?.[0]).toContain("ALL current and future");
     expect(result.exitCode).toBe(approve ? 0 : 1);
-    expect(result.stdout).toContain(approve ? "Hook policy: trust_all" : "approval_declined");
+    expect(result.stdout).toContain(approve ? "Hook policy: trust all current and future global hooks" : "approval declined");
     expect((await inspectCodexHooks(f.trust)).status).toBe(approve ? "approved" : "unsupported");
   });
 

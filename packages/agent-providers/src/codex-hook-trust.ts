@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
 import { z } from "zod";
 import { parseCodexEnabledPlugins, parseCodexTomlHooks } from "./codex-hook-toml.js";
+import { managedCodexDisabledPlugins, managedCodexPluginArgs } from "./codex-plugin-policy.js";
 
 const SHA256 = z.string().regex(/^[a-f0-9]{64}$/);
 const ABSOLUTE = z.string().min(1).refine(isAbsolute, "must be an absolute path");
@@ -571,6 +572,9 @@ async function pluginHookInputs(home: string, id: string, sources: CodexHookSour
       if (inspected.bytes) inputs.push(jsonObject(inspected.bytes, "Plugin hooks"));
       else if (required) throw new Error("Declared plugin hook file is absent");
     } else if (value && typeof value === "object") {
+      // An explicit empty inline declaration means no hooks, not the fallback hook file.
+      // File-backed hooks.json still goes through the strict extractHooks envelope check.
+      if (Object.keys(value).length === 0) return;
       inputs.push(value);
     } else throw new Error("Plugin hooks have an unsupported declaration shape");
   };
@@ -631,7 +635,12 @@ async function buildInventory(options: CodexHookTrustOptions = {}): Promise<Omit
     diagnostics.push(hasTomlHooks ? "Codex executable TOML hook declarations are included in this snapshot." : "Codex executable TOML hook declarations are absent; native hooks.state metadata is excluded.");
     const entries = extractHooks({ hooks: tomlHooks }, unsupportedReasons);
     const pluginOrigins = new Map<(typeof entries)[number], string>();
+    const disabledPlugins = new Set(managedCodexDisabledPlugins(enabledPlugins));
     for (const id of enabledPlugins) {
+      if (disabledPlugins.has(id)) {
+        diagnostics.push(`Plugin ${id} is disabled only in Bflow-managed Codex processes (${managedCodexPluginArgs().join(" ")}); its hooks are excluded from this snapshot.`);
+        continue;
+      }
       try {
         const { inputs } = await pluginHookInputs(home, id, sources);
         for (const input of inputs) {

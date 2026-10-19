@@ -19,15 +19,6 @@ Commands:
   approve         Record human approval, rejection, or rework request for a task
   resume          Resume an active or waiting workflow run
   cancel          Cancel an active workflow run or task
-  repo inspect    Inspect repository structure, conventions, and files
-  task plan       Decompose a specification into an actionable workflow task DAG
-  task implement  Execute implementation for a task with conditional TDD
-  verify          Execute task or workflow verification against criteria
-  git prepare     Reconcile Git branches, prepare integration and worktrees
-  mcp status      Inspect status of registered MCP services
-  tool status     Inspect status of pinned machine and repo tools
-  skills sync     Synchronize or list agent skills across providers
-  agent check     Check provider readiness and activated health
   help            Show help for a command
 
 ${HIGH_LEVEL_SUMMARY}
@@ -44,14 +35,14 @@ Examples:
   bflow setup --check
   bflow run "Add user authentication feature"
   bflow repo inspect
-  bflow task plan ./specs/auth.json
-  bflow task implement task-1 --run-id run-101
-  bflow verify task-1 --run-id run-101
-  bflow git prepare --run-id run-101 --task task-a
+  bflow task plan --spec ./specs/auth.json
+  bflow task implement task-1 --run run-101 --spec ./specs/auth.json
+  bflow verify task-1 --run run-101 --plan ./verification.json
+  bflow git prepare run-101 --task task-a
   bflow mcp status
   bflow tool status
   bflow skills sync
-  bflow agent check
+  bflow agent check codex
   bflow status
   bflow status run-123
   bflow approve qa --decision approved
@@ -309,7 +300,7 @@ Options:
   -h, --help            Show help for task implement command
 
 Examples:
-  bflow task implement task-1 --run-id run-101
+  bflow task implement task-1 --run run-101 --spec ./specs/auth.json
   bflow task implement task-2 --run-id run-101 --owned-path src/auth --require-red-evidence`;
 
 const VERIFY_HELP = `Usage: bflow verify [task-id] [options]
@@ -340,7 +331,7 @@ Options:
   -h, --help            Show help for verify command
 
 Examples:
-  bflow verify task-1 --run-id run-101
+  bflow verify task-1 --run run-101 --plan ./verification.json
   bflow verify --scope workflow --run-id run-101`;
 
 const GIT_PREPARE_HELP = `Usage: bflow git prepare [options]
@@ -464,7 +455,7 @@ Options:
   -h, --help            Show help for agent check command
 
 Examples:
-  bflow agent check
+  bflow agent check codex
   bflow agent check claude
   bflow agent check --provider codex --stage activated`;
 

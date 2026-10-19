@@ -114,6 +114,8 @@ export interface SetupCommandOutput {
   /** Isolation namespace of OS unit names (isolated setup only); units are named bflow-<namespace>-<service>. */
   readonly serviceUnitNamespace?: string;
   readonly plan: SetupPlan;
+  /** Complete target inventory for scripts; human output groups content-addressed bundles. */
+  readonly preview?: import("@bflow/machine-setup").SetupPreview;
   readonly receipt?: SetupReceipt;
   readonly receipts?: readonly SetupReceipt[];
   readonly inventory?: readonly import("./setup-defaults.js").DefaultSetupInventory[];
