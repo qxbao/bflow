@@ -187,6 +187,9 @@ importers:
       '@bflow/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@bflow/docs-retrieval':
+        specifier: workspace:*
+        version: link:../../packages/docs-retrieval
       '@bflow/git-orchestrator':
         specifier: workspace:*
         version: link:../../packages/git-orchestrator
@@ -259,6 +262,8 @@ importers:
       '@bflow/contracts':
         specifier: workspace:*
         version: link:../contracts
+
+  packages/docs-retrieval: {}
 
   packages/git-orchestrator:
     dependencies:

@@ -8,9 +8,11 @@ All commands listed below comply with `@bflow/skills` `SupportedCommandsSchema` 
 
 | Command | Syntax | Purpose | Reused Engines | Skills |
 | --- | --- | --- | --- | --- |
+| `config-migrate` | `bflow config-migrate [--json]` | Validate and migrate one legacy repository config to the canonical YAML file, retaining a byte-for-byte backup. | RepositoryIdentity, RepositoryConfigCodec | using-bflow |
 | `help` | `bflow help [command] [options]` | Show global CLI usage or detailed help for a specific command. | HelpFormatter | using-bflow |
 | `version` | `bflow version [options] / bflow --version / bflow -v` | Display the current version and build information for the bflow CLI. | PackageMetadata | using-bflow |
 | `init` | `bflow init [options]` | Initialize bflow repository configuration and default workflow definition at the repository root. | RepositoryConfigService, DefaultWorkflowDefinition | using-bflow |
+| `setup` | `bflow setup [options] | bflow setup --codex-hooks (--check|--plan|--apply)` | Review and approve Codex global hooks explicitly; choose exact snapshot approval or explicit all-hook policy; never runs normal tool/service setup. | CodexHookInventory, CodexHookApprovalStore | using-bflow |
 | `up` | `bflow up [options]` | Start or reconcile the repository headless named session and wait for required role panes. | PaneManager, EnvironmentDependencies, HerdrSessionAdapter | using-bflow |
 | `down` | `bflow down [options]` | Checkpoint active workflow runs and gracefully stop this repository's named session. | PaneManager, RuntimeService, LifecycleLock | using-bflow |
 | `attach` | `bflow attach [options]` | Attach interactive terminal to the Conversation pane of the active session. | PaneManager, HerdrSessionAdapter | using-bflow |
@@ -26,6 +28,7 @@ All commands listed below comply with `@bflow/skills` `SupportedCommandsSchema` 
 | `task implement` | `bflow task implement <task-id> [options]` | Execute implementation for a task in an isolated worktree with conditional TDD enforcement. | DeveloperAgent, TestStrategyResolver, GitOrchestrator, OperationLedger | implement-task, conditional-tdd, using-bflow |
 | `verify` | `bflow verify [task-id] [options]` | Execute task-level or workflow-level verification against specification acceptance criteria. | VerificationEngine, QualityGates, OperationLedger | run-verification, conditional-tdd, using-bflow |
 | `git prepare` | `bflow git prepare [options]` | Reconcile Git branches, prepare dependency-ordered integration, and validate worktrees. | GitOrchestrator, OperationLedger | implement-task, using-bflow |
+| `docs` | `bflow docs search <library> [options] | bflow docs lookup [<library>] --query <text> [options] | bflow docs status [options]` | Look up current, version-specific library documentation through the shared Gateway's Context7 service; status reports whether it is reachable, authenticated and usable. | DocsClient, McpGateway | use-context7, using-bflow |
 | `mcp status` | `bflow mcp status [options]` | Inspect status and health of registered Model Context Protocol (MCP) services and bridges. | McpGateway, OperationLedger | use-gitnexus, use-mempalace, browser-inspection, using-bflow |
 | `tool status` | `bflow tool status [options] / bflow tools status [options]` | Inspect availability, version, and health of pinned machine and repo tools (e.g. RTK). | ToolInstaller, OperationLedger | use-rtk, using-bflow |
 | `tools status` | `bflow tools status [options]` | Alias for 'bflow tool status'. Inspect availability and health of pinned tools. | ToolInstaller, OperationLedger | use-rtk, using-bflow |
@@ -34,6 +37,21 @@ All commands listed below comply with `@bflow/skills` `SupportedCommandsSchema` 
 | `agent check` | `bflow agent check [provider] [options]` | Check provider readiness and activated health against platform contracts. | AgentProviderRegistry, OperationLedger | using-bflow |
 
 ## Detailed Command Specifications
+
+### `bflow config-migrate`
+
+- **Syntax**: `bflow config-migrate [--json]`
+- **Purpose**: Validate and migrate one legacy repository config to the canonical YAML file, retaining a byte-for-byte backup.
+- **Reused Engines**: `RepositoryIdentity`, `RepositoryConfigCodec`
+- **Required Flags**: None
+- **Optional Flags**: `-j, --json`, `-h, --help`
+- **Idempotency & Retry**: Idempotent when the canonical target matches its migration backup. Conflicting or edited configs are left untouched.
+- **Permission Requirements**: Requires local filesystem access to the repository .bflow directory.
+- **Associated Skills**: `using-bflow`
+- **Exit Codes**:
+  - `0`: Command succeeded without errors.
+  - `1`: Runtime or execution failure.
+  - `2`: CLI argument or option validation error.
 
 ### `bflow help`
 
@@ -74,6 +92,21 @@ All commands listed below comply with `@bflow/skills` `SupportedCommandsSchema` 
 - **Optional Flags**: `--dir <path>`, `--config <path>`, `--name <name>`, `--provider <claude|codex>`, `-f, --force`, `-y, --yes`, `-j, --json`, `-h, --help`
 - **Idempotency & Retry**: Idempotent. Re-running without --force verifies existing configuration without modifying it.
 - **Permission Requirements**: Requires filesystem write access to the repository directory.
+- **Associated Skills**: `using-bflow`
+- **Exit Codes**:
+  - `0`: Command succeeded without errors.
+  - `1`: Runtime or execution failure.
+  - `2`: CLI argument or option validation error.
+
+### `bflow setup`
+
+- **Syntax**: `bflow setup [options] | bflow setup --codex-hooks (--check|--plan|--apply)`
+- **Purpose**: Review and approve Codex global hooks explicitly; choose exact snapshot approval or explicit all-hook policy; never runs normal tool/service setup.
+- **Reused Engines**: `CodexHookInventory`, `CodexHookApprovalStore`
+- **Required Flags**: None
+- **Optional Flags**: `--check`, `--dry-run, --plan`, `--apply`, `--yes`, `--codex-hooks`, `--hook-digest <sha256>`, `--trust-all`, `--revoke-trust-all`, `--dir <path>`, `--catalog-dir <path>`, `-j, --json`, `-h, --help`
+- **Idempotency & Retry**: Inspection is read-only. Snapshot approval binds the reviewed digest. Explicit --trust-all trusts current/future hooks for the selected Codex home until --revoke-trust-all.
+- **Permission Requirements**: Approval store is private and user-owned. Only the explicit Codex hook apply path can write hook approval state.
 - **Associated Skills**: `using-bflow`
 - **Exit Codes**:
   - `0`: Command succeeded without errors.
@@ -300,6 +333,21 @@ All commands listed below comply with `@bflow/skills` `SupportedCommandsSchema` 
 - **Idempotency & Retry**: Atomic branch preparation and merge dry-run. Idempotent under integration receipt.
 - **Permission Requirements**: Git repository branch management permissions.
 - **Associated Skills**: `implement-task`, `using-bflow`
+- **Exit Codes**:
+  - `0`: Command succeeded without errors.
+  - `1`: Runtime or execution failure.
+  - `2`: CLI argument or option validation error.
+
+### `bflow docs`
+
+- **Syntax**: `bflow docs search <library> [options] | bflow docs lookup [<library>] --query <text> [options] | bflow docs status [options]`
+- **Purpose**: Look up current, version-specific library documentation through the shared Gateway's Context7 service; status reports whether it is reachable, authenticated and usable.
+- **Reused Engines**: `DocsClient`, `McpGateway`
+- **Required Flags**: `--query <text> (lookup)`
+- **Optional Flags**: `--library-id <id>`, `--version <version>`, `--language <name>`, `--no-cache`, `--role <role>`, `--timeout <ms>`, `-j, --json`, `-h, --help`
+- **Idempotency & Retry**: Read-only and safe to repeat. Transient failures (network, timeout, rate limit) are retried by the Gateway only for read-only calls; results may be served from an optional local cache.
+- **Permission Requirements**: Needs a Gateway registration that grants the context7 service. Inside an agent pane the agent's own registration is used; an operator outside a pane acts under the role given by --role. Queries are sent to the hosted Context7 service.
+- **Associated Skills**: `use-context7`, `using-bflow`
 - **Exit Codes**:
   - `0`: Command succeeded without errors.
   - `1`: Runtime or execution failure.

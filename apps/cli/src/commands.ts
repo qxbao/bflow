@@ -280,6 +280,17 @@ async function executeCommandWithProgress(
     return makeResult(CLI_EXIT_CODES.SUCCESS, true, "init", initRes.value, undefined, isJson, io, presentation);
   }
 
+  if (parsed.command === "docs") {
+    try {
+      const { executeDocsCommand } = await import("./docs-command.js");
+      const data = await executeDocsCommand(parsed, context);
+      return makeResult(data.ok ? CLI_EXIT_CODES.SUCCESS : CLI_EXIT_CODES.RUNTIME_ERROR, true, "docs", data, undefined, isJson, io, presentation);
+    } catch (error) {
+      const contractError = toContractError(error);
+      return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "docs", undefined, contractError, isJson, io, presentation);
+    }
+  }
+
   if (parsed.command === "setup") {
     if (parsed.codexHooks) {
       try {

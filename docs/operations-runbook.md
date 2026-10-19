@@ -82,7 +82,7 @@ bflow down --yes
 | `bflow task implement --task-id <id>` | Chuẩn bị worktree và môi trường thực thi cho task | Tuân thủ chặt chẽ Red-Green-Refactor nếu `required` |
 | `bflow verify --task-id <id>` | Chạy vòng lặp kiểm chứng độc lập (Quality Gates + Reviewer/QA) | Tối đa `maxIterations` (mặc định 3) |
 | `bflow git prepare --task-id <id>` | Kiểm tra phạm vi file thay đổi (`ownedPaths`) và chuẩn bị tích hợp nhánh | Dừng ở cổng phê duyệt nếu yêu cầu human approval |
-| `bflow skills sync` | Đồng bộ lại `skills-store` và kiểm tra digest của 32 skills | Idempotent |
+| `bflow skills sync` | Đồng bộ lại `skills-store` và kiểm tra digest của 33 skills | Idempotent |
 | `bflow agent check [provider]` | Kiểm tra preflight health của `claude`, `codex`, `agy` | Không khởi chạy Herdr |
 
 ### Bảng mã thoát chuẩn (Standard CLI Exit Codes)

@@ -93,6 +93,12 @@ to the existing AgentRole enum. "Analyst" maps to existing `specifier`; Chat map
 | reviewer | independent review and bounded repair findings | Verdict is authenticated evidence, not direct success transition |
 | security | threat analysis, policy findings | No wider filesystem/network/secret grants implied by role |
 
+`use-context7` (hosted documentation lookup) is bound to specifier, architect, planner, developer, reviewer and qa. It
+declares no `requiredToolIds`: the same role `toolIds` list feeds both the skill tool inventory and the Gateway grant, which
+checks MCP *tool names*, so a tool-id requirement such as `context7` could never also be a granted tool name. Availability is
+instead established by the Gateway grant itself, `bflow docs status` and the skill's own error handling. The Conversation role is
+excluded because the Gateway never gives it tools; it can ask the Coordinator.
+
 ## Provider rendering and readiness
 
 The resolver produces provider-neutral text/resource manifests first. P25 renders them

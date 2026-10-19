@@ -87,6 +87,48 @@ Khi chạy `bflow setup`, hệ thống thực hiện theo đúng thứ tự ph�
 
 Chạy lại `bflow setup --yes` lần thứ hai trên môi trường đã hội tụ sẽ trả về `outcome: "noop"` (`already_satisfied`) mà không ghi thừa.
 
+### 3.2.1 Context7: tra cứu tài liệu thư viện qua Gateway dùng chung
+
+`bflow setup` cấu hình **Context7** (dịch vụ MCP lưu trữ sẵn tại `https://mcp.context7.com/mcp`) như một dịch vụ *từ xa* của Shared MCP Gateway. Không có tiến trình cục bộ nào được khởi chạy và không có gì để cài: mọi agent dùng chung một upstream, mỗi agent được Gateway phân quyền theo registration của riêng mình. `ctx7` CLI **không** được cài, vì không có lệnh nào của Bflow cần nó.
+
+- **Khóa API (tùy chọn).** Không có khóa, Context7 chạy ẩn danh với giới hạn tốc độ thấp hơn. Lấy khóa tại `https://context7.com/dashboard` (hoặc `npx ctx7 setup`), rồi lưu bằng một trong hai cách; khóa không bao giờ đi qua đối số dòng lệnh:
+
+  ```bash
+  printf %s "$KEY" | bflow setup --apply --context7-api-key-stdin
+  CONTEXT7_API_KEY="$KEY" bflow setup --apply      # biến môi trường được dùng như nhau
+  ```
+
+  Khóa được ghi nguyên tử vào `<state>/secrets/context7-api-key` (thư mục `0700`, tệp `0600`, bị từ chối nếu là symlink hoặc người khác đọc được) và chỉ nằm trong bộ nhớ của Gateway. Cấu hình, nhật ký, receipt, prompt và repository chỉ chứa tham chiếu `secret://bflow/context7/api-key` và một dấu vân tay ngắn để phát hiện việc đổi khóa. Đổi khóa bằng cách chạy lại lệnh trên: Gateway được khởi động lại vì dấu vân tay thay đổi.
+- **OAuth** (`/mcp/oauth`) **chưa được hỗ trợ**: Gateway chạy nền, không có luồng đăng nhập tương tác.
+- **Cấu hình có sẵn.** Setup chỉ *đọc* `~/.claude.json`, `$CODEX_HOME/config.toml` và `agy mcp list` để báo nếu Context7 đã được đăng ký trực tiếp với một provider; nó không sửa và không ghi đè cấu hình MCP nào của bạn. Role do Bflow chạy chỉ nhận máy chủ MCP qua Gateway (Claude dùng `--strict-mcp-config`, Codex tắt máy chủ MCP toàn cục, Agy dùng `--mcp-config`), nên không có đăng ký trùng.
+- **Tắt:** `bflow setup --apply --no-context7`. `--check`, `--dry-run` và `--repair` hoạt động như với các thành phần khác.
+- **Dữ liệu rời khỏi máy.** Tên thư viện và câu hỏi tài liệu được gửi tới `context7.com`. Không đưa mã nguồn hoặc bí mật vào truy vấn.
+
+Bật cho từng repository trong `.bflow/config.yml` (`bflow init` bật sẵn, ở chế độ tùy chọn):
+
+```yaml
+environment:
+  context7:
+    enabled: true     # repository cũ chưa có khóa này thì tắt: không có gì rời khỏi máy nếu chưa chọn
+    required: false   # true: `bflow up` và `bflow doctor` thất bại khi chưa sẵn sàng; false: cảnh báo, role chạy không có Context7
+    cache:            # tùy chọn, mặc định tắt
+      enabled: true
+      ttlSeconds: 3600
+      allowAuthenticated: false   # có khóa thì câu trả lời có thể đến từ thư viện riêng: không cache trừ khi bật
+```
+
+Chỉ các role mà định nghĩa skill `use-context7` đã duyệt cho phép (specifier, architect, planner, developer, reviewer, qa) nhận dịch vụ. Vai Conversation không bao giờ nhận công cụ Gateway, và Coordinator không dùng Context7.
+
+Tra cứu từ dòng lệnh (chỉ đọc, `--json` được hỗ trợ, dùng registration của chính agent khi chạy trong pane; ngoài pane thì người vận hành tạm đăng ký rồi thu hồi theo `--role`):
+
+```bash
+bflow docs search react
+bflow docs lookup react --query "cleanup function trong useEffect" --json
+bflow docs status
+```
+
+`lookup` tìm từ thư mục hiện tại lên tới gốc repository (nên chạy được trong một package của monorepo, và dùng lockfile đặt ở gốc workspace), rồi lấy phiên bản đang dùng từ lockfile (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `uv.lock`, `poetry.lock`, `go.mod`, `Cargo.lock`) rồi manifest. Nó không bao giờ tự chuyển sang tài liệu mới hơn: nếu phiên bản đó không có tài liệu, kết quả nêu rõ và liệt kê các phiên bản có sẵn.
+
 ### 3.3 Sửa chữa thiết lập bị hỏng (`--repair`)
 
 Nếu file `state.json`, `skills-store` hoặc cấu hình dịch vụ bị hỏng/thiếu:
@@ -129,8 +171,9 @@ bflow agent check agy
 # 3. Kiểm tra trạng thái các công cụ phụ trợ và MCP Gateway:
 bflow tool status
 bflow mcp status
+bflow docs status      # Context7: Gateway, dịch vụ, xác thực, khám phá tool, resolve-library-id, query-docs, hạn mức
 
-# 4. Đồng bộ và kiểm tra 32 role skills:
+# 4. Đồng bộ và kiểm tra 33 role skills:
 bflow skills sync
 ```
 

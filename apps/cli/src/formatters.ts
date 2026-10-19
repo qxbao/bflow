@@ -56,6 +56,60 @@ function isConfigMigrationOutput(command: CliCommandName, data: CliCommandData):
   return command === "config-migrate" && typeof data === "object" && data !== null && "sourcePath" in data && "configPath" in data && "migrated" in data;
 }
 
+function isDocsOutput(data: CliCommandData): data is import("./docs-command.js").DocsCommandOutput {
+  return typeof data === "object" && data !== null && "docs" in data && (data as { docs?: unknown }).docs === true && "action" in data;
+}
+
+function formatDocsOutput(output: import("./docs-command.js").DocsCommandOutput, useColor = false): string {
+  const lines: string[] = [];
+  const mark = (status: "pass" | "warn" | "fail" | "skipped") =>
+    status === "pass" ? (useColor ? green(bold("[OK]"), true) : "[OK]") : status === "fail" ? "[FAIL]" : status === "warn" ? "[WARN]" : "[SKIP]";
+  if (output.action === "status" && output.health) {
+    const health = output.health;
+    lines.push(`Context7: ${health.state}${health.enabled ? (health.required ? " (required)" : " (optional)") : ""}`);
+    for (const check of health.checks) {
+      lines.push(`  ${mark(check.status)} ${check.id}: ${sanitizeIdentifier(check.message)}`);
+      if (check.remediation && check.status !== "pass" && check.status !== "skipped") lines.push(`        Fix: ${sanitizeIdentifier(check.remediation)}`);
+    }
+    lines.push(`  Provider access (from configuration): ${health.providers.map(item => `${item.provider} ${item.granted ? `yes (${item.roles.join(", ")})` : "no"}`).join("; ")}`);
+    lines.push(`  Live probe: ${health.probe.mode === "none" ? `not run${health.probe.reason ? ` (${sanitizeIdentifier(health.probe.reason)})` : ""}` : `through the Gateway as ${health.probe.mode}`}`);
+    return lines.join("\n");
+  }
+  if (output.failure) {
+    const failure = output.failure;
+    lines.push(`[FAIL] docs ${output.action}${failure.stage ? ` (${failure.stage})` : ""}: ${failure.kind}${failure.retryable ? " (retryable)" : ""}`);
+    lines.push(`  ${sanitizeIdentifier(failure.message)}`);
+    if (failure.retryAfterMs) lines.push(`  Retry after about ${Math.ceil(failure.retryAfterMs / 1000)}s.`);
+    if (failure.availableVersions?.length) lines.push(`  Available versions: ${failure.availableVersions.map(sanitizeIdentifier).join(", ")}`);
+    if (output.access.mode === "none" && output.access.reason) lines.push(`  Access: ${sanitizeIdentifier(output.access.reason)}`);
+    for (const warning of output.warnings) lines.push(`  Warning: ${sanitizeIdentifier(warning)}`);
+    return lines.join("\n");
+  }
+  if (output.search) {
+    const search = output.search;
+    lines.push(`Library search: ${sanitizeIdentifier(search.library)} (${search.selection})`);
+    if (search.installed) lines.push(`  Project uses ${sanitizeIdentifier(search.installed.dependency)} ${sanitizeIdentifier(search.installed.version)} (${search.installed.exact ? "exact" : "lowest of range"}, from ${sanitizeIdentifier(search.installed.source)})`);
+    if (search.version) lines.push(`  Documentation choice: ${search.version.versionUsed ? `${sanitizeIdentifier(search.version.libraryId)} (${search.version.match})` : `${sanitizeIdentifier(search.version.libraryId)} (no matching version)`}`);
+    for (const candidate of search.candidates.slice(0, 8)) {
+      const versions = candidate.versions.length ? ` versions: ${candidate.versions.slice(0, 6).map(sanitizeIdentifier).join(", ")}${candidate.versions.length > 6 ? ", ..." : ""}` : "";
+      lines.push(`  - ${sanitizeIdentifier(candidate.id)}  ${sanitizeIdentifier(candidate.title)}${candidate.reputation ? `  [${sanitizeIdentifier(candidate.reputation)}]` : ""}${versions}`);
+    }
+    for (const warning of output.warnings) lines.push(`  Warning: ${sanitizeIdentifier(warning)}`);
+    return lines.join("\n");
+  }
+  if (output.lookup) {
+    const lookup = output.lookup;
+    lines.push(`Documentation for ${sanitizeIdentifier(lookup.libraryTitle ?? lookup.libraryId)} (${sanitizeIdentifier(lookup.libraryId)})`);
+    lines.push(`  Version: requested ${lookup.requestedVersion ? sanitizeIdentifier(lookup.requestedVersion) : "none"} (${lookup.versionSource}), documentation ${lookup.versionUsed ? sanitizeIdentifier(lookup.versionUsed) : "unversioned"} (${lookup.versionMatch})`);
+    lines.push(`  Source: Context7 via the shared Gateway; cache ${lookup.cache.hit ? "hit" : lookup.cache.stored ? "miss, stored" : "miss"}; retrieved ${sanitizeIdentifier(lookup.retrievedAt)}`);
+    for (const warning of output.warnings) lines.push(`  Warning: ${sanitizeIdentifier(warning)}`);
+    // Retrieved text is untrusted: drop terminal control characters (including escape sequences) before it reaches a terminal.
+    lines.push("", lookup.content.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ""));
+    return lines.join("\n");
+  }
+  return JSON.stringify(output, null, 2);
+}
+
 function isSetupOutput(data: CliCommandData): data is SetupCommandOutput {
   return typeof data === "object" && data !== null && "machineId" in data && "serviceManagerKind" in data && "plan" in data;
 }
@@ -710,6 +764,10 @@ export function formatCommandSuccess(
       `  Config: ${sanitizeIdentifier(data.configPath)}`,
       ...(data.backupPath ? [`  Backup: ${sanitizeIdentifier(data.backupPath)}`] : [])
     ].join("\n");
+  }
+
+  if (isDocsOutput(data)) {
+    return formatDocsOutput(data, useColor);
   }
 
   if (isSetupOutput(data)) {
