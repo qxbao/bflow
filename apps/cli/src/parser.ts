@@ -1676,6 +1676,8 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         "--apply",
         "--repair",
         "--codex-hooks",
+        "--trust-all",
+        "--revoke-trust-all",
         "--yes",
         "-y",
         "--json",
@@ -1690,6 +1692,8 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         "--apply",
         "--repair",
         "--codex-hooks",
+        "--trust-all",
+        "--revoke-trust-all",
         "--yes",
         "-y",
         "--dir",
@@ -1748,8 +1752,14 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
 
       const yes = optRes.value.flags.has("--yes") || optRes.value.flags.has("-y");
       const codexHooks = optRes.value.flags.has("--codex-hooks");
+      const trustAllHooks = optRes.value.flags.has("--trust-all");
+      const revokeAllHookTrust = optRes.value.flags.has("--revoke-trust-all");
       const hookDigest = optRes.value.flags.get("--hook-digest");
 
+      if ((trustAllHooks || revokeAllHookTrust) && !codexHooks)
+        return makeValidationError("Hook policy flags require '--codex-hooks'.", json, "setup");
+      if ((trustAllHooks && revokeAllHookTrust) || ((trustAllHooks || revokeAllHookTrust) && hookDigest !== undefined))
+        return makeValidationError("Choose one hook policy action; do not combine it with '--hook-digest'.", json, "setup");
       if (hookDigest !== undefined && !codexHooks) {
         return makeValidationError("Option '--hook-digest' requires '--codex-hooks'.", json, "setup");
       }
@@ -1763,10 +1773,13 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         if (dir !== undefined || catalogDir !== undefined || optRes.value.flags.has("--memory-provider")) {
           return makeValidationError("'--codex-hooks' cannot be combined with --dir, --catalog-dir, or --memory-provider.", json, "setup");
         }
+        if (mode !== "apply" && (trustAllHooks || revokeAllHookTrust)) {
+          return makeValidationError(`'${trustAllHooks ? "--trust-all" : "--revoke-trust-all"}' is valid only with 'setup --codex-hooks --apply'.`, json, "setup");
+        }
         if (mode !== "apply" && (yes || hookDigest !== undefined)) {
           return makeValidationError("'--yes' and '--hook-digest' are valid only with 'setup --codex-hooks --apply'.", json, "setup");
         }
-        if (yes !== (hookDigest !== undefined)) {
+        if (!trustAllHooks && !revokeAllHookTrust && yes !== (hookDigest !== undefined)) {
           return makeValidationError("Non-interactive Codex hook approval requires both '--yes' and '--hook-digest <sha256>'.", json, "setup");
         }
       }
@@ -1776,6 +1789,8 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         mode,
         yes,
         ...(codexHooks ? { codexHooks: true } : {}),
+        ...(trustAllHooks ? { trustAllHooks: true } : {}),
+        ...(revokeAllHookTrust ? { revokeAllHookTrust: true } : {}),
         ...(typeof hookDigest === "string" ? { hookDigest } : {}),
         dir,
         catalogDir,

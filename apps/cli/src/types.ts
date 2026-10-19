@@ -100,6 +100,8 @@ export interface SetupCommandArgs extends GlobalCliFlags {
   readonly codexHooks?: boolean | undefined;
   /** Exact SHA-256 reviewed snapshot required with --yes for hook approval. */
   readonly hookDigest?: string | undefined;
+  readonly trustAllHooks?: boolean | undefined;
+  readonly revokeAllHookTrust?: boolean | undefined;
   readonly dir?: string | undefined;
   readonly catalogDir?: string | undefined;
   readonly memoryProvider?: "auto" | "claude" | "codex" | "host" | undefined;

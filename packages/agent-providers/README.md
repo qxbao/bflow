@@ -164,6 +164,27 @@ Global hooks use a separate explicit operator review flow. The package exports:
 
 The default receipt lives under `${XDG_STATE_HOME:-$HOME/.local/state}/bflow/`, outside Codex home and repository config. Runtime may provide an explicit private machine-state path. The 0600 atomic receipt can hold approvals for multiple canonical Codex homes; each approval is bound to its home and complete reviewed digest. Inspection and check/plan are read-only. Approval does not grant Bflow permissions, widen the sandbox, or approve a different future snapshot.
 
+Operators may separately grant `trustAllCodexHooks({ approvedBy, ...options })`.
+Its private, atomic `codex-hook-approvals.policy.json` receipt is scoped to the
+canonical Codex home and exact approval-store path. `inspectCodexHooks` then returns
+`status: approved`, `approvalMode: trust_all` and a stable policy digest, skipping
+hook source/dependency inspection even for unsafe permissions or dynamic commands.
+This is explicit trust for all current and future hooks, not a verified inventory.
+The grant is idempotent; ordinary source updates do not invalidate it. Local
+`flock` serializes each complete policy read/update/write, so concurrent grants
+cannot restore a successfully revoked home. The kernel releases the lock if the
+updating process exits. Grant/revoke therefore require the util-linux `flock`
+command (Linux) on PATH; without it they fail with an explicit error and write no policy.
+Inspection under the policy adds advisory `Warning:` diagnostics (excluded from the
+digest) when the Codex home, `hooks.json` or `config.toml` is group/world-writable or
+foreign-owned; they never block. A malformed or foreign-bound policy store fails closed
+with an error naming its path; preserve and inspect it, then remove it manually to reset.
+`revokeAllCodexHookTrust(options)` restores exact snapshot behavior and preserves
+snapshot receipts. Malformed, symlinked, foreign or non-private policy state blocks
+use. Other homes/stores receive no grant. Required Bflow hooks, auth, permissions,
+sandbox and MCP isolation are unchanged. Prepared profiles still bind the policy
+receipt digest, so revocation or policy changes invalidate their old authority.
+
 The inventory hashes raw `hooks.json` bytes and captures event, matcher, command, directly referenced local files and digests. Codex TOML parsing includes executable `[hooks]` events and explicit plugin enablement; validated `hooks.state` trust metadata (including plugin-scoped identifiers) and unrelated credentials/MCP data are excluded from the digest. Native Codex trust metadata never supplies Bflow approval. Commands support absolute Bun/Node/Python binaries with an absolute script and literal arguments, and pinned `/bin/sh` or Bash plus absolute script and literal arguments. Direct absolute executables accept at most 16 literal words including the executable; shebang scripts additionally pin their absolute interpreter. `env` shebangs, interpreter flags, shell expansion/control operators, relative executable paths, malformed/special/symlinked or oversized files, and unpinned shell source dependencies fail closed.
 
 Explicitly enabled plugins are inspected from a single unambiguous local cache version. Their supported native or compatibility manifest, declared hook files (or absent default `hooks/hooks.json`), commands and directly resolved code enter the same snapshot. Multiple cached versions, unavailable installations, escaping/symlinked hook paths and dynamic plugin commands remain unsupported. Plugin discovery through other config layers or implicit remote installation is not covered by this local inventory. Plugin enablement or hook-source changes invalidate previous approval; older receipts remain readable but do not approve the new inventory digest.
@@ -188,7 +209,7 @@ Shell dependency checks follow the explicit interpreter or direct script's sheba
 
 The known Orca inline wrapper is matched as a complete fixed command template. Its `${ORCA_AGENT_HOOK_ROOT}/agent-hooks/codex-hook.sh` candidate and `$HOME/.orca/agent-hooks/codex-hook.sh` fallback are recorded with file hashes or absent-file facts. A changed root, appearing fallback or changed script changes the digest. The known script's source endpoint is accepted only while `ORCA_AGENT_HOOK_ENDPOINT` is absent; when set, the hook remains unsupported and the endpoint file/token is not read. Herdr shell integration scripts are pinned by digest.
 
-Unapproved or unsupported hooks block before Codex login/auth/model execution probes and before launch files are written; read-only version/help/config inventory may still run. The approval digest is stored in private, non-provider-executed launch settings whose file digest contributes to the launch fingerprint. Activated health re-inspects the current inventory and rejects drift from the prepared profile even if a new snapshot was approved after launch preparation. Bflow's existing per-invocation `--dangerously-bypass-hook-trust` is retained for native hook startup and is reached only after the global snapshot passes this gate; it does not approve global hook sources or change provider permissions.
+Without an explicit all-hook policy, unapproved or unsupported hooks block before Codex login/auth/model execution probes and before launch files are written; read-only version/help/config inventory may still run. The approval digest is stored in private, non-provider-executed launch settings whose file digest contributes to the launch fingerprint. Activated health re-inspects the current inventory and rejects drift from the prepared profile even if a new snapshot was approved after launch preparation. Bflow's existing per-invocation `--dangerously-bypass-hook-trust` is retained for native hook startup and is reached only after the selected snapshot or all-hook policy passes this gate; it does not approve global hook sources or change provider permissions.
 
 This review binds hook configuration and directly referenced code. It pins directly resolved interpreters, but does not recursively pin the operating system, system utilities, packages, arbitrary runtime data or other transitive dependencies. Approved hooks are not isolated from a hostile process or from their host account's available resources and permissions. This is operator trust for exact hook sources, not a hostile-code sandbox. No real installed hook is executed or approved by the provider tests.
 

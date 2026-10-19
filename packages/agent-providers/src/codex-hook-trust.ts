@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
 import { open, lstat, mkdir, opendir, realpath, rename, stat, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -65,7 +66,8 @@ export const CodexHookReviewSchema = z.object({
   sources: z.array(CodexHookSourceSchema).max(MAX_DEPENDENCIES),
   hooks: z.array(CodexHookInventoryEntrySchema).max(MAX_HOOKS),
   diagnostics: z.array(z.string().max(1000)),
-  unsupportedReasons: z.array(z.string().max(1000))
+  unsupportedReasons: z.array(z.string().max(1000)),
+  approvalMode: z.literal("trust_all").optional()
 }).strict();
 export type CodexHookReview = z.infer<typeof CodexHookReviewSchema>;
 
@@ -78,6 +80,19 @@ export const CodexHookApprovalSchema = z.object({
   approvedBy: z.string().trim().min(1).max(200)
 }).strict();
 export type CodexHookApproval = z.infer<typeof CodexHookApprovalSchema>;
+
+/** Explicit operator policy, separate from exact-digest snapshot receipts. */
+export const CodexHookPolicySchema = z.object({
+  schemaVersion: z.literal(1), policy: z.literal("trust_all"), codexHomeDirectory: ABSOLUTE,
+  approvalStorePath: ABSOLUTE, approvedAt: z.string().datetime({ offset: true }),
+  approvedBy: z.string().trim().min(1).max(200)
+}).strict();
+export type CodexHookPolicy = z.infer<typeof CodexHookPolicySchema>;
+const HookPolicyStoreSchema = z.object({ schemaVersion: z.literal(1), policies: z.array(CodexHookPolicySchema).max(256) }).strict();
+
+export function codexHookPolicyPath(approvalStorePath: string): string {
+  return approvalStorePath.replace(/\.json$/, "") + ".policy.json";
+}
 
 const ApprovalStoreSchema = z.object({
   schemaVersion: z.literal(1),
@@ -588,7 +603,8 @@ async function ensurePrivateStoreParent(storePath: string, create: boolean): Pro
     catch (error) {
       if (!notFound(error)) throw error;
       if (!create) return false;
-      await mkdir(current, { mode: 0o700 });
+      try { await mkdir(current, { mode: 0o700 }); }
+      catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "EEXIST")) throw error; }
       stat = await lstat(current);
     }
     const stickyTempAncestor = stat.uid === 0 && (stat.mode & 0o1000) !== 0;
@@ -612,7 +628,7 @@ async function readApprovalStore(storePath: string): Promise<z.infer<typeof Appr
   return parsed.data;
 }
 
-async function writeApprovalStore(storePath: string, value: z.infer<typeof ApprovalStoreSchema>): Promise<void> {
+async function writePrivateStore(storePath: string, value: unknown): Promise<void> {
   const parent = dirname(storePath);
   await ensurePrivateStoreParent(storePath, true);
   const tempPath = join(parent, `.${CODEX_HOOK_APPROVAL_FILE}.${randomBytes(8).toString("hex")}.tmp`);
@@ -797,8 +813,103 @@ async function buildInventory(options: CodexHookTrustOptions = {}): Promise<Omit
   return { schemaVersion: 1, codexHomeDirectory: home, approvalStorePath: store, digest, sources, hooks, diagnostics: uniqueDiagnostics, unsupportedReasons: uniqueReasons };
 }
 
+async function policyHome(home: string, store: string): Promise<string> {
+  // All-hook trust is an operator decision even when source permissions are lax.
+  // Bind the actual selected directory, without treating its contents as verified.
+  let canonical: string;
+  try { canonical = await realpath(home); }
+  catch (error) { if (notFound(error)) return resolve(home); throw error; }
+  if (!(await lstat(canonical)).isDirectory()) throw new Error("Codex hook policy home must be a directory.");
+  const location = relative(canonical, store);
+  if (location === "" || (location !== ".." && !location.startsWith(`..${sep}`) && !isAbsolute(location)))
+    throw new Error("Codex hook policy store must be outside the resolved provider home.");
+  return canonical;
+}
+
+async function readHookPolicyStore(approvalStorePath: string): Promise<z.infer<typeof HookPolicyStoreSchema> | undefined> {
+  const path = codexHookPolicyPath(approvalStorePath);
+  try { await lstat(path); } catch (error) { if (notFound(error)) return undefined; throw error; }
+  if (!await ensurePrivateStoreParent(path, false)) return undefined;
+  let bytes: Buffer;
+  try { bytes = await readBoundedRegular(path, 128 * 1024, true); }
+  catch (error) { if (notFound(error)) return undefined; throw error; }
+  const corrupt = (detail: string): Error => new Error(`Codex hook policy store ${path} is invalid (${detail}); preserve and inspect it, then remove it manually to reset all-hook trust.`);
+  let raw: unknown;
+  try { raw = JSON.parse(bytes.toString("utf8")); } catch { throw corrupt("malformed JSON"); }
+  const parsed = HookPolicyStoreSchema.safeParse(raw);
+  if (!parsed.success) throw corrupt(`schema mismatch: ${parsed.error.issues.slice(0, 3).map(issue => `${issue.path.join(".") || "<root>"}: ${issue.message}`).join("; ").slice(0, 300)}`);
+  if (parsed.data.policies.some(policy => policy.approvalStorePath !== approvalStorePath))
+    throw corrupt("bound to a different approval store");
+  return parsed.data;
+}
+
+async function laxTrustAllWarnings(home: string): Promise<string[]> {
+  const warnings: string[] = [];
+  for (const [name, path] of [["Codex home", home], ["hooks.json", join(home, "hooks.json")], ["config.toml", join(home, "config.toml")]] as const) {
+    let info;
+    // Best effort only: trust_all deliberately does not block on these facts.
+    try { info = await lstat(path); if (info.isSymbolicLink()) info = await stat(path); } catch { continue; }
+    if (!ownedByCurrentUserOrRoot(info) || (info.mode & 0o022) !== 0)
+      warnings.push(`Warning: ${name} is group/world-writable or not owned by the current user; under trust_all another local account could install hooks that run as you.`);
+  }
+  return warnings;
+}
+
+async function withHookPolicyLock<T>(store: string, update: () => Promise<T>): Promise<T> {
+  const path = codexHookPolicyPath(store) + ".lock";
+  await ensurePrivateStoreParent(path, true);
+  const file = await open(path, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+  try {
+    const stat = await file.stat();
+    if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0 ||
+        (typeof process.getuid === "function" && stat.uid !== process.getuid()))
+      throw new Error("Hook policy lock must be a private current-user-owned regular file.");
+    // Linux flock follows the inherited open-file description: the parent holds
+    // fd 3's lock through the complete read/modify/write, including child exit.
+    await new Promise<void>((accept, reject) => {
+      const child = spawn("flock", ["--exclusive", "--timeout", "5", "3"], { stdio: ["ignore", "ignore", "ignore", file.fd] });
+      child.once("error", error => reject(notFound(error)
+        ? new Error("Hook policy updates require the util-linux 'flock' command (Linux); install it and retry.") : error));
+      child.once("exit", code => code === 0 ? accept() : reject(new Error("Another hook policy update is busy; retry the setup action.")));
+    });
+    return await update();
+  } finally { await file.close(); }
+}
+
+/** Trust current/future global hooks for this exact Codex home; never executes or edits them. */
+export async function trustAllCodexHooks(options: CodexHookTrustOptions & { readonly approvedBy: string }): Promise<CodexHookPolicy> {
+  const paths = pathOptions(options), home = await policyHome(paths.home, paths.store);
+  return withHookPolicyLock(paths.store, async () => {
+    const previous = await readHookPolicyStore(paths.store);
+    const existing = previous?.policies.find(item => item.codexHomeDirectory === home);
+    if (existing) return existing;
+    const policy = CodexHookPolicySchema.parse({ schemaVersion: 1, policy: "trust_all", codexHomeDirectory: home,
+      approvalStorePath: paths.store, approvedAt: new Date().toISOString(), approvedBy: options.approvedBy });
+    const policies = [...(previous?.policies ?? []).filter(item => item.codexHomeDirectory !== home), policy];
+    await writePrivateStore(codexHookPolicyPath(paths.store), HookPolicyStoreSchema.parse({ schemaVersion: 1, policies }));
+    return policy;
+  });
+}
+
+export async function revokeAllCodexHookTrust(options: CodexHookTrustOptions = {}): Promise<void> {
+  const paths = pathOptions(options), home = await policyHome(paths.home, paths.store);
+  await withHookPolicyLock(paths.store, async () => {
+    const previous = await readHookPolicyStore(paths.store);
+    if (!previous || !previous.policies.some(policy => policy.codexHomeDirectory === home)) return;
+    await writePrivateStore(codexHookPolicyPath(paths.store), HookPolicyStoreSchema.parse({ schemaVersion: 1,
+      policies: previous.policies.filter(policy => policy.codexHomeDirectory !== home) }));
+  });
+}
+
 export async function inspectCodexHooks(options: CodexHookTrustOptions = {}): Promise<CodexHookReview> {
   try {
+    const paths = pathOptions(options), home = await policyHome(paths.home, paths.store);
+    const policies = await readHookPolicyStore(paths.store);
+    const policy = policies?.policies.find(item => item.codexHomeDirectory === home);
+    // Diagnostics are advisory and intentionally excluded from the policy digest.
+    if (policy) return CodexHookReviewSchema.parse({ schemaVersion: 1, codexHomeDirectory: home, approvalStorePath: paths.store,
+      digest: sha256(JSON.stringify(policy)), status: "approved", approvalMode: "trust_all", sources: [], hooks: [], unsupportedReasons: [],
+      diagnostics: ["Operator policy trusts all current and future Codex global hooks; source inspection is skipped.", ...await laxTrustAllWarnings(home)] });
     const inventory = await buildInventory(options);
     if (inventory.unsupportedReasons.length === 0 && inventory.hooks.length === 0)
       return CodexHookReviewSchema.parse({ ...inventory, status: "none" });
@@ -836,6 +947,6 @@ export async function approveCodexHooks(reviewInput: CodexHookReview, options: C
   const approval = CodexHookApprovalSchema.parse({ schemaVersion: 1, codexHomeDirectory: home, approvalStorePath: paths.store,
     digest: current.digest, approvedAt: new Date().toISOString(), approvedBy: options.approvedBy });
   const approvals = [...(previous?.approvals ?? []).filter(item => item.digest !== approval.digest), approval];
-  await writeApprovalStore(paths.store, ApprovalStoreSchema.parse({ schemaVersion: 1, approvals }));
+  await writePrivateStore(paths.store, ApprovalStoreSchema.parse({ schemaVersion: 1, approvals }));
   return approval;
 }

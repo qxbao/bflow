@@ -53,7 +53,7 @@ current hooks, commands, dependency file digests, and snapshot digest without
 writing approval state. `bflow setup --codex-hooks --apply` shows that inventory
 and asks for interactive approval. Non-interactive approval must pass both
 `--yes` and the exact `--hook-digest <sha256>` printed by the current review.
-Approval is tied to the inspected Codex home and hook snapshot; any changed hook
+Snapshot approval is tied to the inspected Codex home and hook snapshot; any changed hook
 or dependency needs a new review. This grants approval only for the inspected
 Codex hooks; it does not widen Bflow permissions or provide an OS sandbox. The
 inventory pins direct local scripts and resolved interpreters, not arbitrary
@@ -61,6 +61,23 @@ transitive packages or runtime data; unsupported dynamic shell forms remain bloc
 Explicitly enabled plugin hook sources are included when their local installation
 can be resolved unambiguously. Setup review and Runtime launches use the same
 environment with outer Orca pane selectors cleared only for Bflow child processes.
+
+To trust **all current and future global hooks** for the selected Codex home, including
+hooks/plugins Bflow cannot statically inspect, run:
+
+```bash
+bflow setup --codex-hooks --apply --trust-all --yes
+```
+
+This persists a private operator policy beside the snapshot receipt file
+(`codex-hook-approvals.policy.json`). The hook inventory no longer blocks startup;
+`--check` reports `approvalMode: trust_all` and says that source inspection is skipped.
+It does not edit hook/plugin files or provider settings. Bflow's required hooks,
+permissions, sandbox, auth and MCP checks remain active. The policy is scoped to
+the selected canonical Codex home and private approval store. Revoke it with
+`bflow setup --codex-hooks --apply --revoke-trust-all` to restore snapshot review.
+`--check`/`--plan` print warnings, without blocking, when the Codex home, `hooks.json`
+or `config.toml` is group/world-writable or not owned by the current user.
 
 `up --timeout <ms>` controls the complete startup budget, including host provider
 preparation. The host control call uses the remaining lifecycle deadline instead

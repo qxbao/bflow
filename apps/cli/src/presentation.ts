@@ -299,7 +299,7 @@ export function resolveActionableRemediation(
 
   // 3. Check for specific authored instructions already embedded in the message
   if (msg.startsWith("Provider readiness is not satisfied;") && msg.includes("codex_global_hooks_")) {
-    return "Run 'bflow setup --codex-hooks --plan' to inspect every hook source and blocking reason; approve only a supported, reviewed snapshot.";
+    return "Run 'bflow setup --codex-hooks --plan' to inspect every hook source and blocking reason; approve a supported snapshot or explicitly use 'bflow setup --codex-hooks --apply --trust-all --yes' to trust all global hooks.";
   }
   if (msg.includes("Run bflow recover --yes")) {
     return "Stop any old Bflow lifecycle commands, then run 'bflow recover --yes' to migrate the legacy lock.";

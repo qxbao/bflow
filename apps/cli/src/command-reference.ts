@@ -99,12 +99,12 @@ export const CLI_COMMAND_REFERENCE: readonly CliCommandReferenceEntry[] = [
   {
     command: "setup",
     syntax: "bflow setup [options] | bflow setup --codex-hooks (--check|--plan|--apply)",
-    purpose: "Review and approve Codex global hooks explicitly; hook approval authorizes only the inspected hook snapshot and never runs normal tool/service setup.",
+    purpose: "Review and approve Codex global hooks explicitly; choose exact snapshot approval or explicit all-hook policy; never runs normal tool/service setup.",
     reusedEngines: ["CodexHookInventory", "CodexHookApprovalStore"],
     requiredFlags: [],
-    optionalFlags: ["--check", "--dry-run, --plan", "--apply", "--yes", "--codex-hooks", "--hook-digest <sha256>", "--dir <path>", "--catalog-dir <path>", "--memory-provider <id>", "-j, --json", "-h, --help"],
+    optionalFlags: ["--check", "--dry-run, --plan", "--apply", "--yes", "--codex-hooks", "--hook-digest <sha256>", "--trust-all", "--revoke-trust-all", "--dir <path>", "--catalog-dir <path>", "--memory-provider <id>", "-j, --json", "-h, --help"],
     exitCodes: COMMON_EXIT_CODES,
-    idempotencyAndRetry: "Inspection is read-only. Approval is bound to the exact reviewed digest; changed hooks require a new review.",
+    idempotencyAndRetry: "Inspection is read-only. Snapshot approval binds the reviewed digest. Explicit --trust-all trusts current/future hooks for the selected Codex home until --revoke-trust-all.",
     permissionRequirements: "Approval store is private and user-owned. Only the explicit Codex hook apply path can write hook approval state.",
     skills: ["using-bflow"]
   },

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -232,4 +232,57 @@ describe("Codex hook-only setup", () => {
     expect(confirm).not.toHaveBeenCalled();
     await expect(readFile(f.store)).rejects.toMatchObject({ code: "ENOENT" });
   });
+  it("explicitly trusts all hooks despite unsupported inspection and keeps later changes nonblocking", async () => {
+    const f = await fixture();
+    await writeFile(f.config, "malformed hooks JSON");
+    const before = await readFile(f.config, "utf8");
+    const result = await runCli(["setup", "--codex-hooks", "--apply", "--trust-all", "--yes", "--json"], f.context);
+    expect(result.exitCode, result.stdout + result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout).data.review).toMatchObject({ status: "approved", approvalMode: "trust_all" });
+    await writeFile(f.config, "different future malformed config");
+    const checked = await runCli(["setup", "--codex-hooks", "--check", "--json"], f.context);
+    expect(checked.exitCode, checked.stdout).toBe(0);
+    expect(JSON.parse(checked.stdout).data.review.approvalMode).toBe("trust_all");
+    expect(before).toBe("malformed hooks JSON");
+    const revoked = await runCli(["setup", "--codex-hooks", "--apply", "--revoke-trust-all", "--json"], f.context);
+    expect(revoked.exitCode, revoked.stdout).toBe(0);
+    expect(JSON.parse(revoked.stdout).data.outcome).toBe("trust_revoked");
+    expect((await inspectCodexHooks(f.trust)).status).toBe("unsupported");
+  });
+
+  it("prints nonblocking lax-permission warnings in human --check output under trust_all", async () => {
+    const f = await fixture();
+    const granted = await runCli(["setup", "--codex-hooks", "--apply", "--trust-all", "--yes", "--json"], f.context);
+    expect(granted.exitCode, granted.stdout + granted.stderr).toBe(0);
+    const strict = await runCli(["setup", "--codex-hooks", "--check"], f.context);
+    expect(strict.stdout).not.toContain("Warning:");
+    await chmod(f.config, 0o777);
+    const checked = await runCli(["setup", "--codex-hooks", "--check"], f.context);
+    expect(checked.exitCode, checked.stdout + checked.stderr).toBe(0);
+    expect(checked.stdout).toContain("Hook policy: trust_all");
+    expect(checked.stdout).toMatch(/^Warning: hooks\.json is group\/world-writable or not owned by the current user/m);
+    expect(checked.stdout).toContain("Result: already_approved");
+  });
+
+  it("does not grant all-hook trust from a noninteractive request without --yes", async () => {
+    const f = await fixture();
+    const result = await runCli(["setup", "--codex-hooks", "--apply", "--trust-all", "--json"], f.context);
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.stdout).data.outcome).toBe("approval_required");
+    expect((await inspectCodexHooks(f.trust)).status).toBe("approval_required");
+  });
+
+  it.each([true, false])("shows the full scope when asking for interactive all-hook trust (approve=%s)", async approve => {
+    const f = await fixture();
+    await writeFile(f.config, "uninspectable hooks");
+    const confirm = vi.fn(async (_question: string) => approve);
+    const result = await runCli(["setup", "--codex-hooks", "--apply", "--trust-all"], {
+      ...f.context, setup: { ...f.context.setup, confirm }
+    });
+    expect(confirm.mock.calls[0]?.[0]).toContain("ALL current and future");
+    expect(result.exitCode).toBe(approve ? 0 : 1);
+    expect(result.stdout).toContain(approve ? "Hook policy: trust_all" : "approval_declined");
+    expect((await inspectCodexHooks(f.trust)).status).toBe(approve ? "approved" : "unsupported");
+  });
+
 });

@@ -100,9 +100,11 @@ Modes:
   --repair              Repair invalid machine configuration and restore state
   --codex-hooks         Review Codex global hooks only; combine with --check, --plan, or --apply
   --hook-digest <sha256> Exact reviewed hook snapshot for non-interactive hook approval (requires --yes)
+  --trust-all           With --codex-hooks --apply, trust all current/future global hooks; use --yes or confirm
+  --revoke-trust-all    With --codex-hooks --apply, revoke broad trust and restore snapshot review
 
 Options:
-  -y, --yes             Assume yes for standard setup; hook approval also needs --hook-digest
+  -y, --yes             Confirm setup, exact snapshot approval (--hook-digest), or explicit --trust-all
   --dir <path>          Repository to prepare (machine installation stays user-global)
   --catalog-dir <path>  Custom skills catalog directory
   --memory-provider <id> Claude-Mem observer: auto, claude, codex, host (default: auto)
@@ -114,6 +116,8 @@ Examples:
   bflow setup --check
   bflow setup --dry-run
   bflow setup --codex-hooks --plan
+  bflow setup --codex-hooks --apply --trust-all --yes
+  bflow setup --codex-hooks --apply --revoke-trust-all
   bflow setup --apply --yes
   bflow setup --repair --yes`;
 

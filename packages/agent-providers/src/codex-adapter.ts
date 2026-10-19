@@ -207,7 +207,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
    * `-c mcp_servers.<name>.enabled=false` (verified against codex-cli 0.162.0: the override is honored by
    * `codex mcp list --json`, merges with the Bflow `mcp_servers=` table only when placed after it, and an
    * unknown name aborts config loading, so only names enumerated from the config are passed). Global hooks
-   * have no verified per-invocation bypass that keeps Bflow hooks, so their presence fails closed.
+   * require exact snapshot approval or an explicit operator all-hook policy. Neither mode disables Bflow hooks.
    */
   protected override async resolveInheritedIsolation(
     _environment: AgentEnvironment,
@@ -257,13 +257,13 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
       hookFailure = {
         code: "codex_global_hooks_unsupported",
         message: `Global Codex hook configuration cannot be safely reviewed: ${hookReview.unsupportedReasons.join("; ")}`,
-        remediation: "Use supported literal hook commands and inspect the reported dependencies. Dynamic sourced endpoint scripts remain blocked."
+        remediation: "Use supported literal hook commands and inspect the reported dependencies. Dynamic sourced endpoint scripts remain blocked in snapshot mode. Or explicitly choose `bflow setup --codex-hooks --apply --trust-all --yes`."
       };
     } else if (hookReview.status === "approval_required") {
       hookFailure = {
         code: "codex_global_hooks_approval_required",
         message: `Global Codex hooks require exact snapshot approval (digest ${hookReview.digest}).`,
-        remediation: "Run `bflow setup --codex-hooks --plan`, inspect the hook sources, then apply with the reviewed digest."
+        remediation: "Run `bflow setup --codex-hooks --plan`, inspect the hook sources, then apply with the reviewed digest, or explicitly choose `bflow setup --codex-hooks --apply --trust-all --yes`."
       };
     }
 

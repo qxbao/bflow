@@ -17,6 +17,8 @@ import {
 import {
   AgyProviderAdapter,
   approveCodexHooks,
+  trustAllCodexHooks,
+  revokeAllCodexHookTrust,
   ClaudeProviderAdapter,
   CodexProviderAdapter,
   codexStartupPrompt,
@@ -2081,6 +2083,35 @@ describe("@bflow/agent-providers", () => {
       const adapter = codexAdapter(codexRunner({ globalServers: [] }), home, { hostMcpServers: bflowServer });
       const launch = await adapter.prepareLaunch(createTestEnvironment("codex", "workspace_auto"));
       expect(launch.ok).toBe(true);
+    });
+
+    it("permits operator-trusted unsupported hooks while retaining provider permissions and MCP isolation", async () => {
+      const home = await freshCodexHome({ "hooks.json": "uninspectable hook configuration",
+        "config.toml": '[mcp_servers.external]\ncommand = "/usr/bin/true"\n' });
+      await chmod(join(home, "hooks.json"), 0o777);
+      const runner = codexRunner({ globalServers: ["external"] });
+      const hostHooks = { SessionStart: "/opt/bflow/session-start", PreToolUse: "/opt/bflow/check-tool" };
+      const adapter = new CodexProviderAdapter({ runner, executablePath: fakeBinaryPath, allowTestFilesystemOwnership: true,
+        codexHomeDirectory: home, codexHookApprovalPath: join(testStateDir, "codex-hook-approvals.json"),
+        hostMcpServers: bflowServer, hostHooks });
+      const env = createTestEnvironment("codex", "workspace_auto");
+      expect((await adapter.prepareLaunch(env)).ok).toBe(false);
+      const options = { codexHomeDirectory: home, approvalStorePath: join(testStateDir, "codex-hook-approvals.json") };
+      await trustAllCodexHooks({ ...options, approvedBy: "operator" });
+      const prepared = await adapter.prepareLaunch(env);
+      expect(prepared.ok).toBe(true);
+      if (!prepared.ok) return;
+      expect(prepared.value.argv).toContain("mcp_servers.external.enabled=false");
+      expect(prepared.value.argv).toContain("--dangerously-bypass-hook-trust");
+      expect(prepared.value.argv).toContain("workspace-write");
+      const settings = JSON.parse(await readFile(prepared.value.configFiles.find(file => file.path.endsWith(".settings.json"))!.path, "utf8"));
+      expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe(hostHooks.PreToolUse);
+      const before = await inspectCodexHooks(options);
+      await writeFile(join(home, "hooks.json"), "future uninspectable hooks");
+      expect((await inspectCodexHooks(options)).digest).toBe(before.digest);
+      expect((await adapter.prepareLaunch(env)).ok).toBe(true);
+      await revokeAllCodexHookTrust(options);
+      expect((await adapter.prepareLaunch(env)).ok).toBe(false);
     });
 
     it("runs probes only after exact approval and blocks activation when an approved snapshot drifts", async () => {

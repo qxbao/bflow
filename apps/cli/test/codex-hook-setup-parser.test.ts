@@ -51,4 +51,32 @@ describe("explicit Codex hook setup command options", () => {
     expect(reference?.optionalFlags).toContain("--hook-digest <sha256>");
     expect(renderCommandReferenceMarkdown()).toContain("--codex-hooks (--check|--plan|--apply)");
   });
+  it("accepts explicit all-hook trust without a snapshot digest", () => {
+    const parsed = parseCliArgs(["setup", "--codex-hooks", "--apply", "--trust-all", "--yes"]);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.value).toMatchObject({ trustAllHooks: true, yes: true });
+  });
+  it.each([
+    ["setup", "--trust-all", "--yes"],
+    ["setup", "--codex-hooks", "--plan", "--trust-all"],
+    ["setup", "--codex-hooks", "--apply", "--trust-all", "--hook-digest", "a".repeat(64)],
+    ["setup", "--codex-hooks", "--apply", "--trust-all", "--revoke-trust-all"]
+  ].map(args => ({ args })))("rejects misplaced/conflicting all-hook policy flags: %j", ({ args }) => {
+    expect(parseCliArgs(args).ok).toBe(false);
+  });
+  it.each([
+    ["--trust-all", "'--trust-all' is valid only with 'setup --codex-hooks --apply'."],
+    ["--revoke-trust-all", "'--revoke-trust-all' is valid only with 'setup --codex-hooks --apply'."]
+  ] as const)("names the misplaced policy flag %s outside --apply", (flag, message) => {
+    const result = parseCliArgs(["setup", "--codex-hooks", "--plan", flag]);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.message).toBe(message);
+    const check = parseCliArgs(["setup", "--codex-hooks", "--check", flag, "--yes"]);
+    expect(check.ok).toBe(false);
+    if (!check.ok) expect(check.error.message).toBe(message);
+    const yesOnly = parseCliArgs(["setup", "--codex-hooks", "--plan", "--yes"]);
+    if (!yesOnly.ok) expect(yesOnly.error.message).toBe("'--yes' and '--hook-digest' are valid only with 'setup --codex-hooks --apply'.");
+    expect(yesOnly.ok).toBe(false);
+  });
+
 });

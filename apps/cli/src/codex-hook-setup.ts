@@ -3,6 +3,11 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   approveCodexHooks,
+  trustAllCodexHooks,
+  revokeAllCodexHookTrust,
+  codexHookPolicyPath,
+  CodexHookPolicySchema,
+  type CodexHookPolicy,
   CODEX_HOOK_APPROVAL_FILE,
   CodexHookApprovalSchema,
   CodexHookReviewSchema,
@@ -26,7 +31,8 @@ export type CodexHookSetupOutcome =
   | "approved"
   | "digest_mismatch"
   | "stale_review"
-  | "unsupported";
+  | "unsupported"
+  | "trust_revoked";
 
 export interface CodexHookSetupOutput {
   readonly codexHooks: true;
@@ -34,6 +40,7 @@ export interface CodexHookSetupOutput {
   readonly outcome: CodexHookSetupOutcome;
   readonly review: CodexHookReview;
   readonly approval?: CodexHookApproval | undefined;
+  readonly policy?: CodexHookPolicy | undefined;
   readonly message?: string | undefined;
 }
 
@@ -115,6 +122,15 @@ function trustOptions(context?: CliContext): CodexHookTrustOptions {
 
 export function formatCodexHookReview(reviewInput: CodexHookReview): string {
   const review = safeReview(reviewInput);
+  if (review.approvalMode === "trust_all") return [
+    "Codex global hook review", "Status: approved", "Hook policy: trust_all",
+    "Codex home: " + review.codexHomeDirectory,
+    "Private policy store: " + codexHookPolicyPath(review.approvalStorePath),
+    "Policy digest: " + review.digest,
+    ...review.diagnostics.filter(diagnostic => diagnostic.startsWith("Warning:")).map(privateReviewText),
+    "All current and future global hooks are trusted by operator policy; source inspection is skipped.",
+    "Bflow permissions, required hooks, auth, sandbox and MCP checks remain in effect."
+  ].join("\n");
   const lines = [
     "Codex global hook review",
     "Status: " + review.status,
@@ -177,15 +193,17 @@ function canPrompt(args: SetupCommandArgs, context?: CliContext): boolean {
   return context?.setup?.confirm !== undefined || Boolean(process.stdin.isTTY && process.stderr.isTTY);
 }
 
-async function askForApproval(review: CodexHookReview, context?: CliContext): Promise<boolean> {
-  const text = formatCodexHookReview(review);
+async function askForApproval(review: CodexHookReview, context?: CliContext, trustAll = false): Promise<boolean> {
+  const text = trustAll
+    ? `Trust ALL current and future global hooks for ${sanitizeIdentifier(review.codexHomeDirectory)}? Source inspection will be skipped; hook files and provider settings are preserved.`
+    : formatCodexHookReview(review);
   if (context?.setup?.confirm) {
     context.io?.stderr(text);
     return context.setup.confirm(text);
   }
   process.stderr.write(text + "\n\n");
   const terminal = createInterface({ input: process.stdin, output: process.stderr });
-  try { return /^(y|yes)$/i.test((await terminal.question("Approve these exact Codex hooks? [y/N] ")).trim()); }
+  try { return /^(y|yes)$/i.test((await terminal.question(trustAll ? "Trust all global hooks? [y/N] " : "Approve these exact Codex hooks? [y/N] ")).trim()); }
   finally { terminal.close(); }
 }
 
@@ -213,11 +231,35 @@ export async function executeCodexHookSetup(args: SetupCommandArgs, context?: Cl
   if (args.mode === "repair") throw new Error("Codex hook review does not support repair mode.");
   const options = trustOptions(context);
   const review = CodexHookReviewSchema.parse(await inspectCodexHooks(options));
+  if ((args.trustAllHooks || args.revokeAllHookTrust) && (args.mode !== "apply" || args.hookDigest !== undefined || (args.trustAllHooks && args.revokeAllHookTrust)))
+    throw new Error("Choose one hook policy action with --apply, without --hook-digest.");
+  if (args.revokeAllHookTrust) {
+    await revokeAllCodexHookTrust(options);
+    return output(args.mode, "trust_revoked", await inspectCodexHooks(options), "All-hook trust was revoked; exact snapshot review is active again.");
+  }
+  if (args.trustAllHooks) {
+    if (review.approvalMode === "trust_all") return output(args.mode, "already_approved", review, "All current and future global hooks are already trusted.");
+    if (!args.yes) {
+      if (!canPrompt(args, context)) return output(args.mode, "approval_required", review,
+        "Use --trust-all --yes to explicitly trust all current and future global hooks, or confirm interactively.");
+      if (!(await askForApproval(review, context, true))) return output(args.mode, "approval_declined", review,
+        "All-hook trust was declined; no policy was written.");
+    }
+    const policy = CodexHookPolicySchema.parse(await trustAllCodexHooks({ ...options, approvedBy: "cli-operator" }));
+    const after = CodexHookReviewSchema.parse(await inspectCodexHooks(options));
+    if (after.status !== "approved" || after.approvalMode !== "trust_all")
+      return output(args.mode, "unsupported", after, "The explicit hook policy could not be confirmed.");
+    // The persisted policy was validated above; display sanitization must not fail a completed grant.
+    const safePolicy: CodexHookPolicy = { ...policy, codexHomeDirectory: sanitizeIdentifier(policy.codexHomeDirectory),
+      approvalStorePath: sanitizeIdentifier(policy.approvalStorePath), approvedBy: privateReviewText(policy.approvedBy) };
+    return { ...output(args.mode, "approved", after, "All current and future global hooks are trusted; their source inventory no longer blocks startup."), policy: safePolicy };
+  }
 
   if (review.status === "unsupported") return output(args.mode, "unsupported", review,
-    "Unsupported Codex hooks remain blocked; no approval state was changed.");
+    "Snapshot review is unsupported; no approval state was changed. To trust all current/future hooks explicitly, use --apply --trust-all --yes.");
   if (review.status === "none") return output(args.mode, "no_hooks", review, "No Codex global hooks are configured.");
-  if (review.status === "approved") return output(args.mode, "already_approved", review, "This exact Codex hook snapshot is already approved.");
+  if (review.status === "approved") return output(args.mode, "already_approved", review, review.approvalMode === "trust_all"
+    ? "All current and future global hooks are already trusted." : "This exact Codex hook snapshot is already approved.");
   if (args.mode !== "apply") return output(args.mode, "approval_required", review, "Use --apply to review this snapshot for approval.");
 
   // `--yes` is never a substitute for the reviewed digest, even for direct callers bypassing the CLI parser.
@@ -242,5 +284,5 @@ export function codexHookSetupSucceeded(result: CodexHookSetupOutput): boolean {
   if (result.mode === "dry_run") return true;
   if (result.outcome === "unsupported") return false;
   if (result.mode === "check") return ["no_hooks", "already_approved"].includes(result.outcome);
-  return ["no_hooks", "already_approved", "approved"].includes(result.outcome);
+  return ["no_hooks", "already_approved", "approved", "trust_revoked"].includes(result.outcome);
 }
