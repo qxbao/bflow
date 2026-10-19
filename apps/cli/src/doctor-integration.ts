@@ -1028,7 +1028,7 @@ export async function runDoctorDiagnostics(
   // Group 4: tools
   // ==========================================
 
-  const toolsList = ["rtk", "claude-mem", "gitnexus", "chrome-devtools-mcp", "superpowers"] as const;
+  const toolsList = ["rtk", "mempalace", "gitnexus", "chrome-devtools-mcp", "superpowers"] as const;
   const requiredTools = config?.environment?.requiredTools ?? [];
 
   for (const tool of toolsList) {

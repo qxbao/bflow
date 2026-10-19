@@ -7,7 +7,7 @@ describe("default pinned installer catalog", () => {
   it("plans installable defaults and reports native plugins separately", async () => {
     const catalog = defaultToolCatalog("linux", "x64");
     expect(catalog.pins.map(pin => pin.toolId).sort()).toEqual(["agy", "chrome-devtools-mcp", "claude", "codex", "gitnexus", "herdr", "rtk"]);
-    expect(catalog.manual.map(item => item.toolId).sort()).toEqual(["claude-mem", "superpowers"]);
+    expect(catalog.manual.map(item => item.toolId).sort()).toEqual(["mempalace", "superpowers"]);
     const installer = new ManagedToolInstaller({ managedRoot: "/tmp/bflow-default-plan/tools", pins: catalog.pins });
     for (const pin of catalog.pins) {
       expect(pin.version).toMatch(/^\d+\.\d+\.\d+$/);

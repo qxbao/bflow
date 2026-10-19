@@ -1484,7 +1484,7 @@ export class HighLevelCliFacade {
     const knownToolIds = new Set<string>([
       ...catalogEntries.map((e: any) => e.toolId ?? e.id ?? e.name),
       "rtk",
-      "claude-mem",
+      "mempalace",
       "gitnexus",
       "chrome-devtools-mcp",
       "superpowers"

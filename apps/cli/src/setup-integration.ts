@@ -225,8 +225,7 @@ export async function executeSetupCommand(
     const target = resolve(context?.cwd ?? process.cwd(), args.dir ?? ".");
     try { repositoryRoot = (await identifyRepository(target)).root; }
     catch (error) { if (args.dir) throw error; }
-    const defaults = await createDefaultSetupConfiguration({ platform, memoryProvider: args.memoryProvider ?? "auto",
-      projectRoot: repositoryRoot ?? target,
+    const defaults = await createDefaultSetupConfiguration({ platform, projectRoot: repositoryRoot ?? target,
       // Isolated setup must never write the real provider homes; the isolation is passed explicitly, not via global state.
       ...(isolatedRoot ? { isolation: isolatedProviderHomes(isolatedRoot) } : {}),
       ...(context?.setup?.machineConfig || existsSync(configPath) ? { config: machineConfig } : {}),
@@ -297,8 +296,8 @@ export async function executeSetupCommand(
           ? new NonInteractiveApprover()
           : new InteractiveApprover(async text => {
             const notes = diagnostics.filter(note => /license|PolyForm|build scripts/i.test(note));
-            if (inventory.some(item => item.toolId === "claude-mem" || item.toolId === "superpowers"))
-              notes.push(`Native plugins update the ${machineConfig.providers.join(", ")} configuration folders in this account. Claude-Mem uses the selected account's quota.`);
+            if (inventory.some(item => item.toolId === "superpowers"))
+              notes.push(`Native plugins update the ${machineConfig.providers.join(", ")} configuration folders in this account.`);
             const preview = [...notes, text].join("\n\n");
             // Keep injected approval callbacks plain for programmatic consumers.
             const prompt = formatSetupPreview(preview, !context?.setup?.confirm && Boolean(context?.presentation?.stderrColor) && !args.json);

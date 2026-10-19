@@ -102,7 +102,6 @@ export interface SetupCommandArgs extends GlobalCliFlags {
   readonly hookDigest?: string | undefined;
   readonly dir?: string | undefined;
   readonly catalogDir?: string | undefined;
-  readonly memoryProvider?: "auto" | "claude" | "codex" | "host" | undefined;
 }
 
 export interface SetupCommandOutput {

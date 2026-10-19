@@ -105,7 +105,6 @@ Options:
   -y, --yes             Assume yes for standard setup; hook approval also needs --hook-digest
   --dir <path>          Repository to prepare (machine installation stays user-global)
   --catalog-dir <path>  Custom skills catalog directory
-  --memory-provider <id> Claude-Mem observer: auto, claude, codex, host (default: auto)
   -j, --json            Output response in JSON envelope format
   -h, --help            Show help for setup command
 

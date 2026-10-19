@@ -219,8 +219,8 @@ const reviewed: CatalogPin[] = [
 ];
 
 const nativeManual: ManualToolRequirement[] = [
-  { toolId: "claude-mem", documentation: "https://docs.claude-mem.ai/installation",
-    diagnostic: "Review then run npx claude-mem install for each selected provider (or Claude Code /plugin marketplace add thedotmack/claude-mem then /plugin install claude-mem); npm SDK presence is insufficient. Configure one shared worker, then verify provider hooks, project-filtered reads and worker health. Automatic activation requires reviewed provider-home changes and functional readiness probes." },
+  { toolId: "mempalace", documentation: "https://pypi.org/project/mempalace/",
+    diagnostic: "Install with python3 -m venv ~/.mempalace-venv && ~/.mempalace-venv/bin/pip install mempalace, register the MCP server with claude mcp add --scope user mempalace -- ~/.mempalace-venv/bin/mempalace-mcp, then verify mempalace status and that the MCP server connects. Bflow does not install or configure MemPalace automatically and never treats its presence as task evidence." },
   { toolId: "superpowers", documentation: "https://github.com/obra/superpowers#Getting-Started",
     diagnostic: "Use Claude Code /plugin install superpowers@claude-plugins-official, Codex /plugins then search Superpowers, or agy plugin install https://github.com/obra/superpowers. Then verify the exact enabled plugin, marketplace provenance and active using-superpowers skill. Bflow cannot infer native activation from a downloaded archive or modify provider settings automatically." }
 ];
@@ -253,10 +253,6 @@ export function defaultNativeToolPins(): ManagedToolPin[] {
     { toolId: "superpowers", installerId: "bflow-native-superpowers-v1", version: "7.0.0",
       source: "https://github.com/obra/superpowers/archive/refs/tags/v7.0.0.tar.gz",
       integrity: "b1fa757963ba9817035e77b3039518bca95fd250684d49299616fa2676f5baee",
-      license: "MIT", recipe: { kind: "provider_plugin", provider: "codex" } },
-    { toolId: "claude-mem", installerId: "bflow-native-claude-mem-v1", version: "14.0.1",
-      source: "https://registry.npmjs.org/claude-mem/-/claude-mem-14.0.1.tgz",
-      integrity: "48fb5123bc0f9d7f5962692775b9b6293be8bba2566006d8a608cb42bf301bd8",
-      license: "Apache-2.0", recipe: { kind: "provider_plugin", provider: "codex" } }
+      license: "MIT", recipe: { kind: "provider_plugin", provider: "codex" } }
   ].map(pin => ManagedToolPinSchema.parse(pin));
 }

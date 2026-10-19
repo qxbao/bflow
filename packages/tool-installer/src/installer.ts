@@ -45,11 +45,11 @@ const parse = <T>(schema: z.ZodType<T>, value: unknown): OperationResult<T> => {
 };
 
 export const ManagedToolPinSchema = z.object({
-  toolId: z.enum(["rtk", "claude-mem", "gitnexus", "chrome-devtools-mcp", "superpowers", "claude", "codex", "agy", "herdr"]),
+  toolId: z.enum(["rtk", "gitnexus", "chrome-devtools-mcp", "superpowers", "claude", "codex", "agy", "herdr"]),
   installerId: z.string().min(1), version: z.string().min(1), source: z.string().url(),
   integrity: z.string().regex(/^[0-9a-f]{64}$/),
   recipe: z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("npm"), packageName: z.enum(["claude-mem", "gitnexus", "chrome-devtools-mcp", "@anthropic-ai/claude-code", "@openai/codex"]),
+    z.object({ kind: z.literal("npm"), packageName: z.enum(["gitnexus", "chrome-devtools-mcp", "@anthropic-ai/claude-code", "@openai/codex"]),
       executable: z.string().min(1), allowBuildScripts: z.boolean() }).strict(),
     z.object({ kind: z.literal("rtk_archive"), archiveMember: z.enum(["rtk", "./rtk"]) }).strict(),
     z.object({ kind: z.literal("binary"), executable: z.enum(["herdr"]) }).strict(),
@@ -183,7 +183,6 @@ export class ManagedToolInstaller implements ToolInstaller {
       if (url.protocol !== "https:" || url.username || url.password || url.hash) throw new Error("Pinned source must be HTTPS without credentials or fragment");
       if ((pin.recipe.kind === "npm" || pin.recipe.kind === "provider_plugin") &&
         !/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(pin.version)) throw new Error("Package/plugin version must be exact");
-      if (pin.toolId === "claude-mem" && pin.recipe.kind === "npm") throw new Error("Claude-Mem npm SDK is not a plugin installation; use provider-specific installation");
       if (pin.toolId === "rtk" && pin.recipe.kind !== "rtk_archive") throw new Error("RTK must use the rtk-ai release binary archive");
       if (pin.toolId === "rtk" && (url.hostname !== "github.com" || !url.pathname.startsWith("/rtk-ai/rtk/releases/download/")))
         throw new Error("RTK source must be an official rtk-ai/rtk release asset");
@@ -345,7 +344,7 @@ export class ManagedToolInstaller implements ToolInstaller {
   }
 
   async #probe(destination: string, pin: ManagedToolPin): Promise<boolean> {
-    const artifact = join(destination, pin.recipe.kind === "npm" || pin.toolId === "claude-mem" ? "artifact.tgz" : "artifact");
+    const artifact = join(destination, pin.recipe.kind === "npm" ? "artifact.tgz" : "artifact");
     try { if (await digestFile(artifact) !== pin.integrity) return false; }
     catch { return false; }
     if (pin.recipe.kind === "provider_plugin") {
@@ -400,7 +399,7 @@ export class ManagedToolInstaller implements ToolInstaller {
       }
       catch { /* absent */ }
       await mkdir(stage, { mode: 0o700 });
-      const artifact = join(stage, pin.recipe.kind === "npm" || pin.toolId === "claude-mem" ? "artifact.tgz" : "artifact");
+      const artifact = join(stage, pin.recipe.kind === "npm" ? "artifact.tgz" : "artifact");
       await this.#host.download(pin.source, artifact, options?.signal);
       if (await digestFile(artifact) !== pin.integrity) return ok(await this.#receipt(request, "failed", ["Downloaded artifact SHA-256 mismatch"]));
       if (pin.recipe.kind === "npm") {
@@ -490,10 +489,9 @@ export class ManagedToolInstaller implements ToolInstaller {
   }
 }
 
-export function createToolCapability(toolId: "rtk" | "claude-mem" | "gitnexus" | "chrome-devtools-mcp" | "superpowers", version: string, repositoryId: string): ToolCapability {
+export function createToolCapability(toolId: "rtk" | "gitnexus" | "chrome-devtools-mcp" | "superpowers", version: string, repositoryId: string): ToolCapability {
   const definitions = {
     rtk: { kind: "cli_only", operations: ["optimize_output", "gain"], resource: { sharing: "concurrent", maxConcurrency: 64 } },
-    "claude-mem": { kind: "existing_shared_worker", operations: ["memory_search"], resource: { sharing: "concurrent", maxConcurrency: 8 } },
     gitnexus: { kind: "stdio_mcp", operations: ["code_query", "code_context", "impact"], resource: { sharing: "exclusive", resourceKey: `gitnexus-${repositoryId}` } },
     "chrome-devtools-mcp": { kind: "stdio_mcp", operations: ["browser_debug", "page_navigate"], resource: { sharing: "exclusive", resourceKey: `chrome-${repositoryId}` } },
     superpowers: { kind: "cli_only", operations: ["skills_instruction"], resource: { sharing: "concurrent", maxConcurrency: 64 } }

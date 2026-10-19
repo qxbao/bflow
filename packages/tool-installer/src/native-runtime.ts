@@ -1,16 +1,12 @@
 import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { cp, lstat, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import { createConnection } from "node:net";
 import { z } from "zod";
 import type { OperationOptions } from "@bflow/contracts";
 import type { ManagedToolPin, ToolHost } from "./installer.js";
-import { atomicJson, existingPrivateDirectory, extractPinnedArchive, fileDigest, privateDirectory, readRegular, sha256, treeDigest, withFileLock } from "./files.js";
-import { ClaudeMemProjectReader, observeClaudeMemWorker, readClaudeMemWorkerIdentity } from "./integrations.js";
-
-import { resolveMemoryProvider, type MemoryProviderMode } from "./memory-provider.js";
+import { atomicJson, existingPrivateDirectory, extractPinnedArchive, privateDirectory, readRegular, sha256, treeDigest, withFileLock } from "./files.js";
 
 export type NativeProvider = "claude" | "codex" | "agy";
 /** Isolated provider configuration supplied explicitly by the composition root. Only providers with a
@@ -29,7 +25,6 @@ export interface NativeRuntimeOptions {
   /** When present, provider child processes and provider config reads are confined to these directories. */
   isolation?: NativeProviderIsolation;
   executables?: Partial<Record<NativeProvider, string>>;
-  memory?: { provider?: MemoryProviderMode; dataDir: string; projectRoot: string; project: string; port?: number; address?: string; startIfMissing?: boolean };
   bflowSkillIds?: readonly string[];
 }
 
@@ -68,24 +63,6 @@ const installedSchema = z.union([z.array(installedEntrySchema), z.object({ insta
   plugins: z.array(installedEntrySchema).optional() }).passthrough()]);
 const manifestSchema = z.object({ name: z.string(), version: z.string(), license: z.string().optional() }).passthrough();
 const policy = `Bflow policy takes precedence over this external skill. Apply TDD only according to Bflow's accepted TddDecision: required means Red-Green-Refactor is mandatory; recommended permits the approved verification strategy; not_applicable requires its alternative verification. Never impose TDD on every change. Preserve Bflow specifications, approvals, leases, verification limits and role authority. Route user decisions through Bflow Conversation. Skill instructions grant no permissions.\n`;
-
-async function portRefusesConnections(host: string, port: number): Promise<boolean> {
-  return new Promise(resolve => {
-    const socket = createConnection({ host, port });
-    socket.setTimeout(1000);
-    socket.once("connect", () => { socket.destroy(); resolve(false); });
-    socket.once("timeout", () => { socket.destroy(); resolve(false); });
-    socket.once("error", error => { socket.destroy(); resolve((error as NodeJS.ErrnoException).code === "ECONNREFUSED"); });
-  });
-}
-
-function absoluteMemoryHooks(value: unknown, launcher: string): void {
-  if (!value || typeof value !== "object") return;
-  if (Array.isArray(value)) { value.forEach(item => absoluteMemoryHooks(item, launcher)); return; }
-  const object = value as Record<string, unknown>;
-  if (object.command === "claude-mem") object.command = launcher;
-  Object.values(object).forEach(item => absoluteMemoryHooks(item, launcher));
-}
 
 export class NativePluginRuntime {
   readonly #options: NativeRuntimeOptions;
@@ -130,7 +107,6 @@ export class NativePluginRuntime {
     try {
       const record = await this.#record(destination, pin);
       if (await treeDigest(record.bundleRoot) !== record.bundleDigest) throw new Error("Native source bytes changed");
-      if (pin.toolId === "claude-mem") return await this.#verifyMemory(pin, record.bundleRoot);
       const provider = this.#provider(pin);
       const entries = await this.#inventory(provider);
       const entry = entries.find(item => [item.pluginId, item.id, item.name].includes(record.pluginId) ||
@@ -216,7 +192,6 @@ export class NativePluginRuntime {
     const provider = this.#provider(pin);
     const managed = await privateDirectory(this.#options.managedRoot);
     return withFileLock(join(managed, `${pin.toolId}-${provider}.lock`), async () => {
-      if (pin.toolId === "claude-mem") return this.#activateMemory(pin, artifact, options);
       if (pin.toolId !== "superpowers") throw new Error("Unknown native plugin");
       const bundle = await this.#superpowersBundle(pin, artifact);
       const executable = this.#binary(provider);
@@ -250,146 +225,6 @@ export class NativePluginRuntime {
     });
   }
 
-  /** Real mode forwards only an inherited CODEX_HOME; isolated mode forces the isolated provider homes. */
-  #memoryEnvironment(): { environment?: Readonly<Record<string, string>> } {
-    const isolated = isolatedProviderEnvironment(this.#options.isolation);
-    if (isolated) return { environment: isolated };
-    return process.env.CODEX_HOME ? { environment: { CODEX_HOME: process.env.CODEX_HOME } } : {};
-  }
-  #memory() {
-    const dataDir = this.#options.memory?.dataDir ?? join(this.#home, ".claude-mem");
-    const projectRoot = this.#options.memory?.projectRoot ?? process.cwd();
-    return { dataDir, projectRoot, project: this.#options.memory?.project ?? projectRoot,
-      ...this.#options.memory };
-  }
-  async #activateMemory(pin: ManagedToolPin, artifact: string, options?: OperationOptions) {
-    const memory = this.#memory();
-    const selected = await resolveMemoryProvider({ provider: memory.provider ?? "auto", homeDirectory: this.#home, dataDir: memory.dataDir,
-      host: this.#host, executables: { claude: this.#binary("claude"), codex: this.#binary("codex") },
-      ...this.#memoryEnvironment() });
-    const managed = await privateDirectory(this.#options.managedRoot);
-    const generation = join(managed, `claude-mem-${pin.integrity}`);
-    const environment = { CI: "1", CLAUDE_MEM_DATA_DIR: memory.dataDir, ...isolatedProviderEnvironment(this.#options.isolation),
-      ...(selected.provider === "claude" ? { CLAUDE_MEM_PROVIDER: "claude", CLAUDE_MEM_CLAUDE_AUTH_METHOD: "subscription",
-        ANTHROPIC_API_KEY: "", ANTHROPIC_AUTH_TOKEN: "", ANTHROPIC_BASE_URL: "" } :
-        selected.provider === "codex" ? { CLAUDE_MEM_PROVIDER: "codex", CLAUDE_MEM_CODEX_PATH: this.#binary("codex"), OPENAI_API_KEY: "" } : {}),
-      CLAUDE_MEM_WORKER_HOST: memory.address ?? "127.0.0.1",
-      ...(memory.port ? { CLAUDE_MEM_WORKER_PORT: String(memory.port) } : {}) };
-    try { await lstat(generation); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      await mkdir(generation, { mode: 0o700 });
-      try {
-        const installed = await this.#host.run("npm", ["install", "--prefix", generation, "--no-save", "--package-lock=false", artifact],
-          { timeoutMs: options?.timeoutMs ?? 180_000, environment });
-        if (installed.exitCode !== 0) throw new Error("Pinned Claude-Mem package dependencies failed to install");
-        const manifest = manifestSchema.parse(JSON.parse(await readRegular(join(generation, "node_modules", "claude-mem", "package.json"))));
-        if (manifest.name !== "claude-mem" || manifest.version !== pin.version || manifest.license !== pin.license)
-          throw new Error("Claude-Mem identity/version/license mismatch");
-        await cp(artifact, join(generation, "approved.tgz"));
-      } catch (failure) { await rm(generation, { recursive: true, force: true }); throw failure; }
-    }
-    if (await fileDigest(join(generation, "approved.tgz")) !== pin.integrity) throw new Error("Stored Claude-Mem artifact changed");
-    const executable = join(generation, "node_modules", ".bin", "claude-mem");
-    const provider = this.#provider(pin);
-    const ide = { claude: "claude-code", codex: "codex-cli", agy: "antigravity" }[provider];
-    const result = await this.#host.run(executable, ["install", "--ide", ide, "--provider", selected.provider, "--no-auto-start"],
-      { timeoutMs: options?.timeoutMs ?? 300_000, environment, ...(options?.signal ? { signal: options.signal } : {}) });
-    await writeFile(join(dirname(artifact), "native-installer.log"), result.stdout + result.stderr, { mode: 0o600 });
-    if (result.exitCode !== 0) return { success: false, diagnostic: /No OpenAI-compatible host observer is listening/.test(result.stderr)
-      ? "Claude-Mem host observer is unavailable on loopback ports 37777/37778. Start the existing OpenAI-compatible observer (or set CLAUDE_MEM_HOST_OBSERVER_PORT), inspect native-installer.log and explicitly review the retained native intent before retrying. No subscription or credentials were created."
-      : `Official Claude-Mem installer exited ${result.exitCode}; full output retained in native-installer.log` };
-    if (provider === "claude") {
-      const pluginRoot = join(this.#configRoot("claude"), "plugins", "cache", "thedotmack", "claude-mem", pin.version);
-      const hooks = JSON.parse(await readRegular(join(generation, "node_modules", "claude-mem", "plugin", "hooks", "hooks.json")));
-      const launcher = join(this.#home, ".local", "bin", "claude-mem");
-      absoluteMemoryHooks(hooks, launcher);
-      const hooksPath = join(pluginRoot, "hooks", "hooks.json");
-      const backup = join(managed, `claude-mem-hooks-before-${pin.integrity}.json`);
-      try { await writeFile(backup, await readRegular(hooksPath), { flag: "wx", mode: 0o600 }); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
-      await atomicJson(hooksPath, hooks);
-    }
-    let worker = await observeClaudeMemWorker({ ...memory, version: pin.version });
-    const pidExists = (await readClaudeMemWorkerIdentity(memory.dataDir)) !== null;
-    const settings = z.record(z.unknown()).parse(JSON.parse(await readRegular(join(memory.dataDir, "settings.json"))));
-    const port = memory.port ?? Number(settings.CLAUDE_MEM_WORKER_PORT ?? 37700 + ((process.getuid?.() ?? 0) % 100));
-    if (worker.status !== "ready" && !pidExists && memory.startIfMissing !== false &&
-      await portRefusesConnections(memory.address ?? "127.0.0.1", port)) {
-      await withFileLock(join(managed, "claude-mem-worker.lock"), async () => {
-        worker = await observeClaudeMemWorker({ ...memory, version: pin.version });
-        if (worker.status !== "ready") await this.#host.run(executable, ["start"], { timeoutMs: 60_000, environment });
-      });
-    }
-    await atomicJson(join(dirname(artifact), ".bflow-native.json"), { schemaVersion: 3, toolId: pin.toolId, provider,
-      version: pin.version, sourceIntegrity: pin.integrity, bundleRoot: generation, bundleDigest: await treeDigest(generation),
-      pluginId: provider === "codex" ? "claude-mem@claude-mem-local" : "claude-mem@thedotmack", marketplaceRoot: generation,
-      uninstall: [] });
-    return { success: true, diagnostic: "Official host installer finished; worker is adopted and verified separately" };
-  }
-  async #verifyMemory(pin: ManagedToolPin, generation: string) {
-    const memory = this.#memory();
-    const selected = await resolveMemoryProvider({ provider: memory.provider ?? "auto", homeDirectory: this.#home, dataDir: memory.dataDir,
-      host: this.#host, executables: { claude: this.#binary("claude"), codex: this.#binary("codex") },
-      ...this.#memoryEnvironment() });
-    const settings = z.record(z.unknown()).parse(JSON.parse(await readRegular(join(memory.dataDir, "settings.json"))));
-    const expected = selected.provider === "host" ? "openai-compatible" : selected.provider;
-    if (settings.CLAUDE_MEM_PROVIDER !== expected || (expected === "claude" && settings.CLAUDE_MEM_CLAUDE_AUTH_METHOD && settings.CLAUDE_MEM_CLAUDE_AUTH_METHOD !== "subscription"))
-      throw Error("Active Claude-Mem provider differs from the approved subscription route");
-    const environment = { CLAUDE_MEM_DATA_DIR: memory.dataDir, PATH: [join(this.#home, ".local", "bin"), process.env.PATH ?? ""].join(delimiter),
-      ...isolatedProviderEnvironment(this.#options.isolation),
-      ...(memory.port ? { CLAUDE_MEM_WORKER_PORT: String(memory.port) } : {}) };
-    const executable = join(generation, "node_modules", ".bin", "claude-mem");
-    const doctor = await this.#host.run(executable, ["doctor"], { timeoutMs: 30_000, environment });
-    if (doctor.exitCode !== 0) throw new Error("Claude-Mem dependency doctor failed");
-    const worker = await observeClaudeMemWorker({ ...memory, version: pin.version });
-    if (worker.status !== "ready" || !worker.endpoint) throw new Error(worker.diagnostic);
-    await new ClaudeMemProjectReader(worker.endpoint, memory.project).recent(1);
-    const provider = this.#provider(pin);
-    if (provider === "claude" || provider === "codex") {
-      const id = provider === "claude" ? "claude-mem@thedotmack" : "claude-mem@claude-mem-local";
-      if (!(await this.#inventory(provider)).some(entry => [entry.pluginId, entry.id].includes(id) && entry.enabled === true))
-        throw new Error("Claude-Mem host plugin is not active");
-    } else {
-      const hooks = z.record(z.unknown()).parse(JSON.parse(await readRegular(join(this.#home, ".gemini", "config", "hooks.json"))));
-      const events = z.object({ PreInvocation: z.array(z.unknown()).min(1), PostToolUse: z.array(z.unknown()).min(1) })
-        .passthrough().parse(hooks["claude-mem"]);
-      if (!events) throw new Error("Agy native memory adapter is missing");
-    }
-    // Exercise the specific platform formatter against the adopted worker without starting an agent.
-    const pluginRoot = join(this.#configRoot("claude"), "plugins", "cache", "thedotmack", "claude-mem", pin.version);
-    const runner =join(pluginRoot, "scripts", "bun-runner.js");
-    const service = join(pluginRoot, "scripts", "worker-service.cjs");
-    await readRegular(runner);
-    const sourceRoot = join(generation, "node_modules", "claude-mem", "plugin");
-    for (const file of ["scripts/bun-runner.js", "scripts/worker-service.cjs"])
-      if (await fileDigest(join(pluginRoot, file)) !== await fileDigest(join(sourceRoot, file))) throw new Error("Active memory adapter source differs from the approved package");
-    if (provider === "claude") {
-      const expected = JSON.parse(await readRegular(join(sourceRoot, "hooks", "hooks.json")));
-      absoluteMemoryHooks(expected, join(this.#home, ".local", "bin", "claude-mem"));
-      const active = JSON.parse(await readRegular(join(pluginRoot, "hooks", "hooks.json")));
-      if (JSON.stringify(active) !== JSON.stringify(expected)) throw new Error("Active Claude memory hooks differ from the configured pinned hooks");
-    }
-    const input = provider === "agy" ? { conversationId: `bflow-probe-${randomUUID()}`, workspacePaths: [memory.projectRoot], invocationNum: 1 } :
-      { session_id: `bflow-probe-${randomUUID()}`, cwd: memory.projectRoot, hook_event_name: "SessionStart", source: "startup" };
-    let command = process.execPath;
-    let args = [runner, service, "hook", provider === "claude" ? "claude-code" : "codex", "context"];
-    if (provider === "agy") {
-      const config = z.object({ "claude-mem": z.object({ PreInvocation: z.array(z.object({ command: z.string() }).passthrough()).min(1) }).passthrough() })
-        .passthrough().parse(JSON.parse(await readRegular(join(this.#home, ".gemini", "config", "hooks.json"))));
-      const parts = config["claude-mem"].PreInvocation[0]!.command.split(" ");
-      if (parts.length !== 5 || !isAbsolute(parts[0]!) || !isAbsolute(parts[1]!) || parts.slice(2).join(" ") !== "hook antigravity-cli context" ||
-        await fileDigest(parts[1]!) !== await fileDigest(join(sourceRoot, "scripts", "worker-service.cjs"))) throw new Error("Agy memory hook command does not match the pinned adapter");
-      command = parts[0]!; args = parts.slice(1);
-    }
-    const probe = await this.#host.run(command, args, { timeoutMs: 30_000, input: JSON.stringify(input), environment });
-    if (probe.exitCode !== 0) throw new Error("Platform memory context adapter failed");
-    const output = JSON.parse(probe.stdout);
-    if (provider === "agy") z.object({ injectSteps: z.array(z.object({ ephemeralMessage: z.string().min(1) })).min(1) }).passthrough().parse(output);
-    else z.object({ hookSpecificOutput: z.object({ hookEventName: z.literal("SessionStart"), additionalContext: z.string() }).passthrough() })
-      .passthrough().parse(output);
-    return { ready: true, diagnostic: "Official dependencies, shared worker, project-filtered HTTP reads and provider-specific context adapter verified" };
-  }
 }
 
 export async function nativeRollbackMetadata(destination: string) {

@@ -39,13 +39,6 @@ function isolationFor(root: string): NativeProviderIsolation {
   return { homeDirectory: join(providers, "home"), claudeConfigDir: join(providers, "claude"), codexHome: join(providers, "codex") };
 }
 
-function memoryPin(): ManagedToolPin {
-  return { toolId: "claude-mem", installerId: "native-memory", version: "14.0.1",
-    source: "https://registry.npmjs.org/claude-mem/-/claude-mem-14.0.1.tgz",
-    integrity: createHash("sha256").update("memory-archive").digest("hex"), license: "AGPL-3.0",
-    recipe: { kind: "provider_plugin", provider: "claude" } };
-}
-
 function request(pin: ManagedToolPin, destination: string, idempotencyKey: string) {
   return { schemaVersion: 3 as const, toolId: pin.toolId, installerId: pin.installerId, version: pin.version, source: pin.source,
     integrity: pin.integrity, destination, scope: { kind: "machine" as const, machineId: "machine" }, idempotencyKey };
@@ -89,43 +82,6 @@ async function assertNoRealHome(calls: Invocation[], realHome: string, root: str
 }
 
 describe("isolated native provider setup", () => {
-  it("resolves Claude-Mem provider login only under the isolated provider homes", async () => {
-    const root = await tempRoot("bflow-native-iso-memory-");
-    const realHome = join(root, "real-home");
-    const isolation = isolationFor(root);
-    const calls: Invocation[] = [];
-    const pin = memoryPin();
-    const installer = new NativeProvidersToolInstaller({ managedRoot: join(root, "isolated", "data", "tools"), pin,
-      providers: ["claude"], host: recordingHost(calls),
-      configuration: { homeDirectory: isolation.homeDirectory, isolation,
-        memory: { dataDir: join(root, "isolated", "data", "claude-mem"), projectRoot: root, project: root } } });
-    const planned = await installer.plan(request(pin, join(root, "isolated", "data", "tools", "claude-mem"), "iso-memory"));
-    expect(planned.ok).toBe(false);
-    const claudeCalls = calls.filter(call => call.executable === "claude");
-    expect(claudeCalls.length).toBeGreaterThan(0);
-    for (const call of claudeCalls) {
-      expect(call.environment?.HOME).toBe(isolation.homeDirectory);
-      expect(call.environment?.CLAUDE_CONFIG_DIR).toBe(isolation.claudeConfigDir);
-    }
-    await assertNoRealHome(calls, realHome, root);
-  });
-
-  it("keeps real (non-isolated) provider commands on the caller environment without forcing isolated homes", async () => {
-    const root = await tempRoot("bflow-native-real-memory-");
-    const calls: Invocation[] = [];
-    const pin = memoryPin();
-    const installer = new NativeProvidersToolInstaller({ managedRoot: join(root, "tools"), pin, providers: ["claude"],
-      host: recordingHost(calls), configuration: { homeDirectory: join(root, "home"),
-        memory: { dataDir: join(root, "memory"), projectRoot: root, project: root } } });
-    await installer.plan(request(pin, join(root, "tools", "claude-mem"), "real-memory"));
-    const claudeCalls = calls.filter(call => call.executable === "claude");
-    expect(claudeCalls.length).toBeGreaterThan(0);
-    for (const call of claudeCalls) {
-      expect(call.environment?.HOME).toBeUndefined();
-      expect(call.environment?.CLAUDE_CONFIG_DIR).toBeUndefined();
-    }
-  });
-
   it("defers providers without an isolation variable: agy is never activated and is reported as an owner action", async () => {
     const root = await tempRoot("bflow-native-iso-agy-");
     const realHome = join(root, "real-home");

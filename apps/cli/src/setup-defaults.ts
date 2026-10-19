@@ -39,7 +39,6 @@ export async function createDefaultSetupConfiguration(options: {
   platform: PlatformProfile;
   config?: MachineConfig;
   registry?: ToolInstallerRegistry;
-  memoryProvider?: "auto" | "claude" | "codex" | "host";
   projectRoot?: string;
   isolation?: IsolatedProviderHomes;
 }): Promise<{ config: MachineConfig; registry: ToolInstallerRegistry; diagnostics: string[];
@@ -81,8 +80,7 @@ export async function createDefaultSetupConfiguration(options: {
     const nativeInstaller = new leaf.NativeProvidersToolInstaller({ managedRoot: join(platform.paths.data, "tools"),
       pin, providers: config.providers, host: nativeHost,
       configuration: { homeDirectory: options.isolation?.homeDirectory ?? platform.homeDir,
-        ...(options.isolation ? { isolation: { ...options.isolation } } : {}), executables: providerExecutables,
-        memory: { provider: options.memoryProvider ?? "auto", dataDir: join(platform.paths.data, "claude-mem"), projectRoot: options.projectRoot ?? process.cwd(), project: options.projectRoot ?? process.cwd(), startIfMissing: true } } });
+        ...(options.isolation ? { isolation: { ...options.isolation } } : {}), executables: providerExecutables } });
     nativeInspectors.set(nativeInstaller.installerId, nativeInstaller);
     if (!registry.get(nativeInstaller.installerId)) {
       const registration = registry.register(nativeInstaller);
@@ -115,9 +113,6 @@ export async function createDefaultSetupConfiguration(options: {
   const diagnostics = manual.map(item => `${item.toolId}: ${item.diagnostic} ${item.documentation}`);
   diagnostics.push("claude/codex/agy: Complete each selected provider's own login flow; setup does not create credentials or widen permissions.");
   diagnostics.push("GitNexus 1.6.12 uses PolyForm-Noncommercial-1.0.0; review eligibility or obtain the upstream commercial license before approving installation. Its npm native dependency build scripts execute during the approved install.");
-  if (nativePins.some((pin: { toolId: string }) => pin.toolId === "claude-mem")) diagnostics.push(options.memoryProvider === "host"
-    ? "claude-mem: Explicit host mode requires an existing loopback observer on port 37777/37778 or CLAUDE_MEM_HOST_OBSERVER_PORT."
-    : "claude-mem: Setup preserves the saved provider or selects an already authenticated Claude/ChatGPT subscription. Memory processing shares that account quota; setup performs no inference, creates no credentials and does not create a new subscription.");
   diagnostics.push("Pinned npm entry tarballs are checksum-verified; transitive npm dependencies are resolved by npm and are not a fully locked offline dependency bundle.");
   const launchRequirements: DefaultSetupLaunchRequirement[] = [];
   for (const toolId of ["gitnexus", "chrome-devtools-mcp"] as const) {
@@ -132,7 +127,7 @@ export async function createDefaultSetupConfiguration(options: {
   const additionalToolObservations = async (currentPlatform: PlatformProfile, currentConfig: MachineConfig): Promise<ToolObservation[]> => {
     const observations: ToolObservation[] = [];
     for (const pin of currentConfig.toolPins) {
-      const native = pin.toolId === "superpowers" || pin.toolId === "claude-mem";
+      const native = pin.toolId === "superpowers";
       const managedMcpPin = (pin.toolId === "gitnexus" || pin.toolId === "chrome-devtools-mcp")
         ? catalog.pins.find((candidate: { toolId: string; installerId: string; version: string; source: string; integrity: string }) =>
           candidate.toolId === pin.toolId && candidate.installerId === pin.installerId && candidate.version === pin.version &&

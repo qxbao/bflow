@@ -809,7 +809,7 @@ describe("Task 3: Full 11-Scenario Integration Test Suite & Platform v3 Lifecycl
           sessionRegistrations: new Map<string, string[]>(),
           services: {
             gitnexus: { status: "ready", scope: "machine" },
-            "claude-mem-adapter": { status: "ready" },
+            "mempalace-adapter": { status: "ready" },
             "local-mcp-a": { status: "ready" }
           },
           stoppedServices: []
@@ -823,13 +823,13 @@ describe("Task 3: Full 11-Scenario Integration Test Suite & Platform v3 Lifecycl
         await writeFile(
           join(dirA, ".bflow/config.yaml"),
           makeConfig(repoA, "claude", {
-            requiredMcpServices: ["gitnexus", "claude-mem-adapter", "local-mcp-a"]
+            requiredMcpServices: ["gitnexus", "mempalace-adapter", "local-mcp-a"]
           })
         );
         await writeFile(
           join(dirB, ".bflow/config.yaml"),
           makeConfig(repoB, "claude", {
-            requiredMcpServices: ["gitnexus", "claude-mem-adapter"]
+            requiredMcpServices: ["gitnexus", "mempalace-adapter"]
           })
         );
 
@@ -868,7 +868,7 @@ describe("Task 3: Full 11-Scenario Integration Test Suite & Platform v3 Lifecycl
 
         // Shared/machine MCP services were NOT stopped
         expect(sharedMcpState.stoppedServices).not.toContain("gitnexus");
-        expect(sharedMcpState.stoppedServices).not.toContain("claude-mem-adapter");
+        expect(sharedMcpState.stoppedServices).not.toContain("mempalace-adapter");
 
         // local-mcp-a WAS stopped
         expect(sharedMcpState.stoppedServices).toContain("local-mcp-a");
