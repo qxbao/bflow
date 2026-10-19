@@ -228,6 +228,17 @@ export interface GitNexusIndexObservation {
   diagnostic: string;
 }
 
+async function gitNexusBusyDiagnostic(lockPath: string, kind: "storage" | "writer"): Promise<string> {
+  let owner = "owner unknown";
+  try {
+    const record = z.object({ pid: z.number().int().positive().max(2_147_483_647) }).passthrough()
+      .parse(JSON.parse(await readRegular(lockPath, 4096)));
+    owner = `recorded owner PID ${record.pid}`;
+  } catch { /* A missing, legacy or unreadable record does not establish a process owner. */ }
+  return `GitNexus index needs rebuilding; retained ${kind} lock: ${lockPath} (${owner}). ` +
+    "Inspect the lock and arrange release of its reader or writer before rerunning approved setup.";
+}
+
 /** One machine-wide writer lock because independent repos may share a GitNexus registry/store. */
 export async function ensureGitNexusIndex(input: {
   repositoryRoot: string; stateRoot: string; executable: string; host?: ToolHost; timeoutMs?: number;
@@ -262,13 +273,13 @@ export async function ensureGitNexusIndex(input: {
   const storageLockPath = join(input.stateRoot, `gitnexus-storage-${sha(root)}.lock`);
   let storageLock;
   try { storageLock = await open(storageLockPath, "wx", 0o600); }
-  catch { return { status: "busy", repositoryRoot: root, fingerprint, diagnostic: "GitNexus storage is in use by a reader or writer" }; }
+  catch { return { status: "busy", repositoryRoot: root, fingerprint, diagnostic: await gitNexusBusyDiagnostic(storageLockPath, "storage") }; }
   const lockPath = join(input.stateRoot, "gitnexus-writer.lock");
   let lock;
   try { lock = await open(lockPath, "wx", 0o600); }
   catch {
     await storageLock.close(); await rm(storageLockPath, { force: true });
-    return { status: "busy", repositoryRoot: root, fingerprint, diagnostic: "GitNexus writer already active" };
+    return { status: "busy", repositoryRoot: root, fingerprint, diagnostic: await gitNexusBusyDiagnostic(lockPath, "writer") };
   }
   const receiptPath = join(input.stateRoot, `gitnexus-${sha(root)}.json`);
   try {
