@@ -565,6 +565,14 @@ describe("P12 repository environment lifecycle", () => {
     expect(runner.running.has(repository.sessionName)).toBe(false);
     expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("down");
     expect((await lifecycle.up()).status).toBe("up");
+    const unactivated = new EnvironmentLifecycle(dir, { runner, integration: {
+      manager: fixture.manager, runtime: mockRuntime(),
+      quiesce: async () => ({ ok: false, error: { code: "transport_unavailable", retryable: true, message: "Error: Persisted agentic work requires activation/reconciliation before safe shutdown" } }),
+      terminateIncompatibleHost: async () => { events.push("terminate-unactivated"); }
+    } });
+    await expect(unactivated.down(true, 3000)).rejects.toThrow("requires activation");
+    expect((await unactivated.down(false, 3000, true)).status).toBe("down");
+    expect(events.at(-1)).toBe("terminate-unactivated");
   });
   linuxIt("force down cannot bypass failed aggregate checkpoint persistence", async () => {
     await lifecycle.up();

@@ -800,10 +800,12 @@ export class EnvironmentLifecycle {
     try {
       return await this.locked(repository, () => this.downLocked(repository, config, confirmed || force, timeoutMs, this.dependencies.signal, undefined, force));
     } catch (error) {
-      // Only a host that rejects the protocol is bypassed; genuine barrier/checkpoint failures still abort a forced stop.
-      if (!force || !/Unknown host operation/.test(error instanceof Error ? error.message : String(error))) throw error;
+      // Only a host that cannot run the barrier at all is bypassed: an incompatible build, or an unactivated host that
+      // refuses to quiesce over persisted work. Journal/run store stay on disk and the next `up` reconciles them.
+      // Genuine barrier/checkpoint failures on an active host still abort a forced stop.
+      if (!force || !/Unknown host operation|requires activation\/reconciliation before safe shutdown/.test(error instanceof Error ? error.message : String(error))) throw error;
     }
-    this.progress("Host daemon runs an incompatible build; force-stopping it. Durable state is preserved.");
+    this.progress("Host daemon cannot run the shutdown barrier; force-stopping it. Durable state is preserved and the next 'bflow up' reconciles it.");
     return this.locked(repository, () => this.forceStopIncompatibleHost(repository, config, timeoutMs));
   }
   private async forceStopIncompatibleHost(repository: RepositoryIdentity, config: EnvironmentConfig, timeoutMs?: number): Promise<SessionManifest | EnvironmentStatus> {
