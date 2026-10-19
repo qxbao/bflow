@@ -196,6 +196,8 @@ export class HerdrOutbox {
         timeout: { executionTimeoutMs: 300_000, onTimeout: "block" },
         idempotency: { key: wire.idempotency_key, scope: "agent-request", fingerprint: digest(wire) },
         createdAt: this.now(), metadata: { leaseId: out.lease.leaseId, fencingToken: out.lease.fencingToken } });
+      if (wire.type === "delegation.request" && wire.recipient.role === "coordinator")
+        out.coordinatorResponseBaseline ??= this.state.outbound.length;
       out.status = "sending";
       await this.save(); // write-ahead intent; a crash/lost acknowledgement forbids resend
       if (out.parentAssignmentId) {

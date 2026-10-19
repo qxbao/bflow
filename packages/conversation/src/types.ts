@@ -117,11 +117,13 @@ export const ExtractedRequirementDraftSchema = z
     acceptanceCriteriaDescriptions: z.array(z.string()),
     isRequirementChange: z.boolean(),
     targetRunId: IdentifierSchema.optional(),
-    targetCorrelationId: IdentifierSchema.optional()
+    targetCorrelationId: IdentifierSchema.optional(),
+    investigationTasks: z.array(z.object({ objective: z.string().min(1), affectedPaths: z.array(z.string()), codeChangesAuthorized: z.literal(false) }).strict()).optional()
   })
   .strict();
 
 export interface ExtractedRequirementDraft {
+  readonly investigationTasks?: readonly { readonly objective: string; readonly affectedPaths: readonly string[]; readonly codeChangesAuthorized: false }[] | undefined;
   readonly title: string;
   readonly objective: string;
   readonly kind: WorkflowRequestKind;
@@ -151,6 +153,8 @@ export interface ExtractedCancellationInput {
 }
 
 export interface IntentClassificationResult {
+  /** Remaining clauses persisted through the existing inbound FIFO after the primary action. */
+  readonly followUpContents?: readonly string[];
   readonly intent: RecognizedIntent;
   readonly confidence: number;
   readonly rationale: string;

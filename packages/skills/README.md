@@ -97,6 +97,11 @@ may remain after process death; they are not published skill entries. Atomic pub
 is not a multi-file or power-loss transaction, and this is not hostile same-UID,
 network-filesystem or multi-host isolation. Full provider sandboxing remains P25/P30 work.
 
+The canonical `use-mempalace` bundle is version `1.0.1`: its setup-owned prerequisite
+wording changed after `1.0.0` was published. Setup appends the new exact pin alongside
+installed `1.0.0` bytes, preserving existing session manifests. Do not delete the old
+catalog or overwrite the old version to reconcile a changed distribution bundle.
+
 ## Example: machine catalog to a scoped Developer manifest
 
 ```ts

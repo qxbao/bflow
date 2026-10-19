@@ -231,7 +231,12 @@ describe("tool integrations", () => {
       calls.push(`${executable} ${args[0]}`);
       if (args[0] === "rev-parse") return { exitCode: 0, stdout: "abc\n", stderr: "" };
       if (args[0] === "status" && executable === "git") return { exitCode: 0, stdout: "", stderr: "" };
-      if (args[0] === "analyze") { expect(args).toContain("--index-only"); indexed = true; forcedStale = false; return { exitCode: 0, stdout: "analyzed", stderr: "" }; }
+      if (args[0] === "analyze") {
+        expect(args).toContain("--index-only");
+        expect(await readFile(join(stateRoot, "gitnexus-writer.lock"), "utf8")).toBe("");
+        expect(await readFile(join(stateRoot, `gitnexus-storage-${hash(root)}.lock`), "utf8")).toBe("");
+        indexed = true; forcedStale = false; return { exitCode: 0, stdout: "analyzed", stderr: "" };
+      }
       return { exitCode: 0, stdout: JSON.stringify(indexed ? { schemaVersion: 1, repository: root, status: forcedStale ? "stale" : "up-to-date" } :
         { schemaVersion: 1, repository: root, error: "not-indexed" }), stderr: "" };
     } };
@@ -256,6 +261,24 @@ describe("tool integrations", () => {
     const deferred = await ensureGitNexusIndex({ repositoryRoot: root, stateRoot, executable: "gitnexus", host: unborn });
     expect(deferred.status).toBe("failed");
     expect(deferred.diagnostic).toMatch(/at least one commit/);
+  });
+
+  it("observes a current GitNexus index while the Gateway holds its storage reader lock", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bflow-index-reader-")); roots.push(root);
+    const stateRoot = join(root, "state"); await mkdir(stateRoot);
+    const storageLock = join(stateRoot, `gitnexus-storage-${hash(root)}.lock`);
+    await writeFile(storageLock, "active reader");
+    let freshness = "up-to-date";
+    const host: ToolHost = { async download() {}, async run(executable, args) {
+      if (executable === "git") return { exitCode: 0, stdout: args[0] === "rev-parse" ? "abc\n" : "", stderr: "" };
+      expect(args).toEqual(["status", "--json"]);
+      return { exitCode: 0, stdout: JSON.stringify({ schemaVersion: 1, repository: root, status: freshness }), stderr: "" };
+    } };
+    expect((await ensureGitNexusIndex({ repositoryRoot: root, stateRoot, executable: "gitnexus", host })).status).toBe("fresh");
+    expect(await readFile(storageLock, "utf8")).toBe("active reader");
+    freshness = "stale";
+    expect((await ensureGitNexusIndex({ repositoryRoot: root, stateRoot, executable: "gitnexus", host })).status).toBe("busy");
+    expect(await readFile(storageLock, "utf8")).toBe("active reader");
   });
 
   it("uses task-owned Chrome profiles and blocks a locked profile", async () => {

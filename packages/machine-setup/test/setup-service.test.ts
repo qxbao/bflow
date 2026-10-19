@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SetupReceiptSchema, type SetupReceipt, type SetupStep, type ToolInstaller } from "@bflow/contracts";
 import {
   DOCTOR_STEP_ID,
@@ -15,7 +15,8 @@ import {
   digest,
   parseEnvironmentManifest,
   type CommandRunner,
-  type HostEnvironment
+  type HostEnvironment,
+  type SetupComponent
 } from "../src/index.js";
 
 const NOW = new Date("2026-01-02T03:04:05.000Z");
@@ -206,6 +207,44 @@ describe("MachineSetupService", () => {
     expect(r.machineWideChanges).toEqual([`install_tool:pnpm: ${path.join(xdg().data, "tools", "pnpm")}`]);
     expect(r.observations.find((o) => o.toolId === "pnpm")!.status).toBe("present");
   });
+
+  it.each(["apply-fails", "observe-throws", "desired-throws", "needs-repair"])(
+    "does not apply services after MCP %s; unrelated configuration and final doctor still run", async (failure) => {
+      const component = (componentId: string): SetupComponent => {
+        let applied = false;
+        return {
+          componentId, action: componentId === "mcp-config" ? "register_mcp" : "configure", rollback: "none",
+          observe: async () => ({ stateDigest: applied ? digest(componentId) : null, valid: applied, diagnostics: [] }),
+          desired: async () => ({ digest: digest(componentId), summary: componentId, targets: [], machineWide: false, repairNeeded: false }),
+          apply: async () => { applied = true; return { ownedPaths: [], diagnostics: [] }; }
+        };
+      };
+      const mcp = component("mcp-config");
+      if (failure === "apply-fails") mcp.apply = async () => ({ ownedPaths: [], diagnostics: ["GitNexus storage is in use by a reader or writer"] });
+      if (failure === "observe-throws") mcp.observe = async () => { throw new Error("MCP observation unavailable"); };
+      if (failure === "desired-throws") mcp.desired = async () => { throw new Error("MCP planning unavailable"); };
+      if (failure === "needs-repair") mcp.desired = async () => ({
+        digest: digest("mcp-config"), summary: "repair MCP", targets: [], machineWide: false, repairNeeded: true
+      });
+      const services = component("services");
+      const servicesApply = vi.spyOn(services, "apply");
+      const report = await service({ components: [mcp, services, component("path")] })
+        .run({ mode: "apply", assumeYes: true });
+      expect(servicesApply).not.toHaveBeenCalled();
+      expect(report.receipts.find((r) => r.stepId === "configure:path")?.status).toBe("applied");
+      expect(report.receipts.at(-1)?.stepId).toBe(DOCTOR_STEP_ID);
+      expect(report.doctor?.healthy).toBe(false);
+      if (failure === "apply-fails") {
+        expect(report.receipts.find((r) => r.stepId === "register_mcp:mcp-config")?.status).toBe("failed");
+        expect(report.receipts.find((r) => r.stepId === "configure:services")).toMatchObject({
+          status: "blocked", diagnostics: ["dependency register_mcp:mcp-config is failed"]
+        });
+      } else {
+        expect(report.plan?.steps.some((s) => s.componentId === "services")).toBe(false);
+        expect(report.doctor?.checks).toContainEqual(expect.objectContaining({ checkId: "planning-services", status: "failed" }));
+      }
+    }
+  );
 
   it("invalid machine config: apply blocked with zero writes; repair backs up and restores defaults", async () => {
     const cfgDir = xdg().config;

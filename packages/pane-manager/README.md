@@ -93,11 +93,24 @@ using these flags are unsupported. Ignored files also make the tree dirty, so
 preserve or remove generated files explicitly before releasing a worktree. The
 inspector never clears flags, deletes files or discards edits.
 
-`shutdownTopology` first obtains a successful live pane listing and closes only
-the recorded panes still present. It records `down` after each required close
-confirms success. Failed/timed-out closes retain the previous manifest; retry
+`shutdownTopology` first reconciles live panes in every recorded workspace,
+including Developer workspaces, and closes only the recorded panes still present.
+If a workspace is already gone, a structured `not_found` response plus a fresh
+successful workspace listing that omits it allows shutdown to continue. A timeout,
+malformed response or contradictory listing leaves shutdown incomplete. It records
+`down` after every required close confirms success. Failed/timed-out closes retain the previous manifest; retry
 uses another successful listing to reconcile panes already closed. Runtime
 quiesce and durable checkpoints remain the caller's responsibility.
+
+Native agent startup waits are capped at Herdr's protocol limit of 300000 ms.
+The requested/role timeout remains an upper bound; a larger total lifecycle budget
+is never forwarded unchanged. `OperationOptions.timeoutMs` and `deadline` further
+bound the wait, including time spent checking shell readiness and validating
+prompts. Each acknowledged busy retry recomputes the remaining budget. A remaining
+budget of 3000 ms or less returns a local `timeout` with `retrySafety: not_started`
+before agent launch; invalid numeric inputs fail validation. The command runner
+uses the same bounded wait and retains cancellation. Lost acknowledgements still
+require reconciliation rather than automatic replay.
 
 Permanent-role startup persists an `initializing` manifest and `launchIntent`
 binding before each `agent start`, then persists each successful binding. A

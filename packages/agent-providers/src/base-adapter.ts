@@ -171,7 +171,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     return { argv: [] };
   }
 
-  private resolveHostLaunchMaterial(capabilities: DetectedProviderCapabilities): ResolvedLaunchMaterial {
+  protected resolveHostLaunchMaterial(capabilities: DetectedProviderCapabilities): ResolvedLaunchMaterial {
     return resolveLaunchMaterial({
       options: this.options,
       supportsNativeHooks: capabilities.supportsNativeHooks,
@@ -806,7 +806,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       capabilities,
       {
         cwd: environment.cwd,
-        mcpServerNames: registrations.map((r) => r.registrationId),
+        mcpServerNames: Object.keys(this.resolveHostLaunchMaterial(capabilities).mcpServers),
         ...(this.options.osSandboxPath !== undefined ? { osSandboxPath: this.options.osSandboxPath } : {})
       }
     );
@@ -1438,7 +1438,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       capabilities,
       {
         cwd: environment.cwd,
-        mcpServerNames: (this.options.mcpRegistrations ?? []).map((r) => r.registrationId),
+        mcpServerNames: Object.keys(this.resolveHostLaunchMaterial(capabilities).mcpServers),
         ...(this.options.osSandboxPath !== undefined ? { osSandboxPath: this.options.osSandboxPath } : {})
       }
     );

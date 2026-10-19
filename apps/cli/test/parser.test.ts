@@ -14,6 +14,21 @@ import type {
   HelpCommandArgs
 } from "../src/index.js";
 
+describe("force environment shutdown arguments", () => {
+  it("accepts an explicit force shutdown without requiring a second confirmation flag", () => {
+    const result = parseCliArgs(["down", "--force", "--json", "--timeout", "12000"]);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value).toMatchObject({ command: "down", force: true, json: true, timeoutMs: 12000 });
+  });
+  it.each(["up", "attach", "doctor", "recover"])("rejects force on %s", command => {
+    expect(parseCliArgs([command, "--force"]).ok).toBe(false);
+  });
+  it("documents the recovery flag in down help", () => {
+    expect(getHelpText("down")).toContain("--force");
+    expect(getHelpText("down")).toContain("checkpoint");
+  });
+});
+
 describe("CLI Argument Parser - parseCliArgs", () => {
   describe("1. Help flag & command", () => {
     it("parses empty args as global help", () => {

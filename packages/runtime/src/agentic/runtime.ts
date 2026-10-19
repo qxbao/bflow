@@ -271,6 +271,46 @@ export class AgenticWorkflowRuntime {
     });
   }
 
+  /** Private host boundary: provider text is useful only when it is an exact pinned Runtime delivery. */
+  private providerDelivery(state: JournalState, message: RoleMessage, binding: PaneBinding): Outbound {
+    const outbound = state.outbound.find(out => out.request && ["sending", "unknown_delivery", "accepted", "released"].includes(out.status) &&
+      out.request.target.paneId === binding.paneId && out.request.target.agentId === binding.agentId &&
+      out.request.target.workspaceId === binding.workspaceId && out.request.target.tabId === binding.tabId &&
+      digest(out.request.target.session) === digest(binding.session) && digest(out.request.context) === digest(message));
+    if (!outbound || message.recipient.role !== binding.role) throw new Error("Inbound provider prompt is not an exact Runtime outbox delivery");
+    return outbound;
+  }
+  async validateProviderDelivery(input: unknown, bindingInput: unknown): Promise<void> {
+    const message = RoleMessageSchema.parse(input), binding = PaneBindingSchema.parse(bindingInput);
+    await this.transaction(async state => { this.providerDelivery(state, message, binding); });
+  }
+  /** An authenticated Stop is operational evidence only. It never applies ingress, retries delivery or changes business state. */
+  async coordinatorTurnStopped(input: unknown, bindingInput: unknown): Promise<void> {
+    const message = RoleMessageSchema.parse(input), binding = PaneBindingSchema.parse(bindingInput);
+    await this.transaction(async (state, save, _core, outbox) => {
+      const delivery = this.providerDelivery(state, message, binding);
+      if (binding.role !== "coordinator" || message.type !== "delegation.request" || message.sender.role !== "conversation")
+        throw new Error("Coordinator Stop requires an exact Conversation delegation");
+      const run = state.runs.find(item => item.runId === message.run_id);
+      if (run && (run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || run.coreCreated || run.status === "awaiting_approval" || run.approval && (!run.decision || run.decision.approvalId !== run.approval.approvalId) ||
+          Object.values(run.userDecisions ?? {}).some(item => item.status === "pending"))) return;
+      const baseline = delivery.coordinatorResponseBaseline ?? state.outbound.indexOf(delivery) + 1;
+      const response = state.outbound.slice(baseline).some(out => out.message.run_id === message.run_id && out.message.correlation_id === message.correlation_id &&
+        out.message.sender.role === "coordinator" && out.message.type !== "delegation.accepted" &&
+        !(out.message.type === "conversation.progress" && typeof out.message.payload === "object" && out.message.payload !== null && !Array.isArray(out.message.payload) && out.message.payload.kind === "coordinator_no_response"));
+      if (response) return; // Includes queued progress/clarifications/approvals, before physical transport.
+      const applied = state.inbox.some(item => item.status === "applied" && item.message.message_id === message.message_id);
+      const messageId = `coordinator-no-response-${digest(message.message_id)}`;
+      if (state.outbound.some(out => out.message.message_id === messageId)) return;
+      outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: messageId, correlation_id: message.correlation_id,
+        causation_id: message.message_id, run_id: message.run_id, sender: { role: "coordinator" }, recipient: { role: "conversation" },
+        type: "conversation.progress", payload: { kind: "coordinator_no_response", headline: "Coordinator turn ended without a structured response",
+          blockageReason: applied ? "No structured Coordinator progress or workflow response was recorded. The request remains unresolved."
+            : "The delivered delegation has no durable ingress in Runtime. The request remains unresolved; inspect host delivery diagnostics before retrying." },
+        artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }));
+      await save();
+    });
+  }
   /** Coordinator chooses these calls adaptively. No fixed chain of Analyst -> Architect -> Planner. */
   async reportProgress(runId: string, headline: string, questions: string[] = []): Promise<JsonValue> {
     return this.transaction(async (state, save, _core, outbox) => {

@@ -7,9 +7,9 @@ import {
   QualityGateResultSchema, RoleMessageSchema, VerificationResultSchema,
   type ApprovalDecision, type JsonValue, type PaneBinding, type QualityGateResult, type RoleMessage, type VerificationResult
 } from "@bflow/contracts";
-import { digest, json, record, textField } from "./journal.js";
+import { digest, json, record, strings, textField } from "./journal.js";
 
-type Kind = "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack";
+type Kind = "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled";
 export interface HumanHookProvenance {
   origin: "UserPromptSubmit"; binding: PaneBinding; nativeSessionId: string;
   conversationSessionId: string; userId: string; messageId: string; promptDigest: string;
@@ -17,6 +17,7 @@ export interface HumanHookProvenance {
 export interface HostObservation {
   binding: PaneBinding; observation: JsonValue; context?: unknown; runId?: string; taskId?: string;
 }
+export interface CoordinatorTurnObservation { binding: PaneBinding; message: RoleMessage; sequence: number; nativeResponseBaseline?: string[] }
 interface Envelope { version: 1; repository: string; sessionId: string; kind: Kind; id: string; payload: JsonValue; checksum: string }
 
 /** Private host authority, separate from model-accessible artifacts and Conversation context.
@@ -37,6 +38,21 @@ export class HostReceiptJournal {
   }
   private filename(kind: Kind, id: string): string { return `${kind}-${digest(textField(id))}.json`; }
   private parsePayload(kind: Kind, input: unknown): JsonValue {
+    if (kind === "coordinator-boundary") {
+      const raw = record(input), binding = PaneBindingSchema.parse(raw.binding);
+      if (binding.sessionId !== this.sessionId || binding.role !== "coordinator" || !binding.session || !Number.isSafeInteger(raw.sequence) || Number(raw.sequence) < 1)
+        throw new Error("Invalid Coordinator turn boundary");
+      return json({ binding, sequence: raw.sequence });
+    }
+    if (kind.startsWith("coordinator-")) {
+      const raw = record(input), binding = PaneBindingSchema.parse(raw.binding), message = RoleMessageSchema.parse(raw.message);
+      if (binding.sessionId !== this.sessionId || binding.role !== "coordinator" || !binding.session ||
+          message.recipient.role !== "coordinator" || message.sender.role !== "conversation" || message.type !== "delegation.request" ||
+          !Number.isSafeInteger(raw.sequence) || Number(raw.sequence) < 1) throw new Error("Invalid Coordinator turn observation");
+      const baseline = raw.nativeResponseBaseline;
+      if (baseline !== undefined && (!Array.isArray(baseline) || baseline.some(id => typeof id !== "string" || !id))) throw new Error("Invalid native response baseline");
+      return json({ binding, message, sequence: raw.sequence, ...(baseline === undefined ? {} : { nativeResponseBaseline: baseline }) });
+    }
     if (kind === "native-intent" || kind === "native-ack") return json(RoleMessageSchema.parse(input));
     if (kind === "gate") return json(QualityGateResultSchema.parse(input));
     if (kind === "evidence") return json(VerificationResultSchema.parse(input));
@@ -103,6 +119,88 @@ export class HostReceiptJournal {
       try { await directory.sync(); } finally { await directory.close(); }
       return created;
     } finally { await rm(path, { force: true }); }
+  }
+  private turnId(binding: PaneBinding, message: RoleMessage): string {
+    return digest([binding.paneId, binding.session, message.message_id]);
+  }
+  private bindingIdentity(binding: PaneBinding): string { return digest({ ...binding, transportState: undefined }); }
+  private async receiptIds(kind: Kind): Promise<string[]> {
+    await this.prepare(); const ids: string[] = [];
+    for (const name of await readdir(this.directory)) {
+      if (!name.startsWith(`${kind}-`) || !name.endsWith(".json")) continue;
+      const file = await open(join(this.directory, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      let id: string;
+      try { const stat = await file.stat(); if (!stat.isFile() || stat.size > 16 * 1024 * 1024) throw new Error("Unsafe host receipt file");
+        id = textField(record(JSON.parse(await file.readFile("utf8"))).id); } finally { await file.close(); }
+      if (name !== this.filename(kind, id)) throw new Error("Host receipt filename identity mismatch");
+      await this.read(kind, id); ids.push(id);
+    }
+    return ids;
+  }
+  private async coordinatorStarts(): Promise<CoordinatorTurnObservation[]> {
+    const values: CoordinatorTurnObservation[] = [];
+    for (const id of await this.receiptIds("coordinator-start")) {
+      const raw = record(await this.read("coordinator-start", id));
+      const value: CoordinatorTurnObservation = { binding: PaneBindingSchema.parse(raw.binding), message: RoleMessageSchema.parse(raw.message), sequence: Number(raw.sequence),
+        ...(raw.nativeResponseBaseline === undefined ? {} : { nativeResponseBaseline: strings(raw.nativeResponseBaseline) }) };
+      if (this.turnId(value.binding, value.message) !== id) throw new Error("Coordinator turn receipt identity mismatch");
+      values.push(value);
+    }
+    return values;
+  }
+  private async coordinatorBoundaries(): Promise<{ binding: PaneBinding; sequence: number }[]> {
+    const values: { binding: PaneBinding; sequence: number }[] = [];
+    for (const id of await this.receiptIds("coordinator-boundary")) {
+      const raw = record(await this.read("coordinator-boundary", id));
+      values.push({ binding: PaneBindingSchema.parse(raw.binding), sequence: Number(raw.sequence) });
+    }
+    return values;
+  }
+  async recordCoordinatorBoundary(binding: PaneBinding): Promise<void> {
+    const sequences = [...await this.coordinatorStarts(), ...await this.coordinatorBoundaries()].map(item => item.sequence);
+    await this.write("coordinator-boundary", randomUUID(), { binding, sequence: Math.max(0, ...sequences) + 1 });
+  }
+  async startCoordinatorTurn(binding: PaneBinding, message: RoleMessage): Promise<void> {
+    const id = this.turnId(binding, message), previous = await this.read("coordinator-start", id);
+    if (previous) {
+      const raw = record(previous);
+      if (this.bindingIdentity(PaneBindingSchema.parse(raw.binding)) !== this.bindingIdentity(binding) || digest(raw.message) !== digest(message)) throw new Error("Conflicting Coordinator turn");
+      return;
+    }
+    const starts = await this.coordinatorStarts();
+    const nativeResponseBaseline: string[] = [];
+    for (const id of await this.receiptIds("native-intent")) nativeResponseBaseline.push(RoleMessageSchema.parse(await this.read("native-intent", id)).message_id);
+    await this.write("coordinator-start", id, { binding, message, sequence: Math.max(0, ...[...starts, ...await this.coordinatorBoundaries()].map(item => item.sequence)) + 1, nativeResponseBaseline });
+  }
+  async stopCoordinatorTurn(binding: PaneBinding): Promise<boolean> {
+    const starts = (await this.coordinatorStarts()).filter(item => this.bindingIdentity(item.binding) === this.bindingIdentity(binding)).sort((a, b) => b.sequence - a.sequence);
+    const current = starts[0]; if (!current) return false;
+    if ((await this.coordinatorBoundaries()).some(item => this.bindingIdentity(item.binding) === this.bindingIdentity(binding) && item.sequence >= current.sequence)) return false;
+    if (starts[1]?.sequence === current.sequence) throw new Error("Ambiguous Coordinator turn identity");
+    await this.write("coordinator-stop", this.turnId(binding, current.message), current); return true;
+  }
+  async pendingCoordinatorStops(): Promise<CoordinatorTurnObservation[]> {
+    const pending: CoordinatorTurnObservation[] = [];
+    for (const item of await this.coordinatorStarts()) {
+      const id = this.turnId(item.binding, item.message);
+      if (await this.read("coordinator-stop", id) !== undefined && await this.read("coordinator-stop-handled", id) === undefined) pending.push(item);
+    }
+    return pending;
+  }
+  async hasCoordinatorResponse(item: CoordinatorTurnObservation): Promise<boolean> {
+    for (const id of await this.receiptIds("native-intent")) {
+      const message = RoleMessageSchema.parse(await this.read("native-intent", id));
+      if (!(item.nativeResponseBaseline ?? []).includes(message.message_id) && message.run_id === item.message.run_id &&
+          message.correlation_id === item.message.correlation_id && message.sender.role === "coordinator" &&
+          message.type !== "delegation.accepted" &&
+          !(message.type === "conversation.progress" && typeof message.payload === "object" && message.payload !== null && !Array.isArray(message.payload) && message.payload.kind === "coordinator_no_response")) return true;
+    }
+    return false;
+  }
+  async completeCoordinatorStop(item: CoordinatorTurnObservation): Promise<void> {
+    const id = this.turnId(item.binding, item.message);
+    if (digest(await this.read("coordinator-stop", id)) !== digest(item)) throw new Error("Missing exact Coordinator stop observation");
+    await this.write("coordinator-stop-handled", id, item);
   }
   async recordHuman(decision: ApprovalDecision, provenance: HumanHookProvenance): Promise<void> {
     const parsed = ApprovalDecisionSchema.parse(decision); await this.write("human", parsed.approvalId, { decision: parsed, provenance });

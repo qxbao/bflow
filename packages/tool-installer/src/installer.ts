@@ -183,7 +183,7 @@ export interface ProviderPluginAdapter {
   verify(pin: ManagedToolPin, destination: string): Promise<{ ready: boolean; diagnostic: string }>;
   activate(pin: ManagedToolPin, artifact: string, action: "install" | "update" | "repair",
     options?: OperationOptions): Promise<{ success: boolean; diagnostic: string }>;
-  /** true: nothing of this plugin is registered with the provider; false: registered; null: could not be determined. */
+  /** true: registered with the provider; false: proven absent; null: could not be determined. */
   registered?(pin: ManagedToolPin): Promise<boolean | null>;
 }
 
@@ -351,7 +351,13 @@ export class ManagedToolInstaller implements ToolInstaller {
           return observed( "unknown", ["Another unresolved native activation owns this destination"], [pendingPath]);
         let observationPath = intent.stage;
         try { await lstat(observationPath); } catch { observationPath = destination; }
-        const observation = await this.#providerPlugin!.verify(pin, observationPath);
+        let observation = await this.#providerPlugin!.verify(pin, observationPath);
+        // Older interrupted activations wrote native metadata only after the command returned.
+        // The retained installation may still prove this exact desired pin in the active cache.
+        if (!observation.ready && observationPath !== destination) {
+          const existing = await this.#providerPlugin!.verify(pin, destination);
+          if (existing.ready) { observation = existing; observationPath = destination; }
+        }
         if (!observation.ready && await this.#providerPlugin!.registered?.(pin) === false)
           return observed( "blocked", [observation.diagnostic, "Interrupted native activation left nothing registered with the provider; the next apply discards it and retries"],
             [observationPath, pendingPath]);

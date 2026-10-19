@@ -107,6 +107,7 @@ export function buildDelegationRequest(params: {
   const metadata: Metadata = {
     revision: params.revision ?? 1,
     isRequirementChange: params.draft.isRequirementChange,
+    ...(params.draft.investigationTasks ? { investigationTasks: params.draft.investigationTasks.map(task => ({ objective: task.objective, affectedPaths: [...task.affectedPaths], codeChangesAuthorized: false })) } : {}),
     ...(params.draft.affectedPaths.length > 0
       ? { affectedPaths: [...params.draft.affectedPaths] }
       : {})

@@ -150,6 +150,7 @@ export interface EnvironmentCommandArgs extends GlobalCliFlags {
   readonly command: "up" | "down" | "attach" | "doctor" | "recover";
   readonly timeoutMs?: number | undefined;
   readonly yes: boolean;
+  readonly force?: boolean | undefined;
 }
 
 export interface RunCommandArgs extends GlobalCliFlags {

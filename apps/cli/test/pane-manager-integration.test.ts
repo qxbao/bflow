@@ -7,7 +7,7 @@ import { SessionManifestSchema } from "@bflow/contracts";
 import type { HostPrepareResponse } from "@bflow/runtime";
 import { FileSessionManifestStore, readBuiltinRolePrompt, resolveTopologyRole } from "@bflow/pane-manager";
 import { EnvironmentLifecycle, PaneManagerLifecycleAdapter, createNamedPaneRunner, identifyRepository, readEnvironmentConfig, runCli, openPaneManagerEnvironment,
-  type EnvironmentCompositionInput } from "../src/index.js";
+  renderEnvironmentConfigYaml, type EnvironmentCompositionInput } from "../src/index.js";
 import { HerdrProcesses } from "./fixtures/herdr-processes.js";
 import type { LifecycleHost } from "../src/agentic-host.js";
 
@@ -103,6 +103,20 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     expect(starts(runner).every(call => call.args.includes("--test-host-role-config"))).toBe(true);
     expect(host.prepare).toHaveBeenCalledTimes(1);
     expect(host.activate).toHaveBeenCalledWith(expect.objectContaining({ status: "up" }), expect.any(Object));
+  });
+  linuxIt("keeps a 600000ms config inside the CLI startup deadline and native Herdr start limit", async () => {
+    const config = { ...input.config, environment: { ...input.config.environment, startupTimeoutMs: 600_000 } };
+    await writeFile(join(dir, ".bflow/config.yml"), renderEnvironmentConfigYaml(config));
+    expect((await lifecycle().up(299_999)).status).toBe("up");
+    const calls = starts(runner);
+    expect(calls).toHaveLength(7);
+    for (const call of calls) {
+      const timeout = Number(call.args[call.args.indexOf("--timeout") + 1]);
+      expect(Number.isInteger(timeout)).toBe(true);
+      expect(timeout).toBeGreaterThan(3000);
+      expect(timeout).toBeLessThan(299_999);
+      expect(call.timeoutMs).toBeLessThanOrEqual(300_000);
+    }
   });
   linuxIt("reopens composition across CLI invocations without starting duplicate agents", async () => {
     await lifecycle().up();
