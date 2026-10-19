@@ -220,7 +220,7 @@ const reviewed: CatalogPin[] = [
 
 const nativeManual: ManualToolRequirement[] = [
   { toolId: "mempalace", documentation: "https://pypi.org/project/mempalace/",
-    diagnostic: "Install with python3 -m venv ~/.mempalace-venv && ~/.mempalace-venv/bin/pip install mempalace, register the MCP server with claude mcp add --scope user mempalace -- ~/.mempalace-venv/bin/mempalace-mcp, then verify mempalace status and that the MCP server connects. Bflow does not install or configure MemPalace automatically and never treats its presence as task evidence." },
+    diagnostic: "Install with uv tool install mempalace (or pipx install mempalace) so the mempalace and mempalace-mcp commands are on PATH, register the MCP server with claude mcp add --scope user mempalace -- mempalace-mcp, then verify mempalace status and that the MCP server connects. Bflow does not install or configure MemPalace automatically and never treats its presence as task evidence." },
   { toolId: "superpowers", documentation: "https://github.com/obra/superpowers#Getting-Started",
     diagnostic: "Use Claude Code /plugin install superpowers@claude-plugins-official, Codex /plugins then search Superpowers, or agy plugin install https://github.com/obra/superpowers. Then verify the exact enabled plugin, marketplace provenance and active using-superpowers skill. Bflow cannot infer native activation from a downloaded archive or modify provider settings automatically." }
 ];
