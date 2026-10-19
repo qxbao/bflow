@@ -358,6 +358,11 @@ class FakeHerdrCommandRunner implements HerdrCommandRunner {
       if (action === "list") {
         const wsIdx = rest.indexOf("--workspace");
         const wsId = wsIdx !== -1 ? rest[wsIdx + 1] : undefined;
+        if (wsId && !this.workspaces.has(wsId)) {
+          return { exitCode: 1, stdout: "", stderr: JSON.stringify({ id: "1", error: {
+            code: "workspace_not_found", message: `workspace ${wsId} not found`
+          } }) };
+        }
         const panes = Array.from(this.panes.values()).filter((p) => !wsId || p.workspaceId === wsId);
         return {
           exitCode: 0,
@@ -1756,6 +1761,79 @@ describe("RolePaneManager Verification Suite", () => {
       const result = await manager.shutdownTopology();
       expect(result.ok && result.value.status).toBe("down");
       expect(runner.calls.slice(before).some(c => c.args[0] === "pane" && c.args[1] === "close" && c.args[2] === firstPane)).toBe(false);
+    });
+
+    it("finishes shutdown when the recorded workspace has already disappeared", async () => {
+      const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+      const initialized = await manager.initializeTopology();
+      if (!initialized.ok) throw new Error("initialize failed");
+      runner.workspaces.clear();
+      runner.panes.clear();
+      runner.agents.clear();
+      await runner.run({ args: ["workspace", "create", "--label", "operator-workspace", "--cwd", "/other/repository"] });
+      const unrelatedPaneIds = [...runner.panes.keys()];
+      const result = await manager.shutdownTopology();
+      expect(result.ok && result.value.status).toBe("down");
+      expect([...runner.panes.keys()]).toEqual(unrelatedPaneIds);
+      const persisted = await store.load(config.sessionId);
+      expect(persisted.ok && persisted.value?.status).toBe("down");
+    });
+
+    it("closes a developer in its own workspace after the primary workspace disappears, preserving the worktree", async () => {
+      const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+      const initialized = await manager.initializeTopology();
+      if (!initialized.ok) throw new Error("initialize failed");
+      const worktreePath = "/repo/.worktrees/shutdown-developer";
+      inspector.setCleanliness(worktreePath, { exists: false, isClean: true, dirtyFiles: [] });
+      const developer = await manager.allocateDeveloper({ taskId: "shutdown-task", worktreePath, agentName: "dev-shutdown" });
+      if (!developer.ok) throw new Error(developer.error.message);
+      runner.workspaces.delete(initialized.value.herdrWorkspaceId);
+      for (const pane of initialized.value.panes) {
+        runner.panes.delete(pane.paneId);
+        runner.agents.delete(pane.agentId);
+      }
+      const result = await manager.shutdownTopology();
+      expect(result.ok && result.value.status).toBe("down");
+      expect(runner.panes.has(developer.value.paneId)).toBe(false);
+      expect(runner.agents.has("dev-shutdown")).toBe(false);
+      expect(runner.worktrees.has(worktreePath)).toBe(true);
+    });
+
+    it.each(["timeout", "malformed", "permission"])("does not infer absent panes from a failed pane listing: %s", async failure => {
+      const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+      const initialized = await manager.initializeTopology();
+      if (!initialized.ok) throw new Error("initialize failed");
+      runner.onCommand = invocation => {
+        if (invocation.args[0] !== "pane" || invocation.args[1] !== "list") return;
+        if (failure === "timeout") return { exitCode: null, stdout: "", stderr: "", failure: "timeout", started: true };
+        if (failure === "malformed") return { exitCode: 0, stdout: "{}", stderr: "" };
+        return { exitCode: 1, stdout: "", stderr: JSON.stringify({ id: "1", error: { code: "denied", message: "permission denied" } }) };
+      };
+      const result = await manager.shutdownTopology();
+      expect(result.ok).toBe(false);
+      const persisted = await store.load(config.sessionId);
+      expect(persisted.ok && persisted.value).toEqual(initialized.value);
+      expect(runner.panes.size).toBe(initialized.value.panes.length);
+    });
+
+    it.each(["timeout", "malformed", "contradictory"])("keeps the manifest when workspace absence cannot be established: %s", async failure => {
+      const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+      const initialized = await manager.initializeTopology();
+      if (!initialized.ok) throw new Error("initialize failed");
+      runner.onCommand = invocation => {
+        if (invocation.args[0] === "pane" && invocation.args[1] === "list") {
+          return { exitCode: 1, stdout: "", stderr: JSON.stringify({ id: "1", error: { code: "workspace_not_found", message: "workspace missing" } }) };
+        }
+        if (invocation.args[0] === "workspace" && invocation.args[1] === "list") {
+          if (failure === "timeout") return { exitCode: null, stdout: "", stderr: "", failure: "timeout", started: true };
+          if (failure === "malformed") return { exitCode: 0, stdout: "{}", stderr: "" };
+        }
+      };
+      const result = await manager.shutdownTopology();
+      expect(result.ok).toBe(false);
+      const persisted = await store.load(config.sessionId);
+      expect(persisted.ok && persisted.value).toEqual(initialized.value);
+      expect(runner.panes.size).toBe(initialized.value.panes.length);
     });
 
     it("propagates store.save error in inspectTopologyHealth, focusConversationPane, and allocateDeveloper", async () => {

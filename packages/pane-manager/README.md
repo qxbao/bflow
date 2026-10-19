@@ -93,9 +93,12 @@ using these flags are unsupported. Ignored files also make the tree dirty, so
 preserve or remove generated files explicitly before releasing a worktree. The
 inspector never clears flags, deletes files or discards edits.
 
-`shutdownTopology` first obtains a successful live pane listing and closes only
-the recorded panes still present. It records `down` after each required close
-confirms success. Failed/timed-out closes retain the previous manifest; retry
+`shutdownTopology` first reconciles live panes in every recorded workspace,
+including Developer workspaces, and closes only the recorded panes still present.
+If a workspace is already gone, a structured `not_found` response plus a fresh
+successful workspace listing that omits it allows shutdown to continue. A timeout,
+malformed response or contradictory listing leaves shutdown incomplete. It records
+`down` after every required close confirms success. Failed/timed-out closes retain the previous manifest; retry
 uses another successful listing to reconcile panes already closed. Runtime
 quiesce and durable checkpoints remain the caller's responsibility.
 

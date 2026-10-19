@@ -449,11 +449,35 @@ export class RolePaneManager {
         return notFoundError(`Session manifest not found for session '${this.#config.sessionId}'`);
       }
 
-      // A prior down may have closed a prefix before losing an acknowledgement.
-      // Only a successful current listing proves those exact panes are absent.
-      const listed = await this.#runHerdr(["pane", "list", "--workspace", manifest.herdrWorkspaceId], options);
-      if (listed.exitCode !== 0 || listed.failure) return toCommandError(listed, "Cannot reconcile panes before shutdown");
-      const livePaneIds = new Set(parsePaneListResult(listed).map(pane => pane.paneId));
+      // A prior down may have closed panes or their entire workspace before
+      // losing an acknowledgement. Reconcile every recorded workspace, including
+      // Developer workspaces, before closing any remaining owned pane.
+      const livePaneIds = new Set<string>();
+      const workspaceIds = new Set([manifest.herdrWorkspaceId, ...manifest.panes.map(pane => pane.workspaceId)]);
+      for (const workspaceId of workspaceIds) {
+        const listed = await this.#runHerdr(["pane", "list", "--workspace", workspaceId], options);
+        if (listed.exitCode !== 0 || listed.failure) {
+          const failure = toCommandError(listed, "Cannot reconcile panes before shutdown");
+          if (failure.ok || failure.error.code !== "not_found") return failure;
+          // A not_found response alone is insufficient: confirm the workspace is
+          // absent using a fresh successful listing. Uncertain/malformed reads or
+          // a contradictory listing preserve the manifest for another attempt.
+          const workspaces = await this.#runHerdr(["workspace", "list"], options);
+          if (workspaces.exitCode !== 0 || workspaces.failure) {
+            return toCommandError(workspaces, "Cannot confirm workspace absence before shutdown");
+          }
+          if (parseWorkspaceListResult(workspaces).some(workspace => workspace.workspaceId === workspaceId)) {
+            return failure;
+          }
+          continue;
+        }
+        for (const pane of parsePaneListResult(listed)) {
+          if (pane.workspaceId !== workspaceId) {
+            return conflictError(`Pane listing does not match workspace '${workspaceId}'; shutdown state preserved`);
+          }
+          livePaneIds.add(pane.paneId);
+        }
+      }
       for (const pane of manifest.panes) {
         if (!livePaneIds.has(pane.paneId)) continue;
         const outcome = await this.#runHerdr(["pane", "close", pane.paneId], options);
