@@ -170,8 +170,13 @@ lifecycle locks/receipts and P13 pane manifests retain their existing paths and
 session identities. `bflow doctor` reports the selected private Runtime location.
 An unused old `host.json` left by the original privacy failure is preserved and
 its exposed token is never copied or reused. Existing host ownership/other host
-files, endpoints, agentic storage or platform state block automatic relocation and
+files, unbound endpoints, agentic storage or platform state block automatic relocation and
 require reconciliation; Runtime does not silently migrate recovery authority.
+A retained unused config may name the same stable socket now served by the pinned
+private host. It does not block reopening when both configs match the exact
+repository/session and socket, the legacy directory matches its original location,
+and the private host uses a different credential. Foreign bindings, copied/exposed
+credentials and endpoints without pinned private authority still block recovery.
 This behavior does not relocate explicit legacy Runtime storage configuration or
 claim provider/Herdr acceptance on every filesystem.
 

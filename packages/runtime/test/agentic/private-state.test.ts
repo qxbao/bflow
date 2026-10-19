@@ -136,6 +136,25 @@ describe.skipIf(process.platform !== "linux")("private Runtime state placement",
     expect(() => resolvePrivateRuntimeStateDirectory(f.repository)).toThrow(/preserve.*reconcile/i);
     expect(fs.existsSync(endpoint)).toBe(true);
   });
+  it.each(["missing private config", "foreign repository", "foreign directory", "foreign session", "different socket", "reused token"])("preserves the endpoint guard for %s", mismatch => {
+    const f = fixture(); emulateNonPosixMount(f.repository);
+    expect(resolvePrivateRuntimeStateDirectory(f.repository)).toBe(f.external);
+    const socketPath = join(f.root, "existing.sock"); fs.writeFileSync(socketPath, "");
+    const privateHost = join(f.external, "host/session-1");
+    fs.mkdirSync(privateHost, { recursive: true, mode: 0o700 });
+    if (mismatch !== "missing private config") fs.writeFileSync(join(privateHost, "host.json"), JSON.stringify({
+      repositoryPath: f.repository, sessionId: "session-1", directory: privateHost,
+      socketPath: mismatch === "different socket" ? join(f.root, "other.sock") : socketPath, token: "private-token"
+    }), { mode: 0o600 });
+    const legacyHost = join(f.repository, ".bflow/state/host/session-1"); fs.mkdirSync(legacyHost, { recursive: true });
+    const legacy = JSON.stringify({ repositoryPath: mismatch === "foreign repository" ? "/foreign" : f.repository,
+      sessionId: mismatch === "foreign session" ? "other-session" : "session-1",
+      directory: mismatch === "foreign directory" ? "/foreign" : legacyHost, socketPath,
+      token: mismatch === "reused token" ? "private-token" : "unused-old-token" });
+    fs.writeFileSync(join(legacyHost, "host.json"), legacy);
+    expect(() => resolvePrivateRuntimeStateDirectory(f.repository)).toThrow(/preserve.*reconcile/i);
+    expect(fs.readFileSync(join(legacyHost, "host.json"), "utf8")).toBe(legacy);
+  });
   it("rejects symlinked and publicly writable external storage", () => {
     const f = fixture(); emulateNonPosixMount(f.repository);
     fs.symlinkSync(f.repository, join(f.stateHome, "bflow"));

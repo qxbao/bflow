@@ -54,7 +54,7 @@ function supportsPrivateFiles(metadata: string): boolean {
     fs.rmSync(probe, { recursive: true, force: true });
   }
 }
-function preserveLegacyAuthority(local: string): void {
+function preserveLegacyAuthority(local: string, relocated?: ReadonlyMap<string, z.infer<typeof HostEndpointSchema>>): void {
   const refuse = () => { throw new Error(`Private Runtime state cannot move automatically: preserve ${local} and reconcile its existing host/run/platform authority before retrying.`); };
   for (const name of ["agentic", "platform"]) if (exists(join(local, name))) refuse();
   const hosts = join(local, "host");
@@ -71,7 +71,16 @@ function preserveLegacyAuthority(local: string): void {
         if (stat.size > 1024 * 1024) refuse();
         let value: unknown;
         try { value = JSON.parse(fs.readFileSync(path, "utf8")); } catch { refuse(); }
-        if (value && typeof value === "object" && "socketPath" in value && typeof value.socketPath === "string" && exists(value.socketPath)) refuse();
+        if (value && typeof value === "object" && "socketPath" in value && typeof value.socketPath === "string" && exists(value.socketPath)) {
+          const previous = HostEndpointSchema.safeParse(value), current = relocated?.get(session);
+          // The stable endpoint is repository/session-scoped, so the new private
+          // host can make the unused legacy config's old socket path live again.
+          // Its authenticated controller still verifies the private token; never
+          // adopt a foreign binding or reuse the legacy exposed credential.
+          if (!previous.success || !current || previous.data.repositoryPath !== current.repositoryPath ||
+              previous.data.directory !== host || previous.data.sessionId !== session ||
+              previous.data.socketPath !== current.socketPath || previous.data.token === current.token) refuse();
+        }
       }
     }
   }
@@ -80,6 +89,7 @@ function preserveLegacyAuthority(local: string): void {
 const LocationSchema = z.object({ schemaVersion: z.literal(1), repositoryPath: z.string().min(1),
   repositoryHash: z.string().regex(/^[a-f0-9]{64}$/), directory: z.string().min(1) }).strict();
 const HostBindingSchema = z.object({ repositoryPath: z.string(), directory: z.string(), sessionId: z.string() }).passthrough();
+const HostEndpointSchema = HostBindingSchema.extend({ socketPath: z.string().min(1), token: z.string().min(1) });
 function readObject(path: string, privateFile: boolean): unknown {
   const fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
   try {
@@ -97,11 +107,11 @@ function readPinnedLocation(locator: string, repository: string, repositoryHash:
       resolve(external) !== external || !external.endsWith(`/bflow/repositories/${repositoryHash}/state`))
     throw new Error(`Foreign Runtime state locator; preserve ${locator} and reconcile before retrying`);
   if (!exists(external)) throw new Error(`Missing pinned Runtime authority; preserve ${locator} and reconcile before retrying`);
-  preserveLegacyAuthority(local);
   const application = resolve(external, "../../..");
   privateAncestors(resolve(application, ".."));
   for (const path of [application, join(application, "repositories"), resolve(external, ".."), external]) privateDirectory(path);
   const hosts = join(external, "host");
+  const relocated = new Map<string, z.infer<typeof HostEndpointSchema>>();
   if (exists(hosts)) {
     privateDirectory(hosts);
     for (const session of fs.readdirSync(hosts)) {
@@ -111,8 +121,11 @@ function readPinnedLocation(locator: string, repository: string, repositoryHash:
       const binding = HostBindingSchema.parse(readObject(config, true));
       if (binding.repositoryPath !== repository || binding.directory !== host || binding.sessionId !== session)
         throw new Error(`Foreign pinned host authority; preserve ${config} and reconcile before retrying`);
+      const endpoint = HostEndpointSchema.safeParse(binding);
+      if (endpoint.success) relocated.set(session, endpoint.data);
     }
   }
+  preserveLegacyAuthority(local, relocated);
   return external;
 }
 function pinLocation(locator: string, repository: string, repositoryHash: string, external: string): void {

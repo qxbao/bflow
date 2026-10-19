@@ -44,7 +44,12 @@ async function exercise(root: string, emulate: boolean) {
   expect(fs.statSync(path).mode & 0o777).toBe(0o600);
   const before = fs.readFileSync(path, "utf8");
   expect(before).not.toContain("unused-exposed-token");
-  expect(fs.readFileSync(join(legacyHost, "host.json"), "utf8")).toBe('{"token":"unused-exposed-token"}');
+  // A failed pre-relocation startup retained a full config naming the same
+  // stable socket. Once the private host starts, that socket is now live.
+  const legacyConfiguration = JSON.stringify({ ...JSON.parse(before), directory: legacyHost, token: "unused-exposed-token" });
+  fs.writeFileSync(join(legacyHost, "host.json"), legacyConfiguration);
+  expect(resolvePrivateRuntimeStateDirectory(root)).toBe(state);
+  expect(fs.readFileSync(join(legacyHost, "host.json"), "utf8")).toBe(legacyConfiguration);
   expect((await host.runtime.findRuns({ limit: 10 })).ok).toBe(true);
   expect(fs.existsSync(join(state, "agentic/runs.db"))).toBe(true);
   expect(fs.existsSync(join(root, ".bflow/state/agentic"))).toBe(false);
