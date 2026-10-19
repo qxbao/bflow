@@ -80,3 +80,16 @@ it("uses a verified existing installation when a legacy interrupted stage has no
   expect(await treeDigest(f.managed)).toBe(before);
   expect(f.mutations()).toBe(mutations);
 });
+
+it("retains unknown delivery for a legacy first installation without any native record", async () => {
+  const f = await fixture();
+  await f.installer.apply(f.apply);
+  await rm(join(f.stage(), ".bflow-native.json"));
+  const before = await treeDigest(f.managed), mutations = f.mutations();
+  const observed = await f.installer.reconcile(f.apply);
+  expect(observed.ok && observed.value.status).toBe("unknown");
+  expect(await treeDigest(f.managed)).toBe(before);
+  const again = await f.installer.apply(f.apply);
+  expect(again.ok && again.value.status).toBe("unknown");
+  expect(f.mutations()).toBe(mutations);
+});

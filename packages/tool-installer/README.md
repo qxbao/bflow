@@ -82,7 +82,9 @@ saved before provider mutations so a timed-out command can be reconciled against
 enabled inventory and exact active cache. Metadata alone never establishes installation. Reconciliation
 also checks the retained installation when an older interrupted staging directory lacks its metadata;
 it accepts only an independently verified desired pin and never creates missing receipts. These
-observations leave the pending intent and staged files unchanged. Unknown native delivery remains retained
+observations leave the pending intent and staged files unchanged. A legacy first installation with
+a registered plugin and no native receipt in either location remains `unknown` and requires operator
+review. Unknown native delivery remains retained
 and is never automatically replayed, with one exception: when the provider's own plugin inventory is
 readable and proves nothing of the plugin is registered, the next apply archives the interrupted
 intent (`<destination>.native-pending.json.reviewed-<id>`), drops its staging directory and installs
