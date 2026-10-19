@@ -55,7 +55,7 @@ describe("BuiltinSetupDoctor", () => {
   });
 
   it("a required tool with an owner action is a warning carrying that remediation; a plain missing required tool still fails", async () => {
-    const login = "MemPalace is installed manually: run pip install mempalace, then rerun setup.";
+    const login = "mempalace could not be installed: install Python 3.9 or newer, then rerun setup.";
     const deferred = await doctor.run(ctx, { ...base, observations: [{ ...tool("mempalace", "missing", true), diagnostics: [login], ownerAction: login }] });
     const check = deferred.checks.find((c) => c.checkId === "tool-mempalace")!;
     expect(check.status).toBe("warning");

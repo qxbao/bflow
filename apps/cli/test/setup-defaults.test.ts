@@ -17,8 +17,8 @@ describe("CLI setup default inventory", () => {
     expect(result.config.mcpServices).toEqual([]);
     expect(result.config.services).toEqual([]);
     expect(result.registry.resolve("rtk", "linux", result.config.toolPins)).not.toBeNull();
-    expect(result.inventory.find(item => item.toolId === "mempalace")?.status).toBe("manual");
-    expect(result.launchRequirements.map(item => item.toolId)).toEqual(["gitnexus", "chrome-devtools-mcp"]);
+    expect(result.inventory.find(item => item.toolId === "mempalace")?.status).toBe("pinned");
+    expect(result.launchRequirements.map(item => item.toolId)).toEqual(["gitnexus", "chrome-devtools-mcp", "mempalace"]);
     const native = (await result.additionalToolObservations(platform, result.config)).filter(item => ["superpowers"].includes(item.toolId));
     expect(native.map(item => item.toolId).sort()).toEqual(["superpowers"]);
     expect(native.every(item => item.status === "missing" && item.required)).toBe(true);

@@ -1,6 +1,6 @@
 import { ManagedToolPinSchema, type ManagedToolPin } from "./installer.js";
 
-/** Fixed release artifacts downloaded and checked against upstream checksums/SRI on 2026-10-18.
+/** Fixed release artifacts downloaded and checked against upstream checksums/SRI on 2026-10-18 (MemPalace wheel hash taken from the PyPI release metadata and re-verified by download on 2026-10-19).
  * Updating requires downloading the new artifact and reviewing its license and install behavior.
  * Catalog selection is read-only; it never queries a floating release channel at runtime. */
 export const DEFAULT_INSTALLER_ID = "bflow-default-tools-v1";
@@ -67,6 +67,22 @@ const reviewed: CatalogPin[] = [
         "packageName": "gitnexus",
         "executable": "gitnexus",
         "allowBuildScripts": true
+      },
+      "installerId": "bflow-default-tools-v1"
+    }
+  },
+  {
+    "pin": {
+      "toolId": "mempalace",
+      "version": "3.11.0",
+      "source": "https://files.pythonhosted.org/packages/8d/fb/24cde4c9f29472483a7f33441d6e154bf56f45c6840fcffdb69f94853859/mempalace-3.11.0-py3-none-any.whl",
+      "integrity": "43e4c690e339b66e86a3177fe4eea15da3d9541ecbd58e671431c1e13dc1bf0c",
+      "license": "MIT",
+      "recipe": {
+        "kind": "python_wheel",
+        "packageName": "mempalace",
+        "executable": "mempalace",
+        "mcpExecutable": "mempalace-mcp"
       },
       "installerId": "bflow-default-tools-v1"
     }
@@ -219,8 +235,6 @@ const reviewed: CatalogPin[] = [
 ];
 
 const nativeManual: ManualToolRequirement[] = [
-  { toolId: "mempalace", documentation: "https://pypi.org/project/mempalace/",
-    diagnostic: "Install with uv tool install mempalace (or pipx install mempalace) so the mempalace and mempalace-mcp commands are on PATH, register the MCP server with claude mcp add --scope user mempalace -- mempalace-mcp, then verify mempalace status and that the MCP server connects. Bflow does not install or configure MemPalace automatically and never treats its presence as task evidence." },
   { toolId: "superpowers", documentation: "https://github.com/obra/superpowers#Getting-Started",
     diagnostic: "Use Claude Code /plugin install superpowers@claude-plugins-official, Codex /plugins then search Superpowers, or agy plugin install https://github.com/obra/superpowers. Then verify the exact enabled plugin, marketplace provenance and active using-superpowers skill. Bflow cannot infer native activation from a downloaded archive or modify provider settings automatically." }
 ];
@@ -232,11 +246,12 @@ export function defaultToolCatalog(os: string, arch: string): { pins: ManagedToo
   if (!pins.some(pin => pin.toolId === "agy")) manual.push({ toolId: "agy",
     documentation: "https://antigravity.google/docs/cli/install/",
     diagnostic: "No reviewed Agy artifact for this OS/architecture. Install the official native CLI, verify agy --version, and complete agy login; Bflow never substitutes Gemini CLI." });
-  if (!supported) for (const toolId of ["rtk", "gitnexus", "chrome-devtools-mcp", "claude", "codex", "herdr"]) {
+  if (!supported) for (const toolId of ["rtk", "gitnexus", "chrome-devtools-mcp", "mempalace", "claude", "codex", "herdr"]) {
     const documentation: Record<string, string> = {
       rtk: "https://github.com/rtk-ai/rtk/blob/develop/INSTALL.md",
       gitnexus: "https://github.com/abhigyanpatwari/GitNexus",
       "chrome-devtools-mcp": "https://github.com/ChromeDevTools/chrome-devtools-mcp",
+      mempalace: "https://pypi.org/project/mempalace/",
       claude: "https://code.claude.com/docs/en/setup",
       codex: "https://github.com/openai/codex",
       herdr: "https://herdr.dev/docs/install/"

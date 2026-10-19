@@ -45,12 +45,14 @@ const parse = <T>(schema: z.ZodType<T>, value: unknown): OperationResult<T> => {
 };
 
 export const ManagedToolPinSchema = z.object({
-  toolId: z.enum(["rtk", "gitnexus", "chrome-devtools-mcp", "superpowers", "claude", "codex", "agy", "herdr"]),
+  toolId: z.enum(["rtk", "gitnexus", "chrome-devtools-mcp", "mempalace", "superpowers", "claude", "codex", "agy", "herdr"]),
   installerId: z.string().min(1), version: z.string().min(1), source: z.string().url(),
   integrity: z.string().regex(/^[0-9a-f]{64}$/),
   recipe: z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("npm"), packageName: z.enum(["gitnexus", "chrome-devtools-mcp", "@anthropic-ai/claude-code", "@openai/codex"]),
       executable: z.string().min(1), allowBuildScripts: z.boolean() }).strict(),
+    z.object({ kind: z.literal("python_wheel"), packageName: z.literal("mempalace"),
+      executable: z.literal("mempalace"), mcpExecutable: z.literal("mempalace-mcp") }).strict(),
     z.object({ kind: z.literal("rtk_archive"), archiveMember: z.enum(["rtk", "./rtk"]) }).strict(),
     z.object({ kind: z.literal("binary"), executable: z.enum(["herdr"]) }).strict(),
     z.object({ kind: z.literal("binary_archive"), archiveMember: z.literal("antigravity"), executable: z.literal("agy") }).strict(),
@@ -60,10 +62,37 @@ export const ManagedToolPinSchema = z.object({
 }).strict();
 export type ManagedToolPin = z.infer<typeof ManagedToolPinSchema>;
 
+/** Relative location of the MCP stdio entry point of a Python wheel installation (null for other recipes). */
+export function managedToolMcpExecutable(pin: ManagedToolPin): string | null {
+  return pin.recipe.kind === "python_wheel" ? join("bin", pin.recipe.mcpExecutable) : null;
+}
+
+/** Stored artifact name. pip/uv require the original wheel filename, so a wheel keeps the reviewed filename. */
+function artifactName(pin: ManagedToolPin): string {
+  if (pin.recipe.kind === "npm") return "artifact.tgz";
+  if (pin.recipe.kind === "python_wheel") return new URL(pin.source).pathname.split("/").pop() ?? "artifact.whl";
+  return "artifact";
+}
+
+/** The venv interpreter keeps absolute paths in console-script shebangs, which break when staging is renamed
+ * into place. These wrappers resolve the venv relative to themselves instead. */
+function pythonWheelWrapper(module: string, attribute: string, name: string): string {
+  return `#!/bin/sh
+SELF=$0
+while [ -h "$SELF" ]; do
+  LINK=$(readlink "$SELF")
+  case $LINK in /*) SELF=$LINK ;; *) SELF=$(dirname "$SELF")/$LINK ;; esac
+done
+DIR=$(cd "$(dirname "$SELF")/.." && pwd -P)
+exec "$DIR/venv/bin/python" -c 'import sys; sys.argv[0] = "${name}"; from ${module} import ${attribute}; sys.exit(${attribute}())' "$@"
+`;
+}
+
 /** Relative executable location inside an owned installation. Native plugins have no standalone executable. */
 export function managedToolExecutable(pin: ManagedToolPin): string {
   switch (pin.recipe.kind) {
     case "npm": return join("node_modules", ".bin", pin.recipe.executable);
+    case "python_wheel": return join("bin", pin.recipe.executable);
     case "rtk_archive": return "rtk";
     case "binary": case "binary_archive": return pin.recipe.executable;
     case "provider_plugin": return `native:${pin.recipe.provider}`;
@@ -181,13 +210,17 @@ export class ManagedToolInstaller implements ToolInstaller {
       if (this.#pins.has(pin.toolId)) throw new Error(`Duplicate tool pin: ${pin.toolId}`);
       const url = new URL(pin.source);
       if (url.protocol !== "https:" || url.username || url.password || url.hash) throw new Error("Pinned source must be HTTPS without credentials or fragment");
-      if ((pin.recipe.kind === "npm" || pin.recipe.kind === "provider_plugin") &&
+      if ((pin.recipe.kind === "npm" || pin.recipe.kind === "provider_plugin" || pin.recipe.kind === "python_wheel") &&
         !/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(pin.version)) throw new Error("Package/plugin version must be exact");
       if (pin.toolId === "rtk" && pin.recipe.kind !== "rtk_archive") throw new Error("RTK must use the rtk-ai release binary archive");
       if (pin.toolId === "rtk" && (url.hostname !== "github.com" || !url.pathname.startsWith("/rtk-ai/rtk/releases/download/")))
         throw new Error("RTK source must be an official rtk-ai/rtk release asset");
       if (pin.toolId === "gitnexus" && (pin.recipe.kind !== "npm" || pin.recipe.packageName !== "gitnexus")) throw new Error("GitNexus must use its official npm package");
       if (pin.toolId === "chrome-devtools-mcp" && (pin.recipe.kind !== "npm" || pin.recipe.packageName !== "chrome-devtools-mcp")) throw new Error("Chrome DevTools MCP must use its official npm package");
+      if (pin.toolId === "mempalace" && (pin.recipe.kind !== "python_wheel" || url.hostname !== "files.pythonhosted.org" ||
+        !url.pathname.startsWith("/packages/") || !/^mempalace-\d+\.\d+\.\d+-py3-none-any\.whl$/.test(artifactName(pin))))
+        throw new Error("MemPalace must use its official PyPI wheel");
+      if (pin.recipe.kind === "python_wheel" && pin.toolId !== "mempalace") throw new Error("Python wheel recipe is reserved for MemPalace");
       if (pin.toolId === "superpowers" && pin.recipe.kind !== "provider_plugin") throw new Error("Superpowers must use a provider plugin route");
       const providerPackage = pin.toolId === "claude" ? "@anthropic-ai/claude-code" : pin.toolId === "codex" ? "@openai/codex" : null;
       if (providerPackage && (pin.recipe.kind !== "npm" || pin.recipe.packageName !== providerPackage))
@@ -344,7 +377,7 @@ export class ManagedToolInstaller implements ToolInstaller {
   }
 
   async #probe(destination: string, pin: ManagedToolPin): Promise<boolean> {
-    const artifact = join(destination, pin.recipe.kind === "npm" ? "artifact.tgz" : "artifact");
+    const artifact = join(destination, artifactName(pin));
     try { if (await digestFile(artifact) !== pin.integrity) return false; }
     catch { return false; }
     if (pin.recipe.kind === "provider_plugin") {
@@ -399,7 +432,7 @@ export class ManagedToolInstaller implements ToolInstaller {
       }
       catch { /* absent */ }
       await mkdir(stage, { mode: 0o700 });
-      const artifact = join(stage, pin.recipe.kind === "npm" ? "artifact.tgz" : "artifact");
+      const artifact = join(stage, artifactName(pin));
       await this.#host.download(pin.source, artifact, options?.signal);
       if (await digestFile(artifact) !== pin.integrity) return ok(await this.#receipt(request, "failed", ["Downloaded artifact SHA-256 mismatch"]));
       if (pin.recipe.kind === "npm") {
@@ -410,6 +443,9 @@ export class ManagedToolInstaller implements ToolInstaller {
         const manifest = JSON.parse(await readFile(join(stage, "node_modules", pin.recipe.packageName, "package.json"), "utf8")) as { name?: string; version?: string; license?: string };
         if (manifest.name !== pin.recipe.packageName || manifest.version !== pin.version) return ok(await this.#receipt(request, "failed", ["Installed package identity/version mismatch"]));
         if (manifest.license !== pin.license) return ok(await this.#receipt(request, "failed", ["Installed package license differs from reviewed pin"]));
+      } else if (pin.recipe.kind === "python_wheel") {
+        const failure = await this.#installPythonWheel(stage, artifact, pin, options);
+        if (failure) return ok(await this.#receipt(request, "failed", [failure]));
       } else if (pin.recipe.kind === "binary") {
         await copyFile(artifact, join(stage, pin.recipe.executable));
         await chmod(join(stage, pin.recipe.executable), 0o700);
@@ -462,6 +498,48 @@ export class ManagedToolInstaller implements ToolInstaller {
     }
   }
 
+  /** Creates a private venv in the stage and installs the digest-verified wheel. Returns a failure diagnostic or null.
+   * Transitive Python dependencies are resolved by uv/pip and are not a fully locked offline bundle. */
+  async #installPythonWheel(stage: string, artifact: string, pin: ManagedToolPin, options?: OperationOptions): Promise<string | null> {
+    if (pin.recipe.kind !== "python_wheel") return "Not a Python wheel recipe";
+    const timeout = { timeoutMs: options?.timeoutMs ?? 600_000, ...(options?.signal ? { signal: options.signal } : {}) };
+    const environment = { UV_PYTHON_DOWNLOADS: "never", PIP_REQUIRE_VIRTUALENV: "0", PIP_DISABLE_PIP_VERSION_CHECK: "1" };
+    const venv = join(stage, "venv");
+    const python = join(venv, "bin", "python");
+    const uv = await this.#host.run("uv", ["--version"], { timeoutMs: 15_000 }).catch(() => null);
+    const attempts: Array<{ name: string; create: () => Promise<ProcessResult>; install: () => Promise<ProcessResult> }> = [];
+    if (uv?.exitCode === 0) attempts.push({ name: "uv",
+      create: () => this.#host.run("uv", ["venv", "--quiet", venv], { ...timeout, environment }),
+      install: () => this.#host.run("uv", ["pip", "install", "--quiet", "--python", python, artifact], { ...timeout, environment }) });
+    attempts.push({ name: "python3",
+      create: () => this.#host.run("python3", ["-m", "venv", venv], { ...timeout, environment }),
+      install: () => this.#host.run(python, ["-m", "pip", "install", "--quiet", artifact], { ...timeout, environment }) });
+    let failure = "no Python runtime found";
+    let installed = false;
+    for (const attempt of attempts) {
+      await rm(venv, { recursive: true, force: true });
+      if (options?.signal?.aborted) return "Operation cancelled before install";
+      const created = await attempt.create().catch(error => ({ exitCode: 1, stdout: "", stderr: String(error) }));
+      if (created.exitCode !== 0) { failure = `${attempt.name} virtualenv creation failed: ${created.stderr.slice(0, 300)}`; continue; }
+      const result = await attempt.install().catch(error => ({ exitCode: 1, stdout: "", stderr: String(error) }));
+      if (result.exitCode !== 0) { failure = `${attempt.name} package install exited ${result.exitCode}: ${result.stderr.slice(0, 400)}`; continue; }
+      installed = true; break;
+    }
+    if (!installed) return `Python install failed (need uv or python3 >= 3.9 on PATH): ${failure}`;
+    const identity = await this.#host.run(python, ["-c",
+      "import importlib.metadata as m; d = m.distribution('mempalace'); print(d.metadata['Name'], d.version, d.metadata.get('License-Expression') or d.metadata.get('License') or '')"],
+      { timeoutMs: 30_000, environment });
+    const [name, version, ...license] = identity.stdout.trim().split(/\s+/);
+    if (identity.exitCode !== 0 || name?.toLowerCase() !== pin.recipe.packageName || version !== pin.version)
+      return "Installed package identity/version mismatch";
+    if (license.join(" ") !== pin.license) return "Installed package license differs from reviewed pin";
+    const bin = join(stage, "bin");
+    await mkdir(bin, { mode: 0o700 });
+    await writeFile(join(bin, pin.recipe.executable), pythonWheelWrapper("mempalace.cli", "main", pin.recipe.executable), { mode: 0o700 });
+    await writeFile(join(bin, pin.recipe.mcpExecutable), pythonWheelWrapper("mempalace.mcp_proxy", "main", pin.recipe.mcpExecutable), { mode: 0o700 });
+    return null;
+  }
+
   /** Explicit operator recovery after inspecting an uncertain native mutation; never called by apply/reconcile. */
   async retryNativeAfterReview(raw: SetupApplyRequest, expectedIntentDigest: string, options?: OperationOptions): Promise<OperationResult<SetupReceipt>> {
     const validated = await this.#validated(raw);
@@ -489,11 +567,12 @@ export class ManagedToolInstaller implements ToolInstaller {
   }
 }
 
-export function createToolCapability(toolId: "rtk" | "gitnexus" | "chrome-devtools-mcp" | "superpowers", version: string, repositoryId: string): ToolCapability {
+export function createToolCapability(toolId: "rtk" | "gitnexus" | "chrome-devtools-mcp" | "mempalace" | "superpowers", version: string, repositoryId: string): ToolCapability {
   const definitions = {
     rtk: { kind: "cli_only", operations: ["optimize_output", "gain"], resource: { sharing: "concurrent", maxConcurrency: 64 } },
     gitnexus: { kind: "stdio_mcp", operations: ["code_query", "code_context", "impact"], resource: { sharing: "exclusive", resourceKey: `gitnexus-${repositoryId}` } },
     "chrome-devtools-mcp": { kind: "stdio_mcp", operations: ["browser_debug", "page_navigate"], resource: { sharing: "exclusive", resourceKey: `chrome-${repositoryId}` } },
+    mempalace: { kind: "stdio_mcp", operations: ["mempalace_status", "mempalace_search"], resource: { sharing: "concurrent", maxConcurrency: 16 } },
     superpowers: { kind: "cli_only", operations: ["skills_instruction"], resource: { sharing: "concurrent", maxConcurrency: 64 } }
   } as const;
   return ToolCapabilitySchema.parse({ schemaVersion: 3, toolId, version, ...definitions[toolId], required: false });
