@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -41,7 +41,7 @@ function environment(role: "conversation" | "reviewer" = "conversation"): AgentE
   });
 }
 
-function harness(settings: { probeOutcome?: ProviderCommandOutcome; differentAccounts?: boolean; successfulResultTtlMs?: number } = {}) {
+function harness(settings: { probeOutcome?: ProviderCommandOutcome; differentAccounts?: boolean; successfulResultTtlMs?: number; executionOutcome?: () => Promise<ProviderCommandOutcome | undefined> } = {}) {
   let probes = 0;
   let authentications = 0;
   const commands: ProviderCommandInvocation[] = [];
@@ -52,6 +52,10 @@ function harness(settings: { probeOutcome?: ProviderCommandOutcome; differentAcc
       probes++;
       // Simulate an external model request so other roles may arrive while it is in flight.
       await new Promise(resolve => setTimeout(resolve, 100));
+      if (settings.executionOutcome) {
+        const outcome = await settings.executionOutcome();
+        if (outcome !== undefined) return outcome;
+      }
       if (settings.probeOutcome) return settings.probeOutcome;
     }
     if (invocation.args.join(" ") === "login status") {
@@ -244,5 +248,117 @@ describe("Codex successful completed model ping reuse", () => {
     await h.health("reviewer");
     expect(h.probes).toBe(2);
     expect(h.authentications).toBe(3);
+  });
+});
+
+
+describe("Codex config-selected model probe dependencies", () => {
+  function dependencyOutcome(path: string) {
+    return async (): Promise<ProviderCommandOutcome | undefined> => {
+      try { if (await readFile(path, "utf8") === "allowed\n") return undefined; } catch { /* Provider cannot load required input. */ }
+      return { exitCode: 1, started: true, stdout: "", stderr: "instruction input unavailable" };
+    };
+  }
+
+  it.each(["global", "profile", "project"] as const)("invalidates %s model_instructions_file content and removal with unchanged config", async layer => {
+    const instructions = join(root, "external-instructions.md");
+    await writeFile(instructions, "allowed\n", { mode: 0o600 });
+    const config = layer === "project" ? join(workspace, ".codex", "config.toml") : join(home, "config.toml");
+    if (layer === "project") await mkdir(join(workspace, ".codex"), { mode: 0o700 });
+    await writeFile(config, `${layer === "profile" ? 'profile = "team"\n[profiles.team]\n' : ""}model_instructions_file = ${JSON.stringify(instructions)}\n`, { mode: 0o600 });
+    const h = harness({ successfulResultTtlMs: 30_000, executionOutcome: dependencyOutcome(instructions) });
+    expect((await h.health("conversation")).ok).toBe(true);
+    const unchanged = await h.health("reviewer");
+    expect(unchanged.ok && unchanged.value.status).toBe("ready");
+    expect(h.probes).toBe(1);
+    await writeFile(instructions, "changed\n", { mode: 0o600 });
+    const changed = await h.health("reviewer");
+    expect(changed.ok && changed.value.status).toBe("blocked");
+    expect(h.probes).toBe(2);
+    await writeFile(instructions, "allowed\n", { mode: 0o600 });
+    const restored = await h.health("conversation");
+    expect(restored.ok && restored.value.status).toBe("ready");
+    await rm(instructions);
+    const missing = await h.health("reviewer");
+    expect(missing.ok && missing.value.status).toBe("blocked");
+    expect(h.probes).toBe(4);
+  });
+
+  it.each(["global", "profile", "project"] as const)("tracks %s project_doc_fallback_filenames through creation and change", async layer => {
+    const config = layer === "project" ? join(workspace, ".codex", "config.toml") : join(home, "config.toml");
+    if (layer === "project") await mkdir(join(workspace, ".codex"), { mode: 0o700 });
+    await writeFile(config, `${layer === "profile" ? 'profile = "team"\n[profiles.team]\n' : ""}project_doc_fallback_filenames = ["CUSTOM.instructions.md"]\n`, { mode: 0o600 });
+    const h = harness({ successfulResultTtlMs: 30_000 });
+    await h.health("conversation");
+    await h.health("reviewer");
+    expect(h.probes).toBe(1);
+    const document = join(workspace, "CUSTOM.instructions.md");
+    await writeFile(document, "first\n", { mode: 0o600 });
+    await h.health("reviewer");
+    expect(h.probes).toBe(2);
+    await writeFile(document, "second\n", { mode: 0o600 });
+    await h.health("reviewer");
+    expect(h.probes).toBe(3);
+  });
+
+  it.each(["global", "profile", "project"] as const)("invalidates removed %s fallback documents without changing config", async layer => {
+    const config = layer === "project" ? join(workspace, ".codex", "config.toml") : join(home, "config.toml");
+    if (layer === "project") await mkdir(join(workspace, ".codex"), { mode: 0o700 });
+    await writeFile(config, `${layer === "profile" ? 'profile = "team"\n[profiles.team]\n' : ""}project_doc_fallback_filenames = ["CUSTOM.instructions.md"]\n`, { mode: 0o600 });
+    const document = join(workspace, "CUSTOM.instructions.md");
+    await writeFile(document, "allowed\n", { mode: 0o600 });
+    const h = harness({ successfulResultTtlMs: 30_000, executionOutcome: dependencyOutcome(document) });
+    const first = await h.health("conversation");
+    expect(first.ok && first.value.status).toBe("ready");
+    await rm(document);
+    const second = await h.health("reviewer");
+    expect(second.ok && second.value.status).toBe("blocked");
+    expect(h.probes).toBe(2);
+  });
+
+  it.each([
+    'model_instructions_file = "relative-instructions.md"',
+    '[profiles.team]\nmodel_instructions_file = "../instructions.md"',
+    'model_instructions_file = 42',
+    'project_doc_fallback_filenames = ["../outside.md"]',
+    '[profiles.team]\nproject_doc_fallback_filenames = ["docs/instructions.md"]'
+  ])("uses individual pings when config dependencies are ambiguous: %s", async config => {
+    await writeFile(join(home, "config.toml"), config + "\n", { mode: 0o600 });
+    const h = harness({ successfulResultTtlMs: 30_000 });
+    const results = await Promise.all([h.health("conversation"), h.health("reviewer")]);
+    expect(results.every(result => result.ok && result.value.status === "ready")).toBe(true);
+    expect(h.probes).toBe(2);
+    await h.health("reviewer");
+    expect(h.probes).toBe(3);
+  });
+
+  it.each([
+    'experimental_instructions_file = "/unobserved/legacy.md"',
+    'model_catalog_json = "/unobserved/models.json"',
+    '[profiles.team]\nmodel_catalog_json = "/unobserved/models.json"',
+    'future_input_file = "/unobserved/input.md"',
+    '[profiles.team]\nfuture_document_path = "../instructions.md"',
+    '[experimental]\nfile_input = "/unobserved/input.md"'
+  ])("does not assume an unfamiliar file selector is self-contained: %s", async config => {
+    await writeFile(join(home, "config.toml"), config + "\n", { mode: 0o600 });
+    const h = harness({ successfulResultTtlMs: 30_000 });
+    const results = await Promise.all([h.health("conversation"), h.health("reviewer")]);
+    expect(results.every(result => result.ok && result.value.status === "ready")).toBe(true);
+    expect(h.probes).toBe(2);
+    await h.health("reviewer");
+    expect(h.probes).toBe(3);
+  });
+
+  it.each(["missing", "symlink", "directory", "home-directory"] as const)("does not coalesce an unsafe %s required instruction dependency", async kind => {
+    const instructions = kind === "home-directory" ? home : join(root, "required.md");
+    if (kind === "directory") await mkdir(instructions);
+    if (kind === "symlink") {
+      await writeFile(join(root, "target.md"), "allowed\n", { mode: 0o600 });
+      await symlink(join(root, "target.md"), instructions);
+    }
+    await writeFile(join(home, "config.toml"), `model_instructions_file = ${JSON.stringify(instructions)}\n`, { mode: 0o600 });
+    const h = harness({ successfulResultTtlMs: 30_000 });
+    await Promise.all([h.health("conversation"), h.health("reviewer")]);
+    expect(h.probes).toBe(2);
   });
 });

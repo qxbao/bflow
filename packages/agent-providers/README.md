@@ -108,7 +108,13 @@ and digest, ping arguments (including model/effort and inherited isolation), cwd
 environment, environment variables/secret references and freshly observed account output. Keys are
 SHA-256 digests. Codex config/auth file identity and nanosecond change metadata, ancestor project
 config/instructions, approved hook sources/dependencies and approval receipts must stay unchanged.
-Credential contents are never read by the snapshotter. Missing required `config.toml`/`auth.json`,
+Bounded TOML inspection observes global and ancestor project config, including all profiles. Literal
+absolute `model_instructions_file` dependencies must remain safe regular files; simple basename
+`project_doc_fallback_filenames` are observed across cwd ancestors, including absence. Relative or
+ambiguous paths, unsupported values, unfamiliar file/path/directory selectors (including legacy
+instruction-file settings and `model_catalog_json`), or exceeded inspection limits disable reuse
+and coalescing and run individual probes. Config inspection retains dependency paths only; the
+snapshotter does not read `auth.json` credential bytes. Missing required `config.toml`/`auth.json`,
 symlinks, special files, inaccessible inputs or trust-all hook policies use individual probes.
 Changes during an eligible probe block that observation and require a fresh health check.
 
