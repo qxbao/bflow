@@ -177,7 +177,7 @@ export interface HostLaunchExtras {
 }
 
 /** Builds a provider adapter bound to one role launch context (adapter options are constructor-scoped). */
-export type ProviderAdapterFactory = (provider: AgentProviderId, context: ProviderAdapterContext) => AgentProviderAdapter;
+export type ProviderAdapterFactory = (provider: AgentProviderId, context: ProviderAdapterContext, options?: OperationOptions) => AgentProviderAdapter;
 
 export interface LaunchAttestationInput {
   readonly receiptId: string;

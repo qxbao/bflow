@@ -105,6 +105,7 @@ interface RoleBlocked extends RoleAttemptBase {
 }
 
 type RoleAttempt = RoleReady | RoleBlocked;
+type RoleEnvironmentReady = Omit<RoleReady, "preflight" | "summary">;
 
 const NO_GATEWAY_ACCESS: RoleGatewayAccess = { registrations: [], observations: [], tokenEnvironment: {} };
 const DECLARED_STATUSES: readonly RolePreflightSummary["status"][] = ["blocked", "unsupported", "error"];
@@ -173,18 +174,42 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     options?: OperationOptions
   ): Promise<OperationResult<{ report: PlatformPreflightReport; launches: readonly PreparedRoleLaunch[] }>> {
     this.track(identity);
-    const attempts: RoleAttempt[] = [];
+    const interrupted = (): ContractError | undefined => options?.signal?.aborted
+      ? { code: "cancelled", retryable: false, message: "Platform preparation interrupted; no roles may launch" }
+      : options?.deadline !== undefined && Date.parse(options.deadline) <= this.now().getTime()
+        ? { code: "timeout", retryable: true, retrySafety: "observation_only", message: "Platform preparation deadline expired; no roles may launch" } : undefined;
+    // State/skill/Gateway preparation remains ordered; only independent provider
+    // observations overlap. Launch intents still wait for every preflight verdict.
+    const environments: (RoleEnvironmentReady | RoleBlocked)[] = [];
     for (const requirement of requirements) {
-      attempts.push(await this.preflightRole(identity, requirement, options));
+      const error = interrupted();
+      if (error) break;
+      environments.push(await this.prepareRoleEnvironment(identity, requirement, options));
     }
+    const attempts: RoleAttempt[] = new Array(environments.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(3, environments.length) }, async () => {
+      while (next < environments.length) {
+        const index = next++;
+        const environment = environments[index]!;
+        if (!environment.ready) { attempts[index] = environment; continue; }
+        const interruption = interrupted();
+        if (interruption) { attempts[index] = this.blockedRole(environment, interruption); continue; }
+        try { attempts[index] = await this.checkPreparedRole(environment, options); }
+        catch { attempts[index] = this.blockedRole(environment, {
+          code: "validation", retryable: false, message: "Provider preflight failed before returning a health verdict"
+        }); }
+      }
+    }));
 
     const summaries = attempts.map(attempt => attempt.summary);
     const launched = new Map<number, PreparedRoleLaunch>();
-    const requiredBlocked = attempts.some(attempt => !attempt.ready && attempt.requirement.required);
+    const requiredBlocked = attempts.length !== requirements.length || attempts.some(attempt => !attempt.ready && attempt.requirement.required);
     let requiredLaunchFailed = false;
 
     if (!requiredBlocked) {
       for (const [index, attempt] of attempts.entries()) {
+        if (interrupted()) { requiredLaunchFailed = true; break; }
         if (!attempt.ready) continue;
         const prepared = await this.launchRole(attempt, options);
         if (prepared.ok) {
@@ -197,7 +222,7 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     }
 
     // All-or-nothing: any required failure discards every launch made in this call.
-    const ready = !requiredBlocked && !requiredLaunchFailed;
+    const ready = !requiredBlocked && !requiredLaunchFailed && interrupted() === undefined;
     if (!ready) {
       for (const prepared of launched.values()) await this.dropLaunch(prepared.launch.launchId, true);
       launched.clear();
@@ -205,13 +230,16 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
 
     for (const [index, attempt] of attempts.entries()) {
       if (!attempt.gatewayTouched || launched.has(index)) continue;
-      const revoked = await this.revokeRoleGateway(attempt.identity, attempt.requirement, options);
+      // Cleanup has its own bounded calls; an expired preparation must not suppress revocation.
+      const revoked = await this.revokeRoleGateway(attempt.identity, attempt.requirement);
       if (!revoked.ok) {
         summaries[index] = withMessage(summaries[index] ?? attempt.summary,
           `Gateway cleanup failed: ${revoked.error.message}`);
       }
     }
 
+    const interruption = interrupted();
+    if (interruption) return failWith(interruption);
     return ok({
       report: {
         ready,
@@ -428,6 +456,15 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     requirement: RolePlatformRequirement,
     options?: OperationOptions
   ): Promise<RoleAttempt> {
+    const prepared = await this.prepareRoleEnvironment(identity, requirement, options);
+    return prepared.ready ? this.checkPreparedRole(prepared, options) : prepared;
+  }
+
+  private async prepareRoleEnvironment(
+    identity: PlatformSessionIdentity,
+    requirement: RolePlatformRequirement,
+    options?: OperationOptions
+  ): Promise<RoleEnvironmentReady | RoleBlocked> {
     const environmentId = this.deps.environments.environmentId(identity, requirement);
     let gatewayTouched = false;
     const blocked = (error: ContractError): RoleBlocked => ({
@@ -504,9 +541,6 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       ...(gateway.registrations.length > 0 ? { mcpTokenEnvironmentNames: tokenNames } : {})
     };
 
-    const preflight = await this.deps.providers.preflight(environment.value, context, options);
-    if (!preflight.ok) return blocked(preflight.error);
-
     return {
       ready: true,
       identity,
@@ -514,11 +548,20 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       gatewayTouched,
       environment: environment.value,
       context,
-      preflight: preflight.value,
       skills: skills.value,
-      gateway,
-      summary: summaryOf(requirement, "ready", preflight.value.checks)
+      gateway
     };
+  }
+
+  private blockedRole(prepared: RoleEnvironmentReady, error: ContractError): RoleBlocked {
+    return { identity: prepared.identity, requirement: prepared.requirement, gatewayTouched: prepared.gatewayTouched,
+      ready: false, error, summary: summaryOf(prepared.requirement, statusOf(error), checksOf(error), error.message) };
+  }
+
+  private async checkPreparedRole(prepared: RoleEnvironmentReady, options?: OperationOptions): Promise<RoleAttempt> {
+    const preflight = await this.deps.providers.preflight(prepared.environment, prepared.context, options);
+    return preflight.ok ? { ...prepared, preflight: preflight.value,
+      summary: summaryOf(prepared.requirement, "ready", preflight.value.checks) } : this.blockedRole(prepared, preflight.error);
   }
 
   /** Records the launch intent (journaled by readiness) and retains material for later activation. */

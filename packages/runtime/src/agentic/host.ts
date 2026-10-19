@@ -1,15 +1,16 @@
 import { execFile } from "node:child_process";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, connect, type Socket } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { z } from "zod";
 import {
   AgentBindingReceiptSchema, AgentExecutionHandleSchema, AgentProviderIdSchema, AgentResultSchema, AgentRoleSchema, ApprovalDecisionSchema,
   JsonValueSchema, RoleMessageSchema, RunQuerySchema, SessionManifestSchema,
-  type AgentProviderId, type AgentRole, type RoleMessage, type SessionManifest, type RunStore
+  type AgentProviderId, type AgentRole, type RoleMessage, type SessionManifest, type RunStore, type OperationOptions
 } from "@bflow/contracts";
 import { authenticateNativeHerdrMessage } from "./herdr-ingress.js";
 import { callHost } from "./host-protocol.js";
@@ -38,8 +39,8 @@ const capabilities = { conversation: ["conversation"], coordinator: ["coordinati
   specifier: ["specification"], architect: ["architecture"], planner: ["planning"], developer: ["implementation"],
   tester: ["testing"], reviewer: ["review"], qa: ["verification", "testing"], security: ["security"] };
 interface RoleConfiguration { socketPath: string; token: string; role: AgentRole; provider: AgentProviderId; herdrBinary: string; sessionId: string }
-async function privateFile(path: string, content: string): Promise<void> {
-  await writeFile(path, content, { mode: 0o600 }); await chmod(path, 0o600);
+async function privateFile(path: string, content: string, mode = 0o600): Promise<void> {
+  await writeFile(path, content, { mode }); await chmod(path, mode);
 }
 async function readRoleConfiguration(path: string): Promise<RoleConfiguration> {
   const stat = await lstat(path); if (!stat.isFile() || (stat.mode & 0o077) !== 0) throw new Error("Unsafe role host configuration");
@@ -50,7 +51,10 @@ async function readRoleConfiguration(path: string): Promise<RoleConfiguration> {
 }
 function shellQuote(value: string): string { return "'" + value.replaceAll("'", "'\\''") + "'"; }
 const NATIVE_HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "PreToolUse"] as const;
-function hookCommandFor(rolePath: string, event: string): string { return [process.execPath, fileURLToPath(import.meta.url), "hook", rolePath, event].map(shellQuote).join(" "); }
+function hookCommandFor(rolePath: string, event: string, hookRunner?: string): string {
+  if (hookRunner) return `${shellQuote(hookRunner)} ${shellQuote(event)}`;
+  return [process.execPath, fileURLToPath(import.meta.url), "hook", rolePath, event].map(shellQuote).join(" ");
+}
 
 export const NON_USER_FACING_AUTONOMOUS_POLICY = [
   "You are a non-user-facing execution agent.",
@@ -80,6 +84,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   // The manifest of the latest activation attempt: diagnostics (`platform_status`) report its proofs even when it was refused.
   let attemptedManifest: SessionManifest | undefined;
   let quiesced = false, quiesceCompleted = false, closing = false;
+  let preparation: Promise<unknown> | undefined;
   let scheduler: Promise<unknown> | undefined, schedulerError: string | undefined;
   const receipts = new HostReceiptJournal(join(configuration.directory, "authentication-receipts"), configuration.repositoryPath, configuration.sessionId);
   const roleTokens = new Map<string, AgentRole>();
@@ -100,8 +105,27 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const publicKey = await readFile(publicPath, "utf8");
   const promptAssets = await import(new URL("../../../pane-manager/dist/index.js", import.meta.url).href);
   const platformRoles = configuration.platform?.roles ?? [];
+  const hookRunners = new Map<string, string>();
+  const shortHookDir = join("/tmp", `bf-h-${process.getuid?.() ?? "0"}`);
+  let useShortHook = false;
+  try {
+    await mkdir(shortHookDir, { recursive: true, mode: 0o700 });
+    await chmod(shortHookDir, 0o700);
+    const stat = await lstat(shortHookDir);
+    if (stat.isDirectory() && (stat.mode & 0o077) === 0 && (!process.getuid || stat.uid === process.getuid())) {
+      useShortHook = true;
+    }
+  } catch {
+    useShortHook = false;
+  }
   for (const role of roles) {
     const path = join(configuration.directory, role + ".json");
+    const hookRunnerPath = useShortHook
+      ? join(shortHookDir, `${configuration.sessionId.slice(0, 8)}-${role}.sh`)
+      : join(configuration.directory, `${role}.hook.sh`);
+    const hookScriptContent = `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(executable)} hook ${shellQuote(path)} "$@"\n`;
+    await privateFile(hookRunnerPath, hookScriptContent, 0o700);
+    hookRunners.set(role, hookRunnerPath);
     const provider: AgentProviderId = platformRoles.find(option => option.role === role)?.provider ?? "claude";
     let roleConfig: RoleConfiguration;
     try { roleConfig = await readRoleConfiguration(path); }
@@ -115,7 +139,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const mcpConfigFile = join(configuration.directory, role + ".mcp.json");
     const hooksSettingsFile = join(configuration.directory, role + ".hooks.json");
     await privateFile(mcpConfigFile, JSON.stringify({ mcpServers: { bflow: { type: "stdio", command: process.execPath, args: [executable, "mcp", path] } } }));
-    const hooks = Object.fromEntries(NATIVE_HOOK_EVENTS.map(event => [event, [{ hooks: [{ type: "command", command: hookCommandFor(path, event), timeout: 30 }] }]]));
+    const hooks = Object.fromEntries(NATIVE_HOOK_EVENTS.map(event => [event, [{ hooks: [{ type: "command", command: hookCommandFor(path, event, hookRunnerPath), timeout: 30 }] }]]));
     await privateFile(hooksSettingsFile, JSON.stringify({ hooks }));
     let systemPrompt = `You are Bflow's ${role} in a dedicated Herdr pane. Use the bflow MCP tools. All cross-role messages must use send_role_message through native Herdr; never use files as a mailbox. Never fabricate evidence or approvals. `;
     const promptInput = await promptAssets.readBuiltinRolePrompt(role);
@@ -150,10 +174,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     rolePrompt: role => launch[role]?.systemPrompt,
     hostLaunch: role => {
       const rolePath = join(configuration.directory, role + ".json");
-      const hookEntries = Object.fromEntries(NATIVE_HOOK_EVENTS.map(event => [event, hookCommandFor(rolePath, event)]));
+      const runner = hookRunners.get(role);
+      const hookEntries = Object.fromEntries(NATIVE_HOOK_EVENTS.map(event => [event, hookCommandFor(rolePath, event, runner)]));
       return { mcpServers: { bflow: { command: process.execPath, args: [executable, "mcp", rolePath] } }, hooks: hookEntries };
     },
-    nativeSessionHookCommand: role => hookCommandFor(join(configuration.directory, role + ".json"), "SessionStart")
+    nativeSessionHookCommand: role => hookCommandFor(join(configuration.directory, role + ".json"), "SessionStart", hookRunners.get(role))
   });
   const observeAgent = async (paneId: string): Promise<HostAgentObservation> => {
     const agent = record(record(record(JSON.parse(await herdr(["agent", "get", paneId]))).result).agent);
@@ -294,10 +319,12 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     for (const pane of accepted.panes) {
       const actual = record(record(record(JSON.parse(await herdr(["agent", "get", pane.paneId]))).result).agent);
       const native = actual.agent_session ? record(actual.agent_session) : undefined;
+      const validSource = (source: unknown) =>
+        source === `herdr:${pane.provider}` || source === `herdr:${pane.agentKind}` || source === pane.agentKind || source === pane.provider;
       if (startupPaths.get(pane.role) === "mcp_bootstrap") {
         // No SessionStart hook registered this pane: Herdr's observed native session is the proof, registered here.
         if (!native) throw new Error(`[bflow:native-startup-pending] ${pane.role} pane ${pane.paneId} has bootstrap reachability but Herdr reports no native session yet.`);
-        if (native.source !== `herdr:${pane.provider}` || native.kind !== "id" || (actual.name ?? actual.agent) !== pane.agentId)
+        if (!validSource(native.source) || native.kind !== "id" || (actual.name ?? actual.agent) !== pane.agentId)
           throw new Error(`Role ${pane.role} has no matching Bflow provider startup/native-session receipt; stop and recreate legacy bare panes`);
         if (!pane.session || pane.session.source !== native.source || pane.session.kind !== native.kind || pane.session.value !== native.value)
           throw new Error(`[bflow:native-startup-pending] ${pane.role} pane ${pane.paneId}: the manifest has not recorded Herdr's observed native session yet.`);
@@ -311,7 +338,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const receipt = nativeSessions.get(pane.paneId);
       if (native && pane.session?.value === native.value && (!receipt || receipt.sessionId !== native.value))
         throw new Error(`[bflow:native-startup-pending] ${pane.role} pane ${pane.paneId} is still publishing its Bflow native-session receipt.`);
-      if (!receipt || receipt.role !== pane.role || !native || native.source !== `herdr:${pane.provider}` || native.kind !== "id" || native.value !== receipt.sessionId ||
+      if (!receipt || receipt.role !== pane.role || !native || !validSource(native.source) || native.kind !== "id" || native.value !== receipt.sessionId ||
           pane.session?.value !== receipt.sessionId || (actual.name ?? actual.agent) !== pane.agentId)
         throw new Error(`Role ${pane.role} has no matching Bflow provider startup/native-session receipt; stop and recreate legacy bare panes`);
     }
@@ -492,7 +519,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     return host.tools.invoke(name, parameters, { role });
   };
   const physicalPrompts: {role: AgentRole; paneId: string; message: RoleMessage}[] = [];
-  const dispatch = async (token: string, method: string, params: unknown): Promise<unknown> => {
+  const dispatch = async (token: string, method: string, params: unknown, operation?: OperationOptions): Promise<unknown> => {
     if (token !== configuration.token) {
       const role = roleTokens.get(token); if (!role) throw new Error("Host authentication failed");
       if (method === "tool_guard") {
@@ -560,17 +587,30 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     switch (method) {
       case "ping": return { active: !!workspace, quiesced, schedulerError: schedulerError ?? null };
       case "prepare": {
-        // H1: legacy per-role plans never survive a new generation; launch-keyed plans are published by the session.
-        await removeLegacyRoleProbes(configuration.directory, roles);
-        toolExpectations.clear();
-        if (!platformSession) return { roleLaunch: launch };
-        const prepared = await platformSession.prepare();
-        for (const [role, expectation] of prepared.reachability) toolExpectations.set(role, expectation);
-        const roleLaunch = Object.fromEntries(Object.entries(launch).map(([role, descriptor]) => {
-          const ready = prepared.launches.get(role as AgentRole);
-          return [role, ready ? { ...descriptor, launch: launchMaterial(ready) } : descriptor];
-        }));
-        return { roleLaunch, platform: prepared.report };
+        if (quiesced || closing) throw new Error("Host is shutting down; reconcile before preparing roles");
+        if (preparation) throw new Error("Host role preparation is already in progress; reconcile before retrying");
+        const request = z.object({ deadline: z.string().datetime().optional() }).strict().parse(params);
+        const deadline = request.deadline ?? new Date(Date.now() + 600_000).toISOString();
+        const remaining = Date.parse(deadline) - Date.now();
+        if (remaining <= 0) throw new Error("Host preparation deadline has expired; no roles were prepared");
+        const signal = AbortSignal.any([AbortSignal.timeout(Math.min(remaining, 600_000)),
+          ...(operation?.signal ? [operation.signal] : [])]);
+        const options: OperationOptions = { deadline, signal, timeoutMs: Math.min(remaining, 600_000) };
+        preparation = (async () => {
+          // H1: legacy per-role plans never survive a new generation; launch-keyed plans are published by the session.
+          await removeLegacyRoleProbes(configuration.directory, roles);
+          toolExpectations.clear();
+          if (!platformSession) return { roleLaunch: launch };
+          const prepared = await platformSession.prepare(options);
+          for (const [role, expectation] of prepared.reachability) toolExpectations.set(role, expectation);
+          const roleLaunch = Object.fromEntries(Object.entries(launch).map(([role, descriptor]) => {
+            const ready = prepared.launches.get(role as AgentRole);
+            return [role, ready ? { ...descriptor, launch: launchMaterial(ready) } : descriptor];
+          }));
+          return { roleLaunch, platform: prepared.report };
+        })();
+        try { return await preparation; }
+        finally { preparation = undefined; }
       }
       case "platform_status": {
         // Legacy hosts (no platform) keep the original response shape exactly.
@@ -601,6 +641,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       case "find_runs": { const page = unwrap(await (await getQueryStore()).find(RunQuerySchema.parse(params))); return { ...page, items: page.items.map(item => item.snapshot) }; }
       case "quiesce": {
         quiesced = true;
+        await preparation?.catch(() => undefined);
         if (!workspace) {
           let cursor: string | undefined;
           do {
@@ -629,20 +670,24 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (workspace && !quiesceCompleted) throw new Error("Quiesce and checkpoint before stopping the host");
         const status = record(JSON.parse(await herdr(["status", "server", "--json"])));
         if (status.running === true) throw new Error("Stop the named Herdr session before stopping its host");
+        closing = true;
+        await preparation?.catch(() => undefined);
         await platformSession?.shutdown();
-        closing = true; setImmediate(() => { void close(); }); return null;
+        setImmediate(() => { void close(); }); return null;
       }
       default: throw new Error("Unknown host operation");
     }
   };
   const sockets = new Set<Socket>();
   const server = createServer(socket => {
+    const operation = new AbortController();
+    socket.once("close", () => operation.abort());
     sockets.add(socket); socket.on("close", () => sockets.delete(socket)); socket.on("error", () => undefined); socket.setTimeout(600_000, () => socket.destroy());
     let input = "", started = false;
     socket.on("data", chunk => { if (started) return; input += String(chunk);
       if (Buffer.byteLength(input) > 4 * 1024 * 1024) { socket.destroy(); return; }
       if (!input.includes("\n")) return; started = true;
-      void (async () => { const value = record(JSON.parse(input.split("\n")[0]!)); const result = await dispatch(textField(value.token), textField(value.method), JsonValueSchema.parse(value.params));
+      void (async () => { const value = record(JSON.parse(input.split("\n")[0]!)); const result = await dispatch(textField(value.token), textField(value.method), JsonValueSchema.parse(value.params), { signal: operation.signal });
         socket.end(JSON.stringify({ ok: true, value: result ?? null }) + "\n"); })().catch(error => socket.end(JSON.stringify({ ok: false, error: String(error) }) + "\n"));
     });
   });
@@ -687,10 +732,16 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   }, 30_000);
   gatewayTimer.unref();
   const close = async () => {
-    closing = true; clearInterval(timer); clearInterval(pump); clearInterval(gatewayTimer); if (workspace) { await workspace.runtime.quiesce(); await scheduler; await workspace.close(); }
+    closing = true; clearInterval(timer); clearInterval(pump); clearInterval(gatewayTimer);
+    for (const runner of hookRunners.values()) {
+      await rm(runner, { force: true }).catch(() => undefined);
+    }
+    if (workspace) { await workspace.runtime.quiesce(); await scheduler; await workspace.close(); }
+    await preparation?.catch(() => undefined);
     queryStore?.close();
     for (const socket of sockets) socket.destroy();
-    await new Promise<void>(accept => server.close(() => accept())); await unlink(configuration.socketPath);
+    // node:net removes its owned Unix socket when server.close completes.
+    await new Promise<void>(accept => server.close(() => accept()));
   };
   // Abrupt process signals are crashes, never graceful-shutdown receipts.
   process.once("SIGTERM", () => { void close().then(() => process.exit(0), () => process.exit(1)); });
@@ -739,6 +790,53 @@ export function availableTools(role: AgentRole) {
   };
   return tools.map(tool => ({ ...tool, inputSchema: { type: "object", ...(argumentsByName[tool.name] ?? {properties:{},required:[]}), additionalProperties:false } }));
 }
+async function reportHerdrNativeSession(params: {
+  readonly provider: AgentProviderId;
+  readonly paneId: string;
+  readonly sessionId: string;
+  readonly socketPath: string;
+  readonly transcriptPath?: string;
+  readonly source?: string;
+}): Promise<void> {
+  const request = {
+    id: `bflow-native-${Date.now()}`,
+    method: "pane.report_agent_session",
+    params: {
+      pane_id: params.paneId,
+      source: `herdr:${params.provider}`,
+      agent: params.provider,
+      seq: Date.now() * 1000,
+      agent_session_id: params.sessionId,
+      ...(params.transcriptPath ? { agent_session_path: params.transcriptPath } : {}),
+      ...(params.source ? { session_start_source: params.source } : {})
+    }
+  };
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await new Promise<void>((accept, reject) => {
+        const socket = connect(params.socketPath);
+        let response = "";
+        socket.setTimeout(5000, () => { socket.destroy(); reject(new Error("Native session report timed out")); });
+        socket.once("error", reject);
+        socket.once("close", () => { if (!response.includes("\n")) reject(new Error("Native session report closed before acknowledgement")); });
+        socket.once("connect", () => socket.write(JSON.stringify(request) + "\n"));
+        socket.on("data", chunk => {
+          response += String(chunk);
+          if (!response.includes("\n")) return;
+          socket.end();
+          try {
+            record(JSON.parse(response.split("\n")[0]!)).error ? reject(new Error("Herdr rejected native provider session")) : accept();
+          } catch (error) { reject(error); }
+        });
+      });
+      return;
+    } catch (err) {
+      if (attempt === 4) throw err;
+      await new Promise(r => setTimeout(r, 200));
+    }
+  }
+}
+
 /**
  * Startup reachability bootstrap. The provider spawns this MCP child at startup, inside its launch environment, so the
  * child can probe the launch's Gateway registrations without a SessionStart hook (Codex does not fire one at startup).
@@ -746,7 +844,8 @@ export function availableTools(role: AgentRole) {
  * Only the token-free probe records and the pane id are sent, authenticated with the role token.
  */
 function bootstrapProviderReachability(configuration: RoleConfiguration, roleConfigPath: string | undefined): void {
-  if (process.env[BFLOW_LAUNCH_ID_ENV] === undefined || roleConfigPath === undefined) return;
+  const launchId = process.env[BFLOW_LAUNCH_ID_ENV];
+  if (launchId === undefined || roleConfigPath === undefined) return;
   void (async () => {
     const plan = await resolveProbePlan(dirname(roleConfigPath), configuration.role, process.env);
     if (plan === undefined) return;
@@ -778,27 +877,81 @@ export async function runRoleMcp(configuration: RoleConfiguration, roleConfigPat
     } catch (error) { reply({ isError: true, content: [{ type: "text", text: String(error) }] }); }
   }
 }
+
+function parseHookJson(raw: string): Record<string, unknown> {
+  const trimmed = raw.trim();
+  try {
+    return record(JSON.parse(trimmed));
+  } catch (initialError) {
+    let startIndex = trimmed.indexOf("{");
+    while (startIndex !== -1) {
+      let depth = 0;
+      let inString = false;
+      let escape = false;
+      for (let i = startIndex; i < trimmed.length; i++) {
+        const char = trimmed[i];
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (char === "\\") {
+          escape = true;
+          continue;
+        }
+        if (char === '"') {
+          inString = !inString;
+          continue;
+        }
+        if (!inString) {
+          if (char === "{") depth++;
+          else if (char === "}") {
+            depth--;
+            if (depth === 0) {
+              try {
+                const parsed = JSON.parse(trimmed.slice(startIndex, i + 1));
+                if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                  return record(parsed);
+                }
+              } catch {
+                // continue searching next '{'
+              }
+              break;
+            }
+          }
+        }
+      }
+      startIndex = trimmed.indexOf("{", startIndex + 1);
+    }
+    throw initialError;
+  }
+}
+
 export async function runProviderHook(configuration: RoleConfiguration, event: string, roleConfigPath?: string): Promise<void> {
   const chunks: Buffer[] = []; let size = 0;
   for await (const chunk of process.stdin) { size += Buffer.byteLength(chunk); if (size > 1024 * 1024) throw new Error("Oversized provider hook"); chunks.push(Buffer.from(chunk)); }
-  const hook = record(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+  const rawInput = Buffer.concat(chunks).toString("utf8");
+  if (!rawInput.trim()) return;
+  const hook = parseHookJson(rawInput);
   const paneId = textField(process.env.HERDR_PANE_ID);
   if (event === "SessionStart" || event === "Stop") {
     const session = textField(hook.session_id);
     if (event !== hook.hook_event_name) throw new Error("Provider hook event mismatch");
     if (hook.agent_id || process.env.CURSOR_VERSION || hook.cursor_version) return;
-    const request = { id: `bflow-native-${Date.now()}`, method: "pane.report_agent_session", params: { pane_id: paneId,
-      source: `herdr:${configuration.provider}`, agent: configuration.provider, seq: Date.now() * 1000, agent_session_id: session,
-      ...(typeof hook.transcript_path === "string" ? { agent_session_path: hook.transcript_path } : {}),
-      ...(typeof hook.source === "string" ? { session_start_source: hook.source } : {}) } };
-    await new Promise<void>((accept, reject) => {
-      const socket = connect(textField(process.env.HERDR_SOCKET_PATH)); let response = "";
-      socket.setTimeout(5000, () => { socket.destroy(); reject(new Error("Native session report timed out")); }); socket.once("error", reject);
-      socket.once("close", () => { if (!response.includes("\n")) reject(new Error("Native session report closed before acknowledgement")); });
-      socket.once("connect", () => socket.write(JSON.stringify(request) + "\n"));
-      socket.on("data", chunk => { response += String(chunk); if (!response.includes("\n")) return; socket.end();
-        try { record(JSON.parse(response.split("\n")[0]!)).error ? reject(new Error("Herdr rejected native provider session")) : accept(); } catch (error) { reject(error); } });
-    });
+    const socketPath = process.env.HERDR_SOCKET_PATH;
+    if (socketPath) {
+      try {
+        await reportHerdrNativeSession({
+          provider: configuration.provider,
+          paneId,
+          sessionId: session,
+          socketPath,
+          ...(typeof hook.transcript_path === "string" ? { transcriptPath: hook.transcript_path } : {}),
+          ...(typeof hook.source === "string" ? { source: hook.source } : {})
+        });
+      } catch (error) {
+        process.stderr.write(`Failed to report native session to Herdr: ${redactString(String(error))}\n`);
+      }
+    }
     // H1: the probe runs here, inside the provider process, so it sees the launch environment Herdr passed to the provider.
     // The plan is selected by this launch's BFLOW_LAUNCH_ID (fails closed on a malformed id); the legacy role file is a fallback only.
     const plan = event === "SessionStart" && roleConfigPath !== undefined
@@ -817,6 +970,7 @@ export async function runProviderHook(configuration: RoleConfiguration, event: s
     }
   }
   if (event === "UserPromptSubmit" && configuration.role === "conversation") {
+    if (typeof hook.prompt === "string" && hook.prompt.trim() === "ping") return;
     const result = await callHost(configuration.socketPath, configuration.token, "user_prompt", { paneId, hook });
     process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: "Trusted Bflow Conversation Gateway result: " + JSON.stringify(result) } }) + "\n");
   }

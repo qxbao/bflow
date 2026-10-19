@@ -185,6 +185,30 @@ describe("P30 platform readiness in up", () => {
   const roleLaunchesFor = async (input: EnvironmentCompositionInput) => Object.fromEntries(await Promise.all(
     input.config.environment.roles.map(async role => [role.role, await launchFor(role.role, role.cli as Provider)])));
 
+  it("passes the startup budget to the host before evaluating blocked readiness", async () => {
+    const host = hostWith({}, { ready: false, generation: 1, checkedAt: new Date().toISOString(), roles: [] });
+    const options = { timeoutMs: 65_000, deadline: new Date(Date.now() + 65_000).toISOString(), signal: new AbortController().signal };
+    const result = await openPaneManagerEnvironment(base, runner, async () => host).manager.up(base.repository.sessionName, options);
+    expect(host.prepare).toHaveBeenCalledWith(options);
+    expect(result.ok).toBe(false);
+    expect(starts()).toHaveLength(0);
+  });
+
+  it.each(["cancelled", "expired"])("does not start panes after %s host preparation", async kind => {
+    const controller = new AbortController();
+    const options = { timeoutMs: 65_000, deadline: new Date(Date.now() + 65_000).toISOString(), signal: controller.signal };
+    const host = hostWith({});
+    host.prepare = vi.fn(async () => {
+      if (kind === "cancelled") controller.abort();
+      else options.deadline = new Date(Date.now() - 1).toISOString();
+      return { roleLaunch: {} };
+    });
+    await expect(openPaneManagerEnvironment(base, runner, async () => host).manager.up(base.repository.sessionName, options))
+      .rejects.toThrow(/interrupted|exceeded the startup deadline/);
+    expect(starts()).toHaveLength(0);
+    expect(runner.calls).toHaveLength(0);
+  });
+
   linuxIt("starts an all-Codex configuration with the host-prepared launch profile", async () => {
     const input = withProviders(() => "codex");
     serverRunning(input);

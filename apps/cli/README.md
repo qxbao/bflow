@@ -61,6 +61,15 @@ transitive packages or runtime data; unsupported dynamic shell forms remain bloc
 Explicitly enabled plugin hook sources are included when their local installation
 can be resolved unambiguously. Setup review and Runtime launches use the same
 environment with outer Orca pane selectors cleared only for Bflow child processes.
+
+`up --timeout <ms>` controls the complete startup budget, including host provider
+preparation. The host control call uses the remaining lifecycle deadline instead
+of a separate 30-second limit. Cancellation or deadline expiry prevents pane
+creation; cleanup drains pending preparation before revoking session resources.
+Preparation completes before the CLI records a pane dispatch intent. A timeout
+at that stage can therefore use the host shutdown barrier without a pane receipt.
+`down` reopens the existing host with its persisted platform and policy, even if
+the desired configuration has changed since startup.
 Startup readiness errors retain the per-role diagnostic report (up to 256 lines /
 64,000 characters) after terminal sanitization and credential redaction, and direct
 hook failures point to the hook-only plan command.

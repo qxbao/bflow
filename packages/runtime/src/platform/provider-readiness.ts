@@ -106,7 +106,7 @@ export class ProviderReadiness implements ProviderReadinessPort {
       return fail("validation", `preflight request failed schema validation: ${request.error.message}`);
     }
 
-    const adapter = this.factory(environment.provider, context);
+    const adapter = this.factory(environment.provider, context, options);
     const outcome = await adapter.checkHealth(request.data, options);
     if (!outcome.ok) return outcome;
 
@@ -142,7 +142,7 @@ export class ProviderReadiness implements ProviderReadinessPort {
       return fail("conflict", "environment changed since preflight; recheck before launch");
     }
 
-    const adapter = this.factory(environment.provider, context);
+    const adapter = this.factory(environment.provider, context, options);
     const outcome = await adapter.prepareLaunch(environment, options);
     if (!outcome.ok) return outcome;
 
@@ -221,7 +221,7 @@ export class ProviderReadiness implements ProviderReadinessPort {
       ...context,
       trustedIssuerKeys: { ...context.trustedIssuerKeys, [signer.issuerId]: signer.publicKeyPem }
     };
-    const adapter = this.factory(environment.provider, activationContext);
+    const adapter = this.factory(environment.provider, activationContext, options);
     const healthRequest = AgentHealthRequestSchema.safeParse({
       schemaVersion: CURRENT_PLATFORM_SCHEMA_VERSION,
       environment,

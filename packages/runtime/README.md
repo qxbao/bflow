@@ -262,6 +262,19 @@ pump run independently of model turns. `close()` disconnects a CLI client;
 operations. Shutdown requires the named Herdr server to have stopped. Failed or
 uncertain work keeps its worktrees and requires reconciliation.
 
+Host `prepare(options)` accepts the lifecycle deadline, timeout and cancellation
+signal. Provider preparation uses that deadline instead of the short default
+control RPC timeout. A disconnected preparation is cancelled; quiesce and shutdown
+wait for it to drain before releasing launch registrations. No expired or cancelled
+preparation authorizes a pane launch. Standalone preparation without options is
+bounded to ten minutes; CLI startup supplies its remaining configured budget.
+`openPersistedAgenticHost` reopens a host for shutdown/recovery using the stored
+platform, policy and behavioral authority; it does not request a configuration
+change. Permanent-role provider observations run at most three at a time, after
+ordered environment/skills/Gateway preparation. Every provider subprocess receives
+the operation's cancellation signal and remaining deadline; launch preparation
+still waits for all required preflight verdicts.
+
 The stdio MCP entrypoint exposes orchestration tools only to Coordinator, and
 implementation authorization/submission only to Developer. Tester/QA alternative
 evidence and Reviewer/QA verdicts are tied to host-captured exact committed diffs
