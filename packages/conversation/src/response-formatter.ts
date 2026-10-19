@@ -199,8 +199,8 @@ export function formatCoordinatorMessageForUser(params: {
       "",
       "👉 Bạn có thể phản hồi bằng một trong các cú pháp sau:",
       "- `approve` hoặc `đồng ý`: Chấp thuận cho quy trình tiếp tục.",
-      "- `reject <lý do>` hoặc `từ chối <lý do>`: Bác bỏ yêu cầu.",
-      "- `request changes <nội dung>` hoặc `cần sửa <nội dung>`: Yêu cầu chỉnh sửa lại."
+      `- \`${approvalId}: reject <lý do>\` hoặc \`${approvalId}: từ chối <lý do>\`: Bác bỏ yêu cầu.`,
+      `- \`${approvalId}: request changes <nội dung>\` hoặc \`${approvalId}: cần sửa <nội dung>\`: Yêu cầu chỉnh sửa lại.`
     ].join("\n");
   }
   // 2. Verification escalation
@@ -477,7 +477,7 @@ export function formatStatusSummaryForUser(
     for (const apr of pendingApprovals) {
       lines.push(`  - **\`${apr.approvalId}\`**: ${apr.reason} (gửi bởi ${apr.requestedBy})`);
     }
-    lines.push("  👉 Gõ `approve` để duyệt hoặc `reject <lý do>` để từ chối.");
+    lines.push("  👉 Gõ `apr-...: approve` để duyệt hoặc `apr-...: reject <lý do>` để từ chối đúng yêu cầu.");
   }
 
   const pendingClarifications = Object.values(context.pendingClarifications);

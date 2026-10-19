@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   ApprovalRequestSchema,
   CancellationRequestSchema,
+  ContractErrorSchema,
   ConversationMessageSchema,
   DelegationRequestSchema,
   type AgentTransportState,
@@ -10,6 +11,7 @@ import {
   type ConversationMessage,
   type ConversationSession,
   type ConversationSessionStatus,
+  type ContractError,
   type JsonValue,
   type OperationOptions,
   type OperationResult,
@@ -165,6 +167,34 @@ export class ConversationGateway {
     return input.conversationDecision && input.messageId
       ? `${prefix}-${createHash("sha256").update(JSON.stringify([this.config.sessionId, input.messageId, prefix])).digest("hex")}`
       : this.generateId(prefix);
+  }
+
+  private async rejectQueuedDecision(
+    item: Extract<PendingInboundItem, { kind: "user_turn" }>, error: ContractError
+  ): Promise<OperationResult<UserFriendlyResponse>> {
+    const input = item.input, now = this.getNow();
+    const correlationId = input.conversationDecision && "targetCorrelationId" in input.conversationDecision
+      ? input.conversationDecision.targetCorrelationId ?? this.generateTurnId(input, "corr")
+      : this.generateTurnId(input, "corr");
+    const userMessage = ConversationMessageSchema.parse({ schemaVersion: 2, sessionId: this.config.sessionId,
+      messageId: input.messageId, correlationId, turnSequence: this.snapshot!.session.turnCount + 1,
+      sender: "user", recipient: "conversation", intent: "user_request", content: input.content,
+      artifactReferences: input.inputArtifacts ?? [], createdAt: input.occurredAt ?? now,
+      metadata: { conversationDecision: input.conversationDecision } });
+    const agentReply = ConversationMessageSchema.parse({ schemaVersion: 2, sessionId: this.config.sessionId,
+      messageId: this.generateTurnId(input, "msg-rejected"), correlationId, turnSequence: userMessage.turnSequence + 1,
+      sender: "conversation", recipient: "user", intent: "error_report",
+      content: `Yêu cầu trong hàng đợi không còn hợp lệ và chưa được thực thi: ${error.message}`,
+      artifactReferences: [], createdAt: now, metadata: { rejectedDecision: error } });
+    const saved = await this.persistUpdatedSnapshot({ ...this.snapshot!,
+      session: { ...this.snapshot!.session, turnCount: agentReply.turnSequence, updatedAt: now },
+      messages: [...this.snapshot!.messages, userMessage, agentReply],
+      pendingInboundQueue: this.snapshot!.pendingInboundQueue.filter(pending => pending.queueId !== item.queueId)
+    }, new Set([item.queueId]));
+    if (!saved.ok) return saved;
+    return { ok: true, value: { sessionId: this.config.sessionId, correlationId, recognizedIntent: "conversation_only",
+      sessionStatus: saved.value.session.status, userMessage, agentReply, rejectedDecision: error,
+      queuedBecauseBusy: false, substantiveUpdate: true } };
   }
 
   private validateConversationMessages(...messages: readonly ConversationMessage[]): OperationResult<void> {
@@ -343,11 +373,13 @@ export class ConversationGateway {
         if (!repaired.ok) return repaired;
         const delegation = agentReply.metadata?.delegationRequest;
         const cancellation = agentReply.metadata?.cancellationRequest;
+        const rejection = agentReply.metadata?.rejectedDecision;
         return { ok: true, value: { sessionId: this.config.sessionId, correlationId: userMessage.correlationId,
-          ...(userMessage.runId ? { runId: userMessage.runId } : {}), recognizedIntent: input.conversationDecision.intent,
+          ...(userMessage.runId ? { runId: userMessage.runId } : {}), recognizedIntent: rejection ? "conversation_only" : input.conversationDecision.intent,
           sessionStatus: this.snapshot!.session.status, userMessage, agentReply, queuedBecauseBusy: false,
           substantiveUpdate: input.conversationDecision.intent !== "conversation_only",
           ...(delegation ? { delegationRequest: DelegationRequestSchema.parse(delegation) } : {}),
+          ...(rejection ? { rejectedDecision: ContractErrorSchema.parse(rejection) } : {}),
           ...(cancellation ? { cancellationRequest: CancellationRequestSchema.parse(cancellation) } : {}) } };
       }
     }
@@ -1666,6 +1698,16 @@ export class ConversationGateway {
         // Structured turns have durable identities: retain them until their result is saved.
         // A crash after execution then replays the committed message instead of losing work.
         const retainUntilProcessed = nextItem.kind === "user_turn" && nextItem.input.conversationDecision !== undefined;
+        if (nextItem.kind === "user_turn" && nextItem.input.conversationDecision &&
+            !this.snapshot.messages.some(message => message.sender === "user" && message.messageId === nextItem.input.messageId)) {
+          const currentDecision = resolveChatDecision(nextItem.input.conversationDecision, this.snapshot);
+          if (!currentDecision.ok) {
+            const rejected = await this.rejectQueuedDecision(nextItem, currentDecision.error);
+            if (!rejected.ok) return rejected;
+            processedUserTurns.push(rejected.value);
+            continue;
+          }
+        }
         if (!retainUntilProcessed) {
           const saveRes = await this.persistUpdatedSnapshot({ ...this.snapshot,
             pendingInboundQueue: this.snapshot.pendingInboundQueue.slice(1) }, new Set([nextItem.queueId]));

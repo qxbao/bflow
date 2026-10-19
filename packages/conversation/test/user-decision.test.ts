@@ -69,14 +69,31 @@ describe("trusted hook approval routing", () => {
   it.each([
     "Yêu cầu workflow loại spike: khảo sát cơ chế phê duyệt, chỉ đọc.",
     'Yêu cầu workflow: kiểm tra token "approve" trong parser',
-    "apr-user-decision-abc123: Yêu cầu workflow khảo sát token approve"
+    "apr-user-decision-abc123: Yêu cầu workflow khảo sát token approve",
+    "approve là từ khóa tiếng Anh nghĩa là gì?",
+    "đồng ý rằng Gateway có lỗi; hãy khảo sát thêm trước khi duyệt",
+    "Cần sửa lỗi Conversation Gateway trong packages/conversation",
+    "không đồng ý sửa mã nguồn, chỉ khảo sát"
   ])("does not approve a pending design because a new request mentions approval: %s", content => {
     expect(classifyTrustedApprovalReply(turn(content), designContext())).toBeUndefined();
   });
-  it.each(["approve", "Phê duyệt apr-user-decision-abc123", "apr-user-decision-abc123: approve", "reject", "Cần sửa thêm tiêu chí"])("retains an explicit governance reply: %s", content => {
+  it.each(["approve", "Phê duyệt apr-user-decision-abc123", "apr-user-decision-abc123: approve", "reject", "cần sửa", "apr-user-decision-abc123: Cần sửa thêm tiêu chí", "apr-user-decision-abc123: reject thiếu kiểm thử"])("retains an explicit governance reply: %s", content => {
     const result = classifyTrustedApprovalReply(turn(content), designContext());
     expect(result?.ok).toBe(true);
     if (result?.ok) expect(result.value.intent).toBe("approval_response");
+  });
+  it("requires a known target when several design approvals are pending", () => {
+    const firstContext = designContext();
+    const second = userDecisionRequest({ approvalId: "apr-design-second", metadata: {}, requestedBy: "coordinator" });
+    const context = { ...firstContext, pendingApprovals: { ...firstContext.pendingApprovals, [second.approvalId]: second } };
+    expect(classifyTrustedApprovalReply(turn("approve"), context)).toBeUndefined();
+    expect(classifyTrustedApprovalReply(turn("approve apr-missing"), context)).toBeUndefined();
+    const targeted = classifyTrustedApprovalReply(turn("apr-design-second: approve"), context);
+    expect(targeted?.ok && targeted.value.approvalInput?.approvalId).toBe("apr-design-second");
+  });
+  it("retains an exact rejection of one pending specialist question", () => {
+    const result = classifyTrustedApprovalReply(turn("reject"), contextWith(userDecisionRequest()));
+    expect(result?.ok && result.value.approvalInput?.decision).toBe("rejected");
   });
   it("retains exact specialist option replies", () => {
     const result = classifyTrustedApprovalReply(turn("2"), contextWith(userDecisionRequest()));

@@ -720,13 +720,25 @@ export function classifyTrustedApprovalReply(
   const approval = classified.value.approvalInput;
   if (approval?.selectedOption !== undefined) return classified;
   const content = normalizeForMatching(input.content);
-  const namedId = extractExplicitId(content, "apr-");
-  const namesPendingRequest = namedId !== undefined && context.pendingApprovals[namedId] !== undefined && content.startsWith(namedId);
-  const reply = namesPendingRequest ? content.slice(namedId!.length).replace(/^[\s:,-]+/, "") : content;
-  const explicitDecision = /^(?:(?:tôi|i)\s+)?(?:approve(?:d)?|lgtm|phê duyệt|đồng ý(?: duyệt)?|duyệt|chấp thuận|chấp nhận|ok duyệt|xác nhận duyệt|reject(?:ed)?|decline|từ chối|không đồng ý|không duyệt|bác bỏ|request changes|changes requested|changes_requested|cần sửa|yêu cầu chỉnh sửa|chỉnh sửa lại|cần thay đổi)(?!\p{L})/iu.test(reply);
-  const pendingRequest = approval?.approvalId ? context.pendingApprovals[approval.approvalId] : undefined;
-  const targetedSpecialistAnswer = namesPendingRequest && pendingRequest !== undefined && isUserDecisionRequest(pendingRequest);
-  return explicitDecision || targetedSpecialistAnswer ? classified : undefined;
+  const namedId = extractExplicitId(sanitizeInputText(input.content), "apr-");
+  const namedRequest = namedId ? context.pendingApprovals[namedId] : undefined;
+  // Never let an unrecognized id fall back to a different pending approval.
+  if (namedId && !namedRequest) return undefined;
+  const normalizedId = namedId?.toLowerCase();
+  const namesPendingRequest = normalizedId !== undefined && content.startsWith(normalizedId);
+  const endsWithPendingRequest = normalizedId !== undefined && content.endsWith(normalizedId);
+  const reply = (namesPendingRequest ? content.slice(normalizedId!.length) :
+    endsWithPendingRequest ? content.slice(0, -normalizedId!.length) : content).replace(/^[\s:,-]+|[\s:,.!?-]+$/gu, "");
+
+  // A keyword prefix is not approval evidence: “đồng ý rằng ...” and “cần sửa lỗi ...”
+  // may be ordinary discussion or a new request. Bare replies must be complete commands.
+  const completeDecision = /^(?:(?:tôi|i)\s+)?(?:approve(?:d)?|lgtm|phê duyệt|đồng ý(?: duyệt)?|duyệt|chấp thuận|chấp nhận|ok duyệt|xác nhận duyệt|reject(?:ed)?|decline|từ chối|không đồng ý|không duyệt|bác bỏ|request changes|changes requested|changes_requested|cần sửa|yêu cầu chỉnh sửa|chỉnh sửa lại|cần thay đổi)$/iu.test(reply);
+  const targetedReason = (namesPendingRequest || endsWithPendingRequest) &&
+    /^(?:(?:tôi|i)\s+)?(?:reject(?:ed)?|decline|từ chối|không đồng ý|không duyệt|bác bỏ|request changes|changes requested|changes_requested|cần sửa|yêu cầu chỉnh sửa|chỉnh sửa lại|cần thay đổi)(?!\p{L})/iu.test(reply);
+  const targetedSpecialistAnswer = namesPendingRequest && namedRequest !== undefined && isUserDecisionRequest(namedRequest);
+  const pendingDesigns = Object.values(context.pendingApprovals).filter(request => !isUserDecisionRequest(request));
+  const unambiguousTarget = namedRequest !== undefined || pendingDesigns.length === 1 || Object.keys(context.pendingApprovals).length === 1;
+  return (completeDecision || targetedReason || targetedSpecialistAnswer) && unambiguousTarget ? classified : undefined;
 }
 
 /**

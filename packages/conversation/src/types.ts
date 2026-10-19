@@ -397,6 +397,8 @@ export interface ConversationContextSnapshot {
 }
 
 export interface UserFriendlyResponse {
+  /** A queued proposal became invalid before execution; no handoff was performed. */
+  readonly rejectedDecision?: ContractError;
   readonly sessionId: string;
   readonly correlationId: string;
   readonly runId?: string;

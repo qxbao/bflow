@@ -129,6 +129,34 @@ describe("Chat decides intent; Gateway validates and executes", () => {
     expect(transport.sentRoleMessages).toHaveLength(1);
   });
 
+  it("rejects a queued action whose target has ended and continues processing the FIFO", async () => {
+    const { gateway, turn, config, transport } = await setup();
+    const first = await turn("Khảo sát MCP", spike("Khảo sát MCP"));
+    if (!first.ok || !first.value.runId) throw new Error("setup failed");
+    await gateway.setAgentBusyState(true);
+    const progress = { schema_version: 2, message_id: "progress-ended", correlation_id: first.value.correlationId,
+      run_id: first.value.runId, sender: { role: "coordinator", agent_id: "coordinator", pane_id: "pane-coordinator" },
+      recipient: { role: "conversation", agent_id: "chat", pane_id: "pane-chat" }, type: "conversation.progress",
+      payload: { sdlcStatus: "failed", failureSummary: "Workflow failed", headline: "Workflow failed" },
+      artifact_references: [], occurred_at: new Date().toISOString() };
+    expect((await gateway.handleCoordinatorRoleMessage(progress)).ok).toBe(true);
+    const cancellation = { intent: "cancellation_request", cancellationInput: { runId: first.value.runId } };
+    expect((await turn("Hủy workflow", cancellation, { messageId: "queued-cancel" })).ok).toBe(true);
+    expect((await turn("Khảo sát kỹ năng", spike("Khảo sát kỹ năng"))).ok).toBe(true);
+    const drained = await gateway.setAgentBusyState(false);
+    expect(drained.ok).toBe(true);
+    expect(gateway.getContextSnapshot().pendingInboundQueue).toHaveLength(0);
+    expect(transport.sentRoleMessages).toHaveLength(2);
+    const replay = async (instance: ConversationGateway) => instance.handleUserTurn({ sessionId: "session-chat",
+      messageId: "queued-cancel", content: "Hủy workflow", conversationDecision: cancellation } as never);
+    const rejected = await replay(gateway);
+    expect(rejected).toMatchObject({ ok: true, value: { recognizedIntent: "conversation_only",
+      rejectedDecision: { code: "validation" }, agentReply: { intent: "error_report" } } });
+    const recovered = new ConversationGateway(config);
+    expect(await replay(recovered)).toMatchObject({ ok: true, value: { rejectedDecision: { code: "validation" } } });
+    expect(transport.sentRoleMessages).toHaveLength(2);
+  });
+
   it("replays a committed decision after recovery without a second handoff", async () => {
     const { turn, config, transport } = await setup();
     const decision = spike("Khảo sát MCP");
