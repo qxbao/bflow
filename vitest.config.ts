@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { defineConfig } from "vitest/config";
 
 /**
@@ -9,7 +10,13 @@ const decodeEncodedFilePaths = {
   name: "bflow-decode-encoded-file-paths",
   enforce: "pre" as const,
   resolveId(id: string) {
-    return id.startsWith("/") && id.includes("%") ? decodeURIComponent(id) : null;
+    if (!id.startsWith("/") || !id.includes("%")) return null;
+    // A real path may contain a literal "%"; only rewrite when the decoded path exists and the raw one does not.
+    if (existsSync(id)) return null;
+    try {
+      const decoded = decodeURIComponent(id);
+      return existsSync(decoded) ? decoded : null;
+    } catch { return null; }
   }
 };
 
