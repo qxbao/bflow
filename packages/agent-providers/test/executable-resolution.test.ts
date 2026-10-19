@@ -11,7 +11,7 @@ afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, {
 async function fixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-path-")));
   roots.push(root);
-  const shadow = join(root, "claude-mem");
+  const shadow = join(root, "shadow-dir");
   const bin = join(root, "bin");
   await mkdir(shadow, { mode: 0o700 });
   await mkdir(bin, { mode: 0o700 });

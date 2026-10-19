@@ -55,14 +55,14 @@ describe("BuiltinSetupDoctor", () => {
   });
 
   it("a required tool with an owner action is a warning carrying that remediation; a plain missing required tool still fails", async () => {
-    const login = "Claude-Mem needs an existing subscription login: run claude auth login or codex login, then rerun setup.";
-    const deferred = await doctor.run(ctx, { ...base, observations: [{ ...tool("claude-mem", "missing", true), diagnostics: [login], ownerAction: login }] });
-    const check = deferred.checks.find((c) => c.checkId === "tool-claude-mem")!;
+    const login = "MemPalace is installed manually: run pip install mempalace, then rerun setup.";
+    const deferred = await doctor.run(ctx, { ...base, observations: [{ ...tool("mempalace", "missing", true), diagnostics: [login], ownerAction: login }] });
+    const check = deferred.checks.find((c) => c.checkId === "tool-mempalace")!;
     expect(check.status).toBe("warning");
     expect(check.remediation).toBe(login);
     expect(deferred.healthy).toBe(true);
-    const failing = await doctor.run(ctx, { ...base, observations: [tool("claude-mem", "missing", true)] });
-    expect(failing.checks.find((c) => c.checkId === "tool-claude-mem")!.status).toBe("failed");
+    const failing = await doctor.run(ctx, { ...base, observations: [tool("mempalace", "missing", true)] });
+    expect(failing.checks.find((c) => c.checkId === "tool-mempalace")!.status).toBe("failed");
     expect(failing.healthy).toBe(false);
   });
 

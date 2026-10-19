@@ -1903,7 +1903,7 @@ describe("@bflow/agent-providers", () => {
     });
 
     it("never overrides plugin-provided MCP servers that have no config.toml table (live: invalid transport)", async () => {
-      // Live finding (codex-cli 0.162.0): Claude-Mem's Codex plugin exposes `mcp-search` without a config table;
+      // Live finding (codex-cli 0.162.0): a Codex plugin can expose `mcp-search` without a config table;
       // `mcp_servers.mcp-search.enabled=false` made Codex abort loading its config.
       const home = await freshCodexHome({ "config.toml": "[mcp_servers.gitnexus]\ncommand = \"/usr/bin/true\"\n" });
       const adapter = codexAdapter(codexRunner({ globalServers: ["gitnexus", "mcp-search"] }), home, { hostMcpServers: bflowServer });
