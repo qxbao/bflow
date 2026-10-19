@@ -42,7 +42,8 @@ import {
   runWithRtk,
   superpowersInstallRoute,
   verifyRtk,
-  verifySuperpowersSkills
+  verifySuperpowersSkills,
+  type ToolHost
 } from "@bflow/tool-installer";
 import { CheckConfigurationSchema, ObservationSchema } from "@bflow/verification";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -75,6 +76,39 @@ function extractCommandOutput(res: { envelope?: { result?: { output?: unknown } 
     outcome?: string;
     steps?: Array<{ id: string; data?: Record<string, unknown> }>;
   };
+}
+
+function gitNexusIndexHarness(repositoryRoot: string, refreshedBeforeWriterLock = false) {
+  let indexed = false, statusCalls = 0, analyzeCalls = 0;
+  const observations: string[] = [];
+  const host: ToolHost = {
+    async download() { throw new Error("GitNexus indexing harness must not download"); },
+    async run(executable, args) {
+      if (executable === "git" && args[0] === "rev-parse")
+        return { exitCode: 0, stdout: "0123456789abcdef0123456789abcdef01234567\n", stderr: "" };
+      if (executable === "git" && args[0] === "status") return { exitCode: 0, stdout: "", stderr: "" };
+      if (args[0] === "status") {
+        expect(args).toEqual(["status", "--json"]);
+        statusCalls += 1;
+        // Simulate another writer only in the explicit race scenario. Otherwise
+        // both the initial read and locked recheck remain stale until analyze.
+        if (refreshedBeforeWriterLock && statusCalls > 1) indexed = true;
+        observations.push(indexed ? "status:registered" : "status:not-indexed");
+        return { exitCode: 0, stdout: indexed
+          ? `Partial index found...\n${JSON.stringify({ schemaVersion: 1, repository: repositoryRoot, status: "registered" })}`
+          : JSON.stringify({ schemaVersion: 1, repository: repositoryRoot, error: "not-indexed" }), stderr: "" };
+      }
+      if (args[0] === "analyze") {
+        expect(args).toEqual(["analyze", repositoryRoot, "--index-only"]);
+        analyzeCalls += 1;
+        observations.push("analyze");
+        indexed = true;
+        return { exitCode: 0, stdout: "indexed", stderr: "" };
+      }
+      throw new Error(`Unexpected harness command: ${executable} ${args.join(" ")}`);
+    }
+  };
+  return { host, observations, get analyzeCalls() { return analyzeCalls; } };
 }
 
 describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Harness + Real Tool Binaries)", () => {
@@ -137,32 +171,25 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
     const gnStateDir = join(tmpRoot, "gn-state-harness");
     mkdirSync(gnStateDir, { mode: 0o700 });
     const canonicalRtkRepo = realpathSync(rtkRepoDir);
-    let statusCalls = 0;
+    const harness = gitNexusIndexHarness(canonicalRtkRepo);
     const harnessObservation = await ensureGitNexusIndex({
-      repositoryRoot: rtkRepoDir,
-      stateRoot: gnStateDir,
-      executable: "gitnexus",
-      host: {
-        async download() {},
-        async run(executable, args) {
-          if (executable === "git" && args[0] === "rev-parse")
-            return { exitCode: 0, stdout: "0123456789abcdef0123456789abcdef01234567\n", stderr: "" };
-          if (executable === "git" && args[0] === "status") return { exitCode: 0, stdout: "", stderr: "" };
-          if (args[0] === "status") {
-            statusCalls += 1;
-            return {
-              exitCode: 0,
-              stdout: statusCalls === 1
-                ? JSON.stringify({ schemaVersion: 1, repository: canonicalRtkRepo, error: "not-indexed" })
-                : `Partial index found...\n${JSON.stringify({ schemaVersion: 1, repository: canonicalRtkRepo, status: "registered" })}`,
-              stderr: ""
-            };
-          }
-          return { exitCode: 0, stdout: "indexed", stderr: "" };
-        }
-      }
+      repositoryRoot: rtkRepoDir, stateRoot: gnStateDir, executable: "gitnexus", host: harness.host
     });
     expect(harnessObservation.status).toBe("indexed");
+    expect(harness.analyzeCalls).toBe(1);
+    expect(harness.observations).toEqual(["status:not-indexed", "status:not-indexed", "analyze", "status:registered"]);
+  });
+
+  it("[HARNESS] avoids GitNexus analysis when another writer refreshes the index before the locked recheck", async () => {
+    const gnStateDir = join(tmpRoot, "gn-state-concurrent-refresh");
+    mkdirSync(gnStateDir, { mode: 0o700 });
+    const harness = gitNexusIndexHarness(realpathSync(rtkRepoDir), true);
+    const observation = await ensureGitNexusIndex({
+      repositoryRoot: rtkRepoDir, stateRoot: gnStateDir, executable: "gitnexus", host: harness.host
+    });
+    expect(observation.status).toBe("fresh");
+    expect(harness.analyzeCalls).toBe(0);
+    expect(harness.observations).toEqual(["status:not-indexed", "status:registered"]);
   });
 
   it.skipIf(!livePlatformEnabled)("[LIVE TOOL] verifies GitNexus 1.6.12 repository indexing, status schema, and live stdio MCP tools", async () => {
@@ -190,37 +217,14 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
     expect(parsedRealStatus.schemaVersion).toBe(1);
     expect(realpathSync(parsedRealStatus.repository)).toBe(canonicalRtkRepo);
 
-    let realSchemaStatusCalls = 0;
+    const realSchemaHarness = gitNexusIndexHarness(canonicalRtkRepo);
     const gnRealSchemaObs = await ensureGitNexusIndex({
-      repositoryRoot: rtkRepoDir,
-      stateRoot: join(tmpRoot, "gn-state-real-schema"),
-      executable: gnBin,
-      host: {
-        async download() {},
-        async run(executable, args) {
-          if (executable === "git" && args[0] === "rev-parse") {
-            return { exitCode: 0, stdout: "0123456789abcdef0123456789abcdef01234567\n", stderr: "" };
-          }
-          if (executable === "git" && args[0] === "status") {
-            return { exitCode: 0, stdout: "", stderr: "" };
-          }
-          if (args[0] === "status") {
-            realSchemaStatusCalls += 1;
-            return {
-              exitCode: 0,
-              stdout:
-                realSchemaStatusCalls === 1
-                  ? JSON.stringify({ schemaVersion: 1, repository: canonicalRtkRepo, error: "not-indexed" })
-                  : `Partial index found...\n${JSON.stringify({ schemaVersion: 1, repository: canonicalRtkRepo, status: "registered" })}`,
-              stderr: ""
-            };
-          }
-          return { exitCode: 0, stdout: "indexed", stderr: "" };
-        }
-      }
+      repositoryRoot: rtkRepoDir, stateRoot: join(tmpRoot, "gn-state-real-schema"), executable: gnBin,
+      host: realSchemaHarness.host
     });
     // QA-P34-08 fixed: gitnexus 1.6.12 status="registered" (with leading warning line) is accepted as indexed
     expect(gnRealSchemaObs.status).toBe("indexed");
+    expect(realSchemaHarness.analyzeCalls).toBe(1);
 
     // 3. Real GitNexus service definition & real stdio MCP server negotiation
     const gnServiceDef = await createGitNexusService({
