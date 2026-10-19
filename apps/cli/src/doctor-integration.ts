@@ -1033,6 +1033,10 @@ export async function runDoctorDiagnostics(
 
   for (const tool of toolsList) {
     const isRequired = requiredTools.includes(tool);
+    // MemPalace is a manual prerequisite: `bflow setup --apply` never installs it.
+    const installHint = tool === "mempalace"
+      ? "Install MemPalace manually (uv tool install mempalace) and register its MCP server; 'bflow setup --apply' does not install it."
+      : `Run 'bflow setup --apply' to install '${tool}'.`;
     const override = dependencies?.toolOverrides?.[tool];
 
     let tStatus: DoctorCheckStatus = "pass";
@@ -1050,8 +1054,8 @@ export async function runDoctorDiagnostics(
         if (isRequired) {
           tStatus = "fail";
           tReason = `Required tool '${tool}' is missing or unavailable.`;
-          tRemediation = `Run 'bflow setup --apply' to install '${tool}'.`;
-          tRepair = "bflow setup --apply";
+          tRemediation = installHint;
+          tRepair = tool === "mempalace" ? undefined : "bflow setup --apply";
         } else {
           tStatus = "skipped";
           tReason = `Tool '${tool}' is optional and not installed.`;
@@ -1074,8 +1078,8 @@ export async function runDoctorDiagnostics(
           if (isRequired) {
             tStatus = "fail";
             tReason = `Required tool '${tool}' failed with exit code ${tRes.exitCode}.`;
-            tRemediation = `Run 'bflow setup --apply' to install '${tool}'.`;
-            tRepair = "bflow setup --apply";
+            tRemediation = installHint;
+            tRepair = tool === "mempalace" ? undefined : "bflow setup --apply";
           } else {
             tStatus = "skipped";
             tReason = `Tool '${tool}' is optional and not installed.`;
@@ -1085,8 +1089,8 @@ export async function runDoctorDiagnostics(
         if (isRequired) {
           tStatus = "fail";
           tReason = `Required tool '${tool}' is missing or unavailable.`;
-          tRemediation = `Run 'bflow setup --apply' to install '${tool}'.`;
-          tRepair = "bflow setup --apply";
+          tRemediation = installHint;
+          tRepair = tool === "mempalace" ? undefined : "bflow setup --apply";
         } else {
           tStatus = "skipped";
           tReason = `Tool '${tool}' is optional and not installed.`;
