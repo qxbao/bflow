@@ -79,8 +79,12 @@ function hasChangeAuthority(text: string): boolean {
   const changeText = separateInvestigations(text).changeText;
   // Negative acceptance examples and scoped exclusions do not revoke the top-level request.
   const authorityLines = changeText.split(/\n/u).filter(line => !/^\s*(?:[-*•]|\d+[.)])\s+/.test(line)).join("\n");
+  const authorityText = commandText(authorityLines).replace(
+    /(?<!\p{L})(?:(?:chưa|không|đừng)\s+(?:sửa|viết|triển khai|thay đổi)|(?:do not|don't)\s+(?:edit|change|implement))\s+(?=(?:(?:packages|src|apps|tests|test|scripts|lib|components|skills|agents|docs)\/))/giu,
+    ""
+  );
   return /^(?:bugfix|triển khai|viết|sửa|tạo|xây dựng|thêm|cập nhật|xóa|tối ưu|tái cấu trúc|build|implement|refactor|fix|add|update|remove|delete|change requirement|thay đổi yêu cầu)(?!\p{L})/iu.test(requestBody(changeText)) &&
-    !/(?:chưa|không|đừng)\s+(?:sửa|viết|triển khai|thay đổi)|(?:do not|don't)\s+(?:edit|change|implement)/iu.test(commandText(authorityLines));
+    !/(?:chưa|không|đừng)\s+(?:sửa|viết|triển khai|thay đổi)|(?:do not|don't)\s+(?:edit|change|implement)/iu.test(authorityText);
 }
 
 function clarification(question: string): IntentClassificationResult {

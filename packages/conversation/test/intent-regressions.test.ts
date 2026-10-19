@@ -11,6 +11,15 @@ async function setup() {
 }
 
 describe("Conversation authority and intent regressions", () => {
+  it("keeps a positive change request while excluding a protected package", async () => {
+    const { turn } = await setup();
+    const result = await turn("Sửa packages/parser, không thay đổi packages/core");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.recognizedIntent).toBe("workflow_request");
+    expect(result.value.delegationRequest?.metadata?.affectedPaths).toEqual(["packages/parser"]);
+  });
+
   it.each(["Bạn có những MCP nào", "Soạn sẵn prompt để tôi gửi cho session mới", "Draft a prompt to fix packages/conversation in another session", "Giải thích ví dụ: cancel workflow", "Explain `stop run run-old`", "Khảo sát packages/core và báo cáo nguyên nhân, chưa sửa code"])("keeps conversational intent without run: %s", async content => {
     const { turn, transport, gateway } = await setup();
     const response = await turn(content);
