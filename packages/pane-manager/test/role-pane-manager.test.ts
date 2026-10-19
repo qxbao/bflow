@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -970,6 +970,126 @@ describe("RolePaneManager Verification Suite", () => {
     const starts = runner.calls.filter(call => call.args[0] === "agent" && call.args[1] === "start");
     expect(starts).toHaveLength(8);
     expect(starts[0]!.args[starts[0]!.args.indexOf("--timeout") + 1]).toBe("90000");
+  });
+  describe("native agent startup budgets", () => {
+    const request = { role: "developer" as const, paneId: "pane-budget", workspaceId: "ws-budget", tabId: "tab-budget", cwd: config.workspaceRoot };
+    const epoch = Date.parse("2026-10-19T00:00:00.000Z");
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(epoch);
+      runner.panes.set(request.paneId, { paneId: request.paneId, terminalId: "term-budget", workspaceId: request.workspaceId,
+        tabId: request.tabId, agent: null, agentStatus: "idle", focused: false, revision: 1 });
+      runner.processInfos.set(request.paneId, { paneId: request.paneId, shellPid: 1000,
+        foregroundProcessGroupId: 1000, foregroundProcesses: [{ pid: 1000, command: "zsh" }] });
+    });
+    afterEach(() => vi.useRealTimers());
+    const starts = () => runner.calls.filter(call => call.args[0] === "agent" && call.args[1] === "start");
+
+    it.each([3001, 90000, 299999, 300000, 300001, 600000])("bounds configured timeout %s to the native maximum", async timeoutMs => {
+      const manager = createRolePaneManager({ config: { ...config, roleConfigs: { developer: { startupTimeoutMs: timeoutMs } } }, runner });
+      const pending = manager.startAgentInPane(request);
+      await vi.runAllTimersAsync();
+      expect((await pending).ok).toBe(true);
+      expect(starts()).toHaveLength(1);
+      const call = starts()[0]!;
+      expect(call.args[call.args.indexOf("--timeout") + 1]).toBe(String(Math.min(timeoutMs, 300000)));
+      expect(call.timeoutMs).toBe(Math.min(timeoutMs, 300000));
+    });
+
+    it("preserves a request timeout below the role timeout", async () => {
+      const manager = createRolePaneManager({ config: { ...config, roleConfigs: { developer: { startupTimeoutMs: 600000 } } }, runner });
+      const pending = manager.startAgentInPane({ ...request, timeoutMs: 90000 });
+      await vi.runAllTimersAsync();
+      expect((await pending).ok).toBe(true);
+      expect(starts()[0]!.args[starts()[0]!.args.indexOf("--timeout") + 1]).toBe("90000");
+    });
+
+    it.each([
+      [{ timeoutMs: 10000 }, 9100],
+      [{ deadline: new Date(epoch + 10000).toISOString() }, 9100],
+      [{ timeoutMs: 300000, deadline: new Date(epoch + 600000).toISOString() }, 299100]
+    ] as const)("uses the remaining operation budget %j", async (options, expected) => {
+      const manager = createRolePaneManager({ config, runner });
+      const pending = manager.startAgentInPane({ ...request, timeoutMs: 600000 }, options);
+      await vi.runAllTimersAsync();
+      expect((await pending).ok).toBe(true);
+      const call = starts()[0]!;
+      expect(call.args[call.args.indexOf("--timeout") + 1]).toBe(String(expected));
+      expect(call.timeoutMs).toBe(expected);
+    });
+
+    it("honors a request override and the remaining lifecycle budget without dropping cancellation", async () => {
+      const signal = new AbortController().signal;
+      const manager = createRolePaneManager({ config: { ...config, roleConfigs: { developer: { startupTimeoutMs: 600000 } } }, runner });
+      const pending = manager.startAgentInPane({ ...request, timeoutMs: 90000 }, { timeoutMs: 20000, deadline: new Date(epoch + 10000).toISOString(), signal });
+      await vi.runAllTimersAsync();
+      expect((await pending).ok).toBe(true);
+      const call = starts()[0]!;
+      expect(call.args[call.args.indexOf("--timeout") + 1]).toBe("9100");
+      expect(call.timeoutMs).toBe(9100);
+      expect(call.signal).toBe(signal);
+    });
+
+    it.each([1, 3000])("does not widen a short requested timeout %s", async timeoutMs => {
+      const manager = createRolePaneManager({ config, runner });
+      const pending = manager.startAgentInPane({ ...request, timeoutMs });
+      await vi.runAllTimersAsync();
+      expect(await pending).toMatchObject({ ok: false, error: { code: "timeout", retrySafety: "not_started", details: { started: false } } });
+      expect(starts()).toHaveLength(0);
+    });
+
+    it.each([NaN, Infinity, -1, 0, 3001.5])("rejects invalid timeout %s before Herdr calls", async timeoutMs => {
+      const manager = createRolePaneManager({ config, runner });
+      const pending = manager.startAgentInPane({ ...request, timeoutMs });
+      await vi.runAllTimersAsync();
+      expect(await pending).toMatchObject({ ok: false, error: { code: "validation" } });
+      expect(runner.calls).toHaveLength(0);
+    });
+
+    it.each([
+      { timeoutMs: NaN }, { timeoutMs: Infinity }, { timeoutMs: -1 }, { timeoutMs: 3001.5 }, { deadline: "invalid" }
+    ])("rejects invalid operation options %j before Herdr calls", async options => {
+      const manager = createRolePaneManager({ config, runner });
+      const pending = manager.startAgentInPane(request, options);
+      await vi.runAllTimersAsync();
+      expect(await pending).toMatchObject({ ok: false, error: { code: "validation" } });
+      expect(runner.calls).toHaveLength(0);
+    });
+
+    it.each([
+      { timeoutMs: 3000 }, { timeoutMs: 3900 }, { deadline: new Date(epoch - 1).toISOString() },
+      { deadline: new Date(epoch + 3900).toISOString() }
+    ])("does not launch when the lifecycle budget has expired or become too short: %j", async options => {
+      const manager = createRolePaneManager({ config, runner });
+      const pending = manager.startAgentInPane(request, options);
+      await vi.runAllTimersAsync();
+      expect(await pending).toMatchObject({ ok: false, error: { code: "timeout", retrySafety: "not_started", details: { started: false } } });
+      expect(starts()).toHaveLength(0);
+    });
+
+    it("recomputes the remaining budget after an acknowledged busy rejection", async () => {
+      runner.onCommand = call => call.args[0] === "agent" && call.args[1] === "start"
+        ? { exitCode: 1, stdout: "", stderr: JSON.stringify({ id: "1", error: { code: "agent_pane_busy", message: "busy" } }) } : undefined;
+      const manager = createRolePaneManager({ config, runner });
+      const pending = manager.startAgentInPane(request, { timeoutMs: 4200 });
+      await vi.runAllTimersAsync();
+      expect(await pending).toMatchObject({ ok: false, error: { code: "timeout", retrySafety: "not_started", details: { started: false } } });
+      expect(starts()).toHaveLength(1);
+      expect(starts()[0]!.args[starts()[0]!.args.indexOf("--timeout") + 1]).toBe("3300");
+    });
+
+    it("does not dispatch when cancelled during shell readiness", async () => {
+      const controller = new AbortController();
+      runner.onCommand = call => {
+        if (call.args[0] === "pane" && call.args[1] === "process-info") controller.abort();
+        return undefined;
+      };
+      const manager = createRolePaneManager({ config, runner });
+      const pending = manager.startAgentInPane(request, { signal: controller.signal });
+      await vi.runAllTimersAsync();
+      expect(await pending).toMatchObject({ ok: false, error: { code: "cancelled" } });
+      expect(starts()).toHaveLength(0);
+    });
   });
   it("explains Codex update blocking with exact targets and never echoes raw screen secrets or accepts the dialog", async () => {
     const secret = "SCREEN_SECRET_CANARY_DO_NOT_ECHO";

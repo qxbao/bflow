@@ -102,6 +102,16 @@ malformed response or contradictory listing leaves shutdown incomplete. It recor
 uses another successful listing to reconcile panes already closed. Runtime
 quiesce and durable checkpoints remain the caller's responsibility.
 
+Native agent startup waits are capped at Herdr's protocol limit of 300000 ms.
+The requested/role timeout remains an upper bound; a larger total lifecycle budget
+is never forwarded unchanged. `OperationOptions.timeoutMs` and `deadline` further
+bound the wait, including time spent checking shell readiness and validating
+prompts. Each acknowledged busy retry recomputes the remaining budget. A remaining
+budget of 3000 ms or less returns a local `timeout` with `retrySafety: not_started`
+before agent launch; invalid numeric inputs fail validation. The command runner
+uses the same bounded wait and retains cancellation. Lost acknowledgements still
+require reconciliation rather than automatic replay.
+
 Permanent-role startup persists an `initializing` manifest and `launchIntent`
 binding before each `agent start`, then persists each successful binding. A
 blocked startup or lost acknowledgement therefore retains the exact pane for

@@ -1000,6 +1000,27 @@ export class RolePaneManager {
       }
 
       const roleConfig = this.#config.roleConfigs?.[spec.topologyRole];
+      const startupTimeoutMs = request.timeoutMs ?? roleConfig?.startupTimeoutMs ?? 60000;
+      if (!Number.isSafeInteger(startupTimeoutMs) || startupTimeoutMs <= 0)
+        return validationError("Agent startup timeout must be a positive safe integer in milliseconds");
+      if (options?.timeoutMs !== undefined && (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs <= 0))
+        return validationError("Operation timeout must be a positive safe integer in milliseconds");
+      const deadline = options?.deadline === undefined ? Infinity : Date.parse(options.deadline);
+      if (Number.isNaN(deadline)) return validationError("Operation deadline must be a valid timestamp");
+      const operationDeadline = Math.min(deadline, options?.timeoutMs === undefined ? Infinity : this.#clock().getTime() + options.timeoutMs);
+      const launchBudget = (): OperationResult<number> => {
+        if (options?.signal?.aborted)
+          return { ok: false, error: { code: "cancelled", retryable: false, message: "Agent startup interrupted; state preserved." } };
+        // Herdr protocol 22 accepts integer readiness waits in (3000, 300000].
+        const timeoutMs = Math.floor(Math.min(startupTimeoutMs, 300000, operationDeadline - this.#clock().getTime()));
+        if (timeoutMs <= 3000)
+          return { ok: false, error: { code: "timeout", retryable: true, retrySafety: "not_started",
+            message: "Agent was not started: the remaining startup budget must exceed 3000ms. Increase the configured startup timeout or lifecycle timeout and retry.",
+            details: { started: false } } };
+        return ok(timeoutMs);
+      };
+      const initialBudget = launchBudget();
+      if (!initialBudget.ok) return initialBudget;
       const agentName = request.agentName ?? roleConfig?.agentName ?? spec.defaultAgentName;
       if (!isValidAgentName(agentName)) {
         return validationError(
@@ -1077,7 +1098,8 @@ export class RolePaneManager {
       let processInfo = parsePaneProcessInfoResult(procOutcome);
       let stableReadyCount = 0;
       for (let attempt = 0; attempt < 60; attempt++) {
-        if (options?.signal?.aborted) return { ok: false, error: { code: "cancelled", retryable: false, message: "Shell startup wait interrupted; state preserved." } };
+        const budget = launchBudget();
+        if (!budget.ok) return budget;
         const readiness = isShellReadyForAgent(pane, processInfo);
         if (readiness.ready) {
           stableReadyCount++;
@@ -1096,10 +1118,6 @@ export class RolePaneManager {
       }
 
       const startArgs = ["agent", "start", agentName, "--kind", agentKind, "--pane", request.paneId];
-      const timeout = request.timeoutMs ?? roleConfig?.startupTimeoutMs ?? 60000;
-      if (timeout !== undefined) {
-        startArgs.push("--timeout", String(timeout));
-      }
       let passedArgs = launch !== undefined ? [...launch.argv] : (request.args ?? roleConfig?.args);
       let originalPromptSource: string | undefined;
       if (launch !== undefined && ["chat", "coordinator"].includes(spec.topologyRole)) {
@@ -1143,13 +1161,19 @@ export class RolePaneManager {
         } finally { await file.close(); }
         passedArgs = args;
       }
-      if (passedArgs && passedArgs.length > 0) {
-        startArgs.push("--", ...passedArgs);
-      }
-
+      const providerArgs = passedArgs?.length ? ["--", ...passedArgs] : [];
       // Launch env is NOT passed here: `agent start` types the command into the pane's existing shell, so
       // invocation env never reaches the provider. Env is applied at pane creation (see #herdrCreate).
-      let startOutcome = await this.#runHerdr(startArgs, options);
+      const dispatchStart = async (): Promise<OperationResult<CommandOutcome>> => {
+        // Shell readiness, prompt validation and acknowledged busy waits consume the lifecycle budget.
+        const budget = launchBudget();
+        if (!budget.ok) return budget;
+        const args = [...startArgs, "--timeout", String(budget.value), ...providerArgs];
+        return ok(await this.#runHerdr(args, { ...options, timeoutMs: budget.value }));
+      };
+      let dispatched = await dispatchStart();
+      if (!dispatched.ok) return dispatched;
+      let startOutcome = dispatched.value;
       const isBusyError = (outcome: CommandOutcome): boolean => {
         // Only an acknowledged pre-dispatch rejection proves that retry cannot
         // duplicate a launch. Timeouts/partial output require reconciliation.
@@ -1164,7 +1188,9 @@ export class RolePaneManager {
       for (let busyRetry = 0; busyRetry < 20 && isBusyError(startOutcome); busyRetry++) {
         if (options?.signal?.aborted) return { ok: false, error: { code: "cancelled", retryable: false, message: "Agent startup wait interrupted; state preserved." } };
         await new Promise(resolve => setTimeout(resolve, 500));
-        startOutcome = await this.#runHerdr(startArgs, options);
+        dispatched = await dispatchStart();
+        if (!dispatched.ok) return dispatched;
+        startOutcome = dispatched.value;
       }
 
       if (startOutcome.exitCode !== 0 || startOutcome.failure) {
