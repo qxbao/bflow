@@ -14,14 +14,14 @@ The built-in npm recipe downloads an exact tarball and verifies its SHA-256 befo
 
 Generated config may be written with `writeOwnedToolConfig`, which refuses unowned files, returns a rollback copy for an owned update, and serializes writers. It is for Bflow-owned generated files, not arbitrary edits to `~/.claude`, `~/.codex`, or `~/.gemini`.
 
-For `provider_plugin` pins, pass `OfficialProviderPluginAdapter` as `providerPlugin` to `ManagedToolInstaller`. Its `discoverSkills` callback must inspect the provider's *active* skill inventory; `probeMemory` must test the configured shared worker and the specific provider integration. `verifyProvenance` must bind an active Superpowers marketplace snapshot to the reviewed pin; version alone is insufficient. The installer downloads and verifies the approved artifact before invoking a native route, then checks exact installed version and functional readiness. Claude-Mem uses its pinned npm installer with `--ide` and `--no-auto-start`; it does not start a worker per Bflow agent. Superpowers uses each provider's plugin CLI. Each provider gets its own installer instance and destination. The machine setup approval must cover the provider-home mutations listed by the upstream command. These native routes can touch shared provider state, so Bflow does not claim those files in `ownedPaths` or remove them automatically on rollback.
+For `provider_plugin` pins, pass `OfficialProviderPluginAdapter` as `providerPlugin` to `ManagedToolInstaller`. Its `discoverSkills` callback must inspect the provider's *active* skill inventory. `verifyProvenance` must bind an active Superpowers marketplace snapshot to the reviewed pin; version alone is insufficient. The installer downloads and verifies the approved artifact before invoking a native route, then checks exact installed version and functional readiness. Superpowers uses each provider's plugin CLI. Each provider gets its own installer instance and destination. The machine setup approval must cover the provider-home mutations listed by the upstream command. These native routes can touch shared provider state, so Bflow does not claim those files in `ownedPaths` or remove them automatically on rollback.
 
 ## Tool-specific operation
 
 | Tool | Installation and update | Verification and capability | Configuration / rollback |
 | --- | --- | --- | --- |
 | RTK | Pin the `rtk-ai/rtk` release binary archive; `rtk_archive` recipe. | `rtk --version`, `rtk gain`; `cli_only`. | `rtkProviderIntegration` gives official Claude/Codex/Antigravity init routes; host must check `rtk init --help`, existing hooks and provider release before applying one route. `rtk proxy` retains full output. Remove only Bflow-owned binary/config, or restore retained version. |
-| Claude-Mem | The native adapter installs a checksum-verified npm tarball, then runs the pinned CLI's `install --ide claude-code\|codex-cli\|antigravity --provider host --no-auto-start`. A global npm SDK installation does not count as activation. | Checks package identity/version/license, `doctor`, existing worker and provider-specific probe. `observeClaudeMemWorker` requires JSON `status: ok` and the exact configured worker version. `observeClaudeMemGrowth` samples RSS. | Use configured data directory and `.worker.port` or explicit port. Never start a worker per agent. `ClaudeMemProjectReader` exposes only project-filtered batch reads on loopback and rechecks every row; P27 must wrap it with Gateway authorization. Codex and Agy use their official installer adapters, never Claude hook semantics. Native rollback remains manual. |
+| MemPalace | Not installed by Bflow. `mempalace` is a manual requirement: the operator installs the PyPI package (for example into a private virtualenv) and registers its MCP server with the provider. | `bflow doctor` only runs `mempalace --version`; presence is not evidence of task success. | The palace lives outside the repository (`~/.mempalace`); Bflow neither mines, repairs nor rewrites it. |
 | GitNexus | Pin official `gitnexus` npm tarball; review the selected package's license. | `gitnexus --version`; `ensureGitNexusIndex` requires versioned `status --json`, then `analyze <repo> --index-only` under one machine writer lock when stale, and checks JSON status again. It refuses malformed/unsupported status instead of inferring freshness from exit code or Git porcelain. MCP `initialize`/`tools/list` must pass `verifyMcpStartup`. | `--index-only` avoids GitNexus writing AGENTS.md or skills into the repository. Gateway should launch pinned `gitnexus mcp` with `GITNEXUS_MCP_ALLOWED_REPOS` and, where suitable, `GITNEXUS_MCP_READ_ONLY=1`. Partition by repo/storage; do not let concurrent writers share a LadybugDB store. Retained previous install is rollback. |
 | Chrome DevTools MCP | Pin official `chrome-devtools-mcp` npm tarball. | Check server version and Chrome executable version, then Gateway MCP startup/tool discovery. `planChromeSession` rejects Chrome `SingletonLock`. | Use `--userDataDir` under Bflow managed root and `--executablePath` for the verified browser. One profile per repository/task, with Gateway exclusive resource lease per page call. The server launches Chrome on first browser-tool use. Never connect to the personal Chrome profile. |
 | Superpowers | Install independently through `claude plugin install`, `codex plugin add`, and `agy plugin install`. `superpowersInstallRoute` records each route. | Require exact enabled plugin version, verified marketplace provenance, and `using-superpowers` in active skill discovery. | Namespace external skills separately from Bflow skills. Bflow's `TddDecision` controls TDD; the external skill's default cannot widen policy or skip gates. Provider marketplace installation may not reproduce the downloaded archive byte-for-byte. Native rollback remains manual. |
@@ -35,7 +35,6 @@ For `provider_plugin` pins, pass `OfficialProviderPluginAdapter` as `providerPlu
 | Plugin unavailable or probe fails | Planning requires a configured native adapter; activation without independent functional verification returns `unknown`. | Provider-specific official install, version-specific hook/skill test and marketplace provenance check. |
 | MCP startup failure | `verifyMcpStartup` returns blocked and no capability. | P27 Gateway performs real protocol negotiation, authorization, tool discovery and restart limits. |
 | Duplicate GitNexus writer | Exclusive machine writer lock returns `busy`. | Shared storage topology and cross-host locking are not supported. |
-| Claude-Mem growth / worker loss | RSS probe and loopback health report growing/blocked; no worker spawn. | Operator sets growth thresholds and P27 adapter enforces project-filtered access. |
 | Browser profile lock | `profile_locked`; separate task profile/resource key. | Gateway enforces lease/fencing and page routing; live Chrome launch and per-page isolation must be tested. |
 
 This package's tests use fake command runners and HTTP probes. They do not prove live Herdr, provider hooks, MCP wire compatibility, Chrome launch or commercial GitNexus license eligibility. `FileToolCapabilityRegistry` is local-filesystem only; a crash can leave a lock file that an operator must inspect before removal.
@@ -52,7 +51,7 @@ From the repository root: `pnpm exec tsc -b packages/tool-installer --pretty fal
 ## Official references
 
 - [RTK installation and agent support](https://github.com/rtk-ai/rtk)
-- [Claude-Mem installation](https://docs.claude-mem.ai/installation)
+- [MemPalace on PyPI](https://pypi.org/project/mempalace/)
 - [GitNexus CLI, MCP and repository policy](https://github.com/abhigyanpatwari/GitNexus) and [license](https://github.com/abhigyanpatwari/GitNexus/blob/main/LICENSE)
 - [Chrome DevTools MCP configuration](https://github.com/ChromeDevTools/chrome-devtools-mcp/blob/main/docs/configuration.md)
 - [Superpowers provider installation](https://github.com/obra/superpowers)
@@ -76,17 +75,9 @@ selected RTK release includes the BUSL-1.1 engine license alongside its MIT CLI 
 Agy uses the native archive linked by the [official installer](https://antigravity.google/docs/cli/install/).
 Herdr uses the raw release binary from the [official release manifest](https://herdr.dev/latest.json).
 The installer adds no shell initialization, provider permissions, hooks or credentials.
-Claude-Mem and Superpowers use `NativeProvidersToolInstaller`, composing an approved
+Superpowers uses `NativeProvidersToolInstaller`, composing an approved
 provider-specific installation for every selected provider. The existing native runtime
-verifies active-cache provenance, Bflow policy overlays and shared worker/project-filtered
-memory hooks. Memory defaults to `auto`: preserve a compatible saved route, otherwise
-select an already authenticated Claude subscription or file-backed ChatGPT/Codex login.
-`memory.provider` (CLI `--memory-provider`) can explicitly select `claude`, `codex` or
-`host`. Account discovery reads status/structured metadata without inference, token
-refresh, credential copying or signup. The selected quota route and data directory are
-bound to the approved native desired-state digest; account-route drift invalidates the
-plan before installation. Models already saved in memory settings are preserved. Host
-mode requires an existing external loopback observer only when explicitly selected. Unknown native delivery remains retained
+verifies active-cache provenance and Bflow policy overlays. Unknown native delivery remains retained
 and is never automatically replayed. Native provider config changes require the machine
 setup approval. Isolated setup passes `NativeRuntimeOptions.isolation` (HOME plus
 `CLAUDE_CONFIG_DIR` for Claude and `CODEX_HOME` for Codex) to every provider child process, and
@@ -96,5 +87,3 @@ Real setup passes no isolation and keeps the caller environment unchanged. `addi
 machine setup doctor without pretending that plugin files are standalone executables. MCP launch requirements are returned separately for Runtime/Gateway scope,
 Chrome profile isolation and verified index setup; installing a server does not register
 or start it. Binary version checks do not establish live SDLC readiness.
-
-Pinned Claude-Mem provider behavior follows the [v14.0.1 configuration](https://raw.githubusercontent.com/thedotmack/claude-mem/v14.0.1/docs/public/configuration.mdx) and [installation](https://raw.githubusercontent.com/thedotmack/claude-mem/v14.0.1/docs/public/installation.mdx) documentation. Codex subscription authentication must be file-backed ChatGPT login; API keys and keychain-only credentials are rejected. Missing login reports `claude auth login` or `codex login`, without creating credentials. Setup tests do not generate memory observations or make inference calls.

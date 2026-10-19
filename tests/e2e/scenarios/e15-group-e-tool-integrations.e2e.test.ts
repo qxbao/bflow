@@ -1,7 +1,5 @@
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -33,12 +31,9 @@ import {
 import { SpecificationEngine } from "@bflow/specification";
 import { TestStrategyResolver } from "@bflow/test-strategy";
 import {
-  ClaudeMemProjectReader,
   applyRtkConfiguration,
-  createClaudeMemService,
   createGitNexusService,
   ensureGitNexusIndex,
-  observeClaudeMemWorker,
   planChromeSession,
   planRtkConfiguration,
   probeStdioMcp,
@@ -136,110 +131,6 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
     const proxyRun = await runWithRtk(rtkBin, ["git", "status", "--short"], true);
     expect(filteredRun.exitCode).toBe(0);
     expect(proxyRun.exitCode).toBe(0);
-  });
-
-  it("[HARNESS + REAL STDIO MCP ADAPTER] verifies Claude-Mem worker adoption, project-scoped reader, cross-project batch rejection, and stdio MCP adapter", async () => {
-    const memDataDir = join(tmpRoot, "claude-mem-data");
-    const memConfigDir = join(tmpRoot, "claude-mem-config");
-    mkdirSync(memDataDir, { mode: 0o700 });
-    mkdirSync(memConfigDir, { mode: 0o700 });
-
-    const observations = [
-      { id: 1, project: "repo-alpha", text: "Observation 1 for repo-alpha: strict schema v3" },
-      { id: 2, project: "repo-alpha", text: "Observation 2 for repo-alpha: Herdr done is not task success" },
-      { id: 99, project: "repo-beta-leak", text: "Secret observation from repo-beta" }
-    ];
-
-    const memServer = createServer(async (req, res) => {
-      const u = new URL(req.url ?? "/", "http://127.0.0.1");
-      if (u.pathname === "/api/health") {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ status: "ok", version: "1.0.0", initialized: true, pid: process.pid }));
-        return;
-      }
-      if (u.pathname === "/api/observations" && req.method === "GET") {
-        const proj = u.searchParams.get("project");
-        const limit = Number(u.searchParams.get("limit") ?? 20);
-        const items = observations.filter((o) => o.project === proj).slice(0, limit);
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ items }));
-        return;
-      }
-      if (u.pathname === "/api/observations/batch" && req.method === "POST") {
-        let body = "";
-        for await (const chunk of req) body += chunk;
-        const parsed = JSON.parse(body) as { ids: number[] };
-        const items = observations.filter((o) => parsed.ids.includes(o.id));
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(items));
-        return;
-      }
-      res.writeHead(404);
-      res.end();
-    });
-
-    await new Promise<void>((r) => memServer.listen(0, "127.0.0.1", r));
-    const memPort = (memServer.address() as AddressInfo).port;
-    writeFileSync(join(memDataDir, "worker.pid"), JSON.stringify({ pid: process.pid, port: memPort }), { mode: 0o600 });
-    writeFileSync(
-      join(memDataDir, "settings.json"),
-      JSON.stringify({ CLAUDE_MEM_WORKER_HOST: "127.0.0.1", CLAUDE_MEM_WORKER_PORT: memPort }),
-      { mode: 0o600 }
-    );
-
-    try {
-      const workerObs = await observeClaudeMemWorker({
-        dataDir: memDataDir,
-        projectRoot: rtkRepoDir,
-        version: "1.0.0"
-      });
-      expect(workerObs.status).toBe("ready");
-      expect(workerObs.endpoint).toBe(`http://127.0.0.1:${memPort}`);
-
-      const reader = new ClaudeMemProjectReader(`http://127.0.0.1:${memPort}`, "repo-alpha");
-      const recentItems = await reader.recent(10);
-      const searchItems = await reader.search("herdr", 5);
-      const batchAlpha = await reader.getObservations([1, 2]);
-      expect(recentItems).toHaveLength(2);
-      expect(searchItems).toHaveLength(1);
-      expect(batchAlpha).toHaveLength(2);
-      await expect(reader.getObservations([1, 99])).rejects.toThrow(/Cross-project memory response rejected/);
-
-      const memServiceDef = await createClaudeMemService({
-        dataDir: memDataDir,
-        projectRoot: rtkRepoDir,
-        project: "repo-alpha",
-        version: "1.0.0",
-        configRoot: memConfigDir,
-        operation: {
-          schemaVersion: CURRENT_PLATFORM_SCHEMA_VERSION,
-          scope: {
-            kind: "repository",
-            machineId: "machine-qa-01",
-            repositoryId: "repo-alpha",
-            workspaceRoot: rtkRepoDir
-          },
-          idempotencyKey: "idem-create-mem-svc"
-        }
-      });
-
-      expect(memServiceDef.connection.kind).toBe("stdio_mcp");
-      if (memServiceDef.connection.kind === "stdio_mcp") {
-        const memMcpProbe = await probeStdioMcp({
-          executable: memServiceDef.connection.executable,
-          argv: memServiceDef.connection.argv,
-          requiredTools: ["memory_recent", "memory_search", "memory_get"],
-          call: { name: "memory_search", arguments: { query: "schema", limit: 5 } },
-          timeoutMs: 15_000
-        });
-        expect(memMcpProbe.discoveredTools).toEqual(
-          expect.arrayContaining(["memory_recent", "memory_search", "memory_get"])
-        );
-        expect(memMcpProbe.callResult).toBeDefined();
-      }
-    } finally {
-      memServer.close();
-    }
   });
 
   it("[HARNESS] handles GitNexus not-indexed to indexed status with leading warnings", async () => {

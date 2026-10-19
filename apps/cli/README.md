@@ -24,14 +24,9 @@ to load the managed PATH when needed.
 
 Default setup uses the reviewed, exact-version tool catalog for the supported
 platform: Herdr, Claude Code, Codex, Agy, RTK, GitNexus, Chrome DevTools MCP,
-Superpowers and Claude-Mem.
+Superpowers. MemPalace is listed as a manual requirement and is never installed by setup.
 Explicit machine pins are preserved. Provider login remains the account owner's
-interactive action; installing a CLI does not establish authentication. Claude-Mem
-uses `--memory-provider auto` by default: preserve an existing compatible subscription
-route, otherwise select a verified Claude subscription login or a file-backed Codex
-ChatGPT login. This uses that account's quota. `claude`, `codex`, and `host` are explicit
-overrides; `host` requires a preexisting local observer. Setup never signs up for a
-hosted memory subscription. Upstream
+interactive action; installing a CLI does not establish authentication. Upstream
 license conditions are shown in the installation diagnostics.
 
 Setup configures the shared MCP Gateway as a current-user service and verifies

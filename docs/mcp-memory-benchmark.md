@@ -1,5 +1,7 @@
 # Bflow Platform v3 — Shared MCP Gateway Architecture & Real Linux Memory Benchmark
 
+> **Ghi chú (lịch sử):** Tài liệu này ghi lại bằng chứng đo tại thời điểm đó, trong đó có Claude-Mem. Bflow không còn hỗ trợ Claude-Mem (thay bằng MemPalace cài thủ công); các số liệu và đường dẫn liên quan đến `claude-mem` chỉ còn giá trị lịch sử và không thể tái tạo từ mã hiện tại.
+
 **Tested Baseline Commit**: `7133b02` (`main`, post P24–P33 integration)
 **Measurement Timestamp**: `2026-10-17T14:43:39.461Z`
 **Host Kernel & OS**: Linux `x86_64` (`/proc/<pid>/status` `VmRSS` & `/proc/<pid>/smaps_rollup` `Pss`)
