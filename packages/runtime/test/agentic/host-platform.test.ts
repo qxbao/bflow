@@ -387,7 +387,7 @@ describe("P30 host platform composition", () => {
     expect(service.requirements[0]!.every(requirement => requirement.provider === "codex" && requirement.cwd === root)).toBe(true);
     const material = launchMaterial(result.launches.get("conversation")!);
     expect(material).toEqual({ provider: "codex", argv: ["--kind-independent", "--provider=codex"],
-      env: { BFLOW_MCP_TOKEN_CHAT: token, BFLOW_LAUNCH_ID: "launch-conv" }, launchId: "launch-conv", launchFingerprint: "a".repeat(64) });
+      env: { BFLOW_MCP_TOKEN_CHAT: token, BFLOW_LAUNCH_ID: "launch-conv", BFLOW_ENVIRONMENT_ID: "env-conversation" }, launchId: "launch-conv", launchFingerprint: "a".repeat(64) });
     expect(JSON.parse(await readFile(join(root, "platform-generation.json"), "utf8"))).toEqual({ generation: 1 });
     expect((await host.prepare()).report.ready).toBe(true);
     expect(JSON.parse(await readFile(join(root, "platform-generation.json"), "utf8"))).toEqual({ generation: 2 });

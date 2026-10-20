@@ -31,6 +31,7 @@ describe("explicit provider role launch policy", () => {
       expect(args.find(a => a.startsWith("hooks.SessionStart="))).toContain('/trusted/session-hook');
       expect(args.find(a => a.startsWith("mcp_servers="))).toContain('/trusted/role-host.mjs');
       expect(args.find(a => a.startsWith("mcp_servers="))).toContain('"default_tools_approval_mode"="approve"');
+      expect(args.find(a => a.startsWith("mcp_servers="))).toContain('"env_vars"=["HERDR_PANE_ID","BFLOW_LAUNCH_ID"]');
       expect(args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
     }
   });

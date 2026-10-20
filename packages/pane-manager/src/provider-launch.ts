@@ -34,6 +34,12 @@ function toml(value: unknown): string {
   return JSON.stringify(value);
 }
 
+/**
+ * Codex starts stdio MCP servers with a default env allow-list; these names reach the role MCP server only
+ * when listed in `env_vars` (mirrors agent-providers, which this leaf package must not import).
+ */
+const CODEX_MCP_FORWARDED_ENV = ["HERDR_PANE_ID", "BFLOW_LAUNCH_ID"] as const;
+
 /** Roles that investigate read-only and may run the git reads below (mirrors the Runtime host guard). */
 const INVESTIGATION_ROLES: ReadonlySet<string> = new Set(["planner", "specifier", "architect", "reviewer", "qa"]);
 const READ_ONLY_GIT_PATTERNS = ["log", "show", "diff", "status", "branch"].map(command => `Bash(git ${command}:*)`);
@@ -73,7 +79,7 @@ export function buildProviderRoleLaunch(options: ProviderRoleLaunchOptions): rea
     "--ask-for-approval", "never", "-c", `developer_instructions=${JSON.stringify(options.systemPrompt)}`,
     // Approval policy `never` auto-rejects MCP calls Codex would prompt for; pre-approve the operator servers.
     "-c", "web_search=\"disabled\"", "-c", `mcp_servers=${toml(Object.fromEntries(Object.entries(servers)
-      .map(([name, server]) => [name, { ...server, default_tools_approval_mode: "approve" }])))}`];
+      .map(([name, server]) => [name, { ...server, env_vars: [...CODEX_MCP_FORWARDED_ENV], default_tools_approval_mode: "approve" }])))}`];
   if (hook) args.push("--enable", "hooks", "--dangerously-bypass-hook-trust", "-c",
     `hooks.SessionStart=${toml([{ hooks: [{ type: "command", command: hook, timeout: 10 }] }])}`);
   if (options.model) args.push("--model", options.model);

@@ -61,6 +61,19 @@ function tomlValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
+/**
+ * Codex starts stdio MCP servers with a default env allow-list (HOME, PATH, ...). Parent variables outside it
+ * reach a server only when named in its `env_vars`; the Bflow role MCP server needs these two (verified against codex-cli 0.162.0).
+ */
+export const CODEX_MCP_FORWARDED_ENV = ["HERDR_PANE_ID", "BFLOW_LAUNCH_ID"] as const;
+
+/** Adds the forwarded env names to a stdio server (keeps existing `env_vars` first); URL servers are unchanged. */
+function withForwardedMcpEnv(server: Record<string, unknown>): Record<string, unknown> {
+  if (typeof server["command"] !== "string") return server;
+  const existing = Array.isArray(server["env_vars"]) ? server["env_vars"].filter((name): name is string => typeof name === "string") : [];
+  return { ...server, env_vars: [...new Set([...existing, ...CODEX_MCP_FORWARDED_ENV])] };
+}
+
 /** Reserved, environment-bound startup turn; ordinary user prompts must still reach Conversation. */
 export function codexStartupPrompt(environmentId: string): string {
   return `[bflow startup ${environmentId}] Reply only pong. Do not use tools or start a workflow.`;
@@ -506,7 +519,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
         // requires approval, but approval policy is never"), so the trusted host/Gateway servers are
         // pre-approved like Claude's `--allowedTools mcp__<server>__*`; the host still guards each call.
         const approved = Object.fromEntries(Object.entries(mcpParsed.mcpServers).map(([name, server]) =>
-          [name, { ...(server as Record<string, unknown>), default_tools_approval_mode: "approve" }]));
+          [name, { ...withForwardedMcpEnv(server as Record<string, unknown>), default_tools_approval_mode: "approve" }]));
         argv.push("-c", `mcp_servers=${tomlValue(approved)}`);
       }
     } catch {

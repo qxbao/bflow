@@ -1309,7 +1309,9 @@ export async function runRoleMcp(configuration: RoleConfiguration, roleConfigPat
       if (request.method !== "tools/call") throw new Error("Unsupported MCP method");
       const params = record(request.params); if (!availableTools(configuration.role).some(tool => tool.name === params.name)) throw new Error("Tool is unavailable for this role");
       const measured = ["record_behavioral_verification", "check_work", "complete_review", "record_alternative_verification"].includes(String(params.name));
-      const result = await callHost(configuration.socketPath, configuration.token, "role_call", { ...params, paneId: textField(process.env.HERDR_PANE_ID) }, measured ? 600_000 : 30_000);
+      const paneId = process.env.HERDR_PANE_ID;
+      if (paneId === undefined || paneId.length === 0) throw new Error("HERDR_PANE_ID is not set in the Bflow MCP server environment; the provider must forward it");
+      const result = await callHost(configuration.socketPath, configuration.token, "role_call", { ...params, paneId }, measured ? 600_000 : 30_000);
       reply({ content: [{ type: "text", text: JSON.stringify(result) }] });
     } catch (error) { reply({ isError: true, content: [{ type: "text", text: String(error) }] }); }
   }

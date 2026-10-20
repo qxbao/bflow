@@ -171,7 +171,7 @@ export function launchMaterial(prepared: PreparedRoleLaunch): HostLaunchMaterial
   return HostLaunchMaterialSchema.parse({
     provider: prepared.provider,
     argv: [...prepared.launch.argv],
-    env: { ...prepared.launch.env, [BFLOW_LAUNCH_ID_ENV]: prepared.launch.launchId },
+    env: { ...prepared.launch.env, [BFLOW_LAUNCH_ID_ENV]: prepared.launch.launchId, BFLOW_ENVIRONMENT_ID: prepared.environment.environmentId },
     launchId: prepared.launch.launchId,
     launchFingerprint: prepared.launch.launchFingerprint
   });
