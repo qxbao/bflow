@@ -57,6 +57,43 @@ describe("buildHostPlatformOptions", () => {
     expect(providers).toMatchObject({ conversation: "claude", coordinator: "codex", planner: "agy" });
   });
 
+  it("uses a role profile override before the selected provider default", async () => {
+    const input = configure(environment => {
+      Object.assign(environment, { defaults: {
+        codex: { "profile-name": "work" },
+        claude: { "profile-name": "personal" },
+        agy: { "profile-name": "work" }
+      } });
+      environment.roles = environment.roles.map(role => role.role === "coordinator"
+        ? Object.assign({ ...role, model: "gpt-model", effort: "high" as const }, { "profile-name": "lead" })
+        : role);
+    });
+    const options = await buildHostPlatformOptions(input, { context, fileExists: absent });
+    expect(options.roles.find(role => role.role === "coordinator")).toMatchObject({
+      provider: "codex", profileName: "lead", model: "gpt-model", effort: "high"
+    });
+    expect(options.roles.find(role => role.role === "conversation")).toMatchObject({ provider: "codex", profileName: "work" });
+  });
+
+  it("selects provider defaults independently and preserves profile inheritance for the dynamic Developer", async () => {
+    const input = configure(environment => {
+      Object.assign(environment, { defaults: {
+        codex: { "profile-name": "work" },
+        claude: { "profile-name": "personal" },
+        agy: { "profile-name": "agy-work" }
+      } });
+      environment.roles = environment.roles.map(role => role.role === "coordinator"
+        ? Object.assign({ ...role, cli: "codex", model: "coord-model", effort: "xhigh" as const }, { "profile-name": "lead" })
+        : { ...role, cli: "claude" });
+    });
+    const options = await buildHostPlatformOptions(input, { context, fileExists: absent });
+    expect(options.roles.find(role => role.role === "coordinator")).toMatchObject({ provider: "codex", profileName: "lead" });
+    expect(options.roles.find(role => role.role === "conversation")).toMatchObject({ provider: "claude", profileName: "personal" });
+    expect(options.roles.find(role => role.role === "developer")).toMatchObject({
+      provider: "codex", profileName: "lead", model: "coord-model", effort: "xhigh", required: false
+    });
+  });
+
   it("rejects an unknown provider by name without applying any readiness rule", async () => {
     const input = configure(environment => { environment.roles[0] = { ...environment.roles[0]!, cli: "gemini" }; });
     await expect(buildHostPlatformOptions(input, { context, fileExists: absent })).rejects.toThrow("unsupported provider 'gemini'");

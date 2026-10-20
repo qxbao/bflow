@@ -62,7 +62,7 @@ export function stringifyConfigYaml(value: unknown): string {
   if (env) {
     const envOrdered: Record<string, unknown> = {};
     if (Array.isArray(env["roles"])) envOrdered["roles"] = env["roles"];
-    const envOrder = ["sdd", "tdd", "verification", "concurrency", "startupTimeoutMs", "shutdownTimeoutMs", "allowProviderFallback", "permissions", "requiredMcpServices", "requiredTools", "context7", "skills", "repositoryId", "workspaceRoot", "sessionName", "herdrBinary"];
+    const envOrder = ["defaults", "sdd", "tdd", "verification", "concurrency", "startupTimeoutMs", "shutdownTimeoutMs", "allowProviderFallback", "permissions", "requiredMcpServices", "requiredTools", "context7", "skills", "repositoryId", "workspaceRoot", "sessionName", "herdrBinary"];
     for (const key of envOrder) if (key in env) envOrdered[key] = env[key];
     for (const [key, item] of Object.entries(env)) if (!(key in envOrdered) && key !== "roles") envOrdered[key] = item;
     ordered["environment"] = envOrdered;
@@ -73,12 +73,12 @@ export function stringifyConfigYaml(value: unknown): string {
 
 export function renderEnvironmentConfigYaml(value: unknown): string {
   const serialized = stringifyConfigYaml(value)
-    .replace(/^environment:\n  roles:\n/m, "environment:\n  # Pick a CLI and optional model per role. Omit model to use the provider default.\n  # Example override:\n  # - role: developer\n  #   cli: codex\n  #   model: <provider-specific-model>\n  #   effort: high\n  roles:\n")
+    .replace(/^environment:\n  roles:\n/m, "environment:\n  # Optional existing ai-isolator profiles: set defaults.<codex|claude|agy>.profile-name here.\n  # Example provider defaults:\n  # defaults:\n  #   codex:\n  #     profile-name: work\n  #   claude:\n  #     profile-name: personal\n  #   agy:\n  #     profile-name: work\n  # A role's profile-name overrides its provider default; add it to the existing role entry.\n  # Example role override:\n  # - role: coordinator\n  #   cli: codex\n  #   profile-name: lead\n  # Missing profiles block startup; bflow up does not create one or fall back to the account HOME.\n  # Pick a CLI and optional model per role. Omit model to use the provider default.\n  # Example model override:\n  # - role: developer\n  #   cli: codex\n  #   model: <provider-specific-model>\n  #   effort: high\n  roles:\n")
     .replace(/^  sdd:\n/m, "  # SDLC policy and runtime limits are usually left at their defaults.\n  sdd:\n")
     .replace(/^projectName:/m, "# Storage paths and repository identity live below the frequently edited agent choices.\nprojectName:");
   return [
     "# Bflow repository configuration. Change agent choices first; the provider default model is used when omitted.",
-    "# A dynamically spawned Developer role without an explicit entry inherits the Coordinator's provider/model/effort.",
+    "# A dynamically spawned Developer role without an explicit entry inherits the Coordinator's provider/model/effort/profile.",
     "# effort is optional (minimal, low, medium, high, xhigh, max); valid values depend on the provider.",
     "# Agy encodes effort in the model name, so do not set effort for an agy role.",
     "",

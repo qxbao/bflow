@@ -457,3 +457,32 @@ profile-owned state;
 it does not make Bflow workflows isolated or assert provider/runtime readiness.
 Review profile and shell configuration before use. No provider account credentials
 are bundled or copied by the CLI.
+
+To bind roles to profiles already created with `bflow iso`, merge this YAML into
+the generated `.bflow/config.yml` `environment:` section. A role-level
+`profile-name` takes precedence over that provider's default:
+
+```yaml
+environment:
+  defaults:
+    codex:
+      profile-name: work
+    claude:
+      profile-name: personal
+    agy:
+      profile-name: work
+  roles:
+    - role: conversation
+      cli: claude
+    - role: coordinator
+      cli: codex
+      profile-name: lead
+```
+
+Keep the other generated policy fields and role entries when merging this
+example. The profile names are selectors, not setup instructions: `bflow up`
+does not create profiles, copy credentials or fall back to the provider's
+account HOME. A missing, invalid or wrong-provider profile blocks startup before
+provider execution; create and authenticate the isolated profile explicitly
+before selecting it. A dynamically spawned Developer with no configured role
+inherits the Coordinator's selected profile only with the Coordinator's provider.

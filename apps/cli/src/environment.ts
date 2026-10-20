@@ -343,8 +343,10 @@ export class EnvironmentLifecycle {
           }
           if (!available) {
             if (config.environment.allowProviderFallback === true && role.fallbackCli) {
+              const previousProvider = role.cli;
               fallbackNotices.push(`Role '${role.role}' fell back from '${role.cli}' to '${role.fallbackCli}'.`);
               role.cli = role.fallbackCli;
+              if (role.cli !== previousProvider) delete role["profile-name"];
             } else {
               const displayName = cli === "codex" ? "OpenAI Codex CLI ('codex')" : cli === "claude" ? "Claude Code CLI ('claude')" : "Antigravity CLI ('agy')";
               const remediation = `Install ${displayName} and ensure it is on PATH, then run 'bflow doctor'.`;
@@ -585,7 +587,10 @@ export class EnvironmentLifecycle {
       }
 
       this.progress("Composing session lifecycle integration...");
-      const integration = await deadline.call(() => this.integration(repository, config));
+      const compositionConfig = fallbackNotices.length > 0
+        ? { ...config, environment: { ...config.environment, roles: rolesToRun } }
+        : config;
+      const integration = await deadline.call(() => this.integration(repository, compositionConfig));
       if (!integration) fail("P13 SessionLifecycleManager is not composed. Supply CliContext.environment.openIntegration or BFLOW_ENVIRONMENT_MODULE; no roles were started.");
 
       let cleanupEligible = false;

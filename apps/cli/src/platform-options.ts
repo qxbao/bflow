@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { AgenticHostPlatformOptions, HostPrepareResponse, PlatformRoleOption } from "@bflow/runtime";
 import type { EnvironmentCompositionInput } from "./environment.js";
-import { EnvironmentProviderSchema, type EnvironmentRoleConfig } from "./environment-config.js";
+import { EnvironmentProviderSchema, type EnvironmentProvider, type EnvironmentRoleConfig } from "./environment-config.js";
 import { GATEWAY_CONTROL_LOCATOR_FILE } from "./gateway-control.js";
 import { CONTEXT7_SERVICE_ID, CONTEXT7_TOOLS } from "./context7-constants.js";
 import { SUPPORTED_CLI_COMMANDS } from "./command-reference.js";
@@ -94,9 +94,13 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
     deps.warn?.("Context7 is enabled but the Gateway does not report it ready; roles start without documentation lookup (degraded). Run 'bflow doctor' for the cause, or set environment.context7.required to refuse to start without it.");
   const roles: PlatformRoleOption[] = environment.roles.map(role => roleOption(role, input, deps.context.skills, context7Active));
   // Developers are allocated dynamically in task worktrees; without a configured Developer, the template uses the Coordinator's provider.
-  if (!configured.has("developer"))
+  if (!configured.has("developer")) {
+    const inheritedProfileName = selectedProfileName(coordinator, environment);
     roles.push(roleOption({ role: "developer", cli: coordinator.cli, required: false,
-      ...modelSettings(coordinator) }, input, deps.context.skills, context7Active));
+      ...modelSettings(coordinator),
+      ...(inheritedProfileName !== undefined ? { "profile-name": inheritedProfileName } : {})
+    }, input, deps.context.skills, context7Active));
+  }
 
   const locatorPath = join(deps.context.stateDirectory, GATEWAY_CONTROL_LOCATOR_FILE);
   const gatewayLocatorPath = (deps.fileExists ?? existsSync)(locatorPath) ? { gatewayLocatorPath: locatorPath } : {};
@@ -134,6 +138,7 @@ function roleOption(role: EnvironmentRoleConfig, input: EnvironmentCompositionIn
     role: role.role,
     provider: provider.data,
     required: role.required ?? true,
+    ...profileSettings(selectedProfileName(role, environment)),
     ...modelSettings(role),
     permissionMode: role.permissionMode ?? environment.permissions?.mode ?? "workspace_auto",
     capabilityIds: [],
@@ -141,6 +146,14 @@ function roleOption(role: EnvironmentRoleConfig, input: EnvironmentCompositionIn
     toolIds: [...new Set([...(environment.requiredTools ?? []), ...(context7Role ? CONTEXT7_TOOLS : [])])],
     skillSelections: skills.resolvePins(role.role, skillIds)
   };
+}
+
+function selectedProfileName(role: EnvironmentRoleConfig, environment: EnvironmentCompositionInput["config"]["environment"]): string | undefined {
+  return role["profile-name"] ?? environment.defaults?.[role.cli as EnvironmentProvider]?.["profile-name"];
+}
+
+function profileSettings(profileName: string | undefined): { readonly profileName?: string } {
+  return profileName === undefined ? {} : { profileName };
 }
 
 /** Model selection and effort are role-local. */

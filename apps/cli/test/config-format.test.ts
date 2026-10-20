@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseConfigYaml, renderEnvironmentConfigYaml } from "../src/config-format.js";
-import { EnvironmentRoleConfigSchema } from "../src/environment-config.js";
+import { EnvironmentConfigEnvironmentSchema, EnvironmentRoleConfigSchema } from "../src/environment-config.js";
 
 describe("configuration YAML format", () => {
   it("parses ordinary YAML with comments and renders editable roles before policy and storage", () => {
@@ -15,8 +15,70 @@ describe("configuration YAML format", () => {
   it("validates optional model and provider-neutral effort while rejecting Agy effort", () => {
     expect(EnvironmentRoleConfigSchema.parse({ role: "coordinator", cli: "codex", model: "gpt-model", effort: "xhigh" }))
       .toMatchObject({ model: "gpt-model", effort: "xhigh" });
+    expect(EnvironmentRoleConfigSchema.parse({ role: "coordinator", cli: "codex", "profile-name": "lead" }))
+      .toMatchObject({ "profile-name": "lead" });
+    expect(EnvironmentRoleConfigSchema.safeParse({ role: "coordinator", cli: "codex", profileName: "lead" }).success).toBe(false);
     expect(EnvironmentRoleConfigSchema.safeParse({ role: "coordinator", cli: "agy", effort: "high" }).success).toBe(false);
     expect(EnvironmentRoleConfigSchema.safeParse({ role: "coordinator", cli: "claude", effort: "invalid" }).success).toBe(false);
+  });
+
+  it.each(["", "  ", "../outside", "profile/name", "profile\\name", "profile\u0000name", "profile\u0085name"])(
+    "rejects unsafe profile names (%j)", profileName => {
+      expect(EnvironmentRoleConfigSchema.safeParse({ role: "coordinator", cli: "codex", "profile-name": profileName }).success).toBe(false);
+    }
+  );
+
+  it("accepts strict provider profile defaults without changing the no-profile configuration", () => {
+    const environment = {
+      repositoryId: "repo-id",
+      workspaceRoot: "/workspace",
+      sessionName: "bf-session",
+      herdrBinary: "herdr",
+      roles: [
+        { role: "conversation", cli: "claude" },
+        { role: "coordinator", cli: "codex", model: "gpt-model", effort: "high", "profile-name": "lead" }
+      ],
+      defaults: {
+        codex: { "profile-name": "work" },
+        claude: { "profile-name": "personal" },
+        agy: { "profile-name": "work" }
+      },
+      sdd: { minimumLevel: "lightweight", approvalRequired: true },
+      tdd: { policy: "conditional" },
+      verification: { maxIterations: 3, onExhausted: "require_human" },
+      concurrency: { maxConcurrency: 2 },
+      startupTimeoutMs: 300_000,
+      shutdownTimeoutMs: 30_000
+    };
+
+    const parsed = EnvironmentConfigEnvironmentSchema.parse(environment);
+    expect(parsed.defaults).toEqual(environment.defaults);
+    expect(parsed.roles[1]).toMatchObject({ model: "gpt-model", effort: "high", "profile-name": "lead" });
+    expect(EnvironmentConfigEnvironmentSchema.parse({ ...environment, defaults: undefined }).defaults).toBeUndefined();
+    expect(EnvironmentConfigEnvironmentSchema.safeParse({ ...environment, defaults: { gemini: { "profile-name": "work" } } }).success).toBe(false);
+    expect(EnvironmentConfigEnvironmentSchema.safeParse({ ...environment, defaults: { codex: { "profile-name": "work", model: "unsafe-extra" } } }).success).toBe(false);
+    expect(EnvironmentConfigEnvironmentSchema.safeParse({ ...environment, defaults: { codex: { "profile-name": "../outside" } } }).success).toBe(false);
+    expect(EnvironmentConfigEnvironmentSchema.safeParse({ ...environment, defaults: { codex: { "profile-name": 42 } } }).success).toBe(false);
+    expect(EnvironmentConfigEnvironmentSchema.safeParse({ ...environment, unexpected: true }).success).toBe(false);
+  });
+
+  it("renders runnable provider defaults and role profile overrides as comments and round-trips YAML", () => {
+    const value = {
+      environment: {
+        defaults: {
+          codex: { "profile-name": "work" },
+          claude: { "profile-name": "personal" },
+          agy: { "profile-name": "work" }
+        },
+        roles: [{ role: "coordinator", cli: "codex", "profile-name": "lead", model: "gpt-model", effort: "high" }]
+      }
+    };
+    const rendered = renderEnvironmentConfigYaml(value);
+    expect(rendered).toContain("#   codex:");
+    expect(rendered).toContain("#     profile-name: work");
+    expect(rendered).toContain("#   profile-name: lead");
+    expect(rendered).toContain("Missing profiles");
+    expect(parseConfigYaml(rendered)).toEqual(value);
   });
 
   it("does not alter values containing config key text when inserting comments", () => {
