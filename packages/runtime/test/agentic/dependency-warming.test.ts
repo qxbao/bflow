@@ -41,11 +41,30 @@ it("network warming mounts only Runtime cache, public system files and narrow to
   expect(invocation.args.join(" ")).toContain("/tmp/bflow-cache-owned/resolv.conf /etc/resolv.conf");
   expect(invocation.args).toContain("--unshare-all");
   expect(invocation.args.slice(-7)).toEqual(["ci", "--ignore-scripts", "--no-audit", "--no-fund", "--no-progress", "--registry=https://registry.npmjs.org", "--cache=/cache/npm-cache"]);
-  expect(invocation.env).toMatchObject({ HOME: "/tmp/home", NPM_CONFIG_USERCONFIG: "/dev/null", NPM_CONFIG_GLOBALCONFIG: "/dev/null", NPM_CONFIG_IGNORE_SCRIPTS: "true" });
+  expect(invocation.env).toMatchObject({ HOME: "/tmp/home", NPM_CONFIG_USERCONFIG: "/tmp/home/user.npmrc", NPM_CONFIG_GLOBALCONFIG: "/tmp/home/global.npmrc", NPM_CONFIG_IGNORE_SCRIPTS: "true" });
   expect(Object.keys(invocation.env)).not.toContain("NPM_TOKEN");
   expect(invocation.args.join(" ")).not.toMatch(/\/home\/|\/run\/|\.npmrc|\.ssh|\.netrc/);
   const writes = invocation.args.flatMap((arg, index) => arg === "--bind" ? [invocation.args.slice(index + 1, index + 3)] : []);
   expect(writes).toEqual([["/tmp/bflow-cache-owned", "/cache"]]);
+});
+it("uses distinct private npm config files accepted by the actual installed npm", async context => {
+  const { execFile } = await import("node:child_process"), { promisify } = await import("node:util"), { basename } = await import("node:path");
+  let cli: string;
+  try { cli = await realpath(join(dirname(process.execPath), "npm")); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") { context.skip(); return; } throw error; }
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-npm-config-probe-"))); cleanups.push(root);
+  const invocation = npmWarmInvocation(root, "/usr/bin/bwrap", process.execPath, dirname(dirname(cli)));
+  const environment = { ...invocation.env, HOME: root, TMPDIR: root,
+    NPM_CONFIG_USERCONFIG: join(root, basename(invocation.env.NPM_CONFIG_USERCONFIG!)),
+    NPM_CONFIG_GLOBALCONFIG: join(root, basename(invocation.env.NPM_CONFIG_GLOBALCONFIG!)) };
+  const result = await promisify(execFile)(process.execPath, [cli, "--version"], { cwd: root, env: environment, timeout: 10000 });
+  expect(result.stdout).toMatch(/^\d+\.\d+\.\d+/);
+  expect(environment.NPM_CONFIG_USERCONFIG).not.toBe(environment.NPM_CONFIG_GLOBALCONFIG);
+  const noDependencies = { name: "fixture", version: "1.0.0", scripts: { postinstall: "node -e \"process.exit(99)\"" } };
+  await writeFile(join(root, "package.json"), JSON.stringify(noDependencies));
+  await writeFile(join(root, "package-lock.json"), JSON.stringify({ ...noDependencies, lockfileVersion: 3, packages: { "": noDependencies } }));
+  await promisify(execFile)(process.execPath, [cli, "ci", "--ignore-scripts", "--no-audit", "--no-fund", `--cache=${join(root, "cache")}`], { cwd: root, env: environment, timeout: 10000 });
+  expect(JSON.parse(await readFile(join(root, "package.json"), "utf8"))).toEqual(noDependencies);
 });
 it("avoids devpts setup so the helper can enter the user namespace that owns the network", () => {
   const invocation = npmWarmInvocation("/tmp/bflow-cache-owned", "/usr/bin/bwrap", "/opt/node/bin/node", "/opt/node/lib/node_modules/npm");

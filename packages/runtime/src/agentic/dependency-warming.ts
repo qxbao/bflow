@@ -91,7 +91,7 @@ export function npmWarmInvocation(cacheRoot: string, sandboxExecutable: string, 
       "--chdir", "/cache", "--", "/runtime/bin/node", "/runtime/npm/bin/npm-cli.js",
       "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--no-progress", "--registry=https://registry.npmjs.org", "--cache=/cache/npm-cache"],
     env: { PATH: "/runtime/bin:/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", HOME: "/tmp/home", TMPDIR: "/tmp",
-      NPM_CONFIG_USERCONFIG: "/dev/null", NPM_CONFIG_GLOBALCONFIG: "/dev/null", NPM_CONFIG_IGNORE_SCRIPTS: "true", NPM_CONFIG_UPDATE_NOTIFIER: "false", NPM_CONFIG_LOGLEVEL: "error" }
+      NPM_CONFIG_USERCONFIG: "/tmp/home/user.npmrc", NPM_CONFIG_GLOBALCONFIG: "/tmp/home/global.npmrc", NPM_CONFIG_IGNORE_SCRIPTS: "true", NPM_CONFIG_UPDATE_NOTIFIER: "false", NPM_CONFIG_LOGLEVEL: "error" }
   };
 }
 async function readManifest(root: string, name: string): Promise<string> {
@@ -107,17 +107,20 @@ async function readManifest(root: string, name: string): Promise<string> {
 }
 async function findNpm(repositoryRoot: string): Promise<{ node: string; npmRoot: string }> {
   const node = await realpath(process.execPath);
-  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
-    if (!isAbsolute(directory)) continue;
-    try {
-      const cli = await realpath(join(directory, "npm")); await access(cli, constants.X_OK);
-      if (cli === repositoryRoot || cli.startsWith(repositoryRoot + "/")) continue;
-      const npmRoot = dirname(dirname(cli));
-      if (basename(npmRoot) !== "npm" || npmRoot === resolve(homedir()) || cli !== join(npmRoot, "bin", "npm-cli.js") || record(JSON.parse(await readFile(join(npmRoot, "package.json"), "utf8"))).name !== "npm" || await realpath(npmRoot) !== npmRoot) continue;
-      const version = await execute(node, [cli, "--version"], { cwd: "/", env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent", NPM_CONFIG_USERCONFIG: "/dev/null", NPM_CONFIG_GLOBALCONFIG: "/dev/null" }, timeout: 5000, maxBuffer: 4096 });
-      if (/^(?:[7-9]|[1-9]\d+)\.\d+\.\d+\s*$/.test(version.stdout)) return { node, npmRoot };
-    } catch { /* Keep searching narrow installed npm locations. */ }
-  }
+  const probeHome = await mkdtemp(join(tmpdir(), "bflow-npm-probe-"));
+  try {
+    for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+      if (!isAbsolute(directory)) continue;
+      try {
+        const cli = await realpath(join(directory, "npm")); await access(cli, constants.X_OK);
+        if (cli === repositoryRoot || cli.startsWith(repositoryRoot + "/")) continue;
+        const npmRoot = dirname(dirname(cli));
+        if (basename(npmRoot) !== "npm" || npmRoot === resolve(homedir()) || cli !== join(npmRoot, "bin", "npm-cli.js") || record(JSON.parse(await readFile(join(npmRoot, "package.json"), "utf8"))).name !== "npm" || await realpath(npmRoot) !== npmRoot) continue;
+        const version = await execute(node, [cli, "--version"], { cwd: "/", env: { PATH: "/usr/bin:/bin", HOME: probeHome, NPM_CONFIG_USERCONFIG: join(probeHome, "user.npmrc"), NPM_CONFIG_GLOBALCONFIG: join(probeHome, "global.npmrc") }, timeout: 5000, maxBuffer: 4096 });
+        if (/^(?:[7-9]|[1-9]\d+)\.\d+\.\d+\s*$/.test(version.stdout)) return { node, npmRoot };
+      } catch { /* Keep searching narrow installed npm locations. */ }
+    }
+  } finally { await rm(probeHome, { recursive: true, force: true }); }
   throw new Error("No supported installed npm CLI is available for isolated dependency warming");
 }
 /** Safe warming is intentionally restricted to public, fully integrity-pinned npm v2/v3 locks.
