@@ -1,0 +1,199 @@
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { createManagedAdapters, managedAdapters, type ManagedAdapterHost } from "../../src/agentic/runner-adapters/managed.js";
+import type { AdapterContext, AdapterRunner } from "../../src/agentic/runner-adapter.js";
+
+const temporary: string[] = [];
+afterEach(async () => { await Promise.all(temporary.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
+
+async function fixture(files: Record<string, string>): Promise<AdapterContext> {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-managed-"))); temporary.push(root);
+  for (const [path, content] of Object.entries(files)) {
+    await mkdir(dirname(join(root, path)), { recursive: true }); await writeFile(join(root, path), content);
+  }
+  return { root, files: Object.keys(files) };
+}
+
+function host(homeDirectory: string, unavailable: string[] = []): ManagedAdapterHost {
+  return { homeDirectory, async findTool(name) { return unavailable.includes(name) ? undefined : { executable: `/usr/bin/${name}`, version: "8.1.2" }; } };
+}
+
+async function detected(id: string, files: Record<string, string>) {
+  const context = await fixture(files);
+  const result = await createManagedAdapters(host(join(context.root, "home"))).find(adapter => adapter.id === id)!.detect(context);
+  expect(result.notes).toEqual([]); expect(result.runners).toHaveLength(1);
+  return { context, runner: result.runners[0]! };
+}
+
+describe("managed-language runner adapters", () => {
+  it("detects nested Maven with fixed offline argv and exact Class#method selectors", async () => {
+    const { runner } = await detected("maven", { "service/pom.xml": "<project/>", "service/.mvn/jvm.config": "-Xmx256m", "service/src/test/java/a/FeatureTest.java": "", ".github/workflows/test.yml": "" });
+    expect(runner).toMatchObject({ adapterId: "maven", projectDirectory: "service", format: "junit", environment: { MAVEN_SKIP_RC: "true", JAVA_HOME: "/usr" } });
+    expect(runner.protectedPaths).toContain("service/.mvn/jvm.config");
+    expect(runner.bind({ testNames: ["a.FeatureTest.accepts", "a.FeatureTest.rejects"], testPaths: ["service/src/test/java/a/FeatureTest.java"] }, "/tmp/reports")).toEqual({
+      args: ["--offline", "--batch-mode", "--no-transfer-progress", "-Dmaven.repo.local=/bflow-cache/maven", "-Dtest=a.FeatureTest#accepts,a.FeatureTest#rejects", "-DfailIfNoTests=true", "-Dsurefire.failIfNoSpecifiedTests=true", "test"], reportPaths: ["service/target/surefire-reports/TEST-*.xml"]
+    });
+  });
+
+  it("detects Gradle Kotlin with read-only dependency cache, no daemon, and exact filters", async () => {
+    const { runner } = await detected("gradle", { "app/build.gradle.kts": "plugins {}", "app/settings.gradle.kts": "", "app/src/test/kotlin/FooTest.kt": "" });
+    expect(runner.environment).toMatchObject({ GRADLE_USER_HOME: "/tmp/bflow-gradle", GRADLE_RO_DEP_CACHE: "/bflow-cache/gradle/caches/modules-2" });
+    expect(runner.bind({ testNames: ["org.FooTest.target"], testPaths: ["app/src/test/kotlin/FooTest.kt"] }, "/tmp/reports")).toEqual({
+      args: ["--offline", "--no-daemon", "--console=plain", "--no-build-cache", "--rerun-tasks", "test", "--tests", "org.FooTest.target"], reportPaths: ["app/build/test-results/test/TEST-*.xml"]
+    });
+  });
+
+  it("detects .NET test projects, excludes libraries, and selects exact FQN tests without restore", async () => {
+    const { runner, context } = await detected("dotnet", { "tests/Behavior.csproj": '<Project><PackageReference Include="Microsoft.NET.Test.Sdk"/></Project>', "lib/Lib.csproj": "<Project/>", "tests/Test.cs": "", "tests/Directory.Build.props": "" });
+    expect(runner.format).toBe("trx"); expect(runner.projectDirectory).toBe("tests");
+    expect(runner.protectedPaths).toContain("tests/Directory.Build.props");
+    const invocation = runner.bind({ testNames: ["Example.Behavior.passes", "Example.Behavior.fails"], testPaths: ["tests/Test.cs"] }, "/tmp/reports");
+    expect(invocation.args).toEqual(["test", "Behavior.csproj", "--no-restore", "--nologo", "--filter", "FullyQualifiedName=Example.Behavior.passes|FullyQualifiedName=Example.Behavior.fails", "--logger", "trx;LogFileName=results.trx", "--results-directory", "/tmp/reports"]);
+    expect(runner.mounts.some(mount => mount.source === join(context.root, "home/.dotnet"))).toBe(false);
+  });
+
+  it("uses native RSpec JSON and anchored full-description regexes, never Gemfile scripts", async () => {
+    const { runner } = await detected("ruby", { Gemfile: 'gem "rspec"', ".rspec": "--format malicious", "spec/a_spec.rb": "" });
+    expect(runner).toMatchObject({ adapterId: "rspec", format: "rspec_json", environment: { BUNDLE_IGNORE_CONFIG: "1", BUNDLE_FROZEN: "true" } });
+    expect(runner.protectedPaths).toContain(".rspec");
+    expect(runner.bind({ testNames: ["a feature (safe) works?"], testPaths: ["spec/a_spec.rb"] }, "/tmp/reports").args).toEqual(["--format", "json", "--out", "/tmp/reports/rspec.json", "--example", "\\Aa feature \\(safe\\) works\\?\\z", "--", "spec/a_spec.rb"]);
+  });
+
+  it("reports missing minitest reporter as an agent setup task", async () => {
+    const context = await fixture({ Gemfile: 'gem "minitest"' });
+    const result = await createManagedAdapters(host(context.root)).find(adapter => adapter.id === "ruby")!.detect(context);
+    expect(result.runners).toHaveLength(0); expect(result.notes.join(" ")).toContain("runner_reporter_required");
+    expect(result.notes.join(" ")).toContain("Coordinator");
+  });
+
+  it("detects PHPUnit with JUnit and exact namespace-qualified method filters", async () => {
+    const { runner } = await detected("phpunit", { "composer.json": '{"require-dev":{"phpunit/phpunit":"^11"}}', "composer.lock": "{}", "tests/FooTest.php": "" });
+    const invocation = runner.bind({ testNames: ["Tests\\FooTest.test_ok"], testPaths: ["tests/FooTest.php"] }, "/tmp/reports");
+    expect(invocation.args).toEqual(["--do-not-cache-result", "--log-junit", "/tmp/reports/phpunit.xml", "--filter", "/^(?:Tests\\\\FooTest::test_ok)$/", "tests/FooTest.php"]);
+    expect(runner.protectedPaths).toEqual(["composer.json", "composer.lock"]);
+  });
+
+  it("selects CTest registrations exactly using JUnit on supported versions", async () => {
+    const { runner } = await detected("ctest", { "build/CTestTestfile.cmake": "add_test(test-a ...)" });
+    expect(runner.bind({ testNames: ["test-a [one]"], testPaths: ["build/CTestTestfile.cmake"] }, "/tmp/reports").args).toEqual(["--output-on-failure", "--no-tests=error", "--output-junit", "/tmp/reports/ctest.xml", "-R", "^(test-a \\[one\\])$"]);
+  });
+
+  it("detects multiple ecosystems in a single monorepo without short-circuiting", async () => {
+    const context = await fixture({ "jvm/pom.xml": "<project/>", "net/Net.csproj": "<Project><IsTestProject>true</IsTestProject></Project>", "ruby/Gemfile": 'gem "rspec"', "php/composer.json": '{"require-dev":{"phpunit/phpunit":"^11"}}' });
+    const detections = await Promise.all(createManagedAdapters(host(context.root)).map(adapter => adapter.detect(context)));
+    expect(detections.flatMap(result => result.runners).map(runner => `${runner.adapterId}:${runner.projectDirectory}`)).toEqual(["maven:jvm", "dotnet:net", "rspec:ruby", "phpunit:php"]);
+  });
+
+  it("fails closed on ambiguous selectors, duplicate identities and cross-project paths", async () => {
+    const { runner } = await detected("maven", { "jvm/pom.xml": "<project/>" });
+    for (const testNames of [[], ["a.Test.*"], ["a.Test.ok|other"], ["a.Test.ok", "a.Test.ok"], ["a.Test.foo[0]"]]) {
+      expect(() => runner.bind({ testNames, testPaths: ["jvm/src/test/java/Test.java"] }, "/tmp/reports")).toThrow("runner_identity_unselectable");
+    }
+    for (const path of ["../Test.java", "other/Test.java", "/jvm/Test.java", "jvm/../Test.java"]) {
+      expect(() => runner.bind({ testNames: ["a.Test.ok"], testPaths: [path] }, "/tmp/reports")).toThrow("runner_identity_unselectable");
+    }
+  });
+
+  it("mounts only canonical dependency subtrees, excludes settings and rejects symlink escapes", async () => {
+    const context = await fixture({ "pom.xml": "<project/>", "home/.m2/repository/a.jar": "jar", "home/.m2/settings.xml": "SECRET", "home/.ssh/id_rsa": "SECRET" });
+    const detection = await createManagedAdapters(host(join(context.root, "home"))).find(adapter => adapter.id === "maven")!.detect(context);
+    expect(detection.runners[0]!.mounts).toEqual([{ source: join(context.root, "home/.m2/repository"), target: "/bflow-cache/maven" }]);
+    await rm(join(context.root, "home/.m2/repository"), { recursive: true });
+    await symlink(join(context.root, "home/.ssh"), join(context.root, "home/.m2/repository"));
+    const rejected = await createManagedAdapters(host(join(context.root, "home"))).find(adapter => adapter.id === "maven")!.detect(context);
+    expect(rejected.runners[0]!.mounts).toEqual([]);
+  });
+
+  it("reports unavailable toolchains as structured setup reasons without executing project code", async () => {
+    const context = await fixture({ "pom.xml": "<project/>" });
+    const result = await createManagedAdapters(host(context.root, ["mvn"])).find(adapter => adapter.id === "maven")!.detect(context);
+    expect(result.runners).toEqual([]); expect(result.notes.join(" ")).toContain("runner_toolchain_unavailable");
+  });
+
+  it("imports external Maven runtime pieces without its credential-capable conf/settings.xml", async () => {
+    const context = await fixture({ "pom.xml": "<project/>", "home/sdk/maven/bin/mvn": "binary", "home/sdk/maven/bin/m2.conf": "runtime config", "home/sdk/maven/boot/launcher.jar": "jar", "home/sdk/maven/lib/maven.jar": "jar", "home/sdk/maven/conf/settings.xml": "SECRET" });
+    const injected = host(join(context.root, "home"));
+    injected.findTool = async name => ({ executable: name === "mvn" ? join(context.root, "home/sdk/maven/bin/mvn") : `/usr/bin/${name}`, version: "3.9.9" });
+    const result = await createManagedAdapters(injected).find(adapter => adapter.id === "maven")!.detect(context);
+    expect(result.runners[0]!.mounts.map(mount => mount.source)).toEqual([
+      join(context.root, "home/sdk/maven/bin/mvn"), join(context.root, "home/sdk/maven/boot"),
+      join(context.root, "home/sdk/maven/lib"), join(context.root, "home/sdk/maven/bin/m2.conf")
+    ]);
+    expect(result.runners[0]!.mounts.some(mount => mount.source.endsWith("/maven") || mount.source.includes("settings.xml"))).toBe(false);
+  });
+
+  it("probes installed Maven and Java versions rather than trusting manifest declarations", async () => {
+    const context = await fixture({ "pom.xml": "<project/>" });
+    const result = await managedAdapters.find(adapter => adapter.id === "maven")!.detect(context);
+    if (!existsSync("/usr/bin/mvn")) { expect(result.runners).toEqual([]); return; }
+    expect(result.runners[0]?.version).toMatch(/^\d+\.\d+/);
+    expect(result.runners[0]?.executable).toContain("maven");
+  });
+});
+
+function hasTool(name: string): boolean {
+  try { execFileSync("/bin/sh", ["-c", `command -v ${name}`], { stdio: "ignore" }); return true; } catch { return false; }
+}
+
+function hasWorkingSandbox(): boolean {
+  if (process.platform !== "linux" || !existsSync("/usr/bin/bwrap")) return false;
+  try {
+    execFileSync("/usr/bin/bwrap", ["--unshare-all", "--die-with-parent", "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin", "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64", "--", "/usr/bin/true"], { stdio: "ignore", timeout: 5_000 });
+    return true;
+  } catch { return false; }
+}
+
+// These are explicit coverage gaps on hosts without a toolchain, never fake-runner evidence.
+for (const { id, tool, files } of [
+  { id: "gradle", tool: "gradle", files: { "build.gradle": "plugins { id 'java' }" } },
+  { id: "dotnet", tool: "dotnet", files: { "Test.csproj": "<Project><IsTestProject>true</IsTestProject></Project>" } },
+  { id: "ruby", tool: "rspec", files: { Gemfile: 'gem "rspec"' } },
+  { id: "phpunit", tool: "phpunit", files: { "composer.json": '{"require-dev":{"phpunit/phpunit":"*"}}' } },
+  { id: "ctest", tool: "ctest", files: { "CTestTestfile.cmake": "" } }
+] as { id: string; tool: string; files: Record<string, string> }[]) {
+  it.skipIf(!hasTool(tool))(`${id}: installed toolchain detection verifies its actual version`, async () => {
+    const context = await fixture(files);
+    const result = await managedAdapters.find(adapter => adapter.id === id)!.detect(context);
+    expect(result.runners[0], result.notes.join(" ")).toBeDefined();
+    expect(result.runners[0]!.version).toMatch(/\d+\.\d+/);
+  });
+}
+
+export async function runManagedSandbox(runner: AdapterRunner, root: string, args: string[]) {
+  const sandboxArgs = ["--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin", "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--bind", root, root, "--chdir", join(root, runner.projectDirectory)];
+  for (const mount of runner.mounts) sandboxArgs.push("--ro-bind", mount.source, mount.target);
+  // Debian/Ubuntu Java runtime distribution needs its system security configuration.
+  if (existsSync("/etc/java-17-openjdk")) sandboxArgs.push("--ro-bind", "/etc/java-17-openjdk", "/etc/java-17-openjdk");
+  const env = { PATH: "/usr/bin:/bin", HOME: "/tmp", LANG: "C.UTF-8", ...runner.environment };
+  try { return { code: 0, output: execFileSync("/usr/bin/bwrap", [...sandboxArgs, "--", runner.executable, ...args], { env, encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1_048_576 }) }; }
+  catch (error) {
+    const failure = error as { status: number; stdout: Buffer; stderr: Buffer };
+    return { code: failure.status, output: `${failure.stdout ?? ""}\n${failure.stderr ?? ""}` };
+  }
+}
+
+describe.skipIf(!hasTool("mvn") || !hasWorkingSandbox())("Maven in a real offline sandbox", () => {
+  it("reports the exact mapped test for pass, assertion Red, and runtime infrastructure error", async () => {
+    const context = await fixture({
+      "pom.xml": '<project><modelVersion>4.0.0</modelVersion><groupId>bflow.fixture</groupId><artifactId>runner</artifactId><version>1</version><properties><maven.compiler.source>17</maven.compiler.source><maven.compiler.target>17</maven.compiler.target></properties><dependencies><dependency><groupId>junit</groupId><artifactId>junit</artifactId><version>4.13.2</version><scope>test</scope></dependency></dependencies><build><plugins><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-resources-plugin</artifactId><version>3.3.1</version></plugin><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.11.0</version></plugin><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.2.5</version></plugin></plugins></build></project>',
+      "src/test/java/example/BehaviorTest.java": 'package example; import org.junit.Test; import static org.junit.Assert.*; public class BehaviorTest { @Test public void target() { assertEquals(4, 2+2); } @Test public void neverSelected() { fail("must not execute"); } }'
+    });
+    const detection = await managedAdapters.find(adapter => adapter.id === "maven")!.detect(context);
+    const runner = detection.runners[0]!; expect(runner, detection.notes.join(" ")).toBeDefined();
+    for (const [label, body, expectedCode, reportTag] of [["pass", "assertEquals(4, 2+2);", 0, ""], ["red", "assertEquals(5, 2+2);", 1, '<failure message='], ["infrastructure", 'throw new IllegalStateException("runtime infrastructure");', 1, '<error message=']] as const) {
+      await writeFile(join(context.root, "src/test/java/example/BehaviorTest.java"), `package example; import org.junit.Test; import static org.junit.Assert.*; public class BehaviorTest { @Test public void target() { ${body} } @Test public void neverSelected() { fail("must not execute"); } }`);
+      const reports = join(context.root, "reports", label); await mkdir(reports, { recursive: true });
+      const invocation = runner.bind({ testNames: ["example.BehaviorTest.target"], testPaths: ["src/test/java/example/BehaviorTest.java"] }, reports);
+      const result = await runManagedSandbox(runner, context.root, invocation.args);
+      expect(result.code, result.output).toBe(expectedCode);
+      const xml = await readFile(join(context.root, "target/surefire-reports/TEST-example.BehaviorTest.xml"), "utf8");
+      expect(xml).toContain('name="target" classname="example.BehaviorTest"');
+      expect(xml).not.toContain('name="neverSelected"');
+      if (reportTag) expect(xml).toContain(reportTag);
+    }
+  }, 180_000);
+});
