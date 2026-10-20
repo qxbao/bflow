@@ -634,3 +634,7 @@ suy ra từ fake transport, receipt, hoặc test Herdr native actor.
 Để yêu cầu tiếp tục run bị chặn trong Conversation, dùng `tiếp tục` hoặc `resume <run-id>`.
 Host kiểm tra input người dùng thật và session trước khi chuyển yêu cầu tới Runtime; thao tác
 này không thay thế một approval đang chờ và không tạo workflow mới.
+
+Runtime lưu intake đã được Conversation xác thực cùng outbox intent trước dispatch đầu tiên;
+`delegation.accepted` và ingress Herdr vẫn là các bước riêng. Vì vậy capability denial trước khi
+Coordinator nhận yêu cầu cũng giữ được cùng run và action để xử lý, thay vì chỉ có terminal lỗi.

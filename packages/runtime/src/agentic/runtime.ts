@@ -385,6 +385,11 @@ export class AgenticWorkflowRuntime {
         const admission = this.admitDelegation(state, delegation, this.inFlightDelegations(state, delegation.runId));
         // A duplicate carries already-admitted content, so a later turn re-sending it is still delivered; the outbox dedupes by message id.
         if (admission.kind === "rejected") { this.notifyRejection(state, outbox, message, admission.reason); await save(); throw new AdmissionRejectedError(admission.reason); }
+        // The trusted Conversation already authorized this objective. Persist intake before capability/transport
+        // checks, without inventing signed ingress or Coordinator acceptance. A first-dispatch failure must be resumable.
+        if (admission.kind === "new" && !state.runs.some(run => run.runId === delegation.runId)) state.runs.push({
+          runId: delegation.runId!, delegation, status: "intake", tasks: [], coreCreated: false, cancelled: false, maxIterations: 3
+        });
       }
       if (message.type === "approval.decision") {
         const run = state.runs.find(item => item.runId === message.run_id);
@@ -1022,6 +1027,8 @@ export class AgenticWorkflowRuntime {
         await save(); return;
       }
       if (run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || this.hasSemanticNextAction(state, run)) return;
+      if (!state.inbox.some(item => item.message.message_id === message.message_id && item.status === "applied"))
+        run.error = "The delivered delegation has no durable ingress in Runtime; authorized intake is retained. Reconcile the delivery or resume the same run.";
       this.recordCoordinatorNoNextAction(state, outbox, run, message, delivery);
       await save();
     });

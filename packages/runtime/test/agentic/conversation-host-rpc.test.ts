@@ -97,10 +97,12 @@ describe.skipIf(process.platform !== "linux")("Conversation decisions through th
     const sourceMessageId = "blocked-source", actionId = `next-${digest([admitted.runId, sourceMessageId])}`;
     await expect.poll(async () => {
       try { await journal.exclusive(async (state, save) => {
-      if (state.runs.some(run => run.runId === admitted.runId)) return;
-      state.runs.push({ runId: admitted.runId!, delegation: admitted, status: "escalated", tasks: [], coreCreated: false,
+      const existingRun = state.runs.find(run => run.runId === admitted.runId);
+      const blockedRun = { runId: admitted.runId!, delegation: admitted, status: "escalated", tasks: [], coreCreated: false,
         cancelled: false, maxIterations: 3, pendingAction: { actionId, kind: "resume_coordinator", owner: "coordinator",
-          reason: "Read capability repaired", sourceMessageId, createdAt: at, state: "pending", previousStatus: "specifying", recovery: "manual" } });
+          reason: "Read capability repaired", sourceMessageId, createdAt: at, state: "pending", previousStatus: "specifying", recovery: "manual" } } as const;
+      if (existingRun) Object.assign(existingRun, blockedRun);
+      else state.runs.push(blockedRun as any);
       await save();
       }); return true; } catch (error) { if (String(error).includes("runtime busy")) return false; throw error; }
     }, { timeout: 10_000, interval: 25 }).toBe(true);

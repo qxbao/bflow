@@ -93,3 +93,13 @@ the same capability/approval/cancellation/unknown-delivery/idempotency checks. A
 or unrelated user message cannot authorize it. This does not approve a human gate or directly
 dispatch a specialist. Existing public schemas remain unchanged; older clients simply do not
 expose this new private host tool until their session is relaunched.
+
+## Private integration decision: intake before first dispatch
+
+A validated, trusted Conversation delegation now creates durable `intake` in the same journal
+transaction as its outbox intent. This records the already authorized objective, not a signed
+Herdr ingress or Coordinator acceptance. Physical delivery/application and `delegation.accepted`
+remain distinct. This lets first-dispatch capability failure produce the same resumable action
+as later failures, with no invented Core state. Legacy journals without intake retain their
+explicit ingress-failure notice rather than fabricating a received result. Requirement revision,
+approval, cancellation and duplicate-delegation tests exercise this ordering.

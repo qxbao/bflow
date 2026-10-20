@@ -205,4 +205,18 @@ describe("root acceptance of durable next actions", () => {
       { role: "architect", paneId: "pane-architect", status: "working" }, { role: "coordinator", paneId: "pane-coordinator", status: "idle" } ] })).toEqual([]);
   });
 
+  it("persists intake and a resumable blocker when the first Coordinator dispatch fails capability preflight", async () => {
+    let ready = false;
+    const f = await fixture({ runs: [], preflight: async () => { if (!ready) throw new RoleCapabilityPreflightError("Coordinator reader unavailable"); } });
+    const request = delegationEnvelope();
+    await f.runtime.queueHerdr(request); await f.runtime.flushOutbound();
+    const current = await f.runtime.inspect("run-1") as unknown as RunRecord;
+    expect(current).toMatchObject({ status: "escalated", coreCreated: false, pendingAction: { recovery: "capability_repair" } });
+    expect(f.transport.sentRequests).toHaveLength(0);
+    ready = true; await f.runtime.resumeBlockedRun("run-1", current.pendingAction!.actionId); await f.runtime.flushOutbound();
+    expect(f.transport.sentRequests).toHaveLength(1);
+    expect((await f.runtime.inspect("run-1") as unknown as RunRecord).runId).toBe("run-1");
+    expect((await f.inspect()).inbox).toHaveLength(0);
+  });
+
 });

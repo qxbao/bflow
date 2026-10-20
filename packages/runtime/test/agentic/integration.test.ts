@@ -931,8 +931,9 @@ describe("Coordinator no-response host observations", () => {
     await f.runtime.queueHerdr(message); await f.runtime.flushOutbound();
     return { ...f, message, binding: f.panes.bindings.find(p => p.role === "coordinator")! };
   }
-  it("queues correlated blockage even when native Runtime ingress never created a run", async () => {
+  it("reports a legacy delivery whose journal has neither intake nor native ingress", async () => {
     const f = await delivered();
+    await (f.runtime as any).journal.exclusive(async (state: any, save: any) => { state.runs = []; await save(); });
     await f.runtime.coordinatorTurnStopped(f.message, f.binding);
     const state = await f.runtime.inspect() as any;
     expect(state.runs).toEqual([]); expect(state.inbox).toEqual([]);
@@ -984,7 +985,7 @@ describe("Coordinator Stop delivery to Conversation", () => {
     const context = unwrap(await new module.FileConversationContextStore(contextDirectory).load("session-1"))!;
     expect(Object.values(context.workflows)[0]).toMatchObject({ completedVerified: false, blockedReason: expect.stringContaining("no durable ingress") });
     expect(context.session.status).toBe("reporting_progress");
-    expect((await f.runtime.inspect() as any).runs).toEqual([]);
+    expect((await f.runtime.inspect() as any).runs).toEqual([expect.objectContaining({ status: "escalated", coreCreated: false })]);
   });
   it("does not let progress from an earlier delegation hide an unanswered later turn", async () => {
     const f = await fixture(); await f.runtime.reportProgress("run-1", "Previous turn progress");
