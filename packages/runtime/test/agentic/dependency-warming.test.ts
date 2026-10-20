@@ -1,8 +1,10 @@
 import { afterEach, expect, it } from "vitest";
 import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { createServer } from "node:net";
+import { once } from "node:events";
 import { tmpdir } from "node:os";
-import { validateNpmWarmManifests, npmWarmInvocation, warmNpmDependencies } from "../../src/agentic/dependency-warming.js";
+import { validateNpmWarmManifests, npmWarmInvocation, warmNpmDependencies, slirpWarmInvocation, parseWarmChildPid, probeNpmWarmNetwork, runNpmWarmSandbox, NPM_WARM_RESOLVER } from "../../src/agentic/dependency-warming.js";
 import { probeBehavioralSandbox } from "../../src/agentic/sandbox-readiness.js";
 const cleanups: string[] = [];
 afterEach(async () => { for (const path of cleanups.splice(0)) await rm(path, { recursive: true, force: true }); });
@@ -33,7 +35,10 @@ it("validates nested lock entries and paths, including npm v2 legacy resolution 
 it("network warming mounts only Runtime cache, public system files and narrow toolchain paths", () => {
   const invocation = npmWarmInvocation("/tmp/bflow-cache-owned", "/usr/bin/bwrap", "/opt/node/bin/node", "/opt/node/lib/node_modules/npm");
   expect(invocation.executable).toBe("/usr/bin/bwrap");
-  expect(invocation.args).toContain("--share-net");
+  expect(invocation.args).not.toContain("--share-net");
+  expect(invocation.args).toContain("--info-fd");
+  expect(invocation.args).toContain("--block-fd");
+  expect(invocation.args.join(" ")).toContain("/tmp/bflow-cache-owned/resolv.conf /etc/resolv.conf");
   expect(invocation.args).toContain("--unshare-all");
   expect(invocation.args.slice(-7)).toEqual(["ci", "--ignore-scripts", "--no-audit", "--no-fund", "--no-progress", "--registry=https://registry.npmjs.org", "--cache=/cache/npm-cache"]);
   expect(invocation.env).toMatchObject({ HOME: "/tmp/home", NPM_CONFIG_USERCONFIG: "/dev/null", NPM_CONFIG_GLOBALCONFIG: "/dev/null", NPM_CONFIG_IGNORE_SCRIPTS: "true" });
@@ -56,7 +61,8 @@ it("fails unsupported before side effects when no supported frozen lockfile exis
   expect(JSON.parse(await readFile(join(root, "package.json"), "utf8"))).toEqual(manifest);
 });
 const readiness = await probeBehavioralSandbox();
-it.skipIf(readiness.status !== "ready")("real isolated no-dependency npm ci leaves the checkout unchanged", async () => {
+const networkReadiness = await probeNpmWarmNetwork();
+it.skipIf(readiness.status !== "ready" || networkReadiness.status !== "ready")("real isolated no-dependency npm ci leaves the checkout unchanged", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-warm-live-"))); cleanups.push(root);
   const noDependencies = { name: "fixture", version: "1.0.0", scripts: { postinstall: "node -e \"process.exit(99)\"" } };
   await writeFile(join(root, "package.json"), JSON.stringify(noDependencies));
@@ -77,4 +83,77 @@ it("rejects nested dependency source changes, weak/malformed SRI and embedded sh
 
 it("rejects broad home/config directories as toolchain mount sources", () => {
   for (const npmRoot of ["/home/user", "/home/user/.config/npm", "/usr", "/"]) expect(() => npmWarmInvocation("/tmp/bflow-owned-cache", "/usr/bin/bwrap", "/opt/node/bin/node", npmRoot)).toThrow();
+});
+
+it("slirp networking disables host loopback and the host DNS proxy before releasing npm", () => {
+  const invocation = slirpWarmInvocation("/usr/bin/slirp4netns", 123);
+  expect(invocation.args).toEqual(["--configure", "--disable-host-loopback", "--disable-dns", "--ready-fd=3", "--exit-fd=4", "--userns-path=/proc/123/ns/user", "123", "tap0"]);
+  expect(invocation.env).toEqual({PATH:"/usr/bin:/bin", LANG:"C", LC_ALL:"C", HOME:"/nonexistent"});
+  expect(() => slirpWarmInvocation("/usr/bin/slirp4netns", 0)).toThrow();
+});
+it.each(["{}", '{"child-pid":0}', '{"child-pid":-1}', '{"child-pid":"123"}', '{"child-pid":1.2}', "{}\n{}"]) ("rejects malformed namespace handshake %s", value => expect(() => parseWarmChildPid(value)).toThrow());
+it("accepts the bounded documented bwrap child-pid handshake", () => {
+  expect(parseWarmChildPid('{"child-pid":123,"user-namespace":1234}')).toBe(123);
+  expect(() => parseWarmChildPid(" ".repeat(4097))).toThrow();
+});
+
+it("uses fixed public DNS without a host resolver/proxy fallback", () => {
+  expect(NPM_WARM_RESOLVER).toBe("nameserver 1.1.1.1\noptions timeout:2 attempts:2\n");
+});
+async function processFixture(helperSource: string) {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-warm-supervision-"))); cleanups.push(root);
+  const program = (name: string, source: string) => writeFile(join(root, name), `#!${process.execPath}\n${source}`, {mode:0o700});
+  await program("bwrap", `import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(join(root,"sandbox-pid"))},String(process.pid));const info=fs.createWriteStream(null,{fd:3});info.end(JSON.stringify({'child-pid':process.pid}));const block=fs.createReadStream(null,{fd:4});block.once('data',()=>{fs.writeFileSync(${JSON.stringify(join(root,"started"))},'started');process.exit(0)});`);
+  await program("slirp", `import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(join(root,"helper-pid"))},String(process.pid));${helperSource}`);
+  return {root, invocation:{executable:join(root,"bwrap"),args:["--unshare-all"],env:{PATH:"/usr/bin:/bin"}}, helper:join(root,"slirp")};
+}
+it("waits for the helper readiness byte before unblocking the sandbox and reaps the helper", async () => {
+  const f=await processFixture("const ready=fs.createWriteStream(null,{fd:3});ready.end('1');fs.createReadStream(null,{fd:4}).resume();");
+  await runNpmWarmSandbox(f.invocation,f.helper,f.root,5000);
+  expect(await readFile(join(f.root,"started"),"utf8")).toBe("started");
+  const pid=Number(await readFile(join(f.root,"helper-pid"),"utf8"));
+  expect(()=>process.kill(pid,0)).toThrow();
+});
+it("rejects an empty helper readiness pipe without releasing the sandbox", async () => {
+  const f=await processFixture("process.exit(0);");
+  await expect(runNpmWarmSandbox(f.invocation,f.helper,f.root,5000)).rejects.toThrow();
+  await expect(readFile(join(f.root,"started"))).rejects.toMatchObject({code:"ENOENT"});
+});
+it("bounds a hung bootstrap and kills both process trees", async () => {
+  const f=await processFixture("setInterval(()=>{},1000);");
+  await expect(runNpmWarmSandbox(f.invocation,f.helper,f.root,1000)).rejects.toThrow(/deadline/);
+  const pid=Number(await readFile(join(f.root,"sandbox-pid"),"utf8"));
+  expect(()=>process.kill(pid,0)).toThrow();
+  await expect(readFile(join(f.root,"started"))).rejects.toMatchObject({code:"ENOENT"});
+});
+it("rejects accidental shared-host networking before spawning a process", async () => {
+  await expect(runNpmWarmSandbox({executable:"/not/run",args:["--unshare-all","--share-net"],env:{}},"/not/run","/",1)).rejects.toThrow(/policy/);
+});
+it.skipIf(readiness.status!=="ready" || networkReadiness.status!=="ready")("real warming network cannot connect to host abstract sockets or loopback listeners", async () => {
+  if(readiness.status!=="ready" || networkReadiness.status!=="ready")return;
+  const root=await realpath(await mkdtemp(join(tmpdir(),"bflow-warm-socket-test-")));cleanups.push(root);
+  await Promise.all([writeFile(join(root,"package.json"),"{}"),writeFile(join(root,"package-lock.json"),"{}"),writeFile(join(root,"resolv.conf"),NPM_WARM_RESOLVER)]);
+  const abstractName="\0bflow-warm-"+process.pid+"-"+Date.now(), abstract=createServer(),tcp=createServer();
+  abstract.listen(abstractName);await once(abstract,"listening");tcp.listen(0,"127.0.0.1");await once(tcp,"listening");
+  try{
+    const address=tcp.address();if(!address || typeof address==="string")throw new Error("missing port");
+    const node=await realpath(process.execPath),npmRoot=await realpath(join(dirname(dirname(node)),"lib/node_modules/npm"));
+    const invocation=npmWarmInvocation(root,readiness.executable,node,npmRoot),marker=invocation.args.indexOf("--");
+    const code=`const net=require('node:net');const endpoints=[{path:${JSON.stringify(abstractName)}},{host:'127.0.0.1',port:${address.port}},{host:'10.0.2.2',port:${address.port}},{host:'10.0.2.3',port:${address.port}}];Promise.all(endpoints.map(options=>new Promise((resolve,reject)=>{const socket=net.connect(options);socket.setTimeout(1000,()=>{socket.destroy();resolve()});socket.on('connect',()=>{socket.destroy();reject(new Error('host reachable'))});socket.on('error',()=>resolve())}))).then(()=>process.exit(0),()=>process.exit(20));`;
+    invocation.args.splice(marker+1,invocation.args.length-marker-1,"/runtime/bin/node","-e",code);
+    await runNpmWarmSandbox(invocation,networkReadiness.executable,root,15000);
+  }finally{await Promise.all([new Promise(resolve=>abstract.close(resolve)),new Promise(resolve=>tcp.close(resolve))]);}
+});
+
+it("requires actual helper capability output including disable-dns", async () => {
+  const root=await realpath(await mkdtemp(join(tmpdir(),"bflow-slirp-probe-")));cleanups.push(root);
+  const previous=process.env.PATH;
+  try{
+    process.env.PATH=root;
+    expect((await probeNpmWarmNetwork()).status).toBe("unsupported");
+    const writeHelper=(flags:string)=>writeFile(join(root,"slirp4netns"),`#!${process.execPath}\nconsole.log(process.argv.includes('--version')?'slirp4netns version 1.3.2':${JSON.stringify(flags)});`,{mode:0o700});
+    const flags="--configure --disable-host-loopback --ready-fd --exit-fd --userns-path";
+    await writeHelper(flags);expect((await probeNpmWarmNetwork()).status).toBe("unsupported");
+    await writeHelper(flags+" --disable-dns");expect((await probeNpmWarmNetwork()).status).toBe("ready");
+  }finally{if(previous===undefined)delete process.env.PATH;else process.env.PATH=previous;}
 });
