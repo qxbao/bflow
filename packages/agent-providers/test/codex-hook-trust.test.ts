@@ -46,6 +46,96 @@ async function writeOrcaHook(home: string): Promise<void> {
 }
 
 describe("Codex hook approval inventory", () => {
+  async function sharedProfile() {
+    const native = await setup();
+    const profileRoot = join(native.root, "profiles", "codex--personal");
+    const profileHome = join(profileRoot, "home");
+    const codexHome = join(profileHome, ".codex");
+    await mkdir(codexHome, { recursive: true, mode: 0o700 });
+    await chmod(profileRoot, 0o700);
+    await chmod(profileHome, 0o700);
+    await chmod(codexHome, 0o775);
+    await writeFile(join(native.home, "hooks.json"), JSON.stringify({ hooks: {
+      SessionStart: [{ hooks: [{ type: "command", command: "echo $(already-approved-native-hook)" }] }]
+    } }), { mode: 0o664 });
+    await chmod(join(native.home, "hooks.json"), 0o664);
+    await symlink(join(native.home, "hooks.json"), join(codexHome, "hooks.json"));
+    await trustAllCodexHooks({ ...native.options, approvedBy: "fixture-operator" });
+    const options = { ...native.options, codexHomeDirectory: codexHome,
+      isolatorHomeDirectory: profileHome, sharedNativeCodexHomeDirectory: native.home };
+    return { ...native, profileRoot, profileHome, codexHome, profileOptions: options };
+  }
+
+  it("uses existing native approval for only the linked source in a private isolated home", async () => {
+    const f = await sharedProfile();
+    const first = await inspectCodexHooks(f.profileOptions);
+    expect(first.status, first.unsupportedReasons.join("; ")).toBe("approved");
+    expect(first.approvalMode).toBeUndefined();
+    expect(first.diagnostics.join(" ")).toContain("shared native hooks");
+    const policyBefore = await readFile(codexHookPolicyPath(f.store), "utf8");
+    await writeFile(join(f.codexHome, "config.toml"), '[hooks]\nSessionStart = [{ hooks = [{ type = "command", command = "/usr/bin/true" }] }]\n', { mode: 0o600 });
+    expect((await inspectCodexHooks(f.profileOptions)).status).toBe("approval_required");
+    expect(await readFile(codexHookPolicyPath(f.store), "utf8")).toBe(policyBefore);
+  });
+
+  it("reuses native plugin authority only while enabled plugin contents match exactly", async () => {
+    const f = await sharedProfile();
+    const id = "fixture@fixture";
+    await writeFile(join(f.home, "config.toml"), `[plugins."${id}"]\nenabled = true\n`, { mode: 0o600 });
+    await writeFile(join(f.codexHome, "config.toml"), `[plugins."${id}"]\nenabled = true\n`, { mode: 0o600 });
+    for (const home of [f.home, f.codexHome]) {
+      const plugin = join(home, "plugins/cache/fixture/fixture/1");
+      await mkdir(join(plugin, ".codex-plugin"), { recursive: true, mode: 0o700 });
+      await mkdir(join(plugin, "hooks"), { recursive: true, mode: 0o700 });
+      await writeFile(join(plugin, ".codex-plugin/plugin.json"), '{"name":"fixture","hooks":"./hooks/hooks.json"}', { mode: 0o600 });
+      await writeFile(join(plugin, "hooks/hooks.json"), '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo $(approved-native-plugin)"}]}]}}', { mode: 0o600 });
+    }
+    expect((await inspectCodexHooks(f.profileOptions)).status).toBe("approved");
+    await writeFile(join(f.codexHome, "plugins/cache/fixture/fixture/1/hooks/hooks.json"), '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/usr/bin/true"}]}]}}');
+    expect((await inspectCodexHooks(f.profileOptions)).status).toBe("approval_required");
+  });
+
+  it("does not require hook approval for a profile-only instruction plugin with empty hooks", async () => {
+    const f = await sharedProfile();
+    const plugin = join(f.codexHome, "plugins/cache/local/instructions/1");
+    await mkdir(join(plugin, ".codex-plugin"), { recursive: true, mode: 0o700 });
+    await chmod(plugin, 0o775);
+    const manifest = join(plugin, ".codex-plugin/plugin.json");
+    await writeFile(manifest, '{"name":"instructions","hooks":{}}', { mode: 0o664 });
+    await chmod(manifest, 0o664);
+    await writeFile(join(f.codexHome, "config.toml"), '[plugins."instructions@local"]\nenabled = true\n', { mode: 0o600 });
+    expect((await inspectCodexHooks(f.profileOptions)).status).toBe("approved");
+    await writeFile(manifest, '{"name":"instructions","hooks":{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo $(unapproved-local-code)"}]}]}}}');
+    expect((await inspectCodexHooks(f.profileOptions)).status).toBe("unsupported");
+  });
+
+  it("revokes linked native source authority and rejects a retargeted hook link", async () => {
+    const f = await sharedProfile();
+    expect((await inspectCodexHooks(f.profileOptions)).status).toBe("approved");
+    await revokeAllCodexHookTrust(f.options);
+    expect((await inspectCodexHooks(f.profileOptions)).status).toBe("unsupported");
+    await trustAllCodexHooks({ ...f.options, approvedBy: "fixture-operator" });
+    const unrelated = join(f.root, "unrelated-hooks.json");
+    await writeFile(unrelated, '{"hooks":{}}', { mode: 0o600 });
+    await rm(join(f.codexHome, "hooks.json"));
+    await symlink(unrelated, join(f.codexHome, "hooks.json"));
+    expect((await inspectCodexHooks(f.profileOptions)).status).toBe("unsupported");
+  });
+
+  it("does not inspect an unrelated native home when the profile has its own hooks file", async () => {
+    const f = await sharedProfile();
+    await rm(join(f.codexHome, "hooks.json"));
+    await writeFile(join(f.codexHome, "hooks.json"), '{"hooks":{}}', { mode: 0o600 });
+    await chmod(f.home, 0o775);
+    expect((await inspectCodexHooks(f.profileOptions)).status).toBe("none");
+  });
+
+  it("keeps the isolated profile root private even when descendants are permitted", async () => {
+    const f = await sharedProfile();
+    await chmod(f.profileRoot, 0o775);
+    expect((await inspectCodexHooks(f.profileOptions)).status).toBe("unsupported");
+  });
+
   it("reports no hooks without creating approval state", async () => {
     const { home, store, options } = await setup();
     const review = await inspectCodexHooks(options);

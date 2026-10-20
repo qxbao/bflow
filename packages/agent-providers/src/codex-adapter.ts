@@ -173,6 +173,13 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
     };
   }
 
+  private sharedNativeHookOptions(): { isolatorHomeDirectory?: string; sharedNativeCodexHomeDirectory?: string } {
+    const home = this.options.isolatorEnvironment?.["HOME"];
+    if (home === undefined) return {};
+    return { isolatorHomeDirectory: home,
+      ...(this.options.codexHomeDirectory !== undefined ? { sharedNativeCodexHomeDirectory: this.options.codexHomeDirectory } : {}) };
+  }
+
   private trustedHookEnvironment(): Readonly<Record<string, string | undefined>> {
     if (this.options.isolatorEnvironment !== undefined) {
       const selected = this.options.isolatorEnvironment;
@@ -225,13 +232,14 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
               ? this.options.isolatorEnvironment["CODEX_LB_API_KEY"]
               : process.env["CODEX_LB_API_KEY"])?.trim()
           ))
-        : []),
-      "exec"
+        : [])
     ];
+    // Codex exec's own -c list replaces root overrides, so keep all config overrides before the subcommand.
+    if (this.options.effort) probe.push("-c", `model_reasoning_effort=${JSON.stringify(this.options.effort)}`);
+    probe.push("exec");
     if (this.options.model) {
       probe.push("--model", this.options.model);
     }
-    if (this.options.effort) probe.push("-c", `model_reasoning_effort=${JSON.stringify(this.options.effort)}`);
     probe.push("ping");
     return probe;
   }
@@ -360,6 +368,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
 
     const hookReview = await inspectCodexHooks({
       codexHomeDirectory: home,
+      ...this.sharedNativeHookOptions(),
       ...(this.options.codexHookApprovalPath !== undefined ? { approvalStorePath: this.options.codexHookApprovalPath } : {}),
       environment: this.trustedHookEnvironment()
     });
@@ -432,6 +441,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
       const files = await probeFileSnapshot(allProbeFiles, allRequiredFiles, home);
       if (files === undefined || await probeFileSnapshot(probeFiles, requiredProbeFiles, home) !== beforeConfigRead) return undefined;
       const currentHooks = await inspectCodexHooks({ codexHomeDirectory: home,
+        ...this.sharedNativeHookOptions(),
         ...(this.options.codexHookApprovalPath !== undefined ? { approvalStorePath: this.options.codexHookApprovalPath } : {}),
         environment: this.trustedHookEnvironment() });
       if (currentHooks.digest !== hookReview.digest || currentHooks.status !== hookReview.status ||

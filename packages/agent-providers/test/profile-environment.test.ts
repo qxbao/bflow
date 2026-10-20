@@ -244,6 +244,8 @@ describe("profile-selected provider environments", () => {
       runner: recordingRunner(calls),
       isolatorEnvironment,
       codexBackendUrl: "http://127.0.0.1:8787/v1",
+      model: "gpt-6.1-sol",
+      effort: "medium",
       codexHookApprovalPath: join(root, "machine-state", "codex-hook-approvals.json"),
       allowTestFilesystemOwnership: true
     });
@@ -273,6 +275,9 @@ describe("profile-selected provider environments", () => {
       'model_providers.codex-lb.env_key="CODEX_LB_API_KEY"'
     ]));
     expect(probe?.args.join(" ")).not.toContain(token);
+    const execIndex = probe!.args.indexOf("exec");
+    expect(probe!.args.slice(execIndex + 1)).not.toContain("-c");
+    expect(probe!.args.indexOf('model_reasoning_effort="medium"')).toBeLessThan(execIndex);
     for (const call of calls.filter((entry) => entry !== probe)) {
       expect(call.env?.["CODEX_LB_API_KEY"]).toBeUndefined();
     }

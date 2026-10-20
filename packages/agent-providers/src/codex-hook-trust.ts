@@ -89,6 +89,10 @@ const ApprovalStoreSchema = z.object({
 export interface CodexHookTrustOptions {
   readonly codexHomeDirectory?: string;
   readonly approvalStorePath?: string;
+  /** Trusted selected profile HOME, supplied by Runtime, never repository hook configuration. */
+  readonly isolatorHomeDirectory?: string;
+  /** Machine-selected native Codex source; only its exact linked hooks.json can reuse its existing policy. */
+  readonly sharedNativeCodexHomeDirectory?: string;
   readonly environment?: Readonly<Record<string, string | undefined>>;
 }
 
@@ -162,13 +166,17 @@ function ownedByCurrentUserOrRoot(stat: { uid?: number }): boolean {
   return stat.uid === uid || stat.uid === 0;
 }
 
-async function readBoundedRegular(path: string, maxBytes: number, privateFile = false): Promise<Buffer> {
+async function readBoundedRegular(path: string, maxBytes: number, privateFile = false, protectedDirectory?: string): Promise<Buffer> {
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = await handle.stat();
     const beforePrecise = await handle.stat({ bigint: true });
     if (!stat.isFile()) throw new Error(`Expected a regular file: ${path}`);
-    if (!ownedByCurrentUserOrRoot(stat) || (stat.mode & 0o022) !== 0)
+    const protectedRelative = protectedDirectory === undefined ? undefined : relative(protectedDirectory, path);
+    const protectedFile = protectedDirectory !== undefined && protectedRelative !== undefined &&
+      protectedRelative !== "" && protectedRelative !== ".." && !protectedRelative.startsWith(`..${sep}`) &&
+      !isAbsolute(protectedRelative) && await isPrivateOwnedDirectory(protectedDirectory);
+    if (!ownedByCurrentUserOrRoot(stat) || ((stat.mode & 0o022) !== 0 && !protectedFile))
       throw new Error(`File has unsafe ownership or is group/world writable: ${path}`);
     if (privateFile && ((stat.mode & 0o077) !== 0 || (typeof process.getuid === "function" && stat.uid !== process.getuid())))
       throw new Error(`Approval state file must be current-user-owned with mode 0600 or stricter: ${path}`);
@@ -192,12 +200,12 @@ async function readBoundedRegular(path: string, maxBytes: number, privateFile = 
   }
 }
 
-async function inspectPath(path: string, maxBytes: number, hashContent = true): Promise<{ readonly exists: boolean; readonly resolvedPath: string | null; readonly sha256: string | null; readonly bytes?: Buffer }> {
+async function inspectPath(path: string, maxBytes: number, hashContent = true, protectedDirectory?: string): Promise<{ readonly exists: boolean; readonly resolvedPath: string | null; readonly sha256: string | null; readonly bytes?: Buffer }> {
   let info;
   try { info = await lstat(path); }
   catch (error) { if (notFound(error)) return { exists: false, resolvedPath: null, sha256: null }; throw error; }
   if (info.isSymbolicLink() || !info.isFile()) throw new Error(`Hook source is symlinked or not a regular file: ${path}`);
-  const bytes = await readBoundedRegular(path, maxBytes);
+  const bytes = await readBoundedRegular(path, maxBytes, false, protectedDirectory);
   const after = await lstat(path);
   if (after.isSymbolicLink() || after.dev !== info.dev || after.ino !== info.ino || after.size !== info.size || after.mtimeMs !== info.mtimeMs || after.ctimeMs !== info.ctimeMs)
     throw new Error(`Hook source changed during inspection: ${path}`);
@@ -447,14 +455,62 @@ function extractHooks(raw: unknown, unsupportedReasons: string[]): Array<{ event
   return entries.slice(0, MAX_HOOKS);
 }
 
-async function canonicalCodexHome(home: string): Promise<string> {
+async function isPrivateOwnedDirectory(path: string): Promise<boolean> {
+  const info = await lstat(path);
+  return info.isDirectory() && !info.isSymbolicLink() &&
+    (typeof process.getuid !== "function" || info.uid === process.getuid()) &&
+    (info.mode & 0o077) === 0 && await realpath(path) === resolve(path);
+}
+
+async function canonicalCodexHome(home: string, isolatorHome?: string): Promise<string> {
   let canonical: string;
   try { canonical = await realpath(home); }
   catch (error) { if (notFound(error)) return resolve(home); throw error; }
-  const stat = await lstat(canonical);
-  if (stat.isSymbolicLink() || !stat.isDirectory() || !ownedByCurrentUserOrRoot(stat) || (stat.mode & 0o022) !== 0)
+  const info = await lstat(canonical);
+  let protectedProfile = false;
+  if (isolatorHome !== undefined) {
+    const selected = resolve(isolatorHome), root = dirname(selected);
+    if (resolve(home) !== join(selected, ".codex") || !await isPrivateOwnedDirectory(root))
+      throw new Error("Selected Codex profile must remain inside its private user-owned profile root.");
+    for (const path of [selected, resolve(home)]) {
+      const entry = await lstat(path);
+      if (!entry.isDirectory() || entry.isSymbolicLink() || await realpath(path) !== path ||
+          (typeof process.getuid === "function" && entry.uid !== process.getuid()))
+        throw new Error("Selected Codex profile directories must be canonical and user-owned.");
+    }
+    protectedProfile = true;
+  }
+  if (info.isSymbolicLink() || !info.isDirectory() || !ownedByCurrentUserOrRoot(info) ||
+      ((info.mode & 0o022) !== 0 && !protectedProfile))
     throw new Error("Codex home must be a user-owned directory that is not group/world writable.");
   return canonical;
+}
+
+async function trustedSharedNativeHooks(options: CodexHookTrustOptions, home: string, store: string): Promise<{ sources: CodexHookSource[]; authorityDigest: string } | undefined> {
+  if (options.isolatorHomeDirectory === undefined || options.sharedNativeCodexHomeDirectory === undefined) return undefined;
+  const link = join(home, "hooks.json");
+  let before;
+  try { before = await lstat(link); } catch (error) { if (notFound(error)) return undefined; throw error; }
+  if (!before.isSymbolicLink()) return undefined;
+  const native = await canonicalCodexHome(options.sharedNativeCodexHomeDirectory);
+  if (native === home) return undefined;
+  const source = join(native, "hooks.json");
+  if (await realpath(link) !== source) return undefined;
+  const policy = (await readHookPolicyStore(store))?.policies.find(item => item.codexHomeDirectory === native);
+  if (!policy) return undefined;
+  // Reuse authority over this exact native source, never a trust-all policy for profile-local hooks/plugins.
+  const bytes = await readBoundedRegular(source, MAX_SOURCE_BYTES, false, native);
+  if ((await lstat(source)).isSymbolicLink() || await realpath(source) !== source || await realpath(link) !== source)
+    throw new Error("Shared native hooks changed their canonical source during inspection.");
+  const after = await lstat(link);
+  if (!after.isSymbolicLink() || after.dev !== before.dev || after.ino !== before.ino ||
+      after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs)
+    throw new Error("Shared native hook binding changed during inspection.");
+  const sourceDigest = sha256(bytes);
+  return { authorityDigest: sha256(JSON.stringify({ native, source, policy })), sources: [
+    { kind: "hooks_json", path: link, exists: true, sha256: sourceDigest },
+    { kind: "hooks_json", path: source, exists: true, sha256: sourceDigest }
+  ] };
 }
 
 async function ensurePrivateStoreParent(storePath: string, create: boolean): Promise<boolean> {
@@ -518,7 +574,7 @@ function jsonObject(bytes: Buffer, label: string): Record<string, unknown> {
 }
 
 /** Resolve only an unambiguous, local cache installation; never guess the newest version. */
-async function pluginHookInputs(home: string, id: string, sources: CodexHookSource[]): Promise<{ root: string; inputs: unknown[] }> {
+async function pluginInstallationRoot(home: string, id: string, protectedHome = false): Promise<string> {
   const [name, marketplace] = id.split("@");
   const cache = join(home, "plugins", "cache", marketplace!, name!);
   const versions: string[] = [];
@@ -535,7 +591,14 @@ async function pluginHookInputs(home: string, id: string, sources: CodexHookSour
   const root = join(cache, versions[0]!);
   if (await realpath(root) !== resolve(root)) throw new Error("Plugin installation has a symlinked path component");
   const stat = await lstat(root);
-  if (!ownedByCurrentUserOrRoot(stat) || (stat.mode & 0o022) !== 0) throw new Error("Plugin installation has unsafe ownership or permissions");
+  if (!ownedByCurrentUserOrRoot(stat) || ((stat.mode & 0o022) !== 0 && !protectedHome)) throw new Error("Plugin installation has unsafe ownership or permissions");
+  return root;
+}
+
+async function pluginHookInputs(home: string, id: string, sources: CodexHookSource[], protectedDirectory?: string): Promise<{ root: string; inputs: unknown[] }> {
+  if (protectedDirectory !== undefined && !await isPrivateOwnedDirectory(protectedDirectory))
+    throw new Error("Profile plugin inspection requires its private enclosing directory");
+  const root = await pluginInstallationRoot(home, id, protectedDirectory !== undefined);
   const manifests = [join(root, "plugin.json"), join(root, ".codex-plugin", "plugin.json"), join(root, ".claude-plugin", "plugin.json")];
   let declaration: unknown;
   let selected = false;
@@ -544,7 +607,7 @@ async function pluginHookInputs(home: string, id: string, sources: CodexHookSour
     sources.push(source);
   };
   for (const [index, path] of manifests.entries()) {
-    const inspected = await inspectPath(path, MAX_SOURCE_BYTES);
+    const inspected = await inspectPath(path, MAX_SOURCE_BYTES, true, protectedDirectory);
     trackSource({ kind: "plugin_manifest", path, exists: inspected.exists, sha256: inspected.sha256 });
     if (!inspected.bytes || selected) continue;
     const manifest = jsonObject(inspected.bytes, "Plugin manifest");
@@ -567,7 +630,7 @@ async function pluginHookInputs(home: string, id: string, sources: CodexHookSour
       if (!value.startsWith("./") || value.includes("\\") || value.includes("\0") || value.slice(2).split("/").some(part => !part || part === "." || part === ".."))
         throw new Error("Plugin hook path must stay inside the plugin installation");
       const path = join(root, value);
-      const inspected = await inspectPath(path, MAX_SOURCE_BYTES);
+      const inspected = await inspectPath(path, MAX_SOURCE_BYTES, true, protectedDirectory);
       trackSource({ kind: "plugin_hooks", path, exists: inspected.exists, sha256: inspected.sha256 });
       if (inspected.bytes) inputs.push(jsonObject(inspected.bytes, "Plugin hooks"));
       else if (required) throw new Error("Declared plugin hook file is absent");
@@ -582,9 +645,55 @@ async function pluginHookInputs(home: string, id: string, sources: CodexHookSour
   return { root, inputs };
 }
 
-async function buildInventory(options: CodexHookTrustOptions = {}): Promise<Omit<CodexHookReview, "status">> {
+async function pluginTreeDigest(root: string, protectedDirectory: string): Promise<string> {
+  if (!await isPrivateOwnedDirectory(protectedDirectory)) throw new Error("Shared plugin authority requires a private enclosing directory");
+  const digest = createHash("sha256");
+  let count = 0, total = 0;
+  const visit = async (path: string, depth: number): Promise<void> => {
+    if (++count > 1024 || depth > 20) throw new Error("Shared plugin exceeds the bounded tree limit");
+    const info = await lstat(path);
+    if (info.isSymbolicLink() || !ownedByCurrentUserOrRoot(info) || await realpath(path) !== resolve(path))
+      throw new Error("Shared plugin contains an unsafe path");
+    const name = relative(root, path);
+    if (info.isDirectory()) {
+      digest.update(`directory:${name}\0`);
+      const entries: string[] = [];
+      const directory = await opendir(path);
+      for await (const entry of directory) {
+        if (entries.length >= 1024) throw new Error("Shared plugin exceeds the bounded tree limit");
+        entries.push(entry.name);
+      }
+      for (const entry of entries.sort()) await visit(join(path, entry), depth + 1);
+    } else if (info.isFile()) {
+      const bytes = await readBoundedRegular(path, MAX_SCRIPT_BYTES, false, protectedDirectory);
+      total += bytes.length;
+      if (total > 32 * 1024 * 1024) throw new Error("Shared plugin exceeds the bounded byte limit");
+      digest.update(`file:${name}\0`).update(sha256(bytes));
+    } else throw new Error("Shared plugin contains a non-regular asset");
+  };
+  await visit(root, 0);
+  return digest.digest("hex");
+}
+
+async function trustedNativePluginCopy(options: CodexHookTrustOptions, home: string, id: string): Promise<string | undefined> {
+  if (options.isolatorHomeDirectory === undefined || options.sharedNativeCodexHomeDirectory === undefined) return undefined;
+  const native = await canonicalCodexHome(options.sharedNativeCodexHomeDirectory);
+  let config: Buffer;
+  try { config = await readBoundedRegular(join(native, "config.toml"), MAX_SOURCE_BYTES, false, native); }
+  catch (error) { if (notFound(error)) return undefined; throw error; }
+  if (!parseCodexEnabledPlugins(config.toString("utf8")).includes(id)) return undefined;
+  const source = await pluginInstallationRoot(native, id, true);
+  const target = await pluginInstallationRoot(home, id, true);
+  if (source === target || source.split(sep).at(-1) !== target.split(sep).at(-1)) return undefined;
+  const sourceDigest = await pluginTreeDigest(source, native);
+  const targetDigest = await pluginTreeDigest(target, dirname(options.isolatorHomeDirectory));
+  if (sourceDigest !== targetDigest) return undefined;
+  return sha256(JSON.stringify({ source, target, sourceDigest, targetDigest }));
+}
+
+async function buildInventory(options: CodexHookTrustOptions = {}): Promise<Omit<CodexHookReview, "status"> & { sharedNativeHooksTrusted: boolean }> {
   const paths = pathOptions(options);
-  const home = await canonicalCodexHome(paths.home);
+  const home = await canonicalCodexHome(paths.home, options.isolatorHomeDirectory);
   const store = paths.store;
   const sources: CodexHookSource[] = [];
   const hooks: CodexHookInventoryEntry[] = [];
@@ -593,27 +702,33 @@ async function buildInventory(options: CodexHookTrustOptions = {}): Promise<Omit
   const candidates = configuredOrcaCandidates(paths.environment);
 
   const hooksPath = join(home, "hooks.json");
+  const sharedNative = await trustedSharedNativeHooks(options, home, store);
   try {
-    const inspected = await inspectPath(hooksPath, MAX_SOURCE_BYTES);
-    sources.push({ kind: "hooks_json", path: resolve(hooksPath), exists: inspected.exists, sha256: inspected.sha256 });
-    if (inspected.bytes) {
-      let raw: unknown;
-      try { raw = JSON.parse(inspected.bytes.toString("utf8")) as unknown; }
-      catch { unsupportedReasons.push("hooks.json is malformed JSON."); raw = undefined; }
-      if (raw !== undefined) {
-        const entries = extractHooks(raw, unsupportedReasons);
-        for (const entry of entries) {
-          const dependencies = await dependenciesForCommand(entry.command, candidates, paths.environment, unsupportedReasons, diagnostics);
-          for (const dependency of dependencies) {
-            if (!sources.some(source => source.path === dependency.requestedPath))
-              sources.push(CodexHookSourceSchema.parse({ kind: candidates.includes(dependency.requestedPath) ? "orca_candidate" : "script",
-                path: dependency.requestedPath, exists: dependency.exists, sha256: dependency.sha256 }));
+    if (sharedNative) {
+      sources.push(...sharedNative.sources);
+      diagnostics.push(`Existing native operator policy approves only this exact linked shared native hooks source (authority ${sharedNative.authorityDigest}); profile-local hooks remain independently reviewed.`);
+    } else {
+      const inspected = await inspectPath(hooksPath, MAX_SOURCE_BYTES);
+      sources.push({ kind: "hooks_json", path: resolve(hooksPath), exists: inspected.exists, sha256: inspected.sha256 });
+      if (inspected.bytes) {
+        let raw: unknown;
+        try { raw = JSON.parse(inspected.bytes.toString("utf8")) as unknown; }
+        catch { unsupportedReasons.push("hooks.json is malformed JSON."); raw = undefined; }
+        if (raw !== undefined) {
+          const entries = extractHooks(raw, unsupportedReasons);
+          for (const entry of entries) {
+            const dependencies = await dependenciesForCommand(entry.command, candidates, paths.environment, unsupportedReasons, diagnostics);
+            for (const dependency of dependencies) {
+              if (!sources.some(source => source.path === dependency.requestedPath))
+                sources.push(CodexHookSourceSchema.parse({ kind: candidates.includes(dependency.requestedPath) ? "orca_candidate" : "script",
+                  path: dependency.requestedPath, exists: dependency.exists, sha256: dependency.sha256 }));
+            }
+            hooks.push(CodexHookInventoryEntrySchema.parse({
+              ...entry,
+              digest: sha256(JSON.stringify({ event: entry.event, matcher: entry.matcher ?? null, command: entry.command })),
+              dependencies
+            }));
           }
-          hooks.push(CodexHookInventoryEntrySchema.parse({
-            ...entry,
-            digest: sha256(JSON.stringify({ event: entry.event, matcher: entry.matcher ?? null, command: entry.command })),
-            dependencies
-          }));
         }
       }
     }
@@ -642,7 +757,13 @@ async function buildInventory(options: CodexHookTrustOptions = {}): Promise<Omit
         continue;
       }
       try {
-        const { inputs } = await pluginHookInputs(home, id, sources);
+        const nativeCopy = sharedNative ? await trustedNativePluginCopy(options, home, id) : undefined;
+        if (nativeCopy) {
+          diagnostics.push(`Existing native operator policy approves unchanged shared native plugin ${id} (content binding ${nativeCopy}); modified profile copies require their own approval.`);
+          continue;
+        }
+        const { inputs } = await pluginHookInputs(home, id, sources,
+          options.isolatorHomeDirectory === undefined ? undefined : dirname(options.isolatorHomeDirectory));
         for (const input of inputs) {
           const pluginEntries = extractHooks(input, unsupportedReasons);
           for (const entry of pluginEntries) { pluginOrigins.set(entry, id); }
@@ -678,7 +799,8 @@ async function buildInventory(options: CodexHookTrustOptions = {}): Promise<Omit
   const uniqueDiagnostics = [...new Set(diagnostics)];
   const uniqueReasons = [...new Set(unsupportedReasons)];
   const digest = sha256(JSON.stringify({ schemaVersion: 1, codexHomeDirectory: home, approvalStorePath: store, selectorState, sources, hooks, diagnostics: uniqueDiagnostics, unsupportedReasons: uniqueReasons }));
-  return { schemaVersion: 1, codexHomeDirectory: home, approvalStorePath: store, digest, sources, hooks, diagnostics: uniqueDiagnostics, unsupportedReasons: uniqueReasons };
+  return { schemaVersion: 1, codexHomeDirectory: home, approvalStorePath: store, digest, sources, hooks, diagnostics: uniqueDiagnostics, unsupportedReasons: uniqueReasons,
+    sharedNativeHooksTrusted: sharedNative !== undefined };
 }
 
 async function policyHome(home: string, store: string): Promise<string> {
@@ -778,9 +900,9 @@ export async function inspectCodexHooks(options: CodexHookTrustOptions = {}): Pr
     if (policy) return CodexHookReviewSchema.parse({ schemaVersion: 1, codexHomeDirectory: home, approvalStorePath: paths.store,
       digest: sha256(JSON.stringify(policy)), status: "approved", approvalMode: "trust_all", sources: [], hooks: [], unsupportedReasons: [],
       diagnostics: ["Operator policy trusts all current and future Codex global hooks; source inspection is skipped.", ...await laxTrustAllWarnings(home)] });
-    const inventory = await buildInventory(options);
+    const { sharedNativeHooksTrusted, ...inventory } = await buildInventory(options);
     if (inventory.unsupportedReasons.length === 0 && inventory.hooks.length === 0)
-      return CodexHookReviewSchema.parse({ ...inventory, status: "none" });
+      return CodexHookReviewSchema.parse({ ...inventory, status: sharedNativeHooksTrusted ? "approved" : "none" });
     const store = await readApprovalStore(inventory.approvalStorePath);
     const approved = store?.approvals.some(item => item.digest === inventory.digest && item.codexHomeDirectory === inventory.codexHomeDirectory) ?? false;
     const status: CodexHookReview["status"] = inventory.unsupportedReasons.length > 0

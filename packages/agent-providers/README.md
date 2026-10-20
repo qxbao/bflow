@@ -304,3 +304,21 @@ herdr agent start <agentName> --kind <provider> --pane <paneId> [--timeout <ms>]
 ```
 Các argument sau `--` được validate nghiêm ngặt để ngăn ngắt dòng shell nhiều dòng, byte NUL hoặc token bí mật.
 Các biến môi trường của provider (`PATH`, `HOME`, `XDG_*`, `BHOME`, `BFLOW_*`) cô lập cấu hình theo từng session.
+
+### Hooks Codex dùng chung với profile cô lập
+
+Provider chấp nhận các thư mục con thuộc người dùng hiện tại bên dưới profile root
+riêng tư đã được Runtime xác thực, kể cả khi `.codex` có mode `775`. Các nguồn hooks
+vẫn được đọc có giới hạn và kiểm tra đường dẫn, chủ sở hữu, symlink và thay đổi nội dung.
+
+Nếu profile liên kết đúng `hooks.json` native và machine store đã có policy cho nguồn
+native đó, provider dùng lại thẩm quyền của đúng nguồn được liên kết. Plugin đã bật ở
+native chỉ được dùng lại policy khi phiên bản và toàn bộ nội dung khớp bản trong profile.
+Plugin riêng chỉ chứa hướng dẫn và khai báo hooks rỗng không cần phê duyệt hook.
+Các hooks riêng, plugin khác nội dung, symlink đổi đích hoặc policy bị thu hồi vẫn bị
+kiểm tra độc lập; adapter không tạo policy `trust_all` mới cho profile. Native source,
+policy và nội dung plugin được ràng buộc vào digest và kiểm tra lại trước khi thực thi.
+
+Readiness probe Codex đặt tất cả override `-c` trước subcommand `exec`, gồm backend
+đã liên kết và reasoning effort. Một danh sách `-c` sau `exec` có thể thay thế override
+ở cấp root trong CLI, làm mất backend profile và gửi ping đến sai provider.

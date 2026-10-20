@@ -1,5 +1,34 @@
 # Configured iso profiles and setup parity
 
+## Live startup follow-up — 2026-10-20
+
+The earlier synthetic-only evidence below describes the initial milestone. This
+follow-up fixes the real selected-profile startup path and adds live startup evidence:
+
+- Selected Codex directories and instruction-only plugins accept inherited modes
+  beneath the validated private profile root. Exact native shared hook sources
+  can reuse an existing native operator policy; no profile-wide policy is created.
+  Other profile hooks, changed plugin copies, retargeted links and revoked source
+  policies remain independently gated.
+- Codex reasoning effort overrides now precede `exec`. A local HTTP fixture
+  with the installed CLI proved that placing `-c` after `exec` lost the backend
+  override and used the fallback endpoint; moving it before `exec` retained LB.
+- Corrected two local YAML model spellings from `gpt-6.1.sol` to `gpt-6.1-sol`.
+  This repository-local ignored config stays local; no auth data was copied.
+- Focused provider suite: **258 passed, 0 failed**. Build, typecheck, dependency
+  boundaries and whitespace checks passed. No full-repository rerun was performed.
+- Actual `bflow down --force` preserved durable recovery data, then `bflow up`
+  exited **0** with `Environment ready` / `up`. A separate status check returned
+  `server: running`, seven configured roles, and **no issues**. Conversation,
+  Coordinator and Architect run Codex with `personal`; Planner, Specifier,
+  Reviewer and QA run Claude. The environment was left running.
+
+This establishes live startup, authenticated readiness and activation for this
+local configuration. It does not establish completion of an SDLC workflow or
+acceptance across every OS/provider combination. The initial evidence below
+retains its original test counts and limitations for that earlier snapshot.
+
+
 This follow-up adds optional `environment.roles[].profile-name` and provider
 defaults under `environment.defaults.<provider>.profile-name`. A role overrides
 its provider default. An omitted Developer inherits the resolved Coordinator
