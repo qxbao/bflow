@@ -428,7 +428,7 @@ export class IsolatorProfileResolver {
     };
     if (this.environment.PATH !== undefined) environment["PATH"] = this.environment.PATH;
     if (provider === "codex") environment["CODEX_HOME"] = join(home, ".codex");
-    if (provider === "claude") delete environment["CLAUDE_CONFIG_DIR"];
+    if (provider === "claude") environment["CLAUDE_CONFIG_DIR"] = join(home, ".claude");
     if (provider === "codex" && backendUrl !== undefined) {
       const key = this.environment.CODEX_LB_API_KEY;
       if (key !== undefined) environment["CODEX_LB_API_KEY"] = key;

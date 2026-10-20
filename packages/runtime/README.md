@@ -568,6 +568,13 @@ Guarantees implemented here, with package-local tests in `test/platform/service.
   emits an explicit deny decision. Only the reserved environment-bound Codex startup turn is skipped.
 - Native session sources must identify the configured provider (`codex` or `herdr:codex`, for example).
   Herdr as a transport does not make generic `herdr`/`herdr:herdr` sources valid provider proof.
+- Claude roles using an isolator profile receive `CLAUDE_CONFIG_DIR=<selected-profile-HOME>/.claude`
+  in both preflight probes and the final launch. This pins native auth/config lookup to the selected
+  profile and prevents an inherited outer `CLAUDE_CONFIG_DIR` from selecting another account. Claude
+  then keeps its native `.claude.json` at `CLAUDE_CONFIG_DIR/.claude.json`; Runtime does not copy,
+  migrate or symlink the standalone `HOME/.claude.json` file. Profile MCP synchronization owns the
+  managed MCP entries in both native locations independently, while account state remains profile-local.
+  This behavior is covered by local synthetic-state tests, not live provider or model verification.
 
 Limitations: this is source composition with local fake-runner and fake-Gateway evidence only. Live
 provider probes, a live Gateway daemon and Pane Manager/Conversation wiring are not verified here. The

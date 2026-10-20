@@ -585,10 +585,7 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       : undefined;
     const profileLaunchEnvironment = isolatorProfile === undefined
       ? undefined
-      : {
-          ...isolatorProfile.environment,
-          ...(requirement.provider === "claude" ? { CLAUDE_CONFIG_DIR: "" } : {})
-        };
+      : { ...isolatorProfile.environment };
     const launchEnvironment = isolatorProfile === undefined
       ? codexLaunchEnvironment
       : { ...(codexLaunchEnvironment ?? {}), ...profileLaunchEnvironment };

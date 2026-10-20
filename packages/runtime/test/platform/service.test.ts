@@ -755,9 +755,9 @@ describe("DefaultPlatformReadinessService", () => {
       expect(invocations.length).toBeGreaterThan(0);
       expect(invocations.every(invocation => invocation.inheritEnvironment === false)).toBe(true);
       expect(invocations.every(invocation => invocation.env?.["HOME"] === home)).toBe(true);
-      expect(invocations.every(invocation => invocation.env?.["CLAUDE_CONFIG_DIR"] === undefined)).toBe(true);
+      expect(invocations.every(invocation => invocation.env?.["CLAUDE_CONFIG_DIR"] === join(home, ".claude"))).toBe(true);
       expect(result.value.launches[0]?.launch.env["HOME"]).toBe(home);
-      expect(result.value.launches[0]?.launch.env["CLAUDE_CONFIG_DIR"]).toBe("");
+      expect(result.value.launches[0]?.launch.env["CLAUDE_CONFIG_DIR"]).toBe(join(home, ".claude"));
       expect(await readFile(nativeStatePath, "utf8")).toBe(nativeState);
     } finally {
       restore();
