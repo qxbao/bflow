@@ -137,6 +137,26 @@ export function renderPendingApprovalForStatus(request: {
   return renderUserDecisionPrompt({ ...request }).split("\n").map((line) => (line === "" ? "" : `${indent}${line}`));
 }
 
+/** 1-based position of `selected` among the request's offered options, matching the numbered prompt. */
+export function optionPosition(request: { readonly metadata?: unknown }, selected: string): number | undefined {
+  const index = optionsOf(request)?.indexOf(selected) ?? -1;
+  return index >= 0 ? index + 1 : undefined;
+}
+
+/** One-line outcome of a user-decision reply. The chosen option is named by its prompt number, never a status marker. */
+export function renderUserDecisionOutcome(input: {
+  readonly approvalId: string;
+  readonly decision: "approved" | "rejected" | "changes_requested";
+  readonly selectedOption?: string | undefined;
+  readonly optionPosition?: number | undefined;
+}): string {
+  if (input.decision !== "approved") return `Đã từ chối câu hỏi ${input.approvalId}`;
+  if (input.selectedOption !== undefined && input.optionPosition !== undefined) {
+    return `Đã chọn phương án ${input.optionPosition}: ${input.selectedOption}`;
+  }
+  return `Đã ghi nhận câu trả lời cho ${input.approvalId}`;
+}
+
 /**
  * Maps a free-text reply onto the pending user decision. Unknown or ambiguous replies return
  * `ambiguous` with a re-ask message; no default option is ever chosen.
