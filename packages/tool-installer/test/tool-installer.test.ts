@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile, realpath } from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ManagedToolInstaller, createToolCapability, type ManagedToolPin, type ToolHost } from "../src/installer.js";
@@ -13,7 +13,7 @@ const hash = (bytes: string) => createHash("sha256").update(bytes).digest("hex")
 const roots: string[] = [];
 afterEach(async () => { for (const path of roots.splice(0)) await rm(path, { recursive: true, force: true }); });
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "bflow-tool-")); roots.push(root);
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-tool-"))); roots.push(root);
   const version = "1.2.3";
   const pin: ManagedToolPin = { toolId: "chrome-devtools-mcp", installerId: "bflow-tools", version,
     source: "https://registry.npmjs.org/chrome-devtools-mcp/-/chrome-devtools-mcp-1.2.3.tgz",
@@ -49,7 +49,7 @@ async function fixture() {
 
 describe("managed tool installer", () => {
   it("plans approved native plugins, verifies activation and leaves uncertain mutations unresolved", async () => {
-    const root = await mkdtemp(join(tmpdir(), "bflow-native-")); roots.push(root);
+    const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-native-"))); roots.push(root);
     const pin: ManagedToolPin = { toolId: "superpowers", installerId: "bflow-tools", version: "6.4.2",
       source: "https://github.com/obra/superpowers/archive/refs/tags/v6.4.2.tar.gz", integrity: hash("plugin"),
       recipe: { kind: "provider_plugin", provider: "codex" }, license: "MIT" };
@@ -211,7 +211,7 @@ describe("tool integrations", () => {
   });
 
   it("persists scoped capability registrations across registry instances", async () => {
-    const root = await mkdtemp(join(tmpdir(), "bflow-capabilities-")); roots.push(root);
+    const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-capabilities-"))); roots.push(root);
     const file = join(root, "capabilities.json");
     const registry = new FileToolCapabilityRegistry(file);
     await registry.register(createToolCapability("rtk", "1.2.3", "repo-a"), { verified: true, version: "1.2.3", scopeKey: "repo-a" });
@@ -222,7 +222,7 @@ describe("tool integrations", () => {
   });
 
   it("serializes GitNexus writers and tracks repository fingerprint", async () => {
-    const root = await mkdtemp(join(tmpdir(), "bflow-index-")); roots.push(root);
+    const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-index-"))); roots.push(root);
     const stateRoot = join(root, "state"); await mkdir(stateRoot);
     const calls: string[] = [];
     let indexed = false;
@@ -264,7 +264,7 @@ describe("tool integrations", () => {
   });
 
   it("observes a current GitNexus index while the Gateway holds its storage reader lock", async () => {
-    const root = await mkdtemp(join(tmpdir(), "bflow-index-reader-")); roots.push(root);
+    const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-index-reader-"))); roots.push(root);
     const stateRoot = join(root, "state"); await mkdir(stateRoot);
     const storageLock = join(stateRoot, `gitnexus-storage-${hash(root)}.lock`);
     await writeFile(storageLock, "active reader");
@@ -282,7 +282,7 @@ describe("tool integrations", () => {
   });
 
   it("uses task-owned Chrome profiles and blocks a locked profile", async () => {
-    const root = await mkdtemp(join(tmpdir(), "bflow-browser-")); roots.push(root);
+    const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-browser-"))); roots.push(root);
     const host: ToolHost = { async download() {}, async run() { return { exitCode: 0, stdout: "Google Chrome 150", stderr: "" }; } };
     const input = { managedRoot: root, repositoryId: "repo", taskId: "task", browserExecutable: "chrome", serverExecutable: "chrome-devtools-mcp", host };
     const ready = await planChromeSession(input);
@@ -290,6 +290,13 @@ describe("tool integrations", () => {
     expect(ready.argv).toContain(ready.profileDir);
     await writeFile(join(ready.profileDir, "SingletonLock"), "locked");
     expect((await planChromeSession(input)).status).toBe("profile_locked");
+    // A lock whose owner on this host is dead is stale and is cleared; a live owner still blocks.
+    await rm(join(ready.profileDir, "SingletonLock"), { force: true });
+    await symlink(`${hostname()}-${process.pid}`, join(ready.profileDir, "SingletonLock"));
+    expect((await planChromeSession(input)).status).toBe("profile_locked");
+    await rm(join(ready.profileDir, "SingletonLock"), { force: true });
+    await symlink(`${hostname()}-2147483646`, join(ready.profileDir, "SingletonLock"));
+    expect((await planChromeSession(input)).status).toBe("ready");
     const other = await planChromeSession({ ...input, taskId: "other" });
     expect(other.resourceKey).not.toBe(ready.resourceKey);
     const linkedRoot = join(root, "linked");
@@ -307,7 +314,7 @@ describe("tool integrations", () => {
   });
 
   it("preserves existing config and records a rollback copy for owned updates", async () => {
-    const root = await mkdtemp(join(tmpdir(), "bflow-config-")); roots.push(root);
+    const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-config-"))); roots.push(root);
     const path = join(root, "settings.json");
     await writeFile(path, "user config");
     expect((await writeOwnedToolConfig(path, "bflow config", null)).status).toBe("blocked");
