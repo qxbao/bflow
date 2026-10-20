@@ -161,7 +161,9 @@ environment and key to the launched pane.
 Các pattern permission MCP được suy ra từ cùng launch material đã validate với
 cấu hình MCP, gồm `bflow` do host cung cấp và các Gateway registration được chọn. Các role Claude Conversation và Coordinator không có
 tool repository native; các tool MCP đã cấu hình của chúng được cho phép tường minh dưới `dontAsk` ở cả
-launch argument lẫn session settings. MCP server chưa cấu hình không nhận grant nào.
+launch argument lẫn session settings. Với Codex, mỗi server trong bảng `mcp_servers` đã cấu hình
+được gắn `default_tools_approval_mode="approve"`, vì dưới `--ask-for-approval never` Codex tự từ chối
+mọi MCP call cần approval. MCP server chưa cấu hình không nhận grant nào.
 
 1. **`restricted`**:
    - Filesystem chỉ đọc (`filesystem: "read_only"`, `writableRoots: []`).

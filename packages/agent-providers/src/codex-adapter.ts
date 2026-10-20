@@ -502,7 +502,12 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
       const mcpContent = await readFile(configFiles.mcpConfigFile, "utf8");
       const mcpParsed = JSON.parse(mcpContent) as { mcpServers?: Record<string, unknown> };
       if (mcpParsed.mcpServers && Object.keys(mcpParsed.mcpServers).length > 0) {
-        argv.push("-c", `mcp_servers=${tomlValue(mcpParsed.mcpServers)}`);
+        // `--ask-for-approval never` auto-rejects every MCP call Codex would prompt for ("MCP tool call
+        // requires approval, but approval policy is never"), so the trusted host/Gateway servers are
+        // pre-approved like Claude's `--allowedTools mcp__<server>__*`; the host still guards each call.
+        const approved = Object.fromEntries(Object.entries(mcpParsed.mcpServers).map(([name, server]) =>
+          [name, { ...(server as Record<string, unknown>), default_tools_approval_mode: "approve" }]));
+        argv.push("-c", `mcp_servers=${tomlValue(approved)}`);
       }
     } catch {
       // Ignore reading error if missing

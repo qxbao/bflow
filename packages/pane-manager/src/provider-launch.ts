@@ -71,7 +71,9 @@ export function buildProviderRoleLaunch(options: ProviderRoleLaunchOptions): rea
   }
   const args = ["--no-daemon", "--sandbox", spec.readOnlyWorkspace ? "read-only" : "workspace-write",
     "--ask-for-approval", "never", "-c", `developer_instructions=${JSON.stringify(options.systemPrompt)}`,
-    "-c", "web_search=\"disabled\"", "-c", `mcp_servers=${toml(servers)}`];
+    // Approval policy `never` auto-rejects MCP calls Codex would prompt for; pre-approve the operator servers.
+    "-c", "web_search=\"disabled\"", "-c", `mcp_servers=${toml(Object.fromEntries(Object.entries(servers)
+      .map(([name, server]) => [name, { ...server, default_tools_approval_mode: "approve" }])))}`];
   if (hook) args.push("--enable", "hooks", "--dangerously-bypass-hook-trust", "-c",
     `hooks.SessionStart=${toml([{ hooks: [{ type: "command", command: hook, timeout: 10 }] }])}`);
   if (options.model) args.push("--model", options.model);

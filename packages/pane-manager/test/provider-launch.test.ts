@@ -30,6 +30,7 @@ describe("explicit provider role launch policy", () => {
       expect(args).toContain('developer_instructions="Bounded role."');
       expect(args.find(a => a.startsWith("hooks.SessionStart="))).toContain('/trusted/session-hook');
       expect(args.find(a => a.startsWith("mcp_servers="))).toContain('/trusted/role-host.mjs');
+      expect(args.find(a => a.startsWith("mcp_servers="))).toContain('"default_tools_approval_mode"="approve"');
       expect(args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
     }
   });
