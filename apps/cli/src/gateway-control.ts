@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
@@ -97,7 +97,8 @@ export async function startGatewayControl(options: GatewayControlOptions): Promi
   await ensurePrivateDirectory(options.stateRoot, uid);
   let socketDirectory = options.stateRoot;
   if (Buffer.byteLength(join(options.stateRoot, SOCKET_FILE)) >= MAX_SOCKET_PATH_BYTES) {
-    socketDirectory = `/tmp/bflow-gw-${uid}`;
+    // Keyed by state root so repositories with long paths never share (and fight over) one fallback socket.
+    socketDirectory = `/tmp/bflow-gw-${uid}-${createHash("sha256").update(options.stateRoot).digest("hex").slice(0, 12)}`;
     await ensurePrivateDirectory(socketDirectory, uid);
   }
   const socketPath = join(socketDirectory, SOCKET_FILE);
@@ -336,10 +337,14 @@ class GatewayControlService {
   private checkScope(scope: TrustScope): ControlReply | undefined {
     if (scope.kind !== "session") return failure("validation", "Gateway control requires session scope");
     if (scope.machineId !== this.settings.machineId) return failure("validation", "Operation belongs to a different machine");
-    const workspaceAllowed = this.settings.workspaceRoot !== undefined
-      ? scope.workspaceRoot === this.settings.workspaceRoot
-      : isCanonicalDirectory(scope.workspaceRoot);
-    if (!workspaceAllowed) return failure("validation", "Operation belongs to a foreign or non-canonical workspace");
+    const bound = this.settings.workspaceRoot;
+    if (bound !== undefined) {
+      if (scope.workspaceRoot !== bound) {
+        return failure("validation", `The machine Gateway is bound to workspace '${bound}' but this operation targets '${scope.workspaceRoot}'. Run 'bflow setup --dir ${scope.workspaceRoot}' to rebind the Gateway to this repository, then retry.`);
+      }
+      return undefined;
+    }
+    if (!isCanonicalDirectory(scope.workspaceRoot)) return failure("validation", "Operation belongs to a non-canonical workspace");
     return undefined;
   }
 
