@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { AgenticHostPlatformOptionsSchema } from "@bflow/runtime";
 import { identifyRepository, readEnvironmentConfig, runCli, type EnvironmentCompositionInput } from "../src/index.js";
-import { buildHostPlatformOptions, formatPlatformNotReady, resolveCodexTrustPaths, type HostPlatformContext } from "../src/platform-options.js";
+import { buildHostPlatformOptions, formatPlatformNotReady, resolveCodexTrustPaths, resolveIsolatorStateRoot, type HostPlatformContext } from "../src/platform-options.js";
 import { loadMachineSkillCatalog } from "../src/skill-catalog.js";
 import { GATEWAY_CONTROL_LOCATOR_FILE } from "../src/gateway-control.js";
 
@@ -16,6 +16,7 @@ beforeAll(async () => {
   context = { machineId: "m-test-machine", stateDirectory: "/state/bflow", dataDirectory: "/data/bflow",
     codexHomeDirectory: "/home/test/.codex", codexProcessHomeDirectory: "/home/test",
     codexHookApprovalPath: "/state/bflow/codex-hook-approvals.json",
+    isolatorStateRoot: "/home/test/.local/share/ai-isolator",
     skills: await loadMachineSkillCatalog() };
 });
 beforeEach(async () => {
@@ -35,6 +36,13 @@ function configure(edit: (environment: EnvironmentCompositionInput["config"]["en
 const absent = () => false;
 
 describe("buildHostPlatformOptions", () => {
+  it("derives the isolator root only from trusted machine environment", () => {
+    expect(resolveIsolatorStateRoot({ AI_ISOLATOR_HOME: "/machine/isolator" }, "/home/native")).toBe("/machine/isolator");
+    expect(resolveIsolatorStateRoot({ AI_ISOLATOR_REAL_HOME: "/home/real" }, "/home/isolated-profile"))
+      .toBe("/home/real/.local/share/ai-isolator");
+    expect(resolveIsolatorStateRoot({}, "/home/native")).toBe("/home/native/.local/share/ai-isolator");
+  });
+
   it.each([
     ["all Claude", "claude"], ["all Codex", "codex"], ["all Agy", "agy"]
   ] as const)("produces valid v3 options for an %s configuration", async (_label, provider) => {
@@ -73,6 +81,23 @@ describe("buildHostPlatformOptions", () => {
       provider: "codex", profileName: "lead", model: "gpt-model", effort: "high"
     });
     expect(options.roles.find(role => role.role === "conversation")).toMatchObject({ provider: "codex", profileName: "work" });
+  });
+
+  it("binds selected profiles to the trusted isolator root while omitting it without a selection", async () => {
+    const input = configure(environment => {
+      Object.assign(environment, { defaults: { codex: { "profile-name": "work" } } });
+    });
+    const first = await buildHostPlatformOptions(input, {
+      context: { ...context, isolatorStateRoot: "/machine/isolator-one" }, fileExists: absent
+    });
+    const second = await buildHostPlatformOptions(input, {
+      context: { ...context, isolatorStateRoot: "/machine/isolator-two" }, fileExists: absent
+    });
+    expect(first).toMatchObject({ isolatorStateRoot: "/machine/isolator-one" });
+    expect(second).toMatchObject({ isolatorStateRoot: "/machine/isolator-two" });
+
+    const noProfile = await buildHostPlatformOptions(base, { context, fileExists: absent });
+    expect(noProfile).not.toHaveProperty("isolatorStateRoot");
   });
 
   it("selects provider defaults independently and preserves profile inheritance for the dynamic Developer", async () => {

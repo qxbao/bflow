@@ -28,6 +28,17 @@ describe("configuration YAML format", () => {
     }
   );
 
+  it.each([" work", "work ", "\twork", "work\n", "work\u007f"])(
+    "rejects profile names with whitespace or control characters (%j)", profileName => {
+      expect(EnvironmentRoleConfigSchema.safeParse({ role: "coordinator", cli: "codex", "profile-name": profileName }).success).toBe(false);
+    }
+  );
+
+  it("accepts a long safe ASCII profile name without trimming or an arbitrary length cap", () => {
+    const profileName = "p".repeat(256);
+    expect(EnvironmentRoleConfigSchema.parse({ role: "coordinator", cli: "codex", "profile-name": profileName })["profile-name"]).toBe(profileName);
+  });
+
   it("accepts strict provider profile defaults without changing the no-profile configuration", () => {
     const environment = {
       repositoryId: "repo-id",

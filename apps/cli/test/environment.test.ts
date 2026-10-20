@@ -29,14 +29,17 @@ class FakeProcesses implements EnvironmentProcessRunner {
   authenticated = true;
   claudeStatus: unknown = { loggedIn: true };
   missing = new Set<string>();
+  authCommands: string[] = [];
   async run(request: EnvironmentProcessRequest) {
     this.requests.push(request);
     if (request.executable === "git") return environmentProcessRunner.run(request);
     if (this.missing.has(request.executable)) throw new Error(`ENOENT ${request.executable}`);
     const session = request.env?.["HERDR_SESSION"] ?? "incorrect-default";
     const args = request.args.join(" ");
+    if (args === "login status" || args === "auth status --json" || args === "auth status") this.authCommands.push(`${request.executable} ${args}`);
     if (args === "login status") return { exitCode: this.authenticated ? 0 : 1, stdout: "", stderr: this.authenticated ? "Logged in" : "secret-account-information" };
     if (args === "auth status --json") return { exitCode: 0, stdout: JSON.stringify(this.claudeStatus), stderr: "" };
+    if (args === "auth status") return { exitCode: this.authenticated ? 0 : 1, stdout: "", stderr: "" };
     let value: unknown = {};
     if (args === "--help") return { exitCode: 0, stdout: "herdr --session NAME; Run as headless server", stderr: "" };
     if (args === "api schema --json") value = { protocol: 22, schema_version: 1 };
@@ -110,6 +113,62 @@ describe("P12 repository environment lifecycle", () => {
     expect(report.healthy).toBe(false);
     expect(report.checks.find(check => check.checkId === "auth-codex")?.status).toBe("failed");
     expect(JSON.stringify(report)).not.toContain("secret-account-information");
+  });
+
+  linuxIt("defers authentication for a selected profile role while retaining binary checks", async () => {
+    const path = join(dir, ".bflow/config.yml");
+    const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
+    config.environment.roles = config.environment.roles.map(role => ({
+      ...role,
+      required: role.role === "conversation" || role.role === "coordinator",
+      ...(role.role === "conversation" || role.role === "coordinator" ? { "profile-name": "work" } : {})
+    }));
+    await writeFile(path, renderEnvironmentConfigYaml(config));
+    runner.authenticated = false;
+    const profileLifecycle = new EnvironmentLifecycle(dir, {
+      runner, integration: { manager: fixture.manager, runtime: mockRuntime(), quiesce: async () => ({ ok: true, value: undefined }) },
+      providerOverrides: { codex: { available: true, authenticated: false } }
+    });
+
+    expect((await profileLifecycle.up()).status).toBe("up");
+    expect(runner.requests.some(request => ["codex", "claude", "agy"].includes(request.executable))).toBe(false);
+    expect(runner.authCommands).toEqual([]);
+  });
+
+  linuxIt("keeps native authentication checks when selected and unselected roles share a provider", async () => {
+    const path = join(dir, ".bflow/config.yml");
+    const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
+    config.environment.roles = config.environment.roles.map(role => ({
+      ...role,
+      required: role.role === "conversation" || role.role === "coordinator" || role.role === "planner",
+      ...(role.role === "conversation" || role.role === "coordinator" ? { "profile-name": "work" } : {})
+    }));
+    await writeFile(path, renderEnvironmentConfigYaml(config));
+    runner.authenticated = false;
+
+    await expect(lifecycle.up()).rejects.toThrow("not authenticated");
+    expect(runner.authCommands).toEqual(["codex login status"]);
+  });
+
+  linuxIt("resolves profile selection after provider fallback and honors that provider default", async () => {
+    const path = join(dir, ".bflow/config.yml");
+    const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
+    config.environment.allowProviderFallback = true;
+    config.environment.defaults = { claude: { "profile-name": "fallback-profile" } };
+    config.environment.roles = config.environment.roles.map(role => role.role === "conversation"
+      ? { ...role, cli: "claude", required: true }
+      : role.role === "coordinator"
+        ? { ...role, required: true, fallbackCli: "claude" }
+        : { ...role, required: false });
+    await writeFile(path, renderEnvironmentConfigYaml(config));
+    runner.authenticated = false;
+    const fallbackLifecycle = new EnvironmentLifecycle(dir, {
+      runner, integration: { manager: fixture.manager, runtime: mockRuntime(), quiesce: async () => ({ ok: true, value: undefined }) },
+      providerOverrides: { codex: { available: false } }
+    });
+
+    expect((await fallbackLifecycle.up()).status).toBe("up");
+    expect(runner.authCommands).toEqual([]);
   });
   linuxIt("does not shut down a healthy preexisting session when startup validation fails before mutation", async () => {
     await lifecycle.up();

@@ -21,6 +21,8 @@ export interface HostPlatformContext {
   readonly codexHomeDirectory: string;
   /** Private machine-owned approval store for Codex global hooks. */
   readonly codexHookApprovalPath: string;
+  /** Trusted ai-isolator state root; never supplied by repository configuration. */
+  readonly isolatorStateRoot?: string;
   readonly skills: MachineSkillCatalog;
 }
 
@@ -50,9 +52,19 @@ export async function loadHostPlatformContext(): Promise<HostPlatformContext> {
     machineId: platform.machineId,
     stateDirectory: platform.paths.state,
     dataDirectory: platform.paths.data,
+    isolatorStateRoot: resolveIsolatorStateRoot(host.env, host.homeDir),
     ...codexTrust,
     skills: await loadMachineSkillCatalog()
   };
+}
+
+export function resolveIsolatorStateRoot(
+  environment: Readonly<Record<string, string | undefined>>,
+  homeDirectory: string
+): string {
+  if (environment.AI_ISOLATOR_HOME) return resolve(environment.AI_ISOLATOR_HOME);
+  const realHome = environment.AI_ISOLATOR_REAL_HOME || homeDirectory;
+  return resolve(realHome, ".local", "share", "ai-isolator");
 }
 
 /** Resolves only trusted process/machine context; repository configuration cannot redirect approvals or Codex hooks. */
@@ -104,6 +116,8 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
 
   const locatorPath = join(deps.context.stateDirectory, GATEWAY_CONTROL_LOCATOR_FILE);
   const gatewayLocatorPath = (deps.fileExists ?? existsSync)(locatorPath) ? { gatewayLocatorPath: locatorPath } : {};
+  const hasSelectedProfiles = environment.roles.some(role => selectedProfileName(role, environment) !== undefined) ||
+    (!configured.has("developer") && selectedProfileName(coordinator, environment) !== undefined);
   return AgenticHostPlatformOptionsSchema.parse({
     schemaVersion: 3,
     machineId: deps.context.machineId,
@@ -115,6 +129,9 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
     skillsStoreRoot: join(deps.context.dataDirectory, "skills-store"),
     approvedBuiltinSkillDigests: [...deps.context.skills.approvedBuiltinSkillDigests],
     supportedCommands: [...SUPPORTED_CLI_COMMANDS],
+    ...(hasSelectedProfiles && deps.context.isolatorStateRoot
+      ? { isolatorStateRoot: deps.context.isolatorStateRoot }
+      : {}),
     ...gatewayLocatorPath
   });
 }

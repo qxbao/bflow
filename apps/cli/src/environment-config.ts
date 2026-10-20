@@ -17,7 +17,7 @@ export const DEFAULT_PROVIDER_BY_CLI: Record<EnvironmentProvider, string> = {
   agy: "google"
 };
 
-const EnvironmentProfileNameSchema = z.string().trim().regex(/^[A-Za-z0-9._-]+$/, "Profile names may contain only letters, numbers, dots, underscores and hyphens.");
+const EnvironmentProfileNameSchema = z.string().min(1).regex(/^[A-Za-z0-9._-]+$/, "Profile names may contain only letters, numbers, dots, underscores and hyphens.");
 
 export const EnvironmentProfileDefaultsSchema = z.object({
   codex: z.object({ "profile-name": EnvironmentProfileNameSchema.optional() }).strict().optional(),

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { existsSync, readdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { delimiter, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   ContractErrorSchema, CreateCheckpointCommandSchema,
@@ -10,7 +10,8 @@ import {
   type OperationOptions, type OperationResult, type RecoveryCheckpoint, type RuntimeService,
   type SessionLifecycleManager, type SessionManifest, type PaneBinding
 } from "@bflow/contracts";
-import { readEnvironmentConfig, type EnvironmentConfig } from "./environment-config.js";
+import { findExecutable } from "@bflow/machine-setup";
+import { readEnvironmentConfig, type EnvironmentConfig, type EnvironmentRoleConfig } from "./environment-config.js";
 import { environmentProcessRunner, namedSessionEnvironment, type EnvironmentProcessRunner } from "./environment-process.js";
 import { identifyRepository, type RepositoryIdentity } from "./repository.js";
 import { openPaneManagerEnvironment } from "./pane-manager-integration.js";
@@ -319,6 +320,10 @@ export class EnvironmentLifecycle {
       const fallbackNotices: string[] = [];
       const rolesToRun = config.environment.roles.map((r) => ({ ...r }));
       const cliAvailableCache = new Map<string, boolean>();
+      const selectedProfiles = config.environment.defaults;
+      const hasSelectedProfile = (role: EnvironmentRoleConfig) =>
+        role["profile-name"] !== undefined ||
+        selectedProfiles?.[role.cli as "claude" | "codex" | "agy"]?.["profile-name"] !== undefined;
       for (const role of rolesToRun) {
         if (role.required ?? true) {
           const cli = role.cli as "claude" | "codex" | "agy";
@@ -329,6 +334,10 @@ export class EnvironmentLifecycle {
               available = false;
             } else if (cliAvailableCache.has(cli)) {
               available = cliAvailableCache.get(cli)!;
+            } else if (hasSelectedProfile(role)) {
+              const path = this.env[process.platform === "win32" ? "Path" : "PATH"] ?? this.env["PATH"] ?? "";
+              available = await findExecutable(cli, path.split(delimiter), process.platform) !== null;
+              cliAvailableCache.set(cli, available);
             } else {
               const probe = await this.runner.run({
                 executable: cli,
@@ -362,7 +371,11 @@ export class EnvironmentLifecycle {
       const schema = object(JSON.parse(await this.command(repository, config.environment.herdrBinary, ["api", "schema", "--json"], deadline)) as unknown);
       if (schema["protocol"] !== 22 || schema["schema_version"] !== 1) fail("Unsupported Herdr API: expected protocol 22/schema 1");
 
-      const distinctRequiredClis = Array.from(new Set(rolesToRun.filter((r) => r.required ?? true).map((r) => r.cli as "claude" | "codex" | "agy")));
+      const requiresNativeAuthentication = (role: EnvironmentRoleConfig) =>
+        !hasSelectedProfile(role);
+      const distinctRequiredClis = Array.from(new Set(rolesToRun
+        .filter((role) => (role.required ?? true) && requiresNativeAuthentication(role))
+        .map((r) => r.cli as "claude" | "codex" | "agy")));
       for (const cli of distinctRequiredClis) {
         const override = this.dependencies.providerOverrides?.[cli];
         if (override?.available === false) {
