@@ -1,6 +1,7 @@
+import { win32 } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { CommandRunner, SetupContext } from "@bflow/machine-setup";
-import { ProfileSetupComponent, resolveProfileSetupOptions } from "../src/profile-setup.js";
+import { isPathWithin, ProfileSetupComponent, resolveProfileSetupOptions } from "../src/profile-setup.js";
 
 const digest = "a".repeat(64);
 const target = "/home/operator/.local/share/ai-isolator/profiles/codex--work/home";
@@ -84,16 +85,36 @@ describe("ProfileSetupComponent", () => {
       isolatedRoot: "/machine/bflow",
       environment: {
         HOME: "/home/real",
-        AI_ISOLATOR_HOME: "/home/real/isolator",
+        AI_ISOLATOR_REAL_HOME: "/home/real",
         CODEX_HOME: "/home/real/.codex",
         CLAUDE_CONFIG_DIR: "/home/real/.claude"
       }
     });
     expect(isolated.sourceHome).toBe("/machine/bflow/providers/home");
-    expect(isolated.stateRoot).toBe("/machine/bflow/ai-isolator");
+    expect(isolated.stateRoot).toBe("/home/real/.local/share/ai-isolator");
     expect(isolated.sourceCodexHome).toBe("/machine/bflow/providers/codex");
     expect(isolated.sourceClaudeConfigDir).toBe("/machine/bflow/providers/claude");
-    expect(isolated.expectedIdentity).not.toContain("/home/real");
+    expect(isolated.expectedIdentity).toContain("/home/real/.local/share/ai-isolator");
+    expect(isolated.expectedIdentity).toContain("/machine/bflow/providers/codex");
+    expect(isolated.expectedIdentity).toContain("/machine/bflow/providers/claude");
+  });
+
+  it("uses the explicit shared profile root even when BFLOW_HOME is set", () => {
+    const options = resolveProfileSetupOptions({
+      helperPath: "/bundle/profile_sync.py",
+      homeDirectory: "/home/real",
+      isolatedRoot: "/machine/bflow",
+      environment: {
+        AI_ISOLATOR_HOME: "/shared/custom-profiles",
+        CODEX_HOME: "/home/real/.codex",
+        CLAUDE_CONFIG_DIR: "/home/real/.claude"
+      },
+      expectedIdentity: "pin"
+    });
+    expect(options.stateRoot).toBe("/shared/custom-profiles");
+    expect(options.sourceHome).toBe("/machine/bflow/providers/home");
+    expect(options.sourceCodexHome).toBe("/machine/bflow/providers/codex");
+    expect(options.sourceClaudeConfigDir).toBe("/machine/bflow/providers/claude");
   });
 
   it("converges explicitly when there are no existing profiles", async () => {
@@ -121,6 +142,30 @@ describe("ProfileSetupComponent", () => {
     const observed = await component().observe(context);
     expect(observed.valid).toBe(false);
     expect(observed.diagnostics[0]).toContain("out-of-scope");
+  });
+
+  it("allows only the exact private receipt sibling as an owned path", async () => {
+    const receipt = target.replace(/[/\\]home$/, "/.bflow-profile-sync.json");
+    const owned = [target + "/.codex/config.toml", receipt];
+    const { commands, context } = fixture("apply", [report(true, { ownedPaths: owned }), report(true, { ownedPaths: owned })]);
+    const result = await component().apply(context);
+    expect(result.ownedPaths).toEqual(owned);
+    expect(result.diagnostics).toEqual([]);
+    expect(commands.filter(command => command[1]?.endsWith("profile_sync.py")).map(command => command[2]))
+      .toEqual(["apply", "inspect"]);
+  });
+
+  it("rejects arbitrary profile-root sibling writes such as profile.env", async () => {
+    const profileEnv = target.replace(/[/\\]home$/, "/profile.env");
+    const { context } = fixture("check", [report(true, { ownedPaths: [profileEnv] })]);
+    const observed = await component().observe(context);
+    expect(observed.valid).toBe(false);
+    expect(observed.diagnostics[0]).toContain("out-of-scope");
+  });
+
+  it("rejects cross-drive Windows relative paths", () => {
+    expect(isPathWithin("C:\\ai-isolator\\profiles", "D:\\outside\\home", win32)).toBe(false);
+    expect(isPathWithin("C:\\ai-isolator\\profiles", "C:\\ai-isolator\\profiles\\codex--work\\home", win32)).toBe(true);
   });
 
   it("treats reported drift and malformed helper output as unsatisfied", async () => {

@@ -465,13 +465,18 @@ approved skill instructions and the Bflow-managed plugin registration/assets;
 profile auth, account/model preferences, permissions and unrelated local entries
 remain separate. `--check` and `--dry-run` only inspect. The step fails visibly
 when its pinned Python/helper, native source configuration or profile target is
-invalid, and verifies the result after apply. `AI_ISOLATOR_HOME` selects the
-trusted profile root; with `BFLOW_HOME`, setup uses a separate
-`<BFLOW_HOME>/ai-isolator` root and provider sources under that isolated setup,
-never the real account home. `CODEX_HOME`, `CLAUDE_CONFIG_DIR` and
-`AI_ISOLATOR_CODEX_SKILLS_SOURCE` are honored only for non-isolated machine
-setup. This synchronization does not authenticate a profile or prove live provider
-readiness.
+invalid, and verifies the result after apply. Profile targets always use the
+shared ai-isolator root: explicit `AI_ISOLATOR_HOME`, otherwise the trusted real
+home (or `AI_ISOLATOR_REAL_HOME` when already inside a profile) plus
+`.local/share/ai-isolator`. `BFLOW_HOME` changes native source homes only; it does
+not move or migrate existing profiles. To keep profile targets inside a sandbox,
+explicitly set `AI_ISOLATOR_HOME=$BFLOW_HOME/ai-isolator` consistently for
+`bflow setup`, `bflow iso` and `bflow up`. Under `BFLOW_HOME`, native provider
+sources use its `providers/home`, `providers/codex` and `providers/claude` paths,
+regardless of outer account overrides. Outside that isolated source mode,
+`CODEX_HOME`, `CLAUDE_CONFIG_DIR` and `AI_ISOLATOR_CODEX_SKILLS_SOURCE` are
+honored when explicitly set. This synchronization does not authenticate a profile
+or prove live provider readiness.
 
 To bind roles to profiles already created with `bflow iso`, merge this YAML into
 the generated `.bflow/config.yml` `environment:` section. A role-level

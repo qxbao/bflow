@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import path, { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import type { ComponentDesiredState, ComponentObservation, SetupComponent, SetupContext } from "@bflow/machine-setup";
 
@@ -27,6 +27,14 @@ export interface ProfileSetupOptions {
   readonly pythonCandidates?: readonly string[];
 }
 
+type PathApi = Pick<typeof path, "relative" | "isAbsolute" | "sep">;
+
+export function isPathWithin(root: string, candidate: string, pathApi: PathApi = path): boolean {
+  const fromRoot = pathApi.relative(root, candidate);
+  return fromRoot === "" || (!pathApi.isAbsolute(fromRoot) && fromRoot !== ".." &&
+    !fromRoot.startsWith(`..${pathApi.sep}`));
+}
+
 export function resolveProfileSetupOptions(input: {
   readonly helperPath: string;
   readonly homeDirectory: string;
@@ -36,14 +44,13 @@ export function resolveProfileSetupOptions(input: {
   readonly pythonCandidates?: readonly string[];
 }): ProfileSetupOptions {
   const isolatedRoot = input.isolatedRoot ? resolve(input.isolatedRoot) : undefined;
+  const realHome = resolve(input.environment.AI_ISOLATOR_REAL_HOME || input.homeDirectory);
   const sourceHome = isolatedRoot
     ? join(isolatedRoot, "providers", "home")
-    : resolve(input.environment.AI_ISOLATOR_REAL_HOME || input.homeDirectory);
-  const stateRoot = isolatedRoot
-    ? join(isolatedRoot, "ai-isolator")
-    : input.environment.AI_ISOLATOR_HOME
+    : realHome;
+  const stateRoot = input.environment.AI_ISOLATOR_HOME
       ? resolve(input.environment.AI_ISOLATOR_HOME)
-      : join(sourceHome, ".local", "share", "ai-isolator");
+      : join(realHome, ".local", "share", "ai-isolator");
   const sourceCodexHome = isolatedRoot
     ? join(isolatedRoot, "providers", "codex")
     : input.environment.CODEX_HOME ? resolve(input.environment.CODEX_HOME) : undefined;
@@ -109,17 +116,17 @@ export class ProfileSetupComponent implements SetupComponent {
     try { parsed = ProfileSyncReportSchema.parse(JSON.parse(result.stdout)); }
     catch { throw new Error(`Profile synchronizer returned an invalid ${action} report (exit ${result.exitCode ?? "unknown"})`); }
     const profilesRoot = resolve(this.options.stateRoot, "profiles");
-    const isProfilePath = (path: string) => {
-      if (!isAbsolute(path) || resolve(path) !== path) return false;
-      const fromProfiles = relative(profilesRoot, path);
-      return fromProfiles !== "" && fromProfiles !== ".." && !fromProfiles.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`);
+    const isProfilePath = (candidate: string) => {
+      if (!isAbsolute(candidate) || resolve(candidate) !== candidate) return false;
+      if (!isPathWithin(profilesRoot, candidate) || candidate === profilesRoot) return false;
+      const fromProfiles = relative(profilesRoot, candidate).split(path.sep);
+      return fromProfiles.length === 2 && /^(codex|claude|agy)--[A-Za-z0-9._-]+$/.test(fromProfiles[0]!) &&
+        fromProfiles[1] === "home";
     };
+    const receiptPaths = new Set(parsed.targets.map(target => join(dirname(target), ".bflow-profile-sync.json")));
     if (parsed.targets.some(path => !isProfilePath(path)) ||
         parsed.ownedPaths.some(path => !isAbsolute(path) || resolve(path) !== path ||
-          !parsed.targets.some(target => {
-            const fromHome = relative(target, path);
-            return fromHome === "" || (fromHome !== ".." && !fromHome.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`));
-          }))) {
+          (!parsed.targets.some(target => isPathWithin(target, path)) && !receiptPaths.has(path)))) {
       throw new Error(`Profile synchronizer returned an out-of-scope ${action} path`);
     }
     if (result.exitCode !== 0 && parsed.valid) throw new Error("Profile synchronizer reported success with a failing exit status");
