@@ -253,6 +253,10 @@ Binary health and launch preparation resolve against the same PATH used by provi
 
 Failed execution probes classify model errors from explicit model failure text. Normal `model:` and
 `approval: never` banner lines, or an unrelated missing directory, do not establish model incompatibility.
+Incidental authentication text and `tokens used` output do not establish expired credentials. Expired credentials require
+an explicit expiration error; other explicit authentication failures report `auth_missing`. Diagnostics
+prefer the provider's error over its startup banner before applying the 240-character display limit,
+redact complete streams before selecting lines, and retain runner failure details when output is empty.
 Codex interactive launch includes a reserved startup prompt bound to `BFLOW_ENVIRONMENT_ID`, asking only
 for `pong` without tool calls or workflow work. Runtime consumes that exact startup turn; ordinary
 user input such as `ping` still passes through the Conversation Gateway.

@@ -3,8 +3,9 @@ import {
   AgentHealthCheckSchema,
   type AgentHealthResult
 } from "@bflow/contracts";
+import type { ProviderCommandOutcome } from "./types.js";
 
-export function scrubDiagnosticText(input: string): string {
+function redactDiagnosticText(input: string): string {
   if (!input) return "";
   let text = input;
 
@@ -31,8 +32,35 @@ export function scrubDiagnosticText(input: string): string {
   // Redact email addresses
   text = text.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[REDACTED_EMAIL]");
 
+  // Remove terminal colour sequences before control characters and error-line selection.
+  text = text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+
   // Strip non-printable control characters except standard space
   text = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "");
+
+  return text;
+}
+
+/** Select failure evidence before the health check's 240-character display limit. */
+export function executionProbeFailureDiagnostic(outcome: ProviderCommandOutcome): string {
+  // Redact the complete streams first: quoted credentials can span multiple lines.
+  const streams = [outcome.stderr, outcome.stdout, outcome.cause ?? ""].map(output =>
+    redactDiagnosticText(output).split(/\r?\n/).map(line => line.trim()).filter(Boolean));
+  // Prefer stderr's concrete error over model commentary written to stdout.
+  const error = streams.map(lines => {
+    let index = lines.length - 1;
+    while (index >= 0 && !/(?:^|\s)(?:error|fatal)\b|"error"\s*:/i.test(lines[index]!)) index -= 1;
+    // Preserve continuation lines, including pretty-printed JSON error.message/code.
+    return index < 0 ? undefined : lines.slice(index, index + 8).join(" ");
+  })
+    .find(line => line !== undefined);
+  const detail = error ?? streams[2]?.at(-1) ?? streams[0]?.at(-1) ?? streams[1]?.at(-1) ?? "Provider returned no diagnostic output.";
+  const processState = outcome.failure ?? (outcome.started ? `exit ${outcome.exitCode ?? "unknown"}` : "not started");
+  return `${processState}: ${detail}`;
+}
+
+export function scrubDiagnosticText(input: string): string {
+  let text = redactDiagnosticText(input);
 
   // Collapse multiline strings and tabs into single spaces
   text = text.replace(/\s+/g, " ").trim();
