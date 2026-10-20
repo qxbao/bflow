@@ -129,7 +129,7 @@ Bất kỳ tin nhắn nào đến từ người dùng hoặc thông điệp ti�
 
 Lỗi định dạng hiển thị của một `RoleMessage` hợp lệ không làm từ chối thông điệp: nội dung được render lại theo dạng chung đã làm sạch (`formatCoordinatorMessageForUser`), và phê duyệt vẫn được đăng ký.
 
-Phản hồi phê duyệt không khớp (`apr-...` không tồn tại, đã quyết định, đã hết hạn, lựa chọn sai, hoặc không có phê duyệt nào đang chờ) luôn nhận một trả lời hiển thị cho người dùng và không thay đổi trạng thái. Một mã `apr-...` không bao giờ được thay bằng phê duyệt khác. Câu hỏi trạng thái thuần túy (`trạng thái`, `tiến độ thế nào?`) trong lúc có quyết định đang chờ được định tuyến tới báo cáo trạng thái, không được coi là câu trả lời.
+Phản hồi phê duyệt không khớp (`apr-...` không tồn tại, đã quyết định, đã hết hạn, lựa chọn sai, hoặc không có phê duyệt nào đang chờ) luôn nhận một trả lời hiển thị cho người dùng và không thay đổi trạng thái. Một mã `apr-...` không bao giờ được thay bằng phê duyệt khác. Phê duyệt của một run đã `completed`/`failed`/`cancelled`, hoặc được Runtime báo `approval_superseded` do một revision yêu cầu, được đóng (`closedApprovals`, trạng thái `expired`/`superseded`): rời danh sách chờ, không gửi quyết định nào tới Coordinator, và phản hồi cho nó nhận lý do từ chối rõ ràng. Câu hỏi làm rõ không được trả lời sau 24 giờ bị đóng; phản hồi không kèm `correlationId` chỉ được gắn với câu hỏi làm rõ mới nhất còn mở. Quyết định của người dùng cho một câu hỏi có lựa chọn được trả lời theo số phương án (`Đã chọn phương án N: ...`) và gửi kèm `selectedOptionIndex`. Câu hỏi trạng thái thuần túy (`trạng thái`, `tiến độ thế nào?`) trong lúc có quyết định đang chờ được định tuyến tới báo cáo trạng thái, không được coi là câu trả lời.
 
 ---
 

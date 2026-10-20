@@ -28,7 +28,15 @@ import {
 import { HerdrConversationBridge } from "./herdr-bridge.js";
 import { classifyUserIntent } from "./intent-classifier.js";
 import { resolveChatDecision } from "./chat-decision.js";
-import { isUserDecisionRequest, renderUserDecisionPrompt, userDecisionExpiredApprovalId } from "./user-decision.js";
+import { expireStaleClarifications } from "./clarification-lifecycle.js";
+import { closedApprovalNotice, isTerminalRunStatus, supersededApprovals } from "./approval-lifecycle.js";
+import {
+  isUserDecisionRequest,
+  optionPosition,
+  renderUserDecisionOutcome,
+  renderUserDecisionPrompt,
+  userDecisionExpiredApprovalId
+} from "./user-decision.js";
 import {
   formatCoordinatorMessageForUser,
   formatStatusSummaryForUser
@@ -43,6 +51,7 @@ import {
   MAX_QUEUE_PROCESSING_ATTEMPTS,
   UserTurnInputSchema,
   type ApprovalReconciliation,
+  type ClosedApproval,
   type DeadLetterItem,
   type QueueProcessingFailure,
   type QueueReport,
@@ -547,6 +556,13 @@ export class ConversationGateway {
         };
       }
 
+      // Clarifications idle past their TTL are closed before any reply can be matched to them.
+      const unexpired = expireStaleClarifications(this.snapshot!, now);
+      if (unexpired !== this.snapshot) {
+        const pruned = await this.persistUpdatedSnapshot(unexpired);
+        if (!pruned.ok) return pruned;
+      }
+
       // 4. Classify user intent
       const classificationResult = input.conversationDecision
         ? resolveChatDecision(input.conversationDecision, this.snapshot!)
@@ -705,23 +721,25 @@ export class ConversationGateway {
             correlationId,
             originalRequestText: previousClarification?.originalRequestText ?? input.content,
             accumulatedDetails: [...(previousClarification?.accumulatedDetails ?? []), input.content],
-            unresolvedQuestions: questions.length > 0 ? [...questions] : ["Vui lòng xác định phạm vi"],
+            unresolvedQuestions: [...questions],
             draft,
             createdAt: now,
-            updatedAt: now
-          };
-
-          const updatedSession: ConversationSession = {
-            ...this.snapshot!.session,
-            status: "awaiting_user_clarification",
-            unresolvedQuestions: [...pendingClarification.unresolvedQuestions],
-            turnCount: agentTurnSequence,
             updatedAt: now
           };
 
           const updatedPendingClarifications = {
             ...this.snapshot!.pendingClarifications,
             [correlationId]: pendingClarification
+          };
+          // Only questions that were actually asked are listed; no generic placeholder is ever recorded.
+          const openQuestions = Object.values(updatedPendingClarifications).flatMap((c) => c.unresolvedQuestions);
+
+          const updatedSession: ConversationSession = {
+            ...this.snapshot!.session,
+            status: openQuestions.length > 0 ? "awaiting_user_clarification" : "active",
+            unresolvedQuestions: openQuestions,
+            turnCount: agentTurnSequence,
+            updatedAt: now
           };
 
           const updatedSnapshot: ConversationContextSnapshot = {
@@ -855,7 +873,10 @@ export class ConversationGateway {
             [runId]: correlationId
           };
 
-          const updatedPendingClarifications = { ...this.snapshot!.pendingClarifications };
+          // A new independent request supersedes every abandoned clarification; a requirement change only closes its own.
+          const independentRequest = !isRequirementChange && existingWorkflow === undefined &&
+            this.snapshot!.pendingClarifications[correlationId] === undefined;
+          const updatedPendingClarifications = independentRequest ? {} : { ...this.snapshot!.pendingClarifications };
           delete updatedPendingClarifications[correlationId];
 
           const remainingUnresolvedQuestions = Object.values(updatedPendingClarifications).flatMap(
@@ -1003,6 +1024,8 @@ export class ConversationGateway {
           if (approvalInput.approvalId) {
             targetApproval = this.snapshot!.pendingApprovals[approvalInput.approvalId];
             if (!targetApproval) {
+              const closed = this.snapshot!.closedApprovals?.[approvalInput.approvalId];
+              if (closed) return this.answerWithNotice(input, correlationId, closedApprovalNotice(closed), closed.runId);
               return this.answerWithNotice(input, correlationId,
                 this.unknownApprovalNotice(approvalInput.approvalId, this.snapshot!.approvalDecisions[approvalInput.approvalId] !== undefined));
             }
@@ -1052,6 +1075,10 @@ export class ConversationGateway {
             }
           }
 
+          // The 1-based position is sent with the option text so Coordinator sees the same choice the prompt numbered.
+          const chosenPosition = isUserDecisionRequest(targetApproval) && approvalInput.selectedOption !== undefined
+            ? optionPosition(targetApproval, approvalInput.selectedOption)
+            : undefined;
           const decisionResult = buildApprovalDecision({
             approvalRequest: targetApproval,
             decision: approvalInput.decision,
@@ -1065,6 +1092,7 @@ export class ConversationGateway {
             metadata: {
               ...(targetApproval.metadata ?? {}),
               ...(approvalInput.selectedOption !== undefined ? { selectedOption: approvalInput.selectedOption } : {}),
+              ...(chosenPosition !== undefined ? { selectedOptionIndex: chosenPosition } : {}),
               correlationId
             }
           });
@@ -1102,7 +1130,10 @@ export class ConversationGateway {
             sender: "conversation",
             recipient: "user",
             intent: "progress_update",
-            content: `Quyết định phê duyệt [${approvalDecision.decision.toUpperCase()}] cho "${targetApproval.reason}" đã được gửi qua Herdr; đang chờ Runtime/Coordinator xác nhận.`,
+            content: `${isUserDecisionRequest(targetApproval)
+              ? renderUserDecisionOutcome({ approvalId: targetApproval.approvalId, decision: approvalDecision.decision,
+                selectedOption: approvalInput.selectedOption, optionPosition: chosenPosition })
+              : `Quyết định phê duyệt [${approvalDecision.decision.toUpperCase()}] cho "${targetApproval.reason}"`} đã được gửi qua Herdr; đang chờ Runtime/Coordinator xác nhận.`,
             artifactReferences: [],
             createdAt: now
           };
@@ -1412,6 +1443,7 @@ export class ConversationGateway {
       const reject = (reason: string) => { outcome.rejected.push({ approvalId: request.approvalId, reason }); };
       if (request.sessionId !== this.config.sessionId) { reject("approval thuộc session khác"); continue; }
       if (this.snapshot!.approvalDecisions[request.approvalId]) { reject("approval đã được quyết định"); continue; }
+      if (this.snapshot!.closedApprovals?.[request.approvalId]) { reject("approval đã đóng vì run kết thúc hoặc được thay thế"); continue; }
       if (isUserDecisionRequest(request) && request.expiresAt !== undefined && Date.parse(now) >= Date.parse(request.expiresAt)) { reject("approval đã hết hạn"); continue; }
       const existing = pending[request.approvalId];
       if (existing) {
@@ -1501,6 +1533,21 @@ export class ConversationGateway {
         };
       }
       validatedApprovalRequest = aprResult.data;
+      // A closed approval never comes back: a replayed request is acknowledged without being registered.
+      if (this.snapshot!.closedApprovals?.[validatedApprovalRequest.approvalId] !== undefined) {
+        return {
+          ok: true,
+          value: {
+            sessionId: this.config.sessionId,
+            correlationId: message.correlation_id,
+            ...(message.run_id ? { runId: message.run_id } : {}),
+            sessionStatus: this.snapshot!.session.status,
+            queuedBecauseBusy: false,
+            duplicateIgnored: true,
+            substantiveUpdate: false
+          }
+        };
+      }
     }
 
     // Busy-State Buffering (Requirement 10)
@@ -1594,6 +1641,7 @@ export class ConversationGateway {
         updatedWorkflows[correlationId] = workflow;
       }
       const updatedPendingApprovals = { ...this.snapshot!.pendingApprovals };
+      let closedApprovals: Record<string, ClosedApproval> | undefined;
       let updatedActiveApprovalIds = [...this.snapshot!.session.activeApprovalIds];
       let nextSessionStatus = this.snapshot!.session.status;
       let turnCount = this.snapshot!.session.turnCount;
@@ -1710,8 +1758,45 @@ export class ConversationGateway {
         }
       }
 
+      // A run that ended, or a requirement revision that replaced approvals, closes those approvals so no human
+      // decision reaches Coordinator for them. Each closure is kept so a late reply gets a clear refusal.
+      const endedRun = updatedWorkflows[correlationId];
+      const endedRunId = endedRun && isTerminalRunStatus(endedRun.sdlcStatus) ? endedRun.runId : undefined;
+      const superseded = supersededApprovals(message.type, message.payload);
+      const closures = new Map<string, { readonly status: ClosedApproval["status"]; readonly reason: string }>();
+      for (const request of Object.values(updatedPendingApprovals)) {
+        if (endedRunId !== undefined && request.runId === endedRunId) {
+          closures.set(request.approvalId, { status: "expired", reason: `Run ${endedRunId} đã kết thúc (${endedRun!.sdlcStatus})` });
+        }
+      }
+      for (const approvalId of superseded?.approvalIds ?? []) {
+        if (updatedPendingApprovals[approvalId] !== undefined) closures.set(approvalId, { status: "superseded", reason: superseded!.reason });
+      }
+      if (closures.size > 0) {
+        closedApprovals = { ...(this.snapshot!.closedApprovals ?? {}) };
+        for (const [approvalId, closure] of closures) {
+          closedApprovals[approvalId] = { approvalId, runId: updatedPendingApprovals[approvalId]!.runId, status: closure.status,
+            reason: sanitizeReasonForUser(closure.reason, 300), closedAt: now };
+          delete updatedPendingApprovals[approvalId];
+        }
+        const closedIds = new Set(closures.keys());
+        updatedActiveApprovalIds = updatedActiveApprovalIds.filter((id) => !closedIds.has(id));
+        for (const [id, workflowContext] of Object.entries(updatedWorkflows)) {
+          if (workflowContext.activeApprovalIds.some((value) => closedIds.has(value))) {
+            updatedWorkflows[id] = { ...workflowContext,
+              activeApprovalIds: workflowContext.activeApprovalIds.filter((value) => !closedIds.has(value)), updatedAt: now };
+          }
+        }
+        if (nextSessionStatus === "awaiting_user_approval" && updatedActiveApprovalIds.length === 0) {
+          nextSessionStatus = "reporting_progress";
+        }
+      }
+      if (endedRunId !== undefined && activeRunId === endedRunId) activeRunId = undefined;
+
+      // Rebuilt without the previous activeRunId so that clearing it actually removes it from the session.
+      const { activeRunId: _previousActiveRunId, ...sessionBase } = this.snapshot!.session;
       const updatedSession: ConversationSession = {
-        ...this.snapshot!.session,
+        ...sessionBase,
         status: nextSessionStatus,
         activeApprovalIds: updatedActiveApprovalIds,
         turnCount,
@@ -1726,7 +1811,8 @@ export class ConversationGateway {
         workflows: updatedWorkflows,
         runIdToCorrelationId: updatedRunIdToCorrelationId,
         pendingApprovals: updatedPendingApprovals,
-        processedMessageIds: updatedProcessedMessageIds
+        processedMessageIds: updatedProcessedMessageIds,
+        ...(closedApprovals !== undefined ? { closedApprovals } : {})
       };
 
       const saveRes = await this.persistUpdatedSnapshot(updatedSnapshot);

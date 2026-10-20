@@ -76,7 +76,14 @@ Incomplete infrastructure prevents pretending that a runnable Red phase exists.
 Every selected behavioral method must have a configured command before TDD can be
 required. Existing regression checks for a behaviorless formatting/documentation
 change remain mandatory without manufacturing a failing-test-first target.
-Domain logic and bug fixes never resolve to `not_applicable`; this resolver does
+Characterization work whose affected paths are only test files (`*.test.*`, `*.spec.*`,
+`test/`, `tests/`, `__tests__/`, `__fixtures__/`), with no logic, bugfix or regression
+surface, resolves to `not_applicable` and requires a successful record that the tests
+pass on the current code. Domain-logic characterization (still test files only, no regression)
+resolves to `recommended` with the same evidence, so no impossible Red phase blocks it.
+A regression reproduction keeps `required`, and any production path keeps the normal policy.
+Domain logic and bug fixes never resolve to `not_applicable` (the contract also rejects it
+without `humanOverrideApproved`); this resolver does
 not manufacture or honor an unverified human-override boolean. High risk adds
 static analysis and review, and integration checks for behavioral work. Missing
 commands are exposed as provisioning conditions, never invented or silently waived.

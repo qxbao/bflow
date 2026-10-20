@@ -272,14 +272,19 @@ describe("Turn correlation with pending clarifications", () => {
     if (!stale.ok || !run.ok) throw new Error("setup failed");
     expect(run.value.recognizedIntent).toBe("workflow_request");
     expect(transport.sentRequests).toHaveLength(1);
-    expect(gateway.getContextSnapshot().pendingClarifications[stale.value.correlationId]).toBeDefined();
+    // The independent request closed the abandoned clarification and its questions.
+    expect(gateway.getContextSnapshot().pendingClarifications[stale.value.correlationId]).toBeUndefined();
+    expect(gateway.getContextSnapshot().session.unresolvedQuestions).toEqual([]);
 
     const result = await turn(CONVERSATION_REQUEST, explicit ? { correlationId: stale.value.correlationId } : {});
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.recognizedIntent).toBe("conversation_only");
-    expect(result.value.correlationId).not.toBe(stale.value.correlationId);
+    // Without an explicit id the turn gets a fresh one; an explicit id of the closed clarification no longer refers to anything.
+    if (!explicit) expect(result.value.correlationId).not.toBe(stale.value.correlationId);
     expect(result.value.correlationId).not.toBe(run.value.correlationId);
+    expect(gateway.getContextSnapshot().pendingClarifications).toEqual({});
+    expect(gateway.getContextSnapshot().workflows[stale.value.correlationId]).toBeUndefined();
   });
 
   it("gives an independent new request its own correlation despite a stale pending clarification", async () => {
