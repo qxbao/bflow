@@ -16,6 +16,8 @@ export function assertCheckoutDependencyRoot(path: string): void {
 async function checkoutDependencyMounts(command: BoundBehavioralCommand, checkout: string): Promise<[string, string][]> {
   const roots = command.checkoutDependencyRoots, source = command.dependencySource;
   if (roots === undefined && source === undefined) return [];
+  // A dependency-free checkout (no node_modules roots) has nothing to mount.
+  if (roots?.length === 0) return [];
   if (!roots?.length || source === undefined || !isAbsolute(source) || await realpath(source) !== resolve(source))
     throw new Error("Behavioral checkout dependencies require a canonical dependency source and node_modules roots");
   const realCheckout = await realpath(checkout), mounts: [string, string][] = [];

@@ -34,8 +34,8 @@ const defaultFs: DetectionFs = {
 };
 
 /** Fixed Runtime-owned bounds. Mirrors the rules enforced by `parseBehavioralCommands`. */
-const PROFILE_TIMEOUT_MS = 180_000;
-const PREPARE_TIMEOUT_MS = 120_000;
+export const PROFILE_TIMEOUT_MS = 180_000;
+export const PREPARE_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_BYTES = 4_194_304;
 const MAX_DEPENDENCY_ROOTS = 500;
 const SKIPPED_DIRECTORIES = new Set(["node_modules", ".git", ".bflow", ".claude", "dist", "coverage"]);

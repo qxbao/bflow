@@ -116,12 +116,18 @@ detection, notification and Stop-hook continuation are not live-verified.
 - **Rejected workflow proposals.** `propose_workflow` pre-checks (project policy, then verification
   support) return a structured error `{ code, reason, methods?, criteria?, options }` to the
   Coordinator. The same reason reaches Conversation as a `workflow_rejected` notice, outside any
-  journal transaction. Codes: `missing_behavioral_runner` (no owner runner for a criterion's method),
-  `unsupported_verification`, `policy_violation`. The options are informational: the owner configures
-  `.bflow/verification.json`, the user approves a revised specification, or the run is cancelled.
-  Nothing is applied automatically, and the specification and its criteria are never changed.
-  The owner runner configuration is pinned when the host is created (`docs/verification-runners.md`),
-  so changing the file later requires quiescing the host and reconciling it explicitly.
+  journal transaction. User-facing codes: `no_test_runner_detected` (automatic detection found no
+  supported runner; options: the Coordinator adds a setup task, or the run is cancelled), plus
+  `unsupported_verification` and `policy_violation`; `missing_behavioral_runner` remains only for
+  owner-configured runners. Coordinator-fixable codes are returned to the Coordinator as the tool error
+  and are never sent to Conversation: `missing_test_paths` (no test file in `affectedPaths`),
+  `missing_test_mapping` (a criterion has no mapped test names), `unknown_test_command` (a target
+  command is not a detected label, or the label is missing from `infrastructure.commands`) and
+  `unsupported_method` (no runner for the criterion's method). The options are informational; nothing
+  is applied automatically, and the specification and its criteria are never changed by Runtime.
+  Automatic detection is retried on each proposal while unsupported, so no host restart is needed.
+  An owner-configured runner (`.bflow/verification.json`, optional override) is pinned when the host is
+  created (`docs/verification-runners.md`), so changing that file later requires quiescing the host.
 - **Hang watchdog** (`src/agentic/run-watchdog.ts`, pure `evaluateWatchdog`; host timer every 15 s).
   It (a) recreates a pending user decision's notice receipt from the pending request when none exists,
   after 60 seconds, then re-registers with Conversation; (b) resurfaces a user decision that stays

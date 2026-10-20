@@ -1,12 +1,58 @@
-# Owner-configured verification runners
+# Verification runners
 
-Default Claude host supports manual documentation review and configured behavioral
-checks. Configure `.bflow/verification.json` before the first `bflow up`. This is
-operator authority: Coordinator can select accepted command labels and mapped test
-names, but cannot supply executables, argv, output or a successful verdict.
-The persisted host pins the configuration digest. Changing the file after host
-creation is rejected; preserve state and reconcile/migrate the host explicitly.
-Do not delete host journals to bypass a configuration mismatch.
+## Automatic detection (default, no configuration)
+
+Acceptance criteria with `verificationMethod` `unit_test` or `integration_test` are
+measured with no user configuration. When `.bflow/verification.json` is absent,
+Runtime inspects the repository itself (`packages/runtime/src/agentic/runner-detection.ts`)
+and exposes two labels to the Coordinator through `planning_reference.testRunners`:
+
+| Label | Method | Levels |
+| --- | --- | --- |
+| `auto:unit` | `unit_test` | `unit`, `regression` |
+| `auto:integration` | `integration_test` | `integration`, `regression` |
+
+Detection runs no package scripts, no shell and no install. It accepts:
+
+- **vitest 2.x** declared in `package.json` and installed at the repository root
+  (`node_modules/vitest/vitest.mjs`, a real directory, not a symlink). Measured with
+  the JSON reporter plus Runtime's companion reporter.
+- **`node --test`** when the `test` script contains `node --test`. Measured as flat
+  TAP. No dependencies are needed.
+- An optional **`tsc` build** (`tsc`, `tsc -b` or `tsc --build`, optionally with
+  safe relative project paths) from the `build` script, run as a sandboxed prepare step
+  before the tests. It may only create git-ignored output. Other build scripts are
+  skipped and reported in the detection notes.
+- Nested `node_modules` directories found by a walk that does not follow symlinks.
+  Each one is mounted read-only at the same relative path inside the measurement
+  checkout.
+
+Limits: only vitest 2.x and `node --test` are supported. Other versions (for example
+vitest 3) report `unsupported` with the version found. A missing `node_modules` or a
+symlinked root `node_modules` is also unsupported. Measurements require Linux and
+`bwrap` (see below), and there is no network access and no dependency installation.
+If detection is `unsupported`, Runtime retries it on the next `propose_workflow` (and
+when the Coordinator reads `planning_reference`), so installing dependencies or adding
+the runner does not require a host restart. The Coordinator is then told
+(`no_test_runner_detected`) to add a setup task; the user is shown that notice.
+
+Per task, Runtime binds the detected profile to identities taken from the accepted
+specification: test names from the `criterionMappings` of the active automated criteria
+with that method, and test files from `affectedPaths` that are test files and, for a
+Developer, owned by the task. Test files must be committed in the checkout at the
+measured revision. vitest reports `fullName` (describe titles plus the test title joined
+by one space). node --test reports the test title only.
+
+## Optional owner override: `.bflow/verification.json`
+
+Owners may still declare their own behavioral commands in `.bflow/verification.json`
+(for example for a runner or reporter that detection does not support, or to pin exact
+argv). When that file exists its commands are used exactly as before, and automatic
+detection is disabled for that host. This is operator authority: Coordinator can select
+accepted command labels and mapped test names, but cannot supply executables, argv,
+output or a successful verdict. The persisted host pins the configuration digest.
+Changing the file after host creation is rejected; preserve state and reconcile/migrate
+the host explicitly. Do not delete host journals to bypass a configuration mismatch.
 
 ## Node TAP example
 
@@ -73,11 +119,13 @@ Dependency roots must be canonical directories named `node_modules`; symlinks th
 point outside mounted trees remain unavailable. This is a local Linux boundary,
 not a multi-tenant or hostile-kernel guarantee.
 
-No dependency install, build preparation, workspace symlink restoration or network
-fetch happens automatically. Dependencies needed by a test must be present in the
-explicit toolchain or committed checkout. Workspace links to unmounted packages,
-TS projects needing generated `dist`, aggregate coverage, mixed manual/automated
-criteria and other reporter versions are not yet supported by this default path.
+No dependency install, workspace symlink restoration or network fetch happens
+automatically. Dependencies needed by a test must already be installed in the
+repository's `node_modules` (or be part of the committed checkout). The only build step
+is the detected `tsc` prepare step described above. Workspace links to unmounted
+packages, `dist` output produced by other build scripts, aggregate coverage, mixed
+manual/automated criteria and other reporter versions are not supported by the default
+path; use the owner override for those.
 The repository's normal `pnpm test` suite is run separately; it is not claimed to
 run wholesale in this small configured fixture runner.
 

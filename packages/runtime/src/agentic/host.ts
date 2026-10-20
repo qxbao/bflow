@@ -27,7 +27,8 @@ import { unwrap } from "./outbox.js";
 import { HostVerification, HostBehavioralFailure, DEFAULT_HOST_CHECKS } from "./host-verification.js";
 import { HostReceiptJournal, MAX_NOTICE_REBLOCKS, deliveryFailureNotice, isCoordinatorTrigger, type CoordinatorTurnObservation, type HumanHookProvenance } from "./host-receipts.js";
 import { parseBehavioralCommands } from "./behavioral-runner.js";
-import { WorkflowProposalRejected, guardWorkflowProposal } from "./workflow-rejection.js";
+import { WorkflowProposalRejected, guardWorkflowProposal, reportsToUser } from "./workflow-rejection.js";
+import { TestRunnerSource, describeTestRunners } from "./task-commands.js";
 import { evaluateWatchdog } from "./run-watchdog.js";
 import { HostConversationIntake } from "./host-conversation.js";
 import { HostDevelopment } from "./host-development.js";
@@ -247,8 +248,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
   };
   const behavioralCommands = parseBehavioralCommands(configuration.behavioralCommands);
-  const verification = new HostVerification(() => requireWorkspace().runtime, () => requireWorkspace().runtime.ports.artifactStore, receipts, behavioralCommands);
-  const development = new HostDevelopment(() => requireWorkspace().runtime, behavioralCommands);
+  // Owner commands are an optional override; without them Runtime detects the repository's test runner (no user configuration).
+  const testRunners = new TestRunnerSource(behavioralCommands, configuration.repositoryPath);
+  await testRunners.refresh();
+  const verification = new HostVerification(() => requireWorkspace().runtime, () => requireWorkspace().runtime.ports.artifactStore, receipts, testRunners);
+  const development = new HostDevelopment(() => requireWorkspace().runtime, testRunners);
   const conversationIntake = new HostConversationIntake(receipts, () => requireWorkspace().conversation);
   const nativeSessions = new Map<string, {role: AgentRole; sessionId: string}>();
   try { for (const [pane, value] of Object.entries(record(JSON.parse(await readFile(join(configuration.directory, "native-sessions.json"), "utf8"))))) {
@@ -494,7 +498,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const references: Record<string, string[]> = { specification:["../../../../templates/node-typescript/specifications/docs.spec.json","../../../specification/dist/schema.js","../../../specification/dist/classification.js"],
         test_strategy:["../../../test-strategy/dist/schema.js","../../../../templates/node-typescript/specifications/bugfix.spec.json"], workflow:["../../../contracts/dist/workflow.js"] };
       const selected = references[section]; if (!selected) throw new Error("Unknown planning section: choose specification, test_strategy, workflow");
+      await testRunners.refresh();
       return json({ references: await Promise.all(selected.map(async path => ({source:path,content:await readFile(new URL(path,import.meta.url),"utf8")}))),
+        ...describeTestRunners(testRunners),
         behavioralCommands: behavioralCommands.map(({ id, command, method, levels, testNames, testPaths, reporter }) =>
           ({ id, command, method, levels, testNames, testPaths, reporter: reporter ?? "node_tap" })) });
     }
@@ -630,6 +636,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (parameters.maxIterations !== undefined && parameters.maxIterations !== configuration.policy.verification.maxIterations) throw new Error("Verification limit is fixed by the project owner policy");
         parameters.maxIterations = configuration.policy.verification.maxIterations;
       }
+      // Lazily retries an unsupported detection, so dependencies installed since the host started are picked up without a restart.
+      await testRunners.refresh();
       const spec = record(parameters.specification), configuredMethods = verification.configuredMethods();
       const runId = typeof parameters.runId === "string" ? parameters.runId : undefined;
       try {
@@ -640,7 +648,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           verification.assertSupported(spec, host.runtime.ports.policies.strategy.resolve(spec)) });
       } catch (error) {
         // Outside any journal transaction: Conversation learns why, and the Coordinator receives the same structured reason as its tool error.
-        if (error instanceof WorkflowProposalRejected && runId !== undefined) {
+        // Coordinator-fixable refusals stay with the Coordinator (structured tool error only); user notices are for the rest.
+        if (error instanceof WorkflowProposalRejected && runId !== undefined && reportsToUser(error.rejection)) {
           try { await host.runtime.reportWorkflowRejected(runId, error.rejection); }
           catch (reportError) { process.stderr.write(`Bflow could not report workflow rejection: ${redactString(String(reportError))}\n`); }
         }

@@ -335,10 +335,14 @@ Long XDG/profile paths can exceed Linux Unix-socket path limits. Bflow surfaces
 the Herdr error; operators can select a shorter `XDG_CONFIG_HOME` consistently
 for their environment. Bflow does not guess or redirect socket paths.
 
-Before the first Agentic `up`, owners can add `.bflow/verification.json` for
-Node TAP or Vitest 2.1 behavioral checks. The host pins this authority; Coordinator
-cannot choose arbitrary shell commands. Automated checks require Linux Bubblewrap
-and explicitly available dependencies. See [configuration and limits](../../docs/verification-runners.md).
+No verification configuration is needed. Agentic `up` detects the repository's test
+runner (vitest 2.x or `node --test`, with an optional `tsc` build) and uses it for
+`unit_test` and `integration_test` criteria. If none is detected, Conversation shows a
+notice and the Coordinator can add a setup task; no host restart is needed once the runner
+is installed. Owners may still add `.bflow/verification.json` as an optional advanced
+override for Node TAP or Vitest commands; the host pins that authority, and Coordinator
+cannot choose arbitrary shell commands. Measurements require Linux Bubblewrap. See
+[verification runners](../../docs/verification-runners.md).
 
 Chat/Coordinator load their complete installed original prompts before the first
 turn. Claude uses a launch-local prompt file; Codex file launches use native

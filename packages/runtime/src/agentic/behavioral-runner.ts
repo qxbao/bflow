@@ -42,7 +42,7 @@ const permittedLevels: Record<BehavioralCommand["method"], readonly string[]> = 
   unit_test: ["unit", "property", "regression"], integration_test: ["integration", "regression", "smoke"], e2e_test: ["e2e", "regression", "smoke"]
 };
 /** Bound test files must live in a test directory or carry a test/spec suffix; owner configuration is not restricted this way. */
-const testFilePattern = /(^|\/)(test|tests|__tests__)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
+export const testFilePattern = /(^|\/)(test|tests|__tests__)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
 function strings(value: unknown, name: string, nonempty = true): string[] {
   if (!Array.isArray(value) || nonempty && !value.length || value.some(item => typeof item !== "string" || !item.length || item.includes("\0"))) throw new Error(`Invalid behavioral ${name}`);
   return [...value];
@@ -92,7 +92,8 @@ export function bindRunnerProfile(profile: RunnerProfile, identities: { testName
   const testNames = strings(identities.testNames, "test names"), testPaths = strings(identities.testPaths, "test paths");
   assertTestIdentities(testNames, testPaths);
   if (testPaths.some(path => !testFilePattern.test(path))) throw new Error("Behavioral test paths must be committed test files");
-  const checkoutDependencyRoots = strings(profile.checkoutDependencyRoots, "checkout dependency roots");
+  // A dependency-free repository (for example node --test without node_modules) has no roots to mount.
+  const checkoutDependencyRoots = strings(profile.checkoutDependencyRoots, "checkout dependency roots", false);
   for (const path of checkoutDependencyRoots) assertCheckoutDependencyRoot(path);
   if (!isAbsolute(profile.dependencySource) || profile.dependencySource.includes("\0")) throw new Error("Behavioral dependency source must be an absolute repository path");
   assertExecutionBounds(profile.timeoutMs, profile.maxOutputBytes);

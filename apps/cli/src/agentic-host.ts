@@ -43,6 +43,8 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
     return runtime;
   };
 
+  // `.bflow/verification.json` is an optional owner override. When absent, [] is returned and Runtime detects the
+  // repository's test runner itself (see docs/verification-runners.md); no user configuration is required.
   const readOwnerBehavioralCommands = async (runtime: Awaited<ReturnType<typeof loadRuntime>>) => {
     const verificationPath = resolve(input.repository.root, ".bflow/verification.json");
     try {

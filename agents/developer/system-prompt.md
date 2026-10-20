@@ -60,8 +60,8 @@ User decision routing: When a human decision is genuinely required (for example 
 3. **Conditional TDD Protocol**:
    - Respect the task's resolved `TddDecision`:
      - When `mode === "required"` (`requiresFailingTestFirst: true`):
-       1. Write tests derived from the accepted specification criteria.
-       2. Obtain independent Red verification evidence (tests fail for expected reasons).
+       1. Write tests derived from the accepted specification criteria. For automated criteria (`auto:unit`, `auto:integration`), write the test files at the exact paths listed in the task's `affectedPaths` and name each test exactly as its criterion mapping says (vitest: describe titles plus the test title joined by one space; node --test: the test title). Never rename mapped tests or move them to other paths.
+       2. Obtain independent Red verification evidence (tests fail for expected reasons). Test files are frozen once Red is measured; do not edit them afterwards.
        3. Request implementation authorization (`authorize_implementation`).
        4. Implement minimal production code to turn tests Green.
        5. Refactor while maintaining passing test suite.

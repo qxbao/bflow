@@ -3,9 +3,11 @@ import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { AgentExecutionHandleSchema, PaneBindingSchema, RoleMessageSchema, type PaneBinding } from "@bflow/contracts";
-import { measureBehavior, type BehavioralCommand } from "./behavioral-runner.js";
+import { measureBehavior, parseBehavioralCommands, type BehavioralCommand } from "./behavioral-runner.js";
+import { TestRunnerSource, resolveTaskCommands } from "./task-commands.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
 import { json, record, strings, textField } from "./journal.js";
+import type { Specification, TestStrategy } from "@bflow/contracts";
 
 const execute = promisify(execFile);
 const covers = (prefix: string, path: string) => prefix === path || path.startsWith(prefix + "/");
@@ -15,7 +17,15 @@ const safe = (path: string) => !isAbsolute(path) && !path.includes("\\") && !pat
 /** Developer mutations remain inside the current leased task, accepted scope,
  * and TDD phase. Git commits are structured host operations, never shell input. */
 export class HostDevelopment {
-  constructor(private readonly runtime: () => AgenticWorkflowRuntime, private readonly commands: readonly BehavioralCommand[]) {}
+  private readonly runners: TestRunnerSource;
+  constructor(private readonly runtime: () => AgenticWorkflowRuntime, runners: TestRunnerSource | readonly BehavioralCommand[]) {
+    this.runners = runners instanceof TestRunnerSource ? runners : new TestRunnerSource(parseBehavioralCommands(runners));
+  }
+  /** The same resolver as Verification: owner commands and automatic profiles, bound to this task's identities and ownership. */
+  private commandsFor(task: { spec: { specification: Specification; strategy: TestStrategy } }, ownedPaths: string[]) {
+    return resolveTaskCommands({ owner: this.runners.owner, profiles: this.runners.profiles, strategy: task.spec.strategy,
+      specification: task.spec.specification, ownedPaths });
+  }
   private async git(cwd: string, args: string[]) {
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_") && !key.startsWith("NODE_")));
     return (await execute("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false", ...args],
@@ -57,7 +67,7 @@ export class HostDevelopment {
     await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async (task, definition) => {
       this.scope(path, strings(record(definition.metadata).ownedPaths), strings(record(definition.metadata).forbiddenPaths ?? []));
       const strategy = task.spec.strategy;
-      const tests = this.commands.filter(command => strategy.targetCommands.includes(command.command)).flatMap(command => command.testPaths);
+      const tests = this.commandsFor(task, strings(record(definition.metadata).ownedPaths)).flatMap(command => command.testPaths);
       const isTest = tests.some(test => test === path);
       const evidence = strategy.metadata?.tddEvidence;
       if (strategy.tddDecision.mode === "required" && Array.isArray(evidence) && evidence.length && isTest)
@@ -75,11 +85,11 @@ export class HostDevelopment {
   /** Useful Developer feedback, deliberately not authenticated QA evidence. */
   async check(binding: PaneBinding, input: unknown) {
     const context = await this.identity(binding, input);
-    const selected = await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async task => ({
-      commands: this.commands.filter(command => task.spec.strategy.targetCommands.includes(command.command)),
+    const selected = await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async (task, definition) => ({
+      commands: this.commandsFor(task, strings(record(definition.metadata).ownedPaths)),
       head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim()
     }));
-    if (!selected.commands.length) throw new Error("No owner-configured automated checks for this task");
+    if (!selected.commands.length) throw new Error("No automated checks for this task: configure an owner command or make the accepted criteria and test files resolvable");
     const measurements = [];
     for (const command of selected.commands) measurements.push(await measureBehavior(command, context.cwd, selected.head));
     return json({ independentAcceptanceEvidence: false, sourceRevision: selected.head, measurements });
@@ -101,7 +111,7 @@ export class HostDevelopment {
         const path = line.slice(3); this.scope(path, owned, forbidden); return path;
       });
       if (!paths.length) return json({ committed: false, head: expected });
-      const tests = this.commands.filter(command => task.spec.strategy.targetCommands.includes(command.command)).flatMap(command => command.testPaths);
+      const tests = this.commandsFor(task, owned).flatMap(command => command.testPaths);
       if (task.spec.strategy.tddDecision.mode === "required") {
         const evidence = task.spec.strategy.metadata?.tddEvidence;
         if (Array.isArray(evidence) && evidence.length && paths.some(path => tests.includes(path)))
