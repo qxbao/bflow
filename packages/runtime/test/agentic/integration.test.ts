@@ -1005,3 +1005,67 @@ describe("Specialist reply wake-up and failure visibility", () => {
     expect(notices[0].payload.blockageReason).toContain("Recipient pane unavailable");
   });
 });
+
+describe("Runtime Stop and uncertain delivery notices", () => {
+  it("specialistTurnStopped tells Conversation and wakes the Coordinator once while the assignment is unanswered", async () => {
+    const f = await fixture();
+    await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", ["architecture"]);
+    await f.runtime.flushOutbound();
+    const architect = f.panes.bindings.find(p => p.role === "architect")!;
+    await f.runtime.specialistTurnStopped(architect, "architect");
+    await f.runtime.specialistTurnStopped(architect, "architect");
+    await f.runtime.flushOutbound();
+    expect(f.conversationInbox.filter(message => (message.payload as any).kind === "specialist_no_response")).toHaveLength(1);
+    const wakes = f.transport.sentRequests.filter(request => request.role === "coordinator").map(request => JSON.parse(request.instruction));
+    expect(wakes.filter(wake => wake.payload?.kind === "specialist_no_response")).toEqual([expect.objectContaining({
+      type: "task.status", sender: { role: "runtime" }, payload: expect.objectContaining({ fromRole: "architect", reason: expect.stringContaining("architect") }) })]);
+  });
+  it("does not report a specialist that already answered its assignment", async () => {
+    const f = await fixture();
+    const queued = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", ["architecture"]) as any;
+    await f.runtime.flushOutbound();
+    await f.runtime.receiveHerdr(f.envelope("spec.draft", { status: "completed", summary: "Impact analysis" }, { causation_id: queued.message_id,
+      sender: { role: "architect", agent_id: "architect", pane_id: "pane-architect" }, recipient: { role: "coordinator" } }));
+    await f.runtime.specialistTurnStopped(f.panes.bindings.find(p => p.role === "architect")!, "architect");
+    await f.runtime.flushOutbound();
+    expect(f.conversationInbox.filter(message => (message.payload as any).kind === "specialist_no_response")).toEqual([]);
+  });
+  it("does not report a specialist that stopped while waiting on a user decision it requested", async () => {
+    const f = await fixture();
+    await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", ["architecture"]);
+    await f.runtime.flushOutbound();
+    const architect = f.panes.bindings.find(p => p.role === "architect")!;
+    await f.runtime.requestUserDecision(architect, "architect", { runId: "run-1", taskId: "planning", question: "Which design?", options: ["A", "B"] });
+    await f.runtime.specialistTurnStopped(architect, "architect");
+    await f.runtime.flushOutbound();
+    expect(f.conversationInbox.filter(message => (message.payload as any).kind === "specialist_no_response")).toEqual([]);
+  });
+  it("coordinatorStopWithoutResponse carries the reason and numbered options to Conversation", async () => {
+    const f = await fixture();
+    const message = f.envelope("delegation.request", { schemaVersion: 2, delegationId: "delegation-1", messageId: "intake-1", correlationId: "correlation-1",
+      sessionId: "session-1", runId: "run-1", requestedBy: "conversation", targetRole: "coordinator", title: "Plan change", objective: "Plan change",
+      sddLevel: "lightweight", specificationId: f.spec.specId, acceptanceCriteria: f.spec.acceptanceCriteria, inputArtifacts: [], priority: "normal", requestedAt: new Date().toISOString(), idempotencyKey: "intake-2" },
+      { message_id: "intake-2", idempotency_key: "intake-2" });
+    await f.runtime.queueHerdr(message); await f.runtime.flushOutbound();
+    const binding = f.panes.bindings.find(p => p.role === "coordinator")!;
+    await f.runtime.coordinatorStopWithoutResponse(message, binding, "Coordinator pane could not be matched: occupant changed");
+    await f.runtime.flushOutbound();
+    expect(f.conversationInbox.find(item => (item.payload as any).kind === "coordinator_no_response")?.payload).toMatchObject({
+      reason: "Coordinator pane could not be matched: occupant changed", blockageReason: "Coordinator pane could not be matched: occupant changed",
+      options: ["Yêu cầu Coordinator tiếp tục hoặc giải thích trạng thái", "Hủy run"] });
+  });
+  it("reportUncertainNativeDelivery surfaces a delivery_failure with the operation id once, and never resends", async () => {
+    const f = await fixture();
+    await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", ["architecture"]);
+    await f.runtime.flushOutbound();
+    const request = (await f.runtime.inspect() as any).outbound.find((out: any) => out.message.type === "delegation.request").message;
+    const sentBefore = f.transport.sentRequests.length;
+    await f.runtime.reportUncertainNativeDelivery(request, "op-42", "Native delivery acknowledgement is uncertain");
+    await f.runtime.reportUncertainNativeDelivery(request, "op-42", "Native delivery acknowledgement is uncertain");
+    await f.runtime.flushOutbound();
+    const failures = f.conversationInbox.filter(item => (item.payload as any).kind === "delivery_failure");
+    expect(failures).toHaveLength(1);
+    expect((failures[0]!.payload as any).blockageReason).toContain("op-42");
+    expect(f.transport.sentRequests.slice(sentBefore).filter(request => request.role === "architect")).toEqual([]);
+  });
+});

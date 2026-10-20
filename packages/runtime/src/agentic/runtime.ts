@@ -1286,6 +1286,103 @@ export class AgenticWorkflowRuntime {
     this.progress(state, outbox, run, "Run cancelled; execution stop and retained worktrees require reconciliation");
     await save();
   }
+  /**
+   * Host-reported Stop of a specialist turn. A role that still owes an answer (an accepted assignment or delegation with no
+   * applied message from it since) makes Conversation see `developer_no_response` / `specialist_no_response` and wakes the
+   * Coordinator once per assignment. Herdr Stop is operational evidence only, never task success.
+   */
+  async specialistTurnStopped(bindingInput: unknown, roleInput: unknown): Promise<void> {
+    const binding = PaneBindingSchema.parse(bindingInput), role = textField(roleInput);
+    if (binding.role !== role || role === "conversation" || role === "coordinator") throw new Error("Specialist Stop requires a non-Conversation specialist binding");
+    await this.transaction(async (state, save, _core, outbox) => {
+      let changed = false;
+      for (const out of [...state.outbound]) {
+        if (out.message.recipient.role !== role || out.handle?.target.paneId !== binding.paneId || !["accepted", "released"].includes(out.status)) continue;
+        if (!["task.assignment", "delegation.request"].includes(out.message.type) || !out.message.run_id) continue;
+        const run = state.runs.find(item => item.runId === out.message.run_id);
+        if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || run.status === "awaiting_approval") continue;
+        // Waiting on a user decision it asked for through Runtime is a legitimate idle turn, not a missing answer.
+        if (Object.values(run.userDecisions ?? {}).some(item => item.role === role && item.status === "pending")) continue;
+        const sentAt = out.message.occurred_at ?? "";
+        const answered = state.inbox.some(item => item.status === "applied" && item.message.sender.role === role && item.message.run_id === run.runId &&
+          !["task.status", "conversation.progress"].includes(item.message.type) &&
+          (item.message.causation_id === out.message.message_id || (item.message.occurred_at ?? "") >= sentAt));
+        if (answered) continue;
+        const kind = role === "developer" ? "developer_no_response" : "specialist_no_response";
+        const reason = `${role} ended its turn for ${out.message.type} (${out.message.message_id}) without a structured result`;
+        this.emit(state, outbox, run, "conversation.progress", { kind, runId: run.runId, reason, headline: `${role} không trả kết quả: ${out.message.type}`,
+          options: ["Yêu cầu Coordinator giao lại việc hoặc giải thích trạng thái", "Hủy run"], blockageReason: reason },
+        `${kind}:${out.message.message_id}`, "conversation", []);
+        const wakeId = `p19-wake-${digest([run.runId, `${kind}:${out.message.message_id}`])}`;
+        if (!state.outbound.some(item => item.message.message_id === wakeId)) {
+          outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: wakeId, correlation_id: run.delegation.correlationId,
+            causation_id: out.message.message_id, run_id: run.runId, sender: { role: "runtime" }, recipient: { role: "coordinator" }, type: "task.status",
+            payload: { kind: "specialist_no_response", fromRole: role, sourceMessageId: out.message.message_id, sdlcStatus: run.status, reason,
+              next: "The specialist ended without a result. Reassign the work through Runtime, or report a blocker; do not treat its idle pane as success." },
+            artifact_references: [], occurred_at: this.now(), idempotency_key: wakeId }), "coordinator");
+        }
+        changed = true;
+      }
+      if (changed) await save();
+    });
+  }
+  /**
+   * Stop of a turn that was woken by a Runtime notice (the wake-up is a Runtime task.status to the Coordinator) or a delegation.
+   * Emits `coordinator_no_response` with the reason and numbered options when the Coordinator produced no structured response.
+   * Also the unrecoverable-item path: the host calls it when the pane/native session can no longer be matched.
+   */
+  async coordinatorStopWithoutResponse(input: unknown, bindingInput: unknown, reason?: string): Promise<void> {
+    const message = RoleMessageSchema.parse(input), binding = PaneBindingSchema.parse(bindingInput);
+    await this.transaction(async (state, save, _core, outbox) => {
+      const delivery = this.providerDelivery(state, message, binding);
+      if (binding.role !== "coordinator" || message.recipient.role !== "coordinator") throw new Error("Coordinator Stop requires a Coordinator delivery");
+      const run = state.runs.find(item => item.runId === message.run_id);
+      if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || run.coreCreated || run.status === "awaiting_approval" ||
+          Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) return;
+      const baseline = delivery.coordinatorResponseBaseline ?? state.outbound.indexOf(delivery) + 1;
+      const response = state.outbound.slice(baseline).some(out => out.message.run_id === message.run_id && out.message.correlation_id === message.correlation_id &&
+        out.message.sender.role === "coordinator" && out.message.type !== "delegation.accepted" &&
+        !(out.message.type === "conversation.progress" && typeof out.message.payload === "object" && out.message.payload !== null && !Array.isArray(out.message.payload) &&
+          (out.message.payload.kind === "coordinator_no_response" || out.message.payload.kind === "delivery_failure")));
+      if (response) return;
+      const messageId = `coordinator-no-response-${digest(message.message_id)}`;
+      if (state.outbound.some(out => out.message.message_id === messageId)) return;
+      const blockage = reason ?? (state.inbox.some(item => item.status === "applied" && item.message.message_id === message.message_id)
+        ? "No structured Coordinator progress or workflow response was recorded. The request remains unresolved."
+        : "The delivered message has no durable ingress in Runtime. The request remains unresolved; inspect host delivery diagnostics before retrying.");
+      outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: messageId, correlation_id: message.correlation_id,
+        causation_id: message.message_id, run_id: message.run_id, sender: { role: "coordinator" }, recipient: { role: "conversation" },
+        type: "conversation.progress", payload: { kind: "coordinator_no_response", runId: run.runId, headline: "Coordinator turn ended without a structured response",
+          reason: blockage, blockageReason: blockage, options: ["Yêu cầu Coordinator tiếp tục hoặc giải thích trạng thái", "Hủy run"] },
+        artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }));
+      await save();
+    });
+  }
+  /**
+   * A native delivery whose acknowledgement was not observed. Conversation and the Coordinator see `delivery_failure` with the
+   * operation id. The message is never resent here; reconciliation decides what happened.
+   */
+  async reportUncertainNativeDelivery(input: unknown, operationId: string, reason: string): Promise<void> {
+    const message = RoleMessageSchema.parse(input);
+    if (!message.run_id) return;
+    await this.transaction(async (state, save, _core, outbox) => {
+      const run = state.runs.find(item => item.runId === message.run_id);
+      if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) return;
+      const subject = `native delivery ${operationId} (${message.type} to ${message.recipient.role}, ${message.message_id})`;
+      this.surfaceFailure(state, outbox, run, subject, redactString(reason));
+      if (message.recipient.role !== "coordinator" && message.sender.role !== "coordinator") {
+        const wakeId = `p19-wake-${digest([run.runId, "delivery-failure", operationId])}`;
+        if (!state.outbound.some(out => out.message.message_id === wakeId)) {
+          outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: wakeId, correlation_id: run.delegation.correlationId,
+            causation_id: message.message_id, run_id: run.runId, sender: { role: "runtime" }, recipient: { role: "coordinator" }, type: "task.status",
+            payload: { kind: "delivery_failure", operationId, sdlcStatus: run.status, reason: redactString(reason),
+              next: "A delivery is unconfirmed and is not resent. Inspect the run state before assuming the recipient acted." },
+            artifact_references: [], occurred_at: this.now(), idempotency_key: wakeId }), "coordinator");
+        }
+      }
+      await save();
+    });
+  }
 }
 interface VerificationJob {
   runId: string; taskId: string; plan: VerificationPlan; cycle: import("@bflow/contracts").VerificationCycle;

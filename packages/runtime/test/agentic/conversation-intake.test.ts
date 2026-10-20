@@ -108,7 +108,9 @@ describe("trusted raw turns and model decision receipts", () => {
     f.port.handleTrustedApproval = async () => ++calls === 1
       ? { ok: false, error: { code: "transport", retryable: true, message: "Herdr unavailable" } }
       : { ok: true, value: { recognizedIntent: "approval_response", queuedBecauseBusy: false } };
-    await expect(f.intake.receive(f.binding, f.turn("user-approve", "approve"))).rejects.toThrow("Trusted approval failed");
+    // The failure is returned as context for the provider hook (not thrown, so the hook is never silent), and nothing is recorded.
+    await expect(f.intake.receive(f.binding, f.turn("user-approve", "approve"))).resolves.toMatchObject({ approvalFailed: true,
+      approvalFailure: { error: { error: { code: "transport" } } } });
     expect(await f.journal().conversationDecision("user-approve")).toBeUndefined();
     await expect(f.reopen().receive(f.binding, f.turn("user-approve", "approve"))).resolves.toMatchObject({
       requiresConversationDecision: false, result: { ok: true } });
