@@ -701,6 +701,62 @@ describe("@bflow/agent-providers", () => {
 
   describe("5. All 8 Failure Scenarios", () => {
     it.each([
+      ["I will check authentication.\ntokens used\n123", "ERROR: upstream returned 429 Too Many Requests", "probe_failed"],
+      ["", "OpenAI Codex\nprovider: auth-proxy\nERROR: connection reset by peer", "probe_failed"],
+      ["", "ERROR: OAuth access token expired", "auth_expired"],
+      ["", "ERROR: Your API key has expired", "auth_expired"],
+      ["", '{"error":{"code":"api_key_expired"}}', "auth_expired"],
+      ["", "ERROR: authentication failed: invalid API key", "auth_missing"],
+      ["", "ERROR: HTTP 401 Unauthorized", "auth_missing"],
+      ["ERROR: authentication failed", "ERROR: connection reset by peer", "probe_failed"],
+      ['{"error":{"message":"invalid API key"}}', "OpenAI Codex\nmodel: supported-model", "auth_missing"],
+      ["", 'ERROR: request failed\n{\n  "error": {\n    "message": "OAuth access token expired",\n    "type": "authentication_error"\n  }\n}', "auth_expired"],
+      ["", 'ERROR: request failed\n{\n  "error": {\n    "message": "The model `missing` does not exist",\n    "code": "model_not_found"\n  }\n}', "incompatible_model"]
+    ])("classifies the actual probe failure without treating incidental auth/token text as expiry (%s, %s)", async (stdout, stderr, code) => {
+      const runner = createFakeProviderRunner({ customHandler: invocation => invocation.args.includes("exec")
+        ? { exitCode: 1, started: true, stdout, stderr } : undefined });
+      const adapter = new CodexProviderAdapter({ runner, executablePath: fakeBinaryPath, codexHomeDirectory: testCodexHome });
+      const result = await adapter.checkHealth({ schemaVersion: 3, environment: createTestEnvironment("codex"), stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("Expected a validated health result");
+      expect(result.value.status).toBe("blocked");
+      const check = result.value.checks.find(check => check.check === "authentication");
+      expect(check?.code).toBe(code);
+      if (code === "probe_failed") expect(check?.remediation).not.toMatch(/re-authenticate/i);
+    });
+
+    it("keeps the trailing upstream error visible after a long Codex startup banner and redacts credentials", async () => {
+      const stderr = "Reading additional input from stdin...\nOpenAI Codex v0.163.0\n" +
+        "workdir: /workspace\nmodel: supported-model\nprovider: custom-provider\n".repeat(8) +
+        '\x1b[31mERROR: upstream returned 429 Too Many Requests; SERVICE_TOKEN="opaque\ncredential-tail"\x1b[0m\n' +
+        "tokens used\n123\n";
+      const runner = createFakeProviderRunner({ customHandler: invocation => invocation.args.includes("exec")
+        ? { exitCode: 1, started: true, stdout: "", stderr } : undefined });
+      const adapter = new CodexProviderAdapter({ runner, executablePath: fakeBinaryPath, codexHomeDirectory: testCodexHome });
+      const result = await adapter.checkHealth({ schemaVersion: 3, environment: createTestEnvironment("codex"), stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("Expected a validated health result");
+      const check = result.value.checks.find(check => check.check === "authentication");
+      expect(result.value.status).toBe("blocked");
+      expect(check?.code).toBe("probe_failed");
+      expect(check?.message).toContain("429 Too Many Requests");
+      expect(check?.message).toContain("[REDACTED]");
+      expect(check?.message.length).toBeLessThanOrEqual(240);
+      expect(JSON.stringify(result)).not.toMatch(/opaque|credential-tail/);
+    });
+
+    it("reports runner failure details when a failed probe has no output", async () => {
+      const runner = createFakeProviderRunner({ customHandler: invocation => invocation.args.includes("exec")
+        ? { exitCode: null, started: false, failure: "spawn", cause: "spawn codex EAGAIN", stdout: "", stderr: "" } : undefined });
+      const adapter = new CodexProviderAdapter({ runner, executablePath: fakeBinaryPath, codexHomeDirectory: testCodexHome });
+      const result = await adapter.checkHealth({ schemaVersion: 3, environment: createTestEnvironment("codex"), stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("Expected a validated health result");
+      expect(result.value.status).toBe("blocked");
+      expect(result.value.checks.find(check => check.check === "authentication")?.message).toContain("EAGAIN");
+    });
+
+    it.each([
       ["pong\nOpenAI Codex\nmodel: supported-model\nsandbox: workspace-write\napproval: never", "probe_failed"],
       ["OpenAI Codex\nmodel: supported-model\nError: directory does not exist", "probe_failed"],
       ["OpenAI Codex\nmodel: supported-model\nError: The model `missing-model` does not exist", "incompatible_model"]
