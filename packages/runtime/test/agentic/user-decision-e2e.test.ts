@@ -11,7 +11,6 @@ import { AgenticJournal, type JournalState } from "../../src/agentic/journal.js"
 import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import { createAgenticConversationHost, type AgenticConversationHost } from "../../src/agentic/conversation.js";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
-import { runAsHostAuthenticated, authenticateNativeHerdrMessage } from "../../src/agentic/herdr-ingress.js";
 import { parseUserDecisionToolInput } from "../../src/agentic/decision-routing.js";
 import type { AgenticRuntimePorts } from "../../src/agentic/ports.js";
 import { FakeAgentTransport } from "../helpers/fake-transport.js";
@@ -69,8 +68,10 @@ async function fixture(options: { design?: boolean } = {}) {
   const transport = new FakeAgentTransport();
   const registry = new FileAgentRegistry({ stateFile: join(root, "registry.json") });
   const panes = new Panes();
+  const inbox: RoleMessage[] = [];
   const ports = {
     clock, transport, registry, panes,
+    deliverToConversation: async (message: RoleMessage) => { inbox.push(message); },
     authenticateMessage: async () => true,
     authorizeHuman: (decision: ApprovalDecision) => receipts.authenticateHuman(decision),
     roleCapabilities: { conversation: ["conversation"], coordinator: ["coordination"], developer: ["implementation"] }
@@ -111,13 +112,14 @@ async function fixture(options: { design?: boolean } = {}) {
     runtime: instance, manifest: unwrap(await panes.getManifest()), contextDirectory: join(root, "conversation"),
     onHumanDecision: recordReceipts ? decision => receipts.recordHuman(decision, provenance("user-reply")) : undefined
   });
-  return { root, transport, registry, receipts, runtime, chat, provenance, developer: panes.bindings[2]!, journal };
+  return { root, transport, registry, receipts, runtime, chat, provenance, inbox, developer: panes.bindings[2]!, journal };
 }
 
 const outbound = async (instance: AgenticWorkflowRuntime): Promise<Entry[]> =>
   (await instance.inspect() as unknown as { outbound: Entry[] }).outbound;
 const userDecisions = async (instance: AgenticWorkflowRuntime, approvalId: string): Promise<UserDecisionState | undefined> =>
   ((await instance.inspect(RUN)) as unknown as { userDecisions?: Record<string, UserDecisionState> }).userDecisions?.[approvalId];
+const inboxTo = (inbox: RoleMessage[], type?: string) => inbox.filter(message => type === undefined || message.type === type);
 const sentTo = (transport: FakeAgentTransport, role: string, type?: string) =>
   transport.sentRequests.filter(request => request.role === role && (type === undefined || (JSON.parse(request.instruction) as { type?: string }).type === type));
 
@@ -148,7 +150,7 @@ describe.skipIf(process.platform !== "linux")("P30 user decisions end to end", (
     expect(prompts).toHaveLength(1);
     expect(prompts[0]!.message.recipient.role).toBe("conversation");
     expect(prompts[0]!.message.payload).toMatchObject({ approvalId, metadata: { kind: "user_decision", options: ["SQLite", "Postgres"] } });
-    expect(f.transport.sentRequests.filter(r => r.role === "conversation" && r.instruction.includes("approval.request"))).toHaveLength(1);
+    expect(inboxTo(f.inbox, "approval.request")).toHaveLength(1);
 
     const host = await f.chat(runtime);
     await host.receiveHerdr(await promptOf(runtime));
@@ -164,7 +166,7 @@ describe.skipIf(process.platform !== "linux")("P30 user decisions end to end", (
     const delivered = sentTo(f.transport, "developer", "task.status");
     expect(delivered).toHaveLength(1);
     expect(JSON.parse(delivered[0]!.instruction).payload).toMatchObject({ kind: "user_decision_answer", approvalId, outcome: "approved", selectedOption: "Postgres" });
-    expect(sentTo(f.transport, "conversation", "approval.request")).toHaveLength(1);
+    expect(inboxTo(f.inbox, "approval.request")).toHaveLength(1);
   });
 
   it("keeps the resume queued while the asker lease is busy and delivers it exactly once after release", async () => {
@@ -264,7 +266,7 @@ describe.skipIf(process.platform !== "linux")("P30 user decisions end to end", (
     const second = f.runtime();
     await second.flushOutbound();
     expect((await outbound(second)).filter(entry => entry.message.type === "approval.request")).toHaveLength(1);
-    expect(sentTo(f.transport, "conversation", "approval.request")).toHaveLength(1);
+    expect(inboxTo(f.inbox, "approval.request")).toHaveLength(1);
     const host = await f.chat(second);
     await host.receiveHerdr(await promptOf(second));
     await reply(host, "2");
@@ -340,8 +342,7 @@ describe.skipIf(process.platform !== "linux")("P30 user decisions end to end", (
     vi.setSystemTime(start + 2 * 60_000);
     await runtime.tick(); await runtime.flushOutbound();
 
-    const notice = sentTo(f.transport, "conversation", "conversation.progress")
-      .map(request => JSON.parse(request.instruction) as RoleMessage)
+    const notice = inboxTo(f.inbox, "conversation.progress")
       .find(message => (message.payload as { kind?: string }).kind === "user_decision_expired");
     expect(notice).toMatchObject({ type: "conversation.progress", recipient: { role: "conversation" },
       payload: { kind: "user_decision_expired", approvalId } });
@@ -410,20 +411,18 @@ describe.skipIf(process.platform !== "linux")("P30 user decisions end to end", (
       expect(context.session.status).toBe("awaiting_user_approval");
     });
 
-    it("root cause: a Runtime-authored user_decision prompt reaches the Gateway only through host authentication", async () => {
+    it("root cause: a Runtime-authored user_decision prompt is applied to the Gateway through the trusted inbox", async () => {
       const f = await fixture(); const runtime = f.runtime();
       const approvalId = await request(runtime, f.developer);
       await runtime.flushOutbound();
-      const message = await promptOf(runtime);
-      expect(message.sender.role).toBe("runtime");
-      const ports = { authenticateMessage: authenticateNativeHerdrMessage };
-      const host = await f.chat(Object.assign(runtime, { ports: { ...runtime.ports, ...ports } }) as AgenticWorkflowRuntime);
-      await expect(host.receiveHerdr(message)).rejects.toThrow("Unauthenticated");
-      await runAsHostAuthenticated(message, () => host.receiveHerdr(message));
+      // sender=runtime must still reach Conversation (it was silently skipped by the host pump before), and never via transport.
+      const delivered = inboxTo(f.inbox, "approval.request");
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]!.sender.role).toBe("runtime");
+      expect(sentTo(f.transport, "conversation")).toHaveLength(0);
+      const host = await f.chat(runtime);
+      await host.receiveHerdr(delivered[0]!);
       expect(Object.keys(((await host.getContext()) as { pendingApprovals: object }).pendingApprovals)).toEqual([approvalId]);
-      // Replay is deduplicated, and the helper refuses anything not Runtime-authored.
-      await runAsHostAuthenticated(message, () => host.receiveHerdr(message));
-      expect(() => runAsHostAuthenticated({ ...message, sender: { role: "coordinator" } }, async () => undefined)).toThrow("Runtime-authored");
     });
 
     it("(b) refuses an apr-... reply the Runtime does not know and records no decision", async () => {

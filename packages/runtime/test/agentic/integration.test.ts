@@ -115,7 +115,11 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
     evaluate: (...args: Parameters<QualityGate["evaluate"]>) => runtime.herdrQualityGate(gate.id).evaluate(...args) } : gate) : gates;
   const policies = await loadAgenticPolicies({ repositoryPath: repository, artifactStore: artifacts, gates: actualGates,
     loadSpecification: id => runtime.loadSpecification(id), authorizeApprover: decision => ["coordinator", "human-1"].includes(decision.decidedBy) });
+  // Conversation-bound messages are delivered through the trusted inbox, never through transport or the input box.
+  const conversationInbox: RoleMessage[] = [];
+  let conversationReentry: ((message: RoleMessage) => Promise<unknown>) | undefined;
   const ports = { engine, runStore: store, artifactStore: artifacts, registry, transport, panes, policies,
+    deliverToConversation: async (message: RoleMessage) => { conversationInbox.push(message); await conversationReentry?.(message); },
     roleCapabilities: { developer: ["implementation"], coordinator: ["coordination"], conversation: ["conversation"], specifier: ["specification"], architect: ["architecture"], planner: ["planning"], reviewer: ["review"], qa: ["verification", ...(options.behavioral ? ["testing"] : [])], tester: ["testing"] },
     taskChecks: checks, workflowChecks: checks,
     authenticateMessage: async () => true, authenticateResult: async () => true, authenticateEvidence: async (result: any) => options.behavioral ? verification.authenticateEvidence(result) : true,
@@ -204,7 +208,8 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
     }
     await runtime.receiveHerdr(envelope("approval.decision", approved));
   }
-  return { root, repository, get runtime() { return runtime; }, ports, privateKey, publicKey, runtimeOptions, panes, transport, spec, def, envelope, inspect, dossier, evidence, submit, approve, verification, receipts,
+  return { root, repository, get runtime() { return runtime; }, ports, privateKey, publicKey, runtimeOptions, panes, transport, conversationInbox,
+    reenterOnConversationDelivery(action: (message: RoleMessage) => Promise<unknown>) { conversationReentry = action; }, spec, def, envelope, inspect, dossier, evidence, submit, approve, verification, receipts,
     calls, localReview: (context: QualityGateContext) => gates.find(gate => gate.id === "review")!.evaluate(context), setFailReview: (value: boolean) => { failReview = value; },
     setReviewerExecutor: (value: string) => { reviewerExecutorId = value; },
     reopenStorage: () => { store.close(); store = unwrap(openSqliteRunStore({ filename: join(root, "runs.db") })); ports.runStore = store; },
@@ -448,11 +453,26 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
   });
   it("busy Conversation does not block Developer dispatch; progress survives restart", async () => {
     const f = await fixture(); f.panes.busy.add("conversation"); await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
-    expect(f.transport.sentRequests.filter(req => req.role === "conversation")).toHaveLength(0);
+    expect(f.transport.sentRequests.some(req => req.role === "conversation")).toBe(false);
     expect(f.transport.sentRequests.some(req => req.role === "developer")).toBe(true);
+    expect(f.conversationInbox.length).toBeGreaterThan(0);
+    const delivered = f.conversationInbox.length;
     f.panes.busy.delete("conversation"); const restarted = f.restart(); await restarted.tick();
-    expect(f.transport.sentRequests.some(req => req.role === "conversation")).toBe(true);
+    expect(f.conversationInbox).toHaveLength(delivered);
     expect(f.transport.sentRequests.filter(req => req.role === "developer")).toHaveLength(1);
+  });
+  it("delivers to Conversation outside the journal lock, so a Gateway that re-enters Runtime cannot deadlock", async () => {
+    const f = await fixture();
+    // A busy Gateway drains a queued user turn whose handoff enqueues back into Runtime during delivery.
+    f.reenterOnConversationDelivery(() => f.runtime.inspect());
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([f.runtime.tick(), new Promise((_resolve, reject) => { timer = setTimeout(() => reject(new Error("Conversation delivery deadlocked")), 10_000); })])
+      .finally(() => clearTimeout(timer));
+    expect(f.conversationInbox.length).toBeGreaterThan(0);
+    const outbound = ((await f.runtime.inspect()) as any).outbound.filter((out: any) => out.message.recipient.role === "conversation");
+    expect(outbound.length).toBeGreaterThan(0);
+    expect(outbound.every((out: any) => out.status === "delivered")).toBe(true);
   });
   it("unknown_delivery remains durable across restart and never automatically resends", async () => {
     const f = await fixture(); f.transport.customSendHandler = req => ({ ok: false, error: { code: "timeout", retryable: true, message: "lost ACK" } });
@@ -862,7 +882,8 @@ describe("Coordinator no-response host observations", () => {
     await f.restart().coordinatorTurnStopped(f.message, f.binding);
     expect((await f.runtime.inspect() as any).outbound.filter((out: any) => out.message.type === "conversation.progress")).toHaveLength(1);
     await f.runtime.flushOutbound();
-    expect(f.transport.sentRequests.some(call => JSON.parse(call.instruction).payload.kind === "coordinator_no_response")).toBe(true);
+    expect(f.conversationInbox.some(message => (message.payload as any).kind === "coordinator_no_response")).toBe(true);
+    expect(f.transport.sentRequests.some(call => call.role === "conversation")).toBe(false);
   });
   it("rejects untrusted envelopes and foreign pane/native sessions", async () => {
     const f = await delivered();
@@ -896,7 +917,7 @@ describe("Coordinator Stop delivery to Conversation", () => {
     const delegation = JSON.parse(f.transport.sentRequests.find(request => request.role === "coordinator")!.instruction);
     await f.runtime.coordinatorTurnStopped(delegation, f.panes.bindings.find(p => p.role === "coordinator")!);
     await f.runtime.flushOutbound();
-    const notice = JSON.parse(f.transport.sentRequests.find(request => JSON.parse(request.instruction).payload.kind === "coordinator_no_response")!.instruction);
+    const notice = f.conversationInbox.find(message => (message.payload as any).kind === "coordinator_no_response")!;
     expect((await chat.receiveHerdr(notice) as any).ok).toBe(true);
     const module = await import("../../../conversation/dist/index.js");
     const context = unwrap(await new module.FileConversationContextStore(contextDirectory).load("session-1"))!;
@@ -967,7 +988,7 @@ describe("Specialist reply wake-up and failure visibility", () => {
     await f.runtime.reportInboundFailure(reply, "Transport sender binding unavailable");
     await f.runtime.reportInboundFailure(reply, "Transport sender binding unavailable"); // idempotent
     await f.runtime.flushOutbound();
-    const notices = sentTo(f, "conversation").filter(message => message.payload.kind === "delivery_failure");
+    const notices = f.conversationInbox.filter(message => (message.payload as any).kind === "delivery_failure").map(message => message as any);
     expect(notices).toHaveLength(1);
     expect(notices[0].payload.blockageReason).toContain("Transport sender binding unavailable");
     expect(notices[0].payload.blockageReason).toContain("architect");
@@ -979,7 +1000,7 @@ describe("Specialist reply wake-up and failure visibility", () => {
     f.panes.bindings.splice(f.panes.bindings.findIndex(p => p.role === "planner"), 1);
     const out = f.envelope("task.status", { kind: "probe" }, { sender: { role: "runtime" }, recipient: { role: "planner" } });
     await f.runtime.queueHerdr(out); await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
-    const notices = sentTo(f, "conversation").filter(message => message.payload.kind === "delivery_failure");
+    const notices = f.conversationInbox.filter(message => (message.payload as any).kind === "delivery_failure").map(message => message as any);
     expect(notices).toHaveLength(1);
     expect(notices[0].payload.blockageReason).toContain("Recipient pane unavailable");
   });

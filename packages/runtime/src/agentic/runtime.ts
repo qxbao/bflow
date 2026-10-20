@@ -8,7 +8,7 @@ import {
   type ArtifactReference, type JsonValue, type RoleMessage, type QualityGate, type QualityGateResult, type Specification,
   type PaneBinding, type TaskDefinition, type AgentRole
 } from "@bflow/contracts";
-import { AgenticJournal, digest, json, record, strings, textField, type JournalState,
+import { AgenticJournal, digest, isConversationDelivery, json, record, strings, textField, type JournalState,
   type Outbound, type RunRecord, type SpecRecord, type TaskRecord, type UserDecisionRecord } from "./journal.js";
 import { buildDecisionRequestMessage, buildUserDecisionRequest, USER_DECISION_EXPIRED_KIND, validateUserDecisionAnswer, type UserDecisionToolInput } from "./decision-routing.js";
 import { captureIntegratedChange } from "./integration-change.js";
@@ -150,6 +150,32 @@ export class AgenticWorkflowRuntime {
       await outbox.flush((out, handle) => this.bind(state, core, out, handle));
       this.surfaceOutboundFailures(state, outbox); await save();
     });
+    await this.deliverConversationInbox();
+  }
+  private conversationDelivery: Promise<void> | undefined;
+  /**
+   * Applies write-ahead Conversation inbox messages outside the journal lock, because the Gateway may drain a queued
+   * user turn that enqueues back into Runtime. The Gateway deduplicates by message_id, so a failure is requeued and retried.
+   */
+  private deliverConversationInbox(): Promise<void> {
+    this.conversationDelivery ??= (async () => {
+      try {
+        if (this.quiesced) return;
+        const pending = await this.journal.exclusive(async state =>
+          state.outbound.filter(out => isConversationDelivery(out) && out.status === "sending").map(out => out.message));
+        for (const message of pending) {
+          let error: string | undefined;
+          try { await this.ports.deliverToConversation(message); } catch (failure) { error = String(failure); }
+          await this.journal.exclusive(async (state, save) => {
+            const out = state.outbound.find(item => item.message.message_id === message.message_id);
+            if (out?.status !== "sending") return;
+            if (error === undefined) { out.status = "delivered"; delete out.error; } else { out.status = "queued"; out.error = error; }
+            await save();
+          });
+        }
+      } finally { this.conversationDelivery = undefined; }
+    })();
+    return this.conversationDelivery;
   }
   private readonly gateWaiters = new Map<string, { runId: string; accept(result: QualityGateResult): void; reject(error: Error): void }>();
   /** Reviewer/QA checks are delivered through Herdr; awaiting a reply never holds the Runtime journal lock. */
@@ -989,6 +1015,7 @@ export class AgenticWorkflowRuntime {
         await save(); return jobs;
       } finally { this.activeState = undefined; }
     });
+    await this.deliverConversationInbox();
     for (const job of jobs) {
       // No Runtime lock is held: QA/Reviewer may reply through Herdr while verification awaits them.
       try {

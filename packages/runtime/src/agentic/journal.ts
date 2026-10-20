@@ -77,7 +77,8 @@ function parseUserDecisions(value: unknown, runId: string): void {
   }
 }
 export interface Outbound {
-  message: RoleMessage; status: "queued" | "sending" | "unknown_delivery" | "accepted" | "released" | "cancelled";
+  message: RoleMessage; status: "queued" | "sending" | "unknown_delivery" | "accepted" | "released" | "cancelled" | "delivered";
+  /** Conversation-bound notices are delivered through the trusted inbox: terminal, with no dispatch handle, lease or request. */
   selector: string; taskId: string; attemptId: string; capabilities: string[];
   assignment?: AgentAssignment; lease?: AgentLease; request?: AgentRequest; handle?: AgentExecutionHandle;
   error?: string; cancelRequested?: boolean;
@@ -95,6 +96,10 @@ export interface JournalState {
   inbox: { message: RoleMessage; status: "received" | "applied" }[];
   pendingCore: AppendEventsRequest[];
   pendingVerifications: { job: JsonValue; outcome: JsonValue }[];
+}
+/** Conversation-bound messages use the trusted inbox: no lease, no transport, no dispatch request, never typed into the input box. */
+export function isConversationDelivery(out: Outbound): boolean {
+  return !out.parentAssignmentId && out.message.recipient.role === "conversation";
 }
 /** Private storage codec; exported schemas validate every persisted boundary value. */
 function parseState(input: unknown, repository: string): JournalState {
@@ -128,7 +133,7 @@ function parseState(input: unknown, repository: string): JournalState {
   }
   for (const out of state.outbound) {
     out.message = RoleMessageSchema.parse(out.message); textField(out.selector); textField(out.taskId); textField(out.attemptId); strings(out.capabilities);
-    if (!["queued", "sending", "unknown_delivery", "accepted", "released", "cancelled"].includes(out.status)) throw new Error("Invalid outbound status");
+    if (!["queued", "sending", "unknown_delivery", "accepted", "released", "cancelled", "delivered"].includes(out.status)) throw new Error("Invalid outbound status");
     if (out.coordinatorResponseBaseline !== undefined && (!Number.isSafeInteger(out.coordinatorResponseBaseline) || out.coordinatorResponseBaseline < 0 || out.coordinatorResponseBaseline > state.outbound.length))
       throw new Error("Invalid Coordinator response baseline");
     if (out.assignment) out.assignment = AgentAssignmentSchema.parse(out.assignment);
@@ -154,7 +159,9 @@ function parseState(input: unknown, repository: string): JournalState {
           out.leaseRelease.leaseId !== out.lease.leaseId || out.leaseRelease.fencingToken !== out.lease.fencingToken ||
           out.leaseRelease.expectedVersion !== out.lease.version) throw new Error("Invalid pending outbound lease release");
     }
-    if (["sending", "unknown_delivery", "accepted"].includes(out.status) && !out.request) throw new Error("Missing outbound dispatch intent");
+    // An inbox delivery's write-ahead intent is the message itself; it never has a transport request.
+    if (["sending", "unknown_delivery", "accepted"].includes(out.status) && !out.request && !(isConversationDelivery(out) && out.status !== "accepted"))
+      throw new Error("Missing outbound dispatch intent");
     if (out.status === "accepted" && (!out.handle || !out.lease)) throw new Error("Missing outbound binding/lease");
   }
   for (const out of state.outbound) if (out.parentAssignmentId !== undefined) {

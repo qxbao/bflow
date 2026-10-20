@@ -10,15 +10,6 @@ const authenticated = new AsyncLocalStorage<string>();
 export async function authenticateNativeHerdrMessage(message: RoleMessage): Promise<boolean> {
   return authenticated.getStore() === canonicalReceiptJson(message);
 }
-/**
- * Host-internal delivery of a Runtime-authored message that has no pane to sign it. The caller must already have proven the
- * message is the exact Runtime outbox delivery (validateProviderDelivery); pane or model content never reaches this.
- */
-export function runAsHostAuthenticated<T>(message: RoleMessage, work: () => Promise<T>): Promise<T> {
-  if (message.sender.role !== "runtime" || message.sender.agent_id !== undefined || message.sender.pane_id !== undefined)
-    throw new Error("Host authentication is only for Runtime-authored messages");
-  return authenticated.run(canonicalReceiptJson(message), work);
-}
 /** Receives messages forwarded by a signed native Herdr plugin invocation, never terminal snapshots. */
 export async function startHerdrReceiptIngress(options: {
   socketPath: string; publicKeys: Readonly<Record<string, string>>;
