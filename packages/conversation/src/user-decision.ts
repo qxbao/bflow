@@ -117,7 +117,8 @@ export function renderUserDecisionPrompt(payload: Record<string, unknown>): stri
 /** Deadline text shown when a user decision carries no expiry. */
 export const NO_DEADLINE_TEXT = "Không có hạn — đang chờ bạn trả lời";
 
-function formatDeadline(expiresAt: string): string {
+/** Human-readable deadline (UTC ISO) for a user-facing prompt. Unparseable values are shown verbatim. */
+export function formatDeadline(expiresAt: string): string {
   const millis = Date.parse(expiresAt);
   return Number.isNaN(millis) ? expiresAt : new Date(millis).toISOString();
 }

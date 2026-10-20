@@ -123,6 +123,13 @@ Bất kỳ tin nhắn nào đến từ người dùng hoặc thông điệp ti�
 2. Lưu tức thì vào `ConversationContextStore` để chống mất dữ liệu khi crash.
 3. Khi người dùng gửi đến trong lúc bận, hệ thống trả về thông báo tiếp nhận an toàn (`queuedBecauseBusy: true`).
 4. Ngay khi `chat` chuyển về trạng thái rảnh (`busy = false`), hàm `flushPendingInboundQueue()` sẽ tự động xử lý tuần tự toàn bộ hàng đợi theo nguyên tắc **FIFO**.
+5. Mỗi mục vẫn nằm trong hàng đợi cho tới khi được xử lý xong. Nếu xử lý lỗi, mục được giữ lại với số lần thử (`attempts`, `lastError`) và các mục phía sau vẫn được xử lý trong cùng lượt. Sau `MAX_QUEUE_PROCESSING_ATTEMPTS` (3) lần lỗi, mục chuyển sang `deadLetters` của snapshot và Conversation gửi thông báo cho người dùng (lỗi gì, run nào, và các lựa chọn: gửi lại, hỏi `trạng thái`, hoặc `hủy <run-id>`).
+6. Các lỗi xả hàng đợi không bị bỏ qua: kết quả của lượt (`handleUserTurn`, `handleCoordinatorRoleMessage`, `setAgentBusyState`) và `flushPendingInboundQueue` trả về `queueFailures`, `queueNotices` (và `queueFlushError` nếu không lưu được snapshot). Host phải chuyển các thông báo này tới người dùng.
+7. Giới hạn đã biết: nếu tiến trình dừng sau khi một mục đã được ghi nhận vào lịch sử nhưng trước khi xóa khỏi hàng đợi, mục đó có thể được xử lý lại khi khôi phục. Mục có `messageId` của Chat (quyết định có cấu trúc) được khử trùng lặp theo `messageId`; mục người dùng thường không có khóa khử trùng lặp.
+
+Lỗi định dạng hiển thị của một `RoleMessage` hợp lệ không làm từ chối thông điệp: nội dung được render lại theo dạng chung đã làm sạch (`formatCoordinatorMessageForUser`), và phê duyệt vẫn được đăng ký.
+
+Phản hồi phê duyệt không khớp (`apr-...` không tồn tại, đã quyết định, đã hết hạn, lựa chọn sai, hoặc không có phê duyệt nào đang chờ) luôn nhận một trả lời hiển thị cho người dùng và không thay đổi trạng thái. Một mã `apr-...` không bao giờ được thay bằng phê duyệt khác. Câu hỏi trạng thái thuần túy (`trạng thái`, `tiến độ thế nào?`) trong lúc có quyết định đang chờ được định tuyến tới báo cáo trạng thái, không được coi là câu trả lời.
 
 ---
 

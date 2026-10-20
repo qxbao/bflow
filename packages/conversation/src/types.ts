@@ -291,13 +291,23 @@ export interface WorkflowRequestContext {
   readonly updatedAt: string;
 }
 
+/** Maximum failed processing attempts for one queued item before it is dead-lettered. */
+export const MAX_QUEUE_PROCESSING_ATTEMPTS = 3;
+
+/** Optional per-item retry bookkeeping (absent in snapshots written before attempt counting). */
+const QueueAttemptFieldsSchema = {
+  attempts: z.number().int().nonnegative().optional(),
+  lastError: z.string().max(1000).optional()
+};
+
 export const PendingInboundItemSchema = z.discriminatedUnion("kind", [
   z
     .object({
       queueId: IdentifierSchema,
       kind: z.literal("coordinator_message"),
       enqueuedAt: IsoDateTimeSchema,
-      message: RoleMessageSchema
+      message: RoleMessageSchema,
+      ...QueueAttemptFieldsSchema
     })
     .strict(),
   z
@@ -305,7 +315,8 @@ export const PendingInboundItemSchema = z.discriminatedUnion("kind", [
       queueId: IdentifierSchema,
       kind: z.literal("user_turn"),
       enqueuedAt: IsoDateTimeSchema,
-      input: UserTurnInputSchema
+      input: UserTurnInputSchema,
+      ...QueueAttemptFieldsSchema
     })
     .strict()
 ]);
@@ -316,13 +327,58 @@ export type PendingInboundItem =
       readonly kind: "coordinator_message";
       readonly enqueuedAt: string;
       readonly message: RoleMessage;
+      readonly attempts?: number | undefined;
+      readonly lastError?: string | undefined;
     }
   | {
       readonly queueId: string;
       readonly kind: "user_turn";
       readonly enqueuedAt: string;
       readonly input: UserTurnInput;
+      readonly attempts?: number | undefined;
+      readonly lastError?: string | undefined;
     };
+
+/** A queued item that failed MAX_QUEUE_PROCESSING_ATTEMPTS times. Kept for diagnosis; never retried automatically. */
+export const DeadLetterItemSchema = z
+  .object({
+    queueId: IdentifierSchema,
+    deadLetteredAt: IsoDateTimeSchema,
+    attempts: z.number().int().positive(),
+    reason: z.string().max(1000),
+    runId: IdentifierSchema.optional(),
+    correlationId: IdentifierSchema.optional(),
+    item: PendingInboundItemSchema
+  })
+  .strict();
+
+export interface DeadLetterItem {
+  readonly queueId: string;
+  readonly deadLetteredAt: string;
+  readonly attempts: number;
+  readonly reason: string;
+  readonly runId?: string | undefined;
+  readonly correlationId?: string | undefined;
+  readonly item: PendingInboundItem;
+}
+
+/** Queue report attached to turn and flush results; only present when there is something to report. */
+export interface QueueReport {
+  readonly queueFailures?: readonly QueueProcessingFailure[];
+  readonly queueNotices?: readonly ConversationMessage[];
+  readonly queueFlushError?: ContractError;
+}
+
+/** A queued item whose processing failed in this flush pass (retained unless it was dead-lettered). */
+export interface QueueProcessingFailure {
+  readonly queueId: string;
+  readonly kind: PendingInboundItem["kind"];
+  readonly attempts: number;
+  readonly deadLettered: boolean;
+  readonly reason: string;
+  readonly runId?: string;
+  readonly correlationId?: string;
+}
 
 export const DeliveryTrackingRecordSchema = z
   .object({
@@ -373,6 +429,8 @@ export const ConversationContextSnapshotSchema = z
     pendingApprovals: z.record(IdentifierSchema, ApprovalRequestSchema),
     approvalDecisions: z.record(IdentifierSchema, ApprovalDecisionSchema),
     pendingInboundQueue: z.array(PendingInboundItemSchema),
+    /** Optional for snapshots written before dead-lettering; absent means no dead letters. */
+    deadLetters: z.array(DeadLetterItemSchema).optional(),
     processedMessageIds: z.array(IdentifierSchema),
     deliveryRecords: z.record(IdentifierSchema, DeliveryTrackingRecordSchema),
     agentBusy: z.boolean(),
@@ -390,6 +448,7 @@ export interface ConversationContextSnapshot {
   readonly pendingApprovals: Readonly<Record<string, ApprovalRequest>>;
   readonly approvalDecisions: Readonly<Record<string, ApprovalDecision>>;
   readonly pendingInboundQueue: readonly PendingInboundItem[];
+  readonly deadLetters?: readonly DeadLetterItem[] | undefined;
   readonly processedMessageIds: readonly string[];
   readonly deliveryRecords: Readonly<Record<string, DeliveryTrackingRecord>>;
   readonly agentBusy: boolean;
@@ -412,6 +471,12 @@ export interface UserFriendlyResponse {
   readonly outboundRoleMessage?: RoleMessage;
   readonly queuedBecauseBusy: boolean;
   readonly substantiveUpdate: boolean;
+  /** Queued items from this flush that failed; never silently dropped. */
+  readonly queueFailures?: readonly QueueProcessingFailure[];
+  /** User-visible Conversation notices produced by this flush (e.g. dead-lettered items). */
+  readonly queueNotices?: readonly ConversationMessage[];
+  /** Set when the queue could not be persisted after this turn; the turn itself was saved. */
+  readonly queueFlushError?: ContractError;
 }
 
 /** Result of registering Runtime-reported pending approvals that Conversation had not recorded. */
@@ -435,6 +500,9 @@ export interface CoordinatorUpdateOutcome {
   readonly substantiveUpdate: boolean;
   readonly userNotification?: ConversationMessage;
   readonly approvalPrompted?: ApprovalRequest;
+  readonly queueFailures?: readonly QueueProcessingFailure[];
+  readonly queueNotices?: readonly ConversationMessage[];
+  readonly queueFlushError?: ContractError;
 }
 
 export type DangerousContentCategory =

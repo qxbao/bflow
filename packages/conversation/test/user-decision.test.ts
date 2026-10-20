@@ -420,9 +420,13 @@ describe("P30 T8 conversation user-decision relay", () => {
       });
       const { gateway } = await openGatewayWithDecision(request);
       const late = await gateway.handleUserTurn(turn("1"));
-      expect(late.ok).toBe(false);
-      if (late.ok) return;
-      expect(late.error.message).toContain("expired");
+      // The refusal is visible to the user as a Conversation reply; no decision is recorded.
+      expect(late.ok).toBe(true);
+      if (!late.ok) return;
+      expect(late.value.approvalDecision).toBeUndefined();
+      expect(late.value.agentReply.intent).toBe("error_report");
+      expect(late.value.agentReply.content).toContain("hết hạn");
+      expect(gateway.getContextSnapshot().approvalDecisions[request.approvalId]).toBeUndefined();
     });
 
     it("drops an expired prompt on Runtime's expiry notice and tells the user", async () => {

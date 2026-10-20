@@ -190,10 +190,12 @@ function detectApproval(
     return { matched: false };
   }
 
+  // An id-less reply names an approval only when exactly one is pending; with several it stays
+  // unnamed so the Gateway asks which one instead of deciding the first.
+  const pendingIds = [...new Set([...pendingApprovalKeys, ...activeApprovalIds])];
   const explicitId =
     extractExplicitId(rawContent, "apr-") ??
-    pendingApprovalKeys[0] ??
-    activeApprovalIds[0];
+    (pendingIds.length === 1 ? pendingIds[0] : undefined);
 
   let reason: string | undefined;
   if (decision !== "approved") {
@@ -225,6 +227,12 @@ function detectApproval(
   };
 }
 
+function optionLabelsOf(request: { readonly metadata?: unknown }): readonly string[] | undefined {
+  const options = (request.metadata as Record<string, unknown> | undefined)?.["options"];
+  if (!Array.isArray(options)) return undefined;
+  return options.filter((option): option is string => typeof option === "string");
+}
+
 /**
  * Routes a reply to a pending specialist user decision. Options are matched strictly; an unknown
  * reply is answered with a re-ask (conversation_only, no state change) and never defaults.
@@ -244,6 +252,17 @@ function detectUserDecision(
   const explicitId = extractExplicitId(rawContent, "apr-");
   if (explicitId !== undefined && !pending.some((request) => request.approvalId === explicitId)) {
     // The reply names a non-user approval (design/task); leave it to the approval path.
+    return { matched: false };
+  }
+
+  // A plain status question is routed to the status report (which re-renders the pending decision in
+  // full), not treated as an answer or re-asked. An exact option label still counts as the answer.
+  const answerCandidate = explicitId !== undefined
+    ? rawContent.replace(explicitId, "").replace(/^[\s:,-]+|[\s:,-]+$/g, "")
+    : rawContent;
+  const matchesExactOption = pending.some((request) =>
+    (optionLabelsOf(request) ?? []).some((option) => normalizeForMatching(option) === normalizeForMatching(answerCandidate)));
+  if (!matchesExactOption && isClearStatusQuestion(answerCandidate)) {
     return { matched: false };
   }
 
@@ -271,10 +290,7 @@ function detectUserDecision(
     ...(targetCorrelationId !== undefined ? { targetCorrelationId } : {})
   };
   // A targeted reply ("apr-... 2") answers the named request; strip the id before mapping the answer.
-  const answerText = explicitId !== undefined
-    ? rawContent.replace(explicitId, "").replace(/^[\s:,-]+|[\s:,-]+$/g, "")
-    : rawContent;
-  const resolution = resolveUserDecisionReply(target, answerText);
+  const resolution = resolveUserDecisionReply(target, answerCandidate);
   // While a design/task approval is also pending, only an explicit id or an exact option claims the reply.
   // Anything else (reject words, free text, ambiguous numbers) is left to the approval path.
   const matchesOption = resolution.kind === "answer" && resolution.selectedOption !== undefined;
@@ -319,16 +335,31 @@ function detectUserDecision(
   };
 }
 
+const STATUS_KEYWORD_REGEX =
+  /(?<!\p{L})(?:status|tiến độ|trạng thái|đang làm gì|tới đâu rồi|tiến trình|công việc thế nào|báo cáo tiến độ|tình hình sao rồi|progress|progress update|how is the workflow going|what is the status|what are you doing|current state)(?!\p{L})/iu;
+
+/**
+ * True for a plain status question ("trạng thái", "tiến độ thế nào?", "cho tôi xem tiến độ").
+ * Such a reply is a question, never an answer to a pending decision, even when a decision is open.
+ */
+function isClearStatusQuestion(text: string): boolean {
+  const norm = normalizeForMatching(text);
+  if (!STATUS_KEYWORD_REGEX.test(norm)) return false;
+  if (hasChangeAuthority(text)) return false;
+  const words = norm.split(/\s+/).filter((word) => word.length > 0).length;
+  return norm.endsWith("?") ||
+    words <= 4 ||
+    /^(?:cho (?:tôi|mình|em|anh|chị)|xem|báo cáo|kiểm tra|cập nhật|tóm tắt)(?!\p{L})/iu.test(norm) ||
+    /(?:thế nào|ra sao|sao rồi|tới đâu|đến đâu|như thế nào|bao nhiêu|hiện tại|bây giờ)(?!\p{L})/iu.test(norm);
+}
+
 function detectStatusQuery(
   rawContent: string,
   context: ConversationContextSnapshot
 ): { matched: boolean; result?: IntentClassificationResult } {
   const norm = normalizeForMatching(rawContent);
 
-  const statusRegex =
-    /(?<!\p{L})(?:status|tiến độ|trạng thái|đang làm gì|tới đâu rồi|tiến trình|công việc thế nào|báo cáo tiến độ|tình hình sao rồi|progress|progress update|how is the workflow going|what is the status|what are you doing|current state)(?!\p{L})/iu;
-
-  if (statusRegex.test(norm)) {
+  if (STATUS_KEYWORD_REGEX.test(norm)) {
     const explicitRunId = extractExplicitId(rawContent, "run-") ?? context.session.activeRunId;
     const explicitCorrelationId =
       extractExplicitId(rawContent, "corr-") ??

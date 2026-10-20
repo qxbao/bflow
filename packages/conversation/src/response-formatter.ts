@@ -1,5 +1,6 @@
 import { ConversationMessageSchema } from "@bflow/contracts";
-import { isUserDecisionRequest, renderPendingApprovalForStatus, renderUserDecisionExpiredNotice, renderUserDecisionPrompt, userDecisionExpiredApprovalId } from "./user-decision.js";
+import { formatDeadline, isUserDecisionRequest, NO_DEADLINE_TEXT, renderPendingApprovalForStatus, renderUserDecisionExpiredNotice, renderUserDecisionPrompt, userDecisionExpiredApprovalId } from "./user-decision.js";
+import { sanitizeReasonForUser, wrapUntrustedRepositoryContent } from "./safety.js";
 
 import type {
   ConversationContextSnapshot,
@@ -124,6 +125,68 @@ export function isSubstantiveCoordinatorUpdate(
   return true;
 }
 
+function describeApprovalTarget(target: unknown): string {
+  const record = getPayloadRecord(target);
+  const type = safeString(record.type) ?? "Tác vụ hệ thống";
+  const details = Object.entries(record)
+    .filter(([key, value]) => key !== "type" && typeof value === "string" && value.trim().length > 0)
+    .map(([key, value]) => `${key}=${sanitizeReasonForUser(String(value), 120)}`);
+  return details.length > 0 ? `${type} (${details.join(", ")})` : type;
+}
+
+/**
+ * Renders a design/task approval request with everything needed to decide: target, reason,
+ * requester, evidence artifacts, deadline and the exact reply syntax.
+ */
+function renderDesignApprovalPrompt(p: Record<string, unknown>): string {
+  const approvalId = safeString(p.approvalId) ?? "apr-unknown";
+  const reason = sanitizeReasonForUser(safeString(p.reason), 600);
+  const requestedBy = sanitizeReasonForUser(safeString(p.requestedBy) ?? "Coordinator", 120);
+  const expiresAt = safeString(p.expiresAt);
+  const evidence = Array.isArray(p.evidence) ? p.evidence : [];
+  const evidenceLines = evidence.map((item) => {
+    const ref = getPayloadRecord(item);
+    const uri = safeString(ref.uri) ?? safeString(ref.artifactId) ?? "artifact không xác định";
+    const kind = safeString(ref.kind);
+    return `  - \`${uri}\`${kind ? ` (${kind})` : ""}`;
+  });
+
+  return [
+    `🔔 **YÊU CẦU PHÊ DUYỆT (Approval Required) [${approvalId}]**`,
+    `- **Đối tượng:** ${describeApprovalTarget(p.target)}`,
+    `- **Lý do:** ${reason}`,
+    `- **Người yêu cầu:** ${requestedBy}`,
+    evidenceLines.length > 0 ? "- **Bằng chứng đính kèm:**" : "- **Bằng chứng đính kèm:** không có",
+    ...evidenceLines,
+    `- **Hết hạn:** ${expiresAt ? formatDeadline(expiresAt) : NO_DEADLINE_TEXT}`,
+    "",
+    "👉 Trả lời đúng cú pháp:",
+    `- \`${approvalId}: approve\` — chấp thuận để quy trình tiếp tục.`,
+    `- \`${approvalId}: reject <lý do>\` — từ chối (cần ghi lý do).`,
+    `- \`${approvalId}: request changes <nội dung>\` — yêu cầu chỉnh sửa trước khi duyệt.`
+  ].join("\n");
+}
+
+/**
+ * Last-resort rendering for a valid RoleMessage whose normal rendering failed to validate. It never
+ * echoes raw payload structure; the reason is sanitized and wrapped as untrusted text.
+ */
+function renderGenericFallback(p: Record<string, unknown>, type: string, roleMessage: RoleMessage): string {
+  const reason = sanitizeReasonForUser(safeString(p.reason) ?? safeString(p.blockageReason) ?? safeString(p.failureSummary) ?? safeString(p.headline));
+  const approvalId = safeString(p.approvalId);
+  const lines = [
+    `⚠️ **Thông điệp từ Coordinator (${type}) không hiển thị đầy đủ được, nội dung đã được làm sạch**`,
+    `- **Mã tương quan:** ${roleMessage.correlation_id}`,
+    ...(approvalId ? [`- **Mã phê duyệt:** ${approvalId}`] : []),
+    `- **Nội dung (đã làm sạch):** ${wrapUntrustedRepositoryContent(reason)}`,
+    "",
+    approvalId
+      ? `👉 Trả lời đúng cú pháp: \`${approvalId}: approve\` hoặc \`${approvalId}: reject <lý do>\`.`
+      : "Bạn có thể hỏi \"trạng thái\" để xem tiến độ hiện tại, hoặc yêu cầu hủy bằng \"hủy <run-id>\"."
+  ];
+  return lines.join("\n");
+}
+
 /**
  * Translates technical Coordinator RoleMessage payloads into clear, human-readable user messages.
  */
@@ -185,23 +248,7 @@ export function formatCoordinatorMessageForUser(params: {
   }
   else if (type === "approval.request") {
     messageIntent = "approval_prompt";
-    const approvalId = safeString(p.approvalId) ?? "apr-unknown";
-    const reason = safeString(p.reason) ?? "Yêu cầu phê duyệt từ hệ thống";
-    const requestedBy = safeString(p.requestedBy) ?? "Coordinator";
-    const targetObj = getPayloadRecord(p.target);
-    const targetType = safeString(targetObj.type) ?? "Tác vụ hệ thống";
-
-    formattedContent = [
-      `🔔 **YÊU CẦU PHÊ DUYỆT (Approval Required) [${approvalId}]**`,
-      `- **Đối tượng:** ${targetType}`,
-      `- **Lý do:** ${reason}`,
-      `- **Người yêu cầu:** ${requestedBy}`,
-      "",
-      "👉 Bạn có thể phản hồi bằng một trong các cú pháp sau:",
-      "- `approve` hoặc `đồng ý`: Chấp thuận cho quy trình tiếp tục.",
-      `- \`${approvalId}: reject <lý do>\` hoặc \`${approvalId}: từ chối <lý do>\`: Bác bỏ yêu cầu.`,
-      `- \`${approvalId}: request changes <nội dung>\` hoặc \`${approvalId}: cần sửa <nội dung>\`: Yêu cầu chỉnh sửa lại.`
-    ].join("\n");
+    formattedContent = renderDesignApprovalPrompt(p);
   }
   // 2. Verification escalation
   else if (type === "verification.escalation" || isEscalated) {
@@ -375,9 +422,21 @@ export function formatCoordinatorMessageForUser(params: {
     createdAt: params.createdAt
   };
 
-  const parsed = ConversationMessageSchema.safeParse(rawMessage);
+  let parsed = ConversationMessageSchema.safeParse(rawMessage);
   if (!parsed.success) {
-    return { ok: false, error: formatZodError(parsed.error) };
+    // A valid RoleMessage must never be rejected because its display rendering failed: an approval
+    // or blocker would then be retried forever. Retry once with a generic, sanitized rendering that
+    // drops the fields most likely to be malformed (run id and artifact references).
+    const { runId: _runId, ...withoutRun } = rawMessage;
+    parsed = ConversationMessageSchema.safeParse({
+      ...withoutRun,
+      content: renderGenericFallback(p, type, params.roleMessage),
+      intent: messageIntent === "approval_prompt" ? "approval_prompt" : "progress_update",
+      artifactReferences: []
+    });
+    if (!parsed.success) {
+      return { ok: false, error: formatZodError(parsed.error) };
+    }
   }
 
   return {

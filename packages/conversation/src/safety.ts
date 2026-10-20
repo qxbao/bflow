@@ -314,6 +314,32 @@ export function wrapUntrustedRepositoryContent(content: string): string {
   ].join("\n");
 }
 
+/** Key=value secrets first, so a value is redacted once; then bare secret-shaped tokens. */
+const SECRET_ASSIGNMENT_PATTERN = /\b(password|passwd|secret|token|api[_-]?key)\b(\s*[:=]\s*)\S+/gi;
+const SECRET_TOKEN_PATTERNS: readonly RegExp[] = [
+  /\b(?:sk|pk|ghp|gho|ghs|github_pat|xox[abprs])[-_][A-Za-z0-9_-]{8,}/g,
+  /\bAKIA[0-9A-Z]{12,}\b/g,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi
+];
+
+/**
+ * Makes raw Runtime/Coordinator reason text safe to show in a user-facing notice: strips invisible
+ * characters, neutralizes closing isolation tags, redacts secret-shaped values, collapses whitespace
+ * and bounds the length. The result is still untrusted text; wrap it with wrapUntrustedRepositoryContent
+ * before embedding it where it could be read as instructions.
+ */
+export function sanitizeReasonForUser(raw: string | undefined, maxLength = 400): string {
+  if (raw === undefined) return "(không có mô tả)";
+  let text = raw.replace(ZERO_WIDTH_STRIP_REGEX, "").replace(/<\/?untrusted_repository_content>/gi, "[đã ẩn]");
+  text = text.replace(SECRET_ASSIGNMENT_PATTERN, (_match, key: string, separator: string) => `${key}${separator}[đã ẩn]`);
+  for (const pattern of SECRET_TOKEN_PATTERNS) {
+    text = text.replace(pattern, "[đã ẩn]");
+  }
+  text = text.replace(/\s+/g, " ").trim();
+  if (text.length === 0) return "(không có mô tả)";
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
 /**
  * Verifies that an incoming approval decision originates from an authenticated user
  * and is not spoofed by untrusted repository content.

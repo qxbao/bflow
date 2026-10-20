@@ -119,10 +119,15 @@ describe("Chat decides intent; Gateway validates and executes", () => {
     const dispatch = config.bridge.handOffToCoordinator.bind(config.bridge);
     config.bridge.handOffToCoordinator = async () => ({ ok: false,
       error: { code: "corruption", retryable: false, message: "Interrupted before dispatch completed" } });
-    expect((await gateway.setAgentBusyState(false)).ok).toBe(false);
+    // The failed item is reported with its attempt count and stays queued for a later drain.
+    const failed = await gateway.setAgentBusyState(false);
+    expect(failed.ok).toBe(true);
+    if (!failed.ok) return;
+    expect(failed.value.queueFailures).toEqual([expect.objectContaining({ attempts: 1, deadLettered: false })]);
     const recovered = new ConversationGateway(config);
     await recovered.initializeOrRecoverSession();
     expect(recovered.getContextSnapshot().pendingInboundQueue).toHaveLength(1);
+    expect(recovered.getContextSnapshot().pendingInboundQueue[0]?.attempts).toBe(1);
     config.bridge.handOffToCoordinator = dispatch;
     expect((await recovered.flushPendingInboundQueue()).ok).toBe(true);
     expect(recovered.getContextSnapshot().pendingInboundQueue).toHaveLength(0);

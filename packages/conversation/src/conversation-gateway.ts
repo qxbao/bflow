@@ -38,9 +38,14 @@ import {
   inspectRepositoryContentSafety,
   verifyUserApprovalProvenance
 } from "./safety.js";
+import { sanitizeReasonForUser, wrapUntrustedRepositoryContent } from "./safety.js";
 import {
+  MAX_QUEUE_PROCESSING_ATTEMPTS,
   UserTurnInputSchema,
   type ApprovalReconciliation,
+  type DeadLetterItem,
+  type QueueProcessingFailure,
+  type QueueReport,
   type ConversationContextSnapshot,
   type CoordinatorUpdateOutcome,
   type ExtractedRequirementDraft,
@@ -293,7 +298,7 @@ export class ConversationGateway {
   async setAgentBusyState(
     busy: boolean,
     transportState?: AgentTransportState
-  ): Promise<OperationResult<ConversationContextSnapshot>> {
+  ): Promise<OperationResult<ConversationContextSnapshot & QueueReport>> {
     if (!this.snapshot) {
       const initResult = await this.initializeOrRecoverSession();
       if (!initResult.ok) {
@@ -318,15 +323,49 @@ export class ConversationGateway {
     if (!busy && this.snapshot!.pendingInboundQueue.length > 0) {
       const flushed = await this.flushPendingInboundQueue();
       if (!flushed.ok) return flushed;
+      return { ok: true, value: { ...this.snapshot!, ...queueReportOf(flushed.value) } };
     }
 
     return { ok: true, value: this.snapshot! };
   }
 
+  /** User-facing text for an approval reply that names no pending approval. Nothing is applied. */
+  private unknownApprovalNotice(approvalId: string | undefined, alreadyDecided: boolean): string {
+    if (approvalId === undefined) {
+      return "Hiện không có phê duyệt nào đang chờ bạn, nên phản hồi của bạn chưa được ghi nhận. Hỏi \"trạng thái\" để xem tiến độ hiện tại.";
+    }
+    return [
+      `Không tìm thấy phê duyệt ${approvalId} đang chờ trong session này${alreadyDecided ? " (đã được quyết định trước đó)" : " (mã sai, đã hết hạn hoặc đã được xử lý)"}.`,
+      "Phản hồi của bạn chưa được ghi nhận và không có quyết định nào được áp dụng.",
+      `👉 Hỏi "trạng thái" để xem danh sách phê duyệt đang chờ, rồi trả lời đúng mã: \`${approvalId}: approve\` hoặc \`${approvalId}: reject <lý do>\`.`
+    ].join("\n");
+  }
+
+  /** User-facing text for an approval reply that was refused, with the reason and the way to answer. */
+  private rejectedReplyNotice(approvalId: string, reason: string, offered: readonly string[] | undefined): string {
+    const choices = offered && offered.length > 0 ? `\n${offered.map((option, index) => `${index + 1}. ${option}`).join("\n")}` : "";
+    return [
+      `Phản hồi cho ${approvalId} chưa được ghi nhận: ${sanitizeReasonForUser(reason, 300)}`,
+      `👉 Trả lời lại bằng \`${approvalId}: <số hoặc nội dung lựa chọn>\`, hoặc \`${approvalId}: từ chối <lý do>\`.${choices}`
+    ].join("\n");
+  }
+
   /**
-   * Handles an incoming user message turn.
+   * Handles an incoming user message turn, then drains any queued items that are now processable.
+   * Queue failures and dead letters from that drain are returned with the turn, never discarded.
    */
   async handleUserTurn(
+    input: UserTurnInput,
+    options?: OperationOptions
+  ): Promise<OperationResult<UserFriendlyResponse & QueueReport>> {
+    const result = await this.handleUserTurnCore(input, options);
+    return this.withQueueReportAfterTurn(result, options);
+  }
+
+  /**
+   * Handles an incoming user message turn (queue drain excluded, see handleUserTurn).
+   */
+  private async handleUserTurnCore(
     input: UserTurnInput,
     options?: OperationOptions
   ): Promise<OperationResult<UserFriendlyResponse>> {
@@ -958,10 +997,15 @@ export class ConversationGateway {
             };
           }
 
-          // Locate pending approval
+          // Locate pending approval. A named apr-... id must match exactly: it never falls back to
+          // another pending approval, which could approve something the user did not name.
           let targetApproval: ApprovalRequest | undefined;
-          if (approvalInput.approvalId && this.snapshot!.pendingApprovals[approvalInput.approvalId]) {
+          if (approvalInput.approvalId) {
             targetApproval = this.snapshot!.pendingApprovals[approvalInput.approvalId];
+            if (!targetApproval) {
+              return this.answerWithNotice(input, correlationId,
+                this.unknownApprovalNotice(approvalInput.approvalId, this.snapshot!.approvalDecisions[approvalInput.approvalId] !== undefined));
+            }
           } else {
             // Without an explicit id, a design/task approval is preferred over a specialist user decision.
             const pendingList = Object.values(this.snapshot!.pendingApprovals);
@@ -969,20 +1013,21 @@ export class ConversationGateway {
               ...pendingList.filter((request) => !isUserDecisionRequest(request)),
               ...pendingList.filter((request) => isUserDecisionRequest(request))
             ];
-            if (orderedPending.length > 0) {
+            // With several pending approvals an id-less reply is ambiguous; never guess which one the user meant.
+            if (orderedPending.length > 1) {
+              return this.answerWithNotice(input, correlationId, [
+                "Đang có nhiều phê duyệt/câu hỏi chờ bạn, nên phản hồi không ghi mã chưa được ghi nhận:",
+                ...orderedPending.map((request) => `- \`${request.approvalId}\`: ${sanitizeReasonForUser(request.reason, 200)}`),
+                "👉 Trả lời kèm đúng mã, ví dụ `apr-…: approve` hoặc `apr-…: <số lựa chọn>`."
+              ].join("\n"));
+            }
+            if (orderedPending.length === 1) {
               targetApproval = orderedPending[0];
             }
           }
 
           if (!targetApproval) {
-            return {
-              ok: false,
-              error: {
-                code: "not_found",
-                retryable: false,
-                message: "No pending approval request found matching this response"
-              }
-            };
+            return this.answerWithNotice(input, correlationId, this.unknownApprovalNotice(undefined, false));
           }
 
           // Specialist user decisions: the selected option must be one that was offered and the
@@ -994,22 +1039,16 @@ export class ConversationGateway {
               : undefined;
             const selected = approvalInput.selectedOption;
             if (approvalInput.decision === "approved" && offered !== undefined && (selected === undefined || !offered.includes(selected))) {
-              return {
-                ok: false,
-                error: { code: "validation", retryable: false, message: "User decision must select one of the offered options" }
-              };
+              return this.answerWithNotice(input, correlationId, this.rejectedReplyNotice(targetApproval.approvalId,
+                "Hãy trả lời bằng số hoặc đúng nội dung một lựa chọn trong danh sách.", offered));
             }
             if (selected !== undefined && (offered === undefined || !offered.includes(selected))) {
-              return {
-                ok: false,
-                error: { code: "validation", retryable: false, message: "selectedOption is not one of the offered options" }
-              };
+              return this.answerWithNotice(input, correlationId, this.rejectedReplyNotice(targetApproval.approvalId,
+                "Lựa chọn bạn gửi không nằm trong danh sách đã đưa ra.", offered));
             }
             if (targetApproval.expiresAt !== undefined && Date.parse(now) >= Date.parse(targetApproval.expiresAt)) {
-              return {
-                ok: false,
-                error: { code: "validation", retryable: false, message: "User decision request has expired" }
-              };
+              return this.answerWithNotice(input, correlationId, this.rejectedReplyNotice(targetApproval.approvalId,
+                "Câu hỏi này đã hết hạn và không còn nhận trả lời.", undefined));
             }
           }
 
@@ -1031,7 +1070,8 @@ export class ConversationGateway {
           });
 
           if (!decisionResult.ok) {
-            return decisionResult;
+            return this.answerWithNotice(input, correlationId, this.rejectedReplyNotice(targetApproval.approvalId,
+              decisionResult.error.message, undefined));
           }
 
           const approvalDecision = decisionResult.value;
@@ -1343,15 +1383,6 @@ export class ConversationGateway {
       }
     } finally {
       this.isProcessingTurn = false;
-      if (
-        !this.isFlushingQueue &&
-        !this.isDrainingSingleQueueItem &&
-        this.snapshot &&
-        this.snapshot.pendingInboundQueue.length > 0 &&
-        !this.snapshot.agentBusy
-      ) {
-        await this.flushPendingInboundQueue(options);
-      }
     }
   }
 
@@ -1415,6 +1446,13 @@ export class ConversationGateway {
   async handleCoordinatorRoleMessage(
     rawMessage: unknown,
     options?: OperationOptions
+  ): Promise<OperationResult<CoordinatorUpdateOutcome & QueueReport>> {
+    const result = await this.handleCoordinatorRoleMessageCore(rawMessage);
+    return this.withQueueReportAfterTurn(result, options);
+  }
+
+  private async handleCoordinatorRoleMessageCore(
+    rawMessage: unknown
   ): Promise<OperationResult<CoordinatorUpdateOutcome>> {
     if (!this.snapshot) {
       const initResult = await this.initializeOrRecoverSession();
@@ -1710,20 +1748,38 @@ export class ConversationGateway {
       };
     } finally {
       this.isProcessingTurn = false;
-      if (
-        !this.isFlushingQueue &&
-        !this.isDrainingSingleQueueItem &&
-        this.snapshot &&
-        this.snapshot.pendingInboundQueue.length > 0 &&
-        !this.snapshot.agentBusy
-      ) {
-        await this.flushPendingInboundQueue(options);
-      }
     }
   }
 
   /**
+   * Runs the queue drain that follows a turn and returns its report with the turn result.
+   * Skipped when the turn itself is being drained from the queue (the outer drain reports it).
+   */
+  private async withQueueReportAfterTurn<T extends object>(
+    result: OperationResult<T>,
+    options?: OperationOptions
+  ): Promise<OperationResult<T & QueueReport>> {
+    let report: QueueReport = {};
+    if (
+      !this.isFlushingQueue &&
+      !this.isDrainingSingleQueueItem &&
+      this.snapshot &&
+      this.snapshot.pendingInboundQueue.length > 0 &&
+      !this.snapshot.agentBusy
+    ) {
+      const flushed = await this.flushPendingInboundQueue(options);
+      report = flushed.ok ? queueReportOf(flushed.value) : { queueFlushError: flushed.error };
+    }
+    if (!result.ok) return result;
+    return { ok: true, value: { ...result.value, ...report } };
+  }
+
+  /**
    * Drains the pending inbound queue in strict FIFO order when not busy.
+   *
+   * Each item stays queued until it is processed. A failing item is retried by a later drain and is
+   * dead-lettered after MAX_QUEUE_PROCESSING_ATTEMPTS failures, with a user-visible notice. A failure
+   * never blocks the items behind it in the same pass, and every failure is returned in the result.
    */
   async flushPendingInboundQueue(
     options?: OperationOptions
@@ -1731,30 +1787,33 @@ export class ConversationGateway {
     OperationResult<{
       processedUserTurns: readonly UserFriendlyResponse[];
       processedCoordinatorUpdates: readonly CoordinatorUpdateOutcome[];
+      queueFailures: readonly QueueProcessingFailure[];
+      queueNotices: readonly ConversationMessage[];
     }>
   > {
+    const empty = { processedUserTurns: [], processedCoordinatorUpdates: [], queueFailures: [], queueNotices: [] };
     if (!this.snapshot) {
-      return { ok: true, value: { processedUserTurns: [], processedCoordinatorUpdates: [] } };
+      return { ok: true, value: empty };
     }
 
     if (this.isFlushingQueue || this.isProcessingTurn || this.snapshot.agentBusy) {
-      return { ok: true, value: { processedUserTurns: [], processedCoordinatorUpdates: [] } };
+      return { ok: true, value: empty };
     }
 
     this.isFlushingQueue = true;
     const processedUserTurns: UserFriendlyResponse[] = [];
     const processedCoordinatorUpdates: CoordinatorUpdateOutcome[] = [];
+    const queueFailures: QueueProcessingFailure[] = [];
+    const queueNotices: ConversationMessage[] = [];
 
     try {
-      while (!this.snapshot.agentBusy && this.snapshot.pendingInboundQueue.length > 0) {
-        const nextItem = this.snapshot.pendingInboundQueue[0];
-        if (!nextItem) {
-          break;
-        }
+      // Only items queued when this pass started are attempted; a later call retries the failed ones.
+      for (const queueId of this.snapshot.pendingInboundQueue.map((item) => item.queueId)) {
+        if (this.snapshot.agentBusy) break;
+        const nextItem = this.snapshot.pendingInboundQueue.find((item) => item.queueId === queueId);
+        if (!nextItem) continue;
 
-        // Structured turns have durable identities: retain them until their result is saved.
-        // A crash after execution then replays the committed message instead of losing work.
-        const retainUntilProcessed = nextItem.kind === "user_turn" && nextItem.input.conversationDecision !== undefined;
+        // A structured decision whose target is gone is rejected visibly (not retried).
         if (nextItem.kind === "user_turn" && nextItem.input.conversationDecision &&
             !this.snapshot.messages.some(message => message.sender === "user" && message.messageId === nextItem.input.messageId)) {
           const currentDecision = resolveChatDecision(nextItem.input.conversationDecision, this.snapshot);
@@ -1765,48 +1824,160 @@ export class ConversationGateway {
             continue;
           }
         }
-        if (!retainUntilProcessed) {
-          const saveRes = await this.persistUpdatedSnapshot({ ...this.snapshot,
-            pendingInboundQueue: this.snapshot.pendingInboundQueue.slice(1) }, new Set([nextItem.queueId]));
-          if (!saveRes.ok) return saveRes;
-        }
 
         this.isDrainingSingleQueueItem = true;
+        let succeeded: boolean;
+        let failure: ContractError | undefined;
         try {
           if (nextItem.kind === "user_turn") {
             const turnResult = await this.handleUserTurn(nextItem.input, options);
-            if (turnResult.ok) {
-              processedUserTurns.push(turnResult.value);
-            } else if (retainUntilProcessed) {
-              return turnResult;
-            }
-          } else if (nextItem.kind === "coordinator_message") {
+            succeeded = turnResult.ok;
+            if (turnResult.ok) processedUserTurns.push(stripQueueReport(turnResult.value));
+            else failure = turnResult.error;
+          } else {
             const updateResult = await this.handleCoordinatorRoleMessage(nextItem.message, options);
-            if (updateResult.ok) {
-              processedCoordinatorUpdates.push(updateResult.value);
-            }
+            succeeded = updateResult.ok;
+            if (updateResult.ok) processedCoordinatorUpdates.push(stripQueueReport(updateResult.value));
+            else failure = updateResult.error;
           }
         } finally {
           this.isDrainingSingleQueueItem = false;
         }
-        if (retainUntilProcessed) {
+
+        if (succeeded) {
           const saveRes = await this.persistUpdatedSnapshot({ ...this.snapshot,
-            pendingInboundQueue: this.snapshot.pendingInboundQueue.filter(item => item.queueId !== nextItem.queueId) },
-            new Set([nextItem.queueId]));
+            pendingInboundQueue: this.snapshot.pendingInboundQueue.filter(item => item.queueId !== queueId) },
+          new Set([queueId]));
           if (!saveRes.ok) return saveRes;
+          continue;
         }
+
+        const recorded = await this.recordQueueFailure(nextItem, failure ?? {
+          code: "transport_unavailable", retryable: true, message: "Queued item processing failed without an error" });
+        if (!recorded.ok) return recorded;
+        queueFailures.push(recorded.value.failure);
+        if (recorded.value.notice) queueNotices.push(recorded.value.notice);
       }
 
       return {
         ok: true,
-        value: {
-          processedUserTurns,
-          processedCoordinatorUpdates
-        }
+        value: { processedUserTurns, processedCoordinatorUpdates, queueFailures, queueNotices }
       };
     } finally {
       this.isFlushingQueue = false;
     }
+  }
+
+  /**
+   * Counts one failed processing attempt. Below the limit the item stays queued with its attempt count.
+   * At the limit it moves to the dead-letter list and Conversation tells the user what happened.
+   */
+  private async recordQueueFailure(
+    item: PendingInboundItem,
+    error: ContractError
+  ): Promise<OperationResult<{ failure: QueueProcessingFailure; notice?: ConversationMessage }>> {
+    const attempts = (item.attempts ?? 0) + 1;
+    const reason = sanitizeReasonForUser(error.message, 300);
+    const runId = item.kind === "coordinator_message" ? item.message.run_id : item.input.runId;
+    const correlationId = item.kind === "coordinator_message" ? item.message.correlation_id : item.input.correlationId;
+    const failedItem = { ...item, attempts, lastError: reason } as PendingInboundItem;
+    const failureBase = { queueId: item.queueId, kind: item.kind, attempts, reason,
+      ...(runId !== undefined ? { runId } : {}), ...(correlationId !== undefined ? { correlationId } : {}) };
+
+    if (attempts < MAX_QUEUE_PROCESSING_ATTEMPTS) {
+      const saveRes = await this.persistUpdatedSnapshot({ ...this.snapshot!,
+        pendingInboundQueue: this.snapshot!.pendingInboundQueue.map(queued => queued.queueId === item.queueId ? failedItem : queued) });
+      if (!saveRes.ok) return saveRes;
+      return { ok: true, value: { failure: { ...failureBase, deadLettered: false } } };
+    }
+
+    const now = this.getNow();
+    const turnSequence = this.snapshot!.session.turnCount + 1;
+    const sourceLabel = item.kind === "user_turn"
+      ? "yêu cầu hoặc quyết định của bạn"
+      : `thông điệp "${item.message.type}" từ Coordinator`;
+    const notice = ConversationMessageSchema.parse({
+      schemaVersion: 2,
+      messageId: this.generateId("msg-deadletter"),
+      sessionId: this.config.sessionId,
+      correlationId: correlationId ?? `corr-${item.queueId}`,
+      ...(runId !== undefined ? { runId } : {}),
+      turnSequence,
+      sender: "conversation",
+      recipient: "user",
+      intent: "error_report",
+      content: [
+        `⚠️ **KHÔNG XỬ LÝ ĐƯỢC MỘT MỤC ĐANG CHỜ SAU ${attempts} LẦN THỬ [${item.queueId}]**`,
+        `- **Nguồn:** ${sourceLabel}`,
+        `- **Run:** ${runId ?? "không xác định"}`,
+        `- **Lý do:** ${wrapUntrustedRepositoryContent(reason)}`,
+        "",
+        "Hệ thống đã ngừng thử lại mục này để không chặn các mục khác. Bạn có thể:",
+        "1. Gửi lại yêu cầu hoặc quyết định của mình, nêu rõ mã run hoặc mã phê duyệt (apr-...) nếu có.",
+        "2. Hỏi \"trạng thái\" để xem tiến độ hiện tại của run.",
+        "3. Nếu không cần tiếp tục, hủy run bằng \"hủy <run-id>\"."
+      ].join("\n"),
+      artifactReferences: [],
+      createdAt: now
+    });
+    const deadLetter: DeadLetterItem = { queueId: item.queueId, deadLetteredAt: now, attempts, reason,
+      ...(runId !== undefined ? { runId } : {}), ...(correlationId !== undefined ? { correlationId } : {}), item: failedItem };
+    const saveRes = await this.persistUpdatedSnapshot({ ...this.snapshot!,
+      session: { ...this.snapshot!.session, turnCount: turnSequence, updatedAt: now },
+      messages: [...this.snapshot!.messages, notice],
+      pendingInboundQueue: this.snapshot!.pendingInboundQueue.filter(queued => queued.queueId !== item.queueId),
+      deadLetters: [...(this.snapshot!.deadLetters ?? []), deadLetter] }, new Set([item.queueId]));
+    if (!saveRes.ok) return saveRes;
+    return { ok: true, value: { failure: { ...failureBase, deadLettered: true }, notice } };
+  }
+
+  /**
+   * Answers an approval reply that cannot be applied, visibly and without changing any state.
+   */
+  private async answerWithNotice(
+    input: UserTurnInput,
+    correlationId: string,
+    content: string,
+    runId?: string
+  ): Promise<OperationResult<UserFriendlyResponse>> {
+    const now = this.getNow();
+    const userTurnSequence = this.snapshot!.session.turnCount + 1;
+    const agentTurnSequence = userTurnSequence + 1;
+    const userMessage = ConversationMessageSchema.parse({
+      schemaVersion: 2,
+      messageId: input.messageId ?? this.generateId("msg-user"),
+      sessionId: this.config.sessionId,
+      correlationId,
+      ...(runId !== undefined ? { runId } : {}),
+      turnSequence: userTurnSequence,
+      sender: "user",
+      recipient: "conversation",
+      intent: "approval_response",
+      content: input.content,
+      artifactReferences: input.inputArtifacts ? [...input.inputArtifacts] : [],
+      createdAt: input.occurredAt ?? now
+    });
+    const agentReply = ConversationMessageSchema.parse({
+      schemaVersion: 2,
+      messageId: this.generateId("msg-chat"),
+      sessionId: this.config.sessionId,
+      correlationId,
+      ...(runId !== undefined ? { runId } : {}),
+      turnSequence: agentTurnSequence,
+      sender: "conversation",
+      recipient: "user",
+      intent: "error_report",
+      content,
+      artifactReferences: [],
+      createdAt: now
+    });
+    const saved = await this.persistUpdatedSnapshot({ ...this.snapshot!,
+      session: { ...this.snapshot!.session, turnCount: agentTurnSequence, updatedAt: now },
+      messages: [...this.snapshot!.messages, userMessage, agentReply] });
+    if (!saved.ok) return saved;
+    return { ok: true, value: { sessionId: this.config.sessionId, correlationId, ...(runId !== undefined ? { runId } : {}),
+      recognizedIntent: "conversation_only", sessionStatus: saved.value.session.status, userMessage, agentReply,
+      queuedBecauseBusy: false, substantiveUpdate: false } };
   }
 
   // --- Negative Invariant Guard APIs (proving and enforcing prohibitions at API level) ---
@@ -1831,4 +2002,18 @@ export class ConversationGateway {
   attemptUnilateralCompletion(): OperationResult<void> {
     return assertConversationRoleBoundaries({ attemptsDirectCompletion: true });
   }
+}
+
+/** Extracts the queue report of a turn or flush result, omitting empty fields. */
+function queueReportOf(value: { queueFailures?: readonly QueueProcessingFailure[]; queueNotices?: readonly ConversationMessage[] }): QueueReport {
+  return {
+    ...(value.queueFailures && value.queueFailures.length > 0 ? { queueFailures: value.queueFailures } : {}),
+    ...(value.queueNotices && value.queueNotices.length > 0 ? { queueNotices: value.queueNotices } : {})
+  };
+}
+
+/** Removes a queue report from a result stored as a processed item (the report is returned once, by the drain). */
+function stripQueueReport<T extends QueueReport>(value: T): T {
+  const { queueFailures: _failures, queueNotices: _notices, queueFlushError: _error, ...rest } = value;
+  return rest as T;
 }
