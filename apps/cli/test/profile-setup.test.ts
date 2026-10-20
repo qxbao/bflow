@@ -61,6 +61,24 @@ describe("ProfileSetupComponent", () => {
       .not.toContain("--source-claude-config-dir");
   });
 
+  it("ignores generated nested profile selectors while preserving custom native overrides", () => {
+    const homeDirectory = "/state/profiles/codex--personal/home";
+    const input = {
+      helperPath: "/bflow/profile_sync.py", homeDirectory, expectedIdentity: "pin",
+      environment: { AI_ISOLATOR: "1", AI_ISOLATOR_REAL_HOME: "/real",
+        CODEX_HOME: `${homeDirectory}/.codex`, CLAUDE_CONFIG_DIR: `${homeDirectory}/.claude` }
+    };
+    const generated = resolveProfileSetupOptions(input);
+    expect(generated.sourceHome).toBe("/real");
+    expect(generated.sourceCodexHome).toBeUndefined();
+    expect(generated.sourceClaudeConfigDir).toBeUndefined();
+    const custom = resolveProfileSetupOptions({ ...input,
+      environment: { ...input.environment, CODEX_HOME: "/native/custom-codex", CLAUDE_CONFIG_DIR: "/native/custom-claude" }
+    });
+    expect(custom.sourceCodexHome).toBe("/native/custom-codex");
+    expect(custom.sourceClaudeConfigDir).toBe("/native/custom-claude");
+  });
+
   it("resolves native and BFLOW_HOME sources without crossing account boundaries", () => {
     const base = {
       helperPath: "/bundle/profile_sync.py",

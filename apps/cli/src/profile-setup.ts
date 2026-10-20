@@ -51,12 +51,18 @@ export function resolveProfileSetupOptions(input: {
   const stateRoot = input.environment.AI_ISOLATOR_HOME
       ? resolve(input.environment.AI_ISOLATOR_HOME)
       : join(realHome, ".local", "share", "ai-isolator");
+  const nestedProfile = input.environment.AI_ISOLATOR === "1" && Boolean(input.environment.AI_ISOLATOR_REAL_HOME);
+  const nativeOverride = (value: string | undefined, generatedDirectory: string): string | undefined => {
+    if (!value) return undefined;
+    const selected = resolve(value);
+    return nestedProfile && selected === resolve(input.homeDirectory, generatedDirectory) ? undefined : selected;
+  };
   const sourceCodexHome = isolatedRoot
     ? join(isolatedRoot, "providers", "codex")
-    : input.environment.CODEX_HOME ? resolve(input.environment.CODEX_HOME) : undefined;
+    : nativeOverride(input.environment.CODEX_HOME, ".codex");
   const sourceClaudeConfigDir = isolatedRoot
     ? join(isolatedRoot, "providers", "claude")
-    : input.environment.CLAUDE_CONFIG_DIR ? resolve(input.environment.CLAUDE_CONFIG_DIR) : undefined;
+    : nativeOverride(input.environment.CLAUDE_CONFIG_DIR, ".claude");
   const sourceCodexSkills = !isolatedRoot && input.environment.AI_ISOLATOR_CODEX_SKILLS_SOURCE
     ? resolve(input.environment.AI_ISOLATOR_CODEX_SKILLS_SOURCE) : undefined;
   const sourceIdentity = {
