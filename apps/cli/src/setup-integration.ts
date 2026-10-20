@@ -303,7 +303,10 @@ export async function executeSetupCommand(
     installerRegistry = observedRegistry;
   }
 
-  const profileSourceEnvironment = defaultHostEnvironment();
+  // An injected platform is the machine being set up: never fall back to this process user's home/isolator state.
+  const profileSourceEnvironment = context?.setup?.platform
+    ? { homeDir: context.setup.platform.homeDir, env: {} as Record<string, string | undefined> }
+    : defaultHostEnvironment();
   const profileSetupOptions = resolveProfileSetupOptions({
     helperPath: fileURLToPath(new URL("../isolation/lib/profile_sync.py", import.meta.url)),
     homeDirectory: profileSourceEnvironment.homeDir,
