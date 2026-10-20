@@ -113,7 +113,17 @@ export class HostVerification {
     } };
   }
   /** Owner-configured checks always; automatic checks only when no owner file exists (static definitions, bound at plan time). */
-  behavioralChecks() { return [...behavioralChecks(this.runners.owner), ...(this.runners.automatic ? automaticChecks(this.runners.availableProfiles) : [])]; }
+  behavioralChecks(specification?: Specification, strategy?: TestStrategy, originalRevision?: string) {
+    const owner = behavioralChecks(this.runners.owner);
+    if (!this.runners.automatic) return owner;
+    if (!specification || !strategy) return [...owner, ...automaticChecks(this.runners.availableProfiles)];
+    const commands = resolveTaskCommands({ owner: [], profiles: this.runners.profilesForRevision(originalRevision), specification, strategy });
+    return [...owner, ...automaticChecks(commands).map(check => {
+      const command = commands.find(item => `host-behavioral-${item.id}` === check.id)!;
+      return { ...check, metadata: { ...check.metadata, boundRunnerIdentities: true },
+        configuration: json({ ...record(check.configuration), testNames: command.testNames }) };
+    })];
+  }
   /** Methods with a runner: owner-configured, or Runtime-detected. Fixed per owner configuration; detection may refresh. */
   configuredMethods(): string[] { return [...new Set([...this.runners.owner.map(command => command.method), ...this.runners.profiles.map(profile => profile.method)])]; }
   /**

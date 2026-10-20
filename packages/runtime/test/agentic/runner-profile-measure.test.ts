@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, realpath, rm, stat, symlink, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { pinRunnerDefinitions } from "../../src/agentic/runner-provenance.js";
 import { probeBehavioralSandbox } from "../../src/agentic/sandbox-readiness.js";
 import { bindRunnerProfile, measureBehavior, type RunnerProfile } from "../../src/agentic/behavioral-runner.js";
 
@@ -39,6 +40,12 @@ describe("bindRunnerProfile", () => {
   });
 });
 
+async function pinnedProfile(cwd: string, overrides: Partial<RunnerProfile> = {}) {
+  const detection = await pinRunnerDefinitions(cwd, { status: "detected", profiles: [profile(cwd, overrides)], notes: [] });
+  if (detection.status !== "detected") throw new Error(detection.reason);
+  return detection.profiles[0]!;
+}
+
 async function pnpmLikeRepo() {
   const cwd = await realpath(await mkdtemp(join(tmpdir(), "bflow-profile-measure-")));
   cleanups.push(() => rm(cwd, { recursive: true, force: true }));
@@ -62,7 +69,7 @@ async function pnpmLikeRepo() {
 describe.skipIf((await probeBehavioralSandbox()).status !== "ready")("runner profile measurements in the Linux sandbox", () => {
   it("measures a pnpm-style relative-symlinked dependency tree without modifying tracked files", async () => {
     const f = await pnpmLikeRepo();
-    const command = bindRunnerProfile(profile(f.cwd), { testNames: [depName], testPaths: ["pkg/test/dep.test.cjs"] });
+    const command = bindRunnerProfile(await pinnedProfile(f.cwd), { testNames: [depName], testPaths: ["pkg/test/dep.test.cjs"] });
     const measured = await measureBehavior(command, f.cwd, f.revision);
     expect(measured).toMatchObject({ tests: 1, passed: 1, failed: 0, testNames: [depName] });
     expect(f.git("status", "--porcelain")).toBe("");
@@ -70,7 +77,7 @@ describe.skipIf((await probeBehavioralSandbox()).status !== "ready")("runner pro
   }, 120_000);
   it("allows a sandboxed prepare step to create only git-ignored outputs used by the tests", async () => {
     const f = await pnpmLikeRepo();
-    const command = bindRunnerProfile(profile(f.cwd, { prepare: { args: ["scripts/gen.cjs"], timeoutMs: 30_000 } }),
+    const command = bindRunnerProfile(await pinnedProfile(f.cwd, { prepare: { args: ["scripts/gen.cjs"], timeoutMs: 30_000 } }),
       { testNames: [generatedName], testPaths: ["pkg/test/generated.test.cjs"] });
     expect(await measureBehavior(command, f.cwd, f.revision)).toMatchObject({ tests: 1, passed: 1, failed: 0 });
     await expect(stat(join(f.cwd, "out"))).rejects.toMatchObject({ code: "ENOENT" });
@@ -78,22 +85,31 @@ describe.skipIf((await probeBehavioralSandbox()).status !== "ready")("runner pro
   }, 120_000);
   it("rejects a prepare step that modifies a tracked file", async () => {
     const f = await pnpmLikeRepo();
-    const command = bindRunnerProfile(profile(f.cwd, { prepare: { args: ["scripts/tamper.cjs"], timeoutMs: 30_000 } }),
+    const command = bindRunnerProfile(await pinnedProfile(f.cwd, { prepare: { args: ["scripts/tamper.cjs"], timeoutMs: 30_000 } }),
       { testNames: [depName], testPaths: ["pkg/test/dep.test.cjs"] });
     await expect(measureBehavior(command, f.cwd, f.revision)).rejects.toThrow("clean worktree");
     expect(f.git("worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1);
   }, 120_000);
   it("reports a failing prepare step as a bounded infrastructure failure with its stderr tail", async () => {
     const f = await pnpmLikeRepo();
-    const command = bindRunnerProfile(profile(f.cwd, { prepare: { args: ["scripts/fail.cjs"], timeoutMs: 30_000 } }),
+    const command = bindRunnerProfile(await pinnedProfile(f.cwd, { prepare: { args: ["scripts/fail.cjs"], timeoutMs: 30_000 } }),
       { testNames: [depName], testPaths: ["pkg/test/dep.test.cjs"] });
     await expect(measureBehavior(command, f.cwd, f.revision)).rejects.toThrow(/infrastructure failure \(prepare\): exit 1 stderr: tsc: compile failed in pkg/);
     expect(f.git("worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1);
   }, 120_000);
   it("reports a prepare step exceeding its own deadline as an infrastructure failure", async () => {
     const f = await pnpmLikeRepo();
-    const command = bindRunnerProfile(profile(f.cwd, { prepare: { args: ["scripts/gen.cjs"], timeoutMs: 1 } }),
+    const command = bindRunnerProfile(await pinnedProfile(f.cwd, { prepare: { args: ["scripts/gen.cjs"], timeoutMs: 1 } }),
       { testNames: [generatedName], testPaths: ["pkg/test/generated.test.cjs"] });
     await expect(measureBehavior(command, f.cwd, f.revision)).rejects.toThrow("infrastructure failure (prepare): deadline exceeded");
   }, 120_000);
+  it("rejects a prepare step even if the test would restore the modified tracked bytes", async () => {
+    const f = await pnpmLikeRepo(), path = "pkg/test/dep.test.cjs";
+    const original = await (await import("node:fs/promises")).readFile(join(f.cwd, path), "utf8");
+    await writeFile(join(f.cwd, "scripts/replace-and-restore.cjs"), `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(path)}, ${JSON.stringify("require('node:fs').writeFileSync(__filename," + JSON.stringify(original) + ");\n" + original)});\n`);
+    f.git("add", "."); f.git("commit", "-m", "pin prepare restore fixture"); const revision = f.git("rev-parse", "HEAD");
+    const command = bindRunnerProfile(await pinnedProfile(f.cwd, { prepare: { args: ["scripts/replace-and-restore.cjs"], timeoutMs: 30000 } }), { testNames: [depName], testPaths: [path] });
+    await expect(measureBehavior(command, f.cwd, revision)).rejects.toThrow("clean worktree");
+  }, 120000);
+
 });

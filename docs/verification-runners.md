@@ -19,7 +19,7 @@ Multiple adapters can match one repository. Labels are `auto:unit:<adapter>`,
 readable repository-path slug plus a stable SHA-256 suffix, so paths such as `a/b` and `a-b` cannot collide. Existing root JavaScript `auto:unit` / `auto:integration`
 labels remain aliases; `auto:e2e` is added. `planning_reference.testRunners` includes
 the exact name rule, version and project. Coordinator selects these labels through
-the existing infrastructure commands. A language label does not establish that a
+the existing infrastructure commands. Nested Vitest and Node projects use the same reporter protocols and exact-name filters as root projects. Each criterion mapping must bind unambiguously to one selected profile; only that profile receives its names, and Quality Gates retain the same partition. Ambiguous cross-runner mappings require a reviewed task/specification split. A language label does not establish that a
 particular test is an integration or E2E test; its accepted criterion remains authoritative.
 
 The same task resolver feeds Developer feedback, independent Red/Green/Refactor and
@@ -48,14 +48,14 @@ are separate from test execution evidence.
 | JS/TS | `node --test` TAP | test title; anchored `--test-name-pattern`, explicit files | flat TAP only; Node version filtering behavior is validated by parser |
 | Python | pytest JUnit (unittest can run through pytest) | `classname.name`; invert mapped module/class into exact pytest node IDs | existing `.venv`, `venv`, active env, uv in-project env, Poetry/Pipenv matching envs; installed pytest required |
 | Go | `go test -json` | import-path + `.` + Test/subtest | one package per command; exact top-level union or one subtest path; no benchmark evidence |
-| Rust | cargo / libtest | exact libtest test name | one exact test and explicit lib/integration target per command; locked offline dependencies; inline test files freeze their implementation bytes after Red |
+| Rust | cargo / libtest | exact libtest test name | one exact test and explicit lib/integration target per command; libtest captures assertion diagnostics for Red; locked offline dependencies; inline test files freeze their implementation bytes after Red |
 | Java/Kotlin | Maven Surefire JUnit | fully qualified class + `.` + method | conventional Surefire reports, exact `-Dtest`; parameterized identities require agent setup |
 | Java/Kotlin | Gradle JUnit | fully qualified class + `.` + method | conventional `test` task/report path; installed Gradle; exact `--tests` |
 | .NET | `dotnet test` TRX | TRX TestMethod className + `.` + method | one test project per directory; isolated offline restore from installed cache, then exact FQN filter |
 | Ruby | RSpec native JSON | example full_description | installed RSpec; exact full-description regex; no external JUnit formatter needed |
 | Ruby | Minitest Runtime JUnit helper | Ruby class + `.` + method | installed reporter-capable Minitest; immutable Runtime helper; exact Class#method regex |
 | PHP | PHPUnit JUnit | namespace-qualified class + `.` + method | existing global/local PHPUnit; exact class::method filter |
-| C/C++ | CTest >=3.21 JUnit | testcase name | already configured CTest project; one CTest registration is one test; build/configure automation is not implemented |
+| C/C++ | CTest >=3.21 JUnit | testcase name | committed CTest registration and executable material only; generated ignored build directories request agent setup; build/configure automation is not implemented |
 | Other | declared Make/Just/Task target with JUnit protocol | `classname.name`; selected names/files passed as JSON argv variables | ordinary arbitrary scripts, tox/nox require a reviewed agent setup task |
 | Elixir, Swift, Dart/Flutter | not implemented | — | follow-up adapters; do not downgrade criteria |
 
@@ -93,7 +93,7 @@ Detection pins committed Git blobs for manifests, lockfiles, runner config, buil
 CI config, scripts and test/helper trees. Local definitions must match committed bytes.
 At measurement, changed/deleted/new definitions—including root `conftest.py`, Cargo
 `build.rs`, Python startup hooks, Makefiles and package scripts—reject evidence.
-Missing pin metadata rejects automatic measurements. Selected test paths are handled
+Gradle `.gradle`/`.gradle.kts` and MSBuild `.props`/`.targets` files are pinned throughout the repository. Literal Gradle `apply from` and MSBuild `Import Project` references are followed to committed repository-local files, including custom suffixes. Dynamic/concatenated or unresolvable references return an agent setup requirement. Missing pin metadata rejects automatic measurements. Selected test paths are handled
 separately: Developer may create/change them before independent Red; afterward exact
 Red test blobs and all execution definitions are frozen. Runtime compares those blobs
 again for Green/Refactor. Test setup changes must go through review and integration,
@@ -102,7 +102,7 @@ and become authority only from the base revision of later tasks.
 The fallback recognizes a declared `test` target only when its definition mentions all
 three Runtime protocol values: `BFLOW_TEST_NAMES` (JSON), `BFLOW_TEST_FILES` (JSON), and
 `BFLOW_JUNIT_OUTPUT` (private report path). Runtime passes values as separate argv tokens;
-it never evaluates a RoleMessage command. The target must produce fresh structured output
+it never evaluates a RoleMessage command. Because recipe engines can re-expand assignments, the generic fallback accepts only literal safe name/path characters; shell/Make syntax in identities requests agent setup rather than entering target expansion. The target must produce fresh structured output
 with exactly the selected names. A plain `make test`, shell exit 0, CI success or an old
 report is not evidence. Arbitrary target syntax, tox/nox and script-specific reporters
 are agent setup work, rather than guessed invocation conventions. This intentionally
@@ -191,14 +191,14 @@ files and escaping cache symlinks are rejected. Java imports only public launche
 files, not Maven settings or Java management passwords. Dependency trees are read-only:
 repo-relative node_modules/vendor and selected venv libraries retain their layout;
 Cargo registry, GOMODCACHE, Maven repository, Gradle modules cache and NuGet packages
-use selected paths. No `~/.npmrc`, `.netrc`, `.ssh`, global Gradle init/config, Composer auth
+use selected paths. Imported node_modules trees are checked for special files (including pathname sockets) and credential material; pnpm links across the selected repository layout remain supported. No `~/.npmrc`, `.netrc`, `.ssh`, global Gradle init/config, Composer auth
 or provider credentials are intentionally imported. This is a local Linux boundary,
 not hostile-kernel or hostile-same-UID isolation certification.
 
 Fresh reports come from private output paths or bounded conventional build-report
 patterns. Preexisting reports reject invocation. Collection rejects symlinks, special files,
 path escapes, duplicate files and oversized output; regular files are opened without
-following symlinks. Host Git operations used for measurement disable user/system Git configuration, hooks, fsmonitor, recursive submodules and locally registered clean/smudge/process filters, so checkout/status cannot launch repository filter commands before the sandbox. Git attributes/LFS/submodule definitions are pinned too. After prepare/tests, tracked and nonignored untracked files must
+following symlinks. Host Git operations used for measurement disable user/system Git configuration, hooks, fsmonitor, recursive submodules and effective clean/smudge/process filters, including included configuration, worktree scopes and gitdir-conditional includes, so checkout/status cannot launch repository filter commands before the sandbox. A worktree is registered with `--no-checkout`; its effective configuration is inspected again before file materialization. Git attributes/LFS/submodule definitions are pinned too. Tracked integrity and report freshness are checked again between prepare and the test command, preventing a prepare step from changing bytes that tests later restore or pre-seeding a report. After prepare/tests, tracked and nonignored untracked files must
 still match the exact revision. Only disposable checkouts are forcibly removed.
 
 ## Automatic dependency warming: threat model and limits

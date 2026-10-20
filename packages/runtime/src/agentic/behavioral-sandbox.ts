@@ -1,4 +1,4 @@
-import { lstat, mkdir, readdir, readFile, realpath } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { probeBehavioralSandbox } from "./sandbox-readiness.js";
@@ -57,6 +57,8 @@ export async function sandboxBehavior(command: BoundBehavioralCommand, checkout:
   const binary = await realpath(command.executable);
   if (!(await lstat(binary)).isFile()) throw new Error("Behavioral executable must resolve to a regular file");
   args.push("--ro-bind", binary, command.executable);
+  const checkoutMounts = await checkoutDependencyMounts(command, checkout);
+  await validateDependencyTrees([...(command.dependencyRoots ?? []), ...checkoutMounts.map(([from]) => from)], command.dependencySource);
   for (const path of command.dependencyRoots ?? []) {
     // Only dependency trees can be imported; mounting a project or a home would
     // expose host state and turn this into an ineffective read-only wrapper.
@@ -65,7 +67,7 @@ export async function sandboxBehavior(command: BoundBehavioralCommand, checkout:
     args.push("--ro-bind", path, path);
   }
   // Runtime-detected dependencies keep their repository-relative layout (pnpm relative symlinks resolve inside the checkout).
-  for (const [from, to] of await checkoutDependencyMounts(command, checkout)) args.push("--ro-bind", from, to);
+  for (const [from, to] of checkoutMounts) args.push("--ro-bind", from, to);
   for (const mount of command.adapter?.mounts ?? []) {
     await validateRunnerMount(mount, checkout);
     const target = command.dependencySource && mount.target.startsWith(command.dependencySource + "/") ? join(checkout, mount.target.slice(command.dependencySource.length + 1)) : mount.target;
@@ -122,6 +124,33 @@ export async function validateRunnerMount(mount: RunnerMount, checkout: string):
           const text = await readFile(path, "utf8");
           if (/[a-z]+:\/\/[^/\s]+@|credential|extraheader/i.test(text)) throw new Error("Credentials in dependency cache configuration");
         }
+      }
+    }
+  }
+}
+
+/** Inspect imported dependency content without following directory links. Mounted Unix sockets remain reachable even offline. */
+export async function validateDependencyTrees(roots: readonly string[], repositorySource?: string): Promise<void> {
+  const allowed = [...roots, ...(repositorySource ? [repositorySource] : []), "/usr"];
+  const sensitive = /^(?:\.ssh|\.aws|\.azure|\.gnupg|\.kube|\.npmrc|\.netrc|credentials(?:\.toml)?|settings\.xml|auth\.json|id_rsa|id_ed25519)$/i;
+  let count = 0;
+  for (const root of new Set(roots)) {
+    if (!isAbsolute(root) || await realpath(root) !== resolve(root) || !(await lstat(root)).isDirectory()) throw new Error("Dependency tree must be a canonical directory");
+    const pending = [root];
+    while (pending.length) {
+      const directory = pending.pop()!;
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        if (++count > 200000) throw new Error("Dependency tree inspection exceeds bounds");
+        const path = join(directory, entry.name);
+        if (sensitive.test(entry.name)) throw new Error("Credential material in dependency tree");
+        if (entry.isDirectory()) pending.push(path);
+        else if (entry.isSymbolicLink()) {
+          const destination = await realpath(path).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
+          if (destination === undefined) continue;
+          if (!allowed.some(base => destination === base || destination.startsWith(base + "/"))) throw new Error("Dependency symlink escapes selected trees");
+          const target = await stat(path);
+          if (!target.isDirectory() && !target.isFile()) throw new Error("Special file in dependency tree");
+        } else if (!entry.isFile()) throw new Error("Special file in dependency tree");
       }
     }
   }

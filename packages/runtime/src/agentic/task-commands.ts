@@ -62,18 +62,15 @@ export function unique<T>(values: readonly T[]): T[] { return [...new Set(values
 /** Test identities for one automatic profile: mapped names of the active criteria with its method, and the test files in scope. */
 function matchesRunnerFile(profile: RunnerProfile, path: string): boolean {
   const adapter = profile.adapter?.adapterId ?? "javascript";
-  const patterns: Record<string, RegExp> = { javascript: /\.[cm]?[jt]sx?$/, jest: /\.[cm]?[jt]sx?$/, mocha: /\.[cm]?[jt]sx?$/,
+  const patterns: Record<string, RegExp> = { javascript: /\.[cm]?[jt]sx?$/, vitest: /\.[cm]?[jt]sx?$/, node: /\.[cm]?[jt]sx?$/, jest: /\.[cm]?[jt]sx?$/, mocha: /\.[cm]?[jt]sx?$/,
     python: /\.py$/, pytest: /\.py$/, go: /_test\.go$/, rust: /\.rs$/, cargo: /\.rs$/, maven: /\.(?:java|kt)$/, gradle: /\.(?:java|kt)$/, dotnet: /\.(?:cs|fs|vb)$/, rspec: /\.rb$/, minitest: /\.rb$/, phpunit: /\.php$/, ctest: /\.(?:c|cc|cpp|cxx|cmake)$/ };
   return patterns[adapter]?.test(path) ?? true;
 }
-export function automaticIdentities(profile: RunnerProfile, specification: Specification, strategy: TestStrategy, ownedPaths?: readonly string[] | undefined) {
-  const criteria = specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived" && criterion.verificationMethod === profile.method);
-  const testNames = unique(criteria.flatMap(criterion => strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id)?.testNames ?? []));
+export function automaticTestPaths(profile: RunnerProfile, specification: Specification, ownedPaths?: readonly string[]) {
   const project = profile.adapter?.projectDirectory;
-  const testPaths = unique(specification.affectedPaths.filter(path => testFilePattern.test(path) && matchesRunnerFile(profile, path) &&
+  return unique(specification.affectedPaths.filter(path => testFilePattern.test(path) && matchesRunnerFile(profile, path) &&
     (project === undefined || project === "." || path.startsWith(project + "/")) &&
     (ownedPaths === undefined || ownedPaths.some(prefix => path === prefix || path.startsWith(`${prefix}/`)))));
-  return testNames.length && testPaths.length ? { testNames, testPaths } : undefined;
 }
 
 export interface TaskCommandInput {
@@ -88,10 +85,27 @@ export interface TaskCommandInput {
 export function resolveTaskCommands(input: TaskCommandInput): BoundBehavioralCommand[] {
   const targets = new Set(input.strategy.targetCommands);
   const owner: BoundBehavioralCommand[] = input.owner.filter(command => targets.has(command.command));
-  const bound = input.profiles.filter(profile => targets.has(profile.command)).flatMap(profile => {
-    const identities = automaticIdentities(profile, input.specification, input.strategy, input.ownedPaths);
-    return identities ? [bindRunnerProfile(profile, identities)] : [];
-  });
+  const selected = input.profiles.filter(profile => targets.has(profile.command));
+  const namesByProfile = new Map<RunnerProfile, string[]>();
+  for (const criterion of input.specification.acceptanceCriteria.filter(item => item.required !== false && item.status !== "waived")) {
+    const mapping = input.strategy.criterionMappings.find(item => item.criterionId === criterion.id);
+    if (!mapping?.testNames.length || !selected.some(profile => profile.method === criterion.verificationMethod)) continue;
+    const matches = selected.filter(profile => {
+      if (profile.method !== criterion.verificationMethod) return false;
+      const testPaths = automaticTestPaths(profile, input.specification);
+      if (!testPaths.length) return false;
+      try { bindRunnerProfile(profile, { testNames: unique(mapping.testNames), testPaths }); return true; } catch { return false; }
+    });
+    if (matches.length !== 1) throw new Error(`runner_identity_unselectable: criterion ${criterion.id} needs one unambiguous selected runner; split ambiguous criterion mappings`);
+    const profile = matches[0]!, testPaths = automaticTestPaths(profile, input.specification, input.ownedPaths);
+    if (!testPaths.length) continue;
+    try { bindRunnerProfile(profile, { testNames: unique(mapping.testNames), testPaths }); }
+    catch (error) { if (input.ownedPaths !== undefined) continue; throw error; }
+    namesByProfile.set(profile, unique([...(namesByProfile.get(profile) ?? []), ...mapping.testNames]));
+  }
+  const bound = [...namesByProfile].map(([profile, testNames]) => bindRunnerProfile(profile, {
+    testNames, testPaths: automaticTestPaths(profile, input.specification, input.ownedPaths)
+  }));
   const commands = [...owner, ...bound];
   if (bound.length && commands.reduce((total, command) => total + command.timeoutMs + (command.prepare?.timeoutMs ?? command.adapter?.prepare?.timeoutMs ?? command.adapter?.bind(command, "/tmp/bflow-profile-validation").prepare?.timeoutMs ?? 0) + 90000, 0) > 540000)
     throw new Error("runner_identity_unselectable: split selected runners into tasks within the independent execution deadline");

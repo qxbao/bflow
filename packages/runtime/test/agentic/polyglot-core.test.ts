@@ -112,3 +112,74 @@ it("never executes repository Git smudge/process filters while creating the disp
     expect(await readFile(join(checkout, "data.txt"), "utf8")).toBe("committed bytes\n");
   } finally { await verificationGit(cwd, ["worktree", "remove", "--force", checkout]).catch(() => undefined); }
 });
+it.each(["include", "worktree", "future-worktree"] as const)("does not execute Git filters inherited through %s configuration", async scope => {
+  const { verificationGit } = await import("../../src/agentic/behavioral-runner.js");
+  const cwd = await root(), checkout = join(await root(), "checkout"), sentinel = join(cwd, "filter-ran");
+  const git = (...args: string[]) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", ...args], { cwd, encoding: "utf8" }).trim();
+  git("init", "-b", "main"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.test");
+  await writeFile(join(cwd, ".gitattributes"), "*.txt filter=fixture\n"); await writeFile(join(cwd, "data.txt"), "original\n");
+  git("add", "."); git("commit", "-m", "base");
+  const included = join(cwd, ".git", "included.config");
+  await writeFile(included, `[filter "fixture"]\n smudge = "touch '${sentinel}'; cat"\n required = true\n`);
+  if (scope === "include") git("config", "include.path", included);
+  else if (scope === "worktree") { git("config", "extensions.worktreeConfig", "true"); git("config", "--worktree", "include.path", included); }
+  else git("config", `includeIf.gitdir:${cwd}/.git/worktrees/.path`, included);
+  try {
+    await verificationGit(cwd, ["worktree", "add", "--detach", checkout, git("rev-parse", "HEAD")]);
+    const { readFile } = await import("node:fs/promises");
+    await expect(readFile(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(checkout, "data.txt"), "utf8")).toBe("original\n");
+  } finally { await verificationGit(cwd, ["worktree", "remove", "--force", checkout]).catch(() => undefined); }
+});
+it.each(["build-support/checks.gradle", "build-support/checks.gradle.kts", "build-support/checks.targets", "build-support/checks.props", "build-support/checks.cmake"])("freezes imported execution definitions at %s", async helper => {
+  const cwd = await root();
+  const git = (...args: string[]) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", ...args], { cwd, encoding: "utf8" }).trim();
+  git("init", "-b", "main"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.test");
+  await mkdir(join(cwd, "build-support")); await writeFile(join(cwd, "build.gradle"), `apply from: '${helper}'\n`); await writeFile(join(cwd, helper), "original test configuration\n");
+  git("add", "."); git("commit", "-m", "base"); const originalRevision = git("rev-parse", "HEAD");
+  const detection = await pinRunnerDefinitions(cwd, { status: "detected", profiles: [profile(cwd)], notes: [] });
+  if (detection.status !== "detected") throw new Error("missing profile");
+  const command = { ...bindRunnerProfile(detection.profiles[0]!, { testNames: ["target"], testPaths: ["tests/a.test.js"] }), originalRevision };
+  await writeFile(join(cwd, helper), "disable tests and synthesize output\n"); git("add", "."); git("commit", "-m", "task replaces imported script");
+  await expect(assertRunnerProvenance(command, cwd, git("rev-parse", "HEAD"))).rejects.toThrow("original revision");
+});
+it("rejects imported dependency sockets and credentials while allowing pnpm links inside the selected layout", async () => {
+  const { validateDependencyTrees } = await import("../../src/agentic/behavioral-sandbox.js");
+  const { createServer } = await import("node:net");
+  const cwd = await root(), modules = join(cwd, "node_modules"), nested = join(cwd, "pkg/node_modules");
+  await mkdir(join(modules, ".store/dep"), { recursive: true }); await mkdir(nested, { recursive: true });
+  await writeFile(join(modules, ".store/dep/index.js"), "module.exports=4");
+  await symlink("../../node_modules/.store/dep", join(nested, "dep"));
+  await expect(validateDependencyTrees([modules, nested], cwd)).resolves.toBeUndefined();
+  const server = createServer(); const socket = join(modules, "host.sock");
+  await new Promise<void>((accept, reject) => { server.once("error", reject); server.listen(socket, accept); });
+  try { await expect(validateDependencyTrees([modules, nested], cwd)).rejects.toThrow("Special file"); }
+  finally { await new Promise<void>(accept => server.close(() => accept())); }
+  await writeFile(join(modules, ".npmrc"), "sensitive fixture");
+  await expect(validateDependencyTrees([modules], cwd)).rejects.toThrow("Credential");
+});
+it("pins a literal Gradle import with a custom suffix and rejects unresolvable dynamic imports", async () => {
+  const cwd = await root();
+  const git = (...args: string[]) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", ...args], { cwd, encoding: "utf8" }).trim();
+  git("init", "-b", "main"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.test");
+  await writeFile(join(cwd, "build.gradle"), "apply from: 'checks.custom'\n"); await writeFile(join(cwd, "checks.custom"), "test setup\n");
+  git("add", "."); git("commit", "-m", "static");
+  const detected = await pinRunnerDefinitions(cwd, { status: "detected", profiles: [profile(cwd)], notes: [] });
+  expect(detected.status).toBe("detected"); if (detected.status !== "detected") throw new Error("missing pin");
+  expect(detected.profiles[0]!.definitionBlobs).toHaveProperty("checks.custom");
+  await writeFile(join(cwd, "build.gradle"), "apply from: computeFile()\n"); git("add", "."); git("commit", "-m", "dynamic");
+  expect(await pinRunnerDefinitions(cwd, { status: "detected", profiles: [profile(cwd)], notes: [] })).toMatchObject({ status: "unsupported", agentFixable: true });
+});
+it("resolves nested Gradle apply paths against the owning project, including custom-suffix imports", async () => {
+  const cwd = await root();
+  const git = (...args: string[]) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", ...args], { cwd, encoding: "utf8" }).trim();
+  git("init", "-b", "main"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.test");
+  await mkdir(join(cwd, "build-support"));
+  await writeFile(join(cwd, "build.gradle"), "apply from: 'build-support/first.gradle'\n");
+  await writeFile(join(cwd, "build-support/first.gradle"), "apply from: 'second.custom'\n");
+  await writeFile(join(cwd, "second.custom"), "actual project script\n"); await writeFile(join(cwd, "build-support/second.custom"), "unrelated same-name file\n");
+  git("add", "."); git("commit", "-m", "nested static scripts");
+  const detection = await pinRunnerDefinitions(cwd, { status: "detected", profiles: [profile(cwd)], notes: [] });
+  expect(detection.status).toBe("detected"); if (detection.status !== "detected") throw new Error("missing pin");
+  expect(detection.profiles[0]!.definitionBlobs).toHaveProperty("second.custom");
+});

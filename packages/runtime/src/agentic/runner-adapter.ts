@@ -1,5 +1,5 @@
 /** Runtime-private adapter API. No executable, mount, environment or parser is accepted from role messages. */
-export type ResultFormat = "junit" | "go_json" | "rust_libtest" | "trx" | "jest_json" | "mocha_json" | "rspec_json";
+export type ResultFormat = "vitest_json" | "node_tap" | "junit" | "go_json" | "rust_libtest" | "trx" | "jest_json" | "mocha_json" | "rspec_json";
 export interface RunnerMount { source: string; target: string }
 export interface RunnerIdentities { testNames: string[]; testPaths: string[] }
 export interface RunnerInvocation {

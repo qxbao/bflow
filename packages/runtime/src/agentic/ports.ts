@@ -98,7 +98,7 @@ export interface AgenticRuntimePorts {
   maxConcurrency?: number;
   /** The concrete host can route P16 alternative-evidence requests to its measurement tools. */
   automaticAlternativeEvidence?: boolean;
-  behavioralChecks?: () => readonly QualityGateDefinition[];
+  behavioralChecks?: (specification: Specification, strategy: TestStrategy, originalRevision?: string) => readonly QualityGateDefinition[];
   taskChecks: readonly QualityGateDefinition[];
   workflowChecks: readonly QualityGateDefinition[];
   clock?: () => Date;

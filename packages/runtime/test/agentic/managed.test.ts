@@ -42,7 +42,7 @@ describe("managed-language runner adapters", () => {
 
   it("detects Gradle Kotlin with read-only dependency cache, no daemon, and exact filters", async () => {
     const { runner } = await detected("gradle", { "app/build.gradle.kts": "plugins {}", "app/settings.gradle.kts": "", "app/src/test/kotlin/FooTest.kt": "" });
-    expect(runner.environment).toMatchObject({ GRADLE_USER_HOME: "/tmp/bflow-gradle", GRADLE_RO_DEP_CACHE: "/bflow-cache/gradle/caches/modules-2" });
+    expect(runner.environment).toMatchObject({ GRADLE_USER_HOME: "/tmp/bflow-gradle", GRADLE_RO_DEP_CACHE: "/bflow-cache/gradle/caches" });
     expect(runner.bind({ testNames: ["org.FooTest.target"], testPaths: ["app/src/test/kotlin/FooTest.kt"] }, "/tmp/reports")).toEqual({
       args: ["--offline", "--no-daemon", "--console=plain", "--no-build-cache", "--rerun-tasks", "test", "--tests", "org.FooTest.target"], reportPaths: ["app/build/test-results/test/TEST-*.xml"]
     });

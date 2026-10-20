@@ -27,6 +27,9 @@ export const declaredRunnerAdapter: RunnerAdapter = {
         runners.push({ adapterId: `declared-${kind}`, version: /\d+\.\d+(?:\.\d+)?/.exec(checked.stdout)![0], executable, projectDirectory: project,
           format: "junit", nameRule: "JUnit classname.name; target must honor BFLOW_TEST_NAMES JSON and BFLOW_TEST_FILES JSON", mounts: [], environment: {}, protectedPaths: [file],
           bind(identities, reports) {
+            // Recipe/task engines can re-expand assignment values. Reject executable syntax instead of passing it through.
+            if (identities.testNames.some(name => !/^[A-Za-z0-9_.:#/ \[\]-]+$/.test(name)) || identities.testPaths.some(path => !/^[A-Za-z0-9_./-]+$/.test(path)))
+              throw new Error("runner_identity_unselectable: declared target identities require a safe literal selection protocol");
             const output = join(reports, "declared.xml");
             if (identities.testPaths.some(path => project !== "." && !path.startsWith(project + "/"))) throw new Error("Declared test file outside project");
             const files = identities.testPaths.map(path => project === "." ? path : path.slice(project.length + 1));

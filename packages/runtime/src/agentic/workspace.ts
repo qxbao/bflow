@@ -23,7 +23,7 @@ export interface OpenAgenticWorkspaceOptions {
   taskChecks: AgenticRuntimePorts["taskChecks"]; workflowChecks: AgenticRuntimePorts["workflowChecks"];
   /** Deterministic host runners. Review checks are always routed through Herdr. */
   deterministicGates: readonly QualityGate[];
-  behavioralChecks?: () => readonly import("@bflow/contracts").QualityGateDefinition[];
+  behavioralChecks?: AgenticRuntimePorts["behavioralChecks"];
   behavioralGates?: () => readonly QualityGate[];
   authenticateMessage: AgenticRuntimePorts["authenticateMessage"];
   /** Called after Conversation applied a Runtime outbox message; the host records it as a durable notice for the model. */

@@ -266,7 +266,7 @@ export function createManagedAdapters(host: ManagedAdapterHost = systemHost): Ru
     const java = await javaEnvironment(host, context.root);
     base.mounts.push(...java.mounts, ...await optionalMount(join(host.homeDirectory, ".gradle/caches/modules-2"), "/bflow-cache/gradle/caches/modules-2", host));
     // GRADLE_RO_DEP_CACHE is Gradle's documented read-only dependency cache, not a writable user home.
-    base.environment = { ...java.environment, GRADLE_USER_HOME: "/tmp/bflow-gradle", GRADLE_RO_DEP_CACHE: "/bflow-cache/gradle/caches/modules-2" };
+    base.environment = { ...java.environment, GRADLE_USER_HOME: "/tmp/bflow-gradle", GRADLE_RO_DEP_CACHE: "/bflow-cache/gradle/caches" };
     return { runners: [{ ...base, format: "junit", nameRule: "classname.name (fully qualified Java/Kotlin class, dot, method)", bind(identities) {
       validateSelection(identities, project);
       return { args: ["--offline", "--no-daemon", "--console=plain", "--no-build-cache", "--rerun-tasks", "test", ...fqnNames(identities).flatMap(name => ["--tests", name])], reportPaths: [`${project === "." ? "" : `${project}/`}build/test-results/test/TEST-*.xml`] };
@@ -361,7 +361,8 @@ export function createManagedAdapters(host: ManagedAdapterHost = systemHost): Ru
     } }], notes: [] };
   }, host);
 
-  const ctest = adapter("ctest", path => basename(path) === "CTestTestfile.cmake", async (context, manifest) => {
+  const ctest = adapter("ctest", path => ["CTestTestfile.cmake", "CMakeLists.txt"].includes(basename(path)), async (context, manifest) => {
+    if (basename(manifest) === "CMakeLists.txt") return { runners: [], notes: context.files.includes(join(dirname(manifest), "CTestTestfile.cmake")) ? [] : ["ctest: runner_build_setup_required: generated build directories require an isolated configure/build setup task before measurement"] };
     const tool = await host.findTool("ctest", ["--version"], context.root);
     if (!tool) return missing("ctest", "CTest");
     const [major = 0, minor = 0] = tool.version.split(".").map(Number);

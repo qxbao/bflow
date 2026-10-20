@@ -499,11 +499,11 @@ pnpm exec vitest run packages/runtime/test/scenarios/09-session-recovery-reliabi
 The default host discovers Runtime-private adapters for JS/TS (Vitest 1/2/3,
 Jest, Mocha, Node TAP), Python/pytest, Go, Rust, Maven/Gradle, .NET, Ruby
 (RSpec/Minitest), PHPUnit and configured CTest. Unit/integration/E2E labels expose
-exact naming rules through planning_reference; multiple language projects can coexist.
+exact naming rules through planning_reference; nested JS and multiple language projects can coexist. Criterion names are partitioned per selected runner and retained by the independent gates.
 Owner-configured Node TAP/Vitest commands remain an optional override.
 
 Executable/argv, offline settings, mounts and parsers come from Runtime. Manifest,
-script, runner configuration and helper blobs are pinned to the committed original
+script, runner configuration, imported Gradle/MSBuild definitions and helper blobs are pinned to the committed original
 revision; selected test files freeze after independent Red. Structured leaf results,
 assertion/error discrimination and independent Quality Gates remain mandatory.
 

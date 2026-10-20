@@ -467,7 +467,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       } } : {}), maxDeveloperCapacity: configuration.policy?.concurrency.maxConcurrency ?? configuration.maxDeveloperCapacity ?? 2,
       nativeIngressSocket: nativeSocket, bindingReceiptKeys: { [issuerId]: publicKey }, roleLaunch: launch,
       roleCapabilities: capabilities, taskChecks: DEFAULT_HOST_CHECKS, workflowChecks: DEFAULT_HOST_CHECKS, deterministicGates: [verification.deterministicGate()],
-      behavioralChecks: () => verification.behavioralChecks(), behavioralGates: () => verification.behavioralGates(),
+      behavioralChecks: (specification, strategy, originalRevision) => verification.behavioralChecks(specification, strategy, originalRevision), behavioralGates: () => verification.behavioralGates(),
       authenticateMessage: authenticateNativeHerdrMessage,
       // Runtime outbox messages reach Conversation in-process; the model learns of them only through hook notices.
       onConversationNotice: async message => { await receipts.appendConversationNotice(message); },

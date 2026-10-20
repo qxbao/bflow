@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { HostVerification } from "../../src/agentic/host-verification.js";
+import type { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import { bindRunnerProfile, measureBehavior, type RunnerProfile } from "../../src/agentic/behavioral-runner.js";
 import { detectTestRunners } from "../../src/agentic/runner-detection.js";
 import { SpecificationSchema, TestStrategySchema } from "@bflow/contracts";
@@ -206,4 +208,22 @@ it("catalogs Go + Python + TypeScript together and resolves the accepted task to
     expect(commands[0]).toMatchObject({ command: target.command, testNames: [target.name], testPaths: [target.path] });
     expect(commands[0]!.adapter?.adapterId).toBe(target.adapter);
   }
+  const native = wanted.filter(target => target.adapter !== undefined);
+  const assessed = assessment("domain_logic", { infrastructure: { readiness: "ready", commands: native.map(target => ({ method: "unit_test", command: target.command, level: "unit" })) } });
+  const base = spec(assessed, "unit_test");
+  const specification = SpecificationSchema.parse({ ...base, affectedPaths: native.map(target => target.path), acceptanceCriteria: native.map((target, index) => ({ ...base.acceptanceCriteria[0], id: `ac-${index + 1}` })) });
+  const strategy = TestStrategySchema.parse({ ...new TestStrategyResolver().resolve(specification), criterionMappings: native.map((target, index) => ({ criterionId: `ac-${index + 1}`, testNames: [target.name] })) });
+  const checks = new HostVerification(() => ({} as AgenticWorkflowRuntime), () => { throw new Error("unused"); }, undefined, source).behavioralChecks(specification, strategy);
+  expect(checks).toHaveLength(2);
+  for (const target of native) {
+    const check = checks.find(item => (item.configuration as { command: string }).command === target.command)!;
+    expect(check.metadata?.boundRunnerIdentities).toBe(true);
+    expect((check.configuration as { testNames: string[] }).testNames).toEqual([target.name]);
+  }
+  const bound = resolveTaskCommands({ owner: [], profiles: source.profiles, specification, strategy });
+  expect(bound).toHaveLength(2);
+  for (const target of native) expect(bound.find(command => command.command === target.command)).toMatchObject({ testNames: [target.name], testPaths: [target.path] });
+  const pythonTask = resolveTaskCommands({ owner: [], profiles: source.profiles, specification, strategy, ownedPaths: [native[1]!.path] });
+  expect(pythonTask).toHaveLength(1); expect(pythonTask[0]!.testNames).toEqual([native[1]!.name]);
+
 });

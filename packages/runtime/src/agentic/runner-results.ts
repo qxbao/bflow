@@ -1,4 +1,6 @@
 import type { QualityCommandOutcome } from "@bflow/quality-gates";
+import { parseNodeTap } from "./node-tap.js";
+import { parseVitestJson } from "./vitest-json.js";
 import type { ResultFormat } from "./runner-adapter.js";
 
 interface TestResult { name: string; passed: boolean }
@@ -283,6 +285,8 @@ export function parseRunnerResult(format: ResultFormat, outcome: QualityCommandO
   let results: TestResult[];
   const output = outcome.stdout.replace(/\r\n/g, "\n");
   switch (format) {
+    case "node_tap": return parseNodeTap(outcome, expectedNames, true);
+    case "vitest_json": return parseVitestJson(outcome, expectedNames, true);
     case "junit": results = junitResults(reports ?? [output]); break;
     case "trx": results = trxResults(reports ?? [output]); break;
     case "go_json": results = goResults(output); break;

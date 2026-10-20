@@ -36,6 +36,8 @@ it("uses pinned declared target argv and blocks a task changing its Makefile", a
   expect(catalog.status).toBe("detected"); if (catalog.status !== "detected") throw new Error("missing declared adapter");
   const command = bindRunnerProfile(catalog.profiles[0]!, { testNames: ["Suite.target"], testPaths: ["tests/a.test.js"] });
   const before = command.adapter!.bind(command, "/tmp/reports");
+  for (const name of ["Suite.$(shell touch sentinel)", "Suite.`touch sentinel`", "Suite.target; true", "Suite.target\nfalse"])
+    expect(() => command.adapter!.bind({ ...command, testNames: [name] }, "/tmp/reports")).toThrow("safe literal");
   await writeFile(join(root, "Makefile"), "test:\n\tfalse\n"); git("add", "."); git("commit", "-m", "task attempts replacement");
   expect(command.adapter!.bind(command, "/tmp/reports")).toEqual(before);
   await expect(assertRunnerProvenance(command, root, git("rev-parse", "HEAD"))).rejects.toThrow("original revision");
@@ -47,4 +49,18 @@ it("rejects uncommitted runner-definition edits at detection", async () => {
   await writeFile(join(root, "package.json"), '{"scripts":{"test":"echo unsafe"}}');
   const result = await pinRunnerDefinitions(root, { status: "detected", profiles: [], notes: [] });
   expect(result).toMatchObject({ status: "unsupported", agentFixable: true });
+});
+it.each(["vitest", "node"] as const)("discovers nested %s projects and binds paths relative to their project", async runner => {
+  const root = await fixture({ "web/package.json": JSON.stringify(runner === "vitest" ? { devDependencies: { vitest: "2.1.9" } } : { scripts: { test: "node --test" } }), ...(runner === "vitest" ? { "web/node_modules/vitest/package.json": '{"version":"2.1.9"}', "web/node_modules/vitest/vitest.mjs": "" } : {}) });
+  const detection = await detectTestRunners(root);
+  expect(detection.status).toBe("detected"); if (detection.status !== "detected") throw new Error(detection.reason);
+  const selected = detection.profiles.find(profile => profile.method === "unit_test" && profile.adapter?.adapterId === runner)!;
+  expect(selected.adapter?.projectDirectory).toBe("web");
+  const command = selected.adapter!.bind({ testNames: ["target"], testPaths: ["web/tests/a.test.js"] }, "/tmp/reports");
+  expect(command.args).toContain("tests/a.test.js"); expect(command.args).not.toContain("web/tests/a.test.js");
+});
+it("routes generated CTest build directories to agent setup rather than claiming their host outputs can be measured", async () => {
+  const root = await fixture({ "CMakeLists.txt": "enable_testing()\n", "build/CTestTestfile.cmake": "add_test(target /host/build/test)\n" });
+  const result = await detectTestRunners(root);
+  expect(result).toMatchObject({ status: "unsupported", agentFixable: true, reason: expect.stringContaining("runner_build_setup_required") });
 });

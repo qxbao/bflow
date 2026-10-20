@@ -250,7 +250,7 @@ async function detectRust(context: AdapterContext, host: NativeHost): Promise<Ad
       if (!/^[A-Za-z_][\w:]*(?:[A-Za-z0-9_])?$/.test(name)) throw new Error("runner_identity_invalid: malformed Rust identity");
       const integration = [...new Set(paths.filter(path => /^tests\/[^/]+\.rs$/.test(path)).map(path => basename(path, ".rs")))];
       if (integration.length > 1 || (integration.length && paths.some(path => !path.startsWith("tests/")))) throw new Error("runner_identity_invalid: split Rust test targets into separate tasks");
-      return { args: ["test", "--offline", "--locked", ...(integration.length ? ["--test", integration[0]!] : ["--lib"]), "--", name, "--exact", "--nocapture", "--test-threads=1"] };
+      return { args: ["test", "--offline", "--locked", ...(integration.length ? ["--test", integration[0]!] : ["--lib"]), "--", name, "--exact", "--test-threads=1"] };
     }
   });
   return { runners, notes };

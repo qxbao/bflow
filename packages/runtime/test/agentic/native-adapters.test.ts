@@ -134,7 +134,7 @@ describe("Rust native runner", () => {
     expect(profile.mounts.map(value => value.source)).toContain(join(host.home, ".cargo/registry/src"));
     expect(profile.mounts.some(value => value.source.endsWith(".cargo") || value.source.includes("credentials"))).toBe(false);
     expect(profile.protectedPaths).toEqual([".cargo/config.toml", "Cargo.lock", "Cargo.toml", "build.rs"]);
-    expect(profile.bind({ testNames: ["tests::addition"], testPaths: ["src/lib.rs"] }, "/tmp/r").args).toEqual(["test", "--offline", "--locked", "--lib", "--", "tests::addition", "--exact", "--nocapture", "--test-threads=1"]);
+    expect(profile.bind({ testNames: ["tests::addition"], testPaths: ["src/lib.rs"] }, "/tmp/r").args).toEqual(["test", "--offline", "--locked", "--lib", "--", "tests::addition", "--exact", "--test-threads=1"]);
     expect(profile.bind({ testNames: ["addition"], testPaths: ["tests/math.rs"] }, "/tmp/r").args).toContain("math");
   });
   it("rejects ambiguous targets and multiple name filters", async () => {
