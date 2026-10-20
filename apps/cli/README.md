@@ -106,9 +106,11 @@ session startup. Insufficient launch budget fails locally before dispatch. Start
 errors and automatic-cleanup outcomes are printed on separate lines.
 `down` reopens the existing host with its persisted platform and policy, even if
 the desired configuration has changed since startup.
-Startup readiness errors retain the per-role diagnostic report (up to 256 lines /
-64,000 characters) after terminal sanitization and credential redaction, and direct
-hook failures point to the hook-only plan command.
+Human startup readiness errors group identical causes by provider, list affected roles
+and blocked checks once, and keep different causes, optional roles and cleanup outcomes visible.
+Hook failures point to the read-only hook plan command. Unrecognized report layouts retain
+their original diagnostics. Terminal sanitization, credential redaction and output bounds
+(256 lines / 64,000 characters) apply before and after grouping; JSON keeps the complete original report.
 Credential redaction also covers opaque command-line flags, environment assignments and JSON credential fields,
 including quoted values whose closing quote is missing from truncated subprocess output.
 

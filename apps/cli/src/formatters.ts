@@ -35,6 +35,7 @@ import {
 import type { EnvironmentStatus } from "./environment.js";
 import { formatCodexHookSetupOutput } from "./codex-hook-setup.js";
 import { renderPreview } from "@bflow/machine-setup";
+import { boundReadinessReport, summarizeReadinessReport } from "./readiness-output.js";
 
 export interface FormatterOptions {
   readonly color?: boolean | undefined;
@@ -868,14 +869,14 @@ export function formatCommandError(
 
   // Clean, redact sensitive credentials, and bound untrusted messages
   const redactedMessage = redactSensitive(stripAnsi(error.message));
-  // Startup reports contain independently useful failures for every role. Keep the
-  // report bounded, but do not apply the generic five-line/350-character summary.
+  // Sanitize and bound the full report before grouping shared causes for humans.
   const isReadinessReport = redactedMessage.startsWith("Provider readiness is not satisfied; no panes were started.\n");
   const report = redactedMessage.split("\n").filter(line => !/^\s+at\s+/.test(line));
-  const cleanMessage = isReadinessReport
-    ? report.slice(0, 256).join("\n").slice(0, 64_000).trimEnd() +
-      (report.length > 256 || redactedMessage.length > 64_000 ? "\n... [truncated; inspect the JSON error report]" : "")
+  const boundedMessage = isReadinessReport
+    ? boundReadinessReport(report.join("\n"))
     : boundMessage(redactedMessage);
+  const summary = isReadinessReport ? summarizeReadinessReport(boundedMessage) : undefined;
+  const cleanMessage = summary === undefined ? boundedMessage : boundReadinessReport(summary);
 
   const errorTag = useColor ? red(bold(`Error [${error.code}]:`), true) : `Error [${error.code}]:`;
   let out = `${errorTag} ${cleanMessage}`;
