@@ -158,6 +158,33 @@ describe("risk-based conditional TDD", () => {
     expect(strategy.tddDecision.mode).toBe("not_applicable");
     expect(strategy.targetCommands).toContain("pnpm test:unit");
   });
+  it("characterization tasks touching only test files are not_applicable, with a pass-on-current-code obligation", () => {
+    const s = spec(assessment("refactoring"));
+    s.affectedPaths = ["packages/example/test/logic.test.ts", "packages/example/test/__fixtures__/logic.json"];
+    const strategy = resolver.resolve(s);
+    expect(strategy.tddDecision.mode).toBe("not_applicable");
+    expect(strategy.tddDecision.requiresFailingTestFirst).toBe(false);
+    expect(strategy.metadata.conditionalTdd.evidenceRequirements.join(" ")).toMatch(/tests pass on current code/i);
+    expect(resolver.validate(strategy)).toEqual(strategy);
+  });
+  it("a production file in the affected paths keeps required TDD for the same test-touching task", () => {
+    const s = spec(assessment("refactoring"));
+    s.affectedPaths = ["packages/example/test/logic.test.ts", "packages/example/src/logic.ts"];
+    expect(resolver.resolve(s).tddDecision.mode).toBe("recommended");
+    const logic = spec(assessment("domain_logic"));
+    logic.affectedPaths = ["packages/example/test/logic.test.ts", "packages/example/src/logic.ts"];
+    expect(resolver.resolve(logic).tddDecision.mode).toBe("required");
+  });
+  it("domain logic touching only test files keeps required TDD, because the contract forbids not_applicable without override", () => {
+    const s = spec(assessment("domain_logic"));
+    s.affectedPaths = ["packages/example/test/logic.test.ts"];
+    expect(resolver.resolve(s).tddDecision.mode).toBe("required");
+  });
+  it("a test-only bugfix still requires a failing reproduction first", () => {
+    const s = spec(assessment("bugfix"));
+    s.affectedPaths = ["packages/example/test/regression.test.ts"];
+    expect(resolver.resolve(s).tddDecision.mode).toBe("required");
+  });
   it("does not require Red when a behavioral criterion lacks its test command", () => {
     const s = spec();
     s.acceptanceCriteria.push({ ...s.acceptanceCriteria[0]!, id: "ac-browser", verificationMethod: "e2e_test" });
