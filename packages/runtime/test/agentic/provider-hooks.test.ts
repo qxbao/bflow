@@ -21,7 +21,8 @@ async function fixture(role = "conversation", provider = "codex", replies: Recor
       if (!input.includes("\n")) return;
       const call = JSON.parse(input.split("\n")[0]!);
       calls.push(call);
-      socket.end(JSON.stringify({ ok: true, value: replies[call.method] ?? { accepted: true } }) + "\n");
+      const reply = Array.isArray(replies[call.method]) ? (replies[call.method] as unknown[]).shift() : replies[call.method];
+      socket.end(JSON.stringify({ ok: true, value: reply ?? { accepted: true } }) + "\n");
     });
   });
   await new Promise<void>(accept => server.listen(socketPath, accept));
@@ -161,6 +162,27 @@ describe.skipIf(process.platform === "win32")("Conversation inbox hooks", () => 
     expect(result.code).toBe(0);
     expect(f.calls.map(call => call.method)).toEqual(["conversation_notices", "conversation_notices_surfaced"]);
     expect(JSON.parse(result.stdout).hookSpecificOutput.additionalContext).toContain("not a user message and not an approval");
+  });
+  it("keeps a large Conversation turn context within the provider hook output cap", async () => {
+    const messages = Array.from({ length: 20 }, (_, index) => ({ messageId: `m-${index}`, sender: "user", content: "x".repeat(900) }));
+    const workflows = Object.fromEntries(Array.from({ length: 8 }, (_, index) => [`corr-${index}`, { correlationId: `corr-${index}`, runId: `run-${index}`,
+      title: `Yêu cầu ${index}`, objective: "o".repeat(12000), sdlcStatus: "cancelled", updatedAt: `2026-10-20T00:0${index}:00.000Z` }]));
+    const reply = { messageId: "user-1", requiresConversationDecision: true, notices: [notice], undisplayed: [],
+      context: { session: { sessionId: "s-1", status: "active" }, agentBusy: false, pendingClarifications: {}, pendingApprovals: {}, approvalWarnings: [],
+        workflows, runIdToCorrelationId: {}, messages } };
+    const f = await fixture("conversation", "claude", { user_prompt: [reply] });
+    const result = await f.invoke("UserPromptSubmit", JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "hello" }));
+    const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
+    expect(context.length).toBeLessThanOrEqual(7200);
+    expect(context.startsWith("Trusted Bflow user turn: messageId=user-1; requiresConversationDecision=true. ")).toBe(true);
+  });
+  it("gives each consecutive Conversation turn its own messageId in the header", async () => {
+    const turn = (messageId: string) => ({ messageId, requiresConversationDecision: true, notices: [], undisplayed: [], context: { messages: [] } });
+    const f = await fixture("conversation", "claude", { user_prompt: [turn("user-1"), turn("user-2")] });
+    const first = await f.invoke("UserPromptSubmit", JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "one" }));
+    const second = await f.invoke("UserPromptSubmit", JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "two" }));
+    expect(JSON.parse(first.stdout).hookSpecificOutput.additionalContext).toMatch(/^Trusted Bflow user turn: messageId=user-1;/);
+    expect(JSON.parse(second.stdout).hookSpecificOutput.additionalContext).toMatch(/^Trusted Bflow user turn: messageId=user-2;/);
   });
   it("surfaces notices with a real user turn only after its context is emitted", async () => {
     const f = await fixture("conversation", "claude", { user_prompt: { messageId: "user-1", notices: [notice] } });

@@ -25,7 +25,7 @@ import { USER_DECISION_TOOL, buildDecisionRequestMessage, guardDirectUserInterac
 import { AdmissionRejectedError, isNonRetryableDeliveryError } from "./runtime.js";
 import { permitsReadOnlyInvestigation } from "./read-only-git.js";
 import { schedulerStatusReport } from "./scheduler-status.js";
-import { boundConversationContext } from "./conversation-context-budget.js";
+import { CONVERSATION_CONTEXT_BUDGET, boundConversationContext } from "./conversation-context-budget.js";
 import { openAgenticWorkspace, type AgenticWorkspaceHandle } from "./workspace.js";
 import { unwrap } from "./outbox.js";
 import { HostVerification, HostBehavioralFailure, DEFAULT_HOST_CHECKS } from "./host-verification.js";
@@ -1496,8 +1496,13 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
   }
   if (event === "UserPromptSubmit" && configuration.role === "conversation") {
     const result = await callHost(configuration.socketPath, configuration.token, "user_prompt", { paneId, hook });
+    // The header comes first, so the model finds the turn's messageId even when the notices or history below are long.
+    const turnId = record(result).messageId;
+    const header = typeof turnId === "string" ? `Trusted Bflow user turn: messageId=${turnId}; requiresConversationDecision=${record(result).requiresConversationDecision === true}. Call conversation_decide with exactly this messageId. ` : "";
     const shownFirst = mustShowSection([...(record(result).notices as unknown[] ?? []), ...undisplayedNotices(result).map(item => item.notice)] as Parameters<typeof mustShowSection>[0]);
-    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: shownFirst + "Trusted Bflow user turn and Conversation context: " + JSON.stringify(boundConversationContext(result)) } }) + "\n");
+    const prefix = header + shownFirst + "Trusted Bflow user turn and Conversation context: ";
+    // The JSON budget is what remains after the prefix, so the whole additionalContext stays within CONVERSATION_CONTEXT_BUDGET.
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: prefix + JSON.stringify(boundConversationContext(result, CONVERSATION_CONTEXT_BUDGET - Buffer.byteLength(prefix))) } }) + "\n");
     // Marked only after the context reached the provider; a crash before this line re-surfaces the notices.
     const ids = noticeIds(result);
     if (ids.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_surfaced", { paneId, nativeSessionId: textField(hook.session_id), messageIds: ids });

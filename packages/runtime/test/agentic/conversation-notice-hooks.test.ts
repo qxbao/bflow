@@ -118,7 +118,8 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
     const f = await fixture({ user_prompt: { messageId: "user-1", notices: [decisionNotice], undisplayed: [] } });
     const result = await f.invoke("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "hello" });
     const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
-    expect(context.startsWith("MUST SHOW TO USER VERBATIM:")).toBe(true);
+    expect(context.startsWith("Trusted Bflow user turn: messageId=user-1; requiresConversationDecision=false. ")).toBe(true);
+    expect(context.indexOf("MUST SHOW TO USER VERBATIM:")).toBeLessThan(context.indexOf("Trusted Bflow user turn and Conversation context:"));
     expect(context).toContain("Trusted Bflow user turn and Conversation context:");
   });
 });
