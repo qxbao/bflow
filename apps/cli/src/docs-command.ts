@@ -63,7 +63,9 @@ export async function collectContext7Health(input: {
     ...(deps.access ? { deps: { access: deps.access } } : {}) });
 }
 
-export async function executeDocsCommand(args: DocsCommandArgs, context?: CliContext): Promise<DocsCommandOutput> {
+export async function executeDocsCommand(args: DocsCommandArgs, context?: CliContext, onProgress?: (phase: string) => void): Promise<DocsCommandOutput> {
+  const progress = (phase: string) => { try { onProgress?.(phase); } catch { /* observational only */ } };
+  progress("Reading documentation configuration...");
   const deps: DocsCommandDependencies = context?.docs ?? {};
   const cwd = context?.cwd ?? process.cwd();
   const env = deps.env ?? process.env;
@@ -74,12 +76,14 @@ export async function executeDocsCommand(args: DocsCommandArgs, context?: CliCon
   if (repository) { try { config = await readEnvironmentConfig(repository); } catch { config = undefined; } }
 
   if (args.action === "status") {
+    progress("Checking Context7 Gateway access and health...");
     const health = await collectContext7Health({ repository, config, env, role: args.role, timeoutMs: args.timeoutMs,
       deps: { ...deps, stateDirectory: where.stateDirectory, machineId: where.machineId } });
     return { docs: true, action: "status", ok: health.state === "healthy" || health.state === "disabled", access: { mode: health.probe.mode, ...(health.probe.reason ? { reason: health.probe.reason } : {}) },
       warnings: health.checks.filter(check => check.status === "warn").map(check => check.message), health };
   }
 
+  progress("Checking scoped documentation access...");
   const access = await (deps.access ?? (async (): Promise<DocsAccess> => {
     if (!repository) return { mode: "none", kind: "no_gateway", reason: "Run this inside a Git repository whose agents were started with 'bflow up'." };
     // From a task worktree, the host's state and the Gateway's session scope are those of the main working tree.
@@ -106,12 +110,14 @@ export async function executeDocsCommand(args: DocsCommandArgs, context?: CliCon
     const projectRoot = repository?.root ?? cwd;
     const accessInfo = { mode: access.mode } as const;
     if (args.action === "search") {
+      progress("Searching Context7 libraries...");
       const result = await client.search({ library: args.library, projectRoot, startDir: cwd, ...(args.query !== undefined ? { query: args.query } : {}), ...(args.version !== undefined ? { version: args.version } : {}) });
       if (!result.ok) return { docs: true, action: "search", ok: false, access: accessInfo, warnings: [], failure: { ...result.failure, stage: result.stage }, metrics: client.metrics() };
       const { ok: _ok, ...search } = result;
       return { docs: true, action: "search", ok: result.selection !== "no_match", access: accessInfo, warnings: result.warnings, search, metrics: client.metrics(),
         ...(result.selection === "no_match" ? { failure: { kind: "library_not_found", message: `Context7 has no library matching "${args.library}".`, retryable: false, stage: "resolve" } } : {}) };
     }
+    progress("Looking up Context7 documentation...");
     const result = await client.lookup({ query: args.query, projectRoot, startDir: cwd, ...(args.library !== undefined ? { library: args.library } : {}),
       ...(args.libraryId !== undefined ? { libraryId: args.libraryId } : {}), ...(args.language !== undefined ? { language: args.language } : {}),
       ...(args.version !== undefined ? { version: args.version } : {}), ...(args.noCache ? { noCache: true } : {}) });

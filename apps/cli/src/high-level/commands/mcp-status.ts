@@ -5,7 +5,7 @@ import { findExecutable, McpConfigFileSchema } from "@bflow/machine-setup";
 import type { JsonValue, MCPServiceDefinition } from "@bflow/contracts";
 import type { CommandSpec } from "../args.js";
 import { HIGH_LEVEL_EXIT_CODES, HighLevelError, notFoundError } from "../envelope.js";
-import { describeError, guarded, StepLog, type HighLevelHandler } from "../context.js";
+import { describeError, guarded, reportUnits, StepLog, type HighLevelHandler } from "../context.js";
 
 export const MCP_STATUS_SPEC: CommandSpec = {
   name: "mcp.status",
@@ -71,6 +71,7 @@ export const mcpStatus: HighLevelHandler = async (args, ctx) => {
 
     const services = config.services.filter(s => selected === undefined || selected.includes(s.serviceId));
     const backends = [];
+    reportUnits(ctx, 0, services.length, "MCP backends inspected");
     for (const service of services) {
       const local = await localCheck(service, platform.pathEntries);
       const reported = gateway.backends.find(b => b.serviceId === service.serviceId);
@@ -79,6 +80,7 @@ export const mcpStatus: HighLevelHandler = async (args, ctx) => {
         serviceId: service.serviceId, kind: service.connection.kind, revision: service.revision, state,
         healthy: state === "healthy", local: local.detail, ...(reported?.detail !== undefined ? { gateway: reported.detail } : {})
       });
+      reportUnits(ctx, backends.length, services.length, "MCP backends inspected");
     }
     const ready = gateway.reachable && config.state !== "invalid" && backends.every(b => b.healthy);
     const data: JsonValue = JSON.parse(JSON.stringify({

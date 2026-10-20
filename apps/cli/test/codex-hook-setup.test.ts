@@ -93,6 +93,51 @@ describe("Codex hook-only setup", () => {
     expect(result.stdout).toContain("Approval covers only this inspected Codex hook snapshot");
   });
 
+  it("keeps approved results concise while preserving the receipt and exact scope", async () => {
+    const f = await fixture();
+    const review = await inspectCodexHooks(f.trust);
+    const result = await runCli(["setup", "--codex-hooks", "--apply", "--yes", "--hook-digest", review.digest], f.context);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Approved");
+    expect(result.stdout).toContain("Scope: Only the inspected Codex hook snapshot");
+    expect(result.stdout).toContain(f.store);
+    expect(result.stdout).not.toContain("Sources (");
+    expect(result.stdout).not.toContain("Hook digest:");
+    const plan = await runCli(["setup", "--codex-hooks", "--plan"], f.context);
+    expect(plan.stdout).toContain("Snapshot digest: " + review.digest);
+    expect(plan.stdout).toContain("Matcher:");
+    expect(plan.stdout).toContain("Pinned local dependencies");
+  });
+
+  it("provides a copyable exact-snapshot approval command alongside the full review", async () => {
+    const f = await fixture();
+    const review = await inspectCodexHooks(f.trust);
+    const result = await runCli(["setup", "--codex-hooks", "--plan"], f.context);
+    expect(result.stdout).toContain("bflow setup --codex-hooks --apply --yes --hook-digest " + review.digest);
+    expect(result.stdout).toContain(f.script);
+  });
+
+  it("suspends animation around the existing exact hook approval preview and resumes after it", async () => {
+    const f = await fixture();
+    const chunks: string[] = [], progress: string[] = [], previews: string[] = [];
+    const result = await runCli(["setup", "--codex-hooks", "--apply"], { ...f.context,
+      io: { stdout: () => {}, stderr: text => previews.push(text), progress: text => progress.push(text), stderrRaw: chunk => chunks.push(chunk) },
+      presentation: { interactive: true }, setup: { ...f.context.setup, confirm: async review => {
+        expect(review).toContain("Snapshot digest:");
+        expect(review).toContain("Command: " + f.script);
+        expect(previews).toEqual([review]);
+        expect(progress.at(-1)).toContain("Waiting for your confirmation");
+        const count = chunks.length;
+        await new Promise(resolve => setTimeout(resolve, 150));
+        expect(chunks).toHaveLength(count);
+        return true;
+      } } });
+    expect(result.exitCode).toBe(0);
+    expect(progress.at(-1)).toContain("Saving approval for the reviewed hook snapshot");
+    expect(chunks.at(-1)).toBe("\r\x1b[2K");
+    expect(result.stdout).not.toContain("Sources (");
+  });
+
   it("redacts command-line credentials from human and JSON hook inventories", async () => {
     const f = await fixture();
     const raw = JSON.parse(await readFile(f.config, "utf8"));
@@ -175,7 +220,7 @@ describe("Codex hook-only setup", () => {
     expect(reviewText).toContain("Snapshot digest");
     expect(reviewText).toContain("does not grant Bflow permissions");
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Result: approved");
+    expect(result.stdout).toContain("Codex global hooks: Approved");
     expect((await inspectCodexHooks(f.trust)).status).toBe("approved");
   });
 
@@ -259,9 +304,9 @@ describe("Codex hook-only setup", () => {
     await chmod(f.config, 0o777);
     const checked = await runCli(["setup", "--codex-hooks", "--check"], f.context);
     expect(checked.exitCode, checked.stdout + checked.stderr).toBe(0);
-    expect(checked.stdout).toContain("Hook policy: trust all current and future global hooks");
+    expect(checked.stdout).toContain("Scope: All current and future global hooks");
     expect(checked.stdout).toMatch(/^Warning: hooks\.json is group\/world-writable or not owned by the current user/m);
-    expect(checked.stdout).toContain("Result: already approved");
+    expect(checked.stdout).toContain("Codex global hooks: Already approved");
   });
 
   it("does not grant all-hook trust from a noninteractive request without --yes", async () => {
@@ -281,7 +326,7 @@ describe("Codex hook-only setup", () => {
     });
     expect(confirm.mock.calls[0]?.[0]).toContain("ALL current and future");
     expect(result.exitCode).toBe(approve ? 0 : 1);
-    expect(result.stdout).toContain(approve ? "Hook policy: trust all current and future global hooks" : "approval declined");
+    expect(result.stdout).toContain(approve ? "Scope: All current and future global hooks" : "approval declined");
     expect((await inspectCodexHooks(f.trust)).status).toBe(approve ? "approved" : "unsupported");
   });
 

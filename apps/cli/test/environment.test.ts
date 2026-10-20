@@ -233,6 +233,56 @@ describe("P12 repository environment lifecycle", () => {
     expect(activate).toHaveBeenCalledTimes(2); expect(fixture.manager.up).toHaveBeenCalledTimes(1);
     expect(runner.requests.filter(r => r.args[0] === "server")).toHaveLength(1);
   });
+  linuxIt("deduplicates native and transport waits independently while both remain pending", async () => {
+    const observations: string[] = [];
+    const manifest = SessionManifestSchema.parse({ ...fixture.create(), status: "initializing", panes: fixture.create().panes.map(pane => ({ ...pane, permanent: true, transportState: "starting" })) });
+    fixture.set(manifest);
+    vi.mocked(fixture.manager.up).mockResolvedValue({ ok: true, value: manifest });
+    let polls = 0;
+    vi.mocked(fixture.manager.getManifest).mockImplementation(async () => {
+      if (++polls > 2) throw new Error("Fixture polling ended");
+      return { ok: true, value: manifest };
+    });
+    const composed = new EnvironmentLifecycle(dir, { runner, onProgress: message => observations.push(message),
+      integration: { manager: fixture.manager, requiresNativeSession: true, runtime: mockRuntime(), quiesce: async () => ({ ok: true, value: undefined }) } });
+    await expect(composed.up(5000)).rejects.toThrow("Fixture polling ended");
+    expect(observations.filter(message => message.includes("Waiting for native-session hooks:"))).toHaveLength(1);
+    expect(observations.filter(message => message.includes("Waiting for required roles:"))).toHaveLength(1);
+    expect(observations.findIndex(message => message.includes("Waiting for role transport"))).toBeLessThan(observations.findIndex(message => message.includes("Waiting for native-session hooks:")));
+  });
+
+  it("reports status and each diagnostic group without deriving readiness from progress", async () => {
+    const observations: string[] = [];
+    const composed = new EnvironmentLifecycle(dir, { runner, onProgress: message => observations.push(message),
+      integration: { manager: fixture.manager } });
+    const status = await composed.status();
+    expect(status.server).toBe("stopped");
+    expect(observations).toContain("Reading repository configuration and saved session state...");
+    expect(observations).toContain("Checking session server and dependencies...");
+    observations.length = 0;
+    const doctor = await composed.doctor();
+    expect(doctor.schemaVersion).toBe(2);
+    expect(observations).toEqual(["Reading repository configuration for diagnostics...", "Checking Runtime and lifecycle health...",
+      "Checking agent providers and authentication...", "Checking shared MCP services...", "Checking installed tools...", "Checking approved skills..."]);
+  });
+
+  linuxIt("publishes changing native startup observations before the deadline, without duplicates", async () => {
+    const observations: string[] = [];
+    let attempts = 0;
+    const activate = async () => {
+      attempts++;
+      if (attempts > 3) return;
+      throw new EnvironmentError({ code: "conflict", retryable: true,
+        message: attempts < 3 ? "Coordinator pane pane-7 waiting for receipt" : "Verifier pane pane-8 waiting for receipt",
+        details: { stage: "native_startup" } });
+    };
+    const composed = new EnvironmentLifecycle(dir, { runner, onProgress: message => observations.push(message),
+      integration: { manager: fixture.manager, runtime: mockRuntime(), quiesce: async () => ({ ok: true, value: undefined }), activate } });
+    expect((await composed.up(5000)).status).toBe("up");
+    expect(observations.filter(message => message.includes("Coordinator pane pane-7"))).toHaveLength(1);
+    expect(observations.filter(message => message.includes("Verifier pane pane-8"))).toHaveLength(1);
+    expect(fixture.manager.up).toHaveBeenCalledTimes(1);
+  });
   linuxIt("retains actionable native-hook context when activation readiness times out", async () => {
     const activate = vi.fn(async () => { throw new EnvironmentError({ code: "conflict", retryable: true,
       message: "Coordinator pane pane-7 is still publishing its native receipt", details: { stage: "native_startup" } }); });
@@ -369,6 +419,15 @@ describe("P12 repository environment lifecycle", () => {
     const attach = runner.requests.find((r) => r.mode === "interactive")!;
     expect(attach.args).toEqual(["session", "attach", repository.sessionName]);
     expect(attach.env?.["HERDR_SESSION"]).toBe(repository.sessionName);
+  });
+  linuxIt("keeps raw progress off the terminal while attach owns it", async () => {
+    await lifecycle.up();
+    const chunks: string[] = [];
+    const result = await main(["attach"], { cwd: dir, io: { stdout: () => {}, stderr: () => {}, stderrRaw: chunk => chunks.push(chunk) },
+      presentation: { interactive: true }, environment: { runner, integration: { manager: fixture.manager } } });
+    expect(result.exitCode).toBe(0);
+    expect(chunks).toEqual([]);
+    process.exitCode = 0;
   });
   linuxIt("rejects a manager attach target belonging to another role", async () => {
     await lifecycle.up(); vi.mocked(fixture.manager.attach).mockResolvedValue({ ok: true, value: fixture.get().panes[1]! });

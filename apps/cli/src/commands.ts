@@ -162,8 +162,8 @@ export async function executeCommand(
   });
   const io = context?.io;
   const executionContext = io ? { ...context, io: { ...io,
-    stdout: (message: string) => { progress.stop(); io.stdout(message); },
-    stderr: (message: string) => { progress.stop(); io.stderr(message); }
+    stdout: (message: string) => { if (!progress.awaitingInput) progress.stop(); io.stdout(message); },
+    stderr: (message: string) => { if (!progress.awaitingInput) progress.stop(); io.stderr(message); }
   } } : context;
   try { return await executeCommandWithProgress(parsed, executionContext, progress); }
   finally { progress.stop(); }
@@ -232,6 +232,13 @@ async function executeCommandWithProgress(
     const envDeps = {
       ...context?.environment,
       ...(context?.operationOptions?.signal ? { signal: context.operationOptions.signal } : {}),
+      onProgressDetail: (message: string) => {
+        try {
+          if (context?.environment?.onProgressDetail) context.environment.onProgressDetail(message);
+          else context?.environment?.onProgress?.(message);
+        } catch {}
+        if (showProgress) progress.detail(message);
+      },
       onProgress: (step: string) => {
         try { context?.environment?.onProgress?.(step); } catch {}
         if (showProgress) {
@@ -283,7 +290,7 @@ async function executeCommandWithProgress(
   if (parsed.command === "docs") {
     try {
       const { executeDocsCommand } = await import("./docs-command.js");
-      const data = await executeDocsCommand(parsed, context);
+      const data = await executeDocsCommand(parsed, context, showProgress ? emitProgress : undefined);
       return makeResult(data.ok ? CLI_EXIT_CODES.SUCCESS : CLI_EXIT_CODES.RUNTIME_ERROR, true, "docs", data, undefined, isJson, io, presentation);
     } catch (error) {
       const contractError = toContractError(error);
@@ -294,7 +301,9 @@ async function executeCommandWithProgress(
   if (parsed.command === "setup") {
     if (parsed.codexHooks) {
       try {
-        const data = await executeCodexHookSetup(parsed, context);
+        const data = await executeCodexHookSetup(parsed, context, showProgress ? {
+          step: emitProgress, confirm: action => progress.confirmation(action)
+        } : undefined);
         return makeResult(codexHookSetupSucceeded(data) ? CLI_EXIT_CODES.SUCCESS : CLI_EXIT_CODES.RUNTIME_ERROR,
           true, "setup", data, undefined, isJson, io, presentation);
       } catch (error) {
@@ -304,7 +313,8 @@ async function executeCommandWithProgress(
     }
     try {
       const data = await executeSetupCommand(parsed, context, showProgress ? emitProgress : undefined,
-        showProgress ? { detail: message => progress.detail(message),
+        showProgress ? { detail: message => progress.detail(message), important: message => progress.important(message),
+          units: (completed, total, label) => progress.units(completed, total, label),
           confirm: action => progress.confirmation(action) } : undefined);
       const successful = data.outcome === undefined || ["healthy", "applied"].includes(data.outcome) ||
         parsed.mode === "dry_run" && data.outcome === "changes_pending";
