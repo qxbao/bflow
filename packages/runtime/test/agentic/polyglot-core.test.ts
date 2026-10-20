@@ -96,3 +96,19 @@ it("assigns unique stable labels to nested projects whose flattened paths collid
   expect(new Set(result.profiles.map(profile => profile.id)).size).toBe(6);
   expect(new Set(result.profiles.map(profile => profile.command)).size).toBe(6);
 });
+it("never executes repository Git smudge/process filters while creating the disposable measurement checkout", async () => {
+  const { verificationGit } = await import("../../src/agentic/behavioral-runner.js");
+  const cwd = await root(), checkout = await root(), sentinel = join(cwd, "filter-was-executed");
+  await rm(checkout, { recursive: true });
+  const git = (...args: string[]) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", ...args], { cwd, encoding: "utf8" }).trim();
+  git("init", "-b", "main"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.test");
+  await writeFile(join(cwd, ".gitattributes"), "*.txt filter=fixture\n"); await writeFile(join(cwd, "data.txt"), "committed bytes\n");
+  git("add", "."); git("commit", "-m", "base");
+  git("config", "filter.fixture.smudge", `touch '${sentinel}'; cat`); git("config", "filter.fixture.required", "true");
+  try {
+    await verificationGit(cwd, ["worktree", "add", "--detach", checkout, git("rev-parse", "HEAD")]);
+    const { readFile } = await import("node:fs/promises");
+    await expect(readFile(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(checkout, "data.txt"), "utf8")).toBe("committed bytes\n");
+  } finally { await verificationGit(cwd, ["worktree", "remove", "--force", checkout]).catch(() => undefined); }
+});

@@ -198,7 +198,7 @@ not hostile-kernel or hostile-same-UID isolation certification.
 Fresh reports come from private output paths or bounded conventional build-report
 patterns. Preexisting reports reject invocation. Collection rejects symlinks, special files,
 path escapes, duplicate files and oversized output; regular files are opened without
-following symlinks. After prepare/tests, tracked and nonignored untracked files must
+following symlinks. Host Git operations used for measurement disable user/system Git configuration, hooks, fsmonitor, recursive submodules and locally registered clean/smudge/process filters, so checkout/status cannot launch repository filter commands before the sandbox. Git attributes/LFS/submodule definitions are pinned too. After prepare/tests, tracked and nonignored untracked files must
 still match the exact revision. Only disposable checkouts are forcibly removed.
 
 ## Automatic dependency warming: threat model and limits

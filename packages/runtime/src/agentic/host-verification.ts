@@ -1,6 +1,4 @@
-import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { promisify } from "node:util";
 import {
   ArtifactReferenceSchema, ArtifactWriteOptionsSchema, QualityGateContextSchema, QualityGateDefinitionSchema,
   PaneBindingSchema, QualityGateResultSchema, SpecificationSchema, TestStrategySchema, VerificationResultSchema,
@@ -8,11 +6,10 @@ import {
 } from "@bflow/contracts";
 import { digest, json, record, strings, textField } from "./journal.js";
 import { unwrap } from "./outbox.js";
-import { behavioralChecks, measureBehavior, parseBehavioralCommands, testFilePattern, type BehavioralCommand, type BoundBehavioralCommand } from "./behavioral-runner.js";
+import { behavioralChecks, verificationGit, measureBehavior, parseBehavioralCommands, testFilePattern, type BehavioralCommand, type BoundBehavioralCommand } from "./behavioral-runner.js";
 import { TestRunnerSource, automaticChecks, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
 import { WorkflowProposalRejected, type WorkflowRejectionCode } from "./workflow-rejection.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
-const execute = promisify(execFile);
 const whitespaceCommand = "git diff --check";
 /** Default checks support documentation only. Behavioral checks require owner configuration. */
 export const DEFAULT_HOST_CHECKS = [
@@ -74,8 +71,7 @@ export class HostVerification {
   private async trustEvidence(result: VerificationResult) { await this.receipts?.recordEvidence(result); this.evidenceReceipts.set(result.verificationId, digest(result)); this.evidenceRecords.set(result.verificationId, result); }
   private bindingIdentity(binding: PaneBinding) { const { transportState: _transportState, ...identity } = binding; return identity; }
   private async git(cwd: string, args: string[]): Promise<string> {
-    const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")));
-    return (await execute("git", ["-c", "core.hooksPath=/dev/null", "-c", "diff.external=", ...args], { cwd, env, timeout: 30_000, maxBuffer: 2 * 1024 * 1024 })).stdout;
+    return verificationGit(cwd, args);
   }
   private async capture(cwd: string, base: string, revision: string) {
     if (!/^[a-f0-9]{40}$/.test(base) || !/^[a-f0-9]{40}$/.test(revision)) throw new Error("Verification needs pinned Git revisions");

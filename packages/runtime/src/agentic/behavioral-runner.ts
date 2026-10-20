@@ -124,8 +124,21 @@ export function behavioralChecks(commands: readonly BehavioralCommand[]): Qualit
 }
 const execute = promisify(execFile);
 export async function verificationGit(cwd: string, args: string[]): Promise<string> {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")));
-  return (await execute("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "diff.external=", ...args], { cwd, env, timeout: 30_000, maxBuffer: 2 * 1024 * 1024 })).stdout;
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_"))), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+  const options = { cwd, env, timeout: 30000, maxBuffer: 2 * 1024 * 1024 };
+  const fixed = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "diff.external=", "-c", "submodule.recurse=false"];
+  // Git checkout/status can run smudge/clean/process filters before the test sandbox exists.
+  // Disable every locally configured filter; global/system config is excluded above.
+  let keys = "";
+  try { keys = (await execute("git", [...fixed, "config", "--local", "--name-only", "--get-regexp", "^filter\\..*\\.(clean|smudge|process|required)$"], options)).stdout; }
+  catch (error) { if ((error as { code?: unknown }).code !== 1) throw error; }
+  const filters = new Set(keys.trim().split("\n").filter(Boolean).map(key => {
+    const match = /^filter\.(.+)\.(?:clean|smudge|process|required)$/.exec(key);
+    if (!match || /[\0\r\n]/.test(match[1]!)) throw new Error("Invalid local Git filter definition");
+    return match[1]!;
+  }));
+  for (const name of filters) fixed.push("-c", `filter.${name}.clean=`, "-c", `filter.${name}.smudge=`, "-c", `filter.${name}.process=`, "-c", `filter.${name}.required=false`);
+  return (await execute("git", [...fixed, ...args], options)).stdout;
 }
 export async function assertPinnedRevision(cwd: string, revision: string) {
   if (!/^[a-f0-9]{40}$/.test(revision) || (await verificationGit(cwd, ["rev-parse", "HEAD"])).trim() !== revision || await verificationGit(cwd, ["status", "--porcelain=v1", "--untracked-files=all", "-z"])) throw new Error("Verification needs a clean worktree at the pinned revision");
