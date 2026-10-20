@@ -108,7 +108,7 @@ function junitResults(reports: readonly string[]): TestResult[] {
       checkAllowedChildren(child, ["failure", "error", "skipped", "system-out", "system-err", "properties"]);
       if (child.text.trim()) invalid("unexpected JUnit testcase text");
       const failures = children(child, "failure");
-      if (children(child, "error").length || children(child, "skipped").length || failures.length > 1 || child.attrs.status === "notrun" || child.attrs.status === "disabled") invalid("JUnit skipped or runtime error");
+      if (children(child, "error").length || children(child, "skipped").length || failures.length > 1 || child.attrs.status !== undefined && !["run", "passed", "success"].includes(child.attrs.status)) invalid("JUnit skipped or runtime error");
       if (failures.some(failure => !assertion(failure.attrs.type?.trim() || `${failure.attrs.message ?? ""}\n${content(failure)}`))) invalid("JUnit failure is not a recognized assertion");
       const name = text(child.attrs.name), className = child.attrs.classname ?? "";
       results.push({ name: className ? `${className}.${name}` : name, passed: failures.length === 0 });
@@ -221,25 +221,26 @@ function trxResults(reports: readonly string[]): TestResult[] {
     return results;
   });
 }
-function jestResults(input: string): TestResult[] {
+function jestResults(input: string, selected: readonly string[]): TestResult[] {
   const report = object(json(input)), results: TestResult[] = [];
   const tests = number(report.numTotalTests), passed = number(report.numPassedTests), failed = number(report.numFailedTests);
-  if (number(report.numPendingTests) || number(report.numTodoTests) || number(report.numPendingTestSuites) || number(report.numRuntimeErrorTestSuites) || report.wasInterrupted !== false || report.success !== (failed === 0)) invalid("Jest skipped, interrupted or runtime errors");
-  const suites = array(report.testResults); let failedSuites = 0;
+  if (number(report.numTodoTests) || number(report.numPendingTestSuites) || number(report.numRuntimeErrorTestSuites) || report.wasInterrupted !== false || report.success !== (failed === 0)) invalid("Jest skipped, interrupted or runtime errors");
+  const suites = array(report.testResults); let failedSuites = 0, filtered = 0;
   for (const item of suites) {
     const suite = object(item), leaves = array(suite.assertionResults); let suiteFailed = false;
     if (!leaves.length || !["passed", "failed"].includes(String(suite.status)) || suite.testExecError !== undefined) invalid("Jest suite infrastructure error");
     for (const leaf of leaves) {
       const test = object(leaf), failed = test.status === "failed", messages = array(test.failureMessages);
-      if (!["passed", "failed"].includes(String(test.status)) || messages.some(value => typeof value !== "string") || (failed ? !messages.length || messages.some(message => !assertion(String(message)) && !/^Error: expect\(/.test(String(message))) : messages.length > 0)) invalid("Jest skipped or non-assertion failure");
+      if (!["passed", "failed", "pending"].includes(String(test.status)) || messages.some(value => typeof value !== "string") || (failed ? !messages.length || messages.some(message => !assertion(String(message)) && !/^Error: expect\(/.test(String(message))) : messages.length > 0)) invalid("Jest skipped or non-assertion failure");
       const ancestors = array(test.ancestorTitles).map(text), title = text(test.title), fullName = text(test.fullName);
       if ([...ancestors, title].join(" ") !== fullName) invalid("Jest fullName contradicts titles");
+      if (test.status === "pending") { if (selected.includes(fullName)) invalid("Selected Jest test skipped"); filtered++; continue; }
       results.push({ name: fullName, passed: !failed }); suiteFailed ||= failed;
     }
     if (suite.status !== (suiteFailed ? "failed" : "passed") || !suiteFailed && suite.message !== "") invalid("Jest suite status contradiction");
     if (suiteFailed) failedSuites++;
   }
-  if (tests !== results.length || passed !== results.filter(test => test.passed).length || failed !== tests - passed || number(report.numTotalTestSuites) !== suites.length || number(report.numPassedTestSuites) !== suites.length - failedSuites || number(report.numFailedTestSuites) !== failedSuites) invalid("Jest counters contradict results");
+  if (tests !== results.length + filtered || number(report.numPendingTests) !== filtered || passed !== results.filter(test => test.passed).length || failed !== results.length - passed || number(report.numTotalTestSuites) !== suites.length || number(report.numPassedTestSuites) !== suites.length - failedSuites || number(report.numFailedTestSuites) !== failedSuites) invalid("Jest counters contradict results");
   return results;
 }
 function mochaResults(input: string): TestResult[] {
@@ -286,9 +287,9 @@ export function parseRunnerResult(format: ResultFormat, outcome: QualityCommandO
     case "trx": results = trxResults(reports ?? [output]); break;
     case "go_json": results = goResults(output); break;
     case "rust_libtest": results = rustResults(output); break;
-    case "jest_json": results = jestResults(reports?.length === 1 ? reports[0]! : output); break;
+    case "jest_json": results = jestResults(reports?.length === 1 ? reports[0]! : output, expectedNames); break;
     case "mocha_json": results = mochaResults(output); break;
-    case "rspec_json": results = rspecResults(output); break;
+    case "rspec_json": results = rspecResults(reports?.length === 1 ? reports[0]! : output); break;
     default: return invalid("unsupported result format");
   }
   return finish(results, outcome, expectedNames, failureExitCodes ?? (format === "rust_libtest" ? [101] : [1]));

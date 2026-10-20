@@ -67,7 +67,7 @@ export class HostDevelopment {
     await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async (task, definition) => {
       this.scope(path, strings(record(definition.metadata).ownedPaths), strings(record(definition.metadata).forbiddenPaths ?? []));
       const strategy = task.spec.strategy;
-      const tests = this.commandsFor(task, strings(record(definition.metadata).ownedPaths)).flatMap(command => command.testPaths);
+      const tests = this.commandsFor(task, strings(record(definition.metadata).ownedPaths)).flatMap(command => [...command.testPaths, ...Object.keys(command.definitionBlobs ?? {})]);
       const isTest = tests.some(test => test === path);
       const evidence = strategy.metadata?.tddEvidence;
       if (strategy.tddDecision.mode === "required" && Array.isArray(evidence) && evidence.length && isTest)
@@ -111,7 +111,7 @@ export class HostDevelopment {
         const path = line.slice(3); this.scope(path, owned, forbidden); return path;
       });
       if (!paths.length) return json({ committed: false, head: expected });
-      const tests = this.commandsFor(task, owned).flatMap(command => command.testPaths);
+      const tests = this.commandsFor(task, owned).flatMap(command => [...command.testPaths, ...Object.keys(command.definitionBlobs ?? {})]);
       if (task.spec.strategy.tddDecision.mode === "required") {
         const evidence = task.spec.strategy.metadata?.tddEvidence;
         if (Array.isArray(evidence) && evidence.length && paths.some(path => tests.includes(path)))

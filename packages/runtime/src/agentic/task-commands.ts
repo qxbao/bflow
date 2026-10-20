@@ -1,4 +1,5 @@
 import { QualityGateDefinitionSchema, type QualityGateDefinition, type Specification, type TestStrategy } from "@bflow/contracts";
+import { verificationGit } from "./behavioral-runner.js";
 import { bindRunnerProfile, testFilePattern, type BehavioralCommand, type BoundBehavioralCommand, type RunnerDetection, type RunnerProfile } from "./behavioral-runner.js";
 import { PREPARE_TIMEOUT_MS, PROFILE_TIMEOUT_MS, detectTestRunners } from "./runner-detection.js";
 
@@ -11,11 +12,11 @@ export const AUTOMATIC_RUNNERS = [
   { id: "auto-integration", command: "auto:integration", method: "integration_test", levels: ["integration", "regression"] }
 ] as const;
 
-export type AutomaticRunner = (typeof AUTOMATIC_RUNNERS)[number];
+export interface AutomaticRunner { id: string; command: string; method: BehavioralCommand["method"]; levels: readonly string[] }
 
 /** Static gate definitions for the automatic runners; their test identities are bound when the verification plan is built. */
-export function automaticChecks(): QualityGateDefinition[] {
-  return AUTOMATIC_RUNNERS.map(runner => QualityGateDefinitionSchema.parse({
+export function automaticChecks(runners: readonly AutomaticRunner[] = AUTOMATIC_RUNNERS): QualityGateDefinition[] {
+  return runners.map(runner => QualityGateDefinitionSchema.parse({
     id: `host-behavioral-${runner.id}`, name: `Independent ${runner.command}`, evaluator: "host-behavioral-command", required: true,
     timeout: { executionTimeoutMs: PROFILE_TIMEOUT_MS + PREPARE_TIMEOUT_MS + 60_000, onTimeout: "block" },
     metadata: { bindAcceptedCriteria: true, bindMethodTestNames: true },
@@ -29,6 +30,7 @@ export function automaticChecks(): QualityGateDefinition[] {
  */
 export class TestRunnerSource {
   private detection: RunnerDetection | undefined;
+  private revision: string | undefined;
   constructor(readonly owner: readonly BehavioralCommand[], private readonly repositoryRoot?: string,
     private readonly detect: (repositoryRoot: string) => Promise<RunnerDetection> = root => detectTestRunners(root)) {}
   /** True when no owner command exists and a repository is available for detection. */
@@ -42,7 +44,10 @@ export class TestRunnerSource {
    */
   async refresh(): Promise<RunnerDetection | undefined> {
     if (!this.automatic) return undefined;
-    if (this.detection?.status !== "detected") this.detection = await this.detect(this.repositoryRoot!);
+    const revision = await verificationGit(this.repositoryRoot!, ["rev-parse", "HEAD"]).then(value => value.trim()).catch(() => undefined);
+    if (this.detection?.status !== "detected" || revision !== this.revision) {
+      this.detection = await this.detect(this.repositoryRoot!); this.revision = revision;
+    }
     return this.detection;
   }
 }
@@ -50,10 +55,18 @@ export class TestRunnerSource {
 export function unique<T>(values: readonly T[]): T[] { return [...new Set(values)]; }
 
 /** Test identities for one automatic profile: mapped names of the active criteria with its method, and the test files in scope. */
+function matchesRunnerFile(profile: RunnerProfile, path: string): boolean {
+  const adapter = profile.adapter?.adapterId ?? "javascript";
+  const patterns: Record<string, RegExp> = { javascript: /\.[cm]?[jt]sx?$/, jest: /\.[cm]?[jt]sx?$/, mocha: /\.[cm]?[jt]sx?$/,
+    python: /\.py$/, pytest: /\.py$/, go: /_test\.go$/, rust: /\.rs$/, cargo: /\.rs$/, maven: /\.(?:java|kt)$/, gradle: /\.(?:java|kt)$/, dotnet: /\.(?:cs|fs|vb)$/, rspec: /\.rb$/, minitest: /\.rb$/, phpunit: /\.php$/, ctest: /\.(?:c|cc|cpp|cxx|cmake)$/ };
+  return patterns[adapter]?.test(path) ?? true;
+}
 export function automaticIdentities(profile: RunnerProfile, specification: Specification, strategy: TestStrategy, ownedPaths?: readonly string[] | undefined) {
   const criteria = specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived" && criterion.verificationMethod === profile.method);
   const testNames = unique(criteria.flatMap(criterion => strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id)?.testNames ?? []));
-  const testPaths = unique(specification.affectedPaths.filter(path => testFilePattern.test(path) &&
+  const project = profile.adapter?.projectDirectory;
+  const testPaths = unique(specification.affectedPaths.filter(path => testFilePattern.test(path) && matchesRunnerFile(profile, path) &&
+    (project === undefined || project === "." || path.startsWith(project + "/")) &&
     (ownedPaths === undefined || ownedPaths.some(prefix => path === prefix || path.startsWith(`${prefix}/`)))));
   return testNames.length && testPaths.length ? { testNames, testPaths } : undefined;
 }
@@ -77,7 +90,7 @@ export function resolveTaskCommands(input: TaskCommandInput): BoundBehavioralCom
   return [...owner, ...bound];
 }
 
-const TEST_PATH_RULE = "Test files must be listed in specification.affectedPaths (a test/ or tests/ directory or a .test/.spec suffix), committed in the task, and owned by the task.";
+const TEST_PATH_RULE = "Test files must be listed in specification.affectedPaths, use the selected adapter language and its project directory, be committed, and belong to the task ownership. Split tasks whose criterion identities cannot be selected unambiguously.";
 const VITEST_NAME_RULE = "vitest reports fullName: describe titles plus the test title joined by a single space. Use exactly that string in criterionMappings.testNames.";
 const TAP_NAME_RULE = "node --test reports the test title only. Use exactly that string in criterionMappings.testNames.";
 
@@ -90,7 +103,8 @@ export function describeTestRunners(source: TestRunnerSource) {
         ({ id, command, method, levels, testNames, testPaths, reporter: reporter ?? "node_tap", source: "owner" })),
       ...source.profiles.map(profile => ({
         id: profile.id, command: profile.command, method: profile.method, levels: profile.levels, reporter: profile.reporter, source: "detected",
-        testPathRule: TEST_PATH_RULE, testNameRule: profile.reporter === "vitest_json" ? VITEST_NAME_RULE : TAP_NAME_RULE
+        testPathRule: TEST_PATH_RULE, testNameRule: profile.adapter?.nameRule ?? (profile.reporter === "vitest_json" ? VITEST_NAME_RULE : TAP_NAME_RULE),
+        ...(profile.adapter ? { adapter: profile.adapter.adapterId, version: profile.adapter.version, projectDirectory: profile.adapter.projectDirectory, resultFormat: profile.adapter.format } : {})
       }))
     ],
     testRunnerDetection: !source.automatic ? { status: "owner" }

@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { probeBehavioralSandbox } from "../../src/agentic/sandbox-readiness.js";
 import { bindRunnerProfile, measureBehavior, type RunnerProfile } from "../../src/agentic/behavioral-runner.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -13,7 +13,7 @@ const depName = "dep resolves through the checkout", generatedName = "generated 
 function profile(dependencySource: string, overrides: Partial<RunnerProfile> = {}): RunnerProfile {
   return { id: "node-tap-pnpm", command: "detected:node-tap", executable: process.execPath, args: ["--test", "--test-reporter=tap"],
     method: "unit_test", levels: ["unit", "regression"], reporter: "node_tap", timeoutMs: 30_000,
-    checkoutDependencyRoots: ["node_modules", "pkg/node_modules"], dependencySource, source: "detected", ...overrides };
+    definitionBlobs: {}, checkoutDependencyRoots: ["node_modules", "pkg/node_modules"], dependencySource, source: "detected", ...overrides };
 }
 
 describe("bindRunnerProfile", () => {
@@ -21,9 +21,9 @@ describe("bindRunnerProfile", () => {
     const bound = bindRunnerProfile(profile("/repo", { prepare: { args: ["node_modules/typescript/bin/tsc", "-b"], timeoutMs: 60_000 } }),
       { testNames: ["a"], testPaths: ["pkg/test/a.test.cjs"] });
     expect(bound).toEqual({ id: "node-tap-pnpm", command: "detected:node-tap", executable: process.execPath,
-      args: ["--test", "--test-reporter=tap", "pkg/test/a.test.cjs"], method: "unit_test", levels: ["unit", "regression"],
+      args: ["--test", "--test-reporter=tap", "--test-name-pattern=^(?:a)$", "pkg/test/a.test.cjs"], method: "unit_test", levels: ["unit", "regression"],
       testNames: ["a"], testPaths: ["pkg/test/a.test.cjs"], reporter: "node_tap", timeoutMs: 30_000,
-      checkoutDependencyRoots: ["node_modules", "pkg/node_modules"], dependencySource: "/repo",
+      definitionBlobs: {}, checkoutDependencyRoots: ["node_modules", "pkg/node_modules"], dependencySource: "/repo",
       prepare: { args: ["node_modules/typescript/bin/tsc", "-b"], timeoutMs: 60_000 } });
     expect(bindRunnerProfile(profile("/repo"), { testNames: ["a"], testPaths: ["src/feature.spec.ts"] })).not.toHaveProperty("prepare");
   });
@@ -59,7 +59,7 @@ async function pnpmLikeRepo() {
 }
 
 // Measurements launch the production Bubblewrap sandbox, so they need Linux and /usr/bin/bwrap.
-describe.skipIf(process.platform !== "linux" || !existsSync("/usr/bin/bwrap"))("runner profile measurements in the Linux sandbox", () => {
+describe.skipIf((await probeBehavioralSandbox()).status !== "ready")("runner profile measurements in the Linux sandbox", () => {
   it("measures a pnpm-style relative-symlinked dependency tree without modifying tracked files", async () => {
     const f = await pnpmLikeRepo();
     const command = bindRunnerProfile(profile(f.cwd), { testNames: [depName], testPaths: ["pkg/test/dep.test.cjs"] });

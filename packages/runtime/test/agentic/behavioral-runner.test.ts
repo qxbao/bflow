@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { probeBehavioralSandbox } from "../../src/agentic/sandbox-readiness.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { PaneBindingSchema, QualityGateContextSchema, SpecificationSchema } from "@bflow/contracts";
 import { openFilesystemArtifactStore } from "@bflow/artifact-store";
@@ -48,7 +49,7 @@ async function fixture(taskType = "bugfix", reporter: "node_tap" | "vitest_json"
   return { cwd, git, commit, command, specification, redRevision, base, binding, host, restart(commands = [command]) { return new HostVerification(() => runtime, () => opened.value, new HostReceiptJournal(receiptsPath, cwd, "session-1"), commands); }, get strategy() { return strategy; }, accept(result: unknown) { strategy = recordEvidence(strategy, result); } };
 }
 // Measurement launches require the production Bubblewrap namespace sandbox.
-describe.skipIf(process.platform !== "linux")("independent behavioral command measurements", () => {
+describe.skipIf((await probeBehavioralSandbox()).status !== "ready")("independent behavioral command measurements", () => {
   it("bounds aggregate command time and output within host transport capacity", async () => {
     const f = await fixture();
     expect(() => parseBehavioralCommands([{ ...f.command, timeoutMs: 300_001 }])).toThrow("execution bounds");

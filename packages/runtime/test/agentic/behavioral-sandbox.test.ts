@@ -4,6 +4,7 @@ import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink,
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { probeBehavioralSandbox } from "../../src/agentic/sandbox-readiness.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { measureBehavior, parseBehavioralCommands } from "../../src/agentic/behavioral-runner.js";
 import { sandboxBehavior } from "../../src/agentic/behavioral-sandbox.js";
@@ -37,7 +38,7 @@ async function listen(pathOrPort: string | number) {
 }
 
 // These adversarial checks require Bubblewrap namespaces, host socket isolation, and Linux procfs.
-describe.skipIf(process.platform !== "linux")("mandatory Linux behavioral sandbox adversarial boundaries", () => {
+describe.skipIf((await probeBehavioralSandbox()).status !== "ready")("mandatory Linux behavioral sandbox adversarial boundaries", () => {
   it("runs normal Node tests without inheriting host environment or Git metadata", async () => {
     const f = await fixture(), revision = await f.commit(`
       assert.equal(2+2,4);

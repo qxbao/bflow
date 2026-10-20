@@ -9,7 +9,7 @@ import {
 import { digest, json, record, strings, textField } from "./journal.js";
 import { unwrap } from "./outbox.js";
 import { behavioralChecks, measureBehavior, parseBehavioralCommands, testFilePattern, type BehavioralCommand, type BoundBehavioralCommand } from "./behavioral-runner.js";
-import { AUTOMATIC_RUNNERS, TestRunnerSource, automaticChecks, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
+import { TestRunnerSource, automaticChecks, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
 import { WorkflowProposalRejected, type WorkflowRejectionCode } from "./workflow-rejection.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
 const execute = promisify(execFile);
@@ -116,7 +116,7 @@ export class HostVerification {
     } };
   }
   /** Owner-configured checks always; automatic checks only when no owner file exists (static definitions, bound at plan time). */
-  behavioralChecks() { return [...behavioralChecks(this.runners.owner), ...(this.runners.automatic ? automaticChecks() : [])]; }
+  behavioralChecks() { return [...behavioralChecks(this.runners.owner), ...(this.runners.automatic ? automaticChecks(this.runners.profiles) : [])]; }
   /** Methods with a runner: owner-configured, or Runtime-detected. Fixed per owner configuration; detection may refresh. */
   configuredMethods(): string[] { return [...new Set([...this.runners.owner.map(command => command.method), ...this.runners.profiles.map(profile => profile.method)])]; }
   /**
@@ -148,8 +148,8 @@ export class HostVerification {
     const detection = this.runners.current;
     if (detection?.status !== "detected") {
       const reason = detection?.status === "unsupported" ? detection.reason : "Test runner detection has not run yet";
-      throw new WorkflowProposalRejected({ code: "no_test_runner_detected", reason, options: [
-        "Coordinator thêm task thiết lập test runner (vitest) rồi đề xuất lại workflow", "Hủy run"] });
+      throw new WorkflowProposalRejected({ code: detection?.status === "unsupported" && detection.agentFixable ? "runner_setup_required" : "no_test_runner_detected", reason, options: [
+        "Coordinator tự thiết lập runner phù hợp qua một task có review rồi đề xuất lại workflow", "Hủy run"] });
     }
     const reject = (code: WorkflowRejectionCode, reason: string): never => { throw new WorkflowProposalRejected({ code, reason, options: [] }); };
     const profiles = detection.profiles, labels = profiles.map(profile => profile.command).join(", ");
@@ -158,8 +158,9 @@ export class HostVerification {
     if (!testPaths.length) reject("missing_test_paths", `Automated acceptance criteria (${ids}) need their committed test files listed in specification.affectedPaths. Add the exact test file paths (for example packages/x/test/feature.test.ts) to affectedPaths and propose again.`);
     const strategy = strategyInput === undefined ? undefined : TestStrategySchema.parse(strategyInput);
     for (const criterion of automated) {
-      const profile = profiles.find(item => item.method === criterion.verificationMethod);
-      if (!profile) reject("unsupported_method", `Criterion ${criterion.id} uses ${criterion.verificationMethod}, which has no detected runner (detected: ${labels || "none"}). Only unit_test and integration_test are supported automatically; the Coordinator cannot change verificationMethod, so report this to the user through Conversation.`);
+      const candidates = profiles.filter(item => item.method === criterion.verificationMethod);
+      const profile = candidates.find(item => strategy?.targetCommands.includes(item.command)) ?? candidates[0];
+      if (!profile) reject("unsupported_method", `Criterion ${criterion.id} uses ${criterion.verificationMethod}, which has no detected runner (detected: ${labels || "none"}). Coordinator must add a reviewed runner setup task without changing verificationMethod.`);
       if (!strategy) continue;
       const mapping = strategy.criterionMappings.find(item => item.criterionId === criterion.id);
       if (!mapping?.testNames.length) reject("missing_test_mapping", `Criterion ${criterion.id} has no criterionMappings entry with test names. Set criterionMappings to [{"criterionId":"${criterion.id}","testNames":[...]}] using the exact names the runner reports (vitest: describe titles plus the test title joined by one space; node --test: the test title).`);
@@ -168,6 +169,8 @@ export class HostVerification {
     if (strategy) {
       for (const command of strategy.targetCommands) if (!profiles.some(profile => profile.command === command)) reject("unknown_test_command", `targetCommands contains '${command}', which is not a detected runner label (${labels}). Use only detected labels, or remove the command, and propose again.`);
       if (strategy.coverageThresholdPercent !== undefined) throw new Error("Configured behavioral reporters do not measure aggregate coverage");
+      try { resolveTaskCommands({ owner: [], profiles, strategy, specification: spec }); }
+      catch { reject("runner_setup_required", "Selected test identities cannot be bound exactly to the detected runner. Coordinator must split ambiguous tasks or create a reviewed runner setup task; preserve verificationMethod."); }
     }
   }
   /** Gate for one owner command, bound to the owner configuration (unchanged behaviour). */
@@ -185,7 +188,7 @@ export class HostVerification {
   }
   behavioralGates(): QualityGate[] {
     return [...this.runners.owner.map(command => this.ownerGate(command)),
-      ...(this.runners.automatic ? AUTOMATIC_RUNNERS.map(runner => this.automaticGate(runner)) : [])];
+      ...(this.runners.automatic ? this.runners.profiles.map(runner => this.automaticGate(runner)) : [])];
   }
   private gate(id: string, resolveCommand: (context: { runId: string; taskId?: string | undefined }) => Promise<BoundBehavioralCommand>): QualityGate {
     return { id, evaluate: async raw => {

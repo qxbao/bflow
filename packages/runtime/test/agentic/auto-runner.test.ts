@@ -83,7 +83,7 @@ describe("automatic test runner proposals (no owner configuration)", () => {
     expect(strategy.targetCommands).toEqual(["auto:unit"]);
     const verification = verificationWith(runners);
     expect(() => verification.assertSupported(specification, strategy)).not.toThrow();
-    expect(verification.configuredMethods()).toEqual(["unit_test", "integration_test"]);
+    expect(verification.configuredMethods()).toEqual(["unit_test", "integration_test", "e2e_test"]);
   });
 
   it("refuses a proposal whose affectedPaths lack test files with a Coordinator-fixable code that is never reported to the user", async () => {
@@ -108,16 +108,16 @@ describe("automatic test runner proposals (no owner configuration)", () => {
     expect(reportsToUser(rejection)).toBe(false);
   });
 
-  it("reports an unsupported repository as no_test_runner_detected with two informational options and no manual configuration", async () => {
+  it("keeps a recognized ecosystem without a reporter agent-fixable without manual configuration", async () => {
     const root = await repository({ "package.json": JSON.stringify({ scripts: { test: "echo ok" } }), "node_modules/.keep": "" });
     const runners = new TestRunnerSource([], root);
     await runners.refresh();
     expect(runners.current).toMatchObject({ status: "unsupported" });
     const { specification, strategy } = proposal(["packages/example/test/logic.test.ts"]);
     const rejection = rejectionOf(() => verificationWith(runners).assertSupported(specification, strategy)).rejection;
-    expect(rejection).toMatchObject({ code: "no_test_runner_detected" });
-    expect(reportsToUser(rejection)).toBe(true);
-    expect(rejection.options).toEqual(["Coordinator thêm task thiết lập test runner (vitest) rồi đề xuất lại workflow", "Hủy run"]);
+    expect(rejection).toMatchObject({ code: "runner_setup_required" });
+    expect(reportsToUser(rejection)).toBe(false);
+    expect(rejection.options).toEqual(["Coordinator tự thiết lập runner phù hợp qua một task có review rồi đề xuất lại workflow", "Hủy run"]);
     expect(JSON.stringify(rejection)).not.toContain("verification.json");
   });
 
@@ -128,7 +128,7 @@ describe("automatic test runner proposals (no owner configuration)", () => {
     expect(runners.current).toMatchObject({ status: "unsupported" });
     const { specification, strategy } = proposal(["packages/example/test/logic.test.ts"]);
     const verification = verificationWith(runners);
-    expect(rejectionOf(() => verification.assertSupported(specification, strategy)).rejection).toMatchObject({ code: "no_test_runner_detected" });
+    expect(rejectionOf(() => verification.assertSupported(specification, strategy)).rejection).toMatchObject({ code: "runner_setup_required" });
 
     await write(root, { "node_modules/vitest/package.json": '{"version":"2.1.9"}', "node_modules/vitest/vitest.mjs": "" });
     await runners.refresh();
@@ -179,8 +179,8 @@ describe("automatic test runner proposals (no owner configuration)", () => {
     const runners = new TestRunnerSource([], root);
     await runners.refresh();
     const planning = describeTestRunners(runners);
-    expect(planning.testRunners).toEqual([expect.objectContaining({ command: "auto:unit", method: "unit_test", source: "detected" }),
-      expect.objectContaining({ command: "auto:integration", method: "integration_test", source: "detected" })]);
+    expect(planning.testRunners).toEqual(expect.arrayContaining([expect.objectContaining({ command: "auto:unit", method: "unit_test", source: "detected" }),
+      expect.objectContaining({ command: "auto:integration", method: "integration_test", source: "detected" })]));
     expect(planning.testRunners[0]).toMatchObject({ testNameRule: expect.stringContaining("single space") });
     expect(planning.testRunnerDetection).toMatchObject({ status: "detected" });
   });

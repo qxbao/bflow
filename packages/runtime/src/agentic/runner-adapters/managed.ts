@@ -77,12 +77,12 @@ export interface ManagedTool {
 /** Private dependency injection for detection tests; role messages never populate this port. */
 export interface ManagedAdapterHost {
   homeDirectory: string;
-  findTool(name: string, versionArgs: string[]): Promise<ManagedTool | undefined>;
+  findTool(name: string, versionArgs: string[], repositoryRoot?: string): Promise<ManagedTool | undefined>;
 }
 
 const systemHost: ManagedAdapterHost = {
   homeDirectory: homedir(),
-  async findTool(name, versionArgs) {
+  async findTool(name, versionArgs, repositoryRoot) {
     // Command names are Runtime constants, never repository or agent input.
     if (!/^[a-z][a-z0-9-]*$/.test(name)) return undefined;
     try {
@@ -90,6 +90,7 @@ const systemHost: ManagedAdapterHost = {
         cwd: "/", env: { PATH: process.env.PATH ?? "/usr/bin:/bin" }, timeout: VERSION_TIMEOUT_MS, maxBuffer: 16_384
       });
       const executable = await realpath(found.stdout.trim());
+      if (repositoryRoot && (executable === repositoryRoot || executable.startsWith(repositoryRoot + "/"))) return undefined;
       if (!isAbsolute(executable) || !(await lstat(executable)).isFile()) return undefined;
       const result = await runFile(executable, versionArgs, {
         cwd: "/", env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: "/nonexistent", LANG: "C", LC_ALL: "C", MAVEN_SKIP_RC: "true", DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1", DOTNET_CLI_TELEMETRY_OPTOUT: "1",
@@ -190,8 +191,8 @@ async function rubyBase(context: AdapterContext, project: string, adapterId: str
   return base;
 }
 
-async function javaEnvironment(host: ManagedAdapterHost): Promise<{ mounts: RunnerMount[]; environment: Record<string, string> }> {
-  const java = await host.findTool("java", ["-version"]);
+async function javaEnvironment(host: ManagedAdapterHost, root: string): Promise<{ mounts: RunnerMount[]; environment: Record<string, string> }> {
+  const java = await host.findTool("java", ["-version"], root);
   if (!java) throw new Error("runner_toolchain_unavailable: Java runtime not detected");
   const javaHome = dirname(dirname(java.executable));
   const mounts = await mountTool(java, host.homeDirectory);
@@ -232,7 +233,7 @@ function missing(id: string, tool: string): AdapterDetection {
 
 export function createManagedAdapters(host: ManagedAdapterHost = systemHost): RunnerAdapter[] {
   const maven = adapter("maven", path => basename(path) === "pom.xml", async (context, manifest) => {
-    const tool = await host.findTool("mvn", ["--version"]);
+    const tool = await host.findTool("mvn", ["--version"], context.root);
     if (!tool) return missing("maven", "Maven");
     const project = dirname(manifest), base = await baseRunner(context, project, "maven", tool, host);
     if (!tool.executable.startsWith("/usr/")) {
@@ -243,7 +244,7 @@ export function createManagedAdapters(host: ManagedAdapterHost = systemHost): Ru
         base.mounts.push(...await optionalMount(join(mavenHome, part), join(mavenHome, part), host));
       }
     }
-    const java = await javaEnvironment(host);
+    const java = await javaEnvironment(host, context.root);
     base.mounts.push(...java.mounts, ...await optionalMount(join(host.homeDirectory, ".m2/repository"), "/bflow-cache/maven", host));
     // The Debian launcher needs m2.conf, while settings.xml may contain credentials and is deliberately absent.
     try {
@@ -259,10 +260,10 @@ export function createManagedAdapters(host: ManagedAdapterHost = systemHost): Ru
   }, host);
 
   const gradle = adapter("gradle", path => /^build\.gradle(?:\.kts)?$/.test(basename(path)), async (context, manifest) => {
-    const tool = await host.findTool("gradle", ["--version"]);
+    const tool = await host.findTool("gradle", ["--version"], context.root);
     if (!tool) return missing("gradle", "Gradle");
     const project = dirname(manifest), base = await baseRunner(context, project, "gradle", tool, host);
-    const java = await javaEnvironment(host);
+    const java = await javaEnvironment(host, context.root);
     base.mounts.push(...java.mounts, ...await optionalMount(join(host.homeDirectory, ".gradle/caches/modules-2"), "/bflow-cache/gradle/caches/modules-2", host));
     // GRADLE_RO_DEP_CACHE is Gradle's documented read-only dependency cache, not a writable user home.
     base.environment = { ...java.environment, GRADLE_USER_HOME: "/tmp/bflow-gradle", GRADLE_RO_DEP_CACHE: "/bflow-cache/gradle/caches/modules-2" };
@@ -273,7 +274,7 @@ export function createManagedAdapters(host: ManagedAdapterHost = systemHost): Ru
   }, host);
 
   const dotnet = adapter("dotnet", path => DOTNET_PROJECT.test(path), async (context, manifest) => {
-    const tool = await host.findTool("dotnet", ["--version"]);
+    const tool = await host.findTool("dotnet", ["--version"], context.root);
     if (!tool) return missing("dotnet", "dotnet");
     const xml = await readFile(join(context.root, manifest), "utf8");
     if (!/<(?:IsTestProject)>\s*true\s*<\//i.test(xml) && !/Microsoft\.NET\.Test\.Sdk|xunit|nunit|MSTest/i.test(xml)) return { runners: [], notes: [] };
@@ -295,11 +296,11 @@ export function createManagedAdapters(host: ManagedAdapterHost = systemHost): Ru
     const project = dirname(manifest), gemfile = await readFile(join(context.root, manifest), "utf8");
     const hasRspec = /\brspec\b/.test(gemfile), hasMinitest = /\bminitest\b/.test(gemfile);
     if (!hasRspec && !hasMinitest) return { runners: [], notes: ["ruby: runner_reporter_required: Coordinator should schedule a reviewed structured test-runner setup task"] };
-    const rubyTool = await host.findTool("ruby", ["--version"]);
+    const rubyTool = await host.findTool("ruby", ["--version"], context.root);
     if (!rubyTool) return missing("ruby", "Ruby");
     const runners: AdapterRunner[] = [], notes: string[] = [];
     if (hasRspec) {
-      const tool = await host.findTool("rspec", ["--version"]);
+      const tool = await host.findTool("rspec", ["--version"], context.root);
       if (!tool) notes.push(...missing("rspec", "RSpec").notes);
       else {
         const base = await rubyBase(context, project, "rspec", tool, rubyTool, host);
@@ -310,7 +311,7 @@ export function createManagedAdapters(host: ManagedAdapterHost = systemHost): Ru
       }
     }
     if (hasMinitest) {
-      const minitest = await host.findTool("ruby", ["-r", "minitest", "-e", "abort unless defined?(Minitest::AbstractReporter) && defined?(Minitest::UnexpectedError) && defined?(Minitest::Skip); print Minitest::VERSION"]);
+      const minitest = await host.findTool("ruby", ["-r", "minitest", "-e", "abort unless defined?(Minitest::AbstractReporter) && defined?(Minitest::UnexpectedError) && defined?(Minitest::Skip); print Minitest::VERSION"], context.root);
       if (!minitest) notes.push(...missing("minitest", "reporter-capable Minitest").notes);
       else {
         const base = await rubyBase(context, project, "minitest", { ...rubyTool, version: `Ruby ${rubyTool.version}; Minitest ${minitest.version}` }, rubyTool, host);
@@ -335,9 +336,9 @@ export function createManagedAdapters(host: ManagedAdapterHost = systemHost): Ru
     let composer: unknown;
     try { composer = JSON.parse(await readFile(join(context.root, manifest), "utf8")); } catch { return { runners: [], notes: ["phpunit: malformed composer.json"] }; }
     if (!composer || typeof composer !== "object" || !/phpunit\/phpunit/.test(JSON.stringify(composer))) return { runners: [], notes: [] };
-    const phpTool = await host.findTool("php", ["--version"]);
+    const phpTool = await host.findTool("php", ["--version"], context.root);
     if (!phpTool) return missing("phpunit", "PHP");
-    let tool = await host.findTool("phpunit", ["--version"]);
+    let tool = await host.findTool("phpunit", ["--version"], context.root);
     const localEntry = join(context.root, project, "vendor/phpunit/phpunit/phpunit");
     let local = false;
     try {
@@ -361,7 +362,7 @@ export function createManagedAdapters(host: ManagedAdapterHost = systemHost): Ru
   }, host);
 
   const ctest = adapter("ctest", path => basename(path) === "CTestTestfile.cmake", async (context, manifest) => {
-    const tool = await host.findTool("ctest", ["--version"]);
+    const tool = await host.findTool("ctest", ["--version"], context.root);
     if (!tool) return missing("ctest", "CTest");
     const [major = 0, minor = 0] = tool.version.split(".").map(Number);
     if (major < 3 || (major === 3 && minor < 21)) return { runners: [], notes: ["ctest: runner_reporter_required: installed CTest predates --output-junit"] };

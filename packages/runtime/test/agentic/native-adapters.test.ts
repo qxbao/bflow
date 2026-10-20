@@ -2,8 +2,8 @@ import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createNativeAdapters, type NativeHost } from "./native.js";
-import type { AdapterContext, AdapterRunner } from "../runner-adapter.js";
+import { createNativeAdapters, type NativeHost } from "../../src/agentic/runner-adapters/native.js";
+import type { AdapterContext, AdapterRunner } from "../../src/agentic/runner-adapter.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true }))); });

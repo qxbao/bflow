@@ -116,16 +116,16 @@ detection, notification and Stop-hook continuation are not live-verified.
 - **Rejected workflow proposals.** `propose_workflow` pre-checks (project policy, then verification
   support) return a structured error `{ code, reason, methods?, criteria?, options }` to the
   Coordinator. The same reason reaches Conversation as a `workflow_rejected` notice, outside any
-  journal transaction. User-facing codes: `no_test_runner_detected` (automatic detection found no
+  journal transaction. User-facing codes: `no_test_runner_detected` (unknown ecosystem found no
   supported runner; options: the Coordinator adds a setup task, or the run is cancelled), plus
   `unsupported_verification` and `policy_violation`; `missing_behavioral_runner` remains only for
   owner-configured runners. Coordinator-fixable codes are returned to the Coordinator as the tool error
-  and are never sent to Conversation: `missing_test_paths` (no test file in `affectedPaths`),
+  and are never sent to Conversation: `runner_setup_required` (a recognized ecosystem needs a reviewed runner/reporter setup task), `missing_test_paths` (no test file in `affectedPaths`),
   `missing_test_mapping` (a criterion has no mapped test names), `unknown_test_command` (a target
   command is not a detected label, or the label is missing from `infrastructure.commands`) and
   `unsupported_method` (no runner for the criterion's method). The options are informational; nothing
   is applied automatically, and the specification and its criteria are never changed by Runtime.
-  Automatic detection is retried on each proposal while unsupported, so no host restart is needed.
+  Automatic detection is retried on each proposal while unsupported and refreshed after repository HEAD changes. Dynamic checks/gates use the same VerificationEngine when each plan is frozen, so no host restart is needed.
   An owner-configured runner (`.bflow/verification.json`, optional override) is pinned when the host is
   created (`docs/verification-runners.md`), so changing that file later requires quiescing the host.
 - **Hang watchdog** (`src/agentic/run-watchdog.ts`, pure `evaluateWatchdog`; host timer every 15 s).
@@ -496,11 +496,30 @@ pnpm exec vitest run packages/runtime/test/scenarios/09-session-recovery-reliabi
 
 ## Configured host verification and durable authentication
 
-The default Claude host now supports owner-configured Node TAP and Vitest 2.1
-commands, independent conditional-TDD phases, frozen Red test files, constrained
-Developer commits and bounded phase repairs. Behavioral commands run in mandatory
-Linux Bubblewrap namespaces with explicit read-only dependencies; there is no
-unsandboxed fallback. See [runner configuration](../../docs/verification-runners.md).
+The default host discovers Runtime-private adapters for JS/TS (Vitest 1/2/3,
+Jest, Mocha, Node TAP), Python/pytest, Go, Rust, Maven/Gradle, .NET, Ruby
+(RSpec/Minitest), PHPUnit and configured CTest. Unit/integration/E2E labels expose
+exact naming rules through planning_reference; multiple language projects can coexist.
+Owner-configured Node TAP/Vitest commands remain an optional override.
+
+Executable/argv, offline settings, mounts and parsers come from Runtime. Manifest,
+script, runner configuration and helper blobs are pinned to the committed original
+revision; selected test files freeze after independent Red. Structured leaf results,
+assertion/error discrimination and independent Quality Gates remain mandatory.
+
+Linux Bubblewrap is discovered on PATH and actually probed. `up` exposes structured
+sandbox unavailability; measurement never falls back to host execution. External
+toolchains/caches mount narrowly and read-only, without whole homes or credentials.
+Only public integrity-pinned npm lock v2/v3 warming is implemented, in a separate
+no-script network sandbox whose only writable host path is an owned cache; measurement
+then remains offline. Other ecosystems require installed dependencies/caches.
+
+See [runner architecture, matrix and threat model](../../docs/verification-runners.md)
+for exact formats, platform limits and agent setup routing. Evidence on the implementation
+host is source plus local parser/fixture tests: the real Bubblewrap namespace probe is
+blocked (`RTM_NEWADDR: Operation not permitted`), so successful sandbox measurements
+and live Herdr/provider behavior are **not verified**. macOS/native Windows/container
+backends, Elixir/Swift/Dart adapters and universal safe dependency warming remain open.
 
 Private fsynced receipts preserve human-hook provenance, independent review
 observations, gate/evidence authentication and native send intent/acknowledgement.

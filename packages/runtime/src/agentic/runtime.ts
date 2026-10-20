@@ -1107,11 +1107,12 @@ export class AgenticWorkflowRuntime {
     const dossier = task?.spec ?? run.workflowSpec!;
     const plan = this.ports.policies.createVerificationPlan({ runId: run.runId, taskId: task?.taskId ?? FINAL_TASK,
       scope: task ? "task" : "workflow", specification: dossier.specification, strategy: dossier.strategy,
-      checks: (task ? [...this.ports.taskChecks] : [...this.ports.workflowChecks]).flatMap(check => {
+      checks: ([...(task ? this.ports.taskChecks : this.ports.workflowChecks), ...(this.ports.behavioralChecks?.() ?? [])]).flatMap(check => {
         if (check.metadata?.bindAcceptedCriteria !== true) return [check];
         const config = record(check.configuration);
         // A method-bound check (automatic runner) takes its names from the accepted mappings of that method, and does not apply without them.
         const methodBound = check.metadata?.bindMethodTestNames === true;
+        if (methodBound && !dossier.strategy.targetCommands.includes(String(config.command))) return [];
         const names = methodBound ? dossier.strategy.criterionMappings.filter(mapping => dossier.specification.acceptanceCriteria.some(criterion =>
           criterion.id === mapping.criterionId && criterion.required !== false && criterion.status !== "waived" && criterion.verificationMethod === config.method))
           .flatMap(mapping => mapping.testNames) : config.testNames;
