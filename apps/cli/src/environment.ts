@@ -644,14 +644,15 @@ export class EnvironmentLifecycle {
 
         // Step 10: confirm_roles_ready
         let reportedWaiting = false;
-        const lastStartupObservations = new Map<string, string>();
-        const observeStartup = (message: string, kind: "native" | "transport" | "activation") => {
-          if (message === lastStartupObservations.get(kind)) return;
-          lastStartupObservations.set(kind, message);
+        let lastStartupObservation: string | undefined;
+        const observeStartup = (message: string) => {
+          if (message === lastStartupObservation) return;
+          lastStartupObservation = message;
           this.progressDetail(message);
         };
         let reportedActivating = false;
         while (true) {
+          const startupObservations: string[] = [];
           const nativeReady = !integration.requiresNativeSession || manifest.panes.filter(p => p.permanent).every(p => p.session);
           if ((!nativeReady || !this.ready(manifest, config)) && !reportedWaiting) {
             this.progress("Waiting for role transport and native readiness...");
@@ -659,7 +660,7 @@ export class EnvironmentLifecycle {
           }
           if (!nativeReady) {
             deadline.context = `Waiting for native-session hooks: ${manifest.panes.filter(p => p.permanent && !p.session).map(p => `${p.role} (${p.paneId})`).join(", ")}. Inspect this session with herdr --session ${repository.sessionName} session attach ${repository.sessionName}; resolve its provider dialogs, then bflow up. State was preserved.`;
-            observeStartup(deadline.context, "native");
+            startupObservations.push(`Waiting for native-session hooks: ${manifest.panes.filter(p => p.permanent && !p.session).map(p => p.role).join(", ")}`);
           }
           await this.saveManifest(repository, { ...manifest, status: manifest.status === "up" && (!this.ready(manifest, config) || !nativeReady) ? "initializing" : manifest.status });
 
@@ -689,7 +690,7 @@ export class EnvironmentLifecycle {
                 if (!(error instanceof EnvironmentError) || error.contractError.details === null || typeof error.contractError.details !== "object" ||
                     Array.isArray(error.contractError.details) || error.contractError.details.stage !== "native_startup") throw error;
                 deadline.context = `${error.message} Run bflow status/doctor; resolve startup in its named pane, then bflow up, or bflow down --yes for a checked restart. Do not delete .bflow.`;
-                observeStartup(deadline.context, "activation");
+                observeStartup(deadline.context);
                 await deadline.pause(); continue;
               }
             }
@@ -704,10 +705,13 @@ export class EnvironmentLifecycle {
             const roleName = missingOrStarting.role;
             const p = manifest.panes.find(pane => pane.role === roleName);
             const details = !p ? `missing pane for role '${roleName}'` : `role '${roleName}' in state '${p.transportState}'`;
-            observeStartup(`Waiting for required roles: ${details}`, "transport");
+            startupObservations.push(`Waiting for required roles: ${details}`);
             deadline.context = `timed out waiting for required roles to become ready (${details}). Remediation: Run 'bflow doctor' to inspect provider startup or 'bflow down --yes' to clean up.`;
           }
 
+          // Native and transport observations share one mutable terminal line.
+          // Deduplicate the combined current state so a resolved blocker cannot remain visible.
+          observeStartup(startupObservations.join("; "));
           await deadline.pause();
           manifestRaw = unwrap(await deadline.call((opts) => integration.manager.getManifest(repository.sessionName, opts)));
           if (manifestRaw === null) fail("Role manager lost the startup manifest; startup outcome is unresolved");

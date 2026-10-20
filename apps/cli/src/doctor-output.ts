@@ -62,16 +62,15 @@ export function formatDoctorReport(report: EnvironmentDoctorReport, color = fals
   for (const group of new Set(all.map(check => check.group))) {
     const items = all.filter(check => check.group === group);
     lines.push("", `[${color ? cyan(group, true) : group}]`);
-    for (const check of items.filter(item => !["passed", "skipped"].includes(item.status))) {
-      const tag = check.status === "failed" ? "FAIL" : check.status === "warn" ? "WARN" : "UNKNOWN";
-      lines.push(`  - [${color ? (check.status === "failed" ? red : yellow)(tag, true) : tag}] ${check.name}${check.reason ? `: ${check.reason}` : ""}`);
+    for (const check of items.filter(item => item.status !== "passed")) {
+      const tag = check.status === "failed" ? "FAIL" : check.status === "warn" ? "WARN" : check.status === "skipped" ? "SKIPPED" : "UNKNOWN";
+      const identity = check.status === "skipped" && check.id !== check.name ? `${check.name} (${check.id})` : check.name;
+      lines.push(`  - [${color ? (check.status === "failed" ? red : yellow)(tag, true) : tag}] ${identity}${check.reason ? `: ${check.reason}` : ""}`);
       if (check.remediation) lines.push(`      Next: ${check.remediation}`);
       if (check.repair) lines.push(`      Repair: ${check.repair}`);
     }
-    for (const kind of ["passed", "skipped"] as const) {
-      const names = items.filter(item => item.status === kind).map(item => item.name);
-      if (names.length) lines.push(`  ${kind === "passed" ? "Passed" : "Skipped"} (${names.length}): ${names.slice(0, 8).join(", ")}${names.length > 8 ? `, +${names.length - 8} more` : ""}`);
-    }
+    const names = items.filter(item => item.status === "passed").map(item => item.name);
+    if (names.length) lines.push(`  Passed (${names.length}): ${names.slice(0, 8).join(", ")}${names.length > 8 ? `, +${names.length - 8} more` : ""}`);
   }
   if (!healthy && !all.some(check => check.remediation || check.repair)) lines.push("", "Next: Run 'bflow doctor --json' to inspect the full diagnostic report.");
   lines.push("", "Full report: bflow doctor --json");

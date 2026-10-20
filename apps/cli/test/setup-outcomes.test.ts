@@ -21,7 +21,7 @@ describe("setup result reporting", () => {
     expect(JSON.parse(result.stdout).data.outcome).toBe("approval_declined");
   });
 
-  it("preserves every step receipt and displays applied steps without pending approval", async () => {
+  it("preserves every step receipt while summarizing completed setup without pending approval", async () => {
     const receipts = ["resolve_skills:role-skills", "configure:environment-manifest"].map(stepId => ({
       schemaVersion: 3, receiptId: `receipt-${stepId}`, planId: plan.planId, stepId, status: "applied", observedStateDigest: "b".repeat(64),
       ownedPaths: [], diagnostics: [], startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
@@ -30,7 +30,8 @@ describe("setup result reporting", () => {
     const output = await executeSetupCommand({ command: "setup", mode: "apply", yes: true, json: false, help: false }, ctx);
     expect(output).toHaveProperty("receipts", receipts);
     const formatted = formatCommandSuccess("setup", { ...output, plan: { ...plan, steps: receipts.map(r => ({ stepId: r.stepId, componentId: r.stepId.split(":")[1], action: r.stepId.split(":")[0], requiresApproval: true })) } } as any, false);
-    expect(formatted).toContain("[1] Install agent skills [applied]");
+    expect(formatted).toContain("[OK] Setup applied");
+    expect(formatted).not.toContain("[1] Install agent skills");
     expect(formatted).not.toContain("[requires approval]");
   });
 

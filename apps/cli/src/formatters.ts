@@ -567,6 +567,7 @@ export function formatDownOutput(data: SessionManifest | EnvironmentStatus, useC
 
 function formatSetupOutput(output: SetupCommandOutput, useColor = false): string {
   const lines: string[] = [];
+  const shownDiagnostics = new Set(output.diagnostics);
   const positive = (value: string) => useColor ? green(value, true) : value;
   const warning = (value: string) => useColor ? yellow(value, true) : value;
   const heading = (value: string) => useColor ? cyan(value, true) : value;
@@ -595,7 +596,10 @@ function formatSetupOutput(output: SetupCommandOutput, useColor = false): string
       const paintedStatus = receipt?.status === "applied" || receipt?.status === "already_satisfied" ? positive(status)
         : receipt?.status === "failed" ? (useColor ? red(status) : status) : warning(status);
       lines.push(`  ${formatProgressStep(label, useColor, index + 1)} [${paintedStatus}]${approval}`);
-      for (const diagnostic of receipt?.diagnostics ?? []) lines.push(dim(`      ${humanText(diagnostic, 250)}`, useColor));
+      for (const diagnostic of receipt?.diagnostics ?? []) {
+        lines.push(dim(`      ${humanText(diagnostic, 250)}`, useColor));
+        shownDiagnostics.add(diagnostic);
+      }
     }
   }
   if (output.preview && (output.mode === "dry_run" || output.outcome === "approval_declined")) {
@@ -647,6 +651,17 @@ function formatSetupOutput(output: SetupCommandOutput, useColor = false): string
       lines.push(dim(`  - ${humanText(diag, 250)}`, useColor));
     }
   }
+  // Applied receipts may still carry journal-write warnings or reconciliation evidence.
+  // Preserve these even when the successful step inventory is condensed.
+  const receiptDiagnostics: string[] = [];
+  for (const receipt of [...(output.receipts ?? []), ...(output.receipt ? [output.receipt] : [])]) {
+    for (const diagnostic of receipt.diagnostics) {
+      if (shownDiagnostics.has(diagnostic)) continue;
+      shownDiagnostics.add(diagnostic);
+      receiptDiagnostics.push(`  - ${sanitizeIdentifier(receipt.stepId)}: ${humanText(diagnostic, 250)}`);
+    }
+  }
+  if (receiptDiagnostics.length) lines.push("", "Receipt diagnostics:", ...receiptDiagnostics);
   lines.push("");
   if (concise) lines.push("Next: Run 'bflow doctor' in your repository to check readiness.");
   else if (output.outcome === "changes_pending" || output.outcome === "approval_declined") lines.push("Next: Review 'bflow setup --plan', then run 'bflow setup --apply' when you intend to apply it.");

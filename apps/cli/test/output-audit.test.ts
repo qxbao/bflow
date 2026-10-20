@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EnvironmentDoctorReportSchema } from "@bflow/contracts";
+import { EnvironmentDoctorReportSchema, SetupReceiptSchema } from "@bflow/contracts";
 import type { DocsFailureKind } from "@bflow/docs-retrieval";
 import { formatCommandError, formatCommandSuccess, formatEnvironmentStatus } from "../src/formatters.js";
 import { stripAnsi } from "../src/presentation.js";
@@ -36,6 +36,19 @@ describe("CLI output audit", () => {
     for (const value of ["Review the tool installation", "Legacy session needs reconciliation", "skipped"]) expect(text).toContain(value);
     expect(stripAnsi(formatCommandSuccess("doctor", report, false, { color: true }))).toBe(text);
     expect(formatCommandSuccess("doctor", report, false, { color: true })).toContain("\x1b[31m");
+    expect(JSON.parse(formatCommandSuccess("doctor", report, true)).data).toEqual(report);
+  });
+
+  it("retains every skipped doctor check identity, reason and action", () => {
+    const checks = Array.from({ length: 10 }, (_, i) => ({ checkId: `context7-check-${i}`, component: "context7", status: "skipped",
+      reason: `Documentation check ${i} was not requested`, remediation: `Inspect documentation setting ${i}` }));
+    checks[0] = { checkId: "context7-enabled", component: "context7", status: "skipped",
+      reason: "Context7 is not enabled for this repository (environment.context7.enabled).",
+      remediation: "Set environment.context7.enabled: true in .bflow/config.yml to let granted roles look documentation up." };
+    const report = EnvironmentDoctorReportSchema.parse({ schemaVersion: 2, workspaceRoot: "/work/shop", healthy: true,
+      checkedAt: "2026-10-20T00:00:00.000Z", checks: [{ checkId: "node", name: "Node", status: "passed", message: "Node available" }], metadata: { groups: { mcp: checks } } });
+    const output = formatCommandSuccess("doctor", report, false);
+    for (const check of checks) for (const detail of [check.checkId, check.reason, check.remediation]) expect(output).toContain(detail);
     expect(JSON.parse(formatCommandSuccess("doctor", report, true)).data).toEqual(report);
   });
 
@@ -76,6 +89,26 @@ describe("CLI output audit", () => {
     expect(text).toContain("License:");
     expect(text).toContain("2 ready");
     expect(text).toContain("bflow doctor");
+    expect(JSON.parse(formatCommandSuccess("setup", output, true)).data).toEqual(output);
+  });
+
+  it("retains successful receipt warnings and reconciliation evidence in concise setup output", () => {
+    const receipt = SetupReceiptSchema.parse({ schemaVersion: 3, receiptId: "receipt-warning", planId: "setup-plan",
+      planDigest: "a".repeat(64), stepId: "configure:path", scope: { kind: "machine", machineId: "machine" }, status: "applied",
+      desiredStateDigest: "b".repeat(64), observedStateDigest: "b".repeat(64), ownedPaths: [], observedAt: "2026-10-20T00:00:00.000Z",
+      diagnostics: ["reconciled after interruption", "journal could not be updated: disk full", "Warning token=secret\u001b[31m"], idempotencyKey: "setup-key" });
+    const output: SetupCommandOutput = { mode: "apply", machineId: "machine", os: "linux", serviceManagerKind: "systemd-user", outcome: "applied",
+      plan: { schemaVersion: 3, planId: "setup-plan", machineId: "machine", revision: 1, planDigest: "a".repeat(64),
+        createdAt: "2026-10-20T00:00:00.000Z", idempotencyKey: "setup-key", steps: [] },
+      receipt, receipts: [receipt], skills: { catalogLoaded: true, skillCount: 1, syncedManifests: 1, storeRoot: "/skills" },
+      diagnostics: ["Setup completed successfully", "reconciled after interruption"] };
+    const text = formatCommandSuccess("setup", output, false);
+    expect(text).toContain("journal could not be updated: disk full");
+    expect(text).toContain("configure:path");
+    expect(text.match(/reconciled after interruption/g)).toHaveLength(1);
+    expect(text).toContain("token=[REDACTED]");
+    expect(text).not.toMatch(/secret|\u001b/);
+    expect(stripAnsi(formatCommandSuccess("setup", output, false, { color: true }))).toBe(text);
     expect(JSON.parse(formatCommandSuccess("setup", output, true)).data).toEqual(output);
   });
 });

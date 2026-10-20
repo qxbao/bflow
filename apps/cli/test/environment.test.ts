@@ -251,6 +251,41 @@ describe("P12 repository environment lifecycle", () => {
     expect(observations.findIndex(message => message.includes("Waiting for role transport"))).toBeLessThan(observations.findIndex(message => message.includes("Waiting for native-session hooks:")));
   });
 
+  linuxIt("refreshes the current startup blocker when transport becomes ready before native receipts", async () => {
+    const details: string[] = [];
+    const pending = SessionManifestSchema.parse({ ...fixture.create(), status: "initializing",
+      panes: fixture.create().panes.map(pane => ({ ...pane, permanent: true, transportState: "starting" })) });
+    const transportReady = SessionManifestSchema.parse({ ...pending,
+      panes: pending.panes.map(pane => ({ ...pane, transportState: "idle" })) });
+    vi.mocked(fixture.manager.up).mockResolvedValue({ ok: true, value: pending });
+    vi.mocked(fixture.manager.getManifest).mockResolvedValueOnce({ ok: true, value: null })
+      .mockResolvedValueOnce({ ok: true, value: transportReady }).mockRejectedValueOnce(new Error("Fixture polling ended"));
+    const composed = new EnvironmentLifecycle(dir, { runner, onProgressDetail: message => details.push(message),
+      integration: { manager: fixture.manager, requiresNativeSession: true, runtime: mockRuntime(), quiesce: async () => ({ ok: true, value: undefined }) } });
+    await expect(composed.up(5000)).rejects.toThrow("Fixture polling ended");
+    expect(details.at(-1)).toContain("Waiting for native-session hooks:");
+    expect(details.at(-1)).not.toContain("state 'starting'");
+    expect(fixture.manager.up).toHaveBeenCalledTimes(1);
+  });
+
+  linuxIt("clears native blockers from progress when receipts finish while transport is still starting", async () => {
+    const details: string[] = [];
+    const pending = SessionManifestSchema.parse({ ...fixture.create(), status: "initializing",
+      panes: fixture.create().panes.map(pane => ({ ...pane, permanent: true, transportState: "starting" })) });
+    const withReceipts = (all: boolean) => SessionManifestSchema.parse({ ...pending, panes: pending.panes.map((pane, i) => ({ ...pane,
+      ...(all || i === 0 ? { session: { source: "herdr:codex", kind: "id", value: `native-${i}` } } : {}) })) });
+    vi.mocked(fixture.manager.up).mockResolvedValue({ ok: true, value: pending });
+    vi.mocked(fixture.manager.getManifest).mockResolvedValueOnce({ ok: true, value: null })
+      .mockResolvedValueOnce({ ok: true, value: withReceipts(false) }).mockResolvedValueOnce({ ok: true, value: withReceipts(true) })
+      .mockRejectedValueOnce(new Error("Fixture polling ended"));
+    const composed = new EnvironmentLifecycle(dir, { runner, onProgressDetail: message => details.push(message),
+      integration: { manager: fixture.manager, requiresNativeSession: true, runtime: mockRuntime(), quiesce: async () => ({ ok: true, value: undefined }) } });
+    await expect(composed.up(5000)).rejects.toThrow("Fixture polling ended");
+    expect(details.at(-1)).toContain("Waiting for required roles:");
+    expect(details.at(-1)).not.toContain("Waiting for native-session hooks:");
+    expect(fixture.manager.up).toHaveBeenCalledTimes(1);
+  });
+
   it("reports status and each diagnostic group without deriving readiness from progress", async () => {
     const observations: string[] = [];
     const composed = new EnvironmentLifecycle(dir, { runner, onProgress: message => observations.push(message),

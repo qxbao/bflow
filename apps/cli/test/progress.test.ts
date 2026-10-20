@@ -102,6 +102,35 @@ describe("interactive progress", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("keeps free-form fractions indeterminate and safe across animation ticks", () => {
+    vi.useFakeTimers();
+    const { io, chunks } = collector();
+    const progress = new CliProgress({ enabled: true, io, columns: () => 160 });
+    progress.step("Checking tools");
+    for (const detail of ["1/0 optional checks", "8/3 optional checks", "1/3 diagnostic text"]) {
+      expect(() => progress.detail(detail)).not.toThrow();
+      expect(() => vi.advanceTimersByTime(200)).not.toThrow();
+      expect(chunks.at(-1)).toContain("Working");
+      expect(chunks.at(-1)).not.toContain("#");
+    }
+    progress.units(1, 3, "Tools inspected");
+    expect(chunks.at(-1)).toContain("[##----]");
+    progress.detail("1/3 Tools inspected");
+    expect(chunks.at(-1)).toContain("Working");
+    progress.units(1, 3, "Tools inspected");
+    expect(chunks.at(-1)).toContain("[##----]");
+    progress.stop();
+  });
+
+  it("retains validated counts when updates are deferred behind a confirmation", async () => {
+    vi.useFakeTimers();
+    const { io, chunks } = collector();
+    const progress = new CliProgress({ enabled: true, io });
+    await progress.confirmation(async () => { progress.units(2, 3, "Tools inspected"); });
+    expect(chunks.at(-1)).toContain("[####--]");
+    progress.stop();
+  });
+
   it("suspends redraws while a confirmation is pending, then resumes on the next step", async () => {
     vi.useFakeTimers();
     const { io, lines, chunks } = collector();
@@ -247,9 +276,10 @@ class StatefulIo implements CliIo {
 
 describe("setup installer progress boundaries", () => {
   it.each([false, true])("reports checking exactly when reconciliation starts (timeout=%s)", async timedOut => {
-    const { mkdtemp, mkdir, rm, writeFile } = await import("node:fs/promises");
+    const { cp, mkdtemp, mkdir, rm, writeFile } = await import("node:fs/promises");
     const { tmpdir } = await import("node:os");
     const { basename, join } = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
     const { detectPlatform, defaultHostEnvironment, defaultMachineConfig, ToolInstallerRegistry } = await import("@bflow/machine-setup");
     const root = await mkdtemp(join(tmpdir(), "bflow-install-progress-"));
     const bin = join(root, "bin");
@@ -283,12 +313,18 @@ describe("setup installer progress boundaries", () => {
     const registry = new ToolInstallerRegistry(); registry.register(installer);
     try {
       await mkdir(bin);
+      // Exercise real skill setup without coupling installer phase timing to the full catalog size.
+      // setup-outcomes.test.ts retains the bundled-catalog integration coverage.
+      const catalogDir = join(root, "catalog");
+      await mkdir(join(catalogDir, "roles"), { recursive: true });
+      await cp(fileURLToPath(new URL("../../../skills/core/using-bflow", import.meta.url)), join(catalogDir, "core", "using-bflow"), { recursive: true });
+      await writeFile(join(catalogDir, "roles", "bindings.json"), JSON.stringify({ schemaVersion: 3, bindings: { conversation: ["using-bflow"] } }));
       for (const name of ["node", "git", "pnpm", "herdr"]) await writeFile(join(bin, name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
       const platform = detectPlatform({ ...defaultHostEnvironment(), platform: "linux", homeDir: root,
         env: { HOME: root, PATH: bin, SHELL: "/bin/bash", XDG_CONFIG_HOME: join(root, "config"), XDG_DATA_HOME: join(root, "data"), XDG_STATE_HOME: join(root, "state") } });
       const versions: Record<string, string> = { node: "v22.13.0", git: "git version 2.45.0", pnpm: "12.5.1", herdr: "herdr 0.9.5" };
       await executeSetupCommand({ command: "setup", mode: "apply", yes: true, json: false, help: false }, { cwd: root, setup: {
-        platform, toolInstaller: registry,
+        platform, toolInstaller: registry, catalogDir,
         machineConfig: { ...defaultMachineConfig(), toolPins: [{ schemaVersion: 3, toolId: "gitnexus", installerId: "fixture", method: "npm", version: "1.4.7",
           source: "https://example.com/tool.tgz", integrity: "a".repeat(64), platforms: ["linux"], requiresElevation: false }] },
         runner: { run: async argv => ({ exitCode: 0, timedOut: false, stderr: "", stdout: versions[basename(argv[0]!)] ?? "" }) }
