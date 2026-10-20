@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
@@ -111,6 +111,8 @@ export function behavioralChecks(commands: readonly BehavioralCommand[]): Qualit
     timeout: { executionTimeoutMs: command.timeoutMs + 60_000, onTimeout: "block" }, metadata: { bindAcceptedCriteria: true },
     configuration: { kind: "deterministic", method: command.method, command: command.command, criterionIds: [], testNames: command.testNames, role: "quality_gate", levels: command.levels } }));
 }
+/** Launcher failures (bubblewrap or sandbox-exec) are infrastructure errors, never test results. */
+const SANDBOX_ERROR = /^(?:bwrap|sandbox-exec):/;
 const execute = promisify(execFile);
 export async function verificationGit(cwd: string, args: string[]): Promise<string> {
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")));
@@ -156,13 +158,16 @@ export async function measureBehavior(command: BoundBehavioralCommand, cwd: stri
     if (!match) throw new Error(`Behavioral test identity must be a committed regular file: ${path}`);
     testBlobs[path] = match[1]!;
   }
-  const temporary = await mkdtemp(join(tmpdir(), "bflow-behavioral-")), checkout = join(temporary, "checkout");
+  // Canonical path: Vitest reports resolved file names (macOS /var is a symlink to /private/var) and they are matched against the checkout.
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), "bflow-behavioral-"))), checkout = join(temporary, "checkout");
   let added = false;
   try {
     await verificationGit(cwd, ["worktree", "add", "--detach", checkout, revision]); added = true;
     const module = await import(new URL("../../../quality-gates/dist/index.js", import.meta.url).href);
     const runner = module.createQualityCommandRunner();
     const env: Record<string, string> = { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", HOME: temporary, TMPDIR: temporary };
+    // Seatbelt cannot mount a tmpfs, so the sandboxed process writes only to a dedicated scratch sibling of the checkout.
+    if (process.platform === "darwin") { const scratch = join(temporary, "tmp"); await mkdir(scratch, { mode: 0o700 }); env["TMPDIR"] = scratch; env["HOME"] = scratch; }
     const maxOutputBytes = command.maxOutputBytes ?? 1_048_576;
     // A Runtime-detected profile may run a sandboxed build first (e.g. `tsc -b`); it gets the same boundary, its own deadline, and may only leave git-ignored outputs.
     if (command.prepare) {
@@ -172,7 +177,7 @@ export async function measureBehavior(command: BoundBehavioralCommand, cwd: stri
       const prepared = await runner.run({ ...prepareSandbox, cwd: checkout, env, timeoutMs: command.prepare.timeoutMs, maxOutputBytes });
       if (!prepared.ok) throw new Error(`Behavioral runner infrastructure failure (prepare): ${prepared.error.message}`);
       const prepareOutcome = prepared.value as QualityCommandOutcome;
-      const failure = prepareOutcome.spawnError ?? (prepareOutcome.stderr.startsWith("bwrap:") ? prepareOutcome.stderr.trim()
+      const failure = prepareOutcome.spawnError ?? (SANDBOX_ERROR.test(prepareOutcome.stderr) ? prepareOutcome.stderr.trim()
         : prepareOutcome.timedOut ? "deadline exceeded" : prepareOutcome.aborted ? "aborted" : prepareOutcome.signal ? `signal ${prepareOutcome.signal}`
         : prepareOutcome.exitCode !== 0 ? `exit ${prepareOutcome.exitCode}` : undefined);
       if (failure !== undefined) throw new Error(`Behavioral runner infrastructure failure (prepare): ${failure}${outputTail(prepareOutcome)}`);
@@ -192,7 +197,7 @@ export async function measureBehavior(command: BoundBehavioralCommand, cwd: stri
     const result = await runner.run({ ...sandbox, cwd: checkout, env, timeoutMs: command.timeoutMs, maxOutputBytes });
     if (!result.ok) throw new Error(`Behavioral command invocation failed: ${result.error.message}`);
     const outcome = result.value as QualityCommandOutcome;
-    if (outcome.stderr.startsWith("bwrap:")) throw new Error(`Behavioral sandbox failed: ${outcome.stderr.trim()}`);
+    if (SANDBOX_ERROR.test(outcome.stderr)) throw new Error(`Behavioral sandbox failed: ${outcome.stderr.trim()}`);
     // Tracked files must match the revision and no non-ignored untracked file may exist. Prepared checkouts may also hold
     // git-ignored outputs (build output, dependency mountpoints), so only owner commands keep the strict ignored-file check.
     await assertPinnedRevision(checkout, revision);
