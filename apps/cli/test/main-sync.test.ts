@@ -64,7 +64,7 @@ describe("main integration with upstream CLI commands", () => {
     });
     const human = formatCommandSuccess("doctor", report, false);
     expect(human).toContain("[FAIL] Environment unhealthy");
-    expect(human).toContain("FAILED Codex: Login required");
+    expect(human).toContain("[FAIL] Codex: Login required");
     expect(human).toContain("Component Groups:");
     expect(human).toContain("[Providers]");
     expect(human).toContain("Repair: codex login");

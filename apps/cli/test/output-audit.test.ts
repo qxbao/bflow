@@ -1,0 +1,81 @@
+import { describe, expect, it } from "vitest";
+import { EnvironmentDoctorReportSchema } from "@bflow/contracts";
+import type { DocsFailureKind } from "@bflow/docs-retrieval";
+import { formatCommandError, formatCommandSuccess, formatEnvironmentStatus } from "../src/formatters.js";
+import { stripAnsi } from "../src/presentation.js";
+import type { EnvironmentStatus } from "../src/environment.js";
+import type { SetupCommandOutput } from "../src/types.js";
+
+const status: EnvironmentStatus = { workspaceRoot: "/work/shop", sessionName: "shop", server: "stopped", configuration: "valid", manifest: null, liveObservation: false, issues: [] };
+
+describe("CLI output audit", () => {
+  it.each([
+    [{ ...status }, "bflow up"],
+    [{ ...status, server: "unknown" as const, issues: ["Server observation failed"] }, "bflow doctor"],
+    [{ ...status, server: "running" as const, issues: ["Agent health unavailable"] }, "bflow doctor"]
+  ])("never labels incomplete environment observations healthy", (data, next) => {
+    const text = formatEnvironmentStatus(data);
+    expect(text).not.toContain("[OK]");
+    expect(text).toContain(next);
+    for (const issue of data.issues) expect(text).toContain(issue);
+    expect(text).toContain("persisted (may be stale)");
+  });
+
+  it("shows doctor failures once and keeps all failures ahead of healthy detail, including skipped and legacy checks", () => {
+    const healthy = Array.from({ length: 25 }, (_, i) => ({ checkId: `tool-${i}`, component: `tool-${i}`, status: "pass", reason: `Internal successful probe ${i}`, remediation: "" }));
+    const report = EnvironmentDoctorReportSchema.parse({ schemaVersion: 2, workspaceRoot: "/work/shop", healthy: false, checkedAt: "2026-10-20T00:00:00.000Z",
+      checks: [...healthy.map(check => ({ checkId: check.checkId, name: check.component, status: "passed", message: check.reason })),
+        { checkId: "broken", name: "broken", status: "failed", message: "Pinned binary changed", remediation: "Review the tool installation" },
+        { checkId: "legacy", name: "legacy", status: "warn", message: "Legacy session needs reconciliation", remediation: "Run bflow doctor --json" }],
+      metadata: { groups: { tools: [...healthy, { checkId: "broken", component: "broken", status: "fail", reason: "Pinned binary changed", remediation: "Review the tool installation" },
+        { checkId: "optional", component: "optional", status: "skipped", reason: "Optional backend disabled", remediation: "" }] } }
+    });
+    const text = formatCommandSuccess("doctor", report, false);
+    expect(text.match(/Pinned binary changed/g)).toHaveLength(1);
+    expect(text).not.toContain("Internal successful probe");
+    for (const value of ["Review the tool installation", "Legacy session needs reconciliation", "skipped"]) expect(text).toContain(value);
+    expect(stripAnsi(formatCommandSuccess("doctor", report, false, { color: true }))).toBe(text);
+    expect(formatCommandSuccess("doctor", report, false, { color: true })).toContain("\x1b[31m");
+    expect(JSON.parse(formatCommandSuccess("doctor", report, true)).data).toEqual(report);
+  });
+
+  it.each([
+    ["auth_invalid", "context7-api-key-stdin"],
+    ["auth_missing", "context7-api-key-stdin"],
+    ["version_not_found", "--version"],
+    ["library_not_found", "bflow docs search"],
+    ["permission_denied", "grant"],
+    ["network", "bflow docs status"],
+    ["protocol", "bflow docs status"],
+    ["rate_limited", "wait"]
+  ] as const)("offers a specific next step for docs %s without changing JSON", (kind: DocsFailureKind, next) => {
+    const output = { docs: true as const, action: "lookup" as const, ok: false, access: { mode: "none" as const, reason: "Documentation access unavailable" }, warnings: [],
+      failure: { kind, message: "Documentation request failed", retryable: false, retryAfterMs: kind === "rate_limited" ? 5000 : undefined, availableVersions: kind === "version_not_found" ? ["v1", "v2"] : undefined } };
+    const text = formatCommandSuccess("docs", output, false);
+    expect(text).toContain("Next:");
+    expect(text.toLowerCase()).toContain(next.toLowerCase());
+    if (kind === "rate_limited") expect(text).toContain("5s");
+    expect(JSON.parse(formatCommandSuccess("docs", output, true)).data).toEqual(JSON.parse(JSON.stringify(output)));
+  });
+
+  it("gives path-permission and input-file advice while preserving uncertain-delivery priority", () => {
+    const permission = { code: "validation" as const, retryable: false, message: "EACCES: permission denied, open '/work/file'" };
+    expect(formatCommandError(permission, "init", false)).toMatch(/Next:.*ownership/i);
+    const input = { ...permission, message: "ENOENT: no such file or directory, open '/work/spec.json'" };
+    expect(formatCommandError(input, "run", false)).toMatch(/Next:.*input.*path/i);
+    expect(formatCommandError({ ...permission, code: "unknown_delivery", manualInterventionRequired: true }, "up", false)).toMatch(/Next:.*reconcile/i);
+  });
+
+  it("summarizes successful setup bookkeeping but retains failed receipts and warnings", () => {
+    const output: SetupCommandOutput = { mode: "apply", machineId: "internal-machine-id", os: "linux", serviceManagerKind: "systemd-user", outcome: "applied",
+      plan: { schemaVersion: 3, planId: "internal-plan-id", machineId: "internal-machine-id", revision: 1, planDigest: "a".repeat(64), createdAt: "2026-10-20T00:00:00.000Z", idempotencyKey: "internal-key", steps: [] },
+      tools: [{ toolId: "git", status: "present", version: "2" }, { toolId: "node", status: "present", version: "22" }],
+      skills: { catalogLoaded: true, skillCount: 32, syncedManifests: 8, storeRoot: "/private/skills-store" }, diagnostics: ["Setup completed successfully", "License: Review the installed tool's terms"] };
+    const text = formatCommandSuccess("setup", output, false);
+    for (const hidden of ["internal-machine-id", "internal-plan-id", "/private/skills-store", "Setup completed successfully"]) expect(text).not.toContain(hidden);
+    expect(text).toContain("License:");
+    expect(text).toContain("2 ready");
+    expect(text).toContain("bflow doctor");
+    expect(JSON.parse(formatCommandSuccess("setup", output, true)).data).toEqual(output);
+  });
+});

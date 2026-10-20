@@ -348,6 +348,18 @@ export function resolveActionableRemediation(
   }
 
   // 8. Missing executable (do not match broad 'not found')
+  if (/\b(?:EACCES|EPERM)\b/.test(msg)) {
+    return "Check ownership and read/write permissions for the path shown above, then rerun the command.";
+  }
+  if (/\bENOENT\b.*\b(?:open|stat|read|scandir)\b/i.test(msg)) {
+    return "Check the input file path and pass an existing readable file; use the command's --help to review its arguments.";
+  }
+  if (/\b(?:ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT)\b|\bfetch failed\b/i.test(msg)) {
+    return "Check the endpoint and network connection, then run 'bflow doctor' to diagnose provider and Gateway access.";
+  }
+  if (/\bERR_MODULE_NOT_FOUND\b|Cannot find (?:module|package)/i.test(msg)) {
+    return "Reinstall or rebuild the Bflow CLI, then run 'bflow doctor' to verify its components.";
+  }
   if (msg.includes("ENOENT") || msg.includes("Missing/unavailable dependency") || msg.includes("flock") || msg.includes("not installed") || msg.includes("executable is not available")) {
     return "Ensure the required executable is installed and available on PATH, then run 'bflow doctor'.";
   }

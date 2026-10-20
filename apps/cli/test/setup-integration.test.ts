@@ -302,7 +302,7 @@ describe("Task 1: Bflow Platform v3 Setup Integration & Lifecycle", () => {
 
       const formatted = formatCommandSuccess("setup", output, false);
       expect(formatted).toContain("Setup Mode:         APPLY");
-      expect(formatted).toContain("Machine ID:         m-12345");
+      expect(formatted).not.toContain("Machine ID:");
       expect(formatted).toContain("Operating System:   linux");
       expect(formatted).toContain("Service Manager:    systemd-user");
       expect(formatted).toContain("Plan ID:            plan-1");
@@ -344,18 +344,16 @@ describe("Task 1: Bflow Platform v3 Setup Integration & Lifecycle", () => {
       };
 
       const formatted = formatCommandSuccess("doctor", doctorData as any, false);
-      // Preserves original check list lines
+      // Healthy details are summarized; actionable diagnostics remain visible.
       expect(formatted).toContain("Repository: /workspace");
-      expect(formatted).toContain("PASSED herdr: Herdr binary found");
-      expect(formatted).toContain("PASSED git: Git repository valid");
+      expect(formatted).toContain("Passed (2): herdr, git");
 
       // Renders groups
       expect(formatted).toContain("[Runtime]");
-      expect(formatted).toContain("- [PASSED] Workflow Engine (version: 2.0.0)");
+      expect(formatted).toContain("Passed (1): Workflow Engine");
       expect(formatted).toContain("[Agent Providers]");
-      expect(formatted).toContain("- [WARNING] agy");
-      expect(formatted).toContain("Reason: Authentication token expiring soon");
-      expect(formatted).toContain("Remediation: Run agy login");
+      expect(formatted).toContain("- [WARN] agy: Authentication token expiring soon");
+      expect(formatted).toContain("Next: Run agy login");
       expect(formatted).toContain("[MCP]");
       expect(formatted).toContain("[Tools]");
       expect(formatted).toContain("[Skills]");
