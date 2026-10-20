@@ -29,7 +29,7 @@ import {
   resolveAndVerifyExecutable,
   verifyLaunchAttestation
 } from "./attestation.js";
-import { createHealthCheck } from "./diagnostics.js";
+import { createHealthCheck, executionProbeFailureDiagnostic } from "./diagnostics.js";
 import { validateProviderEnvironment } from "./environment.js";
 import { type LaunchMaterialFailure, resolveLaunchMaterial, type ResolvedLaunchMaterial } from "./launch-material.js";
 import { compileProviderPermissions } from "./permissions.js";
@@ -539,9 +539,9 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
             }, options)
           : await this.runner.run(probeInvocation);
 
-        const combinedProbe = `${probeOutcome.stdout}\n${probeOutcome.stderr}`;
         if (probeOutcome.exitCode !== 0 || probeOutcome.failure !== undefined || !probeOutcome.started) {
-          const lower = combinedProbe.toLowerCase();
+          const diagnostic = executionProbeFailureDiagnostic(probeOutcome);
+          const lower = diagnostic.toLowerCase();
           let probeCode = "probe_failed";
           let probeRemediation = "Verify account quotas, network connectivity, and provider permissions.";
 
@@ -557,9 +557,12 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
           } else if (/\b(?:blocked|approval (?:is )?required|requires? (?:interactive )?approval|(?:approval|confirmation) dialog)\b/.test(lower)) {
             probeCode = "agent_blocked";
             probeRemediation = "Complete interactive approvals outside automated flow.";
-          } else if (lower.includes("auth") || lower.includes("expired") || lower.includes("token")) {
+          } else if (/\b(?:auth(?:entication)?|credentials?|api[ _-]?key|(?:access|refresh|oauth)\s+token|token|session)[ _:-]*(?:(?:has|have|is|are)\s+)?expired\b|\bexpired[ _:-]+(?:token|credentials?|api[ _-]?key|session)\b/.test(lower)) {
             probeCode = "auth_expired";
             probeRemediation = "Re-authenticate provider credentials.";
+          } else if (/\b(?:unauthori[sz]ed|unauthenticated|invalid[ _-]+(?:api[ _-]?key|credentials?|token)|(?:auth(?:entication)?|authorization)[ _:-]+(?:failed|failure|required)|not (?:authenticated|logged in))\b|\bhttp(?:\/\S+)?\s+401\b/.test(lower)) {
+            probeCode = "auth_missing";
+            probeRemediation = "Verify the selected provider credentials and authenticate if required.";
           }
 
           checks.push(
@@ -567,7 +570,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
               "authentication",
               "failed",
               probeCode,
-              `Readiness probe failed: ${combinedProbe}`,
+              `Readiness probe failed: ${diagnostic}`,
               probeRemediation
             )
           );
