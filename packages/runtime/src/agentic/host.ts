@@ -13,7 +13,7 @@ import {
   JsonValueSchema, RoleMessageSchema, RunQuerySchema, SessionManifestSchema,
   type AgentProviderId, type AgentRole, type PaneBinding, type RoleMessage, type SessionManifest, type RunStore, type OperationOptions
 } from "@bflow/contracts";
-import { authenticateNativeHerdrMessage } from "./herdr-ingress.js";
+import { authenticateNativeHerdrMessage, runAsHostAuthenticated } from "./herdr-ingress.js";
 import { callHost } from "./host-protocol.js";
 import { readHostConfiguration, type HostConfiguration, type RoleLaunchDescriptor } from "./host-controller.js";
 import { digest, json, record, textField } from "./journal.js";
@@ -851,7 +851,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           if (binding.session?.value !== incoming.nativeSessionId) throw new Error("Queued provider prompt native session changed");
           await requireWorkspace().runtime.validateProviderDelivery(message, binding);
           // A Runtime-originated notice (e.g. specialist_result_ready) is already the exact outbox delivery just validated; it has no pane to re-sign.
-          if (message.sender.role === "runtime") continue;
+          if (message.sender.role === "runtime") {
+            // Conversation never sees Runtime-authored prompts (e.g. a specialist's user_decision) unless the gateway ingests them here.
+            if (message.recipient.role === "conversation") await runAsHostAuthenticated(message, () => requireWorkspace().conversation.receiveHerdr(message));
+            continue;
+          }
           const current = SessionManifestSchema.parse(unwrap(await requireWorkspace().runtime.ports.panes.getManifest()));
           const sender = current.panes.find(pane => pane.role === message.sender.role && (!message.sender.pane_id || pane.paneId === message.sender.pane_id));
           if (!sender) throw new Error("Transport sender binding unavailable");

@@ -4,7 +4,7 @@ import {
   CancellationRequestSchema, DelegationRequestSchema, GitChangeSetSchema,
   PaneBindingSchema, QualityGateContextSchema, QualityGateResultSchema, RoleMessageSchema, SessionManifestSchema,
   SpecificationSchema, TestStrategySchema, VerificationCycleSchema, VerificationResultSchema,
-  WorkflowDefinitionSchema, type AgentExecutionHandle, type ApprovalDecision,
+  WorkflowDefinitionSchema, type AgentExecutionHandle, type ApprovalDecision, type ApprovalRequest,
   type ArtifactReference, type JsonValue, type RoleMessage, type QualityGate, type QualityGateResult, type Specification,
   type PaneBinding, type TaskDefinition, type AgentRole
 } from "@bflow/contracts";
@@ -192,6 +192,24 @@ export class AgenticWorkflowRuntime {
     return this.transaction(async state => json(runId ? this.run(state, runId) : {
       runs: state.runs, outbound: state.outbound, inbox: state.inbox
     }));
+  }
+  /**
+   * Read-only: approvals this session's runs are still waiting on (design/task approval and specialist user decisions).
+   * Conversation reconciles against it; it never mutates state and is not approval evidence by itself.
+   */
+  async pendingApprovals(query: { sessionId: string; runId?: string }): Promise<{ request: ApprovalRequest; correlationId: string }[]> {
+    return this.transaction(async state => {
+      const pending: { request: ApprovalRequest; correlationId: string }[] = [];
+      for (const run of state.runs) {
+        if (run.delegation.sessionId !== query.sessionId || (query.runId !== undefined && run.runId !== query.runId)) continue;
+        if (run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) continue;
+        if (run.approval && run.status === "awaiting_approval" && (!run.decision || run.decision.approvalId !== run.approval.approvalId))
+          pending.push({ request: ApprovalRequestSchema.parse(run.approval), correlationId: run.delegation.correlationId });
+        for (const entry of Object.values(run.userDecisions ?? {}))
+          if (entry.status === "pending") pending.push({ request: ApprovalRequestSchema.parse(entry.request), correlationId: run.delegation.correlationId });
+      }
+      return pending;
+    });
   }
   async loadSpecification(specId: string): Promise<Specification> {
     return this.transaction(async state => {

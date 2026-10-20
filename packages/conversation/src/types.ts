@@ -414,6 +414,15 @@ export interface UserFriendlyResponse {
   readonly substantiveUpdate: boolean;
 }
 
+/** Result of registering Runtime-reported pending approvals that Conversation had not recorded. */
+export interface ApprovalReconciliation {
+  readonly registered: readonly string[];
+  readonly alreadyKnown: readonly string[];
+  readonly rejected: readonly { readonly approvalId: string; readonly reason: string }[];
+  /** Gateway was mid-turn; nothing changed and the caller may retry. */
+  readonly busy?: boolean;
+}
+
 export interface CoordinatorUpdateOutcome {
   readonly sessionId: string;
   readonly correlationId: string;
