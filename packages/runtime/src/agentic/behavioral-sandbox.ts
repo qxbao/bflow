@@ -1,5 +1,8 @@
-import { lstat, mkdir, realpath } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { basename, isAbsolute, join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { probeBehavioralSandbox } from "./sandbox-readiness.js";
+import type { RunnerMount } from "./runner-adapter.js";
 import type { BoundBehavioralCommand } from "./behavioral-runner.js";
 
 /** Repository-relative POSIX path without absolute, backslash, colon, empty, "." or ".." segments. */
@@ -43,20 +46,28 @@ async function checkoutDependencyMounts(command: BoundBehavioralCommand, checkou
  * `argv` selects the invocation (tests, or a profile's prepare step); the same executable runs both. */
 export async function sandboxBehavior(command: BoundBehavioralCommand, checkout: string, argv: string[], reporter?: string) {
   if (process.platform === "darwin") {
+    if (command.adapter && (command.adapter.mounts.length || command.adapter.helpers?.length || !["node_tap", "vitest_json", "mocha_json"].includes(command.adapter.format)))
+      throw new Error("runner_setup_required: this adapter requires Linux toolchain/report sandbox support");
+    const readiness = await probeBehavioralSandbox();
+    if (readiness.status !== "ready") throw new Error(readiness.code + ": " + readiness.reason);
+    const checkoutMounts = await checkoutDependencyMounts(command, checkout);
+    await validateDependencyTrees([...(command.dependencyRoots ?? []), ...checkoutMounts.map(([from]) => from)], command.dependencySource);
     const { sandboxBehaviorDarwin } = await import("./behavioral-sandbox-darwin.js");
     return sandboxBehaviorDarwin(command, checkout, argv, reporter);
   }
   if (process.platform !== "linux") throw new Error("Behavioral verification requires the Linux Bubblewrap or macOS Seatbelt sandbox");
-  const executable = "/usr/bin/bwrap";
-  if (!(await lstat(executable)).isFile()) throw new Error("Behavioral verification requires /usr/bin/bwrap");
+  const readiness = await probeBehavioralSandbox();
+  if (readiness.status !== "ready") throw new Error(readiness.code + ": " + readiness.reason);
+  const executable = readiness.executable;
   const args = ["--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL",
     "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin", "--symlink", "usr/lib", "/lib",
     "--symlink", "usr/lib64", "/lib64", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
     "--ro-bind", "/etc/hosts", "/etc/hosts",
-    "--bind", checkout, checkout, "--chdir", checkout];
+    "--dir", "/tmp/bflow-home", "--bind", checkout, checkout, "--chdir", command.adapter && command.adapter.projectDirectory !== "." ? join(checkout, command.adapter.projectDirectory) : checkout];
   const binary = await realpath(command.executable);
   if (!(await lstat(binary)).isFile()) throw new Error("Behavioral executable must resolve to a regular file");
   args.push("--ro-bind", binary, command.executable);
+  const checkoutMounts = await checkoutDependencyMounts(command, checkout);
   for (const path of command.dependencyRoots ?? []) {
     // Only dependency trees can be imported; mounting a project or a home would
     // expose host state and turn this into an ineffective read-only wrapper.
@@ -64,13 +75,93 @@ export async function sandboxBehavior(command: BoundBehavioralCommand, checkout:
       throw new Error("Behavioral dependency roots must be canonical node_modules directories");
     args.push("--ro-bind", path, path);
   }
+  await validateDependencyTrees([...(command.dependencyRoots ?? []), ...checkoutMounts.map(([from]) => from)], command.dependencySource);
   // Runtime-detected dependencies keep their repository-relative layout (pnpm relative symlinks resolve inside the checkout).
-  for (const [from, to] of await checkoutDependencyMounts(command, checkout)) args.push("--ro-bind", from, to);
+  for (const [from, to] of checkoutMounts) args.push("--ro-bind", from, to);
+  for (const mount of command.adapter?.mounts ?? []) {
+    await validateRunnerMount(mount, checkout);
+    const target = command.dependencySource && mount.target.startsWith(command.dependencySource + "/") ? join(checkout, mount.target.slice(command.dependencySource.length + 1)) : mount.target;
+    if (target.startsWith(checkout + "/")) {
+      let current = checkout;
+      for (const part of target.slice(checkout.length + 1).split("/")) {
+        current = join(current, part);
+        try { if ((await lstat(current)).isSymbolicLink()) throw new Error("Toolchain mountpoint traverses a checkout symlink"); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      }
+    }
+    args.push("--ro-bind", mount.source, target);
+  }
+  if (command.reportDirectory) {
+    args.push("--bind", command.reportDirectory, command.reportDirectory);
+    for (const helper of command.adapter?.helpers ?? []) args.push("--ro-bind", join(command.reportDirectory, helper.name), join(command.reportDirectory, helper.name));
+  }
   if (reporter) {
     args.push("--ro-bind", reporter, reporter);
     try { if ((await lstat(reporter + ".map")).isFile()) args.push("--ro-bind", reporter + ".map", reporter + ".map"); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   }
-  args.push("--", command.executable, ...argv);
+  const sandboxExecutable = command.adapter && command.dependencySource && command.executable.startsWith(command.dependencySource + "/") ? join(checkout, command.executable.slice(command.dependencySource.length + 1)) : command.executable;
+  if (sandboxExecutable !== command.executable) args.push("--ro-bind", binary, sandboxExecutable);
+  args.push("--", sandboxExecutable, ...argv);
   return { executable, args };
+}
+
+/** A mount is a narrowly selected canonical toolchain/cache, never a home, secret tree or namespace override. */
+export async function validateRunnerMount(mount: RunnerMount, checkout: string): Promise<void> {
+  const secret = /(^|\/)(?:\.ssh|\.aws|\.azure|\.gnupg|\.kube|\.config|\.npmrc|\.netrc|settings\.xml|credentials(?:\.toml)?)(?:\/|$)/;
+  const home = await realpath(homedir());
+  if (![mount.source, mount.target].every(path => isAbsolute(path) && !path.includes("\0") && !path.split("/").some(part => part === "." || part === "..")) ||
+      ["/", "/usr", "/etc", "/proc", "/dev", "/run", "/tmp", "/home", home].includes(mount.source) || home.startsWith(mount.source + "/") ||
+      secret.test(mount.source) || secret.test(mount.target) || mount.target === checkout || checkout.startsWith(mount.target + "/") ||
+      ["/", "/usr", "/bin", "/lib", "/lib64", "/etc", "/proc", "/dev", "/run", "/tmp"].includes(mount.target) ||
+      await realpath(mount.source) !== resolve(mount.source)) throw new Error("Unsafe toolchain/cache mount");
+  const info = await lstat(mount.source);
+  if (!info.isFile() && !info.isDirectory()) throw new Error("Toolchain/cache mount must be a regular file or directory");
+  if (info.isDirectory()) {
+    const pending = [mount.source]; let count = 0;
+    while (pending.length) {
+      const directory = pending.pop()!;
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        if (++count > 100000) throw new Error("Toolchain/cache inspection exceeds bounds");
+        const path = join(directory, entry.name);
+        if (secret.test(path) || (/^(?:auth\.json|tokens|passwords|id_rsa|id_ed25519)$/.test(entry.name) || entry.name === "token" && !entry.isDirectory())) throw new Error("Credential material in toolchain/cache mount");
+        if (entry.isDirectory()) pending.push(path);
+        else if (entry.isSymbolicLink()) {
+          const real = await realpath(path).catch(() => "");
+          if (real && !real.startsWith(mount.source + "/") && !real.startsWith("/usr/")) throw new Error("Toolchain/cache symlink escapes selected tree");
+        } else if (!entry.isFile()) throw new Error("Special file in toolchain/cache mount");
+        if (entry.isFile() && entry.name === "config" && path.includes("/.git/")) {
+          const text = await readFile(path, "utf8");
+          if (/[a-z]+:\/\/[^/\s]+@|credential|extraheader/i.test(text)) throw new Error("Credentials in dependency cache configuration");
+        }
+      }
+    }
+  }
+}
+
+/** Inspect imported dependency content without following directory links. Mounted Unix sockets remain reachable even offline. */
+export async function validateDependencyTrees(roots: readonly string[], repositorySource?: string): Promise<void> {
+  const allowed = [...roots, ...(repositorySource ? [repositorySource] : []), "/usr"];
+  const sensitive = /^(?:\.ssh|\.aws|\.azure|\.gnupg|\.kube|\.npmrc|\.netrc|credentials(?:\.toml)?|settings\.xml|auth\.json|id_rsa|id_ed25519)$/i;
+  let count = 0;
+  for (const root of new Set(roots)) {
+    if (!isAbsolute(root) || await realpath(root) !== resolve(root) || !(await lstat(root)).isDirectory()) throw new Error("Dependency tree must be a canonical directory");
+    const pending = [root];
+    while (pending.length) {
+      const directory = pending.pop()!;
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        if (++count > 200000) throw new Error("Dependency tree inspection exceeds bounds");
+        const path = join(directory, entry.name);
+        if (sensitive.test(entry.name)) throw new Error("Credential material in dependency tree");
+        if (entry.isDirectory()) pending.push(path);
+        else if (entry.isSymbolicLink()) {
+          const destination = await realpath(path).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
+          if (destination === undefined) continue;
+          if (!allowed.some(base => destination === base || destination.startsWith(base + "/"))) throw new Error("Dependency symlink escapes selected trees");
+          const target = await stat(path);
+          if (!target.isDirectory() && !target.isFile()) throw new Error("Special file in dependency tree");
+        } else if (!entry.isFile()) throw new Error("Special file in dependency tree");
+      }
+    }
+  }
 }

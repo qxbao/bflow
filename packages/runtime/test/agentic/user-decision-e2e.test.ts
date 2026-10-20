@@ -620,7 +620,7 @@ describe.skipIf(process.platform !== "linux")("Conversation notices and watchdog
       rejection = (error as WorkflowProposalRejected).rejection; message = (error as Error).message;
     }
     expect(rejection).toMatchObject({ code: "no_test_runner_detected" });
-    expect(rejection!.options).toEqual(["Coordinator thêm task thiết lập test runner (vitest) rồi đề xuất lại workflow", "Hủy run"]);
+    expect(rejection!.options).toEqual(["Coordinator tự thiết lập runner phù hợp qua một task có review rồi đề xuất lại workflow", "Hủy run"]);
     expect(JSON.parse(message)).toEqual(rejection);
 
     await runtime.reportWorkflowRejected(RUN, rejection!);
@@ -632,10 +632,10 @@ describe.skipIf(process.platform !== "linux")("Conversation notices and watchdog
     expect((rejected[0]!.payload as { options: string[] }).options).toEqual(rejection!.options);
 
     await persistNotices(f);
-    const notice = (await f.receipts.unsurfacedConversationNotices()).find(item => renderConversationNotice(item).display.includes("thiết lập test runner"))!;
+    const notice = (await f.receipts.unsurfacedConversationNotices()).find(item => renderConversationNotice(item).display.includes("thiết lập runner"))!;
     const rendered = renderConversationNotice(notice);
     expect(rendered.kind).toBe("blocked");
-    expect(rendered.display).toContain("1. Coordinator thêm task thiết lập test runner");
+    expect(rendered.display).toContain("1. Coordinator tự thiết lập runner");
     expect(rendered.display).toContain("2. Hủy run");
     expect(rendered.display).not.toContain("verification.json");
 

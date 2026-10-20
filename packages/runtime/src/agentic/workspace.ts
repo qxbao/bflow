@@ -23,6 +23,8 @@ export interface OpenAgenticWorkspaceOptions {
   taskChecks: AgenticRuntimePorts["taskChecks"]; workflowChecks: AgenticRuntimePorts["workflowChecks"];
   /** Deterministic host runners. Review checks are always routed through Herdr. */
   deterministicGates: readonly QualityGate[];
+  behavioralChecks?: AgenticRuntimePorts["behavioralChecks"];
+  behavioralGates?: () => readonly QualityGate[];
   authenticateMessage: AgenticRuntimePorts["authenticateMessage"];
   /** Called after Conversation applied a Runtime outbox message; the host records it as a durable notice for the model. */
   onConversationNotice?: (message: RoleMessage) => Promise<void>;
@@ -204,7 +206,7 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
     const reviewIds = [...new Set(checks.filter(check => record(check.configuration).kind === "review").map(check => check.id))];
     const gates = [...options.deterministicGates.filter(gate => !reviewIds.includes(gate.id)), ...reviewIds.map(id => ({ id,
       evaluate: (...args: Parameters<QualityGate["evaluate"]>) => runtime.herdrQualityGate(id).evaluate(...args) }))];
-    const policies = await loadAgenticPolicies({ repositoryPath: repository, artifactStore, gates,
+    const policies = await loadAgenticPolicies({ repositoryPath: repository, artifactStore, gates, ...(options.behavioralGates ? { dynamicGates: options.behavioralGates } : {}),
       loadSpecification: id => runtime.loadSpecification(id),
       authorizeApprover: (decision, humanRequired) => {
         if (!humanRequired && decision.decidedBy === "coordinator") return true;
@@ -216,6 +218,7 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
     runtime = new AgenticWorkflowRuntime({ engine: new coreModule.DeterministicWorkflowEngine({ bindingReceiptKeys: options.bindingReceiptKeys }), runStore, artifactStore,
       registry: new registryModule.FileAgentRegistry({ stateFile: resolve(directory, "registry.json") }), transport, panes, policies,
       automaticAlternativeEvidence: true, roleCapabilities: options.roleCapabilities, maxConcurrency: options.maxDeveloperCapacity ?? 2, taskChecks: options.taskChecks, workflowChecks: options.workflowChecks,
+      ...(options.behavioralChecks ? { behavioralChecks: options.behavioralChecks } : {}),
       authenticateMessage: async message => await authenticateNativeHerdrMessage(message) || await options.authenticateMessage(message),
       deliverToConversation: async message => {
         if (!conversation) throw new Error("Conversation host is not ready");

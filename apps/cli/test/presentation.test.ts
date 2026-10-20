@@ -258,6 +258,15 @@ describe("Presentation & Formatting Engine", () => {
       expect(taskRemediation).not.toContain("executable is installed");
     });
 
+    it("keeps Agy authentication recovery specific to its interactive login flow", () => {
+      const next = resolveActionableRemediation({ code: "validation", retryable: false,
+        message: "Agent provider 'agy' is not authenticated. Run 'agy' interactively, then verify with 'agy models'." }, "up");
+      expect(next).toContain("agy");
+      expect(next).not.toContain("agy auth login");
+      expect(next).not.toContain("claude");
+      expect(next).not.toContain("codex");
+    });
+
     it("preserves precise authored recovery instructions", () => {
       expect(
         resolveActionableRemediation({ code: "conflict", retryable: false, message: "Run bflow recover --yes" })

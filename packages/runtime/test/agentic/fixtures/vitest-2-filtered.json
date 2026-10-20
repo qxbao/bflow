@@ -1,0 +1,72 @@
+{
+  "numTotalTestSuites": 3,
+  "numPassedTestSuites": 3,
+  "numFailedTestSuites": 0,
+  "numPendingTestSuites": 0,
+  "numTotalTests": 3,
+  "numPassedTests": 1,
+  "numFailedTests": 0,
+  "numPendingTests": 2,
+  "numTodoTests": 0,
+  "snapshot": {
+    "added": 0,
+    "failure": false,
+    "filesAdded": 0,
+    "filesRemoved": 0,
+    "filesRemovedList": [],
+    "filesUnmatched": 0,
+    "filesUpdated": 0,
+    "matched": 0,
+    "total": 0,
+    "unchecked": 0,
+    "uncheckedKeysByFile": [],
+    "unmatched": 0,
+    "updated": 0,
+    "didUpdate": false
+  },
+  "startTime": 1792486166382,
+  "success": true,
+  "testResults": [
+    {
+      "assertionResults": [
+        {
+          "ancestorTitles": [
+            "suite"
+          ],
+          "fullName": "suite target",
+          "status": "passed",
+          "title": "target",
+          "duration": 1.2944099999999708,
+          "failureMessages": [],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [
+            "suite"
+          ],
+          "fullName": "suite unmapped",
+          "status": "skipped",
+          "title": "unmapped",
+          "failureMessages": [],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [
+            "suite",
+            "other"
+          ],
+          "fullName": "suite other elsewhere",
+          "status": "skipped",
+          "title": "elsewhere",
+          "failureMessages": [],
+          "meta": {}
+        }
+      ],
+      "startTime": 1792486166886,
+      "endTime": 1792486166887.2944,
+      "status": "passed",
+      "message": "",
+      "name": "/fixture/tests/selection.test.ts"
+    }
+  ]
+}

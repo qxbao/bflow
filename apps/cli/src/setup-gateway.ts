@@ -270,8 +270,24 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
       saved.receiptPath !== receiptPath && "receiptPath",
       digest(saved.paths) !== digest(platform.paths) && "paths"
     ].filter(Boolean);
-    if (mismatched.length > 0)
-      throw new Error(`Gateway configuration does not match the approved setup specification (differs: ${mismatched.join(", ")})`);
+    if (mismatched.length > 0) {
+      const changes: string[] = [];
+      const savedRoot = saved.operation.scope.kind === "machine" ? null : saved.operation.scope.workspaceRoot;
+      if (savedRoot !== repositoryRoot || saved.approval?.repositorySelected !== approval.repositorySelected)
+        changes.push(`repository scope changed (configured: ${JSON.stringify(savedRoot)}; requested: ${JSON.stringify(repositoryRoot)})`);
+      if (saved.approval) {
+        const serviceIds = (value: z.infer<typeof ApprovalSchema>) =>
+          new Set([...value.requirements.map(item => item.toolId), ...value.remoteServices.map(item => item.toolId)]);
+        const previous = serviceIds(saved.approval), requested = serviceIds(approval);
+        const added = [...requested].filter(id => !previous.has(id)).sort();
+        const removed = [...previous].filter(id => !requested.has(id)).sort();
+        if (added.length || removed.length)
+          changes.push(`managed MCP services changed (added: ${added.join(", ") || "none"}; removed: ${removed.join(", ") || "none"})`);
+        else if (digest(saved.approval) !== digest(approval)) changes.push("approved launch settings or tool pins changed");
+      }
+      throw new Error(`${changes.length ? `Gateway ${changes.join("; ")}` : "Gateway configuration does not match the approved setup specification"} (differs: ${mismatched.join(", ")}). ` +
+        "Run 'bflow setup' in the requested directory to review and apply a new setup plan; --check does not change the existing Gateway.");
+    }
     if (digest(saved.approval) !== digest(approval)) throw new Error("Gateway canonical launch approval changed");
     await validateLaunches(saved);
     for (const item of activeRequirements) if (item.toolId === "gitnexus") {

@@ -16,6 +16,7 @@ import {
 import { authenticateNativeHerdrMessage } from "./herdr-ingress.js";
 import { BFLOW_INBOX_NUDGE, inboxCheckIntervalMs } from "./conversation-inbox.js";
 import { ConversationInboxNotifier, type ConversationInboxPorts } from "./conversation-inbox-notifier.js";
+import { probeBehavioralSandbox } from "./sandbox-readiness.js";
 import { lastAssistantText, mustShowSection, renderConversationNotice, type NoticeLike } from "./conversation-notice-render.js";
 import { callHost } from "./host-protocol.js";
 import { readHostConfiguration, type HostConfiguration, type RoleLaunchDescriptor } from "./host-controller.js";
@@ -32,6 +33,7 @@ import { HostVerification, HostBehavioralFailure, DEFAULT_HOST_CHECKS } from "./
 import { HostReceiptJournal, MAX_NOTICE_REBLOCKS, deliveryFailureNotice, isCoordinatorTrigger, type CoordinatorTurnObservation, type HumanHookProvenance } from "./host-receipts.js";
 import { parseBehavioralCommands } from "./behavioral-runner.js";
 import { WorkflowProposalRejected, guardWorkflowProposal, reportsToUser } from "./workflow-rejection.js";
+import { disposeDetectedDependencies } from "./runner-detection.js";
 import { TestRunnerSource, describeTestRunners } from "./task-commands.js";
 import { evaluateWatchdog } from "./run-watchdog.js";
 import { HostConversationIntake } from "./host-conversation.js";
@@ -268,6 +270,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   // Owner commands are an optional override; without them Runtime detects the repository's test runner (no user configuration).
   const testRunners = new TestRunnerSource(behavioralCommands, configuration.repositoryPath);
   await testRunners.refresh();
+  let verificationSandbox = await probeBehavioralSandbox(configuration.repositoryPath);
   const verification = new HostVerification(() => requireWorkspace().runtime, () => requireWorkspace().runtime.ports.artifactStore, receipts, testRunners);
   const development = new HostDevelopment(() => requireWorkspace().runtime, testRunners);
   const conversationIntake = new HostConversationIntake(receipts, () => requireWorkspace().conversation);
@@ -480,8 +483,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         degradation: () => platformSession.degradation()
       } } : {}), maxDeveloperCapacity: configuration.policy?.concurrency.maxConcurrency ?? configuration.maxDeveloperCapacity ?? 2,
       nativeIngressSocket: nativeSocket, bindingReceiptKeys: { [issuerId]: publicKey }, roleLaunch: launch,
-      roleCapabilities: capabilities, taskChecks: [...DEFAULT_HOST_CHECKS, ...verification.behavioralChecks()],
-      workflowChecks: [...DEFAULT_HOST_CHECKS, ...verification.behavioralChecks()], deterministicGates: [verification.deterministicGate(), ...verification.behavioralGates()],
+      roleCapabilities: capabilities, taskChecks: DEFAULT_HOST_CHECKS, workflowChecks: DEFAULT_HOST_CHECKS, deterministicGates: [verification.deterministicGate()],
+      behavioralChecks: (specification, strategy, originalRevision) => verification.behavioralChecks(specification, strategy, originalRevision), behavioralGates: () => verification.behavioralGates(),
       authenticateMessage: authenticateNativeHerdrMessage,
       // Runtime outbox messages reach Conversation in-process; the model learns of them only through hook notices.
       onConversationNotice: async message => { await receipts.appendConversationNotice(message); },
@@ -499,6 +502,15 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         await receipts.recordHuman(ApprovalDecisionSchema.parse(decision), humanHookProvenance); }
     });
     manifest = accepted;
+    if (verificationSandbox.status === "unsupported" && (testRunners.profiles.length || behavioralCommands.length)) {
+      const id = `verification-sandbox-${configuration.sessionId}`;
+      await receipts.appendConversationNotice(RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: id,
+        sender: { role: "runtime" }, recipient: { role: "conversation" }, type: "conversation.clarification",
+        payload: { kind: "workflow_blocked", code: verificationSandbox.code, status: "unsupported",
+          headline: "Kiểm chứng độc lập chưa khả dụng trên máy này", reason: verificationSandbox.reason,
+          options: ["Runtime cần môi trường hỗ trợ sandbox để thực hiện phép đo", "Hủy run"] },
+        artifact_references: [], occurred_at: new Date().toISOString(), idempotency_key: id }));
+    }
     return null;
   };
   const deliveredMessageIds = new Set<string>();
@@ -517,7 +529,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const selected = references[section]; if (!selected) throw new Error("Unknown planning section: choose specification, test_strategy, workflow");
       await testRunners.refresh();
       return json({ references: await Promise.all(selected.map(async path => ({source:path,content:await readFile(new URL(path,import.meta.url),"utf8")}))),
-        ...describeTestRunners(testRunners),
+        ...describeTestRunners(testRunners), verificationSandbox,
         behavioralCommands: behavioralCommands.map(({ id, command, method, levels, testNames, testPaths, reporter }) =>
           ({ id, command, method, levels, testNames, testPaths, reporter: reporter ?? "node_tap" })) });
     }
@@ -805,6 +817,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           ...(operation?.signal ? [operation.signal] : [])]);
         const options: OperationOptions = { deadline, signal, timeoutMs: Math.min(remaining, 600_000) };
         preparation = (async () => {
+          verificationSandbox = await probeBehavioralSandbox(configuration.repositoryPath);
           await drainRoleStartup(true);
           roleStartupFailures.clear();
           // H1: legacy per-role plans never survive a new generation; launch-keyed plans are published by the session.
@@ -1152,6 +1165,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     if (useShortHook) await rm(shortHookDir, { recursive: true, force: true });
     if (workspace) { await workspace.runtime.quiesce(); await scheduler; await workspace.close(); }
     await preparation?.catch(() => undefined);
+    await disposeDetectedDependencies();
     queryStore?.close();
     for (const socket of sockets) socket.destroy();
     // node:net removes its owned Unix socket when server.close completes.

@@ -6,9 +6,14 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { QualityGateDefinitionSchema, type QualityGateDefinition } from "@bflow/contracts";
 import type { QualityCommandOutcome } from "@bflow/quality-gates";
-import { digest, record, textField } from "./journal.js";
+import { record, textField } from "./journal.js";
+import { parseNodeTap } from "./node-tap.js";
 import { parseVitestJson } from "./vitest-json.js";
 import { assertCheckoutDependencyRoot, sandboxBehavior } from "./behavioral-sandbox.js";
+import type { AdapterRunner } from "./runner-adapter.js";
+import { parseRunnerResult } from "./runner-results.js";
+import { collectRunnerReports } from "./runner-reports.js";
+import { assertRunnerProvenance } from "./runner-provenance.js";
 
 export interface BehavioralCommand {
   id: string; command: string; executable: string; args: string[];
@@ -32,17 +37,19 @@ export interface RunnerProfile {
   /** Optional sandboxed build before the tests (e.g. `tsc -b`); it may only create git-ignored files. */
   prepare?: { args: string[]; timeoutMs: number };
   source: "detected";
+  adapter?: AdapterRunner;
+  definitionBlobs?: Record<string, string>;
 }
 /** Detection outcome; `unsupported` carries a user-facing reason and what an agent or Runtime could do about it. */
 export type RunnerDetection =
   | { status: "detected"; profiles: RunnerProfile[]; notes: string[] }
-  | { status: "unsupported"; reason: string; remediation: string[] };
-export type BoundBehavioralCommand = BehavioralCommand & Partial<Pick<RunnerProfile, "checkoutDependencyRoots" | "dependencySource" | "prepare">>;
+  | { status: "unsupported"; reason: string; remediation: string[]; agentFixable?: boolean };
+export type BoundBehavioralCommand = BehavioralCommand & Partial<Pick<RunnerProfile, "checkoutDependencyRoots" | "dependencySource" | "prepare" | "adapter" | "definitionBlobs">> & { reportDirectory?: string; originalRevision?: string };
 const permittedLevels: Record<BehavioralCommand["method"], readonly string[]> = {
   unit_test: ["unit", "property", "regression"], integration_test: ["integration", "regression", "smoke"], e2e_test: ["e2e", "regression", "smoke"]
 };
 /** Bound test files must live in a test directory or carry a test/spec suffix; owner configuration is not restricted this way. */
-export const testFilePattern = /(^|\/)(test|tests|__tests__)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
+export const testFilePattern = /(^|\/)(test|tests|__tests__|spec|Specs|Tests)\/|\.(test|spec)\.[cm]?[jt]sx?$|(^|\/)test_[^/]+\.py$|_test\.(py|go|rb|dart|exs)$|Spec\.rb$|(?:Test|Tests|Spec)\.(java|kt|cs|php|swift|cpp|cc|cxx)$|(^|\/)src\/.*\.rs$/;
 function strings(value: unknown, name: string, nonempty = true): string[] {
   if (!Array.isArray(value) || nonempty && !value.length || value.some(item => typeof item !== "string" || !item.length || item.includes("\0"))) throw new Error(`Invalid behavioral ${name}`);
   return [...value];
@@ -98,11 +105,16 @@ export function bindRunnerProfile(profile: RunnerProfile, identities: { testName
   if (!isAbsolute(profile.dependencySource) || profile.dependencySource.includes("\0")) throw new Error("Behavioral dependency source must be an absolute repository path");
   assertExecutionBounds(profile.timeoutMs, profile.maxOutputBytes);
   if (profile.prepare !== undefined) assertExecutionBounds(profile.prepare.timeoutMs, undefined);
+  profile.adapter?.bind({ testNames, testPaths }, "/tmp/bflow-profile-validation");
+  const filter = "^(?:" + testNames.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|") + ")$";
+  const selectedArgs = profile.adapter ? [...args] : [...args, ...(profile.reporter === "vitest_json" ? [`--testNamePattern=${filter}`] : args.includes("--test") ? [`--test-name-pattern=${filter}`] : []), ...testPaths];
   return {
-    id: profile.id, command: profile.command, executable: profile.executable, args: [...args, ...testPaths],
+    id: profile.id, command: profile.command, executable: profile.executable, args: selectedArgs,
     method: profile.method, levels, testNames, testPaths, reporter: profile.reporter, timeoutMs: profile.timeoutMs,
     ...(profile.maxOutputBytes === undefined ? {} : { maxOutputBytes: profile.maxOutputBytes }),
     checkoutDependencyRoots, dependencySource: profile.dependencySource,
+    ...(profile.adapter ? { adapter: profile.adapter } : {}),
+    ...(profile.definitionBlobs ? { definitionBlobs: Object.fromEntries(Object.entries(profile.definitionBlobs).filter(([path]) => !testPaths.includes(path))) } : {}),
     ...(profile.prepare === undefined ? {} : { prepare: { args: strings(profile.prepare.args, "prepare argv"), timeoutMs: profile.prepare.timeoutMs } })
   };
 }
@@ -115,29 +127,35 @@ export function behavioralChecks(commands: readonly BehavioralCommand[]): Qualit
 const SANDBOX_ERROR = /^(?:bwrap|sandbox-exec):/;
 const execute = promisify(execFile);
 export async function verificationGit(cwd: string, args: string[]): Promise<string> {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")));
-  return (await execute("git", ["-c", "core.hooksPath=/dev/null", "-c", "diff.external=", ...args], { cwd, env, timeout: 30_000, maxBuffer: 2 * 1024 * 1024 })).stdout;
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_"))), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+  const options = { cwd, env, timeout: 30000, maxBuffer: 2 * 1024 * 1024 };
+  const fixed = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "diff.external=", "-c", "submodule.recurse=false"];
+  // Git checkout/status can run smudge/clean/process filters before the test sandbox exists.
+  // Disable every effective filter, including config includes and worktree scopes; global/system config is excluded above.
+  let keys = "";
+  try { keys = (await execute("git", [...fixed, "config", "--includes", "--name-only", "--get-regexp", "^filter\\..*\\.(clean|smudge|process|required)$"], options)).stdout; }
+  catch (error) { if ((error as { code?: unknown }).code !== 1) throw error; }
+  const filters = new Set(keys.trim().split("\n").filter(Boolean).map(key => {
+    const match = /^filter\.(.+)\.(?:clean|smudge|process|required)$/.exec(key);
+    if (!match || /[\0\r\n]/.test(match[1]!)) throw new Error("Invalid local Git filter definition");
+    return match[1]!;
+  }));
+  for (const name of filters) fixed.push("-c", `filter.${name}.clean=`, "-c", `filter.${name}.smudge=`, "-c", `filter.${name}.process=`, "-c", `filter.${name}.required=false`);
+  if (args[0] === "worktree" && args[1] === "add" && args[2] === "--detach" && args.length === 5) {
+    const checkout = args[3]!, revision = args[4]!;
+    // Conditional gitdir includes can become active only after the new worktree exists.
+    // Register it without materializing files, then inspect its own effective configuration.
+    const created = await execute("git", [...fixed, "worktree", "add", "--no-checkout", "--detach", checkout, revision], options);
+    try { await verificationGit(checkout, ["reset", "--hard", revision]); }
+    catch (error) { await verificationGit(cwd, ["worktree", "remove", "--force", checkout]).catch(() => undefined); throw error; }
+    return created.stdout;
+  }
+  return (await execute("git", [...fixed, ...args], options)).stdout;
 }
 export async function assertPinnedRevision(cwd: string, revision: string) {
   if (!/^[a-f0-9]{40}$/.test(revision) || (await verificationGit(cwd, ["rev-parse", "HEAD"])).trim() !== revision || await verificationGit(cwd, ["status", "--porcelain=v1", "--untracked-files=all", "-z"])) throw new Error("Verification needs a clean worktree at the pinned revision");
 }
-/** Supported measurement protocol: complete, flat Node test-runner TAP with assertion diagnostics. */
-export function parseNodeTap(outcome: QualityCommandOutcome, expectedNames: readonly string[]) {
-  if (outcome.spawnError || outcome.timedOut || outcome.aborted || outcome.outputTruncated || outcome.signal || outcome.exitCode === null) throw new Error("Behavioral runner infrastructure failure (spawn, deadline, signal or truncated output)");
-  const output = outcome.stdout.replace(/\r\n/g, "\n");
-  if (!output.startsWith("TAP version 13\n") || /^Bail out!/m.test(output)) throw new Error("Behavioral runner requires complete Node TAP output");
-  const results = [...output.matchAll(/^(not ok|ok) (\d+) - (.+)\n([\s\S]*?)(?=^(?:not ok|ok) \d+ - |^1\.\.\d+\s*$)/gm)];
-  const count = (label: string) => { const matches = [...output.matchAll(new RegExp(`^# ${label} (\\d+)$`, "gm"))]; if (matches.length !== 1) throw new Error("Incomplete TAP counters"); return Number(matches[0]![1]); };
-  const tests = count("tests"), passed = count("pass"), failed = count("fail");
-  if (!tests || count("cancelled") || count("skipped") || count("todo") || tests !== results.length || passed + failed !== tests || !new RegExp(`^1\\.\\.${tests}$`, "m").test(output) || results.some((result, index) => Number(result[2]) !== index + 1)) throw new Error("Zero, nested, skipped or incomplete tests cannot prove behavior");
-  const names = results.map(result => result[3]!);
-  if (digest([...names].sort()) !== digest([...expectedNames].sort())) throw new Error("Observed test names differ from owner-configured identities");
-  const failures = results.filter(result => result[1] === "not ok");
-  if (failures.length !== failed || results.filter(result => result[1] === "ok").length !== passed || (failed === 0 ? outcome.exitCode !== 0 : outcome.exitCode !== 1)) throw new Error("TAP result contradicts process exit code");
-  const targetFailure = failed > 0 && failures.every(result => /^\s+failureType: 'testCodeFailure'$/m.test(result[4]!) && /^\s+code: 'ERR_ASSERTION'$/m.test(result[4]!));
-  if (failed && !targetFailure) throw new Error("Behavioral failure is infrastructure or unrelated, not an assertion regression");
-  return { testNames: names, testResults: results.map(result => ({ name: result[3]!, passed: result[1] === "ok" })), tests, passed, failed, targetFailure };
-}
+export { parseNodeTap } from "./node-tap.js";
 export interface BehavioralMeasurement {
   sourceRevision: string; command: string; commandId: string; method: BehavioralCommand["method"];
   testBlobs: Record<string, string>; testNames: string[]; testResults: { name: string; passed: boolean }[]; tests: number; passed: number; failed: number; targetFailure: boolean;
@@ -151,6 +169,7 @@ function outputTail(outcome: QualityCommandOutcome): string {
 /** Runs only committed bytes in a new detached worktree; it has no host credentials or inherited Node/Git overrides. */
 export async function measureBehavior(command: BoundBehavioralCommand, cwd: string, revision: string): Promise<BehavioralMeasurement> {
   await assertPinnedRevision(cwd, revision);
+  await assertRunnerProvenance(command, cwd, revision);
   const testBlobs: Record<string, string> = {};
   for (const path of command.testPaths) {
     const entry = (await verificationGit(cwd, ["ls-tree", revision, "--", path])).trim();
@@ -158,43 +177,60 @@ export async function measureBehavior(command: BoundBehavioralCommand, cwd: stri
     if (!match) throw new Error(`Behavioral test identity must be a committed regular file: ${path}`);
     testBlobs[path] = match[1]!;
   }
+  Object.assign(testBlobs, command.definitionBlobs ?? {});
   // Canonical path: Vitest reports resolved file names (macOS /var is a symlink to /private/var) and they are matched against the checkout.
   const temporary = await realpath(await mkdtemp(join(tmpdir(), "bflow-behavioral-"))), checkout = join(temporary, "checkout");
   let added = false;
   try {
     await verificationGit(cwd, ["worktree", "add", "--detach", checkout, revision]); added = true;
+    const reportDirectory = join(temporary, "reports");
+    if (command.adapter) {
+      await mkdir(reportDirectory, { mode: 0o700 });
+      for (const helper of command.adapter.helpers ?? []) {
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(helper.name) || Buffer.byteLength(helper.content) > 65536) throw new Error("Invalid Runtime runner helper");
+        await writeFile(join(reportDirectory, helper.name), helper.content, { mode: 0o400 });
+      }
+      command = { ...command, reportDirectory };
+    }
+    const invocation = command.adapter?.bind({ testNames: command.testNames, testPaths: command.testPaths }, reportDirectory);
+    if (invocation?.reportPaths?.length && (await collectRunnerReports(invocation.reportPaths, checkout, reportDirectory)).length) throw new Error("Behavioral report must not exist before execution");
+    const projectCwd = command.adapter && command.adapter.projectDirectory !== "." ? join(checkout, command.adapter.projectDirectory) : checkout;
     const module = await import(new URL("../../../quality-gates/dist/index.js", import.meta.url).href);
     const runner = module.createQualityCommandRunner();
-    const env: Record<string, string> = { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", HOME: temporary, TMPDIR: temporary };
+    const env: Record<string, string> = { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", HOME: "/tmp/bflow-home", TMPDIR: "/tmp", ...(command.adapter?.environment ?? {}) };
     // Seatbelt cannot mount a tmpfs, so the sandboxed process writes only to a dedicated scratch sibling of the checkout.
     if (process.platform === "darwin") { const scratch = join(temporary, "tmp"); await mkdir(scratch, { mode: 0o700 }); env["TMPDIR"] = scratch; env["HOME"] = scratch; }
     const maxOutputBytes = command.maxOutputBytes ?? 1_048_576;
     // A Runtime-detected profile may run a sandboxed build first (e.g. `tsc -b`); it gets the same boundary, its own deadline, and may only leave git-ignored outputs.
-    if (command.prepare) {
-      const prepareSandbox = await sandboxBehavior(command, checkout, command.prepare.args).catch(error => {
+    const preparation = invocation?.prepare ?? command.adapter?.prepare ?? (command.prepare ? { ...command.prepare, executable: command.executable } : undefined);
+    if (preparation) {
+      const prepareSandbox = await sandboxBehavior({ ...command, executable: preparation.executable }, checkout, preparation.args).catch(error => {
         throw new Error(`Behavioral runner infrastructure failure (prepare): ${String(error)}`, { cause: error });
       });
-      const prepared = await runner.run({ ...prepareSandbox, cwd: checkout, env, timeoutMs: command.prepare.timeoutMs, maxOutputBytes });
+      const prepared = await runner.run({ ...prepareSandbox, cwd: projectCwd, env, timeoutMs: preparation.timeoutMs, maxOutputBytes });
       if (!prepared.ok) throw new Error(`Behavioral runner infrastructure failure (prepare): ${prepared.error.message}`);
       const prepareOutcome = prepared.value as QualityCommandOutcome;
       const failure = prepareOutcome.spawnError ?? (SANDBOX_ERROR.test(prepareOutcome.stderr) ? prepareOutcome.stderr.trim()
-        : prepareOutcome.timedOut ? "deadline exceeded" : prepareOutcome.aborted ? "aborted" : prepareOutcome.signal ? `signal ${prepareOutcome.signal}`
+        : prepareOutcome.outputTruncated ? "truncated prepare output" : prepareOutcome.timedOut ? "deadline exceeded" : prepareOutcome.aborted ? "aborted" : prepareOutcome.signal ? `signal ${prepareOutcome.signal}`
         : prepareOutcome.exitCode !== 0 ? `exit ${prepareOutcome.exitCode}` : undefined);
       if (failure !== undefined) throw new Error(`Behavioral runner infrastructure failure (prepare): ${failure}${outputTail(prepareOutcome)}`);
+      await assertPinnedRevision(checkout, revision);
     }
     // The official JSON reporter omits runtime errors. A fixed host companion attests its onFinished errors argument.
-    const reporter = command.reporter === "vitest_json" ? join(temporary, "vitest-runtime-reporter.mjs") : undefined;
+    const reporter = (command.reporter === "vitest_json" || command.adapter?.format === "vitest_json") ? join(temporary, "vitest-runtime-reporter.mjs") : undefined;
     if (reporter) {
       const source = await readFile(fileURLToPath(new URL("../../dist/agentic/vitest-runtime-reporter.js", import.meta.url)), "utf8");
       // A standalone immutable copy avoids exposing the host source tree just to
       // satisfy Vite's optional source-map reads inside the empty namespace.
       await writeFile(reporter, source.replace(/^\/\/# sourceMappingURL=.*$/gm, ""), { mode: 0o600 });
     }
-    const args = reporter ? [...command.args, `--reporter=${reporter}`] : command.args;
+    if (invocation?.reportPaths?.length && (await collectRunnerReports(invocation.reportPaths, checkout, reportDirectory)).length) throw new Error("Behavioral report must not exist before the test command");
+    const baseArgs = invocation?.args ?? command.args;
+    const args = reporter ? [...baseArgs, `--reporter=${reporter}`] : baseArgs;
     const sandbox = await sandboxBehavior(command, checkout, args, reporter).catch(error => {
       throw new Error(`Behavioral runner infrastructure failure (sandbox preparation): ${String(error)}`, { cause: error });
     });
-    const result = await runner.run({ ...sandbox, cwd: checkout, env, timeoutMs: command.timeoutMs, maxOutputBytes });
+    const result = await runner.run({ ...sandbox, cwd: projectCwd, env, timeoutMs: command.timeoutMs, maxOutputBytes });
     if (!result.ok) throw new Error(`Behavioral command invocation failed: ${result.error.message}`);
     const outcome = result.value as QualityCommandOutcome;
     if (SANDBOX_ERROR.test(outcome.stderr)) throw new Error(`Behavioral sandbox failed: ${outcome.stderr.trim()}`);
@@ -204,7 +240,10 @@ export async function measureBehavior(command: BoundBehavioralCommand, cwd: stri
     const relaxed = command.prepare !== undefined || command.checkoutDependencyRoots !== undefined;
     if (!relaxed && await verificationGit(checkout, ["status", "--porcelain=v1", "--ignored=matching", "--untracked-files=all", "-z"])) throw new Error("Behavioral execution generated files outside the committed revision");
     await assertPinnedRevision(cwd, revision);
-    return { sourceRevision: revision, command: command.command, commandId: command.id, method: command.method, testBlobs, ...(command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames) : parseNodeTap(outcome, command.testNames)), outcome };
+    const parsed = command.adapter ? parseRunnerResult(command.adapter.format, outcome, command.testNames,
+      invocation?.reportPaths ? await collectRunnerReports(invocation.reportPaths, checkout, reportDirectory) : undefined, command.adapter.failureExitCodes)
+      : command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames, command.checkoutDependencyRoots !== undefined) : parseNodeTap(outcome, command.testNames, command.checkoutDependencyRoots !== undefined);
+    return { sourceRevision: revision, command: command.command, commandId: command.id, method: command.method, testBlobs, ...parsed, outcome };
   } finally {
     if (added) await verificationGit(cwd, ["worktree", "remove", "--force", checkout]);
     await rm(temporary, { recursive: true, force: true });

@@ -1,44 +1,112 @@
 # Verification runner
 
-## Tự động phát hiện (mặc định, không cần cấu hình)
+Runtime discovers installed test toolchains without requiring `.bflow/verification.json`.
+Accepted `unit_test`, `integration_test` and `e2e_test` criteria retain their method;
+an exit code by itself never proves a criterion. Detection, source implementation,
+local parser/fixture tests and real sandbox measurements are different evidence levels.
 
-Các acceptance criteria có `verificationMethod` là `unit_test` hoặc `integration_test` được
-đo mà không cần cấu hình từ người dùng. Khi `.bflow/verification.json` không tồn tại,
-Runtime tự kiểm tra repository (`packages/runtime/src/agentic/runner-detection.ts`)
-và cung cấp hai label cho Coordinator qua `planning_reference.testRunners`:
+## Adapter architecture and planning
 
-| Label | Method | Level |
-| --- | --- | --- |
-| `auto:unit` | `unit_test` | `unit`, `regression` |
-| `auto:integration` | `integration_test` | `integration`, `regression` |
+`RunnerAdapter.detect(AdapterContext)` reads a bounded manifest inventory without
+following symlinks. It returns Runtime-private `AdapterRunner` values: verified
+installed toolchain version, executable, fixed argv binder, optional prepare step,
+read-only mounts, offline environment, protected configuration and result parser.
+No RoleMessage supplies these execution fields. Only exact test names and committed
+test paths come from the accepted strategy/specification and task ownership.
 
-Việc phát hiện không chạy package script, không dùng shell và không cài đặt. Nó chấp nhận:
+Multiple adapters can match one repository. Labels are `auto:unit:<adapter>`,
+`auto:integration:<adapter>` and `auto:e2e:<adapter>`; nested projects append their
+readable repository-path slug plus a stable SHA-256 suffix, so paths such as `a/b` and `a-b` cannot collide. Existing root JavaScript `auto:unit` / `auto:integration`
+labels remain aliases; `auto:e2e` is added. `planning_reference.testRunners` includes
+the exact name rule, version and project. Coordinator selects these labels through
+the existing infrastructure commands. Nested Vitest and Node projects use the same reporter protocols and exact-name filters as root projects. Each criterion mapping must bind unambiguously to one selected profile; only that profile receives its names, and Quality Gates retain the same partition. Ambiguous cross-runner mappings require a reviewed task/specification split. A language label does not establish that a
+particular test is an integration or E2E test; its accepted criterion remains authoritative.
 
-- **vitest 2.x** được khai báo trong `package.json` và cài ở root repository
-  (`node_modules/vitest/vitest.mjs`, là thư mục thật, không phải symlink). Được đo bằng
-  JSON reporter cùng reporter đồng hành của Runtime.
-- **`node --test`** khi script `test` chứa lệnh `node [cờ] --test`, trong đó cờ chỉ được là `--experimental-strip-types` hoặc `--disable-warning=<tên>` (các cờ này được chuyển tiếp trước `--test`; cờ khác như `--require` khiến script không được nhận diện). Được đo dưới dạng TAP phẳng.
-  Không cần dependency.
-- Một **`tsc` build** tùy chọn (`tsc`, `tsc -b` hoặc `tsc --build`, có thể kèm đường dẫn
-  project tương đối an toàn) từ script `build`, chạy như một bước prepare trong sandbox trước
-  các test. Nó chỉ được tạo output bị git ignore. Các build script khác bị bỏ qua và được ghi
-  trong detection notes.
-- Các thư mục `node_modules` lồng nhau được tìm bằng cách duyệt không đi theo symlink.
-  Mỗi thư mục được mount read-only tại cùng đường dẫn tương đối bên trong checkout đo.
+The same task resolver feeds Developer feedback, independent Red/Green/Refactor and
+Quality Gates. Only selected labels become checks. Runtime composes the existing
+VerificationEngine with the current detected gates when a plan is frozen; subsequent
+runner setup does not require a host restart. Unsupported detection retries; successful
+detection refreshes after repository HEAD changes and retains in-process snapshots for existing task revisions. Original task-base blobs are checked even if a newer host revision has been detected. After a host restart, a differing historical profile that cannot be reconstructed remains blocked; durable profile reconstruction is not certified by this change. A task never receives an agent
+supplied replacement command or a successful verdict.
 
-Giới hạn: chỉ hỗ trợ vitest 2.x và `node --test`. Các version khác (ví dụ vitest 3) báo
-`unsupported` kèm version tìm thấy. `node_modules` bị thiếu hoặc `node_modules` ở root là
-symlink cũng là unsupported. Việc đo yêu cầu sandbox của hệ điều hành: Linux với `bwrap`, hoặc macOS với `sandbox-exec` (xem bên dưới), không có truy cập
-mạng và không cài dependency. Nếu việc phát hiện là `unsupported`, Runtime thử lại ở lần
-`propose_workflow` kế tiếp (và khi Coordinator đọc `planning_reference`), nên việc cài
-dependency hoặc thêm runner không đòi hỏi restart host. Khi đó Coordinator được thông báo
-(`no_test_runner_detected`) để thêm một task setup; người dùng được hiển thị thông báo đó.
+## Runner matrix
 
-Với mỗi task, Runtime gắn profile đã phát hiện với các định danh lấy từ specification đã
-chấp nhận: tên test từ `criterionMappings` của các tiêu chí tự động đang active có method đó,
-và file test từ `affectedPaths` là file test và, với Developer, thuộc sở hữu của task. File
-test phải được commit trong checkout tại revision được đo. vitest báo `fullName` (các tiêu đề
-describe cộng tiêu đề test nối bằng một dấu cách). node --test chỉ báo tiêu đề test.
+All rows below have source and local fixture/parser coverage. No row has successful
+real measurement evidence on the implementation host: its real empty Bubblewrap probe
+fails with `loopback: Failed RTM_NEWADDR: Operation not permitted`. Tests explicitly
+skip measurements after that probe; this is not a passing sandbox campaign. Parser
+fixtures for unavailable tools reproduce documented output shapes, not recorded runs.
+The Node/Vitest parser-selection regression includes captures from installed tools,
+which are parser evidence only. Installed Node, Python, Maven and Java version probes
+are separate from test execution evidence.
+
+| Ecosystem | Runner / format | Canonical identity / exact selection | Current limits |
+| --- | --- | --- | --- |
+| JS/TS | Vitest 1/2/3 JSON + trusted completion reporter | describe titles + title, joined by spaces; anchored name regex and explicit files | major versions outside 1–3 rejected; protocol changes fail closed |
+| JS/TS | Jest JSON | fullName; anchored name regex and `--runTestsByPath` | installed runner required |
+| JS/TS | Mocha JSON | fullTitle; anchored `--grep`, explicit files | hooks/runtime exceptions reject Red |
+| JS/TS | `node --test` TAP | test title; anchored `--test-name-pattern`, explicit files | flat TAP only; Node version filtering behavior is validated by parser |
+| Python | pytest JUnit (unittest can run through pytest) | `classname.name`; invert mapped module/class into exact pytest node IDs | existing `.venv`, `venv`, active env, uv in-project env, Poetry/Pipenv matching envs; installed pytest required |
+| Go | `go test -json` | import-path + `.` + Test/subtest | one package per command; exact top-level union or one subtest path; no benchmark evidence |
+| Rust | cargo / libtest | exact libtest test name | one exact test and explicit lib/integration target per command; libtest captures assertion diagnostics for Red; locked offline dependencies; inline test files freeze their implementation bytes after Red |
+| Java/Kotlin | Maven Surefire JUnit | fully qualified class + `.` + method | conventional Surefire reports, exact `-Dtest`; parameterized identities require agent setup |
+| Java/Kotlin | Gradle JUnit | fully qualified class + `.` + method | conventional `test` task/report path; installed Gradle; exact `--tests` |
+| .NET | `dotnet test` TRX | TRX TestMethod className + `.` + method | one test project per directory; isolated offline restore from installed cache, then exact FQN filter |
+| Ruby | RSpec native JSON | example full_description | installed RSpec; exact full-description regex; no external JUnit formatter needed |
+| Ruby | Minitest Runtime JUnit helper | Ruby class + `.` + method | installed reporter-capable Minitest; immutable Runtime helper; exact Class#method regex |
+| PHP | PHPUnit JUnit | JUnit `classname.name`; PHP namespace separators become dots | existing global/local PHPUnit; exact class::method filter |
+| C/C++ | CTest >=3.21 JUnit | testcase name | committed CTest registration and executable material only; generated ignored build directories request agent setup; build/configure automation is not implemented |
+| Other | declared Make/Just/Task target with JUnit protocol | `classname.name`; selected names/files passed as JSON argv variables | ordinary arbitrary scripts, tox/nox require a reviewed agent setup task |
+| Elixir, Swift, Dart/Flutter | not implemented | — | follow-up adapters; do not downgrade criteria |
+
+Detected JS may run only a recognized `tsc`, `tsc -b` or `tsc --build` prepare step,
+including safe relative projects. Other builds receive a detection note. JVM/.NET/Go/
+Rust native commands perform their normal offline build in the disposable checkout;
+outputs must be git-ignored. No snapshot update or tracked-file modification is accepted.
+
+## Structured results
+
+The shared bounded XML codec accepts JUnit suite trees and .NET TRX. DTDs, custom
+entities, external resolution, processing instructions, malformed nesting, duplicate
+attributes, illegal characters and oversized/deep trees are rejected. JUnit names use
+nonempty `classname + '.' + name`, or just `name` when classname is empty. Each suite's
+counters must agree with leaf results. `<error>` is infrastructure; `<failure>` proves
+Red only with recognized assertion diagnostics; skipped/disabled mapped tests block.
+TRX checks definitions, outcomes and counters, then uses the same assertion rule.
+
+Native JSON/libtest/TAP codecs enforce complete output, unique exact mapped identities,
+nonzero test counts and exit consistency. Rust assertion failure exits 101; CTest exits 8;
+other adapters normally exit 1. Go has no typed assertion channel: Red conservatively
+requires source-located expected/want/assertion comparison diagnostics and rejects
+panics/build/runtime errors. This is a narrower supported diagnostic convention, not a
+general proof that arbitrary `testing.T.Fatal` text denotes an assertion.
+
+Name-filtered Vitest/Jest may list unselected tests as pending/skipped; those leaves are
+excluded only when their names are outside the selected mapping, and never contribute
+evidence. A selected skipped/todo test still blocks. Owner-configured commands retain
+their existing stricter reporter policy. Zero, truncated, mismatched or infrastructure
+results never become passing evidence or a conclusive Red receipt.
+
+## Original revision and conditional TDD
+
+Detection pins committed Git blobs for manifests, lockfiles, runner config, build hooks,
+CI config, scripts and test/helper trees. Local definitions must match committed bytes.
+At measurement, changed/deleted/new definitions—including root `conftest.py`, Cargo
+`build.rs`, Python startup hooks, Makefiles and package scripts—reject evidence.
+Gradle `.gradle`/`.gradle.kts` and MSBuild `.props`/`.targets` files are pinned throughout the repository. Literal Gradle `apply from` and MSBuild `Import Project` references are followed to committed repository-local files, including custom suffixes. Dynamic/concatenated or unresolvable references return an agent setup requirement. Missing pin metadata rejects automatic measurements. Selected test paths are handled
+separately: Developer may create/change them before independent Red; afterward exact
+Red test blobs and all execution definitions are frozen. Runtime compares those blobs
+again for Green/Refactor. Test setup changes must go through review and integration,
+and become authority only from the base revision of later tasks.
+
+The fallback recognizes a declared `test` target only when its definition mentions all
+three Runtime protocol values: `BFLOW_TEST_NAMES` (JSON), `BFLOW_TEST_FILES` (JSON), and
+`BFLOW_JUNIT_OUTPUT` (private report path). Runtime passes values as separate argv tokens;
+it never evaluates a RoleMessage command. Because recipe engines can re-expand assignments, the generic fallback accepts only literal safe name/path characters; shell/Make syntax in identities requests agent setup rather than entering target expansion. The target must produce fresh structured output
+with exactly the selected names. A plain `make test`, shell exit 0, CI success or an old
+report is not evidence. Arbitrary target syntax, tox/nox and script-specific reporters
+are agent setup work, rather than guessed invocation conventions. This intentionally
+narrow fallback prevents claiming universal arbitrary-script support.
 
 ## Owner override tùy chọn: `.bflow/verification.json`
 
@@ -104,20 +172,71 @@ lý. Thiếu completion, runtime error, skipped, todo, không có test nào, b�
 tên không mong đợi, timeout và output bị cắt đều chặn bằng chứng. Node TAP vẫn là mặc định khi
 bỏ qua `reporter`.
 
-## Phạm vi thực thi và an toàn
+## Sandbox and dependency ownership
 
-Behavioral verification hiện chạy trên hai backend sandbox: Linux (`/usr/bin/bwrap`) và macOS
-(Seatbelt, `/usr/bin/sandbox-exec`). Các đoạn dưới đây mô tả backend Linux; khác biệt của macOS nằm ở mục
-"Backend macOS (Seatbelt)" ngay sau đó.
+Linux (including WSL2 only when the real namespace probe passes) uses Bubblewrap found
+on PATH, canonicalized and tested in a real empty namespace. `bflow up` probes readiness;
+activation records a structured `verification_sandbox_unavailable` Conversation notice
+when automated runners exist. Planning exposes that state. Measurement always fails closed
+if the boundary is unavailable; no command runs outside it. macOS uses the Seatbelt backend described below for legacy JS/owner commands. Native
+Windows, Docker and Podman backends are not implemented or certified by this change.
+There is no automatic sandbox installation or privilege/sysctl change.
 
-Backend Linux yêu cầu `/usr/bin/bwrap` và quyền tạo namespace
-user/mount/PID/network. Không có fallback không sandbox. Mỗi lần đo dùng một Git checkout
-detached mới tại đúng revision đã commit, môi trường sạch và namespace filesystem rỗng.
-`/usr` của hệ thống, executable Node, `/etc/hosts`, checkout và các root `node_modules`
-read-only được cấu hình tường minh được mount. Home, state, socket và network của host đều
-không có. Root dependency phải là thư mục canonical tên `node_modules`; symlink trỏ ra ngoài
-các cây đã mount vẫn không khả dụng. Đây là ranh giới Linux cục bộ, không phải đảm bảo
-multi-tenant hay chống kernel thù địch.
+Measurement mounts system `/usr` read-only, the exact disposable revision checkout,
+selected binaries and narrowly selected toolchain/dependency roots. It unshares network,
+PID, IPC, user and mount namespaces, drops capabilities and inherits no host environment,
+home or sockets. HOME/TMPDIR refer to private anonymous tmp space. Toolchains outside
+`/usr` use canonical realpaths; whole homes/ancestors, credential directories, special
+files and escaping cache symlinks are rejected. Java imports only public launcher/security
+files, not Maven settings or Java management passwords. Dependency trees are read-only:
+repo-relative node_modules/vendor and selected venv libraries retain their layout;
+Cargo registry, GOMODCACHE, Maven repository, Gradle modules cache and NuGet packages
+use selected paths. Imported node_modules trees are checked for special files (including pathname sockets) and credential material; pnpm links across the selected repository layout remain supported. No `~/.npmrc`, `.netrc`, `.ssh`, global Gradle init/config, Composer auth
+or provider credentials are intentionally imported. This is a local Linux boundary,
+not hostile-kernel or hostile-same-UID isolation certification.
+
+Fresh reports come from private output paths or bounded conventional build-report
+patterns. Preexisting reports reject invocation. Collection rejects symlinks, special files,
+path escapes, duplicate files and oversized output; regular files are opened without
+following symlinks. Host Git operations used for measurement disable user/system Git configuration, hooks, fsmonitor, recursive submodules and effective clean/smudge/process filters, including included configuration, worktree scopes and gitdir-conditional includes, so checkout/status cannot launch repository filter commands before the sandbox. A worktree is registered with `--no-checkout`; its effective configuration is inspected again before file materialization. Git attributes/LFS/submodule definitions are pinned too. Tracked integrity and report freshness are checked again between prepare and the test command, preventing a prepare step from changing bytes that tests later restore or pre-seeding a report. After prepare/tests, tracked and nonignored untracked files must
+still match the exact revision. Only disposable checkouts are forcibly removed.
+
+## Automatic dependency warming: threat model and limits
+
+If JS detection needs missing dependencies and a safe npm lock is available, Runtime
+can create a separate owned cache. Warming requires package-lock v2/v3, registry-only
+specifications, HTTPS public registry tarballs and strong integrity pins. Local/git/URL
+packages, workspaces, overrides and unsupported lock shapes are rejected. The separate
+Bubblewrap sandbox retains its own network namespace. A capability-probed installed `slirp4netns` helper supplies downloads only after an actual readiness handshake; host loopback and the helper DNS proxy are disabled. A Runtime-owned resolver uses public DNS `1.1.1.1`; host resolver configuration is not mounted. Missing helper capabilities return `unsupported`. The guest sees no checkout, host home, socket,
+user/global npm config or inherited proxy/auth environment. It runs only trusted npm
+`ci --ignore-scripts --no-audit --no-fund`; dependency lifecycle/build scripts never run.
+Frozen manifests are mounted read-only. The only writable host path is its owned cache;
+private `/tmp` is anonymous. Subsequent measurement mounts dependencies read-only and
+again unshares network. Host teardown removes caches created by that Runtime process.
+A killed host may leave an orphan cache; no cross-session reuse or replay is inferred.
+
+The installed Node/npm and OS are trusted. A malicious downloader vulnerability or a
+compromised allowed registry remains a risk; integrity pins bind bytes, not package safety.
+Public egress is not domain-level firewalling: npm validation restricts declared URLs,
+but redirects and the trusted downloader's own traffic are not a separate egress guarantee.
+Services on host LAN/public addresses are not separately firewalled. Abstract host Unix
+sockets remain outside the guest network namespace; no direct host-network fallback exists.
+
+Safe warming for pnpm/yarn workspaces, Python, Go, Rust, JVM, .NET, Ruby and PHP is not
+implemented. Their measurements can use already installed dependencies/read-only caches;
+missing dependencies remain agent setup work. In particular, Maven/Gradle resolution and
+language build hooks must not be run in the network sandbox as a shortcut. No automatic
+package lifecycle script or user-global configuration mutation is authorized.
+
+## Repair routing and remaining acceptance
+
+Recognized ecosystems needing a runner/reporter/setup return `runner_setup_required`,
+a Coordinator-fixable structured rejection with no user notice. Missing mappings, paths,
+labels and method support remain agent-fixable. An unknown ecosystem can still return
+`no_test_runner_detected`. User-facing notices contain no manual configuration steps.
+Setup tasks retain SDD, conditional TDD, independent review and approval requirements;
+this implementation emits the task requirement, it does not invent an approved setup task
+or waive a required gate. None of these changes establish live Herdr/provider acceptance.
 
 ### Backend macOS (Seatbelt)
 
@@ -128,7 +247,7 @@ kết quả test. Khác biệt so với Linux:
 
 - Seatbelt không ẩn đường dẫn mà chỉ từ chối nội dung. Host vẫn tồn tại và metadata (`stat`) đọc được vì
   `realpath` của Node cần `lstat` mọi thư mục cha; nội dung home, `.ssh`, `/etc`, state, secret và
-  Git metadata đều bị từ chối đọc/ghi.
+  Git metadata đều bị từ chối đọc/ghi. Các cây dependency cũng được kiểm tra credential, special file và symlink thoát trước khi cấp quyền.
 - Chỉ có các quyền ghi: checkout và một thư mục `tmp` riêng (cũng là `TMPDIR`/`HOME` của tiến trình).
   File reporter companion, executable Node và các root dependency chỉ đọc.
 - Không có bind mount, nên `node_modules` phát hiện tự động được clone vào checkout bằng `cp -c -R`
@@ -138,35 +257,9 @@ kết quả test. Khác biệt so với Linux:
   chính nó (Vitest cần để dừng worker) và đọc `/etc/hosts` để phân giải `localhost`; không có `mach-lookup`
   nên không có kênh DNS.
 - `sandbox-exec` được Apple đánh dấu deprecated nhưng vẫn hoạt động trên Darwin 25.6.
-- Mức bằng chứng: source cộng test đối kháng cục bộ (`behavioral-sandbox-darwin.test.ts`) và đo thật
+- Bằng chứng được ghi nhận trên nhánh main trước tích hợp (không đo lại trên máy Linux này): source cộng test đối kháng cục bộ (`behavioral-sandbox-darwin.test.ts`) và đo thật
   `node --test` (TypeScript) lẫn Vitest 2.1.9 trên macOS. Chưa có live acceptance toàn luồng SDLC và chưa
   có đảm bảo chống kernel thù địch.
 
-Không có việc cài dependency, khôi phục workspace symlink hay fetch qua mạng nào diễn ra tự
-động. Dependency mà test cần phải được cài sẵn trong `node_modules` của repository (hoặc là
-một phần của checkout đã commit). Bước build duy nhất là bước prepare `tsc` được phát hiện đã
-mô tả ở trên. Workspace link tới các package chưa mount, output `dist` do các build script
-khác tạo ra, coverage tổng hợp, tiêu chí manual/automated hỗn hợp và các version reporter khác
-không được hỗ trợ bởi đường mặc định; hãy dùng owner override cho các trường hợp đó.
-Bộ `pnpm test` thông thường của repository được chạy riêng; không tuyên bố rằng nó chạy trọn
-vẹn trong fixture runner nhỏ có cấu hình này.
 
-Mỗi command có timeout riêng tối đa 300 giây; tổng ngân sách đã cấu hình (gồm overhead của
-checkout) phải nằm trong deadline của host. Output bị giới hạn 4 MiB mỗi command. Việc thực thi
-làm thay đổi hoặc sinh file trong checkout bị từ chối; dùng `--no-cache` và tránh cập nhật
-snapshot hay output coverage. Chỉ các checkout đo dùng một lần mới bị xóa cưỡng bức; worktree
-của Developer được giữ lại.
-
-## TDD có điều kiện
-
-Với TDD bắt buộc, ban đầu Developer chỉ có thể sửa/commit các file test đã cấu hình. Nó yêu
-cầu Red độc lập rồi nhường lượt. QA thực thi runner; Runtime ghi một receipt tin cậy và
-resume cùng Developer đó bằng task lease hiện có. Sau Red, các test blob chính xác đó bị đóng
-băng. Green và Refactor đo các revision implementation đã commit với cùng các test. `check_work`
-cung cấp phản hồi cho Developer và không bao giờ cung cấp bằng chứng acceptance độc lập.
-
-Assertion failure thật sinh ra chẩn đoán được giữ lại và thông báo sửa chữa có giới hạn; lặp
-lại một revision đã fail không đưa thêm job vào hàng đợi. Lỗi hạ tầng được escalate. Cạn giới
-hạn phase hoặc verification cũng escalate. Sự không chắc chắn về native delivery được reconcile
-riêng và không bao giờ bị diễn giải thành test failure để biện minh cho việc gửi lại công việc.
-Các approval bắt buộc về con người/thiết kế/delivery vẫn có hiệu lực.
+Polyglot adapter commands requiring toolchain/cache mounts, generated helpers or private report directories currently return unsupported on macOS. Dependency warming is Linux-only. This integration has local Linux test evidence; macOS measurements were not repeated on this host.

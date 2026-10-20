@@ -85,8 +85,8 @@ class FakeLifecycleProcessRunner implements EnvironmentProcessRunner {
     if (args === "auth status --json") {
       return { exitCode: 0, stdout: JSON.stringify(this.claudeStatus), stderr: "" };
     }
-    if (args === "auth status") {
-      return { exitCode: this.authenticated ? 0 : 1, stdout: "", stderr: "" };
+    if (request.executable === "agy" && args === "models") {
+      return { exitCode: this.authenticated ? 0 : 1, stdout: "gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n", stderr: "" };
     }
 
     return { exitCode: 0, stdout: "{}", stderr: "" };

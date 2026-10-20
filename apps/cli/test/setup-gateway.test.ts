@@ -116,6 +116,51 @@ it("fails the service postcheck when a real upstream omits required tools", asyn
   expect((await components[1]!.observe(ctx)).valid).toBe(false);
 });
 
+it("explains repository scope changes without rewriting the previously approved Gateway", async () => {
+  const { components, ctx, input, platform } = fixture();
+  await installFixtureTools(["query", "context", "impact"]);
+  expect((await components[0]!.apply(ctx)).diagnostics).toEqual([]);
+  const configPath = join(platform.paths.config, "setup-gateway.json");
+  const savedBytes = await readFile(configPath, "utf8");
+  const machine = JSON.parse(await readFile(join(platform.paths.config, "machine.json"), "utf8"));
+  const otherRepository = join(root, "other-repository");
+  initializeGitRepository(otherRepository);
+  const changed = wrapSetupComponents([], { ...input, config: machine, repositoryRoot: otherRepository });
+
+  for (const component of changed) {
+    const observed = await component.observe({ ...ctx, mode: "check" });
+    expect(observed.valid).toBe(false);
+    const diagnostic = observed.diagnostics.join(" ");
+    expect(diagnostic).toContain("repository scope changed");
+    expect(diagnostic).toContain(root);
+    expect(diagnostic).toContain(otherRepository);
+    expect(diagnostic).toContain("bflow setup");
+  }
+  expect(await readFile(configPath, "utf8")).toBe(savedBytes);
+  expect(runtime).toBeUndefined();
+});
+
+it("identifies newly selected MCP services as a setup plan change", async () => {
+  const { input, ctx, platform } = fixture();
+  const components = wrapSetupComponents([], { ...input, repositoryRoot: undefined });
+  expect((await components[0]!.apply(ctx)).diagnostics).toEqual([]);
+  const configPath = join(platform.paths.config, "setup-gateway.json");
+  const savedBytes = await readFile(configPath, "utf8");
+  const machine = JSON.parse(await readFile(join(platform.paths.config, "machine.json"), "utf8"));
+  machine.toolPins.push({ ...machine.toolPins[0], toolId: "mempalace", version: "3.11.0" });
+  const changed = wrapSetupComponents([], { ...input, repositoryRoot: undefined, config: machine,
+    launchRequirements: [...input.launchRequirements,
+      { toolId: "mempalace", executable: join(root, "mempalace-mcp"), args: [], requirements: [] }],
+    remoteServices: [{ toolId: "context7", authenticated: false, keyFingerprint: null }] });
+
+  const observed = await changed[0]!.observe({ ...ctx, mode: "check" });
+  expect(observed.valid).toBe(false);
+  expect(observed.diagnostics.join(" ")).toContain("managed MCP services changed (added: context7, mempalace; removed: none)");
+  expect(observed.diagnostics.join(" ")).toContain("bflow setup");
+  expect(await readFile(configPath, "utf8")).toBe(savedBytes);
+  expect(runtime).toBeUndefined();
+});
+
 it("adds MemPalace to an active Gateway while retaining its current GitNexus reader lock", async () => {
   const { components, ctx, input, platform } = fixture();
   await installFixtureTools(["query", "context", "impact"]);
