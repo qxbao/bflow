@@ -145,3 +145,14 @@ it("RSpec blocks runtime exceptions independently from failure count", () => {
 it("rejects XML namespace tricks, mixed content, deep nesting and oversized input", () => {
   for (const report of [ '<x:testsuite tests="1"><x:testcase name="adds"/></x:testsuite>', '<testsuite tests="1"><testcase name="adds"/></testsuite>junk', '<testsuite tests="1">'.repeat(70) + '</testsuite>'.repeat(70), ' '.repeat(4_194_305) ]) expect(() => parse(report)).toThrow();
 });
+
+it("CTest assertion JUnit requires its explicit Runtime-selected failure exit code", () => {
+  const xml = junit('<failure type="AssertionError"/>', 'tests="1" failures="1"');
+  expect(() => parseRunnerResult("junit", outcome("", 8), ["tests.Calculator.adds"], [xml])).toThrow();
+  expect(parseRunnerResult("junit", outcome("", 8), ["tests.Calculator.adds"], [xml], [8]).targetFailure).toBe(true);
+});
+it("Go accepts blank output records but rejects events after completion", () => {
+  const report = goReport("fail", "\n    add_test.go:7: got 1, want 2\n");
+  expect(parseRunnerResult("go_json", outcome(report, 1), ["example/math.TestAdd"]).targetFailure).toBe(true);
+  expect(() => parseRunnerResult("go_json", outcome(goReport("pass") + JSON.stringify({Action:"output",Package:"example/math",Output:"late"})), ["example/math.TestAdd"])).toThrow();
+});

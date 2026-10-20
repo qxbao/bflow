@@ -13,6 +13,7 @@ function object(input: unknown): Record<string, unknown> {
 function array(input: unknown): unknown[] { if (!Array.isArray(input)) invalid("expected array"); return input; }
 function text(input: unknown): string { if (typeof input !== "string" || !input.trim() || input.includes("\0")) invalid("missing text"); return input; }
 function number(input: unknown): number { if (!Number.isSafeInteger(input) || Number(input) < 0) invalid("invalid counter"); return Number(input); }
+function logText(input: unknown): string { if (typeof input !== "string" || input.includes("\0")) invalid("invalid log text"); return input; }
 function json(input: string): unknown { try { return JSON.parse(input); } catch { return invalid("incomplete JSON"); } }
 function finish(results: TestResult[], outcome: QualityCommandOutcome, expected: readonly string[], failureExitCodes: readonly number[] = [1]): ParsedRunnerResult {
   const names = results.map(test => test.name), observed = [...names].sort(), mapped = [...expected].sort();
@@ -128,16 +129,18 @@ function goResults(input: string): TestResult[] {
     const event = object(json(line)), action = text(event.Action), pkgName = text(event.Package);
     if (!["start", "run", "pause", "cont", "output", "pass", "fail", "skip"].includes(action)) invalid("Go build/runtime error or unknown event");
     let pkg = packages.get(pkgName); if (!pkg) { pkg = { tests: new Map() }; packages.set(pkgName, pkg); }
+    if (pkg.status !== undefined) invalid("Go event after package completion");
     if (event.Test === undefined) {
+      if (!["start", "output", "pass", "fail", "skip"].includes(action)) invalid("Go package event lacks test identity");
       if (action === "skip") invalid("Go skipped package");
       if (action === "pass" || action === "fail") { if (pkg.status) invalid("duplicate Go completion"); pkg.status = action; }
-      if (action === "output" && /(?:^|\n)(?:panic:|fatal error:|FAIL\s+.*\[build failed\]|\s*build failed)/.test(text(event.Output))) invalid("Go runtime/build error");
+      if (action === "output" && /(?:^|\n)(?:panic:|fatal error:|FAIL\s+.*\[build failed\]|\s*build failed)/.test(logText(event.Output))) invalid("Go runtime/build error");
       continue;
     }
     const name = text(event.Test);
     let test = pkg.tests.get(name); if (!test) { test = { started: false, output: "" }; pkg.tests.set(name, test); }
     if (action === "run") { if (test.started) invalid("duplicate Go test run"); test.started = true; }
-    if (action === "output") test.output += text(event.Output);
+    if (action === "output") test.output += logText(event.Output);
     if (["pass", "fail", "skip"].includes(action)) { if (test.status) invalid("duplicate Go test completion"); test.status = action; }
   }
   const results: TestResult[] = [];
@@ -272,7 +275,7 @@ function rspecResults(input: string): TestResult[] {
 }
 
 /** Parses only complete structured per-test evidence; process success alone is never accepted. */
-export function parseRunnerResult(format: ResultFormat, outcome: QualityCommandOutcome, expectedNames: readonly string[], reports?: readonly string[]): ParsedRunnerResult {
+export function parseRunnerResult(format: ResultFormat, outcome: QualityCommandOutcome, expectedNames: readonly string[], reports?: readonly string[], failureExitCodes?: readonly number[]): ParsedRunnerResult {
   if (outcome.spawnError || outcome.timedOut || outcome.aborted || outcome.outputTruncated || outcome.signal || outcome.exitCode === null) invalid("runner infrastructure failure (spawn, deadline, signal or truncated output)");
   if (reports !== undefined && (!reports.length || reports.length > 1024 || reports.reduce((total, report) => total + Buffer.byteLength(report), 0) > 4_194_304)) invalid("missing or oversized structured reports");
   if (Buffer.byteLength(outcome.stdout) > 4_194_304) invalid("oversized runner output");
@@ -288,5 +291,5 @@ export function parseRunnerResult(format: ResultFormat, outcome: QualityCommandO
     case "rspec_json": results = rspecResults(output); break;
     default: return invalid("unsupported result format");
   }
-  return finish(results, outcome, expectedNames, format === "rust_libtest" ? [101] : [1]);
+  return finish(results, outcome, expectedNames, failureExitCodes ?? (format === "rust_libtest" ? [101] : [1]));
 }
