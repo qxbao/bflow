@@ -90,7 +90,7 @@ function groupHelp(group: string): string {
   return [`Usage: bflow ${group} <command> [options]`, "", "Commands:",
     ...specs.map(spec => `  bflow ${spec.words.join(" ")}  ${spec.behavior.summary}`),
     "", `Run 'bflow ${group} <command> --help' for command options.`,
-    "Exit codes: 0 success, 1 failed, 2 usage, 3 not ready, 4 not found, 5 approval required, 6 conflict, 7 unknown (reconcile with --resume)."].join("\n");
+    "Exit codes: 0 success, 1 failed, 2 usage, 3 not ready, 4 not found, 5 approval required, 6 conflict, 7 unknown (reconcile the receipt before retrying)."].join("\n");
 }
 
 

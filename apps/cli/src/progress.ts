@@ -51,8 +51,12 @@ export class CliProgress {
   private draw(): void {
     // ASCII skeleton works without color and across terminal font sets.
     const frames = ["=     ", "==    ", " ===  ", "  === ", "    ==", "     ="];
-    const skeleton = `[${frames[this.frame++ % frames.length]}]`;
-    const label = this.waiting ? "Waiting for your confirmation" : "Working";
+    // A unit counter is emitted only by loops with a known enumerated total.
+    const units = /^(\d+)\/(\d+) /.exec(this.detailText);
+    const filled = units ? Math.floor(Number(units[1]) * 6 / Number(units[2])) : undefined;
+    const skeleton = filled === undefined ? `[${frames[this.frame++ % frames.length]}]`
+      : `[${"#".repeat(filled)}${"-".repeat(6 - filled)}]`;
+    const label = this.waiting ? "Waiting for your confirmation" : units ? "Inspected" : "Working";
     const columns = Math.max(2, (this.options.columns?.() ?? process.stderr.columns) || 80);
     // Keep the one mutable line from wrapping, including in narrow terminals.
     const text = `    ${skeleton} ${label} · ${this.detailText}`;

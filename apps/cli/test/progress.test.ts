@@ -73,10 +73,12 @@ describe("interactive progress", () => {
     progress.units(0, 3, "Backends inspected");
     progress.units(1, 3, "Backends inspected");
     expect(stripAnsi(chunks.at(-1)!)).toContain("1/3 Backends inspected");
+    expect(stripAnsi(chunks.at(-1)!)).toContain("[##----]");
     progress.important("backend-2: unavailable");
     progress.units(2, 3, "Backends inspected");
     progress.units(3, 3, "Backends inspected");
     expect(stripAnsi(chunks.at(-1)!)).toContain("3/3 Backends inspected");
+    expect(stripAnsi(chunks.at(-1)!)).toContain("[######]");
     expect(chunks.join("")).not.toMatch(/100%|success|healthy/);
     expect(lines.join("\n")).toContain("backend-2: unavailable");
     const count = chunks.length;
