@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { access, lstat, mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, lstat, mkdtemp, open, readFile, readdir, realpath, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -77,6 +78,8 @@ export interface ManagedTool {
   version: string;
   /** Capabilities observed with php -n, so host ini files cannot establish sandbox readiness. */
   phpRuntime?: { extensionDirectory: string; builtinExtensions: string[] };
+  /** A verified global PHPUnit launcher starts with PHP source or a PHP/PHAR shebang. */
+  phpEntrypoint?: boolean;
 }
 /** Private dependency injection for detection tests; role messages never populate this port. */
 export interface ManagedAdapterHost {
@@ -120,11 +123,30 @@ const systemHost: ManagedAdapterHost = {
           || !("builtinExtensions" in runtime) || !Array.isArray(runtime.builtinExtensions) || runtime.builtinExtensions.some(value => typeof value !== "string")) return undefined;
         return { executable, version, phpRuntime: { extensionDirectory: runtime.extensionDirectory, builtinExtensions: runtime.builtinExtensions } };
       }
-      return { executable, version };
+      return { executable, version, ...(name === "phpunit" ? { phpEntrypoint: await isPhpEntrypoint(executable) } : {}) };
     } catch { return undefined; }
     finally { if (probeHome) await rm(probeHome, { recursive: true, force: true }); }
   }
 };
+
+async function isPhpEntrypoint(path: string): Promise<boolean> {
+  let file;
+  try {
+    // Bound inspection and reject special files/symlinks without executing repository code.
+    file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+    if (!(await file.stat()).isFile()) return false;
+    const prefix = Buffer.alloc(8192);
+    const { bytesRead } = await file.read(prefix, 0, prefix.length, 0);
+    let source = prefix.toString("utf8", 0, bytesRead);
+    if (source.startsWith("#!")) {
+      const newline = source.indexOf("\n");
+      if (newline < 0 || !/^#![ \t]*(?:\/[^\s]*\/php[\d.]*|\/usr\/bin\/env[ \t]+php[\d.]*)(?:[ \t]+[^\r\n]*)?\r?$/.test(source.slice(0, newline))) return false;
+      source = source.slice(newline + 1);
+    }
+    return /^<\?php(?:\s|$)/.test(source);
+  } catch { return false; }
+  finally { await file?.close(); }
+}
 
 function safeRelative(path: string): boolean {
   return !!path && !isAbsolute(path) && !path.startsWith("-") && !/[\\:\0\r\n]/.test(path)
@@ -371,6 +393,9 @@ export function createManagedAdapters(host: ManagedAdapterHost = systemHost): Ru
       if (typeof pkg?.version === "string") { tool = { executable: phpTool.executable, version: pkg.version }; local = true; }
     } catch { /* The global version-checked PHPUnit can still be used. */ }
     if (!tool) return missing("phpunit", "PHPUnit");
+    if (local ? !await isPhpEntrypoint(localEntry) : tool.phpEntrypoint !== true) {
+      return { runners: [], notes: ["phpunit: runner_setup_required: PHPUnit requires a direct PHP/PHAR entrypoint; Coordinator should schedule an isolated setup task for the unsupported launcher"] };
+    }
     const base = await baseRunner(context, project, "phpunit", phpTool, host);
     base.version = tool.version;
     if (!local) base.mounts.push(...await mountTool(tool, host.homeDirectory));

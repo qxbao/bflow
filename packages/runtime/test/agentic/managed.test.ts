@@ -23,6 +23,7 @@ async function fixture(files: Record<string, string>): Promise<AdapterContext> {
 function host(homeDirectory: string, unavailable: string[] = []): ManagedAdapterHost {
   return { homeDirectory, async findTool(name) { return unavailable.includes(name) ? undefined : {
     executable: `/usr/bin/${name}`, version: "8.1.2",
+    ...(name === "phpunit" ? { phpEntrypoint: true } : {}),
     ...(name === "php" ? { phpRuntime: { extensionDirectory: "/usr/lib/php/test", builtinExtensions: ["ctype", "dom", "filter", "json", "libxml", "mbstring", "phar", "tokenizer", "xml", "xmlwriter", "zlib"] } } : {})
   }; } };
 }
@@ -225,7 +226,7 @@ printf 'Welcome to .NET 8.0!\\nSDK Version: 8.0.408\\n'
     expect(result.notes.join(" ")).toContain("PHP extension libxml");
   });
 
-  it("discovers PHP extension capabilities with ini disabled, independently of the host PHPUnit launcher", async () => {
+  it("rejects a version-verified shell PHPUnit launcher before advertising a PHP runner", async () => {
     const tools = await fixture({
       "bin/php": `#!/bin/sh
 test "$1" = "-n" || exit 9
@@ -241,10 +242,50 @@ esac
     vi.stubEnv("PATH", join(tools.root, "bin"));
     const context = await fixture({ "composer.json": '{"require-dev":{"phpunit/phpunit":"^11"}}' });
     const result = await managedAdapters.find(adapter => adapter.id === "phpunit")!.detect(context);
+    expect(result.runners).toEqual([]);
+    expect(result.notes.join(" ")).toContain("runner_setup_required");
+    expect(result.notes.join(" ")).toContain("PHP/PHAR entrypoint");
+  });
+
+  for (const [kind, entrypoint] of [
+    ["PHP script", "#!/usr/bin/env php\n<?php echo 'PHPUnit 11.5.0';\n"],
+    ["PHAR stub", "#!/usr/bin/env php\n<?php Phar::mapPhar(); __HALT_COMPILER(); ?>\r\narchive fixture"]
+  ]) it(`preserves a validated global PHPUnit ${kind} with the isolated PHP runtime`, async () => {
+    const tools = await fixture({
+      "bin/php": `#!/bin/sh
+if test "$1" != "-n"; then
+  test "$1" = "\${0%/*}/phpunit" && test "$2" = "--version" || exit 9
+  printf 'PHPUnit 11.5.0 by Sebastian Bergmann and contributors.\\n'
+  exit 0
+fi
+case "$2" in
+  --version) printf 'PHP 8.3.1 (cli)\\n';;
+  -r) printf '%s' '{"extensionDirectory":"/usr/lib/php/test","builtinExtensions":["ctype","dom","filter","json","libxml","mbstring","phar","tokenizer","xml","xmlwriter","zlib"]}';;
+  *) exit 10;;
+esac
+`,
+      "bin/phpunit": entrypoint!
+    });
+    for (const name of ["php", "phpunit"]) await chmod(join(tools.root, "bin", name), 0o755);
+    vi.stubEnv("PATH", join(tools.root, "bin"));
+    const context = await fixture({ "composer.json": '{"require-dev":{"phpunit/phpunit":"^11"}}' });
+    const result = await managedAdapters.find(adapter => adapter.id === "phpunit")!.detect(context);
     expect(result.notes).toEqual([]);
     expect(result.runners[0]).toMatchObject({ executable: join(tools.root, "bin/php"), version: "11.5.0" });
     expect(result.runners[0]!.bind({ testNames: ["BehaviorTest.testTarget"], testPaths: ["tests/BehaviorTest.php"] }, "/tmp/reports").args.slice(0, 2))
       .toEqual(["-n", join(tools.root, "bin/phpunit")]);
+  });
+
+  it("rejects a Composer PHPUnit shell entrypoint using metadata and file inspection without executing it", async () => {
+    const context = await fixture({
+      "composer.json": '{"require-dev":{"phpunit/phpunit":"^11"}}',
+      "vendor/phpunit/phpunit/phpunit": "#!/bin/sh\ntouch executed-wrapper\n",
+      "vendor/composer/installed.json": '{"packages":[{"name":"phpunit/phpunit","version":"11.5.0"}]}'
+    });
+    const result = await createManagedAdapters(host(context.root, ["phpunit"])).find(adapter => adapter.id === "phpunit")!.detect(context);
+    expect(result.runners).toEqual([]);
+    expect(result.notes.join(" ")).toContain("runner_setup_required");
+    expect(existsSync(join(context.root, "executed-wrapper"))).toBe(false);
   });
 
   it("uses the same isolated PHP runtime for a Composer-installed PHPUnit without a global launcher", async () => {
