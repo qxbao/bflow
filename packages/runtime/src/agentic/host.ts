@@ -1099,6 +1099,17 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         await receipts.appendConversationNotice(deliveryFailureNotice(item.message, item.error, `Conversation không nhận được ${item.message.type}`));
       }
     }
+    // Only a turn drains the Gateway's inbound queue; retry it here (outside the journal lock) and surface dead letters.
+    const drained = record(await host.conversation.flush());
+    for (const notice of drained.ok === true ? z.array(z.object({ messageId: z.string().min(1), correlationId: z.string().min(1),
+      content: z.string() }).passthrough()).catch([]).parse(record(drained.value).queueNotices ?? []) : []) {
+      const id = `queue-dead-letter-${digest(notice.messageId)}`;
+      await receipts.appendConversationNotice(RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: notice.correlationId,
+        sender: { role: "runtime" }, recipient: { role: "conversation" }, type: "conversation.clarification",
+        payload: { kind: "delivery_failure", headline: "Conversation không xử lý được một tin nhắn đang chờ", reason: redactString(notice.content).slice(0, 2000),
+          options: ["Hỏi \"trạng thái\" để xem run hiện tại", "Yêu cầu Coordinator gửi lại việc", "Hủy run"] },
+        artifact_references: [], occurred_at: new Date().toISOString(), idempotency_key: id }));
+    }
   };
   let watchdogRunning = false;
   const watchdogTimer = setInterval(() => {

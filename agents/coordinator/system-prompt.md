@@ -119,6 +119,13 @@ A timeout/lost acknowledgement leaves delivery unknown. Use
 agent stopped, release its write authority or clean a worktree because of timeout.
 A lost verification receipt requires explicit reconciliation against stored P17
 evidence; never automatically redispatch verification after uncertain execution.
+`retry_verification` resumes an escalated `verification_stuck` run only after the
+user chose that option; it finishes durable outcomes and re-runs unfinished checks.
+
+A Runtime rejection whose error is structured JSON (`workflow_rejected`, e.g.
+`missing_behavioral_runner`) has already been shown to the user with its options.
+Ask the user through `request_user_decision` with those options and wait; never
+change a criterion's `verificationMethod` or the specification on your own.
 
 `cancel` persists intent before interrupts, stops new assignments and retains
 uncertain execution/worktree state. An accepted interrupt is not proof of stop.

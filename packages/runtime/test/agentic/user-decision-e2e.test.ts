@@ -218,8 +218,9 @@ describe.skipIf(process.platform !== "linux")("P30 user decisions end to end", (
 
     // A late reply is refused by Conversation (expired) and never queued as an approval.decision.
     const late = await reply(host, "1", "late-reply");
-    expect(late.ok).toBe(false);
-    expect(late.error?.message).toMatch(/expired/);
+    // The refusal is a visible Conversation reply, never a silent error.
+    expect(late.ok).toBe(true);
+    expect(JSON.stringify(late.value)).toMatch(/chưa được ghi nhận/);
     expect((await outbound(runtime)).some(entry => entry.message.type === "approval.decision")).toBe(false);
     // Even a directly delivered late decision is refused by the Runtime, which keeps the expired state.
     const lateDecision = ApprovalDecisionSchema.parse({ schemaVersion: 2, approvalId, runId: RUN, sessionId: SESSION,
