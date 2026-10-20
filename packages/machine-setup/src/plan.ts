@@ -12,7 +12,7 @@ import { TOOL_CATALOG, type ToolObservation } from "./tools.js";
 import type { CommandRunner, PlatformProfile, SetupComponent, SetupContext } from "./types.js";
 import type { MachineConfig } from "./machine-config.js";
 
-export const COMPONENT_ORDER = ["path", "role-skills", "mcp-config", "services", "environment-manifest"] as const;
+export const COMPONENT_ORDER = ["path", "role-skills", "mcp-config", "services", "isolator-profiles", "environment-manifest"] as const;
 export const DOCTOR_STEP_ID = "verify:doctor";
 
 export interface SetupPreviewStep {
@@ -194,7 +194,7 @@ export async function buildSetupPlan(input: BuildSetupPlanInput): Promise<Operat
     }
     const stepId = `${c.action}:${id}`;
     const mcpStep = id === "services" ? componentSteps.get("mcp-config") : undefined;
-    const dependsOn = id === "environment-manifest" ? [...stepIds] : mcpStep ? [mcpStep.stepId] : [];
+    const dependsOn = id === "environment-manifest" || id === "isolator-profiles" ? [...stepIds] : mcpStep ? [mcpStep.stepId] : [];
     const step = SetupStepSchema.safeParse({
       schemaVersion: 3, stepId, action: c.action, componentId: id, level: "machine", scope, dependsOn,
       desiredStateDigest: desired.digest, expectedStateDigest: observed.stateDigest,

@@ -130,6 +130,20 @@ describe("buildSetupPlan", () => {
     expect(preview.steps.find((s) => s.stepId === "install_tool:pnpm")!.commandPreview).toBeUndefined();
   });
 
+  it("plans isolated provider profile synchronization after installs and before the environment manifest", async () => {
+    const { plan } = await okBuilt({
+      observations: [obs("node", "present"), obs("pnpm", "missing")],
+      components: [comp("path"), comp("role-skills"), comp("mcp-config"), comp("services"),
+        comp("isolator-profiles"), comp("environment-manifest")]
+    });
+    const ids = plan.steps.map(step => step.stepId);
+    const profileIndex = ids.indexOf("configure:isolator-profiles");
+    expect(profileIndex).toBeGreaterThan(0);
+    expect(ids[profileIndex + 1]).toBe("configure:environment-manifest");
+    expect(plan.steps[profileIndex]!.dependsOn).toEqual(ids.slice(0, profileIndex));
+    expect(plan.steps[profileIndex + 1]!.dependsOn).toEqual(ids.slice(0, profileIndex + 1));
+  });
+
   it.each(["register_mcp", "configure"] as const)("services depend on the actual %s MCP step", async (action) => {
     const { plan } = await okBuilt({
       observations: [], components: [{ ...comp("mcp-config"), action }, comp("services")]

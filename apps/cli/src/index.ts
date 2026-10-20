@@ -91,6 +91,13 @@ export {
   type ComposedCliRuntime
 } from "./runtime.js";
 export { main } from "./bin.js";
+export {
+  ProfileSetupComponent,
+  ProfileSyncReportSchema,
+  resolveProfileSetupOptions,
+  type ProfileSetupOptions,
+  type ProfileSyncReport
+} from "./profile-setup.js";
 
 export { EnvironmentLifecycle, EnvironmentError } from "./environment.js";
 export type {

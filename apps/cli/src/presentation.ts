@@ -447,6 +447,7 @@ export function statusTag(value: unknown, useColor = false): string {
 export const SETUP_COMPONENT_LABELS: Readonly<Record<string, string>> = {
   path: "Make bflow and installed tools available in the terminal",
   "role-skills": "Install agent skills",
+  "isolator-profiles": "Synchronize native and isolated provider profiles",
   "mcp-config": "Configure MCP tools",
   services: "Start and verify the MCP Gateway",
   "environment-manifest": "Save verified machine configuration",

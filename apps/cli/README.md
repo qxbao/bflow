@@ -458,6 +458,21 @@ it does not make Bflow workflows isolated or assert provider/runtime readiness.
 Review profile and shell configuration before use. No provider account credentials
 are bundled or copied by the CLI.
 
+When an ai-isolator `profiles/` directory already exists, normal `bflow setup`
+adds a separately approved `isolator-profiles` step after native tool installation
+and Gateway configuration. It inspects and synchronizes only MCP definitions,
+approved skill instructions and the Bflow-managed plugin registration/assets;
+profile auth, account/model preferences, permissions and unrelated local entries
+remain separate. `--check` and `--dry-run` only inspect. The step fails visibly
+when its pinned Python/helper, native source configuration or profile target is
+invalid, and verifies the result after apply. `AI_ISOLATOR_HOME` selects the
+trusted profile root; with `BFLOW_HOME`, setup uses a separate
+`<BFLOW_HOME>/ai-isolator` root and provider sources under that isolated setup,
+never the real account home. `CODEX_HOME`, `CLAUDE_CONFIG_DIR` and
+`AI_ISOLATOR_CODEX_SKILLS_SOURCE` are honored only for non-isolated machine
+setup. This synchronization does not authenticate a profile or prove live provider
+readiness.
+
 To bind roles to profiles already created with `bflow iso`, merge this YAML into
 the generated `.bflow/config.yml` `environment:` section. A role-level
 `profile-name` takes precedence over that provider's default:
