@@ -1,8 +1,8 @@
 # Specification Engine (P15)
 
-`@bflow/specification` implements adaptive change classification, contract-backed validation, immutable specification revisions, acceptance criterion management, criterion/task traceability, requirement change impact analysis, approval policy, and human-readable document rendering. It is a leaf package depending on `@bflow/contracts` and `zod`. It neither dispatches agents nor chooses TDD policy.
+`@bflow/specification` triển khai phân loại thay đổi thích ứng, validation dựa trên contract, các revision specification bất biến, quản lý acceptance criterion, truy vết criterion/task, phân tích tác động của thay đổi yêu cầu, chính sách approval, và render tài liệu dễ đọc cho con người. Đây là leaf package phụ thuộc vào `@bflow/contracts` và `zod`. Nó không dispatch agent và cũng không chọn chính sách TDD.
 
-The public document format is `@bflow/contracts.Specification` (schemaVersion 2). `SpecificationDocumentSchema` parses that exported schema and validates P15's private, versioned `metadata.sdd` with `PolicyDetailsSchema`. No shared contract changes or upcasters are introduced. `version`, `complexity`, `riskLevel`, and `traceabilityTaskIds` are explicit for P15 documents. Legacy specs missing P15 metadata require an explicit assessment and a new draft; they are not silently upgraded or approved.
+Định dạng tài liệu công khai là `@bflow/contracts.Specification` (schemaVersion 2). `SpecificationDocumentSchema` parse schema được export đó và validate `metadata.sdd` riêng, có phiên bản của P15 bằng `PolicyDetailsSchema`. Không có thay đổi contract dùng chung hay upcaster nào được đưa vào. `version`, `complexity`, `riskLevel` và `traceabilityTaskIds` là tường minh đối với tài liệu P15. Các spec cũ thiếu metadata P15 yêu cầu một assessment tường minh và một draft mới; chúng không được nâng cấp hay phê duyệt ngầm.
 
 ---
 
@@ -50,157 +50,157 @@ The public document format is `@bflow/contracts.Specification` (schemaVersion 2)
 
 ### 1. Specification Classification
 
-Change classification is driven by explicit impact assessment rather than code diff size. Even a one-line change to authentication, public contracts, or database migrations can introduce critical security or architectural risks.
+Việc phân loại thay đổi dựa trên impact assessment tường minh thay vì kích thước code diff. Ngay cả một thay đổi một dòng đối với authentication, public contract hoặc database migration cũng có thể gây ra rủi ro nghiêm trọng về bảo mật hoặc kiến trúc.
 
-- **`ChangeAssessmentSchema`**: Structured impact assessment supplied by Analyst or Architect:
+- **`ChangeAssessmentSchema`**: Impact assessment có cấu trúc do Analyst hoặc Architect cung cấp:
   - `kind`: `"documentation"` | `"formatting"` | `"feature"` | `"bugfix"` | `"refactoring"` | `"configuration"`
   - `behaviorChange`: boolean
-  - `modules`: non-empty array of affected module names
-  - `securityImpact`, `publicApiImpact`, `dataSchemaImpact`, `architectureImpact`, `migrationRequired`: boolean flags
+  - `modules`: mảng không rỗng các tên module bị ảnh hưởng
+  - `securityImpact`, `publicApiImpact`, `dataSchemaImpact`, `architectureImpact`, `migrationRequired`: các cờ boolean
   - `risk`: `"low"` | `"medium"` | `"high"` | `"critical"`
-  - `unresolvedQuestions`: array of open ambiguities blocking review/implementation
-- **`classifyChange(assessment, affectedPaths)`**: Evaluates assessment flags and conservative path hints:
-  - Promotes to `complexity: "complex"`, `level: "full"`, `riskLevel: "high"`, `humanApprovalRequired: true` if any impact flag is true, multiple modules are touched, risk is high/critical, or path hints match.
-  - Promotes to `complexity: "standard"`, `riskLevel: "medium"` if behavior change occurs or risk is medium.
-  - Limits `complexity: "trivial"`, `level: "lightweight"`, `riskLevel: "low"` to non-behavioral, low-risk changes without security/API/data/architecture impact.
-- **`classifyChangeSafe(assessment, affectedPaths)`**: Non-throwing variant returning `OperationResult<Classification>`.
-- **Conservative Path Hints**:
-  - `hasSecurityPathHint(paths)`: Matches security, auth, crypto, secret, permission, token, jwt, tls, etc.
-  - `hasPublicApiPathHint(paths)`: Matches contracts, openapi, proto, graphql boundaries.
-  - `hasDataSchemaPathHint(paths)`: Matches migrations, schema directories, or `.sql` files.
-- **`getRequiredSpecSections(complexity, migrationOrSchemaImpact)`**: Returns the list of mandatory section names for the given complexity.
+  - `unresolvedQuestions`: mảng các điểm mơ hồ còn mở đang chặn review/triển khai
+- **`classifyChange(assessment, affectedPaths)`**: Đánh giá các cờ assessment và gợi ý đường dẫn theo hướng thận trọng:
+  - Nâng lên `complexity: "complex"`, `level: "full"`, `riskLevel: "high"`, `humanApprovalRequired: true` nếu bất kỳ cờ impact nào là true, nhiều module bị chạm tới, risk là high/critical, hoặc gợi ý đường dẫn khớp.
+  - Nâng lên `complexity: "standard"`, `riskLevel: "medium"` nếu có thay đổi hành vi hoặc risk là medium.
+  - Giới hạn `complexity: "trivial"`, `level: "lightweight"`, `riskLevel: "low"` cho các thay đổi không đổi hành vi, rủi ro thấp và không có tác động security/API/data/architecture.
+- **`classifyChangeSafe(assessment, affectedPaths)`**: Biến thể không throw, trả về `OperationResult<Classification>`.
+- **Gợi ý đường dẫn thận trọng**:
+  - `hasSecurityPathHint(paths)`: Khớp security, auth, crypto, secret, permission, token, jwt, tls, v.v.
+  - `hasPublicApiPathHint(paths)`: Khớp các ranh giới contracts, openapi, proto, graphql.
+  - `hasDataSchemaPathHint(paths)`: Khớp migrations, thư mục schema hoặc file `.sql`.
+- **`getRequiredSpecSections(complexity, migrationOrSchemaImpact)`**: Trả về danh sách tên các section bắt buộc cho complexity đã cho.
 
-| Complexity | Minimum Content | SDD Level | Governance Gate |
+| Complexity | Nội dung tối thiểu | SDD Level | Governance Gate |
 | --- | --- | --- | --- |
-| `trivial` | Title, summary, problem statement, scope, affected paths, >= 1 required criterion | `lightweight` | Authorized automated acceptance |
-| `standard` | Trivial sections + functional requirements + proposed test strategy | `lightweight` (`full` for new features) | Authorized automated acceptance |
-| `complex` | Standard sections + design proposal, technical constraints, API contracts, risks/tradeoffs, architecture notes, security considerations, rollback plan, test strategy, TDD decision (+ migration strategy & dataModelChanges if schema affected) | `full` | Authenticated human design approval |
+| `trivial` | Title, summary, problem statement, scope, affected paths, >= 1 criterion bắt buộc | `lightweight` | Nghiệm thu tự động có ủy quyền |
+| `standard` | Các section của trivial + functional requirements + proposed test strategy | `lightweight` (`full` cho tính năng mới) | Nghiệm thu tự động có ủy quyền |
+| `complex` | Các section của standard + design proposal, technical constraints, API contracts, risks/tradeoffs, architecture notes, security considerations, rollback plan, test strategy, TDD decision (+ migration strategy & dataModelChanges nếu schema bị ảnh hưởng) | `full` | Phê duyệt thiết kế của con người đã xác thực |
 
 ---
 
 ### 2. Specification Schema Validation
 
-`SpecificationDocumentSchema` refines `@bflow/contracts.Specification` by enforcing strict validation on P15's `metadata.sdd`:
+`SpecificationDocumentSchema` tinh chỉnh `@bflow/contracts.Specification` bằng cách áp dụng validation nghiêm ngặt lên `metadata.sdd` của P15:
 
-- **`PolicyDetailsSchema`**: Defines the metadata schema:
+- **`PolicyDetailsSchema`**: Định nghĩa schema metadata:
   - `policyVersion: 1`
   - `assessment`: `ChangeAssessment`
-  - `functionalRequirements`: array of non-empty strings
-  - `proposedTestStrategy`: optional string
-  - `designProposal`, `technicalConstraints`, `apiDataContracts`, `risksAndTradeoffs`: strings/arrays for complex changes
-  - `migrationStrategy`: optional string for data schema changes
-  - `traceability`: array of `{ criterionId, taskIds }`
-  - `revisionReason`: optional string required on revisions
-- **`parseContractOrP15Specification(input)`**: Accepts either a P15 `SpecificationDocumentSchema` document or a plain contract `Specification`; for the latter it synthesizes valid `metadata.sdd` policy details (defaults for assessment, requirements and traceability) so criteria, traceability and change-detection helpers also work on contract specs.
-- **`parseSpecification(input)`**: Validates that:
-  - Classification matches declared assessment and affected paths.
-  - Scope items (`inScope`, `outOfScope`) are non-blank.
-  - Version is an explicit number.
+  - `functionalRequirements`: mảng các chuỗi không rỗng
+  - `proposedTestStrategy`: chuỗi tùy chọn
+  - `designProposal`, `technicalConstraints`, `apiDataContracts`, `risksAndTradeoffs`: chuỗi/mảng cho các thay đổi complex
+  - `migrationStrategy`: chuỗi tùy chọn cho thay đổi data schema
+  - `traceability`: mảng các `{ criterionId, taskIds }`
+  - `revisionReason`: chuỗi tùy chọn, bắt buộc ở các revision
+- **`parseContractOrP15Specification(input)`**: Chấp nhận một tài liệu P15 `SpecificationDocumentSchema` hoặc một `Specification` contract thuần; với loại sau, nó tổng hợp policy details `metadata.sdd` hợp lệ (giá trị mặc định cho assessment, requirements và traceability) để các helper criteria, traceability và change-detection cũng hoạt động trên contract spec.
+- **`parseSpecification(input)`**: Validate rằng:
+  - Classification khớp với assessment đã khai báo và affected paths.
+  - Các mục scope (`inScope`, `outOfScope`) không để trống.
+  - Version là một số tường minh.
   - `updatedAt >= createdAt`.
-  - At least one acceptance criterion is `required: true`.
-  - Required sections for `standard` and `complex` changes are present and non-empty.
-  - Traceability maps exist for all criteria and match `traceabilityTaskIds`.
-  - If `testStrategy` or `tddDecision` are present, they reference the matching `specId` and `runId`.
-- **`validateSpecificationDocument(input)`**: Safe validator returning `OperationResult<Specification>`.
-- **`policyDetails(input)`**: Helper extracting parsed `PolicyDetails` from a valid specification.
+  - Có ít nhất một acceptance criterion là `required: true`.
+  - Các section bắt buộc cho thay đổi `standard` và `complex` có mặt và không rỗng.
+  - Traceability map tồn tại cho mọi criteria và khớp `traceabilityTaskIds`.
+  - Nếu có `testStrategy` hoặc `tddDecision`, chúng tham chiếu đúng `specId` và `runId` tương ứng.
+- **`validateSpecificationDocument(input)`**: Validator an toàn trả về `OperationResult<Specification>`.
+- **`policyDetails(input)`**: Helper trích xuất `PolicyDetails` đã parse từ một specification hợp lệ.
 
 ---
 
 ### 3. Spec Versioning
 
-Specifications follow an immutable, versioned lifecycle. Existing approved specifications are never mutated in place.
+Specification tuân theo vòng đời bất biến, có phiên bản. Các specification đã được phê duyệt không bao giờ bị sửa tại chỗ.
 
 - **`SpecificationEngine.createDraft(input)`**:
-  - Initializes a new specification at `version: 1` in `status: "draft"`.
-  - Enforces that all acceptance criteria are in `status: "pending"` with empty `evidenceArtifactIds` and no `waiverReason`.
-  - Forbids pre-existing `approvedBy` or `artifactRef`.
+  - Khởi tạo một specification mới ở `version: 1` với `status: "draft"`.
+  - Bắt buộc mọi acceptance criteria ở `status: "pending"` với `evidenceArtifactIds` rỗng và không có `waiverReason`.
+  - Cấm `approvedBy` hoặc `artifactRef` có sẵn từ trước.
 - **`SpecificationEngine.revise(previousApproved, proposedDraft, reason)`**:
-  - Preserves specification identity: `specId`, `runId`, `sessionId`, and `createdAt` must match.
-  - Enforces version increment: `proposed.version === previous.version + 1`.
-  - Validates non-decreasing timestamps: `updatedAt >= previous.updatedAt`.
-  - Attaches non-empty `revisionReason` in `metadata.sdd`.
-  - Verifies artifact integrity of `previous` if an artifact reference exists.
-  - Runs `detectSpecChanges` to ensure requirements or criteria actually changed (`requiresReapproval`).
-  - Returns `{ specification: nextDraft, impact }` ready for fresh review.
+  - Bảo toàn danh tính specification: `specId`, `runId`, `sessionId` và `createdAt` phải khớp.
+  - Bắt buộc tăng version: `proposed.version === previous.version + 1`.
+  - Validate timestamp không giảm: `updatedAt >= previous.updatedAt`.
+  - Gắn `revisionReason` không rỗng vào `metadata.sdd`.
+  - Verify tính toàn vẹn artifact của `previous` nếu có artifact reference.
+  - Chạy `detectSpecChanges` để đảm bảo requirements hoặc criteria thực sự đã thay đổi (`requiresReapproval`).
+  - Trả về `{ specification: nextDraft, impact }` sẵn sàng cho lượt review mới.
 - **`SpecificationEngine.supersede(previousApproved, nextApproved)`**:
-  - Transitions `previousApproved` from `status: "approved"` to `status: "superseded"` when `nextApproved` is approved.
-  - Verifies both artifact references in `ArtifactStore` before updating status.
+  - Chuyển `previousApproved` từ `status: "approved"` sang `status: "superseded"` khi `nextApproved` đã được phê duyệt.
+  - Verify cả hai artifact reference trong `ArtifactStore` trước khi cập nhật status.
 
 ---
 
 ### 4. Acceptance Criteria Management & Inviolability
 
-Acceptance criteria define verifiable preconditions for task completion. They are protected by strict anti-weakening guardrails:
+Acceptance criteria định nghĩa các điều kiện tiên quyết có thể kiểm chứng để hoàn thành task. Chúng được bảo vệ bằng các guardrail chống làm yếu đi nghiêm ngặt:
 
-- **Criteria Inviolability Invariant**: Criteria must **NEVER** be deleted, made optional, relaxed in verification method, or reworded to legitimize a failing implementation.
-- **`addCriterionToDraft(spec, criterion, mappedTaskIds)`**: Adds a new pending criterion to a draft specification, updating traceability and test strategy mappings.
-- **`updateCriterionInDraft(spec, criterionId, patch)`**: Updates criterion properties (`description`, `category`, `verificationMethod`, `required`, `mappedTaskIds`) on a draft specification.
-- **`removeCriterionFromDraft(spec, criterionId)`**: Removes a criterion from a draft, cleaning up traceability and test strategy. Fails if removing the last required criterion.
+- **Bất biến bất khả xâm phạm của Criteria**: Criteria **KHÔNG BAO GIỜ** được xóa, chuyển thành tùy chọn, nới lỏng phương thức verification, hay diễn đạt lại để hợp thức hóa một triển khai đang thất bại.
+- **`addCriterionToDraft(spec, criterion, mappedTaskIds)`**: Thêm một criterion pending mới vào draft specification, cập nhật traceability và mapping test strategy.
+- **`updateCriterionInDraft(spec, criterionId, patch)`**: Cập nhật các thuộc tính criterion (`description`, `category`, `verificationMethod`, `required`, `mappedTaskIds`) trên draft specification.
+- **`removeCriterionFromDraft(spec, criterionId)`**: Xóa một criterion khỏi draft, dọn dẹp traceability và test strategy. Thất bại nếu xóa criterion bắt buộc cuối cùng.
 - **`assertNoCriteriaWeakeningOnFailure(previousSpec, proposedSpec, failedVerification, options)`**:
-  - Inspects failed criteria in `failedVerification.evaluatedCriteria`.
-  - Throws an error if any failed criterion was:
-    1. Removed in `proposedSpec`.
-    2. Changed from `required: true` to `required: false`.
-    3. Weakened in verification method rigor (e.g., `e2e_test` -> `manual_review`).
-    4. Modified in description.
-  - Bypass permitted **only** when `options.explicitUserRequirementChangeAuthorized === true`.
+  - Kiểm tra các criteria thất bại trong `failedVerification.evaluatedCriteria`.
+  - Throw lỗi nếu bất kỳ criterion thất bại nào bị:
+    1. Bị xóa trong `proposedSpec`.
+    2. Đổi từ `required: true` sang `required: false`.
+    3. Làm yếu độ nghiêm ngặt của phương thức verification (ví dụ `e2e_test` -> `manual_review`).
+    4. Sửa đổi mô tả.
+  - Chỉ được bypass **khi và chỉ khi** `options.explicitUserRequirementChangeAuthorized === true`.
 - **`evaluateCriteriaFromVerification(spec, verificationResult)`**:
-  - Evaluates criteria against an independent `VerificationResult` from P17.
+  - Đánh giá criteria dựa trên một `VerificationResult` độc lập từ P17.
   - Returns `CriteriaEvaluationSummary` (`allRequiredSatisfied: boolean`, `evaluations: CriterionEvaluation[]`).
-  - Leaves the approved specification immutable; verification results belong in separate evidence artifacts.
+  - Giữ nguyên specification đã phê duyệt ở trạng thái bất biến; kết quả verification thuộc về các evidence artifact riêng.
 
 ---
 
 ### 5. Spec-to-Task Traceability
 
-Every requirement and criterion must trace forward to execution tasks, and every execution task must trace backward to requirements.
+Mọi requirement và criterion phải truy vết xuôi tới các execution task, và mọi execution task phải truy vết ngược về requirements.
 
 - **`validateTraceability(spec, workflow)`**:
-  - Throws if workflow tasks reference unknown acceptance criteria, if any criterion has no mapped task, or if workflow tasks and traceability do not match exactly.
-  - Validates that every acceptance criterion in `spec` maps to at least one task in `workflow`.
-  - Validates that all tasks referenced in `metadata.sdd.traceability` exist in `workflow.tasks`, and no orphan workflow tasks exist without mapped criteria.
+  - Throw nếu các workflow task tham chiếu acceptance criteria không xác định, nếu có criterion nào không có task được map, hoặc nếu workflow task và traceability không khớp chính xác.
+  - Validate rằng mọi acceptance criterion trong `spec` được map tới ít nhất một task trong `workflow`.
+  - Validate rằng mọi task được tham chiếu trong `metadata.sdd.traceability` tồn tại trong `workflow.tasks`, và không có workflow task mồ côi thiếu criteria được map.
 - **`buildTraceabilityMatrix(spec, workflow?)`**:
   - Returns `TraceabilityMatrix`:
-    - `criterionToTasks`: Record mapping criterion IDs to task IDs.
-    - `taskToCriteria`: Record mapping task IDs to criterion IDs.
-    - `orphanCriterionIds`: Criteria with no assigned tasks.
-    - `unmappedWorkflowTaskIds`: Workflow tasks with no mapped criteria.
-    - `unknownMappedTaskIds`: Tasks in traceability that do not exist in the workflow.
-    - `unknownCriterionIds` (optional): Criterion IDs referenced by workflow tasks that the spec does not define.
-  - With explicit `metadata.sdd.traceability` on the spec, that mapping is authoritative; without it and with a workflow supplied, mappings are derived from each task's `acceptanceCriteria`.
-    - `valid`: boolean indicator of complete bidirectional traceability.
+    - `criterionToTasks`: Record map criterion ID sang task ID.
+    - `taskToCriteria`: Record map task ID sang criterion ID.
+    - `orphanCriterionIds`: Criteria không có task được giao.
+    - `unmappedWorkflowTaskIds`: Workflow task không có criteria được map.
+    - `unknownMappedTaskIds`: Task trong traceability không tồn tại trong workflow.
+    - `unknownCriterionIds` (tùy chọn): Criterion ID được workflow task tham chiếu mà spec không định nghĩa.
+  - Khi spec có `metadata.sdd.traceability` tường minh, mapping đó có thẩm quyền; nếu không có nó và có workflow được cung cấp, mapping được suy ra từ `acceptanceCriteria` của từng task.
+    - `valid`: chỉ báo boolean cho traceability hai chiều đầy đủ.
 - **`validateChangedFilesScope(spec, changedPaths)`**:
-  - Validates whether changed files fall within `spec.affectedPaths`.
-  - Supports exact path matches, directory prefix matches, and glob patterns (`**`, `*`, `?`).
+  - Validate xem các changed file có nằm trong `spec.affectedPaths` hay không.
+  - Hỗ trợ khớp đường dẫn chính xác, khớp tiền tố thư mục và glob pattern (`**`, `*`, `?`).
   - Returns `{ withinScope: boolean, outOfScopePaths: string[] }`.
 
 ---
 
 ### 6. Spec Change Detection & DAG Impact Analysis
 
-When requirements change mid-workflow, `detectSpecChanges` determines the exact impact across criteria and the task DAG:
+Khi requirements thay đổi giữa chừng workflow, `detectSpecChanges` xác định chính xác tác động lên criteria và task DAG:
 
 - **`detectSpecChanges(previousSpec, nextSpec, workflow?)`**:
-  - Identifies added, removed, changed, and unchanged criteria:
-    - `addedCriterionIds`: newly introduced criteria.
-    - `removedCriterionIds`: deleted criteria.
-    - `changedCriterionIds`: criteria whose description, category, verificationMethod, or required status changed.
-    - `unchangedCriterionIds`: criteria whose canonical JSON is identical across versions.
-  - Identifies changed fields:
-    - `changedFields`: list of modified top-level and SDD policy fields (e.g. `summary`, `scope`, `functionalRequirements`, `designProposal`).
-  - Identifies global changes:
-    - `globalRequirementsChanged`: true if any top-level requirement or policy section changed beyond criteria.
-  - Computes affected tasks:
-    - `affectedTaskIds`: unique tasks directly mapped to changed criteria (or all mapped tasks if global requirements changed).
-    - `transitivelyAffectedTaskIds`: downstream tasks in the `workflow.dependencies` DAG affected transitively.
+  - Nhận diện criteria được thêm, xóa, thay đổi và không đổi:
+    - `addedCriterionIds`: criteria mới được đưa vào.
+    - `removedCriterionIds`: criteria đã bị xóa.
+    - `changedCriterionIds`: criteria có description, category, verificationMethod hoặc trạng thái required thay đổi.
+    - `unchangedCriterionIds`: criteria có canonical JSON giống hệt nhau giữa các version.
+  - Nhận diện các field thay đổi:
+    - `changedFields`: danh sách các field cấp cao nhất và field chính sách SDD đã thay đổi (ví dụ `summary`, `scope`, `functionalRequirements`, `designProposal`).
+  - Nhận diện thay đổi toàn cục:
+    - `globalRequirementsChanged`: true nếu bất kỳ requirement cấp cao nhất hoặc section chính sách nào thay đổi ngoài criteria.
+  - Tính các task bị ảnh hưởng:
+    - `affectedTaskIds`: các task duy nhất được map trực tiếp tới criteria đã thay đổi (hoặc toàn bộ task được map nếu global requirements thay đổi).
+    - `transitivelyAffectedTaskIds`: các task downstream trong DAG `workflow.dependencies` bị ảnh hưởng gián tiếp.
   - Reapproval gate:
-    - `requiresReapproval`: true if any criterion or requirement was altered.
+    - `requiresReapproval`: true nếu bất kỳ criterion hoặc requirement nào bị thay đổi.
 
 ---
 
 ### 7. Spec Approval Policy & Governance
 
-The approval lifecycle manages formal transition from draft to approved status:
+Vòng đời approval quản lý việc chuyển đổi chính thức từ trạng thái draft sang approved:
 
 ```
 [ draft ] ──── submitForReview() ────► [ review_pending ]
@@ -215,57 +215,57 @@ The approval lifecycle manages formal transition from draft to approved status:
 ```
 
 - **`SpecificationEngine.submitForReview(draft)`**:
-  - Computes canonical JSON of reviewed requirements (excluding lifecycle metadata).
-  - Verifies document size (`<= 1 MiB`).
-  - Persists canonical JSON into `ArtifactStore` with SHA-256 checksum and exact size.
-  - Attaches returned `ArtifactReference` and sets `status: "review_pending"`.
+  - Tính canonical JSON của các requirement được review (không gồm metadata vòng đời).
+  - Verify kích thước tài liệu (`<= 1 MiB`).
+  - Lưu canonical JSON vào `ArtifactStore` với checksum SHA-256 và kích thước chính xác.
+  - Gắn `ArtifactReference` được trả về và đặt `status: "review_pending"`.
 - **`SpecificationEngine.requestApproval(pending, options)`**:
-  - Creates a formal `ApprovalRequest` targeting `{ type: "specification", specId }` at current `revision: spec.version`.
-  - Binds content digest and artifact reference as evidence.
+  - Tạo một `ApprovalRequest` chính thức nhắm tới `{ type: "specification", specId }` tại `revision: spec.version` hiện tại.
+  - Gắn content digest và artifact reference làm evidence.
 - **`SpecificationEngine.approve(pending, request, decision)`**:
-  - Verifies artifact integrity via `verifyArtifact`.
-  - Validates approval window, matching request IDs, revision, and generation.
-  - Invokes `authorizeApprover(decision, humanRequired)`:
-    - Low-risk/trivial changes allow authorized automated approvers (e.g., Coordinator).
-    - Complex/high-risk changes mandate authenticated human owner approval.
-  - Transitions specification to `status: "approved"`.
+  - Verify tính toàn vẹn artifact qua `verifyArtifact`.
+  - Validate cửa sổ approval, request ID khớp, revision và generation.
+  - Gọi `authorizeApprover(decision, humanRequired)`:
+    - Thay đổi low-risk/trivial cho phép approver tự động có ủy quyền (ví dụ Coordinator).
+    - Thay đổi complex/high-risk bắt buộc có phê duyệt của owner là con người đã xác thực.
+  - Chuyển specification sang `status: "approved"`.
 - **`SpecificationEngine.reject(pending, request, decision)`**:
-  - For `decision.decision === "rejected"`: transitions specification to `status: "rejected"`.
-  - For `decision.decision === "changes_requested"`: reverts specification to a clean `status: "draft"` (clearing artifactRef and approvedBy) for rework.
+  - Với `decision.decision === "rejected"`: chuyển specification sang `status: "rejected"`.
+  - Với `decision.decision === "changes_requested"`: đưa specification về `status: "draft"` sạch (xóa artifactRef và approvedBy) để rework.
 - **`SpecificationEngine.assertImplementationReady(approved, request, decision, workflow)`**:
-  - Enforces that specification is approved, decision is verified, artifact is intact, and full workflow traceability matches.
+  - Bắt buộc specification đã approved, decision đã được verify, artifact còn nguyên vẹn, và traceability của workflow đầy đủ khớp.
 - **`SpecificationEngine.verifyArtifact(spec)`**:
-  - Reads stored artifact stream from `ArtifactStore`, recomputes SHA-256 digest, checks byte length, and compares canonical JSON to current spec requirements.
+  - Đọc stream artifact đã lưu từ `ArtifactStore`, tính lại digest SHA-256, kiểm tra độ dài byte, và so sánh canonical JSON với requirements hiện tại của spec.
 
 ---
 
 ### 8. Artifact References, RoleMessage Protocol & Specialist Prompts
 
-P15 standardizes communication across Herdr panes and external stores:
+P15 chuẩn hóa giao tiếp giữa các Herdr pane và store bên ngoài:
 
 - **`createSpecificationArtifactProposal(spec, options)`**:
-  - Formats: `"json"` (canonical JSON content) or `"markdown"` (rendered human-readable markdown).
-  - Computes SHA-256 checksum and size.
+  - Định dạng: `"json"` (nội dung canonical JSON) hoặc `"markdown"` (markdown đã render dễ đọc cho con người).
+  - Tính checksum SHA-256 và kích thước.
   - Returns `{ proposal: ArtifactProposal, bytes: Buffer, checksum: string }`.
 - **`buildSpecRoleMessage(options)`**:
-  - Constructs Protocol 22 `RoleMessage` envelopes:
-    - `type: "spec.draft"`: payload contains `specId`, `specLevel`, `title`, `authorRole`, `summary`, `affectedPaths`.
-    - `type: "spec.approved"`: payload contains `specId`, `approvedBy`, `approvedAt`, optional `notes`.
-  - Populates sender, recipient, correlation ID, causation ID, run ID, and attached artifact references.
+  - Dựng các envelope `RoleMessage` của Protocol 22:
+    - `type: "spec.draft"`: payload chứa `specId`, `specLevel`, `title`, `authorRole`, `summary`, `affectedPaths`.
+    - `type: "spec.approved"`: payload chứa `specId`, `approvedBy`, `approvedAt`, `notes` tùy chọn.
+  - Điền sender, recipient, correlation ID, causation ID, run ID và các artifact reference đính kèm.
 - **`renderSpecification(spec)`**:
-  - Formats specification into human-readable Markdown matching the canonical examples in `examples/`.
+  - Định dạng specification thành Markdown dễ đọc cho con người, khớp với các ví dụ chuẩn trong `examples/`.
 - **Analyst & Architect Specialist Prompts**:
-  - `ANALYST_ROLE_PROFILE`: Specialist profile for Analyst (`role: "specifier"`, read-only workspace).
-  - `ARCHITECT_ROLE_PROFILE`: Specialist profile for Architect (`role: "architect"`, read-only workspace).
-  - `ANALYST_SYSTEM_PROMPT`: Complete system prompt defining Analyst boundaries and SDD responsibilities.
-  - `ARCHITECT_SYSTEM_PROMPT`: Complete system prompt defining Architect boundaries and technical governance.
-  - Both prompts include the mandatory non-user-facing execution policy (no user questions; reversible assumptions recorded; blockers and spec-changing decisions escalated to Coordinator via Herdr) and the seven-field structured result (`status`, `summary`, `evidence`, `artifacts`, `blockers`, `requested_action`, `next_role`, optional `assumptions`). The shipped `agents/analyst` and `agents/architect` prompts carry the same sections.
-  - `renderSpecialistSpecificationPrompt(options)`: Generates task assignment prompts for initial drafting or version revision.
-- **Specification Examples** in `packages/specification/examples/`:
-  - `trivial.json` / `trivial.md`: Local documentation update (lightweight, low risk).
-  - `standard.json` / `standard.md`: Single-module bugfix (lightweight, medium risk).
-  - `complex.json` / `complex.md`: Database schema change with migration (full, high risk).
-  - `api.json` / `api.md`: Public contract extension with TDD decision and test strategy (full, high risk).
+  - `ANALYST_ROLE_PROFILE`: Specialist profile cho Analyst (`role: "specifier"`, workspace chỉ đọc).
+  - `ARCHITECT_ROLE_PROFILE`: Specialist profile cho Architect (`role: "architect"`, workspace chỉ đọc).
+  - `ANALYST_SYSTEM_PROMPT`: System prompt đầy đủ định nghĩa ranh giới và trách nhiệm SDD của Analyst.
+  - `ARCHITECT_SYSTEM_PROMPT`: System prompt đầy đủ định nghĩa ranh giới và governance kỹ thuật của Architect.
+  - Cả hai prompt đều bao gồm chính sách thực thi non-user-facing bắt buộc (không hỏi người dùng; ghi lại các giả định có thể đảo ngược; blocker và các quyết định làm thay đổi spec được escalate lên Coordinator qua Herdr) và structured result bảy field (`status`, `summary`, `evidence`, `artifacts`, `blockers`, `requested_action`, `next_role`, `assumptions` tùy chọn). Các prompt `agents/analyst` và `agents/architect` đi kèm có cùng các section này.
+  - `renderSpecialistSpecificationPrompt(options)`: Sinh task assignment prompt cho việc soạn thảo ban đầu hoặc revision phiên bản.
+- **Specification Examples** trong `packages/specification/examples/`:
+  - `trivial.json` / `trivial.md`: Cập nhật tài liệu cục bộ (lightweight, low risk).
+  - `standard.json` / `standard.md`: Bugfix một module (lightweight, medium risk).
+  - `complex.json` / `complex.md`: Thay đổi database schema kèm migration (full, high risk).
+  - `api.json` / `api.md`: Mở rộng public contract kèm TDD decision và test strategy (full, high risk).
 
 ---
 
@@ -337,7 +337,7 @@ const message = buildSpecRoleMessage({
 
 ## Validation Commands
 
-Run from the repository root:
+Chạy từ thư mục gốc của repository:
 
 ```bash
 # Typecheck specification package

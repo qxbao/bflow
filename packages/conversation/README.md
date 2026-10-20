@@ -9,7 +9,7 @@
 
 ## 1. Overview & Architectural Role
 
-In Bflow Agentic SDLC v2, `@bflow/conversation` implements the **Conversation Agent** (`chat`) and the **Delegation Gateway**. It is the **single user-facing touchpoint** in the entire multi-agent system.
+Trong Bflow Agentic SDLC v2, `@bflow/conversation` triển khai **Conversation Agent** (`chat`) và **Delegation Gateway**. Đây là **điểm tiếp xúc duy nhất với người dùng** trong toàn bộ hệ thống multi-agent.
 
 ```
                                       +------------------------------------+
@@ -40,7 +40,7 @@ In Bflow Agentic SDLC v2, `@bflow/conversation` implements the **Conversation Ag
                                       +------------------------------------+
 ```
 
-### Key Architectural Boundaries:
+### Các ranh giới kiến trúc chính:
 - **Sole User Interface**: Lập trình viên kết nối vào hệ thống độc quyền qua terminal pane của `chat`. Không bao giờ kết nối trực tiếp vào pane của Developer hay Coordinator.
 - **Read-Only Workspace**: Tác tử `chat` hoạt động với `readOnlyWorkspace: true`. Tuyệt đối không bao giờ tự ý sửa đổi mã nguồn kho lưu trữ.
 - **No Direct Specialist Dispatch**: Không bao giờ giao việc trực tiếp cho `developer`, `tester`, `reviewer`, `qa`, `security` hay `architect`. Mọi ủy quyền phải thông qua `coordinator`.
@@ -208,48 +208,48 @@ console.log("Phản hồi của Chat:", response.value.agentReply.content);
 - **Prompt hệ thống (`prompts.ts`, `agents/chat/system-prompt.md`)**: mục "User Interaction & Autonomous Specialist Delegation Boundary" nêu rõ Conversation là điểm tương tác người dùng duy nhất; `coordinator`, `analyst`, `architect`, `planner`, `developer`, `reviewer`, `verifier`/`qa` là tác tử thực thi tự trị, không đối thoại với người dùng. Chỉ Conversation được hỏi làm rõ và trung chuyển `approval.request` / `approval.decision`. Prompt của Conversation không được chứa khối chính sách "non-user-facing execution agent" của các vai trò khác (xem `validateAutonomousRolePrompt` trong `@bflow/agent-registry`).
 - Thông điệp từ vai trò chuyên môn tới `user` không được chấp nhận ở tầng Herdr; mọi yêu cầu làm rõ hoặc phê duyệt phải đi qua Coordinator tới Conversation.
 
-## Hosted Chat intent routing
+## Định tuyến intent của Chat được host
 
-The trusted provider hook records the actual user turn before Chat acts and returns its
-`messageId` plus persisted Conversation context. Chat calls the Conversation-only
-`conversation_decide` MCP tool with that ID and a `ChatDecisionSchema` decision. The host
-binds the proposal to the recorded pane/native session and injects user content/provenance;
-model parameters cannot supply human authority. Gateway uses that validated decision directly.
-It does not run the natural-language classifier on a supplied decision.
+Provider hook đáng tin cậy ghi lại lượt nhập thực tế của người dùng trước khi Chat hành động và trả về
+`messageId` của nó cùng ngữ cảnh Conversation đã lưu. Chat gọi MCP tool chỉ dành cho Conversation
+`conversation_decide` với ID đó và một quyết định theo `ChatDecisionSchema`. Host
+gắn proposal vào pane/native session đã ghi nhận và inject nội dung/provenance của người dùng;
+tham số do model cung cấp không thể tạo ra thẩm quyền của con người. Gateway dùng trực tiếp quyết định đã validate đó.
+Nó không chạy classifier ngôn ngữ tự nhiên trên một quyết định được cung cấp.
 
-Decisions cover direct replies, clarification, workflow handoff, status and targeted
-cancellation. Clarification questions include the exact options Chat asks the user, so the
-saved questions and Chat transcript support short answers such as “A, giữ cả 5 tiêu chí”.
-The resulting draft explicitly targets the pending clarification. Independent requests get
-separate run/correlation IDs even while another request is delegated.
+Các quyết định bao gồm phản hồi trực tiếp, làm rõ, handoff workflow, trạng thái và hủy có mục tiêu.
+Câu hỏi làm rõ chứa chính xác các lựa chọn mà Chat hỏi người dùng, để các câu hỏi
+đã lưu và transcript của Chat hỗ trợ những câu trả lời ngắn như “A, giữ cả 5 tiêu chí”.
+Bản nháp kết quả nhắm tường minh vào việc làm rõ đang chờ. Các yêu cầu độc lập nhận
+run/correlation ID riêng ngay cả khi một yêu cầu khác đang được delegate.
 
-A workflow draft requires defined scope and non-empty acceptance criteria. Named modules or
-roles can define scope without literal paths: `affectedPaths: []` is valid. A read-only
-investigation can be delegated as `kind: "spike"`; delegation metadata preserves
-`workflowKind` and `codeChangesAuthorized` (false by default for spikes), with manual review
-criteria. The objective and criteria must retain the user's scope and no-edit constraint.
-This metadata does not replace downstream Runtime policies or independent acceptance.
+Một bản nháp workflow yêu cầu phạm vi được xác định và acceptance criteria không rỗng. Các module hoặc
+role được nêu tên có thể xác định phạm vi mà không cần đường dẫn literal: `affectedPaths: []` là hợp lệ. Một
+cuộc điều tra chỉ đọc có thể được delegate dưới dạng `kind: "spike"`; metadata delegation giữ lại
+`workflowKind` và `codeChangesAuthorized` (mặc định là false cho spike), kèm tiêu chí
+review thủ công. Mục tiêu và tiêu chí phải giữ nguyên phạm vi của người dùng và ràng buộc không được sửa code.
+Metadata này không thay thế các chính sách Runtime downstream hay việc nghiệm thu độc lập.
 
-`approval_response` is excluded from the model decision schema. Pending human approvals and
-specialist decisions still use the authenticated user hook and existing exact option checks.
-Free-text specialist answers without offered options must start with the pending `apr-...`
-request ID. An explicit governance reply or exact offered option can commit a decision;
-incidental approval words in a new workflow request cannot.
-Conversation cannot approve through MCP, assign specialists directly, edit code, or claim
-transport completion proves workflow success.
+`approval_response` bị loại khỏi schema quyết định của model. Các phê duyệt của con người đang chờ và
+quyết định của specialist vẫn dùng hook người dùng đã xác thực và các kiểm tra lựa chọn chính xác hiện có.
+Câu trả lời tự do của specialist không kèm lựa chọn được đưa ra phải bắt đầu bằng mã request `apr-...`
+đang chờ. Một phản hồi governance tường minh hoặc lựa chọn được đưa ra chính xác có thể commit một quyết định;
+những từ phê duyệt ngẫu nhiên trong một yêu cầu workflow mới thì không.
+Conversation không thể phê duyệt qua MCP, giao việc trực tiếp cho specialist, sửa code, hay tuyên bố
+việc transport hoàn tất chứng minh workflow thành công.
 
-Structured decisions survive the existing busy FIFO and context recovery. Committed retries
-return the saved response without another handoff; conflicting decisions for the same user
-message are rejected. Model-path delegation identities are stable per trusted user message.
-State validation rejects unknown clarification/cancellation targets and requires an explicit
-existing run for requirement changes. Snapshot format v2 remains compatible; decision
-receipts use the existing ConversationMessage metadata field.
+Các quyết định có cấu trúc vẫn tồn tại qua FIFO busy hiện có và việc khôi phục ngữ cảnh. Các retry đã commit
+trả về phản hồi đã lưu mà không handoff lần nữa; các quyết định xung đột cho cùng một user
+message bị từ chối. Danh tính delegation theo đường model ổn định cho mỗi user message đáng tin cậy.
+Việc validate state từ chối các mục tiêu clarification/cancellation không xác định và yêu cầu một run hiện có
+tường minh cho các thay đổi yêu cầu. Định dạng snapshot v2 vẫn tương thích; receipt quyết định
+dùng field metadata `ConversationMessage` hiện có.
 
-Direct `handleUserTurn` callers without `conversationDecision` retain the legacy deterministic
-classifier. That API still requires implementation wording/path scope and keeps investigations
-in Conversation; it is not the ordinary hosted Chat route. It remains for compatibility and
-authenticated approval extraction, not as a second semantic veto over Chat.
+Các caller gọi `handleUserTurn` trực tiếp mà không có `conversationDecision` vẫn dùng classifier xác định
+cũ. API đó vẫn yêu cầu cách diễn đạt triển khai/phạm vi đường dẫn và giữ các cuộc điều tra
+trong Conversation; nó không phải đường Chat được host thông thường. Nó được giữ lại để tương thích và
+trích xuất phê duyệt đã xác thực, không phải một quyền phủ quyết ngữ nghĩa thứ hai đối với Chat.
 
-These guarantees have local package/integration tests. They do not establish live provider,
-Herdr transport, or full SDLC acceptance. Running hosts need a rebuild and restart to load the
-new MCP tool and prompt.
+Các đảm bảo này có test cục bộ ở mức package/integration. Chúng không chứng minh live provider,
+Herdr transport hay nghiệm thu SDLC đầy đủ. Các host đang chạy cần rebuild và restart để nạp
+MCP tool và prompt mới.

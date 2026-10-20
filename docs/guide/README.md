@@ -7,18 +7,18 @@ là **planned/chưa triển khai**. Public contracts và ADR vẫn là nguồn a
 | Chủ đề | Nội dung |
 | --- | --- |
 | [Getting Started](getting-started.md) | Thử trên repository Node.js/TypeScript riêng |
-| [Installation](installation.md) | Source install/build, Node/pnpm/Herdr |
-| [bflow init](bflow-init.md) | Commented config.yml, Git identity, migration, idempotency và cờ overwrite |
-| [bflow up](bflow-up.md) | Named session, permanent roles, readiness, giới hạn host boot |
+| [Installation](installation.md) | Cài đặt/build từ source, Node/pnpm/Herdr |
+| [bflow init](bflow-init.md) | config.yml có chú thích, Git identity, migration, idempotency và cờ overwrite |
+| [bflow up](bflow-up.md) | Named session, role thường trực, readiness, giới hạn khi khởi động host |
 | [bflow attach](bflow-attach.md) | Chỉ attach Conversation |
 | [Recovery sau Ctrl+C](troubleshooting.md) | Kernel lock, recover --yes, native startup dialogs và pane labels |
 | [bflow down](bflow-down.md) | Barrier/checkpoint và giới hạn shutdown mặc định |
 | [Configuration Reference](configuration-reference.md) | Fields thực tế, config CLI/host/Herdr |
 | [Agent Roles](agent-roles.md) | Đủ tám role và ánh xạ contract names |
-| [SDD & TDD Policies](sdd-tdd-policies.md) | Risk assessment, levels, required/recommended/not_applicable |
-| [Verification Loop](verification-loop.md) | Independent checks, retry/rework/iteration bounds |
+| [SDD & TDD Policies](sdd-tdd-policies.md) | Đánh giá rủi ro, các mức, required/recommended/not_applicable |
+| [Verification Loop](verification-loop.md) | Kiểm tra độc lập, giới hạn retry/rework/iteration |
 | [Session Recovery](session-recovery.md) | Restart, uncertain delivery, receipt và aggregate replay |
-| [Herdr Communication](herdr-communication.md) | RoleMessage, authenticated native receipts, transport limits |
+| [Herdr Communication](herdr-communication.md) | RoleMessage, native receipt đã xác thực, giới hạn transport |
 | [Troubleshooting](troubleshooting.md) | Chẩn đoán theo implementation |
 | [Security & Approval](security-approval.md) | Secrets, trusted host và approval boundaries |
 | [Architecture Overview](architecture-overview.md) | Năm thành phần và bốn state domains |

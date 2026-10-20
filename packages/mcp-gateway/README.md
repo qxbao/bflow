@@ -1,76 +1,76 @@
 # @bflow/mcp-gateway
 
-Shared loopback HTTP gateway, stdio-to-HTTP bridge, and resource arbiter for the Model Context Protocol (MCP) in the Bflow Agentic SDLC platform.
+Gateway HTTP loopback dùng chung, stdio-to-HTTP bridge và bộ phân xử resource cho Model Context Protocol (MCP) trong nền tảng Bflow Agentic SDLC.
 
-## Package Status
+## Trạng thái package
 
 - **Platform Version**: Version 3 (`CURRENT_PLATFORM_SCHEMA_VERSION = 3`)
 - **Protocol Baseline**: Model Context Protocol Specification `2025-11-25`
 - **Package Type**: ESM (`type: module`)
-- **Status**: Implemented with deterministic package-local test scenarios (see the matrix below).
+- **Trạng thái**: Đã triển khai cùng các kịch bản test cục bộ của package mang tính xác định (xem ma trận bên dưới).
 
-## Architectural Purpose & Boundary Invariants
+## Mục đích kiến trúc và bất biến ranh giới
 
-The MCP Gateway provides a high-throughput, multiplexing connection hub for MCP tools. It enables multiple provider agents (`claude`, `codex`, `agy`) running across distinct SDLC roles (`coordinator`, `developer`, `reviewer`, `qa`, `tester`) to connect to shared or isolated MCP services over loopback HTTP or stdio without credential leakage, port exhaustion, or unmanaged process collisions.
-
-> [!IMPORTANT]
-> **Tool Connectivity Only**: The MCP Gateway manages tool connections and exclusive tool resources ONLY. It is **NEVER** an inter-role communication transport for `RoleMessage` envelopes. All inter-agent communication must continue to traverse Workflow Runtime and Herdr.
+MCP Gateway cung cấp một hub kết nối ghép kênh thông lượng cao cho các MCP tool. Nó cho phép nhiều provider agent (`claude`, `codex`, `agy`) chạy trên các SDLC role khác nhau (`coordinator`, `developer`, `reviewer`, `qa`, `tester`) kết nối tới các MCP service dùng chung hoặc cô lập qua HTTP loopback hoặc stdio mà không rò rỉ credential, cạn kiệt port hay xung đột tiến trình không được quản lý.
 
 > [!IMPORTANT]
-> **No Direct User Elicitation**: All upstream MCP interactive prompt requests (`elicitation/*`, `sampling/*`, `oauth/interactive`) are intercepted and blocked at the gateway boundary. User decisions must be routed exclusively through Workflow Runtime $\to$ Herdr $\to$ Conversation Agent.
+> **Chỉ kết nối Tool**: MCP Gateway CHỈ quản lý kết nối tool và các exclusive tool resource. Nó **KHÔNG BAO GIỜ** là transport giao tiếp liên role cho các envelope `RoleMessage`. Mọi giao tiếp giữa các agent vẫn phải đi qua Workflow Runtime và Herdr.
+
+> [!IMPORTANT]
+> **Không elicitation trực tiếp từ người dùng**: Mọi request prompt tương tác của MCP upstream (`elicitation/*`, `sampling/*`, `oauth/interactive`) bị chặn và ngăn tại ranh giới gateway. Các quyết định của người dùng chỉ được định tuyến qua Workflow Runtime $\to$ Herdr $\to$ Conversation Agent.
 
 ---
 
-## Core Components
+## Các thành phần cốt lõi
 
 1. **`BflowSharedMCPGateway`** (`src/gateway.ts`):
-   Central arbiter implementing `SharedMCPGateway`. Manages client registrations, bearer tokens, tool authorization scopes, concurrency semaphores, call ledgers, exclusive resource leases with monotonic fencing tokens, and call reconciliation.
+   Bộ phân xử trung tâm triển khai `SharedMCPGateway`. Quản lý đăng ký client, bearer token, scope ủy quyền tool, semaphore concurrency, call ledger, exclusive resource lease với fencing token đơn điệu, và reconciliation lời gọi.
 2. **`StreamableHttpGatewayServer`** (`src/http-server.ts`):
-   Loopback Node.js HTTP/1.1 server serving `POST /mcp`, `GET /mcp` (SSE keepalive), `DELETE /mcp`, `/health`, and `/metrics`. Enforces Host/Origin validation, bearer token authentication, and session containment.
+   Server HTTP/1.1 Node.js trên loopback phục vụ `POST /mcp`, `GET /mcp` (SSE keepalive), `DELETE /mcp`, `/health` và `/metrics`. Thực thi validate Host/Origin, xác thực bearer token và ngăn cách session.
 3. **`StdioToHttpBridge`** (`src/stdio-bridge.ts`):
-   Bridges gateway calls to upstream subprocess stdio MCP workers over newline-delimited JSON-RPC 2.0. Translates and remaps JSON-RPC IDs to `gw_<gen>_<seq>_<session>`, enforces frame size limits (`maxFrameBytes`), write backpressure (`maxPendingWrites`), and blocks unauthorized elicitation prompts.
+   Bridge các lời gọi gateway tới các subprocess stdio MCP worker upstream qua JSON-RPC 2.0 phân tách bằng newline. Chuyển đổi và ánh xạ lại JSON-RPC ID thành `gw_<gen>_<seq>_<session>`, thực thi giới hạn kích thước frame (`maxFrameBytes`), backpressure ghi (`maxPendingWrites`), và chặn các prompt elicitation trái phép.
 4. **`DefaultMCPServiceManager`** (`src/service-manager.ts`):
-   Manages partition lifecycles (`ensure`, `inspect`, `release`, `start`, `stop`, `restart`, `status`, `health`), generation counters, crash recovery, and bounded `restartLimit`. Never terminates adopted external workers on release or stop.
+   Quản lý vòng đời partition (`ensure`, `inspect`, `release`, `start`, `stop`, `restart`, `status`, `health`), bộ đếm generation, phục hồi crash, và `restartLimit` có giới hạn. Không bao giờ chấm dứt các external worker đã tiếp nhận khi release hoặc stop.
 5. **`MCPServiceRegistry`** (`src/registry.ts`):
-   Registers service definitions, computes SHA-256 configuration digests, validates revision monotonic ordering, and binds default or customized `MCPBackendSharingPolicy` profiles.
+   Đăng ký các service definition, tính digest cấu hình SHA-256, validate thứ tự đơn điệu của revision, và gắn các profile `MCPBackendSharingPolicy` mặc định hoặc tùy chỉnh.
 6. **`GatewayMetricsCollector`** (`src/metrics.ts`):
-   Tracks active processes, client sessions, queue depths, backpressure rejections, process/memory limit terminations, and latency percentiles (`minMs`, `maxMs`, `avgMs`, `p50Ms`, `p95Ms`, `p99Ms`).
+   Theo dõi các tiến trình đang hoạt động, client session, độ sâu hàng đợi, các lần từ chối do backpressure, các lần chấm dứt do giới hạn tiến trình/bộ nhớ, và các phân vị độ trễ (`minMs`, `maxMs`, `avgMs`, `p50Ms`, `p95Ms`, `p99Ms`).
 7. **`GatewaySecretStore` & `security.ts`** (`src/security.ts`):
-   Cryptographically issues and rotates bearer tokens, validates loopback `Host` and `Origin` headers, computes partition keys, and scrubs secrets (`Bearer`, `secret://`, `sk-...`, `ghp_...`).
+   Phát hành và xoay vòng bearer token bằng mật mã, validate các header `Host` và `Origin` loopback, tính partition key, và xóa bí mật khỏi nội dung (`Bearer`, `secret://`, `sk-...`, `ghp_...`).
 
 ---
 
-## Streamable HTTP Protocol Overview
+## Tổng quan giao thức Streamable HTTP
 
-Detailed specifications can be found in [PROTOCOL.md](PROTOCOL.md).
+Đặc tả chi tiết có trong [PROTOCOL.md](PROTOCOL.md).
 
-### Summary of Routes
+### Tóm tắt các route
 
-- `POST /mcp`: JSON-RPC 2.0 dispatch (`initialize`, `tools/list`, `tools/call`, `ping`, `notifications/initialized`, `notifications/cancelled`). Supports JSON and Server-Sent Events (`Accept: text/event-stream`).
-- `GET /mcp`: Long-lived SSE keepalive connection for client sessions with `Mcp-Session-Id`.
-- `DELETE /mcp`: Clean disconnect of an active client session.
-- `GET /health`: Loopback health check reporting `status: "ok"`.
-- `GET /metrics`: Full gateway operational metrics snapshot.
+- `POST /mcp`: dispatch JSON-RPC 2.0 (`initialize`, `tools/list`, `tools/call`, `ping`, `notifications/initialized`, `notifications/cancelled`). Hỗ trợ JSON và Server-Sent Events (`Accept: text/event-stream`).
+- `GET /mcp`: kết nối SSE keepalive sống lâu cho client session với `Mcp-Session-Id`.
+- `DELETE /mcp`: ngắt kết nối sạch một client session đang hoạt động.
+- `GET /health`: health check loopback báo `status: "ok"`.
+- `GET /metrics`: snapshot đầy đủ các metric vận hành của gateway.
 
-### Security Invariants
+### Bất biến bảo mật
 
-- **Bearer Token Auth**: All endpoints require `Authorization: Bearer <token>`.
-- **Session Containment**: Rejects any request attempting to use an `Mcp-Session-Id` belonging to another client or project partition with `403 Forbidden`.
-- **Origin Rejection**: Browser origins (`Origin: https://...` or `Origin: http://localhost:...`) are rejected with `403 Forbidden` to prevent cross-site request forgery from local browsers.
-- **Host Validation**: Requests with non-loopback `Host` headers are rejected with `403 Forbidden`.
+- **Bearer Token Auth**: Mọi endpoint yêu cầu `Authorization: Bearer <token>`.
+- **Session Containment**: Từ chối mọi request cố dùng `Mcp-Session-Id` thuộc về client hoặc project partition khác với `403 Forbidden`.
+- **Origin Rejection**: Các origin của trình duyệt (`Origin: https://...` hoặc `Origin: http://localhost:...`) bị từ chối với `403 Forbidden` để ngăn cross-site request forgery từ trình duyệt cục bộ.
+- **Host Validation**: Các request có header `Host` không phải loopback bị từ chối với `403 Forbidden`.
 
 ---
 
-## Sharing & Isolation Policy Matrix
+## Ma trận chính sách chia sẻ và cô lập
 
-Remote upstreams (`native_remote_mcp`, `existing_shared_worker`) use `HttpUpstreamDriverInstance` (`src/http-upstream.ts`):
-Streamable HTTP with JSON or SSE responses, optional `Mcp-Session-Id`, one handshake shared by all callers, bounded retry with
-backoff for tools the host declares read-only (`DefaultMCPServiceManagerOptions.policyOverrides`), structured errors and
-`upstreamHttp` metrics. See `docs/shared-mcp-architecture.md` for the rules.
+Các upstream từ xa (`native_remote_mcp`, `existing_shared_worker`) dùng `HttpUpstreamDriverInstance` (`src/http-upstream.ts`):
+Streamable HTTP với response JSON hoặc SSE, `Mcp-Session-Id` tùy chọn, một handshake dùng chung cho mọi caller, retry có giới hạn với
+backoff cho các tool mà host khai báo là chỉ đọc (`DefaultMCPServiceManagerOptions.policyOverrides`), lỗi có cấu trúc và
+metric `upstreamHttp`. Xem `docs/shared-mcp-architecture.md` để biết các quy tắc.
 
 | Policy Dimension | `stdio_mcp` | `existing_shared_worker` | `native_remote_mcp` | Exclusive / Browser |
 |---|---|---|---|---|
-| `transportCapabilities` | `stdio: true` | `streamableHttp: true, sse: true` | `streamableHttp: true, sse: true` | Inherits connection |
+| `transportCapabilities` | `stdio: true` | `streamableHttp: true, sse: true` | `streamableHttp: true, sse: true` | Kế thừa kết nối |
 | `concurrencyModel` | `multiplexed` | `multiplexed` | `multiplexed` | `exclusive_lease` |
 | `sessionIsolationPolicy` | `repository_partition` | `protocol_session` | `protocol_session` | `repository_partition` |
 | `sharedStatePolicy` | `partitioned_by_repo` | `stateless` | `stateless` | `mutable_shared_exclusive` |
@@ -79,20 +79,20 @@ backoff for tools the host declares read-only (`DefaultMCPServiceManagerOptions.
 
 ---
 
-## Exclusive Resource Leases & Monotonic Fencing
+## Exclusive Resource Lease và Monotonic Fencing
 
-For browser-affecting tools or stateful exclusive hardware/devices:
-1. Client must acquire an `MCPResourceLease` via `gateway.acquireResource()`.
-2. Each lease receives a monotonically increasing `fencingToken`.
-3. Stale fencing tokens, expired leases, or leases belonging to other registrations are rejected pre-dispatch with `details: { diagnosticCode: "stale_lease" }`.
-4. If a mutating tool call times out or the backend crashes mid-call, the call outcome is flagged as `status: "unknown"` and the exclusive resource is quarantined (`diagnosticCode: "resource_quarantined"`).
-5. The resource remains locked fail-closed until resolved via `gateway.reconcileCall()`. **Mutating tool calls are never automatically replayed.**
+Với các tool tác động đến trình duyệt hoặc thiết bị/phần cứng độc quyền có trạng thái:
+1. Client phải lấy một `MCPResourceLease` qua `gateway.acquireResource()`.
+2. Mỗi lease nhận một `fencingToken` tăng đơn điệu.
+3. Fencing token lỗi thời, lease hết hạn, hoặc lease thuộc về đăng ký khác bị từ chối trước khi dispatch với `details: { diagnosticCode: "stale_lease" }`.
+4. Nếu một lời gọi tool mutating bị timeout hoặc backend crash giữa lời gọi, kết quả lời gọi được gắn cờ `status: "unknown"` và exclusive resource bị quarantine (`diagnosticCode: "resource_quarantined"`).
+5. Resource vẫn bị khóa theo kiểu fail-closed cho đến khi được giải quyết qua `gateway.reconcileCall()`. **Các lời gọi tool mutating không bao giờ được tự động phát lại.**
 
 ---
 
-## Runnable Commands
+## Các lệnh chạy được
 
-From repository root:
+Từ thư mục gốc repository:
 
 ```bash
 # Typecheck
@@ -107,18 +107,18 @@ pnpm --filter @bflow/mcp-gateway run test
 
 ---
 
-## Verification Test Suite Matrix
+## Ma trận Verification Test Suite
 
-The test suite in [`test/mcp-gateway.test.ts`](test/mcp-gateway.test.ts) covers the following core architecture scenarios:
+Test suite trong [`test/mcp-gateway.test.ts`](test/mcp-gateway.test.ts) bao phủ các kịch bản kiến trúc cốt lõi sau:
 
-- **Scenario 1**: 10 Concurrent Clients Connecting Simultaneously without ID collision or response leakage.
-- **Scenario 2**: Reusing a Running Backend with single driver creation (`activeProcessCount === 1`).
-- **Scenario 3**: Full Backend Lifecycle (`start`, `status`, `health`, `restart`, `stop`), `restartLimit` enforcement (`restart_limit_exceeded`), and external worker survival.
-- **Scenario 4**: Client Disconnect & Revocation via `DELETE /mcp` and `gateway.revoke()`.
-- **Scenario 5**: Repository-level stdio partition isolation, unsupported sharing rejection, and monotonic fencing token checks.
-- **Scenario 6**: Pre-dispatch queue timeout (`retrySafety: "not_started"`) vs post-dispatch mutating timeout (`status: "unknown"` and resource quarantine).
-- **Scenario 7**: Concurrency semaphore (`maxConcurrency: 2`) and backpressure rejection (`maxQueueSize: 3`).
-- **Scenario 8**: Session leakage protection, unauthorized tool hiding/rejection, `Origin` and `Host` rejection, secret scrubbing, and interactive prompt blocking.
-- **Scenario 9**: Upstream crash handling (`triggerCrash`), quarantine, and clean reconciliation (`reconcileCall`).
-- **Scenario 10**: `maxProcessCount` limits, `maxMemoryBytes` RSS enforcement, and latency percentiles.
-- **Scenario 11**: Schema version 3 enforcement, frame size limit enforcement, `/health`, `/metrics`, and SSE streaming.
+- **Scenario 1**: 10 Concurrent Client kết nối đồng thời mà không xung đột ID hay rò rỉ response.
+- **Scenario 2**: Tái sử dụng một Running Backend với việc tạo driver duy nhất (`activeProcessCount === 1`).
+- **Scenario 3**: Vòng đời Backend đầy đủ (`start`, `status`, `health`, `restart`, `stop`), thực thi `restartLimit` (`restart_limit_exceeded`), và external worker còn sống sau đó.
+- **Scenario 4**: Client Disconnect & Revocation qua `DELETE /mcp` và `gateway.revoke()`.
+- **Scenario 5**: Cô lập stdio partition cấp repository, từ chối chia sẻ không được hỗ trợ, và kiểm tra fencing token đơn điệu.
+- **Scenario 6**: Timeout hàng đợi trước dispatch (`retrySafety: "not_started"`) so với timeout mutating sau dispatch (`status: "unknown"` và quarantine resource).
+- **Scenario 7**: Semaphore concurrency (`maxConcurrency: 2`) và từ chối do backpressure (`maxQueueSize: 3`).
+- **Scenario 8**: Bảo vệ chống rò rỉ session, ẩn/từ chối tool trái phép, từ chối `Origin` và `Host`, xóa bí mật, và chặn interactive prompt.
+- **Scenario 9**: Xử lý upstream crash (`triggerCrash`), quarantine, và reconciliation sạch (`reconcileCall`).
+- **Scenario 10**: Giới hạn `maxProcessCount`, thực thi RSS `maxMemoryBytes`, và các phân vị độ trễ.
+- **Scenario 11**: Thực thi schema version 3, thực thi giới hạn kích thước frame, `/health`, `/metrics` và SSE streaming.

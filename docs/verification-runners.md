@@ -1,64 +1,61 @@
-# Verification runners
+# Verification runner
 
-## Automatic detection (default, no configuration)
+## Tự động phát hiện (mặc định, không cần cấu hình)
 
-Acceptance criteria with `verificationMethod` `unit_test` or `integration_test` are
-measured with no user configuration. When `.bflow/verification.json` is absent,
-Runtime inspects the repository itself (`packages/runtime/src/agentic/runner-detection.ts`)
-and exposes two labels to the Coordinator through `planning_reference.testRunners`:
+Các acceptance criteria có `verificationMethod` là `unit_test` hoặc `integration_test` được
+đo mà không cần cấu hình từ người dùng. Khi `.bflow/verification.json` không tồn tại,
+Runtime tự kiểm tra repository (`packages/runtime/src/agentic/runner-detection.ts`)
+và cung cấp hai label cho Coordinator qua `planning_reference.testRunners`:
 
-| Label | Method | Levels |
+| Label | Method | Level |
 | --- | --- | --- |
 | `auto:unit` | `unit_test` | `unit`, `regression` |
 | `auto:integration` | `integration_test` | `integration`, `regression` |
 
-Detection runs no package scripts, no shell and no install. It accepts:
+Việc phát hiện không chạy package script, không dùng shell và không cài đặt. Nó chấp nhận:
 
-- **vitest 2.x** declared in `package.json` and installed at the repository root
-  (`node_modules/vitest/vitest.mjs`, a real directory, not a symlink). Measured with
-  the JSON reporter plus Runtime's companion reporter.
-- **`node --test`** when the `test` script contains `node --test`. Measured as flat
-  TAP. No dependencies are needed.
-- An optional **`tsc` build** (`tsc`, `tsc -b` or `tsc --build`, optionally with
-  safe relative project paths) from the `build` script, run as a sandboxed prepare step
-  before the tests. It may only create git-ignored output. Other build scripts are
-  skipped and reported in the detection notes.
-- Nested `node_modules` directories found by a walk that does not follow symlinks.
-  Each one is mounted read-only at the same relative path inside the measurement
-  checkout.
+- **vitest 2.x** được khai báo trong `package.json` và cài ở root repository
+  (`node_modules/vitest/vitest.mjs`, là thư mục thật, không phải symlink). Được đo bằng
+  JSON reporter cùng reporter đồng hành của Runtime.
+- **`node --test`** khi script `test` chứa lệnh `node [cờ] --test`, trong đó cờ chỉ được là `--experimental-strip-types` hoặc `--disable-warning=<tên>` (các cờ này được chuyển tiếp trước `--test`; cờ khác như `--require` khiến script không được nhận diện). Được đo dưới dạng TAP phẳng.
+  Không cần dependency.
+- Một **`tsc` build** tùy chọn (`tsc`, `tsc -b` hoặc `tsc --build`, có thể kèm đường dẫn
+  project tương đối an toàn) từ script `build`, chạy như một bước prepare trong sandbox trước
+  các test. Nó chỉ được tạo output bị git ignore. Các build script khác bị bỏ qua và được ghi
+  trong detection notes.
+- Các thư mục `node_modules` lồng nhau được tìm bằng cách duyệt không đi theo symlink.
+  Mỗi thư mục được mount read-only tại cùng đường dẫn tương đối bên trong checkout đo.
 
-Limits: only vitest 2.x and `node --test` are supported. Other versions (for example
-vitest 3) report `unsupported` with the version found. A missing `node_modules` or a
-symlinked root `node_modules` is also unsupported. Measurements require Linux and
-`bwrap` (see below), and there is no network access and no dependency installation.
-If detection is `unsupported`, Runtime retries it on the next `propose_workflow` (and
-when the Coordinator reads `planning_reference`), so installing dependencies or adding
-the runner does not require a host restart. The Coordinator is then told
-(`no_test_runner_detected`) to add a setup task; the user is shown that notice.
+Giới hạn: chỉ hỗ trợ vitest 2.x và `node --test`. Các version khác (ví dụ vitest 3) báo
+`unsupported` kèm version tìm thấy. `node_modules` bị thiếu hoặc `node_modules` ở root là
+symlink cũng là unsupported. Việc đo yêu cầu sandbox của hệ điều hành: Linux với `bwrap`, hoặc macOS với `sandbox-exec` (xem bên dưới), không có truy cập
+mạng và không cài dependency. Nếu việc phát hiện là `unsupported`, Runtime thử lại ở lần
+`propose_workflow` kế tiếp (và khi Coordinator đọc `planning_reference`), nên việc cài
+dependency hoặc thêm runner không đòi hỏi restart host. Khi đó Coordinator được thông báo
+(`no_test_runner_detected`) để thêm một task setup; người dùng được hiển thị thông báo đó.
 
-Per task, Runtime binds the detected profile to identities taken from the accepted
-specification: test names from the `criterionMappings` of the active automated criteria
-with that method, and test files from `affectedPaths` that are test files and, for a
-Developer, owned by the task. Test files must be committed in the checkout at the
-measured revision. vitest reports `fullName` (describe titles plus the test title joined
-by one space). node --test reports the test title only.
+Với mỗi task, Runtime gắn profile đã phát hiện với các định danh lấy từ specification đã
+chấp nhận: tên test từ `criterionMappings` của các tiêu chí tự động đang active có method đó,
+và file test từ `affectedPaths` là file test và, với Developer, thuộc sở hữu của task. File
+test phải được commit trong checkout tại revision được đo. vitest báo `fullName` (các tiêu đề
+describe cộng tiêu đề test nối bằng một dấu cách). node --test chỉ báo tiêu đề test.
 
-## Optional owner override: `.bflow/verification.json`
+## Owner override tùy chọn: `.bflow/verification.json`
 
-Owners may still declare their own behavioral commands in `.bflow/verification.json`
-(for example for a runner or reporter that detection does not support, or to pin exact
-argv). When that file exists its commands are used exactly as before, and automatic
-detection is disabled for that host. This is operator authority: Coordinator can select
-accepted command labels and mapped test names, but cannot supply executables, argv,
-output or a successful verdict. The persisted host pins the configuration digest.
-Changing the file after host creation is rejected; preserve state and reconcile/migrate
-the host explicitly. Do not delete host journals to bypass a configuration mismatch.
+Owner vẫn có thể tự khai báo các behavioral command trong `.bflow/verification.json`
+(ví dụ cho runner hoặc reporter mà việc phát hiện không hỗ trợ, hoặc để pin argv chính xác).
+Khi file đó tồn tại, các command của nó được dùng đúng như trước đây, và việc tự động phát hiện
+bị tắt cho host đó. Đây là thẩm quyền của operator: Coordinator có thể chọn các command label
+đã chấp nhận và tên test đã ánh xạ, nhưng không thể cung cấp executable, argv, output hay
+verdict thành công. Host đã persist pin digest của cấu hình. Thay đổi file sau khi host được
+tạo sẽ bị từ chối; hãy giữ state và reconcile/migrate host một cách tường minh. Không xóa
+journal của host để vượt qua sự không khớp cấu hình.
 
-## Node TAP example
+## Ví dụ Node TAP
 
-Replace `/absolute/path/to/node` with the installed Node executable. Keep exact
-committed test paths and exact observed names; Node's supported protocol is flat
-`node:test` TAP, with assertion failures for Red.
+Thay `/absolute/path/to/node` bằng executable Node đã cài. Giữ đúng đường dẫn test đã commit
+và đúng tên đã quan sát; protocol Node được hỗ trợ là TAP `node:test` phẳng, với assertion
+failure cho pha Red.
 
 ```json
 {
@@ -78,14 +75,14 @@ committed test paths and exact observed names; Node's supported protocol is flat
 }
 ```
 
-The accepted strategy must use `owner:test-unit` and map the criterion to the exact
-test name. The accepted task ownership must include the test and implementation
-paths. Add this configuration only as the project owner; Developer cannot edit
-`.bflow` through its tools or commit it as part of a task.
+Strategy đã chấp nhận phải dùng `owner:test-unit` và ánh xạ tiêu chí tới đúng tên test.
+Quyền sở hữu task đã chấp nhận phải bao gồm các đường dẫn test và implementation. Chỉ thêm
+cấu hình này với tư cách project owner; Developer không thể sửa `.bflow` qua các tool của nó
+hay commit nó như một phần của task.
 
-## Vitest 2.1 example
+## Ví dụ Vitest 2.1
 
-Use the same envelope and command fields, with:
+Dùng cùng envelope và các field command, với:
 
 ```json
 {
@@ -100,52 +97,76 @@ Use the same envelope and command fields, with:
 }
 ```
 
-This is a fragment to merge into the complete command, not a separate config
-schema. Use the actual Vitest JSON `fullName` for every `testNames` entry (including
-suite names). Runtime appends its trusted companion reporter because Vitest 2.1's
-JSON omits unhandled runtime errors. Missing completion, runtime errors, skipped,
-todo, zero tests, malformed counters, unexpected names, timeout and truncated
-output all block evidence. Node TAP remains the default when `reporter` is omitted.
+Đây là đoạn fragment để gộp vào command hoàn chỉnh, không phải schema cấu hình riêng. Dùng
+`fullName` JSON thực tế của Vitest cho mọi mục `testNames` (bao gồm tên suite). Runtime thêm
+reporter đồng hành tin cậy của nó vì JSON của Vitest 2.1 bỏ sót các runtime error không được xử
+lý. Thiếu completion, runtime error, skipped, todo, không có test nào, bộ đếm sai định dạng,
+tên không mong đợi, timeout và output bị cắt đều chặn bằng chứng. Node TAP vẫn là mặc định khi
+bỏ qua `reporter`.
 
-## Execution and safety scope
+## Phạm vi thực thi và an toàn
 
-Behavioral verification currently requires Linux, `/usr/bin/bwrap`, and permission
-to create user/mount/PID/network namespaces. There is no unsandboxed fallback.
-Each measurement uses a new detached Git checkout at the exact committed revision,
-a clean environment and an empty filesystem namespace. System `/usr`, the Node
-executable, `/etc/hosts`, the checkout and explicitly configured read-only
-`node_modules` roots are mounted. Host homes, state, sockets and network are absent.
-Dependency roots must be canonical directories named `node_modules`; symlinks that
-point outside mounted trees remain unavailable. This is a local Linux boundary,
-not a multi-tenant or hostile-kernel guarantee.
+Behavioral verification hiện chạy trên hai backend sandbox: Linux (`/usr/bin/bwrap`) và macOS
+(Seatbelt, `/usr/bin/sandbox-exec`). Các đoạn dưới đây mô tả backend Linux; khác biệt của macOS nằm ở mục
+"Backend macOS (Seatbelt)" ngay sau đó.
 
-No dependency install, workspace symlink restoration or network fetch happens
-automatically. Dependencies needed by a test must already be installed in the
-repository's `node_modules` (or be part of the committed checkout). The only build step
-is the detected `tsc` prepare step described above. Workspace links to unmounted
-packages, `dist` output produced by other build scripts, aggregate coverage, mixed
-manual/automated criteria and other reporter versions are not supported by the default
-path; use the owner override for those.
-The repository's normal `pnpm test` suite is run separately; it is not claimed to
-run wholesale in this small configured fixture runner.
+Backend Linux yêu cầu `/usr/bin/bwrap` và quyền tạo namespace
+user/mount/PID/network. Không có fallback không sandbox. Mỗi lần đo dùng một Git checkout
+detached mới tại đúng revision đã commit, môi trường sạch và namespace filesystem rỗng.
+`/usr` của hệ thống, executable Node, `/etc/hosts`, checkout và các root `node_modules`
+read-only được cấu hình tường minh được mount. Home, state, socket và network của host đều
+không có. Root dependency phải là thư mục canonical tên `node_modules`; symlink trỏ ra ngoài
+các cây đã mount vẫn không khả dụng. Đây là ranh giới Linux cục bộ, không phải đảm bảo
+multi-tenant hay chống kernel thù địch.
 
-Commands have individual timeouts at most 300 seconds; the total configured budget
-(including checkout overhead) must fit the host deadline. Output is bounded at
-4 MiB per command. Execution that changes or generates checkout files is rejected;
-use `--no-cache` and avoid snapshot updates or coverage output. Only disposable
-measurement checkouts are forcibly removed; Developer worktrees are preserved.
+### Backend macOS (Seatbelt)
 
-## Conditional TDD
+Trên macOS, Runtime dùng `/usr/bin/sandbox-exec` với profile `(deny default)`
+(`packages/runtime/src/agentic/behavioral-sandbox-darwin.ts`). Vẫn không có fallback không sandbox:
+thiếu `sandbox-exec` hoặc launcher báo lỗi (`sandbox-exec: ...`) là lỗi hạ tầng, không bao giờ được tính là
+kết quả test. Khác biệt so với Linux:
 
-For required TDD, Developer can initially edit/commit only configured test files.
-It requests independent Red and yields. QA executes the runner; Runtime records a
-trusted receipt and resumes the same Developer using the existing task lease.
-After Red, those exact test blobs are frozen. Green and Refactor measure committed
-implementation revisions with the same tests. `check_work` supplies Developer
-feedback and never supplies independent acceptance evidence.
+- Seatbelt không ẩn đường dẫn mà chỉ từ chối nội dung. Host vẫn tồn tại và metadata (`stat`) đọc được vì
+  `realpath` của Node cần `lstat` mọi thư mục cha; nội dung home, `.ssh`, `/etc`, state, secret và
+  Git metadata đều bị từ chối đọc/ghi.
+- Chỉ có các quyền ghi: checkout và một thư mục `tmp` riêng (cũng là `TMPDIR`/`HOME` của tiến trình).
+  File reporter companion, executable Node và các root dependency chỉ đọc.
+- Không có bind mount, nên `node_modules` phát hiện tự động được clone vào checkout bằng `cp -c -R`
+  (copy-on-write trên APFS), rồi policy chặn ghi lên cây đã clone. `node_modules` phải được git ignore,
+  giống mountpoint trên Linux.
+- Network, socket của host và signal tới process khác đều bị từ chối. Chỉ cho phép signal tới process con của
+  chính nó (Vitest cần để dừng worker) và đọc `/etc/hosts` để phân giải `localhost`; không có `mach-lookup`
+  nên không có kênh DNS.
+- `sandbox-exec` được Apple đánh dấu deprecated nhưng vẫn hoạt động trên Darwin 25.6.
+- Mức bằng chứng: source cộng test đối kháng cục bộ (`behavioral-sandbox-darwin.test.ts`) và đo thật
+  `node --test` (TypeScript) lẫn Vitest 2.1.9 trên macOS. Chưa có live acceptance toàn luồng SDLC và chưa
+  có đảm bảo chống kernel thù địch.
 
-Real assertion failures produce preserved diagnostics and bounded repair notices;
-repeating a failed revision does not enqueue another job. Infrastructure failures
-escalate. Exhausting the phase or verification limit also escalates. Native delivery
-uncertainty is reconciled separately and never interpreted as a test failure to
-justify resending work. Required human/design/delivery approval remains in force.
+Không có việc cài dependency, khôi phục workspace symlink hay fetch qua mạng nào diễn ra tự
+động. Dependency mà test cần phải được cài sẵn trong `node_modules` của repository (hoặc là
+một phần của checkout đã commit). Bước build duy nhất là bước prepare `tsc` được phát hiện đã
+mô tả ở trên. Workspace link tới các package chưa mount, output `dist` do các build script
+khác tạo ra, coverage tổng hợp, tiêu chí manual/automated hỗn hợp và các version reporter khác
+không được hỗ trợ bởi đường mặc định; hãy dùng owner override cho các trường hợp đó.
+Bộ `pnpm test` thông thường của repository được chạy riêng; không tuyên bố rằng nó chạy trọn
+vẹn trong fixture runner nhỏ có cấu hình này.
+
+Mỗi command có timeout riêng tối đa 300 giây; tổng ngân sách đã cấu hình (gồm overhead của
+checkout) phải nằm trong deadline của host. Output bị giới hạn 4 MiB mỗi command. Việc thực thi
+làm thay đổi hoặc sinh file trong checkout bị từ chối; dùng `--no-cache` và tránh cập nhật
+snapshot hay output coverage. Chỉ các checkout đo dùng một lần mới bị xóa cưỡng bức; worktree
+của Developer được giữ lại.
+
+## TDD có điều kiện
+
+Với TDD bắt buộc, ban đầu Developer chỉ có thể sửa/commit các file test đã cấu hình. Nó yêu
+cầu Red độc lập rồi nhường lượt. QA thực thi runner; Runtime ghi một receipt tin cậy và
+resume cùng Developer đó bằng task lease hiện có. Sau Red, các test blob chính xác đó bị đóng
+băng. Green và Refactor đo các revision implementation đã commit với cùng các test. `check_work`
+cung cấp phản hồi cho Developer và không bao giờ cung cấp bằng chứng acceptance độc lập.
+
+Assertion failure thật sinh ra chẩn đoán được giữ lại và thông báo sửa chữa có giới hạn; lặp
+lại một revision đã fail không đưa thêm job vào hàng đợi. Lỗi hạ tầng được escalate. Cạn giới
+hạn phase hoặc verification cũng escalate. Sự không chắc chắn về native delivery được reconcile
+riêng và không bao giờ bị diễn giải thành test failure để biện minh cho việc gửi lại công việc.
+Các approval bắt buộc về con người/thiết kế/delivery vẫn có hiệu lực.

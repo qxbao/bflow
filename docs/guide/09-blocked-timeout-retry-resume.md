@@ -111,4 +111,4 @@ Các điểm sau là hành vi của mã hiện tại (đã quan sát hoặc đ�
 5. **Không có API Runtime** cho: gỡ blocked, chạy lại gate, ghi kết quả `timed_out`, hẹn giờ retry.
 6. **Một QualityGate** cho mọi gate binding của một Runtime.
 7. **Báo cáo handoff** giữ nội dung của lần sinh đầu tiên ([mục 8](08-status-and-artifacts.md#artifact)).
-8. Các mục mở từ audit trước: P02-RA01 (timer của Herdr runner tràn khi > 2 147 483 647 ms) và P03-RA01 (`ArtifactStore.get` có thể trả trễ một chunk cuối sau deadline) — xem [README](../../README.md#reliability-boundaries-and-known-follow-ups).
+8. Các mục mở từ audit trước: P02-RA01 (timer của Herdr runner tràn khi > 2 147 483 647 ms) và P03-RA01 (`ArtifactStore.get` có thể trả trễ một chunk cuối sau deadline) — xem [known limitations](../known-limitations.md) và [known limitations v3](../known-limitations-v3.md#3-các-mục-nợ-kỹ-thuật-cấp-package-từ-các-giai-đoạn-trước-p02-ra01-p03-ra01).

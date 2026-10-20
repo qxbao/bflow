@@ -106,6 +106,15 @@ describe("detectTestRunners", () => {
     expect(result.profiles[0]!.checkoutDependencyRoots).toEqual(["node_modules"]);
   });
 
+  it("forwards allowlisted node flags that precede --test and rejects unknown ones", async () => {
+    const flagged = await fixture({ "package.json": manifest({ scripts: { test: "node --experimental-strip-types --disable-warning=ExperimentalWarning --test test/*.test.ts" } }) });
+    const result = await detectTestRunners(flagged);
+    if (result.status !== "detected") throw new Error(JSON.stringify(result));
+    expect(result.profiles[0]!.args).toEqual(["--experimental-strip-types", "--disable-warning=ExperimentalWarning", "--test", "--test-reporter=tap"]);
+    const unknown = await fixture({ "package.json": manifest({ scripts: { test: "node --require ./evil.js --test" } }) });
+    expect((await detectTestRunners(unknown)).status).toBe("unsupported");
+  });
+
   it("supports a dependency-free node --test repository without node_modules", async () => {
     const root = await fixture({ "package.json": manifest({ scripts: { test: "node --test" } }) });
     const result = await detectTestRunners(root);

@@ -1,4 +1,4 @@
-# Bflow Platform v3 — Compatibility Matrix
+# Bflow Platform v3 — Ma trận tương thích
 
 Tài liệu này quy định ma trận tương thích chính thức của Bflow Platform v3 đối với Hệ điều hành, Hệ tệp, Agent Providers (`claude`, `codex`, `agy`), MCP Transports, Công cụ phụ trợ và Test Runners, kèm phân biệt rõ ràng giữa **Đã xác minh thực tế (Live Verified)**, **Đã xác minh qua Harness/Contract (Harness Verified)** và **Thiết kế / Chưa hỗ trợ (Designed / Unsupported)**.
 
@@ -9,6 +9,7 @@ Tài liệu này quy định ma trận tương thích chính thức của Bflow 
 | Hệ điều hành / Nền tảng | Quản lý dịch vụ nền (OS Service) | Behavioral Test Sandbox | Trạng thái hỗ trợ | Mức bằng chứng |
 | :--- | :--- | :--- | :--- | :--- |
 | **Linux `x86_64` (POSIX `ext4` / `xfs` / `tmpfs`)** | `systemd --user` (`bflow-mcp-gateway.service`, đã kiểm tra bằng `systemd-analyze verify`) | `/usr/bin/bwrap` (Bubblewrap filesystem + PID + network namespaces) | **Supported (Chính thức)** | **Live Verified** (Full unit, integration, E2E & live binary probes) |
+| **macOS `arm64` (APFS, Darwin 25.6)** | `launchd` (`dev.bflow.mcp-gateway`, `launchctl bootstrap`, có retry khi `bootout` chưa hoàn tất) | `/usr/bin/sandbox-exec` (Seatbelt, `deny default`; chỉ ghi checkout + `tmp`, không network) | **Supported (Source + test cục bộ)** | **Chưa Live Verified** (đo thật `node_tap` và `vitest_json` bằng script; chưa nghiệm thu SDLC đầy đủ) |
 | **Linux trên phân vùng `fuseblk` / NTFS / exFAT** | Không áp dụng cho thư mục state | Không hỗ trợ lưu khóa/state do `chmod 0600` trả `0777` (`RR-26`) | **Unsupported cho Runtime State** (Phải dùng worktree/state trên POSIX FS) | **Live Verified (Fail-Closed)** |
 | **macOS (`darwin` `arm64` / `x86_64`, APFS)** | `launchd` (`~/Library/LaunchAgents/dev.bflow.mcp-gateway.plist`) | Chưa có tương đương Bubblewrap (cần cấu hình runner phù hợp) | **Supported (Setup / CLI / MCP Adapter)** | **Harness Verified** (Unit tests với mock runner; chưa chạy trên máy Mac vật lý trong đợt này) |
 | **Windows (`win32`)** | Thiết kế cho Task Scheduler / Registry PATH | Không hỗ trợ Bubblewrap | **`designed_unverified` (Blocked)** | **Harness Verified** (Mọi bước ghi thay đổi hệ thống tự động trả `status: "blocked"`) |
@@ -53,6 +54,6 @@ Tài liệu này quy định ma trận tương thích chính thức của Bflow 
 
 | Test Runner | Phiên bản / Định dạng | Yêu cầu môi trường | Trạng thái hỗ trợ |
 | :--- | :--- | :--- | :--- |
-| **Node.js Built-in Test Runner (`node_tap`)** | Node.js `>= 22` flat TAP output | Linux + `/usr/bin/bwrap` + canonical `node_modules` | **Live Verified** (Đo độc lập Red/Green/Refactor trên detached commit) |
-| **Vitest JSON Runner (`vitest_json`)** | Vitest `2.1.x` JSON reporter + trusted runtime-error companion | Linux + `/usr/bin/bwrap` + canonical `node_modules` | **Live Verified** (Đo độc lập Red/Green/Refactor trên detached commit) |
+| **Node.js Built-in Test Runner (`node_tap`)** | Node.js `>= 22` flat TAP output | Linux + `/usr/bin/bwrap` hoặc macOS + `/usr/bin/sandbox-exec` + canonical `node_modules` | **Live Verified** trên Linux (Đo độc lập Red/Green/Refactor trên detached commit); macOS: source + test cục bộ |
+| **Vitest JSON Runner (`vitest_json`)** | Vitest `2.1.x` JSON reporter + trusted runtime-error companion | Linux + `/usr/bin/bwrap` hoặc macOS + `/usr/bin/sandbox-exec` + canonical `node_modules` | **Live Verified** trên Linux (Đo độc lập Red/Green/Refactor trên detached commit); macOS: source + test cục bộ |
 | **Custom / Mixed Manual-Automated Runners** | Coverage thresholds, symlinks ra ngoài workspace, tự động `npm install`/build trong runner | — | **Unsupported (`RR-22`, `RR-23`)** — Bị từ chối trước khi chạy workflow để bảo toàn tính tất định của sandbox |

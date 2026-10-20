@@ -1,62 +1,61 @@
-# P16 review and integration — 2026-10-16
+# Review và tích hợp P16 — 2026-10-16
 
-Reviewed the policy resolver, evidence ingress, contract compatibility, prompt
-instructions, package registration and original handoff before local integration.
-Original implementation/report commits: `02e6ca5`, `c91a139`.
+Đã review policy resolver, evidence ingress, tương thích contract, hướng dẫn prompt,
+đăng ký package và bản bàn giao gốc trước khi tích hợp cục bộ.
+Các commit triển khai/báo cáo gốc: `02e6ca5`, `c91a139`.
 
-## Findings fixed
+## Các finding đã sửa
 
-| Finding | Correction and regression evidence |
+| Finding | Khắc phục và evidence regression |
 | --- | --- |
-| Existing automated checks made pure formatting require an artificial Red phase | Separate executable checks from evidence of changed behavior; preserve regression checks under alternative verification |
-| `ready` infrastructure with only some behavioral commands could still require TDD | Require configured commands for every selected behavioral method; retain explicit provisioning conditions otherwise |
-| Red incorrectly required every observed criterion to fail | Allow passing existing regression criteria and baseline checks while requiring at least one failing target behavioral observation; preserve all tests through Green/refactor |
-| Evidence phases could come from different verification cycles | Bind successive phase receipts to the same `cycleNumber` |
-| Manual/visual observations could claim success with a nonzero exit code | Reject contradictory observation/evaluation exit codes |
-| Several target commands sharing one verification method could be partially skipped | Successful evidence must cover every target command as well as every method and required criterion |
+| Các automated check hiện có khiến formatting thuần túy phải có phase Red nhân tạo | Tách các check thực thi được khỏi evidence về hành vi thay đổi; giữ các regression check dưới alternative verification |
+| Infrastructure `ready` chỉ với một số behavioral command vẫn có thể yêu cầu TDD | Yêu cầu command đã cấu hình cho mọi behavioral method được chọn; nếu không thì giữ các điều kiện provisioning tường minh |
+| Red yêu cầu sai là mọi criterion được quan sát đều phải thất bại | Cho phép các regression criterion và baseline check hiện có đang pass, đồng thời yêu cầu ít nhất một behavioral observation mục tiêu thất bại; giữ mọi test qua Green/refactor |
+| Các evidence phase có thể đến từ các verification cycle khác nhau | Ràng buộc các phase receipt kế tiếp vào cùng một `cycleNumber` |
+| Observation thủ công/trực quan có thể khai báo thành công với exit code khác 0 | Từ chối exit code observation/evaluation mâu thuẫn |
+| Nhiều target command dùng chung một verification method có thể bị bỏ qua một phần | Evidence thành công phải bao phủ mọi target command cũng như mọi method và criterion bắt buộc |
 
-The initial regression run reproduced five failures (75 passed / 5 failed); the
-all-passing Red guard already worked. A separate multi-command regression reproduced
-one more failure (80 passed / 1 failed). After fixes, `pnpm --filter
-@bflow/test-strategy test` passed 81 tests in two files, with zero failures/skips.
-Both reproduction runs exited 1; the final package run exited 0.
+Lần chạy regression đầu tiên tái hiện năm lỗi (75 passed / 5 failed); guard Red toàn pass
+đã hoạt động. Một regression multi-command riêng tái hiện thêm một lỗi (80 passed / 1
+failed). Sau khi sửa, `pnpm --filter @bflow/test-strategy test` pass 81 test trong hai
+file, không có lỗi/skip. Cả hai lần chạy tái hiện đều exit 1; lần chạy package cuối cùng
+exit 0.
 
-No shared contract or other implementation owner's source was changed. Evidence
-validation continues to rely on P17 for artifact contents/revision verification
-and on P19 for authoritative-spec binding, persistence and Runtime enforcement.
-Those responsibilities are not claimed as complete by this review.
+Không có shared contract hay source của chủ sở hữu triển khai khác bị thay đổi. Việc
+xác thực evidence tiếp tục dựa vào P17 để xác minh nội dung artifact/revision và dựa
+vào P19 cho ràng buộc spec có thẩm quyền, persistence và thực thi qua Runtime.
+Review này không khẳng định các trách nhiệm đó đã hoàn tất.
 
-## Integration validation and local closure
+## Xác thực tích hợp và đóng cục bộ
 
-Source fixes: `4942b08`. The implementation and fixes are preserved through merge
-commit `b35f063`. Workspace registration is commit
-`9a71765f9e79fdc26ea3c5a8a576f5d89e18cac5`, the exact integration HEAD tested below.
-This review report is a subsequent documentation-only commit. The original
-`HANDOFF.md` remains historical evidence.
+Bản sửa source: `4942b08`. Bản triển khai và các bản sửa được giữ qua merge commit
+`b35f063`. Đăng ký workspace là commit `9a71765f9e79fdc26ea3c5a8a576f5d89e18cac5`,
+chính là integration HEAD chính xác được kiểm thử bên dưới. Báo cáo review này là một
+commit chỉ-tài-liệu tiếp theo. `HANDOFF.md` gốc vẫn là evidence lịch sử.
 
-Validation ran from `/tmp/bflow-p16-integration` on Linux with Node `v24.16.0`
-and pnpm `12.5.1`:
+Việc xác thực chạy từ `/tmp/bflow-p16-integration` trên Linux với Node `v24.16.0`
+và pnpm `12.5.1`:
 
-| Command | Exit | Result |
+| Command | Exit | Kết quả |
 | --- | --- | --- |
-| `pnpm install --frozen-lockfile` | 0 | Fresh integration worktree; all workspace packages installed without lockfile changes |
-| `pnpm check:deps` | 0 | Acyclic: 13 packages, 19 internal edges |
-| `pnpm typecheck` | 0 | Root references now include P16 |
-| `pnpm --filter @bflow/test-strategy test` | 0 | Build; 2 files, 81 passed / 0 failed / 0 skipped |
-| `TMPDIR=/tmp pnpm test` | 0 | Root build; 42 files, 954 passed / 0 failed / 0 skipped |
-| Installed package ESM export/example smoke check | 0 | Self-import through `@bflow/test-strategy` exports; resolve and authoritative-spec binding pass |
-| `git diff --check` | 0 | No whitespace errors |
+| `pnpm install --frozen-lockfile` | 0 | Integration worktree mới; mọi workspace package được cài mà không đổi lockfile |
+| `pnpm check:deps` | 0 | Không có chu trình: 13 package, 19 cạnh nội bộ |
+| `pnpm typecheck` | 0 | Các reference gốc nay bao gồm P16 |
+| `pnpm --filter @bflow/test-strategy test` | 0 | Build; 2 file, 81 passed / 0 failed / 0 skipped |
+| `TMPDIR=/tmp pnpm test` | 0 | Build gốc; 42 file, 954 passed / 0 failed / 0 skipped |
+| Smoke check export ESM/ví dụ của package đã cài | 0 | Tự import qua export `@bflow/test-strategy`; resolve và ràng buộc spec có thẩm quyền pass |
+| `git diff --check` | 0 | Không có lỗi whitespace |
 
-The short TMPDIR preserves the original ArtifactStore Unix-socket fixture's path
-length requirement in this environment. No storage test or implementation changed.
+TMPDIR ngắn giữ nguyên yêu cầu độ dài đường dẫn của fixture Unix-socket ArtifactStore
+gốc trong môi trường này. Không có storage test hay triển khai nào bị thay đổi.
 
-Integration changes are limited to registering P16 in `tsconfig.json`, its pinned
-lockfile importer, the root package/command documentation and updated package
-integration notes. Contracts, Core, Runtime and other owners' implementation paths
-have no diff. Generated output is not committed; no migration or contract decision
-is needed. Runtime enforcement still belongs to P19 after the full P12–P18 gate.
+Các thay đổi tích hợp chỉ giới hạn ở việc đăng ký P16 trong `tsconfig.json`, importer
+lockfile đã pin của nó, tài liệu package/command gốc và các ghi chú tích hợp package đã
+cập nhật. Contracts, Core, Runtime và các đường dẫn triển khai của chủ sở hữu khác không
+có diff. Output sinh ra không được commit; không cần migration hay quyết định contract.
+Việc thực thi qua Runtime vẫn thuộc P19 sau toàn bộ gate P12–P18.
 
-The validated integration history and its report-only successor are merged into
-local `main` by fast-forward from `4e818b4`; the main working tree is clean. This
-closes local P16 integration only. No push, remote merge, live Herdr verification
-or complete P12–P18 synchronization is claimed.
+Lịch sử tích hợp đã xác thực và commit kế nhiệm chỉ-báo-cáo của nó được merge vào
+`main` cục bộ bằng fast-forward từ `4e818b4`; cây làm việc main sạch. Điều này chỉ
+đóng tích hợp P16 cục bộ. Không khẳng định push, remote merge, xác minh Herdr thật hay
+đồng bộ P12–P18 hoàn chỉnh.

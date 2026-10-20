@@ -37,12 +37,16 @@ async function checkoutDependencyMounts(command: BoundBehavioralCommand, checkou
   return mounts;
 }
 
-/** Linux runner boundary: an empty filesystem namespace with system tools,
+/** Runner boundary (Linux Bubblewrap; macOS Seatbelt in behavioral-sandbox-darwin.ts, which denies contents instead of hiding paths): an empty filesystem namespace with system tools,
  * committed checkout, and explicitly selected read-only dependencies. No host
  * home, credentials, sockets, Git metadata, network or writable repository.
  * `argv` selects the invocation (tests, or a profile's prepare step); the same executable runs both. */
 export async function sandboxBehavior(command: BoundBehavioralCommand, checkout: string, argv: string[], reporter?: string) {
-  if (process.platform !== "linux") throw new Error("Behavioral verification requires the verified Linux Bubblewrap sandbox");
+  if (process.platform === "darwin") {
+    const { sandboxBehaviorDarwin } = await import("./behavioral-sandbox-darwin.js");
+    return sandboxBehaviorDarwin(command, checkout, argv, reporter);
+  }
+  if (process.platform !== "linux") throw new Error("Behavioral verification requires the Linux Bubblewrap or macOS Seatbelt sandbox");
   const executable = "/usr/bin/bwrap";
   if (!(await lstat(executable)).isFile()) throw new Error("Behavioral verification requires /usr/bin/bwrap");
   const args = ["--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL",

@@ -281,7 +281,7 @@ describe("setup installer progress boundaries", () => {
     const { basename, join } = await import("node:path");
     const { fileURLToPath } = await import("node:url");
     const { detectPlatform, defaultHostEnvironment, defaultMachineConfig, ToolInstallerRegistry } = await import("@bflow/machine-setup");
-    const root = await mkdtemp(join(tmpdir(), "bflow-install-progress-"));
+    const root = await (await import("node:fs/promises")).realpath(await mkdtemp(join(tmpdir(), "bflow-install-progress-")));
     const bin = join(root, "bin");
     const steps: string[] = [], observations: (string | undefined)[] = [];
     let installed = false, applications = 0;
@@ -355,7 +355,7 @@ describe("entrypoint progress forwarding", () => {
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
     const { detectPlatform, defaultHostEnvironment, defaultMachineConfig, ToolInstallerRegistry } = await import("@bflow/machine-setup");
-    const root = await mkdtemp(join(tmpdir(), "bflow-progress-"));
+    const root = await (await import("node:fs/promises")).realpath(await mkdtemp(join(tmpdir(), "bflow-progress-")));
     const bin = join(root, "bin");
     await mkdir(bin);
     for (const name of ["node", "git", "pnpm", "herdr"]) await writeFile(join(bin, name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });

@@ -48,7 +48,7 @@ Provider role process vẫn chung UID: hook/tool policy không bảo vệ trư�
 cùng UID bị compromise đọc token, inject terminal hoặc sửa host files ngoài API.
 Không nâng giới hạn này thành OS separation toàn hệ thống.
 
-## Behavioral runner isolation
+## Cô lập behavioral runner
 
 Review tái hiện được test code ghi ra ngoài detached checkout dù `isolated:true`.
 Đã thay bằng mandatory Linux Bubblewrap namespace: empty root, read-only `/usr`,
@@ -80,7 +80,7 @@ truy cập symlink target ngoài namespace. Supported platform/scope ở
 | RR-06 / P1 | P13 close timeout/error vẫn persist down | Parse close result, fail-closed và preserve partial state; targeted failure fixtures |
 | RR-07 / P2 | Runtime timeout trả retrySafety ngoài contract và tự retry uncertain work | Contract-valid unknown_delivery/nonretryable/manual intervention; one-invocation regression |
 | RR-08 / P2 | Structured envelope/chunked logs có thể lộ secret | Scrub envelope/buffer/sink, detached background relay, host diagnostics; synthetic secret tests |
-| RR-09/17 / P2 | Cached selection/document reads theo symlink/special file; stale checksum | Confined no-follow/nonblocking regular descriptor, containment/inode/byte recheck; symlink/FIFO regressions |
+| RR-09/17 / P2 | Đọc selection/document đã cache theo symlink/special file; checksum cũ (stale) | Descriptor thường bị giới hạn no-follow/nonblocking, kiểm tra lại containment/inode/byte; regression symlink/FIFO |
 | RR-10/11 / P1 release | Archive thiếu packages; manual tag không pin source và thiếu gates | Full package/assets distribution smoke; checkout ref/tag identity + unit/E2E gates. Hosted approval chưa chứng minh |
 | RR-14/15 / P1 | Idle bị coi là auth; partial startup không recover được | Provider login riêng, exact launch receipt, persisted intent và reconciliation không duplicate panes |
 | RR-18 / P2 | Total context budget không bao hết governance/spec | Bound complete formatted prompt; fail-closed thay vì cắt criteria |
@@ -117,15 +117,15 @@ Human decision phải có trusted UserPromptSubmit provenance và matching reque
 Conversation cache không tự tạo approval. Recovered decisions chỉ restore sau durable
 host authentication. Thay đổi binding/session hoặc immutable judgment bị từ chối.
 Native uncertain send không được replay chỉ vì MCP timeout; signed late ACK có thể
-resolve intent gốc. Phase assertion failures và transport uncertainty là hai domain
-khác nhau. Failed phase diagnostics được lưu artifact, không được coi là P16 success.
+resolve intent gốc. Lỗi phase assertion và transport uncertainty là hai domain
+khác nhau. Chẩn đoán phase thất bại được lưu artifact, không được coi là P16 success.
 
-Các regression xác nhận process-crash windows trên local Linux. Chưa chạy fault
-campaign xuyên suốt live AI workflow hoặc chứng minh SQLite/filesystem/transport là
+Các regression xác nhận các cửa sổ process-crash trên Linux local. Chưa chạy chiến dịch
+fault xuyên suốt live AI workflow hoặc chứng minh SQLite/filesystem/transport là
 một transaction. Không chứng nhận power-loss, NFS/distributed leases hay exactly-once
-arbitrary remote side effects.
+cho side effect từ xa tùy ý.
 
-## Target filesystem probe
+## Probe filesystem đích
 
 Checkout gốc trên fuseblk không giữ chmod 0700/0600: mode thực là 0777, owner
 UID 0 trong khi caller UID 1000. Probe chỉ dùng synthetic bytes và đã xóa.
@@ -135,10 +135,10 @@ mount gốc. Dùng POSIX repository/worktree hoặc thực hiện external-state
 migration riêng trước khi chạy host ở đó. Raw evidence:
 `/tmp/bflow-fix-evidence/target-filesystem-permissions.json`.
 
-## Residual release risks
+## Rủi ro release còn lại
 
-Full AI SDLC evidence, active-run drain/recovery, global provider OS separation,
-operational redaction/metrics và hosted release protections còn mở. P02-RA01 thuộc
+Bằng chứng AI SDLC đầy đủ, active-run drain/recovery, cách ly OS toàn cục cho provider,
+redaction/metrics vận hành và bảo vệ release trên hosted vẫn còn mở. P02-RA01 thuộc
 Herdr Adapter và P03-RA01 thuộc ArtifactStore vẫn OPEN. Chi tiết owner/điều kiện đóng
 ở [known limitations](known-limitations.md). Không tự deploy hoặc merge protected
 branch để lấy bằng chứng; không quảng bá production-ready.

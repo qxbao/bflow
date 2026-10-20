@@ -58,3 +58,15 @@ Phiên mới dùng Coordination 2x2 và Verification hai pane. Reconcile phiên 
 resize các boundary để chia diện tích đều, giữ nguyên pane ID và process; không
 dùng layout.apply vì operation đó tạo terminal mới trên Herdr đã thử. Nếu có
 pane do operator thêm vào tab thì Bflow giữ layout đó.
+
+## Lỗi thường gặp khi khởi động
+
+- **`The machine Gateway is bound to workspace ...`**: Gateway của máy đang gắn với repository khác. Chạy
+  `bflow setup --apply --yes --dir <repo hiện tại>`.
+- **`Repository trust confirmation is waiting for your choice`**: Claude đang hỏi tin cậy repository ở pane.
+  Chọn trong pane (`bflow attach` hoặc lệnh `herdr` được in kèm), hoặc đặt `environment.permissions.trustedWorkspace: true`.
+- **`No supported test runner detected`**: Runtime không nhận ra runner. `node --test` được nhận cả khi có cờ
+  `--experimental-strip-types` / `--disable-warning=<tên>` đứng trước `--test`; vitest cần là 2.x và đã cài ở root.
+  Việc đo hành vi cần Linux với `bwrap` hoặc macOS với `sandbox-exec`.
+- **Gateway lặp lại crash khi khởi động (macOS/Linux)**: chạy
+  `node apps/cli/dist/setup-gateway.js --serve ~/.config/bflow/setup-gateway.json <digest>` ở foreground để thấy lỗi.

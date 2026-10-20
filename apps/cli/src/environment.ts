@@ -450,6 +450,11 @@ export class EnvironmentLifecycle {
       if (config.environment.permissions?.trustedWorkspace === false) {
         fail("Workspace trust check failed: repository workspace is not trusted. Remediation: Set environment.permissions.trustedWorkspace to true in .bflow/config.yml or trust the workspace.", { component: "permissions" });
       }
+      // Explicit opt-in only: pre-accept Claude Code's per-project trust dialog so headless panes are not stuck on it.
+      if (config.environment.permissions?.trustedWorkspace === true && distinctRequiredClis.includes("claude")) {
+        const { claudeConfigFile, ensureClaudeWorkspaceTrust } = await import("./claude-trust.js");
+        await ensureClaudeWorkspaceTrust(repository.root, claudeConfigFile(this.env));
+      }
       const isUnattended = config.environment.permissions?.mode === "unattended_isolated" || rolesToRun.some((r) => r.permissionMode === "unattended_isolated");
       if (isUnattended && config.environment.permissions?.isolation !== "os_sandbox" && config.environment.permissions?.isolation !== "container") {
         fail("Permission configuration invalid: 'unattended_isolated' requires 'os_sandbox' or 'container' isolation. Remediation: Configure environment.permissions.isolation as 'os_sandbox' or 'container', or switch permissionMode to 'workspace_auto'.", { component: "permissions" });

@@ -1,26 +1,26 @@
-# ADR 0002: Close P01 recovery and rework contract gaps
+# ADR 0002: Đóng các khoảng trống contract về recovery và rework của P01
 
-- Status: Accepted for P01 remediation by project-owner request, 2026-10-14; independent review required before integration
-- Baseline: `93147ec` (P00 hardening plus original P01)
-- Approving owner: project owner authorizing the P01 remediation
-- Affected owners: contracts/integration, P01 Core, P03 persistence, P06 Runtime
+- Trạng thái: Đã chấp nhận cho việc khắc phục P01 theo yêu cầu của project owner, 2026-10-14; cần review độc lập trước khi tích hợp
+- Baseline: `93147ec` (P00 hardening cộng P01 ban đầu)
+- Owner phê duyệt: project owner cho phép khắc phục P01
+- Các owner bị ảnh hưởng: contracts/integration, P01 Core, P03 persistence, P06 Runtime
 
-## Context
+## Bối cảnh
 
-The independent P01 audit reproduced loss of approvals, gates, cancellation and idempotency after snapshot-only checkpoint recovery. Full event history also lacked command fingerprints and result boundaries needed to return the original outcome for a duplicate command. Task definitions had RetryPolicy but no approved rework limit. Retry scheduling needed a durable eligibility time for deterministic replay.
+Đợt audit độc lập P01 đã tái hiện việc mất approval, gate, cancellation và idempotency sau khi recovery chỉ từ snapshot checkpoint. Lịch sử event đầy đủ cũng thiếu command fingerprint và ranh giới kết quả cần thiết để trả về kết quả gốc cho một command trùng lặp. Task definition có RetryPolicy nhưng không có giới hạn rework được duyệt. Việc lập lịch retry cần một thời điểm eligibility bền vững để replay có tính xác định.
 
-## Decision
+## Quyết định
 
-1. Keep full events authoritative. A successful Core mutation emits its domain effects and a final versioned `command.completed` receipt in one batch. The receipt stores identity, SHA-256 fingerprint of the parsed command, event-group start and runnable task IDs, never the raw command. Replay reconstructs the original snapshot/events/result at the receipt boundary. Same key and same fingerprint returns the original outcome; same key and different fingerprint conflicts.
-2. Add `bflow.workflow-aggregate+json` codec. `WorkflowEngine.createCheckpoint` exports snapshot plus all auxiliary state, command result receipts, retry schedules and generation attempt baselines. Checkpoint-plus-tail replay requires this codec. The old snapshot codec is accepted only as an optimization when complete events from `run.created` are supplied; otherwise Core rejects it. Invalid, unsupported or inconsistent state is rejected, not silently filled with empty maps.
-3. Add optional `TaskDefinition.rework`. Omission is a deliberate migration default of zero reworks with `onExhausted: fail`. `maxReworks` counts generation increments, not total generations. Retry attempts are bounded per generation while `TaskState.attempt` remains globally monotonic. At exhaustion, `fail` ends the run without a new generation; `require_human` blocks it for a later higher-revision decision.
-4. Add `task.retry_scheduled` with policy-derived `eligibleAt`. Backoff is fixed, linear or exponential, capped by `maxDelayMs`; optional jitter is a deterministic full-jitter value derived from stable identity. Core compares command time to eligibility and never runs a timer.
-5. A run-wide cancellation may receive more than one `cancellation.stop_confirmed` event, one per bound execution. The aggregate checkpoint stores a confirmation list rather than a singular confirmation; duplicate execution confirmations conflict, and one stopped execution does not imply all have stopped.
+1. Giữ event đầy đủ là nguồn có thẩm quyền. Một mutation Core thành công phát ra các domain effect của nó và một receipt `command.completed` có version ở cuối trong cùng một batch. Receipt lưu identity, fingerprint SHA-256 của command đã parse, event-group start và các runnable task ID, không bao giờ lưu command thô. Replay dựng lại snapshot/event/result gốc tại ranh giới receipt. Cùng key và cùng fingerprint trả về outcome gốc; cùng key nhưng khác fingerprint là conflict.
+2. Thêm codec `bflow.workflow-aggregate+json`. `WorkflowEngine.createCheckpoint` xuất snapshot cùng toàn bộ trạng thái phụ trợ, command result receipt, retry schedule và attempt baseline của generation. Replay checkpoint-cộng-tail yêu cầu codec này. Codec snapshot cũ chỉ được chấp nhận như một tối ưu hóa khi cung cấp đầy đủ event từ `run.created`; nếu không Core từ chối nó. Trạng thái không hợp lệ, không được hỗ trợ hoặc không nhất quán bị từ chối, không được lặng lẽ điền bằng map rỗng.
+3. Thêm `TaskDefinition.rework` tùy chọn. Việc bỏ qua là mặc định migration có chủ đích: không có rework với `onExhausted: fail`. `maxReworks` đếm số lần tăng generation, không phải tổng số generation. Số lần retry bị giới hạn theo từng generation trong khi `TaskState.attempt` vẫn tăng đơn điệu toàn cục. Khi cạn, `fail` kết thúc run mà không tạo generation mới; `require_human` chặn run để chờ quyết định có revision cao hơn về sau.
+4. Thêm `task.retry_scheduled` với `eligibleAt` suy ra từ policy. Backoff là fixed, linear hoặc exponential, bị chặn bởi `maxDelayMs`; jitter tùy chọn là giá trị full-jitter xác định suy ra từ identity ổn định. Core so sánh thời gian của command với eligibility và không bao giờ chạy timer.
+5. Một cancellation toàn run có thể nhận nhiều hơn một event `cancellation.stop_confirmed`, mỗi event cho một execution đã bind. Aggregate checkpoint lưu danh sách confirmation thay vì một confirmation đơn lẻ; xác nhận execution trùng lặp là conflict, và việc một execution đã dừng không hàm ý tất cả đã dừng.
 
-## Compatibility and migration
+## Tương thích và migration
 
-The new `rework` field is optional so old definitions parse. Its fail-closed zero-rework behavior is intentionally different from the old unbounded implementation. Public `WorkflowEngine` gains `createCheckpoint`, so implementations must add that method. Existing event schema version 1 remains parseable, but histories without command receipts cannot establish exact post-restart idempotency and are rejected for mutable recovery until authoritative receipts are migrated. The legacy snapshot checkpoint codec remains parseable and can be ignored for full replay. New aggregate checkpoints use a distinct codec name/version; no silent upcast invents missing state. `task.retry_scheduled` and `command.completed` are new event kinds; RunStore's generic event envelope and batch contract stay unchanged.
+Field `rework` mới là tùy chọn nên các definition cũ vẫn parse được. Hành vi fail-closed với không rework của nó khác có chủ đích so với triển khai không giới hạn trước đây. `WorkflowEngine` công khai có thêm `createCheckpoint`, nên các triển khai phải bổ sung method này. Event schema version 1 hiện có vẫn parse được, nhưng các lịch sử không có command receipt không thể thiết lập idempotency chính xác sau restart và bị từ chối cho mutable recovery cho đến khi các receipt có thẩm quyền được migrate. Codec snapshot checkpoint cũ vẫn parse được và có thể bị bỏ qua khi full replay. Aggregate checkpoint mới dùng tên/version codec riêng biệt; không có upcast ngầm nào bịa ra trạng thái còn thiếu. `task.retry_scheduled` và `command.completed` là các loại event mới; event envelope chung và batch contract của RunStore giữ nguyên.
 
-## Ownership and consequences
+## Quyền sở hữu và hệ quả
 
-P01 enforces state transitions, replay, retry/rework and checkpoint correctness. P03 will provide atomic durable event/checkpoint storage and any migration from prototype data. P06 will persist the complete event batch before dispatch or other external effects and wake a retry at its eligibility time. This ADR does not assert distributed exactly-once execution, implement SQLite, allocate agents or call Herdr.
+P01 thực thi state transition, replay, retry/rework và tính đúng đắn của checkpoint. P03 sẽ cung cấp lưu trữ event/checkpoint bền vững nguyên tử và mọi migration từ dữ liệu prototype. P06 sẽ persist toàn bộ event batch trước khi dispatch hoặc các external effect khác và đánh thức retry tại thời điểm eligibility của nó. ADR này không khẳng định exactly-once execution phân tán, không triển khai SQLite, không cấp phát agent và không gọi Herdr.

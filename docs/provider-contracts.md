@@ -1,8 +1,8 @@
 # Provider contracts v3
 
-Normative P24 design; implementation owner P25. Public exports:
+Thiết kế chuẩn tắc P24; owner triển khai là P25. Public export:
 `packages/contracts/src/{platform,provider}.ts`. [Runtime v3](runtime-architecture-v3.md)
-records source audit, authorization D24-01, migration and phase ownership.
+ghi lại kết quả audit source, ủy quyền D24-01, migration và quyền sở hữu theo phase.
 
 ## Implementation status (cập nhật 2026-10-17)
 
@@ -18,139 +18,140 @@ test; không có hồ sơ live provider login/launch/permission enforcement cho 
 Chi tiết ở [package README](../packages/agent-providers/README.md) và
 [hồ sơ P25–P29](acceptance/2026-10-17-p25-p29.md). Nội dung dưới đây là thiết kế đóng băng.
 
-## Contract inventory
+## Danh mục contract
 
-| Contract | Schema / meaning |
+| Contract | Schema / ý nghĩa |
 | --- | --- |
-| `AgentProviderAdapter` | TypeScript port; validated descriptor plus `checkHealth(AgentHealthRequest, OperationOptions?) → OperationResult<AgentHealthResult>` and `prepareLaunch(AgentEnvironment, OperationOptions?) → OperationResult<AgentLaunchProfile>` |
-| `AgentCapability` | Existing `AgentCapabilitySchema` in `session.ts`, unchanged. Business ability such as implementation/review; not proof of login, MCP connectivity or authorization |
-| `AgentProviderDescriptor` | Versioned provider catalog wrapping existing capabilities; CLI name, adapter version, MCP transports, unattended/native-binding support |
-| `AgentLaunchProfile` | Exact executable path/digest, provider version, argv array, generated config file digests, environment, interaction mode, launch fingerprint and expiry |
-| `AgentEnvironment` | Resolved provider/role/session, cwd/private state directory, config fingerprint, permission profile, non-secret env values, secret references, required capabilities/services and skill-manifest digest |
-| `PermissionProfile` | Three permission modes, explicit roots/tools/network/isolation, deny behavior and literal `allowGlobalPermissionBypass: false` |
-| `TrustScope` | Discriminated machine/repository/session identity; nested within a versioned document. `isTrustScopeWithin` checks logical containment; host checks canonical filesystem containment separately |
-| `AgentHealthRequest` / `AgentHealthResult` | Stage-specific checks and expiring readiness observation, bound to environment/provider/role/config identity |
-| `AgentLaunchAttestation` | New startup receipt pinned to launch ID/fingerprint, Bflow session, Herdr pane and native provider session; signed by trusted host |
+| `AgentProviderAdapter` | Port TypeScript; descriptor đã validate cùng `checkHealth(AgentHealthRequest, OperationOptions?) → OperationResult<AgentHealthResult>` and `prepareLaunch(AgentEnvironment, OperationOptions?) → OperationResult<AgentLaunchProfile>` |
+| `AgentCapability` | `AgentCapabilitySchema` hiện có trong `session.ts`, không đổi. Năng lực nghiệp vụ như implementation/review; không chứng minh đã đăng nhập, kết nối MCP hay được ủy quyền |
+| `AgentProviderDescriptor` | Catalog provider có version, bọc các capability hiện có; tên CLI, version adapter, MCP transport, hỗ trợ unattended/native-binding |
+| `AgentLaunchProfile` | Đường dẫn/digest executable chính xác, version provider, mảng argv, digest các file config được sinh, environment, interaction mode, launch fingerprint và thời điểm hết hạn |
+| `AgentEnvironment` | Provider/role/session đã resolve, cwd/thư mục state riêng, config fingerprint, permission profile, giá trị env không bí mật, secret reference, capability/service bắt buộc và digest skill-manifest |
+| `PermissionProfile` | Ba permission mode, root/tool/network/isolation tường minh, hành vi deny và literal `allowGlobalPermissionBypass: false` |
+| `TrustScope` | Định danh machine/repository/session dạng discriminated; lồng trong document có version. `isTrustScopeWithin` kiểm tra containment logic; host kiểm tra containment filesystem canonical riêng |
+| `AgentHealthRequest` / `AgentHealthResult` | Các check theo từng stage và quan sát readiness có hạn, gắn với định danh environment/provider/role/config |
+| `AgentLaunchAttestation` | Startup receipt mới gắn với launch ID/fingerprint, Bflow session, Herdr pane và native provider session; được trusted host ký |
 
-All exchanged values must be parsed with the exported schema on both input and output.
-Port objects/functions and in-process `AbortSignal` are not serialized; their method
-requests/results use schemas and existing `OperationResultSchema(TSchema)`. Versioning
-uses literal 3 at the new envelope; no new interpretation of v1/v2 records.
+Mọi giá trị trao đổi phải được parse bằng schema đã export ở cả input lẫn output.
+Port object/function và `AbortSignal` trong tiến trình không được serialize; request/result
+của method dùng schema và `OperationResultSchema(TSchema)` hiện có. Versioning dùng
+literal 3 ở envelope mới; không diễn giải lại record v1/v2.
 
-## Probe and launch protocol
+## Giao thức probe và launch
 
-`checkHealth` is an observation, not an installer or a login command. Every required
-preflight check must be `passed`; missing/unknown/expired/unsupported evidence blocks.
-Codes/remediation must be safe for CLI JSON and Conversation display, without raw provider
-terminal output, email, tokens or arbitrary stderr. Deadlines/AbortSignal propagate via
-existing `OperationOptions`; probes have bounded output, subprocess and time budgets.
+`checkHealth` là một quan sát, không phải trình cài đặt hay lệnh đăng nhập. Mọi preflight
+check bắt buộc phải `passed`; bằng chứng thiếu/unknown/hết hạn/unsupported sẽ chặn. Code và
+remediation phải an toàn để hiển thị trong CLI JSON và Conversation, không chứa output terminal
+thô của provider, email, token hay stderr tùy ý. Deadline/AbortSignal lan truyền qua
+`OperationOptions` hiện có; probe có giới hạn về output, subprocess và thời gian.
 
-| Check | Required evidence / negative behavior |
+| Check | Bằng chứng bắt buộc / hành vi khi âm tính |
 | --- | --- |
-| `binary` | Resolve canonical executable from trusted install/PATH policy, verify ownership/digest, reject changed/missing/unexecutable binary |
-| `version` | Parse actual version output and inspect required CLI flags/behavior; release label alone is not a compatibility allowlist |
-| `authentication` | Provider-native status or safe authenticated readiness probe under the exact credential binding; distinguish missing, expired, unauthorized and unknown. File presence or Herdr idle is insufficient |
-| `environment` | Cwd/worktree identity, writable/read-only mounts, private state permissions, socket realm/path length, OS/process sandbox, required tools/runtime and explicit env allowlist |
-| `mcp` | Supported client transport and exact generated configuration; initialize/negotiate/tools-list and required-tool authorization. No required service is a vacuously successful MCP check only after verifying the empty required set |
-| `launch_arguments` | Exact CLI supports the profile, prompt/config files are regular/private/bounded and digest-matching, trusted hook commands pinned, no inherited unsafe settings/plugins/hooks |
-| `permissions` | Effective rights are no wider than profile; native tool denies, Gateway authorization, OS isolation and network policy enforced. An ignored/unknown permission flag fails |
-| `skills` | Exact role/provider manifest resolved with pinned content/dependencies and required capabilities/tools available; missing required binding fails |
-| `native_binding` | Activated stage only: verify trusted issuer signature and exact launch/session/pane/native binding. Preflight separately checks the adapter's ability to produce this proof |
+| `binary` | Resolve executable canonical từ chính sách install/PATH tin cậy, xác minh ownership/digest, từ chối binary bị đổi/thiếu/không thực thi được |
+| `version` | Parse output version thực tế và kiểm tra các cờ/hành vi CLI bắt buộc; release label đơn thuần không phải allowlist tương thích |
+| `authentication` | Trạng thái native của provider hoặc probe readiness có xác thực an toàn dưới đúng credential binding; phân biệt missing, expired, unauthorized và unknown. Chỉ có file hoặc Herdr idle là chưa đủ |
+| `environment` | Định danh cwd/worktree, mount writable/read-only, quyền của state riêng, socket realm/độ dài path, sandbox OS/process, tool/runtime bắt buộc và env allowlist tường minh |
+| `mcp` | Client transport được hỗ trợ và cấu hình sinh ra chính xác; initialize/negotiate/tools-list và ủy quyền tool bắt buộc. Không có service bắt buộc chỉ là MCP check thành công theo nghĩa rỗng sau khi đã xác minh tập bắt buộc là rỗng |
+| `launch_arguments` | CLI chính xác hỗ trợ profile, file prompt/config là file thường/riêng tư/có giới hạn và khớp digest, lệnh hook tin cậy được pin, không kế thừa settings/plugin/hook không an toàn |
+| `permissions` | Quyền hiệu lực không rộng hơn profile; native tool deny, ủy quyền Gateway, OS isolation và network policy được thực thi. Cờ permission bị bỏ qua/không biết sẽ fail |
+| `skills` | Manifest role/provider chính xác được resolve với nội dung/dependency đã pin và capability/tool bắt buộc khả dụng; thiếu binding bắt buộc sẽ fail |
+| `native_binding` | Chỉ ở stage activated: xác minh chữ ký issuer tin cậy và binding launch/session/pane/native chính xác. Preflight kiểm tra riêng khả năng adapter tạo ra bằng chứng này |
 
-`prepareLaunch` compiles trusted, resolved configuration; it never starts an agent,
-accepts a model-supplied shell command, performs global install or grants new rights.
-Repeated resolution of identical environment generation returns equivalent profile
-content; caller persists launch ID/fingerprint before Herdr side effects. Secrets are
-resolved by host just before launch, not embedded in argv or serializable profile.
-Secret references are opaque locators, not proof that credentials exist or are valid.
-`environmentVariables` permits non-secret values only; host must reject secret env keys,
-loader injection/PATH overrides and unapproved provider config inheritance.
+`prepareLaunch` biên dịch cấu hình đã resolve và tin cậy; nó không bao giờ khởi chạy agent,
+nhận lệnh shell do model cung cấp, cài đặt global hay cấp thêm quyền mới. Resolve lặp lại
+cùng một environment generation phải trả về nội dung profile tương đương; caller lưu launch
+ID/fingerprint trước các side effect của Herdr. Secret được host resolve ngay trước khi
+launch, không nhúng vào argv hay profile có thể serialize. Secret reference là locator mờ,
+không chứng minh credential tồn tại hay hợp lệ. `environmentVariables` chỉ cho phép giá trị
+không bí mật; host phải từ chối env key bí mật, loader injection/ghi đè PATH và việc kế thừa
+cấu hình provider chưa được duyệt.
 
-The host computes SHA-256 over canonical resolved non-secret config and secret-binding
-generation IDs. Do not hash secret bytes into a public fingerprint. Launch fingerprint
-also binds executable digest/version, role/prompt/skill manifest, permission policy,
-MCP registrations, native hook source and session generation. Read files safely, pin
-observed identity and recheck immediately before launch; do not trust digest strings
-supplied by a repository/model. Changes invalidate the profile and health cache.
+Host tính SHA-256 trên config canonical không bí mật đã resolve và các generation ID của
+secret-binding. Không băm byte của secret vào fingerprint công khai. Launch fingerprint còn
+ràng buộc digest/version executable, role/prompt/skill manifest, permission policy, MCP
+registration, nguồn native hook và session generation. Đọc file an toàn, pin định danh đã
+quan sát và kiểm tra lại ngay trước khi launch; không tin chuỗi digest do repository/model
+cung cấp. Mọi thay đổi làm mất hiệu lực profile và health cache.
 
-Activated `checkHealth` requires profile + attestation. Schemas reject mismatched launch
-IDs/fingerprints/session and ready with unknown/missing checks; host additionally checks
-signature, configured issuer, exact current occupant, role/provider/environment equality,
-clock/expiry and no replay from a previous generation. Health TTL is >0 and <=5 minutes;
-the verifier checks current time, never schema parsing alone. A forged but schema-valid
-Ed25519 string is not authenticated evidence.
+`checkHealth` ở stage activated yêu cầu profile + attestation. Schema từ chối launch
+ID/fingerprint/session không khớp và trạng thái ready khi có check unknown/thiếu; host kiểm
+tra thêm chữ ký, issuer đã cấu hình, occupant hiện tại chính xác, role/provider/environment
+bằng nhau, clock/hết hạn và không replay từ generation trước. Health TTL > 0 và <= 5 phút;
+verifier kiểm tra thời gian hiện tại, không bao giờ chỉ dựa vào việc parse schema. Một chuỗi
+Ed25519 giả mạo nhưng hợp lệ về schema không phải bằng chứng đã xác thực.
 
-Startup signature bytes are UTF-8 `bflow.agent-launch-attestation.v3\n` followed by the
-existing exported `canonicalReceiptJson` of the parsed attestation body excluding
-`signature`. The issuer key is selected from trusted host configuration, never from the
-receipt itself. P25 signs at the trusted native-host boundary; P30 verifies before using
-the observation. The prefix prevents reuse across other receipt domains. Persist exact
-signed bytes and launch generation before exposing activated health to consumers.
+Byte chữ ký startup là UTF-8 `bflow.agent-launch-attestation.v3\n` theo sau là
+`canonicalReceiptJson` đã export hiện có của attestation body đã parse, loại trừ
+`signature`. Issuer key được chọn từ cấu hình host tin cậy, không bao giờ từ chính receipt.
+P25 ký tại ranh giới native-host tin cậy; P30 xác minh trước khi dùng quan sát đó. Prefix
+ngăn tái sử dụng chéo giữa các receipt domain khác. Lưu chính xác các byte đã ký và launch
+generation trước khi đưa activated health cho consumer.
 
-The startup attestation differs from ADR 0003 `AgentBindingReceipt`, which is tied to an
-actual task execution handle. Do not fabricate a run/task for startup or rewrite a task
-handle. Preserve existing execution-bound persistence, authenticated task correlation
-and acceptance gating after readiness. P30 adapts the current private host launch-receipt
-ledger through explicit validation without inventing missing historical signatures;
-an old live session lacking required proof stays unresolved until safe reconciliation.
+Startup attestation khác với `AgentBindingReceipt` của ADR 0003, vốn gắn với execution
+handle của một task thực tế. Không bịa run/task cho startup và không viết lại task handle.
+Giữ nguyên việc persist execution-bound hiện có, tương quan task đã xác thực và acceptance
+gating sau khi sẵn sàng. P30 điều chỉnh ledger launch-receipt riêng hiện tại của host thông
+qua validation tường minh mà không bịa chữ ký lịch sử còn thiếu; một session live cũ thiếu
+bằng chứng bắt buộc vẫn ở trạng thái unresolved cho đến khi reconcile an toàn.
 
-## Permission matrix
+## Ma trận permission
 
-| Profile | Files/tools | User interaction | Required boundary |
+| Profile | File/tool | Tương tác người dùng | Ranh giới bắt buộc |
 | --- | --- | --- | --- |
-| `restricted` | Read-only selected roots and exact allowed tools; no writable roots | Deny or request through Conversation | Provider tool policy, host/Gateway authorization; no claim of hostile-process isolation |
-| `workspace_auto` | Writes only authorized worktree roots and task paths; protected state remains denied | Preapproved operations run without a native prompt; other decisions via Conversation | Provider policy + existing host gates; worktree supplies Git isolation only |
-| `unattended_isolated` | Least-privilege task/session filesystem, allowed egress, tool and resource budgets; no host home/secrets/state mounts | No direct specialist prompts; pause/escalate for decisions | Verified OS sandbox/container for entire provider process, session scope, fail if unavailable |
+| `restricted` | Chỉ đọc các root được chọn và đúng các tool được phép; không có root ghi được | Từ chối hoặc yêu cầu qua Conversation | Chính sách tool của provider, ủy quyền host/Gateway; không tuyên bố cô lập process thù địch |
+| `workspace_auto` | Chỉ ghi vào root worktree và path task được ủy quyền; state được bảo vệ vẫn bị deny | Thao tác đã duyệt trước chạy không cần native prompt; các quyết định khác qua Conversation | Chính sách provider + các gate hiện có của host; worktree chỉ cung cấp cô lập Git |
+| `unattended_isolated` | Filesystem task/session theo least-privilege, egress được phép, ngân sách tool và tài nguyên; không mount home/secret/state của host | Không có prompt trực tiếp từ specialist; tạm dừng/escalate khi cần quyết định | OS sandbox/container đã xác minh cho toàn bộ process provider, session scope, fail nếu không khả dụng |
 
-`PermissionProfile` cannot use machine scope, even when installed machine-wide. A
-repository profile may only authorize that canonical repository; a session narrows it
-further. `restricted` must be read-only. `unattended_isolated` rejects `provider_policy`
-isolation and requires session scope. Host rejects `/`, home-wide roots, path traversal,
-symlink escape, unapproved secret/socket mounts and wider network/tool permissions.
-Profile mode never overrides accepted spec, task scope, lease/fence or human approvals.
+`PermissionProfile` không được dùng machine scope, kể cả khi cài đặt toàn máy. Profile
+repository chỉ được ủy quyền cho repository canonical đó; session thu hẹp thêm. `restricted`
+phải là read-only. `unattended_isolated` từ chối isolation `provider_policy` và yêu cầu
+session scope. Host từ chối `/`, root phạm vi toàn home, path traversal, symlink escape,
+mount secret/socket chưa duyệt và quyền network/tool rộng hơn. Profile mode không bao giờ
+ghi đè spec đã chấp nhận, task scope, lease/fence hay các phê duyệt của con người.
 
-No adapter maps unattended to machine-global unrestricted settings. CLI flags that skip
-all approvals/sandbox are not the standard mapping. If the provider cannot honor the
-requested effective rights, return unsupported or blocked. A sandbox used only by test
-subprocesses does not satisfy unattended provider-process isolation.
+Không adapter nào được ánh xạ unattended sang settings không giới hạn ở phạm vi machine.
+Các cờ CLI bỏ qua mọi approval/sandbox không phải ánh xạ chuẩn. Nếu provider không thể đáp
+ứng quyền hiệu lực được yêu cầu, trả về unsupported hoặc blocked. Sandbox chỉ dùng cho
+subprocess của test không thỏa mãn yêu cầu cô lập process provider cho unattended.
 
-## Provider mapping and observed compatibility
+## Ánh xạ provider và tương thích đã quan sát
 
-Existing launch code is `packages/pane-manager/src/provider-launch.ts`; P25 extracts or
-wraps its verified behavior and P30 wires it back into Pane Manager. Do not maintain a
-second, conflicting launch policy. Full original role prompts remain intact, augmented
-by trusted host policy and resolved skill instructions. Do not reduce Chat/Coordinator
-personality to a boilerplate role name.
+Code launch hiện có là `packages/pane-manager/src/provider-launch.ts`; P25 trích xuất hoặc
+bọc lại hành vi đã xác minh của nó và P30 nối ngược vào Pane Manager. Không duy trì chính
+sách launch thứ hai mâu thuẫn. Prompt role gốc đầy đủ được giữ nguyên, bổ sung bằng chính
+sách host tin cậy và skill instruction đã resolve. Không rút gọn personality của
+Chat/Coordinator thành một tên role chung chung.
 
-| Provider | Existing/observed controls | P25 acceptance requirement |
+| Provider | Kiểm soát hiện có/đã quan sát | Yêu cầu nghiệm thu P25 |
 | --- | --- | --- |
-| Claude Code | Installed 2.1.301. Existing launch uses strict MCP config, restricted tools, scoped settings/hooks and `dontAsk`; prompt-file launch exists | Preserve verified native SessionStart/UserPromptSubmit/PreToolUse wiring; prove role capabilities and deny behavior in launch-local config. `dontAsk` denies calls that would require a prompt; it does not provide OS sandboxing. [Official permissions](https://code.claude.com/docs/en/permissions) |
-| Codex | Installed 0.162.0. Existing helper uses read-only/workspace-write sandbox, approval never, explicit MCP, `model_instructions_file`, no daemon; hook trust opt-in is scoped to vetted generated hooks | Verify installed parser/flags, auth, native session/human origin and host tools before default-host support. Approval `never` does not turn off workspace sandbox; do not choose danger-full-access. MCP supports stdio and Streamable HTTP with scoped config. [Official MCP configuration](https://developers.openai.com/codex/mcp), [configuration reference](https://developers.openai.com/codex/config-reference) |
-| Agy | Installed 1.4.0. Local help offers `--sandbox`, print/stream-json, MCP stdio/http configuration; also exposes a permission-skip flag | Verify actual auth/status support, role injection, Herdr agent kind/native session identity, hook equivalent, config scope and enforced sandbox. Help text is discovery evidence only. No supported unattended or P19 integration claim until these pass |
+| Claude Code | Đã cài 2.1.301. Launch hiện có dùng strict MCP config, tool bị hạn chế, settings/hook có scope và `dontAsk`; có launch bằng prompt-file | Giữ nguyên wiring native SessionStart/UserPromptSubmit/PreToolUse đã xác minh; chứng minh capability của role và hành vi deny trong config cục bộ của launch. `dontAsk` từ chối các lời gọi cần prompt; nó không cung cấp OS sandboxing. [Tài liệu permissions chính thức](https://code.claude.com/docs/en/permissions) |
+| Codex | Đã cài 0.162.0. Helper hiện có dùng sandbox read-only/workspace-write, approval never, MCP tường minh, `model_instructions_file`, không daemon; việc opt-in tin cậy hook chỉ áp dụng cho các hook sinh ra đã được kiểm duyệt | Xác minh parser/cờ đã cài, auth, native session/nguồn gốc human và host tool trước khi hỗ trợ default-host. Approval `never` không tắt workspace sandbox; không chọn danger-full-access. MCP hỗ trợ stdio và Streamable HTTP với config có scope. [Cấu hình MCP chính thức](https://developers.openai.com/codex/mcp), [tham chiếu cấu hình](https://developers.openai.com/codex/config-reference) |
+| Agy | Đã cài 1.4.0. Help cục bộ có `--sandbox`, print/stream-json, cấu hình MCP stdio/http; đồng thời có cờ bỏ qua permission | Xác minh hỗ trợ auth/status thực tế, role injection, agent kind của Herdr/định danh native session, hook tương đương, config scope và sandbox được thực thi. Help text chỉ là bằng chứng khám phá. Không tuyên bố hỗ trợ unattended hay tích hợp P19 cho đến khi các mục này pass |
 
-Do not use `codex exec`, Claude background mode, Agy remote-control or another daemon
-to bypass Herdr pane/process ownership. Noninteractive execution must still be launched
-and observed through the Herdr lifecycle. A print-mode probe is a bounded conformance
-probe, not a replacement orchestration system or proof of full workflow success.
+Không dùng `codex exec`, Claude background mode, Agy remote-control hay daemon khác để
+vượt qua quyền sở hữu pane/process của Herdr. Thực thi không tương tác vẫn phải được launch
+và quan sát qua vòng đời Herdr. Một probe print-mode là probe conformance có giới hạn,
+không phải hệ thống orchestration thay thế hay bằng chứng workflow hoàn tất.
 
-P24 inspected versions/help and ran an isolated Herdr transport lifecycle test without
-model turns; it did not test provider login, install skills, modify MCP configs or
-re-certify previous native/model smoke. Unsupported providers remain first-class
-diagnostics; Bflow must not silently fall back to another provider.
+P24 đã kiểm tra version/help và chạy một test vòng đời Herdr transport cô lập mà không có
+lượt model; nó không test đăng nhập provider, không cài skill, không sửa config MCP và không
+chứng nhận lại smoke native/model trước đó. Provider không được hỗ trợ vẫn là chẩn đoán hạng
+nhất; Bflow không được âm thầm fallback sang provider khác.
 
-## Errors, readiness and user decisions
+## Lỗi, readiness và quyết định của người dùng
 
-Use existing ContractError codes: `validation`, `unsupported_version`, `not_found`,
-`conflict`, `transport_unavailable`, deadline-safe `timeout`, `cancelled`, `corruption`,
-and `unknown_delivery` for uncertain transport side effects. Unsupported capabilities
-are a successful observation with health `unsupported`; auth/trust/policy prerequisites
-are health `blocked`. An operational probe failure may use OperationResult failure;
-none of these outcomes may be treated as ready.
+Dùng các ContractError code hiện có: `validation`, `unsupported_version`, `not_found`,
+`conflict`, `transport_unavailable`, `timeout` an toàn với deadline, `cancelled`, `corruption`,
+và `unknown_delivery` cho side effect transport không chắc chắn. Capability không được hỗ trợ
+là một quan sát thành công với health `unsupported`; điều kiện tiên quyết về auth/trust/policy
+là health `blocked`. Lỗi probe vận hành có thể dùng OperationResult failure; không kết quả
+nào trong số này được coi là ready.
 
-Specialists never accept native user questions. Disable direct elicitation/approval UI;
-translate blocked action to a structured Runtime request using existing RoleMessage
-types and correlation. Runtime routes it via Herdr to Conversation; the trusted human
-hook authenticates the answer. A denied or expired request remains denied. Setup/login
-can require an operator command before the session, but startup never auto-accepts
-provider trust/update/login screens. Unattended means authorized work progresses without
-manual keystrokes; mandatory human decisions remain waiting, bounded and recoverable.
+Specialist không bao giờ chấp nhận câu hỏi native từ người dùng. Tắt UI elicitation/approval
+trực tiếp; chuyển hành động bị chặn thành request Runtime có cấu trúc, dùng các RoleMessage
+type và correlation hiện có. Runtime định tuyến qua Herdr tới Conversation; hook human tin
+cậy xác thực câu trả lời. Request bị từ chối hoặc hết hạn vẫn là bị từ chối. Setup/login có
+thể yêu cầu lệnh của operator trước session, nhưng startup không bao giờ tự động chấp nhận
+màn hình trust/update/login của provider. Unattended nghĩa là công việc đã được ủy quyền tiến
+triển mà không cần gõ phím thủ công; các quyết định bắt buộc của con người vẫn ở trạng thái
+chờ, có giới hạn và có thể phục hồi.

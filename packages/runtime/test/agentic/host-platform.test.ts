@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -63,7 +63,7 @@ describe("Codex hook trust propagation", () => {
   });
 
   it("shares execution probes across adapters from one host factory while each role checks authentication", async () => {
-    const root = await mkdtemp(join(tmpdir(), "bflow-host-coalescer-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-host-coalescer-")));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
     const home = join(root, "home"), state = join(root, "state"), binary = join(root, "codex");
     await mkdir(home, { mode: 0o700 }); await mkdir(state, { mode: 0o700 });
@@ -193,7 +193,7 @@ async function activationSession(roles = permanentRoles.map(role => roleOption(r
 }
 
 async function session(service: PlatformReadinessService, extra: Partial<{ generationFile: string; launchesFile: string; gatewayDiagnostic: string }> = {}) {
-  const root = await mkdtemp(join(tmpdir(), "bflow-host-platform-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-host-platform-")));
   cleanup.push(() => rm(root, { recursive: true, force: true }));
   const options = {
     service, platform, repositoryPath: root, sessionId: "s1", stateDirectory: join(root, "state"),

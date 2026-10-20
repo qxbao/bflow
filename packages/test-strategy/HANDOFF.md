@@ -1,122 +1,121 @@
-# P16 implementation handoff — 2026-10-16
+# Bàn giao triển khai P16 — 2026-10-16
 
-Historical implementation handoff. Subsequent review fixes and package registration
-are recorded in [REVIEW.md](REVIEW.md); the integration proposals below describe
-the original pre-integration state.
+Bản bàn giao triển khai mang tính lịch sử. Các bản sửa review sau đó và việc đăng ký
+package được ghi trong [REVIEW.md](REVIEW.md); các đề xuất tích hợp bên dưới mô tả
+trạng thái gốc trước tích hợp.
 
-Conditional TDD Policy Engine is implemented locally on
-`agent/test-strategy/p16-conditional-tdd`, in `/tmp/bflow-p16-test-strategy`.
-The tested implementation commit is
+Conditional TDD Policy Engine được triển khai cục bộ trên
+`agent/test-strategy/p16-conditional-tdd`, tại `/tmp/bflow-p16-test-strategy`.
+Commit triển khai được kiểm thử là
 `02e6ca534ce9cadfbe241523bafc03e330758a7f`.
-This report is a subsequent documentation-only commit. No remote merge, push,
-P19 integration, or live Herdr verification is claimed.
+Báo cáo này là một commit chỉ-tài-liệu tiếp theo. Không khẳng định remote merge, push,
+tích hợp P19 hay xác minh Herdr thật.
 
-## Baseline and ownership
+## Baseline và quyền sở hữu
 
-- Base: `4e818b4a7c0c9b102bf1e85906a24d57fd6c192c`, the observed clean `main` and
-  `origin/main`, containing P11 `106d69d` and accepted extensions `8c27cbf` plus
-  integrated P13/P14/P15 predecessors. Local refs, worktrees, ancestry, contract
-  diffs and patch equivalence (`git cherry -v origin/main main`, empty) were inspected.
-- A dedicated branch/worktree was created; other worktrees and uncommitted work
-  were preserved. `main` remained at the same approved baseline at handoff.
-- The complete committed diff is under `packages/test-strategy/**`: implementation,
-  package configuration, unit tests, prompts, example and package documentation.
-- No contracts, Workflow Engine, Runtime, shared documentation, root configuration,
-  migrations or lockfile changes are committed. Generated `dist`, dependency links
-  and raw test logs remain untracked/ignored or outside the repository.
+- Base: `4e818b4a7c0c9b102bf1e85906a24d57fd6c192c`, `main` và
+  `origin/main` sạch quan sát được, chứa P11 `106d69d` và các phần mở rộng được chấp nhận
+  `8c27cbf` cùng các tiền nhiệm P13/P14/P15 đã tích hợp. Đã kiểm tra các ref cục bộ,
+  worktree, ancestry, contract diff và patch equivalence (`git cherry -v origin/main main`, rỗng).
+- Một branch/worktree riêng được tạo; các worktree khác và công việc chưa commit được
+  giữ nguyên. `main` vẫn ở cùng baseline đã phê duyệt khi bàn giao.
+- Toàn bộ diff đã commit nằm dưới `packages/test-strategy/**`: triển khai, cấu hình
+  package, unit test, prompt, ví dụ và tài liệu package.
+- Không có contract, Workflow Engine, Runtime, tài liệu dùng chung, cấu hình gốc,
+  migration hay thay đổi lockfile nào được commit. `dist` sinh ra, link dependency và
+  raw test log vẫn untracked/ignored hoặc nằm ngoài repository.
 
-## Delivered behavior
+## Hành vi đã bàn giao
 
-`TestStrategyResolver.resolve` parses a contract `Specification`, evaluates seven
-assessment inputs and emits a contract `TestStrategy`/`TddDecision`. Private,
-versioned metadata uses strict Zod schemas. Required verification methods, suggested
-levels, spec-to-test mappings, rationale and evidence requirements are explicit.
+`TestStrategyResolver.resolve` parse một `Specification` contract, đánh giá bảy input
+assessment và phát ra `TestStrategy`/`TddDecision` contract. Metadata riêng tư có phiên
+bản dùng các Zod schema nghiêm ngặt. Các verification method bắt buộc, test level đề
+xuất, ánh xạ spec-to-test, rationale và evidence requirement đều tường minh.
 
-Deterministic logic, reproducible regressions, APIs, validation, transformations
-and state machines typically require TDD when a runnable behavioral test is feasible.
-Integration/refactoring/exploration typically recommend it. Pure documentation,
-formatting, visual layout, wiring and simple configuration can use alternatives.
-Mixed behavioral impacts, behavioral acceptance criteria, actual paths, risk and
-project conventions override superficial task labels. Incomplete infrastructure
-retains verification obligations and exposes missing command provisioning.
+Logic xác định, regression tái hiện được, API, validation, transformation và state
+machine thường yêu cầu TDD khi có một behavioral test chạy được khả thi.
+Integration/refactoring/exploration thường chỉ khuyến nghị. Documentation thuần,
+formatting, visual layout, wiring và configuration đơn giản có thể dùng phương án thay
+thế. Các impact hành vi hỗn hợp, behavioral acceptance criterion, đường dẫn thực tế,
+rủi ro và project convention ghi đè các task label bề ngoài. Infrastructure chưa đầy đủ
+giữ lại nghĩa vụ verification và phơi bày việc thiếu provisioning command.
 
-High/critical risk adds review/static analysis and behavioral integration checks.
-Security/data migration signals raise effective risk. Domain logic/bug fixes cannot
-be marked non-applicable by this engine; unverified override booleans are ignored.
-`validateAgainstSpecification` rejects a changed assessment or mismatched policy
-against the authoritative input, beyond self-consistency checks.
+Rủi ro high/critical bổ sung review/static analysis và behavioral integration check.
+Tín hiệu security/data migration nâng rủi ro hiệu lực. Domain logic/bug fix không thể
+bị đánh dấu non-applicable bởi engine này; các boolean override chưa xác minh bị bỏ qua.
+`validateAgainstSpecification` từ chối assessment bị thay đổi hoặc policy không khớp
+so với input có thẩm quyền, vượt ra ngoài các kiểm tra tự nhất quán.
 
-Evidence APIs parse contract `VerificationResult` records, enforce correlated
-Red/Green/refactor ordering and unchanged test identities, reject unrelated or
-infrastructure Red failures, and require distinct attempts/stored artifacts.
-Alternative modes still need successful objective verification covering required
-criteria and methods. Receipt retries are idempotent; conflicting IDs fail. The
-caller persists the returned contract value, including preserved phase evidence.
+Evidence API parse các record `VerificationResult` của contract, thực thi thứ tự
+Red/Green/refactor tương quan và danh tính test không đổi, từ chối các lỗi Red không
+liên quan hoặc do infrastructure, và yêu cầu attempt/artifact đã lưu khác nhau. Các
+alternative mode vẫn cần verification khách quan thành công bao phủ criterion và method
+bắt buộc. Retry receipt là idempotent; ID xung đột thì thất bại. Caller lưu giá trị
+contract được trả về, bao gồm phase evidence được giữ nguyên.
 
-Three prompt templates cover assessment, required TDD and alternative verification.
-The documented JSON input is exercised by a unit test; built ESM exports were also
-checked with that example.
+Ba prompt template bao phủ assessment, required TDD và alternative verification.
+JSON input được tài liệu hóa được thực thi bởi một unit test; các export ESM đã build
+cũng được kiểm tra với ví dụ đó.
 
-## Validation evidence
+## Evidence xác thực
 
-Platform: Linux/local filesystem, Node `v24.16.0`, pinned pnpm `12.5.1`.
-All final checks below ran against implementation HEAD `02e6ca5`.
+Nền tảng: Linux/hệ thống file cục bộ, Node `v24.16.0`, pnpm `12.5.1` đã pin.
+Mọi kiểm tra cuối cùng bên dưới chạy trên implementation HEAD `02e6ca5`.
 
-| Command | Exit | Result |
+| Command | Exit | Kết quả |
 | --- | --- | --- |
-| `pnpm check:deps` | 0 | Acyclic: 13 packages, 19 internal edges |
-| `pnpm typecheck` | 0 | Existing root project references pass |
-| `pnpm --filter @bflow/test-strategy typecheck` | 0 | P16 explicitly typechecked, including contract project reference |
-| `pnpm --filter @bflow/test-strategy test` | 0 | Build then 2 files, 74 passed / 0 failed / 0 skipped |
-| `TMPDIR=/tmp pnpm test` | 0 | Root build then 42 files, 947 passed / 0 failed / 0 skipped |
-| Built ESM import/example check, command below | 0 | Resolution and authoritative-spec validation pass |
-| `git diff --check` | 0 | No whitespace errors |
-| `git status --short` after restoring generated lockfile importer | 0 | Clean after implementation commit; only this report pending before its commit |
+| `pnpm check:deps` | 0 | Không có chu trình: 13 package, 19 cạnh nội bộ |
+| `pnpm typecheck` | 0 | Các project reference gốc hiện có pass |
+| `pnpm --filter @bflow/test-strategy typecheck` | 0 | P16 được typecheck tường minh, gồm project reference của contract |
+| `pnpm --filter @bflow/test-strategy test` | 0 | Build rồi 2 file, 74 passed / 0 failed / 0 skipped |
+| `TMPDIR=/tmp pnpm test` | 0 | Build gốc rồi 42 file, 947 passed / 0 failed / 0 skipped |
+| Kiểm tra import/ví dụ ESM đã build, lệnh bên dưới | 0 | Resolution và xác thực spec có thẩm quyền pass |
+| `git diff --check` | 0 | Không có lỗi whitespace |
+| `git status --short` sau khi khôi phục importer lockfile sinh ra | 0 | Sạch sau implementation commit; chỉ báo cáo này còn chờ trước commit của nó |
 
-Built export smoke command (from repository root):
+Lệnh smoke export đã build (từ thư mục gốc repository):
 
 ```bash
 node --input-type=module -e 'import { readFileSync } from "node:fs"; import { TestStrategyResolver } from "./packages/test-strategy/dist/index.js"; const spec = JSON.parse(readFileSync("packages/test-strategy/examples/domain-logic.spec.json", "utf8")); const resolver = new TestStrategyResolver(); const strategy = resolver.resolve(spec); resolver.validateAgainstSpecification(strategy, spec); if (strategy.tddDecision.mode !== "required") throw new Error("Unexpected policy"); console.log("Built ESM export and contract example: PASS");'
 ```
 
-The first unmodified `pnpm test` run exited 1: 939 passed, 1 failed, 0 skipped
-(940 tests at that revision). ArtifactStore's Unix-socket fixture could not bind
-its socket because the inherited profile TMPDIR produced an overlong AF_UNIX path
-(`listen EINVAL`). Re-running with `TMPDIR=/tmp` passed all tests, including that
-fixture. No ArtifactStore source or test was changed. The final 947-test count
-includes additional P16 tests added after that initial run.
+Lần chạy `pnpm test` đầu tiên chưa chỉnh sửa exit 1: 939 passed, 1 failed, 0 skipped
+(940 test ở revision đó). Fixture Unix-socket của ArtifactStore không thể bind socket
+vì TMPDIR của profile kế thừa tạo đường dẫn AF_UNIX quá dài (`listen EINVAL`). Chạy lại
+với `TMPDIR=/tmp` pass mọi test, kể cả fixture đó. Không có source hay test ArtifactStore
+nào bị thay đổi. Số lượng 947 test cuối cùng bao gồm các test P16 bổ sung thêm sau lần
+chạy ban đầu.
 
-P16 tests cover task classes, mixed-label evasion, criterion/path contradictions,
-missing rationale/context, all-optional criteria, partial/absent infrastructure,
-high/critical risk, security/migration impact, project conventions, policy
-downgrades, authoritative assessment binding, phase ordering, method/criterion
-coverage, changed tests, incorrect run/task/spec/decision, stale/untrusted artifacts,
-nonzero Red and zero Green exits, receipt collisions, persisted-history validation,
-and successful visual/schema/smoke/formatting and high-risk multi-method evidence.
+Các test P16 bao phủ task class, né tránh bằng label hỗn hợp, mâu thuẫn criterion/đường
+dẫn, thiếu rationale/context, criterion toàn tùy chọn, infrastructure một phần/vắng mặt,
+rủi ro high/critical, tác động security/migration, project convention, hạ cấp policy,
+ràng buộc assessment có thẩm quyền, thứ tự phase, bao phủ method/criterion, test bị đổi,
+run/task/spec/decision sai, artifact cũ/không tin cậy, exit Red khác 0 và Green bằng 0,
+xung đột receipt, xác thực lịch sử đã lưu, và evidence đa-method thành công cho
+visual/schema/smoke/formatting và rủi ro cao.
 
-### Implementation Red/Green/refactor trail
+### Dấu vết Red/Green/refactor của triển khai
 
-These are implementation-session test observations, not live task evidence or
-ArtifactStore trust claims. Raw reports are outside Git; generated logs are not
-committed.
+Đây là các quan sát test trong phiên triển khai, không phải evidence task thật hay
+khẳng định tin cậy ArtifactStore. Raw report nằm ngoài Git; log sinh ra không được commit.
 
-| Stage | Command and result |
+| Giai đoạn | Command và kết quả |
 | --- | --- |
-| Red | `pnpm exec vitest run packages/test-strategy/test --reporter=json --outputFile=/tmp/bflow-p16-red.json` — exit 1, 47 failed / 4 passed / 0 skipped. Resolver/evidence behavior intentionally absent; failures reported `Policy resolution is not implemented`. Invalid-ingress checks already passed. |
-| Green | `pnpm exec vitest run packages/test-strategy/test --reporter=json --outputFile=/tmp/bflow-p16-green.json` — exit 0, 51 passed / 0 failed / 0 skipped after implementing target policy and evidence behavior. |
-| Refactor/hardening | Separated required method levels from optional suggestions, removed redundant phase state, added authoritative-spec binding and adversarial evidence coverage. Final package rerun: 74 passed; full monorepo rerun: 947 passed. |
+| Red | `pnpm exec vitest run packages/test-strategy/test --reporter=json --outputFile=/tmp/bflow-p16-red.json` — exit 1, 47 failed / 4 passed / 0 skipped. Hành vi resolver/evidence cố ý vắng mặt; các lỗi báo `Policy resolution is not implemented`. Các kiểm tra invalid-ingress đã pass. |
+| Green | `pnpm exec vitest run packages/test-strategy/test --reporter=json --outputFile=/tmp/bflow-p16-green.json` — exit 0, 51 passed / 0 failed / 0 skipped sau khi triển khai policy mục tiêu và hành vi evidence. |
+| Refactor/hardening | Tách các level của method bắt buộc khỏi các đề xuất tùy chọn, bỏ phase state dư thừa, thêm ràng buộc spec có thẩm quyền và bao phủ evidence đối kháng. Chạy lại package cuối: 74 passed; chạy lại toàn monorepo: 947 passed. |
 
-Raw report SHA-256 checksums at handoff:
+SHA-256 checksum của raw report khi bàn giao:
 
 - Red: `bee5de2b8c870e33834d2b0d0d3d0cf6c741ccdf8f71dde8c81e084640ac352f`.
 - Green: `33201aa28820f4d724d5c8ba0f95bccb7b94e55db58945f1ece170babb456ba4`.
 
-## Integration proposals and remaining scope
+## Đề xuất tích hợp và phạm vi còn lại
 
-The integrator should register the package in shared build/install configuration:
+Integrator nên đăng ký package trong cấu hình build/install dùng chung:
 
-1. Add `{ "path": "./packages/test-strategy" }` to root `tsconfig.json` references.
-2. Regenerate the lockfile to include this importer, using existing resolved dependencies:
+1. Thêm `{ "path": "./packages/test-strategy" }` vào các reference của `tsconfig.json` gốc.
+2. Sinh lại lockfile để gồm importer này, dùng các dependency đã resolve hiện có:
 
    ```yaml
    packages/test-strategy:
@@ -129,26 +128,26 @@ The integrator should register the package in shared build/install configuration
          version: 3.25.76
    ```
 
-3. Update shared package status documentation to describe P16 as implemented after
-   integration, with Runtime enforcement still pending P19.
-4. P19 consumes the metadata assessment, resolves policy, validates it against the
-   authoritative accepted spec, persists evidence and invokes policy checks through
-   Runtime. P17 independently verifies actual logs, revisions and acceptance.
+3. Cập nhật tài liệu trạng thái package dùng chung để mô tả P16 là đã triển khai sau
+   tích hợp, với việc thực thi qua Runtime vẫn chờ P19.
+4. P19 tiêu thụ metadata assessment, phân giải policy, xác thực nó với spec đã chấp nhận
+   có thẩm quyền, lưu evidence và gọi các kiểm tra policy qua Runtime. P17 xác minh độc
+   lập log thực tế, revision và việc chấp nhận.
 
-pnpm 12 automatically generated the nine-line importer during local command runs;
-it was restored before commits. Root typecheck/build therefore do not yet include
-P16 by reference: the explicit package build/typecheck commands above provide P16
-coverage. Clean frozen-lockfile installation on integration requires proposal 2;
-this feature commit alone does not claim that shared registration is complete.
+pnpm 12 tự động sinh importer chín dòng trong các lần chạy lệnh cục bộ; nó đã được khôi
+phục trước các commit. Do đó build/typecheck gốc chưa bao gồm P16 theo reference: các
+lệnh build/typecheck package tường minh ở trên cung cấp độ bao phủ P16. Cài đặt clean với
+frozen lockfile trên tích hợp cần đề xuất 2; riêng feature commit này không khẳng định
+việc đăng ký dùng chung đã hoàn tất.
 
-No shared contract amendment or migration is requested. Assessment and evidence
-details use existing contract metadata extension points. Full-SDD contract inputs
-already require a valid strategy/decision; initial policy can be resolved on a
-lightweight planning spec and then composed through P15 without weakening contracts.
+Không yêu cầu sửa đổi shared contract hay migration. Chi tiết assessment và evidence dùng
+các điểm mở rộng metadata của contract hiện có. Input contract full-SDD đã yêu cầu strategy/decision
+hợp lệ; policy ban đầu có thể được phân giải trên lightweight planning spec rồi soạn qua
+P15 mà không làm yếu contract.
 
-The engine validates declared evidence structure, bindings and sequence. It does
-not execute tests, read/verify artifact bytes, authenticate reference provenance,
-inspect Git history, grant human overrides or perform independent acceptance.
-Those remain existing ArtifactStore/P17/P19 responsibilities. Synthetic unit
-fixtures do not establish live Herdr E2E or durability/security guarantees.
-P02-RA01 and P03-RA01 remain untouched with their original owners.
+Engine xác thực cấu trúc evidence đã khai báo, ràng buộc và trình tự. Nó không thực thi
+test, không đọc/xác minh byte artifact, không xác thực provenance của reference, không
+kiểm tra lịch sử Git, không cấp human override và không thực hiện chấp nhận độc lập.
+Các việc đó vẫn là trách nhiệm hiện có của ArtifactStore/P17/P19. Các fixture unit tổng
+hợp không xác lập E2E Herdr thật hay đảm bảo về độ bền/bảo mật. P02-RA01 và P03-RA01 không
+bị đụng tới và thuộc các chủ sở hữu gốc.
