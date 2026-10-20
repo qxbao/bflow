@@ -873,7 +873,10 @@ export class ConversationGateway {
             [runId]: correlationId
           };
 
-          const updatedPendingClarifications = { ...this.snapshot!.pendingClarifications };
+          // A new independent request supersedes every abandoned clarification; a requirement change only closes its own.
+          const independentRequest = !isRequirementChange && existingWorkflow === undefined &&
+            this.snapshot!.pendingClarifications[correlationId] === undefined;
+          const updatedPendingClarifications = independentRequest ? {} : { ...this.snapshot!.pendingClarifications };
           delete updatedPendingClarifications[correlationId];
 
           const remainingUnresolvedQuestions = Object.values(updatedPendingClarifications).flatMap(
