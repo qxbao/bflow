@@ -1,4 +1,4 @@
-# SDD & TDD Policies
+# Chính sách SDD & TDD
 
 Trước implementation, cần Specification đã được chấp nhận với criterion records
 cụ thể. `Specification` dùng schemaVersion **2**, khác config/workflow schema

@@ -6,31 +6,31 @@
 [![pnpm 12.5.1](https://img.shields.io/badge/pnpm-12.5.1-F69220?logo=pnpm&logoColor=white)](https://pnpm.io/)
 [![TypeScript 5.7](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 
-**bflow** is a modular TypeScript platform and CLI for orchestrating AI coding agents across software delivery (SDLC) workflows. It coordinates multi-step engineering tasks (`plan` → `implement` → `qa` → `review`) with deterministic state transitions, durable SQLite execution records, content-addressed artifacts, automated quality gates, and human approval checkpoints.
+**bflow** là một nền tảng TypeScript dạng module và CLI để điều phối các AI coding agent trong quy trình phát triển phần mềm (SDLC). Nền tảng điều phối các tác vụ kỹ thuật nhiều bước (`plan` → `implement` → `qa` → `review`) với chuyển trạng thái tất định, bản ghi thực thi SQLite bền vững, artifact định địa chỉ theo nội dung, quality gate tự động và các điểm kiểm tra phê duyệt của con người.
 
 ---
 
-## Features
+## Tính năng
 
-- **Deterministic Workflow Engine (`@bflow/core`)** — Evaluates task DAGs, enforces state transitions, manages bounded retry and rework loops, and supports full recovery from event logs and aggregate checkpoints.
-- **Durable Local Persistence (`@bflow/persistence` & `@bflow/artifact-store`)** — Stores workflow events, execution receipts, and run projections in SQLite (`node:sqlite`) alongside checksum-verified immutable artifacts on disk.
-- **Role & Lease Registry (`@bflow/agent-registry`)** — Resolves configured SDLC roles to agents with lease acquisition, fencing tokens, and structured output validation.
-- **Independent Quality Gates (`@bflow/quality-gates`)** — Runs verification commands (`typecheck`, `lint`, `unit_test`, `build`, or custom checks) in the target workspace independently of agent self-reports.
-- **Human-in-the-Loop Governance** — Enforces human actor verification on approval gates (`approved`, `changes_requested`, `rejected`) before advancing gated tasks.
-- **Platform v3 building blocks (P25–P29)** — Provider adapters (Claude Code, Codex, Agy), machine setup and pinned tool installer, shared MCP Gateway and OS services, pinned instruction-only skills, and high-level CLI commands. Runtime integration (P30) is implemented in source with local tests; platform-v3 acceptance (P31) is not yet implemented.
-- **CLI & Programmatic Runtime (`@bflow/cli` & `@bflow/runtime`)** — Manage workflows from the terminal via `bflow` (human-readable or `--json` output) or embed `createRuntimeService` directly in Node.js applications.
-
----
-
-## Requirements
-
-- **Node.js `>= 22.13`** (required for unflagged built-in `node:sqlite`)
-- **pnpm `12.5.1`** (pinned via `packageManager` in `package.json`)
-- Default persistent Claude host: Linux/local filesystems, Unix sockets and `flock`; other platforms have not been verified.
+- **Deterministic Workflow Engine (`@bflow/core`)** — Đánh giá DAG tác vụ, thực thi các chuyển trạng thái hợp lệ, quản lý vòng retry và rework có giới hạn, và hỗ trợ khôi phục đầy đủ từ event log và aggregate checkpoint.
+- **Durable Local Persistence (`@bflow/persistence` & `@bflow/artifact-store`)** — Lưu workflow event, execution receipt và run projection trong SQLite (`node:sqlite`), cùng với các artifact bất biến được xác minh checksum trên đĩa.
+- **Role & Lease Registry (`@bflow/agent-registry`)** — Ánh xạ các role SDLC đã cấu hình tới agent, kèm lấy lease, fencing token và xác thực đầu ra có cấu trúc.
+- **Independent Quality Gates (`@bflow/quality-gates`)** — Chạy các lệnh xác minh (`typecheck`, `lint`, `unit_test`, `build` hoặc kiểm tra tùy chỉnh) trong workspace đích, độc lập với báo cáo tự đánh giá của agent.
+- **Human-in-the-Loop Governance** — Bắt buộc xác minh tác nhân là con người tại các approval gate (`approved`, `changes_requested`, `rejected`) trước khi cho các tác vụ bị chặn tiến tiếp.
+- **Platform v3 building blocks (P25–P29)** — Provider adapter (Claude Code, Codex, Agy), machine setup và trình cài đặt tool được pin phiên bản, MCP Gateway dùng chung và các dịch vụ OS, skill chỉ chứa hướng dẫn được pin phiên bản, cùng các lệnh CLI cấp cao. Tích hợp Runtime (P30) đã được triển khai trong source với test cục bộ; nghiệm thu platform-v3 (P31) chưa được triển khai.
+- **CLI & Programmatic Runtime (`@bflow/cli` & `@bflow/runtime`)** — Quản lý workflow từ terminal qua `bflow` (đầu ra dễ đọc hoặc `--json`) hoặc nhúng trực tiếp `createRuntimeService` vào ứng dụng Node.js.
 
 ---
 
-## Installation & Quick Start
+## Yêu cầu
+
+- **Node.js `>= 22.13`** (cần cho `node:sqlite` tích hợp sẵn không cần cờ)
+- **pnpm `12.5.1`** (được pin qua `packageManager` trong `package.json`)
+- Persistent Claude host mặc định: Linux/filesystem cục bộ, Unix socket và `flock`; các nền tảng khác chưa được xác minh.
+
+---
+
+## Cài đặt & Bắt đầu nhanh
 
 ```bash
 git clone https://github.com/qxbao/bflow.git
@@ -39,7 +39,7 @@ pnpm install --frozen-lockfile
 pnpm build
 ```
 
-Verify the workspace build and run the demo workflow:
+Xác minh bản build của workspace và chạy workflow demo:
 
 ```bash
 node examples/runtime-demo/run-demo.mjs
@@ -47,168 +47,168 @@ node examples/runtime-demo/run-demo.mjs
 
 ---
 
-## CLI Usage
+## Sử dụng CLI
 
-Build from source, set `BFLOW_HOME` to this checkout's absolute path, then run
-from the target Git repository (including a different Node.js/TypeScript project):
+Build từ source, đặt `BFLOW_HOME` là đường dẫn tuyệt đối của checkout này, rồi chạy
+từ Git repository đích (kể cả một dự án Node.js/TypeScript khác):
 
 ```bash
 node "$BFLOW_HOME/apps/cli/dist/bin.js" init --name my-project --provider claude
 node "$BFLOW_HOME/templates/node-typescript/apply.mjs" . bugfix
 node "$BFLOW_HOME/apps/cli/dist/bin.js" doctor --json
 node "$BFLOW_HOME/apps/cli/dist/bin.js" status --json
-# Requires installed/authenticated Herdr agent integrations:
+# Yêu cầu tích hợp agent Herdr đã được cài đặt/xác thực:
 node "$BFLOW_HOME/apps/cli/dist/bin.js" up --timeout 60000
 node "$BFLOW_HOME/apps/cli/dist/bin.js" attach
 ```
 
-Init writes commented, traditional YAML in **`.bflow/config.yml`** with
-checkout-specific identity. `bflow config-migrate` converts one legacy
-`.bflow/config.yaml` or `.bflow/config.json`, keeps its values, and saves the
-original as a `.bak` file. Run init separately in each repository/worktree.
-Plain repeated init preserves the file; explicit `--force`/`--yes` overwrites it.
-Track portable templates rather than copying a bound config across clones.
-For repositories created by older Bflow versions, run
-`node "$BFLOW_HOME/apps/cli/dist/bin.js" config-migrate` before using the YAML file.
+Init ghi YAML truyền thống có chú thích vào **`.bflow/config.yml`** với
+định danh riêng cho từng checkout. `bflow config-migrate` chuyển đổi một
+`.bflow/config.yaml` hoặc `.bflow/config.json` cũ, giữ nguyên giá trị và lưu
+bản gốc thành file `.bak`. Chạy init riêng trong từng repository/worktree.
+Chạy init lặp lại thông thường sẽ giữ nguyên file; `--force`/`--yes` tường minh sẽ ghi đè.
+Hãy theo dõi các template portable thay vì sao chép config đã gắn định danh giữa các bản clone.
+Với repository được tạo bởi phiên bản Bflow cũ hơn, chạy
+`node "$BFLOW_HOME/apps/cli/dist/bin.js" config-migrate` trước khi dùng file YAML.
 
-If `bflow up` fails after changing session state, it attempts a safe `down`.
-When cleanup cannot be proven safe, the error reports that outcome and preserves
-the operation receipt and recovery state for `status`, `doctor`, or a later
-`bflow down --yes` reconciliation. A failed start is not evidence that all panes
-were stopped.
+Nếu `bflow up` thất bại sau khi đã thay đổi trạng thái session, nó sẽ cố gắng thực hiện `down` an toàn.
+Khi không thể chứng minh việc dọn dẹp là an toàn, lỗi sẽ báo kết quả đó và giữ lại
+operation receipt cùng trạng thái khôi phục cho `status`, `doctor` hoặc lần đối soát
+`bflow down --yes` sau đó. Một lần khởi động thất bại không phải bằng chứng rằng mọi pane
+đã được dừng.
 
-`up` now starts a persistent P19 host, registers scoped Claude MCP tools and
-launch-local native session/user-input hooks, then requires host activation before
-reporting readiness. The default host supports Claude documentation/manual review
-and owner-configured Node TAP or Vitest 2.1 behavioral verification, including
-independent Red–Green–Refactor. Configure [.bflow/verification.json](docs/verification-runners.md)
-before startup; automated checks require the Linux Bubblewrap sandbox. Codex launch helpers remain available, but the default
-host refuses unverified provider hooks. Use `init --provider claude` for this path.
-SDD/conditional-TDD/verification/concurrency policies are forwarded to the host.
-`down` drains the host, persists authoritative checkpoints and closes only the
-repository's panes/server; `--yes` never bypasses the barrier. Live smoke has
-verified `up → down → up → down` without workflow/model turns. Full AI SDLC
-acceptance remains unverified; see [release readiness](docs/release-readiness.md).
+`up` hiện khởi động một persistent P19 host, đăng ký các công cụ Claude MCP có phạm vi
+và các hook native session/user-input cục bộ theo lần launch, rồi yêu cầu host được kích hoạt trước khi
+báo sẵn sàng. Host mặc định hỗ trợ tài liệu Claude/review thủ công
+và xác minh hành vi bằng Node TAP hoặc Vitest 2.1 do owner cấu hình, bao gồm
+Red–Green–Refactor độc lập. Cấu hình [.bflow/verification.json](docs/verification-runners.md)
+trước khi khởi động; các kiểm tra tự động yêu cầu sandbox Linux Bubblewrap. Các codex launch helper vẫn còn, nhưng host
+mặc định từ chối các provider hook chưa được xác minh. Dùng `init --provider claude` cho đường này.
+Các chính sách SDD/conditional-TDD/verification/concurrency được chuyển tiếp tới host.
+`down` drain host, lưu các checkpoint có thẩm quyền và chỉ đóng pane/server
+của repository; `--yes` không bao giờ bỏ qua barrier. Live smoke đã
+xác minh `up → down → up → down` mà không có lượt workflow/model nào. Nghiệm thu AI SDLC
+đầy đủ vẫn chưa được xác minh; xem [release readiness](docs/release-readiness.md).
 
-High-level platform commands (P29), all supporting `--json`: `bflow setup` (`--check`, `--dry-run`/`--plan`, `--apply`, `--repair`, `--yes`), `bflow repo inspect`, `bflow task plan`, `bflow task implement`, `bflow verify`, `bflow git prepare`, `bflow mcp status`, `bflow tool status`, `bflow skills sync` and `bflow agent check`; `bflow recover --yes` clears a legacy lifecycle lock. These reuse existing engines and do not dispatch agents themselves; `bflow up` gates on the Runtime host's per-role provider preflight (P30, source + local tests), and command success is still not workflow acceptance. See `bflow --help`.
+Các lệnh nền tảng cấp cao (P29), đều hỗ trợ `--json`: `bflow setup` (`--check`, `--dry-run`/`--plan`, `--apply`, `--repair`, `--yes`), `bflow repo inspect`, `bflow task plan`, `bflow task implement`, `bflow verify`, `bflow git prepare`, `bflow mcp status`, `bflow tool status`, `bflow skills sync` and `bflow agent check`; `bflow recover --yes` xóa lifecycle lock cũ. Các lệnh này tái sử dụng engine hiện có và tự chúng không dispatch agent; `bflow up` chặn theo preflight provider theo từng role của Runtime host (P30, source + test cục bộ), và việc lệnh thành công vẫn không phải là nghiệm thu workflow. Xem `bflow --help`.
 
-Legacy workflow commands (`run`, `status <run-id>`, `approve`, `resume`, `cancel`)
-remain available through the older workspace Runtime. They do not launch P19.
-Use `--help` for syntax, and the [current guide](docs/guide/README.md) for behavior
-and integration limits. Start with [Getting Started](docs/guide/getting-started.md),
-[portable templates](templates/node-typescript/README.md) and the
-[standalone TypeScript example](examples/portable-node/README.md).
-
----
-
-## Workspace Packages
-
-| Package | Description |
-| --- | --- |
-| [`@bflow/cli`](apps/cli) | Command-line interface (`bflow`) for environment lifecycle (`init`/`up`/`down`/`attach`/`status`/`doctor`), machine setup and provider/skills/tool checks, high-level SDLC commands and workflow-run management |
-| [`@bflow/runtime`](packages/runtime) | High-level orchestration service composing engine, storage, registry, transport, and gates |
-| [`@bflow/core`](packages/core) | Pure deterministic workflow engine (DAG scheduling, transitions, retry/rework, replay) |
-| [`@bflow/contracts`](packages/contracts) | Shared Zod schemas, public port interfaces, and transition/event validators |
-| [`@bflow/agent-registry`](packages/agent-registry) | File-backed role-to-agent registry, leases, fencing tokens, and workflow templates |
-| [`@bflow/herdr-adapter`](packages/herdr-adapter) | CLI-backed `AgentTransport`; protocol/schema negotiation without a CLI version allowlist |
-| [`@bflow/persistence`](packages/persistence) | SQLite `RunStore` for atomic event batches, execution receipts, and checkpoints |
-| [`@bflow/artifact-store`](packages/artifact-store) | Filesystem `ArtifactStore` with SQLite catalog and SHA-256 stream verification |
-| [`@bflow/conversation`](packages/conversation) | Conversation Agent (`chat`) gateway, intent classification, structured `DelegationRequest` builder, and Herdr Coordinator bridge (P14); P19 host composition and authenticated native-message ingress are available through `@bflow/runtime`; live AI delivery requires separate verification |
-| [`@bflow/specification`](packages/specification) | Adaptive specification classification, validation, versioning, traceability and approval policy (P15); P19 host composition and authenticated native-message ingress are available through `@bflow/runtime`; live AI delivery requires separate verification |
-| [`@bflow/test-strategy`](packages/test-strategy) | Conditional TDD policy, criterion mappings and Red/Green/refactor evidence checks (P16); enforced by the implemented P19 host composition |
-| [`@bflow/verification`](packages/verification) | Independent task/workflow verification, criterion evidence, Reviewer/QA checks, bounded rework and escalation (P17); composed by P19 with trusted host gates and authenticated evidence |
-| [`@bflow/git-orchestrator`](packages/git-orchestrator) | Parallel task worktrees, ownership checks, stored patches, recoverable dependency-ordered integration, conflict handoff, workflow verification and provider PR support (P18); composed by P19; requires Linux/local Git |
-| [`@bflow/pane-manager`](packages/pane-manager) | Herdr workspace/tab/pane/agent management, role-to-pane mapping, dynamic Developer worktree panes and restart recovery (P13) |
-| [`@bflow/agent-providers`](packages/agent-providers) | Claude Code, Codex and Agy discovery, preflight/activated health observations, permission-profile compilation, launch profiles and signed startup attestations (P25); composed by the Runtime host for preflight/launch/activation (P30) |
-| [`@bflow/machine-setup`](packages/machine-setup) | Machine setup backend: observe, plan, approve, apply and repair with private state, journal, receipts and doctor (P26); consumed by `bflow setup` |
-| [`@bflow/tool-installer`](packages/tool-installer) | Pinned, checksum-verified tool installs (RTK, GitNexus, MemPalace, provider plugins) and scoped capability inventory (P26) |
-| [`@bflow/mcp-gateway`](packages/mcp-gateway) | Shared MCP service registry, loopback Streamable HTTP server, stdio-to-HTTP bridge, sharing/isolation policy enforcement, exclusive resource leases with fencing tokens, and process/memory/latency metrics (P27); Runtime registers role clients through the authenticated control endpoint (P30) |
-| [`@bflow/mcp-services`](packages/mcp-services) | User-session OS service manager (`systemd --user`, `launchd`, Windows startup), lazy/eager backend resource pooling, memory RSS & process limits, and dedicated isolated Chrome browser runtime with page ownership gates (P27) |
-| [`@bflow/skills`](packages/skills) | Pinned instruction-only skill catalog, role manifests, private storage and provider-neutral references (P28); setup synchronizer, CLI `skills sync` and Runtime per-session manifests (P30) use it |
-| [`@bflow/quality-gates`](packages/quality-gates) | Preset command evaluators, workspace security policies, and RBAC governance |
+Các lệnh workflow cũ (`run`, `status <run-id>`, `approve`, `resume`, `cancel`)
+vẫn dùng được thông qua workspace Runtime cũ. Chúng không khởi chạy P19.
+Dùng `--help` để xem cú pháp, và [hướng dẫn hiện hành](docs/guide/README.md) để biết hành vi
+và giới hạn tích hợp. Bắt đầu với [Getting Started](docs/guide/getting-started.md),
+[portable template](templates/node-typescript/README.md) và
+[ví dụ TypeScript độc lập](examples/portable-node/README.md).
 
 ---
 
-## Development & Testing
+## Các package trong workspace
 
-| Command | Description |
+| Package | Mô tả |
 | --- | --- |
-| `pnpm build` | Compile all workspace packages and CLI (`tsc -b`) |
-| `pnpm lint` | Validate dependency boundaries (`check:deps`) and TypeScript types across workspace & E2E suites |
-| `pnpm test` | Build packages and run all unit & integration tests (Vitest) |
-| `pnpm test:e2e` | Build packages and run end-to-end scenario tests (`tests/e2e`) |
-| `pnpm check` | Run dependency checks, typecheck, and the test suite |
+| [`@bflow/cli`](apps/cli) | Giao diện dòng lệnh (`bflow`) cho vòng đời môi trường (`init`/`up`/`down`/`attach`/`status`/`doctor`), machine setup và kiểm tra provider/skills/tool, các lệnh SDLC cấp cao và quản lý workflow run |
+| [`@bflow/runtime`](packages/runtime) | Dịch vụ điều phối cấp cao kết hợp engine, storage, registry, transport và gate |
+| [`@bflow/core`](packages/core) | Workflow engine tất định thuần (lập lịch DAG, chuyển trạng thái, retry/rework, replay) |
+| [`@bflow/contracts`](packages/contracts) | Zod schema dùng chung, public port interface và các validator transition/event |
+| [`@bflow/agent-registry`](packages/agent-registry) | Registry role-to-agent lưu trên file, lease, fencing token và workflow template |
+| [`@bflow/herdr-adapter`](packages/herdr-adapter) | `AgentTransport` dựa trên CLI; thương lượng protocol/schema không dùng allowlist phiên bản CLI |
+| [`@bflow/persistence`](packages/persistence) | `RunStore` SQLite cho event batch nguyên tử, execution receipt và checkpoint |
+| [`@bflow/artifact-store`](packages/artifact-store) | `ArtifactStore` trên filesystem với catalog SQLite và xác minh stream SHA-256 |
+| [`@bflow/conversation`](packages/conversation) | Gateway của Conversation Agent (`chat`), phân loại intent, bộ dựng `DelegationRequest` có cấu trúc và cầu nối Herdr tới Coordinator (P14); việc kết hợp P19 host và ingress native-message đã xác thực có sẵn qua `@bflow/runtime`; việc chuyển giao AI thực tế cần được xác minh riêng |
+| [`@bflow/specification`](packages/specification) | Phân loại specification thích ứng, xác thực, versioning, truy vết và chính sách phê duyệt (P15); việc kết hợp P19 host và ingress native-message đã xác thực có sẵn qua `@bflow/runtime`; việc chuyển giao AI thực tế cần được xác minh riêng |
+| [`@bflow/test-strategy`](packages/test-strategy) | Chính sách TDD có điều kiện, ánh xạ criterion và kiểm tra bằng chứng Red/Green/refactor (P16); được thực thi bởi phần kết hợp P19 host đã triển khai |
+| [`@bflow/verification`](packages/verification) | Xác minh task/workflow độc lập, bằng chứng criterion, kiểm tra Reviewer/QA, rework có giới hạn và escalation (P17); được P19 kết hợp với các host gate tin cậy và bằng chứng đã xác thực |
+| [`@bflow/git-orchestrator`](packages/git-orchestrator) | Worktree tác vụ song song, kiểm tra quyền sở hữu, patch đã lưu, tích hợp theo thứ tự phụ thuộc có thể khôi phục, bàn giao xung đột, xác minh workflow và hỗ trợ PR của provider (P18); được P19 kết hợp; yêu cầu Linux/Git cục bộ |
+| [`@bflow/pane-manager`](packages/pane-manager) | Quản lý workspace/tab/pane/agent của Herdr, ánh xạ role-to-pane, pane worktree Developer động và khôi phục sau khi restart (P13) |
+| [`@bflow/agent-providers`](packages/agent-providers) | Khám phá Claude Code, Codex và Agy, quan sát health preflight/đã kích hoạt, biên dịch permission profile, launch profile và startup attestation có chữ ký (P25); được Runtime host kết hợp cho preflight/launch/activation (P30) |
+| [`@bflow/machine-setup`](packages/machine-setup) | Backend machine setup: observe, plan, approve, apply và repair với private state, journal, receipt và doctor (P26); được `bflow setup` sử dụng |
+| [`@bflow/tool-installer`](packages/tool-installer) | Cài đặt tool được pin phiên bản và xác minh checksum (RTK, GitNexus, MemPalace, provider plugin) cùng kiểm kê capability theo phạm vi (P26) |
+| [`@bflow/mcp-gateway`](packages/mcp-gateway) | Registry dịch vụ MCP dùng chung, server Streamable HTTP loopback, bridge stdio-to-HTTP, thực thi chính sách chia sẻ/cô lập, exclusive resource lease với fencing token và các metric process/bộ nhớ/độ trễ (P27); Runtime đăng ký role client qua control endpoint đã xác thực (P30) |
+| [`@bflow/mcp-services`](packages/mcp-services) | Trình quản lý dịch vụ OS theo user-session (`systemd --user`, `launchd`, Windows startup), pooling tài nguyên backend lazy/eager, giới hạn RSS bộ nhớ & process, và browser runtime Chrome riêng biệt, cô lập với page ownership gate (P27) |
+| [`@bflow/skills`](packages/skills) | Catalog skill chỉ chứa hướng dẫn được pin phiên bản, role manifest, private storage và tham chiếu trung lập với provider (P28); setup synchronizer, CLI `skills sync` và manifest theo từng session của Runtime (P30) sử dụng nó |
+| [`@bflow/quality-gates`](packages/quality-gates) | Bộ đánh giá lệnh preset, chính sách bảo mật workspace và quản trị RBAC |
 
-### Running Sharded or Targeted Tests
+---
 
-Subprocess and worker tests load compiled modules from `dist/`, so run `pnpm build` before invoking `vitest` directly:
+## Phát triển & Kiểm thử
+
+| Lệnh | Mô tả |
+| --- | --- |
+| `pnpm build` | Biên dịch mọi package trong workspace và CLI (`tsc -b`) |
+| `pnpm lint` | Xác thực ranh giới dependency (`check:deps`) và kiểu TypeScript trên workspace & các suite E2E |
+| `pnpm test` | Build các package và chạy mọi unit & integration test (Vitest) |
+| `pnpm test:e2e` | Build các package và chạy test kịch bản end-to-end (`tests/e2e`) |
+| `pnpm check` | Chạy kiểm tra dependency, typecheck và bộ test |
+
+### Chạy test theo shard hoặc có mục tiêu
+
+Các test subprocess và worker nạp module đã biên dịch từ `dist/`, nên hãy chạy `pnpm build` trước khi gọi trực tiếp `vitest`:
 
 ```bash
 pnpm build
 
-# Run unit tests in shards (e.g. shard 1 of 4)
+# Chạy unit test theo shard (ví dụ shard 1 trên 4)
 pnpm exec vitest run --shard=1/4
 
-# Run E2E tests in shards (e.g. shard 1 of 2)
+# Chạy E2E test theo shard (ví dụ shard 1 trên 2)
 pnpm exec vitest run --config tests/e2e/vitest.config.ts --shard=1/2
 
-# Run tests for a single package
+# Chạy test cho một package
 pnpm exec vitest run packages/runtime/test
 
-# Build and test the independent P17 Verification Engine
+# Build và test Verification Engine P17 độc lập
 pnpm --filter @bflow/verification test
 
-# Run Conversation Gateway tests
+# Chạy test Conversation Gateway
 pnpm --filter @bflow/conversation test
 
-# Run Specification Engine tests
+# Chạy test Specification Engine
 pnpm --filter @bflow/specification test
 
-# Run Conditional TDD Policy Engine tests
+# Chạy test Conditional TDD Policy Engine
 pnpm --filter @bflow/test-strategy test
 
-# Run Git Integration Engine tests (real temporary repositories and SIGKILL recovery)
+# Chạy test Git Integration Engine (repository tạm thật và khôi phục SIGKILL)
 pnpm --filter @bflow/git-orchestrator test
 
-# Run Provider Adapter, Machine Setup, Tool Installer and Skills tests
+# Chạy test Provider Adapter, Machine Setup, Tool Installer và Skills
 pnpm --filter @bflow/agent-providers test
 pnpm --filter @bflow/machine-setup test
 pnpm --filter @bflow/tool-installer test
 pnpm --filter @bflow/skills test
 
-# Run Shared MCP Gateway tests
+# Chạy test Shared MCP Gateway
 pnpm --filter @bflow/mcp-gateway test
 
-# Run OS Services & Dedicated Browser Runtime tests
+# Chạy test OS Services & Dedicated Browser Runtime
 pnpm --filter @bflow/mcp-services test
 ```
 
 ---
 
-## Known Limitations
+## Hạn chế đã biết
 
-- P31 (platform-v3 acceptance) is not implemented; P25–P30 evidence is source implementation plus local/fake-runner tests only (no live provider, Herdr or Gateway backend runs).
-- Live provider (Claude Code/Codex/Agy) and full Agentic SDLC end-to-end acceptance are unverified; see [release readiness](docs/release-readiness.md) and [known limitations](docs/known-limitations.md).
-
----
-
-## CI/CD Pipeline
-
-GitHub Actions workflows are configured under [`.github/workflows/`](.github/workflows):
-
-- **CI ([`ci.yml`](.github/workflows/ci.yml))** — Runs on every push and pull request:
-  1. **Lint & Build**: Validates package dependency boundaries (`pnpm lint`), compiles all packages (`pnpm build`), and uploads compiled `dist/` artifacts.
-  2. **Sharded Unit & Package Tests**: Runs the unit/package test suite in parallel across **4 shards** (`--shard=1/4` .. `4/4`).
-  3. **Sharded E2E Scenarios**: Runs the end-to-end test suite in parallel across **2 shards** (`--shard=1/2` .. `2/2`).
-- **CD ([`cd.yml`](.github/workflows/cd.yml))** — Triggers on version tags (`v*`) or manual dispatch:
-  - Runs lint and build verification, packs all `@bflow/*` workspace packages (`.tgz`), bundles the compiled distribution archive (`bflow-<tag>-dist.tar.gz`) with `SHA256SUMS.txt`, and publishes them to **GitHub Releases**.
+- P31 (nghiệm thu platform-v3) chưa được triển khai; bằng chứng cho P25–P30 chỉ là triển khai source cùng test cục bộ/fake-runner (không có lần chạy provider, Herdr hay Gateway backend thực tế).
+- Nghiệm thu provider thực tế (Claude Code/Codex/Agy) và Agentic SDLC end-to-end đầy đủ chưa được xác minh; xem [release readiness](docs/release-readiness.md) và [known limitations](docs/known-limitations.md).
 
 ---
 
-## Documentation
+## Pipeline CI/CD
 
-- [User Guide (Vietnamese)](docs/guide/README.md)
-- [Architecture Overview](docs/architecture.md)
-- [Public Contracts](docs/contracts.md)
-- [Architecture Decision Records (ADRs)](docs/adr)
-- [Examples & Runtime Demo](examples/README.md)
+Các workflow GitHub Actions được cấu hình trong [`.github/workflows/`](.github/workflows):
+
+- **CI ([`ci.yml`](.github/workflows/ci.yml))** — Chạy trên mọi push và pull request:
+  1. **Lint & Build**: Xác thực ranh giới dependency giữa các package (`pnpm lint`), biên dịch mọi package (`pnpm build`) và tải lên các artifact `dist/` đã biên dịch.
+  2. **Sharded Unit & Package Tests**: Chạy bộ unit/package test song song trên **4 shard** (`--shard=1/4` .. `4/4`).
+  3. **Sharded E2E Scenarios**: Chạy bộ test end-to-end song song trên **2 shard** (`--shard=1/2` .. `2/2`).
+- **CD ([`cd.yml`](.github/workflows/cd.yml))** — Kích hoạt khi có version tag (`v*`) hoặc dispatch thủ công:
+  - Chạy xác minh lint và build, đóng gói mọi package workspace `@bflow/*` (`.tgz`), gộp archive phân phối đã biên dịch (`bflow-<tag>-dist.tar.gz`) cùng `SHA256SUMS.txt`, và xuất bản lên **GitHub Releases**.
+
+---
+
+## Tài liệu
+
+- [Hướng dẫn người dùng (tiếng Việt)](docs/guide/README.md)
+- [Tổng quan kiến trúc](docs/architecture.md)
+- [Public Contract](docs/contracts.md)
+- [Architecture Decision Record (ADR)](docs/adr)
+- [Ví dụ & Runtime Demo](examples/README.md)

@@ -1,146 +1,146 @@
 # Quality Gates & Security Enforcement (`@bflow/quality-gates`)
 
-Independent quality control, command evaluation, and application-layer security enforcement that never trusts subjective AI agent claims.
+Kiểm soát chất lượng độc lập, đánh giá command và thực thi bảo mật ở tầng ứng dụng, không bao giờ tin vào các tuyên bố chủ quan của AI agent.
 
-Run tests from the repository root:
+Chạy test từ thư mục gốc repository:
 ```bash
 pnpm exec vitest run packages/quality-gates/test/quality-gates.test.ts
 ```
 
 ---
 
-## 1. Purpose & Core Philosophy
+## 1. Mục đích & Triết lý cốt lõi
 
-In an automated AI software development lifecycle (SDLC), autonomous agents generate code, execute steps, and claim success. However, an agent's self-reported success cannot be treated as authoritative evidence:
-- **Zero Trust for Agent Claims**: Self-reported success (`agentResult.status: "succeeded"`) or claim of "all tests passed" is never sufficient to pass a quality gate.
-- **Independent Execution & Evidence**: Quality gates re-execute deterministic commands (`typecheck`, `lint`, `test`, `build`, or allowlisted `custom`) in an isolated subprocess (`shell: false`), verifying exit codes, stdout/stderr streams, test counts, and cryptographic evidence artifacts.
-- **Application-Layer Security Guardrails**: Execution is tightly governed by static security policies that block shell injection, arbitrary agent-provided commands, destructive disk/database operations, credential access, and production deployments.
-- **Strict Role-Based Access Control (RBAC) & Human Governance**: Autonomous roles are constrained by least-privilege boundaries (e.g. read-only reviewers, worktree-confined developers, sandbox-confined QA), and delivery operations (`merge_branch`, `deploy_release`) strictly require both 100% passing automated quality gates AND unforgeable human approval.
+Trong vòng đời phát triển phần mềm (SDLC) bằng AI tự động, các agent tự chủ sinh code, thực thi các bước và tuyên bố thành công. Tuy nhiên, thành công do agent tự báo cáo không thể được coi là evidence có thẩm quyền:
+- **Zero Trust cho tuyên bố của Agent**: Thành công tự báo cáo (`agentResult.status: "succeeded"`) hay tuyên bố "all tests passed" không bao giờ đủ để vượt qua một quality gate.
+- **Thực thi & Evidence độc lập**: Quality gate chạy lại các command xác định (`typecheck`, `lint`, `test`, `build`, hoặc `custom` nằm trong allowlist) trong một subprocess cô lập (`shell: false`), xác minh exit code, luồng stdout/stderr, số lượng test và các evidence artifact có mật mã.
+- **Guardrail bảo mật ở tầng ứng dụng**: Việc thực thi được điều chỉnh chặt chẽ bởi các security policy tĩnh, chặn shell injection, command tùy ý do agent cung cấp, thao tác phá hủy đĩa/database, truy cập credential và triển khai production.
+- **Kiểm soát truy cập theo vai trò (RBAC) nghiêm ngặt & Human Governance**: Các role tự chủ bị ràng buộc bởi ranh giới đặc quyền tối thiểu (ví dụ reviewer chỉ đọc, developer giới hạn trong worktree, QA giới hạn trong sandbox), và các thao tác delivery (`merge_branch`, `deploy_release`) bắt buộc phải có cả quality gate tự động pass 100% VÀ human approval không thể giả mạo.
 
 ---
 
 ## 2. Quality Gate Evaluator
 
-The evaluation engine executes checks and translates runtime outcomes into `@bflow/contracts` `QualityGateResult` structures.
+Engine đánh giá thực thi các check và chuyển kết quả runtime thành các cấu trúc `QualityGateResult` của `@bflow/contracts`.
 
-### Supported Check Kinds
+### Các loại check được hỗ trợ
 
-| Kind | Purpose | Default Command | Required Evidence |
+| Kind | Mục đích | Command mặc định | Evidence bắt buộc |
 | --- | --- | --- | --- |
-| `typecheck` | Static TypeScript / compiler verification | `pnpm typecheck` | Exit code 0, non-empty output |
-| `lint` | Static code style and rule enforcement | `pnpm lint` | Exit code 0, no error findings |
-| `unit_test` | Automated test suite execution | `pnpm test` | Exit code 0, non-zero passing tests, zero failures |
-| `build` | Project artifact compilation / bundling | `pnpm build` | Exit code 0, non-empty output |
-| `custom` | Statically allowlisted verification tasks | Configured `CommandSpec` | Exit code 0, custom output assertions |
+| `typecheck` | Xác minh TypeScript / compiler tĩnh | `pnpm typecheck` | Exit code 0, output không rỗng |
+| `lint` | Thực thi quy tắc và style code tĩnh | `pnpm lint` | Exit code 0, không có finding mức error |
+| `unit_test` | Chạy bộ test tự động | `pnpm test` | Exit code 0, số test pass khác 0, không có lỗi |
+| `build` | Biên dịch / đóng gói artifact của dự án | `pnpm build` | Exit code 0, output không rỗng |
+| `custom` | Tác vụ xác minh nằm trong allowlist tĩnh | `CommandSpec` đã cấu hình | Exit code 0, các assertion output tùy chỉnh |
 
-### Key Evaluator Components
+### Các thành phần chính của Evaluator
 
-- **`CommandQualityGate`**: Implementation of `@bflow/contracts` `QualityGate`. Evaluates a `QualityCheckSpec` against an injected `QualitySecurityPolicy` and `QualityCommandRunner`.
-- **`createQualityGate(options)`**: Instantiates a `CommandQualityGate` with custom specifications, security policy, and runner.
-- **`createPresetQualityGate(input)`**: Convenience factory for the 5 standard check kinds with preset commands, path validation, and security policies.
-- **`evaluateQualityCheckSuite(gates, context, options?)`**: Sequentially executes an array of quality gates for a workflow run/task, producing a consolidated `QualityCheckSuiteReport`.
+- **`CommandQualityGate`**: Triển khai `QualityGate` của `@bflow/contracts`. Đánh giá một `QualityCheckSpec` dựa trên `QualitySecurityPolicy` và `QualityCommandRunner` được inject.
+- **`createQualityGate(options)`**: Khởi tạo một `CommandQualityGate` với specification, security policy và runner tùy chỉnh.
+- **`createPresetQualityGate(input)`**: Factory tiện lợi cho 5 loại check chuẩn với command preset, xác thực đường dẫn và security policy.
+- **`evaluateQualityCheckSuite(gates, context, options?)`**: Thực thi tuần tự một mảng quality gate cho một workflow run/task, tạo ra `QualityCheckSuiteReport` tổng hợp.
 
-### Outcome Status & Contract Mapping
+### Trạng thái kết quả & Ánh xạ contract
 
-Each quality check produces an internal `QualityCheckStatus` mapped to `@bflow/contracts` `QualityGateResult`:
+Mỗi quality check tạo ra một `QualityCheckStatus` nội bộ được ánh xạ sang `QualityGateResult` của `@bflow/contracts`:
 
-| Internal Status | Contract Status | Criteria |
+| Trạng thái nội bộ | Trạng thái contract | Tiêu chí |
 | --- | --- | --- |
-| `passed` | `"passed"` | Exit code 0, all output expectations met, verifiable evidence collected |
-| `failed` | `"failed"` | Exit code != 0, forbidden output patterns, or failed test counts detected |
-| `skipped` | `"passed"` | Optional check (`required: false`, `skip: true`) with `CHECK_SKIPPED` info finding |
-| `error` | `"error"` | Process spawn error, abort signal triggered, timeout exceeded, or security violation |
+| `passed` | `"passed"` | Exit code 0, mọi kỳ vọng output được đáp ứng, thu thập được evidence có thể xác minh |
+| `failed` | `"failed"` | Exit code != 0, phát hiện pattern output bị cấm, hoặc số test thất bại |
+| `skipped` | `"passed"` | Check tùy chọn (`required: false`, `skip: true`) kèm finding mức info `CHECK_SKIPPED` |
+| `error` | `"error"` | Lỗi spawn tiến trình, abort signal được kích hoạt, vượt quá timeout, hoặc vi phạm bảo mật |
 
-*Note*: If a check is marked `required: true` (or omitted default) and `skip: true` is requested, it fails with finding `REQUIRED_CHECK_SKIPPED_OR_MISSING_EVIDENCE` and contract status `"failed"`.
+*Lưu ý*: Nếu một check được đánh dấu `required: true` (hoặc mặc định khi bỏ qua) và `skip: true` được yêu cầu, nó thất bại với finding `REQUIRED_CHECK_SKIPPED_OR_MISSING_EVIDENCE` và trạng thái contract `"failed"`.
 
-### Verifiable Evidence Collection (`ArtifactProposal`)
+### Thu thập Evidence có thể xác minh (`ArtifactProposal`)
 
-When a check passes, verifiable evidence is generated:
-- Serialized execution record including command line, working directory, exit code, execution duration, and stdout/stderr.
-- Generated `ArtifactProposal` conforming to `ArtifactProposalSchema`, containing SHA-256 checksum and exact byte size (`expectedIntegrity`).
-- Proposal ID and checksum recorded in `QualityGateResult.metadata` for correlation with downstream `ArtifactStore` ingestion.
+Khi một check pass, evidence có thể xác minh được tạo ra:
+- Bản ghi thực thi đã serialize gồm command line, thư mục làm việc, exit code, thời lượng thực thi và stdout/stderr.
+- `ArtifactProposal` được tạo ra tuân theo `ArtifactProposalSchema`, chứa SHA-256 checksum và kích thước byte chính xác (`expectedIntegrity`).
+- ID và checksum của proposal được ghi trong `QualityGateResult.metadata` để đối chiếu với việc ingest `ArtifactStore` ở downstream.
 
-### Explicit Failed-Task Reporting
+### Báo cáo tường minh task thất bại
 
-When executing a suite of checks via `evaluateQualityCheckSuite`, failed gates are aggregated into `failedTasks` (`QualitySuiteFailedTaskReport`), detailing:
-- `taskId`: Associated workflow task ID.
-- `gateId`: Identifier of the failing gate.
-- `checkKind`: The kind of check (`typecheck`, `lint`, `unit_test`, `build`, `custom`).
-- `status`: `"failed"` or `"error"`.
-- `exitCode`: Process exit code (or `null` if spawn error / timeout).
-- `timedOut`: Boolean indicating if process exceeded timeout.
-- `summary` & `findings`: Detailed error messages and diagnostic findings.
-
----
-
-## 3. Security Policy & Guardrails
-
-The `QualitySecurityPolicy` provides defensive, multi-layered application-level security checks before any subprocess is spawned.
-
-### Execution Invariants
-
-1. **`shell: false` Always**: All subprocesses are invoked directly via `child_process.spawn` with `shell: false` and arguments passed as an array of discrete tokens. Shell interpreters (`sh`, `bash`, `zsh`, `cmd`, `powershell`) are strictly blocked.
-2. **Rejection of Arbitrary Agent Commands**: Directives from agent output attempting to specify shell commands, override commands, or set `skipQualityGates: true` are blocked and rejected with finding `UNTRUSTED_AGENT_COMMAND_REJECTED`.
-3. **Executable & Argument Allowlisting**: Only pre-approved executables (`pnpm`, `npm`, `npx`, `tsc`, `vitest`, `eslint`, `git`) matching specific argument prefixes are permitted.
-4. **Blocking Destructive Commands**:
-   - Filesystem destruction: `rm`, `rmdir`, `shred`, `unlink`, `mkfs`, `fdisk`, `dd`, `truncate`.
-   - Destructive Git operations: `git reset --hard`, `git clean`, `git push --force`, `git branch -D`, `git checkout --`.
-   - Database destruction: `dropdb`, `DROP TABLE`, `DROP DATABASE`, `TRUNCATE TABLE`, `prisma migrate reset`, `db:drop`, `db:reset`.
-5. **Blocking Secret Access & Network Exfiltration**:
-   - Secret file patterns: `.env`, `.ssh`, `id_rsa`, `id_ed25519`, `*.pem`, `*.key`, `.npmrc`, `.netrc`, `.aws/credentials`, `/etc/shadow`, `/etc/passwd`, `/proc/self/environ`.
-   - Exfiltration binaries: `curl`, `wget`, `nc`, `netcat`, `ncat`, `scp`, `sftp`, `ssh`, `ftp`, `socat`.
-   - Environment scrubbing: `sanitizeExecutionEnvironment` strips all sensitive API keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `AWS_SECRET_ACCESS_KEY`, `GITHUB_TOKEN`, `DATABASE_URL`, etc.).
-6. **Blocking Unauthorized Production Deployments**:
-   - Blocked deployment tools: `kubectl`, `helm`, `terraform`, `pulumi`, `ansible-playbook`.
-   - Blocked publishing commands: `npm publish`, `pnpm publish`, `git push`, `docker push`, `fly deploy`, `vercel --prod`, `netlify deploy --prod`, `serverless deploy`.
-7. **Directory Scope Confinement**:
-   - Validates that execution targets are valid directories without `..` traversal segments or NUL bytes.
-   - Resolves canonical paths using `fs.realpath` to ensure target paths reside strictly inside `allowedRootDirs` and within `assignedWorktreePath`.
-   - Rejects sensitive system paths (`/etc`, `/proc`, `/sys`, `/root`, `/dev`).
-   - Detects symlink escapes pointing outside authorized directory trees.
-8. **Timeout Budget Validation**:
-   - Validates timeout integer bounds (`100ms <= timeoutMs <= 2,147,483,647ms`) preventing 32-bit signed integer overflow.
-   - Enforces `maxExecutionTimeoutMs` policy ceiling.
-   - On POSIX, runs commands in a separate process group and signals the group on timeout or abort. After a 250ms termination grace period, sends `SIGKILL`, closes output pipes, and returns even if an escaped descendant retains a pipe. Windows terminates the direct child and uses the same bounded pipe cleanup.
+Khi thực thi một suite các check qua `evaluateQualityCheckSuite`, các gate thất bại được tổng hợp vào `failedTasks` (`QualitySuiteFailedTaskReport`), nêu chi tiết:
+- `taskId`: ID task workflow liên quan.
+- `gateId`: Định danh của gate thất bại.
+- `checkKind`: Loại check (`typecheck`, `lint`, `unit_test`, `build`, `custom`).
+- `status`: `"failed"` hoặc `"error"`.
+- `exitCode`: Exit code của tiến trình (hoặc `null` nếu lỗi spawn / timeout).
+- `timedOut`: Boolean cho biết tiến trình có vượt quá timeout hay không.
+- `summary` & `findings`: Thông báo lỗi chi tiết và các finding chẩn đoán.
 
 ---
 
-## 4. Role-Based Access Control (RBAC) & Human Governance
+## 3. Security Policy & Guardrail
 
-Quality policies define strict separation of duties across the four SDLC roles:
+`QualitySecurityPolicy` cung cấp các kiểm tra bảo mật phòng thủ nhiều lớp ở tầng ứng dụng trước khi bất kỳ subprocess nào được spawn.
 
-### Role Authorization Matrix
+### Các bất biến thực thi
 
-| Role | Read-Only | Allowed Actions | Constraints |
+1. **Luôn `shell: false`**: Mọi subprocess được gọi trực tiếp qua `child_process.spawn` với `shell: false` và các đối số được truyền dưới dạng mảng token rời rạc. Các shell interpreter (`sh`, `bash`, `zsh`, `cmd`, `powershell`) bị chặn nghiêm ngặt.
+2. **Từ chối command tùy ý của Agent**: Các chỉ thị trong output của agent cố chỉ định shell command, ghi đè command hoặc đặt `skipQualityGates: true` bị chặn và từ chối với finding `UNTRUSTED_AGENT_COMMAND_REJECTED`.
+3. **Allowlist executable & đối số**: Chỉ các executable được phê duyệt trước (`pnpm`, `npm`, `npx`, `tsc`, `vitest`, `eslint`, `git`) khớp với các tiền tố đối số cụ thể mới được phép.
+4. **Chặn các command phá hủy**:
+   - Phá hủy filesystem: `rm`, `rmdir`, `shred`, `unlink`, `mkfs`, `fdisk`, `dd`, `truncate`.
+   - Thao tác Git phá hủy: `git reset --hard`, `git clean`, `git push --force`, `git branch -D`, `git checkout --`.
+   - Phá hủy database: `dropdb`, `DROP TABLE`, `DROP DATABASE`, `TRUNCATE TABLE`, `prisma migrate reset`, `db:drop`, `db:reset`.
+5. **Chặn truy cập secret & exfiltration qua mạng**:
+   - Pattern file secret: `.env`, `.ssh`, `id_rsa`, `id_ed25519`, `*.pem`, `*.key`, `.npmrc`, `.netrc`, `.aws/credentials`, `/etc/shadow`, `/etc/passwd`, `/proc/self/environ`.
+   - Binary exfiltration: `curl`, `wget`, `nc`, `netcat`, `ncat`, `scp`, `sftp`, `ssh`, `ftp`, `socat`.
+   - Làm sạch môi trường: `sanitizeExecutionEnvironment` loại bỏ mọi API key nhạy cảm (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `AWS_SECRET_ACCESS_KEY`, `GITHUB_TOKEN`, `DATABASE_URL`, v.v.).
+6. **Chặn triển khai production trái phép**:
+   - Công cụ deployment bị chặn: `kubectl`, `helm`, `terraform`, `pulumi`, `ansible-playbook`.
+   - Command publish bị chặn: `npm publish`, `pnpm publish`, `git push`, `docker push`, `fly deploy`, `vercel --prod`, `netlify deploy --prod`, `serverless deploy`.
+7. **Giới hạn phạm vi thư mục**:
+   - Xác thực rằng đích thực thi là thư mục hợp lệ, không có đoạn traversal `..` hay byte NUL.
+   - Phân giải đường dẫn canonical bằng `fs.realpath` để đảm bảo đường dẫn đích nằm hoàn toàn trong `allowedRootDirs` và trong `assignedWorktreePath`.
+   - Từ chối các đường dẫn hệ thống nhạy cảm (`/etc`, `/proc`, `/sys`, `/root`, `/dev`).
+   - Phát hiện symlink thoát ra ngoài cây thư mục được ủy quyền.
+8. **Xác thực ngân sách timeout**:
+   - Xác thực cận số nguyên của timeout (`100ms <= timeoutMs <= 2,147,483,647ms`) để ngăn tràn số nguyên có dấu 32-bit.
+   - Thực thi trần policy `maxExecutionTimeoutMs`.
+   - Trên POSIX, chạy command trong một process group riêng và gửi tín hiệu cho cả group khi timeout hoặc abort. Sau thời gian ân hạn 250ms, gửi `SIGKILL`, đóng các output pipe, và trả về ngay cả khi một descendant đã thoát ra vẫn giữ pipe. Windows kết thúc child trực tiếp và dùng cùng cách dọn dẹp pipe có giới hạn.
+
+---
+
+## 4. Kiểm soát truy cập theo vai trò (RBAC) & Human Governance
+
+Quality policy định nghĩa sự phân tách nhiệm vụ nghiêm ngặt giữa bốn role SDLC:
+
+### Ma trận ủy quyền theo role
+
+| Role | Chỉ đọc | Hành động được phép | Ràng buộc |
 | --- | --- | --- | --- |
-| `reviewer` | **Yes** | `read_code`, `analyze_code` | Strictly forbidden from modifying files (`modifiedFiles` must be empty). |
-| `developer` | **No** | `read_code`, `analyze_code`, `modify_code`, `run_local_check` | File modifications and checks must remain strictly inside `assignedWorktreePath`. Cannot merge or deploy. |
-| `qa` | **Yes** | `read_code`, `analyze_code`, `execute_test_suite`, `evaluate_quality_gate` | Allowed only in authorized non-production environments (`test`, `ci`, `qa-sandbox`). Forbidden from modifying files. |
-| `delivery` | **No** | `read_code`, `merge_branch`, `deploy_release` | Requires 100% passed automated quality gates AND valid human approval decision. |
+| `reviewer` | **Có** | `read_code`, `analyze_code` | Nghiêm cấm sửa file (`modifiedFiles` phải rỗng). |
+| `developer` | **Không** | `read_code`, `analyze_code`, `modify_code`, `run_local_check` | Việc sửa file và check phải nằm hoàn toàn trong `assignedWorktreePath`. Không thể merge hay deploy. |
+| `qa` | **Có** | `read_code`, `analyze_code`, `execute_test_suite`, `evaluate_quality_gate` | Chỉ được phép trong môi trường non-production được ủy quyền (`test`, `ci`, `qa-sandbox`). Cấm sửa file. |
+| `delivery` | **Không** | `read_code`, `merge_branch`, `deploy_release` | Yêu cầu quality gate tự động pass 100% VÀ quyết định human approval hợp lệ. |
 
-### Strict Separation Between Automated Checks & Human Governance
+### Phân tách nghiêm ngặt giữa Check tự động & Human Governance
 
-The function `evaluateAutomatedVsHumanGovernance` enforces that:
-- **No Agent Self-Approval**: Mandatory human approval cannot be granted by an AI agent or automated bot (identified via `isHumanApprover`, which rejects identifiers with prefixes `agent:`, `ai:`, `bot:`, `llm:`, etc., or `metadata.automatedOnly: true`).
-- **Dual Condition for Delivery**: `canProceedToDelivery: true` strictly requires:
-  1. `allAutomatedGatesPassed: true` (no automated gates failed or errored).
-  2. If human approval is required, `humanApprovalStatus === "approved"` signed by a verified human actor.
-- **Fail-Safe Invariant**: Human approval alone cannot override or mask failing automated quality gates. Both conditions must be satisfied.
+Hàm `evaluateAutomatedVsHumanGovernance` thực thi rằng:
+- **Agent không tự phê duyệt**: Human approval bắt buộc không thể được cấp bởi AI agent hay bot tự động (nhận diện qua `isHumanApprover`, hàm này từ chối các định danh có tiền tố `agent:`, `ai:`, `bot:`, `llm:`, v.v., hoặc `metadata.automatedOnly: true`).
+- **Hai điều kiện cho Delivery**: `canProceedToDelivery: true` bắt buộc phải có:
+  1. `allAutomatedGatesPassed: true` (không có automated gate nào thất bại hoặc lỗi).
+  2. Nếu cần human approval, `humanApprovalStatus === "approved"` được ký bởi một human actor đã xác minh.
+- **Bất biến Fail-Safe**: Chỉ riêng human approval không thể ghi đè hay che giấu các quality gate tự động đang thất bại. Cả hai điều kiện đều phải được thỏa mãn.
 
 ---
 
-## 5. Application-Layer Security Limitations
+## 5. Hạn chế bảo mật ở tầng ứng dụng
 
 > [!WARNING]
-> Application-layer policy validation is **NOT** an operating system kernel sandbox, container (Docker/Podman), virtual machine, or seccomp/AppArmor/cgroup isolation mechanism.
+> Xác thực policy ở tầng ứng dụng **KHÔNG** phải là sandbox kernel hệ điều hành, container (Docker/Podman), máy ảo, hay cơ chế cô lập seccomp/AppArmor/cgroup.
 
-As reported by `getSecurityControlLimitationsReport()` and defined in `APPLICATION_SECURITY_LIMITATIONS`:
+Theo báo cáo của `getSecurityControlLimitationsReport()` và định nghĩa trong `APPLICATION_SECURITY_LIMITATIONS`:
 
-1. **Host Process Privileges**: Once an allowlisted binary (`node`, `pnpm`, `vitest`, `tsc`) starts executing, the child process runs with the same OS user permissions as the host process. It can access any files or sockets that the OS user account has permission to read or write.
-2. **Untrusted Code Execution within Tools**: Test files, project scripts, compiler plugins, or build scripts executed by an allowlisted runner may contain arbitrary code executed by the underlying runtime.
-3. **Time-of-Check to Time-of-Use (TOCTOU)**: Pre-execution path canonicalization (`fs.realpath`) verifies that paths are within allowed directories prior to launch, but cannot prevent race conditions where a concurrently running process alters symlinks during execution.
-4. **Filesystem vs Environment Scrubbing**: Scrubbing `process.env` prevents API keys from being inherited via environment variables, but does not prevent child processes from reading unencrypted configuration files on the local filesystem if readable by the user.
-5. **Grandchild Process Lifecycle**: POSIX process group termination covers ordinary descendants. Descendants that create a new session or process group can escape termination and outlive the command; Windows termination covers only the direct child. Bounded pipe cleanup prevents those descendants from blocking the runner's completion, but does not provide OS cgroup containment.
+1. **Đặc quyền tiến trình host**: Khi một binary trong allowlist (`node`, `pnpm`, `vitest`, `tsc`) bắt đầu chạy, tiến trình con chạy với cùng quyền người dùng OS như tiến trình host. Nó có thể truy cập bất kỳ file hay socket nào mà tài khoản người dùng OS có quyền đọc hoặc ghi.
+2. **Thực thi code không tin cậy trong công cụ**: File test, script dự án, compiler plugin hay build script do một runner trong allowlist thực thi có thể chứa code tùy ý được runtime bên dưới thực thi.
+3. **Time-of-Check to Time-of-Use (TOCTOU)**: Việc canonical hóa đường dẫn trước khi thực thi (`fs.realpath`) xác minh đường dẫn nằm trong thư mục được phép trước khi khởi chạy, nhưng không thể ngăn race condition khi một tiến trình đang chạy đồng thời thay đổi symlink trong lúc thực thi.
+4. **Filesystem so với làm sạch môi trường**: Làm sạch `process.env` ngăn API key bị kế thừa qua biến môi trường, nhưng không ngăn các tiến trình con đọc các file cấu hình không mã hóa trên filesystem cục bộ nếu người dùng đọc được.
+5. **Vòng đời tiến trình cháu (grandchild)**: Việc kết thúc process group trên POSIX bao phủ các descendant thông thường. Các descendant tạo session hoặc process group mới có thể thoát khỏi việc kết thúc và sống lâu hơn command; việc kết thúc trên Windows chỉ bao phủ child trực tiếp. Việc dọn dẹp pipe có giới hạn ngăn các descendant đó chặn việc hoàn tất của runner, nhưng không cung cấp cô lập cgroup của OS.
 
-**Recommended Defense-in-Depth**:
-In production and untrusted CI environments, this application-layer quality gate package must be layered inside OS-level sandboxes (e.g., non-root unprivileged container, rootless Podman, Linux namespaces, or isolated VMs).
+**Defense-in-Depth khuyến nghị**:
+Trong môi trường production và CI không tin cậy, package quality gate ở tầng ứng dụng này phải được đặt bên trong các sandbox cấp OS (ví dụ container không phải root, rootless Podman, Linux namespace hoặc VM cô lập).

@@ -1,54 +1,54 @@
-# ADR 0001: Harden P00 contracts before implementation
+# ADR 0001: Củng cố contract P00 trước khi triển khai
 
-- Status: Accepted on `fix/p00-contract-hardening`
+- Trạng thái: Đã chấp nhận trên `fix/p00-contract-hardening`
 - Baseline: `8d960d02d4f39d555ddd509a7606cc7ff6e750f2`
-- Scope: contracts, pure validators, documentation, and contract tests only
+- Phạm vi: chỉ gồm contract, pure validator, tài liệu và contract test
 
-## Context
+## Bối cảnh
 
-The independent P00 audit found that the bootstrap contracts could not safely express uncertain prompt delivery, durable transport identity, separation of Herdr lifecycle from task outcome, or event/checkpoint compatibility. It also found integration blockers around errors, quality gates, approvals, transitions, concurrency, artifact trust, and cancellation.
+Đợt audit độc lập P00 phát hiện các contract bootstrap không thể biểu diễn an toàn việc gửi prompt không chắc chắn, danh tính transport bền vững, việc tách vòng đời Herdr khỏi kết quả task, và tính tương thích của event/checkpoint. Audit cũng chỉ ra các điểm chặn tích hợp liên quan đến lỗi, quality gate, approval, transition, concurrency, độ tin cậy của artifact và cancellation.
 
-Because no implementation package yet contains business logic, P00 is the least costly point to make intentional breaking changes and freeze a coherent baseline.
+Vì chưa có package triển khai nào chứa business logic, P00 là thời điểm ít tốn kém nhất để thực hiện các thay đổi phá vỡ có chủ đích và đóng băng một baseline nhất quán.
 
-## Decision
+## Quyết định
 
-1. Public asynchronous ports use `OperationResult<T>` and discriminated `ContractError` values.
-2. Agent submission, transport observation, and verified business outcome are separate types. A durable neutral locator and correlation provenance live in `AgentExecutionHandle`.
-3. Unknown delivery is non-retryable until explicit reconciliation proves `not_delivered`; lack of proof requires manual intervention.
-4. Domain events and checkpoints use independent schema versions. Pure compatibility helpers support the original versionless shape as v0 and reject unknown versions.
-5. Workflow commands/events cover execution binding, delivery reconciliation, gate request/result, approval request/decision, and cancellation request/acknowledgement/stop.
-6. Pure transition and event-batch validators define semantic invariants shared by core and persistence.
-7. Registry lookup remains separate from atomic capacity leases. Artifact proposals remain untrusted until store verification.
+1. Các port bất đồng bộ công khai dùng `OperationResult<T>` và các giá trị `ContractError` dạng discriminated.
+2. Việc gửi agent (submission), quan sát transport và kết quả nghiệp vụ đã xác minh là các type riêng biệt. Một locator trung lập bền vững và nguồn gốc correlation nằm trong `AgentExecutionHandle`.
+3. Unknown delivery không được retry cho đến khi reconciliation chứng minh rõ `not_delivered`; thiếu bằng chứng thì cần can thiệp thủ công.
+4. Domain event và checkpoint dùng schema version độc lập. Các helper tương thích thuần túy hỗ trợ dạng gốc không có version như v0 và từ chối các version không biết.
+5. Command/event của workflow bao phủ execution binding, delivery reconciliation, gate request/result, approval request/decision, và cancellation request/acknowledgement/stop.
+6. Các validator thuần túy cho transition và event-batch định nghĩa các bất biến ngữ nghĩa dùng chung giữa core và persistence.
+7. Registry lookup vẫn tách biệt với các capacity lease nguyên tử. Artifact proposal vẫn không đáng tin cho đến khi store xác minh.
 
-## Finding-to-change mapping
+## Ánh xạ finding sang thay đổi
 
-| Finding | Contract resolution | Primary files | Proof tests |
+| Finding | Cách contract giải quyết | Các file chính | Test chứng minh |
 | --- | --- | --- | --- |
-| P0-01 | Durable locator/handle, execution-bound and delivery events, reconcile operation, resend prohibition | `agent.ts`, `events.ts`, `ports.ts`, `orchestration.ts` | `agent-transport.test.ts`, `versioning-events.test.ts` |
-| P0-02 | Submission receipt and lifecycle observation separated from verified result | `agent.ts`, `ports.ts` | `agent-transport.test.ts` |
-| P0-03 | Event/checkpoint schema and codec versions with v0 upcasters | `events.ts`, `execution.ts`, `versioning.ts` | `versioning-events.test.ts` |
-| P1-01 | Typed error/result convention with fixed retryability | `errors.ts`, `ports.ts` | `safety-contracts.test.ts` |
-| P1-02 | Workflow gate definitions/bindings and evaluation commands/events | `workflow.ts`, `quality.ts`, `orchestration.ts`, `events.ts` | `workflow.test.ts` |
-| P1-03 | Required approval target, revision/generation/idempotency/evidence | `approval.ts`, `events.ts`, `orchestration.ts` | `safety-contracts.test.ts` |
-| P1-04 | Normative task/run transition tables and command/event validation | `transitions.ts`, `orchestration.ts`, `events.ts` | `workflow.test.ts` |
-| P1-05 | Lease acquire/renew/release with expiry, fencing and version | `registry.ts`, `ports.ts` | `safety-contracts.test.ts` |
-| P1-06 | Proposal/reference trust split, constrained ID/URI/checksum, expected integrity | `artifact.ts`, `agent.ts`, `quality.ts` | `safety-contracts.test.ts` |
-| P1-07 | Versioned cancellation intent, acceptance/refusal and stop confirmation | `execution.ts`, `events.ts`, `ports.ts` | `safety-contracts.test.ts`, `workflow.test.ts` |
-| P2 | Retry/time refinements and event-batch invariants | `execution.ts`, `agent.ts`, `orchestration.ts` | all contract suites |
+| P0-01 | Locator/handle bền vững, các event execution-bound và delivery, thao tác reconcile, cấm gửi lại | `agent.ts`, `events.ts`, `ports.ts`, `orchestration.ts` | `agent-transport.test.ts`, `versioning-events.test.ts` |
+| P0-02 | Submission receipt và lifecycle observation được tách khỏi verified result | `agent.ts`, `ports.ts` | `agent-transport.test.ts` |
+| P0-03 | Schema và codec version của event/checkpoint với các upcaster v0 | `events.ts`, `execution.ts`, `versioning.ts` | `versioning-events.test.ts` |
+| P1-01 | Quy ước error/result có kiểu với retryability cố định | `errors.ts`, `ports.ts` | `safety-contracts.test.ts` |
+| P1-02 | Định nghĩa/binding của workflow gate và command/event đánh giá | `workflow.ts`, `quality.ts`, `orchestration.ts`, `events.ts` | `workflow.test.ts` |
+| P1-03 | Approval target bắt buộc, revision/generation/idempotency/evidence | `approval.ts`, `events.ts`, `orchestration.ts` | `safety-contracts.test.ts` |
+| P1-04 | Bảng transition chuẩn tắc cho task/run và validation command/event | `transitions.ts`, `orchestration.ts`, `events.ts` | `workflow.test.ts` |
+| P1-05 | Lease acquire/renew/release với expiry, fencing và version | `registry.ts`, `ports.ts` | `safety-contracts.test.ts` |
+| P1-06 | Tách tin cậy proposal/reference, ID/URI/checksum có ràng buộc, integrity kỳ vọng | `artifact.ts`, `agent.ts`, `quality.ts` | `safety-contracts.test.ts` |
+| P1-07 | Cancellation intent có version, chấp nhận/từ chối và xác nhận stop | `execution.ts`, `events.ts`, `ports.ts` | `safety-contracts.test.ts`, `workflow.test.ts` |
+| P2 | Tinh chỉnh retry/thời gian và bất biến event-batch | `execution.ts`, `agent.ts`, `orchestration.ts` | tất cả các contract suite |
 
-## Migration from the initial P00 baseline
+## Migration từ baseline P00 ban đầu
 
-This is an intentional pre-implementation breaking revision:
+Đây là bản sửa đổi phá vỡ có chủ đích trước khi triển khai:
 
-- `AgentTransport.send` returns a receipt; `wait` returns a transport observation; `reconcile` is new.
-- All Promise port returns are wrapped by `OperationResult`; streams yield typed results.
-- Requests/results/events/checkpoints, workflow definitions/task state, approvals, artifacts, and cancellation records gain required fields.
-- Legacy versionless event/checkpoint values must pass through compatibility helpers; stream sequence and aggregate version are preserved during upcast.
-- Agent/gate output exposes `ArtifactProposal`, not a trusted stored reference.
-- Agent registry adds explicit lease operations, while workflow engine adds binding/reconciliation/gate/approval/cancellation methods.
+- `AgentTransport.send` trả về receipt; `wait` trả về transport observation; `reconcile` là mới.
+- Mọi giá trị trả về Promise của port đều được bọc bằng `OperationResult`; các stream yield kết quả có kiểu.
+- Request/result/event/checkpoint, workflow definition/task state, approval, artifact và bản ghi cancellation có thêm các field bắt buộc.
+- Các giá trị event/checkpoint cũ không có version phải đi qua các helper tương thích; stream sequence và aggregate version được giữ nguyên khi upcast.
+- Output của agent/gate trả về `ArtifactProposal`, không phải stored reference đáng tin cậy.
+- Agent registry bổ sung các thao tác lease tường minh, còn workflow engine bổ sung các method binding/reconciliation/gate/approval/cancellation.
 
-There is no data migration implementation in P00. The helpers upcast version/codec metadata only when the remaining payload validates as current; they do not invent newly required identity, target, correlation, or trust evidence. If a prototype persisted incompatible values from `8d960d0`, its owning phase must provide an explicit per-event migration or replay from an authoritative source under its selected migration mechanism.
+P00 không có triển khai migration dữ liệu. Các helper chỉ upcast metadata version/codec khi phần payload còn lại hợp lệ theo schema hiện tại; chúng không bịa ra bằng chứng về identity, target, correlation hay trust mới được yêu cầu. Nếu một prototype đã lưu các giá trị không tương thích từ `8d960d0`, phase sở hữu nó phải cung cấp migration từng event tường minh hoặc replay từ nguồn có thẩm quyền theo cơ chế migration mà phase đó chọn.
 
-## Consequences and deferred work
+## Hệ quả và công việc hoãn lại
 
-The contracts can now express the audited workflows without another known breaking change. They do not make runtime behavior atomic or correct by themselves. P01–P05 still must implement and test scheduling, Herdr mapping, durable transactions/upcasting, checksum/path enforcement, leases/fencing, gate execution, and use-case ordering. Live Herdr, SQLite migration, E2E recovery, and production readiness are explicitly deferred.
+Các contract giờ có thể biểu diễn các workflow đã được audit mà không cần thêm thay đổi phá vỡ nào đã biết. Bản thân chúng không làm cho hành vi runtime trở nên nguyên tử hay đúng đắn. P01–P05 vẫn phải triển khai và kiểm thử scheduling, ánh xạ Herdr, transaction bền vững/upcasting, thực thi checksum/path, lease/fencing, chạy gate và thứ tự use-case. Live Herdr, migration SQLite, E2E recovery và production readiness được hoãn lại một cách tường minh.

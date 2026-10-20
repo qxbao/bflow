@@ -1,43 +1,41 @@
-# Conversation MCP Gateway investigation
+# Điều tra Conversation MCP Gateway
 
-Source audited: `d82ff21fa8037f4bbcfbafc785b022b3e60fb0df`.
-Evidence: source and local launch configuration for session
-`conv-bf-c1695ccd3f2b994f91bd`. No live Gateway/provider conformance test was performed.
+Nguồn được kiểm toán: `d82ff21fa8037f4bbcfbafc785b022b3e60fb0df`.
+Bằng chứng: mã nguồn và cấu hình khởi chạy cục bộ cho session
+`conv-bf-c1695ccd3f2b994f91bd`. Không thực hiện bài kiểm thử conformance Gateway/provider thực (live) nào.
 
-## Why GitNexus is absent
+## Vì sao GitNexus vắng mặt
 
-The repository configuration does not select `environment.requiredMcpServices`
-or `environment.requiredTools`. `apps/cli/src/platform-options.ts` derives every
-role's service/tool requirements from those environment-wide lists, defaulting
-to empty lists. `packages/runtime/src/platform/service.ts` does not create a
-Gateway client registration when a role has no required MCP services.
+Cấu hình repository không chọn `environment.requiredMcpServices`
+hay `environment.requiredTools`. `apps/cli/src/platform-options.ts` suy ra yêu cầu service/tool của mọi
+role từ các danh sách áp dụng toàn môi trường này, mặc định là danh sách rỗng.
+`packages/runtime/src/platform/service.ts` không tạo đăng ký Gateway client
+khi một role không có MCP service bắt buộc.
 
-The local host configuration confirms empty service/tool requirements for all
-roles. Generated Conversation and Coordinator MCP configurations contain only
-the internal `bflow` server, supplied independently by the Runtime host.
-Installing a tool through machine setup does not select it for a repository or
-grant access to its panes.
+Cấu hình host cục bộ xác nhận yêu cầu service/tool rỗng cho mọi role. Các cấu hình MCP được sinh ra
+cho Conversation và Coordinator chỉ chứa server `bflow` nội bộ,
+do Runtime host cung cấp độc lập. Việc cài đặt một tool qua machine setup không chọn tool đó cho
+repository và không cấp quyền truy cập cho các pane của nó.
 
-Explicit repository selection and scoped Gateway registration are intentional
-design. There is no special prohibition on Conversation receiving Gateway MCP
-tools. The present omission is a repository configuration and command-UX gap,
-separate from the missing Claude permission grant for the already configured
-internal `bflow` server.
+Việc chọn repository tường minh và đăng ký Gateway có phạm vi là chủ ý thiết kế.
+Không có quy định cấm riêng việc Conversation nhận các MCP tool của Gateway. Việc thiếu hiện tại là
+một khoảng trống về cấu hình repository và command-UX, tách biệt với việc thiếu quyền Claude
+cấp cho server `bflow` nội bộ đã được cấu hình.
 
-## Recommendation
+## Khuyến nghị
 
-Give Conversation repository-scoped read access to GitNexus operations such as
-`query`, `context` and `impact` to support questions and scope assessment. Keep
-workflow dispatch, inter-role messages and user approval authority in the
-existing Runtime/Herdr path. The managed GitNexus launcher already sets
-`GITNEXUS_MCP_READ_ONLY=1` and restricts allowed repositories; Gateway must still
-enforce the exact service/tool allowlist for the client registration.
+Cấp cho Conversation quyền đọc theo phạm vi repository đối với các thao tác GitNexus như
+`query`, `context` và `impact` để hỗ trợ trả lời câu hỏi và đánh giá phạm vi. Giữ
+việc dispatch workflow, thông điệp giữa các role và thẩm quyền phê duyệt của người dùng trong
+đường Runtime/Herdr hiện có. Launcher GitNexus được quản lý đã đặt
+`GITNEXUS_MCP_READ_ONLY=1` và giới hạn các repository được phép; Gateway vẫn phải
+thực thi đúng allowlist service/tool cho đăng ký client.
 
-Current YAML role entries have no service/tool override fields. Their existing
-environment-wide lists apply to every role. A Conversation-only grant therefore
-needs a separately reviewed configuration enhancement, rather than enabling
-environment-wide tools or inheriting provider-global MCP settings.
+Các mục role YAML hiện tại không có trường ghi đè service/tool. Các danh sách áp dụng toàn môi trường
+hiện có áp dụng cho mọi role. Vì vậy, một quyền chỉ dành cho Conversation cần
+một cải tiến cấu hình được review riêng, thay vì bật tool trên toàn môi trường
+hoặc kế thừa cài đặt MCP toàn cục của provider.
 
-This report does not enable Gateway services, alter machine/provider settings,
-or authorize code changes to MCP Gateway. The project owner decides whether to
-implement the proposed Conversation access.
+Báo cáo này không bật các Gateway service, không thay đổi cài đặt machine/provider,
+và không cho phép thay đổi code của MCP Gateway. Chủ dự án quyết định có triển khai
+quyền truy cập Conversation được đề xuất hay không.

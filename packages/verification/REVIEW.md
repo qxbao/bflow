@@ -1,42 +1,43 @@
-# P17 review and remediation
+# Review và khắc phục P17
 
-Reviewed the implementation at `01eba53` against the v2 contracts, P15 artifact
-content codec, P16 strategy boundary, and the accepted task/workflow verification
-policies. The review request also authorizes fixes and local main integration.
+Đã review bản triển khai tại `01eba53` đối chiếu với các contract v2, codec nội dung artifact
+P15, ranh giới strategy P16, và các policy verification cấp task/workflow đã được chấp nhận.
+Yêu cầu review cũng ủy quyền việc sửa lỗi và tích hợp vào main cục bộ.
 
-Reproduced eight failures before implementation changes (49 existing tests passed).
-Added further cases for reused change-set IDs/revisions, complete workflow provenance
-and below-threshold coverage reuse. The regression suite now covers:
+Đã tái hiện tám lỗi trước khi thay đổi bản triển khai (49 test hiện có vẫn pass). Đã thêm các
+case bổ sung cho change-set ID/revision bị dùng lại, provenance workflow đầy đủ và tái sử dụng
+coverage dưới ngưỡng. Bộ regression nay bao phủ:
 
-- Reject an attempt, change-set ID or Git revision used anywhere in the cycle,
-  including nonadjacent earlier iterations. Checking only the immediately previous
-  iteration allowed an older submission identity to be reused.
-- Require valid passing evidence from every planned check of a criterion. A passing
-  primary test previously let the criterion remain passed when an additional mapped
-  check returned malformed/missing evidence.
-- Reuse only fully successful checks. A gate labelled passed could still have a
-  failing review exit or insufficient measured coverage; those checks must rerun.
-- Reject new gate results with evaluation timestamps before dispatch or after
-  collection on the trusted host clock. Immutable earlier receipts remain reusable
-  only through the separately validated impact/receipt path.
-- Reject `*`/`?` glob expressions in literal repository scope/dependency paths;
-  silently treating a glob as a literal could skip an affected check.
-- Require workflow integration provenance to cover all task IDs traced in the
-  approved specification, reject duplicate IDs, and forward integration context
-  to the independent runner. Task-level success remains insufficient.
-- Compare approved strategy policy separately from append-only P16 `tddEvidence` metadata. Validate receipt shapes/run/task and preserve any approved receipt prefix without changing the accepted specification. P19 still enforces P16 phase sequence and dossier completeness.
-- Emit a scoped finding for every observed failing check/criterion even if another
-  gate already emitted an error. Include the evidence artifact and responsible
-  Developer task/role so one failure cannot hide a second repair obligation.
+- Từ chối attempt, change-set ID hoặc Git revision đã dùng ở bất kỳ đâu trong cycle, kể cả các
+  iteration trước đó không liền kề. Chỉ kiểm tra iteration liền trước từng cho phép dùng lại
+  danh tính submission cũ hơn.
+- Yêu cầu evidence pass hợp lệ từ mọi check đã lập kế hoạch của một criterion. Trước đây một
+  primary test pass vẫn để criterion ở trạng thái passed dù một check bổ sung được ánh xạ trả
+  về evidence sai định dạng/thiếu.
+- Chỉ tái sử dụng các check thành công hoàn toàn. Một gate được gắn nhãn passed vẫn có thể có
+  review exit thất bại hoặc coverage đo được không đủ; các check đó phải chạy lại.
+- Từ chối kết quả gate mới có timestamp đánh giá trước dispatch hoặc sau collection theo đồng
+  hồ của trusted host. Các receipt bất biến trước đó chỉ được tái sử dụng qua đường impact/receipt
+  được xác thực riêng.
+- Từ chối biểu thức glob `*`/`?` trong các đường dẫn scope/dependency literal của repository;
+  coi glob là literal một cách âm thầm có thể bỏ qua một check bị ảnh hưởng.
+- Yêu cầu provenance tích hợp workflow bao phủ mọi task ID được truy vết trong specification đã
+  phê duyệt, từ chối ID trùng lặp, và chuyển tiếp ngữ cảnh tích hợp tới runner độc lập. Thành công
+  cấp task vẫn không đủ.
+- So sánh approved strategy policy tách biệt với metadata `tddEvidence` chỉ-append của P16. Xác
+  thực hình dạng receipt/run/task và giữ nguyên mọi tiền tố receipt đã phê duyệt mà không thay đổi
+  specification đã chấp nhận. P19 vẫn thực thi trình tự phase P16 và độ đầy đủ của dossier.
+- Phát ra finding có phạm vi cho mỗi check/criterion thất bại quan sát được, kể cả khi gate khác
+  đã phát ra lỗi. Kèm theo evidence artifact và task/role Developer chịu trách nhiệm, để một lỗi
+  không che giấu nghĩa vụ sửa thứ hai.
 
-The existing port boundaries remain: actual OS/process independence and Git state
-are established by the trusted host; Runtime supplies the latest cycle and enforces
-optimistic versions, leases, Core rework limits and safe dispatch. This package does
-not authenticate a process, implement P19, deliver messages or perform Git merges.
-No shared contract change, migration, bootstrap adapter or direct shell runner was
-introduced. Root build/lockfile/documentation registration is handled separately
-on the integration branch under the user's merge authorization.
+Các ranh giới port hiện có vẫn giữ nguyên: tính độc lập thực sự của OS/process và trạng thái Git
+do trusted host thiết lập; Runtime cung cấp cycle mới nhất và thực thi optimistic version, lease,
+giới hạn rework của Core và dispatch an toàn. Package này không xác thực tiến trình, không triển
+khai P19, không gửi thông điệp và không thực hiện Git merge. Không có thay đổi shared contract,
+migration, bootstrap adapter hay direct shell runner nào được đưa vào. Việc đăng ký build/lockfile/
+tài liệu gốc được xử lý riêng trên nhánh tích hợp theo ủy quyền merge của người dùng.
 
-See [VALIDATION.md](VALIDATION.md) for the original implementation evidence and the
-integration closure evidence appended during local merge validation. The original
-implementation and its review fixes are preserved in Git history.
+Xem [VALIDATION.md](VALIDATION.md) cho evidence triển khai ban đầu và evidence đóng tích hợp được
+bổ sung trong quá trình xác thực merge cục bộ. Bản triển khai gốc và các bản sửa review được giữ
+trong lịch sử Git.

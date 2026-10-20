@@ -1,4 +1,4 @@
-# Bflow Platform v3 — Operations Runbook
+# Bflow Platform v3 — Sổ tay vận hành
 
 Sổ tay vận hành này cung cấp quy trình chuẩn để khởi chạy, giám sát, xử lý sự cố và khôi phục hệ thống Bflow Platform v3 trong quá trình vận hành thực tế.
 

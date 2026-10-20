@@ -1,4 +1,4 @@
-# Agent-to-agent communication qua Herdr
+# Giao tiếp agent-to-agent qua Herdr
 
 Herdr vận chuyển tương tác và quản lý process/pane. Runtime quyết định task có
 được dispatch hoặc hoàn tất hay không. ArtifactStore lưu evidence bất biến có
