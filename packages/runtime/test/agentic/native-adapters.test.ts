@@ -41,7 +41,7 @@ describe("Python native runner", () => {
     const profile = runner(result.runners[0]);
     expect(profile.adapterId).toBe("python");
     expect(profile.executable).toBe(join(context.root, ".venv/bin/python"));
-    expect(profile.environment).toMatchObject({ PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1", PIP_NO_INDEX: "1", UV_OFFLINE: "1" });
+    expect(profile.environment).toMatchObject({ PIP_NO_INDEX: "1", UV_OFFLINE: "1" });
     expect(profile.protectedPaths).toEqual(["Pipfile.lock", "conftest.py", "poetry.lock", "pyproject.toml", "uv.lock"]);
     expect(profile.mounts.map(value => value.source)).toContain(join(context.root, ".venv/lib"));
     expect(profile.bind({ testNames: ["tests.test_math.TestMath.test_add[param.with.dot]"], testPaths: ["tests/test_math.py"] }, "/tmp/reports")).toEqual({

@@ -31,6 +31,7 @@ export function automaticChecks(runners: readonly AutomaticRunner[] = AUTOMATIC_
 export class TestRunnerSource {
   private detection: RunnerDetection | undefined;
   private revision: string | undefined;
+  private readonly snapshots = new Map<string, RunnerProfile[]>();
   constructor(readonly owner: readonly BehavioralCommand[], private readonly repositoryRoot?: string,
     private readonly detect: (repositoryRoot: string) => Promise<RunnerDetection> = root => detectTestRunners(root)) {}
   /** True when no owner command exists and a repository is available for detection. */
@@ -38,6 +39,9 @@ export class TestRunnerSource {
   /** Latest detection result; undefined before the first refresh or in owner mode. */
   get current(): RunnerDetection | undefined { return this.detection; }
   get profiles(): RunnerProfile[] { return this.detection?.status === "detected" ? [...this.detection.profiles] : []; }
+  /** Profiles already discovered for the task's original repository revision remain authoritative while HEAD advances. */
+  profilesForRevision(revision?: string): RunnerProfile[] { return revision && this.snapshots.has(revision) ? [...this.snapshots.get(revision)!] : this.profiles; }
+  get availableProfiles(): RunnerProfile[] { return [...new Map([...this.snapshots.values()].flat().concat(this.profiles).map(profile => [profile.id, profile])).values()]; }
   /**
    * Detects once. An unsupported result is retried on every call, because dependencies may have been installed since;
    * a host restart is never required.
@@ -47,6 +51,7 @@ export class TestRunnerSource {
     const revision = await verificationGit(this.repositoryRoot!, ["rev-parse", "HEAD"]).then(value => value.trim()).catch(() => undefined);
     if (this.detection?.status !== "detected" || revision !== this.revision) {
       this.detection = await this.detect(this.repositoryRoot!); this.revision = revision;
+      if (revision && this.detection.status === "detected") this.snapshots.set(revision, [...this.detection.profiles]);
     }
     return this.detection;
   }
@@ -87,7 +92,10 @@ export function resolveTaskCommands(input: TaskCommandInput): BoundBehavioralCom
     const identities = automaticIdentities(profile, input.specification, input.strategy, input.ownedPaths);
     return identities ? [bindRunnerProfile(profile, identities)] : [];
   });
-  return [...owner, ...bound];
+  const commands = [...owner, ...bound];
+  if (bound.length && commands.reduce((total, command) => total + command.timeoutMs + (command.prepare?.timeoutMs ?? command.adapter?.prepare?.timeoutMs ?? command.adapter?.bind(command, "/tmp/bflow-profile-validation").prepare?.timeoutMs ?? 0) + 90000, 0) > 540000)
+    throw new Error("runner_identity_unselectable: split selected runners into tasks within the independent execution deadline");
+  return commands;
 }
 
 const TEST_PATH_RULE = "Test files must be listed in specification.affectedPaths, use the selected adapter language and its project directory, be committed, and belong to the task ownership. Split tasks whose criterion identities cannot be selected unambiguously.";

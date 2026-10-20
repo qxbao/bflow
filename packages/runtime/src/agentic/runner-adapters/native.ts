@@ -142,7 +142,7 @@ async function detectPython(context: AdapterContext, host: NativeHost): Promise<
         const sites = await pythonSites(choice.prefix);
         if (!sites.length && !choice.venv && choice.prefix === "/usr" && await exists("/usr/lib/python3/dist-packages/pytest/__init__.py")) sites.push("/usr/lib/python3/dist-packages");
         if (!sites.length) continue;
-        const environment: Record<string, string> = { PYTHONDONTWRITEBYTECODE: "1", PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1", PIP_NO_INDEX: "1", PIP_DISABLE_PIP_VERSION_CHECK: "1", UV_OFFLINE: "1" };
+        const environment: Record<string, string> = { PYTHONDONTWRITEBYTECODE: "1", PIP_NO_INDEX: "1", PIP_DISABLE_PIP_VERSION_CHECK: "1", UV_OFFLINE: "1" };
         const extra = [join(dirname(dirname(binary)), "lib")];
         if (choice.venv) extra.push(join(choice.prefix, "lib"), join(choice.prefix, "pyvenv.cfg"));
         const protectedPaths = configs(context, project, /^(?:pyproject\.toml|pytest\.ini|setup\.(?:cfg|py)|tox\.ini|noxfile\.py|conftest\.py|sitecustomize\.py|usercustomize\.py|Pipfile(?:\.lock)?|poetry\.lock|uv\.lock|requirements[^/]*\.txt)$/);

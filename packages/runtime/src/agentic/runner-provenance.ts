@@ -40,6 +40,12 @@ export async function pinRunnerDefinitions(root: string, detection: RunnerDetect
 export async function assertRunnerProvenance(command: BoundBehavioralCommand, cwd: string, revision: string): Promise<void> {
   if (command.checkoutDependencyRoots === undefined) return; // Explicit owner commands preserve their original authority.
   if (!command.definitionBlobs) throw new Error("Automatic runner has no pinned original revision definitions");
+  if (command.originalRevision) {
+    if (!/^[a-f0-9]{40}$/.test(command.originalRevision)) throw new Error("Invalid original task revision");
+    const original = await blobs(cwd, command.originalRevision, Object.keys(command.definitionBlobs));
+    const selected = (values: Record<string, string>) => JSON.stringify(Object.entries(values).filter(([path]) => !command.testPaths.includes(path)).sort());
+    if (selected(original) !== selected(command.definitionBlobs)) throw new Error("Detected runner definitions do not match the original task revision");
+  }
   const current = await blobs(cwd, revision, Object.keys(command.definitionBlobs));
   for (const path of command.testPaths) delete current[path];
   if (JSON.stringify(Object.entries(current).sort()) !== JSON.stringify(Object.entries(command.definitionBlobs).filter(([path]) => !command.testPaths.includes(path)).sort()))

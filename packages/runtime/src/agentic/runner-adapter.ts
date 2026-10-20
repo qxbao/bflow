@@ -6,6 +6,7 @@ export interface RunnerInvocation {
   args: string[];
   /** Relative to the disposable checkout, or absolute below its private report directory. */
   reportPaths?: string[];
+  prepare?: { executable: string; args: string[]; timeoutMs: number };
 }
 export interface AdapterRunner {
   adapterId: string;

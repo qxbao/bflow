@@ -48,12 +48,14 @@ describe("managed-language runner adapters", () => {
     });
   });
 
-  it("detects .NET test projects, excludes libraries, and selects exact FQN tests without restore", async () => {
+  it("detects .NET test projects, excludes libraries, and restores from the isolated offline cache before exact FQN selection", async () => {
     const { runner, context } = await detected("dotnet", { "tests/Behavior.csproj": '<Project><PackageReference Include="Microsoft.NET.Test.Sdk"/></Project>', "lib/Lib.csproj": "<Project/>", "tests/Test.cs": "", "tests/Directory.Build.props": "" });
     expect(runner.format).toBe("trx"); expect(runner.projectDirectory).toBe("tests");
     expect(runner.protectedPaths).toContain("tests/Directory.Build.props");
     const invocation = runner.bind({ testNames: ["Example.Behavior.passes", "Example.Behavior.fails"], testPaths: ["tests/Test.cs"] }, "/tmp/reports");
     expect(invocation.args).toEqual(["test", "Behavior.csproj", "--no-restore", "--nologo", "--filter", "FullyQualifiedName=Example.Behavior.passes|FullyQualifiedName=Example.Behavior.fails", "--logger", "trx;LogFileName=results.trx", "--results-directory", "/tmp/reports"]);
+    expect(invocation.prepare).toMatchObject({ executable: "/usr/bin/dotnet", args: ["restore", "Behavior.csproj", "--source", "/bflow-cache/nuget", "--packages", "/bflow-cache/nuget", "--ignore-failed-sources", "--disable-parallel", "--configfile", "/tmp/reports/NuGet.Config"] });
+    expect(runner.helpers![0]!.content).toContain("<clear/>");
     expect(runner.mounts.some(mount => mount.source === join(context.root, "home/.dotnet"))).toBe(false);
   });
 

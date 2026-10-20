@@ -286,9 +286,9 @@ export function createManagedAdapters(host: ManagedAdapterHost = systemHost): Ru
     }
     base.mounts.push(...await optionalMount(join(host.homeDirectory, ".nuget/packages"), "/bflow-cache/nuget", host));
     base.environment = { DOTNET_ROOT: dirname(tool.executable), DOTNET_CLI_HOME: "/tmp/bflow-dotnet", NUGET_PACKAGES: "/bflow-cache/nuget", DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1", DOTNET_CLI_TELEMETRY_OPTOUT: "1", DOTNET_NOLOGO: "1" };
-    return { runners: [{ ...base, format: "trx", nameRule: "fully qualified test class.method (TRX UnitTest TestMethod.className + name)", bind(identities, reports) {
+    return { runners: [{ ...base, helpers: [{ name: "NuGet.Config", content: '<configuration><packageSources><clear/><add key="offline" value="/bflow-cache/nuget"/></packageSources><packageSourceMapping><clear/></packageSourceMapping></configuration>' }], format: "trx", nameRule: "fully qualified test class.method (TRX UnitTest TestMethod.className + name)", bind(identities, reports) {
       validateSelection(identities, project);
-      return { args: ["test", basename(manifest), "--no-restore", "--nologo", "--filter", fqnNames(identities).map(name => `FullyQualifiedName=${name}`).join("|"), "--logger", "trx;LogFileName=results.trx", "--results-directory", reports], reportPaths: [`${reports}/results.trx`] };
+      return { args: ["test", basename(manifest), "--no-restore", "--nologo", "--filter", fqnNames(identities).map(name => `FullyQualifiedName=${name}`).join("|"), "--logger", "trx;LogFileName=results.trx", "--results-directory", reports], reportPaths: [`${reports}/results.trx`], prepare: { executable: tool.executable, timeoutMs: 120000, args: ["restore", basename(manifest), "--source", "/bflow-cache/nuget", "--packages", "/bflow-cache/nuget", "--ignore-failed-sources", "--disable-parallel", "--configfile", `${reports}/NuGet.Config`] } };
     } }], notes: [] };
   }, host);
 

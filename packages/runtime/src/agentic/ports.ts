@@ -117,6 +117,7 @@ export async function loadAgenticPolicies(options: AgenticCompositionOptions): P
   const verification = await import(new URL("../../../verification/dist/index.js", import.meta.url).href);
   const git = await import(new URL("../../../git-orchestrator/dist/index.js", import.meta.url).href);
   const engines = new Map<string, VerificationPolicy>();
+  const activePlans = new Set<string>();
   const engineFor = (plan: VerificationPlan): VerificationPolicy => {
     let engine = engines.get(plan.planId);
     if (!engine) {
@@ -134,7 +135,12 @@ export async function loadAgenticPolicies(options: AgenticCompositionOptions): P
     strategy: new tdd.TestStrategyResolver(),
     verification: {
       start: (plan, cycleId) => engineFor(plan).start(plan, cycleId),
-      verify: (plan, cycle, change, input) => engineFor(plan).verify(plan, cycle, change, input)
+      verify: async (plan, cycle, change, input) => {
+        if (activePlans.has(plan.planId)) throw new Error("Verification plan already has an active independent execution");
+        activePlans.add(plan.planId);
+        try { return await engineFor(plan).verify(plan, cycle, change, input); }
+        finally { activePlans.delete(plan.planId); engines.delete(plan.planId); }
+      }
     },
     git: await git.GitIntegrationEngine.open({ repositoryPath: options.repositoryPath, artifactStore: options.artifactStore }),
     classifyChange: spec.classifyChange, createVerificationPlan: verification.createVerificationPlan,

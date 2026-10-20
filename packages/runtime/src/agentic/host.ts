@@ -253,7 +253,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   // Owner commands are an optional override; without them Runtime detects the repository's test runner (no user configuration).
   const testRunners = new TestRunnerSource(behavioralCommands, configuration.repositoryPath);
   await testRunners.refresh();
-  let verificationSandbox = await probeBehavioralSandbox();
+  let verificationSandbox = await probeBehavioralSandbox(configuration.repositoryPath);
   const verification = new HostVerification(() => requireWorkspace().runtime, () => requireWorkspace().runtime.ports.artifactStore, receipts, testRunners);
   const development = new HostDevelopment(() => requireWorkspace().runtime, testRunners);
   const conversationIntake = new HostConversationIntake(receipts, () => requireWorkspace().conversation);
@@ -799,7 +799,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           ...(operation?.signal ? [operation.signal] : [])]);
         const options: OperationOptions = { deadline, signal, timeoutMs: Math.min(remaining, 600_000) };
         preparation = (async () => {
-          verificationSandbox = await probeBehavioralSandbox();
+          verificationSandbox = await probeBehavioralSandbox(configuration.repositoryPath);
           await drainRoleStartup(true);
           roleStartupFailures.clear();
           // H1: legacy per-role plans never survive a new generation; launch-keyed plans are published by the session.

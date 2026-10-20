@@ -43,7 +43,7 @@ export interface RunnerProfile {
 export type RunnerDetection =
   | { status: "detected"; profiles: RunnerProfile[]; notes: string[] }
   | { status: "unsupported"; reason: string; remediation: string[]; agentFixable?: boolean };
-export type BoundBehavioralCommand = BehavioralCommand & Partial<Pick<RunnerProfile, "checkoutDependencyRoots" | "dependencySource" | "prepare" | "adapter" | "definitionBlobs">> & { reportDirectory?: string };
+export type BoundBehavioralCommand = BehavioralCommand & Partial<Pick<RunnerProfile, "checkoutDependencyRoots" | "dependencySource" | "prepare" | "adapter" | "definitionBlobs">> & { reportDirectory?: string; originalRevision?: string };
 const permittedLevels: Record<BehavioralCommand["method"], readonly string[]> = {
   unit_test: ["unit", "property", "regression"], integration_test: ["integration", "regression", "smoke"], e2e_test: ["e2e", "regression", "smoke"]
 };
@@ -192,7 +192,7 @@ export async function measureBehavior(command: BoundBehavioralCommand, cwd: stri
     const env: Record<string, string> = { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", HOME: "/tmp/bflow-home", TMPDIR: "/tmp", ...(command.adapter?.environment ?? {}) };
     const maxOutputBytes = command.maxOutputBytes ?? 1_048_576;
     // A Runtime-detected profile may run a sandboxed build first (e.g. `tsc -b`); it gets the same boundary, its own deadline, and may only leave git-ignored outputs.
-    const preparation = command.adapter?.prepare ?? (command.prepare ? { ...command.prepare, executable: command.executable } : undefined);
+    const preparation = invocation?.prepare ?? command.adapter?.prepare ?? (command.prepare ? { ...command.prepare, executable: command.executable } : undefined);
     if (preparation) {
       const prepareSandbox = await sandboxBehavior({ ...command, executable: preparation.executable }, checkout, preparation.args).catch(error => {
         throw new Error(`Behavioral runner infrastructure failure (prepare): ${String(error)}`, { cause: error });

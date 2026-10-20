@@ -57,15 +57,16 @@ export class HostVerification {
   }
   /** Fresh dossier and ownership for a run's task (or the workflow when taskId is absent), read outside the journal lock. */
   private async dossierFor(runId: string, taskId?: string) {
+    if (taskId === "workflow-verification") taskId = undefined;
     const run = record(await this.runtime().inspect(runId));
     const tasks = Array.isArray(run.tasks) ? run.tasks.map(record) : [];
     const task = taskId === undefined ? undefined : tasks.find(item => item.taskId === taskId);
     if (taskId !== undefined && !task) throw new Error("Unknown task");
     const dossier = record(task ? task.spec : run.workflowSpec);
-    return { run, specification: SpecificationSchema.parse(dossier.specification), strategy: TestStrategySchema.parse(dossier.strategy), ownedPaths: this.ownedPathsOf(run, taskId) };
+    return { run, specification: SpecificationSchema.parse(dossier.specification), strategy: TestStrategySchema.parse(dossier.strategy), ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: task && Array.isArray(task.worktrees) ? textField(record(task.worktrees.at(-1)).baseCommitHash) : textField(run.baseRevision) };
   }
-  private resolve(input: { specification: Specification; strategy: TestStrategy; ownedPaths?: readonly string[] | undefined }): BoundBehavioralCommand[] {
-    return resolveTaskCommands({ owner: this.runners.owner, profiles: this.runners.profiles, ...input });
+  private resolve(input: { specification: Specification; strategy: TestStrategy; ownedPaths?: readonly string[] | undefined; originalRevision?: string }): BoundBehavioralCommand[] {
+    return resolveTaskCommands({ owner: this.runners.owner, profiles: this.runners.profilesForRevision(input.originalRevision), ...input }).map(command => input.originalRevision ? { ...command, originalRevision: input.originalRevision } : command);
   }
   async authenticateGate(result: QualityGateResult): Promise<boolean> { return this.receipts ? this.receipts.authenticateGate(result) : this.gateReceipts.get(result.evaluationId) === digest(result); }
   async authenticateEvidence(result: VerificationResult): Promise<boolean> { return this.receipts ? this.receipts.authenticateEvidence(result) : this.evidenceReceipts.get(result.verificationId) === digest(result); }
@@ -116,7 +117,7 @@ export class HostVerification {
     } };
   }
   /** Owner-configured checks always; automatic checks only when no owner file exists (static definitions, bound at plan time). */
-  behavioralChecks() { return [...behavioralChecks(this.runners.owner), ...(this.runners.automatic ? automaticChecks(this.runners.profiles) : [])]; }
+  behavioralChecks() { return [...behavioralChecks(this.runners.owner), ...(this.runners.automatic ? automaticChecks(this.runners.availableProfiles) : [])]; }
   /** Methods with a runner: owner-configured, or Runtime-detected. Fixed per owner configuration; detection may refresh. */
   configuredMethods(): string[] { return [...new Set([...this.runners.owner.map(command => command.method), ...this.runners.profiles.map(profile => profile.method)])]; }
   /**
@@ -188,7 +189,7 @@ export class HostVerification {
   }
   behavioralGates(): QualityGate[] {
     return [...this.runners.owner.map(command => this.ownerGate(command)),
-      ...(this.runners.automatic ? this.runners.profiles.map(runner => this.automaticGate(runner)) : [])];
+      ...(this.runners.automatic ? this.runners.availableProfiles.map(runner => this.automaticGate(runner)) : [])];
   }
   private gate(id: string, resolveCommand: (context: { runId: string; taskId?: string | undefined }) => Promise<BoundBehavioralCommand>): QualityGate {
     return { id, evaluate: async raw => {
@@ -219,7 +220,7 @@ export class HostVerification {
     const run = record(await this.runtime().inspect(runId)), task = (run.tasks as Record<string, unknown>[]).find(task => task.taskId === taskId);
     if (!task) throw new Error("Unknown task");
     const dossier = record(task.spec), spec = SpecificationSchema.parse(dossier.specification), strategy = TestStrategySchema.parse(dossier.strategy);
-    this.assertSupported(spec, strategy);
+    if (!this.runners.automatic) this.assertSupported(spec, strategy);
     if (spec.status !== "approved" || strategy.tddDecision.runId !== runId || strategy.tddDecision.taskId !== taskId) throw new Error("Behavioral measurement requires an accepted matching task specification");
     const prior = Array.isArray(strategy.metadata?.tddEvidence) ? strategy.metadata.tddEvidence.map(value => VerificationResultSchema.parse(value)) : [];
     for (const receipt of prior) if (!await this.authenticateEvidence(receipt)) throw new Error("Prior behavioral phase lacks a trusted host receipt");
@@ -231,7 +232,7 @@ export class HostVerification {
     if (target.agentId === binding.agentId || target.paneId === binding.paneId) throw new Error("Implementer cannot verify its own change");
     const cwd = textField(target.worktreePath), revision = (await this.git(cwd, ["rev-parse", "HEAD"])).trim(), startedAt = new Date().toISOString();
     const criteria = spec.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived");
-    const commands = this.resolve({ specification: spec, strategy, ownedPaths: this.ownedPathsOf(run, taskId) });
+    const commands = this.resolve({ specification: spec, strategy, ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: Array.isArray(task.worktrees) && task.worktrees.length ? textField(record(task.worktrees.at(-1)).baseCommitHash) : textField(run.baseRevision) });
     if (!commands.length || criteria.some(criterion => criterion.verificationMethod === "manual_review")) throw new Error("This strategy requires independent alternative evidence");
     const verificationId = `host-behavioral-${digest([runId, taskId, strategy.tddDecision.decisionId, phase, revision, commands])}`;
     const replay = this.receipts ? await this.receipts.getEvidence(verificationId) : this.evidenceRecords.get(verificationId);

@@ -22,8 +22,8 @@ export class HostDevelopment {
     this.runners = runners instanceof TestRunnerSource ? runners : new TestRunnerSource(parseBehavioralCommands(runners));
   }
   /** The same resolver as Verification: owner commands and automatic profiles, bound to this task's identities and ownership. */
-  private commandsFor(task: { spec: { specification: Specification; strategy: TestStrategy } }, ownedPaths: string[]) {
-    return resolveTaskCommands({ owner: this.runners.owner, profiles: this.runners.profiles, strategy: task.spec.strategy,
+  private commandsFor(task: { spec: { specification: Specification; strategy: TestStrategy }; worktrees?: { baseCommitHash: string }[] }, ownedPaths: string[]) {
+    return resolveTaskCommands({ owner: this.runners.owner, profiles: this.runners.profilesForRevision(task.worktrees?.at(-1)?.baseCommitHash), strategy: task.spec.strategy,
       specification: task.spec.specification, ownedPaths });
   }
   private async git(cwd: string, args: string[]) {
@@ -87,11 +87,12 @@ export class HostDevelopment {
     const context = await this.identity(binding, input);
     const selected = await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async (task, definition) => ({
       commands: this.commandsFor(task, strings(record(definition.metadata).ownedPaths)),
-      head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim()
+      head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
+      originalRevision: task.worktrees.at(-1)!.baseCommitHash
     }));
     if (!selected.commands.length) throw new Error("No automated checks for this task: configure an owner command or make the accepted criteria and test files resolvable");
     const measurements = [];
-    for (const command of selected.commands) measurements.push(await measureBehavior(command, context.cwd, selected.head));
+    for (const command of selected.commands) measurements.push(await measureBehavior({ ...command, originalRevision: selected.originalRevision }, context.cwd, selected.head));
     return json({ independentAcceptanceEvidence: false, sourceRevision: selected.head, measurements });
   }
   async commit(binding: PaneBinding, input: unknown) {

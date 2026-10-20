@@ -62,3 +62,37 @@ it("rejects unpinned automatic evidence and new root build hooks; permits mapped
   await writeFile(join(cwd, "build.rs"), "fn main(){}"); git("add", "."); git("commit", "-m", "new hook");
   await expect(assertRunnerProvenance(command, cwd, git("rev-parse", "HEAD"))).rejects.toThrow("original revision");
 });
+it("checks the original task base even if the host discovers a newer committed runner configuration", async () => {
+  const cwd = await root();
+  const git = (...args: string[]) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", ...args], { cwd, encoding: "utf8" }).trim();
+  git("init", "-b", "main"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.test");
+  await writeFile(join(cwd, "Makefile"), "test:\n\ttrue\n"); git("add", "."); git("commit", "-m", "base"); const originalRevision = git("rev-parse", "HEAD");
+  await writeFile(join(cwd, "Makefile"), "test:\n\tfalse\n"); git("add", "."); git("commit", "-m", "new host head");
+  const detection = await pinRunnerDefinitions(cwd, { status: "detected", profiles: [profile(cwd)], notes: [] });
+  if (detection.status !== "detected") throw new Error("missing profile");
+  const command = { ...bindRunnerProfile(detection.profiles[0]!, { testNames: ["target"], testPaths: ["tests/a.test.js"] }), originalRevision };
+  await expect(assertRunnerProvenance(command, cwd, git("rev-parse", "HEAD"))).rejects.toThrow("original task revision");
+});
+it("retains detected profile snapshots while repository HEAD advances", async () => {
+  const { TestRunnerSource } = await import("../../src/agentic/task-commands.js");
+  const cwd = await root();
+  const git = (...args: string[]) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", ...args], { cwd, encoding: "utf8" }).trim();
+  git("init", "-b", "main"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.test");
+  await writeFile(join(cwd, "README.md"), "a"); git("add", "."); git("commit", "-m", "first"); const first = git("rev-parse", "HEAD");
+  let generation = 0;
+  const source = new TestRunnerSource([], cwd, async () => ({ status: "detected", profiles: [{ ...profile(cwd), args: [String(++generation)] }], notes: [] }));
+  await source.refresh(); await writeFile(join(cwd, "README.md"), "b"); git("add", "."); git("commit", "-m", "second");
+  await source.refresh();
+  expect(source.profiles[0]!.args).toEqual(["2"]);
+  expect(source.profilesForRevision(first)[0]!.args).toEqual(["1"]);
+});
+it("assigns unique stable labels to nested projects whose flattened paths collide", async () => {
+  const { detectTestRunners } = await import("../../src/agentic/runner-detection.js");
+  const cwd = await root();
+  const adapter = { id: "fixture", async detect() { return { notes: [], runners: ["a/b", "a-b"].map(projectDirectory => ({ adapterId: "go", version: "1.23", executable: "/usr/bin/true", projectDirectory, format: "go_json" as const, nameRule: "package.Test", mounts: [], environment: {}, protectedPaths: [], bind: () => ({ args: [] }) })) }; } };
+  const result = await detectTestRunners(cwd, { adapters: [adapter] });
+  expect(result.status).toBe("detected"); if (result.status !== "detected") throw new Error("missing catalog");
+  expect(result.profiles).toHaveLength(6);
+  expect(new Set(result.profiles.map(profile => profile.id)).size).toBe(6);
+  expect(new Set(result.profiles.map(profile => profile.command)).size).toBe(6);
+});

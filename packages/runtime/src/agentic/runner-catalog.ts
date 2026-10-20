@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { lstat, readdir, realpath } from "node:fs/promises";
 import { join, relative } from "node:path";
 import type { RunnerDetection, RunnerProfile } from "./behavioral-runner.js";
@@ -35,7 +36,7 @@ export async function detectRunnerCatalog(root: string, javascript: RunnerDetect
       for (const candidate of result.runners) {
         const duplicate = result.runners.filter(item => item.adapterId === candidate.adapterId && item.projectDirectory === candidate.projectDirectory).length > 1;
         if (duplicate) { notes.push(`${candidate.adapterId}: runner_identity_unselectable: multiple test projects share one directory`); continue; }
-        const directorySuffix = candidate.projectDirectory === "." ? "" : ":" + candidate.projectDirectory.replace(/[^A-Za-z0-9._-]/g, "-");
+        const directorySuffix = candidate.projectDirectory === "." ? "" : ":" + candidate.projectDirectory.replace(/[^A-Za-z0-9._-]/g, "-").slice(0,48) + "-" + createHash("sha256").update(candidate.projectDirectory).digest("hex").slice(0,12);
         const source = javascriptDependencySource && ["jest", "mocha"].includes(candidate.adapterId) && candidate.projectDirectory === "." ? javascriptDependencySource : root;
         const roots: string[] = [];
         for (const file of context.files.filter(file => /(^|\/)package\.json$/.test(file))) {

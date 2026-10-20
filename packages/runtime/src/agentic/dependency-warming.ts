@@ -100,12 +100,13 @@ async function readManifest(root: string, name: string): Promise<string> {
     return bytes.toString("utf8");
   } finally { await handle.close(); }
 }
-async function findNpm(): Promise<{ node: string; npmRoot: string }> {
+async function findNpm(repositoryRoot: string): Promise<{ node: string; npmRoot: string }> {
   const node = await realpath(process.execPath);
   for (const directory of (process.env.PATH ?? "").split(delimiter)) {
     if (!isAbsolute(directory)) continue;
     try {
       const cli = await realpath(join(directory, "npm")); await access(cli, constants.X_OK);
+      if (cli === repositoryRoot || cli.startsWith(repositoryRoot + "/")) continue;
       const npmRoot = dirname(dirname(cli));
       if (basename(npmRoot) !== "npm" || npmRoot === resolve(homedir()) || cli !== join(npmRoot, "bin", "npm-cli.js") || record(JSON.parse(await readFile(join(npmRoot, "package.json"), "utf8"))).name !== "npm" || await realpath(npmRoot) !== npmRoot) continue;
       const version = await execute(node, [cli, "--version"], { cwd: "/", env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent", NPM_CONFIG_USERCONFIG: "/dev/null", NPM_CONFIG_GLOBALCONFIG: "/dev/null" }, timeout: 5000, maxBuffer: 4096 });
@@ -122,11 +123,11 @@ export async function warmNpmDependencies(root: string): Promise<DependencyWarmR
     if (await realpath(root) !== resolve(root)) return unsupported("Dependency warming requires a canonical repository root");
     const [manifestText, lockText] = await Promise.all([readManifest(root, "package.json"), readManifest(root, "package-lock.json")]);
     validateNpmWarmManifests(JSON.parse(manifestText), JSON.parse(lockText));
-    const readiness = await probeBehavioralSandbox();
+    const readiness = await probeBehavioralSandbox(root);
     if (readiness.status !== "ready") return unsupported(readiness.reason);
-    const network = await probeNpmWarmNetwork();
+    const network = await probeNpmWarmNetwork(root);
     if (network.status !== "ready") return unsupported(network.reason);
-    const tools = await findNpm();
+    const tools = await findNpm(root);
     cache = await realpath(await mkdtemp(join(tmpdir(), "bflow-npm-warm-")));
     await Promise.all([writeFile(join(cache, "package.json"), manifestText, { mode: 0o600 }), writeFile(join(cache, "package-lock.json"), lockText, { mode: 0o600 }), writeFile(join(cache, "resolv.conf"), NPM_WARM_RESOLVER, { mode: 0o600 })]);
     const invocation = npmWarmInvocation(cache, readiness.executable, tools.node, tools.npmRoot);
@@ -147,12 +148,14 @@ export type WarmNetworkReadiness = { status: "ready"; executable: string } | { s
 /** Probe installed behavior/capabilities rather than assuming a release label guarantees the required flags.
  * Official CLI: https://github.com/rootless-containers/slirp4netns/blob/master/slirp4netns.1.md
  * --disable-dns is mandatory: the default DNS proxy can expose host loopback despite --disable-host-loopback. */
-export async function probeNpmWarmNetwork(): Promise<WarmNetworkReadiness> {
+export async function probeNpmWarmNetwork(repositoryRoot = process.cwd()): Promise<WarmNetworkReadiness> {
   if (process.platform !== "linux") return { status: "unsupported", reason: "Isolated dependency networking is only supported on Linux" };
   for (const directory of (process.env.PATH ?? "/usr/bin:/bin").split(delimiter)) {
     if (!isAbsolute(directory)) continue;
     try {
-      const executable = await realpath(join(directory, "slirp4netns")); await access(executable, constants.X_OK);
+      const executable = await realpath(join(directory, "slirp4netns"));
+      if (executable === repositoryRoot || executable.startsWith(repositoryRoot + "/")) continue;
+      await access(executable, constants.X_OK);
       if (!(await lstat(executable)).isFile()) continue;
       const [version, help] = await Promise.all([
         execute(executable, ["--version"], { cwd: "/", env: helperEnvironment(), timeout: 5000, maxBuffer: 16384 }),

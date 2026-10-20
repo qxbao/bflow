@@ -152,6 +152,8 @@ it("catalogs Go + Python + TypeScript together and resolves the accepted task to
     { command: "auto:unit:python:python", path: "python/tests/test_behavior.py", name: "tests.test_behavior.test_target", adapter: "python" }
   ];
   for (const target of wanted) {
+    const selectedProfile = source.profiles.find(profile => target.adapter === undefined ? profile.command === target.command : profile.method === "unit_test" && profile.adapter?.adapterId === target.adapter && target.path.startsWith(profile.adapter.projectDirectory + "/"));
+    expect(selectedProfile).toBeDefined(); target.command = selectedProfile!.command;
     expect(catalog.testRunners.some(entry => entry.command === target.command)).toBe(true);
     const assessed = assessment("domain_logic", { infrastructure: { readiness: "ready", commands: [{ method: "unit_test", command: target.command, level: "unit" }] } });
     const specification = SpecificationSchema.parse({ ...spec(assessed, "unit_test"), affectedPaths: wanted.map(value => value.path) });
