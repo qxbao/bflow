@@ -95,12 +95,18 @@ export interface AgenticRuntimePorts {
   authorizeHuman(decision: ApprovalDecision): Promise<boolean>;
   /** Capabilities configured by the project owner, not inferred from an agent's prompt. */
   roleCapabilities: Readonly<Record<string, readonly string[]>>;
+  /** Verifies requested capabilities against the current authenticated pane/session before any lease or transport side effect. */
+  preflightRoleCapabilities?(binding: PaneBinding, required: readonly string[]): Promise<void>;
   maxConcurrency?: number;
   /** The concrete host can route P16 alternative-evidence requests to its measurement tools. */
   automaticAlternativeEvidence?: boolean;
   taskChecks: readonly QualityGateDefinition[];
   workflowChecks: readonly QualityGateDefinition[];
   clock?: () => Date;
+}
+export class RoleCapabilityPreflightError extends Error {
+  readonly code = "role_capability_preflight";
+  constructor(message: string) { super(message); this.name = "RoleCapabilityPreflightError"; }
 }
 export interface AgenticCompositionOptions {
   artifactStore: ArtifactStore; repositoryPath: string; gates: readonly QualityGate[];

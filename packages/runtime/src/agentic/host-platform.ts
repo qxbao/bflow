@@ -9,6 +9,7 @@ import {
 } from "@bflow/contracts";
 import { createManagedCodexHookEnvironment, createProviderExecutionProbeCoalescer, createProviderProcessRunner, type LiveReadinessObservation } from "@bflow/agent-providers";
 import { FileSkillStore, SkillManager } from "@bflow/skills";
+import type { SkillManifest } from "@bflow/contracts";
 import {
   createPlatformReadinessService, createProviderAdapterFactory, Ed25519LaunchAttestationSigner, GatewayControlClient,
   type GatewayControlPort, type HostLaunchExtras, type PlatformPreflightReport, type PlatformReadinessService,
@@ -229,13 +230,15 @@ export class HostPlatformSession {
   private identity: PlatformSessionIdentity | undefined;
   private report: PlatformPreflightReport | undefined;
   private readonly launches = new Map<AgentRole, { launchId: string; provider: AgentProviderId }>();
+  private readonly roleInstructions = new Map<AgentRole, { launchId: string; manifest: SkillManifest; instructionText: string; references: readonly { name: string; description: string; entrypoint: string; digest: string }[] }>();
   private readonly developerLaunches = new Map<string, string>();
   /** Active Developer launches by launch id: the reachability the launch must prove, or null without Gateway registrations. */
   private readonly developerGates = new Map<string, ReachabilityExpectation | null>();
   private gatewayCheck: NonNullable<HostPlatformStatus["gateway"]> | undefined;
   private restartRecovery: { readonly recoveredAt: string; readonly releasedLaunchIds: readonly string[] } | undefined;
 
-  constructor(private readonly options: HostPlatformSessionOptions) {}
+  constructor(private readonly options: HostPlatformSessionOptions, private readonly skillManager?: SkillManager,
+    private readonly skillStore?: FileSkillStore) {}
 
   /**
    * Preflights every non-Developer role and launches the ready set only when all required roles are ready.
@@ -260,10 +263,14 @@ export class HostPlatformSession {
     if (!result.ok) throw new Error(`Platform readiness could not be prepared: ${describeFailure(result.error)}`);
     this.report = result.value.report;
     this.launches.clear();
+    this.roleInstructions.clear();
     const reachability = new Map<AgentRole, ReachabilityExpectation>();
     try {
       for (const prepared of result.value.launches) {
         this.launches.set(prepared.role, { launchId: prepared.launch.launchId, provider: prepared.provider });
+        if (prepared.skills?.manifest && prepared.skills?.rendered) this.roleInstructions.set(prepared.role, { launchId: prepared.launch.launchId,
+          manifest: prepared.skills.manifest, instructionText: prepared.skills.rendered.instructionText,
+          references: prepared.skills.rendered.references.map(reference => ({ ...reference })) });
         const expectation = await publishLaunchProbe(this.options.probeDirectory, prepared);
         if (expectation !== undefined) reachability.set(prepared.role, expectation);
       }
@@ -283,6 +290,27 @@ export class HostPlatformSession {
       launches: new Map(result.value.launches.map(prepared => [prepared.role, prepared])),
       reachability
     };
+  }
+
+  /** Exact pinned, provider-neutral skills for the current prepared launch; callers receive no storage paths or mutable bundle handles. */
+  async readPinnedInstructions(role: AgentRole, skillId?: string, offset = 0, limit = 8 * 1024): Promise<{ launchId: string; manifestDigest: string; instructionText: string;
+    references: readonly { name: string; description: string; entrypoint: string; digest: string }[];
+    skill?: { skillId: string; version: string; digest: string; offset: number; bytes: number; content: string; truncated: boolean } } | undefined> {
+    const value = this.roleInstructions.get(role), active = this.launches.get(role);
+    if (!value || !active || value.launchId !== active.launchId || !this.skillManager || !this.skillStore) return undefined;
+    const manifest = await this.skillManager.verify(value.manifest);
+    const common = { launchId: value.launchId, manifestDigest: manifest.digest, instructionText: value.instructionText,
+      references: structuredClone(value.references) };
+    if (skillId === undefined) return common;
+    if (!Number.isInteger(offset) || offset < 0 || offset > 1024 * 1024 || !Number.isInteger(limit) || limit < 1 || limit > 16 * 1024)
+      throw new Error("Pinned skill read offset/limit is invalid");
+    const definition = manifest.skills.find(item => item.skillId === skillId);
+    if (!definition) throw new Error("Skill is not selected by this role's verified manifest");
+    const files = await this.skillStore.getBundle(definition.digest), content = files["SKILL.md"];
+    if (typeof content !== "string") throw new Error(`Pinned skill ${definition.skillId} has no SKILL.md`);
+    return { ...common, skill: { skillId, version: definition.version, digest: definition.digest, offset,
+      bytes: Math.min(limit, Math.max(0, Buffer.byteLength(content) - offset)), content: content.slice(offset, offset + limit),
+      truncated: offset + limit < Buffer.byteLength(content) } };
   }
 
   /** Requires an activated, ready verdict for every required role before startup is accepted. */
@@ -639,7 +667,7 @@ export async function createHostPlatformSession(options: CreateHostPlatformSessi
     reachabilityDirectory: join(options.directory, LAUNCH_REACHABILITY_DIRECTORY),
     hostCapabilities: options.hostCapabilities,
     ...(gatewayDiagnostic !== undefined ? { gatewayDiagnostic } : {})
-  });
+  }, skillManager, new FileSkillStore(platform.skillsStoreRoot));
   await session.recoverPreviousDaemon();
   return session;
 }

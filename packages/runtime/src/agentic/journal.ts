@@ -56,6 +56,15 @@ export interface RunRecord {
   delegationHistory?: DelegationRequest[];
   /** Approvals a later requirement revision made obsolete; their decisions are refused with the revision that superseded them. */
   supersededApprovals?: { approvalId: string; supersededByRevision: number }[];
+  /** Durable semantic next action for a live run; optional for version-1 journals written before workflow liveness tracking. */
+  pendingAction?: {
+    actionId: string; kind: "coordinator_continuation" | "resume_coordinator" | "reconcile_delivery"; owner: "coordinator";
+    reason: string; sourceMessageId: string; createdAt: string; state: "pending" | "queued"; previousStatus?: SdlcWorkStatus; resumeAttempts?: number;
+    relatedMessageIds?: string[]; recovery?: "capability_repair" | "manual" | "reconcile_delivery";
+    requiredRole?: AgentRole; requiredCapabilities?: string[];
+  };
+  /** Durable idempotency ledger for recoverable resumes, retained even after the blocker is cleared. */
+  resumeReceipts?: { actionId: string; messageId: string }[];
   /** Set once the run's single final cancellation notice is queued; absent in journals written before cancellation reconciliation. */
   cancelReconciled?: boolean;
 }
@@ -137,6 +146,33 @@ function parseState(input: unknown, repository: string): JournalState {
     if (run.userDecisions !== undefined) parseUserDecisions(run.userDecisions, run.runId);
     if (run.delegationHistory !== undefined) run.delegationHistory = run.delegationHistory.map(item => DelegationRequestSchema.parse(item));
     if (run.cancelReconciled !== undefined && typeof run.cancelReconciled !== "boolean") throw new Error("Invalid cancellation reconciliation flag");
+    if (run.pendingAction !== undefined) {
+      const action = record(run.pendingAction);
+      const allowed = new Set(["actionId", "kind", "owner", "reason", "sourceMessageId", "createdAt", "state", "previousStatus", "resumeAttempts", "relatedMessageIds", "recovery", "requiredRole", "requiredCapabilities"]);
+      if (Object.keys(action).some(key => !allowed.has(key))) throw new Error("Invalid durable workflow next action fields");
+      textField(action.actionId); textField(action.reason); textField(action.sourceMessageId); textField(action.createdAt);
+      if (String(action.reason).length > 2000 || !Number.isFinite(Date.parse(String(action.createdAt))) ||
+          action.actionId !== `next-${digest([run.runId, action.sourceMessageId])}`) throw new Error("Invalid durable workflow next action identity");
+      if (!(["coordinator_continuation", "resume_coordinator", "reconcile_delivery"].includes(String(action.kind)) && action.owner === "coordinator" &&
+          ["pending", "queued"].includes(String(action.state)))) throw new Error("Invalid durable workflow next action");
+      if (action.previousStatus !== undefined) {
+        const status = SdlcWorkStatusSchema.parse(action.previousStatus);
+        if (["completed", "failed", "cancelled", "escalated"].includes(status)) throw new Error("Invalid resume phase in durable workflow next action");
+      }
+      if (action.resumeAttempts !== undefined && (!Number.isInteger(action.resumeAttempts) || Number(action.resumeAttempts) < 0 || Number(action.resumeAttempts) > 3))
+        throw new Error("Invalid durable workflow resume limit");
+      if (action.relatedMessageIds !== undefined && (!Array.isArray(action.relatedMessageIds) || action.relatedMessageIds.length > 100 ||
+          action.relatedMessageIds.some(id => typeof id !== "string" || !id))) throw new Error("Invalid related capability failure identities");
+      if (action.recovery !== undefined && !["capability_repair", "manual", "reconcile_delivery"].includes(String(action.recovery)))
+        throw new Error("Invalid workflow recovery classification");
+      if (action.requiredRole !== undefined) AgentRoleSchema.parse(action.requiredRole);
+      if (action.requiredCapabilities !== undefined) strings(action.requiredCapabilities);
+    }
+    if (run.resumeReceipts !== undefined) {
+      if (!Array.isArray(run.resumeReceipts) || run.resumeReceipts.length > 50) throw new Error("Invalid resume receipt ledger");
+      for (const receipt of run.resumeReceipts) { textField(receipt.actionId); textField(receipt.messageId); }
+      if (new Set(run.resumeReceipts.map(item => item.actionId)).size !== run.resumeReceipts.length) throw new Error("Duplicate resume receipt identity");
+    }
     if (run.supersededApprovals !== undefined) for (const item of run.supersededApprovals) {
       textField(item.approvalId); if (!Number.isSafeInteger(item.supersededByRevision) || item.supersededByRevision < 2) throw new Error("Invalid superseded approval");
     }

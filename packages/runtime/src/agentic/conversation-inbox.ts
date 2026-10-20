@@ -6,14 +6,21 @@ const RULE = /^\s*[─━]{8,}\s*$/u;
 const EMPTY_CURRENT_PROMPT = /^\s*❯[\s ]*$/u;
 
 /**
- * True only when the provider's visible input box is verifiably empty. Fails closed: any provider other than Claude,
- * any unrecognised layout, or any typed/placeholder text returns false, so a nudge never merges with a user draft.
+ * True only when the provider's visible input box is verifiably empty. Supports observed Claude and Codex layouts;
+ * any unrecognised layout or typed text returns false, so a nudge never merges with a user draft.
  * Recognises the current Claude layout (rule, `❯` prompt, rule, optional status line) and the older boxed layout.
  */
 export function isProviderInputEmpty(provider: string, visibleText: string): boolean {
-  if (provider !== "claude") return false;
   const lines = visibleText.split(/\r?\n/);
   while (lines.length && lines[lines.length - 1]!.trim() === "") lines.pop();
+  if (provider === "codex") {
+    const index = lines.map((line, index) => ({ line, index })).filter(item => /^\s*›/u.test(item.line)).pop()?.index;
+    if (index === undefined || !/^\s*›\s*$/u.test(lines[index]!)) return false;
+    const footer = lines.slice(index + 1).filter(line => line.trim() !== "");
+    return footer.length === 2 && /\s·\s+(?:\/|~\/|[A-Za-z]:\\)/u.test(footer[0]!) &&
+      /^\s*\?\s+for shortcuts\b/u.test(footer[1]!);
+  }
+  if (provider !== "claude") return false;
   return isCurrentLayoutEmpty(lines) || isBoxedLayoutEmpty(lines);
 }
 
@@ -24,7 +31,7 @@ export function isProviderInputEmpty(provider: string, visibleText: string): boo
  */
 export function stripGhostSuggestion(ansiText: string): string {
   return ansiText.split(/\r?\n/).map(line => {
-    const prompt = line.includes("❯");
+    const prompt = line.includes("❯") || line.includes("›");
     let out = "", faint = false;
     for (let index = 0; index < line.length;) {
       const csi = /^\x1b\[([0-9;:]*)([@-~])/.exec(line.slice(index));

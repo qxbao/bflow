@@ -14,10 +14,14 @@ export interface ConversationInboxPorts {
   readPaneAnsi(paneId: string): Promise<string>;
   notify(title: string, body: string): Promise<void>;
   prompt(paneId: string, text: string): Promise<void>;
+  /** Durable host receipt for an advisory notification or safe-prompt failure; original inbox notice remains pending. */
+  recordDeliveryFailure?(messageIds: readonly string[], reason: string): Promise<void>;
+  /** Host-owned durable budget, reserved before typing; false requires manual Conversation input. */
+  reserveNudge?(messageIds: readonly string[]): Promise<boolean>;
   now(): number;
 }
 
-export type InboxTickOutcome = "idle" | "notified" | "nudged" | "nudge_backoff" | "pane_unavailable" | "pane_busy" | "input_not_empty";
+export type InboxTickOutcome = "idle" | "notified" | "nudged" | "nudge_backoff" | "nudge_exhausted" | "pane_unavailable" | "pane_busy" | "input_not_empty" | "delivery_failed";
 
 /**
  * One inbox pass. User decisions and blocks are re-notified with backoff until displayed; other notices notify once. A notice
@@ -26,10 +30,11 @@ export type InboxTickOutcome = "idle" | "notified" | "nudged" | "nudge_backoff" 
  */
 export class ConversationInboxNotifier {
   private readonly reminders = new Map<string, ReminderState>();
+  private readonly retryNotifications = new Set<string>();
   private nudge: NudgeState | undefined;
 
   /** A recreated or resurfaced notice is new work: it is re-notified and nudged on the next pass. */
-  forget(messageId: string): void { this.reminders.delete(messageId); this.nudge = undefined; }
+  forget(messageId: string): void { this.reminders.delete(messageId); this.retryNotifications.delete(messageId); this.nudge = undefined; }
 
   async tick(ports: ConversationInboxPorts): Promise<InboxTickOutcome> {
     const unsurfaced = await ports.unsurfacedNotices(), undisplayed = await ports.undisplayedNotices();
@@ -38,14 +43,30 @@ export class ConversationInboxNotifier {
     for (const notice of [...undisplayed, ...unsurfaced.filter(item => !undisplayed.some(other => other.messageId === item.messageId))]) {
       const rendered = renderConversationNotice(notice), userFacing = isUserFacingNotice(rendered);
       const state = this.reminders.get(notice.messageId);
-      if (userFacing ? reminderDue(state, now) : state === undefined) {
+      if (userFacing ? reminderDue(state, now) : state === undefined || this.retryNotifications.has(notice.messageId) && reminderDue(state, now)) {
         due.push({ id: notice.messageId, body: userFacing ? notificationBody(rendered) : rendered.display });
-        this.reminders.set(notice.messageId, userFacing ? afterReminder(state, now) : { shows: 1, nextAt: Number.POSITIVE_INFINITY });
       }
     }
     if (due.length) {
+      let notificationSucceeded = true;
       try { await ports.notify(`Bflow: ${due.length} cập nhật mới`, due.map(item => item.body).join("\n---\n").slice(0, 1200)); }
-      catch { /* the notification is advisory; the nudge below is the wake-up */ }
+      catch (error) {
+        notificationSucceeded = false;
+        for (const item of due) {
+          this.reminders.set(item.id, { shows: (this.reminders.get(item.id)?.shows ?? 0) + 1, nextAt: now + 60_000 });
+          this.retryNotifications.add(item.id);
+        }
+        await ports.recordDeliveryFailure?.(due.map(item => item.id), String(error));
+        // The OS notification is advisory; still attempt the separate safe Conversation wake below.
+      }
+      if (notificationSucceeded) {
+        for (const item of due) {
+          this.retryNotifications.delete(item.id);
+          const notice = [...undisplayed, ...unsurfaced].find(candidate => candidate.messageId === item.id);
+          this.reminders.set(item.id, notice && isUserFacingNotice(renderConversationNotice(notice))
+            ? afterReminder(this.reminders.get(item.id), now) : { shows: (this.reminders.get(item.id)?.shows ?? 0) + 1, nextAt: now + 60_000 });
+        }
+      }
     }
     // Nudge for unsurfaced notices, or for user-facing notices that were just re-shown.
     if (!unsurfaced.length && !due.some(item => undisplayed.some(notice => notice.messageId === item.id))) return due.length ? "notified" : "idle";
@@ -56,8 +77,14 @@ export class ConversationInboxNotifier {
     // Re-checked immediately before submission; any doubt (busy, draft, unknown layout) skips the nudge until the next pass.
     if (await ports.agentStatus(paneId) !== "idle") return "pane_busy";
     if (!isProviderInputEmpty(ports.provider, stripGhostSuggestion(await ports.readPaneAnsi(paneId)))) return "input_not_empty";
+    if (ports.reserveNudge && !await ports.reserveNudge([...new Set([...unsurfaced.map(item => item.messageId), ...due.map(item => item.id)])]))
+      return "nudge_exhausted";
     this.nudge = afterNudge(this.nudge, key, now);
-    await ports.prompt(paneId, BFLOW_INBOX_NUDGE);
+    try { await ports.prompt(paneId, BFLOW_INBOX_NUDGE); }
+    catch (error) {
+      await ports.recordDeliveryFailure?.(unsurfaced.map(item => item.messageId), String(error));
+      return "delivery_failed";
+    }
     return "nudged";
   }
 }

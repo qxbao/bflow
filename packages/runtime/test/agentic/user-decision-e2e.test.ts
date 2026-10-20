@@ -79,7 +79,7 @@ async function fixture(options: { design?: boolean } = {}) {
     deliverToConversation: async (message: RoleMessage) => { inbox.push(message); },
     authenticateMessage: async () => true,
     authorizeHuman: (decision: ApprovalDecision) => receipts.authenticateHuman(decision),
-    roleCapabilities: { conversation: ["conversation"], coordinator: ["coordination"], developer: ["implementation"] }
+    roleCapabilities: { conversation: ["conversation"], coordinator: ["coordination", "repository.read"], developer: ["implementation"] }
   } as unknown as AgenticRuntimePorts;
   const journal = new AgenticJournal(journalDirectory, repository);
   const requestedAt = clock().toISOString();

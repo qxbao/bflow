@@ -121,7 +121,7 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
   let conversationReentry: ((message: RoleMessage) => Promise<unknown>) | undefined;
   const ports = { engine, runStore: store, artifactStore: artifacts, registry, transport, panes, policies,
     deliverToConversation: async (message: RoleMessage) => { conversationInbox.push(message); await conversationReentry?.(message); },
-    roleCapabilities: { developer: ["implementation"], coordinator: ["coordination"], conversation: ["conversation"], specifier: ["specification"], architect: ["architecture"], planner: ["planning"], reviewer: ["review"], qa: ["verification", ...(options.behavioral ? ["testing"] : [])], tester: ["testing"] },
+    roleCapabilities: { developer: ["implementation"], coordinator: ["coordination", "repository.read"], conversation: ["conversation"], specifier: ["specification", "repository.read"], architect: ["architecture", "repository.read"], planner: ["planning", "repository.read"], reviewer: ["review", "repository.read"], qa: ["verification", "repository.read", ...(options.behavioral ? ["testing"] : [])], tester: ["testing", "repository.read"] },
     taskChecks: checks, workflowChecks: checks,
     authenticateMessage: async () => true, authenticateResult: async () => true, authenticateEvidence: async (result: any) => options.behavioral ? verification.authenticateEvidence(result) : true,
     authenticateGateResult: async (result: any) => options.behavioral ? verification.authenticateGate(result) : true,
@@ -764,6 +764,49 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
     expect(unwrap(await f.ports.engine.getSnapshot("run-1"))!.tasks[0]!.status).toBe("running");
     expect((await f.inspect()).tasks[0].cycle).toBeUndefined();
   });
+  it("restores transport authentication only for the exact persisted implementation receipt", async () => {
+    const f = await fixture();
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    await f.evidence("implement"); await f.submit();
+    const message = (await f.runtime.inspect() as any).inbox.find((item: any) => item.message.type === "implementation.submitted").message;
+    const journal = (f.runtime as any).journal;
+    await journal.exclusive(async (state: any, save: any) => {
+      state.inbox.find((item: any) => item.message.message_id === message.message_id).status = "received";
+      await save();
+    });
+    const { authenticateNativeHerdrMessage } = await import("../../src/agentic/herdr-ingress.js");
+    f.ports.authenticateResult = async (_result: any, _handle: any, input: RoleMessage) => authenticateNativeHerdrMessage(input);
+    expect(await authenticateNativeHerdrMessage(message)).toBe(false);
+    await f.restart().recoverMissingCoordinatorWakeups();
+    expect((await f.runtime.inspect() as any).inbox.find((item: any) => item.message.message_id === message.message_id).status).toBe("applied");
+    expect(await authenticateNativeHerdrMessage(message)).toBe(false);
+  });
+
+  it("recovers a verifier job lost after pending persistence and before invocation", async () => {
+    const f = await fixture();
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    await f.runtime.tick(); await f.evidence("implement"); await f.submit();
+    const journal = (f.runtime as any).journal;
+    const exclusive = journal.exclusive.bind(journal);
+    let interrupted = false;
+    const spy = vi.spyOn(journal, "exclusive").mockImplementation(async (action: any) => {
+      const value = await exclusive(action);
+      if (!interrupted && Array.isArray(value) && value.some(item => item?.runId === "run-1" && item.plan && item.cycle)) {
+        interrupted = true;
+        throw new Error("Injected crash before verifier invocation");
+      }
+      return value;
+    });
+    await expect(f.runtime.tick()).rejects.toThrow("Injected crash before verifier invocation");
+    spy.mockRestore();
+    expect((await f.inspect()).tasks[0].verificationPending).toBe(true);
+    const priorCalls = f.calls.length;
+    await f.restart().tick();
+    expect((await f.inspect()).tasks[0].cycle.status).toBe("passed");
+    expect(f.calls.length).toBeGreaterThan(priorCalls);
+    expect((await f.runtime.inspect() as any).outbound.filter((out: any) => out.message.type === "task.assignment")).toHaveLength(1);
+  });
+
   it("replays a durable verification outcome after SQLite append failure without rerunning checks", async () => {
     const f = await fixture(); await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
     await f.evidence("implement"); await f.submit();
@@ -848,7 +891,7 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
 // This recovery path acquires AgenticJournal.exclusive, which uses Linux flock.
 it.skipIf(process.platform !== "linux")("recovers the exact failed phase after a crash following lease release without duplicating repair notices", async () => {
   const f = await fixture({ tdd: true });
-  f.ports.roleCapabilities.qa = ["verification", "testing"];
+  f.ports.roleCapabilities.qa = ["verification", "testing", "repository.read"];
   await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
   const state = await f.runtime.inspect() as any;
   const assignment = state.outbound.find((out: any) => out.message.type === "task.assignment");
@@ -910,17 +953,17 @@ describe("Coordinator no-response host observations", () => {
     for (const binding of [{ ...f.binding, paneId: "other" }, { ...f.binding, session: { ...f.binding.session!, value: "other" } }])
       await expect(f.runtime.coordinatorTurnStopped(f.message, binding)).rejects.toThrow("exact Runtime outbox");
   });
-  it("preserves intake status when only automatic delegation acceptance exists", async () => {
+  it("escalates an unanswered intake with an actionable next step after automatic delegation acceptance", async () => {
     const f = await delivered(); await f.runtime.receiveHerdr(f.message);
     await f.runtime.coordinatorTurnStopped(f.message, f.binding);
-    expect((await f.runtime.inspect("run-1") as any)).toMatchObject({ status: "intake", coreCreated: false });
+    expect((await f.runtime.inspect("run-1") as any)).toMatchObject({ status: "escalated", coreCreated: false, pendingAction: { kind: "resume_coordinator", owner: "coordinator" } });
     expect((await f.runtime.inspect() as any).outbound.filter((out: any) => out.message.payload.kind === "coordinator_no_response")).toHaveLength(1);
   });
-  it("recognizes queued structured progress before Stop even before transport flush", async () => {
+  it("does not treat queued progress as a business next action when the Coordinator stops", async () => {
     const f = await delivered(); await f.runtime.receiveHerdr(f.message);
     const reporting = f.runtime.reportProgress("run-1", "Planning the objective");
     await f.runtime.coordinatorTurnStopped(f.message, f.binding); await reporting;
-    expect((await f.runtime.inspect() as any).outbound.filter((out: any) => out.message.payload.kind === "coordinator_no_response")).toEqual([]);
+    expect((await f.runtime.inspect() as any).outbound.filter((out: any) => out.message.payload.kind === "coordinator_no_response")).toHaveLength(1);
   });
 });
 
@@ -1070,7 +1113,7 @@ describe("Runtime Stop and uncertain delivery notices", () => {
     await f.runtime.flushOutbound();
     expect(f.conversationInbox.find(item => (item.payload as any).kind === "coordinator_no_response")?.payload).toMatchObject({
       reason: "Coordinator pane could not be matched: occupant changed", blockageReason: "Coordinator pane could not be matched: occupant changed",
-      options: ["Yêu cầu Coordinator tiếp tục hoặc giải thích trạng thái", "Hủy run"] });
+      options: ["Khắc phục blocker rồi yêu cầu Coordinator tiếp tục run", "Hủy run"] });
   });
   it("reportUncertainNativeDelivery surfaces a delivery_failure with the operation id once, and never resends", async () => {
     const f = await fixture();

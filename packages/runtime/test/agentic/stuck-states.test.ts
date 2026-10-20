@@ -7,8 +7,10 @@ import { ApprovalRequestSchema, DelegationRequestSchema, PaneBindingSchema, Role
   type OperationResult, type PaneBinding, type RoleMessage } from "@bflow/contracts";
 import { AgenticJournal, digest, type JournalState, type Outbound, type RunRecord } from "../../src/agentic/journal.js";
 import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
+import { routeNativeConversationMessage } from "../../src/agentic/workspace.js";
 import { evaluateWatchdog } from "../../src/agentic/run-watchdog.js";
 import type { AgenticRuntimePorts, PanePolicy } from "../../src/agentic/ports.js";
+import { RoleCapabilityPreflightError } from "../../src/agentic/ports.js";
 import { FakeAgentTransport } from "../helpers/fake-transport.js";
 import { draft } from "../../../specification/test/fixtures.js";
 
@@ -24,7 +26,7 @@ class Panes implements PanePolicy {
   busy = new Set<string>();
   /** Roles whose pane lookup fails (an I/O error, not "no pane"). */
   broken = new Set<string>();
-  bindings: PaneBinding[] = ["conversation", "coordinator", "developer"].map(role => PaneBindingSchema.parse({
+  bindings: PaneBinding[] = ["conversation", "coordinator", "architect", "developer"].map(role => PaneBindingSchema.parse({
     schemaVersion: 2, bindingId: `binding-${role}`, sessionId: "session-1", role, paneGroup: "coordination", agentId: `${role}-agent`,
     workspaceId: "workspace-1", tabId: "tab-1", paneId: `pane-${role}`, provider: "test", agentKind: "test", cwd: "/tmp",
     isolationMode: "dedicated_pane", readOnlyWorkspace: role !== "developer", session: { source: "test", kind: "id", value: `session-${role}` },
@@ -68,7 +70,7 @@ function message(id: string, overrides: Record<string, unknown> = {}): RoleMessa
     artifact_references: [], occurred_at: T0, idempotency_key: id, ...overrides });
 }
 
-async function fixture(options: { deliveryFails?: boolean; runs?: RunRecord[] } = {}) {
+async function fixture(options: { deliveryFails?: boolean; runs?: RunRecord[]; capabilityAllowed?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-stuck-states-")));
   cleanup.push(root);
   let now = Date.parse(T0);
@@ -76,6 +78,7 @@ async function fixture(options: { deliveryFails?: boolean; runs?: RunRecord[] } 
   const registry = new FileAgentRegistry({ stateFile: join(root, "registry.json") });
   const delivered: RoleMessage[] = [];
   const conversation = { attempts: 0, failing: options.deliveryFails ?? false };
+  let capabilityAllowed = options.capabilityAllowed ?? true;
   const ports = {
     clock: () => new Date(now), authenticateMessage: async () => true, authorizeHuman: async () => true,
     deliverToConversation: async (value: RoleMessage) => {
@@ -83,7 +86,10 @@ async function fixture(options: { deliveryFails?: boolean; runs?: RunRecord[] } 
       if (conversation.failing) throw new Error("Gateway unavailable");
       delivered.push(value);
     },
-    transport, registry, panes, roleCapabilities: { coordinator: [], developer: [], conversation: [] },
+    transport, registry, panes, roleCapabilities: { coordinator: ["repository.read"], architect: ["architecture", "repository.read"], developer: [], conversation: [] },
+    preflightRoleCapabilities: async (_binding: PaneBinding, required: readonly string[]) => {
+      if (required.includes("repository.read") && !capabilityAllowed) throw new RoleCapabilityPreflightError("Coordinator read-only tool reachability is missing");
+    },
     engine: {}, runStore: {}, artifactStore: {}, policies: {}, taskChecks: [], workflowChecks: []
   } as unknown as AgenticRuntimePorts;
   const journalDirectory = join(root, "journal"), repository = join(root, "repo");
@@ -100,6 +106,7 @@ async function fixture(options: { deliveryFails?: boolean; runs?: RunRecord[] } 
       (out.message.payload as { kind?: string; runId?: string }).kind === kind && (out.message.payload as { runId?: string }).runId === runId);
   return {
     runtime, panes, transport, registry, delivered, conversation, journal, outboundOf, notices,
+    setCapabilityAllowed: (value: boolean) => { capabilityAllowed = value; },
     now: () => now, setNow: (ms: number) => { now = ms; }, advance: (ms: number) => { now += ms; }
   };
 }
@@ -173,7 +180,7 @@ describe("Conversation inbox delivery", () => {
 describe("run watchdog facts", () => {
   it("counts an accepted handoff as activity only while its pane works, and names the holder when it stops", async () => {
     const f = await fixture();
-    await f.runtime.queueHerdr(message("assign-dev", { recipient: { role: "developer" } }));
+    await f.runtime.queueHerdr(message("assign-dev", { type: "delegation.request", payload: { objective: "Inspect" }, recipient: { role: "developer" } }));
     await f.runtime.flushOutbound();
     expect((await f.outboundOf("assign-dev")).status).toBe("accepted");
     f.panes.busy.add("developer"); // the Developer is working on it: still accepted, not released
@@ -184,10 +191,12 @@ describe("run watchdog facts", () => {
     const [facts] = await f.runtime.watchdogSnapshot("session-1");
     expect(facts).toMatchObject({ activeHandoff: false, acceptedRoles: ["developer"] });
     const idle = [{ role: "coordinator", status: "idle" }, { role: "developer", status: "idle" }];
-    expect(evaluateWatchdog({ now: f.now(), runs: [facts!], notices: [], panes: idle })).toEqual([
+    const paneFacts = idle.map(pane => ({ ...pane, paneId: pane.role === "developer" ? "pane-developer" : "pane-coordinator" }));
+    expect(evaluateWatchdog({ now: f.now(), runs: [facts!], notices: [], panes: paneFacts })).toEqual([
       expect.objectContaining({ kind: "stalled", runId: "run-1", holders: ["developer"] })]);
     expect(evaluateWatchdog({ now: f.now(), runs: [facts!], notices: [],
-      panes: [{ role: "coordinator", status: "idle" }, { role: "developer", status: "working" }] })).toEqual([]);
+      panes: [{ role: "coordinator", paneId: "pane-coordinator", status: "working" }, { role: "developer", paneId: "pane-developer", status: "idle" }] })).toEqual([
+        expect.objectContaining({ kind: "stalled", runId: "run-1" })]);
 
     await f.runtime.reportRunStalled("run-1", `run-1@${Date.parse(T0)}`);
     const reports = await f.notices("developer_no_response");
@@ -212,6 +221,113 @@ describe("run watchdog facts", () => {
 });
 
 describe("specialist blockers and run-step isolation", () => {
+  it("persists a Coordinator blocker before Conversation delivery and exposes an idempotent resume action", async () => {
+    const f = await fixture();
+    const outcome = RoleMessageSchema.parse({ schema_version: 2, message_id: "coordinator-blocked-1", correlation_id: "correlation",
+      run_id: "run-1", sender: { role: "coordinator", agent_id: "coordinator-agent", pane_id: "pane-coordinator" },
+      recipient: { role: "conversation" }, type: "task.status", payload: { status: "blocked", reason: "Repository read capability unavailable" },
+      artifact_references: [], occurred_at: T0, idempotency_key: "coordinator-blocked-1" });
+    const delivered: RoleMessage[] = [];
+    await routeNativeConversationMessage(f.runtime, { receiveHerdr: async input => { delivered.push(RoleMessageSchema.parse(input)); return { accepted: true }; } }, outcome);
+    await routeNativeConversationMessage(f.runtime, { receiveHerdr: async input => { delivered.push(RoleMessageSchema.parse(input)); return { accepted: true }; } }, outcome);
+    expect(delivered).toHaveLength(2);
+    expect(delivered[0]).toEqual(outcome); // Same authenticated envelope is forwarded without mutation.
+    const persisted = await f.runtime.inspect("run-1") as unknown as RunRecord;
+    expect(persisted).toMatchObject({ status: "escalated", error: "Coordinator blocked: Repository read capability unavailable",
+      pendingAction: { kind: "resume_coordinator", owner: "coordinator", sourceMessageId: "coordinator-blocked-1", reason: "Coordinator blocked: Repository read capability unavailable" } });
+    expect(await f.notices("workflow_blocked")).toHaveLength(1);
+    const action = persisted.pendingAction!;
+    await f.runtime.resumeBlockedRun("run-1", action.actionId);
+    await f.runtime.resumeBlockedRun("run-1", action.actionId);
+    const resumed = await f.runtime.inspect("run-1") as unknown as RunRecord;
+    expect(resumed).toMatchObject({ status: "implementing", pendingAction: { kind: "resume_coordinator", state: "queued" } });
+    expect((await f.runtime.inspect() as any).outbound.filter((item: any) => item.message.payload?.kind === "resume_run")).toHaveLength(1);
+  });
+
+  it("recognizes blocked payloads on spec.draft and wakes Coordinator with a user-visible blocker", async () => {
+    const f = await fixture();
+    const draft = RoleMessageSchema.parse({ schema_version: 2, message_id: "architect-blocked-draft", correlation_id: "correlation",
+      run_id: "run-1", sender: { role: "architect", agent_id: "architect-agent", pane_id: "pane-architect" },
+      recipient: { role: "coordinator" }, type: "spec.draft", payload: { status: "blocked", summary: "Cannot read repository", blockers: ["No bounded read capability"] },
+      artifact_references: [], occurred_at: T0, idempotency_key: "architect-blocked-draft" });
+    await f.runtime.receiveHerdr(draft);
+    const persisted = await f.runtime.inspect("run-1") as unknown as RunRecord;
+    expect(persisted).toMatchObject({ pendingAction: { kind: "coordinator_continuation", owner: "coordinator", reason: expect.stringContaining("Cannot read repository") } });
+    expect(await f.notices("workflow_blocked")).toHaveLength(1);
+    expect((await f.runtime.inspect() as any).outbound.some((item: any) => item.message.payload?.kind === "specialist_result_ready")).toBe(true);
+  });
+
+  it.each(["received", "applied"] as const)("reconstructs a missing Coordinator wake from a durable %s result after restart", async inboxStatus => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const request = RoleMessageSchema.parse(await f.runtime.requestSpecialist("run-1", "architect", "Assess the repository", ["architecture"]));
+    await f.runtime.flushOutbound();
+    const outbound = await f.outboundOf(request.message_id);
+    const result = RoleMessageSchema.parse({ schema_version: 2, message_id: "orphaned-result", correlation_id: request.correlation_id,
+      causation_id: request.message_id, run_id: "run-1", sender: { role: "architect", agent_id: outbound.handle!.target.agentId, pane_id: outbound.handle!.target.paneId },
+      recipient: { role: "coordinator" }, type: "spec.draft", payload: { status: "blocked", summary: "Repository read access unavailable" },
+      artifact_references: [], occurred_at: T0, idempotency_key: "orphaned-result" });
+    await f.journal.exclusive(async (state: JournalState, save) => { state.inbox.push({ message: result, status: inboxStatus }); await save(); });
+
+    const restarted = new AgenticWorkflowRuntime(f.runtime.ports, { journalDirectory: f.journal.directory, repositoryPath: f.journal.repository });
+    await restarted.initialize();
+    await restarted.recoverMissingCoordinatorWakeups();
+    await restarted.recoverMissingCoordinatorWakeups();
+    const recovered = await restarted.inspect() as any;
+    expect(recovered.outbound.filter((item: any) => item.message.payload?.kind === "specialist_result_ready" &&
+      item.message.payload?.sourceMessageId === result.message_id)).toHaveLength(1);
+    expect(recovered.runs[0]).toMatchObject({ error: expect.stringContaining("Repository read access unavailable"),
+      pendingAction: { kind: "coordinator_continuation", sourceMessageId: result.message_id } });
+  });
+
+  it("preflights required role capability before transport, durably blocks, then resumes the same intent once", async () => {
+    const f = await fixture({ capabilityAllowed: false });
+    await f.runtime.queueHerdr(message("preflight-1", { recipient: { role: "coordinator" } }));
+    await f.runtime.flushOutbound();
+    expect(f.transport.sentRequests).toHaveLength(0);
+    const blocked = await f.runtime.inspect("run-1") as unknown as RunRecord;
+    expect(blocked).toMatchObject({ status: "escalated", pendingAction: { kind: "resume_coordinator", state: "pending" } });
+    const failedIntent = (await f.runtime.inspect() as any).outbound.find((item: any) => item.message.message_id === "preflight-1");
+    expect(failedIntent.status).toBe("failed");
+    f.setCapabilityAllowed(true);
+    const actionId = blocked.pendingAction!.actionId;
+    await f.runtime.resumeBlockedRun("run-1", actionId);
+    await f.runtime.resumeBlockedRun("run-1", actionId);
+    await f.runtime.flushOutbound();
+    expect(f.transport.sentRequests.filter(request => request.instruction.includes("preflight-1"))).toHaveLength(1);
+    expect((await f.runtime.inspect("run-1") as unknown as RunRecord).resumeReceipts).toHaveLength(1);
+  });
+
+  it("persists a schema-invalid native result rejection against its authenticated assignment without inventing a result", async () => {
+    const f = await fixture();
+    await f.runtime.queueHerdr(message("coordinator-assignment", { recipient: { role: "coordinator" } }));
+    await f.runtime.flushOutbound();
+    const before = f.transport.sentRequests.length;
+    await f.runtime.reportRoleToolFailure(f.panes.bindings.find(pane => pane.role === "coordinator")!,
+      { message: { message_id: "invalid-escalation", run_id: "run-1", type: "escalation.notice" } },
+      "RoleMessageSchema rejected unknown type escalation.notice");
+    const persisted = await f.runtime.inspect("run-1") as unknown as RunRecord;
+    expect(persisted).toMatchObject({ status: "escalated", error: expect.stringContaining("Rejected invalid coordinator RoleMessage"),
+      pendingAction: { kind: "resume_coordinator", recovery: "manual", sourceMessageId: "invalid-escalation" } });
+    expect(await f.notices("workflow_blocked")).toHaveLength(1);
+    expect(f.transport.sentRequests).toHaveLength(before); // Invalid payload is never forwarded or treated as a result.
+    const restarted = new AgenticWorkflowRuntime(f.runtime.ports, { journalDirectory: f.journal.directory, repositoryPath: f.journal.repository });
+    expect(await restarted.inspect("run-1")).toMatchObject({ status: "escalated", pendingAction: { sourceMessageId: "invalid-escalation" } });
+  });
+
+  it("recovers a persisted blocker after Runtime restart without duplicate resume delivery", async () => {
+    const f = await fixture();
+    const outcome = RoleMessageSchema.parse({ schema_version: 2, message_id: "restart-blocked", correlation_id: "correlation", run_id: "run-1",
+      sender: { role: "coordinator", agent_id: "coordinator-agent", pane_id: "pane-coordinator" }, recipient: { role: "conversation" },
+      type: "task.status", payload: { status: "blocked", reason: "Capability repaired" }, artifact_references: [], occurred_at: T0, idempotency_key: "restart-blocked" });
+    await f.runtime.observeCoordinatorOutcome(outcome);
+    const before = await f.runtime.inspect("run-1") as unknown as RunRecord;
+    const restarted = new AgenticWorkflowRuntime(f.runtime.ports, { journalDirectory: f.journal.directory, repositoryPath: f.journal.repository });
+    await restarted.initialize();
+    await restarted.resumeBlockedRun("run-1", before.pendingAction!.actionId);
+    await restarted.resumeBlockedRun("run-1", before.pendingAction!.actionId);
+    expect((await restarted.inspect() as any).outbound.filter((item: any) => item.message.payload?.kind === "resume_run")).toHaveLength(1);
+  });
+
   it("makes a specialist's blocked task.status visible to the user, not only to the Coordinator", async () => {
     const f = await fixture();
     await f.runtime.receiveHerdr(RoleMessageSchema.parse({ schema_version: 2, message_id: "blocked-1", correlation_id: "correlation",

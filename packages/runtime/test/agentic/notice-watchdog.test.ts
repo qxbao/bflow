@@ -109,15 +109,25 @@ describe("run watchdog decisions", () => {
     expect(actions).toEqual([{ kind: "blocked", runId: "run-1", approvalId: APPROVAL_ID, messageId: `decision-${APPROVAL_ID}`, resends: 3 }]);
   });
 
-  it("reports a live run as stalled only when every role pane is not working and it has been idle long enough", () => {
+  it("reports a live run from run-local work, even when an unrelated role pane is busy", () => {
     const facts = run({ lastActivityAt: T0 });
     expect(evaluateWatchdog({ now: T0 + 180 * SEC, runs: [facts], notices: [], panes: idlePanes })).toEqual([]);
     const actions = evaluateWatchdog({ now: T0 + 181 * SEC, runs: [facts], notices: [], panes: idlePanes });
     expect(actions).toEqual([{ kind: "stalled", runId: "run-1", episodeKey: `run-1@${T0}`, idleSince: T0 }]);
-    expect(evaluateWatchdog({ now: T0 + 181 * SEC, runs: [facts], notices: [], panes: [{ role: "developer", status: "working" }] })).toEqual([]);
-    expect(evaluateWatchdog({ now: T0 + 181 * SEC, runs: [facts], notices: [], panes: [{ role: "developer", status: "unavailable" }] })).toEqual([]);
-    expect(evaluateWatchdog({ now: T0 + 181 * SEC, runs: [facts], notices: [], panes: [] })).toEqual([]);
+    expect(evaluateWatchdog({ now: T0 + 181 * SEC, runs: [facts], notices: [], panes: [{ role: "reviewer", paneId: "other-pane", status: "working" }] }))
+      .toEqual([{ kind: "stalled", runId: "run-1", episodeKey: `run-1@${T0}`, idleSince: T0 }]);
+    expect(evaluateWatchdog({ now: T0 + 181 * SEC, runs: [facts], notices: [], panes: [{ role: "reviewer", paneId: "other-pane", status: "unavailable" }] }))
+      .toEqual([{ kind: "stalled", runId: "run-1", episodeKey: `run-1@${T0}`, idleSince: T0 }]);
   });
+
+  it.each(["intake", "clarifying", "specifying", "planning", "tdd_deciding", "implementing", "verifying", "reviewing"] as const)(
+    "applies the same missing-next-action liveness rule during %s", status => {
+      const facts = run({ status, lastActivityAt: T0, awaitingHuman: false, activeHandoff: false, acceptedRoles: [], pendingDecisions: [] });
+      expect(evaluateWatchdog({ now: T0 + 181 * SEC, runs: [facts], notices: [], panes: [] })).toEqual([
+        { kind: "stalled", runId: "run-1", episodeKey: `run-1@${T0}`, idleSince: T0 }
+      ]);
+    }
+  );
 
   it("never reports a stall while a human gate, a handoff or a pending decision is open", () => {
     const now = T0 + 900 * SEC;

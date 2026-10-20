@@ -600,3 +600,33 @@ từng launch và pane.
 
 Giới hạn: kế thừa environment của hook, mở rộng header `${VAR}` của Claude và `bearer_token_env_var` của Codex
 chỉ được xác minh bằng các hook spawn cục bộ và config đã render, không phải provider hay Herdr live.
+
+## Workflow liveness và capability recovery
+
+Host cung cấp `repository_read` cho Coordinator và các role điều tra/verification, cùng
+`read_pinned_instructions` để đọc nội dung skill đã pin. Reader chỉ đọc file text có giới hạn,
+listing có cursor và các thao tác Git cố định; không nhận shell hoặc argv tùy ý. Git status/diff
+fail closed khi repository cấu hình filter có thể chạy chương trình. Dispatch kiểm tra role,
+pane/native session, launch, Bflow tools/list, repository/Git và manifest trước lease/transport.
+Quyền ghi của Developer, Conditional TDD, verification và human gates vẫn theo các đường hiện có.
+
+Coordinator gửi blocker tới Conversation phải được Runtime ghi nhận trước khi giao nguyên
+RoleMessage đã xác thực. Run có thể chuyển sang `escalated` kèm `pendingAction`, owner,
+nguyên nhân và phase để tiếp tục. `resume_run` chỉ tiếp tục action khớp, kiểm tra lại capability,
+không vượt approval/cancellation hoặc delivery chưa rõ; intent chưa gửi được dùng lại id cũ.
+Một lượt Coordinator chỉ báo progress rồi dừng không được tính là có next action.
+
+Recovery đọc inbox/receipts bền vững, phục hồi wake thiếu theo đúng result/assignment/correlation,
+và tiếp tục verification bị gián đoạn bằng plan đã đóng băng. Nó không tạo binding proof hoặc
+resend delivery chưa rõ. Watchdog xét obligation của đúng run/pane; `unknown_delivery` là chờ
+reconciliation có hành động xử lý, không phải task thành công hoặc bằng chứng treo.
+
+Conversation nhận notice qua inbox; receipt chưa đồng nghĩa model đã thấy hoặc người dùng đã
+đọc. Host nhận diện layout idle đã quan sát của Claude/Codex, giữ draft không bị ghi đè và giới
+hạn automatic wake ở ba lần mỗi notice qua restart. Notice và lỗi delivery vẫn được giữ khi
+cạn budget; người dùng có thể mở Conversation và hỏi trạng thái rồi resume/cancel cùng run.
+`host_status` trả các lỗi delivery gần nhất để chẩn đoán. Layout khác fail closed.
+
+Xem `WORKFLOW-LIVENESS-AUDIT.md` và `WORKFLOW-LIVENESS-HANDOFF.md` cho nguồn gốc sự cố và
+ranh giới nghiệm thu. Có local regression tests; live provider/full SDLC acceptance không được
+suy ra từ fake transport, receipt, hoặc test Herdr native actor.

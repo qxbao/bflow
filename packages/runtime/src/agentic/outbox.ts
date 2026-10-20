@@ -3,7 +3,7 @@ import {
   AgentRequestSchema, AgentSubmissionReceiptSchema, PaneBindingSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema, ReleaseAgentLeaseRequestSchema, WorkflowRunSnapshotSchema,
   type AgentExecutionHandle, type OperationResult, type RoleMessage, type PaneBinding
 } from "@bflow/contracts";
-import type { AgenticRuntimePorts } from "./ports.js";
+import { RoleCapabilityPreflightError, type AgenticRuntimePorts } from "./ports.js";
 import { digest, isConversationDelivery, json, type JournalState, type Outbound } from "./journal.js";
 
 /** A recipient observed not ready for this long is reported to Conversation; delivery keeps retrying. */
@@ -30,7 +30,11 @@ export class HerdrOutbox {
       if (digest(existing.message) !== digest(parsed)) throw new Error("Conflicting handoff idempotency key");
       return existing;
     }
-    const out: Outbound = { message: parsed, status: "queued", selector, taskId, attemptId, capabilities };
+    // Every coordination/investigation/verifier handoff depends on the host-owned bounded repository interface.
+    // The lease resolver checks this requirement against the live role registration immediately before dispatch.
+    const repositoryReaders = new Set(["coordinator", "specifier", "architect", "planner", "reviewer", "qa", "tester", "security"]);
+    const required = repositoryReaders.has(parsed.recipient.role) ? [...new Set([...capabilities, "repository.read"])] : capabilities;
+    const out: Outbound = { message: parsed, status: "queued", selector, taskId, attemptId, capabilities: required };
     this.state.outbound.push(out);
     return out;
   }
@@ -124,6 +128,7 @@ export class HerdrOutbox {
       catch (error) {
         out.error = String(error);
         out.deliveryAttempts = (out.deliveryAttempts ?? 0) + 1;
+        if (error instanceof RoleCapabilityPreflightError) out.status = "failed";
         await this.save();
       }
     }
@@ -184,6 +189,8 @@ export class HerdrOutbox {
       this.markNotReady(out); return;
     }
     this.markReady(out);
+    // Fail closed before Registry lease acquisition, dispatch intent, or transport side effects.
+    await this.ports.preflightRoleCapabilities?.(pane, out.capabilities);
     if (out.parentAssignmentId) {
       try { await this.validateNotice(out, pane); }
       catch (error) { out.status = "cancelled"; out.error = String(error); await this.save(); return; }

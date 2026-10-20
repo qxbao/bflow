@@ -7,6 +7,7 @@ import { AgenticJournal } from "../../src/agentic/journal.js";
 import { HerdrOutbox } from "../../src/agentic/outbox.js";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
 import { BFLOW_INBOX_NUDGE, isProviderInputEmpty } from "../../src/agentic/conversation-inbox.js";
+import { ConversationInboxNotifier } from "../../src/agentic/conversation-inbox-notifier.js";
 import type { AgenticRuntimePorts } from "../../src/agentic/ports.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -83,6 +84,22 @@ describe("Conversation notice inbox", () => {
     const [item] = await notices(receipts);
     expect(item).toMatchObject({ truncated: true });
     expect(item!.summary.length).toBe(4096);
+  });
+
+  it("durably records a failed advisory notification and still attempts only the safe empty Conversation wake", async () => {
+    const root = await directory();
+    const receipts = new HostReceiptJournal(join(root, "receipts"), REPOSITORY, "session-1");
+    await receipts.appendConversationNotice(notice("blocked-notification", { kind: "workflow_blocked", reason: "Architect cannot read source" }));
+    let prompted = 0;
+    const notifier = new ConversationInboxNotifier();
+    await expect(notifier.tick({ provider: "claude", unsurfacedNotices: () => receipts.unsurfacedConversationNotices(),
+      undisplayedNotices: () => receipts.undisplayedUserFacingNotices(), conversationPaneId: async () => "pane-conversation",
+      agentStatus: async () => "idle", readPaneAnsi: async () => "╭──╮\n│ > │\n╰──╯", notify: async () => { throw new Error("notification service unavailable"); },
+      prompt: async () => { prompted++; }, recordDeliveryFailure: (ids, reason) => receipts.recordConversationDeliveryFailure(ids, reason), now: () => 10_000 }))
+      .resolves.toBe("nudged");
+    expect(prompted).toBe(1);
+    expect(await receipts.conversationDeliveryFailures()).toMatchObject([{ messageIds: ["blocked-notification"], reason: "Error: notification service unavailable" }]);
+    expect(await receipts.unsurfacedConversationNotices()).toHaveLength(1);
   });
 });
 

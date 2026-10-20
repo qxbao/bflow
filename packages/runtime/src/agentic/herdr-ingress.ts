@@ -10,6 +10,13 @@ const authenticated = new AsyncLocalStorage<string>();
 export async function authenticateNativeHerdrMessage(message: RoleMessage): Promise<boolean> {
   return authenticated.getStore() === canonicalReceiptJson(message);
 }
+/** Trusted Runtime recovery only: the caller must match the exact previously authenticated received journal row.
+ * This restores that receipt's scoped provenance for result/evidence validators; it creates no transport receipt or delivery.
+ * It is never exposed through an agent tool or selected by an envelope field.
+ */
+export function withRecoveredHerdrReceipt<T>(message: RoleMessage, apply: () => Promise<T>): Promise<T> {
+  return authenticated.run(canonicalReceiptJson(RoleMessageSchema.parse(message)), apply);
+}
 /** Receives messages forwarded by a signed native Herdr plugin invocation, never terminal snapshots. */
 export async function startHerdrReceiptIngress(options: {
   socketPath: string; publicKeys: Readonly<Record<string, string>>;

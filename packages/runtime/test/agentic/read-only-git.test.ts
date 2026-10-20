@@ -57,6 +57,13 @@ describe("read-only git investigation allowlist", () => {
     expect(permitsReadOnlyInvestigation("architect", "Bash", "git push")).toBe(false);
   });
 
+  it("does not rely on shell access for Coordinator or Architect repository investigation", async () => {
+    const { availableTools } = await import("../../src/agentic/host.js");
+    for (const role of ["coordinator", "architect"] as const) {
+      expect(availableTools(role).map(tool => tool.name)).toContain("repository_read");
+    }
+  });
+
   it("never permits a non-Bash tool through the git allowlist", () => {
     expect(permitsReadOnlyInvestigation("architect", "Edit", "git log")).toBe(false);
     expect(permitsReadOnlyInvestigation("architect", "Write", "git log")).toBe(false);

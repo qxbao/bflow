@@ -20,12 +20,14 @@ export interface RunFacts {
   activeHandoff: boolean;
   /** Roles that hold an accepted, not yet released handoff of this run. A holder whose pane is not working has stopped without reporting. */
   acceptedRoles?: readonly string[];
+  /** Exact per-pane obligations; role names alone merge concurrent same-role assignments and hide dead work. */
+  acceptedPanes?: readonly { role: string; paneId: string }[];
   /** Pending user decisions (specialist questions) of the run. */
   pendingDecisions: readonly { approvalId: string; requestedAt: string }[];
 }
 
 /** Herdr agent status of one role pane, observed by the host. Only "idle", "done" and "unknown" mean not working. */
-export interface PaneFact { role: string; status: string }
+export interface PaneFact { role: string; status: string; paneId?: string }
 
 /** Display state of a user-decision notice (see ConversationNoticeState in host-receipts.ts). `since` is ISO time. */
 export interface NoticeFact { messageId: string; surfaced: boolean; displayed: boolean; resends: number; since: string }
@@ -83,11 +85,18 @@ export function evaluateWatchdog(input: WatchdogInput): WatchdogAction[] {
         actions.push({ kind: "resurface", runId: run.runId, approvalId: decision.approvalId, messageId, attempt: notice.resends + 1 });
       else actions.push({ kind: "blocked", runId: run.runId, approvalId: decision.approvalId, messageId, resends: notice.resends });
     }
-    // A pending human gate, handoff or question is waiting, not stalled. Every role pane must be observed as not working.
+    // A pending human gate, handoff or question is waiting, not stalled. Inspect only this run's accepted holders;
+    // an unrelated busy pane in the same session cannot hide a dead run.
     if (run.awaitingHuman || run.activeHandoff || run.pendingDecisions.length > 0) continue;
-    if (input.panes.length === 0 || !input.panes.every(pane => NOT_WORKING.has(pane.status))) continue;
+    const acceptedPanes = run.acceptedPanes ?? [];
+    if (acceptedPanes.length > 0) {
+      if (acceptedPanes.some(holder => input.panes.some(pane => pane.role === holder.role && pane.paneId === holder.paneId && !NOT_WORKING.has(pane.status)))) continue;
+    } else {
+      const holderRoles = new Set(run.acceptedRoles ?? []);
+      if ([...holderRoles].some(role => input.panes.some(pane => pane.role === role && !NOT_WORKING.has(pane.status)))) continue;
+    }
     if (input.now - run.lastActivityAt <= options.stallAfterMs) continue;
-    // Holders are accepted handoffs whose panes are not working (every pane is, by the check above). Runtime names them in the notice.
+    // Runtime names only this run's accepted holders in the notice.
     const holders = run.acceptedRoles ?? [];
     actions.push({ kind: "stalled", runId: run.runId, episodeKey: `${run.runId}@${run.lastActivityAt}`, idleSince: run.lastActivityAt,
       ...(holders.length ? { holders } : {}) });

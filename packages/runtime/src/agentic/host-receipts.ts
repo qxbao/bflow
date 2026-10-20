@@ -10,9 +10,10 @@ import {
 } from "@bflow/contracts";
 import { digest, json, record, strings, textField } from "./journal.js";
 import { redactString } from "../resilience/redaction.js";
+import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
 import { ApprovalNoticeSchema, UserDecisionNoticeSchema, approvalNoticeFields, isUserFacingNotice, renderConversationNotice, userDecisionNoticeFields } from "./conversation-notice-render.js";
 
-type Kind = "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled";
+type Kind = "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled";
 export interface HumanHookProvenance {
   origin: "UserPromptSubmit"; binding: PaneBinding; nativeSessionId: string;
   conversationSessionId: string; userId: string; messageId: string; promptDigest: string;
@@ -38,6 +39,7 @@ const NoticeSurfacedSchema = z.object({ messageId: z.string().min(1), surfacedAt
 const NoticeDisplayedSchema = z.object({ messageId: z.string().min(1), displayedAt: z.string().datetime() }).strict();
 const NoticeReblockSchema = z.object({ messageId: z.string().min(1), attempt: z.number().int().min(1) }).strict();
 const NoticeResurfacedSchema = z.object({ messageId: z.string().min(1), attempt: z.number().int().min(1), resurfacedAt: z.string().datetime() }).strict();
+const NotificationFailureSchema = z.object({ messageIds: z.array(z.string().min(1)).min(1).max(100), reason: z.string().min(1).max(2000), failedAt: z.string().datetime() }).strict();
 /** A user-facing notice is re-blocked on Stop at most this many times before it is left for the reminder watchdog. */
 export const MAX_NOTICE_REBLOCKS = 2;
 const ConversationDecisionReceiptSchema = z.object({ messageId: z.string().min(1), decision: JsonValueSchema,
@@ -55,7 +57,7 @@ export function isCoordinatorTrigger(message: RoleMessage): boolean {
   return WAKE_KINDS.includes(String((message.payload as Record<string, unknown>).kind));
 }
 /** Runtime wake-ups that the Coordinator must answer through Runtime tools; each one's turn is tracked for a no-response Stop. */
-const WAKE_KINDS = ["specialist_result_ready", "specialist_no_response", "delivery_failure"];
+const WAKE_KINDS = ["specialist_result_ready", "specialist_no_response", "delivery_failure", "resume_run"];
 
 /**
  * A durable Conversation notice for a delivery or inbound failure that Runtime could not record itself. It is idempotent by the
@@ -133,6 +135,8 @@ export class HostReceiptJournal {
     if (kind === "notice-displayed") return json(NoticeDisplayedSchema.parse(input));
     if (kind === "notice-reblock") return json(NoticeReblockSchema.parse(input));
     if (kind === "notice-resurfaced") return json(NoticeResurfacedSchema.parse(input));
+    if (kind === "notification-failure") return json(NotificationFailureSchema.parse(input));
+    if (kind === "notice-nudge") return json(z.object({ messageId: z.string().min(1), attempt: z.number().int().min(1).max(3), attemptedAt: z.string().datetime() }).strict().parse(input));
     if (kind === "native-intent" || kind === "native-ack") return json(RoleMessageSchema.parse(input));
     if (kind === "gate") return json(QualityGateResultSchema.parse(input));
     if (kind === "evidence") return json(VerificationResultSchema.parse(input));
@@ -311,6 +315,33 @@ export class HostReceiptJournal {
     }
     return uncertain;
   }
+  /** Authenticated direct Coordinator-to-Conversation workflow outcomes, including those from before Runtime journaling was added. */
+  async acknowledgedCoordinatorConversationOutcomes(): Promise<RoleMessage[]> {
+    const values: RoleMessage[] = [];
+    for (const id of await this.receiptIds("native-ack")) {
+      const message = RoleMessageSchema.parse(await this.read("native-ack", id));
+      if (message.sender.role === "coordinator" && message.recipient.role === "conversation" && message.run_id &&
+          ["task.status", "conversation.progress"].includes(message.type)) values.push(message);
+    }
+    return values.sort((a, b) => (a.occurred_at ?? "").localeCompare(b.occurred_at ?? "") || a.message_id.localeCompare(b.message_id));
+  }
+  /** Only owned, checksum-validated native ACK receipts may restore their original authentication scope. */
+  async replayAcknowledgedCoordinatorOutcomes(apply: (message: RoleMessage) => Promise<void>): Promise<void> {
+    for (const message of await this.acknowledgedCoordinatorConversationOutcomes())
+      await withRecoveredHerdrReceipt(message, () => apply(message));
+  }
+  /** Every durable Coordinator stop, including already handled receipts, for semantic next-action reconciliation after restart. */
+  async coordinatorStopObservations(): Promise<CoordinatorTurnObservation[]> {
+    const values: CoordinatorTurnObservation[] = [];
+    for (const id of await this.receiptIds("coordinator-stop")) {
+      const raw = record(await this.read("coordinator-stop", id));
+      const item: CoordinatorTurnObservation = { binding: PaneBindingSchema.parse(raw.binding), message: RoleMessageSchema.parse(raw.message),
+        sequence: Number(raw.sequence), ...(Array.isArray(raw.nativeResponseBaseline) ? { nativeResponseBaseline: strings(raw.nativeResponseBaseline) } : {}) };
+      if (!Number.isSafeInteger(item.sequence) || item.sequence < 1) throw new Error("Invalid Coordinator stop observation sequence");
+      if (item.binding.sessionId === this.sessionId) values.push(item);
+    }
+    return values.sort((a, b) => a.sequence - b.sequence);
+  }
   async recordHuman(decision: ApprovalDecision, provenance: HumanHookProvenance): Promise<void> {
     const parsed = ApprovalDecisionSchema.parse(decision); await this.write("human", parsed.approvalId, { decision: parsed, provenance });
   }
@@ -364,6 +395,41 @@ export class HostReceiptJournal {
       ...(parsed.run_id === undefined ? {} : { runId: parsed.run_id }), correlationId: parsed.correlation_id, receivedAt: new Date().toISOString(),
       ...(userDecision === undefined ? {} : { userDecision }), ...(approval === undefined ? {} : { approval }),
       summary: truncated ? text.slice(0, NOTICE_SUMMARY_LIMIT) : text, truncated });
+  }
+  /** Reserve before the Herdr side effect. A lost acknowledgement consumes the attempt; restart never resets this budget. */
+  async reserveConversationNudge(messageIds: readonly string[]): Promise<boolean> {
+    let reserved = false;
+    const ids = [...new Set(messageIds)].slice(0, 100);
+    for (const messageId of ids) {
+      if (await this.read("conversation-notice", messageId) === undefined) throw new Error("Unknown Conversation notice");
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        const id = `${messageId}:${attempt}`;
+        if (await this.read("notice-nudge", id) !== undefined) continue;
+        reserved = await this.write("notice-nudge", id, { messageId, attempt, attemptedAt: new Date().toISOString() }) || reserved;
+        break;
+      }
+    }
+    if (!reserved && ids.length) {
+      const id = `nudge-exhausted:${digest([...ids].sort())}`;
+      if (await this.read("notification-failure", id) === undefined) await this.write("notification-failure", id, {
+        messageIds: ids, failedAt: new Date().toISOString(),
+        reason: "Automatic Conversation wake attempts are exhausted. Open Conversation and submit a status request to read the pending notice; resume or cancel the original run there."
+      });
+    }
+    return reserved;
+  }
+  /** Durable retry breadcrumb for a failed OS notification or safe Conversation nudge. */
+  async recordConversationDeliveryFailure(messageIds: readonly string[], reason: string): Promise<void> {
+    const ids = [...new Set(messageIds.map(value => textField(value)))].slice(0, 100);
+    for (const id of ids) if (await this.read("conversation-notice", id) === undefined) throw new Error("Unknown Conversation notice");
+    const failedAt = new Date().toISOString();
+    const key = `${ids.sort().join(",")}:${failedAt}`;
+    await this.write("notification-failure", key, { messageIds: ids, reason: redactString(reason).slice(0, 2000), failedAt });
+  }
+  async conversationDeliveryFailures(): Promise<{ messageIds: string[]; reason: string; failedAt: string }[]> {
+    const failures: { messageIds: string[]; reason: string; failedAt: string }[] = [];
+    for (const id of await this.receiptIds("notification-failure")) failures.push(NotificationFailureSchema.parse(await this.read("notification-failure", id)));
+    return failures.sort((a, b) => a.failedAt.localeCompare(b.failedAt));
   }
   /** Notices not yet shown to the model, oldest first. A surfaced marker is a separate immutable receipt. */
   async unsurfacedConversationNotices(): Promise<ConversationNotice[]> {

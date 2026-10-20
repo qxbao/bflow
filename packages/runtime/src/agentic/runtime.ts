@@ -1,6 +1,6 @@
 import {
   AgentBindingReceiptSchema, canonicalReceiptJson, hasAuthenticatedBindings, CreateCheckpointCommandSchema, RecoveryCheckpointSchema, WorkflowAggregateCheckpointStateSchema,
-  AgentResultSchema, AgentTransportCapabilitiesSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
+  AgentResultSchema, AgentRoleSchema, AgentTransportCapabilitiesSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
   CancellationRequestSchema, DelegationRequestSchema, GitChangeSetSchema,
   PaneBindingSchema, QualityGateContextSchema, QualityGateResultSchema, RoleMessageSchema, SessionManifestSchema,
   SpecificationSchema, TestStrategySchema, VerificationCycleSchema, VerificationResultSchema,
@@ -15,9 +15,10 @@ import { captureIntegratedChange } from "./integration-change.js";
 import { CoreSession } from "./core-session.js";
 import { redactString } from "../resilience/redaction.js";
 import { CONVERSATION_DELIVERY_MAX_ATTEMPTS, DISPATCH_FAILURE_NOTICE_ATTEMPTS, HerdrOutbox, NOT_READY_FAILURE_MS, unwrap } from "./outbox.js";
-import type { AgenticRuntimePorts, Integration, VerificationPlan } from "./ports.js";
+import { RoleCapabilityPreflightError, type AgenticRuntimePorts, type Integration, type VerificationPlan } from "./ports.js";
 import type { WorkflowRejection } from "./workflow-rejection.js";
 import type { RunFacts } from "./run-watchdog.js";
+import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
 
 const VERIFICATION_GATE = "p19-independent-task-verification";
 const TERMINAL_RUN_STATUSES: readonly string[] = ["completed", "failed", "cancelled", "escalated"];
@@ -57,9 +58,9 @@ function pendingRunId(item: { job: unknown }): string | undefined { const id = o
 function pendingTaskId(item: { job: unknown }): string | undefined { const id = objectField(item.job, "taskId"); return typeof id === "string" ? id : undefined; }
 /** A specialist's structured task.status with status "blocked" is a blocker the user must hear about. */
 function specialistBlockage(payload: unknown): string | undefined {
-  if (objectField(payload, "status") !== "blocked") return undefined;
-  const text = ["reason", "message", "headline"].map(key => objectField(payload, key)).find((item): item is string => typeof item === "string" && item.trim() !== "");
-  return redactString(text ?? "Specialist reported the task as blocked");
+  if (!(["blocked", "failed"].includes(String(objectField(payload, "status"))))) return undefined;
+  const text = ["reason", "message", "headline", "summary"].map(key => objectField(payload, key)).find((item): item is string => typeof item === "string" && item.trim() !== "");
+  return redactString(text ?? `Specialist reported status ${String(objectField(payload, "status"))}`).slice(0, 1800);
 }
 
 /**
@@ -120,6 +121,21 @@ export class AgenticWorkflowRuntime {
         runtimeId: `p19-${digest(this.journal.repository).slice(0, 16)}`, configuration: {}, recoveryMode: true, initializedAt: this.now()
       })));
       SessionManifestSchema.parse(unwrap(await this.ports.panes.getManifest()));
+      await this.transaction(async (state, save) => {
+        // These flags describe coroutines owned by the previous process, not durable verification outcomes.
+        // Keep a persisted outcome for finishVerification; otherwise the next tick resumes the frozen plan.
+        let changed = false;
+        for (const run of state.runs) {
+          if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) continue;
+          for (const task of run.tasks) {
+            const outcome = state.pendingVerifications.some(item => pendingRunId(item) === run.runId && pendingTaskId(item) === task.taskId);
+            if (task.verificationPending && !outcome) { task.verificationPending = false; changed = true; }
+          }
+          const workflowOutcome = state.pendingVerifications.some(item => pendingRunId(item) === run.runId && pendingTaskId(item) === FINAL_TASK);
+          if (run.workflowVerificationPending && !workflowOutcome) { run.workflowVerificationPending = false; changed = true; }
+        }
+        if (changed) await save();
+      });
     })();
     return this.initialization;
   }
@@ -171,6 +187,51 @@ export class AgenticWorkflowRuntime {
         sdlcStatus: run.status, result: message.payload, next: "Call inspect to read the durable inbox, then continue the workflow or report a blocker." },
       artifact_references: message.artifact_references, occurred_at: this.now(), idempotency_key: messageId }), "coordinator");
   }
+  /** Reconstruct a lost deterministic wake from an already-applied, correlated result during recovery. */
+  async recoverMissingCoordinatorWakeups(): Promise<JsonValue> {
+    // `received` is the durable inbox write-ahead before semantic application. The envelope was parsed and authenticated
+    // before that write. Reapply all business validators, deferring blocked/terminal runs until an authorized resume.
+    const received = await this.transaction(async state => state.inbox.filter(item => item.status === "received" &&
+        !state.runs.some(run => run.runId === item.message.run_id && (run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status))))
+      .map(item => RoleMessageSchema.parse(item.message)));
+    let replayed = 0;
+    for (const message of received) {
+      try {
+        await withRecoveredHerdrReceipt(message, async () => {
+          if (message.recipient.role === "conversation" && message.sender.role === "coordinator") await this.observeCoordinatorOutcome(message);
+          else await this.applyAuthenticatedHerdrMessage(message, true);
+        });
+        replayed++;
+      }
+      catch (error) {
+        // Rejected and unknown/terminal results remain persisted; surface their concrete failure without any resend.
+        await this.reportInboundFailure(message, String(error));
+      }
+    }
+    return this.transaction(async (state, save, _core, outbox) => {
+      let recovered = 0;
+      for (const item of state.inbox.filter(entry => entry.status === "applied" && entry.message.recipient.role === "coordinator" &&
+          entry.message.sender.role !== "coordinator" && entry.message.sender.role !== "conversation")) {
+        const message = RoleMessageSchema.parse(item.message);
+        if (!message.run_id || !message.causation_id || !["spec.draft", "task.status", "verification.escalation"].includes(message.type)) continue;
+        const source = state.outbound.find(out => out.message.message_id === message.causation_id && out.message.run_id === message.run_id &&
+          out.message.recipient.role === message.sender.role && out.handle?.target.agentId === message.sender.agent_id &&
+          out.handle?.target.paneId === message.sender.pane_id && ["accepted", "released"].includes(out.status));
+        if (!source) continue; // Do not infer result ownership from role or Herdr idle/done alone.
+        const run = state.runs.find(candidate => candidate.runId === message.run_id);
+        if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || run.status === "awaiting_approval" ||
+            Object.values(run.userDecisions ?? {}).some(decision => decision.status === "pending")) continue;
+        const wakeId = `p19-wake-${digest([run.runId, message.message_id])}`;
+        if (state.outbound.some(out => out.message.message_id === wakeId)) continue;
+        const blockage = specialistBlockage(message.payload);
+        if (blockage !== undefined) this.reportSpecialistBlocked(state, outbox, run, message, blockage);
+        this.wakeCoordinator(state, outbox, run, message);
+        recovered++;
+      }
+      if (recovered) await save();
+      return json({ recovered: recovered + replayed });
+    });
+  }
   /**
    * Surfaces a delivery failure to the user through Conversation. Idempotent per (message, failure class): every retry, reconciliation
    * and dropped-report of the same message reuses the first notice instead of adding one with a different reason text.
@@ -179,6 +240,7 @@ export class AgenticWorkflowRuntime {
     subject: string, reason: string, options: string[] = DELIVERY_FAILURE_OPTIONS): void {
     const text = `${subject}: ${reason}. The run is waiting and will not continue until this is resolved.`;
     this.emit(state, outbox, run, "conversation.progress", { kind: "delivery_failure", runId: run.runId, sdlcStatus: run.status,
+      ...(run.pendingAction === undefined ? {} : { owner: run.pendingAction.owner, actionId: run.pendingAction.actionId }),
       headline: `Herdr delivery failed: ${subject}`, reason: text, blockageReason: text, options },
       `delivery-failure:${digest([messageId, failureClass])}`);
   }
@@ -195,8 +257,43 @@ export class AgenticWorkflowRuntime {
       const run = state.runs.find(item => item.runId === data.run_id);
       if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || this.refused(state, data.message_id)) return;
       const text = redactString(reason);
+      if (run.status !== "awaiting_approval" && !Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
+        const previousStatus = run.status;
+        run.error = `${data.type} ingress failed: ${text}`.slice(0, 2000);
+        run.status = "escalated";
+        run.pendingAction = { actionId: `next-${digest([run.runId, data.message_id])}`, kind: "resume_coordinator", owner: "coordinator",
+          reason: run.error, sourceMessageId: data.message_id, createdAt: data.occurred_at ?? this.now(), state: "pending", previousStatus, resumeAttempts: 0, recovery: "manual" };
+      }
       this.surfaceFailure(state, outbox, run, data.message_id, inboundFailureClass(text),
         `${data.type} from ${data.sender.role} to ${data.recipient.role} (${data.message_id})`, text);
+      await save();
+    });
+  }
+  /** Authenticated host report for a schema-invalid native RoleMessage rejected before transport intent. */
+  async reportRoleToolFailure(bindingInput: unknown, rawMessage: unknown, reasonInput: string): Promise<void> {
+    const binding = PaneBindingSchema.parse(bindingInput);
+    const raw = objectField(rawMessage, "message") ?? rawMessage;
+    const claimedRunId = objectField(raw, "run_id");
+    const claimedMessageId = objectField(raw, "message_id");
+    await this.transaction(async (state, save, _core, outbox) => {
+      const source = state.outbound.find(out => out.handle?.target.paneId === binding.paneId && out.handle.target.agentId === binding.agentId &&
+        out.message.recipient.role === binding.role && ["accepted", "released"].includes(out.status) &&
+        (typeof claimedRunId !== "string" || out.message.run_id === claimedRunId));
+      const run = state.runs.find(item => item.runId === (source?.message.run_id ?? claimedRunId));
+      if (!run || !source || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) return;
+      const messageId = typeof claimedMessageId === "string" && claimedMessageId.length <= 200 ? claimedMessageId : `invalid-role-message-${digest([binding.paneId, source.message.message_id, reasonInput])}`;
+      const reason = `Rejected invalid ${binding.role} RoleMessage before transport: ${redactString(reasonInput)}`.slice(0, 2000);
+      const previousStatus = run.status;
+      if (run.status !== "awaiting_approval" && !Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
+        run.error = reason; run.status = "escalated";
+        run.pendingAction = { actionId: `next-${digest([run.runId, messageId])}`, kind: "resume_coordinator", owner: "coordinator",
+          reason, sourceMessageId: messageId, createdAt: this.now(), state: "pending", previousStatus, recovery: "manual", resumeAttempts: 0 };
+      }
+      this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId,
+        sdlcStatus: run.status, owner: "coordinator", ...(run.pendingAction === undefined ? {} : { actionId: run.pendingAction.actionId }),
+        headline: "Agent result was rejected before delivery", reason, blockageReason: reason,
+        options: ["Ask Coordinator to send a schema-valid result or explain the blocker", "Cancel run"] },
+      `invalid-role-message:${digest([run.runId, messageId])}`, "conversation");
       await save();
     });
   }
@@ -221,12 +318,59 @@ export class AgenticWorkflowRuntime {
       const run = state.runs.find(item => item.runId === out.message.run_id);
       if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) continue;
       const before = state.outbound.length;
+      if (uncertain && !run.pendingAction) {
+        const reason = `Delivery to ${out.message.recipient.role} is unknown: ${redactString(out.error)}. Reconcile before any resend.`.slice(0, 2000);
+        run.error = reason;
+        run.pendingAction = { actionId: `next-${digest([run.runId, out.message.message_id])}`, kind: "resume_coordinator", owner: "coordinator",
+          reason, sourceMessageId: out.message.message_id, createdAt: this.now(), state: "pending", recovery: "reconcile_delivery" };
+      }
       this.surfaceFailure(state, outbox, run, out.message.message_id, uncertain ? "transport_uncertain" : "undeliverable",
         `${out.message.type} to ${out.message.recipient.role} (${out.message.message_id})`, redactString(out.error),
         uncertain ? UNCERTAIN_DELIVERY_OPTIONS : DELIVERY_FAILURE_OPTIONS);
       changed ||= state.outbound.length !== before;
     }
     return changed;
+  }
+  /** A failed capability proof is terminal for this immutable unsent message and creates one resumable blocker. */
+  private surfaceCapabilityPreflightFailures(state: JournalState, outbox: HerdrOutbox): void {
+    const failures = state.outbound.filter(item => item.status === "failed" && item.error?.includes(RoleCapabilityPreflightError.name));
+    const byRun = new Map<string, Outbound[]>();
+    for (const out of failures) if (out.message.run_id) byRun.set(out.message.run_id, [...(byRun.get(out.message.run_id) ?? []), out]);
+    for (const runFailures of byRun.values()) {
+      const out = runFailures[0]!;
+      const run = state.runs.find(item => item.runId === out.message.run_id);
+      if (!run || run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) continue;
+      const existing = run.pendingAction?.kind === "resume_coordinator" ? run.pendingAction : undefined;
+      if (existing?.state === "pending" && runFailures.every(failure => [existing.sourceMessageId, ...(existing.relatedMessageIds ?? [])].includes(failure.message.message_id))) continue;
+      if (run.status === "awaiting_approval" || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
+        for (const failure of runFailures) {
+          const messageId = `capability-blocked-${digest([run.runId, failure.message.message_id])}`;
+          outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: messageId, correlation_id: run.delegation.correlationId,
+            causation_id: failure.message.message_id, run_id: run.runId, sender: { role: "runtime" }, recipient: { role: "conversation" },
+            type: "conversation.progress", payload: { kind: "workflow_blocked", runId: run.runId, sdlcStatus: run.status,
+              owner: "coordinator", reason: `Capability preflight blocked ${failure.message.recipient.role}: ${failure.error}`.slice(0, 2000),
+              headline: "A role capability is unavailable; the approval gate remains pending", options: ["Resolve the current approval, then recheck capability", "Cancel run"] },
+            artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }), "conversation");
+        }
+        continue;
+      }
+      const previousStatus = run.status;
+      const reason = runFailures.map(failure => redactString(failure.error ?? "Role capability preflight failed")).join("; ").slice(0, 2000);
+      run.error = reason;
+      run.status = "escalated";
+      run.pendingAction = { actionId: `next-${digest([run.runId, out.message.message_id])}`, kind: "resume_coordinator", owner: "coordinator",
+        reason, sourceMessageId: out.message.message_id, relatedMessageIds: runFailures.slice(1).map(failure => failure.message.message_id),
+        createdAt: existing?.createdAt ?? this.now(), state: "pending", previousStatus: existing?.previousStatus ?? previousStatus,
+        resumeAttempts: existing?.resumeAttempts ?? 0, recovery: "capability_repair" };
+      const messageId = `capability-blocked-${digest([run.runId, out.message.message_id])}`;
+      outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: messageId, correlation_id: run.delegation.correlationId,
+        causation_id: out.message.message_id, run_id: run.runId, sender: { role: "runtime" }, recipient: { role: "conversation" },
+        type: "conversation.progress", payload: { kind: "workflow_blocked", runId: run.runId, sdlcStatus: run.status,
+          owner: "coordinator", actionId: run.pendingAction.actionId, reason, blockageReason: reason,
+          headline: `Capability preflight blocked ${out.message.recipient.role} before dispatch`,
+          options: ["Khôi phục capability rồi tiếp tục cùng run", "Hủy run"] },
+        artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }), "conversation");
+    }
   }
   /**
    * Trusted local host enqueues a message; actual inter-agent delivery always uses Herdr. A Conversation requirement revision or
@@ -323,7 +467,9 @@ export class AgenticWorkflowRuntime {
     if (this.quiesced) return;
     await this.transaction(async (state, save, core, outbox) => {
       await outbox.flush((out, handle) => this.bind(state, core, out, handle));
-      this.surfaceOutboundFailures(state, outbox); await save();
+      this.surfaceOutboundFailures(state, outbox);
+      this.surfaceCapabilityPreflightFailures(state, outbox);
+      await save();
     });
     await this.deliverConversationInbox();
   }
@@ -436,15 +582,20 @@ export class AgenticWorkflowRuntime {
     const times = [Date.parse(run.delegation.requestedAt), ...messages.map(message => Date.parse(message.occurred_at ?? ""))].filter(Number.isFinite);
     const pendingDecisionRequests = Object.values(run.userDecisions ?? {}).filter(entry => entry.status === "pending")
       .map(entry => ({ request: ApprovalRequestSchema.parse(entry.request), correlationId: run.delegation.correlationId }));
+    const holders = handoffs.filter(out => this.outboundOwesResult(state, run, out) ||
+      out.message.recipient.role === "coordinator" && out.status === "accepted" && out.handle !== undefined);
     return {
       runId: run.runId, status: run.status, live: !(run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)),
-      lastActivityAt: Math.max(...times), awaitingHuman: run.status === "awaiting_approval",
+      lastActivityAt: Math.max(...times), awaitingHuman: run.status === "awaiting_approval" || run.status === "clarifying" && state.outbound.some(out =>
+        out.message.run_id === run.runId && out.message.type === "conversation.clarification" && ["queued", "sending", "delivered"].includes(out.status)),
       // Accepted handoffs are not activity by themselves (their pane must be observed working); a queued one stuck on a
       // not-ready or structurally blocked recipient is reported by its own notice, not treated as work in progress.
       activeHandoff: handoffs.some(out => ["sending", "unknown_delivery"].includes(out.status) ||
         out.status === "queued" && !(out.notReadySince !== undefined && now - Date.parse(out.notReadySince) >= NOT_READY_FAILURE_MS) &&
           !(out.error !== undefined && STRUCTURAL_DELIVERY_BLOCKERS.test(out.error))),
-      acceptedRoles: [...new Set(handoffs.filter(out => out.status === "accepted" && !out.parentAssignmentId).map(out => out.message.recipient.role))],
+      acceptedRoles: [...new Set(holders.map(out => out.message.recipient.role))],
+      acceptedPanes: [...new Map(holders.filter(out => typeof out.handle?.target.paneId === "string").map(out => [
+        `${out.message.recipient.role}:${out.handle!.target.paneId}`, { role: out.message.recipient.role, paneId: out.handle!.target.paneId! }])).values()],
       pendingDecisions: pendingDecisionRequests.map(item => ({ approvalId: item.request.approvalId, requestedAt: item.request.requestedAt })),
       pendingDecisionRequests
     };
@@ -498,12 +649,22 @@ export class AgenticWorkflowRuntime {
       const holders = state.outbound.filter(out => out.message.run_id === run.runId && out.status === "accepted" && out.handle !== undefined &&
         !out.parentAssignmentId && out.message.recipient.role !== "conversation");
       const holder = holders.find(out => out.message.recipient.role === "developer") ?? holders[0];
+      const previousStatus = run.status;
+      const sourceMessageId = holder?.message.message_id ?? run.delegation.messageId;
+      const reasonForAction = holder
+        ? `${holder.message.recipient.role} pane ${holder.handle!.target.paneId} holds accepted ${holder.message.type} for task ${holder.taskId} since ${idleSince} but has no correlated result.`
+        : `No run-local work, wait, or next action was recorded after ${idleSince}.`;
+      run.error = reasonForAction.slice(0, 2000);
+      run.status = "escalated";
+      run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
+        reason: run.error, sourceMessageId, createdAt: this.now(), state: "pending", previousStatus, resumeAttempts: 0, recovery: "manual" };
       if (holder?.handle) {
         const role = holder.message.recipient.role;
         const kind = role === "developer" ? "developer_no_response" : role === "coordinator" ? "coordinator_no_response" : "run_stalled";
         const reason = `${role} pane ${holder.handle.target.paneId} holds accepted ${holder.message.type} for task ${holder.taskId} since ${idleSince} ` +
           "but is not working and has reported no result. Herdr idle/done only means not working, never task success.";
         this.emit(state, outbox, run, "conversation.progress", { kind, runId, reason, idleSince, role, paneId: holder.handle.target.paneId,
+          owner: "coordinator", actionId: run.pendingAction.actionId,
           options: ["Ask Coordinator to inspect the run and re-dispatch the task or report the blocker", "Cancel this run"],
           headline: `Run may be stuck: ${role} stopped without a result (${runId})` },
         `run-stalled:${episodeKey}`, "conversation");
@@ -511,7 +672,7 @@ export class AgenticWorkflowRuntime {
       }
       const reason = `Không có tiến triển từ ${idleSince} và các pane vai trò không ở trạng thái đang làm việc. ` +
         "Trạng thái idle/done của Herdr không chứng minh công việc đã thành công.";
-      this.emit(state, outbox, run, "conversation.progress", { kind: "run_stalled", runId, reason, idleSince,
+      this.emit(state, outbox, run, "conversation.progress", { kind: "run_stalled", runId, reason, idleSince, owner: "coordinator", actionId: run.pendingAction.actionId,
         options: ["Yêu cầu Coordinator tiếp tục hoặc giải thích trạng thái", "Hủy run"], headline: `Run có thể bị treo: ${runId}` },
       `run-stalled:${episodeKey}`, "conversation");
       await save();
@@ -530,10 +691,15 @@ export class AgenticWorkflowRuntime {
     const message = RoleMessageSchema.parse(input);
     if (!message.idempotency_key) throw new Error("Inbound handoff lacks idempotency key");
     if (!await this.ports.authenticateMessage(message)) throw new Error("Unauthenticated Herdr envelope");
+    return this.applyAuthenticatedHerdrMessage(message, false);
+  }
+  /** Replays only the exact journaled received envelope whose authentication succeeded before its durable write-ahead. */
+  private async applyAuthenticatedHerdrMessage(message: RoleMessage, requireReceivedReceipt: boolean): Promise<JsonValue> {
     return this.transaction(async (state, save, core, outbox) => {
       if (!["coordinator", "runtime"].includes(message.recipient.role)) throw new Error("Wrong inbound recipient");
       const old = state.inbox.find(item => item.message.message_id === message.message_id || item.message.idempotency_key === message.idempotency_key);
       if (old && digest(old.message) !== digest(message)) throw new Error("Conflicting inbound idempotency key");
+      if (requireReceivedReceipt && (!old || old.status !== "received")) throw new Error("Trusted ingress replay requires the exact durable received receipt");
       if (old?.status === "applied") return json({ duplicate: true });
       // A refused message stays refused: a redelivery is answered with the same reason, never re-admitted against newer state.
       if (old?.status === "rejected") throw new AdmissionRejectedError(old.reason ?? "Inbound message was refused");
@@ -652,7 +818,7 @@ export class AgenticWorkflowRuntime {
         } else if (!["spec.draft", "task.status", "review.verdict", "verification.escalation"].includes(message.type)) {
           throw new Error(`Unsupported inbound message ${message.type}`);
         } else {
-          const blockage = message.type === "task.status" && message.sender.role !== "coordinator" ? specialistBlockage(message.payload) : undefined;
+          const blockage = message.sender.role !== "coordinator" ? specialistBlockage(message.payload) : undefined;
           if (blockage !== undefined) this.reportSpecialistBlocked(state, outbox, run, message, blockage);
           if (message.recipient.role === "coordinator") this.wakeCoordinator(state, outbox, run, message);
         }
@@ -664,10 +830,162 @@ export class AgenticWorkflowRuntime {
 
   /** A specialist blocker is visible to the user, not only to the Coordinator. Idempotent per message. */
   private reportSpecialistBlocked(state: JournalState, outbox: HerdrOutbox, run: RunRecord, message: RoleMessage, blockage: string): void {
-    run.error = `Specialist ${message.sender.role} blocked: ${blockage}`;
+    run.error = `Specialist ${message.sender.role} blocked: ${blockage}`.slice(0, 2000);
+    run.pendingAction = { actionId: `next-${digest([run.runId, message.message_id])}`, kind: "coordinator_continuation", owner: "coordinator",
+      reason: run.error, sourceMessageId: message.message_id, createdAt: message.occurred_at ?? this.now(), state: "pending" };
     this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId, reason: run.error, fromRole: message.sender.role,
       options: ["Ask Coordinator to resolve the blocker (answer it or re-plan the task)", "Cancel this run"],
       headline: `Workflow blocked: ${run.error}`, sdlcStatus: run.status }, `specialist-blocked:${message.message_id}`, "conversation");
+  }
+
+  /**
+   * Authenticated Coordinator outcomes addressed to Conversation still pass through Runtime first. This is the durable semantic
+   * boundary: an agent's message receipt alone cannot update the user transcript while leaving the run unaware of its blocker.
+   */
+  async observeCoordinatorOutcome(input: unknown, options: { notificationAlreadyRecorded?: boolean } = {}): Promise<void> {
+    const parsed = RoleMessageSchema.parse(input);
+    if (parsed.sender.role !== "coordinator" || parsed.recipient.role !== "conversation" || !parsed.run_id ||
+        !["task.status", "conversation.progress"].includes(parsed.type)) throw new Error("Invalid Coordinator-to-Conversation workflow outcome");
+    if (!await this.ports.authenticateMessage(parsed)) throw new Error("Unauthenticated Coordinator workflow outcome");
+    return this.transaction(async (state, save, _core, outbox) => {
+      const run = state.runs.find(item => item.runId === parsed.run_id);
+      if (!run || parsed.correlation_id !== run.delegation.correlationId) throw new Error("Coordinator outcome does not match a live run");
+      if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) throw new Error(`Run is ${run.status}`);
+      const existing = state.inbox.find(item => item.message.message_id === parsed.message_id || item.message.idempotency_key === parsed.idempotency_key);
+      if (existing && digest(existing.message) !== digest(parsed)) throw new Error("Conflicting Coordinator outcome idempotency key");
+      if (existing?.status === "applied") return;
+      if (!existing) { state.inbox.push({ message: parsed, status: "received" }); await save(); }
+      const blockage = specialistBlockage(parsed.payload);
+      if (blockage !== undefined) {
+        if (run.status === "awaiting_approval" || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
+          const inbox = state.inbox.find(item => item.message.message_id === parsed.message_id)!; inbox.status = "applied"; await save(); return;
+        }
+        if (run.status === "escalated" && run.pendingAction) {
+          const inbox = state.inbox.find(item => item.message.message_id === parsed.message_id)!; inbox.status = "applied"; await save(); return;
+        }
+        const reason = `Coordinator blocked: ${blockage}`;
+        run.error = reason;
+        const capabilityBlocker = /repository|read-only tool|native mutation|exec_command|resource enumeration/i.test(blockage);
+        run.pendingAction = { actionId: `next-${digest([run.runId, parsed.message_id])}`, kind: "resume_coordinator", owner: "coordinator",
+          reason: reason.slice(0, 2000), sourceMessageId: parsed.message_id, createdAt: parsed.occurred_at ?? this.now(),
+          state: "pending", previousStatus: run.status, resumeAttempts: 0, recovery: capabilityBlocker ? "capability_repair" : "manual" };
+        run.status = "escalated";
+        if (!options.notificationAlreadyRecorded) {
+          const noticeId = `coordinator-blocked-${digest([run.runId, parsed.message_id])}`;
+          outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: noticeId, correlation_id: run.delegation.correlationId,
+            causation_id: parsed.message_id, run_id: run.runId, sender: { role: "runtime" }, recipient: { role: "conversation" },
+            type: "conversation.progress", payload: { kind: "workflow_blocked", runId: run.runId, sdlcStatus: run.status,
+              headline: "Workflow đang chờ khắc phục blocker", reason, blockageReason: reason, fromRole: "coordinator",
+              options: ["Khắc phục capability rồi yêu cầu tiếp tục run", "Hủy run"] },
+            artifact_references: [], occurred_at: this.now(), idempotency_key: noticeId }), "conversation");
+        }
+      }
+      const inbox = state.inbox.find(item => item.message.message_id === parsed.message_id)!;
+      inbox.status = "applied"; await save();
+    });
+  }
+
+  /** Resume only a recorded recoverable Coordinator blocker. The stable action identity prevents duplicate wakeups on retry/restart. */
+  async resumeBlockedRun(runIdInput: string, actionIdInput: string): Promise<JsonValue> {
+    const runId = textField(runIdInput), actionId = textField(actionIdInput);
+    return this.transaction(async (state, save, _core, outbox) => {
+      const run = this.run(state, runId), action = run.pendingAction;
+      if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) throw new Error(`Run is ${run.status}; it cannot be resumed`);
+      const priorResume = run.resumeReceipts?.find(item => item.actionId === actionId);
+      const retryUnsent = action?.actionId === actionId && action.state === "pending" &&
+        [action.sourceMessageId, ...(action.relatedMessageIds ?? [])].every(id => state.outbound.some(out =>
+          out.message.message_id === id && out.status === "failed" && out.error?.includes(RoleCapabilityPreflightError.name)));
+      if (priorResume && !retryUnsent) return json({ queued: true, messageId: priorResume.messageId, actionId });
+      if (run.status !== "escalated" || !action || action.actionId !== actionId || action.kind !== "resume_coordinator") {
+        const prior = state.outbound.find(item => item.message.message_id === `resume-${digest([runId, actionId])}`);
+        if (prior) return json({ queued: true, messageId: prior.message.message_id, actionId });
+        throw new Error("No matching recoverable blocker to resume");
+      }
+      if (Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
+          run.approval !== undefined && (!run.decision || run.decision.approvalId !== run.approval.approvalId))
+        throw new Error("A pending approval or user decision must be resolved before resume");
+      if ((action.resumeAttempts ?? 0) >= 3) throw new Error("Bounded resume attempts are exhausted; cancel or request operator intervention");
+      if (state.outbound.some(item => item.message.run_id === runId && item.status === "unknown_delivery"))
+        throw new Error("Unknown delivery must be reconciled before resume");
+      const failureIds = [action.sourceMessageId, ...(action.relatedMessageIds ?? [])];
+      const failedCapabilityDispatches = failureIds.map(id => state.outbound.find(item => item.message.message_id === id &&
+        item.status === "failed" && item.error?.includes(RoleCapabilityPreflightError.name))).filter((item): item is Outbound => item !== undefined);
+      if (action.requiredRole !== undefined && !failedCapabilityDispatches.length) {
+        // requestSpecialist preflight found the needed role unready before a message could be constructed.
+        const binding = unwrap(await this.ports.panes.getRoleBinding(action.requiredRole));
+        if (!binding || !this.ports.preflightRoleCapabilities) throw new Error("The required specialist pane/capability is not ready");
+        const requirements = action.requiredCapabilities ?? ["repository.read"];
+        await this.ports.preflightRoleCapabilities(binding, requirements);
+        if (requirements.some(capability => !this.ports.roleCapabilities[action.requiredRole!]?.includes(capability)))
+          throw new RoleCapabilityPreflightError(`${action.requiredRole} required capability is unavailable: ${requirements.join(", ")}`);
+      } else if (failedCapabilityDispatches.length !== failureIds.length && failedCapabilityDispatches.length > 0) {
+        throw new Error("A recorded capability handoff is missing or no longer safely unsent");
+      }
+      const resumeBindings = failedCapabilityDispatches.length
+        ? await Promise.all(failedCapabilityDispatches.map(async item => ({ item, binding: unwrap(await this.ports.panes.getRoleBinding(item.selector)) })))
+        : [{ item: undefined, binding: unwrap(await this.ports.panes.getRoleBinding(action.requiredRole ?? "coordinator")) }];
+      if (resumeBindings.some(item => !item.binding) || !this.ports.preflightRoleCapabilities)
+        throw new Error("The current session has no verified role capability preflight");
+      const resumeRequirements = action.requiredCapabilities ?? ["repository.read"];
+      for (const entry of resumeBindings) {
+        const binding = entry.binding;
+        if (!binding) throw new RoleCapabilityPreflightError("The required role pane is not bound in this session");
+        const requirements = entry.item?.capabilities ?? resumeRequirements;
+        await this.ports.preflightRoleCapabilities(binding, requirements);
+        if (requirements.some(capability => !this.ports.roleCapabilities[binding.role]?.includes(capability)))
+          throw new RoleCapabilityPreflightError(`${binding.role} required capability is unavailable: ${requirements.join(", ")}`);
+      }
+      const messageId = `resume-${digest([runId, action.actionId])}`;
+      if (failedCapabilityDispatches.length) {
+        // Preflight failed before a lease or transport operation. Reuse that exact immutable unsent handoff once the target proof passes.
+        for (const failedCapabilityDispatch of failedCapabilityDispatches) {
+          failedCapabilityDispatch.status = "queued"; delete failedCapabilityDispatch.error; delete failedCapabilityDispatch.deliveryAttempts;
+        }
+      } else {
+        const existing = state.outbound.find(item => item.message.message_id === messageId);
+        if (!existing) outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: messageId,
+          correlation_id: run.delegation.correlationId, causation_id: action.sourceMessageId, run_id: runId,
+          sender: { role: "runtime" }, recipient: { role: "coordinator" }, type: "task.status",
+          payload: { kind: "resume_run", actionId: action.actionId, reason: action.reason,
+            next: "Inspect the durable blocker, confirm the required capability is now available, then continue this same run through Runtime." },
+          artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }), "coordinator");
+      }
+      action.state = "queued";
+      action.resumeAttempts = (action.resumeAttempts ?? 0) + 1;
+      run.status = action.previousStatus ?? "specifying";
+      delete action.previousStatus;
+      delete run.error;
+      run.resumeReceipts ??= [];
+      if (priorResume) priorResume.messageId = messageId;
+      else run.resumeReceipts.push({ actionId, messageId });
+      if (run.resumeReceipts.length > 50) run.resumeReceipts.shift();
+      await save();
+      return json({ queued: true, messageId, actionId: action.actionId });
+    });
+  }
+
+  /** Restart recovery: resume each persisted capability/no-next-action episode at most once after checking the current Coordinator pane. */
+  async resumeRecoverableRuns(): Promise<JsonValue> {
+    if (!this.ports.roleCapabilities.coordinator?.includes("repository.read")) return json({ resumed: 0, reason: "repository.read unavailable" });
+    const candidates = await this.transaction(async state => state.runs.filter(run => run.status === "escalated" && !run.cancelled &&
+      run.pendingAction?.kind === "resume_coordinator" && run.pendingAction.recovery === "capability_repair" &&
+      run.pendingAction.state === "pending" && (run.pendingAction.resumeAttempts ?? 0) < 3)
+      .map(run => ({ runId: run.runId, actionId: run.pendingAction!.actionId })));
+    let resumed = 0;
+    for (const candidate of candidates) {
+      const pane = unwrap(await this.ports.panes.getRoleBinding("coordinator"));
+      if (!pane) continue;
+      const health = unwrap(await this.ports.panes.inspectRoleHealth("coordinator"));
+      if (!health.readyForPrompt || !health.occupantMatches || health.paneId !== pane.paneId) continue;
+      try { await this.resumeBlockedRun(candidate.runId, candidate.actionId); resumed++; }
+      catch (error) {
+        // Unknown delivery, cancellation/approval, stale role binding and capability proof failures remain durable waits.
+        // Startup recovery is best-effort per action: one unresolved run must not abort host activation or block other runs.
+        if (error instanceof RoleCapabilityPreflightError || /Unknown delivery|pending approval|matching recoverable blocker|no verified role capability|capability is unavailable/i.test(String(error))) continue;
+        throw error;
+      }
+    }
+    return json({ resumed });
   }
   /** Private host boundary: provider text is useful only when it is an exact pinned Runtime delivery. */
   private providerDelivery(state: JournalState, message: RoleMessage, binding: PaneBinding): Outbound {
@@ -690,31 +1008,83 @@ export class AgenticWorkflowRuntime {
       if (binding.role !== "coordinator" || message.type !== "delegation.request" || message.sender.role !== "conversation")
         throw new Error("Coordinator Stop requires an exact Conversation delegation");
       const run = state.runs.find(item => item.runId === message.run_id);
-      if (run && (run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || run.coreCreated || run.status === "awaiting_approval" || run.approval && (!run.decision || run.decision.approvalId !== run.approval.approvalId) ||
-          Object.values(run.userDecisions ?? {}).some(item => item.status === "pending"))) return;
-      const baseline = delivery.coordinatorResponseBaseline ?? state.outbound.indexOf(delivery) + 1;
-      const response = state.outbound.slice(baseline).some(out => out.message.run_id === message.run_id && out.message.correlation_id === message.correlation_id &&
-        out.message.sender.role === "coordinator" && out.message.type !== "delegation.accepted" &&
-        !(out.message.type === "conversation.progress" && typeof out.message.payload === "object" && out.message.payload !== null && !Array.isArray(out.message.payload) &&
-          (out.message.payload.kind === "coordinator_no_response" || out.message.payload.kind === "delivery_failure"))); // Runtime-authored notices are not a Coordinator answer.
-      if (response) return; // Includes queued progress/clarifications/approvals, before physical transport.
-      const applied = state.inbox.some(item => item.status === "applied" && item.message.message_id === message.message_id);
-      const messageId = `coordinator-no-response-${digest(message.message_id)}`;
-      if (state.outbound.some(out => out.message.message_id === messageId)) return;
-      outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: messageId, correlation_id: message.correlation_id,
-        causation_id: message.message_id, run_id: message.run_id, sender: { role: "coordinator" }, recipient: { role: "conversation" },
-        type: "conversation.progress", payload: { kind: "coordinator_no_response", headline: "Coordinator turn ended without a structured response",
-          blockageReason: applied ? "No structured Coordinator progress or workflow response was recorded. The request remains unresolved."
-            : "The delivered delegation has no durable ingress in Runtime. The request remains unresolved; inspect host delivery diagnostics before retrying." },
-        artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }));
+      if (!run) {
+        const messageId = `coordinator-no-response-${digest(message.message_id)}`;
+        if (state.outbound.some(out => out.message.message_id === messageId)) return;
+        outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: messageId,
+          correlation_id: message.correlation_id, causation_id: message.message_id, run_id: message.run_id,
+          sender: { role: "runtime" }, recipient: { role: "conversation" }, type: "conversation.progress",
+          payload: { kind: "coordinator_no_response", owner: "runtime", headline: "Coordinator turn ended without a structured response",
+            reason: "The delivered delegation has no durable ingress in Runtime. Inspect host delivery diagnostics before retrying.",
+            blockageReason: "The delivered delegation has no durable ingress in Runtime. The request remains unresolved.",
+            options: ["Inspect and reconcile the original delegation delivery", "Cancel the pending request"] },
+          artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }));
+        await save(); return;
+      }
+      if (run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || this.hasSemanticNextAction(state, run)) return;
+      this.recordCoordinatorNoNextAction(state, outbox, run, message, delivery);
       await save();
     });
+  }
+
+  /** A business action, not pane activity or a status message, is the evidence that a run can progress. */
+  private hasSemanticNextAction(state: JournalState, run: RunRecord): boolean {
+    if (run.status === "awaiting_approval" || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
+        run.tasks.some(task => task.verificationPending) || state.pendingVerifications.some(item => pendingRunId(item) === run.runId)) return true;
+    if (run.pendingAction?.kind === "resume_coordinator" && run.pendingAction.state === "pending") return true; // Explicitly actionable, surfaced blocker.
+    if (run.pendingAction?.kind === "reconcile_delivery" && run.pendingAction.state === "pending") return true; // Explicit, no-resend reconciliation path.
+    const activeHandoff = state.outbound.some(out => out.message.run_id === run.runId && out.message.recipient.role !== "conversation" &&
+      out.message.recipient.role !== "coordinator" && ["task.assignment", "delegation.request", "verification.requested"].includes(out.message.type) &&
+      ["queued", "sending"].includes(out.status));
+    if (activeHandoff) return true;
+    if (state.outbound.some(out => this.outboundOwesResult(state, run, out))) return true;
+    if (run.pendingAction?.kind === "coordinator_continuation") return false; // A wake exists; only an actual downstream request consumes it.
+    if (run.coreCreated && run.tasks.length > 0 && run.tasks.some(task => !task.result || task.verificationPending || task.cycle?.status !== "passed")) return true;
+    if (run.status === "clarifying" && state.outbound.some(out => out.message.run_id === run.runId &&
+        out.message.type === "conversation.clarification" && ["queued", "sending", "delivered"].includes(out.status))) return true;
+    return false;
+  }
+
+  /** Lease release frees transport capacity; it does not discharge the correlated business result obligation. */
+  private outboundOwesResult(state: JournalState, run: RunRecord, out: Outbound): boolean {
+    if (out.message.run_id !== run.runId || !out.handle || !["accepted", "released"].includes(out.status) ||
+        ["coordinator", "conversation"].includes(out.message.recipient.role) ||
+        !["delegation.request", "task.assignment", "verification.requested"].includes(out.message.type) || out.parentAssignmentId) return false;
+    return !state.inbox.some(item => item.status === "applied" && item.message.run_id === run.runId &&
+      item.message.sender.role === out.message.recipient.role && item.message.sender.agent_id === out.handle!.target.agentId &&
+      item.message.sender.pane_id === out.handle!.target.paneId && item.message.causation_id === out.message.message_id &&
+      (out.message.type !== "task.assignment" || item.message.type === "implementation.submitted") &&
+      ["spec.draft", "task.status", "verification.escalation", "verification.result", "review.verdict", "implementation.submitted"].includes(item.message.type) &&
+      (item.message.type !== "task.status" || ["blocked", "failed", "completed", "succeeded"].includes(String(objectField(item.message.payload, "status")))));
+  }
+
+  private recordCoordinatorNoNextAction(state: JournalState, outbox: HerdrOutbox, run: RunRecord, message: RoleMessage, _delivery: Outbound): void {
+    if (run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) return;
+    const prior = run.pendingAction;
+    const previousStatus = prior?.previousStatus ?? run.status;
+    const reason = prior?.reason ?? run.error ?? `Coordinator turn ended in ${run.status} without recording a durable next action.`;
+    const sourceMessageId = prior?.kind === "coordinator_continuation" && prior.state === "pending"
+      ? prior.sourceMessageId : message.message_id;
+    run.error = reason;
+    run.status = "escalated";
+    run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
+      reason: reason.slice(0, 2000), sourceMessageId, createdAt: prior?.createdAt ?? this.now(), state: "pending", previousStatus,
+      resumeAttempts: prior?.resumeAttempts ?? 0, recovery: "manual" };
+    const messageId = `coordinator-no-next-action-${digest([run.runId, run.pendingAction.actionId])}`;
+    if (state.outbound.some(out => out.message.message_id === messageId)) return;
+    outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: messageId, correlation_id: run.delegation.correlationId,
+      causation_id: message.message_id, run_id: message.run_id, sender: { role: "runtime" }, recipient: { role: "conversation" },
+      type: "conversation.progress", payload: { kind: "coordinator_no_response", runId: run.runId, owner: "coordinator",
+        actionId: run.pendingAction.actionId, headline: "Coordinator stopped without a workflow next action", reason, blockageReason: reason,
+        options: ["Khắc phục blocker rồi yêu cầu Coordinator tiếp tục run", "Hủy run"] },
+      artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }));
   }
   /** Coordinator chooses these calls adaptively. No fixed chain of Analyst -> Architect -> Planner. */
   async reportProgress(runId: string, headline: string, questions: string[] = []): Promise<JsonValue> {
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId); this.live(run);
       if (questions.length) run.status = "clarifying";
+      if (run.pendingAction?.kind === "coordinator_continuation") delete run.pendingAction;
       this.emit(state, outbox, run, questions.length ? "conversation.clarification" : "conversation.progress",
         { headline: textField(headline), questions: strings(questions), sdlcStatus: run.status }, `coordinator-progress:${digest([headline, questions])}`);
       await save(); return json({ queued: true });
@@ -725,13 +1095,37 @@ export class AgenticWorkflowRuntime {
       const run = this.run(state, runId); this.live(run);
       if (!["specifier", "architect", "planner", "security", "reviewer", "qa", "tester"].includes(role)) throw new Error("Not a specialist role");
       const pane = unwrap(await this.ports.panes.getRoleBinding(role));
-      if (!pane || requiredCapabilities.some(cap => !this.ports.roleCapabilities[role]?.includes(cap))) throw new Error("No capable specialist available");
+      const missingCapabilities = [...requiredCapabilities, "repository.read"].filter(cap => !this.ports.roleCapabilities[role]?.includes(cap));
+      if (!pane || missingCapabilities.length) {
+        const parsedRole = AgentRoleSchema.parse(role);
+        const sourceMessageId = `capability-preflight-${digest([runId, role, objective, requiredCapabilities])}`;
+        const reason = `${role} dispatch preflight failed: ${pane ? `missing capabilities ${missingCapabilities.join(", ")}` : "no bound role pane is available"}`;
+        const previousStatus = run.status;
+        run.error = reason.slice(0, 2000); run.status = "escalated";
+        run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
+          reason: run.error, sourceMessageId, createdAt: this.now(), state: "pending", previousStatus, resumeAttempts: 0,
+          recovery: pane ? "capability_repair" : "manual", requiredRole: parsedRole, requiredCapabilities: [...new Set([...requiredCapabilities, "repository.read"])] };
+        const pendingAction = run.pendingAction;
+        this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId, sdlcStatus: run.status,
+          owner: "coordinator", actionId: pendingAction.actionId, reason: run.error, blockageReason: run.error,
+          headline: `Preflight blocked ${role} before any dispatch`, options: ["Restore role capability or pane, then resume this run", "Cancel run"] },
+        `capability-preflight:${sourceMessageId}`, "conversation");
+        await save(); return json({ blocked: true, actionId: pendingAction.actionId, reason: run.error });
+      }
       const key = `specialist:${role}:${digest([objective, requiredCapabilities])}`;
       const delegation = DelegationRequestSchema.parse({ ...run.delegation, delegationId: `delegation-${digest([runId, key])}`,
         messageId: `p19-${digest([runId, key])}`, requestedBy: "coordinator", targetRole: role, objective,
         idempotencyKey: key, requestedAt: this.now() });
       const out = this.emit(state, outbox, run, "delegation.request", delegation, key, pane.role, run.delegation.inputArtifacts);
-      out.capabilities = strings(requiredCapabilities);
+      out.capabilities = [...new Set([...strings(requiredCapabilities), "repository.read"])];
+      if (!this.ports.roleCapabilities[role]?.includes("repository.read")) {
+        out.status = "failed";
+        out.error = `${RoleCapabilityPreflightError.name}: ${role} repository.read capability is missing from the active session`;
+        await this.surfaceCapabilityPreflightFailures(state, outbox);
+        await save();
+        return json({ blocked: true, messageId: out.message.message_id, reason: out.error });
+      }
+      if (run.pendingAction?.kind === "coordinator_continuation") delete run.pendingAction;
       run.status = role === "planner" ? "planning" : "specifying";
       await save(); return json(out.message);
     });
@@ -1292,6 +1686,7 @@ export class AgenticWorkflowRuntime {
   async tick(): Promise<JsonValue> {
     await this.initialize();
     if (this.quiesced) return this.inspect();
+    await this.recoverMissingCoordinatorWakeups();
     await this.transaction(async (state, save, _core, outbox) => { if (this.expireUserDecisions(state, outbox)) await save(); });
     const pending = await this.transaction(async state => structuredClone(state.pendingVerifications));
     for (const item of pending) {
@@ -1371,7 +1766,8 @@ export class AgenticWorkflowRuntime {
         if (!this.quiesced) {
           // Before the flush, so a run's final cancellation notice is delivered in this same tick.
           await this.reconcileCancellations(state, save, core, outbox);
-          await outbox.flush((out, handle) => this.bind(state, core, out, handle)); this.surfaceOutboundFailures(state, outbox);
+          await outbox.flush((out, handle) => this.bind(state, core, out, handle));
+          this.surfaceOutboundFailures(state, outbox); this.surfaceCapabilityPreflightFailures(state, outbox);
         }
         await save(); return jobs;
       } finally { this.activeState = undefined; }
@@ -1576,6 +1972,13 @@ export class AgenticWorkflowRuntime {
   async reconcileDelivery(messageId: string): Promise<JsonValue> {
     return this.transaction(async (state, save, core, outbox) => {
       await outbox.reconcile(messageId, (out, handle) => this.bind(state, core, out, handle));
+      const out = state.outbound.find(item => item.message.message_id === messageId);
+      const run = state.runs.find(item => item.runId === out?.message.run_id);
+      if (out && out.status !== "unknown_delivery" && out.status !== "sending" && run?.pendingAction?.recovery === "reconcile_delivery" &&
+          run.pendingAction.sourceMessageId === messageId) {
+        if (run.error === run.pendingAction.reason) delete run.error;
+        delete run.pendingAction;
+      }
       await save(); return json({ reconciled: true });
     });
   }
@@ -1772,24 +2175,9 @@ export class AgenticWorkflowRuntime {
       const delivery = this.providerDelivery(state, message, binding);
       if (binding.role !== "coordinator" || message.recipient.role !== "coordinator") throw new Error("Coordinator Stop requires a Coordinator delivery");
       const run = state.runs.find(item => item.runId === message.run_id);
-      if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || run.coreCreated || run.status === "awaiting_approval" ||
-          Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) return;
-      const baseline = delivery.coordinatorResponseBaseline ?? state.outbound.indexOf(delivery) + 1;
-      const response = state.outbound.slice(baseline).some(out => out.message.run_id === message.run_id && out.message.correlation_id === message.correlation_id &&
-        out.message.sender.role === "coordinator" && out.message.type !== "delegation.accepted" &&
-        !(out.message.type === "conversation.progress" && typeof out.message.payload === "object" && out.message.payload !== null && !Array.isArray(out.message.payload) &&
-          (out.message.payload.kind === "coordinator_no_response" || out.message.payload.kind === "delivery_failure")));
-      if (response) return;
-      const messageId = `coordinator-no-response-${digest(message.message_id)}`;
-      if (state.outbound.some(out => out.message.message_id === messageId)) return;
-      const blockage = reason ?? (state.inbox.some(item => item.status === "applied" && item.message.message_id === message.message_id)
-        ? "No structured Coordinator progress or workflow response was recorded. The request remains unresolved."
-        : "The delivered message has no durable ingress in Runtime. The request remains unresolved; inspect host delivery diagnostics before retrying.");
-      outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: messageId, correlation_id: message.correlation_id,
-        causation_id: message.message_id, run_id: message.run_id, sender: { role: "coordinator" }, recipient: { role: "conversation" },
-        type: "conversation.progress", payload: { kind: "coordinator_no_response", runId: run.runId, headline: "Coordinator turn ended without a structured response",
-          reason: blockage, blockageReason: blockage, options: ["Yêu cầu Coordinator tiếp tục hoặc giải thích trạng thái", "Hủy run"] },
-        artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }));
+      if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || this.hasSemanticNextAction(state, run)) return;
+      if (reason) run.error = redactString(reason).slice(0, 2000);
+      this.recordCoordinatorNoNextAction(state, outbox, run, message, delivery);
       await save();
     });
   }
@@ -1804,6 +2192,14 @@ export class AgenticWorkflowRuntime {
       const run = state.runs.find(item => item.runId === message.run_id);
       if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || this.refused(state, message.message_id)) return;
       const subject = `native delivery ${operationId} (${message.type} to ${message.recipient.role}, ${message.message_id})`;
+      if (run.status !== "awaiting_approval" && !Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
+        const previousStatus = run.status;
+        const blockage = `Unknown delivery for ${message.type} to ${message.recipient.role} (${operationId}); reconcile the original operation before any resend.`;
+        run.error = blockage;
+        run.status = "escalated";
+        run.pendingAction = { actionId: `next-${digest([run.runId, message.message_id])}`, kind: "reconcile_delivery", owner: "coordinator",
+          reason: blockage, sourceMessageId: message.message_id, createdAt: this.now(), state: "pending", previousStatus };
+      }
       this.surfaceFailure(state, outbox, run, message.message_id, "transport_uncertain", subject, redactString(reason));
       if (message.recipient.role !== "coordinator" && message.sender.role !== "coordinator") {
         const wakeId = `p19-wake-${digest([run.runId, "delivery-failure", operationId])}`;

@@ -2,7 +2,7 @@ import { resolvePrivateRuntimeStateDirectory } from "../private-state.js";
 import { mkdir, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
-  ApprovalDecisionSchema, SessionManifestSchema, type ApprovalDecision, type OperationOptions, type OperationResult, type QualityGate, type RoleMessage
+  ApprovalDecisionSchema, RoleMessageSchema, SessionManifestSchema, type ApprovalDecision, type OperationOptions, type OperationResult, type QualityGate, type RoleMessage
 } from "@bflow/contracts";
 import { AgenticWorkflowRuntime } from "./runtime.js";
 import { loadAgenticPolicies, type AgenticRuntimePorts, type PanePolicy } from "./ports.js";
@@ -20,6 +20,7 @@ export interface OpenAgenticWorkspaceOptions {
   /** Existing P12/P13 session manifests; defaults to .bflow/state/panes. No duplicate topology is created. */
   manifestDirectory?: string; storageDirectory?: string; maxDeveloperCapacity?: number;
   roleCapabilities: AgenticRuntimePorts["roleCapabilities"];
+  preflightRoleCapabilities?: AgenticRuntimePorts["preflightRoleCapabilities"];
   taskChecks: AgenticRuntimePorts["taskChecks"]; workflowChecks: AgenticRuntimePorts["workflowChecks"];
   /** Deterministic host runners. Review checks are always routed through Herdr. */
   deterministicGates: readonly QualityGate[];
@@ -38,6 +39,15 @@ export interface OpenAgenticWorkspaceOptions {
   roleLaunch?: Record<string, { systemPrompt: string; mcpConfigFile: string; hooksSettingsFile: string }>;
   /** P30: per-task Developer launch material from the platform readiness service; absent for legacy hosts. */
   developerLaunches?: DeveloperLaunchPort;
+}
+
+/** Authenticated host-ingress order: persist Coordinator semantics, then deliver the original signed envelope to Conversation. */
+export async function routeNativeConversationMessage(runtime: Pick<AgenticWorkflowRuntime, "observeCoordinatorOutcome">,
+  conversation: Pick<AgenticConversationHost, "receiveHerdr">, input: RoleMessage): Promise<unknown> {
+  const message = RoleMessageSchema.parse(input);
+  if (message.recipient.role === "conversation" && message.sender.role === "coordinator" &&
+      ["task.status", "conversation.progress"].includes(message.type)) await runtime.observeCoordinatorOutcome(message);
+  return conversation.receiveHerdr(message);
 }
 /** Launch material for one Developer task. `env` may carry bearer tokens: it is passed to Herdr only, never persisted. */
 export interface DeveloperLaunchPort {
@@ -215,7 +225,9 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       } });
     runtime = new AgenticWorkflowRuntime({ engine: new coreModule.DeterministicWorkflowEngine({ bindingReceiptKeys: options.bindingReceiptKeys }), runStore, artifactStore,
       registry: new registryModule.FileAgentRegistry({ stateFile: resolve(directory, "registry.json") }), transport, panes, policies,
-      automaticAlternativeEvidence: true, roleCapabilities: options.roleCapabilities, maxConcurrency: options.maxDeveloperCapacity ?? 2, taskChecks: options.taskChecks, workflowChecks: options.workflowChecks,
+      automaticAlternativeEvidence: true, roleCapabilities: options.roleCapabilities,
+      ...(options.preflightRoleCapabilities ? { preflightRoleCapabilities: options.preflightRoleCapabilities } : {}),
+      maxConcurrency: options.maxDeveloperCapacity ?? 2, taskChecks: options.taskChecks, workflowChecks: options.workflowChecks,
       authenticateMessage: async message => await authenticateNativeHerdrMessage(message) || await options.authenticateMessage(message),
       deliverToConversation: async message => {
         if (!conversation) throw new Error("Conversation host is not ready");
@@ -230,10 +242,14 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
     conversation = await createAgenticConversationHost({ runtime, manifest, contextDirectory: resolve(directory, "conversation"),
       ...(options.onHumanDecision ? { onHumanDecision: options.onHumanDecision } : {}),
       ...(options.recoveredHumanDecisions ? { recoveredHumanDecisions: options.recoveredHumanDecisions } : {}) });
+    // Resume only durable, explicitly recoverable blocker actions after the new host/session is fully activated.
+    await runtime.resumeRecoverableRuns();
     const tools = new CoordinatorTools(runtime);
     const ingress = options.nativeIngressSocket ? await startHerdrReceiptIngress({ socketPath: options.nativeIngressSocket,
       publicKeys: options.bindingReceiptKeys ?? {}, receive: async message => {
-        const result = message.recipient.role === "conversation" ? await conversation!.receiveHerdr(message) : await runtime.receiveHerdr(message);
+        const result = message.recipient.role === "conversation"
+          ? await routeNativeConversationMessage(runtime, conversation!, message)
+          : await runtime.receiveHerdr(message);
         await options.onNativeDelivery?.(message); return result;
       }, failed: (message, error) => runtime.reportInboundFailure(message, String(error)) }) : undefined;
     return { runtime, conversation, tools, async close() { await tools.drain(); await ingress?.close(); artifactStore.close(); runStore.close(); } };
