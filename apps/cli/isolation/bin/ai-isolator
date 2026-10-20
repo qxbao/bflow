@@ -15,6 +15,7 @@ case "$(uname -s 2>/dev/null)" in
 esac
 ISOLATOR_PY=""
 ISOLATOR_SKILLS_PY=""
+BFLOW_SOURCE_ISOLATED=0
 for candidate in "${AI_ISOLATOR_PY:-}" "$(command -v python3 2>/dev/null || true)" "$(command -v python 2>/dev/null || true)"; do
   [[ -n "$candidate" && -x "$candidate" ]] || continue
   if "$candidate" -c 'import sys' >/dev/null 2>&1; then
@@ -80,13 +81,52 @@ cleanup_spinner() {
   fi
 }
 
+absolute_path() {
+  case "$1" in
+    /*) printf '%s' "$1" ;;
+    *) printf '%s/%s' "$PWD" "$1" ;;
+  esac
+}
+
 # ---------- đường dẫn ----------
 REAL_HOME="${HOME:?chưa đặt HOME}"
-STATE_ROOT="${AI_ISOLATOR_HOME:-$REAL_HOME/.local/share/ai-isolator}"
-PROFILES_DIR="$STATE_ROOT/profiles"
-mkdir -p "$PROFILES_DIR"
-REAL_CODEX_HOME="${CODEX_HOME:-$REAL_HOME/.codex}"
+REAL_STATE_HOME="${AI_ISOLATOR_REAL_HOME:-$REAL_HOME}"
+if [[ -n "${BFLOW_HOME:-}" ]]; then
+  if [[ -d "$BFLOW_HOME" ]]; then
+    BFLOW_SOURCE_ROOT="$(cd "$BFLOW_HOME" 2>/dev/null && pwd -P)" || exit 1
+  elif [[ "$BFLOW_HOME" == /* ]]; then
+    BFLOW_SOURCE_ROOT="${BFLOW_HOME%/}"
+  else
+    BFLOW_SOURCE_ROOT="$PWD/${BFLOW_HOME#./}"
+  fi
+  BFLOW_SOURCE_ISOLATED=1
+  SOURCE_HOME="${BFLOW_SOURCE_ROOT}/providers/home"
+  STATE_ROOT="${AI_ISOLATOR_HOME:-$REAL_STATE_HOME/.local/share/ai-isolator}"
+  REAL_CODEX_HOME="$BFLOW_SOURCE_ROOT/providers/codex"
+  REAL_CLAUDE_CONFIG_DIR="$BFLOW_SOURCE_ROOT/providers/claude"
+else
+  SOURCE_HOME="${AI_ISOLATOR_REAL_HOME:-$REAL_HOME}"
+  STATE_ROOT="${AI_ISOLATOR_HOME:-$REAL_STATE_HOME/.local/share/ai-isolator}"
+  REAL_CODEX_HOME="${CODEX_HOME:-$SOURCE_HOME/.codex}"
+  REAL_CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$SOURCE_HOME/.claude}"
+  if [[ "${AI_ISOLATOR:-}" == "1" && -n "${AI_ISOLATOR_REAL_HOME:-}" ]]; then
+    if [[ -n "${CODEX_HOME:-}" && "$(absolute_path "$CODEX_HOME")" == "$(absolute_path "$REAL_HOME/.codex")" ]]; then
+      REAL_CODEX_HOME="$SOURCE_HOME/.codex"
+      unset CODEX_HOME
+    fi
+    if [[ -n "${CLAUDE_CONFIG_DIR:-}" && "$(absolute_path "$CLAUDE_CONFIG_DIR")" == "$(absolute_path "$REAL_HOME/.claude")" ]]; then
+      REAL_CLAUDE_CONFIG_DIR="$SOURCE_HOME/.claude"
+      unset CLAUDE_CONFIG_DIR
+    fi
+  fi
+fi
 CODEX_SKILLS_SOURCE="${AI_ISOLATOR_CODEX_SKILLS_SOURCE:-$REAL_CODEX_HOME/skills}"
+SOURCE_HOME="$(absolute_path "$SOURCE_HOME")"
+STATE_ROOT="$(absolute_path "$STATE_ROOT")"
+REAL_CODEX_HOME="$(absolute_path "$REAL_CODEX_HOME")"
+REAL_CLAUDE_CONFIG_DIR="$(absolute_path "$REAL_CLAUDE_CONFIG_DIR")"
+CODEX_SKILLS_SOURCE="$(absolute_path "$CODEX_SKILLS_SOURCE")"
+PROFILES_DIR="$STATE_ROOT/profiles"
 
 CODEX_LB_DETECTED_URL=""
 CODEX_LB_DETECTED_SOURCE=""
@@ -207,16 +247,18 @@ ensure_binary() {
 
 init_profile() {
   local tool="$1" name="$2" dir
+  if [[ "$BFLOW_SOURCE_ISOLATED" -eq 1 && ! -d "$BFLOW_SOURCE_ROOT" ]]; then
+    warn "BFLOW_HOME isolated provider sources are not available yet."
+    return 1
+  fi
+  mkdir -p "$PROFILES_DIR"
   dir="$(profile_dir "$tool" "$name")"
   if [[ -d "$dir" ]]; then
     if [[ "$tool" == "agy" ]]; then
       mkdir -p "$dir/home/.gemini/antigravity-cli"
       chmod 700 "$dir/home/.gemini" "$dir/home/.gemini/antigravity-cli" 2>/dev/null || true
     fi
-    if [[ "$tool" == "codex" ]]; then
-      sync_codex_profile_mcp "$dir"
-      sync_codex_profile_skills "$dir" >/dev/null 2>&1 || true
-    fi
+    sync_profile_capabilities "$tool" "$name" || return 1
     return 0
   fi
 
@@ -240,9 +282,38 @@ EOF_PROFILE
     chmod 700 "$dir/home/.gemini" "$dir/home/.gemini/antigravity-cli" 2>/dev/null || true
   fi
   spinner_stop ok "Đã tạo profile $tool/$name"
+  sync_profile_capabilities "$tool" "$name" || return 1
+}
+
+sync_profile_capabilities() {
+  local tool="$1" name="$2" dir
+  dir="$(profile_dir "$tool" "$name")"
+  if [[ -z "$ISOLATOR_PY" ]]; then
+    warn "Native profile sync skipped: Python 3.11+ with tomllib is required."
+    return 1
+  fi
+  local -a args=(
+    "$SCRIPT_ROOT/lib/profile_sync.py" apply
+    --source-home "$SOURCE_HOME"
+    --state-root "$STATE_ROOT"
+    --provider "$tool"
+    --profile "$name"
+  )
+  if [[ "$BFLOW_SOURCE_ISOLATED" -eq 1 || -n "${CODEX_HOME:-}" ]]; then
+    args+=(--source-codex-home "$REAL_CODEX_HOME")
+  fi
+  if [[ "$BFLOW_SOURCE_ISOLATED" -eq 1 || -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+    args+=(--source-claude-config-dir "$REAL_CLAUDE_CONFIG_DIR")
+  fi
   if [[ "$tool" == "codex" ]]; then
-    sync_codex_profile_mcp "$dir"
-    sync_codex_profile_skills "$dir" >/dev/null 2>&1 || true
+    args+=(--source-codex-skills "$CODEX_SKILLS_SOURCE")
+  fi
+  local output status=0
+  output="$("$ISOLATOR_PY" "${args[@]}" 2>/dev/null)" || status=$?
+  if [[ "$status" -ne 0 || "$output" != *'"valid":true'* ]]; then
+    warn "Native capability sync failed for $tool/$name; profile was not launched."
+    [[ -z "$output" ]] || printf '%s\n' "$output" >&2
+    return 1
   fi
 }
 
@@ -310,6 +381,7 @@ with_profile_env() {
   dir="$(profile_dir "$tool" "$name")"
 
   HOME="$dir/home" \
+  CLAUDE_CONFIG_DIR="$dir/home/.claude" \
   XDG_CONFIG_HOME="$dir/config" \
   XDG_CACHE_HOME="$dir/cache" \
   XDG_DATA_HOME="$dir/data" \
@@ -324,7 +396,6 @@ with_profile_env() {
       -u CODEX_API_KEY \
       -u CODEX_ACCESS_TOKEN \
       -u CODEX_HOME \
-      -u CLAUDE_CONFIG_DIR \
       -u ANTHROPIC_API_KEY \
       -u CLAUDE_CODE_OAUTH_TOKEN \
       -u ANTHROPIC_AUTH_TOKEN \

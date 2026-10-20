@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, symlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, symlinkSync, lstatSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -18,13 +18,22 @@ describe("bundled isolation engine", () => {
   it("runs help and version without an ai-sdlc checkout", () => {
     const home = mkdtempSync(resolve(tmpdir(), "bflow-iso-engine-"));
     try {
-      const env = { ...process.env, HOME: home, AI_ISOLATOR_HOME: resolve(home, "state"), PATH: process.env.PATH ?? "" };
+      const futureBflowHome = resolve(home, "not-created-yet");
+      const env = {
+        ...process.env,
+        HOME: home,
+        AI_ISOLATOR_HOME: resolve(home, "state"),
+        BFLOW_HOME: futureBflowHome,
+        PATH: process.env.PATH ?? "",
+      };
       const help = spawnSync("bash", [enginePath, "--help"], { cwd: home, env, encoding: "utf8" });
       const version = spawnSync("bash", [enginePath, "--version"], { cwd: home, env, encoding: "utf8" });
       expect(help.status).toBe(0);
       expect(help.stdout).toContain("bflow iso codex");
       expect(version.status).toBe(0);
       expect(version.stdout.trim()).toBe("bflow iso 0.4.4");
+      expect(existsSync(resolve(home, "state"))).toBe(false);
+      expect(existsSync(futureBflowHome)).toBe(false);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -115,8 +124,8 @@ describe("bundled isolation engine", () => {
       const goodPython = spawnSync("bash", ["-lc", "command -v python3"], { encoding: "utf8" }).stdout.trim();
       expect(goodPython).toBeTruthy();
       const selected = resolve(home, "selected-python");
-      writeFileSync(resolve(bin, "python3"), `#!/usr/bin/env bash\nif [[ "$*" == *tomllib* ]]; then exit 1; fi\nif [[ "$1" == *mcp_sync.py ]]; then printf python3 >> "$AI_ISOLATOR_TEST_SELECTION"; fi\nexit 0\n`);
-      writeFileSync(resolve(bin, "python"), `#!/usr/bin/env bash\nif [[ "$1" == *mcp_sync.py ]]; then printf python >> "$AI_ISOLATOR_TEST_SELECTION"; fi\nexec ${goodPython} "$@"\n`);
+      writeFileSync(resolve(bin, "python3"), `#!/usr/bin/env bash\nif [[ "$*" == *tomllib* ]]; then exit 1; fi\nif [[ "$1" == *profile_sync.py ]]; then printf python3 >> "$AI_ISOLATOR_TEST_SELECTION"; fi\nexit 0\n`);
+      writeFileSync(resolve(bin, "python"), `#!/usr/bin/env bash\nif [[ "$1" == *profile_sync.py ]]; then printf python >> "$AI_ISOLATOR_TEST_SELECTION"; fi\nexec ${goodPython} "$@"\n`);
       writeFileSync(resolve(bin, "codex"), "#!/usr/bin/env bash\nexit 0\n");
       for (const name of ["python3", "python", "codex"]) chmodSync(resolve(bin, name), 0o755);
 
@@ -158,9 +167,8 @@ describe("bundled isolation engine", () => {
         env,
         encoding: "utf8",
       });
-      expect(result.status).toBe(0);
-      expect(result.stderr).toContain("Codex MCP sync skipped");
-      expect(result.stderr).toContain("Python 3.11+ with tomllib");
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("Python 3.11+ with tomllib is required");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -185,7 +193,7 @@ describe("bundled isolation engine", () => {
     }
   });
 
-  it("clears inherited CLAUDE_CONFIG_DIR before launching Claude from a profile", () => {
+  it("binds Claude probes and launch to the profile config directory", () => {
     const home = mkdtempSync(resolve(tmpdir(), "bflow-iso-claude-config-"));
     try {
       const bin = resolve(home, "bin");
@@ -213,7 +221,200 @@ exit 0
       expect(result.status).toBe(0);
       const record = readFileSync(log, "utf8");
       expect(record).toContain(`HOME=${resolve(home, "state/profiles/claude--isolated/home")}`);
-      expect(record).toContain("CLAUDE_CONFIG_DIR=unset");
+      expect(record).toContain(`CLAUDE_CONFIG_DIR=${resolve(home, "state/profiles/claude--isolated/home/.claude")}`);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("uses BFLOW_HOME provider sources without moving the shared isolator profile store", () => {
+    const home = mkdtempSync(resolve(tmpdir(), "bflow-iso-bflow-home-"));
+    try {
+      const bflow = resolve(home, "bflow");
+      const providers = resolve(bflow, "providers");
+      const nativeCodex = resolve(providers, "codex");
+      const bin = resolve(home, "bin");
+      mkdirSync(nativeCodex, { recursive: true });
+      mkdirSync(bin);
+      writeFileSync(resolve(nativeCodex, "config.toml"), '[mcp_servers.native]\ncommand = "bflow-native-tool"\n');
+      writeFileSync(resolve(bin, "codex"), "#!/usr/bin/env bash\nexit 0\n");
+      chmodSync(resolve(bin, "codex"), 0o755);
+      const env = {
+        ...process.env,
+        HOME: home,
+        BFLOW_HOME: bflow,
+        AI_ISOLATOR_HOME: "",
+        AI_ISOLATOR_REAL_HOME: "",
+        CODEX_HOME: resolve(home, "external-codex"),
+        CLAUDE_CONFIG_DIR: resolve(home, "external-claude"),
+        PATH: `${bin}:/usr/bin:/bin`,
+      };
+      const result = spawnSync("/usr/bin/bash", [enginePath, "codex", "--name", "bflow", "--no-lb", "--no-login"], {
+        cwd: home,
+        env,
+        encoding: "utf8",
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const profileHome = resolve(home, ".local/share/ai-isolator/profiles/codex--bflow/home");
+      const config = readFileSync(resolve(profileHome, ".codex/config.toml"), "utf8");
+      expect(config).toContain("bflow-native-tool");
+      expect(existsSync(resolve(bflow, "state/ai-isolator"))).toBe(false);
+      expect(existsSync(resolve(home, ".local/share/ai-isolator/profiles/codex--explicit"))).toBe(false);
+
+      const explicitState = resolve(home, "explicit-isolator");
+      const explicit = spawnSync("/usr/bin/bash", [enginePath, "codex", "--name", "explicit", "--no-lb", "--no-login"], {
+        cwd: home,
+        env: { ...env, AI_ISOLATOR_HOME: explicitState },
+        encoding: "utf8",
+      });
+      expect(explicit.status, explicit.stderr).toBe(0);
+      expect(existsSync(resolve(explicitState, "profiles/codex--explicit/home/.codex/config.toml"))).toBe(true);
+      expect(existsSync(resolve(home, ".local/share/ai-isolator/profiles/codex--explicit"))).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("uses AI_ISOLATOR_REAL_HOME for the same profile store with BFLOW_HOME on or off", () => {
+    const root = mkdtempSync(resolve(tmpdir(), "bflow-iso-shared-profile-root-"));
+    try {
+      const activeHome = resolve(root, "active-profile-home");
+      const realHome = resolve(root, "real-home");
+      const bflow = resolve(root, "bflow");
+      const bin = resolve(root, "bin");
+      mkdirSync(activeHome, { recursive: true });
+      mkdirSync(resolve(realHome, ".codex"), { recursive: true });
+      mkdirSync(resolve(bflow, "providers/codex"), { recursive: true });
+      mkdirSync(bin);
+      writeFileSync(resolve(realHome, ".codex/config.toml"), '[mcp_servers.native]\ncommand = "real-home-tool"\n');
+      writeFileSync(resolve(bflow, "providers/codex/config.toml"), '[mcp_servers.native]\ncommand = "bflow-tool"\n');
+      writeFileSync(resolve(bin, "codex"), "#!/usr/bin/env bash\nexit 0\n");
+      chmodSync(resolve(bin, "codex"), 0o755);
+      const sharedState = resolve(realHome, ".local/share/ai-isolator");
+      const env = {
+        ...process.env,
+        HOME: activeHome,
+        AI_ISOLATOR_REAL_HOME: realHome,
+        AI_ISOLATOR_HOME: "",
+        CODEX_HOME: "",
+        CLAUDE_CONFIG_DIR: "",
+        BFLOW_HOME: "",
+        PATH: `${bin}:/usr/bin:/bin`,
+      };
+
+      const ordinary = spawnSync("/usr/bin/bash", [enginePath, "codex", "--name", "shared", "--no-lb", "--no-login"], {
+        cwd: activeHome, env, encoding: "utf8",
+      });
+      expect(ordinary.status, ordinary.stderr).toBe(0);
+      const profileHome = resolve(sharedState, "profiles/codex--shared/home");
+      expect(readFileSync(resolve(profileHome, ".codex/config.toml"), "utf8")).toContain("real-home-tool");
+
+      const isolatedSource = spawnSync("/usr/bin/bash", [enginePath, "codex", "--name", "shared", "--no-lb", "--no-login"], {
+        cwd: activeHome, env: { ...env, BFLOW_HOME: bflow }, encoding: "utf8",
+      });
+      expect(isolatedSource.status, isolatedSource.stderr).toBe(0);
+      expect(readFileSync(resolve(profileHome, ".codex/config.toml"), "utf8")).toContain("bflow-tool");
+      expect(existsSync(resolve(activeHome, ".local/share/ai-isolator"))).toBe(false);
+      expect(existsSync(resolve(bflow, "state/ai-isolator"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores inherited selectors pointing at the active parent profile when resolving native setup sources", () => {
+    const root = mkdtempSync(resolve(tmpdir(), "bflow-iso-nested-native-sources-"));
+    try {
+      const activeHome = resolve(root, "active-home");
+      const realHome = resolve(root, "real-home");
+      const bin = resolve(root, "bin");
+      mkdirSync(resolve(activeHome, ".codex"), { recursive: true });
+      mkdirSync(resolve(activeHome, ".claude"), { recursive: true });
+      mkdirSync(resolve(realHome, ".codex"), { recursive: true });
+      mkdirSync(resolve(realHome, ".claude"), { recursive: true });
+      mkdirSync(bin);
+      writeFileSync(resolve(activeHome, ".codex/config.toml"), '[mcp_servers.parent-profile]\ncommand = "parent-codex"\n');
+      writeFileSync(resolve(realHome, ".codex/config.toml"), '[mcp_servers.native]\ncommand = "real-codex"\n');
+      writeFileSync(resolve(activeHome, ".claude/.claude.json"), '{"mcpServers":{"parent-profile":{"command":"parent-claude"}}}');
+      writeFileSync(resolve(realHome, ".claude.json"), '{"mcpServers":{"native":{"command":"real-claude"}}}');
+      writeFileSync(resolve(bin, "codex"), "#!/usr/bin/env bash\nexit 0\n");
+      writeFileSync(resolve(bin, "claude"), "#!/usr/bin/env bash\nexit 0\n");
+      chmodSync(resolve(bin, "codex"), 0o755);
+      chmodSync(resolve(bin, "claude"), 0o755);
+      const state = resolve(root, "state");
+      const env = {
+        ...process.env,
+        HOME: activeHome,
+        AI_ISOLATOR: "1",
+        AI_ISOLATOR_REAL_HOME: realHome,
+        AI_ISOLATOR_HOME: state,
+        CODEX_HOME: resolve(activeHome, ".codex"),
+        CLAUDE_CONFIG_DIR: resolve(activeHome, ".claude"),
+        BFLOW_HOME: "",
+        PATH: `${bin}:/usr/bin:/bin`,
+      };
+      const codex = spawnSync("/usr/bin/bash", [enginePath, "codex", "--name", "nested", "--no-lb", "--no-login"], {
+        cwd: activeHome, env, encoding: "utf8",
+      });
+      expect(codex.status, codex.stderr).toBe(0);
+      const codexConfig = readFileSync(resolve(state, "profiles/codex--nested/home/.codex/config.toml"), "utf8");
+      expect(codexConfig).toContain("real-codex");
+      expect(codexConfig).not.toContain("parent-codex");
+
+      const claude = spawnSync("/usr/bin/bash", [enginePath, "claude", "--name", "nested", "--no-login"], {
+        cwd: activeHome, env, encoding: "utf8",
+      });
+      expect(claude.status, claude.stderr).toBe(0);
+      const claudeConfig = readFileSync(resolve(state, "profiles/claude--nested/home/.claude.json"), "utf8");
+      expect(claudeConfig).toContain("real-claude");
+      expect(claudeConfig).not.toContain("parent-claude");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("shares only native Codex hooks.json and remaps existing hook trust keys on profile init", () => {
+    const home = mkdtempSync(resolve(tmpdir(), "bflow-iso-codex-hooks-"));
+    try {
+      const bin = resolve(home, "bin");
+      mkdirSync(bin);
+      const sourceHooks = resolve(home, ".codex/hooks.json");
+      mkdirSync(resolve(home, ".codex"), { recursive: true });
+      writeFileSync(sourceHooks, '{"hooks":[]}\n');
+      writeFileSync(resolve(home, ".codex/config.toml"), [
+        '[mcp_servers.native]',
+        'command = "native-tool"',
+        `[hooks.state."${sourceHooks}:PreToolUse:0:0"]`,
+        'trusted_hash = "native-hook-trust"',
+        "",
+      ].join("\n"));
+      writeFileSync(resolve(bin, "codex"), "#!/usr/bin/env bash\nexit 0\n");
+      chmodSync(resolve(bin, "codex"), 0o755);
+      const state = resolve(home, "state");
+      const env = { ...process.env, HOME: home, AI_ISOLATOR_HOME: state, CODEX_HOME: "", BFLOW_HOME: "", PATH: `${bin}:/usr/bin:/bin` };
+      const create = spawnSync("/usr/bin/bash", [enginePath, "codex", "--name", "hooks", "--no-lb", "--no-login"], {
+        cwd: home, env, encoding: "utf8",
+      });
+      expect(create.status, create.stderr).toBe(0);
+      const profileHome = resolve(state, "profiles/codex--hooks/home");
+      const profileHooks = resolve(profileHome, ".codex/hooks.json");
+      expect(lstatSync(profileHooks).isSymbolicLink()).toBe(true);
+      expect(readFileSync(profileHooks, "utf8")).toBe('{"hooks":[]}\n');
+      const config = readFileSync(resolve(profileHome, ".codex/config.toml"), "utf8");
+      expect(config).toContain('[mcp_servers.native]');
+      expect(config).toContain(`${profileHooks}:PreToolUse:0:0`);
+      expect(config).toContain('trusted_hash = "native-hook-trust"');
+
+      const localHome = resolve(state, "profiles/codex--local/home");
+      mkdirSync(resolve(localHome, ".codex"), { recursive: true });
+      writeFileSync(resolve(state, "profiles/codex--local/profile.env"), "AI_ISOLATOR_TOOL=codex\nAI_ISOLATOR_PROFILE=local\n");
+      writeFileSync(resolve(localHome, ".codex/hooks.json"), '{"local":"preserve"}\n');
+      const existing = spawnSync("/usr/bin/bash", [enginePath, "run", "codex", "--name", "local", "--no-lb", "--no-login"], {
+        cwd: home, env, encoding: "utf8",
+      });
+      expect(existing.status, existing.stderr).toBe(0);
+      const localHooks = resolve(localHome, ".codex/hooks.json");
+      expect(lstatSync(localHooks).isSymbolicLink()).toBe(false);
+      expect(readFileSync(localHooks, "utf8")).toBe('{"local":"preserve"}\n');
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
