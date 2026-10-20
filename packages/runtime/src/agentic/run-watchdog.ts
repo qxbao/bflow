@@ -13,8 +13,13 @@ export interface RunFacts {
   lastActivityAt: number;
   /** The run is at a human gate (design approval pending). Waiting on a person is not a stall. */
   awaitingHuman: boolean;
-  /** A non-terminal Runtime handoff (queued, sending, unknown delivery or accepted) exists for the run. */
+  /**
+   * A handoff that is still being delivered (queued within its not-ready window, sending or unknown delivery) exists for the run.
+   * An accepted handoff is NOT activity by itself: it is active only while its pane is observed working (see acceptedRoles).
+   */
   activeHandoff: boolean;
+  /** Roles that hold an accepted, not yet released handoff of this run. A holder whose pane is not working has stopped without reporting. */
+  acceptedRoles?: readonly string[];
   /** Pending user decisions (specialist questions) of the run. */
   pendingDecisions: readonly { approvalId: string; requestedAt: string }[];
 }
@@ -52,7 +57,7 @@ export type WatchdogAction =
   /** Resends exhausted: emit one blocked notice for the approval (the host dedupes by approval). */
   | { kind: "blocked"; runId: string; approvalId: string; messageId: string; resends: number }
   /** Live run that is not working for too long. The episode key changes with every new activity, so each episode reports once. */
-  | { kind: "stalled"; runId: string; episodeKey: string; idleSince: number };
+  | { kind: "stalled"; runId: string; episodeKey: string; idleSince: number; holders?: readonly string[] };
 
 /** Notice message identity of a user decision, as Runtime emits it (buildDecisionRequestMessage). */
 export function decisionMessageId(approvalId: string): string { return `decision-${approvalId}`; }
@@ -82,7 +87,10 @@ export function evaluateWatchdog(input: WatchdogInput): WatchdogAction[] {
     if (run.awaitingHuman || run.activeHandoff || run.pendingDecisions.length > 0) continue;
     if (input.panes.length === 0 || !input.panes.every(pane => NOT_WORKING.has(pane.status))) continue;
     if (input.now - run.lastActivityAt <= options.stallAfterMs) continue;
-    actions.push({ kind: "stalled", runId: run.runId, episodeKey: `${run.runId}@${run.lastActivityAt}`, idleSince: run.lastActivityAt });
+    // Holders are accepted handoffs whose panes are not working (every pane is, by the check above). Runtime names them in the notice.
+    const holders = run.acceptedRoles ?? [];
+    actions.push({ kind: "stalled", runId: run.runId, episodeKey: `${run.runId}@${run.lastActivityAt}`, idleSince: run.lastActivityAt,
+      ...(holders.length ? { holders } : {}) });
   }
   return actions;
 }

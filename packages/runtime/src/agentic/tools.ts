@@ -18,6 +18,7 @@ export const COORDINATOR_TOOLS = [
   { name: "tick", description: "Schedule a background Runtime step and return immediately; yield the Coordinator turn so Herdr replies can arrive." },
   { name: "tick_status", description: "Read host scheduler status without waiting for another agent's turn." },
   { name: "reconcile_delivery", description: "Reconcile an uncertain Herdr handoff; resend is allowed only after proven non-delivery." },
+  { name: "retry_verification", description: "Resume verification of an escalated run whose verification could not be delivered or stored; finishes durable outcomes and re-runs only unfinished checks." },
   { name: "authorize_implementation", description: "Check accepted specification and the required independent Red evidence before implementation." },
   { name: "accept_conflict_resolution", description: "Validate a committed scoped conflict resolution using P18; never auto-resolve conflicts." },
   { name: "cancel", description: "Persist cancellation intent, stop new dispatch and request interrupts without inventing stop confirmations." }
@@ -56,6 +57,7 @@ export class CoordinatorTools {
       case "tick": return this.scheduleTick();
       case "tick_status": return JsonValueSchema.parse({ running: !!this.pendingTick, error: this.tickError ?? null });
       case "reconcile_delivery": return this.runtime.reconcileDelivery(textField(args.messageId));
+      case "retry_verification": return this.runtime.retryVerification(textField(args.runId));
       case "authorize_implementation": return this.runtime.authorizeImplementation(textField(args.runId), textField(args.taskId));
       case "accept_conflict_resolution": return this.runtime.acceptConflictResolution(textField(args.runId), textField(args.taskKey), textField(args.resolutionCommitHash));
       case "cancel": return this.runtime.cancel(textField(args.runId), textField(args.reason));
