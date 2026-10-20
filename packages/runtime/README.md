@@ -511,7 +511,7 @@ Linux Bubblewrap is discovered on PATH and actually probed. `up` exposes structu
 sandbox unavailability; measurement never falls back to host execution. External
 toolchains/caches mount narrowly and read-only, without whole homes or credentials.
 Only public integrity-pinned npm lock v2/v3 warming is implemented, in a separate
-no-script network sandbox whose only writable host path is an owned cache; measurement
+no-script network sandbox with capability-probed slirp4netns egress, disabled host loopback/DNS proxy and an owned writable cache; measurement
 then remains offline. Other ecosystems require installed dependencies/caches.
 
 See [runner architecture, matrix and threat model](../../docs/verification-runners.md)

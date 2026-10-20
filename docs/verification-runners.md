@@ -1,47 +1,112 @@
 # Verification runners
 
-## Automatic detection (default, no configuration)
+Runtime discovers installed test toolchains without requiring `.bflow/verification.json`.
+Accepted `unit_test`, `integration_test` and `e2e_test` criteria retain their method;
+an exit code by itself never proves a criterion. Detection, source implementation,
+local parser/fixture tests and real sandbox measurements are different evidence levels.
 
-Acceptance criteria with `verificationMethod` `unit_test` or `integration_test` are
-measured with no user configuration. When `.bflow/verification.json` is absent,
-Runtime inspects the repository itself (`packages/runtime/src/agentic/runner-detection.ts`)
-and exposes two labels to the Coordinator through `planning_reference.testRunners`:
+## Adapter architecture and planning
 
-| Label | Method | Levels |
-| --- | --- | --- |
-| `auto:unit` | `unit_test` | `unit`, `regression` |
-| `auto:integration` | `integration_test` | `integration`, `regression` |
+`RunnerAdapter.detect(AdapterContext)` reads a bounded manifest inventory without
+following symlinks. It returns Runtime-private `AdapterRunner` values: verified
+installed toolchain version, executable, fixed argv binder, optional prepare step,
+read-only mounts, offline environment, protected configuration and result parser.
+No RoleMessage supplies these execution fields. Only exact test names and committed
+test paths come from the accepted strategy/specification and task ownership.
 
-Detection runs no package scripts, no shell and no install. It accepts:
+Multiple adapters can match one repository. Labels are `auto:unit:<adapter>`,
+`auto:integration:<adapter>` and `auto:e2e:<adapter>`; nested projects append their
+readable repository-path slug plus a stable SHA-256 suffix, so paths such as `a/b` and `a-b` cannot collide. Existing root JavaScript `auto:unit` / `auto:integration`
+labels remain aliases; `auto:e2e` is added. `planning_reference.testRunners` includes
+the exact name rule, version and project. Coordinator selects these labels through
+the existing infrastructure commands. A language label does not establish that a
+particular test is an integration or E2E test; its accepted criterion remains authoritative.
 
-- **vitest 2.x** declared in `package.json` and installed at the repository root
-  (`node_modules/vitest/vitest.mjs`, a real directory, not a symlink). Measured with
-  the JSON reporter plus Runtime's companion reporter.
-- **`node --test`** when the `test` script contains `node --test`. Measured as flat
-  TAP. No dependencies are needed.
-- An optional **`tsc` build** (`tsc`, `tsc -b` or `tsc --build`, optionally with
-  safe relative project paths) from the `build` script, run as a sandboxed prepare step
-  before the tests. It may only create git-ignored output. Other build scripts are
-  skipped and reported in the detection notes.
-- Nested `node_modules` directories found by a walk that does not follow symlinks.
-  Each one is mounted read-only at the same relative path inside the measurement
-  checkout.
+The same task resolver feeds Developer feedback, independent Red/Green/Refactor and
+Quality Gates. Only selected labels become checks. Runtime composes the existing
+VerificationEngine with the current detected gates when a plan is frozen; subsequent
+runner setup does not require a host restart. Unsupported detection retries; successful
+detection refreshes after repository HEAD changes and retains in-process snapshots for existing task revisions. Original task-base blobs are checked even if a newer host revision has been detected. After a host restart, a differing historical profile that cannot be reconstructed remains blocked; durable profile reconstruction is not certified by this change. A task never receives an agent
+supplied replacement command or a successful verdict.
 
-Limits: only vitest 2.x and `node --test` are supported. Other versions (for example
-vitest 3) report `unsupported` with the version found. A missing `node_modules` or a
-symlinked root `node_modules` is also unsupported. Measurements require Linux and
-`bwrap` (see below), and there is no network access and no dependency installation.
-If detection is `unsupported`, Runtime retries it on the next `propose_workflow` (and
-when the Coordinator reads `planning_reference`), so installing dependencies or adding
-the runner does not require a host restart. The Coordinator is then told
-(`no_test_runner_detected`) to add a setup task; the user is shown that notice.
+## Runner matrix
 
-Per task, Runtime binds the detected profile to identities taken from the accepted
-specification: test names from the `criterionMappings` of the active automated criteria
-with that method, and test files from `affectedPaths` that are test files and, for a
-Developer, owned by the task. Test files must be committed in the checkout at the
-measured revision. vitest reports `fullName` (describe titles plus the test title joined
-by one space). node --test reports the test title only.
+All rows below have source and local fixture/parser coverage. No row has successful
+real measurement evidence on the implementation host: its real empty Bubblewrap probe
+fails with `loopback: Failed RTM_NEWADDR: Operation not permitted`. Tests explicitly
+skip measurements after that probe; this is not a passing sandbox campaign. Parser
+fixtures for unavailable tools reproduce documented output shapes, not recorded runs.
+The Node/Vitest parser-selection regression includes captures from installed tools,
+which are parser evidence only. Installed Node, Python, Maven and Java version probes
+are separate from test execution evidence.
+
+| Ecosystem | Runner / format | Canonical identity / exact selection | Current limits |
+| --- | --- | --- | --- |
+| JS/TS | Vitest 1/2/3 JSON + trusted completion reporter | describe titles + title, joined by spaces; anchored name regex and explicit files | major versions outside 1–3 rejected; protocol changes fail closed |
+| JS/TS | Jest JSON | fullName; anchored name regex and `--runTestsByPath` | installed runner required |
+| JS/TS | Mocha JSON | fullTitle; anchored `--grep`, explicit files | hooks/runtime exceptions reject Red |
+| JS/TS | `node --test` TAP | test title; anchored `--test-name-pattern`, explicit files | flat TAP only; Node version filtering behavior is validated by parser |
+| Python | pytest JUnit (unittest can run through pytest) | `classname.name`; invert mapped module/class into exact pytest node IDs | existing `.venv`, `venv`, active env, uv in-project env, Poetry/Pipenv matching envs; installed pytest required |
+| Go | `go test -json` | import-path + `.` + Test/subtest | one package per command; exact top-level union or one subtest path; no benchmark evidence |
+| Rust | cargo / libtest | exact libtest test name | one exact test and explicit lib/integration target per command; locked offline dependencies; inline test files freeze their implementation bytes after Red |
+| Java/Kotlin | Maven Surefire JUnit | fully qualified class + `.` + method | conventional Surefire reports, exact `-Dtest`; parameterized identities require agent setup |
+| Java/Kotlin | Gradle JUnit | fully qualified class + `.` + method | conventional `test` task/report path; installed Gradle; exact `--tests` |
+| .NET | `dotnet test` TRX | TRX TestMethod className + `.` + method | one test project per directory; isolated offline restore from installed cache, then exact FQN filter |
+| Ruby | RSpec native JSON | example full_description | installed RSpec; exact full-description regex; no external JUnit formatter needed |
+| Ruby | Minitest Runtime JUnit helper | Ruby class + `.` + method | installed reporter-capable Minitest; immutable Runtime helper; exact Class#method regex |
+| PHP | PHPUnit JUnit | namespace-qualified class + `.` + method | existing global/local PHPUnit; exact class::method filter |
+| C/C++ | CTest >=3.21 JUnit | testcase name | already configured CTest project; one CTest registration is one test; build/configure automation is not implemented |
+| Other | declared Make/Just/Task target with JUnit protocol | `classname.name`; selected names/files passed as JSON argv variables | ordinary arbitrary scripts, tox/nox require a reviewed agent setup task |
+| Elixir, Swift, Dart/Flutter | not implemented | — | follow-up adapters; do not downgrade criteria |
+
+Detected JS may run only a recognized `tsc`, `tsc -b` or `tsc --build` prepare step,
+including safe relative projects. Other builds receive a detection note. JVM/.NET/Go/
+Rust native commands perform their normal offline build in the disposable checkout;
+outputs must be git-ignored. No snapshot update or tracked-file modification is accepted.
+
+## Structured results
+
+The shared bounded XML codec accepts JUnit suite trees and .NET TRX. DTDs, custom
+entities, external resolution, processing instructions, malformed nesting, duplicate
+attributes, illegal characters and oversized/deep trees are rejected. JUnit names use
+nonempty `classname + '.' + name`, or just `name` when classname is empty. Each suite's
+counters must agree with leaf results. `<error>` is infrastructure; `<failure>` proves
+Red only with recognized assertion diagnostics; skipped/disabled mapped tests block.
+TRX checks definitions, outcomes and counters, then uses the same assertion rule.
+
+Native JSON/libtest/TAP codecs enforce complete output, unique exact mapped identities,
+nonzero test counts and exit consistency. Rust assertion failure exits 101; CTest exits 8;
+other adapters normally exit 1. Go has no typed assertion channel: Red conservatively
+requires source-located expected/want/assertion comparison diagnostics and rejects
+panics/build/runtime errors. This is a narrower supported diagnostic convention, not a
+general proof that arbitrary `testing.T.Fatal` text denotes an assertion.
+
+Name-filtered Vitest/Jest may list unselected tests as pending/skipped; those leaves are
+excluded only when their names are outside the selected mapping, and never contribute
+evidence. A selected skipped/todo test still blocks. Owner-configured commands retain
+their existing stricter reporter policy. Zero, truncated, mismatched or infrastructure
+results never become passing evidence or a conclusive Red receipt.
+
+## Original revision and conditional TDD
+
+Detection pins committed Git blobs for manifests, lockfiles, runner config, build hooks,
+CI config, scripts and test/helper trees. Local definitions must match committed bytes.
+At measurement, changed/deleted/new definitions—including root `conftest.py`, Cargo
+`build.rs`, Python startup hooks, Makefiles and package scripts—reject evidence.
+Missing pin metadata rejects automatic measurements. Selected test paths are handled
+separately: Developer may create/change them before independent Red; afterward exact
+Red test blobs and all execution definitions are frozen. Runtime compares those blobs
+again for Green/Refactor. Test setup changes must go through review and integration,
+and become authority only from the base revision of later tasks.
+
+The fallback recognizes a declared `test` target only when its definition mentions all
+three Runtime protocol values: `BFLOW_TEST_NAMES` (JSON), `BFLOW_TEST_FILES` (JSON), and
+`BFLOW_JUNIT_OUTPUT` (private report path). Runtime passes values as separate argv tokens;
+it never evaluates a RoleMessage command. The target must produce fresh structured output
+with exactly the selected names. A plain `make test`, shell exit 0, CI success or an old
+report is not evidence. Arbitrary target syntax, tox/nox and script-specific reporters
+are agent setup work, rather than guessed invocation conventions. This intentionally
+narrow fallback prevents claiming universal arbitrary-script support.
 
 ## Optional owner override: `.bflow/verification.json`
 
@@ -107,45 +172,68 @@ JSON omits unhandled runtime errors. Missing completion, runtime errors, skipped
 todo, zero tests, malformed counters, unexpected names, timeout and truncated
 output all block evidence. Node TAP remains the default when `reporter` is omitted.
 
-## Execution and safety scope
+## Sandbox and dependency ownership
 
-Behavioral verification currently requires Linux, `/usr/bin/bwrap`, and permission
-to create user/mount/PID/network namespaces. There is no unsandboxed fallback.
-Each measurement uses a new detached Git checkout at the exact committed revision,
-a clean environment and an empty filesystem namespace. System `/usr`, the Node
-executable, `/etc/hosts`, the checkout and explicitly configured read-only
-`node_modules` roots are mounted. Host homes, state, sockets and network are absent.
-Dependency roots must be canonical directories named `node_modules`; symlinks that
-point outside mounted trees remain unavailable. This is a local Linux boundary,
-not a multi-tenant or hostile-kernel guarantee.
+Linux (including WSL2 only when the real namespace probe passes) uses Bubblewrap found
+on PATH, canonicalized and tested in a real empty namespace. `bflow up` probes readiness;
+activation records a structured `verification_sandbox_unavailable` Conversation notice
+when automated runners exist. Planning exposes that state. Measurement always fails closed
+if the boundary is unavailable; no command runs outside it. macOS `sandbox-exec`, native
+Windows, Docker and Podman backends are not implemented or certified by this change.
+There is no automatic sandbox installation or privilege/sysctl change.
 
-No dependency install, workspace symlink restoration or network fetch happens
-automatically. Dependencies needed by a test must already be installed in the
-repository's `node_modules` (or be part of the committed checkout). The only build step
-is the detected `tsc` prepare step described above. Workspace links to unmounted
-packages, `dist` output produced by other build scripts, aggregate coverage, mixed
-manual/automated criteria and other reporter versions are not supported by the default
-path; use the owner override for those.
-The repository's normal `pnpm test` suite is run separately; it is not claimed to
-run wholesale in this small configured fixture runner.
+Measurement mounts system `/usr` read-only, the exact disposable revision checkout,
+selected binaries and narrowly selected toolchain/dependency roots. It unshares network,
+PID, IPC, user and mount namespaces, drops capabilities and inherits no host environment,
+home or sockets. HOME/TMPDIR refer to private anonymous tmp space. Toolchains outside
+`/usr` use canonical realpaths; whole homes/ancestors, credential directories, special
+files and escaping cache symlinks are rejected. Java imports only public launcher/security
+files, not Maven settings or Java management passwords. Dependency trees are read-only:
+repo-relative node_modules/vendor and selected venv libraries retain their layout;
+Cargo registry, GOMODCACHE, Maven repository, Gradle modules cache and NuGet packages
+use selected paths. No `~/.npmrc`, `.netrc`, `.ssh`, global Gradle init/config, Composer auth
+or provider credentials are intentionally imported. This is a local Linux boundary,
+not hostile-kernel or hostile-same-UID isolation certification.
 
-Commands have individual timeouts at most 300 seconds; the total configured budget
-(including checkout overhead) must fit the host deadline. Output is bounded at
-4 MiB per command. Execution that changes or generates checkout files is rejected;
-use `--no-cache` and avoid snapshot updates or coverage output. Only disposable
-measurement checkouts are forcibly removed; Developer worktrees are preserved.
+Fresh reports come from private output paths or bounded conventional build-report
+patterns. Preexisting reports reject invocation. Collection rejects symlinks, special files,
+path escapes, duplicate files and oversized output; regular files are opened without
+following symlinks. After prepare/tests, tracked and nonignored untracked files must
+still match the exact revision. Only disposable checkouts are forcibly removed.
 
-## Conditional TDD
+## Automatic dependency warming: threat model and limits
 
-For required TDD, Developer can initially edit/commit only configured test files.
-It requests independent Red and yields. QA executes the runner; Runtime records a
-trusted receipt and resumes the same Developer using the existing task lease.
-After Red, those exact test blobs are frozen. Green and Refactor measure committed
-implementation revisions with the same tests. `check_work` supplies Developer
-feedback and never supplies independent acceptance evidence.
+If JS detection needs missing dependencies and a safe npm lock is available, Runtime
+can create a separate owned cache. Warming requires package-lock v2/v3, registry-only
+specifications, HTTPS public registry tarballs and strong integrity pins. Local/git/URL
+packages, workspaces, overrides and unsupported lock shapes are rejected. The separate
+Bubblewrap sandbox retains its own network namespace. A capability-probed installed `slirp4netns` helper supplies downloads only after an actual readiness handshake; host loopback and the helper DNS proxy are disabled. A Runtime-owned resolver uses public DNS `1.1.1.1`; host resolver configuration is not mounted. Missing helper capabilities return `unsupported`. The guest sees no checkout, host home, socket,
+user/global npm config or inherited proxy/auth environment. It runs only trusted npm
+`ci --ignore-scripts --no-audit --no-fund`; dependency lifecycle/build scripts never run.
+Frozen manifests are mounted read-only. The only writable host path is its owned cache;
+private `/tmp` is anonymous. Subsequent measurement mounts dependencies read-only and
+again unshares network. Host teardown removes caches created by that Runtime process.
+A killed host may leave an orphan cache; no cross-session reuse or replay is inferred.
 
-Real assertion failures produce preserved diagnostics and bounded repair notices;
-repeating a failed revision does not enqueue another job. Infrastructure failures
-escalate. Exhausting the phase or verification limit also escalates. Native delivery
-uncertainty is reconciled separately and never interpreted as a test failure to
-justify resending work. Required human/design/delivery approval remains in force.
+The installed Node/npm and OS are trusted. A malicious downloader vulnerability or a
+compromised allowed registry remains a risk; integrity pins bind bytes, not package safety.
+Public egress is not domain-level firewalling: npm validation restricts declared URLs,
+but redirects and the trusted downloader's own traffic are not a separate egress guarantee.
+Services on host LAN/public addresses are not separately firewalled. Abstract host Unix
+sockets remain outside the guest network namespace; no direct host-network fallback exists.
+
+Safe warming for pnpm/yarn workspaces, Python, Go, Rust, JVM, .NET, Ruby and PHP is not
+implemented. Their measurements can use already installed dependencies/read-only caches;
+missing dependencies remain agent setup work. In particular, Maven/Gradle resolution and
+language build hooks must not be run in the network sandbox as a shortcut. No automatic
+package lifecycle script or user-global configuration mutation is authorized.
+
+## Repair routing and remaining acceptance
+
+Recognized ecosystems needing a runner/reporter/setup return `runner_setup_required`,
+a Coordinator-fixable structured rejection with no user notice. Missing mappings, paths,
+labels and method support remain agent-fixable. An unknown ecosystem can still return
+`no_test_runner_detected`. User-facing notices contain no manual configuration steps.
+Setup tasks retain SDD, conditional TDD, independent review and approval requirements;
+this implementation emits the task requirement, it does not invent an approved setup task
+or waive a required gate. None of these changes establish live Herdr/provider acceptance.
