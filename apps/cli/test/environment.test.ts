@@ -29,14 +29,17 @@ class FakeProcesses implements EnvironmentProcessRunner {
   authenticated = true;
   claudeStatus: unknown = { loggedIn: true };
   missing = new Set<string>();
+  authCommands: string[] = [];
   async run(request: EnvironmentProcessRequest) {
     this.requests.push(request);
     if (request.executable === "git") return environmentProcessRunner.run(request);
     if (this.missing.has(request.executable)) throw new Error(`ENOENT ${request.executable}`);
     const session = request.env?.["HERDR_SESSION"] ?? "incorrect-default";
     const args = request.args.join(" ");
+    if (args === "login status" || args === "auth status --json" || args === "auth status") this.authCommands.push(`${request.executable} ${args}`);
     if (args === "login status") return { exitCode: this.authenticated ? 0 : 1, stdout: "", stderr: this.authenticated ? "Logged in" : "secret-account-information" };
     if (args === "auth status --json") return { exitCode: 0, stdout: JSON.stringify(this.claudeStatus), stderr: "" };
+    if (args === "auth status") return { exitCode: this.authenticated ? 0 : 1, stdout: "", stderr: "" };
     let value: unknown = {};
     if (args === "--help") return { exitCode: 0, stdout: "herdr --session NAME; Run as headless server", stderr: "" };
     if (args === "api schema --json") value = { protocol: 22, schema_version: 1 };
@@ -111,6 +114,86 @@ describe("P12 repository environment lifecycle", () => {
     expect(report.checks.find(check => check.checkId === "auth-codex")?.status).toBe("failed");
     expect(JSON.stringify(report)).not.toContain("secret-account-information");
   });
+
+  linuxIt("defers authentication for a selected profile role while retaining binary checks", async () => {
+    const path = join(dir, ".bflow/config.yml");
+    const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
+    config.environment.roles = config.environment.roles.map(role => ({
+      ...role,
+      required: role.role === "conversation" || role.role === "coordinator",
+      ...(role.role === "conversation" || role.role === "coordinator" ? { "profile-name": "work" } : {})
+    }));
+    await writeFile(path, renderEnvironmentConfigYaml(config));
+    runner.authenticated = false;
+    const profileLifecycle = new EnvironmentLifecycle(dir, {
+      runner, integration: { manager: fixture.manager, runtime: mockRuntime(), quiesce: async () => ({ ok: true, value: undefined }) },
+      providerOverrides: { codex: { available: true, authenticated: false } }
+    });
+
+    expect((await profileLifecycle.up()).status).toBe("up");
+    expect(runner.requests.some(request => ["codex", "claude", "agy"].includes(request.executable))).toBe(false);
+    expect(runner.authCommands).toEqual([]);
+  });
+
+  linuxIt("keeps native authentication checks when selected and unselected roles share a provider", async () => {
+    const path = join(dir, ".bflow/config.yml");
+    const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
+    config.environment.roles = config.environment.roles.map(role => ({
+      ...role,
+      required: role.role === "conversation" || role.role === "coordinator" || role.role === "planner",
+      ...(role.role === "conversation" || role.role === "coordinator" ? { "profile-name": "work" } : {})
+    }));
+    await writeFile(path, renderEnvironmentConfigYaml(config));
+    runner.authenticated = false;
+    const profileLifecycle = new EnvironmentLifecycle(dir, {
+      runner, env: { PATH: "" },
+      providerOverrides: { codex: { available: true } },
+      integration: { manager: fixture.manager, runtime: mockRuntime(), quiesce: async () => ({ ok: true, value: undefined }) }
+    });
+
+    await expect(profileLifecycle.up()).rejects.toThrow("not authenticated");
+    expect(runner.authCommands).toEqual(["codex login status"]);
+  });
+
+  linuxIt("resolves profile selection after provider fallback and honors that provider default", async () => {
+    const path = join(dir, ".bflow/config.yml");
+    const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
+    config.environment.allowProviderFallback = true;
+    config.environment.defaults = { claude: { "profile-name": "fallback-profile" } };
+    config.environment.roles = config.environment.roles.map(role =>
+      role.role === "conversation" || role.role === "coordinator"
+        ? { ...role, required: true, fallbackCli: "claude" }
+        : { ...role, required: false });
+    await writeFile(path, renderEnvironmentConfigYaml(config));
+    runner.authenticated = false;
+    const fallbackLifecycle = new EnvironmentLifecycle(dir, {
+      runner, integration: { manager: fixture.manager, runtime: mockRuntime(), quiesce: async () => ({ ok: true, value: undefined }) },
+      providerOverrides: { codex: { available: false }, claude: { available: true, authenticated: false } }
+    });
+
+    expect((await fallbackLifecycle.up()).status).toBe("up");
+    expect(runner.requests.some(request => ["codex", "claude", "agy"].includes(request.executable))).toBe(false);
+    expect(runner.authCommands).toEqual([]);
+  });
+
+  linuxIt("checks fallback provider presence after applying the fallback profile default", async () => {
+    const path = join(dir, ".bflow/config.yml");
+    const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
+    config.environment.allowProviderFallback = true;
+    config.environment.defaults = { claude: { "profile-name": "fallback-profile" } };
+    config.environment.roles = config.environment.roles.map(role =>
+      role.role === "conversation" || role.role === "coordinator"
+        ? { ...role, required: true, fallbackCli: "claude" }
+        : { ...role, required: false });
+    await writeFile(path, renderEnvironmentConfigYaml(config));
+    const fallbackLifecycle = new EnvironmentLifecycle(dir, {
+      runner, integration: { manager: fixture.manager, runtime: mockRuntime(), quiesce: async () => ({ ok: true, value: undefined }) },
+      providerOverrides: { codex: { available: false }, claude: { available: false } }
+    });
+
+    await expect(fallbackLifecycle.up()).rejects.toThrow("Missing fallback agent provider executable 'claude'");
+    expect(fixture.manager.up).not.toHaveBeenCalled();
+  });
   linuxIt("does not shut down a healthy preexisting session when startup validation fails before mutation", async () => {
     await lifecycle.up();
     const invalid = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager },
@@ -122,7 +205,7 @@ describe("P12 repository environment lifecycle", () => {
   linuxIt("does not require a dynamic Developer template to have a permanent startup pane", async () => {
     const path = join(dir, ".bflow/config.yml");
     const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
-    config.environment.roles.push({ role: "developer", cli: "codex", required: true });
+    expect(config.environment.roles.find(role => role.role === "developer")).toMatchObject({ cli: "codex", required: false });
     await writeFile(path, renderEnvironmentConfigYaml(config));
     const manifest = await lifecycle.up();
     expect(manifest.status).toBe("up");
@@ -471,7 +554,11 @@ describe("P12 repository environment lifecycle", () => {
       expect((await runCli(["init", "--provider", "claude"], { cwd: other })).ok).toBe(true);
       const path = join(other, ".bflow/config.yml");
       const before = await readFile(path, "utf8");
-      expect(EnvironmentConfigSchema.parse(parseConfigYaml(before)).environment.roles.every(role => role.cli === "claude")).toBe(true);
+      const config = EnvironmentConfigSchema.parse(parseConfigYaml(before));
+      expect(config.environment.roles.every(role => role.cli === "claude")).toBe(true);
+      expect(config.environment.roles.filter(role => role.role === "developer")).toEqual([
+        { role: "developer", cli: "claude", required: false }
+      ]);
       expect((await runCli(["init", "--provider", "codex"], { cwd: other })).ok).toBe(true);
       expect(await readFile(path, "utf8")).toBe(before);
     } finally { await rm(other, { recursive: true, force: true }); }

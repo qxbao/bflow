@@ -2,7 +2,7 @@ import { AGY_LOGIN_REMEDIATION, probeAgyAccess } from "./agy-access.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { existsSync, readdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { delimiter, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   ContractErrorSchema, CreateCheckpointCommandSchema,
@@ -11,7 +11,8 @@ import {
   type OperationOptions, type OperationResult, type RecoveryCheckpoint, type RuntimeService,
   type SessionLifecycleManager, type SessionManifest, type PaneBinding
 } from "@bflow/contracts";
-import { readEnvironmentConfig, type EnvironmentConfig } from "./environment-config.js";
+import { findExecutable } from "@bflow/machine-setup";
+import { readEnvironmentConfig, type EnvironmentConfig, type EnvironmentRoleConfig } from "./environment-config.js";
 import { environmentProcessRunner, namedSessionEnvironment, type EnvironmentProcessRunner } from "./environment-process.js";
 import { identifyRepository, type RepositoryIdentity } from "./repository.js";
 import { openPaneManagerEnvironment } from "./pane-manager-integration.js";
@@ -320,32 +321,51 @@ export class EnvironmentLifecycle {
       const fallbackNotices: string[] = [];
       const rolesToRun = config.environment.roles.map((r) => ({ ...r }));
       const cliAvailableCache = new Map<string, boolean>();
+      const selectedProfiles = config.environment.defaults;
+      const hasSelectedProfile = (role: EnvironmentRoleConfig) =>
+        role["profile-name"] !== undefined ||
+        selectedProfiles?.[role.cli as "claude" | "codex" | "agy"]?.["profile-name"] !== undefined;
+      const providerAvailable = async (role: EnvironmentRoleConfig, cli: "claude" | "codex" | "agy") => {
+        const override = this.dependencies.providerOverrides?.[cli];
+        if (override?.available !== undefined) return override.available;
+        if (override?.readiness === "missing_binary") return false;
+        if (cliAvailableCache.has(cli)) return cliAvailableCache.get(cli)!;
+        let available: boolean;
+        if (hasSelectedProfile(role)) {
+          const path = this.env[process.platform === "win32" ? "Path" : "PATH"] ?? this.env["PATH"] ?? "";
+          available = await findExecutable(cli, path.split(delimiter), process.platform) !== null;
+        } else {
+          const probe = await this.runner.run({
+            executable: cli,
+            args: ["--version"],
+            cwd: repository.root,
+            env: namedSessionEnvironment(repository.sessionName),
+            timeoutMs: Math.min(5000, deadline.remaining())
+          }).catch(() => null);
+          available = probe !== null && probe.exitCode === 0;
+        }
+        cliAvailableCache.set(cli, available);
+        return available;
+      };
       for (const role of rolesToRun) {
         if (role.required ?? true) {
           const cli = role.cli as "claude" | "codex" | "agy";
-          const override = this.dependencies.providerOverrides?.[cli];
-          let available = override?.available;
-          if (available === undefined) {
-            if (override?.readiness === "missing_binary") {
-              available = false;
-            } else if (cliAvailableCache.has(cli)) {
-              available = cliAvailableCache.get(cli)!;
-            } else {
-              const probe = await this.runner.run({
-                executable: cli,
-                args: ["--version"],
-                cwd: repository.root,
-                env: namedSessionEnvironment(repository.sessionName),
-                timeoutMs: Math.min(5000, deadline.remaining())
-              }).catch(() => null);
-              available = probe !== null && probe.exitCode === 0;
-              cliAvailableCache.set(cli, available);
-            }
-          }
+          let available = await providerAvailable(role, cli);
           if (!available) {
             if (config.environment.allowProviderFallback === true && role.fallbackCli) {
+              const previousProvider = role.cli;
               fallbackNotices.push(`Role '${role.role}' fell back from '${role.cli}' to '${role.fallbackCli}'.`);
               role.cli = role.fallbackCli;
+              if (role.cli !== previousProvider) delete role["profile-name"];
+              const fallbackProvider = role.cli as "claude" | "codex" | "agy";
+              available = await providerAvailable(role, fallbackProvider);
+              if (!available) {
+                const displayName = fallbackProvider === "codex" ? "OpenAI Codex CLI ('codex')" :
+                  fallbackProvider === "claude" ? "Claude Code CLI ('claude')" : "Antigravity CLI ('agy')";
+                const remediation = `Install ${displayName} and ensure it is on PATH, then run 'bflow doctor'.`;
+                fail(`Missing fallback agent provider executable '${fallbackProvider}'. ${remediation}`,
+                  { component: `provider:${fallbackProvider}`, remediation });
+              }
             } else {
               const displayName = cli === "codex" ? "OpenAI Codex CLI ('codex')" : cli === "claude" ? "Claude Code CLI ('claude')" : "Antigravity CLI ('agy')";
               const remediation = `Install ${displayName} and ensure it is on PATH, then run 'bflow doctor'.`;
@@ -361,7 +381,11 @@ export class EnvironmentLifecycle {
       const schema = object(JSON.parse(await this.command(repository, config.environment.herdrBinary, ["api", "schema", "--json"], deadline)) as unknown);
       if (schema["protocol"] !== 22 || schema["schema_version"] !== 1) fail("Unsupported Herdr API: expected protocol 22/schema 1");
 
-      const distinctRequiredClis = Array.from(new Set(rolesToRun.filter((r) => r.required ?? true).map((r) => r.cli as "claude" | "codex" | "agy")));
+      const requiresNativeAuthentication = (role: EnvironmentRoleConfig) =>
+        !hasSelectedProfile(role);
+      const distinctRequiredClis = Array.from(new Set(rolesToRun
+        .filter((role) => (role.required ?? true) && requiresNativeAuthentication(role))
+        .map((r) => r.cli as "claude" | "codex" | "agy")));
       for (const cli of distinctRequiredClis) {
         const override = this.dependencies.providerOverrides?.[cli];
         if (override?.available === false) {
@@ -420,6 +444,11 @@ export class EnvironmentLifecycle {
       // Step 4: validate_permissions_and_trust
       if (config.environment.permissions?.trustedWorkspace === false) {
         fail("Workspace trust check failed: repository workspace is not trusted. Remediation: Set environment.permissions.trustedWorkspace to true in .bflow/config.yml or trust the workspace.", { component: "permissions" });
+      }
+      // Explicit opt-in only: pre-accept Claude Code's per-project trust dialog so headless panes are not stuck on it.
+      if (config.environment.permissions?.trustedWorkspace === true && distinctRequiredClis.includes("claude")) {
+        const { claudeConfigFile, ensureClaudeWorkspaceTrust } = await import("./claude-trust.js");
+        await ensureClaudeWorkspaceTrust(repository.root, claudeConfigFile(this.env));
       }
       const isUnattended = config.environment.permissions?.mode === "unattended_isolated" || rolesToRun.some((r) => r.permissionMode === "unattended_isolated");
       if (isUnattended && config.environment.permissions?.isolation !== "os_sandbox" && config.environment.permissions?.isolation !== "container") {
@@ -531,7 +560,10 @@ export class EnvironmentLifecycle {
       }
 
       this.progress("Composing session lifecycle integration...");
-      const integration = await deadline.call(() => this.integration(repository, config));
+      const compositionConfig = fallbackNotices.length > 0
+        ? { ...config, environment: { ...config.environment, roles: rolesToRun } }
+        : config;
+      const integration = await deadline.call(() => this.integration(repository, compositionConfig));
       if (!integration) fail("P13 SessionLifecycleManager is not composed. Supply CliContext.environment.openIntegration or BFLOW_ENVIRONMENT_MODULE; no roles were started.");
 
       let cleanupEligible = false;

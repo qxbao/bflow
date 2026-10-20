@@ -107,6 +107,18 @@ export interface UserTurnInput {
   readonly metadata?: Metadata | undefined;
 }
 
+/** Mirrors the verificationMethod enum of AcceptanceCriterionSchema in @bflow/contracts (sdlc.ts). */
+export const VerificationMethodSchema = z.enum([
+  "unit_test",
+  "integration_test",
+  "e2e_test",
+  "typecheck",
+  "lint",
+  "static_analysis",
+  "manual_review"
+]);
+export type VerificationMethod = z.infer<typeof VerificationMethodSchema>;
+
 export const ExtractedRequirementDraftSchema = z
   .object({
     title: z.string().min(1),
@@ -118,6 +130,8 @@ export const ExtractedRequirementDraftSchema = z
     isLargeTask: z.boolean(),
     affectedPaths: z.array(z.string()),
     acceptanceCriteriaDescriptions: z.array(z.string()),
+    /** Optional explicit method per criterion, matched by index. Missing entries are inferred. */
+    verificationMethods: z.array(VerificationMethodSchema).optional(),
     isRequirementChange: z.boolean(),
     codeChangesAuthorized: z.boolean().optional(),
     targetRunId: IdentifierSchema.optional(),
@@ -137,6 +151,7 @@ export interface ExtractedRequirementDraft {
   readonly isLargeTask: boolean;
   readonly affectedPaths: readonly string[];
   readonly acceptanceCriteriaDescriptions: readonly string[];
+  readonly verificationMethods?: readonly VerificationMethod[] | undefined;
   readonly isRequirementChange: boolean;
   readonly codeChangesAuthorized?: boolean | undefined;
   readonly targetRunId?: string | undefined;
@@ -418,6 +433,28 @@ export interface DeliveryTrackingRecord {
   readonly updatedAt: string;
 }
 
+/**
+ * An approval that Conversation stopped accepting without a human decision: its run ended (`expired`)
+ * or a requirement revision replaced it (`superseded`). Kept so a late reply is refused with a reason.
+ */
+export const ClosedApprovalSchema = z
+  .object({
+    approvalId: IdentifierSchema,
+    runId: IdentifierSchema,
+    status: z.enum(["expired", "superseded"]),
+    reason: z.string().min(1).max(500),
+    closedAt: IsoDateTimeSchema
+  })
+  .strict();
+
+export interface ClosedApproval {
+  readonly approvalId: string;
+  readonly runId: string;
+  readonly status: "expired" | "superseded";
+  readonly reason: string;
+  readonly closedAt: string;
+}
+
 export const ConversationContextSnapshotSchema = z
   .object({
     schemaVersion: z.literal(2),
@@ -428,6 +465,8 @@ export const ConversationContextSnapshotSchema = z
     pendingClarifications: z.record(IdentifierSchema, PendingClarificationContextSchema),
     pendingApprovals: z.record(IdentifierSchema, ApprovalRequestSchema),
     approvalDecisions: z.record(IdentifierSchema, ApprovalDecisionSchema),
+    /** Optional for snapshots written before approval closing; absent means nothing was closed. */
+    closedApprovals: z.record(IdentifierSchema, ClosedApprovalSchema).optional(),
     pendingInboundQueue: z.array(PendingInboundItemSchema),
     /** Optional for snapshots written before dead-lettering; absent means no dead letters. */
     deadLetters: z.array(DeadLetterItemSchema).optional(),
@@ -447,6 +486,7 @@ export interface ConversationContextSnapshot {
   readonly pendingClarifications: Readonly<Record<string, PendingClarificationContext>>;
   readonly pendingApprovals: Readonly<Record<string, ApprovalRequest>>;
   readonly approvalDecisions: Readonly<Record<string, ApprovalDecision>>;
+  readonly closedApprovals?: Readonly<Record<string, ClosedApproval>> | undefined;
   readonly pendingInboundQueue: readonly PendingInboundItem[];
   readonly deadLetters?: readonly DeadLetterItem[] | undefined;
   readonly processedMessageIds: readonly string[];

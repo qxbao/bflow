@@ -7,6 +7,7 @@ const levelFor: Partial<Record<VerificationMethod, TestLevel>> = {
   unit_test: "unit", integration_test: "integration", e2e_test: "e2e"
 };
 const unique = <T>(values: T[]): T[] => [...new Set(values)];
+const testFilePattern = /(^|\/)(__tests__|__fixtures__|tests?)\/|\.(test|spec)\.[cm]?[jt]sx?$/i;
 
 export function evaluatePolicy(a: Assessment, criteria: AcceptanceCriterion[], paths: string[], specRisk: RiskLevel = "low") {
   const surfaces = new Set([...a.changeImpact.surfaces, a.taskType]);
@@ -50,9 +51,20 @@ export function evaluatePolicy(a: Assessment, criteria: AcceptanceCriterion[], p
     (executableCriterion && !has("integration", "refactoring", "exploratory_spike")) ||
     (a.changeImpact.deterministic && !has("integration", "refactoring", "exploratory_spike")));
   const wantsRequired = suitable || (behavior && highRisk) || (behavior && a.conventions.tdd === "required");
+  // Characterization: only test files change, so the current production code is the target and tests must already pass.
+  // Bug/regression reproductions still need a failing Red. Domain logic may not be not_applicable (contract rule), so its
+  // characterization is recommended instead: no mandatory Red, the same pass-on-current-code evidence.
+  const testOnly = paths.length > 0 && paths.every(path => testFilePattern.test(path)) && !regression;
+  const characterization = testOnly && !logic, logicCharacterization = testOnly && logic;
   let mode: TddMode;
   let reason: string;
-  if (feasible && wantsRequired) {
+  if (characterization) {
+    mode = "not_applicable";
+    reason = "The change touches only test files (characterization); the current production code is the target, so a meaningful Red phase does not exist.";
+  } else if (logicCharacterization) {
+    mode = "recommended";
+    reason = "Domain-logic characterization touches only test files: the current production code is the target, so Red is not mandatory, but test-first remains recommended.";
+  } else if (feasible && wantsRequired) {
     mode = "required";
     reason = "A repeatable behavioral check is feasible and spec behavior, regression risk, or project convention requires test-first evidence.";
   } else if (behavior || logic || regression || has("integration", "refactoring", "exploratory_spike")) {
@@ -85,7 +97,7 @@ export function evaluatePolicy(a: Assessment, criteria: AcceptanceCriterion[], p
     "Red: spec-derived tests fail with a nonzero exit code because target behavior is absent; retain trusted logs and the unchanged test revision.",
     "Green: implement minimally, then run the same tests successfully on the implementation revision; retain trusted logs.",
     "Refactor: review/refactor the implementation and rerun the same tests successfully; retain trusted logs even when no cleanup is needed."
-  ] : ["Record successful alternative verification with criterion mappings, method observations and trusted artifacts; not_applicable does not waive verification."];
+  ] : characterization || logicCharacterization ? ["Characterization: record a successful run of the same tests on the current, unchanged production code (tests pass on current code) with trusted logs and criterion mappings; not_applicable does not waive verification."] : ["Record successful alternative verification with criterion mappings, method observations and trusted artifacts; not_applicable does not waive verification."];
   evidence.push("Cover every required method and acceptance criterion; independent VerificationResult evidence is mandatory.");
   return { mode, reason, classification, risk, methods: requiredMethods, levels, suggestedLevels, commands, conditions, evidence };
 }

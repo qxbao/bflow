@@ -1,30 +1,30 @@
-# P28 approved scope and acceptance plan
+# Phạm vi đã duyệt và kế hoạch nghiệm thu P28
 
-Owner request authorizes implementation of the P24 skills design. Baseline a39374d
-retains P24 8dbb056; public schemas remain unchanged. Only packages/skills and skills
-are changed. No database migration, provider-home changes, CLI parser changes or
-root build/lock changes are included.
+Yêu cầu của owner cho phép triển khai thiết kế skills của P24. Baseline a39374d
+giữ P24 8dbb056; các schema công khai không đổi. Chỉ packages/skills và skills
+bị thay đổi. Không bao gồm database migration, thay đổi provider-home, thay đổi CLI parser hay
+thay đổi build/lock gốc.
 
-1. Implement strict SKILL.md / skill.json validation, complete bounded content hashing,
-   local reference checks, unsupported command rejection, and immutable private storage.
-2. Implement exact-pin catalog install/update/list, trusted approval checks, dependency
-   resolution, role/provider/capability/tool authorization and deterministic manifests.
-3. Render metadata/reference-only provider manifests with selected on-demand bundles;
-   retain role prompts and policy precedence. Export setup synchronizer and repository
-   config helpers for integration owners; never imply nonexistent CLI handlers run.
-4. Ship all shared and role skills with realistic local examples and complete metadata.
-5. Exercise malformed metadata/references/commands, duplicate names, provider equivalence,
-   authorization/stale approvals, immutable updates, preserved config and recovery.
-6. Run package checks plus required repository checks and commit owned changes.
+1. Triển khai validate nghiêm ngặt SKILL.md / skill.json, băm nội dung đầy đủ có giới hạn,
+   kiểm tra tham chiếu cục bộ, từ chối lệnh không được hỗ trợ, và lưu trữ riêng tư bất biến.
+2. Triển khai install/update/list catalog theo exact-pin, kiểm tra approval đáng tin cậy, phân giải
+   dependency, ủy quyền role/provider/capability/tool và các manifest mang tính xác định.
+3. Render các manifest provider chỉ chứa metadata/tham chiếu cùng các bundle on-demand được chọn;
+   giữ nguyên role prompt và thứ tự ưu tiên chính sách. Xuất setup synchronizer và các helper cấu hình
+   repository cho các integration owner; không bao giờ ngụ ý rằng các CLI handler không tồn tại sẽ chạy.
+4. Phát hành mọi skill dùng chung và skill theo role với các ví dụ cục bộ thực tế và metadata đầy đủ.
+5. Thực thi các trường hợp metadata/tham chiếu/lệnh sai định dạng, tên trùng lặp, tương đương giữa provider,
+   ủy quyền/approval lỗi thời, cập nhật bất biến, config được bảo toàn và phục hồi.
+6. Chạy các kiểm tra package cùng các kiểm tra repository bắt buộc và commit các thay đổi thuộc sở hữu.
 
-Acceptance: all 20 shared IDs and every requested role binding exist; model neutral
-bundles use standard name/description frontmatter. No skill executes hooks, grants
-permissions, waives Conditional TDD or permits specialist direct user questions.
-Machine catalog bytes and session manifests are immutable. Required unavailable content
-blocks resolution. Live sessions continue using old pins after update. Provider output
-contains only selected names/descriptions/entrypoints and manifest identity, never the
-whole instruction library. Runtime keeps independent gates and authenticated decisions.
+Nghiệm thu: cả 20 ID dùng chung và mọi role binding được yêu cầu đều tồn tại; các bundle trung lập
+với model dùng frontmatter name/description chuẩn. Không skill nào thực thi hook, cấp
+quyền, miễn Conditional TDD hay cho phép specialist hỏi trực tiếp người dùng.
+Machine catalog bytes và session manifest là bất biến. Nội dung bắt buộc nhưng không khả dụng
+sẽ chặn việc phân giải. Các live session tiếp tục dùng pin cũ sau khi cập nhật. Đầu ra provider
+chỉ chứa name/description/entrypoint được chọn và danh tính manifest, không bao giờ chứa
+toàn bộ thư viện instruction. Runtime giữ các gate độc lập và các quyết định đã xác thực.
 
-Implementation policy: required failing tests first for resolver/storage behavior;
-content-only examples use structural validation. Full Runtime/CLI activation belongs to
-P29/P30 and is explicitly documented as an integration dependency.
+Chính sách triển khai: các test thất bại bắt buộc phải có trước cho hành vi resolver/storage;
+các ví dụ chỉ có nội dung dùng validate cấu trúc. Việc kích hoạt Runtime/CLI đầy đủ thuộc về
+P29/P30 và được ghi tài liệu tường minh là một dependency tích hợp.

@@ -1,4 +1,4 @@
-# Verification runners
+# Verification runner
 
 Runtime discovers installed test toolchains without requiring `.bflow/verification.json`.
 Accepted `unit_test`, `integration_test` and `e2e_test` criteria retain their method;
@@ -108,22 +108,22 @@ report is not evidence. Arbitrary target syntax, tox/nox and script-specific rep
 are agent setup work, rather than guessed invocation conventions. This intentionally
 narrow fallback prevents claiming universal arbitrary-script support.
 
-## Optional owner override: `.bflow/verification.json`
+## Owner override tùy chọn: `.bflow/verification.json`
 
-Owners may still declare their own behavioral commands in `.bflow/verification.json`
-(for example for a runner or reporter that detection does not support, or to pin exact
-argv). When that file exists its commands are used exactly as before, and automatic
-detection is disabled for that host. This is operator authority: Coordinator can select
-accepted command labels and mapped test names, but cannot supply executables, argv,
-output or a successful verdict. The persisted host pins the configuration digest.
-Changing the file after host creation is rejected; preserve state and reconcile/migrate
-the host explicitly. Do not delete host journals to bypass a configuration mismatch.
+Owner vẫn có thể tự khai báo các behavioral command trong `.bflow/verification.json`
+(ví dụ cho runner hoặc reporter mà việc phát hiện không hỗ trợ, hoặc để pin argv chính xác).
+Khi file đó tồn tại, các command của nó được dùng đúng như trước đây, và việc tự động phát hiện
+bị tắt cho host đó. Đây là thẩm quyền của operator: Coordinator có thể chọn các command label
+đã chấp nhận và tên test đã ánh xạ, nhưng không thể cung cấp executable, argv, output hay
+verdict thành công. Host đã persist pin digest của cấu hình. Thay đổi file sau khi host được
+tạo sẽ bị từ chối; hãy giữ state và reconcile/migrate host một cách tường minh. Không xóa
+journal của host để vượt qua sự không khớp cấu hình.
 
-## Node TAP example
+## Ví dụ Node TAP
 
-Replace `/absolute/path/to/node` with the installed Node executable. Keep exact
-committed test paths and exact observed names; Node's supported protocol is flat
-`node:test` TAP, with assertion failures for Red.
+Thay `/absolute/path/to/node` bằng executable Node đã cài. Giữ đúng đường dẫn test đã commit
+và đúng tên đã quan sát; protocol Node được hỗ trợ là TAP `node:test` phẳng, với assertion
+failure cho pha Red.
 
 ```json
 {
@@ -143,14 +143,14 @@ committed test paths and exact observed names; Node's supported protocol is flat
 }
 ```
 
-The accepted strategy must use `owner:test-unit` and map the criterion to the exact
-test name. The accepted task ownership must include the test and implementation
-paths. Add this configuration only as the project owner; Developer cannot edit
-`.bflow` through its tools or commit it as part of a task.
+Strategy đã chấp nhận phải dùng `owner:test-unit` và ánh xạ tiêu chí tới đúng tên test.
+Quyền sở hữu task đã chấp nhận phải bao gồm các đường dẫn test và implementation. Chỉ thêm
+cấu hình này với tư cách project owner; Developer không thể sửa `.bflow` qua các tool của nó
+hay commit nó như một phần của task.
 
-## Vitest 2.1 example
+## Ví dụ Vitest 2.1
 
-Use the same envelope and command fields, with:
+Dùng cùng envelope và các field command, với:
 
 ```json
 {
@@ -165,12 +165,12 @@ Use the same envelope and command fields, with:
 }
 ```
 
-This is a fragment to merge into the complete command, not a separate config
-schema. Use the actual Vitest JSON `fullName` for every `testNames` entry (including
-suite names). Runtime appends its trusted companion reporter because Vitest 2.1's
-JSON omits unhandled runtime errors. Missing completion, runtime errors, skipped,
-todo, zero tests, malformed counters, unexpected names, timeout and truncated
-output all block evidence. Node TAP remains the default when `reporter` is omitted.
+Đây là đoạn fragment để gộp vào command hoàn chỉnh, không phải schema cấu hình riêng. Dùng
+`fullName` JSON thực tế của Vitest cho mọi mục `testNames` (bao gồm tên suite). Runtime thêm
+reporter đồng hành tin cậy của nó vì JSON của Vitest 2.1 bỏ sót các runtime error không được xử
+lý. Thiếu completion, runtime error, skipped, todo, không có test nào, bộ đếm sai định dạng,
+tên không mong đợi, timeout và output bị cắt đều chặn bằng chứng. Node TAP vẫn là mặc định khi
+bỏ qua `reporter`.
 
 ## Sandbox and dependency ownership
 
@@ -178,7 +178,7 @@ Linux (including WSL2 only when the real namespace probe passes) uses Bubblewrap
 on PATH, canonicalized and tested in a real empty namespace. `bflow up` probes readiness;
 activation records a structured `verification_sandbox_unavailable` Conversation notice
 when automated runners exist. Planning exposes that state. Measurement always fails closed
-if the boundary is unavailable; no command runs outside it. macOS `sandbox-exec`, native
+if the boundary is unavailable; no command runs outside it. macOS uses the Seatbelt backend described below for legacy JS/owner commands. Native
 Windows, Docker and Podman backends are not implemented or certified by this change.
 There is no automatic sandbox installation or privilege/sysctl change.
 
@@ -237,3 +237,29 @@ labels and method support remain agent-fixable. An unknown ecosystem can still r
 Setup tasks retain SDD, conditional TDD, independent review and approval requirements;
 this implementation emits the task requirement, it does not invent an approved setup task
 or waive a required gate. None of these changes establish live Herdr/provider acceptance.
+
+### Backend macOS (Seatbelt)
+
+Trên macOS, Runtime dùng `/usr/bin/sandbox-exec` với profile `(deny default)`
+(`packages/runtime/src/agentic/behavioral-sandbox-darwin.ts`). Vẫn không có fallback không sandbox:
+thiếu `sandbox-exec` hoặc launcher báo lỗi (`sandbox-exec: ...`) là lỗi hạ tầng, không bao giờ được tính là
+kết quả test. Khác biệt so với Linux:
+
+- Seatbelt không ẩn đường dẫn mà chỉ từ chối nội dung. Host vẫn tồn tại và metadata (`stat`) đọc được vì
+  `realpath` của Node cần `lstat` mọi thư mục cha; nội dung home, `.ssh`, `/etc`, state, secret và
+  Git metadata đều bị từ chối đọc/ghi. Các cây dependency cũng được kiểm tra credential, special file và symlink thoát trước khi cấp quyền.
+- Chỉ có các quyền ghi: checkout và một thư mục `tmp` riêng (cũng là `TMPDIR`/`HOME` của tiến trình).
+  File reporter companion, executable Node và các root dependency chỉ đọc.
+- Không có bind mount, nên `node_modules` phát hiện tự động được clone vào checkout bằng `cp -c -R`
+  (copy-on-write trên APFS), rồi policy chặn ghi lên cây đã clone. `node_modules` phải được git ignore,
+  giống mountpoint trên Linux.
+- Network, socket của host và signal tới process khác đều bị từ chối. Chỉ cho phép signal tới process con của
+  chính nó (Vitest cần để dừng worker) và đọc `/etc/hosts` để phân giải `localhost`; không có `mach-lookup`
+  nên không có kênh DNS.
+- `sandbox-exec` được Apple đánh dấu deprecated nhưng vẫn hoạt động trên Darwin 25.6.
+- Bằng chứng được ghi nhận trên nhánh main trước tích hợp (không đo lại trên máy Linux này): source cộng test đối kháng cục bộ (`behavioral-sandbox-darwin.test.ts`) và đo thật
+  `node --test` (TypeScript) lẫn Vitest 2.1.9 trên macOS. Chưa có live acceptance toàn luồng SDLC và chưa
+  có đảm bảo chống kernel thù địch.
+
+
+Polyglot adapter commands requiring toolchain/cache mounts, generated helpers or private report directories currently return unsupported on macOS. Dependency warming is Linux-only. This integration has local Linux test evidence; macOS measurements were not repeated on this host.

@@ -62,7 +62,7 @@ it("fails unsupported before side effects when no supported frozen lockfile exis
 });
 const readiness = await probeBehavioralSandbox();
 const networkReadiness = await probeNpmWarmNetwork();
-it.skipIf(readiness.status !== "ready" || networkReadiness.status !== "ready")("real isolated no-dependency npm ci leaves the checkout unchanged", async () => {
+it.skipIf(process.platform !== "linux" || readiness.status !== "ready" || networkReadiness.status !== "ready")("real isolated no-dependency npm ci leaves the checkout unchanged", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-warm-live-"))); cleanups.push(root);
   const noDependencies = { name: "fixture", version: "1.0.0", scripts: { postinstall: "node -e \"process.exit(99)\"" } };
   await writeFile(join(root, "package.json"), JSON.stringify(noDependencies));
@@ -129,7 +129,7 @@ it("bounds a hung bootstrap and kills both process trees", async () => {
 it("rejects accidental shared-host networking before spawning a process", async () => {
   await expect(runNpmWarmSandbox({executable:"/not/run",args:["--unshare-all","--share-net"],env:{}},"/not/run","/",1)).rejects.toThrow(/policy/);
 });
-it.skipIf(readiness.status!=="ready" || networkReadiness.status!=="ready")("real warming network cannot connect to host abstract sockets or loopback listeners", async () => {
+it.skipIf(process.platform !== "linux" || readiness.status!=="ready" || networkReadiness.status!=="ready")("real warming network cannot connect to host abstract sockets or loopback listeners", async () => {
   if(readiness.status!=="ready" || networkReadiness.status!=="ready")return;
   const root=await realpath(await mkdtemp(join(tmpdir(),"bflow-warm-socket-test-")));cleanups.push(root);
   await Promise.all([writeFile(join(root,"package.json"),"{}"),writeFile(join(root,"package-lock.json"),"{}"),writeFile(join(root,"resolv.conf"),NPM_WARM_RESOLVER)]);

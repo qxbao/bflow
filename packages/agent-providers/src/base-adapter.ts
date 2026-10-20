@@ -136,7 +136,22 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
   }
 
   protected getProviderCommandEnvironment(): Readonly<Record<string, string>> {
-    return { BFLOW_PROVIDER: this.descriptor.provider };
+    return {
+      ...(this.options.isolatorEnvironment ?? {}),
+      BFLOW_PROVIDER: this.descriptor.provider
+    };
+  }
+
+  protected getProviderExecutionEnvironment(): Readonly<Record<string, string>> {
+    return this.getProviderCommandEnvironment();
+  }
+
+  protected commandEnvironmentOptions(): { readonly inheritEnvironment?: false } {
+    return this.options.isolatorEnvironment === undefined ? {} : { inheritEnvironment: false };
+  }
+
+  protected shouldCheckNativeAuthentication(): boolean {
+    return true;
   }
 
   private executableVerificationOptions() {
@@ -195,7 +210,8 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     const versionOutcome = await this.runner.run({
       executable,
       args: ["--version"],
-      env: this.getProviderCommandEnvironment()
+      env: this.getProviderCommandEnvironment(),
+      ...this.commandEnvironmentOptions()
     });
 
     const rawVersion = versionOutcome.stdout.trim() || versionOutcome.stderr.trim();
@@ -205,7 +221,8 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     const helpOutcome = await this.runner.run({
       executable,
       args: ["--help"],
-      env: this.getProviderCommandEnvironment()
+      env: this.getProviderCommandEnvironment(),
+      ...this.commandEnvironmentOptions()
     });
     const helpText = `${helpOutcome.stdout}\n${helpOutcome.stderr}`;
 
@@ -484,12 +501,15 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
         `Provider execution probe was skipped because inherited state is blocked: ${failure.message}`, failure.remediation));
     } else try {
       const authArgs = this.getAuthCommand();
-      const authOutcome = await this.runner.run({
-        executable,
-        args: authArgs,
-        env: this.getProviderCommandEnvironment(),
-        timeoutMs: 45_000
-      });
+      const authOutcome = this.shouldCheckNativeAuthentication()
+        ? await this.runner.run({
+            executable,
+            args: authArgs,
+            env: this.getProviderCommandEnvironment(),
+            ...this.commandEnvironmentOptions(),
+            timeoutMs: 45_000
+          })
+        : { exitCode: 0, stdout: "", stderr: "", started: true };
 
       const combinedAuthOutput = `${authOutcome.stdout}\n${authOutcome.stderr}`;
       const isExpired =
@@ -519,9 +539,10 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
           args: [...inherited.argv, ...probeArgs],
           cwd: environment.cwd,
           env: {
-            ...this.getProviderCommandEnvironment(),
+            ...this.getProviderExecutionEnvironment(),
             ...(agyProbeHome ? { HOME: agyProbeHome } : {})
           },
+          ...this.commandEnvironmentOptions(),
           timeoutMs: 75_000
         };
         const snapshot = this.options.executionProbeCoalescer && binaryPassed && versionPassed
@@ -1663,6 +1684,10 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
   }
 
   private async prepareAgySessionHome(environment: AgentEnvironment): Promise<string | undefined> {
+    if (this.options.isolatorEnvironment !== undefined) {
+      return this.options.isolatorEnvironment["HOME"];
+    }
+
     try {
       const stateStat = await stat(environment.stateDirectory);
       if (!stateStat.isDirectory()) return undefined;

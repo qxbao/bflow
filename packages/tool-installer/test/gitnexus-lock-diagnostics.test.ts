@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
@@ -10,7 +10,7 @@ const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 
 async function fixture(lockKind: "storage" | "writer", content: string) {
-  const root = await mkdtemp(join(tmpdir(), "bflow-index-busy-")); roots.push(root);
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-index-busy-"))); roots.push(root);
   const stateRoot = join(root, "state"); await mkdir(stateRoot);
   const name = lockKind === "storage" ? `gitnexus-storage-${createHash("sha256").update(root).digest("hex")}.lock` : "gitnexus-writer.lock";
   const lockPath = join(stateRoot, name); await writeFile(lockPath, content);

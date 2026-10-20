@@ -1,6 +1,7 @@
 import { readFile, realpath, lstat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { AdapterContext, AdapterDetection, AdapterRunner, RunnerAdapter } from "./runner-adapter.js";
+import { parseNodeTestFlags } from "./runner-detection.js";
 const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** Installed runner metadata is read only; runner code executes only inside measurement. */
 export const javascriptAdapter: RunnerAdapter = {
@@ -18,9 +19,10 @@ export const javascriptAdapter: RunnerAdapter = {
         if (directory !== "." && !file.startsWith(directory + "/")) throw new Error("Test file belongs to another JavaScript project");
         return directory === "." ? file : file.slice(directory.length + 1);
       });
-      if (typeof pkg.scripts?.test === "string" && pkg.scripts.test.includes("node --test")) {
+      const nodeFlags = typeof pkg.scripts?.test === "string" ? parseNodeTestFlags(pkg.scripts.test) : undefined;
+      if (nodeFlags !== undefined) {
         runners.push({ ...base, adapterId: "node", version: process.version, format: "node_tap", nameRule: "node --test test title only",
-          bind(identities) { return { args: ["--test", "--test-reporter=tap", "--test-name-pattern=^(?:" + identities.testNames.map(escape).join("|") + ")$", ...selectedFiles(identities.testPaths)] }; } });
+          bind(identities) { return { args: [...nodeFlags, "--test", "--test-reporter=tap", "--test-name-pattern=^(?:" + identities.testNames.map(escape).join("|") + ")$", ...selectedFiles(identities.testPaths)] }; } });
       }
       for (const [id, entry, format] of [["vitest", "vitest/vitest.mjs", "vitest_json"], ["jest", "jest/bin/jest.js", "jest_json"], ["mocha", "mocha/bin/mocha.js", "mocha_json"]] as const) {
         if (!deps[id]) continue;

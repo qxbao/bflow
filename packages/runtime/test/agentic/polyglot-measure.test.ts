@@ -18,7 +18,7 @@ import { probeBehavioralSandbox } from "../../src/agentic/sandbox-readiness.js";
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 const installedDependencies = fileURLToPath(new URL("../../../../node_modules", import.meta.url));
-const sandboxReady = probeBehavioralSandbox();
+const sandboxReady = process.platform === "linux" ? probeBehavioralSandbox() : Promise.resolve({ status: "unsupported" as const });
 type Phase = "pass" | "assertion Red" | "infrastructure error";
 interface Fixture { files: Record<string, string>; names: string[]; paths: string[] }
 interface RunnerCase {

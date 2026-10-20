@@ -1,81 +1,81 @@
-# P28 Skills Framework handoff — 2026-10-17
+# Bàn giao P28 Skills Framework — 2026-10-17
 
-Implementation source: **03701f0d37bcc34360306feb363b7e0af9905841** on
+Nguồn triển khai: **03701f0d37bcc34360306feb363b7e0af9905841** trên
 `agent/skills/p28-framework`, worktree `/tmp/bflow-p28-skills`.
-Baseline: `a39374d0f06144a25e01691feeb696a1defed211`, verified descendant of approved
-P24 `8dbb056`. `main`/`origin/main` matched at inspection; P24 had no unmatched patches
-in `git cherry main agent/architecture/p24-runtime-v3`. No remote publication or merge.
+Baseline: `a39374d0f06144a25e01691feeb696a1defed211`, đã xác minh là hậu duệ của P24 `8dbb056`
+đã được duyệt. `main`/`origin/main` khớp nhau lúc kiểm tra; P24 không có patch nào không khớp
+trong `git cherry main agent/architecture/p24-runtime-v3`. Không publish remote hay merge.
 
-## Delivered and reviewed
+## Đã bàn giao và đã review
 
-32 complete canonical skills, 32 local worked examples, 49 selections for all 10 contract
-roles. Every requested shared skill and binding is present. Standard name/description
-frontmatter and adjacent strict metadata remain provider/model neutral. One resolved
-manifest exposes only selected names/descriptions/pinned paths; instructions load on demand.
+32 skill canonical hoàn chỉnh, 32 ví dụ thực hành cục bộ, 49 lượt chọn cho cả 10 role trong contract.
+Mọi shared skill và binding được yêu cầu đều có mặt. Frontmatter name/description chuẩn
+và metadata nghiêm ngặt liền kề giữ trung lập với provider/model. Một manifest đã phân giải chỉ
+lộ các name/description/đường dẫn pin được chọn; instruction được nạp theo yêu cầu.
 
-SkillManager implements list, validate, install, sync, link, verify, update, and immutable
-manifest recovery. Includes exact dependency pins, stable ordering, full content inventory
-digests, role/provider/tool/capability checks, authenticated approval callback, private
-atomic storage, exclusive writer lock, read-only setup planning and configuration-preserving
-repository desired data. See README for runnable package API example and limitations.
+SkillManager triển khai list, validate, install, sync, link, verify, update và phục hồi
+manifest bất biến. Bao gồm pin dependency chính xác, thứ tự ổn định, digest kiểm kê nội dung đầy đủ,
+kiểm tra role/provider/tool/capability, callback approval đã xác thực, lưu trữ nguyên tử
+riêng tư, writer lock độc quyền, lập kế hoạch setup chỉ đọc và dữ liệu repository desired
+bảo toàn cấu hình. Xem README để biết ví dụ API package chạy được và các hạn chế.
 
-Independent review found and regression tests now cover: caller-owned mutable install
-bytes; missing/remote angle-bracket resource references; option-first/unknown nested
-commands; optional dependency pin conflicts; and catalog writes during dry-run. Content
-verification is explicitly separate from live provider/tool health, which P25/P30 must
-probe independently. No skill grants permissions or bypasses Bflow policy/human authority.
+Review độc lập đã tìm ra và các regression test nay bao phủ: byte install có thể thay đổi do
+caller sở hữu; tham chiếu resource dạng ngoặc nhọn bị thiếu/từ xa; lệnh lồng nhau option-first/không
+xác định; xung đột pin dependency tùy chọn; và ghi catalog trong lúc dry-run. Xác minh nội dung
+được tách biệt tường minh khỏi sức khỏe provider/tool live, vốn P25/P30 phải thăm dò độc lập.
+Không skill nào cấp quyền hay vượt qua chính sách/thẩm quyền con người của Bflow.
 
-## Validation evidence
+## Bằng chứng xác thực
 
-Linux, Node `v24.16.0`, pnpm `12.5.1`; isolated worktree dependencies installed from
-existing workspace lock/cache. `TMPDIR=/tmp` avoids the existing Unix-socket fixture's
-path-length problem. Final package source tree corresponds to implementation commit above.
+Linux, Node `v24.16.0`, pnpm `12.5.1`; dependency của worktree cô lập được cài từ
+lock/cache workspace hiện có. `TMPDIR=/tmp` tránh vấn đề độ dài đường dẫn của fixture Unix-socket hiện có.
+Cây source package cuối cùng tương ứng với implementation commit ở trên.
 
-| Command from worktree root | Exit | Actual result |
+| Lệnh từ gốc worktree | Exit | Kết quả thực tế |
 | --- | --- | --- |
-| `pnpm --filter @bflow/skills typecheck` | 0 | package project and contracts compile |
-| `TMPDIR=/tmp pnpm --filter @bflow/skills test` | 0 | 6 files, 35 passed, 0 failed/skipped; final run 12.53s |
-| `pnpm check:deps` | 0 | 20 packages / 27 edges; boundaries and acyclic graph verified |
-| `pnpm typecheck` | 0 | existing root project references compile; package checked separately |
-| `TMPDIR=/tmp pnpm test` | 1 | 92 files passed, 2 failed, 3 skipped; 1791 tests passed, 2 failed, 4 skipped; 304.20s |
-| `git diff --check` and baseline ownership diff check | 0 | no whitespace errors |
+| `pnpm --filter @bflow/skills typecheck` | 0 | project của package và contracts biên dịch được |
+| `TMPDIR=/tmp pnpm --filter @bflow/skills test` | 0 | 6 file, 35 đạt, 0 thất bại/bỏ qua; lần chạy cuối 12.53s |
+| `pnpm check:deps` | 0 | 20 package / 27 cạnh; đã xác minh ranh giới và đồ thị không chu trình |
+| `pnpm typecheck` | 0 | các project reference gốc hiện có biên dịch được; package được kiểm tra riêng |
+| `TMPDIR=/tmp pnpm test` | 1 | 92 file đạt, 2 thất bại, 3 bỏ qua; 1791 test đạt, 2 thất bại, 4 bỏ qua; 304.20s |
+| `git diff --check` và kiểm tra ownership diff so với baseline | 0 | không có lỗi whitespace |
 
-The full run started against the P28 working tree before the implementation commit and
-finished after it. Final P28 hardening was additionally covered by the package command
-above. This is local source/rendering evidence, not remote closure or live activation.
+Lần chạy đầy đủ bắt đầu trên working tree P28 trước implementation commit và
+kết thúc sau nó. Phần hardening P28 cuối cùng được bao phủ thêm bởi lệnh package
+ở trên. Đây là bằng chứng source/rendering cục bộ, không phải remote closure hay kích hoạt live.
 
-Full-suite failures outside P28 ownership:
+Các thất bại của lần chạy đầy đủ nằm ngoài quyền sở hữu của P28:
 
-- `packages/machine-setup/test/executor.test.ts:310`: timed abort expected `unknown`,
-  observed `blocked` in the concurrent full run. The baseline owner helper also reproduced
-  the timing failure; an isolated baseline rerun passed, so do not claim it deterministic.
-- `packages/tool-installer/test/services-and-config.test.ts:92`: existing RTK apply rejects
-  the operator's `.codex/hooks.json` as not a bounded regular file. Reproduced on unchanged
-  baseline `a39374d`. No operator hook/config was edited to make the test pass.
+- `packages/machine-setup/test/executor.test.ts:310`: timed abort kỳ vọng `unknown`,
+  quan sát được `blocked` trong lần chạy đầy đủ đồng thời. Helper owner của baseline cũng tái hiện
+  lỗi timing; lần chạy lại baseline cô lập thì đạt, nên đừng khẳng định nó mang tính xác định.
+- `packages/tool-installer/test/services-and-config.test.ts:92`: RTK apply hiện có từ chối
+  `.codex/hooks.json` của operator vì không phải là file thường có giới hạn. Tái hiện trên baseline
+  `a39374d` chưa thay đổi. Không hook/config nào của operator bị sửa để làm test đạt.
 
-The three opt-in live test files were skipped. No model call, native skill discovery,
-provider readiness, live Herdr task success or full SDLC acceptance is claimed. An initial
-run with a root node_modules symlink was discarded after pnpm's unsafe-task-path guard;
-final evidence uses independent real node_modules. No generated dependencies, outputs or
-logs are committed.
+Ba file live test opt-in đã bị bỏ qua. Không tuyên bố gọi model, native skill discovery,
+provider readiness, thành công task Herdr live hay nghiệm thu SDLC đầy đủ. Lần chạy ban đầu
+với symlink node_modules gốc đã bị loại bỏ sau khi cơ chế bảo vệ đường dẫn task không an toàn của pnpm
+chặn; bằng chứng cuối cùng dùng node_modules thật độc lập. Không commit dependency, output
+hay log được sinh ra.
 
-## Integration decisions and ownership
+## Quyết định tích hợp và quyền sở hữu
 
-Changed paths are exclusively `packages/skills/**` and `skills/**`. No public contract,
-root config, lockfile, shared documentation, migration or generated output change is
-included. Installation generated a local lockfile importer for testing; it was restored
-before handoff. Root TypeScript references do not yet include the new package.
+Các đường dẫn thay đổi chỉ là `packages/skills/**` và `skills/**`. Không có thay đổi contract
+công khai, config gốc, lockfile, tài liệu dùng chung, migration hay output được sinh ra. Việc cài đặt đã sinh một
+importer lockfile cục bộ để kiểm thử; nó đã được khôi phục trước khi bàn giao. Các TypeScript reference gốc
+chưa bao gồm package mới.
 
-Integrator should add the package importer/reference; P26 injects SkillsSetupSynchronizer;
-P29 uses repositoryConfig for its init-owned skills config and exposes command UX; P30
-persists the exact session manifest and composes rendered instructions through P25.
-Detailed port usage is in README. CLI `skills`/`setup` and automatic init activation remain
-unwired on this baseline; this handoff does not represent command acceptance.
+Integrator nên thêm importer/reference của package; P26 tiêm SkillsSetupSynchronizer;
+P29 dùng repositoryConfig cho config skills do init sở hữu và cung cấp command UX; P30
+lưu trữ session manifest chính xác và ghép các instruction đã render qua P25.
+Cách dùng port chi tiết nằm trong README. CLI `skills`/`setup` và việc kích hoạt init tự động vẫn
+chưa được nối trên baseline này; bàn giao này không đại diện cho nghiệm thu lệnh.
 
-No contract amendment is requested. Tool requirement IDs (`gitnexus`, `rtk`, `mempalace`,
-`browser`) need mapping to actual approved/probed inventory. The host must supply trusted
-builtin digest pins and authenticate source/dependency/scope/role/provider/expiry approvals.
-Original role prompts remain mandatory. Storage is local POSIX, with no power-loss,
-network-filesystem, multi-host or hostile same-UID guarantee. Crash locks require explicit
-operator reconciliation; no uncertain mutation is retried automatically. Existing P02-RA01,
-P03-RA01 and release acceptance gaps remain unchanged with their original owners.
+Không yêu cầu sửa contract. Các ID yêu cầu tool (`gitnexus`, `rtk`, `mempalace`,
+`browser`) cần được ánh xạ tới inventory thực tế đã duyệt/đã thăm dò. Host phải cung cấp các pin digest builtin
+đáng tin cậy và xác thực các approval về source/dependency/scope/role/provider/expiry.
+Các role prompt gốc vẫn bắt buộc. Storage là POSIX cục bộ, không đảm bảo mất điện,
+network-filesystem, đa host hay same-UID thù địch. Các lock sau crash cần operator reconciliation
+tường minh; không mutation không chắc chắn nào được tự động thử lại. P02-RA01,
+P03-RA01 hiện có và các khoảng trống nghiệm thu release giữ nguyên với owner ban đầu của chúng.

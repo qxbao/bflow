@@ -1079,8 +1079,8 @@ describe("Runtime Stop and uncertain delivery notices", () => {
     const f = await fixture();
     const message = f.envelope("delegation.request", { schemaVersion: 2, delegationId: "delegation-1", messageId: "intake-1", correlationId: "correlation-1",
       sessionId: "session-1", runId: "run-1", requestedBy: "conversation", targetRole: "coordinator", title: "Plan change", objective: "Plan change",
-      sddLevel: "lightweight", specificationId: f.spec.specId, acceptanceCriteria: f.spec.acceptanceCriteria, inputArtifacts: [], priority: "normal", requestedAt: new Date().toISOString(), idempotencyKey: "intake-2" },
-      { message_id: "intake-2", idempotency_key: "intake-2" });
+      sddLevel: "lightweight", specificationId: f.spec.specId, acceptanceCriteria: f.spec.acceptanceCriteria, inputArtifacts: [], priority: "normal", requestedAt: new Date().toISOString(), idempotencyKey: "intake-2",
+      metadata: { isRequirementChange: true, revision: 2 } }, { message_id: "intake-2", idempotency_key: "intake-2" });
     await f.runtime.queueHerdr(message); await f.runtime.flushOutbound();
     const binding = f.panes.bindings.find(p => p.role === "coordinator")!;
     await f.runtime.coordinatorStopWithoutResponse(message, binding, "Coordinator pane could not be matched: occupant changed");

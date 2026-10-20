@@ -1,13 +1,16 @@
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
-  ContractError, MCPClientRegistration, MCPServiceObservation, OperationOptions,
-  OperationResult, ScopedOperation, TrustScope
+  AgentEnvironment, AgentHealthRequest, AgentHealthResult, AgentLaunchProfile, AgentProviderAdapter, AgentProviderDescriptor,
+  ContractError, MCPClientRegistration, MCPServiceObservation, OperationOptions, OperationResult, ScopedOperation, TrustScope
 } from "@bflow/contracts";
-import { createFakeProviderRunner, type ProviderCommandRunner } from "@bflow/agent-providers";
+import { createFakeProviderRunner, type ProviderCommandInvocation, type ProviderCommandRunner } from "@bflow/agent-providers";
 import { SkillFileStore, SkillManager, bundleDigest, type BundleFiles } from "@bflow/skills";
 import { failWith, ok } from "../../src/platform/errors.js";
 import { Ed25519LaunchAttestationSigner } from "../../src/platform/attestation-signer.js";
@@ -19,7 +22,8 @@ import { SkillSessionStore } from "../../src/platform/skills-session.js";
 import { DefaultPlatformReadinessService } from "../../src/platform/service.js";
 import { createProviderAdapterFactory, createSkillResolver } from "../../src/platform/defaults.js";
 import type {
-  GatewayControlPort, GatewayRegistrationGrant, PlatformSessionIdentity, RolePlatformRequirement
+  GatewayControlPort, GatewayRegistrationGrant, PlatformSessionIdentity, ProviderAdapterContext, ProviderAdapterFactory,
+  RolePlatformRequirement
 } from "../../src/platform/ports.js";
 
 const LIVE_READY = {
@@ -112,6 +116,95 @@ const skillFiles = (name: string): BundleFiles => ({
   })
 });
 
+const HEALTH_CHECKS = ["binary", "version", "authentication", "environment", "mcp", "launch_arguments",
+  "permissions", "skills", "native_binding"].map(check => ({
+  check: check as "binary" | "version" | "authentication" | "environment" | "mcp" | "launch_arguments" |
+    "permissions" | "skills" | "native_binding",
+  status: "passed" as const,
+  code: "ok",
+  message: "passed"
+}));
+
+function contextProviderFactory(
+  onContext: (provider: string, context: ProviderAdapterContext) => void,
+  onHealth?: (request: AgentHealthRequest) => Promise<void> | void,
+  onPrepare?: (environment: AgentEnvironment) => Promise<void> | void
+): ProviderAdapterFactory {
+  return (provider, context) => {
+    onContext(provider, context);
+    const adapter: AgentProviderAdapter = {
+      descriptor: {} as AgentProviderDescriptor,
+      async checkHealth(request): Promise<OperationResult<AgentHealthResult>> {
+        await onHealth?.(request);
+        const checkedAt = new Date();
+        return ok({
+          schemaVersion: 3,
+          environmentId: request.environment.environmentId,
+          provider: request.environment.provider,
+          role: request.environment.role,
+          configFingerprint: request.environment.configFingerprint,
+          stage: request.stage,
+          status: "ready",
+          checkedAt: checkedAt.toISOString(),
+          validUntil: new Date(checkedAt.getTime() + 60_000).toISOString(),
+          checks: HEALTH_CHECKS
+        });
+      },
+      async prepareLaunch(environment: AgentEnvironment): Promise<OperationResult<AgentLaunchProfile>> {
+        await onPrepare?.(environment);
+        return ok({
+          schemaVersion: 3,
+          launchId: `launch-${environment.environmentId}`,
+          environment,
+          providerVersion: "1.0.0",
+          executable: "/trusted/provider",
+          executableDigest: "a".repeat(64),
+          argv: [],
+          configFiles: [],
+          launchFingerprint: "b".repeat(64),
+          interaction: environment.role === "conversation" ? "conversation" : "no_direct_user_input",
+          expiresAt: new Date(Date.now() + 60_000).toISOString()
+        });
+      }
+    };
+    return adapter;
+  };
+}
+
+async function createIsolatorProfileAt(
+  profileRoot: string,
+  provider: "claude" | "codex" | "agy",
+  name: string,
+  metadata = `AI_ISOLATOR_TOOL=${provider}\nAI_ISOLATOR_PROFILE=${name}\nAI_ISOLATOR_CREATED_AT=2026-10-20T00:00:00Z\n`
+): Promise<{ profileRoot: string; home: string }> {
+  const home = join(profileRoot, "home");
+  await mkdir(profileRoot, { recursive: true, mode: 0o700 });
+  await chmod(profileRoot, 0o700);
+  for (const directory of ["home", "config", "cache", "data", "state", "tmp"]) {
+    const path = join(profileRoot, directory);
+    await mkdir(path, { mode: 0o700 });
+    await chmod(path, 0o700);
+  }
+  await writeFile(join(profileRoot, "profile.env"), metadata, { mode: 0o600 });
+  await chmod(join(profileRoot, "profile.env"), 0o664);
+  if (provider === "agy") {
+    await mkdir(join(home, ".gemini", "antigravity-cli"), { recursive: true, mode: 0o700 });
+    await chmod(join(home, ".gemini"), 0o700);
+    await chmod(join(home, ".gemini", "antigravity-cli"), 0o700);
+  }
+  return { profileRoot, home };
+}
+
+async function createIsolatorProfile(
+  stateRoot: string,
+  provider: "claude" | "codex" | "agy",
+  name: string,
+  metadata?: string
+): Promise<{ profileRoot: string; home: string }> {
+  const profileRoot = join(stateRoot, "profiles", `${provider}--${name}`);
+  return createIsolatorProfileAt(profileRoot, provider, name, metadata);
+}
+
 describe("DefaultPlatformReadinessService", () => {
   let baseDir: string;
   let workspace: string;
@@ -182,11 +275,12 @@ describe("DefaultPlatformReadinessService", () => {
     gateway?: boolean;
     now?: () => Date;
     codexLaunchEnvironment?: Readonly<Record<string, string>>;
+    providerFactory?: ProviderAdapterFactory;
   } = {}): { service: DefaultPlatformReadinessService; journal: FileLaunchJournal } {
     const journal = new FileLaunchJournal(join(identity.stateDirectory, "launch-journal.jsonl"));
     const now = options.now ?? (() => new Date());
     const providers = new ProviderReadiness({
-      factory: createProviderAdapterFactory({
+      factory: options.providerFactory ?? createProviderAdapterFactory({
         runner: options.runner ?? createFakeProviderRunner({ scenario: "healthy" }),
         now,
         perProvider: {
@@ -214,6 +308,60 @@ describe("DefaultPlatformReadinessService", () => {
       now
     });
     return { service, journal };
+  }
+
+  function useIsolatorState(stateRoot: string): () => void {
+    const previous = {
+      state: process.env.AI_ISOLATOR_HOME,
+      realHome: process.env.AI_ISOLATOR_REAL_HOME,
+      linkedUrl: process.env.AI_ISOLATOR_CODEX_LB_URL,
+      lbKey: process.env.CODEX_LB_API_KEY,
+      claudeConfigDir: process.env.CLAUDE_CONFIG_DIR,
+      codexHome: process.env.CODEX_HOME
+    };
+    process.env.AI_ISOLATOR_HOME = stateRoot;
+    process.env.AI_ISOLATOR_REAL_HOME = join(baseDir, "real-home");
+    process.env.CLAUDE_CONFIG_DIR = join(baseDir, "account-claude");
+    process.env.CODEX_HOME = join(baseDir, "account-codex");
+    delete process.env.AI_ISOLATOR_CODEX_LB_URL;
+    delete process.env.CODEX_LB_API_KEY;
+    return () => {
+      if (previous.state === undefined) delete process.env.AI_ISOLATOR_HOME;
+      else process.env.AI_ISOLATOR_HOME = previous.state;
+      if (previous.realHome === undefined) delete process.env.AI_ISOLATOR_REAL_HOME;
+      else process.env.AI_ISOLATOR_REAL_HOME = previous.realHome;
+      if (previous.linkedUrl === undefined) delete process.env.AI_ISOLATOR_CODEX_LB_URL;
+      else process.env.AI_ISOLATOR_CODEX_LB_URL = previous.linkedUrl;
+      if (previous.lbKey === undefined) delete process.env.CODEX_LB_API_KEY;
+      else process.env.CODEX_LB_API_KEY = previous.lbKey;
+      if (previous.claudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previous.claudeConfigDir;
+      if (previous.codexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previous.codexHome;
+    };
+  }
+
+  async function expectProfileBlocked(
+    provider: "claude" | "codex" | "agy",
+    profileName: string,
+    runner: ProviderCommandRunner
+  ): Promise<void> {
+    const { service } = buildService({ runner });
+    const result = await service.prepareSession(identity, [requirement({
+      provider,
+      profileName,
+      mcpServiceIds: []
+    })]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.report.ready).toBe(false);
+    expect(result.value.report.roles[0]).toMatchObject({
+      role: "developer",
+      provider,
+      status: "blocked",
+      message: expect.stringContaining(`bflow iso ${provider} --name ${profileName}`)
+    });
+    expect(result.value.launches).toEqual([]);
   }
 
   async function journalKinds(journal: FileLaunchJournal): Promise<string[]> {
@@ -248,6 +396,578 @@ describe("DefaultPlatformReadinessService", () => {
     expect(peak).toBe(3);
     expect(started).toBe(7);
     expect(result.value.launches.map(launch => launch.taskId)).toEqual(["t0", "t1", "t2", "t3", "t4", "t5", "t6"]);
+  });
+
+  it("blocks a missing selected profile before invoking any provider command", async () => {
+    const previousState = process.env.AI_ISOLATOR_HOME;
+    const previousRealHome = process.env.AI_ISOLATOR_REAL_HOME;
+    process.env.AI_ISOLATOR_HOME = join(baseDir, "missing-isolator-state");
+    process.env.AI_ISOLATOR_REAL_HOME = join(baseDir, "real-home");
+    const runner = createFakeProviderRunner({ scenario: "healthy" });
+    const run = vi.spyOn(runner, "run");
+    try {
+      const { service } = buildService({ runner });
+      const result = await service.prepareSession(identity, [requirement({
+        profileName: "work",
+        provider: "claude",
+        mcpServiceIds: []
+      })]);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.report.ready).toBe(false);
+      expect(result.value.report.roles[0]).toMatchObject({
+        role: "developer",
+        provider: "claude",
+        status: "blocked",
+        message: expect.stringContaining("bflow iso claude --name work")
+      });
+      expect(result.value.launches).toEqual([]);
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      if (previousState === undefined) delete process.env.AI_ISOLATOR_HOME;
+      else process.env.AI_ISOLATOR_HOME = previousState;
+      if (previousRealHome === undefined) delete process.env.AI_ISOLATOR_REAL_HOME;
+      else process.env.AI_ISOLATOR_REAL_HOME = previousRealHome;
+    }
+  });
+
+  it.each(["wrong-tool", "malformed-metadata"] as const)("blocks %s metadata before provider execution", async kind => {
+    const stateRoot = join(baseDir, "isolator-state");
+    const metadata = kind === "wrong-tool"
+      ? "AI_ISOLATOR_TOOL=codex\nAI_ISOLATOR_PROFILE=work\nAI_ISOLATOR_CREATED_AT=2026-10-20T00:00:00Z\n"
+      : "AI_ISOLATOR_TOOL=claude\nAI_ISOLATOR_PROFILE=work\nINVALID LINE\n";
+    await createIsolatorProfile(stateRoot, "claude", "work", metadata);
+    const restore = useIsolatorState(stateRoot);
+    const runner = createFakeProviderRunner({ scenario: "healthy" });
+    const run = vi.spyOn(runner, "run");
+    try {
+      await expectProfileBlocked("claude", "work", runner);
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it.each(["profile root", "home", "cache", "profile.env", "claude config root", "codex config root", "agy config root"] as const)(
+    "blocks a symlinked %s before provider execution",
+    async kind => {
+      const provider = kind === "codex config root" ? "codex" : kind === "agy config root" ? "agy" : "claude";
+      const name = "work";
+      const stateRoot = join(baseDir, "isolator-state");
+      const profileRoot = join(stateRoot, "profiles", `${provider}--${name}`);
+      let home = join(profileRoot, "home");
+      if (kind === "profile root") {
+        const actual = join(stateRoot, "profiles", "actual-profile");
+        await mkdir(dirname(profileRoot), { recursive: true, mode: 0o700 });
+        await createIsolatorProfileAt(actual, provider, name);
+        await symlink(actual, profileRoot);
+      } else {
+        const { home: createdHome } = await createIsolatorProfile(stateRoot, provider, name);
+        home = createdHome;
+      }
+      if (kind === "home") {
+        const externalHome = join(baseDir, "external-home");
+        await mkdir(externalHome, { mode: 0o700 });
+        await rm(home, { recursive: true });
+        await symlink(externalHome, home);
+      } else if (kind === "cache") {
+        const cache = join(profileRoot, "cache");
+        const externalCache = join(baseDir, "external-cache");
+        await mkdir(externalCache, { mode: 0o700 });
+        await rm(cache, { recursive: true });
+        await symlink(externalCache, cache);
+      } else if (kind === "profile.env") {
+        const metadata = join(profileRoot, "profile.env");
+        const externalMetadata = join(baseDir, "external-profile.env");
+        await writeFile(externalMetadata, "AI_ISOLATOR_TOOL=claude\nAI_ISOLATOR_PROFILE=work\n");
+        await rm(metadata);
+        await symlink(externalMetadata, metadata);
+      } else if (kind.endsWith("config root")) {
+        const configRoot = join(home, kind === "agy config root" ? ".gemini" : `.${provider}`);
+        const externalConfig = join(baseDir, "external-config");
+        await mkdir(externalConfig, { mode: 0o700 });
+        await rm(configRoot, { recursive: true, force: true });
+        await symlink(externalConfig, configRoot);
+      }
+
+      const restore = useIsolatorState(stateRoot);
+      const runner = createFakeProviderRunner({ scenario: "healthy" });
+      const run = vi.spyOn(runner, "run");
+      try {
+        await expectProfileBlocked(provider, name, runner);
+        expect(run).not.toHaveBeenCalled();
+      } finally {
+        restore();
+      }
+    }
+  );
+
+  it("rejects a profile root accessible to other users before provider execution", async () => {
+    const stateRoot = join(baseDir, "isolator-state");
+    const { profileRoot } = await createIsolatorProfile(stateRoot, "claude", "work");
+    await chmod(profileRoot, 0o755);
+    const restore = useIsolatorState(stateRoot);
+    const runner = createFakeProviderRunner({ scenario: "healthy" });
+    const run = vi.spyOn(runner, "run");
+    try {
+      const { service } = buildService({ runner });
+      const result = await service.prepareSession(identity, [requirement({
+        provider: "claude",
+        profileName: "work",
+        mcpServiceIds: []
+      })]);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value.report.ready).toBe(false);
+        expect(result.value.report.roles[0]?.message).toContain(`profile entry is accessible to other users: ${profileRoot}`);
+        expect(result.value.launches).toEqual([]);
+      }
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it("rejects FIFO and oversized profile metadata without blocking or probing providers", async () => {
+    const stateRoot = join(baseDir, "isolator-state");
+    const { profileRoot } = await createIsolatorProfile(stateRoot, "claude", "work");
+    const metadata = join(profileRoot, "profile.env");
+    await rm(metadata);
+    const fifo = spawnSync("mkfifo", [metadata], { encoding: "utf8" });
+    expect(fifo.status, fifo.stderr).toBe(0);
+
+    const restore = useIsolatorState(stateRoot);
+    const runner = createFakeProviderRunner({ scenario: "healthy" });
+    const run = vi.spyOn(runner, "run");
+    try {
+      await expectProfileBlocked("claude", "work", runner);
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+
+    await rm(metadata);
+    await writeFile(metadata, `${"x".repeat(4097)}`, { mode: 0o664 });
+    const restoreOversized = useIsolatorState(stateRoot);
+    try {
+      await expectProfileBlocked("claude", "work", runner);
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      restoreOversized();
+    }
+  });
+
+  it("keeps direct/unset Codex profiles direct and ignores automatic LB discovery", async () => {
+    const stateRoot = join(baseDir, "isolator-state");
+    const { profileRoot } = await createIsolatorProfile(stateRoot, "codex", "work");
+    const restore = useIsolatorState(stateRoot);
+    process.env.AI_ISOLATOR_CODEX_LB_URL = "http://127.0.0.1:1";
+    const fake = createFakeProviderRunner({ scenario: "healthy" });
+    const invocations: ProviderCommandInvocation[] = [];
+    const runner: ProviderCommandRunner = { run: async invocation => {
+      invocations.push(invocation);
+      return fake.run(invocation);
+    } };
+    try {
+      const { service } = buildService({ runner });
+      const result = await service.prepareSession(identity, [requirement({
+        provider: "codex",
+        profileName: "work",
+        mcpServiceIds: []
+      })]);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.report.ready).toBe(true);
+      expect(invocations.length).toBeGreaterThan(0);
+      expect(invocations.every(invocation => invocation.inheritEnvironment === false)).toBe(true);
+      expect(invocations.every(invocation => invocation.env?.["HOME"] === join(profileRoot, "home"))).toBe(true);
+      expect(invocations.every(invocation => invocation.env?.["CODEX_HOME"] === join(profileRoot, "home", ".codex"))).toBe(true);
+      expect(invocations.every(invocation => invocation.env?.["AI_ISOLATOR_CODEX_LB_URL"] === "")).toBe(true);
+      expect(invocations.flatMap(invocation => invocation.args).some(argument => argument.includes("codex-lb"))).toBe(false);
+      expect(result.value.launches[0]?.launch.env["HOME"]).toBe(join(profileRoot, "home"));
+      expect(result.value.launches[0]?.launch.env["ANTHROPIC_API_KEY"]).toBe("");
+      expect(result.value.launches[0]?.launch.env["AI_ISOLATOR_CODEX_LB_URL"]).toBe("");
+    } finally {
+      restore();
+    }
+  });
+
+  it("binds two same-provider roles to their own profile HOME and path fingerprint", async () => {
+    const stateRoot = join(baseDir, "isolator-state");
+    const chat = await createIsolatorProfile(stateRoot, "codex", "chat");
+    const lead = await createIsolatorProfile(stateRoot, "codex", "lead");
+    const restore = useIsolatorState(stateRoot);
+    const contexts: ProviderAdapterContext[] = [];
+    try {
+      const { service } = buildService({
+        providerFactory: contextProviderFactory((_provider, context) => contexts.push(context))
+      });
+      const result = await service.prepareSession(identity, [
+        requirement({ role: "conversation", provider: "codex", profileName: "chat", cwd: workspace,
+          taskId: undefined, skillSelections: [], mcpServiceIds: [] }),
+        requirement({ role: "coordinator", provider: "codex", profileName: "lead", cwd: workspace,
+          taskId: undefined, skillSelections: [], mcpServiceIds: [] })
+      ]);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.report.ready).toBe(true);
+      expect(result.value.launches.map(launch => launch.launch.env["HOME"])).toEqual([
+        join(chat.profileRoot, "home"),
+        join(lead.profileRoot, "home")
+      ]);
+      const profileContexts = contexts.filter(context => context.isolatorEnvironment !== undefined);
+      expect(new Set(profileContexts.map(context => context.isolatorEnvironment?.["HOME"]))).toEqual(new Set([
+        join(chat.profileRoot, "home"),
+        join(lead.profileRoot, "home")
+      ]));
+      expect(result.value.launches[0]?.environment.configFingerprint)
+        .not.toBe(result.value.launches[1]?.environment.configFingerprint);
+    } finally {
+      restore();
+    }
+  });
+
+  it("binds the trusted state root into the role fingerprint for the same profile name", async () => {
+    const firstRoot = join(baseDir, "isolator-first");
+    const secondRoot = join(baseDir, "isolator-second");
+    await createIsolatorProfile(firstRoot, "claude", "work");
+    await createIsolatorProfile(secondRoot, "claude", "work");
+    const firstIdentity = { ...identity, stateDirectory: join(baseDir, "first-runtime-state") };
+    const secondIdentity = { ...identity, stateDirectory: join(baseDir, "second-runtime-state") };
+    await mkdir(firstIdentity.stateDirectory, { recursive: true, mode: 0o700 });
+    await mkdir(secondIdentity.stateDirectory, { recursive: true, mode: 0o700 });
+    const providerFactory = contextProviderFactory(() => undefined);
+    const restoreFirst = useIsolatorState(firstRoot);
+    let firstFingerprint: string | undefined;
+    try {
+      const { service } = buildService({ providerFactory });
+      const first = await service.prepareSession(firstIdentity, [requirement({
+        provider: "claude",
+        profileName: "work",
+        mcpServiceIds: []
+      })]);
+      expect(first.ok).toBe(true);
+      if (first.ok) firstFingerprint = first.value.launches[0]?.environment.configFingerprint;
+    } finally {
+      restoreFirst();
+    }
+
+    const restoreSecond = useIsolatorState(secondRoot);
+    try {
+      const { service } = buildService({ providerFactory });
+      const second = await service.prepareSession(secondIdentity, [requirement({
+        provider: "claude",
+        profileName: "work",
+        mcpServiceIds: []
+      })]);
+      expect(second.ok).toBe(true);
+      if (second.ok) expect(second.value.launches[0]?.environment.configFingerprint).not.toBe(firstFingerprint);
+    } finally {
+      restoreSecond();
+    }
+  });
+
+  it("binds a dynamic Developer profile without changing its task-worktree cwd or permissions", async () => {
+    const stateRoot = join(baseDir, "isolator-state");
+    const { profileRoot } = await createIsolatorProfile(stateRoot, "codex", "work");
+    const worktree = join(baseDir, "task-worktree");
+    const restore = useIsolatorState(stateRoot);
+    const contexts: ProviderAdapterContext[] = [];
+    try {
+      const { service } = buildService({
+        providerFactory: contextProviderFactory((_provider, context) => contexts.push(context))
+      });
+      const result = await service.prepareDeveloper(identity, requirement({
+        provider: "codex",
+        profileName: "work",
+        cwd: worktree,
+        mcpServiceIds: []
+      }));
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.environment.cwd).toBe(worktree);
+      expect(result.value.environment.permissionProfile.writableRoots).toEqual([worktree]);
+      expect(result.value.launch.env["HOME"]).toBe(join(profileRoot, "home"));
+      expect(contexts.some(context => context.isolatorEnvironment?.["AI_ISOLATOR_PROFILE"] === "work")).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it.each(["removed", "replaced"] as const)("refuses to prepare a profile that was %s after preflight", async change => {
+    const stateRoot = join(baseDir, "isolator-state");
+    const { profileRoot } = await createIsolatorProfile(stateRoot, "claude", "work");
+    const restore = useIsolatorState(stateRoot);
+    let prepareCalls = 0;
+    const factory = contextProviderFactory((_provider, _context) => undefined, async request => {
+      if (request.stage !== "preflight") return;
+      await rm(profileRoot, { recursive: true });
+      if (change === "replaced") await createIsolatorProfileAt(profileRoot, "claude", "work");
+    }, () => { prepareCalls++; });
+    try {
+      const { service, journal } = buildService({ providerFactory: factory });
+      const result = await service.prepareSession(identity, [requirement({
+        provider: "claude",
+        profileName: "work",
+        mcpServiceIds: []
+      })]);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.report.ready).toBe(false);
+      expect(result.value.launches).toEqual([]);
+      expect(result.value.report.roles[0]?.message).toContain("bflow iso claude --name work");
+      if (change === "replaced")
+        expect(result.value.report.roles[0]?.message).toContain("profile identity changed after provider preflight");
+      expect(prepareCalls).toBe(0);
+      expect(await journalKinds(journal)).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("revalidates the selected profile again before activation health", async () => {
+    const stateRoot = join(baseDir, "isolator-state");
+    const { profileRoot } = await createIsolatorProfile(stateRoot, "claude", "work");
+    const restore = useIsolatorState(stateRoot);
+    const healthStages: string[] = [];
+    try {
+      const { service } = buildService({
+        providerFactory: contextProviderFactory((_provider, _context) => undefined,
+          request => { healthStages.push(request.stage); })
+      });
+      const prepared = await service.prepareSession(identity, [requirement({
+        provider: "claude",
+        profileName: "work",
+        mcpServiceIds: []
+      })]);
+      expect(prepared.ok).toBe(true);
+      if (!prepared.ok) return;
+      const launch = prepared.value.launches[0]!;
+      await rm(profileRoot, { recursive: true });
+
+      const activated = await service.verifyActivated({
+        launchId: launch.launch.launchId,
+        paneId: "pane-developer-profile",
+        nativeSession: NATIVE_SESSION
+      });
+      expect(activated.ok).toBe(false);
+      if (!activated.ok) expect(activated.error.message).toContain("bflow iso claude --name work");
+      expect(healthStages).toEqual(["preflight"]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps Claude native MCP state in the selected HOME rather than redirecting its config directory", async () => {
+    const stateRoot = join(baseDir, "isolator-state");
+    const { home } = await createIsolatorProfile(stateRoot, "claude", "personal");
+    const nativeStatePath = join(home, ".claude.json");
+    const nativeState = JSON.stringify({ mcpServers: { "bflow-fixture": { command: "/usr/bin/true" } } });
+    await writeFile(nativeStatePath, nativeState, { mode: 0o664 });
+    await mkdir(join(home, ".claude"), { mode: 0o700 });
+    await writeFile(join(home, ".claude", ".credentials.json"), '{"subscriptionType":"synthetic"}', { mode: 0o600 });
+    const restore = useIsolatorState(stateRoot);
+    const fake = createFakeProviderRunner({ scenario: "healthy" });
+    const invocations: ProviderCommandInvocation[] = [];
+    const runner: ProviderCommandRunner = { run: async invocation => {
+      invocations.push(invocation);
+      return fake.run(invocation);
+    } };
+    try {
+      const { service } = buildService({ runner });
+      const result = await service.prepareSession(identity, [requirement({
+        provider: "claude",
+        profileName: "personal",
+        mcpServiceIds: []
+      })]);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.report.ready).toBe(true);
+      expect(invocations.length).toBeGreaterThan(0);
+      expect(invocations.every(invocation => invocation.inheritEnvironment === false)).toBe(true);
+      expect(invocations.every(invocation => invocation.env?.["HOME"] === home)).toBe(true);
+      expect(invocations.every(invocation => invocation.env?.["CLAUDE_CONFIG_DIR"] === join(home, ".claude"))).toBe(true);
+      expect(result.value.launches[0]?.launch.env["HOME"]).toBe(home);
+      expect(result.value.launches[0]?.launch.env["CLAUDE_CONFIG_DIR"]).toBe(join(home, ".claude"));
+      expect(await readFile(nativeStatePath, "utf8")).toBe(nativeState);
+    } finally {
+      restore();
+    }
+  });
+
+  it("blocks a linked Codex profile when its configured readiness endpoint is down", async () => {
+    const stateRoot = join(baseDir, "isolator-state");
+    const { profileRoot } = await createIsolatorProfile(stateRoot, "codex", "work");
+    await writeFile(join(profileRoot, "codex-lb.mode"), "linked\n", { mode: 0o664 });
+    await writeFile(join(profileRoot, "codex-lb.url"), "http://127.0.0.1:1\n", { mode: 0o664 });
+    const restore = useIsolatorState(stateRoot);
+    const runner = createFakeProviderRunner({ scenario: "healthy" });
+    const run = vi.spyOn(runner, "run");
+    try {
+      await expectProfileBlocked("codex", "work", runner);
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it("uses a trusted linked Codex backend key in memory without persisting it", async () => {
+    const server = createServer((request, response) => {
+      response.writeHead(request.url === "/health/ready" ? 200 : 404);
+      response.end("ready");
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address() as AddressInfo;
+    const stateRoot = join(baseDir, "isolator-state");
+    const { profileRoot } = await createIsolatorProfile(stateRoot, "codex", "work");
+    await writeFile(join(profileRoot, "codex-lb.mode"), "linked\n", { mode: 0o664 });
+    await writeFile(join(profileRoot, "codex-lb.url"), `http://127.0.0.1:${address.port}\n`, { mode: 0o664 });
+    const restore = useIsolatorState(stateRoot);
+    const secret = "synthetic-codex-lb-key";
+    process.env.CODEX_LB_API_KEY = secret;
+    const contexts: ProviderAdapterContext[] = [];
+    try {
+      const { service, journal } = buildService({
+        providerFactory: contextProviderFactory((_provider, context) => contexts.push(context))
+      });
+      const result = await service.prepareSession(identity, [requirement({
+        provider: "codex",
+        profileName: "work",
+        mcpServiceIds: []
+      })]);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.report.ready).toBe(true);
+      const context = contexts.find(entry => entry.isolatorEnvironment !== undefined);
+      expect(context?.codexBackendUrl).toBe(`http://127.0.0.1:${address.port}/backend-api/codex`);
+      expect(context?.isolatorEnvironment?.["CODEX_LB_API_KEY"]).toBe(secret);
+      expect(context?.launchEnvironment?.["CODEX_LB_API_KEY"]).toBe(secret);
+      const launch = result.value.launches[0]!;
+      expect(launch.launch.env["CODEX_LB_API_KEY"]).toBe(secret);
+      expect(launch.launch.argv).not.toContain(secret);
+      expect(launch.environment.configFingerprint).not.toContain(secret);
+      expect(await readFile(join(identity.stateDirectory, "launch-journal.jsonl"), "utf8")).not.toContain(secret);
+      expect(await readFile(join(profileRoot, "profile.env"), "utf8")).not.toContain(secret);
+      expect(await journal.entries()).toHaveLength(1);
+    } finally {
+      restore();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("bounds linked-backend readiness by the operation deadline and cancellation signal", async () => {
+    let requests = 0;
+    const server = createServer(() => { requests++; });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address() as AddressInfo;
+    const stateRoot = join(baseDir, "isolator-state");
+    const { profileRoot } = await createIsolatorProfile(stateRoot, "codex", "work");
+    await writeFile(join(profileRoot, "codex-lb.mode"), "linked\n", { mode: 0o664 });
+    await writeFile(join(profileRoot, "codex-lb.url"), `http://127.0.0.1:${address.port}\n`, { mode: 0o664 });
+    const restore = useIsolatorState(stateRoot);
+    const runner = createFakeProviderRunner({ scenario: "healthy" });
+    const run = vi.spyOn(runner, "run");
+    try {
+      const { service } = buildService({ runner });
+      const started = Date.now();
+      const deadlineResult = await service.prepareSession(identity, [requirement({
+        provider: "codex",
+        profileName: "work",
+        mcpServiceIds: []
+      })], { timeoutMs: 5000, deadline: new Date(Date.now() + 150).toISOString() });
+      expect(requests).toBeGreaterThan(0);
+      expect(Date.now() - started).toBeLessThan(1000);
+      expect(deadlineResult.ok && deadlineResult.value.report.ready).toBe(false);
+      expect(run).not.toHaveBeenCalled();
+
+      const controller = new AbortController();
+      const cancelledService = buildService({ runner }).service;
+      const cancelled = cancelledService.prepareSession(identity, [requirement({
+        provider: "codex",
+        profileName: "work",
+        mcpServiceIds: []
+      })], { signal: controller.signal, timeoutMs: 5000 });
+      await expect.poll(() => requests >= 2).toBe(true);
+      controller.abort();
+      const cancelledResult = await cancelled;
+      expect(cancelledResult).toMatchObject({ ok: false, error: { code: "cancelled" } });
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      restore();
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("accepts the file modes produced by the bundled ai-isolator", async () => {
+    const stateRoot = join(baseDir, "engine-state");
+    const realHome = join(baseDir, "engine-home");
+    await mkdir(realHome, { mode: 0o700 });
+    const bin = join(baseDir, "engine-bin");
+    await mkdir(bin, { mode: 0o700 });
+    // Profile creation checks for a CLI even with --no-login, but must never launch it.
+    await writeFile(join(bin, "claude"), "#!/bin/sh\necho 'unexpected Claude launch' >&2\nexit 99\n", { mode: 0o700 });
+    const engine = join(import.meta.dirname, "../../../..", "apps", "cli", "isolation", "bin", "ai-isolator");
+    const generated = spawnSync("bash", [
+      "-c", 'umask 002; exec "$@"', "bflow-iso-test", engine, "claude", "--name", "work", "--no-login"
+    ], {
+      cwd: baseDir,
+      env: {
+        HOME: realHome,
+        PATH: `${bin}:/usr/bin:/bin`,
+        AI_ISOLATOR_HOME: stateRoot,
+        AI_ISOLATOR_SHELL: "bash"
+      },
+      encoding: "utf8"
+    });
+    expect(generated.status, generated.stderr).toBe(0);
+    const profileEnv = join(stateRoot, "profiles", "claude--work", "profile.env");
+    expect((await stat(profileEnv)).mode & 0o777).toBe(0o664);
+
+    const restore = useIsolatorState(stateRoot);
+    const runner = createFakeProviderRunner({ scenario: "healthy" });
+    try {
+      const { service } = buildService({ runner });
+      const result = await service.prepareSession(identity, [requirement({
+        provider: "claude",
+        profileName: "work",
+        mcpServiceIds: []
+      })]);
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value.report.ready).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it("accepts owner-owned profile children with original permissive modes under a private profile root", async () => {
+    const stateRoot = join(baseDir, "isolator-state");
+    const { profileRoot } = await createIsolatorProfile(stateRoot, "codex", "personal");
+    for (const directory of ["home", "config", "cache", "data", "state", "tmp"])
+      await chmod(join(profileRoot, directory), 0o775);
+    expect((await stat(profileRoot)).mode & 0o777).toBe(0o700);
+
+    const restore = useIsolatorState(stateRoot);
+    const runner = createFakeProviderRunner({ scenario: "healthy" });
+    try {
+      const { service } = buildService({ runner });
+      const result = await service.prepareSession(identity, [requirement({
+        provider: "codex",
+        profileName: "personal",
+        mcpServiceIds: []
+      })]);
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value.report.ready).toBe(true);
+    } finally {
+      restore();
+    }
   });
 
   it("forwards cancellation and the remaining deadline to every provider subprocess", async () => {

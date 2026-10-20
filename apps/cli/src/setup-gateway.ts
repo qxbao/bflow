@@ -263,8 +263,14 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
 
   const loadConfigured = async () => {
     const saved = GatewayConfigSchema.parse(await readJson(configPath));
-    if (saved.desiredDigest !== desiredDigest || saved.definitionDigest !== digest(saved.services) ||
-      digest(saved.operation) !== digest(operation) || saved.receiptPath !== receiptPath || digest(saved.paths) !== digest(platform.paths)) {
+    const mismatched = [
+      saved.desiredDigest !== desiredDigest && "desiredDigest",
+      saved.definitionDigest !== digest(saved.services) && "definitionDigest",
+      digest(saved.operation) !== digest(operation) && "operation",
+      saved.receiptPath !== receiptPath && "receiptPath",
+      digest(saved.paths) !== digest(platform.paths) && "paths"
+    ].filter(Boolean);
+    if (mismatched.length > 0) {
       const changes: string[] = [];
       const savedRoot = saved.operation.scope.kind === "machine" ? null : saved.operation.scope.workspaceRoot;
       if (savedRoot !== repositoryRoot || saved.approval?.repositorySelected !== approval.repositorySelected)
@@ -279,7 +285,7 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
           changes.push(`managed MCP services changed (added: ${added.join(", ") || "none"}; removed: ${removed.join(", ") || "none"})`);
         else if (digest(saved.approval) !== digest(approval)) changes.push("approved launch settings or tool pins changed");
       }
-      throw new Error(`${changes.length ? `Gateway ${changes.join("; ")}` : "Gateway configuration does not match the approved setup specification"}. ` +
+      throw new Error(`${changes.length ? `Gateway ${changes.join("; ")}` : "Gateway configuration does not match the approved setup specification"} (differs: ${mismatched.join(", ")}). ` +
         "Run 'bflow setup' in the requested directory to review and apply a new setup plan; --check does not change the existing Gateway.");
     }
     if (digest(saved.approval) !== digest(approval)) throw new Error("Gateway canonical launch approval changed");

@@ -1,8 +1,8 @@
 # Conditional TDD policy engine (P16)
 
-`@bflow/test-strategy` resolves risk-based TDD policy without executing tests,
-editing source, managing workflows, or accepting tasks. Its only workspace
-dependency is `@bflow/contracts`.
+`@bflow/test-strategy` phân giải TDD policy dựa trên rủi ro mà không thực thi test,
+không sửa source, không quản lý workflow và không chấp nhận task. Workspace dependency
+duy nhất của nó là `@bflow/contracts`.
 
 ```ts
 import {
@@ -23,97 +23,104 @@ assertEvidenceComplete(strategy);
 // Persist the returned TestStrategy using existing Runtime persistence ports.
 ```
 
-For `recommended`/`not_applicable`, record one successful aggregate
-`VerificationResult` with phase `verification`, then assert completion. Recommended
-TDD can be practiced voluntarily; an alternative verification receipt remains its
-mandatory submission. The phase APIs validate a policy dossier, not task acceptance.
+Với `recommended`/`not_applicable`, ghi một `VerificationResult` aggregate thành công
+với phase `verification`, rồi assert hoàn tất. Recommended TDD có thể được thực hành
+tự nguyện; một alternative verification receipt vẫn là nội dung nộp bắt buộc của nó.
+Các phase API xác thực một policy dossier, không phải việc chấp nhận task.
 
-## Contract boundary and input
+## Ranh giới contract và input
 
-`resolve(unknown)` parses `SpecificationSchema`, requires `runId` and at least one
-required acceptance criterion, then parses `metadata.conditionalTdd` with the
-exported `AssessmentSchema`. Other metadata, including P15's `metadata.sdd`, can
-coexist. See [the complete input example](examples/domain-logic.spec.json).
+`resolve(unknown)` parse `SpecificationSchema`, yêu cầu `runId` và ít nhất một
+acceptance criterion bắt buộc, rồi parse `metadata.conditionalTdd` bằng
+`AssessmentSchema` được export. Metadata khác, kể cả `metadata.sdd` của P15, có thể
+cùng tồn tại. Xem [ví dụ input đầy đủ](examples/domain-logic.spec.json).
 
-The private, versioned metadata payload supplies all seven assessment inputs:
+Payload metadata riêng tư, có phiên bản cung cấp cả bảy input của assessment:
 
-| Input | Source |
+| Input | Nguồn |
 | --- | --- |
 | Task type | `taskType`, `taskId` |
 | Acceptance criteria | Contract `Specification.acceptanceCriteria` |
-| Change impact | `changeImpact.surfaces`, behavior/determinism/regression flags, security/data impact and scope; `Specification.affectedPaths` |
-| Existing infrastructure | `infrastructure.readiness` and actual method/command pairs |
-| Testability | `testability.level` and concrete rationale (minimum 10 characters) |
-| Risk | Maximum of declared assessment/spec risk and security/migration signals |
-| Project conventions | `conventions.tdd`, required methods and suggested levels |
+| Change impact | `changeImpact.surfaces`, các cờ behavior/determinism/regression, security/data impact và scope; `Specification.affectedPaths` |
+| Existing infrastructure | `infrastructure.readiness` và các cặp method/command thực tế |
+| Testability | `testability.level` và rationale cụ thể (tối thiểu 10 ký tự) |
+| Risk | Giá trị lớn nhất của assessment/spec risk đã khai báo và các tín hiệu security/migration |
+| Project conventions | `conventions.tdd`, các method bắt buộc và test level đề xuất |
 
-Task/impact surfaces cover domain logic, bugs, contracts, validation,
-transformation, state machines, integration, refactoring, layout, infrastructure,
-configuration, documentation, formatting and exploration. Multiple impact surfaces
-take precedence over an innocuous task label. Behavioral criteria and non-document
-paths also contradict a documentation-only claim. This is structured assessment,
-not a semantic diff classifier: P19/P17 must compare assessments with actual changes.
+Task/impact surface bao gồm domain logic, bug, contract, validation, transformation,
+state machine, integration, refactoring, layout, infrastructure, configuration,
+documentation, formatting và exploration. Nhiều impact surface được ưu tiên hơn một
+task label vô hại. Behavioral criterion và các đường dẫn không phải tài liệu cũng
+mâu thuẫn với khẳng định chỉ-tài-liệu. Đây là assessment có cấu trúc, không phải
+semantic diff classifier: P19/P17 phải so sánh assessment với các thay đổi thực tế.
 
-Policy may be resolved before specification approval. Runtime must separately
-enforce accepted specifications and approvals before implementation. A full SDD
-specification already needs its contract-required strategy/decision; resolve a
-lightweight planning specification first, then compose the full document through
-P15. This package does not weaken full-SDD contract invariants.
+Policy có thể được phân giải trước khi phê duyệt specification. Runtime phải tách biệt
+thực thi các specification và approval đã chấp nhận trước khi implementation. Một
+full SDD specification đã cần strategy/decision theo yêu cầu contract; hãy phân giải
+một lightweight planning specification trước, rồi soạn tài liệu full qua P15. Package
+này không làm yếu các invariant full-SDD của contract.
 
-## Policy and output
+## Policy và output
 
-The return value is the existing contract `TestStrategy`, embedding a contract
-`TddDecision`. No new shared schema, port, migration or public wire shape is added.
+Giá trị trả về là `TestStrategy` contract hiện có, nhúng một `TddDecision` contract.
+Không thêm shared schema, port, migration hay public wire shape mới.
 
-| Mode | Typical assessment | Mandatory verification |
+| Mode | Assessment điển hình | Verification bắt buộc |
 | --- | --- | --- |
-| `required` | Repeatable logic, regression, API/validation/transformation/workflow behavior; feasible high-risk behavior or required project convention | Spec-derived Red, unchanged tests Green, successful rerun after refactor, all selected methods |
-| `recommended` | Integration/refactoring/exploration; behavior with incomplete infrastructure/testability | Successful independent alternative checks; explicit provisioning obligations for absent commands |
-| `not_applicable` | Pure documentation, formatting, layout, wiring or simple configuration with no behavioral target | Appropriate manual, visual, lint, schema, smoke or integration evidence |
+| `required` | Logic lặp lại được, regression, hành vi API/validation/transformation/workflow; hành vi rủi ro cao khả thi hoặc project convention bắt buộc | Red dẫn xuất từ spec, test không đổi Green, chạy lại thành công sau refactor, mọi method đã chọn |
+| `recommended` | Integration/refactoring/exploration; hành vi có infrastructure/testability chưa đầy đủ | Alternative check độc lập thành công; nghĩa vụ provisioning tường minh cho các command còn thiếu |
+| `not_applicable` | Thuần documentation, formatting, layout, wiring hoặc configuration đơn giản không có behavioral target | Evidence phù hợp dạng manual, visual, lint, schema, smoke hoặc integration |
 
-These are contextual defaults. Mixed behavior can require TDD regardless of label.
-Incomplete infrastructure prevents pretending that a runnable Red phase exists.
-Every selected behavioral method must have a configured command before TDD can be
-required. Existing regression checks for a behaviorless formatting/documentation
-change remain mandatory without manufacturing a failing-test-first target.
-Domain logic and bug fixes never resolve to `not_applicable`; this resolver does
-not manufacture or honor an unverified human-override boolean. High risk adds
-static analysis and review, and integration checks for behavioral work. Missing
-commands are exposed as provisioning conditions, never invented or silently waived.
+Đây là các mặc định theo ngữ cảnh. Hành vi hỗn hợp có thể yêu cầu TDD bất kể label.
+Infrastructure chưa đầy đủ ngăn việc giả vờ rằng có phase Red chạy được. Mỗi behavioral
+method được chọn phải có command đã cấu hình trước khi TDD có thể được yêu cầu. Các
+regression check hiện có cho thay đổi formatting/documentation không có hành vi vẫn
+bắt buộc mà không tạo ra target failing-test-first. Công việc characterization chỉ
+thay đổi các đường dẫn thuộc tệp test (`*.test.*`, `*.spec.*`, `test/`, `tests/`,
+`__tests__/`, `__fixtures__/`), không có logic, bug fix hay regression surface, được
+phân giải thành `not_applicable` và cần ghi nhận thành công rằng các test chạy qua trên
+code hiện tại. Characterization của domain logic (vẫn chỉ thay đổi tệp test, không có
+regression) được phân giải thành `recommended` với cùng loại evidence, để phase Red bất
+khả thi không chặn công việc. Tái hiện regression vẫn giữ mode `required`; nếu có bất kỳ
+đường dẫn production nào thì áp dụng policy thông thường. Domain logic và bug fix không
+bao giờ được phân giải thành `not_applicable` (contract cũng từ chối mode này nếu không
+có `humanOverrideApproved`); resolver không tự tạo ra hoặc chấp nhận một cờ human override
+chưa được xác minh. Rủi ro cao bổ sung static analysis và review, cùng integration check
+cho công việc có hành vi. Command còn thiếu được nêu thành điều kiện provisioning, không
+bị bịa ra hay âm thầm miễn trừ.
 
-Read `mode`/`rationale` from `tddDecision`; read required methods, suggested levels
-and evidence requirements from `metadata.conditionalTdd`. Contract
-`requiredTestLevels` represent selected method levels; extra project suggestions
-and regression/property suggestions remain in `suggestedTestLevels`. Required
-acceptance methods and project checks are preserved. All criteria receive stable
-spec-derived names; waived criteria do not silently remove verification obligations.
+Đọc `mode`/`rationale` từ `tddDecision`; đọc các method bắt buộc, test level đề xuất
+và evidence requirement từ `metadata.conditionalTdd`. `requiredTestLevels` của contract
+biểu diễn các level của method đã chọn; các đề xuất project bổ sung và đề xuất
+regression/property nằm trong `suggestedTestLevels`. Các acceptance method bắt buộc
+và project check được giữ nguyên. Mọi criterion nhận tên ổn định dẫn xuất từ spec;
+criterion được waive không âm thầm loại bỏ nghĩa vụ verification.
 
-`validate` re-evaluates policy against its stored assessment, rejecting mode,
-rationale, method, command and mapping downgrades. `validateAgainstSpecification`
-additionally binds it to an authoritative specification. Use the latter at
-integration ingress: self-consistency alone cannot authenticate an assessment.
-`validateAgainstSpecification(strategy, specification, decision?)` also accepts an
-optional `TddDecision` and rejects it when its `decisionId` or `mode` differs from
-the strategy's. Verification methods follow the contract `AcceptanceCriterion`
-`verificationMethod` enum (`smoke_test`, `visual_review`, `snapshot_test` and
-`schema_validation` are no longer separate methods; configuration and
-infrastructure changes use `typecheck`/`static_analysis`/`integration_test`, and UI
-layout uses `manual_review`). Existing valid per-criterion test-name mappings on a
-specification are preserved; otherwise mappings are derived from criterion IDs.
-The resolver rejects duplicate criterion IDs, and full-level or approved
-specifications that lack their required sections or approval metadata.
-Decision IDs are deterministic hashes of the relevant specification and assessment.
+`validate` đánh giá lại policy dựa trên assessment đã lưu, từ chối việc hạ cấp mode,
+rationale, method, command và mapping. `validateAgainstSpecification` còn ràng buộc
+nó với một specification có thẩm quyền. Dùng cái sau tại ingress tích hợp: tự nhất
+quán đơn thuần không thể xác thực một assessment.
+`validateAgainstSpecification(strategy, specification, decision?)` cũng nhận một
+`TddDecision` tùy chọn và từ chối nếu `decisionId` hoặc `mode` của nó khác của strategy.
+Các verification method theo enum `verificationMethod` của contract `AcceptanceCriterion`
+(`smoke_test`, `visual_review`, `snapshot_test` và `schema_validation` không còn là
+các method riêng; thay đổi configuration và infrastructure dùng
+`typecheck`/`static_analysis`/`integration_test`, và UI layout dùng `manual_review`).
+Các ánh xạ tên test theo criterion hợp lệ sẵn có trên một specification được giữ nguyên;
+nếu không, ánh xạ được dẫn xuất từ criterion ID. Resolver từ chối criterion ID trùng
+lặp, và các specification mức full hoặc đã phê duyệt thiếu section bắt buộc hay
+metadata phê duyệt. Decision ID là hash xác định của specification và assessment liên quan.
 
-## Evidence and persistence
+## Evidence và persistence
 
-`recordEvidence(unknown, unknown)` parses `TestStrategySchema` and
-`VerificationResultSchema`, validates all prior receipts, and returns a new
-`TestStrategy` with immutable-by-convention receipts in `metadata.tddEvidence`.
-It never mutates inputs. Identical receipt retries are idempotent; conflicting
-receipt IDs fail. The caller persists this contract value through existing ports.
-No polling directory, in-memory persistence adapter or fabricated artifact is used.
+`recordEvidence(unknown, unknown)` parse `TestStrategySchema` và
+`VerificationResultSchema`, xác thực mọi receipt trước đó, và trả về `TestStrategy`
+mới với các receipt bất biến theo quy ước trong `metadata.tddEvidence`. Nó không bao
+giờ thay đổi input. Retry receipt giống hệt là idempotent; receipt ID xung đột thì
+thất bại. Caller lưu giá trị contract này qua các port hiện có. Không dùng thư mục
+polling, adapter persistence in-memory hay artifact bịa đặt nào.
 
-Each result must supply `metadata.conditionalTdd` matching `EvidenceDetailsSchema`:
+Mỗi result phải cung cấp `metadata.conditionalTdd` khớp `EvidenceDetailsSchema`:
 
 ```json
 {
@@ -135,37 +142,36 @@ Each result must supply `metadata.conditionalTdd` matching `EvidenceDetailsSchem
 }
 ```
 
-Green/refactor phases omit `failureKind`, use zero exit codes and retain Red test
-revision/names/commands on an implementation revision. Refactor may retain Green's
-source revision when no cleanup is needed. Timestamps must follow the decision and
-preceding phase; attempts and stored artifacts must be distinct. Every required
-behavioral criterion must have Red evidence. Successful phases must cover every
-required criterion with its declared method, every required method globally, and
-every configured target command, including multiple suites at the same test level.
+Các phase Green/refactor bỏ `failureKind`, dùng exit code bằng 0 và giữ test
+revision/name/command của Red trên một implementation revision. Refactor có thể giữ
+source revision của Green khi không cần dọn dẹp. Timestamp phải đi sau decision và
+phase trước đó; attempt và artifact đã lưu phải khác nhau. Mỗi behavioral criterion
+bắt buộc phải có evidence Red. Các phase thành công phải bao phủ mọi criterion bắt
+buộc bằng method đã khai báo của nó, mọi method bắt buộc trên toàn cục, và mọi target
+command đã cấu hình, kể cả nhiều suite ở cùng test level.
 
-Observations reference the evaluated criterion's stored artifact. When multiple
-checks share one criterion, its evaluation can omit the aggregate `command` and
-`exitCode`; each automated observation still needs its own command and exit code.
-Red must include a failed behavioral observation and its nonzero evaluation exit
-code. Existing behavioral criteria and other checks may already pass in the Red
-suite; forcing those checks to fail is not TDD. Phase receipts must stay in the
-same verification cycle. Manual/visual observations require
-concrete summaries and stored artifacts. Infrastructure or unrelated failures cannot
-establish Red. All referenced artifacts must match the run/task and be ingested
-after the observation starts.
+Observation tham chiếu artifact đã lưu của criterion được đánh giá. Khi nhiều check
+dùng chung một criterion, việc đánh giá của nó có thể bỏ `command` và `exitCode`
+aggregate; mỗi automated observation vẫn cần command và exit code riêng. Red phải bao
+gồm một behavioral observation thất bại và exit code đánh giá khác 0 của nó. Các
+behavioral criterion hiện có và check khác có thể đã pass trong Red suite; ép các
+check đó thất bại không phải TDD. Các phase receipt phải nằm trong cùng verification
+cycle. Observation thủ công/trực quan cần tóm tắt cụ thể và artifact đã lưu. Lỗi
+infrastructure hoặc không liên quan không thể xác lập Red. Mọi artifact được tham
+chiếu phải khớp run/task và được ingest sau khi observation bắt đầu.
 
-Only ArtifactStore may originate trusted references. This package validates receipt
-shape, binding, sequence and declared outcomes; it does not read artifact bytes,
-authenticate a caller, execute commands or inspect Git revisions. P17 must independently
-verify logs and revisions, and P19 must use the authoritative spec, persist receipts
-and enforce these checks through Runtime. `assertEvidenceComplete` is not an
-acceptance gate or a substitute for the bounded Verification Loop.
+Chỉ ArtifactStore mới có thể phát sinh trusted reference. Package này xác thực hình
+dạng receipt, ràng buộc, trình tự và outcome đã khai báo; nó không đọc byte artifact,
+không xác thực caller, không thực thi command và không kiểm tra Git revision. P17
+phải xác minh độc lập log và revision, còn P19 phải dùng spec có thẩm quyền, lưu
+receipt và thực thi các kiểm tra này qua Runtime. `assertEvidenceComplete` không phải
+acceptance gate cũng không thay thế Verification Loop có giới hạn.
 
-## Prompts and validation
+## Prompt và xác thực
 
-Integration prompt templates are in [prompts/](prompts/): assessment, required TDD,
-and alternative verification. They are assets for P19 integration and are not
-installed into another role's prompt ownership here.
+Các prompt template tích hợp nằm ở [prompts/](prompts/): assessment, required TDD
+và alternative verification. Chúng là asset cho tích hợp P19 và không được cài vào
+quyền sở hữu prompt của role khác ở đây.
 
 ```bash
 pnpm --filter @bflow/test-strategy typecheck
@@ -177,7 +183,7 @@ git diff --check
 git status --short
 ```
 
-Build precedes package tests. The package is registered in root TypeScript references
-and the workspace lockfile, so root build/typecheck commands include P16. See
-[REVIEW.md](REVIEW.md) for review fixes and integration evidence;
-[HANDOFF.md](HANDOFF.md) preserves the original implementation handoff.
+Build đi trước các package test. Package được đăng ký trong TypeScript reference gốc
+và workspace lockfile, nên các lệnh build/typecheck gốc bao gồm P16. Xem
+[REVIEW.md](REVIEW.md) cho các bản sửa review và evidence tích hợp;
+[HANDOFF.md](HANDOFF.md) lưu giữ bản bàn giao triển khai ban đầu.

@@ -1,216 +1,216 @@
-# Bflow CLI environment lifecycle (P12)
+# Vòng đời môi trường của Bflow CLI (P12)
 
-Build from the repository root with `pnpm build`, then run
-`node apps/cli/dist/bin.js <command>` (or the installed `bflow` executable).
-Node >=22.13 and the root's pinned pnpm are required for the existing storage runtime.
-Lifecycle locking requires Linux `flock` from util-linux on PATH.
+Build từ thư mục gốc của repository bằng `pnpm build`, sau đó chạy
+`node apps/cli/dist/bin.js <command>` (hoặc executable `bflow` đã cài).
+Cần Node >=22.13 và pnpm được pin ở root cho storage runtime hiện có.
+Việc khóa vòng đời yêu cầu `flock` của Linux (util-linux) có trong PATH.
 
 
-## First-time setup
+## Thiết lập lần đầu
 
-From a source checkout, run `pnpm build`, then `node apps/cli/dist/bin.js setup`.
-Setup previews the machine plan and asks once before applying it in an interactive
-terminal. Use `setup --yes` to approve that plan without a prompt. `--check` and
-`--dry-run` observe without creating directories, changing shell files or installing
-software. A non-interactive invocation without `--yes` reports the missing approval
-and exits with status 1.
+Từ một source checkout, chạy `pnpm build`, sau đó `node apps/cli/dist/bin.js setup`.
+Setup xem trước machine plan và hỏi một lần trước khi áp dụng trong một terminal
+tương tác. Dùng `setup --yes` để chấp thuận plan đó mà không cần prompt. `--check` và
+`--dry-run` chỉ quan sát, không tạo thư mục, không đổi file shell và không cài
+phần mềm. Một lần gọi không tương tác mà thiếu `--yes` sẽ báo thiếu phê duyệt
+và thoát với trạng thái 1.
 
-Machine installation belongs to the current account and works across repositories;
-`--dir` selects repository context without putting machine installs inside its
-`.bflow` directory. The CLI installs an owned `bflow` launcher and manages its PATH
-entry. Existing shell configuration is preserved. An already-open parent shell
-cannot receive environment changes from a child process; the output explains how
-to load the managed PATH when needed.
+Việc cài đặt trên machine thuộc về tài khoản hiện tại và dùng chung giữa các repository;
+`--dir` chọn ngữ cảnh repository mà không đặt các bản cài đặt machine vào thư mục
+`.bflow` của nó. CLI cài một launcher `bflow` do Bflow sở hữu và quản lý mục PATH
+của nó. Cấu hình shell sẵn có được giữ nguyên. Một shell cha đã mở không thể nhận
+thay đổi môi trường từ process con; đầu ra giải thích cách nạp PATH được quản lý khi cần.
 
-Default setup uses the reviewed, exact-version tool catalog for the supported
-platform: Herdr, Claude Code, Codex, Agy, RTK, GitNexus, Chrome DevTools MCP,
-MemPalace, Superpowers. MemPalace is installed from a checksum-pinned PyPI wheel into a
-Bflow-owned virtualenv (uv, or python3 >= 3.9 as fallback) and registered with the Gateway;
-your palace location and configuration are left untouched.
-Explicit machine pins are preserved. Provider login remains the account owner's
-interactive action; installing a CLI does not establish authentication. Upstream
-license conditions are shown in the installation diagnostics.
+Setup mặc định dùng catalog tool đã được review, với phiên bản chính xác, cho nền tảng
+được hỗ trợ: Herdr, Claude Code, Codex, Agy, RTK, GitNexus, Chrome DevTools MCP,
+MemPalace, Superpowers. MemPalace được cài từ một PyPI wheel được pin checksum vào một
+virtualenv do Bflow sở hữu (uv, hoặc python3 >= 3.9 làm phương án dự phòng) và được đăng ký với Gateway;
+vị trí và cấu hình palace của bạn được giữ nguyên.
+Các machine pin tường minh được bảo toàn. Đăng nhập provider vẫn là thao tác
+tương tác của chủ tài khoản; cài một CLI không thiết lập xác thực. Các điều kiện
+license của upstream được hiển thị trong chẩn đoán cài đặt.
 
-Setup configures the shared MCP Gateway as a current-user service and verifies
-upstream MCP negotiation and tool discovery. GitNexus indexing is scoped to the
-selected Git repository; outside a repository, installation proceeds and indexing
-is deferred until `bflow setup --dir <repository>`. Chrome uses a separate Bflow
-profile. Workflow roles connect to the background Gateway through its private
-`gateway-control.json` locator in the Gateway state directory. `bflow up` passes that
-locator to the host when it exists; setup does not establish those role connections.
+Setup cấu hình MCP Gateway dùng chung như một service của người dùng hiện tại và xác minh
+việc thương lượng MCP upstream cùng khám phá tool. Việc index GitNexus được giới hạn trong
+Git repository đã chọn; ngoài một repository, việc cài đặt vẫn tiếp tục và index
+bị hoãn đến khi chạy `bflow setup --dir <repository>`. Chrome dùng một profile Bflow
+riêng. Các workflow role kết nối tới Gateway chạy nền qua bộ định vị riêng
+`gateway-control.json` trong thư mục state của Gateway. `bflow up` truyền bộ định vị đó
+cho host khi nó tồn tại; setup không thiết lập các kết nối role này.
 
-Rerunning setup can add or update Gateway configuration while its GitNexus reader is
-active when `status --json` confirms a current index. Rebuilding a stale index still
-requires exclusive storage access; setup preserves a busy reader or writer lock.
-If that rebuild is blocked, the receipt identifies the retained lock and the Gateway
-startup step is blocked by its MCP configuration dependency. The final doctor still
-reports the incomplete setup. Release the reader or writer during maintenance before
-rerunning setup; setup does not stop an existing Gateway or reclaim retained locks.
+Chạy lại setup có thể thêm hoặc cập nhật cấu hình Gateway trong khi GitNexus reader của nó
+đang hoạt động, khi `status --json` xác nhận index hiện hành. Việc rebuild một index cũ
+vẫn yêu cầu quyền truy cập storage độc quyền; setup giữ nguyên lock reader hoặc writer đang bận.
+Nếu việc rebuild đó bị chặn, receipt chỉ rõ lock được giữ lại và bước khởi động
+Gateway bị chặn bởi phụ thuộc cấu hình MCP của nó. Doctor cuối cùng vẫn
+báo setup chưa hoàn tất. Hãy nhả reader hoặc writer trong lúc bảo trì trước khi
+chạy lại setup; setup không dừng một Gateway đang có và không thu hồi các lock được giữ.
 
-The result includes every step receipt and the final machine doctor report.
-Applied steps display their receipt status instead of a pending approval label.
-Partial application, failed health checks and missing approval return a nonzero
-exit status. A dry run with planned changes remains a successful preview.
+Kết quả bao gồm receipt của mọi bước và báo cáo machine doctor cuối cùng.
+Các bước đã áp dụng hiển thị trạng thái receipt thay vì nhãn chờ phê duyệt.
+Áp dụng một phần, health check thất bại và thiếu phê duyệt đều trả về
+exit status khác 0. Một dry run có thay đổi được lên kế hoạch vẫn là một bản xem trước thành công.
 
-Codex global hooks have a separate review flow and are not approved by normal
-`setup --yes`. Use `bflow setup --codex-hooks --plan` or `--check` to inspect the
-current hooks, commands, dependency file digests, and snapshot digest without
-writing approval state. `bflow setup --codex-hooks --apply` shows that inventory
-and asks for interactive approval. Non-interactive approval must pass both
-`--yes` and the exact `--hook-digest <sha256>` printed by the current review.
-Snapshot approval is tied to the inspected Codex home and hook snapshot; any changed hook
-or dependency needs a new review. This grants approval only for the inspected
-Codex hooks; it does not widen Bflow permissions or provide an OS sandbox. The
-inventory pins direct local scripts and resolved interpreters, not arbitrary
-transitive packages or runtime data; unsupported dynamic shell forms remain blocked.
-Explicitly enabled plugin hook sources are included when their local installation
-can be resolved unambiguously. Setup review and Runtime launches use the same
-environment with outer Orca pane selectors cleared only for Bflow child processes.
+Các Codex global hook có luồng review riêng và không được `setup --yes` thông thường phê duyệt.
+Dùng `bflow setup --codex-hooks --plan` hoặc `--check` để kiểm tra các hook,
+lệnh, digest của file phụ thuộc và digest của snapshot hiện tại mà không
+ghi trạng thái phê duyệt. `bflow setup --codex-hooks --apply` hiển thị bản kiểm kê đó
+và hỏi phê duyệt tương tác. Phê duyệt không tương tác phải truyền cả
+`--yes` và đúng `--hook-digest <sha256>` được in ra từ lần review hiện tại.
+Phê duyệt snapshot gắn với Codex home và hook snapshot đã kiểm tra; mọi hook
+hoặc phụ thuộc thay đổi đều cần review lại. Việc này chỉ cấp phê duyệt cho
+các Codex hook đã kiểm tra; nó không mở rộng quyền của Bflow và không cung cấp OS sandbox. Bản
+kiểm kê pin các script cục bộ trực tiếp và interpreter đã resolve, không pin các package
+transitive tùy ý hay dữ liệu runtime; các dạng shell động không được hỗ trợ vẫn bị chặn.
+Các nguồn plugin hook được bật tường minh được bao gồm khi bản cài đặt cục bộ của chúng
+có thể resolve không mơ hồ. Review của setup và các lần launch của Runtime dùng cùng một
+môi trường, với các selector pane Orca bên ngoài chỉ bị xóa cho các process con của Bflow.
 
-To trust **all current and future global hooks** for the selected Codex home, including
-hooks/plugins Bflow cannot statically inspect, run:
+Để tin cậy **mọi global hook hiện tại và tương lai** của Codex home đã chọn, kể cả
+các hook/plugin mà Bflow không thể kiểm tra tĩnh, chạy:
 
 ```bash
 bflow setup --codex-hooks --apply --trust-all --yes
 ```
 
-This persists a private operator policy beside the snapshot receipt file
-(`codex-hook-approvals.policy.json`). The hook inventory no longer blocks startup;
-`--check` reports `approvalMode: trust_all` and says that source inspection is skipped.
-It does not edit hook/plugin files or provider settings. Bflow's required hooks,
-permissions, sandbox, auth and MCP checks remain active. The policy is scoped to
-the selected canonical Codex home and private approval store. Revoke it with
-`bflow setup --codex-hooks --apply --revoke-trust-all` to restore snapshot review.
-`--check`/`--plan` print warnings, without blocking, when the Codex home, `hooks.json`
-or `config.toml` is group/world-writable or not owned by the current user.
+Lệnh này lưu một chính sách operator riêng tư bên cạnh file snapshot receipt
+(`codex-hook-approvals.policy.json`). Bản kiểm kê hook không còn chặn khởi động;
+`--check` báo `approvalMode: trust_all` và nói rằng việc kiểm tra source bị bỏ qua.
+Nó không sửa file hook/plugin hay cài đặt provider. Các kiểm tra hook, permission,
+sandbox, auth và MCP bắt buộc của Bflow vẫn hoạt động. Chính sách được giới hạn trong
+Codex home chuẩn tắc đã chọn và private approval store. Thu hồi bằng
+`bflow setup --codex-hooks --apply --revoke-trust-all` để khôi phục việc review snapshot.
+`--check`/`--plan` in cảnh báo, không chặn, khi Codex home, `hooks.json`
+hoặc `config.toml` có quyền ghi cho group/world hoặc không thuộc sở hữu của người dùng hiện tại.
 
-After a successful manifest publication, `up` may start up to three preparatory host role
-checks while later panes launch. Only bindings matching the current prepared launch ID and
-fingerprint enter these checks; saved bindings from a previous generation wait for replacement.
-It waits for every required role and repeats the full fresh
-health/attestation gate at final activation. Only the equivalent Codex model execution probe
-can reuse a successful observation, for at most 30 seconds; native/tool/permission/skill proofs
-and role health are freshly checked. Startup cancellation and failure drain started checks
-and daemon proof writes before cleanup, including when a role RPC disconnected. The extra
-local checks add overhead, so this overlap has no measured live latency guarantee.
+Sau khi publish manifest thành công, `up` có thể khởi động tối đa ba lần kiểm tra role của host
+ở bước chuẩn bị trong khi các pane sau đó vẫn đang launch. Chỉ những binding khớp với launch ID và
+fingerprint đã chuẩn bị hiện tại mới vào các kiểm tra này; binding đã lưu từ thế hệ trước phải chờ thay thế.
+Nó chờ mọi role bắt buộc và lặp lại toàn bộ cổng health/attestation mới tại bước kích hoạt cuối cùng.
+Chỉ model execution probe tương đương của Codex mới có thể tái dùng một quan sát thành công, tối đa 30 giây; các bằng chứng
+native/tool/permission/skill và health của role được kiểm tra mới. Việc hủy và thất bại khi khởi động sẽ drain các kiểm tra đã bắt đầu
+và các lần ghi daemon proof trước khi dọn dẹp, kể cả khi một role RPC bị ngắt kết nối. Các
+kiểm tra cục bộ bổ sung làm tăng overhead, nên sự chồng lấp này không có đảm bảo độ trễ thực tế đã đo.
 
-`up --timeout <ms>` controls the complete startup budget, including host provider
-preparation. The host control call uses the remaining lifecycle deadline instead
-of a separate 30-second limit. Cancellation or deadline expiry prevents pane
-creation; cleanup drains pending preparation before revoking session resources.
-Preparation completes before the CLI records a pane dispatch intent. A timeout
-at that stage can therefore use the host shutdown barrier without a pane receipt.
-Each native Herdr agent-start wait is capped at 300000ms and bounded by the
-remaining lifecycle deadline, even when the repository config allows a 600000ms
-session startup. Insufficient launch budget fails locally before dispatch. Startup
-errors and automatic-cleanup outcomes are printed on separate lines.
-`down` reopens the existing host with its persisted platform and policy, even if
-the desired configuration has changed since startup.
-Human startup readiness errors group identical causes by provider, list affected roles
-and blocked checks once, and keep different causes, optional roles and cleanup outcomes visible.
-Hook failures point to the read-only hook plan command. Unrecognized report layouts retain
-their original diagnostics. Terminal sanitization, credential redaction and output bounds
-(256 lines / 64,000 characters) apply before and after grouping; JSON keeps the complete original report.
-Credential redaction also covers opaque command-line flags, environment assignments and JSON credential fields,
-including quoted values whose closing quote is missing from truncated subprocess output.
+`up --timeout <ms>` điều khiển toàn bộ ngân sách khởi động, bao gồm cả bước chuẩn bị provider
+của host. Lệnh gọi điều khiển host dùng phần deadline vòng đời còn lại thay vì
+giới hạn 30 giây riêng. Việc hủy hoặc hết deadline ngăn việc tạo pane; việc dọn dẹp
+drain phần chuẩn bị đang chờ trước khi thu hồi tài nguyên session.
+Bước chuẩn bị hoàn tất trước khi CLI ghi nhận ý định dispatch pane. Một timeout
+ở giai đoạn đó do đó có thể dùng host shutdown barrier mà không cần pane receipt.
+Mỗi lần chờ khởi động agent native của Herdr bị giới hạn ở 300000ms và bị chặn bởi
+deadline vòng đời còn lại, kể cả khi cấu hình repository cho phép session startup 600000ms.
+Ngân sách launch không đủ sẽ fail tại chỗ trước khi dispatch. Lỗi khởi động
+và kết quả tự động dọn dẹp được in ở các dòng riêng.
+`down` mở lại host hiện có với platform và policy đã lưu của nó, ngay cả khi
+cấu hình mong muốn đã thay đổi kể từ lúc khởi động.
+Các lỗi sẵn sàng khi khởi động dành cho người dùng gom các nguyên nhân giống nhau theo provider, liệt kê các role bị ảnh hưởng
+và các kiểm tra bị chặn một lần, đồng thời vẫn hiển thị các nguyên nhân khác nhau, role tùy chọn và kết quả dọn dẹp.
+Lỗi hook trỏ tới lệnh hook plan chỉ đọc. Các bố cục báo cáo không nhận diện được giữ
+nguyên chẩn đoán gốc. Việc làm sạch terminal, che credential và giới hạn đầu ra
+(256 dòng / 64.000 ký tự) áp dụng trước và sau khi gom nhóm; JSON giữ nguyên toàn bộ báo cáo gốc.
+Việc che credential cũng bao gồm các cờ command-line opaque, phép gán biến môi trường và các trường credential JSON,
+kể cả giá trị có dấu nháy mà dấu nháy đóng bị thiếu trong đầu ra subprocess bị cắt ngắn.
 
-| Command | Behavior |
+| Lệnh | Hành vi |
 | --- | --- |
-| `bflow init [--provider claude\|codex\|agy]` | Creates `.bflow/config.yml` and `.bflow/.gitignore` at the canonical Git root. Default provider is Codex. Repeat init preserves configuration; explicit `--force`/`--yes` replaces it. Does not invoke Herdr. |
-| `bflow config-migrate` | Validates one legacy `.bflow/config.yaml` or `.bflow/config.json`, writes `.bflow/config.yml`, saves the original bytes as `<legacy-path>.bak`, then removes the active legacy file. Conflicting sources or targets fail without overwriting. |
-| `bflow setup --codex-hooks --plan\|--check\|--apply` | Inspects the selected Codex home and reviews only global hooks. Plan/check are read-only; apply requires an interactive decision or `--yes --hook-digest <sha256>`. Never installs tools or services. |
-| `bflow up [--timeout <ms>]` | Checks executables, provider authentication and Herdr protocol; starts a named server, prepares the persistent P19 host with platform readiness (refusing to start panes when a required role is blocked), then calls P13. Waits for every required role and host activation acknowledgement before recording ready. Persists validated bindings and reuses live roles. |
-| `bflow attach` | Requires an existing manifest and a running matching session. Calls P13 to focus/validate Conversation, then runs `herdr session attach <name>` with inherited terminal I/O. |
-| `bflow down [--yes] [--force] [--timeout <ms>]` | Inspects active runs and dirty files. Quiesces Runtime intake/dispatch, recollects runs and requires durable aggregate checkpoints. Normal shutdown calls P13 graceful cleanup. `--force` includes confirmation and stops only the repository's owned named session directly, allowing recovery when pane/workspace lookup is stuck. Deletes no worktree, database, artifact, commit or source file. |
-| `bflow status` | Reports configuration, named server, panes/agents and missing executables. Labels persisted observations as potentially stale. Does not open the legacy workflow Runtime. |
-| `bflow recover --yes` | After stopping old CLI commands, migrates only an empty legacy lifecycle lock. Preserves state, panes, source and worktrees. |
-| `bflow doctor` | Reports Node/Git/pnpm/Herdr/agent dependencies, configuration/identity, permissions, lifecycle lock and P13 doctor findings. Returns exit 1 when checks fail. |
+| `bflow init [--provider claude\|codex\|agy]` | Tạo `.bflow/config.yml` và `.bflow/.gitignore` tại Git root chuẩn tắc. Provider mặc định là Codex. Chạy init lặp lại giữ nguyên cấu hình; `--force`/`--yes` tường minh sẽ thay thế. Không gọi Herdr. |
+| `bflow config-migrate` | Xác thực một `.bflow/config.yaml` hoặc `.bflow/config.json` cũ, ghi `.bflow/config.yml`, lưu các byte gốc thành `<legacy-path>.bak`, rồi xóa file cũ đang hoạt động. Nguồn hoặc đích xung đột sẽ fail mà không ghi đè. |
+| `bflow setup --codex-hooks --plan\|--check\|--apply` | Kiểm tra Codex home đã chọn và chỉ review các global hook. Plan/check chỉ đọc; apply yêu cầu một quyết định tương tác hoặc `--yes --hook-digest <sha256>`. Không bao giờ cài tool hay service. |
+| `bflow up [--timeout <ms>]` | Kiểm tra executable, xác thực provider và protocol Herdr; khởi động một server có tên, chuẩn bị persistent P19 host cùng platform readiness (từ chối khởi động pane khi một role bắt buộc bị chặn), rồi gọi P13. Chờ mọi role bắt buộc và xác nhận kích hoạt host trước khi ghi nhận ready. Lưu các binding đã xác thực và tái dùng các role đang sống. |
+| `bflow attach` | Yêu cầu một manifest sẵn có và một session khớp đang chạy. Gọi P13 để focus/xác thực Conversation, rồi chạy `herdr session attach <name>` với terminal I/O được kế thừa. |
+| `bflow down [--yes] [--force] [--timeout <ms>]` | Kiểm tra các run đang hoạt động và file dirty. Quiesce intake/dispatch của Runtime, thu thập lại các run và yêu cầu aggregate checkpoint bền vững. Shutdown thông thường gọi dọn dẹp graceful của P13. `--force` bao gồm xác nhận và chỉ dừng trực tiếp session có tên do repository sở hữu, cho phép khôi phục khi tra cứu pane/workspace bị kẹt. Không xóa worktree, database, artifact, commit hay source file nào. |
+| `bflow status` | Báo cáo cấu hình, server có tên, pane/agent và executable bị thiếu. Gắn nhãn các quan sát đã lưu là có thể đã cũ. Không mở workflow Runtime cũ. |
+| `bflow recover --yes` | Sau khi dừng các lệnh CLI cũ, chỉ migrate một lifecycle lock cũ rỗng. Giữ nguyên state, pane, source và worktree. |
+| `bflow doctor` | Báo cáo các phụ thuộc Node/Git/pnpm/Herdr/agent, cấu hình/định danh, quyền, lifecycle lock và các phát hiện doctor của P13. Trả về exit 1 khi có check thất bại. |
 
-If an interrupted shutdown blocks both normal `down` and `up`, run
-`bflow down --force`, then `bflow up`. Force uses the validated saved ownership
-manifest, skips live pane lookup/closure and verifies that the named Herdr server
-has stopped before finalizing `down`. Failed Runtime barriers or checkpoint writes
-remain errors. A timeout retains `stopping` state for reconciliation; force never
-means deleting `.bflow` or declaring active workflow tasks successful.
+Nếu một lần shutdown bị gián đoạn chặn cả `down` thông thường và `up`, chạy
+`bflow down --force`, rồi `bflow up`. Force dùng ownership manifest đã lưu và được xác thực,
+bỏ qua việc tra cứu/đóng pane trực tiếp và xác minh rằng server Herdr có tên
+đã dừng trước khi hoàn tất `down`. Runtime barrier hoặc ghi checkpoint thất bại
+vẫn là lỗi. Timeout giữ lại trạng thái `stopping` để đối soát; force không bao giờ
+có nghĩa là xóa `.bflow` hay tuyên bố các workflow task đang hoạt động là thành công.
 
-All commands support `--json`. Timeouts are milliseconds, 1–600000. `doctor` returns
-a diagnostic report even when unhealthy; the JSON envelope's `ok: true` means the
-report was produced, while `data.healthy` and exit code indicate environment health.
-`status` similarly returns exit 1 for invalid configuration. `status <run-id>` or
-status filters retain the existing workflow-run commands. Existing explicit
-`.bflow/config.yaml` and `.bflow/config.json` remain readable for compatibility when
-`.bflow/config.yml` is absent. Run `bflow config-migrate` to move one legacy config
-to the canonical path. `bflow init` will preserve and reject a legacy file until it
-has been migrated.
+Mọi lệnh đều hỗ trợ `--json`. Timeout tính bằng mili giây, 1–600000. `doctor` trả về
+báo cáo chẩn đoán ngay cả khi không khỏe; `ok: true` của JSON envelope nghĩa là
+báo cáo đã được tạo, còn `data.healthy` và exit code cho biết sức khỏe môi trường.
+`status` tương tự trả về exit 1 khi cấu hình không hợp lệ. `status <run-id>` hoặc
+các bộ lọc status giữ nguyên các lệnh workflow-run hiện có. Các
+`.bflow/config.yaml` và `.bflow/config.json` tường minh hiện có vẫn đọc được để tương thích khi
+`.bflow/config.yml` không tồn tại. Chạy `bflow config-migrate` để chuyển một config cũ
+sang đường dẫn chuẩn tắc. `bflow init` sẽ giữ nguyên và từ chối một file cũ cho đến khi
+nó được migrate.
 
-Configuration uses ordinary YAML 1.2 block style with comments. Agent roles are
-at the top; set each role's `cli`, optional `model`, and optional `effort` there.
-Omitting `model` uses the provider default. `effort` accepts `minimal`, `low`,
-`medium`, `high`, `xhigh`, or `max`, subject to the selected provider's support;
-Agy encodes effort in the model name and therefore rejects a separate `effort`.
-Defaults cover the existing workflow, SDD approval, conditional TDD, bounded
-verification and concurrency. The default composition passes these policies to
-the persistent P19 host; P12 does not implement Coordinator or workflow policy
-logic. Duplicate keys, multiple documents, non-string mapping keys, explicit tags,
-merge keys and cyclic or excessive aliases are rejected. A config copied/moved to
-another checkout fails identity validation instead of attaching to the original
-repository. A dynamically spawned Developer role without its own role entry
-inherits the Coordinator's provider, model and effort.
+Cấu hình dùng YAML 1.2 block style thông thường kèm chú thích. Các agent role nằm
+ở đầu file; đặt `cli`, `model` tùy chọn và `effort` tùy chọn của từng role tại đó.
+Bỏ `model` thì dùng mặc định của provider. `effort` chấp nhận `minimal`, `low`,
+`medium`, `high`, `xhigh` hoặc `max`, tùy theo hỗ trợ của provider đã chọn;
+Agy mã hóa effort trong tên model và do đó từ chối `effort` riêng.
+Các giá trị mặc định bao phủ workflow hiện có, phê duyệt SDD, conditional TDD, bounded
+verification và concurrency. Phần composition mặc định truyền các policy này cho
+persistent P19 host; P12 không triển khai logic Coordinator hay workflow policy.
+Khóa trùng lặp, nhiều document, khóa mapping không phải chuỗi, tag tường minh,
+merge key và alias vòng hoặc quá mức đều bị từ chối. Một config được sao chép/di chuyển sang
+checkout khác sẽ fail xác thực định danh thay vì gắn vào repository gốc. Một
+Config mặc định có entry `developer` với provider đã chọn khi init và `required: false`.
+Entry này là mẫu khởi chạy động trong worktree của task, không tạo pane thường trực khi
+`bflow up`. Có thể đặt CLI/model/effort/profile riêng cho Developer. Nếu bỏ entry này,
+Developer kế thừa provider, model, effort và profile của Coordinator.
 
-Session identity is `bf-` plus 20 hexadecimal characters of SHA-256 over the
-canonical checkout root and absolute Git directory. Equal repository basenames
-therefore remain isolated; linked worktrees have distinct identities. Herdr
-commands receive `HERDR_SESSION` explicitly. Inherited `HERDR_SOCKET`, pane,
-remote and other caller context is removed. No socket path is constructed or
-managed by Bflow. Explicit `HERDR_CONFIG_PATH` is retained.
+Định danh session là `bf-` cộng 20 ký tự hex của SHA-256 trên
+checkout root chuẩn tắc và thư mục Git tuyệt đối. Do đó các repository có basename giống nhau
+vẫn được cô lập; các linked worktree có định danh riêng. Các lệnh Herdr
+nhận `HERDR_SESSION` một cách tường minh. `HERDR_SOCKET`, pane, remote
+và các ngữ cảnh caller khác được kế thừa sẽ bị loại bỏ. Bflow không dựng hay
+quản lý đường dẫn socket nào. `HERDR_CONFIG_PATH` tường minh được giữ lại.
 
-## CLI Output Presentation, Progress, and Error Handling
+## Trình bày đầu ra CLI, tiến trình và xử lý lỗi
 
-### Color Precedence and Stream Resolution
-Bflow CLI formats human terminal output using a dedicated presentation engine without external dependencies. Color capabilities are resolved independently for `stdout` and `stderr`:
-1. **Explicit options**: Respected when provided via `CliContext.presentation` or formatter options.
-2. **`NO_COLOR`**: In the absence of an explicit option, non-empty `NO_COLOR` disables color output, overriding `FORCE_COLOR`.
-3. **`FORCE_COLOR="0"`**: Disables color output.
-4. **`FORCE_COLOR` (non-zero)**: Explicit non-zero values enable color output, including across piped streams (`isTTY: false`).
-5. **Terminal detection**: Otherwise, colors are enabled if the target stream has `isTTY: true` and `TERM !== "dumb"`.
-6. **Structured JSON**: When `--json` or `-j` is passed, output is guaranteed to be plain deterministic JSON with zero ANSI escape codes.
-7. **Custom I/O Collectors**: Caller-supplied `io` collectors (e.g. in test suites or programmatic embeds) default to plain, non-interactive output unless explicitly opting in via `context.presentation`.
+### Thứ tự ưu tiên màu và phân giải stream
+Bflow CLI định dạng đầu ra terminal cho người dùng bằng một presentation engine riêng, không phụ thuộc bên ngoài. Khả năng hiển thị màu được phân giải độc lập cho `stdout` và `stderr`:
+1. **Tùy chọn tường minh**: Được tôn trọng khi được cung cấp qua `CliContext.presentation` hoặc các tùy chọn formatter.
+2. **`NO_COLOR`**: Khi không có tùy chọn tường minh, `NO_COLOR` không rỗng sẽ tắt màu, ghi đè `FORCE_COLOR`.
+3. **`FORCE_COLOR="0"`**: Tắt màu.
+4. **`FORCE_COLOR` (khác 0)**: Các giá trị khác 0 tường minh bật màu, kể cả qua các stream piped (`isTTY: false`).
+5. **Phát hiện terminal**: Nếu không, màu được bật khi stream đích có `isTTY: true` và `TERM !== "dumb"`.
+6. **JSON có cấu trúc**: Khi truyền `--json` hoặc `-j`, đầu ra được đảm bảo là JSON tất định thuần túy với không có mã ANSI escape nào.
+7. **Custom I/O Collector**: Các `io` collector do caller cung cấp (ví dụ trong bộ test hoặc nhúng theo chương trình) mặc định dùng đầu ra thuần, không tương tác trừ khi chủ động chọn qua `context.presentation`.
 
-### Real-Time Observational Progress
-- Lifecycle and long-running commands (including `status`, `doctor`, documentation requests and hook review) stream real-time progress to human interactive `stderr` only.
-- Progress steps use sequential `[1]`, `[2]`, … markers (bold cyan when color is active). Setup plan summaries and both high-level command formatters use the same numbered layout and readable component labels.
-- Setup approval and dry-run previews group content-addressed skill bundles by store directory and count. Other targets retain their directory and file names, including repository changes; approval, elevation, blocked-platform flags, manual actions and command previews remain visible. `bflow setup --plan --json` includes the complete `data.preview` inventory with every bundle digest and exact target path.
-- `skills sync` uses the same target grouping. High-level commands show labeled identifiers and readable verdicts; tool/provider/backend checks put diagnostics and remediation on separate lines. Empty inventories are explicit. Human formatting does not change JSON verdicts, exit codes or approval requirements.
-- Ordinary process observations update one transient line instead of accumulating permanent logs. Failures, warnings, blocked steps and important diagnostics remain visible; command arguments and raw provider output are excluded from process observations.
-- Inspections of enumerated tool pins, MCP backends and Git worktrees display count-based bars (for example `[##----] 1/3`). Counts mean inspected units, including negative observations; they never prove readiness or success. Provider/network/verification waits use an indeterminate animation without estimated percentages.
-- Before any confirmation, animations stop while the caller shows the exact existing approval preview and reads input. Late ordinary observations are bounded to the latest 50; important diagnostics are retained separately. Timers and mutable lines clear before final output or errors, and animations remain disabled during Herdr attach.
-- Pipes, JSON, help/version and default custom collectors remain static. Embedders can provide `CliIo.progress` for transient lines and `CliIo.stderrRaw` for raw animated chunks when explicitly opting into interactive presentation.
-- Progress reporting is strictly informational (emitting in-flight phase transitions only) and never emits premature conclusive success claims (e.g. `Environment ready` or `Environment stopped`). Conclusive success is reported exclusively by command formatters after underlying operations, state persistence, and resource cleanup succeed.
-- `FORCE_COLOR` never enables progress streaming; progress strictly requires an interactive `stderr` stream (`isTTY: true && TERM !== "dumb"`).
-- Help and version commands never emit progress.
-- Final human output leads with the business outcome and the next action. Routine command IDs, numeric exit codes, successful internal steps, pane/process coordinates, repeated doctor checks and healthy inventory details stay in JSON. Run/task IDs, uncertain-delivery keys, approval scope, failed verification criteria/evidence and warning/error remediation remain visible.
-- Doctor shows one grouped report with healthy/skipped counts and actionable checks; status reports live versus persisted observations without claiming readiness from configuration validity. Verification escalation calls for human review rather than another automatic iteration. Documentation failures provide distinct credential, version, library, access, network and rate-limit guidance.
+### Tiến trình quan sát theo thời gian thực
+- Các lệnh vòng đời và chạy lâu (bao gồm `status`, `doctor`, yêu cầu tài liệu và review hook) stream tiến trình theo thời gian thực chỉ tới `stderr` tương tác của người dùng.
+- Các bước tiến trình dùng marker tuần tự `[1]`, `[2]`, … (cyan đậm khi màu đang bật). Tóm tắt plan của setup và cả hai formatter lệnh cấp cao dùng cùng bố cục đánh số và nhãn thành phần dễ đọc.
+- Bản xem trước phê duyệt và dry-run của setup gom các skill bundle định địa chỉ theo nội dung theo thư mục store và số lượng. Các đích khác giữ tên thư mục và file của chúng, kể cả các thay đổi repository; phê duyệt, nâng quyền, cờ nền tảng bị chặn, hành động thủ công và bản xem trước lệnh vẫn hiển thị. `bflow setup --plan --json` bao gồm toàn bộ bản kiểm kê `data.preview` với mọi bundle digest và đường dẫn đích chính xác.
+- `skills sync` dùng cùng cách gom đích. Các lệnh cấp cao hiển thị định danh có nhãn và kết luận dễ đọc; các check tool/provider/backend đặt chẩn đoán và hướng dẫn khắc phục ở các dòng riêng. Kiểm kê rỗng được nêu tường minh. Định dạng cho người dùng không đổi kết luận JSON, exit code hay yêu cầu phê duyệt.
+- Các quan sát process thông thường cập nhật một dòng tạm thời thay vì tích lũy log vĩnh viễn. Lỗi, cảnh báo, bước bị chặn và chẩn đoán quan trọng vẫn hiển thị; tham số lệnh và đầu ra thô của provider bị loại khỏi các quan sát process.
+- Việc kiểm tra các tool pin, MCP backend và Git worktree được liệt kê hiển thị thanh theo số lượng (ví dụ `[##----] 1/3`). Số lượng nghĩa là số đơn vị đã kiểm tra, bao gồm cả quan sát âm tính; chúng không bao giờ chứng minh readiness hay thành công. Các lần chờ provider/network/verification dùng hoạt ảnh không xác định, không có phần trăm ước lượng.
+- Trước mọi bước xác nhận, hoạt ảnh dừng trong khi caller hiển thị đúng bản xem trước phê duyệt hiện có và đọc input. Các quan sát thông thường đến muộn bị giới hạn ở 50 cái mới nhất; chẩn đoán quan trọng được giữ riêng. Bộ đếm thời gian và các dòng có thể thay đổi được xóa trước đầu ra cuối cùng hoặc lỗi, và hoạt ảnh vẫn bị tắt trong lúc Herdr attach.
+- Pipe, JSON, help/version và các custom collector mặc định vẫn tĩnh. Embedder có thể cung cấp `CliIo.progress` cho các dòng tạm thời và `CliIo.stderrRaw` cho các chunk hoạt ảnh thô khi chủ động chọn trình bày tương tác.
+- Báo cáo tiến trình hoàn toàn mang tính thông tin (chỉ phát các chuyển giai đoạn đang diễn ra) và không bao giờ phát các tuyên bố thành công kết luận quá sớm (ví dụ `Environment ready` hoặc `Environment stopped`). Thành công kết luận chỉ được báo bởi các formatter của lệnh sau khi các thao tác nền, lưu trạng thái và dọn dẹp tài nguyên thành công.
+- `FORCE_COLOR` không bao giờ bật stream tiến trình; tiến trình đòi hỏi nghiêm ngặt một stream `stderr` tương tác (`isTTY: true && TERM !== "dumb"`).
+- Lệnh help và version không bao giờ phát tiến trình.
+- Đầu ra cuối cùng cho người dùng mở đầu bằng kết quả nghiệp vụ và hành động tiếp theo. Command ID thông thường, exit code dạng số, các bước nội bộ thành công, tọa độ pane/process, các doctor check lặp lại và chi tiết kiểm kê khỏe mạnh được giữ trong JSON. Run/task ID, khóa uncertain-delivery, phạm vi phê duyệt, tiêu chí/bằng chứng verification thất bại và hướng dẫn khắc phục cảnh báo/lỗi vẫn hiển thị.
+- Doctor hiển thị một báo cáo gom nhóm với số lượng healthy/skipped và các check có thể hành động; status báo cáo quan sát live so với đã lưu mà không tuyên bố readiness từ tính hợp lệ của cấu hình. Verification escalation kêu gọi human review thay vì một vòng tự động khác. Lỗi tài liệu đưa ra hướng dẫn riêng cho credential, phiên bản, thư viện, quyền truy cập, mạng và rate limit.
 
-### Actionable Error Format
-Human error output follows a bounded, actionable format:
+### Định dạng lỗi có thể hành động
+Đầu ra lỗi cho người dùng theo một định dạng có giới hạn, có thể hành động:
 ```text
 Error [<code>]: <concise bounded explanation>
 Details: <safe scalar details: stage, role, provider, paneId, sessionId, workspaceRoot, taskId, runId>
 Next: <specific actionable next step>
 ```
-- **Sanitization & Redaction**: All human dynamic fields are stripped of ANSI escapes, C0 control characters (including carriage return `\r`), and C1 control sequences (`\u0080`–`\u009F`). Dynamic text is bounded against runaway terminal/subprocess dumps, and automatically redacted for sensitive tokens (`ghp_*`, `gho_*`, `ghu_*`, `ghs_*`, `ghr_*`, `sk-*`, `sk-ant-*`, Bearer tokens, JWTs, generic PKCS#8 / algorithm PEM private keys, passwords, and API keys).
-- **Handled JSON Intact**: Machine-readable JSON envelopes (`--json`) preserve exact unredacted error details and data structures for tooling integration.
-- **Single-Envelope Ownership**: Unexpected runtime errors and lifecycle close failures are validated against `ContractErrorSchema` and emitted in a single authoritative envelope, preventing conflicting output.
+- **Làm sạch & che thông tin (Sanitization & Redaction)**: Mọi trường động cho người dùng đều được loại bỏ ANSI escape, ký tự điều khiển C0 (kể cả carriage return `\r`) và chuỗi điều khiển C1 (`\u0080`–`\u009F`). Văn bản động bị giới hạn để chống tràn terminal/subprocess dump, và được tự động che các token nhạy cảm (`ghp_*`, `gho_*`, `ghu_*`, `ghs_*`, `ghr_*`, `sk-*`, `sk-ant-*`, Bearer token, JWT, khóa riêng PEM PKCS#8 / theo thuật toán chung, mật khẩu và API key).
+- **JSON được xử lý giữ nguyên**: Các JSON envelope đọc được bằng máy (`--json`) giữ chính xác chi tiết lỗi và cấu trúc dữ liệu chưa bị che để tích hợp với công cụ.
+- **Quyền sở hữu envelope duy nhất**: Các lỗi runtime bất ngờ và lỗi đóng vòng đời được xác thực theo `ContractErrorSchema` và phát trong một envelope có thẩm quyền duy nhất, tránh đầu ra mâu thuẫn.
 
-### Status and Shutdown Truthfulness
-- `formatDownOutput` strictly enforces that an environment status only permits claiming `[OK] Environment stopped` when the Herdr server process is confirmed stopped (`server: "stopped"`). A running server with missing or `down` manifest is never reported as stopped. For session manifests, `status: "down"` is required.
+### Tính trung thực của status và shutdown
+- `formatDownOutput` thực thi nghiêm ngặt rằng trạng thái môi trường chỉ cho phép tuyên bố `[OK] Environment stopped` khi process server Herdr được xác nhận đã dừng (`server: "stopped"`). Một server đang chạy với manifest thiếu hoặc `down` không bao giờ được báo là đã dừng. Với session manifest, yêu cầu `status: "down"`.
 
-### Interactive Attach Limitations
-`bflow attach` focuses the Conversation pane and invokes Herdr's interactive terminal attach (`herdr session attach <name>`).
-- **Limitation**: While `attach --json` returns an error envelope on non-interactive failure, an interactive attach session inherits Herdr's interactive TUI standard I/O streams and cannot provide a purely headless, pipe-safe JSON stream while attached.
-- Upon session exit, the human CLI truthfully reports `[OK] Returned from Conversation attach.`.
+### Hạn chế của Interactive Attach
+`bflow attach` focus pane Conversation và gọi interactive terminal attach của Herdr (`herdr session attach <name>`).
+- **Hạn chế**: Trong khi `attach --json` trả về error envelope khi thất bại không tương tác, một phiên interactive attach kế thừa các stream I/O chuẩn của TUI tương tác Herdr và không thể cung cấp một stream JSON thuần headless, an toàn với pipe trong lúc đang attach.
+- Khi thoát session, CLI cho người dùng báo trung thực `[OK] Returned from Conversation attach.`.
 
-## Default host and physical topology composition
+## Kết hợp host mặc định và topology vật lý
 
 P13 is composed automatically through `PaneManagerLifecycleAdapter`. It adapts
 `initializeTopology` / `reconcileTopology` to lifecycle `up`,
@@ -238,28 +238,28 @@ execution readiness before launching roles; model access alone is not readiness.
 The CLI does not print provider account diagnostics or infer authentication from an idle pane. First-use provider trust prompts can still block
 startup and require operator action in that named session.
 
-P13 receives an argv runner that explicitly selects this repository's named
-session. No global process environment is changed. Role CLI names must be supported
-Herdr agent kinds on PATH; custom executable paths and dynamic Developer roles
-cannot be configured as permanent roles.
+P13 nhận một argv runner chọn tường minh session có tên của repository này. Không có
+môi trường process toàn cục nào bị thay đổi. Tên CLI của role phải là các loại Herdr
+agent được hỗ trợ có trong PATH; đường dẫn executable tùy chỉnh và các Developer role động
+không thể được cấu hình thành permanent role.
 
-The adapter uses `FileSessionManifestStore` under `.bflow/state/panes/` rather
-than P13's default in-memory store. It validates repository identity on both reads
-and writes. P13 owns all workspace/tab/pane creation, agent startup and recovery
-logic. CLI never fabricates physical IDs. Both CLI and P13 are built through the
-CLI's TypeScript project reference; no manual composition module is needed for
-`up`, `attach`, `status` or `doctor`.
+Adapter dùng `FileSessionManifestStore` dưới `.bflow/state/panes/` thay vì
+store in-memory mặc định của P13. Nó xác thực định danh repository ở cả lần đọc
+và ghi. P13 sở hữu toàn bộ logic tạo workspace/tab/pane, khởi động agent và khôi phục.
+CLI không bao giờ bịa ID vật lý. Cả CLI và P13 được build qua project reference
+TypeScript của CLI; không cần module composition thủ công cho
+`up`, `attach`, `status` hay `doctor`.
 
-Shutdown uses the host's real intake/dispatch barrier, authoritative `findRuns`
-and `getRun` queries and persisted aggregate checkpoints. P13's `shutdownTopology`
-closes recorded panes only after those barriers succeed, then CLI stops only the
-repository's named Herdr session and explicitly stops the host. No no-op barrier
-or synthetic checkpoint is used. The local lifecycle seam uses the existing
-`CreateCheckpointCommand` and `RecoveryCheckpoint` contracts.
+Shutdown dùng intake/dispatch barrier thật của host, các truy vấn có thẩm quyền `findRuns`
+và `getRun` cùng aggregate checkpoint đã lưu. `shutdownTopology` của P13
+chỉ đóng các pane đã ghi nhận sau khi các barrier đó thành công, rồi CLI chỉ dừng
+session Herdr có tên của repository và dừng host một cách tường minh. Không dùng
+barrier no-op hay checkpoint giả. Lifecycle seam cục bộ dùng các contract
+`CreateCheckpointCommand` và `RecoveryCheckpoint` hiện có.
 
-Embedders pass `CliContext.environment.integration` or `openIntegration(input)`.
-To override the default P13 composition in the executable, the operator can set `BFLOW_ENVIRONMENT_MODULE` to an absolute
-ESM module exporting:
+Embedder truyền `CliContext.environment.integration` hoặc `openIntegration(input)`.
+Để ghi đè composition P13 mặc định trong executable, operator có thể đặt `BFLOW_ENVIRONMENT_MODULE` là đường dẫn tuyệt đối tới một
+module ESM export:
 
 ```ts
 export async function openBflowEnvironment({ repository, config, env }) {
@@ -276,44 +276,44 @@ export async function openBflowEnvironment({ repository, config, env }) {
 }
 ```
 
-`quiesce` must stop intake/dispatch and drain in-flight state writes for **all**
-repository runs. `checkpoint` must persist the authoritative aggregate, including
-approval, cancellation and recovery state, before returning its receipt. Returning
-an unpersisted snapshot is not sufficient. Schema/identity/version/sequence
-checks run at ingress. The factory is selected only through the operator's
-environment, never through repository configuration.
+`quiesce` phải dừng intake/dispatch và drain các lần ghi state đang chạy cho **mọi**
+run của repository. `checkpoint` phải lưu aggregate có thẩm quyền, bao gồm
+trạng thái phê duyệt, hủy và khôi phục, trước khi trả về receipt. Trả về
+một snapshot chưa được lưu là không đủ. Các kiểm tra schema/định danh/phiên bản/sequence
+chạy tại ingress. Factory chỉ được chọn qua môi trường của operator,
+không bao giờ qua cấu hình repository.
 
-The physical adapter's doctor report describes only topology; a healthy pane does
-not prove an SDLC run passed. A custom integration missing authoritative Runtime
-shutdown operations remains guarded, including with `--yes`. Provider hooks,
-role tools and workflow evidence require separate live verification. No full SDLC
-end-to-end claim follows from lifecycle checks.
+Doctor report của physical adapter chỉ mô tả topology; một pane khỏe không
+chứng minh một SDLC run đã passed. Một tích hợp tùy chỉnh thiếu các thao tác shutdown
+Runtime có thẩm quyền vẫn bị bảo vệ, kể cả với `--yes`. Provider hook,
+role tool và bằng chứng workflow cần được xác minh live riêng. Không có tuyên bố SDLC
+end-to-end đầy đủ nào suy ra từ các kiểm tra vòng đời.
 
-## Recovery and verification
+## Khôi phục và xác minh
 
-Runtime state is under `.bflow/state/`, with atomically replaced `session.json`
-and `operation.json`. P13's authoritative manifest is
-`.bflow/state/panes/<session>.manifest.json`; the CLI's `session.json` is its last
-validated observation. An active session's manifest is refreshed through P13
-health inspection before status/readiness decisions. A persistent kernel `flock`
-on `lifecycle.guard` serializes up/down/recover and releases on Ctrl+C, SIGKILL or
-crash. Never delete this guard inode. A legacy empty `lifecycle.lock` directory
-requires explicit `bflow recover --yes` after stopping old CLI commands; unrelated
-contents are never recursively removed. Unresolved role/server
-startup or shutdown delivery is retained. A pending startup can resume through
-P13 only when its validated physical topology receipt exists; missing receipts
-continue to forbid resend. A partial first startup can be shut down using that
-same receipt, with the normal Runtime barriers. A blocked role remains available for
-inspection and is recorded as degraded. No automatic forced kill is used during
-shutdown timeout. These guarantees target local filesystems and cooperative
-same-user processes; power-loss recovery and multi-host operation are unverified.
+Runtime state nằm dưới `.bflow/state/`, với `session.json`
+và `operation.json` được thay thế nguyên tử. Manifest có thẩm quyền của P13 là
+`.bflow/state/panes/<session>.manifest.json`; `session.json` của CLI là quan sát
+đã xác thực gần nhất của nó. Manifest của một session đang hoạt động được làm mới qua kiểm tra health
+của P13 trước các quyết định status/readiness. Một kernel `flock` bền vững
+trên `lifecycle.guard` tuần tự hóa up/down/recover và được nhả khi Ctrl+C, SIGKILL hoặc
+crash. Không bao giờ xóa inode guard này. Một thư mục `lifecycle.lock` cũ rỗng
+yêu cầu `bflow recover --yes` tường minh sau khi dừng các lệnh CLI cũ; nội dung không liên quan
+không bao giờ bị xóa đệ quy. Việc chuyển giao khởi động hoặc shutdown role/server
+chưa được giải quyết được giữ lại. Một lần khởi động đang chờ có thể tiếp tục qua
+P13 chỉ khi topology receipt vật lý đã xác thực của nó tồn tại; thiếu receipt
+vẫn cấm gửi lại. Một lần khởi động đầu tiên dở dang có thể được shutdown bằng
+chính receipt đó, với các Runtime barrier thông thường. Một role bị chặn vẫn khả dụng để
+kiểm tra và được ghi nhận là degraded. Không dùng kill cưỡng bức tự động khi
+shutdown timeout. Các đảm bảo này nhắm tới filesystem cục bộ và các process cùng người dùng
+hợp tác; khôi phục sau mất điện và vận hành đa host chưa được xác minh.
 
-The headless server's detached log relay writes a private mode-0600 log. It
-buffers complete lines across chunks before redaction, suppresses multiline PEM
-private keys and discards oversized log lines. These local logs are diagnostics,
-not trusted task-success evidence.
+Log relay tách rời của headless server ghi một log riêng tư mode-0600. Nó
+đệm các dòng hoàn chỉnh qua các chunk trước khi che, chặn các khóa riêng PEM nhiều dòng
+và loại bỏ các dòng log quá lớn. Các log cục bộ này là chẩn đoán,
+không phải bằng chứng task thành công đáng tin cậy.
 
-From the repository root:
+Từ thư mục gốc của repository:
 
 ```sh
 pnpm build
@@ -326,103 +326,184 @@ git diff --check
 git status --short
 ```
 
-Fake-runner tests cover equal repository names, canonical/symlink identity,
-repeat init/up, attach-before-up, blocked/missing roles, launch failure, timeout
-delivery ambiguity, lock contention, foreign manifests/attach targets,
-confirmation/checkpoint/graceful shutdown, and selective stop. Additional tests
-exercise the actual P13 class and file store through a stateful fake Herdr process
-runner: seven-role topology, persistence across CLI invocations, duplicate prevention,
-live health changes, Conversation focus, foreign manifests, scoped session env,
-blocked startup, unresolved-delivery diagnostics, cancellation, and missing Runtime shutdown APIs. The opt-in live
-test creates two isolated named headless sessions with a short temporary XDG
-configuration root, verifies protocol 22, stops one while the other stays running,
-and stops both before deleting test data. It never starts agents or opens TUI.
+Các fake-runner test bao phủ tên repository giống nhau, định danh canonical/symlink,
+init/up lặp lại, attach-before-up, role bị chặn/thiếu, launch thất bại, mơ hồ khi
+chuyển giao do timeout, tranh chấp lock, manifest/attach target lạ,
+xác nhận/checkpoint/graceful shutdown và selective stop. Các test bổ sung
+thực thi class và file store P13 thật qua một Herdr process runner giả có trạng thái:
+topology bảy role, lưu trữ xuyên các lần gọi CLI, ngăn trùng lặp,
+thay đổi health live, focus Conversation, manifest lạ, session env có phạm vi,
+khởi động bị chặn, chẩn đoán unresolved-delivery, hủy và thiếu Runtime shutdown API. Live
+test opt-in tạo hai headless session có tên được cô lập với một thư mục gốc cấu hình XDG tạm thời ngắn,
+xác minh protocol 22, dừng một session trong khi session kia tiếp tục chạy,
+và dừng cả hai trước khi xóa dữ liệu test. Nó không bao giờ khởi động agent hay mở TUI.
 
-Herdr 0.9.0 was observed to support `HERDR_SESSION`, `herdr server`,
-`status server --json`, protocol 22/schema 1, and `session stop <name> --json`.
-Long XDG/profile paths can exceed Linux Unix-socket path limits. Bflow surfaces
-the Herdr error; operators can select a shorter `XDG_CONFIG_HOME` consistently
-for their environment. Bflow does not guess or redirect socket paths.
+Herdr 0.9.0 được quan sát là hỗ trợ `HERDR_SESSION`, `herdr server`,
+`status server --json`, protocol 22/schema 1 và `session stop <name> --json`.
+Các đường dẫn XDG/profile dài có thể vượt giới hạn đường dẫn Unix-socket của Linux. Bflow đưa ra
+lỗi của Herdr; operator có thể chọn `XDG_CONFIG_HOME` ngắn hơn một cách nhất quán
+cho môi trường của mình. Bflow không đoán hay chuyển hướng đường dẫn socket.
 
-No verification configuration is needed. Agentic `up` detects the repository's test
-runner (vitest 2.x or `node --test`, with an optional `tsc` build) and uses it for
-`unit_test` and `integration_test` criteria. If none is detected, Conversation shows a
-notice and the Coordinator can add a setup task; no host restart is needed once the runner
-is installed. Owners may still add `.bflow/verification.json` as an optional advanced
-override for Node TAP or Vitest commands; the host pins that authority, and Coordinator
-cannot choose arbitrary shell commands. Measurements require Linux Bubblewrap. See
-[verification runners](../../docs/verification-runners.md).
+Runtime tự phát hiện các adapter JS/TS, Python, Go, Rust, JVM, .NET, Ruby, PHP và CTest
+cho tiêu chí `unit_test`, `integration_test` và `e2e_test`, với label và quy tắc tên test
+trong `planning_reference`. Thiếu runner/reporter của hệ sinh thái đã nhận diện được trả
+về Coordinator để tạo setup task có review; phát hiện được làm mới khi revision thay đổi.
+Owner vẫn có thể dùng `.bflow/verification.json` làm ghi đè Node TAP/Vitest tùy chọn.
+Executable và argv do Runtime quyết định, kết quả từng test có cấu trúc là bắt buộc.
+Phép đo yêu cầu sandbox: Linux Bubblewrap hoặc macOS Seatbelt cho các runner JS/owner
+được hỗ trợ. Mount/cache/report của adapter native và làm ấm dependency còn giới hạn Linux.
+Không có fallback chạy ngoài sandbox. Xem [ma trận và giới hạn verification](../../docs/verification-runners.md).
 
-Chat/Coordinator load their complete installed original prompts before the first
-turn. Claude uses a launch-local prompt file; Codex file launches use native
-`model_instructions_file`. Missing or unsafe assets fail clearly. Existing panes
-are preserved until an explicit checked restart; no silent conversation reset.
-Native startup waits for authenticated SessionStart receipts within the command
-deadline. A blocked provider reports the role, provider, exact pane/session and
-manual remediation without returning raw terminal output or accepting dialogs.
+Chat/Coordinator nạp đầy đủ các prompt gốc đã cài trước lượt đầu tiên.
+Claude dùng một prompt file cục bộ theo launch; các file launch của Codex dùng
+`model_instructions_file` native. Asset thiếu hoặc không an toàn sẽ fail rõ ràng. Các pane hiện có
+được giữ nguyên cho đến khi có một lần restart có kiểm tra tường minh; không reset hội thoại ngầm.
+Khởi động native chờ các SessionStart receipt đã xác thực trong deadline của lệnh.
+Một provider bị chặn báo role, provider, pane/session chính xác và
+hướng dẫn khắc phục thủ công mà không trả về đầu ra terminal thô hay chấp nhận dialog.
 
-## High-level Agentic SDLC commands (P29)
+## Các lệnh Agentic SDLC cấp cao (P29)
 
 `bflow repo inspect`, `task plan`, `task implement`, `verify`, `git prepare`, `mcp status`,
-`tool status`, `skills sync` and `agent check` give agents one goal-level command each. They
-reuse the Specification Engine, Conditional TDD Resolver, Verification Engine, Git Orchestrator,
-machine setup tool/MCP/skills components and the Agent Provider Registry through ports in
-`src/high-level/services.ts` and `HighLevelCliFacade`; the CLI adds parsing, ingress validation,
-idempotency receipts, permission stops and the structured envelope, never scheduling, gates or approvals.
+`tool status`, `skills sync` và `agent check` mỗi lệnh cho agent một lệnh cấp mục tiêu. Chúng
+tái dùng Specification Engine, Conditional TDD Resolver, Verification Engine, Git Orchestrator,
+các thành phần tool/MCP/skills của machine setup và Agent Provider Registry qua các port trong
+`src/high-level/services.ts` và `HighLevelCliFacade`; CLI bổ sung parsing, xác thực ingress,
+idempotency receipt, điểm dừng quyền và structured envelope, không bao giờ lập lịch, gate hay phê duyệt.
 
-Every command supports `--help` and `--json`. With `--json` the result is one
-`CommandExecutionResult`-based envelope on stdout and the process exit code matches it
-(0 success, 1 failed, 2 usage, 3 not ready, 4 not found, 5 permission required, 6 conflict,
-7 unknown state). Mutating commands keep receipts in `.bflow/state/cli/` and `.bflow/state/commands/`
-(must be Git-ignored), replay completed requests, serialize concurrent invocations and refuse to
-repeat an interrupted non-idempotent step until `--resume`.
+Mọi lệnh đều hỗ trợ `--help` và `--json`. Với `--json`, kết quả là một envelope dựa trên
+`CommandExecutionResult` trên stdout và exit code của process khớp với nó
+(0 thành công, 1 thất bại, 2 usage, 3 chưa sẵn sàng, 4 không tìm thấy, 5 cần cấp quyền, 6 conflict,
+7 trạng thái không xác định). Các lệnh thay đổi trạng thái giữ receipt trong `.bflow/state/cli/` và `.bflow/state/commands/`
+(phải được Git-ignore), phát lại các request đã hoàn tất, tuần tự hóa các lần gọi đồng thời và từ chối
+lặp lại một bước không idempotent bị gián đoạn cho đến khi có `--resume`.
 
-Agents and scripts should pass `--json`, parse the single envelope, and use the process exit
-code as the authoritative command result. Human output summarizes the command, its ordered
-steps, relevant domain findings and any next action; it does not print the complete result data.
-Color is resolved per output stream, and progress appears only on interactive human stderr. A
-successful command can still report a negative domain outcome such as `not_passed` or
-`not_ready`; those outcomes retain their documented exit codes.
+Agent và script nên truyền `--json`, parse envelope duy nhất và dùng exit code của process
+làm kết quả lệnh có thẩm quyền. Đầu ra cho người dùng tóm tắt lệnh, các bước theo thứ tự,
+các phát hiện domain liên quan và mọi hành động tiếp theo; nó không in toàn bộ dữ liệu kết quả.
+Màu được phân giải theo từng output stream, và tiến trình chỉ xuất hiện trên stderr tương tác của người dùng. Một
+lệnh thành công vẫn có thể báo kết luận domain âm tính như `not_passed` hoặc
+`not_ready`; các kết luận đó giữ exit code đã được tài liệu hóa.
 
-See [docs/command-reference.md](docs/command-reference.md), the generated
-[docs/command-reference.json](docs/command-reference.json) (checked by a unit test), and
-[COMMAND_REFERENCE.md](./COMMAND_REFERENCE.md) for the full contract and skill bindings,
-including current limitations (Linux `flock` for the P18 engine; MCP Gateway and verification
-gate runners still require real injected or composed ports). The default CLI Skills synchronizer
-uses the real skill manager and store with the pinned builtin catalog, while explicitly supplied
-service ports remain in effect. `bflow mcp status` reports `not_ready` without a Gateway health
-observation; a configured MCP file alone does not establish backend health.
+Xem [docs/command-reference.md](docs/command-reference.md), tệp được sinh
+[docs/command-reference.json](docs/command-reference.json) (được kiểm tra bởi một unit test) và
+[COMMAND_REFERENCE.md](./COMMAND_REFERENCE.md) để biết hợp đồng đầy đủ và các skill binding,
+bao gồm các hạn chế hiện tại (Linux `flock` cho engine P18; MCP Gateway và verification
+gate runner vẫn cần các port thật được inject hoặc composed). Skills synchronizer mặc định của CLI
+dùng skill manager và store thật với builtin catalog được pin, còn các
+service port được cung cấp tường minh vẫn có hiệu lực. `bflow mcp status` báo `not_ready` khi không có Gateway health
+observation; chỉ một file MCP đã cấu hình không thiết lập health của backend.
 
-### High-level command summary
+### Tóm tắt lệnh cấp cao
 
-| Command | Purpose | Reused SDLC engines | Key flags |
+| Lệnh | Mục đích | Các SDLC engine được tái dùng | Cờ chính |
 | --- | --- | --- | --- |
-| `bflow repo inspect` | Inspects workspace structure, conventions, and Git status for agent intake. | `ProjectContextService`, Git inspection | `--dir <path>`, `--include-files`, `--max-files <n>` |
-| `bflow task plan` | Decomposes a specification into a validated task DAG with acceptance criteria. | `SpecificationEngine`, Planner Agent | `--spec <path>`, `-w, --workflow <path>`, `--run-id <id>` |
-| `bflow task implement` | Implements a task in an isolated Git worktree under conditional TDD rules. | `DeveloperAgent`, `TestStrategyResolver`, `GitOrchestrator` | `<task-id>`, `--run-id <id>`, `--require-red-evidence` |
-| `bflow verify` | Executes task-level or workflow-level verification against acceptance criteria. | `VerificationEngine`, `QualityGates` | `[task-id]`, `--scope <task\|workflow>`, `--spec <path>` |
-| `bflow git prepare` | Prepares dependency-ordered branch integration and validates worktrees. | `GitOrchestrator` | `--run-id <id>`, `--target-branch <branch>`, `--auto-approve` |
-| `bflow mcp status` | Probes registered MCP tools and bridge connectivity. | `McpGateway` | `--service <id>` |
-| `bflow tool status` | Checks availability, version, and health of pinned tools (e.g. RTK). | `ToolInstaller`, `ToolCatalog` | `--tool <id>` (alias: `bflow tools status`) |
-| `bflow skills sync` | Synchronizes approved skills from catalog to agent provider storage. | `SkillManager`, `SkillStore` | `--list`, `--provider <claude\|codex\|agy>` |
-| `bflow agent check` | Validates provider readiness and activated health against contracts. | `AgentProviderRegistry` | `--provider <claude\|codex\|agy>`, `--stage <preflight\|activated>` |
+| `bflow repo inspect` | Kiểm tra cấu trúc workspace, quy ước và trạng thái Git để agent tiếp nhận. | `ProjectContextService`, Git inspection | `--dir <path>`, `--include-files`, `--max-files <n>` |
+| `bflow task plan` | Phân rã một specification thành task DAG đã xác thực với acceptance criteria. | `SpecificationEngine`, Planner Agent | `--spec <path>`, `-w, --workflow <path>`, `--run-id <id>` |
+| `bflow task implement` | Triển khai một task trong Git worktree cô lập theo quy tắc conditional TDD. | `DeveloperAgent`, `TestStrategyResolver`, `GitOrchestrator` | `<task-id>`, `--run-id <id>`, `--require-red-evidence` |
+| `bflow verify` | Thực thi verification cấp task hoặc cấp workflow theo acceptance criteria. | `VerificationEngine`, `QualityGates` | `[task-id]`, `--scope <task\|workflow>`, `--spec <path>` |
+| `bflow git prepare` | Chuẩn bị tích hợp nhánh theo thứ tự phụ thuộc và xác thực worktree. | `GitOrchestrator` | `--run-id <id>`, `--target-branch <branch>`, `--auto-approve` |
+| `bflow mcp status` | Probe các MCP tool đã đăng ký và khả năng kết nối bridge. | `McpGateway` | `--service <id>` |
+| `bflow tool status` | Kiểm tra tính khả dụng, phiên bản và health của các tool được pin (ví dụ RTK). | `ToolInstaller`, `ToolCatalog` | `--tool <id>` (alias: `bflow tools status`) |
+| `bflow skills sync` | Đồng bộ các skill đã duyệt từ catalog sang storage của agent provider. | `SkillManager`, `SkillStore` | `--list`, `--provider <claude\|codex\|agy>` |
+| `bflow agent check` | Xác thực provider readiness và activated health theo contract. | `AgentProviderRegistry` | `--provider <claude\|codex\|agy>`, `--stage <preflight\|activated>` |
 
 ```bash
 pnpm --filter @bflow/cli build
 pnpm exec vitest run apps/cli/test/high-level
 ```
 
-### Repositories on filesystems without private permissions
+### Repository trên filesystem không có quyền riêng tư
 
-`bflow up` automatically places private host/provider/runtime state in an owned,
-private per-repository directory under `$XDG_STATE_HOME/bflow/repositories` (default
-`~/.local/state/bflow/repositories`) when the repository filesystem cannot enforce
-private file/directory permissions. The source repository stays in place; no copy,
-manual chmod or symlink is needed. `bflow doctor` reports the effective location.
-A nonsecret repository-bound locator pins that location across environment changes;
-recovery and `down` reopen the same authority. Missing or invalid pinned storage
-blocks startup instead of replacing it. Existing lifecycle receipts
-and pane manifests remain repository-local. An old host config from an unstarted
-privacy-check failure is retained without reusing its token; prior host/run/platform
-authority requires reconciliation before relocation. Explicit legacy storage paths
-and other commands' independently configured stores are not rewritten.
+`bflow up` tự động đặt state riêng tư của host/provider/runtime vào một thư mục riêng tư,
+do Bflow sở hữu, theo từng repository dưới `$XDG_STATE_HOME/bflow/repositories` (mặc định
+`~/.local/state/bflow/repositories`) khi filesystem của repository không thể áp dụng
+quyền file/thư mục riêng tư. Source repository vẫn giữ nguyên tại chỗ; không cần sao chép,
+chmod thủ công hay symlink. `bflow doctor` báo vị trí hiệu lực.
+Một bộ định vị không bí mật gắn với repository pin vị trí đó qua các thay đổi môi trường;
+recovery và `down` mở lại cùng một authority. Storage được pin mà thiếu hoặc không hợp lệ
+sẽ chặn khởi động thay vì thay thế nó. Các lifecycle receipt và pane manifest hiện có
+vẫn nằm trong repository. Một host config cũ từ một lần fail kiểm tra quyền riêng tư
+khi chưa khởi động được giữ lại mà không tái dùng token của nó; thẩm quyền host/run/platform
+trước đó cần được đối soát trước khi di dời. Các đường dẫn storage cũ tường minh
+và các store được cấu hình độc lập của các lệnh khác không bị ghi lại.
+
+## Profile nhà cung cấp cô lập
+
+`bflow iso <command> [arguments]` chạy engine ai-isolator được đóng gói kèm. Dùng
+`bflow help iso` để xem ví dụ. Các đối số khởi chạy provider sau lệnh engine
+được truyền trực tiếp tới Bash dưới dạng từng đối số riêng, vì vậy các cờ provider như
+`--json` và `--help` không bị Bflow sử dụng. Executable giữ nguyên thư mục hiện tại,
+môi trường, đầu vào/đầu ra terminal và exit status của provider.
+
+Các lệnh gồm khởi chạy profile `codex`, `claude` và `agy`; `run <provider>`;
+`login <provider>`; `status` (liệt kê profile, trạng thái xác thực Agy chưa được xác minh);
+`remove <provider>`; `help`; và `version`. Lệnh riêng cho Codex `sync-skills` nhận
+`--name NAME` hoặc `--all`, cùng với `--source PATH` tùy chọn.
+
+Package cung cấp `isolation/bin/ai-isolator` bên cạnh cả `src` và `dist`; CLI
+phân giải đường dẫn này tương đối với module của chính nó, không phụ thuộc thư mục
+làm việc của caller. Cần Bash trong PATH; engine dùng Python 3.11 trở lên và
+curl hoặc wget để đồng bộ MCP và kiểm tra provider được liên kết. POSIX `ps` được
+sử dụng để dừng các process con của provider khi Bflow nhận SIGTERM. Trên Windows,
+cần môi trường Bash như Git Bash; chạy Windows native không được hỗ trợ và việc dọn
+process tree bằng tín hiệu qua Git Bash chưa được xác minh.
+
+Profile dùng bố cục state của ai-isolator tại
+`${AI_ISOLATOR_HOME:-$HOME/.local/share/ai-isolator}` và có thể được lệnh độc lập
+`ai-isolator` sử dụng lại khi trỏ tới cùng state root. ai-isolator v0.4.4 gốc hỗ trợ
+tương thích profile hai chiều với Codex và Claude. Hỗ trợ Agy là phần bổ sung của
+Bflow và phiên bản gốc đó không hỗ trợ Agy. `bflow iso login agy --name personal`
+mở giao diện onboarding native của Agy trong profile cô lập. `bflow iso status`
+liệt kê profile và đánh dấu xác thực Agy chưa được xác minh vì engine không dò xác thực
+Agy hoặc model. Engine isolation chỉ quản lý shell alias do nó đánh dấu và state thuộc
+profile; nó không cô lập workflow Bflow hoặc xác nhận provider/runtime đã sẵn sàng.
+Hãy kiểm tra cấu hình profile và shell trước khi dùng. CLI không đóng gói hoặc sao chép
+thông tin đăng nhập tài khoản provider.
+
+Khi đã có thư mục `profiles/` của ai-isolator, `bflow setup` thông thường thêm bước
+`isolator-profiles` cần được phê duyệt riêng sau khi cài native tool và cấu hình Gateway.
+Bước này chỉ kiểm tra và đồng bộ định nghĩa MCP, hướng dẫn skill đã duyệt cùng đăng ký/tài
+nguyên plugin do Bflow quản lý; xác thực profile, tùy chọn account/model, quyền và các mục
+cục bộ không liên quan vẫn được giữ riêng. `--check` và `--dry-run` chỉ kiểm tra. Bước này
+báo lỗi rõ ràng nếu Python/helper được pin, cấu hình nguồn native hoặc profile đích không
+hợp lệ, và xác minh kết quả sau khi áp dụng. Đích profile luôn dùng chung ai-isolator root:
+`AI_ISOLATOR_HOME` tường minh, hoặc home thật đáng tin cậy (hay `AI_ISOLATOR_REAL_HOME`
+khi đang ở trong profile) cộng với `.local/share/ai-isolator`. `BFLOW_HOME` chỉ thay đổi
+native source home; nó không di chuyển hoặc migrate profile hiện có. Để giữ profile đích
+trong sandbox, hãy đặt tường minh `AI_ISOLATOR_HOME=$BFLOW_HOME/ai-isolator` nhất quán
+cho `bflow setup`, `bflow iso` và `bflow up`. Với `BFLOW_HOME`, native provider source
+dùng các đường dẫn `providers/home`, `providers/codex` và `providers/claude` bên dưới nó,
+bất kể override của account bên ngoài. Ngoài chế độ isolated source này,
+`CODEX_HOME`, `CLAUDE_CONFIG_DIR` và `AI_ISOLATOR_CODEX_SKILLS_SOURCE` được tôn trọng
+khi được đặt tường minh. Đồng bộ này không xác thực profile hoặc chứng minh provider đang
+sẵn sàng trực tiếp.
+
+Để gắn role với profile đã tạo bằng `bflow iso`, hãy gộp YAML này vào phần
+`environment:` được tạo trong `.bflow/config.yml`. `profile-name` ở cấp role được ưu tiên
+hơn mặc định của provider đó:
+
+```yaml
+environment:
+  defaults:
+    codex:
+      profile-name: work
+    claude:
+      profile-name: personal
+    agy:
+      profile-name: work
+  roles:
+    - role: conversation
+      cli: claude
+    - role: coordinator
+      cli: codex
+      profile-name: lead
+```
+
+Giữ lại các trường policy và role entry khác được tạo khi gộp ví dụ này. Tên profile là
+bộ chọn, không phải hướng dẫn setup: `bflow up` không tạo profile, sao chép thông tin
+đăng nhập hoặc fallback về account HOME của provider. Profile không tồn tại, không hợp lệ
+hoặc sai provider sẽ chặn khởi chạy trước khi thực thi provider; hãy tạo và xác thực
+profile cô lập một cách tường minh trước khi chọn. Developer được khởi chạy động mà không
+có role đã cấu hình chỉ kế thừa profile được chọn của Coordinator khi dùng cùng provider
+với Coordinator.

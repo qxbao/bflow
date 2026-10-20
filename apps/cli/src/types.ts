@@ -15,7 +15,7 @@ import type {
   WorkflowRunSnapshot
 } from "@bflow/contracts";
 import type { ConcreteRuntimeService } from "@bflow/runtime";
-import type { HighLevelEnvelope, HighLevelExitCode } from "./high-level/envelope.js";
+import type { HighLevelEnvelope } from "./high-level/envelope.js";
 import type { HighLevelServices } from "./high-level/services.js";
 
 export type HighLevelCommandName =
@@ -73,8 +73,8 @@ export const CLI_EXIT_CODES = {
   USAGE_ERROR: 2
 } as const;
 
-/** Legacy commands use 0–2; high-level commands extend this with codes 3–7 (see HIGH_LEVEL_EXIT_CODES). */
-export type CliExitCode = (typeof CLI_EXIT_CODES)[keyof typeof CLI_EXIT_CODES] | HighLevelExitCode;
+/** External commands preserve their exact numeric exit status. */
+export type CliExitCode = number;
 
 export interface GlobalCliFlags {
   readonly json: boolean;
@@ -482,6 +482,8 @@ export interface PresentationOptions {
 export interface CliContext {
   readonly environment?: EnvironmentDependencies | undefined;
   readonly cwd?: string | undefined;
+  /** Test/embedded override for the bundled isolation engine location. */
+  readonly isoEnginePath?: string | undefined;
   readonly runtime?: RuntimeService | ConcreteRuntimeService | undefined;
   readonly io?: CliIo | undefined;
   readonly clock?: (() => Date) | undefined;
@@ -498,7 +500,7 @@ export interface CliContext {
 export interface CliExecutionResult {
   readonly exitCode: CliExitCode;
   readonly ok: boolean;
-  readonly command?: CliCommandName | undefined;
+  readonly command?: CliCommandName | "iso" | undefined;
   readonly stdout: string;
   readonly stderr: string;
   readonly data?: CliCommandData | undefined;

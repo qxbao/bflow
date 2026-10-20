@@ -108,6 +108,26 @@ export function parseTscBuildArgs(script: string): string[] | undefined {
   return rest;
 }
 
+/** Node flags a `node [flags] --test` script may carry; anything else is not forwarded and is not detected. */
+const NODE_TEST_FLAG = /^(--experimental-strip-types|--disable-warning=[A-Za-z][A-Za-z0-9_]*)$/;
+
+/**
+ * Returns the allowlisted node flags that precede `--test` in a script containing `node [flags] --test`, or undefined
+ * when the script has no such invocation. Only the first `node` invocation in the script is considered.
+ */
+export function parseNodeTestFlags(script: string): string[] | undefined {
+  const tokens = script.trim().split(/\s+/);
+  const start = tokens.indexOf("node");
+  if (start === -1) return undefined;
+  const flags: string[] = [];
+  for (const token of tokens.slice(start + 1)) {
+    if (token === "--test") return flags;
+    if (!NODE_TEST_FLAG.test(token)) return undefined;
+    flags.push(token);
+  }
+  return undefined;
+}
+
 /** A workspace package whose entry points resolve into `dist/` needs a build before tests can import it. */
 function pointsIntoDist(value: unknown): boolean {
   if (typeof value === "string") return /(^|\/)dist\//.test(value);
@@ -193,8 +213,9 @@ async function detect(repositoryRoot: string, nodeExecutable: string, fs: Detect
     }
   }
   if (!runner) {
-    if (typeof scripts.test === "string" && scripts.test.includes("node --test")) {
-      runner = { kind: "node_tap", args: ["--test", "--test-reporter=tap"] };
+    const nodeFlags = typeof scripts.test === "string" ? parseNodeTestFlags(scripts.test) : undefined;
+    if (nodeFlags !== undefined) {
+      runner = { kind: "node_tap", args: [...nodeFlags, "--test", "--test-reporter=tap"] };
       notes.push("node --test runner");
     } else {
       return unsupported(vitestProblem ?? "Không phát hiện runner kiểm thử được hỗ trợ (vitest 2.x hoặc node --test) / No supported test runner detected (vitest 2.x or node --test)");

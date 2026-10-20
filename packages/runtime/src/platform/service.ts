@@ -16,6 +16,7 @@ import {
 import type { LiveReadinessObservation } from "@bflow/agent-providers";
 import { sha256Hex } from "./environment.js";
 import { fail, failWith, ok } from "./errors.js";
+import { IsolatorProfileResolver, type ResolvedIsolatorProfile } from "./isolator-profile.js";
 import type {
   GatewayRegistrationPort,
   GatewayRegistrationVerification,
@@ -48,6 +49,7 @@ export interface DefaultPlatformReadinessServiceDeps {
   readonly journal?: LaunchJournalPort | undefined;
   readonly signer: LaunchAttestationSigner;
   readonly codexLaunchEnvironment?: Readonly<Record<string, string>> | undefined;
+  readonly isolatorStateRoot?: string | undefined;
   readonly rolePrompt?: ((role: AgentRole) => string | undefined) | undefined;
   readonly nativeSessionHookCommand?: ((role: AgentRole, taskId?: string) => string | undefined) | undefined;
   /** Trusted host MCP servers and hooks for a role launch (provider-neutral; adapters render them). */
@@ -63,6 +65,7 @@ interface LaunchMaterial {
   readonly requirement: RolePlatformRequirement;
   readonly environment: AgentEnvironment;
   readonly context: ProviderAdapterContext;
+  readonly isolatorProfile?: ResolvedIsolatorProfile;
   readonly profile: AgentLaunchProfile;
   readonly prepared: PreparedRoleLaunch;
   readonly gatewayTouched: boolean;
@@ -84,6 +87,7 @@ const GATEWAY_LOST_CODE = "gateway_registration_lost";
 interface RoleAttemptBase {
   readonly identity: PlatformSessionIdentity;
   readonly requirement: RolePlatformRequirement;
+  readonly isolatorProfile?: ResolvedIsolatorProfile;
   /** True once a Gateway register was attempted, so cleanup must revoke even after a failure. */
   readonly gatewayTouched: boolean;
 }
@@ -93,6 +97,7 @@ interface RoleReady extends RoleAttemptBase {
   readonly summary: RolePreflightSummary;
   readonly environment: AgentEnvironment;
   readonly context: ProviderAdapterContext;
+  readonly isolatorProfile?: ResolvedIsolatorProfile;
   readonly preflight: AgentHealthResult;
   readonly skills: ResolvedRoleSkills;
   readonly gateway: RoleGatewayAccess;
@@ -154,6 +159,20 @@ function withMessage(summary: RolePreflightSummary, extra: string): RolePrefligh
   return { ...summary, message: summary.message ? `${summary.message}; ${extra}` : extra };
 }
 
+function profileErrorForRole(requirement: RolePlatformRequirement, error: ContractError): ContractError {
+  const profileName = requirement.profileName;
+  const validName = profileName !== undefined && /^[A-Za-z0-9._-]+$/.test(profileName);
+  const selectedName = validName ? profileName : "<invalid>";
+  const remediation = validName
+    ? `Run 'bflow iso ${requirement.provider} --name ${profileName}'.`
+    : "Select a valid ai-isolator profile name.";
+  return {
+    ...error,
+    message: `Role ${requirement.role}, provider ${requirement.provider}, profile ${selectedName}: ${error.message}. ${remediation}`,
+    details: { ...(isRecord(error.details) ? error.details : {}), status: "blocked" }
+  };
+}
+
 /**
  * Composes role environment, skills, Gateway registrations and provider readiness into
  * fail-closed launch material. Nothing is launched unless every required role is ready.
@@ -163,9 +182,31 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
   private readonly identities = new Map<string, PlatformSessionIdentity>();
   private generation: number | null = null;
   private readonly now: () => Date;
+  private readonly isolatorProfiles: IsolatorProfileResolver;
 
   constructor(private readonly deps: DefaultPlatformReadinessServiceDeps) {
     this.now = deps.now ?? (() => new Date());
+    this.isolatorProfiles = new IsolatorProfileResolver({
+      ...(deps.isolatorStateRoot !== undefined ? { stateRoot: deps.isolatorStateRoot } : {})
+    });
+  }
+
+  private async revalidateProfile(
+    requirement: RolePlatformRequirement,
+    expected: ResolvedIsolatorProfile | undefined,
+    options?: OperationOptions
+  ): Promise<OperationResult<void>> {
+    if (expected === undefined) return ok(undefined);
+    const current = await this.isolatorProfiles.resolve(requirement.provider, requirement.profileName!, options);
+    if (!current.ok) return failWith(profileErrorForRole(requirement, current.error));
+    if (canonicalReceiptJson(current.value.identity) !== canonicalReceiptJson(expected.identity)) {
+      return failWith(profileErrorForRole(requirement, {
+        code: "conflict",
+        retryable: true,
+        message: "profile identity changed after provider preflight"
+      }));
+    }
+    return ok(undefined);
   }
 
   async prepareSession(
@@ -265,6 +306,11 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     if (record.state === "degraded") return degradedFailure();
     const material = record.material;
     if (!material) return fail("conflict", "launch was released");
+    const profileCheck = await this.revalidateProfile(material.requirement, material.isolatorProfile, options);
+    if (!profileCheck.ok) {
+      record.state = "failed";
+      return profileCheck;
+    }
 
     const result = await this.deps.providers.verifyActivated({
       profile: material.profile,
@@ -476,6 +522,13 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       summary: summaryOf(requirement, statusOf(error), checksOf(error), error.message)
     });
 
+    let isolatorProfile: ResolvedIsolatorProfile | undefined;
+    if (requirement.profileName !== undefined) {
+      const resolvedProfile = await this.isolatorProfiles.resolve(requirement.provider, requirement.profileName, options);
+      if (!resolvedProfile.ok) return blocked(profileErrorForRole(requirement, resolvedProfile.error));
+      isolatorProfile = resolvedProfile.value;
+    }
+
     const skills = await this.deps.skills.resolveForRole(identity, requirement, environmentId);
     if (!skills.ok) return blocked(skills.error);
 
@@ -503,7 +556,10 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       gateway = granted.value;
     }
 
-    const environment = this.deps.environments.resolve(identity, requirement, {
+    const environmentRequirement = isolatorProfile === undefined
+      ? requirement
+      : { ...requirement, isolatorProfileIdentity: isolatorProfile.identity };
+    const environment = this.deps.environments.resolve(identity, environmentRequirement, {
       skillManifestDigest: skills.value.manifest.digest
     });
     if (!environment.ok) return blocked(environment.error);
@@ -524,12 +580,22 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     const extras = this.deps.hostLaunch?.(requirement.role, requirement.taskId);
     const tokenNames = Object.fromEntries(gateway.registrations.map(registration =>
       [registration.registrationId, tokenEnvironmentName(registration.registrationId)]));
+    const codexLaunchEnvironment = requirement.provider === "codex" && this.deps.codexLaunchEnvironment !== undefined
+      ? this.deps.codexLaunchEnvironment
+      : undefined;
+    const profileLaunchEnvironment = isolatorProfile === undefined
+      ? undefined
+      : { ...isolatorProfile.environment };
+    const launchEnvironment = isolatorProfile === undefined
+      ? codexLaunchEnvironment
+      : { ...(codexLaunchEnvironment ?? {}), ...profileLaunchEnvironment };
     const context: ProviderAdapterContext = {
       ...(rolePrompt !== undefined ? { rolePrompt } : {}),
       ...(requirement.model !== undefined ? { model: requirement.model } : {}),
       ...(requirement.effort !== undefined ? { effort: requirement.effort } : {}),
-      ...(requirement.provider === "codex" && this.deps.codexLaunchEnvironment !== undefined
-        ? { launchEnvironment: { ...this.deps.codexLaunchEnvironment } } : {}),
+      ...(launchEnvironment !== undefined ? { launchEnvironment: { ...launchEnvironment } } : {}),
+      ...(isolatorProfile !== undefined ? { isolatorEnvironment: { ...isolatorProfile.environment } } : {}),
+      ...(isolatorProfile?.backendUrl !== undefined ? { codexBackendUrl: isolatorProfile.backendUrl } : {}),
       mcpRegistrations: gateway.registrations,
       mcpObservations: gateway.observations,
       skillManifest: skills.value.manifest,
@@ -548,6 +614,7 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       gatewayTouched,
       environment: environment.value,
       context,
+      ...(isolatorProfile !== undefined ? { isolatorProfile } : {}),
       skills: skills.value,
       gateway
     };
@@ -567,6 +634,8 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
   /** Records the launch intent (journaled by readiness) and retains material for later activation. */
   private async launchRole(attempt: RoleReady, options?: OperationOptions): Promise<OperationResult<PreparedRoleLaunch>> {
     const { identity, requirement } = attempt;
+    const profileCheck = await this.revalidateProfile(requirement, attempt.isolatorProfile, options);
+    if (!profileCheck.ok) return profileCheck;
     const profile = await this.deps.providers.prepareLaunch(attempt.environment, attempt.context, identity.generation, options);
     if (!profile.ok) return failWith(profile.error);
 
@@ -598,6 +667,7 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
         requirement,
         environment: attempt.environment,
         context: attempt.context,
+        ...(attempt.isolatorProfile !== undefined ? { isolatorProfile: attempt.isolatorProfile } : {}),
         profile: profile.value,
         prepared,
         gatewayTouched: attempt.gatewayTouched

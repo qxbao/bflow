@@ -1,4 +1,4 @@
-# Bflow Platform v3 — Setup & Onboarding Guide
+# Bflow Platform v3 — Hướng dẫn thiết lập & onboarding
 
 Tài liệu này hướng dẫn cài đặt, thiết lập cấp máy (`bflow setup`), khởi tạo dự án (`bflow init`) và kiểm tra tính sẵn sàng (`bflow doctor`, `bflow agent check`) cho Bflow Platform v3.
 
@@ -129,6 +129,22 @@ bflow docs status
 
 `lookup` tìm từ thư mục hiện tại lên tới gốc repository (nên chạy được trong một package của monorepo, và dùng lockfile đặt ở gốc workspace), rồi lấy phiên bản đang dùng từ lockfile (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `uv.lock`, `poetry.lock`, `go.mod`, `Cargo.lock`) rồi manifest. Nó không bao giờ tự chuyển sang tài liệu mới hơn: nếu phiên bản đó không có tài liệu, kết quả nêu rõ và liệt kê các phiên bản có sẵn.
 
+### 3.2.2 Gateway của máy gắn với một workspace
+
+Gateway chạy nền là một dịch vụ của máy nhưng được cấu hình theo đúng một repository: workspace nơi chạy
+`bflow setup --apply --dir <repo>` gần nhất. Khi `bflow up` ở repository khác, các role cần Gateway bị chặn với
+thông báo `The machine Gateway is bound to workspace '<A>' but this operation targets '<B>'`. Cách khắc phục:
+chạy `bflow setup --apply --yes --dir <B>` để rebind (Gateway được khởi động lại). Chỉ một repository dùng
+Gateway tại một thời điểm.
+
+Hai nguyên nhân thường gặp khi `setup --apply` không đưa Gateway về trạng thái sẵn sàng:
+
+- `register_mcp:mcp-config: SingletonLock exists`: Chrome profile của setup còn khóa của tiến trình đã chết. Từ
+  bản hiện tại, khóa mà chủ sở hữu (host + pid) đã chết trên cùng máy được dọn tự động; khóa của tiến trình còn sống
+  vẫn chặn.
+- `launchctl bootstrap ... Input/output error` (macOS): `bootout` trả về trước khi launchd gỡ xong job. Setup
+  thử lại `bootstrap` có backoff.
+
 ### 3.3 Sửa chữa thiết lập bị hỏng (`--repair`)
 
 Nếu file `state.json`, `skills-store` hoặc cấu hình dịch vụ bị hỏng/thiếu:
@@ -150,6 +166,20 @@ bflow init
 Lệnh `bflow init` tạo:
 - `.bflow/config.yml`: Cấu hình dự án chuẩn, tên session Herdr, ánh xạ role $\to$ provider (`claude`, `codex`, `agy`), tham số `model` / `effort` theo từng role, chế độ quyền (`restricted`, `workspace_auto`, `unattended_isolated`) và giới hạn tài nguyên.
 - `.bflow/.gitignore`: Tự động loại trừ `state/`, `logs/`, `secrets/`, `worktrees/` và `*.db` để không bao giờ commit trạng thái nhạy cảm vào Git.
+
+Mặc định Claude Code hiện hộp thoại tin cậy repository ở mỗi pane mới, và `bflow up` dừng ở trạng thái
+`blocked` cho tới khi bạn chọn. Để Bflow ghi sẵn sự chấp nhận đó, đặt tường minh trong `.bflow/config.yml`:
+
+```yaml
+environment:
+  permissions:
+    trustedWorkspace: true
+```
+
+Khi `trustedWorkspace: true` và có role dùng Claude, `bflow up` ghi `projects[<repo>].hasTrustDialogAccepted = true`
+vào `$CLAUDE_CONFIG_DIR/.claude.json` (hoặc `~/.claude.json`). Chỉ đúng khóa đó được thay đổi, ghi atomic, và file
+không parse được sẽ được giữ nguyên. Đây là thay đổi cấu hình Claude của người dùng nên mặc định tắt; `false` vẫn
+chặn `up` như trước.
 
 Lệnh `bflow init` có tính idempotent: chạy lại lần 2 sẽ giữ nguyên cấu hình hiện có (`overwritten: false`). Nếu repository đang dùng định dạng cũ (`.bflow/config.yaml` hoặc `.bflow/config.json`), chạy `bflow config-migrate` để chuyển sang `.bflow/config.yml`.
 

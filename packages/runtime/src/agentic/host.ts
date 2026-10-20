@@ -23,6 +23,10 @@ import { readHostConfiguration, type HostConfiguration, type RoleLaunchDescripto
 import { digest, json, record, textField } from "./journal.js";
 import { COORDINATOR_TOOLS } from "./tools.js";
 import { USER_DECISION_TOOL, buildDecisionRequestMessage, guardDirectUserInteraction, parseUserDecisionToolInput } from "./decision-routing.js";
+import { AdmissionRejectedError, isNonRetryableDeliveryError } from "./runtime.js";
+import { permitsReadOnlyInvestigation } from "./read-only-git.js";
+import { schedulerStatusReport } from "./scheduler-status.js";
+import { boundConversationContext } from "./conversation-context-budget.js";
 import { openAgenticWorkspace, type AgenticWorkspaceHandle } from "./workspace.js";
 import { unwrap } from "./outbox.js";
 import { HostVerification, HostBehavioralFailure, DEFAULT_HOST_CHECKS } from "./host-verification.js";
@@ -97,6 +101,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   let preparation: Promise<unknown> | undefined;
   let activation: Promise<unknown> | undefined;
   let scheduler: Promise<unknown> | undefined, schedulerError: string | undefined, inboundError: string | undefined;
+  let schedulerTimerAlive = false, schedulerLastTickAt: string | undefined;
   const receipts = new HostReceiptJournal(join(configuration.directory, "authentication-receipts"), configuration.repositoryPath, configuration.sessionId);
   const roleTokens = new Map<string, AgentRole>();
   const launch: Record<string, RoleLaunchDescriptor> = {};
@@ -216,6 +221,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const nativeDeliver = async (message: RoleMessage, operationId = message.message_id) => {
     const sender = (await principal(AgentRoleSchema.parse(message.sender.role), textField(message.sender.pane_id)));
     if (message.sender.agent_id !== sender.agentId) throw new Error("Role message sender does not match authenticated pane");
+    // Runtime already refused this message; it is never typed into a pane again.
+    const refusal = await workspace?.runtime.inboundRejection(message.message_id);
+    if (refusal !== undefined) throw new AdmissionRejectedError(refusal);
     const previous = await receipts.nativeDelivery(operationId);
     if (previous) {
       const semanticMessage = (value: RoleMessage) => ({ ...value, message_id: undefined, occurred_at: undefined, idempotency_key: undefined });
@@ -236,14 +244,23 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         socket.on("data", chunk => { output += String(chunk); if (output.length > 1024 * 1024) { socket.destroy(); reject(new Error("Oversized native response")); }
           if (output.includes("\n")) { socket.end(); try { const response = record(JSON.parse(output.split("\n")[0]!)); if (response.error) reject(new Error(JSON.stringify(response.error))); else accept(); } catch (error) { reject(error); } } });
       });
-      // The plugin action is asynchronous. Wait for signed ingress acknowledgement, never resend.
+      // The plugin action is asynchronous. Wait for signed ingress acknowledgement, never resend. A refusal by Runtime
+      // arrives through the same ingress, so it is checked on a slower cadence than the acknowledgement itself.
       const deadline = Date.now() + 15_000;
+      let refusalCheckAt = 0;
       while (Date.now() < deadline) {
         if (deliveredMessageIds.has(message.message_id)) return json({ delivered: true, messageId: message.message_id });
+        if (Date.now() >= refusalCheckAt) {
+          refusalCheckAt = Date.now() + 250;
+          const refused = await workspace?.runtime.inboundRejection(message.message_id);
+          if (refused !== undefined) throw new AdmissionRejectedError(refused);
+        }
         await new Promise(accept => setTimeout(accept, 30));
       }
       throw new Error("Native delivery acknowledgement is uncertain; inspect/reconcile before replay");
     } catch (error) {
+      // A refusal is a settled answer, not an unknown delivery: no uncertain report and no resend.
+      if (isNonRetryableDeliveryError(error)) throw error;
       // Intent is recorded but no acknowledgement was observed: the delivery is unknown. Surface it; never resend here.
       await workspace?.runtime.reportUncertainNativeDelivery(message, operationId, redactString(String(error))).catch(() => undefined);
       throw error;
@@ -516,7 +533,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         behavioralCommands: behavioralCommands.map(({ id, command, method, levels, testNames, testPaths, reporter }) =>
           ({ id, command, method, levels, testNames, testPaths, reporter: reporter ?? "node_tap" })) });
     }
-    if (name === "host_status") return json({ active: !!workspace, quiesced, schedulerRunning: !!scheduler, schedulerError: schedulerError ?? null, inboundError: inboundError ?? null });
+    if (name === "host_status") return json({ active: !!workspace, quiesced, ...schedulerStatusReport({ timerAlive: schedulerTimerAlive, quiesced, workspaceOpen: !!workspace, tickInFlight: !!scheduler, lastTickAt: schedulerLastTickAt, error: schedulerError }), inboundError: inboundError ?? null });
     if (name === "read_role_pane") {
       // Read-only diagnostics for Conversation so it can explain a stalled run. Pane text is untrusted data: it is never
       // task-success evidence, an approval, or an instruction, and it is redacted and size-bounded before it leaves the host.
@@ -694,6 +711,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         const direct = guardDirectUserInteraction(role, tool);
         if (!direct.permitted) throw new Error(direct.reason);
         if (tool.startsWith("mcp__bflow__") || ["Read", "Glob", "Grep", "ToolSearch"].includes(tool)) return { permitted: true };
+        if (permitsReadOnlyInvestigation(role, tool, record(hook.tool_input).command)) return { permitted: true };
         if (role !== "developer" || !["Edit", "Write"].includes(tool)) throw new Error("Native mutation/command tool is unavailable for this role");
         await development.authorizeFileEdit(binding, hook); return { permitted: true };
       }
@@ -975,6 +993,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         } catch (error) {
           const reason = redactString(String(error));
           inboundError = reason; process.stderr.write(`Bflow inbound: ${reason}\n`);
+          // Runtime refused it and its notice is the report: retrying or dropping it again would only add a second one.
+          if (isNonRetryableDeliveryError(error)) { physicalPrompts.shift(); continue; }
           head.attempts++;
           if (head.attempts < MAX_INBOUND_ATTEMPTS) { head.retryAt = Date.now() + 250 * 2 ** head.attempts; break; }
           // Dropped only after bounded retries, and never silently: Runtime's run notice, or a direct receipt when that fails.
@@ -1019,8 +1039,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const timer = setInterval(() => {
     if (!workspace || quiesced || closing || scheduler) return;
     const task = workspace.runtime.tick(); scheduler = task;
-    void task.then(() => { schedulerError = undefined; }, error => { schedulerError = redactString(String(error)); process.stderr.write(`Bflow scheduler: ${schedulerError}\n`); }).finally(() => { if (scheduler === task) scheduler = undefined; });
+    void task.then(() => { schedulerError = undefined; }, error => { schedulerError = redactString(String(error)); process.stderr.write(`Bflow scheduler: ${schedulerError}\n`); }).finally(() => { schedulerLastTickAt = new Date().toISOString(); if (scheduler === task) scheduler = undefined; });
   }, 500);
+  schedulerTimerAlive = true;
   // F5: reconcile Gateway registrations periodically; lost ones degrade their launches until `bflow up` relaunches them.
   let verifyingGateway = false;
   const gatewayTimer = setInterval(() => {
@@ -1097,6 +1118,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const host = requireWorkspace();
     for (const { operationId, message } of await receipts.unacknowledgedNativeDeliveries()) {
       if (reportedUncertain.has(operationId)) continue;
+      // A refused delivery is settled by Runtime's refusal notice: it is not uncertain and is never resent.
+      if (await host.runtime.inboundRejection(message.message_id) !== undefined) { reportedUncertain.add(operationId); continue; }
       await host.runtime.reportUncertainNativeDelivery(message, operationId, "Native delivery acknowledgement was not observed; the message was not resent and needs reconciliation");
       reportedUncertain.add(operationId);
     }
@@ -1131,7 +1154,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   }, 15_000);
   watchdogTimer.unref();
   const close = async () => {
-    closing = true; clearInterval(timer); clearInterval(pump); clearInterval(gatewayTimer); clearInterval(inboxTimer); clearInterval(watchdogTimer);
+    closing = true; schedulerTimerAlive = false; clearInterval(timer); clearInterval(pump); clearInterval(gatewayTimer); clearInterval(inboxTimer); clearInterval(watchdogTimer);
     await drainRoleStartup(true);
     await activation?.catch(() => undefined);
     await nativeSessionWrites;
@@ -1177,6 +1200,7 @@ export function availableTools(role: AgentRole) {
   const draft = strictObject({ title: string, objective: string, kind: { type: "string", enum: ["feature", "bugfix", "refactor", "spike"] },
     sddLevel: { type: "string", enum: ["lightweight", "full"] }, priority: { type: "string", enum: ["low", "normal", "high", "critical"] },
     scopeDefined: { type: "boolean" }, isLargeTask: { type: "boolean" }, affectedPaths: array, acceptanceCriteriaDescriptions: array,
+    verificationMethods: { type: "array", items: { type: "string", enum: ["unit_test", "integration_test", "e2e_test", "typecheck", "lint", "static_analysis", "manual_review"] } },
     isRequirementChange: { type: "boolean" }, codeChangesAuthorized: { type: "boolean" }, ...targets,
     investigationTasks: { type: "array", items: strictObject({ objective: string, affectedPaths: array,
       codeChangesAuthorized: { type: "boolean", const: false } }, ["objective", "affectedPaths", "codeChangesAuthorized"]) }
@@ -1485,7 +1509,7 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
   if (event === "UserPromptSubmit" && configuration.role === "conversation") {
     const result = await callHost(configuration.socketPath, configuration.token, "user_prompt", { paneId, hook });
     const shownFirst = mustShowSection([...(record(result).notices as unknown[] ?? []), ...undisplayedNotices(result).map(item => item.notice)] as Parameters<typeof mustShowSection>[0]);
-    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: shownFirst + "Trusted Bflow user turn and Conversation context: " + JSON.stringify(result) } }) + "\n");
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: shownFirst + "Trusted Bflow user turn and Conversation context: " + JSON.stringify(boundConversationContext(result)) } }) + "\n");
     // Marked only after the context reached the provider; a crash before this line re-surfaces the notices.
     const ids = noticeIds(result);
     if (ids.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_surfaced", { paneId, nativeSessionId: textField(hook.session_id), messageIds: ids });

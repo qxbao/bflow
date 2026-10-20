@@ -1,4 +1,4 @@
-# Bflow Platform v3 — Security Audit Report (P24–P34)
+# Bflow Platform v3 — Báo cáo kiểm toán bảo mật (P24–P34)
 
 - **Ngày kiểm toán**: `2026-10-18`
 - **Baseline commit**: `da9e166d136b199c62f4b862141357180268567c`

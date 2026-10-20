@@ -46,6 +46,7 @@ import { executeSetupCommand } from "./setup-integration.js";
 import { codexHookSetupSucceeded, executeCodexHookSetup } from "./codex-hook-setup.js";
 import { migrateRepositoryConfig } from "./config-migration.js";
 import { CliProgress } from "./progress.js";
+import { isIsoInvocation, runIsolator } from "./iso.js";
 
 function loadPackageVersion(): string {
   try {
@@ -655,6 +656,14 @@ export async function runCli(
   argv: readonly string[],
   context?: CliContext | undefined
 ): Promise<CliExecutionResult> {
+  if (isIsoInvocation(argv)) {
+    return runIsolator(argv.slice(1), context);
+  }
+  if (argv[0] === "help" && argv[1] === "iso") {
+    const helpText = getIsoHelpText();
+    context?.io?.stdout(helpText);
+    return { command: "help", exitCode: 0, ok: true, stdout: helpText, stderr: "" };
+  }
   const useFacadePath =
     context?.highLevel !== undefined ||
     (context?.cwd !== undefined &&
@@ -696,4 +705,32 @@ export async function runCli(
   }
 
   return executeCommand(parseRes.value, context);
+}
+
+export function getIsoHelpText(): string {
+  return `Usage: bflow iso <command> [arguments]
+
+Run isolated provider profiles. Provider arguments are passed through unchanged.
+
+Commands:
+  codex, claude, agy  Launch a provider profile [--name NAME] [--] [ARGS...]
+  run <provider>      Launch a provider profile [--name NAME] [--] [ARGS...]
+  login <provider>    Start provider login/onboarding [--name NAME]
+  status              List profiles; Agy authentication is unverified
+  sync-skills         Sync Codex skills: --name NAME or --all [--source PATH]
+  remove <provider>   Remove a profile and its managed aliases
+  help                Show this help
+  version             Show engine version
+
+Examples:
+  bflow iso codex --name work -- --help
+  bflow iso run claude --name personal -- --help
+  bflow iso login agy --name personal
+  bflow iso status
+  bflow iso sync-skills --name work
+  bflow iso sync-skills --all
+
+Agy login opens Agy's native onboarding UI. Profile status does not probe Agy auth or models and reports its authentication as unverified. The original ai-isolator v0.4.4 supports two-way profile compatibility with Codex and Claude; Agy is a Bflow addition and is not supported by that original version.
+
+Requires Bash, Python 3.11 or newer, and curl or wget for MCP synchronization and linked-provider checks. POSIX ps is used to clean up provider processes when bflow receives SIGTERM. Git Bash process-tree cleanup is unverified.`;
 }

@@ -18,6 +18,7 @@ import {
   runDoctorDiagnostics,
   identifyRepository,
   defaultEnvironmentConfig,
+  renderEnvironmentConfigYaml,
   type RepositoryIdentity,
   type EnvironmentConfig,
   type EnvironmentProcessRequest,
@@ -429,6 +430,41 @@ describe("Task 2: Platform v3 Lifecycle & Doctor Integration", () => {
       const metadata = manifest.metadata as any;
       expect(metadata?.providerFallbacks).toBeDefined();
       expect(metadata.providerFallbacks[0]).toContain("fell back from 'claude' to 'codex'");
+    });
+
+    it("does not carry a provider-specific profile override across provider fallback", async () => {
+      const config = defaultEnvironmentConfig(repository, "test-repo", new Date(now), "codex");
+      config.environment.startupTimeoutMs = 5000;
+      config.environment.allowProviderFallback = true;
+      Object.assign(config.environment, { defaults: {
+        codex: { "profile-name": "work" },
+        claude: { "profile-name": "personal" }
+      } });
+      config.environment.roles = config.environment.roles.map(role => role.role === "coordinator"
+        ? Object.assign({ ...role, cli: "claude", fallbackCli: "codex" as const }, { "profile-name": "claude-lead" })
+        : role);
+      await writeFile(join(dir, ".bflow/config.yml"), renderEnvironmentConfigYaml(config));
+
+      let composedConfig: EnvironmentConfig | undefined;
+      const fixture = createMockManager(repository);
+      const lifecycle = new EnvironmentLifecycle(dir, {
+        runner,
+        providerOverrides: {
+          claude: { available: false, authenticated: false },
+          codex: { available: true, authenticated: true }
+        },
+        openIntegration: async input => {
+          composedConfig = input.config;
+          return { manager: fixture.manager };
+        }
+      });
+
+      const manifest = await lifecycle.up();
+      expect(manifest.status).toBe("up");
+      const coordinator = composedConfig?.environment.roles.find(role => role.role === "coordinator");
+      expect(coordinator).toMatchObject({ cli: "codex" });
+      expect(coordinator).not.toHaveProperty("profile-name");
+      expect(composedConfig?.environment).toHaveProperty("defaults.codex.profile-name", "work");
     });
 
     it("fails when provider is not authenticated", async () => {

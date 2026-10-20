@@ -40,12 +40,22 @@ async function checkoutDependencyMounts(command: BoundBehavioralCommand, checkou
   return mounts;
 }
 
-/** Linux runner boundary: an empty filesystem namespace with system tools,
+/** Runner boundary (Linux Bubblewrap; macOS Seatbelt in behavioral-sandbox-darwin.ts, which denies contents instead of hiding paths): an empty filesystem namespace with system tools,
  * committed checkout, and explicitly selected read-only dependencies. No host
  * home, credentials, sockets, Git metadata, network or writable repository.
  * `argv` selects the invocation (tests, or a profile's prepare step); the same executable runs both. */
 export async function sandboxBehavior(command: BoundBehavioralCommand, checkout: string, argv: string[], reporter?: string) {
-  if (process.platform !== "linux") throw new Error("Behavioral verification requires the verified Linux Bubblewrap sandbox");
+  if (process.platform === "darwin") {
+    if (command.adapter && (command.adapter.mounts.length || command.adapter.helpers?.length || !["node_tap", "vitest_json", "mocha_json"].includes(command.adapter.format)))
+      throw new Error("runner_setup_required: this adapter requires Linux toolchain/report sandbox support");
+    const readiness = await probeBehavioralSandbox();
+    if (readiness.status !== "ready") throw new Error(readiness.code + ": " + readiness.reason);
+    const checkoutMounts = await checkoutDependencyMounts(command, checkout);
+    await validateDependencyTrees([...(command.dependencyRoots ?? []), ...checkoutMounts.map(([from]) => from)], command.dependencySource);
+    const { sandboxBehaviorDarwin } = await import("./behavioral-sandbox-darwin.js");
+    return sandboxBehaviorDarwin(command, checkout, argv, reporter);
+  }
+  if (process.platform !== "linux") throw new Error("Behavioral verification requires the Linux Bubblewrap or macOS Seatbelt sandbox");
   const readiness = await probeBehavioralSandbox();
   if (readiness.status !== "ready") throw new Error(readiness.code + ": " + readiness.reason);
   const executable = readiness.executable;

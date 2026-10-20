@@ -1,19 +1,19 @@
 # @bflow/agent-providers
 
-`@bflow/agent-providers` implements the **Provider Adapters** package (Phase P25 of Bflow Platform v3).
-It manages external agent CLI discovery, capability detection, preflight and activated readiness observations, permission profile flag compilation, deterministic launch preparation, startup attestation signing/verification, and Herdr launch command generation across Claude Code, Codex CLI, and Antigravity CLI.
+`@bflow/agent-providers` triển khai package **Provider Adapters** (Phase P25 của Bflow Platform v3).
+Package này quản lý việc discovery CLI của agent bên ngoài, phát hiện capability, quan sát readiness ở giai đoạn preflight và activated, biên dịch cờ permission profile, chuẩn bị launch một cách xác định, ký/xác minh startup attestation, và sinh lệnh launch Herdr cho Claude Code, Codex CLI và Antigravity CLI.
 
-## Architectural Boundaries
+## Ranh giới kiến trúc
 
-In accordance with [docs/provider-contracts.md](../../docs/provider-contracts.md) and [AGENTS.md](../../AGENTS.md):
-- **Contracts-Only Leaf Dependency**: Depends exclusively on `@bflow/contracts` and `zod`. Never imports `@bflow/pane-manager`, `@bflow/runtime`, `@bflow/core`, or `apps/cli`.
-- **Launch Data Only**: Produces validated launch profiles and start command arguments only. Process execution and terminal pane lifecycle are strictly owned by Herdr and Pane Manager.
-- **Strict Version 3 Schema Validation**: All public inputs and outputs are validated with `@bflow/contracts` Zod schemas (`AgentHealthRequestSchema`, `AgentHealthResultSchema`, `AgentEnvironmentSchema`, `AgentLaunchProfileSchema`, `AgentLaunchAttestationSchema`).
-- **Secret Isolation**: Secrets are bound via opaque `secret://` references in `secretBindings` and resolved by the trusted host at launch. Raw secret tokens are forbidden in `argv`, `environmentVariables`, config files, or diagnostic reports.
+Theo [docs/provider-contracts.md](../../docs/provider-contracts.md) và [AGENTS.md](../../AGENTS.md):
+- **Leaf chỉ phụ thuộc Contracts**: Chỉ phụ thuộc `@bflow/contracts` và `zod`. Không bao giờ import `@bflow/pane-manager`, `@bflow/runtime`, `@bflow/core` hay `apps/cli`.
+- **Chỉ tạo dữ liệu launch**: Chỉ sinh launch profile đã validate và argument của lệnh start. Việc thực thi process và vòng đời terminal pane thuộc hoàn toàn về Herdr và Pane Manager.
+- **Validate schema Version 3 nghiêm ngặt**: Mọi input và output công khai đều được validate bằng Zod schema của `@bflow/contracts` (`AgentHealthRequestSchema`, `AgentHealthResultSchema`, `AgentEnvironmentSchema`, `AgentLaunchProfileSchema`, `AgentLaunchAttestationSchema`).
+- **Cô lập secret**: Secret được gắn qua tham chiếu `secret://` mờ trong `secretBindings` và được trusted host resolve lúc launch. Token bí mật dạng thô bị cấm trong `argv`, `environmentVariables`, file cấu hình hay báo cáo chẩn đoán.
 
 ---
 
-## Architecture Overview
+## Tổng quan kiến trúc
 
 ```mermaid
 flowchart TD
@@ -57,225 +57,268 @@ flowchart TD
 
 ---
 
-## Supported Providers
+## Các Provider được hỗ trợ
 
-| Provider | Executable | Installed / Target Version | Capabilities | MCP Transports | Unattended Support | Native Attestation |
+| Provider | Executable | Phiên bản cài đặt / mục tiêu | Capabilities | MCP Transports | Hỗ trợ Unattended | Native Attestation |
 | --- | --- | --- | --- | --- | --- | --- |
-| **Claude Code** (`claude`) | `claude` | 2.1.301 | Implementation, Review, Conversation | stdio, streamable_http | Yes (with OS sandbox / bwrap) | Yes |
-| **Codex CLI** (`codex`) | `codex` | 0.162.0 | Implementation, Review, Testing | stdio, streamable_http | Yes (with OS sandbox / bwrap) | Yes |
-| **Antigravity CLI** (`agy`) | `agy` | 1.4.0 | Implementation, Review | stdio, streamable_http | No (Uncertified) | No (Uncertified) |
+| **Claude Code** (`claude`) | `claude` | 2.1.301 | Implementation, Review, Conversation | stdio, streamable_http | Có (với OS sandbox / bwrap) | Có |
+| **Codex CLI** (`codex`) | `codex` | 0.162.0 | Implementation, Review, Testing | stdio, streamable_http | Có (với OS sandbox / bwrap) | Có |
+| **Antigravity CLI** (`agy`) | `agy` | 1.4.0 | Implementation, Review | stdio, streamable_http | Không (chưa chứng nhận) | Không (chưa chứng nhận) |
 
 ---
 
-## Health Checks Matrix (`checkHealth`)
+## Ma trận Health Check (`checkHealth`)
 
-`checkHealth` performs non-destructive observation without auto-login or modifying environment state.
-Every check returns `status: "passed" | "failed" | "unknown"`. Overall status is:
-- `"ready"`: Every check for the stage is `"passed"`.
-- `"unsupported"`: Provider capability is unsupported (e.g. Agy unattended execution, missing OS sandbox).
-- `"blocked"`: Operational failure (e.g. missing binary, expired authentication, insecure permissions).
+`checkHealth` thực hiện quan sát không phá hủy, không tự đăng nhập và không sửa trạng thái môi trường.
+Mỗi check trả về `status: "passed" | "failed" | "unknown"`. Trạng thái tổng thể là:
+- `"ready"`: Mọi check của giai đoạn đều `"passed"`.
+- `"unsupported"`: Capability của provider không được hỗ trợ (ví dụ thực thi unattended của Agy, thiếu OS sandbox).
+- `"blocked"`: Lỗi vận hành (ví dụ thiếu binary, authentication hết hạn, permission không an toàn).
 
-| Check | Stage | Description |
+| Check | Giai đoạn | Mô tả |
 | --- | --- | --- |
-| `binary` | preflight, activated | Validates executable presence, regular file, execute permissions, and digest matching `pinnedExecutableDigest`. |
-| `version` | preflight, activated | Inspects CLI version and verifies it satisfies minimum required semver (e.g. Claude >= 2.0.0, Codex >= 0.150.0). |
-| `authentication` | preflight, activated | Runs provider auth status (`claude auth status --json`, `codex login status`, `agy models`) and minimal execution probe (`--print`, `exec`). Distinguishes expired vs missing credentials. |
-| `environment` | preflight, activated | Validates canonical directory paths for `cwd` and `stateDirectory` (no symlinks), private `0o700` permissions, and absence of dangerous env variables (`LD_PRELOAD`) or secret tokens. |
-| `mcp` | preflight, activated | Verifies client transport compatibility and registration of all `requiredMcpServiceIds`. |
-| `launch_arguments` | preflight, activated | Validates that launch CLI flags match supported provider capabilities. |
-| `permissions` | preflight, activated | Validates permission profile constraints (`restricted`, `workspace_auto`, `unattended_isolated`). |
-| `skills` | preflight, activated | Verifies resolved skill manifest matches `environment.skillManifestDigest` and allowed role/provider bindings. |
-| `native_binding` | **activated only** | Verifies Ed25519 signature on `AgentLaunchAttestation`, matching executable/config digests on disk, and live pane interactive readiness. |
+| `binary` | preflight, activated | Xác minh sự hiện diện của executable, là regular file, quyền execute, và digest khớp `pinnedExecutableDigest`. |
+| `version` | preflight, activated | Kiểm tra phiên bản CLI và xác minh thỏa semver tối thiểu yêu cầu (ví dụ Claude >= 2.0.0, Codex >= 0.150.0). |
+| `authentication` | preflight, activated | Chạy auth status của provider (`claude auth status --json`, `codex login status`, `agy models`) và probe thực thi tối thiểu (`--print`, `exec`). Phân biệt credential hết hạn với thiếu credential. |
+| `environment` | preflight, activated | Xác minh đường dẫn thư mục canonical của `cwd` và `stateDirectory` (không symlink), quyền riêng tư `0o700`, và không có biến môi trường nguy hiểm (`LD_PRELOAD`) hay token bí mật. |
+| `mcp` | preflight, activated | Xác minh tương thích transport của client và đăng ký của mọi `requiredMcpServiceIds`. |
+| `launch_arguments` | preflight, activated | Xác minh các cờ CLI launch khớp với capability được provider hỗ trợ. |
+| `permissions` | preflight, activated | Xác minh các ràng buộc của permission profile (`restricted`, `workspace_auto`, `unattended_isolated`). |
+| `skills` | preflight, activated | Xác minh skill manifest đã resolve khớp `environment.skillManifestDigest` và các binding role/provider được phép. |
+| `native_binding` | **chỉ activated** | Xác minh chữ ký Ed25519 trên `AgentLaunchAttestation`, digest executable/config khớp trên đĩa, và readiness tương tác của pane đang chạy. |
 
 ---
 
-## Optional Codex model execution probe reuse
+## Tái sử dụng tùy chọn của Codex model execution probe
 
-A host adapter factory may create `createProviderExecutionProbeCoalescer({ runner })` once per
-underlying **raw** `ProviderCommandRunner`, then pass it as `executionProbeCoalescer` to its adapters.
-Keep the normal operation-bound runner for every other command. The coalescer owns independent
-waiter cancellation/timeouts and aborts its bounded subprocess when every waiter has left.
-By default it stores only in-flight entries. To opt into completed successful **model execution
-probe** reuse, pass `successfulResultTtlMs: 30_000` (or a shorter nonnegative duration) when
-creating the coalescer. Values above 30 seconds, negative or nonfinite values are rejected.
-The monotonic age starts at subprocess completion and is never extended by a cache hit.
-Expired successes require a new execution, including when they expire during snapshot validation.
-Retention is bounded to 128 successful observations per factory; expired entries are pruned on use.
-Omitted or zero TTL preserves overlapping-only behavior.
+Một host adapter factory có thể tạo `createProviderExecutionProbeCoalescer({ runner })` một lần cho mỗi
+`ProviderCommandRunner` **thô** bên dưới, rồi truyền nó làm `executionProbeCoalescer` cho các adapter của mình.
+Giữ runner ràng buộc theo operation thông thường cho mọi lệnh khác. Coalescer sở hữu việc hủy/timeout
+độc lập của từng waiter và hủy subprocess có giới hạn của nó khi mọi waiter đã rời đi.
+Mặc định nó chỉ lưu các entry đang chạy dở (in-flight). Để chọn tái sử dụng **model execution
+probe** thành công đã hoàn tất, truyền `successfulResultTtlMs: 30_000` (hoặc một khoảng không âm ngắn hơn) khi
+tạo coalescer. Giá trị trên 30 giây, âm hoặc không hữu hạn bị từ chối.
+Tuổi monotonic bắt đầu tính từ lúc subprocess hoàn tất và không bao giờ được kéo dài bởi một lần cache hit.
+Các thành công đã hết hạn yêu cầu thực thi lại, kể cả khi chúng hết hạn trong lúc validate snapshot.
+Việc lưu giữ bị giới hạn ở 128 quan sát thành công cho mỗi factory; entry hết hạn được dọn khi dùng.
+Bỏ qua hoặc đặt TTL bằng 0 giữ nguyên hành vi chỉ gộp các lần chạy chồng nhau.
 
-Only Codex opts in. Sharing requires matching session/repository/machine scope, canonical binary
-and digest, ping arguments (including model/effort and inherited isolation), cwd, effective process
-environment, environment variables/secret references and freshly observed account output. Keys are
-SHA-256 digests. Codex config/auth file identity and nanosecond change metadata, ancestor project
-config/instructions, approved hook sources/dependencies and approval receipts must stay unchanged.
-Bounded TOML inspection observes global and ancestor project config, including all profiles. Literal
-absolute `model_instructions_file` dependencies must remain safe regular files; simple basename
-`project_doc_fallback_filenames` are observed across cwd ancestors, including absence. Relative or
-ambiguous paths, unsupported values, unfamiliar file/path/directory selectors (including legacy
-instruction-file settings and `model_catalog_json`), or exceeded inspection limits disable reuse
-and coalescing and run individual probes. Config inspection retains dependency paths only; the
-snapshotter does not read `auth.json` credential bytes. Missing required `config.toml`/`auth.json`,
-symlinks, special files, inaccessible inputs or trust-all hook policies use individual probes.
-Changes during an eligible probe block that observation and require a fresh health check.
+Chỉ Codex chọn dùng. Việc chia sẻ yêu cầu khớp scope session/repository/machine, binary và digest
+canonical, argument ping (gồm model/effort và isolation kế thừa), cwd, môi trường process hiệu lực,
+biến môi trường/tham chiếu secret và output account vừa được quan sát mới. Các key là
+digest SHA-256. Danh tính file config/auth của Codex và metadata thay đổi mức nanosecond, config/instruction
+của project tổ tiên, nguồn/dependency hook đã được duyệt và approval receipt phải không đổi.
+Việc kiểm tra TOML có giới hạn quan sát config global và config project tổ tiên, gồm mọi profile. Các dependency
+`model_instructions_file` là đường dẫn tuyệt đối literal phải vẫn là regular file an toàn; các
+`project_doc_fallback_filenames` là basename đơn giản được quan sát trên các thư mục tổ tiên của cwd, kể cả việc vắng mặt. Đường dẫn tương đối hoặc
+mơ hồ, giá trị không được hỗ trợ, selector file/path/directory lạ (gồm các thiết lập instruction-file
+cũ và `model_catalog_json`), hoặc vượt giới hạn kiểm tra sẽ tắt việc tái sử dụng
+và coalescing và chạy từng probe riêng. Việc kiểm tra config chỉ giữ đường dẫn dependency; snapshotter
+không đọc byte credential của `auth.json`. Thiếu `config.toml`/`auth.json` bắt buộc,
+symlink, file đặc biệt, input không truy cập được hoặc chính sách hook trust-all sẽ dùng probe riêng lẻ.
+Thay đổi trong lúc một probe đủ điều kiện đang chạy sẽ chặn quan sát đó và yêu cầu health check mới.
 
-Every role still checks authentication, capabilities, environment, permission policy, skills,
-MCP, hook trust/drift and native launch attestation separately. A shared ping failure is never
-reused as the follower's proof; an unchanged follower executes its own ping within its original
-budget. Every completed hit revalidates the mutable snapshot before accepting it; drift or uncertainty
-blocks the observation and evicts it. Failed, rejected, aborted and timed-out executions are never
-retained. Each caller receives its own outcome object. There is no persistent or global/static
-cache, and no health, native launch, attestation or task proof is shared. Tests cover local command
-reduction for overlapping and sequential matching roles; this is not live provider/Herdr startup
-evidence or a same-UID filesystem isolation guarantee.
+Mọi role vẫn kiểm tra riêng authentication, capabilities, environment, permission policy, skills,
+MCP, hook trust/drift và native launch attestation. Một ping dùng chung bị lỗi không bao giờ
+được tái sử dụng làm bằng chứng cho follower; follower không đổi sẽ tự thực thi ping của mình trong
+ngân sách ban đầu. Mỗi cache hit đã hoàn tất đều revalidate snapshot có thể thay đổi trước khi chấp nhận; drift hoặc sự không chắc chắn
+sẽ chặn quan sát và evict nó. Các lần thực thi thất bại, bị từ chối, bị hủy và timeout không bao giờ
+được giữ lại. Mỗi caller nhận một outcome object riêng. Không có cache bền vững hoặc toàn cục/tĩnh,
+và không có health, native launch, attestation hay bằng chứng task nào được chia sẻ. Test bao phủ việc giảm lệnh cục bộ
+cho các role khớp chồng nhau và tuần tự; đây không phải bằng chứng khởi động provider/Herdr thật hay bảo đảm cô lập filesystem
+cùng UID.
+
+---
+
+## Isolator Profiles and Linked Codex Backends
+
+The trusted host may pass `ProviderAdapterOptions.isolatorEnvironment` after resolving an existing
+AI Isolator profile. The adapter does not read repository environment files or resolve profile
+names itself. With this option set, provider version, help, authentication, MCP inventory and
+execution probes receive the supplied environment and set `inheritEnvironment: false`, so the
+process runner passes only explicit variables to the subprocess. Omitting the option preserves the
+legacy inherited-environment behavior.
+
+Codex hook and MCP inspection uses the selected environment's `CODEX_HOME` or
+`$HOME/.codex`. The configured machine-owned `codexHookApprovalPath` remains outside that provider
+home. Agy uses the selected `HOME` directly; it does not copy authentication material from the
+outer process home or replace the selected home with a generated session home. The adapter does
+not write profile credentials or tokens into launch files.
+
+For a trusted linked Codex LB, the host may also supply `codexBackendUrl`. Codex readiness and
+launch arguments select `codex-lb` at `<root>/backend-api/codex` with the Responses API, websocket
+support, the `x-openai-actor-authorization` header, and native OpenAI auth disabled. Native
+`codex login status` is skipped only for this linked mode; the real `codex exec ... ping` remains
+required and its failure blocks readiness. If a trusted `CODEX_LB_API_KEY` is present, the adapter
+passes it only in the in-memory execution-probe environment and puts only its variable name in
+Codex configuration arguments. The Runtime remains responsible for supplying the selected
+environment and key to the launched pane.
 
 ---
 
 ## Permission Modes
 
-MCP permission patterns are derived from the same validated launch material as
-the MCP configuration, including host-provided `bflow` and selected Gateway
-registrations. Claude Conversation and Coordinator roles have no native repository
-tools; their configured MCP tools are explicitly allowed under `dontAsk` in both
-launch arguments and session settings. Unconfigured MCP servers receive no grant.
+Các pattern permission MCP được suy ra từ cùng launch material đã validate với
+cấu hình MCP, gồm `bflow` do host cung cấp và các Gateway registration được chọn. Các role Claude Conversation và Coordinator không có
+tool repository native; các tool MCP đã cấu hình của chúng được cho phép tường minh dưới `dontAsk` ở cả
+launch argument lẫn session settings. MCP server chưa cấu hình không nhận grant nào.
 
 1. **`restricted`**:
-   - Read-only filesystem (`filesystem: "read_only"`, `writableRoots: []`).
+   - Filesystem chỉ đọc (`filesystem: "read_only"`, `writableRoots: []`).
    - Claude: `--restricted`, `--tools "Read,Glob,Grep"`, `--permission-mode dontAsk`.
    - Codex: `--sandbox read-only`, `--ask-for-approval never`.
    - Agy: `--sandbox`, `--mode plan`.
 
 2. **`workspace_auto`**:
-   - Scoped workspace writes (`filesystem: "workspace_write"`), no global bypass.
+   - Ghi trong workspace theo scope (`filesystem: "workspace_write"`), không có global bypass.
    - Claude: `--restricted`, `--tools "Read,Glob,Grep,Edit,Write"`, `--permission-mode dontAsk`.
    - Codex: `--sandbox workspace-write`, `--ask-for-approval never`.
    - Agy: `--sandbox`, `--mode accept-edits`.
 
 3. **`unattended_isolated`**:
-   - Requires session scope and OS process sandbox (`/usr/bin/bwrap`) or container isolation.
-   - Prohibits machine-wide bypass flags (`--dangerously-skip-permissions`, `--dangerously-bypass-approvals-and-sandbox`, `danger-full-access`).
-   - Claude & Codex: Enforces OS sandbox verification.
-   - Agy: Reports `unsupported` (`agy_unattended_unsupported`) until officially certified.
+   - Yêu cầu session scope và OS process sandbox (`/usr/bin/bwrap`) hoặc cô lập container.
+   - Cấm các cờ bypass toàn máy (`--dangerously-skip-permissions`, `--dangerously-bypass-approvals-and-sandbox`, `danger-full-access`).
+   - Claude & Codex: Bắt buộc xác minh OS sandbox.
+   - Agy: Báo `unsupported` (`agy_unattended_unsupported`) cho đến khi được chứng nhận chính thức.
 
 ---
 
 ## Launch Attestation (`AgentLaunchAttestation`)
 
-Startup proof uses an Ed25519 signature over canonical JSON prefixed by domain separator:
+Bằng chứng khởi động dùng chữ ký Ed25519 trên JSON canonical có tiền tố domain separator:
 ```
 bflow.agent-launch-attestation.v3\n{...canonical JSON of unsigned attestation body...}
 ```
-The signature is verified against configured trusted host public keys (`trustedIssuerKeys`).
+Chữ ký được xác minh với các public key của trusted host đã cấu hình (`trustedIssuerKeys`).
 
 ---
 
-## Host MCP, Gateway and Native Hook Material
+## Host MCP, Gateway và Native Hook Material
 
-`prepareLaunch` writes one MCP config file and one settings file per role. Their content comes from
-`resolveLaunchMaterial` (`src/launch-material.ts`), which `checkHealth` also evaluates, so preflight and launch
-cannot disagree. All written files are covered by `configFiles` digests.
+`prepareLaunch` ghi một file cấu hình MCP và một file settings cho mỗi role. Nội dung của chúng đến từ
+`resolveLaunchMaterial` (`src/launch-material.ts`), cũng được `checkHealth` đánh giá, nên preflight và launch
+không thể mâu thuẫn nhau. Mọi file được ghi đều được bao phủ bởi digest `configFiles`.
 
-| Option | Meaning |
+| Option | Ý nghĩa |
 | --- | --- |
-| `hostMcpServers` | Trusted Bflow host stdio servers. Names match `^[a-z][a-z0-9_-]{0,63}$`; `command` must be absolute. |
-| `mcpRegistrations` | `stdio` entries keep `command`/`args`. `streamable_http` entries need `mcpTokenEnvironmentNames[registrationId]`. |
-| `mcpTokenEnvironmentNames` | registrationId → environment variable **name** (`^[A-Z_][A-Z0-9_]*$`) that holds the bearer token. Token values are never accepted or written. |
-| `hostHooks` | Full shell command for `SessionStart`, `UserPromptSubmit`, `Stop`, `PreToolUse`. Supersedes `nativeSessionHookCommand` for `SessionStart`. |
-| `nativeSessionHookCommand` | Legacy single `SessionStart` hook (timeout 10 s), unchanged when used alone. |
+| `hostMcpServers` | Các stdio server của Bflow host đáng tin. Tên khớp `^[a-z][a-z0-9_-]{0,63}$`; `command` phải là đường dẫn tuyệt đối. |
+| `mcpRegistrations` | Entry `stdio` giữ `command`/`args`. Entry `streamable_http` cần `mcpTokenEnvironmentNames[registrationId]`. |
+| `mcpTokenEnvironmentNames` | registrationId → **tên** biến môi trường (`^[A-Z_][A-Z0-9_]*$`) giữ bearer token. Giá trị token không bao giờ được chấp nhận hay ghi. |
+| `hostHooks` | Lệnh shell đầy đủ cho `SessionStart`, `UserPromptSubmit`, `Stop`, `PreToolUse`. Thay thế `nativeSessionHookCommand` cho `SessionStart`. |
+| `nativeSessionHookCommand` | Hook `SessionStart` đơn cũ (timeout 10 s), không đổi khi dùng một mình. |
 
-Rendered shapes (`<role>.mcp-config.json`):
+Dạng được render (`<role>.mcp-config.json`):
 
-- Claude: `{"mcpServers":{"bflow":{"command":"<abs>","args":[...]},"gateway-dev":{"type":"http","url":"<endpoint>","headers":{"Authorization":"Bearer ${BFLOW_GATEWAY_TOKEN}"}}}}`. Claude expands `${VAR}` at launch.
-- Codex: the same file is converted into `-c mcp_servers={"bflow"={"command"=...,"args"=[...]},"gateway-dev"={"url"="<endpoint>","bearer_token_env_var"="BFLOW_GATEWAY_TOKEN"}}`.
-- Hooks (Claude settings and Codex `-c hooks=`): `{"<Event>":[{"hooks":[{"type":"command","command":"<cmd>","timeout":30}]}]}`.
+- Claude: `{"mcpServers":{"bflow":{"command":"<abs>","args":[...]},"gateway-dev":{"type":"http","url":"<endpoint>","headers":{"Authorization":"Bearer ${BFLOW_GATEWAY_TOKEN}"}}}}`. Claude expand `${VAR}` lúc launch.
+- Codex: cùng file đó được chuyển thành `-c mcp_servers={"bflow"={"command"=...,"args"=[...]},"gateway-dev"={"url"="<endpoint>","bearer_token_env_var"="BFLOW_GATEWAY_TOKEN"}}`.
+- Hooks (settings của Claude và `-c hooks=` của Codex): `{"<Event>":[{"hooks":[{"type":"command","command":"<cmd>","timeout":30}]}]}`.
 
-Fail-closed rules:
+Quy tắc fail-closed:
 
-- A `streamable_http` registration without a valid token environment mapping → `validation`.
-- A registration or host server named the same as another → `validation`.
-- Hooks requested for a provider without native hooks (Agy) → `validation` from `prepareLaunch`; `unsupported` from `checkHealth`.
-- Agy has no verified header/env-reference form, so `streamable_http` registrations fail. Host MCP servers fail unless the CLI advertises `--mcp-config`.
+- Một registration `streamable_http` không có ánh xạ biến môi trường token hợp lệ → `validation`.
+- Một registration hoặc host server trùng tên với cái khác → `validation`.
+- Hooks được yêu cầu cho provider không có native hooks (Agy) → `validation` từ `prepareLaunch`; `unsupported` từ `checkHealth`.
+- Agy không có dạng header/env-reference đã được xác minh, nên các registration `streamable_http` thất bại. Host MCP server thất bại trừ khi CLI quảng bá `--mcp-config`.
 
-The launched process must receive each token in the environment variable named in the config. The adapter does not inject it: `buildProviderEnvironment` builds only the fixed Bflow variables plus `environmentVariables`, and `BFLOW_*` keys are rejected there. The Runtime integrator supplies the token value through the pane environment.
+Process được launch phải nhận mỗi token trong biến môi trường có tên ghi trong config. Adapter không inject nó: `buildProviderEnvironment` chỉ dựng các biến Bflow cố định cộng `environmentVariables`, và các key `BFLOW_*` bị từ chối ở đó. Runtime integrator cung cấp giá trị token qua môi trường của pane.
 
 ---
 
-## Codex Inherited Global MCP Servers and Hooks (L3)
+## Các MCP Server và Hook global kế thừa của Codex (L3)
 
-Codex loads user `config.toml` and `hooks.json` in every invocation. Bflow keeps its existing L3 MCP isolation: it enumerates configured global MCP servers and disables those servers only after its own MCP table, in both launch arguments and the read-only readiness probe. Unenumerable, colliding or unsafe MCP names remain blocked.
+Codex nạp `config.toml` và `hooks.json` của người dùng trong mọi lần gọi. Bflow giữ nguyên cô lập MCP L3 hiện có: nó liệt kê các MCP server global đã cấu hình và chỉ vô hiệu hóa các server đó sau bảng MCP của chính nó, ở cả launch argument lẫn readiness probe chỉ đọc. Tên MCP không liệt kê được, xung đột hoặc không an toàn vẫn bị chặn.
 
-The inventory describes Bflow-managed Codex execution. The retired plugin IDs
-`claude-mem@claude-mem-local` and `claude-mem@thedotmack` are always disabled
-with per-invocation `-c plugins.<id>.enabled=false` overrides
-in MCP enumeration, readiness execution probes and launch profiles. Their hooks
-are excluded with an explicit inventory diagnostic; global config and plugin
-files are preserved. Other plugin IDs and global hooks remain subject to review.
-Both overrides are sent even if the plugin is absent, so enabling it during
-enumeration cannot run hooks that were excluded from the snapshot.
-An empty inline plugin `hooks: {}` declaration means no hooks; malformed hook
-envelopes, including a file-backed `hooks.json` without a `hooks` object, stay blocked.
+Inventory mô tả việc thực thi Codex do Bflow quản lý. Các plugin ID đã retire
+`claude-mem@claude-mem-local` và `claude-mem@thedotmack` luôn bị vô hiệu hóa
+bằng override `-c plugins.<id>.enabled=false` theo từng lần gọi
+trong việc liệt kê MCP, execution probe readiness và launch profile. Hook của chúng
+bị loại trừ kèm chẩn đoán inventory tường minh; config global và file plugin
+được giữ nguyên. Các plugin ID khác và hook global vẫn phải qua review.
+Cả hai override được gửi kể cả khi plugin vắng mặt, nên việc bật nó trong
+lúc liệt kê không thể chạy các hook đã bị loại khỏi snapshot.
+Khai báo `hooks: {}` inline rỗng của plugin nghĩa là không có hook; các envelope hook sai định dạng,
+gồm `hooks.json` dựa trên file không có object `hooks`, vẫn bị chặn.
 
-Global hooks use a separate explicit operator review flow. The package exports:
+Hook global dùng một luồng review riêng tường minh của operator. Package export:
 
-- `inspectCodexHooks(options?)` and the strict `CodexHookReviewSchema` for a read-only inventory.
-- `approveCodexHooks(review, { expectedDigest, approvedBy, ...options })` and `CodexHookApprovalSchema` for exact-digest approval after re-reading the inventory immediately before writing.
-- `defaultCodexHookApprovalPath(environment?, homeDirectory?)` and `CODEX_HOOK_APPROVAL_FILE` (`codex-hook-approvals.json`).
+- `inspectCodexHooks(options?)` và `CodexHookReviewSchema` nghiêm ngặt cho inventory chỉ đọc.
+- `approveCodexHooks(review, { expectedDigest, approvedBy, ...options })` và `CodexHookApprovalSchema` để duyệt theo digest chính xác sau khi đọc lại inventory ngay trước khi ghi.
+- `defaultCodexHookApprovalPath(environment?, homeDirectory?)` và `CODEX_HOOK_APPROVAL_FILE` (`codex-hook-approvals.json`).
 
-The default receipt lives under `${XDG_STATE_HOME:-$HOME/.local/state}/bflow/`, outside Codex home and repository config. Runtime may provide an explicit private machine-state path. The 0600 atomic receipt can hold approvals for multiple canonical Codex homes; each approval is bound to its home and complete reviewed digest. Inspection and check/plan are read-only. Approval does not grant Bflow permissions, widen the sandbox, or approve a different future snapshot.
+Receipt mặc định nằm dưới `${XDG_STATE_HOME:-$HOME/.local/state}/bflow/`, ngoài Codex home và config của repository. Runtime có thể cung cấp đường dẫn machine-state riêng tư tường minh. Receipt atomic 0600 có thể giữ approval cho nhiều Codex home canonical; mỗi approval gắn với home của nó và digest đầy đủ đã review. Inspection và check/plan là chỉ đọc. Approval không cấp quyền Bflow, không mở rộng sandbox, và không duyệt một snapshot tương lai khác.
 
-Operators may separately grant `trustAllCodexHooks({ approvedBy, ...options })`.
-Its private, atomic `codex-hook-approvals.policy.json` receipt is scoped to the
-canonical Codex home and exact approval-store path. `inspectCodexHooks` then returns
-`status: approved`, `approvalMode: trust_all` and a stable policy digest, skipping
-hook source/dependency inspection even for unsafe permissions or dynamic commands.
-This is explicit trust for all current and future hooks, not a verified inventory.
-The grant is idempotent; ordinary source updates do not invalidate it. Local
-`flock` serializes each complete policy read/update/write, so concurrent grants
-cannot restore a successfully revoked home. The kernel releases the lock if the
-updating process exits. Grant/revoke therefore require the util-linux `flock`
-command (Linux) on PATH; without it they fail with an explicit error and write no policy.
-Inspection under the policy adds advisory `Warning:` diagnostics (excluded from the
-digest) when the Codex home, `hooks.json` or `config.toml` is group/world-writable or
-foreign-owned; they never block. A malformed or foreign-bound policy store fails closed
-with an error naming its path; preserve and inspect it, then remove it manually to reset.
-`revokeAllCodexHookTrust(options)` restores exact snapshot behavior and preserves
-snapshot receipts. Malformed, symlinked, foreign or non-private policy state blocks
-use. Other homes/stores receive no grant. Required Bflow hooks, auth, permissions,
-sandbox and MCP isolation are unchanged. Prepared profiles still bind the policy
-receipt digest, so revocation or policy changes invalidate their old authority.
+Operator có thể cấp riêng `trustAllCodexHooks({ approvedBy, ...options })`.
+Receipt `codex-hook-approvals.policy.json` riêng tư, atomic của nó có scope theo
+Codex home canonical và đường dẫn approval-store chính xác. Khi đó `inspectCodexHooks` trả về
+`status: approved`, `approvalMode: trust_all` và một policy digest ổn định, bỏ qua
+việc kiểm tra nguồn/dependency hook kể cả với permission không an toàn hay lệnh động.
+Đây là sự tin cậy tường minh cho mọi hook hiện tại và tương lai, không phải inventory đã xác minh.
+Grant là idempotent; cập nhật nguồn thông thường không làm nó mất hiệu lực. `flock`
+cục bộ tuần tự hóa mỗi chu trình đọc/cập nhật/ghi policy hoàn chỉnh, nên các grant đồng thời
+không thể khôi phục một home đã revoke thành công. Kernel nhả lock nếu
+process đang cập nhật thoát. Vì vậy grant/revoke cần lệnh `flock` của util-linux
+(Linux) trên PATH; nếu thiếu, chúng thất bại với lỗi tường minh và không ghi policy.
+Inspection dưới policy thêm các chẩn đoán `Warning:` mang tính tham khảo (loại khỏi
+digest) khi Codex home, `hooks.json` hoặc `config.toml` ghi được bởi group/world hoặc
+thuộc owner khác; chúng không bao giờ chặn. Policy store sai định dạng hoặc gắn với owner khác sẽ fail closed
+với lỗi nêu đường dẫn của nó; hãy giữ lại và kiểm tra, rồi xóa thủ công để reset.
+`revokeAllCodexHookTrust(options)` khôi phục hành vi snapshot chính xác và giữ lại
+các snapshot receipt. Trạng thái policy sai định dạng, symlink, của owner khác hoặc không riêng tư sẽ chặn
+việc sử dụng. Các home/store khác không nhận grant nào. Hook Bflow bắt buộc, auth, permission,
+sandbox và cô lập MCP không đổi. Profile đã chuẩn bị vẫn gắn digest của policy
+receipt, nên việc revoke hoặc thay đổi policy làm mất hiệu lực thẩm quyền cũ của chúng.
 
-The inventory hashes raw `hooks.json` bytes and captures event, matcher, command, directly referenced local files and digests. Codex TOML parsing includes executable `[hooks]` events and explicit plugin enablement; validated `hooks.state` trust metadata (including plugin-scoped identifiers) and unrelated credentials/MCP data are excluded from the digest. Native Codex trust metadata never supplies Bflow approval. Commands support absolute Bun/Node/Python binaries with an absolute script and literal arguments, and pinned `/bin/sh` or Bash plus absolute script and literal arguments. Direct absolute executables accept at most 16 literal words including the executable; shebang scripts additionally pin their absolute interpreter. `env` shebangs, interpreter flags, shell expansion/control operators, relative executable paths, malformed/special/symlinked or oversized files, and unpinned shell source dependencies fail closed.
+Inventory băm các byte thô của `hooks.json` và ghi lại event, matcher, command, các file cục bộ được tham chiếu trực tiếp cùng digest. Việc parse TOML của Codex gồm các event `[hooks]` thực thi được và việc bật plugin tường minh; metadata trust `hooks.state` đã validate (gồm định danh theo scope plugin) và credential/dữ liệu MCP không liên quan bị loại khỏi digest. Metadata trust native của Codex không bao giờ cung cấp approval của Bflow. Command hỗ trợ binary Bun/Node/Python tuyệt đối với script tuyệt đối và argument literal, và `/bin/sh` hoặc Bash đã pin cùng script tuyệt đối và argument literal. Executable tuyệt đối trực tiếp chấp nhận tối đa 16 từ literal gồm cả executable; script shebang còn pin thêm interpreter tuyệt đối của nó. Shebang `env`, cờ interpreter, shell expansion/toán tử điều khiển, đường dẫn executable tương đối, file sai định dạng/đặc biệt/symlink hoặc quá lớn, và dependency nguồn shell chưa pin đều fail closed.
 
-Explicitly enabled plugins are inspected from a single unambiguous local cache version. Their supported native or compatibility manifest, declared hook files (or absent default `hooks/hooks.json`), commands and directly resolved code enter the same snapshot. Multiple cached versions, unavailable installations, escaping/symlinked hook paths and dynamic plugin commands remain unsupported. Plugin discovery through other config layers or implicit remote installation is not covered by this local inventory. Plugin enablement or hook-source changes invalidate previous approval; older receipts remain readable but do not approve the new inventory digest.
+Các plugin được bật tường minh được kiểm tra từ một phiên bản cache cục bộ duy nhất, không mơ hồ. Manifest native hoặc tương thích được hỗ trợ, các file hook khai báo (hoặc `hooks/hooks.json` mặc định vắng mặt), command và code được resolve trực tiếp của chúng đi vào cùng snapshot. Nhiều phiên bản cache, bản cài không khả dụng, đường dẫn hook thoát ra ngoài/symlink và command plugin động vẫn không được hỗ trợ. Việc khám phá plugin qua các lớp config khác hoặc cài đặt remote ngầm định không được inventory cục bộ này bao phủ. Thay đổi bật plugin hoặc nguồn hook làm mất hiệu lực approval trước đó; receipt cũ vẫn đọc được nhưng không duyệt digest inventory mới.
 
-`createManagedCodexHookEnvironment` supplies the shared setup/host inspection environment. It preserves the chosen HOME and PATH. It explicitly empties the outer Orca pane/root/endpoint/port selectors in Bflow child processes. It does not change the parent environment or user configuration and does not remove Bflow's native Herdr/Runtime hooks. Direct inspection with an explicitly supplied Orca endpoint still fails closed.
+`createManagedCodexHookEnvironment` cung cấp môi trường inspection dùng chung cho setup/host. Nó giữ nguyên HOME và PATH đã chọn. Nó làm rỗng tường minh các selector pane/root/endpoint/port Orca bên ngoài trong các child process của Bflow. Nó không đổi môi trường của parent hay cấu hình người dùng và không gỡ các hook Herdr/Runtime native của Bflow. Inspection trực tiếp với endpoint Orca được cung cấp tường minh vẫn fail closed.
 
-Binary health and launch preparation resolve against the same PATH used by provider child commands. Health preserves `binary_missing`, `binary_not_executable`, `binary_untrusted` and inaccessible/other verification failures separately. A failed ownership or mode check is not reported as a missing installation.
+Binary health và việc chuẩn bị launch resolve theo cùng PATH mà các child command của provider dùng. Health giữ `binary_missing`, `binary_not_executable`, `binary_untrusted` và các lỗi xác minh không truy cập được/khác tách biệt nhau. Việc kiểm tra ownership hoặc mode thất bại không được báo là thiếu bản cài.
 
-Failed execution probes classify model errors from explicit model failure text. Normal `model:` and
-`approval: never` banner lines, or an unrelated missing directory, do not establish model incompatibility.
-Incidental authentication text and `tokens used` output do not establish expired credentials. Expired credentials require
-an explicit expiration error; other explicit authentication failures report `auth_missing`. Diagnostics
-prefer the provider's error over its startup banner before applying the 240-character display limit,
-redact complete streams before selecting lines, and retain runner failure details when output is empty.
-Codex interactive launch includes a reserved startup prompt bound to `BFLOW_ENVIRONMENT_ID`, asking only
-for `pong` without tool calls or workflow work. Runtime consumes that exact startup turn; ordinary
-user input such as `ping` still passes through the Conversation Gateway.
+Các execution probe thất bại phân loại lỗi model từ văn bản lỗi model tường minh. Các dòng banner `model:` và
+`approval: never` thông thường, hoặc một thư mục thiếu không liên quan, không xác lập việc model không tương thích.
+Văn bản authentication ngẫu nhiên và output `tokens used` không xác lập credential hết hạn. Credential hết hạn yêu cầu
+một lỗi expiration tường minh; các lỗi authentication tường minh khác báo `auth_missing`. Chẩn đoán
+ưu tiên lỗi của provider hơn banner khởi động trước khi áp giới hạn hiển thị 240 ký tự,
+redact toàn bộ stream trước khi chọn dòng, và giữ chi tiết lỗi của runner khi output rỗng.
+Launch tương tác của Codex gồm một startup prompt được dành riêng gắn với `BFLOW_ENVIRONMENT_ID`, chỉ yêu cầu
+`pong` mà không gọi tool hay làm việc workflow. Runtime tiêu thụ đúng lượt khởi động đó; input
+người dùng thông thường như `ping` vẫn đi qua Conversation Gateway.
 
-PATH lookup skips directories, dangling entries and files without execute access, so a plugin's `codex/` directory cannot shadow the actual CLI. It preserves physical symlink/parent traversal and treats an empty PATH component as the current directory, matching process spawning. The first executable candidate still must pass ownership and permission verification; an unsafe executable is not silently replaced by a later candidate. Explicit executable paths remain strict. Authentication and execution probes use the verified canonical executable, including when the execution probe changes its working directory.
+Tra cứu PATH bỏ qua thư mục, entry dangling và file không có quyền execute, nên thư mục `codex/` của một plugin không thể che CLI thật. Nó giữ nguyên việc duyệt symlink/parent vật lý và coi thành phần PATH rỗng là thư mục hiện tại, khớp với cách spawn process. Ứng viên executable đầu tiên vẫn phải qua xác minh ownership và permission; một executable không an toàn không bị âm thầm thay bằng ứng viên sau. Đường dẫn executable tường minh vẫn nghiêm ngặt. Probe authentication và execution dùng executable canonical đã xác minh, kể cả khi execution probe đổi working directory.
 
-Shell dependency checks follow the explicit interpreter or direct script's shebang, independently of filename suffix. Absolute Bash/Sh installations outside system bin directories still pin the script argument. Direct scripts require execute permission; a script read by an explicit interpreter may remain non-executable. Unsupported-command reasons omit raw argument text, and provider health redacts opaque credential flags, environment assignments and JSON credential fields before truncation, including incomplete quoted output.
+Kiểm tra dependency shell đi theo shebang của interpreter tường minh hoặc script trực tiếp, độc lập với hậu tố tên file. Bản cài Bash/Sh tuyệt đối ngoài các thư mục bin hệ thống vẫn pin argument script. Script trực tiếp yêu cầu quyền execute; script do interpreter tường minh đọc có thể không có quyền execute. Lý do command không được hỗ trợ bỏ qua văn bản argument thô, và provider health redact các cờ credential mờ, phép gán biến môi trường và trường credential JSON trước khi cắt ngắn, gồm cả output có dấu ngoặc kép chưa đóng.
 
-The known Orca inline wrapper is matched as a complete fixed command template. Its `${ORCA_AGENT_HOOK_ROOT}/agent-hooks/codex-hook.sh` candidate and `$HOME/.orca/agent-hooks/codex-hook.sh` fallback are recorded with file hashes or absent-file facts. A changed root, appearing fallback or changed script changes the digest. The known script's source endpoint is accepted only while `ORCA_AGENT_HOOK_ENDPOINT` is absent; when set, the hook remains unsupported and the endpoint file/token is not read. Herdr shell integration scripts are pinned by digest.
+Wrapper inline Orca đã biết được khớp như một command template cố định hoàn chỉnh. Ứng viên `${ORCA_AGENT_HOOK_ROOT}/agent-hooks/codex-hook.sh` và fallback `$HOME/.orca/agent-hooks/codex-hook.sh` của nó được ghi lại cùng hash file hoặc sự kiện file vắng mặt. Root thay đổi, fallback mới xuất hiện hoặc script thay đổi sẽ đổi digest. Endpoint nguồn của script đã biết chỉ được chấp nhận khi `ORCA_AGENT_HOOK_ENDPOINT` vắng mặt; khi nó được đặt, hook vẫn không được hỗ trợ và file/token endpoint không được đọc. Các script tích hợp shell của Herdr được pin bằng digest.
 
-Without an explicit all-hook policy, unapproved or unsupported hooks block before Codex login/auth/model execution probes and before launch files are written; read-only version/help/config inventory may still run. The approval digest is stored in private, non-provider-executed launch settings whose file digest contributes to the launch fingerprint. Activated health re-inspects the current inventory and rejects drift from the prepared profile even if a new snapshot was approved after launch preparation. Bflow's existing per-invocation `--dangerously-bypass-hook-trust` is retained for native hook startup and is reached only after the selected snapshot or all-hook policy passes this gate; it does not approve global hook sources or change provider permissions.
+Không có chính sách all-hook tường minh, hook chưa duyệt hoặc không được hỗ trợ sẽ chặn trước các probe login/auth/thực thi model của Codex và trước khi ghi file launch; việc inventory version/help/config chỉ đọc vẫn có thể chạy. Approval digest được lưu trong launch settings riêng tư, không do provider thực thi, mà digest file của nó đóng góp vào launch fingerprint. Activated health kiểm tra lại inventory hiện tại và từ chối drift so với profile đã chuẩn bị, kể cả khi một snapshot mới được duyệt sau khi chuẩn bị launch. `--dangerously-bypass-hook-trust` theo từng lần gọi hiện có của Bflow được giữ lại cho việc khởi động native hook và chỉ đạt tới sau khi snapshot được chọn hoặc chính sách all-hook qua cổng này; nó không duyệt nguồn hook global hay đổi permission của provider.
 
-This review binds hook configuration and directly referenced code. It pins directly resolved interpreters, but does not recursively pin the operating system, system utilities, packages, arbitrary runtime data or other transitive dependencies. Approved hooks are not isolated from a hostile process or from their host account's available resources and permissions. This is operator trust for exact hook sources, not a hostile-code sandbox. No real installed hook is executed or approved by the provider tests.
+Review này ràng buộc cấu hình hook và code được tham chiếu trực tiếp. Nó pin các interpreter được resolve trực tiếp, nhưng không pin đệ quy hệ điều hành, tiện ích hệ thống, package, dữ liệu runtime tùy ý hay các dependency bắc cầu khác. Hook đã duyệt không được cô lập khỏi process thù địch hay khỏi tài nguyên và permission sẵn có của tài khoản host. Đây là sự tin cậy của operator đối với nguồn hook chính xác, không phải sandbox cho code thù địch. Không có hook cài đặt thật nào được thực thi hay duyệt bởi test của provider.
 
-## Herdr Launch Integration
+## Tích hợp Herdr Launch
 
-Launch execution commands are built with `buildHerdrAgentStartCommand`:
+Lệnh thực thi launch được dựng bằng `buildHerdrAgentStartCommand`:
 ```bash
 herdr agent start <agentName> --kind <provider> --pane <paneId> [--timeout <ms>] -- <argv...>
 ```
-Arguments after `--` are strictly validated to prevent multiline shell breaks, NUL bytes, or secret tokens.
-Provider environment variables (`PATH`, `HOME`, `XDG_*`, `BHOME`, `BFLOW_*`) isolate configuration per session.
+Các argument sau `--` được validate nghiêm ngặt để ngăn ngắt dòng shell nhiều dòng, byte NUL hoặc token bí mật.
+Các biến môi trường của provider (`PATH`, `HOME`, `XDG_*`, `BHOME`, `BFLOW_*`) cô lập cấu hình theo từng session.
+
+### Hooks Codex dùng chung với profile cô lập
+
+Provider chấp nhận các thư mục con thuộc người dùng hiện tại bên dưới profile root
+riêng tư đã được Runtime xác thực, kể cả khi `.codex` có mode `775`. Các nguồn hooks
+vẫn được đọc có giới hạn và kiểm tra đường dẫn, chủ sở hữu, symlink và thay đổi nội dung.
+
+Nếu profile liên kết đúng `hooks.json` native và machine store đã có policy cho nguồn
+native đó, provider dùng lại thẩm quyền của đúng nguồn được liên kết. Plugin đã bật ở
+native chỉ được dùng lại policy khi phiên bản và toàn bộ nội dung khớp bản trong profile.
+Plugin riêng chỉ chứa hướng dẫn và khai báo hooks rỗng không cần phê duyệt hook.
+Các hooks riêng, plugin khác nội dung, symlink đổi đích hoặc policy bị thu hồi vẫn bị
+kiểm tra độc lập; adapter không tạo policy `trust_all` mới cho profile. Native source,
+policy và nội dung plugin được ràng buộc vào digest và kiểm tra lại trước khi thực thi.
+
+Readiness probe Codex đặt tất cả override `-c` trước subcommand `exec`, gồm backend
+đã liên kết và reasoning effort. Một danh sách `-c` sau `exec` có thể thay thế override
+ở cấp root trong CLI, làm mất backend profile và gửi ping đến sai provider.

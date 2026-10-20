@@ -352,6 +352,21 @@ describe.skipIf(process.platform !== "linux")("P30 platform host", () => {
       .rejects.toThrow("Persisted host platform differs; run bflow down before changing providers/roles");
   });
 
+  it("refuses to change the trusted isolator root while a profile-bound host is running", async () => {
+    const platformWithProfileRoot = (root: string, stateRoot: string) => platformFor(root, {
+      isolatorStateRoot: join(root, stateRoot),
+      roles: [
+        { ...option("conversation", "codex", true), profileName: "personal" },
+        { ...option("coordinator", "codex", true), profileName: "lead" }
+      ]
+    });
+    const f = await fixture(root => platformWithProfileRoot(root, "isolator-a"));
+    await expect(ensureAgenticHost({
+      ...f.config,
+      platform: platformWithProfileRoot(f.root, "isolator-b")
+    } as never)).rejects.toThrow("Persisted host platform differs; run bflow down before changing providers/roles");
+  });
+
   it("requires a prepared platform launch for each required role before activation, and enforces the provider source", async () => {
     const f = await fixture(root => platformFor(root));
     const at = new Date().toISOString();

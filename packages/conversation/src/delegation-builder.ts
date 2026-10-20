@@ -24,8 +24,32 @@ import type {
   Metadata,
   OperationResult,
   RoleMessage,
-  TddDecision
+  TddDecision,
+  VerificationMethod
 } from "./types.js";
+
+/**
+ * Infers how a criterion is verified from its wording. A spike is an investigation, so it is reviewed by hand;
+ * otherwise the wording decides, and unit_test is the default for an implementation criterion.
+ */
+function inferVerificationMethod(description: string, kind: ExtractedRequirementDraft["kind"]): VerificationMethod {
+  if (kind === "spike") return "manual_review";
+  if (/(?<!\p{L})(?:e2e|end-to-end|giao diện|trình duyệt|browser|ui)(?!\p{L})/iu.test(description)) return "e2e_test";
+  if (/(?<!\p{L})(?:tích hợp|integration|endpoint|api)(?!\p{L})/iu.test(description)) return "integration_test";
+  if (/(?<!\p{L})(?:kiểu dữ liệu|typecheck|type check)(?!\p{L})/iu.test(description)) return "typecheck";
+  if (/(?<!\p{L})(?:lint|eslint)(?!\p{L})/iu.test(description)) return "lint";
+  if (/(?<!\p{L})(?:tài liệu|readme|document|báo cáo|report|review)(?!\p{L})/iu.test(description)) return "manual_review";
+  return "unit_test";
+}
+
+/** Infers the criterion category from its wording; functional is the default. */
+function inferCriterionCategory(description: string): "functional" | "security" | "performance" | "regression" | "edge_case" {
+  if (/(?<!\p{L})(?:bảo mật|security|xác thực|auth|jwt|token|quyền)(?!\p{L})/iu.test(description)) return "security";
+  if (/(?<!\p{L})(?:hiệu năng|performance|latency|tốc độ|throughput)(?!\p{L})/iu.test(description)) return "performance";
+  if (/(?<!\p{L})(?:hồi quy|regression|giữ nguyên)(?!\p{L})/iu.test(description)) return "regression";
+  if (/(?<!\p{L})(?:biên|edge|null|rỗng)(?!\p{L})/iu.test(description)) return "edge_case";
+  return "functional";
+}
 
 function formatZodError(error: { issues: readonly { path: readonly (string | number)[]; message: string }[] }): ContractError {
   const issueMessages = error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
@@ -75,11 +99,12 @@ export function buildDelegationRequest(params: {
   const acceptanceCriteria: AcceptanceCriterion[] = [];
   for (let idx = 0; idx < rawCriteria.length; idx++) {
     const desc = rawCriteria[idx] ?? `Tiêu chí nghiệm thu ${idx + 1}`;
+    const description = desc.trim().length > 0 ? desc.trim() : `Tiêu chí nghiệm thu ${idx + 1}`;
     const criterionRaw = {
       id: `ac-${idx + 1}`,
-      description: desc.trim().length > 0 ? desc.trim() : `Tiêu chí nghiệm thu ${idx + 1}`,
-      category: "functional" as const,
-      verificationMethod: params.draft.kind === "spike" ? "manual_review" as const : "unit_test" as const,
+      description,
+      category: inferCriterionCategory(description),
+      verificationMethod: params.draft.verificationMethods?.[idx] ?? inferVerificationMethod(description, params.draft.kind),
       required: true,
       status: "pending" as const,
       evidenceArtifactIds: []

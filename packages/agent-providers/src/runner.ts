@@ -74,7 +74,11 @@ export function createProviderProcessRunner(defaultOptions?: {
             shell: false,
             stdio: ["ignore", "pipe", "pipe"],
             ...(invocation.cwd !== undefined ? { cwd: invocation.cwd } : {}),
-            env: invocation.env ? { ...process.env, ...invocation.env } : process.env
+            env: invocation.inheritEnvironment === false
+              ? { ...invocation.env }
+              : invocation.env
+                ? { ...process.env, ...invocation.env }
+                : process.env
           });
         } catch (err) {
           resolve({

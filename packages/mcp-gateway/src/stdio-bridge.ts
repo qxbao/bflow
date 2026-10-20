@@ -949,7 +949,10 @@ export class SubprocessStdioDriverFactory implements MCPUpstreamDriverFactory {
       });
     }
 
-    const instanceId = `${entry.definition.serviceId}:${partitionKey}:${startGeneration}`;
+    // The observation schema caps instanceId at 200 characters; partition keys embed workspace paths and can exceed it.
+    const rawInstanceId = `${entry.definition.serviceId}:${partitionKey}:${startGeneration}`;
+    const instanceId = rawInstanceId.length <= 200 ? rawInstanceId
+      : `${entry.definition.serviceId}:${createHash("sha256").update(partitionKey).digest("hex").slice(0, 32)}:${startGeneration}`;
 
     const bridge = new StdioToHttpBridge({
       instanceId,

@@ -34,6 +34,10 @@ function toml(value: unknown): string {
   return JSON.stringify(value);
 }
 
+/** Roles that investigate read-only and may run the git reads below (mirrors the Runtime host guard). */
+const INVESTIGATION_ROLES: ReadonlySet<string> = new Set(["planner", "specifier", "architect", "reviewer", "qa"]);
+const READ_ONLY_GIT_PATTERNS = ["log", "show", "diff", "status", "branch"].map(command => `Bash(git ${command}:*)`);
+
 /** Explicit opt-in policy for locally verified Claude/Codex CLI flags. Other kinds keep their own configuration. */
 export function buildProviderRoleLaunch(options: ProviderRoleLaunchOptions): readonly string[] {
   const spec = getRoleTopologySpec(options.role);
@@ -53,9 +57,11 @@ export function buildProviderRoleLaunch(options: ProviderRoleLaunchOptions): rea
     // tools; native repository reads would also expose host state/secrets.
     const tools = spec.topologyRole === "chat" || spec.topologyRole === "coordinator"
       ? "" : spec.readOnlyWorkspace ? "Read,Glob,Grep" : "Read,Glob,Grep,Edit,Write";
+    // Read-only investigation roles may run git reads; dontAsk refuses every other Bash call, and the host guard re-checks each one.
+    const gitReads = tools && INVESTIGATION_ROLES.has(options.role) ? READ_ONLY_GIT_PATTERNS : [];
     return ["--restricted", "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands",
-      "--permission-mode", "dontAsk", "--tools", tools,
-      "--allowedTools", [tools, ...Object.keys(servers).map(name => `mcp__${name}__*`)].filter(Boolean).join(","),
+      "--permission-mode", "dontAsk", "--tools", gitReads.length ? `${tools},Bash` : tools,
+      "--allowedTools", [tools, ...gitReads, ...Object.keys(servers).map(name => `mcp__${name}__*`)].filter(Boolean).join(","),
       // Claude applies Read(path) to all read tools and Edit(path) to all file writes.
       "--disallowedTools", ["Read", "Edit"].flatMap(tool =>
         ["./.bflow/**", "./.git/**", "~/.claude/**", "~/.codex/**", "~/.ssh/**", "~/.aws/**", "~/.config/**"].map(pattern => `${tool}(${pattern})`)).join(","),

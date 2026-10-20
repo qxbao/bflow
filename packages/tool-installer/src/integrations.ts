@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readlink, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { ToolCapabilitySchema, type ToolCapability } from "@bflow/contracts";
 import { z } from "zod";
 import { spawn } from "node:child_process";
-import { constants as osConstants } from "node:os";
+import { constants as osConstants, hostname } from "node:os";
 import { createToolCapability, systemToolHost, type ProcessResult, type ToolHost } from "./installer.js";
 import { privateDirectory, readRegular } from "./files.js";
 
@@ -343,11 +343,27 @@ export async function planChromeSession(input: {
     const info = await lstat(directory);
     if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Browser profile path traverses a link or non-directory");
   }
+  await clearStaleChromeSingleton(profileDir);
   for (const name of ["SingletonLock", ".bflow-profile.lock"]) {
     try { await lstat(join(profileDir, name)); return { ...base, status: "profile_locked", diagnostic: `${name} exists; do not reuse this profile` }; }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   }
   return { ...base, status: "ready", diagnostic: "Dedicated profile ready; server will launch Chrome on first browser tool use" };
+}
+
+/**
+ * Chrome leaves SingletonLock (a symlink to "<host>-<pid>") behind when it dies uncleanly. A lock owned by a dead
+ * process on this host is stale; anything else (live pid, other host, non-symlink) is kept and blocks reuse.
+ */
+async function clearStaleChromeSingleton(profileDir: string): Promise<void> {
+  let target: string;
+  try { target = await readlink(join(profileDir, "SingletonLock")); }
+  catch { return; }
+  const match = /^(.*)-(\d+)$/.exec(target);
+  if (!match || match[1] !== hostname()) return;
+  try { process.kill(Number(match[2]), 0); return; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") return; }
+  for (const name of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) await rm(join(profileDir, name), { force: true });
 }
 
 export const SuperpowersProviderSchema = z.enum(["claude", "codex", "agy"]);

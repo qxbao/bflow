@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { basename, join, resolve } from "node:path";
@@ -48,6 +48,7 @@ import { formatSetupPreview, readableLabel, SETUP_COMPONENT_LABELS } from "./pre
 import { identifyRepository } from "./repository.js";
 import { createDefaultSetupConfiguration, isolatedProviderHomes } from "./setup-defaults.js";
 import { SUPPORTED_CLI_COMMANDS } from "./command-reference.js";
+import { ProfileSetupComponent, resolveProfileSetupOptions } from "./profile-setup.js";
 import type { CliContext, SetupCommandArgs, SetupCommandOutput } from "./types.js";
 
 export type { SetupCommandOutput };
@@ -302,10 +303,26 @@ export async function executeSetupCommand(
     installerRegistry = observedRegistry;
   }
 
+  const profileSourceEnvironment = defaultHostEnvironment();
+  const profileSetupOptions = resolveProfileSetupOptions({
+    helperPath: fileURLToPath(new URL("../isolation/lib/profile_sync.py", import.meta.url)),
+    homeDirectory: profileSourceEnvironment.homeDir,
+    environment: profileSourceEnvironment.env,
+    ...(isolatedRoot ? { isolatedRoot } : {}),
+    expectedIdentity: JSON.stringify(machineConfig.toolPins.filter(pin => pin.toolId === "superpowers")
+      .map(({ toolId, installerId, version, source, integrity }) => ({ toolId, installerId, version, source, integrity }))),
+    pythonCandidates: [profileSourceEnvironment.env.AI_ISOLATOR_PY, "python3", "python"].filter((value): value is string => Boolean(value))
+  });
+  const profileTargets = join(profileSetupOptions.stateRoot, "profiles");
+  let hasProfileDirectory = false;
+  try { lstatSync(profileTargets); hasProfileDirectory = true; } catch { /* No existing profiles: setup creates none. */ }
+  const profileSetup = hasProfileDirectory ? new ProfileSetupComponent(profileSetupOptions) : undefined;
+
   const decorateComponents = (components: readonly SetupComponent[], input: ComponentFactoryInput) => {
-    const composed = launchRequirements.length || remoteServices.length ? wrapSetupComponents(components, { ...input, serviceManager, launchRequirements,
+    let composed = launchRequirements.length || remoteServices.length ? wrapSetupComponents(components, { ...input, serviceManager, launchRequirements,
       remoteServices, ...(context7ApiKey !== undefined && (args.mode === "apply" || args.mode === "repair") ? { context7ApiKey } : {}),
       ...(repositoryRoot ? { repositoryRoot } : {}) }) : components;
+    if (profileSetup) composed = [...composed, profileSetup];
     return !onProgress ? composed : composed.map(component => ({ componentId: component.componentId, action: component.action,
       rollback: component.rollback, observe: component.observe.bind(component), desired: component.desired.bind(component),
       apply: async (ctx: Parameters<SetupComponent["apply"]>[0]) => {

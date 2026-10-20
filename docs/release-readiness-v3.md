@@ -1,4 +1,4 @@
-# Bflow Platform v3 — Release Readiness & Audit Report (P24–P34)
+# Bflow Platform v3 — Báo cáo kiểm toán và mức sẵn sàng phát hành (P24–P34)
 
 - **Ngày kiểm toán**: `2026-10-18`
 - **Baseline commit (`main`)**: `da9e166d136b199c62f4b862141357180268567c` (gồm cả `ee4ff7c`..`da9e166`)
@@ -17,7 +17,7 @@
 
 ---
 
-## 1. Quyết định phát hành (Release Decision)
+## 1. Quyết định phát hành
 
 > **Phân loại toàn sản phẩm**: **NOT PRODUCTION-READY** (Đạt **Platform v3 Architecture, Integration & Local/Live-Binary Verification Baseline**; **chưa đạt** nghiệm thu Full Live Multi-Model AI SDLC End-to-End và Cross-OS/Active-Fault Campaigns).
 
@@ -37,7 +37,7 @@ Tuy nhiên, tuân thủ nguyên tắc nghiêm ngặt **"Không tuyên bố produ
 
 ---
 
-## 2. Kết quả chạy kiểm thử thực tế (Fresh Verification Evidence)
+## 2. Kết quả chạy kiểm thử thực tế (bằng chứng xác minh mới)
 
 Mọi lệnh kiểm thử được chạy trực tiếp trên worktree cô lập `/tmp/bflow-v3-release-review` (POSIX `ext4`):
 
@@ -56,7 +56,7 @@ Mọi lệnh kiểm thử được chạy trực tiếp trên worktree cô lập
 
 ---
 
-## 3. Kiểm toán 18 hạng mục (18-Point Technical & Security Audit)
+## 3. Kiểm toán 18 hạng mục (kiểm toán kỹ thuật và bảo mật)
 
 ### 3.1 Ma trận tổng hợp 18 hạng mục
 
@@ -83,7 +83,7 @@ Mọi lệnh kiểm thử được chạy trực tiếp trên worktree cô lập
 
 ---
 
-## 4. Đánh giá tiêu chí chấp nhận phát hành (Release Criteria Evaluation)
+## 4. Đánh giá tiêu chí chấp nhận phát hành
 
 | Tiêu chí chấp nhận | Trạng thái | Bằng chứng thực tế |
 | :--- | :---: | :--- |
@@ -113,7 +113,7 @@ Bên cạnh 8 lỗi tích hợp `QA-P34-01`..`QA-P34-08` và chuỗi bản vá P
 
 ---
 
-## 6. Tài liệu bàn giao (Deliverables Index)
+## 6. Tài liệu bàn giao (danh mục)
 
 1. [`docs/release-readiness-v3.md`](./release-readiness-v3.md) — Báo cáo kiểm toán 18 hạng mục, kết quả kiểm thử và quyết định phát hành v3 (tài liệu này).
 2. [`docs/setup-guide.md`](./setup-guide.md) — Hướng dẫn cài đặt, chuẩn bị hệ tệp POSIX, cấu hình `bflow setup`, `bflow init`, `bflow doctor` và xác thực 3 providers.

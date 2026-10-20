@@ -72,6 +72,21 @@ const BARE_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
 const MCP_TABLE_PATTERN = /^\s*\[\s*mcp_servers\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\s*(?:\.[^\]]*)?\]/gm;
 const CODEX_HOOK_DIGEST_METADATA_KEY = "bflowCodexHookSnapshotDigest";
 
+function linkedBackendOverrides(url: string, hasApiKey: boolean): string[] {
+  const root = url.replace(/\/+$/, "").replace(/\/backend-api\/codex$/, "").replace(/\/v1$/, "");
+  const backendUrl = `${root}/backend-api/codex`;
+  return [
+    "-c", 'model_provider="codex-lb"',
+    "-c", 'model_providers.codex-lb.name="openai"',
+    "-c", `model_providers.codex-lb.base_url=${JSON.stringify(backendUrl)}`,
+    "-c", 'model_providers.codex-lb.wire_api="responses"',
+    "-c", "model_providers.codex-lb.supports_websockets=true",
+    "-c", "model_providers.codex-lb.requires_openai_auth=false",
+    "-c", 'model_providers.codex-lb.http_headers={"x-openai-actor-authorization"="codex-lb"}',
+    ...(hasApiKey ? ["-c", 'model_providers.codex-lb.env_key="CODEX_LB_API_KEY"'] : [])
+  ];
+}
+
 /** Table names of `[mcp_servers.<name>]` entries in a Codex config.toml (fallback when `codex mcp list` fails). */
 export function parseCodexConfigMcpServerNames(toml: string): string[] {
   const names = new Set<string>();
@@ -129,6 +144,22 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
   }
 
   protected override getProviderCommandEnvironment(): Readonly<Record<string, string>> {
+    if (this.options.isolatorEnvironment !== undefined) {
+      const environment = { ...this.options.isolatorEnvironment };
+      delete environment["CODEX_LB_API_KEY"];
+      return {
+        ...environment,
+        BFLOW_PROVIDER: this.descriptor.provider,
+        HOME: environment["HOME"] ?? "",
+        PATH: environment["PATH"] ?? "",
+        ORCA_AGENT_HOOK_ROOT: "",
+        ORCA_AGENT_HOOK_ENDPOINT: "",
+        ORCA_PANE_KEY: "",
+        ORCA_AGENT_HOOK_PORT: "",
+        CODEX_HOME: this.codexHome()
+      };
+    }
+
     const selected = this.trustedHookEnvironment();
     return {
       BFLOW_PROVIDER: this.descriptor.provider,
@@ -142,7 +173,31 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
     };
   }
 
+  private sharedNativeHookOptions(): { isolatorHomeDirectory?: string; sharedNativeCodexHomeDirectory?: string } {
+    const home = this.options.isolatorEnvironment?.["HOME"];
+    if (home === undefined) return {};
+    return { isolatorHomeDirectory: home,
+      ...(this.options.codexHomeDirectory !== undefined ? { sharedNativeCodexHomeDirectory: this.options.codexHomeDirectory } : {}) };
+  }
+
   private trustedHookEnvironment(): Readonly<Record<string, string | undefined>> {
+    if (this.options.isolatorEnvironment !== undefined) {
+      const selected = this.options.isolatorEnvironment;
+      const hookEnvironment = this.options.codexHookEnvironment ?? {};
+      const home = selected["HOME"] ?? "";
+      return {
+        ...hookEnvironment,
+        ...selected,
+        HOME: home,
+        PATH: selected["PATH"] ?? "",
+        ORCA_AGENT_HOOK_ROOT: hookEnvironment["ORCA_AGENT_HOOK_ROOT"] ?? selected["ORCA_AGENT_HOOK_ROOT"] ?? "",
+        ORCA_AGENT_HOOK_ENDPOINT: hookEnvironment["ORCA_AGENT_HOOK_ENDPOINT"] ?? selected["ORCA_AGENT_HOOK_ENDPOINT"] ?? "",
+        ORCA_PANE_KEY: hookEnvironment["ORCA_PANE_KEY"] ?? selected["ORCA_PANE_KEY"] ?? "",
+        ORCA_AGENT_HOOK_PORT: hookEnvironment["ORCA_AGENT_HOOK_PORT"] ?? selected["ORCA_AGENT_HOOK_PORT"] ?? "",
+        CODEX_HOME: selected["CODEX_HOME"] ?? (home ? join(home, ".codex") : "")
+      };
+    }
+
     if (this.options.codexHookEnvironment === undefined) return process.env;
     return {
       ...this.options.codexHookEnvironment,
@@ -154,12 +209,37 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
     };
   }
 
+  protected override getProviderExecutionEnvironment(): Readonly<Record<string, string>> {
+    const environment: Record<string, string> = { ...this.getProviderCommandEnvironment() };
+    if (this.options.codexBackendUrl !== undefined) {
+      const key = this.options.isolatorEnvironment !== undefined
+        ? this.options.isolatorEnvironment["CODEX_LB_API_KEY"]
+        : process.env["CODEX_LB_API_KEY"];
+      if (key) environment["CODEX_LB_API_KEY"] = key;
+    }
+    return environment;
+  }
+
+  protected override shouldCheckNativeAuthentication(): boolean {
+    return this.options.codexBackendUrl === undefined;
+  }
+
   protected override getProbeCommand(_environment: AgentEnvironment): readonly string[] {
-    const probe = ["exec"];
+    const probe = [
+      ...(this.options.codexBackendUrl !== undefined
+        ? linkedBackendOverrides(this.options.codexBackendUrl, Boolean(
+            (this.options.isolatorEnvironment !== undefined
+              ? this.options.isolatorEnvironment["CODEX_LB_API_KEY"]
+              : process.env["CODEX_LB_API_KEY"])?.trim()
+          ))
+        : [])
+    ];
+    // Codex exec's own -c list replaces root overrides, so keep all config overrides before the subcommand.
+    if (this.options.effort) probe.push("-c", `model_reasoning_effort=${JSON.stringify(this.options.effort)}`);
+    probe.push("exec");
     if (this.options.model) {
       probe.push("--model", this.options.model);
     }
-    if (this.options.effort) probe.push("-c", `model_reasoning_effort=${JSON.stringify(this.options.effort)}`);
     probe.push("ping");
     return probe;
   }
@@ -173,6 +253,10 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
   }
 
   private codexHome(): string {
+    if (this.options.isolatorEnvironment !== undefined) {
+      const selected = this.options.isolatorEnvironment;
+      return selected["CODEX_HOME"] ?? (selected["HOME"] ? join(selected["HOME"], ".codex") : "");
+    }
     const environment = this.trustedHookEnvironment();
     return this.options.codexHomeDirectory || environment["CODEX_HOME"] || join(environment["HOME"] ?? homedir(), ".codex");
   }
@@ -198,6 +282,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
         executable: this.getExecutablePath(),
         args: [...pluginArgs, "mcp", "list", "--json"],
         env: this.getProviderCommandEnvironment(),
+        ...this.commandEnvironmentOptions(),
         timeoutMs: 45_000
       });
       if (outcome.exitCode === 0 && outcome.failure === undefined) {
@@ -283,6 +368,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
 
     const hookReview = await inspectCodexHooks({
       codexHomeDirectory: home,
+      ...this.sharedNativeHookOptions(),
       ...(this.options.codexHookApprovalPath !== undefined ? { approvalStorePath: this.options.codexHookApprovalPath } : {}),
       environment: this.trustedHookEnvironment()
     });
@@ -355,6 +441,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
       const files = await probeFileSnapshot(allProbeFiles, allRequiredFiles, home);
       if (files === undefined || await probeFileSnapshot(probeFiles, requiredProbeFiles, home) !== beforeConfigRead) return undefined;
       const currentHooks = await inspectCodexHooks({ codexHomeDirectory: home,
+        ...this.sharedNativeHookOptions(),
         ...(this.options.codexHookApprovalPath !== undefined ? { approvalStorePath: this.options.codexHookApprovalPath } : {}),
         environment: this.trustedHookEnvironment() });
       if (currentHooks.digest !== hookReview.digest || currentHooks.status !== hookReview.status ||
@@ -400,6 +487,13 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
 
     const argv: string[] = [
       ...permResult.flags,
+      ...(this.options.codexBackendUrl !== undefined
+        ? linkedBackendOverrides(this.options.codexBackendUrl, Boolean(
+            (this.options.isolatorEnvironment !== undefined
+              ? this.options.isolatorEnvironment["CODEX_LB_API_KEY"]
+              : process.env["CODEX_LB_API_KEY"])?.trim()
+          ))
+        : []),
       "-c",
       `model_instructions_file=${JSON.stringify(configFiles.promptFile)}`
     ];

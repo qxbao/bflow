@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile, realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { delimiter, dirname, join } from "node:path";
@@ -11,7 +11,7 @@ import { wrapSetupComponents, startSetupGatewayRuntime, setupGatewayDiagnostics 
 
 let root: string;
 let runtime: Awaited<ReturnType<typeof startSetupGatewayRuntime>> | undefined;
-beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "bflow-gateway-setup-")); });
+beforeEach(async () => { root = await realpath(await mkdtemp(join(tmpdir(), "bflow-gateway-setup-"))); });
 afterEach(async () => {
   await runtime?.stop(); runtime = undefined;
   if (process.env.BFLOW_GATEWAY_KEEP_SMOKE === "1") console.log(`Retained isolated Gateway smoke: ${root}`);

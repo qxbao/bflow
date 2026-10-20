@@ -15,6 +15,8 @@ export * from "./chat-decision.js";
 export * from "./delegation-builder.js";
 export * from "./response-formatter.js";
 export * from "./user-decision.js";
+export * from "./approval-lifecycle.js";
+export * from "./clarification-lifecycle.js";
 export * from "./context-store.js";
 export * from "./herdr-bridge.js";
 export * from "./conversation-gateway.js";

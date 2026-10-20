@@ -38,6 +38,18 @@ describe("explicit provider role launch policy", () => {
     expect(args[args.indexOf("--tools") + 1]).toBe("Read,Glob,Grep,Edit,Write");
     expect(args[args.indexOf("--tools") + 1]).not.toContain("Bash");
   });
+  it("gives Claude read-only investigation roles Bash limited to git reads, and no other role Bash", () => {
+    const reviewer = buildProviderRoleLaunch({ agentKind: "claude", role: "reviewer", systemPrompt: "Review." });
+    expect(reviewer[reviewer.indexOf("--tools") + 1]).toBe("Read,Glob,Grep,Bash");
+    const allowed = reviewer[reviewer.indexOf("--allowedTools") + 1]!.split(",");
+    expect(allowed.filter(tool => tool.startsWith("Bash"))).toEqual(["log", "show", "diff", "status", "branch"].map(command => `Bash(git ${command}:*)`));
+    expect(allowed).not.toContain("Bash");
+    for (const role of ["tester", "conversation", "coordinator"] as const) {
+      const args = buildProviderRoleLaunch({ agentKind: "claude", role, systemPrompt: "Bounded role." });
+      expect(args[args.indexOf("--tools") + 1]).not.toContain("Bash");
+      expect(args[args.indexOf("--allowedTools") + 1]).not.toContain("Bash");
+    }
+  });
   it("rejects unsupported provider policy rather than silently configuring another provider", () => {
     expect(() => buildProviderRoleLaunch({ agentKind: "other" as "codex", role: "reviewer", systemPrompt: "Review" })).toThrow();
     expect(() => buildProviderRoleLaunch({ agentKind: "claude", role: "reviewer", systemPrompt: "" })).toThrow();

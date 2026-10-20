@@ -142,6 +142,7 @@ export function requirementFor(
   return {
     role: option.role,
     provider: option.provider,
+    ...(option.profileName !== undefined ? { profileName: option.profileName } : {}),
     required: option.required,
     ...(option.model !== undefined ? { model: option.model } : {}),
     ...(option.effort !== undefined ? { effort: option.effort } : {}),
@@ -619,6 +620,7 @@ export async function createHostPlatformSession(options: CreateHostPlatformSessi
     ...(gatewayControl !== undefined ? { gatewayControl } : {}),
     ...(gatewayEndpoint !== undefined ? { gatewayEndpoint } : {}),
     signer: new Ed25519LaunchAttestationSigner({ issuerId: options.issuerId, privateKeyPem: options.privateKeyPem, publicKeyPem: options.publicKeyPem }),
+    ...(platform.isolatorStateRoot !== undefined ? { isolatorStateRoot: platform.isolatorStateRoot } : {}),
     providerFactory: createHostProviderAdapterFactory(platform, {}, process.env),
     ...createHostProviderFactoryOptions(platform, process.env),
     rolePrompt: options.rolePrompt,

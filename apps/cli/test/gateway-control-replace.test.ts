@@ -6,11 +6,12 @@ import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { startGatewayControl, type GatewayControl } from "../src/gateway-control.js";
 
+// A short root keeps <state>/gateway-control.sock under the Unix socket path limit (macOS tmpdir is too long).
 let root: string;
 let stateRoot: string;
 let controls: GatewayControl[] = [];
 beforeEach(async () => {
-  root = await realpath(await mkdtemp(join(tmpdir(), "bflow-control-replace-")));
+  root = await realpath(await mkdtemp(join(process.platform === "win32" ? tmpdir() : "/tmp", "bflow-cr-")));
   stateRoot = join(root, "state");
 });
 afterEach(async () => {

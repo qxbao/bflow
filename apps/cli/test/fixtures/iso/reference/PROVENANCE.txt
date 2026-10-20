@@ -1,0 +1,7 @@
+Compatibility reference: ai-isolator v0.4.4
+
+Source: /mnt/01DCE9A4D6522BD0/Project/AI/skill_ai/speckit/runmethod/ai-sdlc/bin/ai-isolator
+SHA-256: 81d9f3649768d3650c6477df8bafbcc222bccfcf8b53893753ab6ffbf20d8b7d
+
+The adjacent ai-isolator-v0.4.4 file is a byte-for-byte copy of that source.
+It is test-only and is executed under temporary HOME/state/PATH fixtures.

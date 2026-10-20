@@ -17,10 +17,19 @@ export const DEFAULT_PROVIDER_BY_CLI: Record<EnvironmentProvider, string> = {
   agy: "google"
 };
 
+const EnvironmentProfileNameSchema = z.string().min(1).regex(/^[A-Za-z0-9._-]+$/, "Profile names may contain only letters, numbers, dots, underscores and hyphens.");
+
+export const EnvironmentProfileDefaultsSchema = z.object({
+  codex: z.object({ "profile-name": EnvironmentProfileNameSchema.optional() }).strict().optional(),
+  claude: z.object({ "profile-name": EnvironmentProfileNameSchema.optional() }).strict().optional(),
+  agy: z.object({ "profile-name": EnvironmentProfileNameSchema.optional() }).strict().optional()
+}).strict();
+
 export const EnvironmentRoleConfigSchema = z
   .object({
     role: AgentRoleSchema,
     cli: z.string().trim().min(1),
+    "profile-name": EnvironmentProfileNameSchema.optional(),
     model: z.string().trim().min(1).optional(),
     effort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).optional(),
     required: z.boolean().optional(),
@@ -45,6 +54,7 @@ export const EnvironmentConfigEnvironmentSchema = z
     sessionName: z.string().min(1),
     herdrBinary: z.string().min(1),
     roles: z.array(EnvironmentRoleConfigSchema).min(1),
+    defaults: EnvironmentProfileDefaultsSchema.optional(),
     sdd: z
       .object({
         minimumLevel: z.enum(["lightweight", "full"]),
@@ -141,7 +151,7 @@ export function defaultEnvironmentConfig(repository: RepositoryIdentity, name?: 
     environment: {
       repositoryId: repository.id, workspaceRoot: repository.root, sessionName: repository.sessionName,
       herdrBinary: "herdr",
-      roles: ["conversation", "coordinator", "planner", "architect", "specifier", "reviewer", "qa"].map((role) => ({ role: AgentRoleSchema.parse(role), cli: provider, required: true })),
+      roles: ["conversation", "coordinator", "planner", "architect", "specifier", "developer", "reviewer", "qa"].map((role) => ({ role: AgentRoleSchema.parse(role), cli: provider, required: role !== "developer" })),
       sdd: { minimumLevel: "lightweight", approvalRequired: true }, tdd: { policy: "conditional" },
       verification: { maxIterations: 3, onExhausted: "require_human" }, concurrency: { maxConcurrency: 2 },
       startupTimeoutMs: 300_000, shutdownTimeoutMs: 30_000,

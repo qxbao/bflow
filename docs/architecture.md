@@ -1,14 +1,14 @@
-# Architecture
+# Kiến trúc
 
-## Scope
+## Phạm vi
 
 > Ghi chú (2026-10-17): tài liệu này là phạm vi và sơ đồ baseline P00. Các module P01–P10 đã được triển khai; sơ đồ phụ thuộc dưới đây không liệt kê các package về sau (pane-manager, conversation, specification, test-strategy, verification, git-orchestrator, agent-providers, machine-setup, tool-installer, mcp-gateway, mcp-services, skills). Xem [architecture v2](architecture-v2.md) và [runtime architecture v3](runtime-architecture-v3.md); câu "does not implement ..." bên dưới chỉ mô tả P00.
 
-P00 defines module boundaries, validated exchange data, public ports, and pure invariants for bflow. It does not implement scheduling, a Herdr adapter, SQLite persistence, artifact I/O, leases, quality command execution, recovery, CLI behavior, or end-to-end workflows.
+P00 định nghĩa ranh giới module, dữ liệu trao đổi đã được validate, các port công khai và các bất biến thuần túy cho bflow. Nó không triển khai scheduling, Herdr adapter, persistence SQLite, I/O artifact, lease, thực thi lệnh quality, recovery, hành vi CLI hay workflow end-to-end.
 
-The first deployment remains a module-first Node.js process. Herdr is an external execution mechanism reached only through `AgentTransport`; core contracts contain no Herdr wire types.
+Lần triển khai đầu tiên vẫn là một process Node.js theo hướng module-first. Herdr là cơ chế thực thi bên ngoài, chỉ được truy cập qua `AgentTransport`; các core contract không chứa wire type của Herdr.
 
-## Modules and dependency direction
+## Các module và hướng phụ thuộc
 
 ```mermaid
 flowchart TD
@@ -23,21 +23,21 @@ flowchart TD
   Gates[packages/quality-gates] --> Contracts
 ```
 
-`contracts` is the shared dependency. Runtime will compose implementations through ports. Leaf implementation packages do not depend on each other, and `core` does not depend on Herdr.
+`contracts` là dependency dùng chung. Runtime sẽ compose các triển khai thông qua port. Các package triển khai leaf không phụ thuộc lẫn nhau, và `core` không phụ thuộc Herdr.
 
-| Module | Future responsibility | Excluded from P00 |
+| Module | Trách nhiệm trong tương lai | Loại trừ khỏi P00 |
 | --- | --- | --- |
-| `contracts` | Zod exchange schemas, ports, pure compatibility/transition/batch validators | I/O and orchestration implementation |
-| `core` | DAG planning, legal transitions, scheduling and recovery decisions | Transport and storage |
-| `herdr-adapter` | Verified mapping from Herdr to `AgentTransport` | Workflow policy and task-success inference |
-| `persistence` | Atomic SQLite event/checkpoint storage and schema evolution | Artifact bytes |
-| `artifact-store` | Validated immutable artifact storage | Run state |
-| `agent-registry` | Role lookup and atomic execution leases | Agent execution |
-| `quality-gates` | Gate evaluators | State mutation |
-| `runtime` | Transaction/use-case ordering across ports | Concrete adapter leakage |
-| `apps/cli` | Command parsing and presentation | Domain decisions |
+| `contracts` | Zod exchange schema, port, các validator thuần túy cho compatibility/transition/batch | Triển khai I/O và orchestration |
+| `core` | Lập kế hoạch DAG, transition hợp lệ, quyết định scheduling và recovery | Transport và storage |
+| `herdr-adapter` | Ánh xạ đã xác minh từ Herdr sang `AgentTransport` | Workflow policy và suy luận task-success |
+| `persistence` | Lưu trữ event/checkpoint SQLite nguyên tử và tiến hóa schema | Byte của artifact |
+| `artifact-store` | Lưu trữ artifact bất biến đã validate | Run state |
+| `agent-registry` | Tra cứu role và execution lease nguyên tử | Thực thi agent |
+| `quality-gates` | Các gate evaluator | Thay đổi state |
+| `runtime` | Thứ tự transaction/use-case giữa các port | Rò rỉ concrete adapter |
+| `apps/cli` | Phân tích lệnh và trình bày | Quyết định domain |
 
-## Dispatch, observation, and task outcome
+## Dispatch, quan sát và task outcome
 
 ```mermaid
 sequenceDiagram
@@ -58,45 +58,45 @@ sequenceDiagram
   end
 ```
 
-`AgentExecutionHandle` stores orchestration execution identity, request/attempt identity, idempotency key, a transport-neutral locator, correlation provenance, and a recovery cursor. A handle is durable only after `agent.execution_bound` is appended. After uncertain delivery, automatic resend is forbidden until reconciliation proves `not_delivered`. If the transport cannot prove either outcome, it returns `unknown_delivery` with manual intervention required; exactly-once delivery is not promised.
+`AgentExecutionHandle` lưu orchestration execution identity, request/attempt identity, idempotency key, locator trung lập với transport, nguồn gốc correlation và recovery cursor. Một handle chỉ bền vững sau khi `agent.execution_bound` được append. Sau khi delivery không chắc chắn, việc tự động gửi lại bị cấm cho đến khi reconciliation chứng minh `not_delivered`. Nếu transport không thể chứng minh được cả hai kết quả, nó trả về `unknown_delivery` kèm yêu cầu can thiệp thủ công; exactly-once delivery không được hứa hẹn.
 
-Transport state and task outcome are separate domains. `wait` returns `AgentTransportObservation`, never `AgentResult`. `done` means only that the transport observed its terminal-like state. A verified `AgentResult` requires separate outcome evidence correlated to the submission. Uncorrelated output stays `unverified` and cannot be accepted by `RecordAgentResultCommandSchema`.
+Transport state và task outcome là hai domain tách biệt. `wait` trả về `AgentTransportObservation`, không bao giờ là `AgentResult`. `done` chỉ có nghĩa là transport quan sát thấy trạng thái giống terminal của nó. Một `AgentResult` đã xác minh cần bằng chứng outcome riêng được correlate với submission. Output không correlate được vẫn là `unverified` và không thể được `RecordAgentResultCommandSchema` chấp nhận.
 
-## Herdr 0.9.1 compatibility boundary
+## Ranh giới tương thích Herdr 0.9.1
 
-P00 inspected the installed CLI and bundled schema read-only:
+P00 đã kiểm tra CLI đã cài và schema đi kèm ở chế độ chỉ đọc:
 
 - protocol `22`, schema version `1`;
-- agent states `idle`, `working`, `blocked`, `done`, and `unknown`;
-- `AgentInfo` exposes workspace/tab/pane/terminal identifiers, revision, state-change sequence, and an optional agent-session locator;
-- `agent start` requires name, kind, and pane;
-- `agent prompt --wait` explicitly does not track turns when the target is already working.
+- các agent state `idle`, `working`, `blocked`, `done` và `unknown`;
+- `AgentInfo` expose các identifier workspace/tab/pane/terminal, revision, state-change sequence và một agent-session locator tùy chọn;
+- `agent start` yêu cầu name, kind và pane;
+- `agent prompt --wait` tường minh không theo dõi turn khi target đang working.
 
-Therefore Herdr `done` is not evidence of task success, and Herdr 0.9.1 does not by itself establish prompt-level idempotency or reliable turn correlation. The adapter phase must map available locator fields, preserve `unknown_delivery`, and report unverified observations where correlation cannot be proven. No live integration claim is made by P00.
+Do đó Herdr `done` không phải bằng chứng task thành công, và bản thân Herdr 0.9.1 không thiết lập được prompt-level idempotency hay turn correlation đáng tin cậy. Phase adapter phải ánh xạ các field locator có sẵn, giữ `unknown_delivery`, và báo cáo các observation chưa xác minh khi không chứng minh được correlation. P00 không đưa ra tuyên bố tích hợp live nào.
 
-## State and concurrency model
+## Mô hình state và concurrency
 
-Workflow definitions represent DAG dependencies, parallel tasks, and bounded workflow concurrency with `maxConcurrency`. `validateTaskTransition` and `validateRunTransition` are mandatory semantic guards; terminal task states cannot restart through a normal transition. Rework is explicitly `succeeded -> ready` with a one-step generation increment. Retry is explicitly `failed -> retrying`.
+Workflow definition biểu diễn các dependency DAG, task song song, và concurrency của workflow có giới hạn bằng `maxConcurrency`. `validateTaskTransition` và `validateRunTransition` là các guard ngữ nghĩa bắt buộc; task state terminal không thể khởi động lại qua một transition thông thường. Rework tường minh là `succeeded -> ready` với generation tăng một bước. Retry tường minh là `failed -> retrying`.
 
-Retry attempts are counted within each rework generation; the task attempt identity remains monotonic across the run. `task.retry_scheduled` captures the policy-derived eligibility time. `advance` may make a retry ready only at or after that timestamp. Runtime later supplies wake-up scheduling; Core never starts a timer. Jitter, when enabled, is deterministic from run/task/generation/attempt identity so replay never samples randomness.
+Số lần retry được đếm trong từng rework generation; task attempt identity vẫn tăng đơn điệu xuyên suốt run. `task.retry_scheduled` ghi lại thời điểm eligibility suy ra từ policy. `advance` chỉ có thể làm retry thành ready tại hoặc sau timestamp đó. Runtime sau này cung cấp việc lập lịch đánh thức; Core không bao giờ khởi động timer. Jitter, khi được bật, mang tính xác định từ run/task/generation/attempt identity để replay không bao giờ lấy mẫu ngẫu nhiên.
 
-Registry lookup and execution capacity are separate. `resolve` selects configuration; `acquireLease`, `renewLease`, and `releaseLease` define the atomic boundary for capacity. Lease ID, expiry, optimistic version, fencing token, and idempotency key allow a later implementation to reject stale owners. P00 does not implement that atomicity.
+Registry lookup và execution capacity là hai việc tách biệt. `resolve` chọn cấu hình; `acquireLease`, `renewLease` và `releaseLease` định nghĩa ranh giới nguyên tử cho capacity. Lease ID, expiry, optimistic version, fencing token và idempotency key cho phép một triển khai sau này từ chối các owner cũ. P00 không triển khai tính nguyên tử đó.
 
-## Persistence and recovery model
+## Mô hình persistence và recovery
 
-Events are authoritative. Every event has event schema version, aggregate version, and stream sequence as distinct fields. `validateEventBatch` verifies one run ID, contiguous sequence/version, and unique event/idempotency identities before `RunStore.appendEvents` performs its future transaction.
+Event là nguồn có thẩm quyền. Mỗi event có event schema version, aggregate version và stream sequence là các field riêng biệt. `validateEventBatch` kiểm tra một run ID duy nhất, sequence/version liên tục, và event/idempotency identity là duy nhất trước khi `RunStore.appendEvents` thực hiện transaction trong tương lai.
 
-Checkpoints are optimizations. They declare checkpoint schema version plus codec name/version. Compatibility helpers upcast the original P00 v0 shape (missing explicit version fields) to v1, reject unsupported versions with typed errors, and validate the resulting current schema. A future recovery engine must load a compatible checkpoint, replay later events, and reconcile every in-flight or uncertain agent submission before retrying.
+Checkpoint là tối ưu hóa. Chúng khai báo checkpoint schema version cùng codec name/version. Các helper tương thích upcast hình dạng v0 gốc của P00 (thiếu các field version tường minh) lên v1, từ chối các version không được hỗ trợ bằng lỗi có kiểu, và validate schema hiện tại thu được. Một recovery engine trong tương lai phải tải checkpoint tương thích, replay các event sau đó, và reconcile mọi agent submission đang bay hoặc không chắc chắn trước khi retry.
 
-P01 remediation uses `command.completed` as the durable command receipt in the same event batch as its effects. Full replay reconstructs cached command outcomes. The aggregate checkpoint codec captures all auxiliary state and cached outcomes; a snapshot-only checkpoint cannot support tail-only recovery. Core's `createCheckpoint` exports state without persisting it. P03 must atomically store events and receipts, and P06 must persist before side effects; neither storage nor transport is implemented in P01.
+Việc khắc phục P01 dùng `command.completed` làm command receipt bền vững trong cùng event batch với các effect của nó. Full replay dựng lại các command outcome đã cache. Aggregate checkpoint codec thu thập toàn bộ trạng thái phụ trợ và outcome đã cache; checkpoint chỉ có snapshot không thể hỗ trợ tail-only recovery. `createCheckpoint` của Core xuất state mà không persist nó. P03 phải lưu event và receipt một cách nguyên tử, và P06 phải persist trước các side effect; cả storage lẫn transport đều không được triển khai trong P01.
 
-## Artifact, approval, gate, and cancellation boundaries
+## Ranh giới artifact, approval, gate và cancellation
 
-- Agent/gate output uses untrusted `ArtifactProposal`; only successful `ArtifactStore.put` returns a trusted `ArtifactReference` with `artifact://` URI and verified checksum.
-- Approval requests and decisions have a required typed target, revision, generation, idempotency key, and evidence/feedback references. Rejection and requested changes require a reason.
-- Workflow tasks bind declared quality gates. Evaluation request/result commands and events carry evaluation identity, expected aggregate version, and idempotency.
-- Cancellation is asynchronous: request, accepted/refused, and confirmed stop are distinct records. Acceptance is not proof of stop. A completion may legally win while state is `cancelling`.
+- Output của agent/gate dùng `ArtifactProposal` không đáng tin; chỉ `ArtifactStore.put` thành công mới trả về `ArtifactReference` đáng tin với URI `artifact://` và checksum đã xác minh.
+- Approval request và decision có target có kiểu bắt buộc, revision, generation, idempotency key và evidence/feedback reference. Từ chối và yêu cầu thay đổi cần có lý do.
+- Workflow task bind các quality gate đã khai báo. Command và event yêu cầu/kết quả đánh giá mang evaluation identity, expected aggregate version và idempotency.
+- Cancellation là bất đồng bộ: request, accepted/refused và confirmed stop là các bản ghi riêng biệt. Acceptance không phải bằng chứng của việc dừng. Một completion có thể hợp lệ thắng khi state là `cancelling`.
 
-## Contract guarantees versus later enforcement
+## Bảo đảm của contract so với việc thực thi sau này
 
-P00 guarantees schema rejection, typed public result shapes, documented semantics, and pure validators. Later implementations must enforce atomic database transactions, exactly-once idempotency effects, lease fencing, checksum verification while streaming, safe filesystem resolution, transport reconciliation, command authorization, event upcasting during replay, and cancellation races. Types alone do not provide those runtime properties.
+P00 bảo đảm việc từ chối schema, hình dạng kết quả công khai có kiểu, ngữ nghĩa được tài liệu hóa và các validator thuần túy. Các triển khai sau này phải thực thi database transaction nguyên tử, hiệu ứng idempotency exactly-once, lease fencing, xác minh checksum khi streaming, phân giải filesystem an toàn, transport reconciliation, ủy quyền command, event upcasting trong lúc replay và các race của cancellation. Riêng type không cung cấp các thuộc tính runtime đó.
