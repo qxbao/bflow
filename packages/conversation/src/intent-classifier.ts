@@ -9,6 +9,7 @@ import type {
   WorkflowRequestContext,
   WorkflowRequestKind
 } from "./types.js";
+import { newestClarification } from "./clarification-lifecycle.js";
 import { isExpiredUserDecision, isUserDecisionRequest, resolveUserDecisionReply } from "./user-decision.js";
 
 const ZERO_WIDTH_STRIP_REGEX = /[\u200B-\u200D\uFEFF\u00AD]/g;
@@ -539,8 +540,8 @@ function resolvePendingClarification(
   context: ConversationContextSnapshot
 ): IntentClassificationResult | undefined {
   const content = sanitizeInputText(input.content);
-  const pending = input.correlationId ? context.pendingClarifications[input.correlationId] :
-    Object.values(context.pendingClarifications).length === 1 ? Object.values(context.pendingClarifications)[0] : undefined;
+  // Without a correlation id the reply can only answer the newest open clarification, never an older one.
+  const pending = input.correlationId ? context.pendingClarifications[input.correlationId] : newestClarification(context.pendingClarifications);
   if (!pending) return undefined;
   if (!hasChangeAuthority(pending.originalRequestText)) return undefined;
   // A fresh imperative is a new request. Only a correlated reply or explicit scope answer
