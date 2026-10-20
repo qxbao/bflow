@@ -1,57 +1,55 @@
 # Hướng dẫn sử dụng Bflow
 
-Bộ hướng dẫn cho repository mới dựa trên source implementation hiện tại. CLI
-lifecycle và P19 host là hai luồng riêng; tính năng chưa tự tích hợp được ghi rõ
-là **planned/chưa triển khai**. Public contracts và ADR vẫn là nguồn authoritative.
+Tài liệu này cung cấp hướng dẫn toàn diện cho việc thiết lập và vận hành Bflow trên một repository mới, dựa trên mã nguồn thực tế hiện tại. Lưu ý rằng tầng quản lý vòng đời CLI và máy chủ P19 host là hai luồng vận hành độc lập; các tính năng chưa được tự động tích hợp đều được chú thích rõ là **dự kiến / chưa triển khai**. Hệ thống hợp đồng giao tiếp công khai (Public Contracts) và các bản ghi quyết định kiến trúc (ADR) luôn là nguồn tham chiếu chuẩn mực cao nhất.
 
-| Chủ đề | Nội dung |
+| Chủ đề | Nội dung tóm tắt |
 | --- | --- |
-| [Getting Started](getting-started.md) | Thử trên repository Node.js/TypeScript riêng |
-| [Installation](installation.md) | Cài đặt/build từ source, Node/pnpm/Herdr |
-| [bflow init](bflow-init.md) | config.yml có chú thích, Git identity, migration, idempotency và cờ overwrite |
-| [bflow up](bflow-up.md) | Named session, role thường trực, readiness, giới hạn khi khởi động host |
-| [bflow attach](bflow-attach.md) | Chỉ attach Conversation |
-| [Recovery sau Ctrl+C](troubleshooting.md) | Kernel lock, recover --yes, native startup dialogs và pane labels |
-| [bflow down](bflow-down.md) | Barrier/checkpoint và giới hạn shutdown mặc định |
-| [Configuration Reference](configuration-reference.md) | Fields thực tế, config CLI/host/Herdr |
-| [Agent Roles](agent-roles.md) | Đủ tám role và ánh xạ contract names |
-| [SDD & TDD Policies](sdd-tdd-policies.md) | Đánh giá rủi ro, các mức, required/recommended/not_applicable |
-| [Verification Loop](verification-loop.md) | Kiểm tra độc lập, giới hạn retry/rework/iteration |
-| [Session Recovery](session-recovery.md) | Restart, uncertain delivery, receipt và aggregate replay |
-| [Herdr Communication](herdr-communication.md) | RoleMessage, native receipt đã xác thực, giới hạn transport |
-| [Troubleshooting](troubleshooting.md) | Chẩn đoán theo implementation |
-| [Security & Approval](security-approval.md) | Secrets, trusted host và approval boundaries |
-| [Architecture Overview](architecture-overview.md) | Năm thành phần và bốn state domains |
+| [Khởi đầu nhanh (Getting Started)](getting-started.md) | Hướng dẫn trải nghiệm trên một repository Node.js/TypeScript độc lập |
+| [Cài đặt (Installation)](installation.md) | Cài đặt và biên dịch từ mã nguồn; yêu cầu Node, pnpm và Herdr |
+| [Khởi tạo dự án (`bflow init`)](bflow-init.md) | Cấu trúc tệp config.yml có chú thích, định danh Git, chuyển đổi phiên bản, tính lũy thừa và cờ ghi đè |
+| [Khởi động dịch vụ (`bflow up`)](bflow-up.md) | Quản lý phiên có tên (named session), các vai trò thường trực, điều kiện sẵn sàng và các giới hạn khi khởi động host |
+| [Gắn kết phiên (`bflow attach`)](bflow-attach.md) | Cơ chế gắn kết trực tiếp vào pane của Conversation Agent |
+| [Khôi phục sự cố sau Ctrl+C](troubleshooting.md) | Cơ chế khoá kernel (kernel lock), lệnh `recover --yes`, hộp thoại khởi động native và nhãn định danh pane |
+| [Hạ dịch vụ (`bflow down`)](bflow-down.md) | Rào chắn an toàn (barrier), điểm kiểm tra (checkpoint) và các giới hạn khi dừng hệ thống |
+| [Tham chiếu cấu hình (Configuration Reference)](configuration-reference.md) | Chi tiết các trường cấu hình thực tế cho CLI, Runtime host và Herdr |
+| [Các vai trò Agent (Agent Roles)](agent-roles.md) | Danh mục 8 vai trò chính thức và ánh xạ định danh theo hợp đồng (contracts) |
+| [Chính sách SDD & TDD](sdd-tdd-policies.md) | Phân loại rủi ro, xác định mức độ đặc tả, các chế độ kiểm thử required/recommended/not_applicable |
+| [Vòng lặp kiểm tra (Verification Loop)](verification-loop.md) | Cơ chế kiểm thử độc lập, kiểm soát giới hạn số lần thử lại (retry), sửa lỗi (rework) và vòng lặp |
+| [Khôi phục phiên làm việc (Session Recovery)](session-recovery.md) | Xử lý khởi động lại, tình trạng truyền tin bất định (uncertain delivery), biên nhận và phát lại điểm kiểm tra |
+| [Giao tiếp qua Herdr (Herdr Communication)](herdr-communication.md) | Cấu trúc RoleMessage, biên nhận native đã xác thực và các giới hạn của tầng truyền tải |
+| [Xử lý sự cố (Troubleshooting)](troubleshooting.md) | Cẩm nang chẩn đoán và khắc phục lỗi thực tế theo từng thành phần |
+| [Bảo mật & Phê duyệt (Security & Approval)](security-approval.md) | Quản lý bí mật (secrets), ranh giới tin cậy của host và thẩm quyền phê duyệt |
+| [Tổng quan kiến trúc (Architecture Overview)](architecture-overview.md) | Mô hình 5 thành phần cốt lõi và 4 miền trạng thái trực giao |
 
-Mẫu portable: [templates/node-typescript](../../templates/node-typescript/README.md).
-Repository thử nghiệm: [examples/portable-node](../../examples/portable-node/README.md).
-[Báo cáo kiểm chứng](../../templates/node-typescript/VALIDATION.md) ghi commands,
-exit codes, baseline và phạm vi live Herdr thật.
+- Mẫu dự án chuẩn (Portable template): [templates/node-typescript](../../templates/node-typescript/README.md)
+- Repository thử nghiệm mẫu: [examples/portable-node](../../examples/portable-node/README.md)
+- Báo cáo kiểm chứng thực tế: [Báo cáo xác thực](../../templates/node-typescript/VALIDATION.md) ghi nhận chi tiết các lệnh, mã thoát (exit code), baseline và phạm vi kiểm thử với Herdr thực tế.
 
-## Trạng thái sử dụng
+---
 
-| Khả năng | Trạng thái |
+## Trạng thái triển khai tính năng
+
+| Năng lực hệ thống | Trạng thái triển khai |
 | --- | --- |
-| Init config và repository identity/isolation | Có implementation, kiểm chứng CLI thật trong repo tạm |
-| Up/attach/status/doctor qua P12 + P13 | Có implementation; môi trường agent/provider phải cài và đăng nhập riêng |
-| Down của default CLI adapter | Đã compose host quiesce/checkpoint + P13 shutdown; live lifecycle smoke đạt; --yes không bypass barrier |
-| P14–P19 SDLC composition | Có API `openAgenticWorkspace`, cần trusted host/provider tool registration/check/auth |
-| Conditional TDD/SDD/verification | Environment policies được truyền vào host; evidence hỗ trợ manual review và owner-configured Node TAP/Vitest trên Linux |
-| CLI tự boot/shutdown host P19 | Đã triển khai cho native Claude hooks/MCP; live up/down/restart smoke đạt |
-| Signed Herdr native message transport | Có smoke kiểm chứng thật; không thay AI delivery hoặc independent measurement evidence |
-| Live model thực hiện SDLC end-to-end | **Chưa kiểm chứng trong đợt này** |
-| Automatic protected merge/push/deploy | Không có execution tool trong Runtime này |
+| Khởi tạo cấu hình và phân tách định danh repository | Đã triển khai đầy đủ; đã kiểm chứng lệnh CLI thực tế trong repository tạm thời |
+| Quản lý vòng đời (Up / Attach / Status / Doctor) qua P12 + P13 | Đã triển khai; môi trường nhà cung cấp (provider) và agent cần được cài đặt, đăng nhập độc lập |
+| Hạ dịch vụ (`bflow down`) của CLI adapter mặc định | Đã tích hợp cơ chế rút cạn/điểm kiểm tra của host cùng quy trình tắt P13; vượt qua kiểm thử smoke; `--yes` không bỏ qua barrier an toàn |
+| Tổ hợp quy trình SDLC (P14–P19) | Đã cung cấp API `openAgenticWorkspace`; đòi hỏi host tin cậy và cơ chế đăng ký/xác thực công cụ của provider |
+| Thực thi chính sách SDD / Conditional TDD / Verification | Chính sách môi trường được chuyển tiếp tới host; hỗ trợ rà soát thủ công và runner kiểm thử Node TAP/Vitest trên Linux |
+| CLI tự động khởi động và tắt host P19 | Đã triển khai với các native Claude hook và dịch vụ MCP; vượt qua kiểm thử chu trình up/down/restart |
+| Tầng truyền tải thông điệp Herdr có chữ ký số | Đã kiểm chứng thực tế; việc truyền tải thông điệp không thay thế cho bằng chứng nghiệm thu kết quả của AI |
+| Nghiệm thu Agentic SDLC đầu-cuối với mô hình trực tiếp | **Chưa kiểm chứng đầy đủ trong đợt phát hành này** |
+| Tự động tích hợp, merge và triển khai nhánh được bảo vệ | Runtime hiện tại không cấp quyền thực thi tự động các thao tác đẩy nhánh/triển khai lên remote |
 
-## Tài liệu legacy P00–P10
+---
 
-Các trang đánh số dưới đây giữ lại để tham khảo API/demo legacy. Những đánh giá
-integration trước P19 không áp dụng cho host P19 hiện tại; dùng các trang mới bên
-trên cho onboarding. Không dùng ví dụ gọi Core trực tiếp để bypass policy P19.
+## Tài liệu lưu trữ kế thừa (Legacy P00–P10)
 
-- [01 Architecture](01-architecture-overview.md), [02 Environment](02-environment.md), [03 Herdr](03-herdr-setup.md)
-- [04 Install/init](04-install-and-init.md), [05 Registry roles](05-roles-and-models.md)
-- [06 Feature](06-feature-workflow.md), [07 Bugfix](07-bugfix-workflow.md)
-- [08 Status/artifacts](08-status-and-artifacts.md), [09 Recovery](09-blocked-timeout-retry-resume.md), [10 Pre-merge](10-pre-merge-verification.md)
+Các tài liệu được đánh số dưới đây được lưu giữ nhằm mục đích tham chiếu API và các bài demo thuộc giai đoạn kiến trúc cũ. Những đánh giá tích hợp trước giai đoạn P19 không còn áp dụng cho mô hình P19 host hiện tại; khuyến nghị người dùng mới sử dụng các tài liệu hướng dẫn ở phần trên. Tuyệt đối không áp dụng các ví dụ thao tác trực tiếp vào Core để vượt qua các chính sách của P19.
 
-[Legacy runtime-demo](../../examples/runtime-demo/README.md) dùng outbox transport
-và predefined patches, không phải model hoặc Herdr E2E.
+- [01. Tổng quan kiến trúc](01-architecture-overview.md), [02. Thiết lập môi trường](02-environment.md), [03. Cấu hình Herdr](03-herdr-setup.md)
+- [04. Cài đặt và khởi tạo](04-install-and-init.md), [05. Vai trò và mô hình trong Registry](05-roles-and-models.md)
+- [06. Quy trình phát triển tính năng](06-feature-workflow.md), [07. Quy trình sửa lỗi](07-bugfix-workflow.md)
+- [08. Trạng thái và Artifact](08-status-and-artifacts.md), [09. Xử lý tắc nghẽn và khôi phục](09-blocked-timeout-retry-resume.md), [10. Xác minh trước khi merge](10-pre-merge-verification.md)
+
+*Lưu ý: Dự án mẫu kế thừa [runtime-demo](../../examples/runtime-demo/README.md) sử dụng cơ chế outbox transport và các bản vá (patch) định sẵn, không phản ánh việc tương tác trực tiếp với mô hình hoặc môi trường Herdr đầu-cuối.*

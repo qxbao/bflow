@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import type { AdapterContext, AdapterDetection, AdapterRunner, RunnerAdapter, RunnerIdentities, RunnerMount } from "../runner-adapter.js";
 
 const runFile = promisify(execFile);
-const VERSION_TIMEOUT_MS = 5_000;
+const VERSION_TIMEOUT_MS = 15_000;
 const CONFIG_FILE = /(?:^|\/)(?:pom\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|gradle\.properties|gradle\.lockfile|Gemfile(?:\.lock)?|\.rspec(?:-local)?|spec_helper\.rb|rails_helper\.rb|test_helper\.rb|composer\.(?:json|lock)|phpunit\.xml(?:\.dist)?|global\.json|NuGet\.Config|nuget\.config|Directory\.(?:Build|Packages)\.(?:props|targets)|CMakeLists\.txt|CTestTestfile\.cmake|CMakePresets\.json|Package\.(?:swift|resolved))$/i;
 const DOTNET_PROJECT = /\.(?:cs|fs|vb)proj$/i;
 const SAFE_FQN = /^[A-Za-z_][A-Za-z0-9_$]*(?:\.[A-Za-z_][A-Za-z0-9_$]*)+$/;
@@ -102,9 +102,9 @@ const systemHost: ManagedAdapterHost = {
       if (!isAbsolute(executable) || !(await lstat(executable)).isFile()) return undefined;
       // A fresh SDK may create first-use sentinels even for --version. Never point that
       // initialization at the user's home or an unwritable/nonexistent directory.
-      if (name === "dotnet") probeHome = await mkdtemp(join(tmpdir(), "bflow-dotnet-probe-"));
+      if (["dotnet", "gradle"].includes(name)) probeHome = await mkdtemp(join(tmpdir(), `bflow-${name}-probe-`));
       const environment = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: "/nonexistent", LANG: "C", LC_ALL: "C", MAVEN_SKIP_RC: "true", DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1", DOTNET_CLI_TELEMETRY_OPTOUT: "1",
-        ...(probeHome ? { HOME: probeHome, DOTNET_CLI_HOME: probeHome, DOTNET_NOLOGO: "1" } : {}),
+        ...(probeHome ? { HOME: probeHome, ...(name === "dotnet" ? { DOTNET_CLI_HOME: probeHome, DOTNET_NOLOGO: "1" } : {}), ...(name === "gradle" ? { GRADLE_USER_HOME: probeHome } : {}) } : {}),
         ...(name === "rspec" && /\/(?:\.gem|\.local\/share\/gem)\/ruby\/\d+\.\d+\.\d+\/bin\/rspec$/.test(executable) ? { GEM_PATH: dirname(dirname(executable)) } : {}) };
       const result = await runFile(executable, name === "php" ? ["-n", ...versionArgs] : versionArgs, {
         cwd: "/", env: environment,
