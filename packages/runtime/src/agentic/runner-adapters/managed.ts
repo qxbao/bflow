@@ -11,6 +11,65 @@ const CONFIG_FILE = /(?:^|\/)(?:pom\.xml|build\.gradle(?:\.kts)?|settings\.gradl
 const DOTNET_PROJECT = /\.(?:cs|fs|vb)proj$/i;
 const SAFE_FQN = /^[A-Za-z_][A-Za-z0-9_$]*(?:\.[A-Za-z_][A-Za-z0-9_$]*)+$/;
 
+/** Runtime-authored reporter: helper bytes are mounted read-only, never supplied by the repository. */
+const MINITEST_REPORTER = `require "minitest"
+require "cgi"
+class BflowMinitestReporter < Minitest::AbstractReporter
+  def initialize(path)
+    @path = path
+    @results = []
+    @mutex = Mutex.new
+  end
+  def record(result)
+    @mutex.synchronize { @results << result }
+  end
+  def passed?
+    @results.all? { |result| result.failures.empty? }
+  end
+  def report
+    escape = ->(value) { CGI.escapeHTML(value.to_s.encode("UTF-8", invalid: :replace, undef: :replace)) }
+    failures = 0
+    errors = 0
+    skipped = 0
+    cases = @results.map do |result|
+      klass = result.respond_to?(:klass) ? result.klass : result.class.name
+      elements = result.failures.map do |failure|
+        tag = if failure.is_a?(Minitest::Skip)
+          skipped += 1
+          "skipped"
+        elsif failure.is_a?(Minitest::UnexpectedError) || !failure.is_a?(Minitest::Assertion)
+          errors += 1
+          "error"
+        else
+          failures += 1
+          "failure"
+        end
+        type = tag == "failure" ? "Minitest::Assertion" : failure.class.name
+        "<#{tag} type=\\"#{escape.call(type)}\\" message=\\"#{escape.call(failure.message)}\\">#{escape.call(Array(failure.backtrace).join("\\n"))}</#{tag}>"
+      end.join
+      "<testcase classname=\\"#{escape.call(klass)}\\" name=\\"#{escape.call(result.name)}\\">#{elements}</testcase>"
+    end.join
+    xml = "<?xml version=\\"1.0\\" encoding=\\"UTF-8\\"?><testsuite name=\\"bflow-minitest\\" tests=\\"#{@results.length}\\" failures=\\"#{failures}\\" errors=\\"#{errors}\\" skipped=\\"#{skipped}\\">#{cases}</testsuite>"
+    File.open(@path, "wb") { |file| file.write(xml) }
+  end
+end
+`;
+
+const MINITEST_LOADER = `report_path = ARGV.shift
+separator = ARGV.index("--")
+abort "missing Runtime test file boundary" unless report_path && separator && separator > 0
+files = ARGV.shift(separator)
+ARGV.shift
+$LOAD_PATH.unshift(File.expand_path("lib", Dir.pwd), File.expand_path("test", Dir.pwd))
+files.map { |path| File.dirname(File.expand_path(path, Dir.pwd)) }.uniq.each { |path| $LOAD_PATH.unshift(path) }
+require "minitest/autorun"
+Minitest.extensions << "bflow"
+Minitest.singleton_class.send(:define_method, :plugin_bflow_init) do |_options|
+  reporter << BflowMinitestReporter.new(report_path)
+end
+files.each { |path| require File.expand_path(path, Dir.pwd) }
+`;
+
 export interface ManagedTool {
   executable: string;
   version: string;
@@ -114,6 +173,23 @@ async function baseRunner(context: AdapterContext, project: string, adapterId: s
   };
 }
 
+async function rubyBase(context: AdapterContext, project: string, adapterId: string, tool: ManagedTool, rubyTool: ManagedTool, host: ManagedAdapterHost) {
+  const base = await baseRunner(context, project, adapterId, tool, host);
+  base.mounts.push(...await mountTool(rubyTool, host.homeDirectory));
+  base.mounts.push(...await optionalMount(join(context.root, project, "vendor/bundle"), join(context.root, project, "vendor/bundle"), host));
+  base.environment = { PATH: `${dirname(rubyTool.executable)}:/usr/bin:/bin`, BUNDLE_IGNORE_CONFIG: "1", BUNDLE_FROZEN: "true", BUNDLE_DISABLE_VERSION_CHECK: "true" };
+  const rubyApi = /^(\d+\.\d+)\./.exec(rubyTool.version)?.[1];
+  if (rubyApi) {
+    const api = `${rubyApi}.0`, gemPaths = [`/usr/lib/ruby/gems/${api}`, "/usr/share/rubygems-integration/all"];
+    for (const root of [join(host.homeDirectory, ".gem/ruby", api), join(host.homeDirectory, ".local/share/gem/ruby", api), `/var/lib/gems/${api}`]) {
+      const mounts = await optionalMount(root, root, host);
+      if (mounts.length) { base.mounts.push(...mounts); gemPaths.push(root); }
+    }
+    base.environment.GEM_PATH = gemPaths.join(":");
+  }
+  return base;
+}
+
 async function javaEnvironment(host: ManagedAdapterHost): Promise<{ mounts: RunnerMount[]; environment: Record<string, string> }> {
   const java = await host.findTool("java", ["-version"]);
   if (!java) throw new Error("runner_toolchain_unavailable: Java runtime not detected");
@@ -211,27 +287,41 @@ export function createManagedAdapters(host: ManagedAdapterHost = systemHost): Ru
 
   const ruby = adapter("ruby", path => basename(path) === "Gemfile", async (context, manifest) => {
     const project = dirname(manifest), gemfile = await readFile(join(context.root, manifest), "utf8");
-    if (!/\brspec\b/.test(gemfile)) return { runners: [], notes: ["ruby: runner_reporter_required: minitest needs a structured JUnit reporter; Coordinator should schedule a reviewed reporter/setup task"] };
-    const tool = await host.findTool("rspec", ["--version"]), rubyTool = await host.findTool("ruby", ["--version"]);
-    if (!tool || !rubyTool) return missing("ruby", "Ruby/RSpec");
-    const base = await baseRunner(context, project, "rspec", tool, host);
-    base.mounts.push(...await mountTool(rubyTool, host.homeDirectory));
-    // Repository-local bundle roots avoid importing ~/.bundle/config or global Ruby settings.
-    base.mounts.push(...await optionalMount(join(context.root, project, "vendor/bundle"), join(context.root, project, "vendor/bundle"), host));
-    base.environment = { PATH: `${dirname(rubyTool.executable)}:/usr/bin:/bin`, BUNDLE_IGNORE_CONFIG: "1", BUNDLE_FROZEN: "true", BUNDLE_DISABLE_VERSION_CHECK: "true" };
-    const rubyApi = /^(\d+\.\d+)\./.exec(rubyTool.version)?.[1];
-    if (rubyApi) {
-      const api = `${rubyApi}.0`, gemPaths = [`/usr/lib/ruby/gems/${api}`, "/usr/share/rubygems-integration/all"];
-      for (const root of [join(host.homeDirectory, ".gem/ruby", api), join(host.homeDirectory, ".local/share/gem/ruby", api), `/var/lib/gems/${api}`]) {
-        const mounts = await optionalMount(root, root, host);
-        if (mounts.length) { base.mounts.push(...mounts); gemPaths.push(root); }
+    const hasRspec = /\brspec\b/.test(gemfile), hasMinitest = /\bminitest\b/.test(gemfile);
+    if (!hasRspec && !hasMinitest) return { runners: [], notes: ["ruby: runner_reporter_required: Coordinator should schedule a reviewed structured test-runner setup task"] };
+    const rubyTool = await host.findTool("ruby", ["--version"]);
+    if (!rubyTool) return missing("ruby", "Ruby");
+    const runners: AdapterRunner[] = [], notes: string[] = [];
+    if (hasRspec) {
+      const tool = await host.findTool("rspec", ["--version"]);
+      if (!tool) notes.push(...missing("rspec", "RSpec").notes);
+      else {
+        const base = await rubyBase(context, project, "rspec", tool, rubyTool, host);
+        runners.push({ ...base, format: "rspec_json", nameRule: "RSpec example.full_description (nested descriptions joined with one space)", bind(identities, reports) {
+          validateSelection(identities, project);
+          return { args: ["--format", "json", "--out", `${reports}/rspec.json`, ...identities.testNames.flatMap(name => ["--example", `\\A${escapedRegex(name)}\\z`]), "--", ...identities.testPaths.map(path => pathInProject(path, project))], reportPaths: [`${reports}/rspec.json`] };
+        } });
       }
-      base.environment.GEM_PATH = gemPaths.join(":");
     }
-    return { runners: [{ ...base, format: "rspec_json", nameRule: "RSpec example.full_description (nested descriptions joined with one space)", bind(identities, reports) {
-      validateSelection(identities, project);
-      return { args: ["--format", "json", "--out", `${reports}/rspec.json`, ...identities.testNames.flatMap(name => ["--example", `\\A${escapedRegex(name)}\\z`]), "--", ...identities.testPaths.map(path => pathInProject(path, project))], reportPaths: [`${reports}/rspec.json`] };
-    } }], notes: [] };
+    if (hasMinitest) {
+      const minitest = await host.findTool("ruby", ["-r", "minitest", "-e", "abort unless defined?(Minitest::AbstractReporter) && defined?(Minitest::UnexpectedError) && defined?(Minitest::Skip); print Minitest::VERSION"]);
+      if (!minitest) notes.push(...missing("minitest", "reporter-capable Minitest").notes);
+      else {
+        const base = await rubyBase(context, project, "minitest", { ...rubyTool, version: `Ruby ${rubyTool.version}; Minitest ${minitest.version}` }, rubyTool, host);
+        runners.push({ ...base, format: "junit", helpers: [{ name: "minitest-reporter.rb", content: MINITEST_REPORTER }], nameRule: "classname.name (Ruby class namespace, dot, Minitest method; selection uses Class#method)", bind(identities, reports) {
+          validateSelection(identities, project);
+          const names = identities.testNames.map(name => {
+            // Minitest::Spec class names can be descriptions containing spaces and dots.
+            const conventional = name.lastIndexOf(".test_"), dot = conventional > 0 ? conventional : name.indexOf(".");
+            const klass = name.slice(0, dot), method = name.slice(dot + 1);
+            if (dot < 1 || !klass.trim() || !method.trim()) throw new Error("runner_identity_unselectable: Minitest requires exact Class.method identities");
+            return `${klass}#${method}`;
+          });
+          return { args: ["-r", `${reports}/minitest-reporter.rb`, "-e", MINITEST_LOADER, `${reports}/minitest.xml`, ...identities.testPaths.map(path => pathInProject(path, project)), "--", "--name", `/\\A(?:${names.map(escapedRegex).join("|")})\\z/`], reportPaths: [`${reports}/minitest.xml`] };
+        } });
+      }
+    }
+    return { runners, notes };
   }, host);
 
   const php = adapter("phpunit", path => basename(path) === "composer.json", async (context, manifest) => {

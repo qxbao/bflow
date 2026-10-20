@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createManagedAdapters, managedAdapters, type ManagedAdapterHost } from "../../src/agentic/runner-adapters/managed.js";
 import type { AdapterContext, AdapterRunner } from "../../src/agentic/runner-adapter.js";
+import { parseRunnerResult } from "../../src/agentic/runner-results.js";
 
 const temporary: string[] = [];
 afterEach(async () => { await Promise.all(temporary.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
@@ -63,11 +64,45 @@ describe("managed-language runner adapters", () => {
     expect(runner.bind({ testNames: ["a feature (safe) works?"], testPaths: ["spec/a_spec.rb"] }, "/tmp/reports").args).toEqual(["--format", "json", "--out", "/tmp/reports/rspec.json", "--example", "\\Aa feature \\(safe\\) works\\?\\z", "--", "spec/a_spec.rb"]);
   });
 
-  it("reports missing minitest reporter as an agent setup task", async () => {
+  it("detects Minitest with a Runtime helper and binds exact qualified methods without repository loader code", async () => {
+    const { runner } = await detected("ruby", { "app/Gemfile": 'gem "minitest"', "app/test/feature_test.rb": "" });
+    expect(runner).toMatchObject({ adapterId: "minitest", format: "junit", version: "Ruby 8.1.2; Minitest 8.1.2", helpers: [{ name: "minitest-reporter.rb" }] });
+    const bound = runner.bind({ testNames: ["Example::BehaviorTest.test_target", "Example::BehaviorTest.test_[name]"], testPaths: ["app/test/feature_test.rb"] }, "/tmp/reports");
+    expect(bound.args.slice(0, 3)).toEqual(["-r", "/tmp/reports/minitest-reporter.rb", "-e"]);
+    expect(bound.args.slice(4)).toEqual(["/tmp/reports/minitest.xml", "test/feature_test.rb", "--", "--name", "/\\A(?:Example::BehaviorTest#test_target|Example::BehaviorTest#test_\\[name\\])\\z/"]);
+    expect(bound.args[3]).toContain('files.each { |path| require File.expand_path(path, Dir.pwd) }');
+    expect(runner.helpers![0]!.content).toContain('failure.is_a?(Minitest::UnexpectedError)');
+    expect(runner.helpers![0]!.content).toContain('type = tag == "failure" ? "Minitest::Assertion"');
+    expect(bound.reportPaths).toEqual(["/tmp/reports/minitest.xml"]);
+    expect(runner.bind({ testNames: ["billing edge.case.test_0001_accepts [value]"], testPaths: ["app/test/feature_test.rb"] }, "/tmp/reports").args.at(-1)).toBe("/\\A(?:billing edge\\.case#test_0001_accepts \\[value\\])\\z/");
+    expect(() => runner.bind({ testNames: ["test_target"], testPaths: ["app/test/feature_test.rb"] }, "/tmp/reports")).toThrow("runner_identity_unselectable");
+  });
+
+  it("detects both Minitest and RSpec in the same project and probes reporter capabilities", async () => {
+    const context = await fixture({ Gemfile: 'gem "minitest"\ngem "rspec"' }), probes: string[][] = [];
+    const injected = host(context.root);
+    injected.findTool = async (name, args) => { probes.push([name, ...args]); return { executable: `/usr/bin/${name}`, version: "5.25.5" }; };
+    const result = await createManagedAdapters(injected).find(adapter => adapter.id === "ruby")!.detect(context);
+    expect(result.runners.map(runner => runner.adapterId)).toEqual(["rspec", "minitest"]);
+    expect(probes).toContainEqual(["ruby", "-r", "minitest", "-e", "abort unless defined?(Minitest::AbstractReporter) && defined?(Minitest::UnexpectedError) && defined?(Minitest::Skip); print Minitest::VERSION"]);
+  });
+
+  it("reports an unavailable Minitest reporter API as an agent setup task", async () => {
     const context = await fixture({ Gemfile: 'gem "minitest"' });
-    const result = await createManagedAdapters(host(context.root)).find(adapter => adapter.id === "ruby")!.detect(context);
-    expect(result.runners).toHaveLength(0); expect(result.notes.join(" ")).toContain("runner_reporter_required");
+    const injected = host(context.root);
+    injected.findTool = async (name, args) => args.includes("minitest") ? undefined : { executable: `/usr/bin/${name}`, version: "3.3.0" };
+    const result = await createManagedAdapters(injected).find(adapter => adapter.id === "ruby")!.detect(context);
+    expect(result.runners).toHaveLength(0); expect(result.notes.join(" ")).toContain("runner_toolchain_unavailable");
     expect(result.notes.join(" ")).toContain("Coordinator");
+  });
+
+  it("accepts the Minitest JUnit shape and distinguishes assertion, runtime error, skip and invalid identity", () => {
+    const outcome = { exitCode: 0, stdout: "", stderr: "", timedOut: false, outputTruncated: false };
+    const report = (body: string, attributes = 'failures="0" errors="0" skipped="0"') => `<?xml version="1.0" encoding="UTF-8"?><testsuite name="bflow-minitest" tests="1" ${attributes}><testcase classname="Example::BehaviorTest" name="test_target">${body}</testcase></testsuite>`;
+    expect(parseRunnerResult("junit", outcome, ["Example::BehaviorTest.test_target"], [report("")])).toMatchObject({ tests: 1, passed: 1, failed: 0 });
+    expect(parseRunnerResult("junit", { ...outcome, exitCode: 1 }, ["Example::BehaviorTest.test_target"], [report('<failure type="Minitest::Assertion" message="Expected 5, got 4">test/feature_test.rb:8</failure>', 'failures="1" errors="0" skipped="0"')])).toMatchObject({ failed: 1, targetFailure: true });
+    for (const xml of [report('<error type="Minitest::UnexpectedError" message="NoMethodError"/>', 'failures="0" errors="1" skipped="0"'), report('<skipped type="Minitest::Skip"/>', 'failures="0" errors="0" skipped="1"')]) expect(() => parseRunnerResult("junit", { ...outcome, exitCode: 1 }, ["Example::BehaviorTest.test_target"], [xml])).toThrow();
+    expect(() => parseRunnerResult("junit", outcome, ["Example::BehaviorTest.other"], [report("")])).toThrow();
   });
 
   it("detects PHPUnit with JUnit and exact namespace-qualified method filters", async () => {
@@ -163,9 +198,12 @@ for (const { id, tool, files } of [
   });
 }
 
-export async function runManagedSandbox(runner: AdapterRunner, root: string, args: string[]) {
+export async function runManagedSandbox(runner: AdapterRunner, root: string, args: string[], helpersDirectory?: string) {
   const sandboxArgs = ["--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin", "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--bind", root, root, "--chdir", join(root, runner.projectDirectory)];
   for (const mount of runner.mounts) sandboxArgs.push("--ro-bind", mount.source, mount.target);
+  if (helpersDirectory) for (const helper of runner.helpers ?? []) {
+    const path = join(helpersDirectory, helper.name); sandboxArgs.push("--ro-bind", path, path);
+  }
   // Debian/Ubuntu Java runtime distribution needs its system security configuration.
   if (existsSync("/etc/java-17-openjdk")) sandboxArgs.push("--ro-bind", "/etc/java-17-openjdk", "/etc/java-17-openjdk");
   const env = { PATH: "/usr/bin:/bin", HOME: "/tmp", LANG: "C.UTF-8", ...runner.environment };
@@ -196,4 +234,26 @@ describe.skipIf(!hasTool("mvn") || !hasWorkingSandbox())("Maven in a real offlin
       if (reportTag) expect(xml).toContain(reportTag);
     }
   }, 180_000);
+});
+
+describe.skipIf(!hasTool("ruby") || !hasWorkingSandbox())("Minitest in a real offline sandbox (requires Ruby/Minitest)", () => {
+  it("emits exact pass, assertion Red and unexpected-error records from the Runtime helper", async context => {
+    const repo = await fixture({ Gemfile: 'gem "minitest"', "test/behavior_test.rb": "" });
+    const detection = await managedAdapters.find(adapter => adapter.id === "ruby")!.detect(repo);
+    const runner = detection.runners.find(candidate => candidate.adapterId === "minitest");
+    if (!runner) { context.skip(); return; }
+    for (const [label, body, code] of [["pass", "assert_equal 4, 2 + 2", 0], ["red", "assert_equal 5, 2 + 2", 1], ["runtime", 'raise NoMethodError, "runtime infrastructure"', 1]] as const) {
+      await writeFile(join(repo.root, "test/behavior_test.rb"), `require "minitest/autorun"\nclass BehaviorTest < Minitest::Test\n def test_target\n ${body}\n end\n def test_never_selected\n flunk "must not execute"\n end\nend\n`);
+      const reports = join(repo.root, "reports", label); await mkdir(reports, { recursive: true });
+      for (const helper of runner.helpers!) await writeFile(join(reports, helper.name), helper.content);
+      const invocation = runner.bind({ testNames: ["BehaviorTest.test_target"], testPaths: ["test/behavior_test.rb"] }, reports);
+      const result = await runManagedSandbox(runner, repo.root, invocation.args, reports);
+      expect(result.code, result.output).toBe(code);
+      const xml = await readFile(join(reports, "minitest.xml"), "utf8");
+      expect(xml).toContain('classname="BehaviorTest" name="test_target"'); expect(xml).not.toContain('name="test_never_selected"');
+      const outcome = { exitCode: result.code, stdout: result.output, stderr: "", timedOut: false, outputTruncated: false };
+      if (label === "runtime") expect(() => parseRunnerResult("junit", outcome, ["BehaviorTest.test_target"], [xml])).toThrow();
+      else expect(parseRunnerResult("junit", outcome, ["BehaviorTest.test_target"], [xml])).toMatchObject({ tests: 1, passed: label === "pass" ? 1 : 0, failed: label === "red" ? 1 : 0 });
+    }
+  }, 120_000);
 });
