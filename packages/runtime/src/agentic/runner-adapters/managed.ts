@@ -418,10 +418,14 @@ export function createManagedAdapters(host: ManagedAdapterHost = systemHost): Ru
     }
     // Only dependency content, never composer auth.json/config.json or the entire Composer home.
     base.mounts.push(...await optionalMount(join(context.root, project, "vendor"), join(context.root, project, "vendor"), host));
-    return { runners: [{ ...base, format: "junit", nameRule: "classname.name (PHP namespace-qualified class, dot, test method)", bind(identities, reports) {
+    return { runners: [{ ...base, format: "junit", nameRule: "JUnit classname.name (PHP namespace separators rendered as dots, then test method)", bind(identities, reports) {
       validateSelection(identities, project);
-      if (identities.testNames.some(name => !/^[A-Za-z_][A-Za-z0-9_\\]*\.[A-Za-z_][A-Za-z0-9_]*$/.test(name))) throw new Error("runner_identity_unselectable: PHPUnit requires exact Namespace\\Class.method identities");
-      const filter = `/^(?:${identities.testNames.map(name => escapedRegex(name.replace(/\.([^.]+)$/, "::$1"))).join("|")})$/`;
+      if (identities.testNames.some(name => !/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(name))) throw new Error("runner_identity_unselectable: PHPUnit requires exact dotted JUnit classname.method identities");
+      const selected = identities.testNames.map(name => {
+        const dot = name.lastIndexOf(".");
+        return escapedRegex(name.slice(0, dot).replaceAll(".", "\\") + "::" + name.slice(dot + 1));
+      });
+      const filter = `/^(?:${selected.join("|")})$/`;
       return { args: [...phpArgs, local ? "vendor/phpunit/phpunit/phpunit" : tool.executable, "--do-not-cache-result", "--log-junit", `${reports}/phpunit.xml`, "--filter", filter, ...identities.testPaths.map(path => pathInProject(path, project))], reportPaths: [`${reports}/phpunit.xml`] };
     } }], notes: [] };
   }, host);

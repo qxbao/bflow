@@ -54,7 +54,7 @@ are separate from test execution evidence.
 | .NET | `dotnet test` TRX | TRX TestMethod className + `.` + method | one test project per directory; isolated offline restore from installed cache, then exact FQN filter |
 | Ruby | RSpec native JSON | example full_description | installed RSpec; exact full-description regex; no external JUnit formatter needed |
 | Ruby | Minitest Runtime JUnit helper | Ruby class + `.` + method | installed reporter-capable Minitest; immutable Runtime helper; exact Class#method regex |
-| PHP | PHPUnit JUnit | namespace-qualified class + `.` + method | existing global/local PHPUnit; exact class::method filter |
+| PHP | PHPUnit JUnit | JUnit `classname.name`; PHP namespace separators become dots | existing global/local PHPUnit; exact class::method filter |
 | C/C++ | CTest >=3.21 JUnit | testcase name | committed CTest registration and executable material only; generated ignored build directories request agent setup; build/configure automation is not implemented |
 | Other | declared Make/Just/Task target with JUnit protocol | `classname.name`; selected names/files passed as JSON argv variables | ordinary arbitrary scripts, tox/nox require a reviewed agent setup task |
 | Elixir, Swift, Dart/Flutter | not implemented | — | follow-up adapters; do not downgrade criteria |

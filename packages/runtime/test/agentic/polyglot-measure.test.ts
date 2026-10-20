@@ -132,7 +132,7 @@ const cases: RunnerCase[] = [
       "composer.json": '{"require-dev":{"phpunit/phpunit":"*"}}',
       "value.php": `<?php namespace Fixture; function value() { ${phase === "infrastructure error" ? 'throw new \\TypeError("runtime infrastructure");' : `return ${phase === "pass" ? 4 : 5};`} }`,
       "tests/BehaviorTest.php": '<?php namespace Fixture; require __DIR__."/../value.php"; final class BehaviorTest extends \\PHPUnit\\Framework\\TestCase { public function testTarget(): void { $this->assertSame(4,value()); } public function testUnmapped(): void { $this->fail("must not execute"); } }'
-    }, names: ["Fixture\\BehaviorTest.testTarget"], paths: ["tests/BehaviorTest.php"] })
+    }, names: ["Fixture.BehaviorTest.testTarget"], paths: ["tests/BehaviorTest.php"] })
   }
 
 ];

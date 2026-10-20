@@ -192,10 +192,24 @@ printf 'Welcome to .NET 8.0!\\nSDK Version: 8.0.408\\n'
 
   it("detects PHPUnit with JUnit and exact namespace-qualified method filters", async () => {
     const { runner } = await detected("phpunit", { "composer.json": '{"require-dev":{"phpunit/phpunit":"^11"}}', "composer.lock": "{}", "tests/FooTest.php": "" });
-    const invocation = runner.bind({ testNames: ["Tests\\FooTest.test_ok"], testPaths: ["tests/FooTest.php"] }, "/tmp/reports");
+    const invocation = runner.bind({ testNames: ["Tests.FooTest.test_ok"], testPaths: ["tests/FooTest.php"] }, "/tmp/reports");
     expect(runner.executable).toBe("/usr/bin/php");
     expect(invocation.args).toEqual(["-n", "/usr/bin/phpunit", "--do-not-cache-result", "--log-junit", "/tmp/reports/phpunit.xml", "--filter", "/^(?:Tests\\\\FooTest::test_ok)$/", "tests/FooTest.php"]);
     expect(runner.protectedPaths).toEqual(["composer.json", "composer.lock"]);
+  });
+
+  it("round-trips PHPUnit dotted JUnit classnames to exact PHP namespace filters", async () => {
+    const { runner } = await detected("phpunit", { "composer.json": '{"require-dev":{"phpunit/phpunit":"^11"}}', "tests/BehaviorTest.php": "" });
+    const names = ["Vendor.Tests.BehaviorTest.testTarget"];
+    const invocation = runner.bind({ testNames: names, testPaths: ["tests/BehaviorTest.php"] }, "/tmp/reports");
+    expect(invocation.args[invocation.args.indexOf("--filter") + 1]).toBe("/^(?:Vendor\\\\Tests\\\\BehaviorTest::testTarget)$/");
+    // PHPUnit JunitXmlLogger emits both class=PHP\Class and classname=PHP.Class.
+    const report = '<testsuite tests="1" failures="0" errors="0" skipped="0"><testcase class="Vendor\\Tests\\BehaviorTest" classname="Vendor.Tests.BehaviorTest" name="testTarget"/></testsuite>';
+    const outcome = { exitCode: 0, stdout: "", stderr: "", timedOut: false, outputTruncated: false };
+    expect(parseRunnerResult("junit", outcome, names, [report])).toMatchObject({ testNames: names, passed: 1 });
+    const red = report.replace('failures="0"', 'failures="1"').replace('/></testsuite>', '><failure type="PHPUnit\\Framework\\ExpectationFailedException">Failed asserting that 5 is identical to 4.</failure></testcase></testsuite>');
+    expect(parseRunnerResult("junit", { ...outcome, exitCode: 1 }, names, [red])).toMatchObject({ failed: 1, targetFailure: true });
+    expect(() => runner.bind({ testNames: ["Vendor\\Tests\\BehaviorTest.testTarget"], testPaths: ["tests/BehaviorTest.php"] }, "/tmp/reports")).toThrow("runner_identity_unselectable");
   });
 
   it("loads only required public PHP modules explicitly without host ini files or Composer credentials", async () => {
