@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { access, lstat, readFile, realpath } from "node:fs/promises";
+import { access, lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -199,7 +199,13 @@ async function javaEnvironment(host: ManagedAdapterHost): Promise<{ mounts: Runn
   try {
     const security = await realpath(join(javaHome, "conf/security/java.security"));
     const config = dirname(dirname(security));
-    if (/^\/etc\/java-[A-Za-z0-9._-]+$/.test(config)) mounts.push(...await optionalMount(config, config, host));
+    if (/^\/etc\/java-[A-Za-z0-9._-]+$/.test(config)) {
+      // management/ may contain a host's JMX passwords. Import only public JVM policy/launcher files.
+      const entries = (await readdir(config)).filter(name => /^(?:jvm-[A-Za-z0-9_-]+\.cfg|logging\.properties)$/.test(name));
+      for (const entry of [...entries, "security/java.security", "security/java.policy", "security/default.policy", "security/blocked.certs", "security/nss.cfg", "security/public_suffix_list.dat", "security/policy"]) {
+        mounts.push(...await optionalMount(join(config, entry), join(config, entry), host));
+      }
+    }
   } catch { /* Other JVM distributions keep configuration inside their toolchain root. */ }
   return { mounts, environment: { JAVA_HOME: javaHome } };
 }

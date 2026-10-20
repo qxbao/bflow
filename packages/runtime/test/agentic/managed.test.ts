@@ -204,8 +204,6 @@ export async function runManagedSandbox(runner: AdapterRunner, root: string, arg
   if (helpersDirectory) for (const helper of runner.helpers ?? []) {
     const path = join(helpersDirectory, helper.name); sandboxArgs.push("--ro-bind", path, path);
   }
-  // Debian/Ubuntu Java runtime distribution needs its system security configuration.
-  if (existsSync("/etc/java-17-openjdk")) sandboxArgs.push("--ro-bind", "/etc/java-17-openjdk", "/etc/java-17-openjdk");
   const env = { PATH: "/usr/bin:/bin", HOME: "/tmp", LANG: "C.UTF-8", ...runner.environment };
   try { return { code: 0, output: execFileSync("/usr/bin/bwrap", [...sandboxArgs, "--", runner.executable, ...args], { env, encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1_048_576 }) }; }
   catch (error) {
