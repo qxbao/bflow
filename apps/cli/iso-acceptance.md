@@ -1,5 +1,10 @@
 # Bflow iso acceptance — 2026-10-20
 
+This records the original standalone isolation milestone. The subsequent
+configured-profile and setup synchronization acceptance is in
+[iso-profile-acceptance.md](iso-profile-acceptance.md), which supersedes its
+feature scope and final combined verification below.
+
 Baseline/tested HEAD: `a4e62b82d36ebe4e7fdc28c2b9923c67bfe22e6c`, plus the CLI changes in the current working tree. Main HEAD was not advanced. Production ownership diff is confined to `apps/cli/**`; no public contracts, migrations, root build configuration or lockfile changes.
 
 ## Implementation and review
