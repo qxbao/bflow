@@ -263,9 +263,15 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
 
   const loadConfigured = async () => {
     const saved = GatewayConfigSchema.parse(await readJson(configPath));
-    if (saved.desiredDigest !== desiredDigest || saved.definitionDigest !== digest(saved.services) ||
-      digest(saved.operation) !== digest(operation) || saved.receiptPath !== receiptPath || digest(saved.paths) !== digest(platform.paths))
-      throw new Error("Gateway configuration does not match the approved setup specification");
+    const mismatched = [
+      saved.desiredDigest !== desiredDigest && "desiredDigest",
+      saved.definitionDigest !== digest(saved.services) && "definitionDigest",
+      digest(saved.operation) !== digest(operation) && "operation",
+      saved.receiptPath !== receiptPath && "receiptPath",
+      digest(saved.paths) !== digest(platform.paths) && "paths"
+    ].filter(Boolean);
+    if (mismatched.length > 0)
+      throw new Error(`Gateway configuration does not match the approved setup specification (differs: ${mismatched.join(", ")})`);
     if (digest(saved.approval) !== digest(approval)) throw new Error("Gateway canonical launch approval changed");
     await validateLaunches(saved);
     for (const item of activeRequirements) if (item.toolId === "gitnexus") {

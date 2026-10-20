@@ -1,29 +1,29 @@
-# Bflow high-level command reference
+# Tham chiếu lệnh cấp cao của Bflow
 
-Stable, goal-level commands for Agentic SDLC agents and the skills that teach them. An agent
-states its goal by choosing one command; the command composes the existing engines instead of
-the agent chaining Git, specification, TDD, verification, tool and provider steps by hand.
+Các lệnh ổn định, theo mục tiêu, dành cho các Agentic SDLC agent và các skill hướng dẫn chúng. Agent
+nêu mục tiêu của mình bằng cách chọn một lệnh; lệnh đó kết hợp các engine hiện có thay vì
+để agent tự nối các bước Git, specification, TDD, verification, tool và provider bằng tay.
 
-The machine-readable twin of this page is [`command-reference.json`](command-reference.json).
-It is generated from the same specs the parser enforces; a unit test fails when they drift.
-Skill authors (SkillManager / P28) should render skills from the JSON and link this page.
+Bản đọc được bằng máy của trang này là [`command-reference.json`](command-reference.json).
+Nó được sinh từ cùng các spec mà parser áp dụng; một unit test sẽ fail khi chúng lệch nhau.
+Tác giả skill (SkillManager / P28) nên render skill từ file JSON và liên kết tới trang này.
 
-| Goal | Command | Reuses |
+| Mục tiêu | Lệnh | Tái sử dụng |
 | --- | --- | --- |
-| Understand the repository | `bflow repo inspect` | read-only Git queries |
-| Create/check the task graph | `bflow task plan --spec <file>` | Specification Engine (P15) traceability |
-| Start work on a task | `bflow task implement <task-id> --run <run-id> --spec <file>` | P15 artifact check, Conditional TDD Resolver (P16), Git Orchestrator (P18), Runtime run state |
-| Verify a task | `bflow verify <task-id> --run <run-id> --plan <file>` | Verification Engine (P17), ArtifactStore, injected independent gates |
-| Prepare integration | `bflow git prepare <run-id>` | Git Orchestrator (P18) integration |
-| MCP health | `bflow mcp status` | Machine setup (P26) `mcp.json`, MCP Gateway port (P27) |
-| Tool health | `bflow tool status` | Machine setup (P26) tool catalog/probe |
-| Sync skills | `bflow skills sync` | Machine setup (P26) `SkillsComponent` + skill manager port (P28) |
-| Provider readiness | `bflow agent check <provider>` | Agent Provider Registry (P25) |
+| Hiểu repository | `bflow repo inspect` | truy vấn Git chỉ đọc |
+| Tạo/kiểm tra task graph | `bflow task plan --spec <file>` | Specification Engine (P15) traceability |
+| Bắt đầu làm một task | `bflow task implement <task-id> --run <run-id> --spec <file>` | kiểm tra artifact P15, Conditional TDD Resolver (P16), Git Orchestrator (P18), Runtime run state |
+| Xác minh một task | `bflow verify <task-id> --run <run-id> --plan <file>` | Verification Engine (P17), ArtifactStore, các gate độc lập được inject |
+| Chuẩn bị integration | `bflow git prepare <run-id>` | Git Orchestrator (P18) integration |
+| Sức khỏe MCP | `bflow mcp status` | Machine setup (P26) `mcp.json`, MCP Gateway port (P27) |
+| Sức khỏe tool | `bflow tool status` | Machine setup (P26) catalog/probe tool |
+| Đồng bộ skill | `bflow skills sync` | Machine setup (P26) `SkillsComponent` + skill manager port (P28) |
+| Mức sẵn sàng của provider | `bflow agent check <provider>` | Agent Provider Registry (P25) |
 
-## Invocation contract
+## Hợp đồng gọi lệnh
 
-Always pass `--json`. Every recognized command writes exactly one JSON document to **stdout**,
-for success and failure alike, and exits with the code in that document:
+Luôn truyền `--json`. Mọi lệnh được nhận diện đều ghi đúng một tài liệu JSON ra **stdout**,
+dù thành công hay thất bại, và thoát với mã nằm trong tài liệu đó:
 
 ```json
 {
@@ -52,191 +52,191 @@ for success and failure alike, and exits with the code in that document:
 }
 ```
 
-- `result` is a `CommandExecutionResult` from `@bflow/contracts` (validate it with
-  `CommandExecutionResultSchema`); the CLI exports `HighLevelEnvelopeSchema` for the whole document.
-- `result.status` is the **command** status (`succeeded`, `failed`, `waiting_user`, `unknown`).
-  `output.outcome` is the **domain verdict** (`ready`, `not_passed`, …). `succeeded` never means a
-  task or run succeeded; only Runtime/Quality Gates decide that.
-- `output.steps` lists every step in order with `succeeded | failed | skipped | blocked | reused`,
-  so a failure in the middle shows exactly which steps completed.
-- IDs: `commandId` is new per invocation; `correlationId` comes from `--correlation-id`,
-  then `BFLOW_CORRELATION_ID`, else is generated; `runId`/`taskId`/`idempotencyKey` are in `output.ids`.
-- An unknown subcommand (no command can be identified) writes `{ "ok": false, "error": … }` to
-  stderr and exits 2. `--help` with `--json` prints `{ "ok": true, "command": "help", "data": { "helpText" } }`.
+- `result` là một `CommandExecutionResult` từ `@bflow/contracts` (xác thực bằng
+  `CommandExecutionResultSchema`); CLI export `HighLevelEnvelopeSchema` cho toàn bộ tài liệu.
+- `result.status` là trạng thái của **lệnh** (`succeeded`, `failed`, `waiting_user`, `unknown`).
+  `output.outcome` là **kết luận theo domain** (`ready`, `not_passed`, …). `succeeded` không bao giờ có nghĩa
+  một task hay run đã thành công; chỉ Runtime/Quality Gates mới quyết định điều đó.
+- `output.steps` liệt kê mọi bước theo thứ tự với `succeeded | failed | skipped | blocked | reused`,
+  nên một lỗi ở giữa chừng cho thấy chính xác những bước nào đã hoàn tất.
+- ID: `commandId` mới cho mỗi lần gọi; `correlationId` lấy từ `--correlation-id`,
+  rồi `BFLOW_CORRELATION_ID`, nếu không thì được sinh; `runId`/`taskId`/`idempotencyKey` nằm trong `output.ids`.
+- Một subcommand không xác định (không nhận diện được lệnh nào) ghi `{ "ok": false, "error": … }` ra
+  stderr và thoát với mã 2. `--help` kèm `--json` in `{ "ok": true, "command": "help", "data": { "helpText" } }`.
 
-### Exit codes
+### Exit code
 
-| Code | Name | Meaning / agent action |
+| Mã | Tên | Ý nghĩa / hành động của agent |
 | --- | --- | --- |
-| 0 | SUCCESS | Done; ready; passed |
-| 1 | FAILED | Operation failed; read `error` and the failed step |
-| 2 | USAGE | Invalid arguments; fix the invocation |
-| 3 | NOT_READY | Ran correctly, verdict negative (not ready, not passed, conflict, unapproved spec) |
-| 4 | NOT_FOUND | Task, run, file, tool, service or repository not found |
-| 5 | PERMISSION_REQUIRED | Risky step needs an explicit flag or approval (`error.details.permission` or `status: waiting_user`) |
-| 6 | CONFLICT | Concurrent invocation (`details.reason: busy`) or idempotency key reused for another request; retry later |
-| 7 | UNKNOWN_STATE | A previous invocation was interrupted; inspect, then re-run with `--resume` |
+| 0 | SUCCESS | Hoàn tất; ready; passed |
+| 1 | FAILED | Thao tác thất bại; đọc `error` và bước bị lỗi |
+| 2 | USAGE | Tham số không hợp lệ; sửa lại lệnh gọi |
+| 3 | NOT_READY | Chạy đúng nhưng kết luận âm tính (not ready, not passed, conflict, spec chưa được duyệt) |
+| 4 | NOT_FOUND | Không tìm thấy task, run, file, tool, service hoặc repository |
+| 5 | PERMISSION_REQUIRED | Bước rủi ro cần cờ tường minh hoặc phê duyệt (`error.details.permission` hoặc `status: waiting_user`) |
+| 6 | CONFLICT | Gọi đồng thời (`details.reason: busy`) hoặc idempotency key bị dùng lại cho request khác; thử lại sau |
+| 7 | UNKNOWN_STATE | Lần gọi trước bị gián đoạn; kiểm tra, rồi chạy lại với `--resume` |
 
-### Idempotency, retry and resume
+### Idempotency, retry và resume
 
-Mutating commands record a receipt under `.bflow/state/cli/commands/` keyed by a deterministic
-idempotency key (override with `--idempotency-key`). That directory must be Git-ignored
-(`bflow init` installs `.bflow/.gitignore`); otherwise the command fails before writing.
-`skills sync` is machine-scoped: it needs no repository and keeps its receipts in
-`$XDG_STATE_HOME/bflow/cli/commands/` (default `~/.local/state/bflow/cli/commands/`).
+Các lệnh có thay đổi trạng thái ghi một receipt dưới `.bflow/state/cli/commands/` theo một
+idempotency key tất định (ghi đè bằng `--idempotency-key`). Thư mục đó phải được Git-ignore
+(`bflow init` cài `.bflow/.gitignore`); nếu không, lệnh fail trước khi ghi.
+`skills sync` có phạm vi machine: không cần repository và giữ receipt trong
+`$XDG_STATE_HOME/bflow/cli/commands/` (mặc định `~/.local/state/bflow/cli/commands/`).
 
-- **Completed receipt**: the same request replays the stored result (`replayed: true`, first
-  step `idempotent-replay`) and repeats no side effect. `task implement` still re-observes state.
-- **Same key, different request**: exit 6, `details.reason: idempotency_key_reuse`.
-- **Concurrent invocation of the same key**: one runs; the others exit 6 with `reason: busy`.
-  `verify` additionally holds one lock per run/task, so concurrent verifications of the same task
-  with different change sets also exit 6 instead of overwriting each other's verification cycle.
-- **Failed receipt**: re-running executes again; engines reconcile their own partial state.
-- **Interrupted receipt** (process died mid-command): `read_only`/`retry_safe` commands run again.
-  `resume_required` commands exit 7 with `error.code: unknown_delivery` and the last step; they
-  never repeat the side effect blindly. `--resume` reconciles through the engine's idempotent path
-  (P18 identical-request reconciliation, skills re-observation before writing).
+- **Receipt đã hoàn tất**: cùng một request sẽ phát lại kết quả đã lưu (`replayed: true`, bước đầu
+  là `idempotent-replay`) và không lặp lại side effect nào. `task implement` vẫn quan sát lại trạng thái.
+- **Cùng key, request khác**: exit 6, `details.reason: idempotency_key_reuse`.
+- **Gọi đồng thời cùng một key**: một lần chạy; các lần còn lại exit 6 với `reason: busy`.
+  `verify` còn giữ thêm một lock cho mỗi run/task, nên các lần verify đồng thời của cùng một task
+  với change set khác nhau cũng exit 6 thay vì ghi đè verification cycle của nhau.
+- **Receipt thất bại**: chạy lại sẽ thực thi lại; các engine tự đối soát trạng thái dở dang của mình.
+- **Receipt bị gián đoạn** (process chết giữa lệnh): các lệnh `read_only`/`retry_safe` chạy lại.
+  Các lệnh `resume_required` exit 7 với `error.code: unknown_delivery` và bước cuối cùng; chúng
+  không bao giờ lặp lại side effect một cách mù quáng. `--resume` đối soát qua đường idempotent của engine
+  (đối soát request giống hệt của P18, quan sát lại skill trước khi ghi).
 
-Control flags (`--json`, `--yes`, `--resume`, `--force`, `--allow-machine-scope`) are not part of
-the request digest, so granting a permission on retry reuses the same key.
+Các cờ điều khiển (`--json`, `--yes`, `--resume`, `--force`, `--allow-machine-scope`) không thuộc
+request digest, nên việc cấp quyền khi retry vẫn dùng lại cùng key.
 
-### Permission and safety rules
+### Quy tắc quyền và an toàn
 
-- No command dispatches an agent, sends a Herdr message, approves a gate, merges into a
-  protected/main branch, pushes, opens a pull request or deploys. Runtime messages the engines
-  produce are returned in `data.pendingMessages` for Runtime to deliver.
-- Risky steps stop before execution and exit 5 until the operator grants them:
-  `git prepare --yes`, `task plan --force` (replace a different plan),
-  `skills sync --allow-machine-scope` (machine-wide targets).
-- Read-only commands (`repo inspect`, `mcp status`, `tool status`, `agent check`) never install,
-  start, stop or log in to anything. `agent check` only creates its empty state directory.
+- Không lệnh nào dispatch agent, gửi message Herdr, phê duyệt gate, merge vào nhánh
+  protected/main, push, mở pull request hay deploy. Các Runtime message do engine
+  tạo ra được trả trong `data.pendingMessages` để Runtime chuyển giao.
+- Các bước rủi ro dừng trước khi thực thi và exit 5 cho đến khi operator cấp quyền:
+  `git prepare --yes`, `task plan --force` (thay thế một plan khác),
+  `skills sync --allow-machine-scope` (đích phạm vi toàn machine).
+- Các lệnh chỉ đọc (`repo inspect`, `mcp status`, `tool status`, `agent check`) không bao giờ cài đặt,
+  khởi động, dừng hay đăng nhập bất cứ thứ gì. `agent check` chỉ tạo thư mục state rỗng của nó.
 
-## Commands
+## Các lệnh
 
 ### `bflow repo inspect`
 
-Read-only: repository root/ID, branch, HEAD, upstream, dirty entries, in-progress merge/rebase,
-worktrees (with Bflow-managed flag), remotes, project markers, package manager, scripts,
-workspace packages, context files (`AGENTS.md`, `CLAUDE.md`, …) and `.bflow` plans.
-Outcome `inspected`; exit 4 outside a Git repository.
+Chỉ đọc: root/ID của repository, branch, HEAD, upstream, các mục dirty, merge/rebase đang diễn ra,
+worktree (kèm cờ do Bflow quản lý), remote, project marker, package manager, script,
+workspace package, context file (`AGENTS.md`, `CLAUDE.md`, …) và các plan `.bflow`.
+Outcome `inspected`; exit 4 khi ở ngoài một Git repository.
 
 ### `bflow task plan --spec <file> [--workflow <file> | --write [--out <file>] [--force]]`
 
-- With `--workflow`: checks the workflow against the specification's P15 traceability
+- Với `--workflow`: kiểm tra workflow theo traceability P15 của specification
   (`orphanCriterionIds`, `unmappedWorkflowTaskIds`, `unknownMappedTaskIds`). Outcome `checked`;
-  exit 3 when traceability is invalid.
-- Otherwise derives a task graph: one `developer` task per traced task ID, criteria by ID,
-  **no inferred dependencies** (the Coordinator declares ordering). Outcome `preview`; with
-  `--write` persists `.bflow/plans/<spec-id>.workflow.json` (outcome `planned`). Identical content
-  is a no-op (`unchanged: true`); different content needs `--force` (exit 5 otherwise). The current
-  file content is part of the request, so a plan edited after a write is re-evaluated rather than
-  hidden behind a replayed receipt.
-- `--out` must resolve inside the repository: `..`, a symlinked target file or a parent directory
-  that resolves outside the root is rejected (exit 1, `reason: path_outside_repository`).
-- Invalid specification: exit 1 (`reason: invalid_specification`); missing file: exit 4.
+  exit 3 khi traceability không hợp lệ.
+- Nếu không, suy ra một task graph: một task `developer` cho mỗi task ID được truy vết, criterion theo ID,
+  **không suy ra dependency** (Coordinator khai báo thứ tự). Outcome `preview`; với
+  `--write` lưu `.bflow/plans/<spec-id>.workflow.json` (outcome `planned`). Nội dung giống hệt
+  là no-op (`unchanged: true`); nội dung khác cần `--force` (nếu không thì exit 5). Nội dung file
+  hiện tại là một phần của request, nên một plan bị sửa sau khi ghi sẽ được đánh giá lại thay vì
+  bị che sau một receipt được phát lại.
+- `--out` phải resolve vào trong repository: `..`, file đích là symlink hoặc thư mục cha
+  resolve ra ngoài root đều bị từ chối (exit 1, `reason: path_outside_repository`).
+- Specification không hợp lệ: exit 1 (`reason: invalid_specification`); thiếu file: exit 4.
 
 ### `bflow task implement <task-id> --run <run-id> --spec <file>`
 
 Options: `--workflow <file>`, `--base <rev>` (HEAD), `--attempt <id>` (attempt-1),
-`--developer <id>` (developer-1), `--owned-path <path>`… (default: spec `affectedPaths`; globs
-must be replaced by literal paths), `--forbidden-path <path>`…, `--artifact-root <dir>`,
+`--developer <id>` (developer-1), `--owned-path <path>`… (mặc định: `affectedPaths` của spec; glob
+phải được thay bằng đường dẫn nguyên văn), `--forbidden-path <path>`…, `--artifact-root <dir>`,
 `--artifact-store-id <id>`, `--resume`.
 
-Steps: `load-specification` → `check-approval` (approved + stored artifact, else exit 3) →
-`check-run-binding` → `resolve-task` (exit 4 when not traced) → `resolve-tdd-policy` →
-`build-context` → `open-resources` → `verify-specification-artifact` (digest/size/content of the
-stored artifact) → `prepare-worktree` (P18 task worktree + branch) → `prepare-assignment` →
+Các bước: `load-specification` → `check-approval` (đã duyệt + có artifact đã lưu, nếu không exit 3) →
+`check-run-binding` → `resolve-task` (exit 4 khi không được truy vết) → `resolve-tdd-policy` →
+`build-context` → `open-resources` → `verify-specification-artifact` (digest/kích thước/nội dung của
+artifact đã lưu) → `prepare-worktree` (task worktree + branch của P18) → `prepare-assignment` →
 `observe-execution`.
 
-`data.assignment` is a `developer_assignment_request` with `status: awaiting_runtime_dispatch`:
+`data.assignment` là một `developer_assignment_request` với `status: awaiting_runtime_dispatch`:
 worktree, branch, base commit, spec ID/version/digest, TDD (`mode`, `requiresFailingTestFirst`,
-target commands, test levels), the task's acceptance criteria and owned/forbidden paths. The
-leased `AgentAssignment` (lease + fencing token) is issued only by Runtime through the
-Coordinator. When `tdd.requiresFailingTestFirst` is true the Developer must follow
-Red-Green-Refactor. `observe-execution` reports the Git task record and Runtime task status;
-Herdr `done` is never treated as success. Re-run the same command to refresh the observation.
+target command, test level), các acceptance criterion của task và các đường dẫn owned/forbidden. Việc
+cấp `AgentAssignment` có lease (lease + fencing token) chỉ do Runtime thực hiện thông qua
+Coordinator. Khi `tdd.requiresFailingTestFirst` là true, Developer phải tuân theo
+Red-Green-Refactor. `observe-execution` báo cáo Git task record và trạng thái task của Runtime;
+Herdr `done` không bao giờ được coi là thành công. Chạy lại cùng lệnh để làm mới quan sát.
 
 ### `bflow verify <task-id> --run <run-id> --plan <file>`
 
-`--plan` is the P17 `createVerificationPlan` input (run, task, scope, approved specification,
-strategy, checks, implementer IDs, `maxIterations`). Options: `--change-set <file>` (a
-`GitChangeSet`; default collects the worktree prepared by `task implement`), `--repair <file>`
-(repair record for a rework iteration), `--integration <file>` (`{ headCommitHash,
-integratedTaskIds }` for workflow scope, e.g. from `git prepare`), `--artifact-root`,
+`--plan` là đầu vào `createVerificationPlan` của P17 (run, task, scope, specification đã duyệt,
+strategy, check, implementer ID, `maxIterations`). Tùy chọn: `--change-set <file>` (một
+`GitChangeSet`; mặc định thu thập worktree do `task implement` chuẩn bị), `--repair <file>`
+(repair record cho một vòng rework), `--integration <file>` (`{ headCommitHash,
+integratedTaskIds }` cho workflow scope, ví dụ từ `git prepare`), `--artifact-root`,
 `--artifact-store-id`.
 
-Returns `data.verification` (`VerificationResult`), `data.cycle` (bounded cycle status and
-iteration) and `data.pendingMessages`. Evidence references are in `result.artifacts`. Exit 0
-only for `passed`; `failed`, `inconclusive`, `blocked` and `escalated` exit 3. A check without a
-configured independent runner yields `blocked`, never `passed`. The same change replays its
-receipt; a new change or repair runs a new iteration until `maxIterations`, then escalates.
+Trả về `data.verification` (`VerificationResult`), `data.cycle` (trạng thái cycle có giới hạn và
+iteration) và `data.pendingMessages`. Các evidence reference nằm trong `result.artifacts`. Exit 0
+chỉ với `passed`; `failed`, `inconclusive`, `blocked` và `escalated` exit 3. Một check không có
+independent runner được cấu hình sẽ cho `blocked`, không bao giờ `passed`. Cùng một thay đổi sẽ phát lại
+receipt; một thay đổi hoặc repair mới chạy một iteration mới cho đến `maxIterations`, rồi escalate.
 
 ### `bflow git prepare <run-id>`
 
-Options: `--task <task-id>`… (default: all prepared tasks of the run), `--workflow <file>`
-(dependency order), `--integration-id <id>` (integration-1), `--base <rev>` (HEAD), `--yes`,
+Tùy chọn: `--task <task-id>`… (mặc định: mọi task đã chuẩn bị của run), `--workflow <file>`
+(thứ tự dependency), `--integration-id <id>` (integration-1), `--base <rev>` (HEAD), `--yes`,
 `--resume`, `--artifact-root`, `--artifact-store-id`.
 
-Without `--yes`: read-only check of each task worktree (active, clean, commits ahead of base);
-exit 5 with `status: waiting_user` and the integration preview. Uncommitted/empty worktrees exit 3
-(`reason: worktree_not_ready`). With `--yes` (after every Developer released write access):
-collects submissions, creates the dedicated `integration/bflow/<run>/<id>` branch, merges in
-dependency order and returns `data.integration` plus `data.workflowVerification` (required,
-request IDs, and the `integration` input for `bflow verify`). A merge conflict exits 3 with
-outcome `conflict_detected` and the conflicting paths; resolution stays with the Coordinator.
+Không có `--yes`: kiểm tra chỉ đọc từng task worktree (active, clean, có commit vượt base);
+exit 5 với `status: waiting_user` và bản xem trước integration. Worktree chưa commit/rỗng exit 3
+(`reason: worktree_not_ready`). Với `--yes` (sau khi mọi Developer đã nhả quyền ghi):
+thu thập submission, tạo nhánh riêng `integration/bflow/<run>/<id>`, merge theo
+thứ tự dependency và trả về `data.integration` cùng `data.workflowVerification` (required,
+request ID, và đầu vào `integration` cho `bflow verify`). Merge conflict exit 3 với
+outcome `conflict_detected` cùng các đường dẫn xung đột; việc giải quyết thuộc về Coordinator.
 
 ### `bflow mcp status [--service <id>]…`
 
-Reads `$XDG_CONFIG_HOME/bflow/mcp.json`, checks pinned stdio executables (presence + digest)
-and asks the shared MCP Gateway for backend health. Exit 0 only when the Gateway is reachable
-and every selected backend is healthy; no Gateway configured, invalid config or unhealthy
-backends exit 3; unknown `--service` exits 4.
+Đọc `$XDG_CONFIG_HOME/bflow/mcp.json`, kiểm tra các stdio executable được pin (sự hiện diện + digest)
+và hỏi MCP Gateway dùng chung về health của backend. Exit 0 chỉ khi Gateway truy cập được
+và mọi backend được chọn đều healthy; chưa cấu hình Gateway, config không hợp lệ hoặc backend
+unhealthy thì exit 3; `--service` không xác định thì exit 4.
 
 ### `bflow tool status [--tool <id>]…`
 
-Probes `node`, `pnpm`, `git`, `herdr`, `claude`, `codex`, `agy`: status (`present`, `missing`,
-`version_mismatch`, `path_missing`, …), version vs requirement, path, binary digest and manual
-remediation. Required tools are the catalog defaults, or every `--tool` given. Exit 3 lists
-`data.blocking`; unknown tool exits 4. Installation is `bflow setup`, never this command.
+Probe `node`, `pnpm`, `git`, `herdr`, `claude`, `codex`, `agy`: trạng thái (`present`, `missing`,
+`version_mismatch`, `path_missing`, …), phiên bản so với yêu cầu, đường dẫn, binary digest và hướng dẫn
+khắc phục thủ công. Các tool bắt buộc là mặc định của catalog, hoặc mọi `--tool` được cung cấp. Exit 3 liệt kê
+`data.blocking`; tool không xác định thì exit 4. Việc cài đặt là của `bflow setup`, không bao giờ của lệnh này.
 
 ### `bflow skills sync [--provider claude|codex|agy]… [--dry-run] [--allow-machine-scope] [--resume]`
 
-Observes installed skills, resolves the pinned desired state and writes only when they differ
-(`already_synced` otherwise). `--dry-run` previews. Machine-wide targets need
-`--allow-machine-scope` (exit 5). After writing, a post-check must observe the desired digest or
-the command fails (`reason: sync_not_converged`). Without an integrated skill manager it fails
-with `reason: skills_synchronizer_not_configured` (exit 1).
+Quan sát các skill đã cài, resolve trạng thái mong muốn được pin và chỉ ghi khi chúng khác nhau
+(nếu không là `already_synced`). `--dry-run` xem trước. Đích phạm vi toàn machine cần
+`--allow-machine-scope` (exit 5). Sau khi ghi, một post-check phải quan sát được digest mong muốn, nếu không
+lệnh fail (`reason: sync_not_converged`). Khi chưa tích hợp skill manager, lệnh fail
+với `reason: skills_synchronizer_not_configured` (exit 1).
 
 ### `bflow agent check <claude|codex|agy> [--role <role>] [--mode restricted|workspace_auto] [--session <id>]`
 
-Builds a session-scoped `AgentEnvironment` (default `restricted`, read-only, network denied) and
-runs the provider adapter's preflight: binary, version, authentication, environment, MCP,
-launch arguments, permissions, skills. Exit 0 only for `ready`; `blocked`/`unsupported` exit 3
-with each check's code and remediation. Preflight is not activated readiness: `bflow up` still
-requires an authenticated launch attestation from the running pane.
+Dựng một `AgentEnvironment` theo phạm vi session (mặc định `restricted`, chỉ đọc, chặn network) và
+chạy preflight của provider adapter: binary, version, authentication, environment, MCP,
+launch argument, permission, skill. Exit 0 chỉ với `ready`; `blocked`/`unsupported` exit 3
+kèm mã và hướng dẫn khắc phục của từng check. Preflight không phải mức sẵn sàng đã kích hoạt: `bflow up` vẫn
+yêu cầu một launch attestation đã xác thực từ pane đang chạy.
 
-## Typical agent flow
+## Luồng agent điển hình
 
 ```sh
 bflow repo inspect --json
 bflow tool status --json && bflow agent check claude --json
 bflow task plan --spec spec.json --write --json
-bflow task implement implement --run run-1 --spec spec.json --json   # then Runtime dispatches the Developer
-bflow verify implement --run run-1 --plan verify-plan.json --json     # 3 → read findings, rework
-bflow git prepare run-1 --json                                         # 5 → human/Coordinator grants --yes
-bflow git prepare run-1 --yes --json                                   # → workflow verification request
+bflow task implement implement --run run-1 --spec spec.json --json   # sau đó Runtime dispatch Developer
+bflow verify implement --run run-1 --plan verify-plan.json --json     # 3 → đọc finding, rework
+bflow git prepare run-1 --json                                         # 5 → con người/Coordinator cấp --yes
+bflow git prepare run-1 --yes --json                                   # → request xác minh workflow
 ```
 
-## Current limitations
+## Hạn chế hiện tại
 
-- Dispatch, leases, Herdr delivery and approvals remain Runtime/Coordinator work; these commands
-  return requests and pending messages instead. Wiring them into the P30 Runtime facade is
-  integration work.
-- `task implement` observes the legacy RuntimeService run store when `.bflow/config.yaml` exists;
-  P19 agentic run state is not yet exposed through a Runtime facade.
-- The P18 Git engine needs Linux `flock`; on other hosts `task implement`, `verify` (without
-  `--change-set`) and `git prepare` fail at the `open-resources` step (exit 1, e.g. `spawn flock ENOENT`)
-  before any side effect; the failed receipt does not block a later retry.
-- No MCP Gateway (P27) or skill manager (P28) implementation is composed by default, so
-  `mcp status` reports not ready and `skills sync` reports not configured until they are integrated.
-- `verify` has no default independent gate runners; hosts inject them (`HighLevelServices.gates`).
+- Dispatch, lease, chuyển giao qua Herdr và phê duyệt vẫn là công việc của Runtime/Coordinator; thay vào đó các lệnh này
+  trả về request và pending message. Nối chúng vào Runtime facade P30 là công việc
+  integration.
+- `task implement` quan sát run store RuntimeService cũ khi `.bflow/config.yaml` tồn tại;
+  trạng thái agentic run của P19 chưa được lộ ra qua một Runtime facade.
+- Git engine P18 cần `flock` của Linux; trên các host khác `task implement`, `verify` (không có
+  `--change-set`) và `git prepare` fail tại bước `open-resources` (exit 1, ví dụ `spawn flock ENOENT`)
+  trước khi có bất kỳ side effect nào; receipt thất bại không chặn lần retry sau.
+- Không có triển khai MCP Gateway (P27) hay skill manager (P28) nào được kết hợp theo mặc định, nên
+  `mcp status` báo not ready và `skills sync` báo not configured cho đến khi chúng được tích hợp.
+- `verify` không có gate runner độc lập mặc định; host inject chúng (`HighLevelServices.gates`).

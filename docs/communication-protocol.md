@@ -2,7 +2,7 @@
 
 ## 1. Tổng quan và Mục đích
 
-Tài liệu này đặc tả quy chuẩn giao thức truyền thông liên vai trò (**Bflow v2 Inter-Role Communication Protocol Specification**) cho nền tảng điều phối phát triển phần mềm tự động hóa Bflow.
+Tài liệu này đặc tả quy chuẩn giao thức truyền thông liên vai trò (**Đặc tả giao thức truyền thông liên vai trò Bflow v2**) cho nền tảng điều phối phát triển phần mềm tự động hóa Bflow.
 
 Giao thức thiết lập một ranh giới giao tiếp chính quy, an toàn, có khả năng phục hồi và truy vết toàn diện giữa:
 - **Người dùng (Human User / Operator)**
@@ -281,28 +281,28 @@ Kiến trúc Bflow v2 quy định ranh giới nghiêm ngặt giữa tầng **Ph�
 
 | Nguồn (Sender) | Đích (Recipient) | Loại thông điệp cho phép | Phương thức kết nối & Rào chắn |
 | :--- | :--- | :--- | :--- |
-| `user` | `conversation` | `conversation.intake`, `conversation.clarification`, `approval.decision` | CLI terminal, `bflow attach`, Socket I/O. |
-| `conversation` | `user` | `conversation.clarification`, `conversation.progress`, `approval.request` | CLI display, phản hồi hội thoại trực tiếp. |
-| `conversation` | `coordinator` | `delegation.request`, `approval.decision` | Internal event bus / Runtime command queue. |
-| `coordinator` | `conversation` | `delegation.accepted`, `conversation.progress`, `approval.request`, `verification.escalation` | Internal event bus / Runtime notification. |
-| `coordinator` | `planner` | `task.assignment` | Herdr pane injection (`pane-planner`). |
-| `planner` | `coordinator` | `task.status`, `spec.draft` | Herdr terminal observation -> Runtime ingest. |
-| `coordinator` | `architect` | `task.assignment` | Herdr pane injection (`pane-architect`). |
-| `architect` | `coordinator` | `task.status`, `spec.draft` | Herdr terminal observation -> Runtime ingest. |
-| `coordinator` | `specifier` | `task.assignment` | Herdr pane injection (`pane-specifier`). |
-| `specifier` | `coordinator` | `task.status`, `spec.draft`, `tdd.decision` | Herdr terminal observation -> Runtime ingest. |
-| `coordinator` | `developer` | `task.assignment` | Herdr pane injection (`pane-developer`) có Worktree riêng. |
-| `developer` | `coordinator` | `task.status`, `implementation.submitted` | Herdr terminal observation -> Runtime ingest. |
-| `coordinator` | `tester` / `qa`| `task.assignment`, `verification.requested` | Herdr pane injection (`pane-tester` / `pane-qa`) read-only worktree. |
-| `tester` / `qa` | `coordinator` | `task.status`, `verification.result`, `verification.escalation` | Herdr terminal observation -> Runtime ingest. |
-| `coordinator` | `reviewer` | `task.assignment`, `verification.requested` | Herdr pane injection (`pane-reviewer`). |
-| `reviewer` | `coordinator` | `task.status`, `review.verdict` | Herdr terminal observation -> Runtime ingest. |
-| `coordinator` | `security` | `task.assignment`, `verification.requested` | Herdr pane injection (`pane-security`). |
-| `security` | `coordinator` | `task.status`, `review.verdict`, `verification.result` | Herdr terminal observation -> Runtime ingest. |
-| `runtime` | `conversation` | `conversation.progress`, `task.status`, `approval.request` | Internal event bus / Notification delivery. |
-| `conversation` | `runtime` | `conversation.progress`, `task.status` | Internal event bus / Runtime notification. |
-| `runtime` | `coordinator` | `task.assignment`, `verification.requested`, `approval.decision` | Internal event dispatch & lease resolution. |
-| `coordinator` | `runtime` | `task.status`, `delegation.accepted`, `approval.request` | Internal command dispatch & state update. |
+| `user` | `conversation` | `conversation.intake`, `conversation.clarification`, `approval.decision` | Terminal CLI, `bflow attach`, Socket I/O. |
+| `conversation` | `user` | `conversation.clarification`, `conversation.progress`, `approval.request` | Hiển thị trên CLI, phản hồi hội thoại trực tiếp. |
+| `conversation` | `coordinator` | `delegation.request`, `approval.decision` | Event bus nội bộ / hàng đợi lệnh của Runtime. |
+| `coordinator` | `conversation` | `delegation.accepted`, `conversation.progress`, `approval.request`, `verification.escalation` | Event bus nội bộ / thông báo của Runtime. |
+| `coordinator` | `planner` | `task.assignment` | Đưa lệnh vào Herdr pane (`pane-planner`). |
+| `planner` | `coordinator` | `task.status`, `spec.draft` | Quan sát terminal của Herdr -> Runtime tiếp nhận (ingest). |
+| `coordinator` | `architect` | `task.assignment` | Đưa lệnh vào Herdr pane (`pane-architect`). |
+| `architect` | `coordinator` | `task.status`, `spec.draft` | Quan sát terminal của Herdr -> Runtime tiếp nhận (ingest). |
+| `coordinator` | `specifier` | `task.assignment` | Đưa lệnh vào Herdr pane (`pane-specifier`). |
+| `specifier` | `coordinator` | `task.status`, `spec.draft`, `tdd.decision` | Quan sát terminal của Herdr -> Runtime tiếp nhận (ingest). |
+| `coordinator` | `developer` | `task.assignment` | Đưa lệnh vào Herdr pane (`pane-developer`) có worktree riêng. |
+| `developer` | `coordinator` | `task.status`, `implementation.submitted` | Quan sát terminal của Herdr -> Runtime tiếp nhận (ingest). |
+| `coordinator` | `tester` / `qa`| `task.assignment`, `verification.requested` | Đưa lệnh vào Herdr pane (`pane-tester` / `pane-qa`) với worktree chỉ đọc. |
+| `tester` / `qa` | `coordinator` | `task.status`, `verification.result`, `verification.escalation` | Quan sát terminal của Herdr -> Runtime tiếp nhận (ingest). |
+| `coordinator` | `reviewer` | `task.assignment`, `verification.requested` | Đưa lệnh vào Herdr pane (`pane-reviewer`). |
+| `reviewer` | `coordinator` | `task.status`, `review.verdict` | Quan sát terminal của Herdr -> Runtime tiếp nhận (ingest). |
+| `coordinator` | `security` | `task.assignment`, `verification.requested` | Đưa lệnh vào Herdr pane (`pane-security`). |
+| `security` | `coordinator` | `task.status`, `review.verdict`, `verification.result` | Quan sát terminal của Herdr -> Runtime tiếp nhận (ingest). |
+| `runtime` | `conversation` | `conversation.progress`, `task.status`, `approval.request` | Event bus nội bộ / chuyển phát thông báo. |
+| `conversation` | `runtime` | `conversation.progress`, `task.status` | Event bus nội bộ / thông báo của Runtime. |
+| `runtime` | `coordinator` | `task.assignment`, `verification.requested`, `approval.decision` | Điều phối sự kiện nội bộ & xử lý lease. |
+| `coordinator` | `runtime` | `task.status`, `delegation.accepted`, `approval.request` | Điều phối lệnh nội bộ & cập nhật trạng thái. |
 
 ### 5.2. Các đường dẫn bị cấm tuyệt đối (Forbidden Paths)
 
@@ -636,21 +636,20 @@ export const VerificationEscalationPayloadSchema = z
    Mọi `RoleMessage` sau khi được xác thực hợp lệ đều được ghi nhận vào nhật ký sự kiện của `RunStore` thông qua sự kiện `domain_event`. Không một thông điệp nào có thể bị xóa hoặc sửa đổi sau khi đã được chắp bút vào stream.
 
 
-## Authenticated binding receipts (ADR 0003)
+## Biên nhận ràng buộc có xác thực (ADR 0003)
 
-`execution.receipt` carries a signed `AgentBindingReceipt` inside the existing
-schema-version-2 RoleMessage envelope. It preserves correlation/causation, pins the
-original raw handle and pane/session, and is delivered through the native Herdr
-plugin action surface. The private signing key belongs to the trusted native host,
-not the model prompt. Runtime verifies sender/assignment/lease, ingests immutable
-receipt bytes through ArtifactStore, and calls the additive
-`AuthenticatedWorkflowEngine.verifyAgentBinding` capability. Core verifies the
-configured issuer's Ed25519 signature and immutable identity before persisting
-`agent.binding_verified` (event envelope v2). It never rewrites the original handle
-or calls Herdr done proof of success. Independent acceptance gates still apply.
+`execution.receipt` mang một `AgentBindingReceipt` đã ký bên trong envelope RoleMessage
+schema-version-2 hiện có. Biên nhận giữ nguyên correlation/causation, ghim handle thô gốc
+và pane/session, và được chuyển qua bề mặt action của plugin Herdr native. Khóa ký riêng
+thuộc về native host đáng tin cậy, không thuộc về model prompt. Runtime xác minh
+sender/assignment/lease, nạp các byte biên nhận bất biến qua ArtifactStore, rồi gọi
+capability bổ sung `AuthenticatedWorkflowEngine.verifyAgentBinding`. Core xác minh chữ ký
+Ed25519 của issuer đã cấu hình và danh tính bất biến trước khi lưu
+`agent.binding_verified` (event envelope v2). Core không bao giờ ghi đè handle gốc
+hay coi Herdr done là bằng chứng thành công. Các acceptance gate độc lập vẫn áp dụng.
 
-The native ingress adapter verifies a signature over the entire RoleMessage before
-installing per-invocation authentication context. It is an adapter endpoint for a
-message already carried through Herdr, not a direct agent-to-agent socket channel.
-Aggregate codec v2 retains proof/command history; legacy receipt-free event and
-checkpoint shapes remain unchanged. See ADR 0003 for fail-closed compatibility.
+Native ingress adapter xác minh chữ ký trên toàn bộ RoleMessage trước khi cài đặt ngữ cảnh
+xác thực theo từng lần gọi. Đây là endpoint adapter cho message đã được chuyển qua Herdr,
+không phải kênh socket trực tiếp giữa các agent. Aggregate codec v2 giữ lại lịch sử
+proof/command; các dạng event và checkpoint cũ không có biên nhận giữ nguyên. Xem ADR 0003
+để biết cách tương thích fail-closed.

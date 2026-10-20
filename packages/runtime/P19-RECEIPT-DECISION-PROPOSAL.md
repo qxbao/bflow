@@ -1,42 +1,42 @@
-# Proposal: authenticated Herdr receipt and binding verification
+# Đề xuất: xác minh receipt và binding Herdr có xác thực
 
-Status: **APPROVED** by the project owner in this conversation on 2026-10-16
-(“Proposal: duyệt”). The implementation decision, compatibility plan and affected
-owners are recorded in [ADR 0003](../../docs/adr/0003-authenticated-herdr-receipts.md).
-The original proposal below is retained as decision history; the Runtime README
-and current validation report describe implemented versus live-verified scope.
+Trạng thái: **APPROVED** bởi chủ dự án trong cuộc hội thoại này vào 2026-10-16
+(“Proposal: duyệt”). Quyết định triển khai, kế hoạch tương thích và các owner bị ảnh hưởng
+được ghi lại trong [ADR 0003](../../docs/adr/0003-authenticated-herdr-receipts.md).
+Đề xuất gốc bên dưới được giữ lại như lịch sử quyết định; README của Runtime
+và báo cáo validation hiện tại mô tả phạm vi đã triển khai so với phạm vi đã xác minh live.
 
-## Exact failing boundary
+## Ranh giới lỗi chính xác
 
-`HerdrCliTransport.send()` currently returns an `AgentExecutionHandle` whose
-`correlation` is `{ provenance: "orchestrator", verified: false, token: ... }`.
-`HerdrCliTransport.read()` emits `AgentMessage.kind: "status"` with
-`data.source: "terminal_snapshot"`, `correlationVerified: false` and
+`HerdrCliTransport.send()` hiện trả về một `AgentExecutionHandle` có
+`correlation` là `{ provenance: "orchestrator", verified: false, token: ... }`.
+`HerdrCliTransport.read()` phát ra `AgentMessage.kind: "status"` với
+`data.source: "terminal_snapshot"`, `correlationVerified: false` và
 `executionOutputVerified: false`.
 
-`WorkflowEngine.recordAgentResult(RecordAgentResultCommand)` correctly requires
-both the stored binding and submitted result to carry matching, verified
-correlation. `WorkflowEngine.bindAgentExecution(BindAgentExecutionCommand)` and
-`recordDeliveryReconciliation(RecordDeliveryReconciliationCommand)` reject any
-replacement of an existing binding. `AgentMessageSchema.kind` currently has no
-structured result/receipt variant.
+`WorkflowEngine.recordAgentResult(RecordAgentResultCommand)` yêu cầu đúng đắn
+cả binding đã lưu và result được gửi đều mang correlation khớp, đã xác minh.
+`WorkflowEngine.bindAgentExecution(BindAgentExecutionCommand)` và
+`recordDeliveryReconciliation(RecordDeliveryReconciliationCommand)` từ chối mọi
+việc thay thế một binding hiện có. `AgentMessageSchema.kind` hiện không có
+biến thể result/receipt có cấu trúc.
 
-Failing fixture: `packages/runtime/test/agentic/integration.test.ts`, case
+Fixture lỗi: `packages/runtime/test/agentic/integration.test.ts`, trường hợp
 “refuses the actual Adapter-style unverified orchestrator handle as task success”.
-The task remains running and never passes a completion gate. Removing that check
-or asserting `verified: true` would invent evidence.
+Task vẫn ở trạng thái running và không bao giờ vượt qua completion gate. Gỡ bỏ kiểm tra đó
+hoặc khẳng định `verified: true` sẽ là bịa ra bằng chứng.
 
-## Proposed compatible direction for owner review
+## Hướng tương thích đề xuất để owner review
 
-1. Define authenticated, structured `RoleMessage`/receipt ingress over an actually
-   supported Herdr version. Specify the native host hook/channel, authenticated
-   process identity, pane/session binding, delivery identity and objective output
-   collection. Do not scrape a terminal snapshot or trust agent-written JSON.
-   Verify available Herdr commands/events before selecting the implementation.
-2. Retain the current immutable submission handle and its persisted
-   `agent.execution_bound` event. Introduce a distinct, receipt-backed verification
-   action rather than replacing a handle through an existing bind method.
-3. Candidate additive capability (names/signature subject to owner decision):
+1. Định nghĩa ingress `RoleMessage`/receipt có cấu trúc và có xác thực trên một phiên bản Herdr
+   thực sự được hỗ trợ. Chỉ rõ native host hook/channel, định danh process đã xác thực,
+   binding pane/session, định danh delivery và việc thu thập output khách quan. Không
+   scrape terminal snapshot hay tin JSON do agent viết.
+   Xác minh các lệnh/sự kiện Herdr khả dụng trước khi chọn cách triển khai.
+2. Giữ submission handle bất biến hiện tại và sự kiện `agent.execution_bound` đã được lưu của nó.
+   Đưa vào một hành động xác minh riêng biệt, dựa trên receipt, thay vì thay thế
+   handle qua một phương thức bind hiện có.
+3. Capability bổ sung ứng viên (tên/signature tùy thuộc quyết định của owner):
 
    ```ts
    interface AuthenticatedWorkflowEngine extends WorkflowEngine {
@@ -47,42 +47,41 @@ or asserting `verified: true` would invent evidence.
    }
    ```
 
-   The command should contain `runId`, `taskId`, `expectedVersion`, `requestId`,
-   `executionId`, `attemptId`, the exact original target/session locator, a verified
-   remote/transport `SubmissionCorrelation`, an ArtifactStore-originated immutable
-   receipt reference, verifier identity, `occurredAt` and `idempotencyKey`.
-   Verification must bind all those identities to one previously recorded request.
-   It must not change target, task attempt, cancellation intent or idempotency key.
-4. Add an explicit domain event for that proof and the corresponding aggregate
-   checkpoint state. Runtime authenticates and ingests the receipt before calling
-   Core; Core enforces identity, legal lifecycle and deterministic replay. Agent
-   assertions and orchestrator-generated correlation are rejected. Late proof
-   cannot reopen a cancelled or terminal execution.
-5. Keep `WorkflowEngine` v1 consumers unchanged through capability negotiation or
-   a separate extended port. Existing events/checkpoints remain readable. Any new
-   event/schema/aggregate codec version requires a documented compatibility
-   matrix and approved migration. An upcaster must never fabricate missing receipt
-   evidence. Old runs with unverified bindings remain inconclusive until explicit
-   valid proof arrives. Old readers fail closed on unsupported new evidence.
+   Command nên chứa `runId`, `taskId`, `expectedVersion`, `requestId`,
+   `executionId`, `attemptId`, target/session locator gốc chính xác, một
+   `SubmissionCorrelation` remote/transport đã xác minh, một tham chiếu receipt bất biến
+   xuất phát từ ArtifactStore, định danh verifier, `occurredAt` và `idempotencyKey`.
+   Việc xác minh phải ràng buộc tất cả các định danh đó với một request đã được ghi nhận trước đó.
+   Nó không được thay đổi target, task attempt, ý định hủy hay idempotency key.
+4. Thêm một domain event tường minh cho bằng chứng đó và trạng thái aggregate checkpoint tương ứng.
+   Runtime xác thực và ingest receipt trước khi gọi Core; Core thực thi định danh,
+   vòng đời hợp lệ và replay tất định. Khẳng định của agent và correlation do orchestrator
+   sinh ra bị từ chối. Bằng chứng đến muộn không thể mở lại một execution đã bị hủy hoặc đã kết thúc.
+5. Giữ nguyên các consumer `WorkflowEngine` v1 thông qua capability negotiation hoặc
+   một port mở rộng riêng. Các event/checkpoint hiện có vẫn đọc được. Mọi phiên bản mới
+   của event/schema/aggregate codec đều cần một ma trận tương thích được tài liệu hóa
+   và migration được duyệt. Upcaster không bao giờ được bịa ra bằng chứng receipt còn thiếu.
+   Các run cũ với binding chưa xác minh vẫn ở trạng thái inconclusive cho đến khi có bằng chứng
+   hợp lệ tường minh. Reader cũ fail closed trước bằng chứng mới không được hỗ trợ.
 
-## Affected owners and acceptance evidence
+## Các owner bị ảnh hưởng và bằng chứng nghiệm thu
 
-- Contracts/integration: explicit decision, wire schemas, event/checkpoint codec,
-  version negotiation and migration/upcaster review.
-- Herdr Adapter/native host: actual authenticated typed ingress and receipt
-  verification; version/protocol evidence and reconnect behavior.
-- Core/Runtime: independent binding verification, persistence, idempotency,
-  fencing, cancellation and crash recovery at receipt boundaries.
-- Conversation/agent host: native prompt/tool registration and independent inbound
-  pumping; user approval provenance; all AI-to-AI traffic still passes through Herdr.
-- CLI/lifecycle: compose the native host into `up`/`down` and its shutdown barrier
-  without creating another session or ignoring active P19 runs.
+- Contracts/integration: quyết định tường minh, wire schema, event/checkpoint codec,
+  version negotiation và review migration/upcaster.
+- Herdr Adapter/native host: ingress có kiểu và có xác thực thực sự cùng việc xác minh receipt;
+  bằng chứng về version/protocol và hành vi reconnect.
+- Core/Runtime: xác minh binding độc lập, persistence, idempotency,
+  fencing, hủy và khôi phục sau crash tại các ranh giới receipt.
+- Conversation/agent host: đăng ký prompt/tool gốc và việc bơm (pump) inbound độc lập;
+  nguồn gốc phê duyệt của người dùng; mọi lưu lượng AI-to-AI vẫn đi qua Herdr.
+- CLI/lifecycle: ghép native host vào `up`/`down` và shutdown barrier của nó
+  mà không tạo session khác hay bỏ qua các run P19 đang hoạt động.
 
-Required validation includes forged/stale/replayed receipt refusal, wrong pane/
-session/attempt/execution rejection, concurrent/cancelled delivery, SIGKILL before
-and after receipt ingest/event append/checkpoint, compatibility fixtures, full
-monorepo checks, and a real isolated Herdr session with an independently executed
-verification and authenticated user approval. Until then, live delivery remains
-**NO-GO**. Approval of this proposal authorizes design/implementation of that
-reviewed boundary; it does not authorize a protected merge, production deploy,
-secret change, destructive cleanup or remote publication.
+Validation bắt buộc gồm từ chối receipt giả mạo/cũ/replay, từ chối sai pane/
+session/attempt/execution, delivery đồng thời/đã hủy, SIGKILL trước
+và sau khi ingest receipt/append event/checkpoint, fixture tương thích, kiểm tra
+toàn monorepo đầy đủ, và một session Herdr cô lập thật với một lần xác minh
+được thực thi độc lập và một lần phê duyệt người dùng có xác thực. Cho đến lúc đó, live delivery vẫn
+**NO-GO**. Việc phê duyệt đề xuất này cho phép thiết kế/triển khai ranh giới đã được review đó;
+nó không cho phép protected merge, production deploy, thay đổi secret,
+dọn dẹp mang tính hủy hoại hay xuất bản từ xa.

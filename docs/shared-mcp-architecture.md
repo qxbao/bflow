@@ -1,7 +1,7 @@
 # Shared MCP architecture v3
 
-Normative P24 design; P27 owns implementation. Public definitions and ports live in
-`packages/contracts/src/{setup,mcp}.ts`. No Gateway/service module is implemented in P24.
+Thiết kế chuẩn tắc P24; P27 sở hữu phần triển khai. Định nghĩa công khai và port nằm trong
+`packages/contracts/src/{setup,mcp}.ts`. P24 không triển khai module Gateway/service nào.
 
 ## Implementation status (cập nhật 2026-10-17)
 
@@ -18,55 +18,55 @@ trên nhiều repo đồng thời). Test hiện có là deterministic/local; sam
 multi-host lease và cách ly tài nguyên không giới hạn vẫn NOT VERIFIED. Câu "No Gateway/service
 module is implemented in P24" dưới đây mô tả baseline P24, không phải trạng thái hiện tại.
 
-## Separate tools, services and agent communication
+## Tách biệt tool, service và giao tiếp giữa các agent
 
-Herdr remains the only inter-role transport. RoleMessage, correlated receipts, progress,
-clarification, delegation, verification and approvals follow existing Runtime → Herdr
-paths. Shared MCP Gateway manages tool connections and authorization. Its API cannot
-send to an arbitrary role/pane, start a task or replace the Runtime scheduler.
-Existing native host tools remain Runtime endpoints: a role calling one requests Runtime
-policy enforcement, and any resulting inter-role message still goes through Herdr.
-The Gateway must never turn a tool call into an alternative direct agent mailbox.
+Herdr vẫn là transport liên-role duy nhất. RoleMessage, receipt có tương quan, tiến độ,
+làm rõ, delegation, verification và approval đi theo các đường Runtime → Herdr hiện có.
+Shared MCP Gateway quản lý kết nối tool và ủy quyền. API của nó không thể gửi tới một
+role/pane tùy ý, khởi chạy task hay thay thế scheduler của Runtime. Các native host tool hiện
+có vẫn là endpoint của Runtime: role gọi một tool là yêu cầu Runtime thực thi chính sách, và
+mọi message liên-role phát sinh vẫn đi qua Herdr. Gateway không bao giờ được biến một lời gọi
+tool thành hộp thư agent trực tiếp thay thế.
 
-| Tool category | Contract representation | Connection/lifecycle |
+| Loại tool | Biểu diễn trong contract | Kết nối/vòng đời |
 | --- | --- | --- |
-| CLI-only tool (git/node/compiler) | `ToolCapability.kind = cli_only` | ToolInstaller/inventory + existing constrained runner; no MCP service, port or fictitious tools/list |
-| Existing shared worker | `existing_shared_worker`, workerId, endpoint, external ownership | Adopt/health-check approved endpoint; worker must speak MCP or use an explicitly implemented adapter. Never spawn a duplicate just because Bflow starts |
-| Native remote MCP server | `native_remote_mcp`, HTTPS endpoint, external ownership | Negotiate protocol/auth directly; share authorized connection pool without copying tokens to roles |
-| stdio MCP | `stdio_mcp`, pinned executable/argv/secret bindings, Bflow ownership, bridgeRequired | Gateway owns one eligible upstream process per service/config/security partition; bridge exposes scoped multi-client sessions |
-| Exclusive tool resource (Chrome) | Any MCP kind + `tool.resource.sharing = exclusive`, stable resourceKey | Sharing connection does not permit concurrent browser actions; Gateway resource lease/fence serializes access |
+| Tool chỉ có CLI (git/node/compiler) | `ToolCapability.kind = cli_only` | ToolInstaller/inventory + runner có ràng buộc hiện có; không có MCP service, port hay tools/list hư cấu |
+| Shared worker hiện có | `existing_shared_worker`, workerId, endpoint, external ownership | Adopt/health-check endpoint đã duyệt; worker phải nói MCP hoặc dùng adapter được triển khai tường minh. Không bao giờ spawn bản trùng chỉ vì Bflow khởi động |
+| MCP server remote native | `native_remote_mcp`, endpoint HTTPS, ownership bên ngoài | Negotiate protocol/auth trực tiếp; chia sẻ connection pool đã ủy quyền mà không sao chép token cho role |
+| stdio MCP | `stdio_mcp`, executable/argv/secret binding đã pin, ownership của Bflow, bridgeRequired | Gateway sở hữu một upstream process đủ điều kiện cho mỗi service/config/security partition; bridge cung cấp các session đa client có phạm vi |
+| Tài nguyên tool độc quyền (Chrome) | Bất kỳ MCP kind nào + `tool.resource.sharing = exclusive`, resourceKey ổn định | Chia sẻ kết nối không cho phép thao tác browser đồng thời; resource lease/fence của Gateway tuần tự hóa truy cập |
 
-Resource sharing is orthogonal to transport. A server may accept many clients while
-all operations mutating one browser remain exclusive. A CLI-only tool is rejected by
-`MCPServiceDefinitionSchema`; P27 must not pretend a command becomes MCP by naming it
-as a service. Existing worker acquisition checks actual protocol, not merely PID/port.
+Chia sẻ tài nguyên trực giao với transport. Một server có thể nhận nhiều client trong khi
+mọi thao tác thay đổi một browser vẫn độc quyền. Tool chỉ có CLI bị `MCPServiceDefinitionSchema`
+từ chối; P27 không được giả vờ một lệnh trở thành MCP bằng cách gọi nó là service. Việc
+acquire worker hiện có kiểm tra protocol thực tế, không chỉ PID/port.
 
-## Public contracts
+## Public contract
 
-| Contract | Fields / port semantics |
+| Contract | Field / ngữ nghĩa port |
 | --- | --- |
-| `ToolCapability` | Versioned tool inventory: kind/version/operations, required flag, concurrent capacity or exclusive resource key |
-| `ToolInstaller` | `plan(ToolInstallRequest) → SetupStep`, `apply(SetupApplyRequest) → SetupReceipt`, `reconcile(SetupApplyRequest) → SetupReceipt`; only pinned owned install steps, not arbitrary shell |
-| `MCPServiceDefinition` | Versioned service ID/revision/scope, tool, connection union, auth references, health/idle timeouts and bounded restart limit |
-| `MCPServiceManager` | `ensure(service, ScopedOperation)`, `inspect(serviceId, ScopedOperation)`, `release(serviceId, ScopedOperation)` return `OperationResult<MCPServiceObservation>` |
-| `MCPClientRegistration` | Versioned environment/provider/role/session, allowed service/tool sets, client transport config, secret token reference, digest/expiry/idempotency |
-| `SharedMCPGateway` | `register`, `revoke`, `acquireResource`, `renewResource`, `releaseResource`, `call`, `reconcileCall`, all using typed requests and OperationResult |
-| `MCPResourceLease` | Dedicated resource lease ID, client/service/resource identity, monotonic fence and acquisition/expiry; separate from Registry task leases |
-| `MCPToolCall` / `MCPToolCallResult` | Bounded command correlation, client/service/tool/input, optional resource proof, idempotency; outcome completed/failed/unknown |
+| `ToolCapability` | Inventory tool có version: kind/version/operation, cờ required, dung lượng đồng thời hoặc resource key độc quyền |
+| `ToolInstaller` | `plan(ToolInstallRequest) → SetupStep`, `apply(SetupApplyRequest) → SetupReceipt`, `reconcile(SetupApplyRequest) → SetupReceipt`; chỉ các bước cài đặt owned đã pin, không phải shell tùy ý |
+| `MCPServiceDefinition` | Service ID/revision/scope có version, tool, connection union, auth reference, timeout health/idle và giới hạn restart có bound |
+| `MCPServiceManager` | `ensure(service, ScopedOperation)`, `inspect(serviceId, ScopedOperation)`, `release(serviceId, ScopedOperation)` trả về `OperationResult<MCPServiceObservation>` |
+| `MCPClientRegistration` | Environment/provider/role/session có version, tập service/tool được phép, cấu hình client transport, secret token reference, digest/hết hạn/idempotency |
+| `SharedMCPGateway` | `register`, `revoke`, `acquireResource`, `renewResource`, `releaseResource`, `call`, `reconcileCall`, tất cả dùng request có kiểu và OperationResult |
+| `MCPResourceLease` | Resource lease ID chuyên dụng, định danh client/service/resource, fence đơn điệu và thời điểm acquire/hết hạn; tách biệt với task lease của Registry |
+| `MCPToolCall` / `MCPToolCallResult` | Tương quan lệnh có bound, client/service/tool/input, resource proof tùy chọn, idempotency; outcome completed/failed/unknown |
 
-Schemas are strict and version 3 at the document boundary. Dynamic tool input/output
-uses JsonValue at this boundary; Gateway must also validate against negotiated MCP tool
-input/output schemas. MCP protocolVersion is separately negotiated and never inferred
-from Bflow schemaVersion. `MCPServiceObservation.ready` requires protocol and discovered
-tools; service reachability alone is insufficient for agent readiness.
+Schema ở mức strict và version 3 tại ranh giới document. Input/output tool động dùng
+JsonValue tại ranh giới này; Gateway cũng phải validate theo schema input/output của MCP tool
+đã negotiate. MCP protocolVersion được negotiate riêng và không bao giờ suy ra từ schemaVersion
+của Bflow. `MCPServiceObservation.ready` đòi hỏi protocol và tool đã discover; chỉ truy cập được
+service là chưa đủ cho agent readiness.
 
-The upstream/client protocol follows MCP's stdio and Streamable HTTP transport model.
-stdio is a subprocess channel; Streamable HTTP supports an independent server with
-multiple client connections. Bridge design must implement real protocol sessions and
-request mapping, not broadcast byte streams to all clients.
-[MCP transport specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports).
+Protocol upstream/client theo mô hình transport stdio và Streamable HTTP của MCP.
+stdio là kênh subprocess; Streamable HTTP hỗ trợ server độc lập với nhiều kết nối client.
+Thiết kế bridge phải triển khai session protocol và request mapping thực sự, không broadcast
+byte stream tới mọi client.
+[Đặc tả transport MCP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports).
 
-## Connection topology and authorization
+## Topology kết nối và ủy quyền
 
 ```mermaid
 flowchart LR
@@ -80,130 +80,130 @@ flowchart LR
   Gateway --> Lease[Exclusive resource leases]
 ```
 
-One machine service manager can serve concurrent repositories, but connections and
-processes are partitioned by canonical service definition digest, credentials/audience,
-machine principal, repo trust, runtime isolation and upstream statefulness. Never reuse
-a process that can expose another repo's cwd, files, browser profile, secret or conversation
-state. Default partition is per repo/security boundary; machine-wide sharing requires
-explicit operator capability approval and a stateless or genuinely partitioned upstream.
+Một machine service manager có thể phục vụ nhiều repository đồng thời, nhưng kết nối và
+process được phân vùng theo digest service definition canonical, credential/audience, machine
+principal, repo trust, runtime isolation và tính stateful của upstream. Không bao giờ tái sử
+dụng process có thể làm lộ cwd, file, browser profile, secret hay state hội thoại của repo
+khác. Phân vùng mặc định là theo repo/ranh giới bảo mật; chia sẻ toàn machine đòi hỏi operator
+duyệt capability tường minh và upstream stateless hoặc được phân vùng thực sự.
 
-Each role gets a separate client registration and short-lived token. Gateway resolves
-the principal from host-issued authentication, not `role`, registrationId or tool input
-claimed by the model. Bind token to machine/repository/session/environment/role and
-allowed service/tool set; require unexpired registration for every tools/list and call.
-Apply intersection of machine policy, repo selection, role capability, permission profile
-and task grant. Hide unauthorized tools and reject guessed names even if provider-side
-filters fail. Do not share upstream auth token, admin API, signing key or another role's
-registration with the model. Secret references never contain bearer token values.
+Mỗi role có một client registration riêng và token ngắn hạn. Gateway resolve principal từ
+xác thực do host cấp, không dựa vào `role`, registrationId hay tool input do model tự khai.
+Ràng buộc token với machine/repository/session/environment/role và tập service/tool được
+phép; yêu cầu registration chưa hết hạn cho mọi tools/list và call. Áp dụng giao của chính
+sách machine, lựa chọn repo, capability của role, permission profile và task grant. Ẩn tool
+không được ủy quyền và từ chối tên đoán mò kể cả khi bộ lọc phía provider thất bại. Không chia
+sẻ upstream auth token, admin API, signing key hay registration của role khác với model. Secret
+reference không bao giờ chứa giá trị bearer token.
 
-Client HTTP endpoint is loopback by default, private realm, authenticated and Origin/
-Host validated. Non-loopback requires TLS and reviewed remote deployment policy. stdio
-clients use a small pinned shim connecting to the same gateway; the shim never starts
-one expensive upstream worker per role. URL userinfo/query/fragment credentials are
-rejected; DNS/redirect/SSRF/egress checks are enforced by the manager, not URL schema alone.
-Remote OAuth credentials are audience-bound, rotated by operator flow and never forwarded
-to a different origin. No arbitrary remote endpoint is accepted from repository/model text.
+Client HTTP endpoint mặc định là loopback, private realm, có xác thực và validate
+Origin/Host. Không phải loopback thì đòi hỏi TLS và chính sách triển khai remote đã được review.
+Client stdio dùng một shim nhỏ đã pin kết nối tới cùng gateway; shim không bao giờ khởi chạy một
+upstream worker đắt đỏ cho mỗi role. Credential trong userinfo/query/fragment của URL bị từ chối;
+kiểm tra DNS/redirect/SSRF/egress do manager thực thi, không chỉ dựa vào URL schema. Credential
+OAuth remote bị ràng buộc audience, được xoay vòng qua luồng của operator và không bao giờ
+chuyển tiếp tới origin khác. Không chấp nhận endpoint remote tùy ý từ văn bản của repository/model.
 
-Repository/service configuration only refers to preapproved service IDs and capabilities.
-Adding a new executable/URL/credential binding is a setup plan change, not `up` discovery
-that silently trusts new code. Provider adapter renders only launch-local MCP config;
-global Claude/Codex/Agy settings remain unchanged unless an explicit setup step owns it.
+Cấu hình repository/service chỉ tham chiếu service ID và capability đã duyệt trước. Thêm
+executable/URL/credential binding mới là thay đổi setup plan, không phải discovery của `up`
+âm thầm tin tưởng code mới. Provider adapter chỉ render cấu hình MCP cục bộ của launch; settings
+global của Claude/Codex/Agy không đổi trừ khi một bước setup tường minh sở hữu chúng.
 
-## Lifecycle, adoption and crash recovery
+## Vòng đời, adoption và crash recovery
 
-1. Setup validates the desired catalog; install only via explicit P26 plan/apply. `up`
-   resolves requirements and acquires a reference for its exact scope/environment.
-2. `ensure` single-flights under machine lock using service revision/config digest and
-   recorded ownership. Existing worker is probed/adopted; owned stdio process starts
-   only after durable intent. Negotiate initialize, protocol, tools and credentials.
-3. Register a separate provider/role client. Missing/denied required tool or unknown
-   upstream state blocks readiness; no fake success service.
-4. On restart, reconstruct owned process/client/call ledger and verify process identity,
-   executable digest and start generation. PID reuse is not ownership. Never kill an
-   external worker or a process whose ownership cannot be proven.
-5. Revoke expired/down session clients, release exact reference/resource grants. Stop
-   Bflow-owned service only after reference count zero + idle policy + no uncertain call.
-   External workers and native remote servers always survive repo shutdown.
+1. Setup validate catalog mong muốn; chỉ cài đặt qua P26 plan/apply tường minh. `up` resolve
+   các yêu cầu và acquire một reference cho đúng scope/environment của nó.
+2. `ensure` chạy single-flight dưới machine lock, dùng service revision/config digest và
+   ownership đã ghi. Worker hiện có được probe/adopt; stdio process owned chỉ khởi động sau khi
+   có intent bền vững. Negotiate initialize, protocol, tool và credential.
+3. Đăng ký một client provider/role riêng. Thiếu/bị từ chối tool bắt buộc hoặc trạng thái
+   upstream không rõ sẽ chặn readiness; không có service thành công giả.
+4. Khi restart, dựng lại ledger process/client/call owned và xác minh định danh process,
+   digest executable và start generation. PID tái sử dụng không phải ownership. Không bao giờ
+   kill worker bên ngoài hay process mà ownership không chứng minh được.
+5. Revoke client của session đã hết hạn/down, release reference/resource grant chính xác. Chỉ
+   dừng service do Bflow sở hữu khi reference count bằng 0 + idle policy + không còn call không
+   chắc chắn. Worker bên ngoài và native remote server luôn sống sót qua repo shutdown.
 
-Persist idempotency keys and request fingerprints. Conflicting same-key payload is
-conflict. Before-write timeout is safely not_started; timeout after possible mutating
-tool effect is `unknown`, retained across restart. `reconcileCall` can prove completion,
-non-delivery/failure or remain unknown; no automatic replay of an uncertain mutating call.
-Underlying MCP/HTTP request IDs are correlation, not an exactly-once side-effect guarantee.
-Read-only observation retry is separately allowed with bounded budgets. Distinguish
-failed tool response (`isError`) from successful output and from transport uncertainty.
+Persist idempotency key và request fingerprint. Payload khác nhau cùng key là conflict.
+Timeout trước khi ghi an toàn là not_started; timeout sau khi có thể đã có tác động mutating
+của tool là `unknown`, được giữ qua restart. `reconcileCall` có thể chứng minh hoàn tất,
+non-delivery/failure hoặc vẫn unknown; không tự động replay call mutating không chắc chắn.
+Request ID MCP/HTTP bên dưới là correlation, không phải đảm bảo side effect exactly-once. Retry
+quan sát read-only được phép riêng với budget có bound. Phân biệt phản hồi tool lỗi (`isError`)
+với output thành công và với sự không chắc chắn của transport.
 
-Session/server restart limit is bounded by `restartLimit`; backoff/output/memory/call
-timeouts are host-enforced. Cancellation attempts do not prove that upstream mutations
-stopped. Reconcile or quarantine affected resources before reassignment. Do not restart
-a browser mid-call and tell the next client its old action definitely failed.
+Giới hạn restart của session/server bị chặn bởi `restartLimit`; backoff/output/memory/call
+timeout do host thực thi. Nỗ lực cancel không chứng minh các mutation upstream đã dừng.
+Reconcile hoặc quarantine tài nguyên bị ảnh hưởng trước khi gán lại. Không restart browser
+giữa chừng một call rồi nói với client kế tiếp rằng hành động cũ chắc chắn đã thất bại.
 
-## Remote upstream example: hosted Context7
+## Ví dụ upstream remote: Context7 hosted
 
-A `native_remote_mcp` service has no Bflow-owned process: every agent shares one upstream, and the Gateway is the only
-HTTP client of it. Implemented in `packages/mcp-gateway/src/http-upstream.ts`; configured by `bflow setup`
-(`createContext7RemoteService`) for `https://mcp.context7.com/mcp`.
+Một service `native_remote_mcp` không có process do Bflow sở hữu: mọi agent chia sẻ một upstream, và Gateway là HTTP client
+duy nhất của nó. Được triển khai trong `packages/mcp-gateway/src/http-upstream.ts`; cấu hình bởi `bflow setup`
+(`createContext7RemoteService`) cho `https://mcp.context7.com/mcp`.
 
-- **Protocol.** `Accept` lists `application/json` and `text/event-stream` (the hosted server answers HTTP 406 otherwise and
-  replies in SSE even for a single message). The negotiated `MCP-Protocol-Version` is echoed, `notifications/initialized`
-  is sent, and an `Mcp-Session-Id` issued by the server is kept and replayed. A server that issues none (Context7 does
-  not) is stateless. A dropped session (HTTP 404) is re-established once and the request replayed, because the server
-  rejected it before processing. Concurrent callers share one handshake.
-- **Sharing.** One upstream session serves all agents; this is valid only because the service is stateless and its tools
-  read documentation. Per-agent authorization stays in the Gateway: a registration needs the service id *and* the tool
-  names, and the Conversation role is never registered. A stateful upstream with per-client state would need per-client
-  sessions and must not reuse this policy.
-- **Retry.** Exponential backoff with jitter (base 250 ms, cap 4 s, 3 attempts), honouring `Retry-After` up to 10 s;
-  longer waits are reported as `rate_limited` with `retryAfterMs` instead of being slept through. Only the handshake,
-  discovery and tools the **host's** policy lists read-only are replayed. A server's own `readOnlyHint` is advice from the
-  party being called and is never trusted for this. Everything else runs once; an ambiguous failure is reported as
-  `unknown`, never replayed. The host declares Context7's two tools read-only by exact endpoint (`trustedGatewayPolicy`).
-  Without that declaration the Gateway treats every tool as a possible write and discards the failure cause.
-- **Errors** are structured in `ContractError.details` (`kind`: `auth_missing`, `auth_rejected`, `rate_limited`, `network`,
-  `timeout`, `protocol`, `upstream_http`, `session_lost`, `cancelled`; plus `status`, `retryAfterMs`, `attempts`). A tool-level
-  failure (`isError`, HTTP 200) is returned as tool output; the documentation layer classifies it from the text
+- **Protocol.** `Accept` liệt kê `application/json` và `text/event-stream` (server hosted trả HTTP 406 nếu không và
+  phản hồi bằng SSE kể cả với một message đơn). `MCP-Protocol-Version` đã negotiate được echo lại, `notifications/initialized`
+  được gửi, và `Mcp-Session-Id` do server cấp được giữ và phát lại. Server không cấp (Context7 không cấp) là
+  stateless. Session bị rớt (HTTP 404) được thiết lập lại một lần và request được replay, vì server đã
+  từ chối nó trước khi xử lý. Các caller đồng thời chia sẻ một handshake.
+- **Sharing.** Một upstream session phục vụ mọi agent; điều này chỉ hợp lệ vì service stateless và các tool của nó
+  đọc tài liệu. Ủy quyền theo từng agent nằm ở Gateway: một registration cần service id *và* tên tool,
+  và role Conversation không bao giờ được đăng ký. Upstream stateful có state theo từng client sẽ cần session
+  riêng cho từng client và không được dùng lại chính sách này.
+- **Retry.** Exponential backoff với jitter (base 250 ms, cap 4 s, 3 lần thử), tôn trọng `Retry-After` tối đa 10 s;
+  thời gian chờ lâu hơn được báo là `rate_limited` kèm `retryAfterMs` thay vì ngủ qua. Chỉ handshake,
+  discovery và các tool mà chính sách của **host** liệt kê là read-only mới được replay. `readOnlyHint` của chính server là
+  lời khuyên từ bên bị gọi và không bao giờ được tin cho việc này. Mọi thứ khác chạy một lần; lỗi mơ hồ được báo là
+  `unknown`, không bao giờ replay. Host khai báo hai tool của Context7 là read-only theo endpoint chính xác (`trustedGatewayPolicy`).
+  Không có khai báo đó, Gateway coi mọi tool là có thể ghi và bỏ nguyên nhân lỗi.
+- **Errors** có cấu trúc trong `ContractError.details` (`kind`: `auth_missing`, `auth_rejected`, `rate_limited`, `network`,
+  `timeout`, `protocol`, `upstream_http`, `session_lost`, `cancelled`; cộng `status`, `retryAfterMs`, `attempts`). Lỗi ở mức
+  tool (`isError`, HTTP 200) được trả về như output của tool; lớp documentation phân loại nó từ văn bản
   (`library_not_found`, `version_not_found`, `auth_invalid`, `invalid_arguments`).
 - **Metrics** (`perService[id].upstreamHttp`): `request`, `retry`, `rate_limited`, `auth_failure`, `network_error`, `timeout`,
-  `protocol_error`, `upstream_error`, `session_started`, `session_reinitialized`. No payload or credential is recorded.
-- **Credentials.** `authentication.mode: "bearer"` names a `secret://` reference the Gateway resolves from memory. A configured
-  credential that is unavailable fails the request before it is sent (`auth_missing`); it is never silently dropped.
-- **Health.** `ready` means the Gateway completed initialize and `tools/list`. `bflow docs status` / `doctor` additionally
-  make a real `resolve-library-id` and `query-docs` call under a real registration, because an invalid key still yields HTTP 200.
+  `protocol_error`, `upstream_error`, `session_started`, `session_reinitialized`. Không ghi payload hay credential.
+- **Credentials.** `authentication.mode: "bearer"` nêu một `secret://` reference mà Gateway resolve từ bộ nhớ. Credential đã
+  cấu hình nhưng không khả dụng sẽ làm request fail trước khi gửi (`auth_missing`); nó không bao giờ bị bỏ qua âm thầm.
+- **Health.** `ready` nghĩa là Gateway đã hoàn tất initialize và `tools/list`. `bflow docs status` / `doctor` còn thực hiện thêm
+  một lời gọi `resolve-library-id` và `query-docs` thật dưới một registration thật, vì key không hợp lệ vẫn trả HTTP 200.
 
-## Exclusive resource example: Chrome
+## Ví dụ tài nguyên độc quyền: Chrome
 
-Use a stable resourceKey identifying the actual Chrome instance/profile, not a random
-task ID. A client acquires a TTL lease, receives a monotonic fencing token, then supplies
-the exact lease with each call. Gateway rechecks current registration, owner, service,
-resource, fence and expiry immediately before the upstream effect. Renew uses the exact
-current lease; stale release/renew cannot affect a newer owner. Agent Registry task lease
-is still independently required for Runtime dispatch.
+Dùng resourceKey ổn định định danh instance/profile Chrome thực tế, không phải task ID ngẫu
+nhiên. Client acquire một lease có TTL, nhận fencing token đơn điệu, rồi đưa đúng lease đó
+kèm mỗi call. Gateway kiểm tra lại registration, owner, service, resource, fence và hết hạn
+hiện tại ngay trước tác động upstream. Renew dùng đúng lease hiện tại; release/renew cũ không
+thể ảnh hưởng owner mới hơn. Task lease của Agent Registry vẫn được yêu cầu độc lập cho Runtime
+dispatch.
 
-One browser transaction may require several calls. Keep the lease across that transaction;
-do not interleave navigation/click/screenshot of unrelated roles. Bounded queue wait,
-explicit busy diagnostics and per-role session limits prevent monopolization. On timeout,
-crash or lease expiry, fence stale holders and reconcile in-flight upstream effects before
-issuing a new holder; TTL expiry alone cannot stop a late Chrome command. If upstream
-cannot enforce fence, Gateway serializes the effect and quarantines uncertainty. Isolated
-browser profiles/contexts may run concurrently only after demonstrating real resource
-separation, no shared cookies/tabs/debugging port or cross-project visibility.
+Một transaction browser có thể cần nhiều call. Giữ lease trong suốt transaction đó; không
+đan xen navigation/click/screenshot của các role không liên quan. Thời gian chờ queue có bound,
+chẩn đoán busy tường minh và giới hạn session theo role ngăn việc độc chiếm. Khi timeout, crash
+hoặc lease hết hạn, fence các holder cũ và reconcile các tác động upstream đang bay trước khi cấp
+holder mới; riêng TTL hết hạn không thể dừng một lệnh Chrome đến muộn. Nếu upstream không thể
+thực thi fence, Gateway tuần tự hóa tác động và quarantine sự không chắc chắn. Profile/context
+browser cô lập chỉ được chạy đồng thời sau khi chứng minh tách biệt tài nguyên thực sự, không
+chia sẻ cookie/tab/debugging port hay khả năng nhìn thấy giữa các project.
 
-## User decisions and evidence
+## Quyết định của người dùng và bằng chứng
 
-Intercept MCP elicitation, OAuth interactive requests, browser permission dialogs and
-operator approval needs. A specialist cannot forward them directly to the user's
-terminal. Return blocked diagnostic to Runtime, preserve correlation, route the question
-to Conversation via Herdr and resume only with authenticated, unexpired authority.
-The Gateway itself does not approve, modify a spec or write a human ApprovalDecision.
+Chặn MCP elicitation, request OAuth tương tác, dialog permission của browser và nhu cầu
+approval của operator. Specialist không thể chuyển tiếp chúng trực tiếp tới terminal của người
+dùng. Trả chẩn đoán blocked cho Runtime, giữ correlation, định tuyến câu hỏi tới Conversation
+qua Herdr và chỉ resume với thẩm quyền đã xác thực, chưa hết hạn. Bản thân Gateway không
+approve, không sửa spec và không ghi ApprovalDecision của con người.
 
-Gateway audit records client identity, service/config digest, call/lease/fence IDs,
-timestamps and scrubbed outcome. Large reports/screenshots enter ArtifactStore through
-ArtifactProposal ingestion; only ArtifactStore returns trusted references. Neither tool
-output nor service health promotes a task to succeeded. Runtime/Verification/Quality
-Gates still independently assess evidence on the exact revision.
+Audit của Gateway ghi định danh client, digest service/config, call/lease/fence ID, timestamp
+và outcome đã scrub. Báo cáo/screenshot lớn đi vào ArtifactStore qua ArtifactProposal ingestion;
+chỉ ArtifactStore trả về reference tin cậy. Cả output của tool lẫn health của service đều không
+đẩy task lên succeeded. Runtime/Verification/Quality Gate vẫn đánh giá bằng chứng độc lập trên
+đúng revision.
 
-P27/P31 tests must cover external-worker survival, no duplicate stdio upstream, client
-revocation, cross-repo leakage, denied guessed tools, stale/expired fences, Chrome late
-effects, stdio framing/backpressure, request-ID remapping, credential rotation and
-unknown-call restart recovery. Same-user compromise, multi-host distributed leases and
-unbounded resource isolation remain unverified until backed by separate evidence.
+Test P27/P31 phải bao phủ việc worker bên ngoài sống sót, không có stdio upstream trùng,
+client revocation, rò rỉ chéo repo, tool đoán mò bị từ chối, fence cũ/hết hạn, tác động đến muộn
+của Chrome, framing/backpressure của stdio, ánh xạ lại request-ID, xoay vòng credential và
+recovery khi restart với call không rõ. Same-user compromise, distributed lease đa host và
+cô lập tài nguyên không giới hạn vẫn chưa được xác minh cho đến khi có bằng chứng riêng.

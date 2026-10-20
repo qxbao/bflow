@@ -1,102 +1,96 @@
-# P17 validation evidence
+# Evidence xác thực P17
 
-Implementation tested: `691a845911ff8e4e17ef520d7314a6a95bab1b5c`.
+Bản triển khai được kiểm thử: `691a845911ff8e4e17ef520d7314a6a95bab1b5c`.
 Baseline: `d8c6d18120c7a01a4bf8aad13f14660d20e0cdf6`.
-Branch: `agent/verification/p17-loop-engine`.
+Nhánh: `agent/verification/p17-loop-engine`.
 Worktree: `/tmp/bflow-p17-verification`.
-Platform: Linux, Node `v24.16.0`, pnpm `12.5.1`.
-Date: 2026-10-16.
+Nền tảng: Linux, Node `v24.16.0`, pnpm `12.5.1`.
+Ngày: 2026-10-16.
 
-| Command | Exit | Result |
+| Command | Exit | Kết quả |
 | --- | --- | --- |
-| `pnpm check:deps` | 0 | Acyclic dependency graph; 14 workspace packages, 20 edges |
-| `pnpm typecheck` | 0 | Existing root project references |
-| `pnpm --filter @bflow/verification typecheck` | 0 | P17 source and contracts reference |
-| `pnpm --filter @bflow/verification test` | 0 | 3 files, 49 passed, 0 failed, 0 skipped |
-| `pnpm exec tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --strict --exactOptionalPropertyTypes --noUncheckedIndexedAccess --skipLibCheck packages/verification/test/*.ts` | 0 | Strict typecheck of test helpers, cases and fixtures |
-| `TMPDIR=/tmp pnpm test` | 0 | 45 files, 1003 passed, 0 failed, 0 skipped |
-| `git diff --check` | 0 | No whitespace errors |
-| `git diff --cached --check` | 0 | No staged whitespace errors before implementation commit |
-| `git status --short` | 0 | Final worktree clean after this evidence commit |
+| `pnpm check:deps` | 0 | Đồ thị dependency không có chu trình; 14 workspace package, 20 cạnh |
+| `pnpm typecheck` | 0 | Các project reference gốc hiện có |
+| `pnpm --filter @bflow/verification typecheck` | 0 | Source P17 và tham chiếu contracts |
+| `pnpm --filter @bflow/verification test` | 0 | 3 file, 49 passed, 0 failed, 0 skipped |
+| `pnpm exec tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --strict --exactOptionalPropertyTypes --noUncheckedIndexedAccess --skipLibCheck packages/verification/test/*.ts` | 0 | Typecheck nghiêm ngặt cho test helper, case và fixture |
+| `TMPDIR=/tmp pnpm test` | 0 | 45 file, 1003 passed, 0 failed, 0 skipped |
+| `git diff --check` | 0 | Không có lỗi whitespace |
+| `git diff --cached --check` | 0 | Không có lỗi whitespace ở staged trước implementation commit |
+| `git status --short` | 0 | Worktree cuối cùng sạch sau evidence commit này |
 
-The first unqualified `pnpm test` run returned exit 1: 977 passed and 1 failed
-(out of 978 tests at that intermediate revision). ArtifactStore's existing
-`A02: Unix socket is rejected before any open/connection` fixture could not create
-a socket beneath the long profile TMPDIR (`listen EINVAL`). The short local POSIX
-path `TMPDIR=/tmp` resolved that environmental failure. Final validation above
-includes all subsequent P17 tests. Build precedes package and full tests.
+Lần chạy `pnpm test` đầu tiên không có điều kiện trả về exit 1: 977 passed và 1 failed
+(trong tổng 978 test ở revision trung gian đó). Fixture hiện có của ArtifactStore
+`A02: Unix socket is rejected before any open/connection` không thể tạo socket dưới
+TMPDIR của profile dài (`listen EINVAL`). Đường dẫn POSIX cục bộ ngắn `TMPDIR=/tmp` đã
+giải quyết lỗi môi trường này. Phần xác thực cuối cùng ở trên bao gồm mọi test P17 sau đó.
+Build được thực hiện trước các test của package và test đầy đủ.
 
-Workspace dependency installation used the baseline's existing pinned lockfile
-versions. pnpm's automatic task preparation temporarily added the new package's
-lockfile importer locally; that generated importer was removed after the checks.
-It is not committed. Root TypeScript references remain unchanged; therefore the
-explicit P17 typecheck/build commands are necessary evidence beyond root typecheck.
-No root lockfile, configuration or shared contract changes are included. The
-integration owner must apply the wiring described in [INTEGRATION.md](INTEGRATION.md)
-before a frozen clean install can discover the new package importer.
+Việc cài đặt workspace dependency dùng đúng các phiên bản lockfile đã pin của baseline.
+Bước chuẩn bị task tự động của pnpm đã tạm thời thêm importer lockfile của package mới ở
+máy cục bộ; importer được sinh ra đó đã bị xóa sau khi kiểm tra. Nó không được commit.
+Các project reference TypeScript gốc không thay đổi; do đó các lệnh typecheck/build P17
+tường minh là evidence cần thiết ngoài typecheck gốc. Không có thay đổi lockfile gốc, cấu hình
+hay shared contract nào. Integration owner phải áp dụng phần wiring mô tả trong
+[INTEGRATION.md](INTEGRATION.md) trước khi một lần cài đặt clean với frozen lockfile có thể
+phát hiện importer của package mới.
 
-The owned diff contains only `packages/verification/**` and
-`agents/verifier/prompt.md`. There are no migrations, dependency upgrades, committed
-build outputs, databases, coverage directories or agent logs. JSON examples are
-requested source fixtures captured using the byte-storing fake ArtifactStore and
-fake tool runner; schema tests validate all six examples.
+Diff thuộc sở hữu chỉ chứa `packages/verification/**` và `agents/verifier/prompt.md`.
+Không có migration, nâng cấp dependency, build output được commit, database, thư mục coverage
+hay agent log. Các ví dụ JSON là source fixture được yêu cầu, thu bằng fake ArtifactStore lưu
+byte và fake tool runner; schema test xác thực cả sáu ví dụ.
 
-Coverage includes the eight requested scenarios, real nonzero exit precedence
-over a passing gate/review, stale attempt/revision and executor rejection, scope
-and specification drift, malformed/missing/corrupted evidence, proposal ingestion,
-coverage threshold enforcement, bounded timeouts, receipt/history tampering,
-configured loop limits, changed versus unaffected check reuse including renames,
-and post-integration workflow verification. Review discovered and closed the
-manual-review/static-check masquerading-as-integration coverage bypass.
+Phạm vi bao phủ gồm tám kịch bản được yêu cầu, ưu tiên của exit khác 0 thực tế so với
+gate/review đang pass, từ chối attempt/revision và executor lỗi thời, scope và specification
+drift, evidence sai định dạng/thiếu/hỏng, ingestion proposal, thực thi ngưỡng coverage, timeout
+có giới hạn, giả mạo receipt/history, giới hạn loop đã cấu hình, tái sử dụng check đã đổi so
+với không bị ảnh hưởng (kể cả đổi tên), và workflow verification sau tích hợp. Review đã phát
+hiện và đóng lỗ hổng bỏ qua coverage trong đó manual-review/static-check giả dạng integration.
 
-This is source implementation and local test evidence. It is not P19 Runtime
-integration, live Herdr verification, live Git integration or remote closure.
-The trusted host must provide actual isolated checks, approved command capabilities,
-executor identity and Git state. Runtime must enforce latest-cycle optimistic
-versions, Core rework limits, leases, cancellation/recovery and message delivery.
-The engine cannot authenticate processes or distinguish replay of an older authentic
-cycle snapshot from the latest cycle by itself. No contract amendment is requested.
-P02-RA01 and P03-RA01 remain outside this package's ownership and are unchanged.
+Đây là evidence triển khai source và test cục bộ. Nó không phải tích hợp Runtime P19, xác minh
+Herdr thật, tích hợp Git thật hay đóng remote. Trusted host phải cung cấp các check cô lập thực
+tế, command capability đã phê duyệt, danh tính executor và trạng thái Git. Runtime phải thực
+thi optimistic version của cycle mới nhất, giới hạn rework của Core, lease, cancellation/recovery
+và việc gửi thông điệp. Engine tự nó không thể xác thực tiến trình hay phân biệt replay một
+snapshot cycle xác thực cũ hơn với cycle mới nhất. Không yêu cầu sửa đổi contract. P02-RA01 và
+P03-RA01 nằm ngoài quyền sở hữu của package này và không thay đổi.
 
-## Reviewed integration closure
+## Đóng tích hợp đã được review
 
-Tested integration commit: `8e7778a4b134d9b85edf5a5989d1da33b36a54cf`.
-Reviewed source fixes: `46a6eac` and `26b1950`.
-Shared build/lockfile/documentation registration: `13e9013`.
-Integration worktree: `/tmp/bflow-p17-integration` on `integration/p17-closure`.
-Local main predecessor: `d8c6d18120c7a01a4bf8aad13f14660d20e0cdf6`.
-Authorization: user's explicit request to review, fix and merge main.
+Integration commit được kiểm thử: `8e7778a4b134d9b85edf5a5989d1da33b36a54cf`.
+Các bản sửa source đã review: `46a6eac` và `26b1950`.
+Đăng ký build/lockfile/tài liệu dùng chung: `13e9013`.
+Integration worktree: `/tmp/bflow-p17-integration` trên `integration/p17-closure`.
+Tiền nhiệm main cục bộ: `d8c6d18120c7a01a4bf8aad13f14660d20e0cdf6`.
+Ủy quyền: yêu cầu tường minh của người dùng để review, fix và merge main.
 
-| Command | Exit | Result |
+| Command | Exit | Kết quả |
 | --- | --- | --- |
-| `pnpm install --frozen-lockfile --ignore-scripts --offline` | 0 | Clean integration worktree installation; pinned dependency versions retained |
-| `pnpm check:deps` | 0 | 14 workspace packages, 20 edges; acyclic |
-| `pnpm typecheck` | 0 | Root references now include P17 |
-| `pnpm --filter @bflow/verification test` | 0 | 4 files, 66 passed, 0 failed, 0 skipped |
-| `pnpm exec tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --strict --exactOptionalPropertyTypes --noUncheckedIndexedAccess --skipLibCheck packages/verification/test/*.ts` | 0 | Strict test/helper typecheck |
-| `pnpm lint` | 0 | Dependency checks, root typecheck and E2E suite type compatibility |
-| `TMPDIR=/tmp pnpm test` | 0 | 46 files, 1020 passed, 0 failed, 0 skipped |
-| `git diff --check` | 0 | Clean |
-| `git status --short` | 0 | Clean tested integration tree |
+| `pnpm install --frozen-lockfile --ignore-scripts --offline` | 0 | Cài đặt sạch trong integration worktree; giữ nguyên phiên bản dependency đã pin |
+| `pnpm check:deps` | 0 | 14 workspace package, 20 cạnh; không có chu trình |
+| `pnpm typecheck` | 0 | Các reference gốc nay bao gồm P17 |
+| `pnpm --filter @bflow/verification test` | 0 | 4 file, 66 passed, 0 failed, 0 skipped |
+| `pnpm exec tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --strict --exactOptionalPropertyTypes --noUncheckedIndexedAccess --skipLibCheck packages/verification/test/*.ts` | 0 | Typecheck nghiêm ngặt cho test/helper |
+| `pnpm lint` | 0 | Kiểm tra dependency, typecheck gốc và tương thích kiểu của bộ E2E |
+| `TMPDIR=/tmp pnpm test` | 0 | 46 file, 1020 passed, 0 failed, 0 skipped |
+| `git diff --check` | 0 | Sạch |
+| `git status --short` | 0 | Cây tích hợp đã kiểm thử sạch |
 
-The review first reproduced eight adversarial failures, then closed them with
-regression tests. A further failing compatibility test reproduced rejection of
-P16's appended TDD receipt metadata. Final tests also cover global submission
-identity uniqueness, missing supplemental criterion checks, timestamp freshness,
-failed review/coverage reuse, literal path declarations, task-complete integration
-provenance, per-check repair routing and immutable approved TDD receipt prefixes.
-See [REVIEW.md](REVIEW.md) for the findings and remediation.
+Review trước tiên tái hiện tám lỗi đối kháng, sau đó đóng chúng bằng regression test. Một test
+tương thích thất bại khác đã tái hiện việc từ chối metadata receipt TDD được append của P16.
+Các test cuối cũng bao phủ tính duy nhất toàn cục của submission identity, thiếu check
+criterion bổ sung, độ mới của timestamp, tái sử dụng review/coverage thất bại, khai báo đường
+dẫn literal, provenance tích hợp task-complete, định tuyến repair theo từng check và các tiền
+tố receipt TDD đã phê duyệt bất biến. Xem [REVIEW.md](REVIEW.md) cho các finding và khắc phục.
 
-The integration diff adds only the P17 package/Verifier prompt plus authorized
-root `README.md`, `tsconfig.json` and the new workspace importer in
-`pnpm-lock.yaml`. No existing dependency version, public contract, migration,
-Runtime/Core implementation or generated build output changes. Original source
-implementation and subsequent fixes remain in the merge ancestry. The earlier
-standalone lockfile/build limitation above is resolved by this integration.
+Diff tích hợp chỉ thêm package P17/Verifier prompt cùng các thay đổi được ủy quyền ở `README.md`
+gốc, `tsconfig.json` và importer workspace mới trong `pnpm-lock.yaml`. Không có phiên bản
+dependency hiện có, public contract, migration, triển khai Runtime/Core hay build output sinh ra
+nào thay đổi. Bản triển khai source gốc và các bản sửa sau đó vẫn nằm trong lịch sử merge. Hạn
+chế lockfile/build độc lập nêu trên đã được giải quyết bởi tích hợp này.
 
-All review findings identified in this pass are fixed. This closes local P17
-source/build integration; it does not implement P19 or verify live Herdr/Git
-execution. Runtime latest-cycle/version/lease/recovery enforcement and trusted host
-capabilities remain explicit integration boundaries. No push, remote merge or PR
-is part of this closure. The evidence commit changes documentation only after the
-tested integration commit.
+Mọi finding review được xác định trong lượt này đều đã sửa. Điều này đóng tích hợp source/build
+cục bộ của P17; nó không triển khai P19 hay xác minh thực thi Herdr/Git thật. Việc Runtime thực
+thi latest-cycle/version/lease/recovery và các trusted host capability vẫn là ranh giới tích hợp
+tường minh. Không có push, remote merge hay PR trong lần đóng này. Evidence commit chỉ thay đổi
+tài liệu sau integration commit đã kiểm thử.

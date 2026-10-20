@@ -1,4 +1,4 @@
-# Bflow Platform v3 — Known Limitations & Open Follow-Ups (Post-P24–P34)
+# Bflow Platform v3 — Giới hạn đã biết & Việc theo dõi còn mở (Post-P24–P34)
 
 Tài liệu này tổng hợp trung thực toàn bộ các giới hạn kỹ thuật, phạm vi chưa được chứng nhận và các mục công việc còn mở của Bflow Platform v3 tại commit baseline `da9e166` (cùng các bản sửa kiểm thử release `REL-V3-01`, `REL-V3-02`).
 
@@ -16,9 +16,9 @@ Tài liệu này tổng hợp trung thực toàn bộ các giới hạn kỹ thu
 
 ---
 
-## 2. Giới hạn theo Thành phần Kỹ thuật (Component-Specific Limitations)
+## 2. Giới hạn theo Thành phần Kỹ thuật (Giới hạn riêng từng thành phần)
 
-### 2.1 Agent Providers & Host Isolation (`packages/agent-providers`, `packages/runtime`)
+### 2.1 Agent Providers & cách ly Host (`packages/agent-providers`, `packages/runtime`)
 
 | Mã giới hạn | Trạng thái | Chi tiết giới hạn | Hướng xử lý / Workaround |
 | :--- | :---: | :--- | :--- |
@@ -27,7 +27,7 @@ Tài liệu này tổng hợp trung thực toàn bộ các giới hạn kỹ thu
 | **`PV3-01-DAEMON-RESTART`** | **By Design (Fail-Closed)** | Khi daemon `AgenticHost` khởi động lại sau khi chết, các launch và registration của daemon cũ (vốn giữ khóa/token trong RAM của tiến trình cũ) sẽ bị thu hồi (`restartRecovery.releasedLaunchIds`) thay vì tự động nhận lại. | Chạy lại `bflow up` để thiết lập lại launch profile và registration mới cho các role panes. |
 | **`RR-13` & `PV3-09` (Same-UID Threat Model)** | **Accepted Risk cho Single-Operator** | Các tiến trình provider chạy cùng UID với người vận hành. Dù biến môi trường đã được truyền qua Herdr socket lúc tạo pane (`33ca7ab`) thay vì dòng lệnh `herdr agent start`, một tiến trình độc hại chạy cùng UID vẫn có thể đọc `/proc/<pid>/environ` để thấy `BFLOW_MCP_TOKEN_*`. | Token có phạm vi hẹp, thời hạn ngắn (`<= 1 giờ`) và bị thu hồi khi `down`/restart. Để chống lại tiến trình cùng UID bị chiếm quyền, cần nâng cấp lên cơ chế cô lập từng role bằng OS user/container riêng. |
 
-### 2.2 Machine Setup, OS Services & Filesystem (`packages/machine-setup`, `packages/tool-installer`)
+### 2.2 Machine Setup, OS Service & Filesystem (`packages/machine-setup`, `packages/tool-installer`)
 
 | Mã giới hạn | Trạng thái | Chi tiết giới hạn | Hướng xử lý / Workaround |
 | :--- | :---: | :--- | :--- |
@@ -38,18 +38,18 @@ Tài liệu này tổng hợp trung thực toàn bộ các giới hạn kỹ thu
 | **Context7 (dịch vụ lưu trữ sẵn)** | **Open P2** | (1) Thông điệp khi vượt hạn mức/quota **chưa quan sát được** nên chỉ xử lý HTTP 429 và so khớp văn bản lỏng lẻo. (2) OAuth (`/mcp/oauth`) chưa hỗ trợ; chỉ khóa API. (3) Mọi truy vấn rời khỏi máy tới `context7.com`. (4) Kiểm tra thật chỉ trên macOS arm64; chưa có Linux, và chưa chạy Claude/Codex/Agy thật gọi công cụ trong phiên `bflow up` đầy đủ. (5) `bflow up` với `required: true` chỉ dựa trên readiness do Gateway công bố; phép gọi thật nằm ở `doctor`/`docs status`. (6) Mục "Provider access" của `docs status` suy ra từ cấu hình, không từ phiên đang chạy. (7) Phát hiện cấu hình Context7 sẵn có của Agy dùng `agy mcp list`; vị trí cấu hình của Agy không được tài liệu hóa. | Dùng `docs status` sau `bflow up`; đặt khóa API cho hạn mức cao hơn. |
 | **`toolIds` của role vừa là kho tool của skill vừa là `allowedTools` của Gateway** | **Open P2 (phát hiện khi tích hợp Context7)** | Cùng một danh sách `toolIds` được dùng cho điều kiện `requiredToolIds` của skill (`skills-session.ts`) và làm `allowedTools` khi đăng ký Gateway (`service.ts`), nơi chỉ chấp nhận *tên tool MCP*. Một skill đòi `requiredToolIds: ["gitnexus"]` cùng một registration cho dịch vụ đó không thể thỏa mãn cả hai. `use-context7` tránh bằng cách không khai `requiredToolIds`; skill `use-gitnexus`/`use-mempalace` chưa được kiểm chứng trong phiên thật. | Tách hai danh sách trong Runtime (owner P30). |
 
-### 2.3 Behavioral Test Runners, CLI & Legacy Paths (`packages/runtime`, `apps/cli`)
+### 2.3 Behavioral Test Runner, CLI & đường dẫn Legacy (`packages/runtime`, `apps/cli`)
 
 | Mã giới hạn | Trạng thái | Chi tiết giới hạn | Hướng xử lý / Workaround |
 | :--- | :---: | :--- | :--- |
-| **`RR-22` & `RR-23` (Behavioral Runner Scope)** | **Scoped Support** | Sandbox kiểm thử hành vi yêu cầu Linux + `/usr/bin/bwrap` và chỉ hỗ trợ `node_tap` (Node flat TAP) cùng `vitest_json` (Vitest 2.1 JSON) với `node_modules` chuẩn (read-only). Chưa hỗ trợ tiêu chí hỗn hợp thủ công/tự động, ngưỡng coverage, symlink ra ngoài workspace hoặc bước tự động build `dist/` bên trong sandbox. | Chuẩn bị sẵn dependencies và cấu hình lệnh test tất định trong cấu hình owner trước khi chạy workflow. |
+| **`RR-22` & `RR-23` (Behavioral Runner Scope)** | **Scoped Support** | Sandbox kiểm thử hành vi yêu cầu Linux + `/usr/bin/bwrap` hoặc macOS + `/usr/bin/sandbox-exec` (Seatbelt: từ chối nội dung chứ không ẩn đường dẫn, chưa live-verified) và chỉ hỗ trợ `node_tap` (Node flat TAP) cùng `vitest_json` (Vitest 2.1 JSON) với `node_modules` chuẩn (read-only). Chưa hỗ trợ tiêu chí hỗn hợp thủ công/tự động, ngưỡng coverage, symlink ra ngoài workspace hoặc bước tự động build `dist/` bên trong sandbox. | Chuẩn bị sẵn dependencies và cấu hình lệnh test tất định trong cấu hình owner trước khi chạy workflow. |
 | **`RR-24` (Resource Quotas)** | **Open P2** | Đã có giới hạn thời gian chạy (`timeoutMs`), dung lượng đầu ra và số vòng lặp (`maxIterations`), nhưng Bubblewrap sandbox chưa gắn `cgroups v2` để giới hạn cứng CPU/RAM/Disk I/O cho từng tiến trình con. | Cấu hình giới hạn tài nguyên thông qua `systemd --user` slice hoặc container ở tầng hạ tầng nếu chạy tải nặng. |
 | **`PV3-07` (Unified Commands vs. Workflow Acceptance)** | **By Design** | 9 lệnh cấp cao của P29 (`repo inspect`, `task plan`, `task implement`, `verify`, `git prepare`, `mcp status`, `tool status`, `skills sync`, `agent check`) là mặt phẳng điều khiển UX; kết quả `succeeded` của một lệnh CLI đơn lẻ **không** đồng nghĩa với việc toàn bộ workflow SDLC đã được nghiệm thu. Các lệnh tắt `feature`, `bugfix`, `refactor`, `review` chưa được mở trong parser. | Sử dụng luồng chuẩn `bflow up` + `bflow attach` (qua Conversation Agent) để thực thi trọn vẹn quy trình SDLC có kiểm chứng. |
 | **Legacy CLI Commands** | **Deprecated / Isolated** | Các lệnh thế hệ cũ (`bflow run`, `bflow approve`, `bflow resume`, `bflow cancel`) dùng Runtime v1 và kho lưu trữ riêng, không tự động kích hoạt kiến trúc điều phối P19/P30. | Không dùng các lệnh legacy để nghiệm thu hoặc khôi phục phiên Agentic v2/v3; sử dụng `bflow up`, `bflow attach`, `bflow down`, `bflow recover`. |
 
 ---
 
-## 3. Các mục nợ kỹ thuật cấp Package từ các фа trước (`P02-RA01`, `P03-RA01`)
+## 3. Các mục nợ kỹ thuật cấp Package từ các giai đoạn trước (`P02-RA01`, `P03-RA01`)
 
 | Mã theo dõi | Package sở hữu | Mô tả chi tiết | Trạng thái |
 | :--- | :--- | :--- | :---: |

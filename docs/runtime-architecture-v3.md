@@ -1,4 +1,4 @@
-# Bflow Runtime Architecture v3 — P24 contract baseline
+# Kiến trúc Runtime Bflow v3 — baseline contract P24
 
 Ngày kiểm toán: 2026-10-16. Source đầu vào: `9235415704d92f4612497b099925f6d23d6d8ca4`.
 P24 chỉ bổ sung thiết kế, schemas, public ports và contract tests. Các module P25–P31
@@ -116,7 +116,7 @@ Giữ TaskStatus/RunStatus, event ordering, command receipts và aggregate recov
 | Tầng | Nội dung | Authority / vòng đời |
 | --- | --- | --- |
 | Machine | Tool inventory/verified binary, provider discovery, approved service definitions, shared skill catalog, secret references | Operator-owned, private XDG config/data/state; machine lock. Không có wildcard repo trust hoặc global permission bypass |
-| Repository | Provider/role selection, optional model/effort, required tools/MCP/skills, verification policy, acceptance/approval requirements | Canonical `.bflow/config.yml`; `bflow config-migrate` explicitly converts legacy `.yaml`/`.json` with a byte-exact backup while preserving bound repository identity. Omitted model/effort keep provider defaults. This is an application config change with no `@bflow/contracts` shape or schema-version change. |
+| Repository | Provider/role selection, optional model/effort, required tools/MCP/skills, verification policy, acceptance/approval requirements | `.bflow/config.yml` chuẩn; `bflow config-migrate` chuyển đổi tường minh `.yaml`/`.json` cũ kèm bản sao lưu khớp từng byte, đồng thời giữ nguyên repository identity đã gắn. Nếu bỏ qua model/effort thì giữ mặc định của provider. Đây là thay đổi cấu hình ứng dụng, không đổi shape hay schema-version của `@bflow/contracts`. |
 | Session/runtime | Resolved environment, permission profile, generated MCP config, scoped tokens, launch files/receipts, leases, expiry | Private POSIX state, session identity và launch generation; revoke khi down hoặc configuration drift |
 
 Vị trí future: `$XDG_CONFIG_HOME/bflow/` cho machine desired config,
@@ -200,8 +200,8 @@ agent runtime không âm thầm tự login hoặc chấp nhận trust/update pro
 
 | Command v3 dự kiến | BflowCommand operation | Tuyến thực thi |
 | --- | --- | --- |
-| `bflow setup --plan`, `bflow setup --apply <plan>` | `setup.plan`, `setup.apply` | P26 plan/receipt orchestration; explicit machine/repo/session scope |
-| `bflow tools status`, `bflow mcp status`, `bflow skills list` | `tools.inspect`, `mcp.inspect`, `skills.inspect` | Read-only inventory/health; không tạo workflow |
+| `bflow setup --plan`, `bflow setup --apply <plan>` | `setup.plan`, `setup.apply` | Điều phối plan/receipt của P26; phạm vi machine/repo/session tường minh |
+| `bflow tools status`, `bflow mcp status`, `bflow skills list` | `tools.inspect`, `mcp.inspect`, `skills.inspect` | Kiểm kê/health chỉ đọc; không tạo workflow |
 | `bflow up/down/attach/status/doctor` | `environment.*` | Mở rộng lifecycle hiện có; attach vẫn chỉ Conversation |
 | `bflow feature/bugfix/refactor/review/verify <objective>` | `workflow.request` | User intent vào ConversationGateway → DelegationRequest → Coordinator → Runtime; accepted spec/criteria, TDD, independent Quality Gates và approvals cũ |
 | Existing `run/approve/resume/cancel` | `workflow.legacy` + existing RuntimeCommand | Giữ legacy RuntimeService/storage; không giả đây là P19 session recovery |
@@ -249,13 +249,13 @@ kiểm chứng của cùng P24 baseline. Không xuất phát từ P11 hoặc ref
 
 | Phase | Owned paths | Trách nhiệm / phụ thuộc |
 | --- | --- | --- |
-| P25 — Provider adapters | `packages/agent-providers/**` | Claude/Codex/Agy probes, scoped permission mapping, launch profiles/native startup attestation; không launch thay Herdr |
-| P26 — Machine setup & tools | `packages/machine-setup/**`, `packages/tool-installer/**` | Three-level config, dry-run/apply/reconcile, pinned installers, owned receipts; không thêm CLI parser |
-| P27 — Shared MCP | `packages/mcp-gateway/**`, `packages/mcp-services/**` | Shared connections, bridge/shim, authorization, reference counts và exclusive resource leases; không agent messaging |
-| P28 — Role skills | `packages/skills/**`, `skills/**` | Catalog, pin/digest/dependencies, role manifests và provider rendering; không thay role personality/host policy |
-| P29 — Unified CLI | `apps/cli/**` | Command UX/serialization và existing lifecycle wrappers qua Runtime facade; không sửa Runtime hoặc contracts |
-| P30 — Runtime integration | `packages/runtime/**`, `packages/pane-manager/**`, `packages/conversation/**`, `agents/**` | Integration-only bridge/wiring: strict readiness, launch lifecycle, Conversation escalation, skills và Gateway vào host hiện có; không viết lại Core/Quality Gates |
-| P31 — Verification & acceptance | `tests/platform-v3/**`, `tests/acceptance/platform-v3/**` | Cross-provider conformance, isolated live/fault/security evidence và final acceptance report trong owned test paths; không sửa production để che test |
+| P25 — Provider adapters | `packages/agent-providers/**` | Probe Claude/Codex/Agy, ánh xạ permission theo scope, launch profile/native startup attestation; không launch thay Herdr |
+| P26 — Machine setup & tools | `packages/machine-setup/**`, `packages/tool-installer/**` | Cấu hình ba tầng, dry-run/apply/reconcile, installer đã pin, receipt thuộc sở hữu; không thêm CLI parser |
+| P27 — Shared MCP | `packages/mcp-gateway/**`, `packages/mcp-services/**` | Kết nối dùng chung, bridge/shim, authorization, reference count và exclusive resource lease; không có agent messaging |
+| P28 — Role skills | `packages/skills/**`, `skills/**` | Catalog, pin/digest/dependency, role manifest và provider rendering; không thay role personality/host policy |
+| P29 — Unified CLI | `apps/cli/**` | Command UX/serialization và wrapper lifecycle hiện có qua Runtime facade; không sửa Runtime hoặc contracts |
+| P30 — Runtime integration | `packages/runtime/**`, `packages/pane-manager/**`, `packages/conversation/**`, `agents/**` | Chỉ làm cầu nối/wiring tích hợp: strict readiness, launch lifecycle, Conversation escalation, skills và Gateway vào host hiện có; không viết lại Core/Quality Gates |
+| P31 — Verification & acceptance | `tests/platform-v3/**`, `tests/acceptance/platform-v3/**` | Cross-provider conformance, bằng chứng live/fault/security cô lập và báo cáo nghiệm thu cuối trong các test path được sở hữu; không sửa production để che test |
 
 Wave A: P24 freeze. Wave B: P25–P28 song song trên worktrees riêng từ P24. Integration
 owner tuần tự hợp nhất, cập nhật root manifests/tsconfig/lockfile nếu cần, chạy full

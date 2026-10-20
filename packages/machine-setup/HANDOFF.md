@@ -1,62 +1,62 @@
-# Phase P26 (`@bflow/machine-setup`) — Integration Handoff
+# Phase P26 (`@bflow/machine-setup`) — Bàn giao tích hợp
 
-## 1. Baseline & Branch Identity
+## 1. Baseline và danh tính branch
 
 - **Phase**: P26 — Machine Setup Backend (`@bflow/machine-setup`)
-- **Baseline Commit**: `15bb288` (contains P24 `8dbb056` freeze + P25 `15bb288`)
-- **Current Head Commit**: `5daea2b` + Task 8 completion
+- **Baseline Commit**: `15bb288` (gồm P24 `8dbb056` freeze + P25 `15bb288`)
+- **Current Head Commit**: `5daea2b` + hoàn thành Task 8
 - **Branch**: `agent/machine-setup/p26-setup-backend`
-- **Owned Paths Modified**: `packages/machine-setup/**` only. Root configuration, contracts, and other packages remain untouched.
+- **Owned Paths đã sửa**: chỉ `packages/machine-setup/**`. Cấu hình gốc, contracts và các package khác không bị động tới.
 
 ---
 
-## 2. Implemented Capabilities & Modules
+## 2. Các capability và module đã triển khai
 
 1. **Platform Profile & Safe Command Runner (`src/platform.ts`, `src/runner.ts`)**:
-   - `detectPlatform(host)`: Resolves OS, architecture, shell (`bash`, `zsh`, `fish`, `sh`, `pwsh`, `cmd`), XDG paths (`$XDG_CONFIG_HOME/bflow`, `$XDG_DATA_HOME/bflow`, `$XDG_STATE_HOME/bflow`), and derives stable `machineId` (`m-` + sha256).
-   - `NodeCommandRunner`: Executes commands with `shell: false`, bounded output buffer (1 MiB), process-tree termination on timeout, and denylists escalation binaries (`sudo`, `doas`, `su`, `runas`, `pkexec`).
-   - `findExecutable`: Searches directories on PATH and known install directories with executable bit (`X_OK`) verification and Windows `PATHEXT` handling.
+   - `detectPlatform(host)`: Resolve OS, kiến trúc, shell (`bash`, `zsh`, `fish`, `sh`, `pwsh`, `cmd`), đường dẫn XDG (`$XDG_CONFIG_HOME/bflow`, `$XDG_DATA_HOME/bflow`, `$XDG_STATE_HOME/bflow`), và suy ra `machineId` ổn định (`m-` + sha256).
+   - `NodeCommandRunner`: Thực thi lệnh với `shell: false`, output buffer có giới hạn (1 MiB), kết thúc cả process tree khi timeout, và denylist các binary leo thang đặc quyền (`sudo`, `doas`, `su`, `runas`, `pkexec`).
+   - `findExecutable`: Tìm trong các thư mục của PATH và các thư mục cài đặt đã biết, có xác minh executable bit (`X_OK`) và xử lý `PATHEXT` của Windows.
 
-2. **Setup State Store & Security Controls (`src/state-store.ts`)**:
-   - `SetupStateStore`: Manages private directories (`0700` mode, rejects symlinks and foreign UIDs) and writes files atomically (`0600` mode, sync before rename).
-   - Lock acquisition (`acquireLock`): Atomic lockfile with PID and hostname check; detects and replaces stale locks from dead processes.
-   - Automatic Backups: Automatically archives any existing file before modification to `<state>/backups/<timestamp>-<sha8>/<basename>` with append-only index tracking.
-   - Strict Version 3 Codecs: Implements versioned storage for journal (`setup/journal.json`), receipts (`setup/receipts.jsonl`), approvals (`setup/approvals/<id>.json`), and change log (`setup/changes.jsonl`). Unknown schema versions return `unsupported_version` errors.
+2. **Setup State Store & kiểm soát bảo mật (`src/state-store.ts`)**:
+   - `SetupStateStore`: Quản lý thư mục riêng tư (mode `0700`, từ chối symlink và UID của owner khác) và ghi file atomic (mode `0600`, sync trước khi rename).
+   - Lấy lock (`acquireLock`): Lockfile atomic có kiểm tra PID và hostname; phát hiện và thay thế các lock cũ (stale) của process đã chết.
+   - Backup tự động: Tự động lưu trữ mọi file hiện có trước khi sửa vào `<state>/backups/<timestamp>-<sha8>/<basename>` với index theo dõi append-only.
+   - Codec Version 3 nghiêm ngặt: Triển khai lưu trữ có version cho journal (`setup/journal.json`), receipt (`setup/receipts.jsonl`), approval (`setup/approvals/<id>.json`) và change log (`setup/changes.jsonl`). Schema version không biết trả về lỗi `unsupported_version`.
 
 3. **Tool Catalog, Probing & Installer Registry (`src/tools.ts`, `src/installer-registry.ts`, `src/machine-config.ts`)**:
-   - Tool catalog for `node` (>=22.13.0), `pnpm` (exact 12.5.1), `git` (>=2.30.0), `herdr` (presence check), and provider CLIs (`claude`, `codex`, `agy`).
-   - `probeTools`: Discovers tool status (`present`, `missing`, `version_mismatch`, `path_missing`), version parsing, and streams real-path binary SHA-256 digests.
-   - `ToolInstallerRegistry`: Resolves tool descriptors by platform preference; accepts injected `ToolInstaller` implementations.
-   - `MachineConfigSchema` (strict v3): Validates `<config>/machine.json` and rejects raw credential literals.
+   - Tool catalog cho `node` (>=22.13.0), `pnpm` (chính xác 12.5.1), `git` (>=2.30.0), `herdr` (kiểm tra hiện diện) và các provider CLI (`claude`, `codex`, `agy`).
+   - `probeTools`: Phát hiện trạng thái tool (`present`, `missing`, `version_mismatch`, `path_missing`), parse version, và stream digest SHA-256 của binary theo real-path.
+   - `ToolInstallerRegistry`: Resolve tool descriptor theo ưu tiên platform; chấp nhận các triển khai `ToolInstaller` được inject.
+   - `MachineConfigSchema` (v3 nghiêm ngặt): Validate `<config>/machine.json` và từ chối literal credential thô.
 
 4. **PATH Manager (`src/path-manager.ts`)**:
-   - `PathComponent`: Configures user shell rc files (`.bashrc`, `.bash_profile`, `.zshrc`, `.profile`, fish conf.d) using managed marker blocks (`# >>> bflow managed PATH >>>`).
-   - Idempotent and safe: Preserves existing user content verbatim, deduplicates directory entries, and repairs malformed or duplicate blocks.
+   - `PathComponent`: Cấu hình các file rc shell của người dùng (`.bashrc`, `.bash_profile`, `.zshrc`, `.profile`, fish conf.d) bằng các managed marker block (`# >>> bflow managed PATH >>>`).
+   - Idempotent và an toàn: Giữ nguyên nội dung người dùng hiện có, khử trùng lặp entry thư mục, và sửa các block sai định dạng hoặc trùng lặp.
 
 5. **MCP Config Registry & OS Service Managers (`src/mcp-registry.ts`, `src/service-manager.ts`)**:
-   - `McpConfigComponent`: Manages `<config>/mcp.json` (strict v3), preserving unmanaged foreign entries while keeping bflow service entries synchronized.
-   - `SystemdUserServiceManager` & `LaunchdServiceManager`: Deterministically renders and installs user-level service units without OS privilege escalation; binds secrets via `secret://` references.
+   - `McpConfigComponent`: Quản lý `<config>/mcp.json` (v3 nghiêm ngặt), giữ nguyên các entry ngoại lai không được quản lý đồng thời giữ các entry service của bflow đồng bộ.
+   - `SystemdUserServiceManager` & `LaunchdServiceManager`: Render và cài đặt một cách xác định các service unit cấp người dùng mà không leo thang đặc quyền OS; gắn secret qua tham chiếu `secret://`.
 
 6. **Doctor, Plan Builder & Approvals (`src/doctor.ts`, `src/plan.ts`, `src/approval.ts`)**:
-   - `BuiltinSetupDoctor`: Read-only evaluator producing `MachineDoctorReport` (strict v3) across tool status, path block, config, and services.
-   - `buildSetupPlan`: Generates topologically sorted plans (`MachineSetupPlanSchema`), change previews, and detects already-satisfied components.
-   - `SetupApprover` & `AssumeYesApprover`: Manages operator approval receipts. Explicitly enforces that `--yes` **never** approves steps requiring elevation (`requiresElevation: true`).
+   - `BuiltinSetupDoctor`: Bộ đánh giá chỉ đọc sinh `MachineDoctorReport` (v3 nghiêm ngặt) trên trạng thái tool, path block, config và service.
+   - `buildSetupPlan`: Sinh plan được sắp xếp topo (`MachineSetupPlanSchema`), preview thay đổi, và phát hiện các component đã thỏa.
+   - `SetupApprover` & `AssumeYesApprover`: Quản lý approval receipt của operator. Thực thi tường minh rằng `--yes` **không bao giờ** duyệt các bước cần nâng quyền (`requiresElevation: true`).
 
 7. **Plan Executor & Facade Service (`src/executor.ts`, `src/manifest.ts`, `src/setup-service.ts`)**:
-   - `executePlan`: Orchestrates plan execution under state store lock; records pre-apply journal state; handles safe retries and interruption reconciliation.
-   - `EnvironmentManifestComponent`: Generates `<state>/environment.json` (strict v3) and updates on non-volatile configuration changes.
-   - `MachineSetupService`: Unified facade providing `check` (zero writes), `dry_run` (zero writes), `apply` (plan, approve, execute, verify), and `repair` (automatic backup, config restoration, block repair, unknown step retry) modes.
+   - `executePlan`: Điều phối thực thi plan dưới lock của state store; ghi trạng thái journal trước khi apply; xử lý retry an toàn và đối soát khi bị gián đoạn.
+   - `EnvironmentManifestComponent`: Sinh `<state>/environment.json` (v3 nghiêm ngặt) và cập nhật khi cấu hình không biến động thay đổi.
+   - `MachineSetupService`: Facade thống nhất cung cấp các mode `check` (không ghi), `dry_run` (không ghi), `apply` (plan, approve, execute, verify) và `repair` (backup tự động, khôi phục config, sửa block, retry bước không rõ).
 
-8. **End-to-End Scenario Suite (`test/scenarios.test.ts`)**:
-   - 11 comprehensive integration scenarios verifying clean machine simulation, partial install, existing install, missing PATH directory, failed install rollback, interrupted step resume & reconciliation, repair mode, idempotent reruns, invalid config handling, elevation security, and secret isolation.
+8. **Bộ kịch bản End-to-End (`test/scenarios.test.ts`)**:
+   - 11 kịch bản tích hợp toàn diện xác minh mô phỏng máy sạch, cài một phần, đã cài sẵn, thiếu thư mục PATH, rollback khi cài thất bại, resume và đối soát bước bị gián đoạn, repair mode, chạy lại idempotent, xử lý config không hợp lệ, bảo mật nâng quyền và cô lập secret.
 
 ---
 
-## 3. Validation Results
+## 3. Kết quả validation
 
-Executed in worktree `/Users/quanganh/AI Learning/bflow-p26-setup`:
+Thực thi trong worktree `/Users/quanganh/AI Learning/bflow-p26-setup`:
 
-1. **Dependency Graph & Package Boundaries**:
+1. **Dependency Graph & ranh giới package**:
    ```bash
    pnpm check:deps
    # Output: Workspace dependency graph is acyclic (17 packages, 24 internal edges).
@@ -64,14 +64,14 @@ Executed in worktree `/Users/quanganh/AI Learning/bflow-p26-setup`:
    # Exit code: 0
    ```
 
-2. **TypeScript Compilation**:
+2. **Biên dịch TypeScript**:
    ```bash
    pnpm exec tsc -b packages/machine-setup
    pnpm typecheck
    # Exit code: 0 (clean compilation)
    ```
 
-3. **Package Test Suite**:
+3. **Bộ test của package**:
    ```bash
    pnpm exec vitest run packages/machine-setup/test
    # Output:
@@ -83,18 +83,18 @@ Executed in worktree `/Users/quanganh/AI Learning/bflow-p26-setup`:
 
 ---
 
-## 4. Integration Requests for Integrator / P27 / P28 / P29 / P30
+## 4. Yêu cầu tích hợp cho Integrator / P27 / P28 / P29 / P30
 
-1. **Root Build Configuration (`tsconfig.json`)**:
-   - Add `{ "path": "./packages/machine-setup" }` to root `tsconfig.json` `references`.
-2. **Lockfile Synchronization (`pnpm-lock.yaml`)**:
-   - Update monorepo lockfile at the integration gate so workspace dependency `@bflow/machine-setup` is tracked.
+1. **Cấu hình build gốc (`tsconfig.json`)**:
+   - Thêm `{ "path": "./packages/machine-setup" }` vào `references` của `tsconfig.json` gốc.
+2. **Đồng bộ lockfile (`pnpm-lock.yaml`)**:
+   - Cập nhật lockfile của monorepo tại integration gate để workspace dependency `@bflow/machine-setup` được theo dõi.
 3. **P28 (Skills & Tool Installers)**:
-   - Provide concrete `ToolInstaller` implementations to register with `ToolInstallerRegistry`.
-   - Provide `SkillsSynchronizer` to inject into `createSkillsComponent`.
+   - Cung cấp các triển khai `ToolInstaller` cụ thể để đăng ký với `ToolInstallerRegistry`.
+   - Cung cấp `SkillsSynchronizer` để inject vào `createSkillsComponent`.
 4. **P27 (MCP Gateway)**:
-   - Point local MCP daemon loader to read `<config>/mcp.json` produced by `McpConfigComponent`.
+   - Trỏ loader MCP daemon cục bộ để đọc `<config>/mcp.json` do `McpConfigComponent` tạo ra.
 5. **P29 (CLI)**:
-   - Wire `bflow setup` commands (`--check`, `--dry-run`, `--repair`, `--yes`) to invoke `MachineSetupService.run()`.
+   - Nối các lệnh `bflow setup` (`--check`, `--dry-run`, `--repair`, `--yes`) để gọi `MachineSetupService.run()`.
 6. **P30 (Runtime Host)**:
-   - Integrate `MachineDoctorReport` and `EnvironmentManifest` into host readiness preflights.
+   - Tích hợp `MachineDoctorReport` và `EnvironmentManifest` vào các preflight readiness của host.

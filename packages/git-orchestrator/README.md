@@ -1,8 +1,8 @@
 # @bflow/git-orchestrator (P18)
 
-Local Git integration mechanics for parallel Developer tasks. Depends only on
-`@bflow/contracts` and Zod; does not call the Workflow scheduler, Herdr, Registry,
-quality gates or a hosted provider automatically.
+Cơ chế tích hợp Git cục bộ cho các task Developer chạy song song. Chỉ phụ thuộc vào
+`@bflow/contracts` và Zod; không tự động gọi Workflow scheduler, Herdr, Registry,
+quality gate hay provider được host.
 
 ## API
 
@@ -31,98 +31,98 @@ const integration = await git.beginIntegration({
 // Runtime consumes integration.requests and executes independent workflow verification.
 ```
 
-All methods return Promises; rejected mutations preserve changes and provide an error.
-`GitOrchestrationError.code` describes policy failures; Git subprocess and Zod
-validation errors retain their diagnostics. No engine method commits Developer
-changes, resets a checkout, auto-stashes, resolves conflicts, deletes branches,
-force-pushes, or merges a protected/main branch. Branch integration uses a dedicated
-`integration/bflow/...` branch, even when `baseRevision` names `main`.
+Mọi method đều trả về Promise; các mutation bị từ chối vẫn bảo toàn thay đổi và cung cấp một error.
+`GitOrchestrationError.code` mô tả các lỗi chính sách; lỗi Git subprocess và lỗi validation của Zod
+giữ nguyên thông tin chẩn đoán. Không có method nào của engine commit thay đổi của Developer,
+reset checkout, auto-stash, giải quyết conflict, xóa branch, force-push hay merge vào
+branch được bảo vệ/main. Việc tích hợp branch dùng một branch `integration/bflow/...` riêng,
+kể cả khi `baseRevision` trỏ tới `main`.
 
 | Method | Behavior |
 | --- | --- |
-| `open({repositoryPath, artifactStore, provider?})` | Discover canonical repository/common Git directory; validate/load journal. Requires an initial SHA-1 commit. |
-| `inspect()` | Observe root, current branch (null when detached), HEAD and NUL-delimited porcelain status without changing the checkout. |
-| `prepareTask(request)` | Persist creation intent, create/lock a unique task worktree and deterministic `agent/bflow/<run>/<task>/<attempt>` branch; retry identical requests idempotently. Reject dirty source, collisions or changed inputs. |
-| `taskBranchName(request)` | Return the same safe branch name before creation; readable truncated IDs plus hash suffixes preserve identity. |
-| `getTask(key)`, `getIntegration(key)` | Read a detached copy of the persisted record. |
-| `collectTask(taskKey)` | Require clean worktree, new linear commits descending from recorded base, net changes and ownership compliance in **every commit**, including changes later reverted. Store actual binary-capable patch via ArtifactStore; return parsed `GitChangeSet`, commits and summary in metadata. |
-| `beginIntegration(request)` | Validate dependency DAG and all submissions/artifacts before creating an integration worktree. Pin task commits, then merge in topological order. Persist intent and receipts around every merge. Reuse of a plan ID with different input fails. |
-| `resumeIntegration(key)` | Reconcile pending Git operations with pinned commits and exact expected merge parents. No duplicate merge/verification request on restart. A recorded conflict waits for explicit resolution acknowledgement. Dirty, unexpected or inconsistent state fails closed. |
-| `acceptConflictResolution(key, {taskKey, resolutionCommitHash})` | Accept an externally resolved, committed merge only when clean, matching the pending task/HEAD, with exact merge parents and changes within that task's scope. Continue remaining merges, then request verification. |
-| `recordVerification(key, result)` | Parse exported `VerificationResultSchema`. Require workflow scope, matching run and `metadata.integrationCommitHash` equal to the exact integration HEAD. Read/checksum all evidence and task patch artifacts. A `passed` result marks Git integration `verified`; other results retain `awaiting_verification`. |
-| `cancelTask(key)` | Mark cancelled, preserving all committed/uncommitted work. Refuse while pinned by a live integration. |
-| `cancelIntegration(key)` | Mark cancelled; retain any pending merge, conflict markers and edits. Cancellation never aborts Git. |
-| `cleanupTask(key)` | Remove only a clean, released task worktree after cancellation or verified integration; reject pending integrations, untracked/ignored files and in-progress Git operations. Retain its branch and journal. |
-| `cleanupIntegration(key)` | Remove only a clean verified/cancelled integration worktree. Retain its branch and receipts. Repeating cleanup, including after process death, is safe. |
-| `requestPullRequest(key, {remote, baseBranch, title, body})` | Explicit publication request. Require configured provider, existing remote/base, provider permission, passing workflow verification and readable evidence. Push **pinned verified SHA** to the dedicated integration branch with ordinary non-force push, disabling automatic tag and submodule publication, then create/reconcile PR. Never merge the PR. |
+| `open({repositoryPath, artifactStore, provider?})` | Tìm repository/thư mục Git chung ở dạng chuẩn tắc; validate/load journal. Yêu cầu có commit SHA-1 ban đầu. |
+| `inspect()` | Quan sát root, branch hiện tại (null khi detached), HEAD và porcelain status phân tách bằng NUL mà không thay đổi checkout. |
+| `prepareTask(request)` | Lưu intent tạo, tạo/khóa một task worktree duy nhất và branch xác định `agent/bflow/<run>/<task>/<attempt>`; retry các request giống hệt một cách idempotent. Từ chối source bị dirty, va chạm hoặc input bị thay đổi. |
+| `taskBranchName(request)` | Trả về cùng tên branch an toàn trước khi tạo; ID rút gọn dễ đọc cộng hậu tố hash giữ nguyên danh tính. |
+| `getTask(key)`, `getIntegration(key)` | Đọc một bản sao tách rời của bản ghi đã lưu. |
+| `collectTask(taskKey)` | Yêu cầu worktree sạch, các commit tuyến tính mới kế thừa từ base đã ghi nhận, thay đổi ròng và tuân thủ ownership trong **mọi commit**, kể cả các thay đổi sau đó bị revert. Lưu patch thực tế hỗ trợ binary qua ArtifactStore; trả về `GitChangeSet` đã parse, các commit và summary trong metadata. |
+| `beginIntegration(request)` | Validate dependency DAG và mọi submission/artifact trước khi tạo integration worktree. Pin các commit của task, rồi merge theo thứ tự topo. Lưu intent và receipt quanh mỗi lần merge. Dùng lại một plan ID với input khác sẽ thất bại. |
+| `resumeIntegration(key)` | Đối chiếu các thao tác Git đang chờ với các commit đã pin và merge parent kỳ vọng chính xác. Không có merge/verification request trùng lặp khi restart. Một conflict đã ghi nhận sẽ chờ xác nhận giải quyết tường minh. Trạng thái dirty, bất ngờ hoặc không nhất quán sẽ fail-closed. |
+| `acceptConflictResolution(key, {taskKey, resolutionCommitHash})` | Chỉ chấp nhận một merge đã được giải quyết bên ngoài và đã commit khi sạch, khớp task/HEAD đang chờ, có merge parent chính xác và thay đổi nằm trong phạm vi của task đó. Tiếp tục các merge còn lại, rồi yêu cầu verification. |
+| `recordVerification(key, result)` | Parse `VerificationResultSchema` được export. Yêu cầu phạm vi workflow, run khớp và `metadata.integrationCommitHash` bằng đúng HEAD của integration. Đọc/checksum toàn bộ evidence và task patch artifact. Kết quả `passed` đánh dấu Git integration là `verified`; các kết quả khác giữ `awaiting_verification`. |
+| `cancelTask(key)` | Đánh dấu cancelled, bảo toàn mọi công việc đã commit/chưa commit. Từ chối khi đang bị pin bởi một integration còn sống. |
+| `cancelIntegration(key)` | Đánh dấu cancelled; giữ lại mọi merge đang chờ, conflict marker và chỉnh sửa. Việc cancel không bao giờ abort Git. |
+| `cleanupTask(key)` | Chỉ xóa task worktree sạch và đã được release sau khi cancel hoặc integration đã verified; từ chối khi có integration đang chờ, file untracked/ignored và thao tác Git đang dở. Giữ lại branch và journal của nó. |
+| `cleanupIntegration(key)` | Chỉ xóa integration worktree sạch đã verified/cancelled. Giữ lại branch và receipt của nó. Lặp lại cleanup, kể cả sau khi process chết, là an toàn. |
+| `requestPullRequest(key, {remote, baseBranch, title, body})` | Yêu cầu publish tường minh. Yêu cầu provider đã cấu hình, remote/base tồn tại, provider cho phép, workflow verification đạt và evidence đọc được. Push **SHA đã verify và pin** lên branch integration riêng bằng push thường không force, tắt việc tự động publish tag và submodule, rồi tạo/đối chiếu PR. Không bao giờ merge PR. |
 
-`ownedPaths`/`forbiddenPaths` are literal repo-relative files or directory prefixes,
-without glob syntax, trailing slash, `.` or `..`. Prefix matching respects directory
-boundaries. Renames are represented as deletion plus addition so both paths are
-checked (Git rename detection is disabled for diffs; copies are reported as additions). The workflow verification request message carries `integratedTaskIds` alongside the integration commit. Generated/sensitive tracked paths (`node_modules`, `dist`, `coverage`,
-`.git`, `.bflow`, `.env*`, private keys, databases and build metadata) are rejected.
-Binary line counts are zero; their bytes remain in the stored Git binary patch.
-Unsupported/non-UTF-8 filenames fail rather than changing their ownership meaning.
-An uncommitted no-op task cannot produce the frozen `GitChangeSet` contract, which
-requires at least one changed file and a stored patch.
+`ownedPaths`/`forbiddenPaths` là các file hoặc tiền tố thư mục tương đối theo repo ở dạng literal,
+không có cú pháp glob, dấu gạch chéo cuối, `.` hay `..`. Việc so khớp tiền tố tôn trọng ranh giới
+thư mục. Rename được biểu diễn bằng xóa cộng thêm để cả hai đường dẫn đều được
+kiểm tra (tính năng phát hiện rename của Git bị tắt cho diff; copy được báo cáo là thêm mới). Message yêu cầu workflow verification mang theo `integratedTaskIds` cùng với integration commit. Các đường dẫn tracked được sinh ra/nhạy cảm (`node_modules`, `dist`, `coverage`,
+`.git`, `.bflow`, `.env*`, private key, database và build metadata) bị từ chối.
+Số dòng của file binary bằng không; phần byte của chúng vẫn nằm trong Git binary patch đã lưu.
+Tên file không được hỗ trợ/không phải UTF-8 sẽ thất bại thay vì làm thay đổi ý nghĩa ownership của chúng.
+Một task no-op chưa commit không thể tạo ra contract `GitChangeSet` đã đóng băng, vì contract này
+yêu cầu ít nhất một changed file và một patch đã lưu.
 
 ## Runtime handoff and conflict ownership
 
-`IntegrationRecord.requests` is a durable outbox of exported `RoleMessage` records:
+`IntegrationRecord.requests` là một outbox bền vững gồm các bản ghi `RoleMessage` được export:
 
-- `task.status` with `reason: "merge_conflict"`, incoming task/commit, Developer ID,
-  integration worktree, pre-merge tip and conflict paths; recipient Coordinator.
-- `verification.requested` with `verificationScope: "workflow"`, exact integration
-  commit, branch/worktree and source patch references; recipient Coordinator.
+- `task.status` với `reason: "merge_conflict"`, task/commit đến, Developer ID,
+  integration worktree, tip trước merge và các đường dẫn conflict; người nhận là Coordinator.
+- `verification.requested` với `verificationScope: "workflow"`, integration
+  commit chính xác, branch/worktree và các patch reference nguồn; người nhận là Coordinator.
 
-Runtime must deliver messages through Herdr with stable message/idempotency IDs,
-reconcile transport delivery, and create the proper leased assignment for the
-original Developer or another approved resolver. The engine never dispatches an
-agent, treats Herdr `done` as success or uses artifact files for communication.
-The resolver commits the pending merge in the **integration** worktree, retaining
-its recorded two parents, and Runtime acknowledges that commit using
-`acceptConflictResolution`. Do not allocate that worktree to another writer while
-a resolver holds it. Complex or out-of-scope conflicts remain for the Coordinator
-and human decision; there is no automatic ours/theirs or rebase fallback.
+Runtime phải chuyển các message qua Herdr với message/idempotency ID ổn định,
+đối chiếu việc chuyển phát của transport, và tạo assignment có lease phù hợp cho
+Developer ban đầu hoặc một resolver khác đã được phê duyệt. Engine không bao giờ dispatch một
+agent, coi Herdr `done` là thành công hay dùng file artifact để giao tiếp.
+Resolver commit merge đang chờ trong **integration** worktree, giữ nguyên
+hai parent đã ghi nhận, và Runtime xác nhận commit đó bằng
+`acceptConflictResolution`. Không cấp phát worktree đó cho writer khác khi
+một resolver đang giữ nó. Các conflict phức tạp hoặc ngoài phạm vi vẫn thuộc về Coordinator
+và quyết định của con người; không có fallback ours/theirs hay rebase tự động.
 
-The engine checks the supplied verification receipt and its stored evidence.
-Specification acceptance, independent execution, leases/fencing, SDLC/task state,
-verification iteration limits and task-completion decisions remain Runtime/P17
-responsibilities. Git integration status is a separate local state domain.
+Engine kiểm tra verification receipt được cung cấp và evidence đã lưu của nó.
+Việc chấp nhận specification, thực thi độc lập, lease/fencing, trạng thái SDLC/task,
+giới hạn số vòng verification và các quyết định hoàn thành task vẫn là trách nhiệm của Runtime/P17.
+Trạng thái Git integration là một miền trạng thái cục bộ riêng biệt.
 
 ## Persistence, recovery and cleanup
 
-The common Git directory contains `bflow-git/state.json`, a local versioned journal,
-lock and managed worktrees. Atomic rename, file sync and directory sync preserve
-creation/merge intents, pinned submissions, receipts, conflict/verification requests
-and PR attempts across process restart. Corrupt/unsupported state is rejected.
-There is no automatic journal upcaster and no change to shared RunStore contracts.
+Thư mục Git chung chứa `bflow-git/state.json`, một journal cục bộ có phiên bản,
+lock và các worktree được quản lý. Atomic rename, file sync và directory sync bảo toàn
+các intent tạo/merge, submission đã pin, receipt, conflict/verification request
+và các lần thử PR qua restart process. State hỏng/không được hỗ trợ sẽ bị từ chối.
+Không có journal upcaster tự động và không thay đổi contract RunStore dùng chung.
 
-Operations across engine instances use Linux `flock`; a live operation returns
-`busy` instead of interleaving another mutation. The lock file descriptor is inherited by every Git child: an orphan Git process
-continues to exclude new engine mutations after its parent dies. The kernel releases
-the lock only when all holders exit. Pending branch/worktree creation is reconciled against recorded base and
-bindings. Pending merge recovery checks `MERGE_HEAD`, worktree state and exact
-merge parents; it recognizes an already committed merge before advancing receipts.
-A clean unchanged tip allows retry of the same pinned merge. Unresolved or
-uncommitted merges request explicit reconciliation. Leftover Git lock files are
-never deleted automatically. Git/filesystem/ArtifactStore/provider writes are not
-one atomic transaction.
+Các thao tác giữa các engine instance dùng `flock` của Linux; một thao tác còn sống trả về
+`busy` thay vì xen kẽ một mutation khác. File descriptor của lock file được mọi Git child kế thừa: một Git process mồ côi
+tiếp tục loại trừ các mutation mới của engine sau khi process cha chết. Kernel chỉ nhả
+lock khi mọi holder đã thoát. Việc tạo branch/worktree đang chờ được đối chiếu với base và
+binding đã ghi nhận. Việc khôi phục merge đang chờ kiểm tra `MERGE_HEAD`, trạng thái worktree và merge parent
+chính xác; nó nhận ra một merge đã commit trước khi tiến các receipt.
+Một tip sạch không đổi cho phép retry cùng merge đã pin. Các merge chưa giải quyết hoặc
+chưa commit sẽ yêu cầu đối chiếu tường minh. Các Git lock file còn sót lại
+không bao giờ bị xóa tự động. Các thao tác ghi Git/filesystem/ArtifactStore/provider không phải
+một transaction nguyên tử duy nhất.
 
-Cleanup checks Git status, ignored files, branch/repository bindings and pending
-operations, then unlocks/removes the worktree without `--force`. Interrupted cleanup
-can be repeated. Index flags `assume-unchanged` and `skip-worktree` can hide
-tracked local edits from Git status and Git worktree removal. Operations requiring
-a clean tree reject these flags with `unsupported_index_flags`; inspect the files
-and clear the flags explicitly before retrying. Sparse checkouts using
-`skip-worktree` are currently unsupported. The engine never clears these flags
-or discards the hidden edits automatically. Branch deletion is a separate owner decision and is deliberately
-absent from this API. Cancellation does not imply cleanup eligibility when data
-or a pending Git operation remains.
+Cleanup kiểm tra Git status, file ignored, binding branch/repository và các thao tác
+đang chờ, rồi unlock/xóa worktree mà không dùng `--force`. Cleanup bị gián đoạn
+có thể được lặp lại. Các index flag `assume-unchanged` và `skip-worktree` có thể che
+các chỉnh sửa cục bộ của file tracked khỏi Git status và việc xóa Git worktree. Các thao tác yêu cầu
+cây sạch sẽ từ chối các flag này với `unsupported_index_flags`; hãy kiểm tra các file
+và xóa flag một cách tường minh trước khi thử lại. Sparse checkout dùng
+`skip-worktree` hiện chưa được hỗ trợ. Engine không bao giờ tự động xóa các flag này
+hay loại bỏ các chỉnh sửa bị ẩn. Việc xóa branch là quyết định riêng của owner và cố ý
+không có trong API này. Cancel không đồng nghĩa đủ điều kiện cleanup khi vẫn còn dữ liệu
+hoặc một thao tác Git đang chờ.
 
 ## Provider adapter
 
-Implement the exported `GitProvider` interface and inject it at `open`:
+Triển khai interface `GitProvider` được export và inject nó tại `open`:
 
 ```ts
 interface GitProvider {
@@ -132,26 +132,26 @@ interface GitProvider {
 }
 ```
 
-`ProviderRequest` includes remote URL, head branch, exact verified SHA, base branch,
-title/body and stable `idempotencyKey`. The adapter must verify repository identity,
-remote authorization and head SHA; `create` must be durably idempotent. `find`
-reconciles a response lost after server-side creation. Do not return `null` when
-access or lookup is inconclusive. Ambiguous delivery retains `pending` in the
-journal and may be resumed with the exact same request. Changing a pending/created
-PR's target or contents is rejected. Exactly one push URL is required for the
-selected remote. No hosted-provider credentials are bundled. Tests use a local
-bare remote and injected provider; live GitHub/GitLab access is **not verified**.
+`ProviderRequest` gồm remote URL, head branch, SHA đã verify chính xác, base branch,
+title/body và `idempotencyKey` ổn định. Adapter phải verify danh tính repository,
+quyền truy cập remote và head SHA; `create` phải idempotent bền vững. `find`
+đối chiếu một response bị mất sau khi server đã tạo. Không trả về `null` khi
+việc kiểm tra quyền truy cập hoặc tra cứu chưa kết luận được. Việc chuyển phát mơ hồ giữ `pending` trong
+journal và có thể được tiếp tục với đúng request y hệt. Việc thay đổi target hoặc nội dung của
+PR đang pending/đã tạo sẽ bị từ chối. Cần đúng một push URL cho remote được chọn.
+Không đi kèm credential của hosted provider nào. Test dùng một bare remote cục bộ và provider được inject;
+truy cập GitHub/GitLab thật **chưa được verify**.
 
 ## Validation and integration notes
 
-Requires Linux, local filesystems, `git`, `flock`, Node >=22.13 and pinned pnpm.
-Inherited `GIT_*` repository/index overrides are removed; Git runs with literal
-arguments, no shell, interactive credential prompts, hooks, signing, rerere,
-autostash, external diff or textconv. Commands have a 60-second/64-MiB output bound.
-Timeout/error leaves durable intent for reconciliation. The engine does not claim
-network-filesystem, multi-host, hostile same-user or power-loss guarantees.
+Yêu cầu Linux, filesystem cục bộ, `git`, `flock`, Node >=22.13 và pnpm đã pin.
+Các override repository/index `GIT_*` được kế thừa sẽ bị loại bỏ; Git chạy với
+argument literal, không shell, không có prompt credential tương tác, hook, signing, rerere,
+autostash, external diff hay textconv. Các lệnh có giới hạn output 60 giây/64 MiB.
+Timeout/lỗi để lại intent bền vững để đối chiếu. Engine không tuyên bố đảm bảo
+network-filesystem, multi-host, hostile same-user hay power-loss.
 
-From repository root:
+Từ thư mục gốc repository:
 
 ```sh
 pnpm --filter @bflow/git-orchestrator build
@@ -163,16 +163,16 @@ pnpm test
 git diff --check
 ```
 
-Tests use real temporary repositories and the real filesystem ArtifactStore,
-including independent tasks, successful/conflicting merges, dirty state, missing
-commits/artifacts, duplicate branches, ownership/history checks, cancellation,
-cleanup, provider publication/reconciliation, and SIGKILL before/during/after a merge, including an orphan Git process retaining the lock.
-Crash subprocess tests import `dist`; build both packages first and after edits.
+Test dùng repository tạm thật và ArtifactStore filesystem thật,
+bao gồm task độc lập, merge thành công/conflict, trạng thái dirty, thiếu
+commit/artifact, branch trùng, kiểm tra ownership/history, cancel,
+cleanup, publish/đối chiếu provider, và SIGKILL trước/trong/sau một merge, kể cả Git process mồ côi giữ lock.
+Test crash subprocess import `dist`; hãy build cả hai package trước và sau mỗi lần chỉnh sửa.
 
-The shared frozen contracts have no Git orchestration port. This package exports
-local validated configuration/journal APIs while all exchanged SDLC evidence,
-artifact operations, verification results and role messages use contracts.
-Integration owner must review any future shared Git port with its compatibility
-plan; this implementation does not amend contracts or scheduler APIs. Root
-TypeScript references and the lockfile importer include this package, so the root
-build and test commands also cover P18. Runtime composition remains P19 work.
+Các contract dùng chung đã đóng băng không có port cho Git orchestration. Package này export
+các API cấu hình/journal cục bộ đã validate, trong khi mọi evidence SDLC được trao đổi,
+thao tác artifact, kết quả verification và role message đều dùng contract.
+Integration owner phải review mọi Git port dùng chung trong tương lai cùng với kế hoạch tương thích của nó;
+triển khai này không sửa contract hay API scheduler. Root
+TypeScript reference và lockfile importer có bao gồm package này, nên các lệnh
+build và test ở root cũng bao phủ P18. Việc compose Runtime vẫn là công việc của P19.

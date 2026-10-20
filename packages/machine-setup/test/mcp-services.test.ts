@@ -284,6 +284,16 @@ describe("service managers", () => {
     expect(runner.calls.filter((c) => !c.includes("is-active"))).toEqual([]);
   });
 
+  it("launchd retries bootstrap while launchd is still tearing down the booted-out job", async () => {
+    const { p, comp } = launchd();
+    let bootstraps = 0;
+    runner.fail = (argv) => argv.includes("bootstrap") && ++bootstraps <= 2
+      ? { exitCode: 5, stdout: "", stderr: "Bootstrap failed: 5: Input/output error", timedOut: false } : null;
+    const res = await comp.apply(ctxFor(p));
+    expect(res.diagnostics).toEqual([]);
+    expect(runner.calls.filter((c) => c.includes("bootstrap"))).toHaveLength(3);
+  });
+
   it("launchd renders plist, bootout ignored, bootstrap, no secrets inlined", async () => {
     const { p, comp } = launchd();
     runner.fail = (argv) => (argv.includes("bootout") ? { exitCode: 3, stdout: "", stderr: "not loaded", timedOut: false } : null);

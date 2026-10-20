@@ -1,6 +1,6 @@
 # @bflow/verification
 
-Independent, bounded verification for the frozen Bflow v2 contracts. The package builds a verification plan from an approved `Specification`, a matching `TestStrategy`, and explicit quality checks. It evaluates evidence against every acceptance criterion and returns contract-validated `VerificationResult` and `VerificationCycle` values. A Developer's self-assessment or Herdr `done` signal cannot establish success.
+Verification độc lập, có giới hạn cho các contract Bflow v2 đã đóng băng. Package dựng một verification plan từ một `Specification` đã phê duyệt, một `TestStrategy` khớp và các quality check tường minh. Nó đánh giá evidence đối với mọi acceptance criterion và trả về các giá trị `VerificationResult` và `VerificationCycle` đã được contract xác thực. Việc Developer tự đánh giá hay tín hiệu `done` của Herdr không thể chứng minh thành công.
 
 ## API
 
@@ -31,65 +31,65 @@ const outcome = await engine.verify(plan, cycle, changeSet);
 // outcome.result: VerificationResult; outcome.cycle: VerificationCycle
 ```
 
-The outcome also contains validated `RoleMessage` values for `verification.result` and, when needed, `verification.escalation`; Runtime delivers them.
+Outcome cũng chứa các giá trị `RoleMessage` đã xác thực cho `verification.result` và, khi cần, `verification.escalation`; Runtime chịu trách nhiệm gửi chúng.
 
-The constructor accepts contract ports `artifactStore` and `gates`, a host callback `loadSpecification`, and an optional `clock` callback. The host supplies actual implementations; the package does not depend on sibling implementation packages. Plan construction rejects unapproved or inconsistent specifications, conflicting strategy/TDD decisions, unsafe paths, incomplete criterion mappings, missing target commands or test levels, and plans without an independent Reviewer or QA check. P16 may append contract-valid `metadata.tddEvidence` receipts without changing approved strategy policy; any approved receipt prefix is retained and receipts must match the strategy run/task. The full dossier is frozen into the plan, while P19 remains responsible for P16 sequence validation. The maximum iteration count is configurable from 1 to 10 and defaults to 3.
+Constructor nhận các contract port `artifactStore` và `gates`, một callback của host `loadSpecification`, và một callback `clock` tùy chọn. Host cung cấp các triển khai thực tế; package không phụ thuộc vào các package triển khai ngang hàng. Việc dựng plan từ chối specification chưa phê duyệt hoặc không nhất quán, strategy/TDD decision mâu thuẫn, đường dẫn không an toàn, ánh xạ criterion chưa đầy đủ, thiếu target command hoặc test level, và các plan không có check Reviewer hoặc QA độc lập. P16 có thể append các receipt `metadata.tddEvidence` hợp lệ theo contract mà không thay đổi approved strategy policy; mọi tiền tố receipt đã phê duyệt được giữ lại và receipt phải khớp run/task của strategy. Toàn bộ dossier được đóng băng vào plan, trong khi P19 vẫn chịu trách nhiệm xác thực trình tự P16. Số iteration tối đa cấu hình được từ 1 đến 10 và mặc định là 3.
 
-`VerificationPlan`, `CheckConfigurationSchema`, and `ObservationSchema` are package-local codecs. They do not amend the shared contracts or introduce a new Herdr message variant.
+`VerificationPlan`, `CheckConfigurationSchema` và `ObservationSchema` là các codec cục bộ của package. Chúng không sửa đổi shared contract hay đưa vào biến thể thông điệp Herdr mới.
 
-## Checks and evidence
+## Check và evidence
 
-Each required `QualityGateDefinition.configuration` must parse with `CheckConfigurationSchema`:
+Mỗi `QualityGateDefinition.configuration` bắt buộc phải parse được bằng `CheckConfigurationSchema`:
 
-| Field | Meaning |
+| Field | Ý nghĩa |
 | --- | --- |
-| `kind` | `deterministic` or `review` |
-| `method` | Acceptance criterion verification method |
-| `command` | Required for deterministic checks; identifies the host-approved command binding |
-| `criterionIds` | Explicit criteria evaluated by this check |
-| `testNames` | Test names corresponding to the strategy criterion mappings |
-| `role` | `quality_gate`, `tester`, `reviewer`, or `qa`; review requires Reviewer or QA |
-| `levels` | Covered test levels from the test strategy |
-| `measuresCoverage` | Optional aggregate coverage measurement; required on a deterministic check when the strategy has a coverage threshold |
-| `dependsOnPaths` | Optional exhaustive impact declaration using safe literal repository paths |
+| `kind` | `deterministic` hoặc `review` |
+| `method` | Phương pháp xác minh acceptance criterion |
+| `command` | Bắt buộc với deterministic check; xác định command binding do host phê duyệt |
+| `criterionIds` | Các criterion tường minh được check này đánh giá |
+| `testNames` | Tên test tương ứng với ánh xạ criterion của strategy |
+| `role` | `quality_gate`, `tester`, `reviewer` hoặc `qa`; review yêu cầu Reviewer hoặc QA |
+| `levels` | Các test level được bao phủ từ test strategy |
+| `measuresCoverage` | Phép đo aggregate coverage tùy chọn; bắt buộc trên deterministic check khi strategy có ngưỡng coverage |
+| `dependsOnPaths` | Khai báo impact đầy đủ tùy chọn dùng các đường dẫn repository literal an toàn |
 
-The engine invokes the supplied `QualityGate` port with validated `QualityGateContext` values. A gate must return a contract-valid `QualityGateResult` with `metadata.verification` matching `ObservationSchema`. The observation binds the evidence to the check, run, task, attempt, Git revision, specification fingerprint, and verification scope. It declares an independent, isolated execution, identifies the executor and role, and provides criterion outcomes, test names, summary, and deterministic command/exit status when applicable. New gate evidence must be timestamped within the current check execution window using the host clock. The executor must be distinct from every listed implementer. Passing review cannot override a failing deterministic check. A configured coverage measurement must report `coveragePercent`; a missing measurement is inconclusive and a value below the accepted strategy threshold fails verification.
+Engine gọi `QualityGate` port được cung cấp với các giá trị `QualityGateContext` đã xác thực. Một gate phải trả về `QualityGateResult` hợp lệ theo contract với `metadata.verification` khớp `ObservationSchema`. Observation gắn evidence với check, run, task, attempt, Git revision, specification fingerprint và verification scope. Nó khai báo việc thực thi độc lập, cô lập, xác định executor và role, đồng thời cung cấp kết quả theo criterion, tên test, tóm tắt, và command/exit status xác định khi áp dụng. Evidence gate mới phải có timestamp nằm trong cửa sổ thực thi check hiện tại theo đồng hồ của host. Executor phải khác với mọi implementer được liệt kê. Review pass không thể ghi đè một deterministic check thất bại. Một phép đo coverage đã cấu hình phải báo cáo `coveragePercent`; thiếu phép đo thì inconclusive và giá trị dưới ngưỡng strategy đã chấp nhận thì verification thất bại.
 
-Gate output artifacts are proposals. Trusted references originate only from `ArtifactStore`; the engine persists its verification audit reports through that port and validates artifact content/checksums. When gates produce proposals, the host supplies `readProposal(proposal)` to open their materialized bytes. The engine ingests them through ArtifactStore, verifies integrity, and includes the stored references in its result. Proposals without materialized bytes prevent acceptance. Each criterion passes only when every planned check mapped to it has valid passing evidence. Its outcome points to an evidence artifact, including an explicit explanation when any check evidence is missing. Failed checks also emit task, role, check, criterion and evidence details even when the gate supplied no finding. A report recording insufficient evidence proves that verification was inconclusive; it does not prove the requirement passed.
+Output artifact của gate là proposal. Trusted reference chỉ xuất phát từ `ArtifactStore`; engine lưu các verification audit report của nó qua port đó và xác thực nội dung/checksum của artifact. Khi gate tạo proposal, host cung cấp `readProposal(proposal)` để mở byte đã materialize của chúng. Engine ingest chúng qua ArtifactStore, xác minh tính toàn vẹn và đưa các reference đã lưu vào kết quả. Proposal không có byte đã materialize sẽ ngăn việc chấp nhận. Mỗi criterion chỉ pass khi mọi check đã lập kế hoạch được ánh xạ tới nó có evidence pass hợp lệ. Outcome của nó trỏ tới một evidence artifact, kèm giải thích tường minh khi bất kỳ evidence check nào bị thiếu. Các check thất bại cũng phát ra chi tiết task, role, check, criterion và evidence ngay cả khi gate không cung cấp finding. Một report ghi nhận evidence không đủ chứng minh verification là inconclusive; nó không chứng minh requirement đã pass.
 
-Waived criteria pass with their waiver reason, and optional (`required: false`) criteria that fail are reported as warnings rather than blocking errors; failures of required criteria remain errors. Workflow audit reports and results record `integrationCommitHash` and `integratedTaskIds` when integration provenance is supplied.
+Criterion được waive sẽ pass kèm lý do waiver, và criterion tùy chọn (`required: false`) thất bại được báo cáo như cảnh báo thay vì lỗi chặn; thất bại của criterion bắt buộc vẫn là lỗi. Workflow audit report và result ghi lại `integrationCommitHash` và `integratedTaskIds` khi có cung cấp provenance tích hợp.
 
-Specifications are loaded before and after verification. A changed specification, unresolved requirement conflict, unavailable dependency, invalid observation, or insufficient evidence prevents a passing result. Verification never edits the specification or repairs source code.
+Specification được tải trước và sau verification. Specification thay đổi, xung đột requirement chưa giải quyết, dependency không khả dụng, observation không hợp lệ hoặc evidence không đủ sẽ ngăn kết quả pass. Verification không bao giờ sửa specification hay sửa source code.
 
-## Outcomes and rework
+## Outcome và rework
 
-| Result | Cycle behavior |
+| Kết quả | Hành vi của cycle |
 | --- | --- |
-| `passed` | Completes the cycle only after all required checks and criteria pass |
-| `failed` | Requests scoped rework while iterations remain; escalates at the limit |
-| `inconclusive` | Escalates immediately because evidence cannot establish a conclusion |
-| `blocked` | Escalates immediately because verification cannot proceed |
+| `passed` | Hoàn tất cycle chỉ sau khi mọi check và criterion bắt buộc pass |
+| `failed` | Yêu cầu rework có phạm vi khi còn iteration; escalate khi đạt giới hạn |
+| `inconclusive` | Escalate ngay vì evidence không thể xác lập kết luận |
+| `blocked` | Escalate ngay vì verification không thể tiếp tục |
 
-Specification/scope conflicts return `escalated`, as allowed by the existing v2 contract. Escalation otherwise preserves the underlying result status and records the escalation on the cycle. It does not turn a failure into success. A failed cycle can be verified again only with a repair record identifying `taskId`, responsible `role: "developer"`, `changeSetId`, and `summary`, plus an attempt, change-set ID and Git head not used anywhere earlier in the cycle. Supply the repair record through `verify(..., { repair })`. Every completed verification appends a structured result to the returned cycle history. Findings retain task/role responsibility for the Coordinator to route; a fix outside the accepted scope requires a separately authorized task.
+Xung đột specification/scope trả về `escalated`, như contract v2 hiện có cho phép. Ngoài ra, escalation giữ nguyên trạng thái kết quả bên dưới và ghi nhận escalation trên cycle. Nó không biến thất bại thành thành công. Một cycle failed chỉ có thể được verify lại với một repair record xác định `taskId`, `role: "developer"` chịu trách nhiệm, `changeSetId` và `summary`, cùng một attempt, change-set ID và Git head chưa được dùng ở bất kỳ đâu trước đó trong cycle. Cung cấp repair record qua `verify(..., { repair })`. Mỗi lần verification hoàn tất sẽ append một result có cấu trúc vào lịch sử cycle được trả về. Finding giữ trách nhiệm task/role để Coordinator định tuyến; một bản sửa ngoài phạm vi đã chấp nhận cần một task được ủy quyền riêng.
 
-Task checks may reuse successful prior check evidence only when the host provided an exhaustive `dependsOnPaths` declaration, the prior gate audit is valid, and the linear Git diff starts from the previously verified head and affects none of those paths. Reuse records its reason. Nonzero review exits and below-threshold coverage prevent reuse even if the gate itself reported `passed`. Dependency paths (`dependsOnPaths`) are literal repository prefixes; glob `*` and `?` expressions are rejected there, whereas specification `affectedPaths` used for scope checks may be safe repository paths or globs (`*`, `**`, `?`). Missing impact declarations cause checks to run again.
+Task check chỉ có thể tái sử dụng evidence check thành công trước đó khi host cung cấp khai báo `dependsOnPaths` đầy đủ, gate audit trước đó hợp lệ, và Git diff tuyến tính bắt đầu từ head đã xác minh trước đó và không ảnh hưởng đến đường dẫn nào trong số đó. Việc tái sử dụng ghi lại lý do. Review exit khác 0 và coverage dưới ngưỡng ngăn tái sử dụng ngay cả khi bản thân gate báo `passed`. Đường dẫn dependency (`dependsOnPaths`) là các tiền tố repository literal; biểu thức glob `*` và `?` bị từ chối ở đó, trong khi `affectedPaths` của specification dùng cho kiểm tra scope có thể là đường dẫn repository an toàn hoặc glob (`*`, `**`, `?`). Thiếu khai báo impact khiến các check chạy lại.
 
-Workflow plans require integration, regression, or E2E coverage. After Git integration, invoke verification with `scope: "workflow"` and `verify(..., { integration })`, supplying `{ headCommitHash, integratedTaskIds }` matching the current head. The workflow `GitChangeSet.taskId` identifies its verification task; the integrated task list is separate provenance, must contain every task listed in the approved specification traceability, and is forwarded to the independent runner. Workflow checks run again on the integrated revision; task results never substitute for this verification.
+Workflow plan yêu cầu bao phủ integration, regression hoặc E2E. Sau Git integration, gọi verification với `scope: "workflow"` và `verify(..., { integration })`, cung cấp `{ headCommitHash, integratedTaskIds }` khớp head hiện tại. `GitChangeSet.taskId` của workflow xác định task verification của nó; danh sách task đã tích hợp là provenance riêng, phải chứa mọi task được liệt kê trong traceability của specification đã phê duyệt, và được chuyển tiếp tới runner độc lập. Workflow check chạy lại trên revision đã tích hợp; kết quả task không bao giờ thay thế verification này.
 
-## Host responsibilities and limitations
+## Trách nhiệm của host và hạn chế
 
-The supplied gate runner must map configured commands to host-approved capabilities and isolated check execution. This package provides no shell runner and does not automatically execute arbitrary command strings. Schema validation and distinct executor IDs cannot authenticate an OS process or prove physical isolation. The host must establish reviewer identity, independent execution, actual Git snapshots/diffs, and artifact provenance.
+Gate runner được cung cấp phải ánh xạ các command đã cấu hình tới capability do host phê duyệt và việc thực thi check cô lập. Package này không cung cấp shell runner và không tự động thực thi chuỗi command tùy ý. Xác thực schema và executor ID khác nhau không thể xác thực một tiến trình OS hay chứng minh sự cô lập vật lý. Host phải thiết lập danh tính reviewer, việc thực thi độc lập, Git snapshot/diff thực tế và provenance của artifact.
 
-Runtime remains responsible for leases/fencing, safe capabilities, dispatch, durable state and crash recovery, cancellation, and approval handling. Persist the returned cycle and evidence before dispatching repairs. Runtime must supply the latest authoritative cycle and enforce optimistic versions/single-writer ownership: a stateless engine cannot distinguish an authentic older snapshot from the latest state. Persisted receipt comparisons reject edits to supplied history; they do not prevent replay of an older authentic snapshot. An exception during storage leaves the durable intent for Runtime reconciliation and must not trigger automatic redispatch. The engine does not dispatch Developer, Reviewer, or QA agents, mutate Git, merge branches, or deliver escalation messages. The Coordinator requests those actions exclusively through Workflow Runtime using validated existing `RoleMessage` variants.
+Runtime vẫn chịu trách nhiệm về lease/fencing, capability an toàn, dispatch, trạng thái bền vững và khôi phục sau crash, cancellation và xử lý approval. Lưu cycle và evidence được trả về trước khi dispatch các bản sửa. Runtime phải cung cấp cycle có thẩm quyền mới nhất và thực thi optimistic version/quyền sở hữu single-writer: một engine không trạng thái không thể phân biệt snapshot xác thực cũ hơn với trạng thái mới nhất. So sánh receipt đã lưu từ chối các chỉnh sửa lên lịch sử được cung cấp; chúng không ngăn replay một snapshot xác thực cũ hơn. Một exception trong lúc lưu trữ để lại durable intent cho Runtime đối soát và không được kích hoạt redispatch tự động. Engine không dispatch agent Developer, Reviewer hay QA, không thay đổi Git, không merge branch và không gửi thông điệp escalation. Coordinator yêu cầu các hành động đó độc quyền qua Workflow Runtime bằng các biến thể `RoleMessage` hiện có đã xác thực.
 
-The package has no live Herdr E2E verification and does not implement P19 Runtime integration. Fake-runner unit tests verify engine policy; they cannot establish live command execution, authenticated independent agents, or integrated system correctness. The reviewed package is registered in root TypeScript references and the workspace lockfile. Root build/typecheck includes P17; this registration does not compose it into Runtime.
+Package không có xác minh E2E Herdr thật và không triển khai tích hợp Runtime P19. Unit test với fake runner xác minh policy của engine; chúng không thể xác lập việc thực thi command thật, các agent độc lập đã xác thực hay tính đúng đắn của hệ thống tích hợp. Package đã review được đăng ký trong TypeScript reference gốc và workspace lockfile. Build/typecheck gốc bao gồm P17; việc đăng ký này không kết hợp nó vào Runtime.
 
-## Validation
+## Xác thực
 
-From the repository root, with the workspace dependencies available:
+Từ thư mục gốc repository, khi các workspace dependency đã sẵn sàng:
 
 ```sh
 pnpm --filter @bflow/verification test
 ```
 
-This builds the package before its unit tests. Repository handoff also requires `pnpm check:deps`, `pnpm typecheck`, `pnpm test`, `git diff --check`, and `git status --short`. Record actual results and the tested commit in handoff evidence; do not interpret a package test run as integration or remote closure.
+Lệnh này build package trước các unit test của nó. Bàn giao repository cũng yêu cầu `pnpm check:deps`, `pnpm typecheck`, `pnpm test`, `git diff --check` và `git status --short`. Ghi lại kết quả thực tế và commit đã kiểm thử vào evidence bàn giao; không diễn giải một lần chạy test của package là tích hợp hay đóng remote.
