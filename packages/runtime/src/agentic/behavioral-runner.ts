@@ -17,6 +17,27 @@ export interface BehavioralCommand {
   testNames: string[]; testPaths: string[]; reporter?: "node_tap" | "vitest_json"; timeoutMs: number; maxOutputBytes?: number;
   dependencyRoots?: string[];
 }
+/**
+ * Runtime-detected runner (no owner file): executable/argv/prepare come only from Runtime's own repository detection, never
+ * from a role message. Test identities are bound per task from the accepted strategy and the task's committed test files.
+ */
+export interface RunnerProfile {
+  id: string; command: string; executable: string; args: string[];
+  method: BehavioralCommand["method"]; levels: BehavioralCommand["levels"]; reporter: NonNullable<BehavioralCommand["reporter"]>;
+  timeoutMs: number; maxOutputBytes?: number;
+  /** Repository-relative `node_modules` directories mounted read-only at the same relative path inside the measurement checkout. */
+  checkoutDependencyRoots: string[];
+  /** Absolute repository root the dependency roots are read from. */
+  dependencySource: string;
+  /** Optional sandboxed build before the tests (e.g. `tsc -b`); it may only create git-ignored files. */
+  prepare?: { args: string[]; timeoutMs: number };
+  source: "detected";
+}
+/** Detection outcome; `unsupported` carries a user-facing reason and what an agent or Runtime could do about it. */
+export type RunnerDetection =
+  | { status: "detected"; profiles: RunnerProfile[]; notes: string[] }
+  | { status: "unsupported"; reason: string; remediation: string[] };
+export type BoundBehavioralCommand = BehavioralCommand & Partial<Pick<RunnerProfile, "checkoutDependencyRoots" | "dependencySource" | "prepare">>;
 const permittedLevels: Record<BehavioralCommand["method"], readonly string[]> = {
   unit_test: ["unit", "property", "regression"], integration_test: ["integration", "regression", "smoke"], e2e_test: ["e2e", "regression", "smoke"]
 };
