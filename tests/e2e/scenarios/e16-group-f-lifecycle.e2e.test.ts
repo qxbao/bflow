@@ -780,6 +780,8 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
     };
 
     const recordedHumanApprovalIds = new Set<string>();
+    // Conversation-bound messages reach the Conversation Gateway in-process, never through transport.
+    const conversationDeliveries: RoleMessage[] = [];
     let engine = new DeterministicWorkflowEngine({ bindingReceiptKeys });
     let runtime!: AgenticWorkflowRuntime;
 
@@ -814,6 +816,7 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
           taskChecks: checks,
           workflowChecks: checks,
           authenticateMessage: async () => true,
+          deliverToConversation: async (message) => { conversationDeliveries.push(message); },
           authenticateResult: async () => true,
           authenticateEvidence: async () => true,
           authenticateGateResult: async () => true,
