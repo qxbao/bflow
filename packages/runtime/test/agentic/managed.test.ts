@@ -114,6 +114,46 @@ printf 'Welcome to .NET 8.0!\\nSDK Version: 8.0.408\\n'
     expect(existsSync(probeHome)).toBe(false);
   });
 
+  it("probes Gradle with disposable writable state and reads the Gradle version after its welcome banner", async () => {
+    const tools = await fixture({
+      "bin/gradle": `#!/bin/sh
+test "$1" = "--version" || exit 2
+test "$HOME" = "$GRADLE_USER_HOME" || exit 3
+/bin/mkdir -p "$GRADLE_USER_HOME/.gradle" || exit 5
+printf '%s\\n' "$GRADLE_USER_HOME" > "\${0%/*}/probe-home"
+printf 'Welcome to Gradle 8.5!\\n\\n------------------------------------------------------------\\nGradle 8.5\\n------------------------------------------------------------\\n'
+`,
+      "bin/java": `#!/bin/sh
+test "$1" = "-version" || exit 2
+printf 'openjdk version "17.0.9" 2023-10-17\\n' >&2
+`
+    });
+    await chmod(join(tools.root, "bin/gradle"), 0o755);
+    await chmod(join(tools.root, "bin/java"), 0o755);
+    vi.stubEnv("PATH", join(tools.root, "bin"));
+    const context = await fixture({ "build.gradle": "plugins { id 'java' }" });
+    const result = await managedAdapters.find(adapter => adapter.id === "gradle")!.detect(context);
+    expect(result.runners[0], result.notes.join(" ")).toMatchObject({ version: "8.5" });
+    const probeHome = (await readFile(join(tools.root, "bin/probe-home"), "utf8")).trim();
+    expect(probeHome).not.toBe(context.root);
+    expect(existsSync(probeHome)).toBe(false);
+  });
+
+  it("rejects a Gradle welcome banner without a verified version and removes failed probe state", async () => {
+    const tools = await fixture({ "bin/gradle": `#!/bin/sh
+printf '%s\\n' "$GRADLE_USER_HOME" > "\${0%/*}/probe-home"
+printf 'Welcome to Gradle!\\nBroken banner without version\\n'
+` });
+    await chmod(join(tools.root, "bin/gradle"), 0o755);
+    vi.stubEnv("PATH", join(tools.root, "bin"));
+    const context = await fixture({ "build.gradle": "plugins { id 'java' }" });
+    const result = await managedAdapters.find(adapter => adapter.id === "gradle")!.detect(context);
+    expect(result.runners).toEqual([]);
+    const probeHome = (await readFile(join(tools.root, "bin/probe-home"), "utf8")).trim();
+    expect(probeHome).toBeTruthy();
+    expect(existsSync(probeHome)).toBe(false);
+  });
+
   it("detects nested Maven with fixed offline argv and exact Class#method selectors", async () => {
     const { runner } = await detected("maven", { "service/pom.xml": "<project/>", "service/.mvn/jvm.config": "-Xmx256m", "service/src/test/java/a/FeatureTest.java": "", ".github/workflows/test.yml": "" });
     expect(runner).toMatchObject({ adapterId: "maven", projectDirectory: "service", format: "junit", environment: { MAVEN_SKIP_RC: "true", JAVA_HOME: "/usr" } });
