@@ -1,15 +1,16 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createManagedAdapters, managedAdapters, type ManagedAdapterHost } from "../../src/agentic/runner-adapters/managed.js";
 import type { AdapterContext, AdapterRunner } from "../../src/agentic/runner-adapter.js";
 import { parseRunnerResult } from "../../src/agentic/runner-results.js";
+import { missingOfflineFixturePrerequisites } from "../helpers/offline-fixture-cache.js";
 
 const temporary: string[] = [];
-afterEach(async () => { await Promise.all(temporary.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
+afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(temporary.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
 
 async function fixture(files: Record<string, string>): Promise<AdapterContext> {
   const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-managed-"))); temporary.push(root);
@@ -20,7 +21,10 @@ async function fixture(files: Record<string, string>): Promise<AdapterContext> {
 }
 
 function host(homeDirectory: string, unavailable: string[] = []): ManagedAdapterHost {
-  return { homeDirectory, async findTool(name) { return unavailable.includes(name) ? undefined : { executable: `/usr/bin/${name}`, version: "8.1.2" }; } };
+  return { homeDirectory, async findTool(name) { return unavailable.includes(name) ? undefined : {
+    executable: `/usr/bin/${name}`, version: "8.1.2",
+    ...(name === "php" ? { phpRuntime: { extensionDirectory: "/usr/lib/php/test", builtinExtensions: ["ctype", "dom", "filter", "json", "libxml", "mbstring", "phar", "tokenizer", "xml", "xmlwriter", "zlib"] } } : {})
+  }; } };
 }
 
 async function detected(id: string, files: Record<string, string>) {
@@ -30,7 +34,85 @@ async function detected(id: string, files: Record<string, string>) {
   return { context, runner: result.runners[0]! };
 }
 
+describe("offline measurement fixture prerequisites", () => {
+  it("requires the Maven lifecycle plugins even when JUnit and Surefire are cached", async () => {
+    const context = await fixture(Object.fromEntries([
+      ["junit/junit/4.13.2/junit-4.13.2", "org/apache/maven/plugins/maven-surefire-plugin/3.2.5/maven-surefire-plugin-3.2.5"]
+        .flatMap(path => ["jar", "pom"].map(extension => [`cache/${path}.${extension}`, "cached artifact"]))
+    ].flat()));
+    const missing = await missingOfflineFixturePrerequisites({ adapterId: "maven", mounts: [{ source: join(context.root, "cache"), target: "/bflow-cache/maven" }] });
+    expect(missing).toContain("Maven offline artifact org/apache/maven/plugins/maven-resources-plugin/3.3.1/maven-resources-plugin-3.3.1.jar");
+    expect(missing.some(path => path.includes("junit-4.13.2"))).toBe(false);
+    expect(missing.some(path => path.includes("maven-surefire-plugin-3.2.5"))).toBe(false);
+  });
+
+  it("requires Gradle offline descriptors as well as dependency JARs and POMs", async () => {
+    const files: Record<string, string> = {};
+    for (const [group, name, version] of [["junit", "junit", "4.13.2"], ["org.hamcrest", "hamcrest-core", "1.3"]]) {
+      for (const extension of ["jar", "pom"]) files[`cache/files-2.1/${group}/${name}/${version}/hash/${name}-${version}.${extension}`] = "cached artifact";
+    }
+    const context = await fixture(files);
+    const adapter = { adapterId: "gradle", mounts: [{ source: join(context.root, "cache"), target: "/bflow-cache/gradle/caches/modules-2" }] };
+    expect(await missingOfflineFixturePrerequisites(adapter)).toEqual(["Gradle offline descriptor junit/junit/4.13.2", "Gradle offline descriptor org.hamcrest/hamcrest-core/1.3"]);
+    for (const path of ["junit/junit/4.13.2", "org.hamcrest/hamcrest-core/1.3"]) {
+      const descriptor = join(context.root, "cache/metadata-2.107/descriptors", path, "repo/descriptor.bin");
+      await mkdir(dirname(descriptor), { recursive: true }); await writeFile(descriptor, "cached descriptor");
+    }
+    expect(await missingOfflineFixturePrerequisites(adapter)).toEqual([]);
+  });
+
+  it("requires net8 runtime and reference packs independently of the installed SDK and cached direct packages", async () => {
+    const files: Record<string, string> = {};
+    for (const [name, version] of [["microsoft.net.test.sdk", "17.11.1"], ["xunit", "2.9.2"], ["xunit.runner.visualstudio", "2.8.2"]]) {
+      for (const file of [`${name}.${version}.nupkg`, `${name}.nuspec`, ".nupkg.metadata"]) files[`cache/${name}/${version}/${file}`] = "cached package";
+    }
+    files["packs/Microsoft.NETCore.App.Ref/9.0.1/ref/net9.0/System.Runtime.dll"] = "different target";
+    files["shared/Microsoft.NETCore.App/9.0.1/System.Private.CoreLib.dll"] = "different target";
+    const context = await fixture(files);
+    const adapter = { adapterId: "dotnet", mounts: [
+      { source: join(context.root, "cache"), target: "/bflow-cache/nuget" },
+      { source: join(context.root, "packs"), target: "/sdk/packs" },
+      { source: join(context.root, "shared"), target: "/sdk/shared" }
+    ] };
+    expect(await missingOfflineFixturePrerequisites(adapter)).toEqual([".NET 8 Microsoft.NETCore.App.Ref", ".NET 8 Microsoft.NETCore.App"]);
+  });
+});
+
 describe("managed-language runner adapters", () => {
+  it("probes a first-run .NET SDK with disposable writable state and reads the SDK version after its welcome banner", async () => {
+    const tools = await fixture({ "bin/dotnet": `#!/bin/sh
+test "$1" = "--version" || exit 2
+test "$HOME" = "$DOTNET_CLI_HOME" || exit 3
+test "$DOTNET_NOLOGO" = "1" || exit 4
+/bin/mkdir -p "$DOTNET_CLI_HOME/.dotnet" || exit 5
+printf '%s\\n' "$DOTNET_CLI_HOME" > "\${0%/*}/probe-home"
+printf 'Welcome to .NET 8.0!\\nSDK Version: 8.0.408\\n\\n8.0.408\\n'
+` });
+    await chmod(join(tools.root, "bin/dotnet"), 0o755);
+    vi.stubEnv("PATH", join(tools.root, "bin"));
+    const context = await fixture({ "Test.csproj": "<Project><IsTestProject>true</IsTestProject></Project>" });
+    const result = await managedAdapters.find(adapter => adapter.id === "dotnet")!.detect(context);
+    expect(result.runners[0], result.notes.join(" ")).toMatchObject({ version: "8.0.408" });
+    const probeHome = (await readFile(join(tools.root, "bin/probe-home"), "utf8")).trim();
+    expect(probeHome).not.toBe(context.root);
+    expect(existsSync(probeHome)).toBe(false);
+  });
+
+  it("rejects a .NET welcome banner without a verified SDK version line and removes failed probe state", async () => {
+    const tools = await fixture({ "bin/dotnet": `#!/bin/sh
+printf '%s\\n' "$DOTNET_CLI_HOME" > "\${0%/*}/probe-home"
+printf 'Welcome to .NET 8.0!\\nSDK Version: 8.0.408\\n'
+` });
+    await chmod(join(tools.root, "bin/dotnet"), 0o755);
+    vi.stubEnv("PATH", join(tools.root, "bin"));
+    const context = await fixture({ "Test.csproj": "<Project><IsTestProject>true</IsTestProject></Project>" });
+    const result = await managedAdapters.find(adapter => adapter.id === "dotnet")!.detect(context);
+    expect(result.runners).toEqual([]);
+    const probeHome = (await readFile(join(tools.root, "bin/probe-home"), "utf8")).trim();
+    expect(probeHome).toBeTruthy();
+    expect(existsSync(probeHome)).toBe(false);
+  });
+
   it("detects nested Maven with fixed offline argv and exact Class#method selectors", async () => {
     const { runner } = await detected("maven", { "service/pom.xml": "<project/>", "service/.mvn/jvm.config": "-Xmx256m", "service/src/test/java/a/FeatureTest.java": "", ".github/workflows/test.yml": "" });
     expect(runner).toMatchObject({ adapterId: "maven", projectDirectory: "service", format: "junit", environment: { MAVEN_SKIP_RC: "true", JAVA_HOME: "/usr" } });
@@ -110,8 +192,74 @@ describe("managed-language runner adapters", () => {
   it("detects PHPUnit with JUnit and exact namespace-qualified method filters", async () => {
     const { runner } = await detected("phpunit", { "composer.json": '{"require-dev":{"phpunit/phpunit":"^11"}}', "composer.lock": "{}", "tests/FooTest.php": "" });
     const invocation = runner.bind({ testNames: ["Tests\\FooTest.test_ok"], testPaths: ["tests/FooTest.php"] }, "/tmp/reports");
-    expect(invocation.args).toEqual(["--do-not-cache-result", "--log-junit", "/tmp/reports/phpunit.xml", "--filter", "/^(?:Tests\\\\FooTest::test_ok)$/", "tests/FooTest.php"]);
+    expect(runner.executable).toBe("/usr/bin/php");
+    expect(invocation.args).toEqual(["-n", "/usr/bin/phpunit", "--do-not-cache-result", "--log-junit", "/tmp/reports/phpunit.xml", "--filter", "/^(?:Tests\\\\FooTest::test_ok)$/", "tests/FooTest.php"]);
     expect(runner.protectedPaths).toEqual(["composer.json", "composer.lock"]);
+  });
+
+  it("loads only required public PHP modules explicitly without host ini files or Composer credentials", async () => {
+    const context = await fixture({ "composer.json": '{"require-dev":{"phpunit/phpunit":"^11"}}', "modules/dom.so": "module", "modules/99-credentials.ini": "SECRET" });
+    const injected = host(context.root), original = injected.findTool;
+    injected.findTool = async (...args) => {
+      const tool = await original(...args);
+      return args[0] === "php" && tool ? { ...tool, phpRuntime: { extensionDirectory: join(context.root, "modules"), builtinExtensions: tool.phpRuntime!.builtinExtensions.filter(name => name !== "dom") } } : tool;
+    };
+    const result = await createManagedAdapters(injected).find(adapter => adapter.id === "phpunit")!.detect(context);
+    expect(result.notes).toEqual([]);
+    const runner = result.runners[0]!;
+    expect(runner.mounts).toEqual([{ source: join(context.root, "modules/dom.so"), target: join(context.root, "modules/dom.so") }]);
+    expect(runner.bind({ testNames: ["BehaviorTest.testTarget"], testPaths: ["tests/BehaviorTest.php"] }, "/tmp/reports").args.slice(0, 4))
+      .toEqual(["-n", "-d", `extension=${join(context.root, "modules/dom.so")}`, "/usr/bin/phpunit"]);
+  });
+
+  it("reports unavailable PHPUnit extension capability before measurement", async () => {
+    const context = await fixture({ "composer.json": '{"require-dev":{"phpunit/phpunit":"^11"}}' });
+    const injected = host(context.root), original = injected.findTool;
+    injected.findTool = async (...args) => {
+      const tool = await original(...args);
+      return args[0] === "php" && tool ? { ...tool, phpRuntime: { extensionDirectory: join(context.root, "missing"), builtinExtensions: [] } } : tool;
+    };
+    const result = await createManagedAdapters(injected).find(adapter => adapter.id === "phpunit")!.detect(context);
+    expect(result.runners).toEqual([]);
+    expect(result.notes.join(" ")).toContain("runner_toolchain_unavailable");
+    expect(result.notes.join(" ")).toContain("PHP extension libxml");
+  });
+
+  it("discovers PHP extension capabilities with ini disabled, independently of the host PHPUnit launcher", async () => {
+    const tools = await fixture({
+      "bin/php": `#!/bin/sh
+test "$1" = "-n" || exit 9
+case "$2" in
+  --version) printf 'PHP 8.3.1 (cli)\\n';;
+  -r) printf '%s' '{"extensionDirectory":"/usr/lib/php/test","builtinExtensions":["ctype","dom","filter","json","libxml","mbstring","phar","tokenizer","xml","xmlwriter","zlib"]}';;
+  *) exit 10;;
+esac
+`,
+      "bin/phpunit": "#!/bin/sh\nprintf 'PHPUnit 11.5.0 by Sebastian Bergmann and contributors.\\n'\n"
+    });
+    for (const name of ["php", "phpunit"]) await chmod(join(tools.root, "bin", name), 0o755);
+    vi.stubEnv("PATH", join(tools.root, "bin"));
+    const context = await fixture({ "composer.json": '{"require-dev":{"phpunit/phpunit":"^11"}}' });
+    const result = await managedAdapters.find(adapter => adapter.id === "phpunit")!.detect(context);
+    expect(result.notes).toEqual([]);
+    expect(result.runners[0]).toMatchObject({ executable: join(tools.root, "bin/php"), version: "11.5.0" });
+    expect(result.runners[0]!.bind({ testNames: ["BehaviorTest.testTarget"], testPaths: ["tests/BehaviorTest.php"] }, "/tmp/reports").args.slice(0, 2))
+      .toEqual(["-n", join(tools.root, "bin/phpunit")]);
+  });
+
+  it("uses the same isolated PHP runtime for a Composer-installed PHPUnit without a global launcher", async () => {
+    const context = await fixture({
+      "composer.json": '{"require-dev":{"phpunit/phpunit":"^11"}}',
+      "vendor/phpunit/phpunit/phpunit": "<?php // dependency fixture",
+      "vendor/composer/installed.json": '{"packages":[{"name":"phpunit/phpunit","version":"11.5.0"}]}'
+    });
+    const result = await createManagedAdapters(host(context.root, ["phpunit"])).find(adapter => adapter.id === "phpunit")!.detect(context);
+    expect(result.notes).toEqual([]);
+    const runner = result.runners[0]!;
+    expect(runner).toMatchObject({ executable: "/usr/bin/php", version: "11.5.0" });
+    expect(runner.bind({ testNames: ["BehaviorTest.testTarget"], testPaths: ["tests/BehaviorTest.php"] }, "/tmp/reports").args.slice(0, 2))
+      .toEqual(["-n", "vendor/phpunit/phpunit/phpunit"]);
+    expect(runner.mounts).toEqual([{ source: join(context.root, "vendor"), target: join(context.root, "vendor") }]);
   });
 
   it("selects CTest registrations exactly using JUnit on supported versions", async () => {
@@ -215,13 +363,19 @@ export async function runManagedSandbox(runner: AdapterRunner, root: string, arg
 }
 
 describe.skipIf(!hasTool("mvn") || !hasWorkingSandbox())("Maven in a real offline sandbox", () => {
-  it("reports the exact mapped test for pass, assertion Red, and runtime infrastructure error", async () => {
+  it("reports the exact mapped test for pass, assertion Red, and runtime infrastructure error", async test => {
     const context = await fixture({
       "pom.xml": '<project><modelVersion>4.0.0</modelVersion><groupId>bflow.fixture</groupId><artifactId>runner</artifactId><version>1</version><properties><maven.compiler.source>17</maven.compiler.source><maven.compiler.target>17</maven.compiler.target></properties><dependencies><dependency><groupId>junit</groupId><artifactId>junit</artifactId><version>4.13.2</version><scope>test</scope></dependency></dependencies><build><plugins><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-resources-plugin</artifactId><version>3.3.1</version></plugin><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.11.0</version></plugin><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.2.5</version></plugin></plugins></build></project>',
       "src/test/java/example/BehaviorTest.java": 'package example; import org.junit.Test; import static org.junit.Assert.*; public class BehaviorTest { @Test public void target() { assertEquals(4, 2+2); } @Test public void neverSelected() { fail("must not execute"); } }'
     });
     const detection = await managedAdapters.find(adapter => adapter.id === "maven")!.detect(context);
     const runner = detection.runners[0]!; expect(runner, detection.notes.join(" ")).toBeDefined();
+    const missingArtifacts = await missingOfflineFixturePrerequisites(runner);
+    if (missingArtifacts.length) {
+      console.info(`Maven offline fixture unavailable: missing ${missingArtifacts.join(", ")}`);
+      test.skip(); // Installed Maven is insufficient: this fixture requires the pinned offline artifacts above.
+      return;
+    }
     for (const [label, body, expectedCode, reportTag] of [["pass", "assertEquals(4, 2+2);", 0, ""], ["red", "assertEquals(5, 2+2);", 1, '<failure message='], ["infrastructure", 'throw new IllegalStateException("runtime infrastructure");', 1, '<error message=']] as const) {
       await writeFile(join(context.root, "src/test/java/example/BehaviorTest.java"), `package example; import org.junit.Test; import static org.junit.Assert.*; public class BehaviorTest { @Test public void target() { ${body} } @Test public void neverSelected() { fail("must not execute"); } }`);
       const reports = join(context.root, "reports", label); await mkdir(reports, { recursive: true });

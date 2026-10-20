@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { access, lstat, readFile, readdir, realpath } from "node:fs/promises";
-import { homedir } from "node:os";
+import { access, lstat, mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { AdapterContext, AdapterDetection, AdapterRunner, RunnerAdapter, RunnerIdentities, RunnerMount } from "../runner-adapter.js";
@@ -10,6 +10,8 @@ const VERSION_TIMEOUT_MS = 5_000;
 const CONFIG_FILE = /(?:^|\/)(?:pom\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|gradle\.properties|gradle\.lockfile|Gemfile(?:\.lock)?|\.rspec(?:-local)?|spec_helper\.rb|rails_helper\.rb|test_helper\.rb|composer\.(?:json|lock)|phpunit\.xml(?:\.dist)?|global\.json|NuGet\.Config|nuget\.config|Directory\.(?:Build|Packages)\.(?:props|targets)|CMakeLists\.txt|CTestTestfile\.cmake|CMakePresets\.json|Package\.(?:swift|resolved))$/i;
 const DOTNET_PROJECT = /\.(?:cs|fs|vb)proj$/i;
 const SAFE_FQN = /^[A-Za-z_][A-Za-z0-9_$]*(?:\.[A-Za-z_][A-Za-z0-9_$]*)+$/;
+const PHPUNIT_EXTENSIONS = ["libxml", "ctype", "dom", "filter", "json", "mbstring", "tokenizer", "xml", "xmlwriter"];
+const PHP_RUNTIME_PROBE = 'echo json_encode(["extensionDirectory" => PHP_EXTENSION_DIR, "builtinExtensions" => get_loaded_extensions()]);';
 
 /** Runtime-authored reporter: helper bytes are mounted read-only, never supplied by the repository. */
 const MINITEST_REPORTER = `require "minitest"
@@ -73,6 +75,8 @@ files.each { |path| require File.expand_path(path, Dir.pwd) }
 export interface ManagedTool {
   executable: string;
   version: string;
+  /** Capabilities observed with php -n, so host ini files cannot establish sandbox readiness. */
+  phpRuntime?: { extensionDirectory: string; builtinExtensions: string[] };
 }
 /** Private dependency injection for detection tests; role messages never populate this port. */
 export interface ManagedAdapterHost {
@@ -85,6 +89,7 @@ const systemHost: ManagedAdapterHost = {
   async findTool(name, versionArgs, repositoryRoot) {
     // Command names are Runtime constants, never repository or agent input.
     if (!/^[a-z][a-z0-9-]*$/.test(name)) return undefined;
+    let probeHome: string | undefined;
     try {
       const found = await runFile("/bin/sh", ["-c", `command -v ${name}`], {
         cwd: "/", env: { PATH: process.env.PATH ?? "/usr/bin:/bin" }, timeout: VERSION_TIMEOUT_MS, maxBuffer: 16_384
@@ -92,15 +97,32 @@ const systemHost: ManagedAdapterHost = {
       const executable = await realpath(found.stdout.trim());
       if (repositoryRoot && (executable === repositoryRoot || executable.startsWith(repositoryRoot + "/"))) return undefined;
       if (!isAbsolute(executable) || !(await lstat(executable)).isFile()) return undefined;
-      const result = await runFile(executable, versionArgs, {
-        cwd: "/", env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: "/nonexistent", LANG: "C", LC_ALL: "C", MAVEN_SKIP_RC: "true", DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1", DOTNET_CLI_TELEMETRY_OPTOUT: "1",
-          ...(name === "rspec" && /\/(?:\.gem|\.local\/share\/gem)\/ruby\/\d+\.\d+\.\d+\/bin\/rspec$/.test(executable) ? { GEM_PATH: dirname(dirname(executable)) } : {}) },
+      // A fresh SDK may create first-use sentinels even for --version. Never point that
+      // initialization at the user's home or an unwritable/nonexistent directory.
+      if (name === "dotnet") probeHome = await mkdtemp(join(tmpdir(), "bflow-dotnet-probe-"));
+      const environment = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: "/nonexistent", LANG: "C", LC_ALL: "C", MAVEN_SKIP_RC: "true", DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1", DOTNET_CLI_TELEMETRY_OPTOUT: "1",
+        ...(probeHome ? { HOME: probeHome, DOTNET_CLI_HOME: probeHome, DOTNET_NOLOGO: "1" } : {}),
+        ...(name === "rspec" && /\/(?:\.gem|\.local\/share\/gem)\/ruby\/\d+\.\d+\.\d+\/bin\/rspec$/.test(executable) ? { GEM_PATH: dirname(dirname(executable)) } : {}) };
+      const result = await runFile(executable, name === "php" ? ["-n", ...versionArgs] : versionArgs, {
+        cwd: "/", env: environment,
         timeout: VERSION_TIMEOUT_MS, maxBuffer: 65_536
       });
       const output = `${result.stdout}\n${result.stderr}`.replace(/\u001b\[[\d;]*m/g, "");
-      const version = /\b\d+\.\d+(?:\.\d+)?(?:[.-][A-Za-z0-9.-]+)?\b/.exec(output)?.[0];
-      return version ? { executable, version } : undefined;
+      const version = name === "dotnet"
+        ? /^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?\s*$/m.exec(result.stdout)?.[0].trim()
+        : /\b\d+\.\d+(?:\.\d+)?(?:[.-][A-Za-z0-9.-]+)?\b/.exec(output)?.[0];
+      if (!version) return undefined;
+      if (name === "php") {
+        const probe = await runFile(executable, ["-n", "-r", PHP_RUNTIME_PROBE], { cwd: "/", env: environment, timeout: VERSION_TIMEOUT_MS, maxBuffer: 16_384 });
+        const runtime: unknown = JSON.parse(probe.stdout);
+        if (!runtime || typeof runtime !== "object" || !("extensionDirectory" in runtime) || typeof runtime.extensionDirectory !== "string"
+          || !isAbsolute(runtime.extensionDirectory) || /[\0\r\n]/.test(runtime.extensionDirectory)
+          || !("builtinExtensions" in runtime) || !Array.isArray(runtime.builtinExtensions) || runtime.builtinExtensions.some(value => typeof value !== "string")) return undefined;
+        return { executable, version, phpRuntime: { extensionDirectory: runtime.extensionDirectory, builtinExtensions: runtime.builtinExtensions } };
+      }
+      return { executable, version };
     } catch { return undefined; }
+    finally { if (probeHome) await rm(probeHome, { recursive: true, force: true }); }
   }
 };
 
@@ -349,15 +371,33 @@ export function createManagedAdapters(host: ManagedAdapterHost = systemHost): Ru
       if (typeof pkg?.version === "string") { tool = { executable: phpTool.executable, version: pkg.version }; local = true; }
     } catch { /* The global version-checked PHPUnit can still be used. */ }
     if (!tool) return missing("phpunit", "PHPUnit");
-    const base = await baseRunner(context, project, "phpunit", tool, host);
-    base.mounts.push(...await mountTool(phpTool, host.homeDirectory));
+    const base = await baseRunner(context, project, "phpunit", phpTool, host);
+    base.version = tool.version;
+    if (!local) base.mounts.push(...await mountTool(tool, host.homeDirectory));
+    if (!phpTool.phpRuntime) return missing("phpunit", "PHP runtime extension metadata");
+    const phpArgs = ["-n"];
+    // An empty sandbox has no /etc/php ini scan tree. Importing it would also import
+    // arbitrary host configuration. Load only required, version-matched public modules.
+    for (const extension of [...PHPUNIT_EXTENSIONS, "phar", "zlib"]) {
+      if (phpTool.phpRuntime.builtinExtensions.some(value => value.toLowerCase() === extension)) continue;
+      const path = join(phpTool.phpRuntime.extensionDirectory, `${extension}.so`);
+      const mounts = await optionalMount(path, path, host);
+      // Phar/compression support is useful for global .phar distributions, but
+      // is not a prerequisite for a Composer-installed PHPUnit PHP script.
+      if (!mounts.length) {
+        if (PHPUNIT_EXTENSIONS.includes(extension)) return missing("phpunit", `PHP extension ${extension}`);
+        continue;
+      }
+      base.mounts.push(...mounts);
+      phpArgs.push("-d", `extension=${path}`);
+    }
     // Only dependency content, never composer auth.json/config.json or the entire Composer home.
     base.mounts.push(...await optionalMount(join(context.root, project, "vendor"), join(context.root, project, "vendor"), host));
     return { runners: [{ ...base, format: "junit", nameRule: "classname.name (PHP namespace-qualified class, dot, test method)", bind(identities, reports) {
       validateSelection(identities, project);
       if (identities.testNames.some(name => !/^[A-Za-z_][A-Za-z0-9_\\]*\.[A-Za-z_][A-Za-z0-9_]*$/.test(name))) throw new Error("runner_identity_unselectable: PHPUnit requires exact Namespace\\Class.method identities");
       const filter = `/^(?:${identities.testNames.map(name => escapedRegex(name.replace(/\.([^.]+)$/, "::$1"))).join("|")})$/`;
-      return { args: [...(local ? ["vendor/phpunit/phpunit/phpunit"] : []), "--do-not-cache-result", "--log-junit", `${reports}/phpunit.xml`, "--filter", filter, ...identities.testPaths.map(path => pathInProject(path, project))], reportPaths: [`${reports}/phpunit.xml`] };
+      return { args: [...phpArgs, local ? "vendor/phpunit/phpunit/phpunit" : tool.executable, "--do-not-cache-result", "--log-junit", `${reports}/phpunit.xml`, "--filter", filter, ...identities.testPaths.map(path => pathInProject(path, project))], reportPaths: [`${reports}/phpunit.xml`] };
     } }], notes: [] };
   }, host);
 
