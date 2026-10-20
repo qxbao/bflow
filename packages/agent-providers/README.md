@@ -130,6 +130,32 @@ evidence or a same-UID filesystem isolation guarantee.
 
 ---
 
+## Isolator Profiles and Linked Codex Backends
+
+The trusted host may pass `ProviderAdapterOptions.isolatorEnvironment` after resolving an existing
+AI Isolator profile. The adapter does not read repository environment files or resolve profile
+names itself. With this option set, provider version, help, authentication, MCP inventory and
+execution probes receive the supplied environment and set `inheritEnvironment: false`, so the
+process runner passes only explicit variables to the subprocess. Omitting the option preserves the
+legacy inherited-environment behavior.
+
+Codex hook and MCP inspection uses the selected environment's `CODEX_HOME` or
+`$HOME/.codex`. The configured machine-owned `codexHookApprovalPath` remains outside that provider
+home. Agy uses the selected `HOME` directly; it does not copy authentication material from the
+outer process home or replace the selected home with a generated session home. The adapter does
+not write profile credentials or tokens into launch files.
+
+For a trusted linked Codex LB, the host may also supply `codexBackendUrl`. Codex readiness and
+launch arguments select `codex-lb` at `<root>/backend-api/codex` with the Responses API, websocket
+support, the `x-openai-actor-authorization` header, and native OpenAI auth disabled. Native
+`codex login status` is skipped only for this linked mode; the real `codex exec ... ping` remains
+required and its failure blocks readiness. If a trusted `CODEX_LB_API_KEY` is present, the adapter
+passes it only in the in-memory execution-probe environment and puts only its variable name in
+Codex configuration arguments. The Runtime remains responsible for supplying the selected
+environment and key to the launched pane.
+
+---
+
 ## Permission Modes
 
 MCP permission patterns are derived from the same validated launch material as

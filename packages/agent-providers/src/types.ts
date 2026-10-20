@@ -9,6 +9,8 @@ export interface ProviderCommandInvocation {
   readonly args: readonly string[];
   readonly cwd?: string;
   readonly env?: Readonly<Record<string, string>>;
+  /** Defaults to true. When false, only `env` is passed to the child process. */
+  readonly inheritEnvironment?: boolean;
   readonly timeoutMs?: number;
   readonly maxOutputBytes?: number;
   readonly signal?: AbortSignal;
@@ -81,6 +83,10 @@ export interface ProviderAdapterOptions {
   readonly pinnedExecutableDigest?: string;
   readonly minimumVersion?: string;
   readonly runner?: ProviderCommandRunner;
+  /** Trusted machine-resolved provider profile environment; never sourced from repository config. */
+  readonly isolatorEnvironment?: Readonly<Record<string, string>>;
+  /** Validated linked Codex LB root URL; omitted means direct Codex execution. */
+  readonly codexBackendUrl?: string;
   readonly rolePrompt?: string;
   readonly model?: string;
   readonly effort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";

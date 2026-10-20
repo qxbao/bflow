@@ -75,9 +75,12 @@ export function createProviderExecutionProbeCoalescer(options: {
         executable: request.invocation.executable,
         args: request.invocation.args,
         cwd: request.invocation.cwd ?? process.cwd(),
-        // Snapshot the actual inherited environment too, including account selectors. Only its digest
-        // is retained; no credentials or provider output are written to disk or diagnostics.
-        env: { ...process.env, ...request.invocation.env },
+        // Snapshot the effective environment, including whether host variables are inherited.
+        // Only its digest is retained; credentials are never written to disk or diagnostics.
+        inheritEnvironment: request.invocation.inheritEnvironment ?? true,
+        env: request.invocation.inheritEnvironment === false
+          ? { ...request.invocation.env }
+          : { ...process.env, ...request.invocation.env },
         maxOutputBytes: request.invocation.maxOutputBytes ?? null
       })).digest("hex");
       const key = observationKey();
