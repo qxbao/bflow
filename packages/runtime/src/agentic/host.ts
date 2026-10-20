@@ -24,7 +24,7 @@ import { USER_DECISION_TOOL, buildDecisionRequestMessage, guardDirectUserInterac
 import { openAgenticWorkspace, type AgenticWorkspaceHandle } from "./workspace.js";
 import { unwrap } from "./outbox.js";
 import { HostVerification, HostBehavioralFailure, DEFAULT_HOST_CHECKS } from "./host-verification.js";
-import { HostReceiptJournal, MAX_NOTICE_REBLOCKS, type HumanHookProvenance } from "./host-receipts.js";
+import { HostReceiptJournal, MAX_NOTICE_REBLOCKS, deliveryFailureNotice, isCoordinatorTrigger, type CoordinatorTurnObservation, type HumanHookProvenance } from "./host-receipts.js";
 import { parseBehavioralCommands } from "./behavioral-runner.js";
 import { WorkflowProposalRejected, guardWorkflowProposal } from "./workflow-rejection.js";
 import { evaluateWatchdog } from "./run-watchdog.js";
@@ -220,24 +220,30 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       throw new Error("Native delivery is uncertain; reconcile the original operation before retrying");
     }
     if (!await receipts.recordNativeIntent(operationId, message)) throw new Error("Native delivery already started; reconcile before retrying");
-    const socketPath = textField(record(JSON.parse(await herdr(["status", "server", "--json"]))).socket);
-    await new Promise<void>((accept, reject) => {
-      const socket = connect(socketPath); let output = "";
-      socket.setTimeout(20_000, () => { socket.destroy(); reject(new Error("Native Herdr action timed out; reconcile before retry")); });
-      socket.once("error", reject);
-      socket.once("close", () => { if (!output.includes("\n")) reject(new Error("Native Herdr action closed before acknowledgement; reconcile before retry")); });
-      socket.once("connect", () => socket.write(JSON.stringify({ id: message.message_id, method: "plugin.action.invoke", params: { plugin_id: "bflow.receipts", action_id: "deliver",
-        context: { selected_text: JSON.stringify(message), correlation_id: message.causation_id ?? message.message_id, focused_pane_id: sender.paneId, workspace_id: sender.workspaceId } } }) + "\n"));
-      socket.on("data", chunk => { output += String(chunk); if (output.length > 1024 * 1024) { socket.destroy(); reject(new Error("Oversized native response")); }
-        if (output.includes("\n")) { socket.end(); try { const response = record(JSON.parse(output.split("\n")[0]!)); if (response.error) reject(new Error(JSON.stringify(response.error))); else accept(); } catch (error) { reject(error); } } });
-    });
-    // The plugin action is asynchronous. Wait for signed ingress acknowledgement, never resend.
-    const deadline = Date.now() + 15_000;
-    while (Date.now() < deadline) {
-      if (deliveredMessageIds.has(message.message_id)) return json({ delivered: true, messageId: message.message_id });
-      await new Promise(accept => setTimeout(accept, 30));
+    try {
+      const socketPath = textField(record(JSON.parse(await herdr(["status", "server", "--json"]))).socket);
+      await new Promise<void>((accept, reject) => {
+        const socket = connect(socketPath); let output = "";
+        socket.setTimeout(20_000, () => { socket.destroy(); reject(new Error("Native Herdr action timed out; reconcile before retry")); });
+        socket.once("error", reject);
+        socket.once("close", () => { if (!output.includes("\n")) reject(new Error("Native Herdr action closed before acknowledgement; reconcile before retry")); });
+        socket.once("connect", () => socket.write(JSON.stringify({ id: message.message_id, method: "plugin.action.invoke", params: { plugin_id: "bflow.receipts", action_id: "deliver",
+          context: { selected_text: JSON.stringify(message), correlation_id: message.causation_id ?? message.message_id, focused_pane_id: sender.paneId, workspace_id: sender.workspaceId } } }) + "\n"));
+        socket.on("data", chunk => { output += String(chunk); if (output.length > 1024 * 1024) { socket.destroy(); reject(new Error("Oversized native response")); }
+          if (output.includes("\n")) { socket.end(); try { const response = record(JSON.parse(output.split("\n")[0]!)); if (response.error) reject(new Error(JSON.stringify(response.error))); else accept(); } catch (error) { reject(error); } } });
+      });
+      // The plugin action is asynchronous. Wait for signed ingress acknowledgement, never resend.
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        if (deliveredMessageIds.has(message.message_id)) return json({ delivered: true, messageId: message.message_id });
+        await new Promise(accept => setTimeout(accept, 30));
+      }
+      throw new Error("Native delivery acknowledgement is uncertain; inspect/reconcile before replay");
+    } catch (error) {
+      // Intent is recorded but no acknowledgement was observed: the delivery is unknown. Surface it; never resend here.
+      await workspace?.runtime.reportUncertainNativeDelivery(message, operationId, redactString(String(error))).catch(() => undefined);
+      throw error;
     }
-    throw new Error("Native delivery acknowledgement is uncertain; inspect/reconcile before replay");
   };
   const behavioralCommands = parseBehavioralCommands(configuration.behavioralCommands);
   const verification = new HostVerification(() => requireWorkspace().runtime, () => requireWorkspace().runtime.ports.artifactStore, receipts, behavioralCommands);
@@ -643,12 +649,18 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     return host.tools.invoke(name, parameters, { role });
   };
   /** Best effort: a failure to report is logged, never thrown, so it cannot mask the original error. */
-  const reportInboundFailure = async (message: RoleMessage, reason: string) => {
-    try { await workspace?.runtime.reportInboundFailure(message, reason); }
-    catch (error) { process.stderr.write(`Bflow could not report inbound failure: ${redactString(String(error))}\n`); }
+  /** Returns whether Runtime recorded the failure in its run; false means the caller must write a notice receipt itself. */
+  const reportInboundFailure = async (message: RoleMessage, reason: string): Promise<boolean> => {
+    try { await workspace?.runtime.reportInboundFailure(message, reason); return message.run_id !== undefined; }
+    catch (error) { process.stderr.write(`Bflow could not report inbound failure: ${redactString(String(error))}\n`); return false; }
   };
-  const physicalPrompts: {role: AgentRole; paneId: string; nativeSessionId: string; message: RoleMessage}[] = [];
-  let coordinatorStopGeneration = 1, reconciledCoordinatorStopGeneration = 0; // First pump recovers durable stops after restart.
+  const physicalPrompts: {role: AgentRole; paneId: string; nativeSessionId: string; message: RoleMessage; attempts: number; retryAt: number}[] = [];
+  let stopGeneration = 1, reconciledStopGeneration = 0; // First pump recovers durable stops after restart.
+  /** Bounded retry for transient inbound and Stop reconciliation failures; after this many, the item is dropped with a durable notice. */
+  const MAX_INBOUND_ATTEMPTS = 5;
+  /** Next time a pump should retry unsettled Stop receipts (0 when none are waiting for a retry). */
+  let stopRetryAt = 0;
+  const stopAttempts = new Map<string, number>();
   const dispatch = async (token: string, method: string, params: unknown, operation?: OperationOptions): Promise<unknown> => {
     if (token !== configuration.token) {
       const role = roleTokens.get(token); if (!role) throw new Error("Host authentication failed");
@@ -689,9 +701,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         // Enqueue only: agent.prompt may still own Runtime's journal while this hook runs.
         const binding = await principal(role, textField(input.paneId));
         if (!binding.session || binding.session.value !== textField(input.nativeSessionId)) throw new Error("Provider prompt native session mismatch");
-        if (role === "coordinator" && message.type === "delegation.request" && message.sender.role === "conversation")
-          await receipts.startCoordinatorTurn(binding, message);
-        physicalPrompts.push({ role, paneId: binding.paneId, nativeSessionId: binding.session.value, message });
+        if (role === "coordinator" && isCoordinatorTrigger(message)) await receipts.startCoordinatorTurn(binding, message);
+        physicalPrompts.push({ role, paneId: binding.paneId, nativeSessionId: binding.session.value, message, attempts: 0, retryAt: 0 });
         return { queued: true };
       }
       if (method === "provider_prompt_boundary") {
@@ -707,7 +718,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (!workspace) return { recorded: false };
         const input = record(params), binding = await principal(role, textField(input.paneId));
         if (!binding.session || binding.session.value !== textField(input.nativeSessionId)) throw new Error("Provider Stop native session mismatch");
-        if (role === "coordinator" && await receipts.stopCoordinatorTurn(binding)) coordinatorStopGeneration++;
+        // Every non-Conversation role's Stop is durable: an unanswered assignment must not vanish with its turn.
+        if (role === "coordinator") { if (await receipts.stopCoordinatorTurn(binding)) stopGeneration++; }
+        else { await receipts.recordSpecialistStop(binding); stopGeneration++; }
         return { recorded: true };
       }
       if (["conversation_notices", "conversation_notices_surfaced", "conversation_notices_displayed", "conversation_notices_reblocked"].includes(method)) {
@@ -876,41 +889,108 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   await new Promise<void>((accept, reject) => { server.once("error", reject); server.listen(configuration.socketPath, accept); });
   await chmod(configuration.socketPath, 0o600);
   await privateFile(join(configuration.directory,"owner.json"), JSON.stringify({pid:process.pid,startedAt:new Date().toISOString()}));
+  /** Applies one queued provider prompt. Throws on any failure so the pump can retry or drop it with a notice. */
+  const applyInboundPrompt = async (incoming: {role: AgentRole; paneId: string; nativeSessionId: string; message: RoleMessage}): Promise<void> => {
+    const message = incoming.message;
+    const binding = await principal(incoming.role, incoming.paneId);
+    if (binding.session?.value !== incoming.nativeSessionId) throw new Error("Queued provider prompt native session changed");
+    await requireWorkspace().runtime.validateProviderDelivery(message, binding);
+    // A Runtime-originated notice (e.g. specialist_result_ready) is already the exact outbox delivery just validated; it has no pane to re-sign.
+    if (message.sender.role === "runtime") return;
+    const current = SessionManifestSchema.parse(unwrap(await requireWorkspace().runtime.ports.panes.getManifest()));
+    const sender = current.panes.find(pane => pane.role === message.sender.role && (!message.sender.pane_id || pane.paneId === message.sender.pane_id));
+    if (!sender) throw new Error("Transport sender binding unavailable");
+    // Specialist assignments remain in their model turn; only authoritative receivers apply inbox state.
+    if (["coordinator", "runtime", "conversation"].includes(message.recipient.role))
+      await nativeDeliver(RoleMessageSchema.parse({ ...message, sender: { ...message.sender, pane_id: sender.paneId, agent_id: sender.agentId } }));
+  };
+  /**
+   * Settles one Coordinator Stop receipt. A pane that can no longer be matched is unrecoverable: Conversation gets the
+   * no-response notice with its reason and the receipt is completed. Other failures throw so the pump retries them.
+   */
+  const settleCoordinatorStop = async (stopped: CoordinatorTurnObservation, key: string): Promise<void> => {
+    const runtime = requireWorkspace().runtime;
+    let unrecoverable: string | undefined;
+    let binding: PaneBinding | undefined;
+    try {
+      binding = await principal("coordinator", stopped.binding.paneId);
+      if (digest({ ...binding, transportState: undefined }) !== digest({ ...stopped.binding, transportState: undefined }))
+        unrecoverable = "Coordinator pane or native session changed before its turn was reconciled";
+    } catch (error) {
+      const text = redactString(String(error));
+      if (!/occupant\/native session changed|outside the current session manifest/.test(text)) throw error;
+      unrecoverable = `Coordinator pane could not be matched: ${text}`;
+    }
+    if (unrecoverable === undefined && binding !== undefined) {
+      if (!await receipts.hasCoordinatorResponse(stopped)) {
+        if (stopped.message.type === "delegation.request") await runtime.coordinatorTurnStopped(stopped.message, binding);
+        else await runtime.coordinatorStopWithoutResponse(stopped.message, stopped.binding);
+      }
+    } else {
+      // The recorded binding still names the delivery; its no-response notice explains why the turn cannot be reconciled.
+      await runtime.coordinatorStopWithoutResponse(stopped.message, stopped.binding, unrecoverable).catch(error =>
+        process.stderr.write(`Bflow stop: ${redactString(String(error))}\n`));
+    }
+    stopAttempts.delete(key);
+    await receipts.completeCoordinatorStop(stopped);
+  };
   let pumping = false;
   const pump = setInterval(() => {
-    if (!workspace || pumping || quiesced || closing || (!physicalPrompts.length && coordinatorStopGeneration === reconciledCoordinatorStopGeneration)) return;
+    const retryDue = stopRetryAt !== 0 && Date.now() >= stopRetryAt;
+    if (!workspace || pumping || quiesced || closing || (!physicalPrompts.length && stopGeneration === reconciledStopGeneration && !retryDue)) return;
     pumping = true;
-    const stopGeneration = coordinatorStopGeneration;
+    const generation = stopGeneration;
     void (async () => {
+      stopRetryAt = 0;
+      // Head-of-line: a waiting head keeps its place so later prompts never overtake it.
       while (physicalPrompts.length) {
-        const incoming = physicalPrompts.shift()!;
-        const message = incoming.message;
-        // One bad prompt must neither drop the ones queued behind it nor fail silently: the run's user is told why.
+        const head = physicalPrompts[0]!;
+        if (head.retryAt > Date.now()) break;
         try {
-          const binding = await principal(incoming.role, incoming.paneId);
-          if (binding.session?.value !== incoming.nativeSessionId) throw new Error("Queued provider prompt native session changed");
-          await requireWorkspace().runtime.validateProviderDelivery(message, binding);
-          // A Runtime-originated notice (e.g. specialist_result_ready) is already the exact outbox delivery just validated; it has no pane to re-sign.
-          if (message.sender.role === "runtime") continue;
-          const current = SessionManifestSchema.parse(unwrap(await requireWorkspace().runtime.ports.panes.getManifest()));
-          const sender = current.panes.find(pane => pane.role === message.sender.role && (!message.sender.pane_id || pane.paneId === message.sender.pane_id));
-          if (!sender) throw new Error("Transport sender binding unavailable");
-          // Specialist assignments remain in their model turn; only authoritative receivers apply inbox state.
-          if (["coordinator", "runtime", "conversation"].includes(message.recipient.role))
-            await nativeDeliver(RoleMessageSchema.parse({ ...message, sender: { ...message.sender, pane_id: sender.paneId, agent_id: sender.agentId } }));
+          await applyInboundPrompt(head);
+          physicalPrompts.shift();
         } catch (error) {
-          inboundError = redactString(String(error)); process.stderr.write(`Bflow inbound: ${inboundError}\n`);
-          await reportInboundFailure(message, inboundError);
+          const reason = redactString(String(error));
+          inboundError = reason; process.stderr.write(`Bflow inbound: ${reason}\n`);
+          head.attempts++;
+          if (head.attempts < MAX_INBOUND_ATTEMPTS) { head.retryAt = Date.now() + 250 * 2 ** head.attempts; break; }
+          // Dropped only after bounded retries, and never silently: Runtime's run notice, or a direct receipt when that fails.
+          physicalPrompts.shift();
+          const dropped = `${reason} (dropped after ${head.attempts} attempts)`;
+          if (!await reportInboundFailure(head.message, dropped)) {
+            await receipts.appendConversationNotice(deliveryFailureNotice(head.message, dropped, `Không xử lý được ${head.message.type} từ ${head.message.sender.role}`))
+              .catch(noticeError => process.stderr.write(`Bflow could not record inbound failure: ${redactString(String(noticeError))}\n`));
+          }
         }
       }
+      // Each unsettled Stop is settled on its own: one bad item never blocks the others or the generation.
+      let retryNeeded = false;
       for (const stopped of await receipts.pendingCoordinatorStops()) {
-        const binding = await principal("coordinator", stopped.binding.paneId);
-        if (digest({ ...binding, transportState: undefined }) !== digest({ ...stopped.binding, transportState: undefined }))
-          throw new Error("Stopped Coordinator pane/native session changed; reconcile its original turn");
-        if (!await receipts.hasCoordinatorResponse(stopped)) await requireWorkspace().runtime.coordinatorTurnStopped(stopped.message, binding);
-        await receipts.completeCoordinatorStop(stopped);
+        const key = digest(["coordinator", stopped.binding.paneId, stopped.message.message_id]);
+        try { await settleCoordinatorStop(stopped, key); }
+        catch (error) {
+          inboundError = redactString(String(error)); process.stderr.write(`Bflow stop: ${inboundError}\n`);
+          stopAttempts.set(key, (stopAttempts.get(key) ?? 0) + 1);
+          if (stopAttempts.get(key)! < MAX_INBOUND_ATTEMPTS) { retryNeeded = true; continue; }
+          // Still unsettled after bounded retries: Conversation hears why, and the receipt is completed rather than retried forever.
+          await requireWorkspace().runtime.coordinatorStopWithoutResponse(stopped.message, stopped.binding, `Coordinator turn could not be reconciled after ${MAX_INBOUND_ATTEMPTS} attempts: ${inboundError}`)
+            .catch(() => undefined);
+          await receipts.completeCoordinatorStop(stopped).catch(() => undefined); stopAttempts.delete(key);
+        }
       }
-      reconciledCoordinatorStopGeneration = stopGeneration;
+      for (const stopped of await receipts.pendingSpecialistStops()) {
+        const key = digest(["specialist", stopped.stopId]);
+        try {
+          await requireWorkspace().runtime.specialistTurnStopped(stopped.binding, stopped.binding.role);
+          await receipts.completeSpecialistStop(stopped.stopId); stopAttempts.delete(key);
+        } catch (error) {
+          retryNeeded = true; inboundError = redactString(String(error)); process.stderr.write(`Bflow stop: ${inboundError}\n`);
+          stopAttempts.set(key, (stopAttempts.get(key) ?? 0) + 1);
+          if (stopAttempts.get(key)! >= MAX_INBOUND_ATTEMPTS) { await receipts.completeSpecialistStop(stopped.stopId); stopAttempts.delete(key); }
+        }
+      }
+      if (retryNeeded) stopRetryAt = Date.now() + 1000;
+      reconciledStopGeneration = generation;
     })().catch(error => { inboundError = redactString(String(error)); process.stderr.write(`Bflow inbound: ${inboundError}\n`); }).finally(() => { pumping = false; });
   }, 100);
   const timer = setInterval(() => {
@@ -999,11 +1079,35 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       } catch (error) { process.stderr.write(`Bflow watchdog ${action.kind}: ${redactString(String(error))}\n`); }
     }
   };
+  /**
+   * Surfaces native deliveries whose acknowledgement was never observed, once per operation, and never resends them.
+   * An ack that arrived later is already recorded by the ingress callback, so an unknown entry here is still unacknowledged.
+   * Also writes Conversation notices for failed Conversation deliveries when Runtime exposes them.
+   */
+  const reportedUncertain = new Set<string>();
+  const reconcileRuntimeDeliveries = async () => {
+    const host = requireWorkspace();
+    for (const { operationId, message } of await receipts.unacknowledgedNativeDeliveries()) {
+      if (reportedUncertain.has(operationId)) continue;
+      await host.runtime.reportUncertainNativeDelivery(message, operationId, "Native delivery acknowledgement was not observed; the message was not resent and needs reconciliation");
+      reportedUncertain.add(operationId);
+    }
+    // Optional Runtime capability: a Conversation delivery that Runtime gave up on is shown to the user as a durable notice.
+    const failed = (host.runtime as unknown as { failedConversationDeliveries?: () => Promise<{ message: RoleMessage; error: string }[]> }).failedConversationDeliveries;
+    if (typeof failed === "function") {
+      for (const item of await failed.call(host.runtime)) {
+        await receipts.appendConversationNotice(deliveryFailureNotice(item.message, item.error, `Conversation không nhận được ${item.message.type}`));
+      }
+    }
+  };
   let watchdogRunning = false;
   const watchdogTimer = setInterval(() => {
     if (!workspace || quiesced || closing || watchdogRunning) return;
     watchdogRunning = true;
-    void runWatchdog().catch(error => { process.stderr.write(`Bflow watchdog: ${redactString(String(error))}\n`); })
+    void reconcileRuntimeDeliveries()
+      .catch(error => { process.stderr.write(`Bflow delivery reconcile: ${redactString(String(error))}\n`); })
+      .then(() => runWatchdog())
+      .catch(error => { process.stderr.write(`Bflow watchdog: ${redactString(String(error))}\n`); })
       .finally(() => { watchdogRunning = false; });
   }, 15_000);
   watchdogTimer.unref();
@@ -1311,7 +1415,7 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
     if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "provider_started", { paneId, nativeSessionId: session,
       ...(plan === undefined || reachability === undefined ? {} : { launchId: plan.launchId, toolReachability: reachability }) });
     if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "native_session", {paneId, sessionId:session});
-    if (event === "Stop" && configuration.role === "coordinator") await callHost(configuration.socketPath, configuration.token, "provider_stopped", { paneId, nativeSessionId: session });
+    if (event === "Stop" && configuration.role !== "conversation") await callHost(configuration.socketPath, configuration.token, "provider_stopped", { paneId, nativeSessionId: session });
     // Only Claude's Stop `block` continuation is relied on; elsewhere notices wait for the next user turn instead of being lost.
     if (event === "Stop" && configuration.role === "conversation" && configuration.provider === "claude") {
       // Each notice blocks at most one Stop: it is marked surfaced once its reason has been emitted, so no loop is possible.

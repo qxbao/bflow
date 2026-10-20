@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { JsonValueSchema, PaneBindingSchema, type JsonValue, type PaneBinding } from "@bflow/contracts";
 import { digest, json, record } from "./journal.js";
+import { redactString } from "../resilience/redaction.js";
 import { HostReceiptJournal, type TrustedConversationTurn } from "./host-receipts.js";
 
 interface ConversationIntakePort {
@@ -58,7 +59,12 @@ export class HostConversationIntake {
         return json({ messageId: turn.messageId, requiresConversationDecision: true, context: await this.conversation().getContext() });
       }
       const result = json(approval);
-      if (record(result).ok !== true) throw new Error(`Trusted approval failed: ${JSON.stringify(record(result).error)}`);
+      if (record(result).ok !== true) {
+        // Nothing is recorded, so the same user turn can be retried. The explanation reaches the provider as context, not as a thrown hook error.
+        return json({ messageId: turn.messageId, requiresConversationDecision: false, approvalFailed: true,
+          approvalFailure: { error: redactString(JSON.stringify(record(result).error ?? result)).slice(0, 2000), note: "The approval was NOT recorded and nothing was applied. Explain this failure to the user and ask what to do next; do not claim the approval succeeded." },
+          context: await this.conversation().getContext() });
+      }
       await this.receipts.recordConversationIntent(turn.messageId, TRUSTED_APPROVAL);
       // A durable FIFO acknowledgement is pending work; the next receive resumes it through the port.
       if (record(record(result).value).queuedBecauseBusy !== true) {

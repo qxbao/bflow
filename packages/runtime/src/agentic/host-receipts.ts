@@ -9,9 +9,10 @@ import {
   type ApprovalDecision, type JsonValue, type PaneBinding, type QualityGateResult, type RoleMessage, type VerificationResult
 } from "@bflow/contracts";
 import { digest, json, record, strings, textField } from "./journal.js";
-import { UserDecisionNoticeSchema, isUserFacingNotice, renderConversationNotice, userDecisionNoticeFields } from "./conversation-notice-render.js";
+import { redactString } from "../resilience/redaction.js";
+import { ApprovalNoticeSchema, UserDecisionNoticeSchema, approvalNoticeFields, isUserFacingNotice, renderConversationNotice, userDecisionNoticeFields } from "./conversation-notice-render.js";
 
-type Kind = "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled";
+type Kind = "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled";
 export interface HumanHookProvenance {
   origin: "UserPromptSubmit"; binding: PaneBinding; nativeSessionId: string;
   conversationSessionId: string; userId: string; messageId: string; promptDigest: string;
@@ -27,7 +28,9 @@ export const ConversationNoticeSchema = z.object({ messageId: z.string().min(1),
   runId: z.string().min(1).optional(), correlationId: z.string().min(1), receivedAt: z.string().datetime(),
   summary: z.string(), truncated: z.boolean(),
   /** Bounded decision fields for user decisions, independent of the summary cap. Absent on receipts written before this field. */
-  userDecision: UserDecisionNoticeSchema.optional() }).strict();
+  userDecision: UserDecisionNoticeSchema.optional(),
+  /** Bounded structured fields of a non-decision approval (design, task, gate). Absent on receipts written before this field. */
+  approval: ApprovalNoticeSchema.optional() }).strict();
 export type ConversationNotice = z.infer<typeof ConversationNoticeSchema>;
 /** Display state of a user-decision notice, for the Runtime watchdog. `since` is when the current wait began. */
 export interface ConversationNoticeState { messageId: string; approvalId?: string; runId?: string; surfaced: boolean; displayed: boolean; resends: number; since: string }
@@ -44,6 +47,31 @@ export interface HostObservation {
 }
 export interface CoordinatorTurnObservation { binding: PaneBinding; message: RoleMessage; sequence: number; nativeResponseBaseline?: string[] }
 interface Envelope { version: 1; repository: string; sessionId: string; kind: Kind; id: string; payload: JsonValue; checksum: string }
+
+/** A message that starts a Coordinator model turn the host must watch for a response: a user delegation or a Runtime wake-up. */
+export function isCoordinatorTrigger(message: RoleMessage): boolean {
+  if (message.sender.role === "conversation") return message.type === "delegation.request";
+  if (message.sender.role !== "runtime" || message.type !== "task.status" || typeof message.payload !== "object" || message.payload === null || Array.isArray(message.payload)) return false;
+  return WAKE_KINDS.includes(String((message.payload as Record<string, unknown>).kind));
+}
+/** Runtime wake-ups that the Coordinator must answer through Runtime tools; each one's turn is tracked for a no-response Stop. */
+const WAKE_KINDS = ["specialist_result_ready", "specialist_no_response", "delivery_failure"];
+
+/**
+ * A durable Conversation notice for a delivery or inbound failure that Runtime could not record itself. It is idempotent by the
+ * original message id, so a repeated report never creates a second notice. The reason is redacted before it is stored.
+ */
+export function deliveryFailureNotice(message: RoleMessage, reason: string, headline: string): RoleMessage {
+  const id = `delivery-failure-${digest(message.message_id)}`, text = redactString(reason);
+  const payload = { kind: "delivery_failure", headline, reason: text, blockageReason: `${message.type} from ${message.sender.role} (${message.message_id}): ${text}. The run is waiting and will not continue until this is resolved.`,
+    summary: `${message.type} from ${message.sender.role} to ${message.recipient.role} (${message.message_id})`,
+    options: ["Kiểm tra trạng thái run và yêu cầu Coordinator gửi lại việc", "Hủy run"] };
+  return RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: message.correlation_id, causation_id: message.message_id,
+    ...(message.run_id === undefined ? {} : { run_id: message.run_id }), sender: { role: "runtime" }, recipient: { role: "conversation" },
+    // A run-less message cannot carry a run-bound progress type; a clarification is exempt from run_id and renders the same blocked notice.
+    type: message.run_id === undefined ? "conversation.clarification" : "conversation.progress", payload, artifact_references: [],
+    occurred_at: new Date().toISOString(), idempotency_key: id });
+}
 
 /** Private host authority, separate from model-accessible artifacts and Conversation context.
  * Immutable records are linked only after file fsync; the directory is fsynced before ACK.
@@ -80,10 +108,21 @@ export class HostReceiptJournal {
         throw new Error("Invalid Coordinator turn boundary");
       return json({ binding, sequence: raw.sequence });
     }
+    if (kind === "specialist-stop") {
+      const raw = record(input), binding = PaneBindingSchema.parse(raw.binding);
+      if (binding.sessionId !== this.sessionId || binding.role === "coordinator" || binding.role === "conversation" || !binding.session || typeof raw.observedAt !== "string")
+        throw new Error("Invalid specialist turn stop");
+      return json({ binding, observedAt: raw.observedAt });
+    }
+    if (kind === "specialist-settled") {
+      const raw = record(input);
+      if (typeof raw.stopId !== "string" || !raw.stopId) throw new Error("Invalid specialist stop acknowledgement");
+      return json({ stopId: raw.stopId });
+    }
     if (kind.startsWith("coordinator-")) {
       const raw = record(input), binding = PaneBindingSchema.parse(raw.binding), message = RoleMessageSchema.parse(raw.message);
       if (binding.sessionId !== this.sessionId || binding.role !== "coordinator" || !binding.session ||
-          message.recipient.role !== "coordinator" || message.sender.role !== "conversation" || message.type !== "delegation.request" ||
+          message.recipient.role !== "coordinator" || !isCoordinatorTrigger(message) ||
           !Number.isSafeInteger(raw.sequence) || Number(raw.sequence) < 1) throw new Error("Invalid Coordinator turn observation");
       const baseline = raw.nativeResponseBaseline;
       if (baseline !== undefined && (!Array.isArray(baseline) || baseline.some(id => typeof id !== "string" || !id))) throw new Error("Invalid native response baseline");
@@ -245,6 +284,33 @@ export class HostReceiptJournal {
     if (digest(await this.read("coordinator-stop", id)) !== digest(item)) throw new Error("Missing exact Coordinator stop observation");
     await this.write("coordinator-stop-handled", id, item);
   }
+  /** Durable record of every non-Conversation provider turn that stopped; Runtime decides whether it left work unanswered. */
+  async recordSpecialistStop(binding: PaneBinding): Promise<string> {
+    const id = randomUUID();
+    await this.write("specialist-stop", id, { binding, observedAt: new Date().toISOString() });
+    return id;
+  }
+  async pendingSpecialistStops(): Promise<{ stopId: string; binding: PaneBinding; observedAt: string }[]> {
+    const pending: { stopId: string; binding: PaneBinding; observedAt: string }[] = [];
+    for (const id of await this.receiptIds("specialist-stop")) {
+      if (await this.read("specialist-settled", id) !== undefined) continue;
+      const raw = record(await this.read("specialist-stop", id));
+      pending.push({ stopId: id, binding: PaneBindingSchema.parse(raw.binding), observedAt: textField(raw.observedAt) });
+    }
+    return pending;
+  }
+  async completeSpecialistStop(stopId: string): Promise<void> {
+    await this.write("specialist-settled", stopId, { stopId });
+  }
+  /** Native deliveries whose acknowledgement was not observed. Each one is never resent; it needs reconciliation. */
+  async unacknowledgedNativeDeliveries(): Promise<{ operationId: string; message: RoleMessage }[]> {
+    const uncertain: { operationId: string; message: RoleMessage }[] = [];
+    for (const operationId of await this.receiptIds("native-intent")) {
+      const delivery = await this.nativeDelivery(operationId);
+      if (delivery?.status === "unknown_delivery") uncertain.push({ operationId, message: delivery.message });
+    }
+    return uncertain;
+  }
   async recordHuman(decision: ApprovalDecision, provenance: HumanHookProvenance): Promise<void> {
     const parsed = ApprovalDecisionSchema.parse(decision); await this.write("human", parsed.approvalId, { decision: parsed, provenance });
   }
@@ -293,9 +359,10 @@ export class HostReceiptJournal {
     if (await this.read("conversation-notice", parsed.message_id) !== undefined) return false;
     const text = JSON.stringify(parsed.payload) ?? "null", truncated = text.length > NOTICE_SUMMARY_LIMIT;
     const userDecision = parsed.type === "approval.request" ? userDecisionNoticeFields(parsed.payload) : undefined;
+    const approval = parsed.type === "approval.request" && userDecision === undefined ? approvalNoticeFields(parsed.payload) : undefined;
     return this.write("conversation-notice", parsed.message_id, { messageId: parsed.message_id, type: parsed.type, senderRole: parsed.sender.role,
       ...(parsed.run_id === undefined ? {} : { runId: parsed.run_id }), correlationId: parsed.correlation_id, receivedAt: new Date().toISOString(),
-      ...(userDecision === undefined ? {} : { userDecision }),
+      ...(userDecision === undefined ? {} : { userDecision }), ...(approval === undefined ? {} : { approval }),
       summary: truncated ? text.slice(0, NOTICE_SUMMARY_LIMIT) : text, truncated });
   }
   /** Notices not yet shown to the model, oldest first. A surfaced marker is a separate immutable receipt. */
