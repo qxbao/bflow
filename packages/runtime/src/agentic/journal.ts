@@ -77,7 +77,14 @@ function parseUserDecisions(value: unknown, runId: string): void {
   }
 }
 export interface Outbound {
-  message: RoleMessage; status: "queued" | "sending" | "unknown_delivery" | "accepted" | "released" | "cancelled" | "delivered";
+  /** "failed" is terminal for Conversation-bound inbox writes only (after bounded Gateway retries); it is never dispatched to Herdr. */
+  message: RoleMessage; status: "queued" | "sending" | "unknown_delivery" | "accepted" | "released" | "cancelled" | "delivered" | "failed";
+  /** First time the recipient was observed not ready for a prompt; cleared once it is ready. Durable for the not-ready escalation. */
+  notReadySince?: string;
+  /** Consecutive failed delivery attempts (Gateway writes or dispatch exceptions). Reset on success. */
+  deliveryAttempts?: number;
+  /** Earliest time a failed Conversation inbox write may be retried (backoff). */
+  nextAttemptAt?: string;
   /** Conversation-bound notices are delivered through the trusted inbox: terminal, with no dispatch handle, lease or request. */
   selector: string; taskId: string; attemptId: string; capabilities: string[];
   assignment?: AgentAssignment; lease?: AgentLease; request?: AgentRequest; handle?: AgentExecutionHandle;
@@ -95,7 +102,8 @@ export interface JournalState {
   version: 1; repository: string; runs: RunRecord[]; outbound: Outbound[];
   inbox: { message: RoleMessage; status: "received" | "applied" }[];
   pendingCore: AppendEventsRequest[];
-  pendingVerifications: { job: JsonValue; outcome: JsonValue }[];
+  /** attempts/lastError/stuck: bounded retry bookkeeping for a durable verification outcome that cannot be finished yet. */
+  pendingVerifications: { job: JsonValue; outcome: JsonValue; attempts?: number; lastError?: string; stuck?: boolean }[];
 }
 /** Conversation-bound messages use the trusted inbox: no lease, no transport, no dispatch request, never typed into the input box. */
 export function isConversationDelivery(out: Outbound): boolean {
@@ -133,7 +141,10 @@ function parseState(input: unknown, repository: string): JournalState {
   }
   for (const out of state.outbound) {
     out.message = RoleMessageSchema.parse(out.message); textField(out.selector); textField(out.taskId); textField(out.attemptId); strings(out.capabilities);
-    if (!["queued", "sending", "unknown_delivery", "accepted", "released", "cancelled", "delivered"].includes(out.status)) throw new Error("Invalid outbound status");
+    if (!["queued", "sending", "unknown_delivery", "accepted", "released", "cancelled", "delivered", "failed"].includes(out.status)) throw new Error("Invalid outbound status");
+    if (out.notReadySince !== undefined) { textField(out.notReadySince); if (!Number.isFinite(Date.parse(out.notReadySince))) throw new Error("Invalid not-ready timestamp"); }
+    if (out.nextAttemptAt !== undefined) { textField(out.nextAttemptAt); if (!Number.isFinite(Date.parse(out.nextAttemptAt))) throw new Error("Invalid retry timestamp"); }
+    if (out.deliveryAttempts !== undefined && (!Number.isSafeInteger(out.deliveryAttempts) || out.deliveryAttempts < 0)) throw new Error("Invalid delivery attempts");
     if (out.coordinatorResponseBaseline !== undefined && (!Number.isSafeInteger(out.coordinatorResponseBaseline) || out.coordinatorResponseBaseline < 0 || out.coordinatorResponseBaseline > state.outbound.length))
       throw new Error("Invalid Coordinator response baseline");
     if (out.assignment) out.assignment = AgentAssignmentSchema.parse(out.assignment);
@@ -186,6 +197,9 @@ function parseState(input: unknown, repository: string): JournalState {
     textField(job.runId); textField(job.taskId); record(job.plan);
     VerificationCycleSchema.parse(job.cycle); GitChangeSetSchema.parse(job.change);
     VerificationResultSchema.parse(outcome.result); VerificationCycleSchema.parse(outcome.cycle);
+    if (pending.attempts !== undefined && (!Number.isSafeInteger(pending.attempts) || pending.attempts < 0)) throw new Error("Invalid verification attempts");
+    if (pending.lastError !== undefined) textField(pending.lastError);
+    if (pending.stuck !== undefined && typeof pending.stuck !== "boolean") throw new Error("Invalid verification stuck flag");
   }
   state.pendingCore = state.pendingCore.map(value => AppendEventsRequestSchema.parse(value));
   return state;

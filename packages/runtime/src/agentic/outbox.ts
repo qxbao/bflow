@@ -6,6 +6,13 @@ import {
 import type { AgenticRuntimePorts } from "./ports.js";
 import { digest, isConversationDelivery, json, type JournalState, type Outbound } from "./journal.js";
 
+/** A recipient observed not ready for this long is reported to Conversation; delivery keeps retrying. */
+export const NOT_READY_FAILURE_MS = 5 * 60_000;
+/** Consecutive failed Conversation inbox writes before the message is marked failed (never silently retried forever). */
+export const CONVERSATION_DELIVERY_MAX_ATTEMPTS = 5;
+/** Consecutive dispatch failures before a queued message is surfaced to Conversation (it keeps retrying). */
+export const DISPATCH_FAILURE_NOTICE_ATTEMPTS = 5;
+
 export function unwrap<T>(result: OperationResult<T>): T {
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
   return result.value;
@@ -107,134 +114,163 @@ export class HerdrOutbox {
     out.status = "released";
     await this.save();
   }
+  /**
+   * One bounded pass over the outbox. Each outbound is isolated: a failure is recorded on that message (error, attempt
+   * count) and the pass continues, so one stuck recipient never blocks later messages. No waits for turns or reciprocal ACKs.
+   */
   async flush(onBound: (out: Outbound, handle: AgentExecutionHandle) => Promise<void>): Promise<void> {
-    // One bounded pass. No waits for turns or reciprocal ACKs while holding a mailbox/runtime lock.
     for (const out of this.state.outbound) {
-      if (out.leaseRelease) { await this.release(out); continue; }
-      // A Conversation inbox write-ahead stays "sending": Runtime applies it after this locked pass.
-      if (out.status === "sending" && !isConversationDelivery(out)) { out.status = "unknown_delivery"; await this.save(); }
-      if (out.status === "accepted" && out.handle) {
-        if (!out.parentAssignmentId) await onBound(out, out.handle);
-        if (out.message.type === "task.assignment") {
-          const run = this.state.runs.find(item => item.runId === out.message.run_id);
-          if (run && !run.cancelled && !["completed", "failed", "escalated"].includes(run.status)) {
-            try { await this.renew(out); } catch (error) { out.error = String(error); await this.save(); }
-          }
-          continue;
-        }
-        const health = await this.ports.panes.inspectRoleHealth(out.selector);
-        if (health.ok && health.value.readyForPrompt && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId)
-          await this.release(out); // transport capacity only; never task-success evidence
-        else if (health.ok && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId && !out.parentAssignmentId)
-          await this.renew(out); // a bounded host measurement may outlive one lease period
-        continue;
-      }
-      if (out.status !== "queued") continue;
-      // Never call the Gateway here: it may drain a queued user turn that enqueues back into this locked journal.
-      if (isConversationDelivery(out)) { out.status = "sending"; await this.save(); continue; }
-      if (out.parentAssignmentId) {
-        try { this.noticeParent(out); } catch (error) { out.status = "cancelled"; out.error = String(error); await this.save(); continue; }
-      }
-      const run = this.state.runs.find(item => item.runId === out.message.run_id);
-      if (run && (run.cancelled || ["completed", "failed", "escalated"].includes(run.status)) &&
-          (out.message.type === "task.assignment" || out.message.type === "delegation.request" && out.message.sender.role === "coordinator")) {
-        if (out.lease) await this.release(out);
-        out.status = "cancelled"; await this.save(); continue;
-      }
-      const bindingValue = unwrap(await this.ports.panes.getRoleBinding(out.selector));
-      if (!bindingValue) { out.error = "Recipient pane unavailable"; continue; }
-      const pane = PaneBindingSchema.parse(bindingValue);
-      const health = unwrap(await this.ports.panes.inspectRoleHealth(out.selector));
-      if (!health.readyForPrompt || !health.occupantMatches || health.paneId !== pane.paneId || health.agentId !== pane.agentId) continue;
-      if (out.parentAssignmentId) {
-        try { await this.validateNotice(out, pane); }
-        catch (error) { out.status = "cancelled"; out.error = String(error); await this.save(); continue; }
-      }
-      if (!out.parentAssignmentId) {
-        const capabilities = [...(this.ports.roleCapabilities[pane.role] ?? [])];
-        const config = AgentConfigurationSchema.parse({ agentId: pane.agentId, role: pane.role, transport: "herdr", enabled: true,
-          priority: 0, maxConcurrentTasks: 1, capabilities, settings: {} });
-        unwrap(await this.ports.registry.upsert(config));
-        const resolved = unwrap(await this.ports.registry.resolve(pane.role, { runId: out.message.run_id!,
-          taskId: out.taskId, preferredAgentId: pane.agentId, requiredCapabilities: out.capabilities }));
-        if (!resolved || resolved.agentId !== pane.agentId) { out.error = "No capable agent in recipient pane"; continue; }
-        if (!out.lease) {
-          const acquired = await this.ports.registry.acquireLease({
-            leaseId: `lease-${digest(out.message.message_id)}`, agentId: pane.agentId, runId: out.message.run_id!,
-            taskId: out.taskId, attemptId: out.attemptId, ttlMs: 300_000, requestedAt: this.now(),
-            idempotencyKey: `acquire:${out.message.message_id}`
-          });
-          if (!acquired.ok) { out.error = acquired.error.message; continue; }
-          out.lease = AgentLeaseSchema.parse(acquired.value);
-          await this.save();
-        }
-      }
-      // Registry is authoritative: renewal detects stale/released fencing tokens and optimistic versions.
-      try { await this.renew(out); } catch (error) {
-        if (!out.parentAssignmentId) throw error;
-        out.error = String(error); await this.save(); continue;
-      }
-      if (!out.lease) throw new Error("Dispatch has no lease");
-      if (out.lease.agentId !== pane.agentId || Date.parse(out.lease.expiresAt) <= Date.parse(this.now())) throw new Error("Stale dispatch lease");
-      const target = this.target(pane);
-      let wire = out.message;
-      if (wire.type === "task.assignment") {
-        const run = this.state.runs.find(r => r.runId === wire.run_id);
-        if (!run) throw new Error("Assignment without delegation");
-        out.assignment = AgentAssignmentSchema.parse({ schemaVersion: 2, assignmentId: `assignment-${digest(wire.message_id)}`,
-          runId: run.runId, taskId: out.taskId, delegationId: run.delegation.delegationId, role: pane.role,
-          agentId: pane.agentId, paneId: pane.paneId, leaseId: out.lease.leaseId, fencingToken: out.lease.fencingToken,
-          requiredCapabilities: out.capabilities, assignedBy: "coordinator", assignedAt: out.message.occurred_at ?? this.now(),
-          status: "assigned", ...(pane.worktreePath ? { worktreePath: pane.worktreePath } : {}), idempotencyKey: wire.idempotency_key });
-        wire = RoleMessageSchema.parse({ ...wire, recipient: { role: pane.role, agent_id: pane.agentId, pane_id: pane.paneId },
-          payload: { assignment: out.assignment, context: wire.payload } });
-      }
-      if (out.request && (digest(out.request.target) !== digest(target) || digest(out.request.context) !== digest(json(wire)))) {
-        out.error = "Pinned request or recipient changed; explicit reconciliation required"; await this.save(); continue;
-      }
-      out.request ??= AgentRequestSchema.parse({ requestId: `request-${digest(wire.message_id)}`, attemptId: out.attemptId,
-        runId: wire.run_id, taskId: out.taskId, role: pane.role, target, instruction: JSON.stringify(wire),
-        workingDirectory: pane.cwd, inputs: wire.artifact_references, context: json(wire), attempt: 1,
-        retry: { maxAttempts: 1, strategy: "fixed", initialDelayMs: 0, maxDelayMs: 0, jitter: false },
-        timeout: { executionTimeoutMs: 300_000, onTimeout: "block" },
-        idempotency: { key: wire.idempotency_key, scope: "agent-request", fingerprint: digest(wire) },
-        createdAt: this.now(), metadata: { leaseId: out.lease.leaseId, fencingToken: out.lease.fencingToken } });
-      if (wire.type === "delegation.request" && wire.recipient.role === "coordinator")
-        out.coordinatorResponseBaseline ??= this.state.outbound.length;
-      out.status = "sending";
-      await this.save(); // write-ahead intent; a crash/lost acknowledgement forbids resend
-      if (out.parentAssignmentId) {
-        try {
-          const current = unwrap(await this.ports.panes.getRoleBinding(out.selector));
-          if (!current) throw new Error("Task notice recipient disappeared");
-          const currentPane = PaneBindingSchema.parse(current), currentHealth = unwrap(await this.ports.panes.inspectRoleHealth(out.selector));
-          if (!currentHealth.readyForPrompt || !currentHealth.occupantMatches || currentHealth.paneId !== currentPane.paneId || currentHealth.agentId !== currentPane.agentId)
-            throw new Error("Task notice recipient is no longer ready");
-          await this.validateNotice(out, currentPane); await this.renew(out);
-        } catch (error) { out.status = "queued"; out.error = String(error); await this.save(); continue; }
-      }
-      try {
-        const value = unwrap(await this.ports.transport.send(out.request));
-        const receipt = AgentSubmissionReceiptSchema.parse(value);
-        if (receipt.requestId !== out.request.requestId || receipt.attemptId !== out.attemptId || receipt.runId !== out.request.runId || receipt.taskId !== out.taskId)
-          throw new Error("Transport receipt ownership mismatch");
-        if (receipt.status === "accepted") {
-          if (digest(receipt.handle.target) !== digest(out.request.target) || receipt.handle.idempotencyKey !== out.request.idempotency.key)
-            throw new Error("Transport binding mismatch");
-          out.handle = receipt.handle; out.status = "accepted"; delete out.error;
-          await this.save();
-          if (!out.parentAssignmentId) await onBound(out, receipt.handle);
-        } else if (receipt.status === "unknown_delivery") {
-          out.status = "unknown_delivery"; out.error = receipt.reason; await this.save();
-        } else {
-          // A proven rejection permits a later delivery, while other panes remain independently drainable.
-          out.status = "queued"; out.error = receipt.reason; await this.save();
-        }
-      } catch (error) {
-        out.status = "unknown_delivery"; out.error = String(error); await this.save();
+      try { await this.step(out, onBound); }
+      catch (error) {
+        out.error = String(error);
+        out.deliveryAttempts = (out.deliveryAttempts ?? 0) + 1;
+        await this.save();
       }
     }
     await this.save();
+  }
+  /** A recipient that is not ready keeps its message queued; after NOT_READY_FAILURE_MS the wait is recorded as an error. */
+  private markNotReady(out: Outbound): void {
+    const now = Date.parse(this.now());
+    out.notReadySince ??= new Date(now).toISOString();
+    if (now - Date.parse(out.notReadySince) >= NOT_READY_FAILURE_MS)
+      out.error = `Recipient ${out.message.recipient.role} not ready since ${out.notReadySince}`;
+  }
+  private markReady(out: Outbound): void {
+    if (out.notReadySince === undefined) return;
+    delete out.notReadySince;
+    if (out.error?.includes(" not ready since ")) delete out.error;
+  }
+  private async step(out: Outbound, onBound: (out: Outbound, handle: AgentExecutionHandle) => Promise<void>): Promise<void> {
+    if (out.leaseRelease) { await this.release(out); return; }
+    // A Conversation inbox write-ahead stays "sending": Runtime applies it after this locked pass.
+    if (out.status === "sending" && !isConversationDelivery(out)) { out.status = "unknown_delivery"; await this.save(); }
+    if (out.status === "accepted" && out.handle) {
+      if (!out.parentAssignmentId) await onBound(out, out.handle);
+      if (out.message.type === "task.assignment") {
+        const run = this.state.runs.find(item => item.runId === out.message.run_id);
+        if (run && !run.cancelled && !["completed", "failed", "escalated"].includes(run.status)) {
+          try { await this.renew(out); } catch (error) { out.error = String(error); await this.save(); }
+        }
+        return;
+      }
+      const health = await this.ports.panes.inspectRoleHealth(out.selector);
+      if (health.ok && health.value.readyForPrompt && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId)
+        await this.release(out); // transport capacity only; never task-success evidence
+      else if (health.ok && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId && !out.parentAssignmentId)
+        await this.renew(out); // a bounded host measurement may outlive one lease period
+      return;
+    }
+    if (out.status !== "queued") return;
+    // Never call the Gateway here: it may drain a queued user turn that enqueues back into this locked journal.
+    if (isConversationDelivery(out)) {
+      if (out.nextAttemptAt !== undefined && Date.parse(out.nextAttemptAt) > Date.parse(this.now())) return; // backoff after a failed write
+      out.status = "sending"; await this.save(); return;
+    }
+    if (out.parentAssignmentId) {
+      try { this.noticeParent(out); } catch (error) { out.status = "cancelled"; out.error = String(error); await this.save(); return; }
+    }
+    const run = this.state.runs.find(item => item.runId === out.message.run_id);
+    if (run && (run.cancelled || ["completed", "failed", "escalated"].includes(run.status)) &&
+        (out.message.type === "task.assignment" || out.message.type === "delegation.request" && out.message.sender.role === "coordinator")) {
+      if (out.lease) await this.release(out);
+      out.status = "cancelled"; await this.save(); return;
+    }
+    const bindingValue = unwrap(await this.ports.panes.getRoleBinding(out.selector));
+    if (!bindingValue) { out.error = "Recipient pane unavailable"; return; }
+    const pane = PaneBindingSchema.parse(bindingValue);
+    const health = unwrap(await this.ports.panes.inspectRoleHealth(out.selector));
+    if (!health.readyForPrompt || !health.occupantMatches || health.paneId !== pane.paneId || health.agentId !== pane.agentId) {
+      this.markNotReady(out); return;
+    }
+    this.markReady(out);
+    if (out.parentAssignmentId) {
+      try { await this.validateNotice(out, pane); }
+      catch (error) { out.status = "cancelled"; out.error = String(error); await this.save(); return; }
+    }
+    if (!out.parentAssignmentId) {
+      const capabilities = [...(this.ports.roleCapabilities[pane.role] ?? [])];
+      const config = AgentConfigurationSchema.parse({ agentId: pane.agentId, role: pane.role, transport: "herdr", enabled: true,
+        priority: 0, maxConcurrentTasks: 1, capabilities, settings: {} });
+      unwrap(await this.ports.registry.upsert(config));
+      const resolved = unwrap(await this.ports.registry.resolve(pane.role, { runId: out.message.run_id!,
+        taskId: out.taskId, preferredAgentId: pane.agentId, requiredCapabilities: out.capabilities }));
+      if (!resolved || resolved.agentId !== pane.agentId) { out.error = "No capable agent in recipient pane"; return; }
+      if (!out.lease) {
+        const acquired = await this.ports.registry.acquireLease({
+          leaseId: `lease-${digest(out.message.message_id)}`, agentId: pane.agentId, runId: out.message.run_id!,
+          taskId: out.taskId, attemptId: out.attemptId, ttlMs: 300_000, requestedAt: this.now(),
+          idempotencyKey: `acquire:${out.message.message_id}`
+        });
+        if (!acquired.ok) { out.error = acquired.error.message; return; }
+        out.lease = AgentLeaseSchema.parse(acquired.value);
+        await this.save();
+      }
+    }
+    // Registry is authoritative: renewal detects stale/released fencing tokens and optimistic versions.
+    try { await this.renew(out); } catch (error) {
+      if (!out.parentAssignmentId) throw error;
+      out.error = String(error); await this.save(); return;
+    }
+    if (!out.lease) throw new Error("Dispatch has no lease");
+    if (out.lease.agentId !== pane.agentId || Date.parse(out.lease.expiresAt) <= Date.parse(this.now())) throw new Error("Stale dispatch lease");
+    const target = this.target(pane);
+    let wire = out.message;
+    if (wire.type === "task.assignment") {
+      const run = this.state.runs.find(r => r.runId === wire.run_id);
+      if (!run) throw new Error("Assignment without delegation");
+      out.assignment = AgentAssignmentSchema.parse({ schemaVersion: 2, assignmentId: `assignment-${digest(wire.message_id)}`,
+        runId: run.runId, taskId: out.taskId, delegationId: run.delegation.delegationId, role: pane.role,
+        agentId: pane.agentId, paneId: pane.paneId, leaseId: out.lease.leaseId, fencingToken: out.lease.fencingToken,
+        requiredCapabilities: out.capabilities, assignedBy: "coordinator", assignedAt: out.message.occurred_at ?? this.now(),
+        status: "assigned", ...(pane.worktreePath ? { worktreePath: pane.worktreePath } : {}), idempotencyKey: wire.idempotency_key });
+      wire = RoleMessageSchema.parse({ ...wire, recipient: { role: pane.role, agent_id: pane.agentId, pane_id: pane.paneId },
+        payload: { assignment: out.assignment, context: wire.payload } });
+    }
+    if (out.request && (digest(out.request.target) !== digest(target) || digest(out.request.context) !== digest(json(wire)))) {
+      out.error = "Pinned request or recipient changed; explicit reconciliation required"; await this.save(); return;
+    }
+    out.request ??= AgentRequestSchema.parse({ requestId: `request-${digest(wire.message_id)}`, attemptId: out.attemptId,
+      runId: wire.run_id, taskId: out.taskId, role: pane.role, target, instruction: JSON.stringify(wire),
+      workingDirectory: pane.cwd, inputs: wire.artifact_references, context: json(wire), attempt: 1,
+      retry: { maxAttempts: 1, strategy: "fixed", initialDelayMs: 0, maxDelayMs: 0, jitter: false },
+      timeout: { executionTimeoutMs: 300_000, onTimeout: "block" },
+      idempotency: { key: wire.idempotency_key, scope: "agent-request", fingerprint: digest(wire) },
+      createdAt: this.now(), metadata: { leaseId: out.lease.leaseId, fencingToken: out.lease.fencingToken } });
+    if (wire.type === "delegation.request" && wire.recipient.role === "coordinator")
+      out.coordinatorResponseBaseline ??= this.state.outbound.length;
+    out.status = "sending";
+    await this.save(); // write-ahead intent; a crash/lost acknowledgement forbids resend
+    if (out.parentAssignmentId) {
+      try {
+        const current = unwrap(await this.ports.panes.getRoleBinding(out.selector));
+        if (!current) throw new Error("Task notice recipient disappeared");
+        const currentPane = PaneBindingSchema.parse(current), currentHealth = unwrap(await this.ports.panes.inspectRoleHealth(out.selector));
+        if (!currentHealth.readyForPrompt || !currentHealth.occupantMatches || currentHealth.paneId !== currentPane.paneId || currentHealth.agentId !== currentPane.agentId)
+          throw new Error("Task notice recipient is no longer ready");
+        await this.validateNotice(out, currentPane); await this.renew(out);
+      } catch (error) { out.status = "queued"; out.error = String(error); await this.save(); return; }
+    }
+    try {
+      const value = unwrap(await this.ports.transport.send(out.request));
+      const receipt = AgentSubmissionReceiptSchema.parse(value);
+      if (receipt.requestId !== out.request.requestId || receipt.attemptId !== out.attemptId || receipt.runId !== out.request.runId || receipt.taskId !== out.taskId)
+        throw new Error("Transport receipt ownership mismatch");
+      if (receipt.status === "accepted") {
+        if (digest(receipt.handle.target) !== digest(out.request.target) || receipt.handle.idempotencyKey !== out.request.idempotency.key)
+          throw new Error("Transport binding mismatch");
+        out.handle = receipt.handle; out.status = "accepted"; delete out.error; delete out.deliveryAttempts;
+        await this.save();
+        if (!out.parentAssignmentId) await onBound(out, receipt.handle);
+      } else if (receipt.status === "unknown_delivery") {
+        out.status = "unknown_delivery"; out.error = receipt.reason; await this.save();
+      } else {
+        // A proven rejection permits a later delivery, while other panes remain independently drainable.
+        out.status = "queued"; out.error = receipt.reason; await this.save();
+      }
+    } catch (error) {
+      out.status = "unknown_delivery"; out.error = String(error); await this.save();
+    }
   }
   async reconcile(messageId: string, onBound: (out: Outbound, handle: AgentExecutionHandle) => Promise<void>): Promise<void> {
     const out = this.state.outbound.find(item => item.message.message_id === messageId);
