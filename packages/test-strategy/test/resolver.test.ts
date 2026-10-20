@@ -175,10 +175,14 @@ describe("risk-based conditional TDD", () => {
     logic.affectedPaths = ["packages/example/test/logic.test.ts", "packages/example/src/logic.ts"];
     expect(resolver.resolve(logic).tddDecision.mode).toBe("required");
   });
-  it("domain logic touching only test files keeps required TDD, because the contract forbids not_applicable without override", () => {
+  it("domain logic touching only test files is recommended, not required, because the contract forbids not_applicable without override", () => {
     const s = spec(assessment("domain_logic"));
     s.affectedPaths = ["packages/example/test/logic.test.ts"];
-    expect(resolver.resolve(s).tddDecision.mode).toBe("required");
+    const strategy = resolver.resolve(s);
+    expect(strategy.tddDecision.mode).toBe("recommended");
+    expect(strategy.tddDecision.requiresFailingTestFirst).toBe(false);
+    expect(strategy.metadata.conditionalTdd.evidenceRequirements.join(" ")).toMatch(/tests pass on current code/i);
+    expect(resolver.validate(strategy)).toEqual(strategy);
   });
   it("a test-only bugfix still requires a failing reproduction first", () => {
     const s = spec(assessment("bugfix"));

@@ -79,7 +79,9 @@ change remain mandatory without manufacturing a failing-test-first target.
 Characterization work whose affected paths are only test files (`*.test.*`, `*.spec.*`,
 `test/`, `tests/`, `__tests__/`, `__fixtures__/`), with no logic, bugfix or regression
 surface, resolves to `not_applicable` and requires a successful record that the tests
-pass on the current code. Any production path keeps the normal policy.
+pass on the current code. Domain-logic characterization (still test files only, no regression)
+resolves to `recommended` with the same evidence, so no impossible Red phase blocks it.
+A regression reproduction keeps `required`, and any production path keeps the normal policy.
 Domain logic and bug fixes never resolve to `not_applicable` (the contract also rejects it
 without `humanOverrideApproved`); this resolver does
 not manufacture or honor an unverified human-override boolean. High risk adds
