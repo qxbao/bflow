@@ -1186,6 +1186,7 @@ export function availableTools(role: AgentRole) {
   const draft = strictObject({ title: string, objective: string, kind: { type: "string", enum: ["feature", "bugfix", "refactor", "spike"] },
     sddLevel: { type: "string", enum: ["lightweight", "full"] }, priority: { type: "string", enum: ["low", "normal", "high", "critical"] },
     scopeDefined: { type: "boolean" }, isLargeTask: { type: "boolean" }, affectedPaths: array, acceptanceCriteriaDescriptions: array,
+    verificationMethods: { type: "array", items: { type: "string", enum: ["unit_test", "integration_test", "e2e_test", "typecheck", "lint", "static_analysis", "manual_review"] } },
     isRequirementChange: { type: "boolean" }, codeChangesAuthorized: { type: "boolean" }, ...targets,
     investigationTasks: { type: "array", items: strictObject({ objective: string, affectedPaths: array,
       codeChangesAuthorized: { type: "boolean", const: false } }, ["objective", "affectedPaths", "codeChangesAuthorized"]) }

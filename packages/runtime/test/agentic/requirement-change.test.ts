@@ -228,6 +228,20 @@ describe("requirement change: superseded design approvals cannot be decided", ()
     await expect(f.runtime.queueHerdr(decision)).rejects.toThrow("Approval superseded by requirement revision 2");
     await expect(f.runtime.receiveHerdr(decision)).rejects.toThrow("Approval superseded by requirement revision 2");
   });
+  it("gives the re-planned revision a new approval id and no repeated spec evidence", async () => {
+    const f = await fixture({ humanApproval: true });
+    await admit(f, f.handoff(f.request(1, "Rev1 criterion")));
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    const first = (await f.run()).approval;
+    await admit(f, f.handoff(f.request(2, "Rev2 criterion")));
+    const rev2Spec = { ...f.spec, acceptanceCriteria: f.spec.acceptanceCriteria.map(criterion => ({ ...criterion, description: "Rev2 criterion" })) };
+    await f.runtime.proposeWorkflow("run-1", rev2Spec, f.def);
+    const second = (await f.run()).approval;
+    expect(second.approvalId).not.toBe(first.approvalId);
+    expect(second.idempotencyKey).not.toBe(first.idempotencyKey);
+    // Every task covers all of the workflow's criteria here, so a per-task spec would only repeat the workflow spec.
+    expect(second.evidence).toHaveLength(1);
+  });
 });
 
 describe("requirement change: obsolete work is withdrawn, never recalled", () => {

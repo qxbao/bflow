@@ -794,12 +794,19 @@ export class AgenticWorkflowRuntime {
       }
       run.definition = definition; run.workflowSpec = workflowSpec; run.tasks = tasks; run.maxIterations = maxIterations;
       run.baseRevision = textField((await this.ports.policies.git.inspect()).head);
-      run.approval = ApprovalRequestSchema.parse({ schemaVersion: 2, approvalId: `design-${digest([runId, definition])}`,
+      // A requirement revision gets its own approval even when it plans the same tasks: the superseded id must never come back.
+      // Revision 1 keeps the historical id/key so existing journals and decisions still match.
+      const requirement = revisionOf(run.delegation), revisionKey = requirement > 1 ? `:r${requirement}` : "";
+      const workflowCriteria = digest(workflowSpec.specification.acceptanceCriteria.map(c => c.id));
+      run.approval = ApprovalRequestSchema.parse({ schemaVersion: 2,
+        approvalId: requirement > 1 ? `design-${digest([runId, definition, requirement])}` : `design-${digest([runId, definition])}`,
         runId, sessionId: run.delegation.sessionId, target: { type: "run" }, revision: draft.version ?? 1,
         generation: 0, status: "pending", requestedBy: "coordinator", requestedAt: this.now(),
         reason: classification.humanApprovalRequired ? "Human design approval required before implementation" : "Specification acceptance",
-        evidence: [workflowSpec.specification.artifactRef!, ...tasks.map(task => task.spec.specification.artifactRef!)],
-        idempotencyKey: `design:${runId}`, metadata: { bundleFingerprint: digest([definition, workflowSpec, tasks]) } });
+        // A task spec covering exactly the workflow's criteria repeats the workflow spec, so only narrower task specs are listed.
+        evidence: [workflowSpec.specification.artifactRef!, ...tasks.filter(task => digest(task.spec.specification.acceptanceCriteria.map(c => c.id)) !== workflowCriteria)
+          .map(task => task.spec.specification.artifactRef!)],
+        idempotencyKey: `design:${runId}${revisionKey}`, metadata: { bundleFingerprint: digest([definition, workflowSpec, tasks]) } });
       run.approvalKind = "design"; run.status = "awaiting_approval";
       await save();
       await this.settleDesignApproval(state, save, core, outbox, run, this.designNeedsHuman(draft, definition));

@@ -35,7 +35,11 @@ export async function createAgenticConversationHost(options: {
   const runtime = options.runtime;
   const enqueue = async (message: RoleMessage): Promise<OperationResult<void>> => {
     try { await runtime.queueHerdr(message); return { ok: true, value: undefined }; }
-    catch (error) { return { ok: false, error: { code: "corruption", retryable: false, message: String(error) } }; }
+    catch (error) {
+      // Runtime refusing a request is a decision about its content, not damaged data; the user already has its notice.
+      const refused = error instanceof Error && error.name === "AdmissionRejectedError";
+      return { ok: false, error: { code: refused ? "validation" : "corruption", retryable: false, message: String(error) } };
+    }
   };
   const enqueueDecision = async (input: unknown): Promise<OperationResult<void>> => {
     const decision = ApprovalDecisionSchema.parse(input);
