@@ -29,7 +29,7 @@ interface RunnerCase {
 async function repository(files: Record<string, string>) {
   const cwd = await realpath(await mkdtemp(join(tmpdir(), "bflow-polyglot-measure-")));
   roots.push(cwd);
-  for (const [path, content] of Object.entries({ ".gitignore": "node_modules/\n.venv/\nvenv/\ntarget/\nbuild/\n__pycache__/\n.pytest_cache/\n", ...files })) {
+  for (const [path, content] of Object.entries({ ".gitignore": "node_modules/\n.venv/\nvenv/\ntarget/\nbuild/\n.gradle/\nbin/\nobj/\n__pycache__/\n.pytest_cache/\n", ...files })) {
     await mkdir(dirname(join(cwd, path)), { recursive: true }); await writeFile(join(cwd, path), content);
   }
   const git = (...args: string[]) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false", ...args], { cwd, encoding: "utf8" }).trim();
@@ -87,6 +87,49 @@ const cases: RunnerCase[] = [
       "src/test/java/example/BehaviorTest.java": 'package example; import org.junit.Test; import static org.junit.Assert.*; public class BehaviorTest { @Test public void target() { assertEquals(4,Value.value()); } @Test public void unmapped() { fail("must not execute"); } }'
     }, names: ["example.BehaviorTest.target"], paths: ["src/test/java/example/BehaviorTest.java"] })
   }
+
+  ,{
+    id: "Gradle JUnit", select: profile => profile.adapter?.adapterId === "gradle",
+    fixture: phase => ({ files: {
+      "settings.gradle": "rootProject.name='bflow-fixture'\n",
+      "build.gradle": "plugins { id 'java' }\nrepositories { mavenCentral() }\ndependencies { testImplementation 'junit:junit:4.13.2' }\n",
+      "src/main/java/example/Value.java": `package example; public class Value { public static int value() { ${phase === "infrastructure error" ? 'throw new IllegalStateException("runtime infrastructure");' : `return ${phase === "pass" ? 4 : 5};`} } }`,
+      "src/test/java/example/BehaviorTest.java": 'package example; import org.junit.Test; import static org.junit.Assert.*; public class BehaviorTest { @Test public void target() { assertEquals(4,Value.value()); } @Test public void unmapped(){ fail("must not execute"); } }'
+    }, names: ["example.BehaviorTest.target"], paths: ["src/test/java/example/BehaviorTest.java"] })
+  },
+  {
+    id: "dotnet TRX", select: profile => profile.adapter?.adapterId === "dotnet",
+    fixture: phase => ({ files: {
+      "Behavior.csproj": '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0</TargetFramework><IsTestProject>true</IsTestProject></PropertyGroup><ItemGroup><PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1"/><PackageReference Include="xunit" Version="2.9.2"/><PackageReference Include="xunit.runner.visualstudio" Version="2.8.2"/></ItemGroup></Project>',
+      "src/Value.cs": `namespace Fixture; public static class Value { public static int Read() { ${phase === "infrastructure error" ? 'throw new System.InvalidOperationException("runtime infrastructure");' : `return ${phase === "pass" ? 4 : 5};`} } }`,
+      "tests/BehaviorTest.cs": 'namespace Fixture; public class BehaviorTest { [Xunit.Fact] public void Target(){ Xunit.Assert.Equal(4,Value.Read()); } [Xunit.Fact] public void Unmapped(){ Xunit.Assert.True(false); } }'
+    }, names: ["Fixture.BehaviorTest.Target"], paths: ["tests/BehaviorTest.cs"] })
+  },
+  {
+    id: "RSpec JSON", select: profile => profile.adapter?.adapterId === "rspec",
+    fixture: phase => ({ files: {
+      "Gemfile": 'source "https://rubygems.org"\ngem "rspec"\n',
+      "value.rb": `def value; ${phase === "infrastructure error" ? 'raise TypeError, "runtime infrastructure"' : phase === "pass" ? "4" : "5"}; end\n`,
+      "spec/behavior_spec.rb": 'require_relative "../value"\nRSpec.describe "Behavior" do\n  it("target") { expect(value).to eq(4) }\n  it("unmapped") { fail "must not execute" }\nend\n'
+    }, names: ["Behavior target"], paths: ["spec/behavior_spec.rb"] })
+  },
+  {
+    id: "Minitest JUnit", select: profile => profile.adapter?.adapterId === "minitest",
+    fixture: phase => ({ files: {
+      "Gemfile": 'source "https://rubygems.org"\ngem "minitest"\n',
+      "value.rb": `def value; ${phase === "infrastructure error" ? 'raise TypeError, "runtime infrastructure"' : phase === "pass" ? "4" : "5"}; end\n`,
+      "test/behavior_test.rb": 'require "minitest/autorun"\nrequire_relative "../value"\nclass BehaviorTest < Minitest::Test\n  def test_target; assert_equal 4,value; end\n  def test_unmapped; flunk "must not execute"; end\nend\n'
+    }, names: ["BehaviorTest.test_target"], paths: ["test/behavior_test.rb"] })
+  },
+  {
+    id: "PHPUnit JUnit", select: profile => profile.adapter?.adapterId === "phpunit",
+    fixture: phase => ({ files: {
+      "composer.json": '{"require-dev":{"phpunit/phpunit":"*"}}',
+      "value.php": `<?php namespace Fixture; function value() { ${phase === "infrastructure error" ? 'throw new \\TypeError("runtime infrastructure");' : `return ${phase === "pass" ? 4 : 5};`} }`,
+      "tests/BehaviorTest.php": '<?php namespace Fixture; require __DIR__."/../value.php"; final class BehaviorTest extends \\PHPUnit\\Framework\\TestCase { public function testTarget(): void { $this->assertSame(4,value()); } public function testUnmapped(): void { $this->fail("must not execute"); } }'
+    }, names: ["Fixture\\BehaviorTest.testTarget"], paths: ["tests/BehaviorTest.php"] })
+  }
+
 ];
 
 for (const candidate of cases) describe(`production independent measurement: ${candidate.id}`, () => {

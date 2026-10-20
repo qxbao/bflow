@@ -92,7 +92,7 @@ export class HostDevelopment {
     }));
     if (!selected.commands.length) throw new Error("No automated checks for this task: configure an owner command or make the accepted criteria and test files resolvable");
     const measurements = [];
-    for (const command of selected.commands) measurements.push(await measureBehavior({ ...command, originalRevision: selected.originalRevision }, context.cwd, selected.head));
+    for (const command of selected.commands) measurements.push(await measureBehavior(command.checkoutDependencyRoots === undefined ? command : { ...command, originalRevision: selected.originalRevision }, context.cwd, selected.head));
     return json({ independentAcceptanceEvidence: false, sourceRevision: selected.head, measurements });
   }
   async commit(binding: PaneBinding, input: unknown) {

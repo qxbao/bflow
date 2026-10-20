@@ -66,7 +66,7 @@ export class HostVerification {
     return { run, specification: SpecificationSchema.parse(dossier.specification), strategy: TestStrategySchema.parse(dossier.strategy), ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: task && Array.isArray(task.worktrees) ? textField(record(task.worktrees.at(-1)).baseCommitHash) : textField(run.baseRevision) };
   }
   private resolve(input: { specification: Specification; strategy: TestStrategy; ownedPaths?: readonly string[] | undefined; originalRevision?: string }): BoundBehavioralCommand[] {
-    return resolveTaskCommands({ owner: this.runners.owner, profiles: this.runners.profilesForRevision(input.originalRevision), ...input }).map(command => input.originalRevision ? { ...command, originalRevision: input.originalRevision } : command);
+    return resolveTaskCommands({ owner: this.runners.owner, profiles: this.runners.profilesForRevision(input.originalRevision), ...input }).map(command => input.originalRevision && command.checkoutDependencyRoots !== undefined ? { ...command, originalRevision: input.originalRevision } : command);
   }
   async authenticateGate(result: QualityGateResult): Promise<boolean> { return this.receipts ? this.receipts.authenticateGate(result) : this.gateReceipts.get(result.evaluationId) === digest(result); }
   async authenticateEvidence(result: VerificationResult): Promise<boolean> { return this.receipts ? this.receipts.authenticateEvidence(result) : this.evidenceReceipts.get(result.verificationId) === digest(result); }
