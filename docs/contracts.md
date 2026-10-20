@@ -1,10 +1,12 @@
-# Public contracts
+# Hợp đồng giao tiếp công khai (Public Contracts)
 
-Toàn bộ schema công khai, type suy ra, pure validator và port được export từ `@bflow/contracts`. Zod schema là thẩm quyền runtime tại ingress của package. Các exchange object là strict; field không biết sẽ bị từ chối trừ khi một schema version sau này bổ sung tường minh.
+Toàn bộ các schema công khai, kiểu dữ liệu suy diễn, bộ xác thực thuần túy (pure validators) và các giao diện cổng (ports) đều được xuất bản chính thức từ package `@bflow/contracts`. Lược đồ Zod schema đóng vai trò là cơ quan thẩm quyền tối cao tại ranh giới tiếp nhận (ingress) của mỗi package. Các đối tượng trao đổi dữ liệu đều tuân thủ quy tắc nghiêm ngặt (`.strict()`); mọi trường dữ liệu lạ không được khai báo trước sẽ bị từ chối, trừ khi được bổ sung tường minh trong các phiên bản lược đồ kế tiếp.
 
-## Quy ước về lỗi và bất đồng bộ
+---
 
-Các thao tác Promise công khai trả về `OperationResult<T>`:
+## 1. Quy ước về Lỗi và Xử lý Bất đồng bộ
+
+Mọi thao tác bất đồng bộ (Promise) công khai đều trả về kết quả chuẩn hóa theo kiểu `OperationResult<T>`:
 
 ```ts
 type OperationResult<T> =
@@ -12,114 +14,121 @@ type OperationResult<T> =
   | { ok: false; error: ContractError };
 ```
 
-`ContractError` là discriminated theo `code`. Các lỗi validation, cancellation, unknown delivery, corruption, unsupported version và not-found là không thể retry theo như nhận được. Các lỗi conflict, timeout và transport-unavailable chỉ có thể retry sau khi thỏa điều kiện tiên quyết được tài liệu hóa (ví dụ, reload sau conflict). Một `timeout` khai báo rằng thao tác chưa bắt đầu hoặc chỉ là observation. Một lần gửi có thể đã vượt qua ranh giới transport thì thay vào đó là `unknown_delivery`, luôn có `retryable: false`, và cần reconciliation/xử lý thủ công; caller không được diễn giải lại nó thành một timeout retry được thông thường.
+Kiểu dữ liệu `ContractError` được phân biệt theo trường mã lỗi `code`:
+- **Lỗi không thể thử lại ngay (Non-retryable)**: Các lỗi thẩm định (`validation`), yêu cầu hủy (`cancellation`), truyền tin bất định (`unknown_delivery`), hỏng dữ liệu (`corruption`), phiên bản không hỗ trợ (`unsupported_version`) và không tìm thấy thực thể (`not_found`).
+- **Lỗi có thể thử lại có điều kiện (Retryable with preconditions)**: Các lỗi xung đột dữ liệu (`conflict`), quá thời gian chờ (`timeout`) và tầng truyền tải không khả dụng (`transport_unavailable`) chỉ được phép thử lại sau khi đã thỏa mãn các điều kiện tiên quyết (ví dụ: tải lại trạng thái mới nhất sau khi gặp xung đột).
+- **Lỗi truyền tin bất định (`unknown_delivery`)**: Khi một yêu cầu đã vượt qua ranh giới tầng truyền tải nhưng không thể xác nhận phản hồi, hệ thống trả về `unknown_delivery` với cờ `retryable: false`, bắt buộc phải qua đối soát (reconciliation) hoặc xử lý thủ công; bên gọi tuyệt đối không được tự ý diễn giải thành lỗi timeout thông thường để gửi lại.
 
-Các async stream (`read`, artifact `get` và runtime `watch`) yield `OperationResult<T>` để các lỗi ở cấp item vẫn có kiểu. Một triển khai vẫn có thể bị JavaScript runtime làm gián đoạn, nhưng phải chuyển các lỗi domain/hạ tầng dự kiến thành `ContractError`.
+Các luồng dữ liệu bất đồng bộ (async stream: `read`, `get` của artifact và `watch` của runtime) đều phát ra `OperationResult<T>` nhằm đảm bảo lỗi ở từng phần tử đều mang kiểu dữ liệu rõ ràng.
 
-`OperationOptions` cung cấp `AbortSignal` hợp tác, timeout tương đối và deadline tuyệt đối. Việc hủy chờ cục bộ không chứng minh việc hủy một remote execution.
+Đối tượng `OperationOptions` cung cấp tín hiệu hủy hợp tác `AbortSignal`, thời gian chờ tương đối và hạn chót tuyệt đối (deadline). Việc hủy chờ ở client cục bộ không đồng nghĩa với việc tác vụ thực thi từ xa đã dừng lại.
 
-## Dữ liệu cốt lõi và bất biến
+---
 
-| Contract | Được bảo đảm bởi schema/pure validator |
-| --- | --- |
-| `WorkflowDefinition` | Task/gate ID duy nhất, gate binding và dependency endpoint hợp lệ, không có dependency trùng, không có chu trình DAG, concurrency dương có giới hạn |
-| `TaskDefinition` | Role/instruction, retry/rework/timeout, cờ approval, quality-gate binding tường minh |
-| `AgentRequest` | Request và attempt identity, target locator, số attempt, thời gian, retry/timeout, idempotency của agent-request |
-| `AgentExecutionHandle` | Execution/request/attempt identity bền vững, target locator, nguồn gốc correlation, recovery cursor tùy chọn |
-| `AgentResult` | Business outcome tách biệt khỏi transport state; correlation đã xác minh cho mọi outcome conclusive; lỗi/blockage theo từng status và thứ tự timestamp |
-| `ArtifactProposal` | Metadata không đáng tin với logical name an toàn và checksum/size kỳ vọng |
-| `ArtifactReference` | Marker stored đáng tin, ID opaque an toàn, URI `artifact://store/id` có ràng buộc, mã hóa SHA-256/SHA-512 chính xác |
-| `ApprovalRequest` / `ApprovalDecision` | Target có kiểu bắt buộc, revision/generation, idempotency, evidence/feedback và thời gian/actor audit |
-| `DomainEvent` | Event schema v1 cùng stream/aggregate identity và payload strict có version |
-| `RecoveryCheckpoint` | Checkpoint schema v1 cùng codec snapshot-v1 hoặc aggregate-v1 có tên, vị trí stream/version và state JSON |
+## 2. Dữ liệu cốt lõi và các Bất biến Hệ thống
 
-`validateTaskTransition` và `validateRunTransition` là các quy tắc transition chuẩn tắc. `validateEventBatch` là tiền điều kiện chuẩn tắc cho append nguyên tử. Các Zod command/event schema gọi transition hoặc batch validator tương ứng.
+| Tên Hợp đồng | Cam kết được bảo đảm bởi Schema / Pure Validator |
+| :--- | :--- |
+| **`WorkflowDefinition`** | Định danh tác vụ/cổng kiểm soát là duy nhất; liên kết cổng và điểm mút phụ thuộc hợp lệ; không chứa phụ thuộc trùng lặp; không có chu trình vòng lặp trong đồ thị DAG; giới hạn mức độ đồng thời dương. |
+| **`TaskDefinition`** | Phân định vai trò và câu lệnh chỉ dẫn rõ ràng; quy định cấu hình thử lại, sửa đổi và thời gian chờ; cờ phê duyệt bắt buộc; liên kết cổng kiểm soát chất lượng tường minh. |
+| **`AgentRequest`** | Định danh yêu cầu và lần thử; định vị đối tượng đích; số thứ tự lần thử; mốc thời gian; cấu hình retry/timeout và khóa lũy thừa của yêu cầu. |
+| **`AgentExecutionHandle`** | Định danh thực thi/yêu cầu/lần thử bền vững; định vị đối tượng đích; nguồn gốc tương quan và con trỏ phục hồi tùy chọn. |
+| **`AgentResult`** | Kết quả nghiệp vụ tách biệt hoàn toàn khỏi trạng thái tầng truyền tải; tương quan đã xác thực cho mọi kết quả kết luận; phân loại lỗi/tắc nghẽn theo từng trạng thái và thứ tự thời gian. |
+| **`ArtifactProposal`** | Siêu dữ liệu ban đầu chưa được xác thực, chứa tên logic an toàn và kích thước/mã băm mong đợi. |
+| **`ArtifactReference`** | Đánh dấu artifact đã lưu trữ tin cậy với ID an toàn, định dạng URI ràng buộc `artifact://store/id`, xác thực toàn vẹn bằng SHA-256 hoặc SHA-512. |
+| **`ApprovalRequest` / `ApprovalDecision`** | Đối tượng mục tiêu mang kiểu cụ thể; phiên bản sửa đổi/thế hệ tác vụ; khóa lũy thừa; bằng chứng/phản hồi đi kèm và thông tin kiểm toán người thực hiện. |
+| **`DomainEvent`** | Lược đồ sự kiện phiên bản 1; định danh luồng/tổng hợp và tải trọng dữ liệu nghiêm ngặt có phiên bản. |
+| **`RecoveryCheckpoint`** | Lược đồ điểm kiểm tra phiên bản 1 đi kèm codec định danh (`snapshot-v1` hoặc `aggregate-v1`), vị trí luồng/phiên bản và trạng thái JSON. |
 
-## `AgentTransport`
+Hai hàm kiểm tra `validateTaskTransition` và `validateRunTransition` là các quy tắc chuẩn tắc kiểm soát sự chuyển trạng thái. Hàm `validateEventBatch` là điều kiện tiên quyết bắt buộc trước khi ghi nhận sự kiện nguyên tử vào cơ sở dữ liệu.
 
-- `initialize` trả về các transport capability đã xác minh, bao gồm việc submission correlation có sẵn hay không.
-- `send` trả về `AgentSubmissionReceipt`, không phải task result. `accepted` có handle; `rejected` chứng minh không có submission nào được chấp nhận; `unknown_delivery` cấm resend.
-- `reconcile` dùng request ID, attempt ID, idempotency key và target locator. Nó trả về `bound`, `not_delivered` (outcome mơ hồ duy nhất an toàn để retry), hoặc `unknown_delivery` yêu cầu can thiệp thủ công.
-- `read` stream các transport message/proposal theo execution handle và cursor.
-- `wait` trả về `AgentTransportObservation`. Các state như `done` và `blocked` là sự kiện transport và không hàm ý task outcome `succeeded` hay failed.
-- `cancel` yêu cầu hủy từ xa và trả về chấp nhận/từ chối; nó không bao giờ xác nhận execution đã dừng.
+---
 
-Thứ tự bền vững là dispatch intent -> send -> persist `agent.execution_bound` trước khi dựa vào handle. Nếu process lỗi giữa send và binding, recovery dùng request identity/target đã persist để reconcile. Một transport không thể correlate prompt phải dùng orchestrator token được đánh dấu unverified và không được tạo ra task success đã xác minh.
+## 3. Giao diện Tầng truyền tải `AgentTransport`
 
-## `WorkflowEngine`
+- **`initialize`**: Trả về danh mục năng lực đã xác thực của tầng truyền tải, bao gồm khả năng hỗ trợ đối soát tương quan hay không.
+- **`send`**: Trả về biên nhận gửi `AgentSubmissionReceipt`, tuyệt đối không phải là kết quả tác vụ. Trạng thái `accepted` cấp phát handle thực thi; `rejected` chứng minh yêu cầu không được chấp nhận; `unknown_delivery` nghiêm cấm việc tự động gửi lại.
+- **`reconcile`**: Sử dụng ID yêu cầu, ID lần thử, khóa lũy thừa và định vị đích để đối soát. Trả về `bound`, `not_delivered` (kết quả mơ hồ duy nhất an toàn để gửi lại), hoặc `unknown_delivery` đòi hỏi can thiệp thủ công.
+- **`read`**: Phát luồng các thông điệp và đề xuất artifact theo handle thực thi và con trỏ vị trí.
+- **`wait`**: Trả về dữ liệu quan sát tầng truyền tải `AgentTransportObservation`. Các trạng thái như `done` hay `blocked` chỉ phản ánh sự kiện truyền tải, không đại diện cho kết quả tác vụ thành công hay thất bại.
+- **`cancel`**: Gửi yêu cầu hủy từ xa và ghi nhận phản hồi chấp nhận hoặc từ chối; không xác nhận việc tiến trình đã dừng hẳn.
 
-Engine validate definition; tạo/advance/dựng lại snapshot; validate các task transition tường minh; bind execution handle; ghi lại delivery reconciliation và agent result đã xác minh; yêu cầu/áp dụng approval và quality evaluation; và ghi lại cancellation acceptance/confirmation. Mọi mutating command mang expected aggregate version và/hoặc idempotency identity tùy trường hợp.
+Thứ tự đảm bảo tính bền vững: Ghi nhận ý định phân phối (`dispatch intent`) $\to$ Gửi qua tầng truyền tải $\to$ Lưu sự kiện `agent.execution_bound` trước khi sử dụng handle. Nếu tiến trình sập nguồn giữa bước gửi và liên kết, cơ chế khôi phục sẽ dựa vào thông tin đã lưu để tiến hành đối soát.
 
-Engine sở hữu các quyết định nhưng không sở hữu I/O bên ngoài. Caller persist các event phát ra một cách nguyên tử trước khi thực thi các side effect dẫn xuất. `recordAgentResult` từ chối các observation `unverified` tại ranh giới Zod của nó.
+---
 
-Mỗi mutation thành công kết thúc bằng một event `command.completed` chứa receipt có version: command identity, idempotency key, fingerprint SHA-256 của command đã validate, event sequence đầu tiên của command, và các runnable task ID. Receipt không chứa payload command thô. Cùng key với cùng fingerprint trả về result gốc; fingerprint khác thì conflict. `task.retry_scheduled` ghi lại timestamp eligibility xác định. Runtime phải persist toàn bộ event batch trả về trước khi hành động trên các runnable task; Core không hứa hẹn exactly-once execution phân tán.
+## 4. Bộ máy Quy trình `WorkflowEngine`
 
-`createCheckpoint` là thao tác engine chỉ đọc với expected aggregate version. Nó xuất một aggregate checkpoint hoàn chỉnh cho `RunStore.saveCheckpoint`; checkpoint chỉ có snapshot là không đủ cho tail-only recovery.
+Động cơ quy trình thực hiện thẩm định định nghĩa; khởi tạo, tiến bước và tái thiết lập ảnh chụp trạng thái snapshot; kiểm tra tính hợp lệ của các bước chuyển trạng thái tác vụ; liên kết handle thực thi; ghi nhận kết quả đối soát truyền tin và kết quả agent đã xác thực; yêu cầu và áp dụng phê duyệt cùng đánh giá chất lượng; đồng thời ghi nhận xác nhận hủy bỏ. Mọi lệnh làm thay đổi trạng thái đều bắt buộc phải mang phiên bản tổng hợp kỳ vọng và/hoặc khóa lũy thừa tương ứng.
 
-## `RunStore`
+Engine nắm giữ quyền đưa ra các quyết định nhưng không trực tiếp thực hiện thao tác I/O ngoại vi. Bên gọi có trách nhiệm lưu trữ các sự kiện phát ra một cách nguyên tử trước khi thực thi các tác dụng phụ tiếp theo. Lệnh `recordAgentResult` sẽ chủ động từ chối các quan sát chưa được xác thực (`unverified`) ngay tại ranh giới Zod schema.
 
-- `appendEvents` so sánh `expectedVersion` một cách nguyên tử, kiểm tra `expectedLastSequence`, và append batch đã validate.
-- Việc xử lý command trùng lặp phải dựng lại outcome gốc và báo cáo event ID trùng mà không có side effect mới.
-- Hàng event và hàng snapshot/index được duy trì phải chung một SQLite transaction.
-- `saveCheckpoint` là optimistic và chỉ lưu checkpoint hoàn chỉnh có codec version.
-- Compatibility parsing diễn ra trước replay. Các checkpoint không được hỗ trợ/hỏng bị loại bỏ để ưu tiên checkpoint trước đó/full replay theo persistence policy trong tương lai.
+Mỗi thay đổi trạng thái thành công đều kết thúc bằng sự kiện `command.completed` chứa biên nhận có phiên bản: định danh lệnh, khóa lũy thừa, mã băm SHA-256 của lệnh đã thẩm định, số thứ tự sự kiện đầu tiên và danh sách tác vụ đủ điều kiện chạy (`runnable tasks`). Cùng một khóa với cùng mã băm sẽ trả về kết quả ban đầu; nếu mã băm khác biệt sẽ báo lỗi xung đột.
 
-P00 định nghĩa các nghĩa vụ này nhưng không chọn SQLite driver hay migration framework.
+---
 
-## `ArtifactStore`
+## 5. Tầng Lưu trữ Lịch sử `RunStore`
 
-`put` nhận byte cùng integrity kỳ vọng và chỉ trả về reference bất biến đáng tin sau khi xác minh checksum/size và đặt bền vững. Caller không bao giờ được biến artifact ID hay logical name thành đường dẫn filesystem. `get`, `resolve`, `find` và `delete` được lifecycle cho phép hoạt động trên reference đáng tin/ID opaque. Việc sinh URI và canonical path containment vẫn là trách nhiệm của triển khai.
+- **`appendEvents`**: So sánh phiên bản kỳ vọng (`expectedVersion`) một cách nguyên tử, kiểm tra số thứ tự cuối cùng kỳ vọng (`expectedLastSequence`), và ghi nhận lô sự kiện đã qua thẩm định.
+- **Xử lý trùng lặp**: Tái tạo lại kết quả ban đầu và báo cáo ID sự kiện trùng lặp mà không gây ra tác dụng phụ mới.
+- **Tính nguyên tử**: Bản ghi sự kiện và bản ghi chỉ mục/snapshot bắt buộc phải được duy trì trong cùng một giao dịch SQLite duy nhất.
+- **`saveCheckpoint`**: Thực hiện theo cơ chế lạc quan (optimistic) và chỉ lưu trữ các điểm kiểm tra hoàn chỉnh đi kèm phiên bản codec hợp lệ.
+- **Khôi phục trạng thái**: Thẩm định tính tương thích diễn ra trước khi phát lại (replay). Các checkpoint hỏng hoặc không được hỗ trợ sẽ bị loại bỏ để ưu tiên checkpoint hợp lệ trước đó hoặc thực hiện phát lại toàn bộ sự kiện từ đầu.
 
-## `AgentRegistry`
+---
 
-`resolve` chỉ là tra cứu cấu hình. Capacity được giữ chỗ riêng qua `acquireLease`, `renewLease` và `releaseLease` nguyên tử. Các triển khai phải thực thi `maxConcurrentTasks`, expiry, expected lease version, fencing token tăng đơn điệu và idempotency trong cùng một durable transaction. Một fence cũ không bao giờ được dispatch công việc.
+## 6. Kho lưu trữ Tạo phẩm `ArtifactStore`
 
-## `QualityGate`
+Phương thức `put` tiếp nhận luồng dữ liệu byte cùng thông tin toàn vẹn kỳ vọng, chỉ trả về tham chiếu bất biến đáng tin cậy sau khi đã kiểm tra mã băm checksum, kích thước và lưu trữ bền vững xuống đĩa. Bên gọi tuyệt đối không được tự ý chuyển đổi ID artifact hay tên logic thành đường dẫn hệ thống tệp tin trực tiếp. Các thao tác `get`, `resolve`, `find` và `delete` chỉ được phép hoạt động trên các tham chiếu tin cậy và ID an toàn.
 
-Các định nghĩa gate cấp workflow được bind từ task theo ID và phase. `EvaluateQualityGateCommand`/`quality_gate.evaluation_requested` lập lịch một evaluation identity. `RecordQualityGateResultCommand`/`quality_gate.evaluated` trả nó về workflow dưới sự bảo vệ của expected-version và idempotency. Output tạo ra là artifact proposal không đáng tin cho đến khi được lưu. Chỉ workflow engine mới thay đổi task/run state.
+---
 
-## Approval và rework
+## 7. Đăng ký Vai trò và Cấp phát Tài nguyên `AgentRegistry`
 
-`ApprovalTarget` chính xác là một trong run, task hoặc quality gate. `approval.requested` và `approval.decided` là các event bền vững riêng biệt. Decision chỉ áp dụng cho cùng approval ID, target, revision và generation; engine trong tương lai phải từ chối các decision cũ hoặc trùng lặp một cách idempotent. `changes_requested` điều khiển rework transition tường minh (`succeeded -> ready`, generation +1), không bao giờ là transition trực tiếp từ terminal sang running.
+Thao tác `resolve` đơn thuần là tra cứu cấu hình vai trò. Năng lực thực thi (capacity) được quản lý và bảo lưu thông qua các phương thức nguyên tử: `acquireLease`, `renewLease` và `releaseLease`. Bản hiện thực bắt buộc phải thực thi giới hạn số tác vụ đồng thời (`maxConcurrentTasks`), thời hạn hết hạn, phiên bản lease kỳ vọng, token hàng rào (`fencing token`) tăng đơn điệu và khóa lũy thừa trong cùng một giao dịch bền vững. Một fencing token cũ không bao giờ được phép phân phối công việc mới.
 
-`ReworkPolicy.maxReworks` đếm các transition từ generation N sang N+1; generation zero là công việc gốc, không phải rework. `maxAttempts` của retry áp dụng riêng trong từng generation, dù `TaskState.attempt` công khai vẫn là attempt identity tăng đơn điệu toàn run. Khi cạn, `fail` làm run terminal failed trong khi `require_human` chặn run mà không tăng generation; một approval sau này có revision cao hơn có thể gỡ chặn. Các definition cũ không có `rework` vẫn hợp lệ theo schema và được Core xử lý như `{ maxReworks: 0, onExhausted: "fail" }`, nên definition cũ không được rework không giới hạn.
+---
 
-## Cancellation
+## 8. Cổng Kiểm soát Chất lượng `QualityGate`
 
-Cancellation có ba giai đoạn bền vững:
+Các cổng chất lượng ở cấp quy trình được liên kết từ tác vụ theo định danh và giai đoạn. Lệnh `EvaluateQualityGateCommand` (sự kiện `quality_gate.evaluation_requested`) lập lịch định danh đánh giá. Lệnh `RecordQualityGateResultCommand` (sự kiện `quality_gate.evaluated`) trả kết quả về quy trình dưới sự bảo vệ của phiên bản kỳ vọng và tính lũy thừa. Đầu ra ban đầu là đề xuất artifact chưa được xác thực cho đến khi được lưu trữ chính thức. Chỉ có Workflow Engine mới có quyền thay đổi trạng thái tác vụ hoặc lượt chạy.
 
-1. `CancellationRequest` / `cancellation.requested` có version ghi lại intent;
-2. `CancellationResult` / event accepted hoặc refused ghi lại phản hồi của transport;
-3. `CancellationStopConfirmation` / `cancellation.stop_confirmed` ghi lại việc dừng terminal đã quan sát.
+---
 
-Chỉ acceptance thì state vẫn là `cancelling`. Nếu success/failure được quan sát trước, transition hợp lệ cho phép completion thắng; cancellation acknowledgement đến muộn được giữ lại để audit nhưng không được ghi đè terminal outcome.
+## 9. Phê duyệt (Approval) và Sửa đổi (Rework)
 
-Một cancellation toàn run có thể bao phủ nhiều execution đã bind. Mỗi `cancellation.stop_confirmed` xác định một execution đã dừng; aggregate checkpoint giữ các confirmation riêng biệt cho cùng cancellation ID. Xác nhận một execution không bao giờ chứng minh các execution khác đã dừng.
+Đối tượng mục tiêu của phê duyệt (`ApprovalTarget`) bắt buộc phải thuộc một trong ba loại: lượt chạy (`run`), tác vụ (`task`) hoặc cổng chất lượng (`quality gate`). Sự kiện yêu cầu phê duyệt (`approval.requested`) và quyết định phê duyệt (`approval.decided`) là các bản ghi độc lập. Quyết định phê duyệt chỉ áp dụng cho đúng ID phê duyệt, đối tượng, phiên bản sửa đổi và thế hệ tác vụ tương ứng. 
 
-## Tương thích event/checkpoint
+Quyết định yêu cầu sửa đổi (`changes_requested`) điều khiển việc chuyển đổi trạng thái sửa đổi một cách tường minh (`succeeded → ready` với thế hệ `generation + 1`), tuyệt đối không bao giờ cho phép chuyển trực tiếp từ trạng thái kết thúc sang trạng thái đang chạy (`running`). Số lần sửa đổi tối đa `maxReworks` đếm số lần chuyển thế hệ; thế hệ ban đầu (generation 0) là công việc gốc chứ không tính là sửa đổi.
 
-Event và checkpoint schema version hiện tại là `1`. Định dạng P00 gốc được gọi là legacy v0 vì nó thiếu các field này. `parseDomainEventWithCompatibility` và `parseRecoveryCheckpointWithCompatibility`:
+---
 
-1. phát hiện version tường minh, coi version thiếu là v0;
-2. upcast metadata envelope/codec v0 đã biết mà không thay đổi domain payload;
-3. validate schema strict hiện tại;
-4. trả về `unsupported_version` cho các version số không biết và `validation` cho dữ liệu sai định dạng.
+## 10. Cơ chế Hủy bỏ Bất đồng bộ (Cancellation)
 
-Sau khi parse envelope, `decodeWorkflowRunCheckpointState` validate JSON của checkpoint theo schema `WorkflowRunSnapshot` của codec và trả về `corruption` nếu không khớp. Recovery không được tin field JSON opaque nếu thiếu bước codec dispatch này.
+Quy trình hủy bỏ bao gồm ba giai đoạn bền vững:
+1. `CancellationRequest` (sự kiện `cancellation.requested`): Ghi nhận ý định hủy bỏ của người dùng.
+2. `CancellationResult`: Ghi nhận phản hồi chấp nhận hoặc từ chối từ tầng truyền tải.
+3. `CancellationStopConfirmation` (sự kiện `cancellation.stop_confirmed`): Xác nhận tiến trình thực thi đã thực sự dừng hoàn toàn.
 
-P01 thêm codec `bflow.workflow-aggregate+json`, được giải mã bởi `decodeWorkflowAggregateCheckpointState`. Nó chứa snapshot, trạng thái approval/gate/cancellation, các attempt thành công, retry schedule và attempt baseline, cùng các command receipt/result gốc. Tail-only replay yêu cầu codec này. Một legacy snapshot checkpoint chỉ có thể bị bỏ qua khi có các event từ `run.created` trở đi để full replay. Các lịch sử event có trước `command.completed` không thể dựng lại an toàn idempotency command chính xác và phải được migrate từ các command receipt có thẩm quyền hoặc bị từ chối; không có identity nào bị bịa ra. Checkpoint không được hỗ trợ hoặc hỏng sẽ fail closed trong Core.
+Chỉ khi nhận được sự chấp nhận hủy, trạng thái của quy trình mới chuyển sang `cancelling`. Nếu kết quả thành công hoặc thất bại của tác vụ được ghi nhận trước, chuyển trạng thái hoàn tất sẽ thắng; tín hiệu xác nhận hủy đến muộn sẽ được bảo lưu phục vụ kiểm toán chứ không ghi đè kết quả kết thúc. Xác nhận dừng của một tác vụ không chứng minh các tác vụ khác đã dừng hẳn.
 
-Không hỗ trợ downcasting. Một thay đổi schema trong tương lai phải bổ sung upcaster tường minh và fixture trước khi producer phát ra nó. Aggregate version và event sequence không bao giờ được dùng làm schema version.
+---
 
-Helper v0 chỉ cung cấp metadata version/codec khi domain payload vốn đã tương thích. Các event kind baseline có payload bắt buộc đã thay đổi (ví dụ chi tiết execution/result/approval) cố ý fail ở validation hiện tại thay vì bịa identity hay bằng chứng tin cậy. Nếu tồn tại dữ liệu prototype như vậy, persistence phase phải cung cấp migration từng event tường minh hoặc replay từ nguồn có thẩm quyền; P00 không lặng lẽ bịa ra các sự thật còn thiếu.
+## 11. Tính tương thích của Sự kiện và Điểm kiểm tra
 
-## `RuntimeService`
+Phiên bản lược đồ của sự kiện và checkpoint hiện tại là `1`. Khi phân tích cú pháp:
+1. Phát hiện phiên bản tường minh; các dữ liệu thiếu trường này được coi là phiên bản kế thừa v0.
+2. Nâng cấp siêu dữ liệu (upcast) cho các định dạng v0 đã biết mà không làm biến đổi tải trọng dữ liệu nghiệp vụ.
+3. Thẩm định nghiêm ngặt theo lược đồ schema hiện hành.
+4. Trả về mã lỗi `unsupported_version` nếu gặp phiên bản số không được hỗ trợ và `validation` nếu dữ liệu sai lệch định dạng.
 
-Đây là ranh giới use-case hướng CLI. Các thao tác và event stream của nó dùng cùng quy ước lỗi có kiểu. Runtime sẽ compose store, engine, transport, registry, gate và artifact trong khi giữ nguyên thứ tự ở trên. Code CLI không được chạm tới concrete adapter.
+Codec `bflow.workflow-aggregate+json` chứa toàn bộ ảnh chụp snapshot, trạng thái phê duyệt/cổng/hủy, lịch sử các lần thử thành công, lịch lập trình thử lại, cùng toàn bộ biên nhận và kết quả lệnh ban đầu. Quá trình phát lại phần đuôi (tail-only replay) bắt buộc phải sử dụng codec này. Hệ thống tuyệt đối không hỗ trợ hạ cấp phiên bản (downcasting).
 
-## Chính sách tương thích
+---
 
-Bản hardening này cố ý phá vỡ bootstrap `8d960d0` ban đầu trước khi việc triển khai downstream bắt đầu. Chi tiết migration nằm trong `docs/adr/0001-p00-contract-hardening.md`. Sau khi branch này được chấp nhận làm baseline P00, các thay đổi về field bắt buộc, method signature, ngữ nghĩa event hoặc idempotency cần có quyết định tích hợp, kế hoạch migration/upcast và sự chấp thuận của owner bị ảnh hưởng.
+## 12. Dịch vụ Điều phối `RuntimeService`
+
+Đây là ranh giới cung cấp các ca sử dụng hướng tới giao diện dòng lệnh (CLI). Mọi thao tác và luồng sự kiện của Runtime đều tuân thủ cùng quy ước xử lý lỗi có kiểu chuẩn xác. Runtime chịu trách nhiệm tổ hợp tầng lưu trữ, động cơ quy trình, tầng truyền tải, registry quản lý vai trò, cổng chất lượng và kho artifact. Mã nguồn của ứng dụng CLI tuyệt đối không được can thiệp trực tiếp vào các bộ điều hợp cụ thể.
 
 ## Contracts v2 (nâng cấp Agentic SDLC P11)
 

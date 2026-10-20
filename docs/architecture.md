@@ -1,14 +1,17 @@
-# Kiến trúc
+# Kiến trúc Hệ thống (Architecture)
 
-## Phạm vi
+## 1. Phạm vi kiến trúc
 
-> Ghi chú (2026-10-17): tài liệu này là phạm vi và sơ đồ baseline P00. Các module P01–P10 đã được triển khai; sơ đồ phụ thuộc dưới đây không liệt kê các package về sau (pane-manager, conversation, specification, test-strategy, verification, git-orchestrator, agent-providers, machine-setup, tool-installer, mcp-gateway, mcp-services, skills). Xem [architecture v2](architecture-v2.md) và [runtime architecture v3](runtime-architecture-v3.md); câu "does not implement ..." bên dưới chỉ mô tả P00.
+> [!NOTE]
+> *(Cập nhật ngày 17/10/2026)*: Tài liệu này mô tả phạm vi kiến trúc và sơ đồ phụ thuộc thuộc giai đoạn nền tảng P00. Các phân hệ từ P01–P10 đã được triển khai đầy đủ; sơ đồ phụ thuộc dưới đây chưa bao gồm các package mở rộng phát triển sau đó (như `pane-manager`, `conversation`, `specification`, `test-strategy`, `verification`, `git-orchestrator`, `agent-providers`, `machine-setup`, `tool-installer`, `mcp-gateway`, `mcp-services`, `skills`). Vui lòng tham khảo thêm tài liệu [Kiến trúc v2](architecture-v2.md) và [Kiến trúc Runtime v3](runtime-architecture-v3.md).
 
-P00 định nghĩa ranh giới module, dữ liệu trao đổi đã được validate, các port công khai và các bất biến thuần túy cho bflow. Nó không triển khai scheduling, Herdr adapter, persistence SQLite, I/O artifact, lease, thực thi lệnh quality, recovery, hành vi CLI hay workflow end-to-end.
+Giai đoạn P00 tập trung định nghĩa ranh giới giữa các module, chuẩn hóa dữ liệu trao đổi đã qua thẩm định schema, thiết lập các cổng giao tiếp công khai (public ports) và các bất biến thuần túy cho hệ thống Bflow. Giai đoạn này không đảm nhiệm việc triển khai lập lịch DAG, bộ điều hợp Herdr, tầng lưu trữ SQLite, thao tác I/O artifact, quản lý lease, thực thi lệnh kiểm tra chất lượng, cơ chế phục hồi hay hành vi đầu-cuối của CLI.
 
-Lần triển khai đầu tiên vẫn là một process Node.js theo hướng module-first. Herdr là cơ chế thực thi bên ngoài, chỉ được truy cập qua `AgentTransport`; các core contract không chứa wire type của Herdr.
+Kiến trúc ban đầu được xây dựng dưới dạng một tiến trình Node.js theo định hướng ưu tiên module hoá (module-first). Herdr đóng vai trò là cơ chế thực thi tiến trình bên ngoài, chỉ được tương tác gián tiếp thông qua giao diện `AgentTransport`; các hợp đồng cốt lõi tuyệt đối không phụ thuộc vào kiểu dữ liệu truyền tải (wire types) của Herdr.
 
-## Các module và hướng phụ thuộc
+---
+
+## 2. Các module và Chiều phụ thuộc
 
 ```mermaid
 flowchart TD
@@ -23,21 +26,23 @@ flowchart TD
   Gates[packages/quality-gates] --> Contracts
 ```
 
-`contracts` là dependency dùng chung. Runtime sẽ compose các triển khai thông qua port. Các package triển khai leaf không phụ thuộc lẫn nhau, và `core` không phụ thuộc Herdr.
+Gói `contracts` là thành phần phụ thuộc dùng chung duy nhất cho toàn bộ hệ thống. Tầng `runtime` sẽ tổ hợp các bản hiện thực thông qua các cổng giao tiếp chuẩn hóa. Các gói triển khai độc lập (leaf packages) tuyệt đối không phụ thuộc lẫn nhau, và khối `core` không bao giờ phụ thuộc trực tiếp vào Herdr.
 
-| Module | Trách nhiệm trong tương lai | Loại trừ khỏi P00 |
-| --- | --- | --- |
-| `contracts` | Zod exchange schema, port, các validator thuần túy cho compatibility/transition/batch | Triển khai I/O và orchestration |
-| `core` | Lập kế hoạch DAG, transition hợp lệ, quyết định scheduling và recovery | Transport và storage |
-| `herdr-adapter` | Ánh xạ đã xác minh từ Herdr sang `AgentTransport` | Workflow policy và suy luận task-success |
-| `persistence` | Lưu trữ event/checkpoint SQLite nguyên tử và tiến hóa schema | Byte của artifact |
-| `artifact-store` | Lưu trữ artifact bất biến đã validate | Run state |
-| `agent-registry` | Tra cứu role và execution lease nguyên tử | Thực thi agent |
-| `quality-gates` | Các gate evaluator | Thay đổi state |
-| `runtime` | Thứ tự transaction/use-case giữa các port | Rò rỉ concrete adapter |
-| `apps/cli` | Phân tích lệnh và trình bày | Quyết định domain |
+| Module | Trách nhiệm thiết kế | Phạm vi loại trừ ở P00 |
+| :--- | :--- | :--- |
+| **`contracts`** | Lược đồ trao đổi dữ liệu Zod, giao diện port, các bộ kiểm tra thuần túy về tính tương thích, chuyển trạng thái và tính hợp lệ theo lô | Không triển khai I/O và logic điều phối |
+| **`core`** | Đánh giá đồ thị DAG, kiểm soát chuyển trạng thái hợp lệ, đưa ra quyết định lập lịch và khôi phục | Không đảm nhiệm tầng truyền tải và lưu trữ |
+| **`herdr-adapter`** | Ánh xạ chuẩn mực từ lệnh Herdr sang giao diện `AgentTransport` | Không quản lý chính sách quy trình và không tự suy đoán thành bại của tác vụ |
+| **`persistence`** | Lưu trữ nguyên tử sự kiện/checkpoint trên SQLite và quản lý tiến hóa lược đồ | Không lưu trữ trực tiếp nội dung byte của artifact |
+| **`artifact-store`** | Kho lưu trữ artifact bất biến đã được xác thực toàn vẹn | Không quản lý trạng thái của lượt chạy |
+| **`agent-registry`** | Tra cứu vai trò và cấp phát lease thực thi một cách nguyên tử | Không trực tiếp vận hành agent |
+| **`quality-gates`** | Bộ đánh giá các cổng kiểm soát chất lượng | Không thay đổi trạng thái của quy trình |
+| **`runtime`** | Điều phối thứ tự giao dịch và ca sử dụng giữa các port | Không để lộ bộ điều hợp cụ thể ra bên ngoài |
+| **`apps/cli`** | Phân tích cú pháp dòng lệnh và hiển thị giao diện | Không đưa ra các quyết định nghiệp vụ domain |
 
-## Dispatch, quan sát và task outcome
+---
+
+## 3. Quy trình Phân phối (Dispatch), Quan sát và Kết quả Tác vụ
 
 ```mermaid
 sequenceDiagram
@@ -46,57 +51,61 @@ sequenceDiagram
   participant T as AgentTransport
   E->>S: persist task.dispatch_requested
   E->>T: send(request)
-  alt accepted
+  alt Chấp nhận thành công (accepted)
     T-->>E: AgentSubmissionReceipt + durable handle
     E->>S: persist agent.execution_bound
     E->>T: wait/read(handle)
-    T-->>E: transport observations
-  else unknown delivery
+    T-->>E: Dữ liệu quan sát tầng truyền tải
+  else Truyền tin bất định (unknown delivery)
     T-->>E: unknown_delivery, resendAllowed=false
     E->>S: persist delivery uncertainty / block
     E->>T: reconcile(requestId, attemptId, idempotencyKey, target)
   end
 ```
 
-`AgentExecutionHandle` lưu orchestration execution identity, request/attempt identity, idempotency key, locator trung lập với transport, nguồn gốc correlation và recovery cursor. Một handle chỉ bền vững sau khi `agent.execution_bound` được append. Sau khi delivery không chắc chắn, việc tự động gửi lại bị cấm cho đến khi reconciliation chứng minh `not_delivered`. Nếu transport không thể chứng minh được cả hai kết quả, nó trả về `unknown_delivery` kèm yêu cầu can thiệp thủ công; exactly-once delivery không được hứa hẹn.
+Bộ điều phối `AgentExecutionHandle` lưu giữ đầy đủ thông tin định danh thực thi, định danh yêu cầu/lần thử, khóa lũy thừa (idempotency key), định vị trung lập với tầng truyền tải, nguồn gốc liên kết và con trỏ phục hồi (recovery cursor). Một handle chỉ được coi là bền vững sau khi sự kiện `agent.execution_bound` đã được ghi nhận vào cơ sở dữ liệu. 
 
-Transport state và task outcome là hai domain tách biệt. `wait` trả về `AgentTransportObservation`, không bao giờ là `AgentResult`. `done` chỉ có nghĩa là transport quan sát thấy trạng thái giống terminal của nó. Một `AgentResult` đã xác minh cần bằng chứng outcome riêng được correlate với submission. Output không correlate được vẫn là `unverified` và không thể được `RecordAgentResultCommandSchema` chấp nhận.
+Khi xảy ra tình trạng truyền tin bất định, hệ thống nghiêm cấm việc tự động gửi lại thông điệp cho tới khi quá trình đối soát chứng minh được trạng thái `not_delivered`. Nếu tầng truyền tải không thể đưa ra bằng chứng kết luận, hệ thống sẽ trả về mã `unknown_delivery` và yêu cầu con người can thiệp thủ công; hệ thống không cam kết khả năng chuyển phát chính xác một lần (exactly-once delivery).
 
-## Ranh giới tương thích Herdr 0.9.1
+> [!IMPORTANT]
+> **Trạng thái truyền tải và kết quả tác vụ là hai miền dữ liệu hoàn toàn tách biệt**:
+> Phương thức `wait` chỉ trả về quan sát tầng truyền tải `AgentTransportObservation`, tuyệt đối không đại diện cho kết quả nghiệp vụ `AgentResult`. Trạng thái `done` chỉ mang ý nghĩa agent đã hoàn tất lượt tương tác. Một `AgentResult` hợp lệ đòi hỏi phải có bằng chứng khách quan độc lập được liên kết chuẩn xác với lượt giao nhiệm vụ ban đầu. Mọi đầu ra không thể đối soát đều bị coi là chưa xác thực (`unverified`) và sẽ bị từ chối bởi `RecordAgentResultCommandSchema`.
 
-P00 đã kiểm tra CLI đã cài và schema đi kèm ở chế độ chỉ đọc:
+---
 
-- protocol `22`, schema version `1`;
-- các agent state `idle`, `working`, `blocked`, `done` và `unknown`;
-- `AgentInfo` expose các identifier workspace/tab/pane/terminal, revision, state-change sequence và một agent-session locator tùy chọn;
-- `agent start` yêu cầu name, kind và pane;
-- `agent prompt --wait` tường minh không theo dõi turn khi target đang working.
+## 4. Ranh giới tương thích với Herdr 0.9.1
 
-Do đó Herdr `done` không phải bằng chứng task thành công, và bản thân Herdr 0.9.1 không thiết lập được prompt-level idempotency hay turn correlation đáng tin cậy. Phase adapter phải ánh xạ các field locator có sẵn, giữ `unknown_delivery`, và báo cáo các observation chưa xác minh khi không chứng minh được correlation. P00 không đưa ra tuyên bố tích hợp live nào.
+Giai đoạn P00 tiến hành thẩm định Herdr CLI và lược đồ dữ liệu đi kèm ở chế độ chỉ đọc:
+- Sử dụng giao thức **Protocol `22`**, phiên bản lược đồ **Schema `1`**.
+- Các trạng thái vận hành của agent: `idle`, `working`, `blocked`, `done` và `unknown`.
+- Thực thể `AgentInfo` cung cấp định danh cho workspace, tab, pane, terminal, phiên bản sửa đổi (revision), chuỗi thay đổi trạng thái và định vị phiên agent tùy chọn.
+- Lệnh `agent start` yêu cầu bắt buộc các tham số: `name`, `kind` và `pane`.
+- Lệnh `agent prompt --wait` chủ động không theo dõi lượt phản hồi khi đối tượng đích đang ở trạng thái làm việc (`working`).
 
-## Mô hình state và concurrency
+Do đó, trạng thái `done` của Herdr không được coi là bằng chứng cho thấy tác vụ thành công, và bản thân Herdr 0.9.1 không tự động đảm bảo tính lũy thừa ở cấp độ prompt hay sự liên kết phản hồi đáng tin cậy. Bộ điều hợp phải chịu trách nhiệm ánh xạ các trường định vị sẵn có, duy trì trạng thái `unknown_delivery`, và cảnh báo khi thiếu bằng chứng liên kết.
 
-Workflow definition biểu diễn các dependency DAG, task song song, và concurrency của workflow có giới hạn bằng `maxConcurrency`. `validateTaskTransition` và `validateRunTransition` là các guard ngữ nghĩa bắt buộc; task state terminal không thể khởi động lại qua một transition thông thường. Rework tường minh là `succeeded -> ready` với generation tăng một bước. Retry tường minh là `failed -> retrying`.
+---
 
-Số lần retry được đếm trong từng rework generation; task attempt identity vẫn tăng đơn điệu xuyên suốt run. `task.retry_scheduled` ghi lại thời điểm eligibility suy ra từ policy. `advance` chỉ có thể làm retry thành ready tại hoặc sau timestamp đó. Runtime sau này cung cấp việc lập lịch đánh thức; Core không bao giờ khởi động timer. Jitter, khi được bật, mang tính xác định từ run/task/generation/attempt identity để replay không bao giờ lấy mẫu ngẫu nhiên.
+## 5. Mô hình Trạng thái và Xử lý Song song (Concurrency)
 
-Registry lookup và execution capacity là hai việc tách biệt. `resolve` chọn cấu hình; `acquireLease`, `renewLease` và `releaseLease` định nghĩa ranh giới nguyên tử cho capacity. Lease ID, expiry, optimistic version, fencing token và idempotency key cho phép một triển khai sau này từ chối các owner cũ. P00 không triển khai tính nguyên tử đó.
+Định nghĩa quy trình công việc biểu diễn đồ thị phụ thuộc DAG, hỗ trợ các tác vụ song song với giới hạn mức độ đồng thời thông qua trường `maxConcurrency`. Hai hàm kiểm tra `validateTaskTransition` và `validateRunTransition` đóng vai trò là các chốt chặn ngữ nghĩa bắt buộc: trạng thái kết thúc (terminal state) của một tác vụ không bao giờ được phép khởi động lại qua chuyển trạng thái thông thường.
+- Thao tác sửa đổi (Rework) tường minh: chuyển từ `succeeded → ready` với thế hệ (generation) tăng một bước.
+- Thao tác thử lại (Retry) tường minh: chuyển từ `failed → retrying`.
 
-## Mô hình persistence và recovery
+Số lần thử lại được giới hạn chặt chẽ trong từng thế hệ sửa đổi; định danh lần thử (`attempt`) luôn tăng đơn điệu trong suốt vòng đời của lượt chạy. Sự kiện `task.retry_scheduled` ghi lại mốc thời gian đủ điều kiện kích hoạt theo chính sách. Phương thức `advance` chỉ có thể chuyển trạng thái từ retry sang ready khi đã chạm hoặc vượt qua mốc thời gian đó. Biến thiên thời gian (jitter) khi được kích hoạt sẽ mang tính xác định từ định danh run/task/generation/attempt, đảm bảo việc phát lại sự kiện (replay) không bao giờ bị phụ thuộc vào yếu tố ngẫu nhiên.
 
-Event là nguồn có thẩm quyền. Mỗi event có event schema version, aggregate version và stream sequence là các field riêng biệt. `validateEventBatch` kiểm tra một run ID duy nhất, sequence/version liên tục, và event/idempotency identity là duy nhất trước khi `RunStore.appendEvents` thực hiện transaction trong tương lai.
+---
 
-Checkpoint là tối ưu hóa. Chúng khai báo checkpoint schema version cùng codec name/version. Các helper tương thích upcast hình dạng v0 gốc của P00 (thiếu các field version tường minh) lên v1, từ chối các version không được hỗ trợ bằng lỗi có kiểu, và validate schema hiện tại thu được. Một recovery engine trong tương lai phải tải checkpoint tương thích, replay các event sau đó, và reconcile mọi agent submission đang bay hoặc không chắc chắn trước khi retry.
+## 6. Mô hình Lưu trữ Bền vững và Khôi phục
 
-Việc khắc phục P01 dùng `command.completed` làm command receipt bền vững trong cùng event batch với các effect của nó. Full replay dựng lại các command outcome đã cache. Aggregate checkpoint codec thu thập toàn bộ trạng thái phụ trợ và outcome đã cache; checkpoint chỉ có snapshot không thể hỗ trợ tail-only recovery. `createCheckpoint` của Core xuất state mà không persist nó. P03 phải lưu event và receipt một cách nguyên tử, và P06 phải persist trước các side effect; cả storage lẫn transport đều không được triển khai trong P01.
+- **Sự kiện là nguồn gốc chân lý (Source of Truth)**: Mỗi sự kiện đều mang phiên bản lược đồ sự kiện, phiên bản tổng hợp và số thứ tự luồng (stream sequence) riêng biệt. Hàm `validateEventBatch` kiểm tra tính duy nhất của run ID, tính liên tục của chuỗi thứ tự và tính duy nhất của khóa lũy thừa trước khi cho phép ghi nhận giao dịch vào `RunStore`.
+- **Điểm kiểm tra (Checkpoint) là cơ chế tối ưu hóa**: Checkpoint lưu trữ phiên bản lược đồ cùng tên và phiên bản codec tương ứng. Khi khôi phục trạng thái, động cơ phục hồi phải nạp checkpoint tương thích, phát lại toàn bộ các sự kiện kế tiếp, và đối soát toàn bộ các yêu cầu đang gửi dở dang trước khi cho phép thử lại.
 
-## Ranh giới artifact, approval, gate và cancellation
+---
 
-- Output của agent/gate dùng `ArtifactProposal` không đáng tin; chỉ `ArtifactStore.put` thành công mới trả về `ArtifactReference` đáng tin với URI `artifact://` và checksum đã xác minh.
-- Approval request và decision có target có kiểu bắt buộc, revision, generation, idempotency key và evidence/feedback reference. Từ chối và yêu cầu thay đổi cần có lý do.
-- Workflow task bind các quality gate đã khai báo. Command và event yêu cầu/kết quả đánh giá mang evaluation identity, expected aggregate version và idempotency.
-- Cancellation là bất đồng bộ: request, accepted/refused và confirmed stop là các bản ghi riêng biệt. Acceptance không phải bằng chứng của việc dừng. Một completion có thể hợp lệ thắng khi state là `cancelling`.
+## 7. Ranh giới Quản trị: Artifact, Phê duyệt, Cổng Kiểm soát và Hủy bỏ
 
-## Bảo đảm của contract so với việc thực thi sau này
-
-P00 bảo đảm việc từ chối schema, hình dạng kết quả công khai có kiểu, ngữ nghĩa được tài liệu hóa và các validator thuần túy. Các triển khai sau này phải thực thi database transaction nguyên tử, hiệu ứng idempotency exactly-once, lease fencing, xác minh checksum khi streaming, phân giải filesystem an toàn, transport reconciliation, ủy quyền command, event upcasting trong lúc replay và các race của cancellation. Riêng type không cung cấp các thuộc tính runtime đó.
+- **Bảo chứng Artifact**: Đầu ra của agent hoặc cổng kiểm tra ban đầu chỉ là đề xuất chưa được xác thực (`ArtifactProposal`); chỉ sau khi được ghi nhận thành công qua `ArtifactStore.put`, hệ thống mới cấp phát tham chiếu tin cậy `ArtifactReference` với định dạng URI `artifact://` cùng mã băm checksum đã xác minh.
+- **Tính chuẩn mực của Phê duyệt**: Yêu cầu và quyết định phê duyệt bắt buộc phải có đối tượng mục tiêu cụ thể, phiên bản mã nguồn, thế hệ tác vụ, khóa lũy thừa và tham chiếu bằng chứng kiểm thử đi kèm. Mọi quyết định từ chối hoặc yêu cầu sửa đổi đều phải nêu rõ lý do kỹ thuật.
+- **Cổng kiểm soát chất lượng (Quality Gates)**: Tác vụ quy trình liên kết chặt chẽ với các cổng chất lượng đã khai báo; mọi yêu cầu và kết quả đánh giá đều mang định danh đánh giá riêng và kỳ vọng phiên bản tổng hợp chính xác.
+- **Hủy bỏ bất đồng bộ**: Yêu cầu hủy bỏ, chấp nhận/từ chối hủy và xác nhận dừng hoàn toàn là các bản ghi sự kiện riêng biệt; việc chấp nhận yêu cầu hủy không đồng nghĩa với việc tiến trình đã dừng hẳn.
