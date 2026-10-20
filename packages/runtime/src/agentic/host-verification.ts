@@ -92,6 +92,8 @@ export class HostVerification {
     } };
   }
   behavioralChecks() { return behavioralChecks(this.commands); }
+  /** Verification methods the owner configured for this host; fixed at host creation (see docs/verification-runners.md). */
+  configuredMethods(): string[] { return [...new Set(this.commands.map(command => command.method))]; }
   /** Fail closed at proposal ingress; unsupported verification methods require another trusted runner. */
   assertSupported(input: unknown, strategyInput?: unknown) {
     const spec = SpecificationSchema.parse(input);

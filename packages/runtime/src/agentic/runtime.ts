@@ -16,6 +16,8 @@ import { CoreSession } from "./core-session.js";
 import { redactString } from "../resilience/redaction.js";
 import { HerdrOutbox, unwrap } from "./outbox.js";
 import type { AgenticRuntimePorts, Integration, VerificationPlan } from "./ports.js";
+import type { WorkflowRejection } from "./workflow-rejection.js";
+import type { RunFacts } from "./run-watchdog.js";
 
 const STRUCTURAL_DELIVERY_BLOCKERS = /^(Recipient pane unavailable|No capable agent in recipient pane|Pinned request or recipient changed)/;
 const VERIFICATION_GATE = "p19-independent-task-verification";
@@ -235,6 +237,75 @@ export class AgenticWorkflowRuntime {
           if (entry.status === "pending") pending.push({ request: ApprovalRequestSchema.parse(entry.request), correlationId: run.delegation.correlationId });
       }
       return pending;
+    });
+  }
+  /** Facts the host watchdog needs about one run. Derived from durable state only; activity ignores Conversation-bound notices. */
+  private runFacts(state: JournalState, run: RunRecord): RunFacts & { pendingDecisionRequests: { request: ApprovalRequest; correlationId: string }[] } {
+    const messages = [...state.outbound.map(out => out.message), ...state.inbox.map(item => item.message)]
+      .filter(message => message.run_id === run.runId && message.recipient.role !== "conversation");
+    const times = [Date.parse(run.delegation.requestedAt), ...messages.map(message => Date.parse(message.occurred_at ?? ""))].filter(Number.isFinite);
+    const pendingDecisionRequests = Object.values(run.userDecisions ?? {}).filter(entry => entry.status === "pending")
+      .map(entry => ({ request: ApprovalRequestSchema.parse(entry.request), correlationId: run.delegation.correlationId }));
+    return {
+      runId: run.runId, status: run.status, live: !(run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)),
+      lastActivityAt: Math.max(...times), awaitingHuman: run.status === "awaiting_approval",
+      activeHandoff: state.outbound.some(out => out.message.run_id === run.runId && out.message.recipient.role !== "conversation" &&
+        ["queued", "sending", "unknown_delivery", "accepted"].includes(out.status)),
+      pendingDecisions: pendingDecisionRequests.map(item => ({ approvalId: item.request.approvalId, requestedAt: item.request.requestedAt })),
+      pendingDecisionRequests
+    };
+  }
+  /**
+   * Read-only snapshot for the host watchdog. It never decides anything; the watchdog reads it outside the journal lock and
+   * then calls the report methods below one at a time.
+   */
+  async watchdogSnapshot(sessionId: string): Promise<(RunFacts & { pendingDecisionRequests: { request: ApprovalRequest; correlationId: string }[] })[]> {
+    return this.transaction(async state => state.runs.filter(run => run.delegation.sessionId === sessionId).map(run => this.runFacts(state, run)));
+  }
+  /**
+   * Tells Conversation why Runtime refused a workflow proposal. The Coordinator gets the same structured reason from the tool error.
+   * Informational only: nothing is changed or approved. Idempotent per (run, code, reason).
+   */
+  async reportWorkflowRejected(runId: string, rejection: WorkflowRejection): Promise<void> {
+    await this.transaction(async (state, save, _core, outbox) => {
+      const run = state.runs.find(item => item.runId === runId);
+      if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) return;
+      this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_rejected", runId, code: rejection.code, reason: rejection.reason,
+        ...(rejection.methods === undefined ? {} : { methods: rejection.methods }), ...(rejection.criteria === undefined ? {} : { criteria: rejection.criteria }),
+        options: rejection.options, headline: `Workflow bị từ chối: ${rejection.reason}` },
+      `workflow-rejected:${digest([runId, rejection.code, rejection.reason])}`, "conversation");
+      await save();
+    });
+  }
+  /** A user-decision notice stayed undisplayed through its resends. Idempotent per approval. */
+  async reportWorkflowBlocked(runId: string, approvalId: string, resends: number): Promise<void> {
+    await this.transaction(async (state, save, _core, outbox) => {
+      const run = state.runs.find(item => item.runId === runId);
+      if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) return;
+      const reason = `Conversation chưa hiển thị câu hỏi ${approvalId} sau ${resends} lần gửi lại`;
+      this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId, approvalId, reason,
+        options: ["Yêu cầu Conversation hiển thị lại câu hỏi đang chờ", "Hủy run này"], headline: `Workflow bị chặn: ${reason}` },
+      `workflow-blocked:${approvalId}`, "conversation");
+      await save();
+    });
+  }
+  /**
+   * A live run has no pending decision, handoff or human gate, and its role panes are not working, with no activity since idleSince.
+   * Herdr idle/done only means "not working" here, never task success. Once per episode (episodeKey changes with activity).
+   */
+  async reportRunStalled(runId: string, episodeKey: string): Promise<void> {
+    await this.transaction(async (state, save, _core, outbox) => {
+      const run = state.runs.find(item => item.runId === runId);
+      if (!run) return;
+      const facts = this.runFacts(state, run);
+      if (!facts.live || facts.awaitingHuman || facts.activeHandoff || facts.pendingDecisions.length) return;
+      const idleSince = new Date(facts.lastActivityAt).toISOString();
+      const reason = `Không có tiến triển từ ${idleSince} và các pane vai trò không ở trạng thái đang làm việc. ` +
+        "Trạng thái idle/done của Herdr không chứng minh công việc đã thành công.";
+      this.emit(state, outbox, run, "conversation.progress", { kind: "run_stalled", runId, reason, idleSince,
+        options: ["Yêu cầu Coordinator tiếp tục hoặc giải thích trạng thái", "Hủy run"], headline: `Run có thể bị treo: ${runId}` },
+      `run-stalled:${episodeKey}`, "conversation");
+      await save();
     });
   }
   async loadSpecification(specId: string): Promise<Specification> {
@@ -627,7 +698,8 @@ export class AgenticWorkflowRuntime {
   private resumeUserDecisionAsker(outbox: HerdrOutbox, run: RunRecord, entry: UserDecisionRecord, payload: Record<string, unknown>): void {
     const id = `user-decision-answer-${digest([run.runId, entry.request.approvalId, entry.status])}`;
     outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: run.delegation.correlationId,
-      causation_id: `decision-${entry.request.approvalId}`, run_id: run.runId, sender: { role: "coordinator" },
+      // A Coordinator asker is resumed by Runtime itself: a role message cannot name the same role as sender and recipient.
+      causation_id: `decision-${entry.request.approvalId}`, run_id: run.runId, sender: { role: entry.role === "coordinator" ? "runtime" : "coordinator" },
       recipient: { role: entry.role, agent_id: entry.agentId, pane_id: entry.paneId }, type: "task.status",
       payload: json(payload), artifact_references: [], occurred_at: this.now(), idempotency_key: id }), entry.role, entry.taskId, `attempt-${id}`);
   }

@@ -101,6 +101,40 @@ empty; other providers and unrecognised layouts fail closed. Notices are deliver
 only, never task success, and the nudge never creates a user turn or approval. The empty-input
 detection, notification and Stop-hook continuation are not live-verified.
 
+### Conversation notice display, rejection notices and the hang watchdog
+
+- **Structured decision notices.** A user decision notice stores bounded fields (approval id, role,
+  question up to 2000 characters, at most 10 options of 500 characters, deadline) beside the
+  4096-character summary, so a long question stays answerable. Receipts written before this field
+  still render from their summary, or degrade to a generic update that says it was cut short.
+- **Display acknowledgement.** A surfaced user decision or block counts as displayed only when the
+  final Conversation turn names it (its approval id). Undisplayed notices are re-blocked on Stop at
+  most twice and re-shown with reminder backoff. Last assistant text is read back to the last
+  genuine user prompt, skipping tool-result entries.
+- **Rejected workflow proposals.** `propose_workflow` pre-checks (project policy, then verification
+  support) return a structured error `{ code, reason, methods?, criteria?, options }` to the
+  Coordinator. The same reason reaches Conversation as a `workflow_rejected` notice, outside any
+  journal transaction. Codes: `missing_behavioral_runner` (no owner runner for a criterion's method),
+  `unsupported_verification`, `policy_violation`. The options are informational: the owner configures
+  `.bflow/verification.json`, the user approves a revised specification, or the run is cancelled.
+  Nothing is applied automatically, and the specification and its criteria are never changed.
+  The owner runner configuration is pinned when the host is created (`docs/verification-runners.md`),
+  so changing the file later requires quiescing the host and reconciling it explicitly.
+- **Hang watchdog** (`src/agentic/run-watchdog.ts`, pure `evaluateWatchdog`; host timer every 15 s).
+  It (a) recreates a pending user decision's notice receipt from the pending request when none exists,
+  after 60 seconds, then re-registers with Conversation; (b) resurfaces a user decision that stays
+  undisplayed for 60 seconds, at most three times, after which one `workflow_blocked` notice is emitted
+  per approval; (c) reports a live run as `run_stalled` once per episode, when it has no pending
+  decision, human gate or non-terminal handoff, every role pane is `idle`, `done` or `unknown`, and
+  there has been no non-Conversation activity for 180 seconds. A Herdr `done` or `idle` means only
+  "not working", never success. Activity is the `occurred_at` of non-Conversation messages for the run,
+  falling back to the delegation time. Limits: an unreadable pane is treated as working, and a design
+  approval that never reached Conversation is not reconciled by the watchdog. Resurfacing counts
+  unsurfaced notices as well, so a busy Conversation pane can reach the blocked notice.
+- **Not live-verified.** The host timer, the Herdr notifications and the Stop-hook display acknowledgement
+  depend on a live Herdr and Claude Code session. Tests cover the pure logic, the receipt epochs, the Runtime
+  reports and the Gateway wiring with a fake transport; the host closure itself is only type-checked.
+
 ## Policies and lifecycle
 
 The Coordinator can assess requirements, request only useful specialists, prepare a

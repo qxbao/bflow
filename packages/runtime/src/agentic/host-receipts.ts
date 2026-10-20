@@ -9,8 +9,9 @@ import {
   type ApprovalDecision, type JsonValue, type PaneBinding, type QualityGateResult, type RoleMessage, type VerificationResult
 } from "@bflow/contracts";
 import { digest, json, record, strings, textField } from "./journal.js";
+import { UserDecisionNoticeSchema, isUserFacingNotice, renderConversationNotice, userDecisionNoticeFields } from "./conversation-notice-render.js";
 
-type Kind = "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled";
+type Kind = "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled";
 export interface HumanHookProvenance {
   origin: "UserPromptSubmit"; binding: PaneBinding; nativeSessionId: string;
   conversationSessionId: string; userId: string; messageId: string; promptDigest: string;
@@ -24,9 +25,18 @@ export type TrustedConversationTurn = z.infer<typeof TrustedConversationTurnSche
 const NOTICE_SUMMARY_LIMIT = 4096;
 export const ConversationNoticeSchema = z.object({ messageId: z.string().min(1), type: z.string().min(1), senderRole: z.string().min(1),
   runId: z.string().min(1).optional(), correlationId: z.string().min(1), receivedAt: z.string().datetime(),
-  summary: z.string(), truncated: z.boolean() }).strict();
+  summary: z.string(), truncated: z.boolean(),
+  /** Bounded decision fields for user decisions, independent of the summary cap. Absent on receipts written before this field. */
+  userDecision: UserDecisionNoticeSchema.optional() }).strict();
 export type ConversationNotice = z.infer<typeof ConversationNoticeSchema>;
-const NoticeSurfacedSchema = z.object({ messageId: z.string().min(1) }).strict();
+/** Display state of a user-decision notice, for the Runtime watchdog. `since` is when the current wait began. */
+export interface ConversationNoticeState { messageId: string; approvalId?: string; runId?: string; surfaced: boolean; displayed: boolean; resends: number; since: string }
+const NoticeSurfacedSchema = z.object({ messageId: z.string().min(1), surfacedAt: z.string().datetime().optional() }).strict();
+const NoticeDisplayedSchema = z.object({ messageId: z.string().min(1), displayedAt: z.string().datetime() }).strict();
+const NoticeReblockSchema = z.object({ messageId: z.string().min(1), attempt: z.number().int().min(1) }).strict();
+const NoticeResurfacedSchema = z.object({ messageId: z.string().min(1), attempt: z.number().int().min(1), resurfacedAt: z.string().datetime() }).strict();
+/** A user-facing notice is re-blocked on Stop at most this many times before it is left for the reminder watchdog. */
+export const MAX_NOTICE_REBLOCKS = 2;
 const ConversationDecisionReceiptSchema = z.object({ messageId: z.string().min(1), decision: JsonValueSchema,
   result: JsonValueSchema.optional() }).strict();
 export interface HostObservation {
@@ -81,6 +91,9 @@ export class HostReceiptJournal {
     }
     if (kind === "conversation-notice") return json(ConversationNoticeSchema.parse(input));
     if (kind === "notice-surfaced") return json(NoticeSurfacedSchema.parse(input));
+    if (kind === "notice-displayed") return json(NoticeDisplayedSchema.parse(input));
+    if (kind === "notice-reblock") return json(NoticeReblockSchema.parse(input));
+    if (kind === "notice-resurfaced") return json(NoticeResurfacedSchema.parse(input));
     if (kind === "native-intent" || kind === "native-ack") return json(RoleMessageSchema.parse(input));
     if (kind === "gate") return json(QualityGateResultSchema.parse(input));
     if (kind === "evidence") return json(VerificationResultSchema.parse(input));
@@ -113,7 +126,7 @@ export class HostReceiptJournal {
         kind === "human" && ApprovalDecisionSchema.parse(record(payload).decision).approvalId !== id ||
         kind === "gate" && QualityGateResultSchema.parse(payload).evaluationId !== id ||
         kind === "evidence" && VerificationResultSchema.parse(payload).verificationId !== id ||
-        kind === "notice-surfaced" && record(payload).messageId !== id ||
+        (kind === "notice-surfaced" || kind === "notice-displayed" || kind === "notice-resurfaced") && record(payload).messageId !== id.split("#")[0] ||
         kind === "native-ack" && RoleMessageSchema.parse(payload).message_id !== id)
       throw new Error("Host receipt identity mismatch");
     return { ...envelope, checksum: textField(value.checksum) };
@@ -279,24 +292,107 @@ export class HostReceiptJournal {
     const parsed = RoleMessageSchema.parse(message);
     if (await this.read("conversation-notice", parsed.message_id) !== undefined) return false;
     const text = JSON.stringify(parsed.payload) ?? "null", truncated = text.length > NOTICE_SUMMARY_LIMIT;
+    const userDecision = parsed.type === "approval.request" ? userDecisionNoticeFields(parsed.payload) : undefined;
     return this.write("conversation-notice", parsed.message_id, { messageId: parsed.message_id, type: parsed.type, senderRole: parsed.sender.role,
       ...(parsed.run_id === undefined ? {} : { runId: parsed.run_id }), correlationId: parsed.correlation_id, receivedAt: new Date().toISOString(),
+      ...(userDecision === undefined ? {} : { userDecision }),
       summary: truncated ? text.slice(0, NOTICE_SUMMARY_LIMIT) : text, truncated });
   }
   /** Notices not yet shown to the model, oldest first. A surfaced marker is a separate immutable receipt. */
   async unsurfacedConversationNotices(): Promise<ConversationNotice[]> {
     const notices: ConversationNotice[] = [];
     for (const id of await this.receiptIds("conversation-notice")) {
-      if (await this.read("notice-surfaced", id) !== undefined) continue;
+      if (await this.read("notice-surfaced", this.epochKey(id, await this.noticeEpoch(id))) !== undefined) continue;
       notices.push(ConversationNoticeSchema.parse(await this.read("conversation-notice", id)));
     }
     return notices.sort((a, b) => a.receivedAt.localeCompare(b.receivedAt) || a.messageId.localeCompare(b.messageId));
   }
+  /** Idempotent: a second call for the same notice keeps the first surfacing time. */
   async markConversationNoticesSurfaced(messageIds: readonly string[]): Promise<void> {
     for (const id of new Set(messageIds.map(value => textField(value)))) {
       if (await this.read("conversation-notice", id) === undefined) throw new Error("Unknown Conversation notice");
-      await this.write("notice-surfaced", id, { messageId: id });
+      const key = this.epochKey(id, await this.noticeEpoch(id));
+      if (await this.read("notice-surfaced", key) === undefined) await this.write("notice-surfaced", key, { messageId: id, surfacedAt: new Date().toISOString() });
     }
+  }
+  /**
+   * User-facing notices (user decisions, blocks) that were surfaced but not yet shown to the user, oldest first.
+   * `reblocks` counts how many Stop hooks already re-blocked for display.
+   */
+  async undisplayedUserFacingNotices(): Promise<(ConversationNotice & { surfacedAt: string; reblocks: number })[]> {
+    const values: (ConversationNotice & { surfacedAt: string; reblocks: number })[] = [];
+    for (const id of await this.receiptIds("conversation-notice")) {
+      const surfaced = await this.read("notice-surfaced", this.epochKey(id, await this.noticeEpoch(id)));
+      if (surfaced === undefined || await this.read("notice-displayed", id) !== undefined) continue;
+      const notice = ConversationNoticeSchema.parse(await this.read("conversation-notice", id));
+      if (!isUserFacingNotice(renderConversationNotice(notice))) continue;
+      const surfacedAt = NoticeSurfacedSchema.parse(surfaced).surfacedAt ?? notice.receivedAt;
+      values.push({ ...notice, surfacedAt, reblocks: await this.noticeReblockCount(id) });
+    }
+    return values.sort((a, b) => a.surfacedAt.localeCompare(b.surfacedAt) || a.messageId.localeCompare(b.messageId));
+  }
+  /** Epoch 0 is the original surfacing; each resurfacing starts a new epoch whose surfaced marker carries a `#n` suffix. */
+  private epochKey(messageId: string, epoch: number): string { return epoch === 0 ? messageId : `${messageId}#${epoch}`; }
+  /** Number of resurfacings already recorded for a notice, which is its current epoch. */
+  private async noticeEpoch(messageId: string): Promise<number> {
+    let count = 0;
+    while (await this.read("notice-resurfaced", `${messageId}#${count + 1}`) !== undefined) count++;
+    return count;
+  }
+  /**
+   * Makes a notice that is surfaced but not displayed (or not surfaced yet) eligible for surfacing again, as a new epoch.
+   * Returns the new attempt number, or undefined when the notice is unknown or already displayed.
+   */
+  async resurfaceConversationNotice(messageId: string, now: Date = new Date()): Promise<number | undefined> {
+    const id = textField(messageId);
+    if (await this.read("conversation-notice", id) === undefined || await this.read("notice-displayed", id) !== undefined) return undefined;
+    const attempt = await this.noticeEpoch(id) + 1;
+    await this.write("notice-resurfaced", `${id}#${attempt}`, { messageId: id, attempt, resurfacedAt: now.toISOString() });
+    return attempt;
+  }
+  /** Display state of every user-decision notice, oldest wait first. Read-only. */
+  async conversationNoticeStates(): Promise<ConversationNoticeState[]> {
+    const states: ConversationNoticeState[] = [];
+    for (const id of await this.receiptIds("conversation-notice")) {
+      const notice = ConversationNoticeSchema.parse(await this.read("conversation-notice", id));
+      const rendered = renderConversationNotice(notice);
+      if (rendered.kind !== "user_decision") continue;
+      const resends = await this.noticeEpoch(id), key = this.epochKey(id, resends);
+      const surfaced = await this.read("notice-surfaced", key), displayed = await this.read("notice-displayed", id) !== undefined;
+      const resurfacedAt = resends === 0 ? undefined : NoticeResurfacedSchema.parse(await this.read("notice-resurfaced", key)).resurfacedAt;
+      const surfacedAt = surfaced === undefined ? undefined : NoticeSurfacedSchema.parse(surfaced).surfacedAt ?? notice.receivedAt;
+      states.push({ messageId: id, ...(rendered.approvalId === undefined ? {} : { approvalId: rendered.approvalId }),
+        ...(notice.runId === undefined ? {} : { runId: notice.runId }), surfaced: surfacedAt !== undefined, displayed, resends,
+        since: surfacedAt ?? resurfacedAt ?? notice.receivedAt });
+    }
+    return states.sort((a, b) => a.since.localeCompare(b.since) || a.messageId.localeCompare(b.messageId));
+  }
+  private async noticeReblockCount(messageId: string): Promise<number> {
+    let count = 0;
+    while (count < MAX_NOTICE_REBLOCKS + 1 && await this.read("notice-reblock", `${messageId}#${count + 1}`) !== undefined) count++;
+    return count;
+  }
+  /** Records one more Stop re-block for a notice; returns the new attempt count. */
+  async recordNoticeReblock(messageId: string): Promise<number> {
+    const id = textField(messageId), attempt = await this.noticeReblockCount(id) + 1;
+    await this.write("notice-reblock", `${id}#${attempt}`, { messageId: id, attempt });
+    return attempt;
+  }
+  /**
+   * Marks surfaced, user-facing notices as displayed. Ids that are unknown, unsurfaced or not user-facing are ignored;
+   * the returned list holds only the ids newly marked.
+   */
+  async markConversationNoticesDisplayed(messageIds: readonly string[]): Promise<string[]> {
+    const marked: string[] = [];
+    for (const id of new Set(messageIds.map(value => textField(value)))) {
+      if (await this.read("notice-displayed", id) !== undefined) continue;
+      const notice = await this.read("conversation-notice", id);
+      if (notice === undefined || await this.read("notice-surfaced", this.epochKey(id, await this.noticeEpoch(id))) === undefined) continue;
+      if (!isUserFacingNotice(renderConversationNotice(ConversationNoticeSchema.parse(notice)))) continue;
+      await this.write("notice-displayed", id, { messageId: id, displayedAt: new Date().toISOString() });
+      marked.push(id);
+    }
+    return marked;
   }
   async recordGate(result: QualityGateResult): Promise<void> { const parsed = QualityGateResultSchema.parse(result); await this.write("gate", parsed.evaluationId, parsed); }
   async authenticateGate(input: QualityGateResult): Promise<boolean> { const result = QualityGateResultSchema.parse(input); return digest(await this.read("gate", result.evaluationId)) === digest(result); }

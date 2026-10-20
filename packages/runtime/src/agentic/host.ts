@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, connect, type Socket } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -14,17 +14,20 @@ import {
   type AgentProviderId, type AgentRole, type PaneBinding, type RoleMessage, type SessionManifest, type RunStore, type OperationOptions
 } from "@bflow/contracts";
 import { authenticateNativeHerdrMessage } from "./herdr-ingress.js";
-import { BFLOW_INBOX_NUDGE, isProviderInputEmpty } from "./conversation-inbox.js";
+import { BFLOW_INBOX_NUDGE, afterReminder, isProviderInputEmpty, reminderDue, type ReminderState } from "./conversation-inbox.js";
+import { isUserFacingNotice, lastAssistantText, mustShowSection, notificationBody, renderConversationNotice, type NoticeLike } from "./conversation-notice-render.js";
 import { callHost } from "./host-protocol.js";
 import { readHostConfiguration, type HostConfiguration, type RoleLaunchDescriptor } from "./host-controller.js";
 import { digest, json, record, textField } from "./journal.js";
 import { COORDINATOR_TOOLS } from "./tools.js";
-import { USER_DECISION_TOOL, guardDirectUserInteraction, parseUserDecisionToolInput } from "./decision-routing.js";
+import { USER_DECISION_TOOL, buildDecisionRequestMessage, guardDirectUserInteraction, parseUserDecisionToolInput } from "./decision-routing.js";
 import { openAgenticWorkspace, type AgenticWorkspaceHandle } from "./workspace.js";
 import { unwrap } from "./outbox.js";
 import { HostVerification, HostBehavioralFailure, DEFAULT_HOST_CHECKS } from "./host-verification.js";
-import { HostReceiptJournal, type HumanHookProvenance } from "./host-receipts.js";
+import { HostReceiptJournal, MAX_NOTICE_REBLOCKS, type HumanHookProvenance } from "./host-receipts.js";
 import { parseBehavioralCommands } from "./behavioral-runner.js";
+import { WorkflowProposalRejected, guardWorkflowProposal } from "./workflow-rejection.js";
+import { evaluateWatchdog } from "./run-watchdog.js";
 import { HostConversationIntake } from "./host-conversation.js";
 import { HostDevelopment } from "./host-development.js";
 import { redactString } from "../resilience/redaction.js";
@@ -620,9 +623,22 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (parameters.maxIterations !== undefined && parameters.maxIterations !== configuration.policy.verification.maxIterations) throw new Error("Verification limit is fixed by the project owner policy");
         parameters.maxIterations = configuration.policy.verification.maxIterations;
       }
-      const spec = record(parameters.specification);
-      if (configuration.policy?.sdd.minimumLevel === "full" && spec.level !== "full") throw new Error("Project policy requires a full specification");
-      verification.assertSupported(spec, host.runtime.ports.policies.strategy.resolve(spec));
+      const spec = record(parameters.specification), configuredMethods = verification.configuredMethods();
+      const runId = typeof parameters.runId === "string" ? parameters.runId : undefined;
+      try {
+        guardWorkflowProposal({ phase: "policy", specification: spec, configuredMethods, check: () => {
+          if (configuration.policy?.sdd.minimumLevel === "full" && spec.level !== "full") throw new Error("Project policy requires a full specification");
+        } });
+        guardWorkflowProposal({ phase: "verification", specification: spec, configuredMethods, check: () =>
+          verification.assertSupported(spec, host.runtime.ports.policies.strategy.resolve(spec)) });
+      } catch (error) {
+        // Outside any journal transaction: Conversation learns why, and the Coordinator receives the same structured reason as its tool error.
+        if (error instanceof WorkflowProposalRejected && runId !== undefined) {
+          try { await host.runtime.reportWorkflowRejected(runId, error.rejection); }
+          catch (reportError) { process.stderr.write(`Bflow could not report workflow rejection: ${redactString(String(reportError))}\n`); }
+        }
+        throw error;
+      }
     }
     return host.tools.invoke(name, parameters, { role });
   };
@@ -694,14 +710,20 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (role === "coordinator" && await receipts.stopCoordinatorTurn(binding)) coordinatorStopGeneration++;
         return { recorded: true };
       }
-      if (method === "conversation_notices" || method === "conversation_notices_surfaced") {
+      if (["conversation_notices", "conversation_notices_surfaced", "conversation_notices_displayed", "conversation_notices_reblocked"].includes(method)) {
         if (role !== "conversation") throw new Error("Only Conversation reads inbox notices");
         const input = record(params);
         // Like provider_stopped: before activation there is no authenticated pane, so there are no notices to read or mark.
-        if (!workspace) return method === "conversation_notices" ? { notices: [] } : { recorded: false };
+        if (!workspace) return method === "conversation_notices" ? { notices: [], undisplayed: [] } : { recorded: false };
         const binding = await principal(role, textField(input.paneId));
         if (!binding.session || binding.session.value !== textField(input.nativeSessionId)) throw new Error("Conversation notice native session mismatch");
-        if (method === "conversation_notices") return { notices: await receipts.unsurfacedConversationNotices() };
+        if (method === "conversation_notices") return { notices: await receipts.unsurfacedConversationNotices(), undisplayed: await receipts.undisplayedUserFacingNotices() };
+        if (method === "conversation_notices_displayed") return { displayed: await receipts.markConversationNoticesDisplayed(z.array(z.string().min(1)).parse(input.messageIds)) };
+        if (method === "conversation_notices_reblocked") {
+          const ids = z.array(z.string().min(1)).parse(input.messageIds);
+          for (const id of new Set(ids)) await receipts.recordNoticeReblock(id);
+          return { recorded: true };
+        }
         await receipts.markConversationNoticesSurfaced(z.array(z.string().min(1)).parse(input.messageIds));
         return { recorded: true };
       }
@@ -723,7 +745,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
             conversationSessionId: manifest!.conversationSessionId, promptDigest: digest(prompt) };
           try { const received = record(await conversationIntake.receive(binding, { conversationSessionId: manifest!.conversationSessionId,
             messageId, content: prompt, userId }));
-            return json({ ...received, notices: await receipts.unsurfacedConversationNotices() }); }
+            return json({ ...received, notices: await receipts.unsurfacedConversationNotices(), undisplayed: await receipts.undisplayedUserFacingNotices() }); }
           finally { humanHookProvenance = undefined; }
         }); userQueue = work; return work;
       }
@@ -906,8 +928,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }, error => { process.stderr.write(`Bflow Gateway check: ${redactString(String(error))}\n`); }).finally(() => { verifyingGateway = false; });
   }, 30_000);
   gatewayTimer.unref();
-  // Inbox reminder: one Herdr notification per new notice; the nudge is typed only into a verifiably idle, empty input box.
-  const remindedNotices = new Set<string>();
+  // Inbox reminder: user decisions and blocks are re-shown with backoff until displayed; other new notices notify once.
+  // The nudge is typed only into a verifiably idle, empty input box.
+  const reminders = new Map<string, ReminderState>();
   let remindingInbox = false;
   const conversationProvider = platformRoles.find(option => option.role === "conversation")?.provider ?? "claude";
   const inboxTimer = setInterval(() => {
@@ -915,13 +938,23 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     remindingInbox = true;
     void (async () => {
       const unsurfaced = await receipts.unsurfacedConversationNotices();
-      if (!unsurfaced.length) return;
-      const fresh = unsurfaced.filter(notice => !remindedNotices.has(notice.messageId));
-      if (fresh.length) {
-        for (const notice of fresh) remindedNotices.add(notice.messageId);
-        try { await herdr(["notification", "show", `Bflow: ${fresh.length} cập nhật mới`, "--body", fresh.map(notice => notice.type).join(", "), "--sound", "request"]); }
+      const undisplayed = await receipts.undisplayedUserFacingNotices();
+      if (!unsurfaced.length && !undisplayed.length) return;
+      const now = Date.now(), due: { id: string; body: string }[] = [];
+      for (const notice of [...undisplayed, ...unsurfaced.filter(item => !undisplayed.some(other => other.messageId === item.messageId))]) {
+        const rendered = renderConversationNotice(notice), userFacing = isUserFacingNotice(rendered);
+        const state = reminders.get(notice.messageId);
+        if (userFacing ? reminderDue(state, now) : state === undefined) {
+          due.push({ id: notice.messageId, body: userFacing ? notificationBody(rendered) : rendered.display });
+          reminders.set(notice.messageId, userFacing ? afterReminder(state, now) : { shows: 1, nextAt: Number.POSITIVE_INFINITY });
+        }
+      }
+      if (due.length) {
+        try { await herdr(["notification", "show", `Bflow: ${due.length} cập nhật mới`, "--body", due.map(item => item.body).join("\n---\n").slice(0, 1200), "--sound", "request"]); }
         catch (error) { process.stderr.write(`Bflow inbox notification: ${redactString(String(error))}\n`); }
       }
+      // Nudge for unsurfaced notices, or for user-facing notices that were just re-shown.
+      if (!unsurfaced.length && !due.some(item => undisplayed.some(notice => notice.messageId === item.id))) return;
       const pane = unwrap(await requireWorkspace().runtime.ports.panes.getRoleBinding("conversation"));
       if (!pane) return;
       // Re-checked immediately before submission; any doubt (busy, draft, unknown layout) skips the nudge.
@@ -932,8 +965,50 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       .finally(() => { remindingInbox = false; });
   }, 30_000);
   inboxTimer.unref();
+  // Hang watchdog (decisions in run-watchdog.ts): recreates lost user-decision notices, resurfaces undisplayed ones and reports
+  // runs that are not working. Actions run one at a time outside the journal lock; each Runtime report is its own transaction.
+  const watchdogReported = new Set<string>();
+  const runWatchdog = async () => {
+    const host = requireWorkspace(), now = Date.now();
+    const runs = await host.runtime.watchdogSnapshot(manifest!.conversationSessionId);
+    if (!runs.some(run => run.live)) return;
+    const notices = await receipts.conversationNoticeStates();
+    const current = SessionManifestSchema.parse(unwrap(await host.runtime.ports.panes.getManifest()));
+    // An unreadable pane is "unavailable", which is not "not working": it never produces a stall.
+    const panes = await Promise.all(current.panes.filter(pane => pane.role !== "conversation").map(async pane => ({ role: pane.role,
+      status: await observeAgent(pane.paneId).then(agent => agent.status, () => "unavailable") })));
+    for (const action of evaluateWatchdog({ now, runs, notices, panes })) {
+      try {
+        if (action.kind === "reconcile_notice") {
+          const pending = runs.flatMap(run => run.pendingDecisionRequests).find(item => item.request.approvalId === action.approvalId);
+          if (!pending) continue;
+          // Gateway registration first; the notice receipt is what the user sees. Both are idempotent.
+          await host.conversation.reconcileApprovals().catch(() => undefined);
+          await receipts.appendConversationNotice(buildDecisionRequestMessage({ request: pending.request, correlationId: pending.correlationId,
+            sender: { role: "runtime" }, conversation: { role: "conversation" } }));
+          reminders.delete(action.messageId);
+        } else if (action.kind === "resurface") {
+          if (await receipts.resurfaceConversationNotice(action.messageId) !== undefined) reminders.delete(action.messageId);
+        } else {
+          const key = action.kind === "stalled" ? `stalled:${action.episodeKey}` : `blocked:${action.messageId}`;
+          if (watchdogReported.has(key)) continue;
+          if (action.kind === "blocked") await host.runtime.reportWorkflowBlocked(action.runId, action.approvalId, action.resends);
+          else await host.runtime.reportRunStalled(action.runId, action.episodeKey);
+          watchdogReported.add(key);
+        }
+      } catch (error) { process.stderr.write(`Bflow watchdog ${action.kind}: ${redactString(String(error))}\n`); }
+    }
+  };
+  let watchdogRunning = false;
+  const watchdogTimer = setInterval(() => {
+    if (!workspace || quiesced || closing || watchdogRunning) return;
+    watchdogRunning = true;
+    void runWatchdog().catch(error => { process.stderr.write(`Bflow watchdog: ${redactString(String(error))}\n`); })
+      .finally(() => { watchdogRunning = false; });
+  }, 15_000);
+  watchdogTimer.unref();
   const close = async () => {
-    closing = true; clearInterval(timer); clearInterval(pump); clearInterval(gatewayTimer); clearInterval(inboxTimer);
+    closing = true; clearInterval(timer); clearInterval(pump); clearInterval(gatewayTimer); clearInterval(inboxTimer); clearInterval(watchdogTimer);
     await drainRoleStartup(true);
     await activation?.catch(() => undefined);
     await nativeSessionWrites;
@@ -1181,6 +1256,28 @@ function noticeIds(reply: unknown): string[] {
     .map(notice => notice.messageId);
 }
 
+/** Surfaced user-facing notices not yet shown to the user, with their Stop re-block count. */
+function undisplayedNotices(reply: unknown): { notice: Record<string, unknown>; messageId: string; reblocks: number; ackToken?: string }[] {
+  return z.object({ undisplayed: z.array(z.object({ messageId: z.string().min(1), reblocks: z.number().int().min(0).optional() }).passthrough()).optional() })
+    .passthrough().parse(reply).undisplayed?.map(item => {
+      const notice = item as Record<string, unknown>, rendered = renderConversationNotice(item as unknown as NoticeLike);
+      return { notice, messageId: item.messageId, reblocks: item.reblocks ?? 0, ...(rendered.ackToken === undefined ? {} : { ackToken: rendered.ackToken }) };
+    }) ?? [];
+}
+
+/** Assistant text of the final assistant turn in a Claude transcript, read from a capped tail. Advisory only: unreadable means not shown. */
+async function transcriptAssistantText(path: unknown): Promise<string> {
+  if (typeof path !== "string" || !path) return "";
+  try {
+    const file = await open(path, "r");
+    try {
+      const { size } = await file.stat(), length = Math.min(size, 512 * 1024), buffer = Buffer.alloc(length);
+      await file.read(buffer, 0, length, size - length);
+      return lastAssistantText(buffer.toString("utf8"));
+    } finally { await file.close(); }
+  } catch { return ""; }
+}
+
 async function handleProviderHook(configuration: RoleConfiguration, event: string, roleConfigPath?: string): Promise<void> {
   const chunks: Buffer[] = []; let size = 0;
   for await (const chunk of process.stdin) { size += Buffer.byteLength(chunk); if (size > 1024 * 1024) throw new Error("Oversized provider hook"); chunks.push(Buffer.from(chunk)); }
@@ -1219,19 +1316,29 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
     if (event === "Stop" && configuration.role === "conversation" && configuration.provider === "claude") {
       // Each notice blocks at most one Stop: it is marked surfaced once its reason has been emitted, so no loop is possible.
       const reply = await callHost(configuration.socketPath, configuration.token, "conversation_notices", { paneId, nativeSessionId: session });
-      const ids = noticeIds(reply);
-      if (ids.length) {
-        process.stdout.write(JSON.stringify({ decision: "block", reason: "Bflow Runtime updates (report them to the user, do not ask the user to repeat): " + JSON.stringify(record(reply).notices) }) + "\n");
-        await callHost(configuration.socketPath, configuration.token, "conversation_notices_surfaced", { paneId, nativeSessionId: session, messageIds: ids });
+      const ids = noticeIds(reply), undisplayed = undisplayedNotices(reply);
+      // Display acknowledgement: a surfaced user decision or block counts as shown only when the final Conversation turn names it.
+      const shown = await transcriptAssistantText(hook.transcript_path);
+      const displayed = undisplayed.filter(item => item.ackToken !== undefined && shown.includes(item.ackToken));
+      if (displayed.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_displayed", { paneId, nativeSessionId: session, messageIds: displayed.map(item => item.messageId) });
+      const reblock = undisplayed.filter(item => !displayed.includes(item) && item.reblocks < MAX_NOTICE_REBLOCKS);
+      if (ids.length || reblock.length) {
+        const notices = [...(record(reply).notices as unknown[] ?? []), ...reblock.map(item => item.notice)];
+        process.stdout.write(JSON.stringify({ decision: "block", reason: mustShowSection(notices as Parameters<typeof mustShowSection>[0]) +
+          "Bflow Runtime updates (report them to the user, do not ask the user to repeat): " + JSON.stringify(notices) }) + "\n");
+        if (reblock.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_reblocked", { paneId, nativeSessionId: session, messageIds: reblock.map(item => item.messageId) });
+        if (ids.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_surfaced", { paneId, nativeSessionId: session, messageIds: ids });
       }
     }
   }
   if (event === "UserPromptSubmit" && configuration.role === "conversation" && textField(hook.prompt).trim() === BFLOW_INBOX_NUDGE) {
     // A host-typed nudge is not human input: it never reaches user_prompt, so it cannot create a trusted turn or approval.
     const reply = await callHost(configuration.socketPath, configuration.token, "conversation_notices", { paneId, nativeSessionId: textField(hook.session_id) });
-    const ids = noticeIds(reply);
+    const ids = noticeIds(reply), pending = undisplayedNotices(reply).map(item => item.notice);
+    const notices = [...(record(reply).notices as unknown[] ?? []), ...pending];
     process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: "Trusted Bflow inbox nudge, not a user message and not an approval. " +
-      (ids.length ? "Runtime updates: " + JSON.stringify(record(reply).notices) : "No new Runtime updates.") } }) + "\n");
+      mustShowSection(notices as Parameters<typeof mustShowSection>[0]) +
+      (notices.length ? "Runtime updates: " + JSON.stringify(notices) : "No new Runtime updates.") } }) + "\n");
     if (ids.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_surfaced", { paneId, nativeSessionId: textField(hook.session_id), messageIds: ids });
     return;
   }
@@ -1253,7 +1360,8 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
   }
   if (event === "UserPromptSubmit" && configuration.role === "conversation") {
     const result = await callHost(configuration.socketPath, configuration.token, "user_prompt", { paneId, hook });
-    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: "Trusted Bflow user turn and Conversation context: " + JSON.stringify(result) } }) + "\n");
+    const shownFirst = mustShowSection([...(record(result).notices as unknown[] ?? []), ...undisplayedNotices(result).map(item => item.notice)] as Parameters<typeof mustShowSection>[0]);
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: shownFirst + "Trusted Bflow user turn and Conversation context: " + JSON.stringify(result) } }) + "\n");
     // Marked only after the context reached the provider; a crash before this line re-surfaces the notices.
     const ids = noticeIds(result);
     if (ids.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_surfaced", { paneId, nativeSessionId: textField(hook.session_id), messageIds: ids });

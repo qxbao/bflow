@@ -1,0 +1,220 @@
+import { z } from "zod";
+
+/**
+ * Pure rendering of durable Conversation notices into the Vietnamese text the user must see.
+ * Notice text is data: it is rendered for display and identification only, never used as authority.
+ */
+
+/** Bounded structured fields of a user decision request, stored beside the notice summary so truncation cannot hide the question. */
+export const UserDecisionNoticeSchema = z.object({
+  approvalId: z.string().min(1).max(200),
+  runId: z.string().min(1).max(200).optional(),
+  requestedByRole: z.string().min(1).max(64).optional(),
+  question: z.string().min(1).max(2000),
+  options: z.array(z.string().min(1).max(500)).max(10).optional(),
+  expiresAt: z.string().min(1).max(64).optional()
+}).strict();
+export type UserDecisionNotice = z.infer<typeof UserDecisionNoticeSchema>;
+
+/** Structural input: a stored ConversationNotice, or a partial notice from a host reply. Never throws. */
+export interface NoticeLike {
+  messageId: string;
+  type?: string | undefined;
+  senderRole?: string | undefined;
+  runId?: string | undefined;
+  summary?: string | undefined;
+  truncated?: boolean | undefined;
+  /** Preferred over the summary when present and valid. Receipts written before this field existed simply lack it. */
+  userDecision?: unknown;
+}
+
+export type RenderedNoticeKind = "user_decision" | "approval" | "blocked" | "update";
+
+export interface RenderedNotice {
+  messageId: string;
+  kind: RenderedNoticeKind;
+  runId?: string;
+  approvalId?: string;
+  requestedByRole?: string | undefined;
+  question?: string | undefined;
+  options?: { number: number; text: string }[];
+  expiresAt?: string;
+  /** Identity the displayed-acknowledgement check looks for in the Conversation transcript. */
+  ackToken?: string;
+  headline: string;
+  reply?: string;
+  display: string;
+}
+
+const APPROVAL_PAYLOAD = z.object({
+  approvalId: z.string().min(1),
+  runId: z.string().min(1).optional(),
+  expiresAt: z.string().min(1).optional(),
+  metadata: z.object({
+    kind: z.string(),
+    question: z.string().min(1).optional(),
+    requestedByRole: z.string().min(1).optional(),
+    options: z.array(z.string()).optional()
+  }).passthrough().optional()
+}).passthrough();
+
+const BLOCKED_PAYLOAD = z.object({
+  kind: z.enum(["workflow_blocked", "run_stalled", "workflow_rejected"]),
+  reason: z.string().min(1),
+  options: z.array(z.string()).optional(),
+  runId: z.string().min(1).optional()
+}).passthrough();
+
+const BLOCKED_LABEL: Record<z.infer<typeof BLOCKED_PAYLOAD>["kind"], string> = {
+  workflow_blocked: "workflow bị chặn",
+  run_stalled: "run bị treo",
+  workflow_rejected: "workflow bị từ chối"
+};
+
+/**
+ * Structured decision fields for an approval.request payload, clipped to the receipt bounds.
+ * Undefined for anything that is not a user decision. The approval id is never clipped: a clipped id is a different id.
+ */
+export function userDecisionNoticeFields(payload: unknown): UserDecisionNotice | undefined {
+  const parsed = APPROVAL_PAYLOAD.safeParse(payload);
+  const metadata = parsed.success ? parsed.data.metadata : undefined;
+  if (!parsed.success || metadata?.kind !== "user_decision" || metadata.question === undefined) return undefined;
+  const fields = UserDecisionNoticeSchema.safeParse({
+    approvalId: parsed.data.approvalId,
+    ...(parsed.data.runId === undefined ? {} : { runId: parsed.data.runId }),
+    ...(metadata.requestedByRole === undefined ? {} : { requestedByRole: metadata.requestedByRole.slice(0, 64) }),
+    question: metadata.question.slice(0, 2000),
+    ...(metadata.options === undefined ? {} : { options: metadata.options.filter(option => option.length > 0).slice(0, 10).map(option => option.slice(0, 500)) }),
+    ...(parsed.data.expiresAt === undefined ? {} : { expiresAt: parsed.data.expiresAt.slice(0, 64) })
+  });
+  return fields.success ? fields.data : undefined;
+}
+
+/** Notices a user must see verbatim: a missed decision or block is a lost user action. */
+export function isUserFacingNotice(notice: RenderedNotice): boolean {
+  return notice.kind === "user_decision" || notice.kind === "blocked";
+}
+
+/** Display priority: user decisions, then blocks, then everything else. */
+export function noticePriority(notice: RenderedNotice): number {
+  return notice.kind === "user_decision" ? 0 : notice.kind === "blocked" ? 1 : 2;
+}
+
+function parseSummary(notice: NoticeLike): unknown {
+  if (notice.summary === undefined || notice.truncated === true) return undefined;
+  try { return JSON.parse(notice.summary) as unknown; } catch { return undefined; }
+}
+
+function capitalise(value: string): string { return value.charAt(0).toUpperCase() + value.slice(1); }
+
+function updateNotice(notice: NoticeLike): RenderedNotice {
+  const type = notice.type ?? "notice", sender = notice.senderRole ?? "runtime";
+  const truncated = notice.truncated === true;
+  const headline = `ℹ️ Cập nhật từ ${sender} (${type})${notice.runId ? ` · run ${notice.runId}` : ""}`;
+  const note = truncated ? " — nội dung bị cắt ngắn, không hiển thị đầy đủ" : "";
+  return { messageId: notice.messageId, kind: "update", ...(notice.runId ? { runId: notice.runId } : {}), headline,
+    display: `${headline}${note}` };
+}
+
+function decisionNotice(notice: NoticeLike, fields: UserDecisionNotice): RenderedNotice {
+  const runPart = fields.runId ? ` (run ${fields.runId})` : "";
+  const role = fields.requestedByRole ? capitalise(fields.requestedByRole) : "Một vai trò";
+  const options = (fields.options ?? []).map((text, index) => ({ number: index + 1, text }));
+  const headline = `🔔 [${fields.approvalId}] ${role} cần bạn quyết định${runPart}:`;
+  const reply = `Trả lời: ${fields.approvalId}: ${options.length ? "<số lựa chọn>" : "<nội dung trả lời>"}`;
+  const hanLine = `Hạn: ${fields.expiresAt ?? "Không có hạn — đang chờ bạn trả lời"}`;
+  const lines = [headline, fields.question, ...options.map(option => `${option.number}. ${option.text}`), hanLine, reply];
+  return { messageId: notice.messageId, kind: "user_decision", approvalId: fields.approvalId, ackToken: fields.approvalId,
+    ...(fields.runId ? { runId: fields.runId } : {}), requestedByRole: fields.requestedByRole, question: fields.question,
+    options, ...(fields.expiresAt ? { expiresAt: fields.expiresAt } : {}), headline, reply, display: lines.join("\n") };
+}
+
+function approvalNotice(notice: NoticeLike, payload: z.infer<typeof APPROVAL_PAYLOAD>): RenderedNotice {
+  const runPart = payload.runId ? ` (run ${payload.runId})` : "";
+  const metadata = payload.metadata;
+  if (metadata?.kind !== "user_decision" || metadata.question === undefined) {
+    const headline = `🔔 [${payload.approvalId}] Yêu cầu phê duyệt${runPart}`;
+    return { messageId: notice.messageId, kind: "approval", approvalId: payload.approvalId, ...(payload.runId ? { runId: payload.runId } : {}),
+      headline, reply: `Trả lời "duyệt" hoặc "từ chối" kèm mã ${payload.approvalId}`,
+      display: `${headline}. Trả lời "duyệt" hoặc "từ chối" kèm mã ${payload.approvalId}.` };
+  }
+  return decisionNotice(notice, { approvalId: payload.approvalId, ...(payload.runId ? { runId: payload.runId } : {}),
+    ...(metadata.requestedByRole ? { requestedByRole: metadata.requestedByRole } : {}), question: metadata.question,
+    ...(metadata.options ? { options: metadata.options } : {}), ...(payload.expiresAt ? { expiresAt: payload.expiresAt } : {}) });
+}
+
+function blockedNotice(notice: NoticeLike, payload: z.infer<typeof BLOCKED_PAYLOAD>): RenderedNotice {
+  const runId = payload.runId ?? notice.runId;
+  const options = (payload.options ?? []).map((text, index) => ({ number: index + 1, text }));
+  const headline = `⚠️ [${notice.messageId}] ${capitalise(BLOCKED_LABEL[payload.kind])}${runId ? ` (run ${runId})` : ""}: ${payload.reason}`;
+  const reply = options.length ? "Trả lời: <số lựa chọn>, hoặc nêu rõ cách xử lý" : "Hãy cho Conversation biết cách xử lý";
+  return { messageId: notice.messageId, kind: "blocked", ...(runId ? { runId } : {}), ackToken: notice.messageId, headline, reply,
+    options, display: [headline, ...options.map(option => `${option.number}. ${option.text}`), reply].join("\n") };
+}
+
+/** Renders one notice. Anything unparseable or truncated degrades to a generic update that says so. */
+export function renderConversationNotice(notice: NoticeLike): RenderedNotice {
+  const structured = notice.userDecision === undefined ? undefined : UserDecisionNoticeSchema.safeParse(notice.userDecision);
+  if (structured?.success) return decisionNotice(notice, structured.data);
+  if (notice.type === "approval.request") {
+    const approval = APPROVAL_PAYLOAD.safeParse(parseSummary(notice));
+    if (approval.success) return approvalNotice(notice, approval.data);
+  }
+  const blocked = BLOCKED_PAYLOAD.safeParse(parseSummary(notice));
+  if (blocked.success) return blockedNotice(notice, blocked.data);
+  return updateNotice(notice);
+}
+
+/** Notification text: the whole display when it fits, otherwise headline, clipped question and the reply line. */
+export function notificationBody(notice: RenderedNotice, max = 400): string {
+  if (notice.display.length <= max) return notice.display;
+  const reply = notice.reply ?? "";
+  const head = notice.headline;
+  const room = max - head.length - reply.length - 4;
+  const question = (notice.question ?? "").slice(0, Math.max(0, room));
+  return [head, ...(question ? [question] : []), ...(reply ? [reply] : [])].join("\n").slice(0, max);
+}
+
+/** The MUST SHOW block placed first in hook output. Empty when there is nothing to show. */
+export function mustShowSection(notices: readonly NoticeLike[]): string {
+  const rendered = notices.map(renderConversationNotice).sort((a, b) => noticePriority(a) - noticePriority(b));
+  if (!rendered.length) return "";
+  return "MUST SHOW TO USER VERBATIM:\n" + rendered.map(notice => notice.display).join("\n\n") + "\n\n";
+}
+
+/** A genuine user prompt: a string, or a user entry with a text block. Tool results are user-role entries without text. */
+function isGenuineUserPrompt(content: unknown): boolean {
+  if (typeof content === "string") return true;
+  return Array.isArray(content) && content.some(block => typeof block === "object" && block !== null &&
+    (block as { type?: unknown }).type === "text" && typeof (block as { text?: unknown }).text === "string");
+}
+
+/** Text blocks of one assistant entry, in order. Never mutates the parsed content. */
+function assistantTexts(content: unknown): string[] {
+  if (typeof content === "string") return [content];
+  if (!Array.isArray(content)) return [];
+  return content.flatMap(block => typeof block === "object" && block !== null && (block as { type?: unknown }).type === "text" &&
+    typeof (block as { text?: unknown }).text === "string" ? [(block as { text: string }).text] : []);
+}
+
+/**
+ * Assistant text of the final assistant turn in a Claude JSONL transcript tail: everything after the last genuine user prompt.
+ * Tool-result entries (user role, no text) and malformed lines, such as a partial first line of a tail read, are skipped.
+ */
+export function lastAssistantText(jsonl: string): string {
+  const lines = jsonl.split("\n"), reversed: string[] = [];
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const line = lines[index]!.trim();
+    if (!line) continue;
+    let entry: unknown;
+    try { entry = JSON.parse(line); } catch { continue; }
+    if (typeof entry !== "object" || entry === null) continue;
+    const type = (entry as { type?: unknown }).type;
+    const content = ((entry as { message?: { content?: unknown } }).message)?.content;
+    if (type === "user") { if (isGenuineUserPrompt(content)) break; continue; }
+    if (type !== "assistant") continue;
+    const texts = assistantTexts(content);
+    for (let position = texts.length - 1; position >= 0; position--) reversed.push(texts[position]!);
+  }
+  return reversed.reverse().join("\n");
+}

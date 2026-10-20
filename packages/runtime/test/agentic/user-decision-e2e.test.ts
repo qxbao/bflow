@@ -11,7 +11,11 @@ import { AgenticJournal, type JournalState } from "../../src/agentic/journal.js"
 import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import { createAgenticConversationHost, type AgenticConversationHost } from "../../src/agentic/conversation.js";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
-import { parseUserDecisionToolInput } from "../../src/agentic/decision-routing.js";
+import { buildDecisionRequestMessage, parseUserDecisionToolInput } from "../../src/agentic/decision-routing.js";
+import { renderConversationNotice } from "../../src/agentic/conversation-notice-render.js";
+import { decisionMessageId, evaluateWatchdog, type WatchdogAction } from "../../src/agentic/run-watchdog.js";
+import { HostVerification } from "../../src/agentic/host-verification.js";
+import { WorkflowProposalRejected, guardWorkflowProposal, type WorkflowRejection } from "../../src/agentic/workflow-rejection.js";
 import type { AgenticRuntimePorts } from "../../src/agentic/ports.js";
 import { FakeAgentTransport } from "../helpers/fake-transport.js";
 
@@ -112,7 +116,7 @@ async function fixture(options: { design?: boolean } = {}) {
     runtime: instance, manifest: unwrap(await panes.getManifest()), contextDirectory: join(root, "conversation"),
     onHumanDecision: recordReceipts ? decision => receipts.recordHuman(decision, provenance("user-reply")) : undefined
   });
-  return { root, transport, registry, receipts, runtime, chat, provenance, inbox, developer: panes.bindings[2]!, journal };
+  return { root, transport, registry, receipts, runtime, chat, provenance, inbox, coordinator: panes.bindings[1]!, developer: panes.bindings[2]!, journal };
 }
 
 const outbound = async (instance: AgenticWorkflowRuntime): Promise<Entry[]> =>
@@ -486,5 +490,150 @@ describe.skipIf(process.platform !== "linux")("P30 user decisions end to end", (
       expect(status.approvalWarnings?.[0]).toContain(approvalId);
       expect(status.approvalWarnings?.[0]).toContain(`run ${RUN}`);
     });
+  });
+});
+
+/** Mirrors the host: every message Runtime delivered to Conversation is recorded as a notice receipt. */
+async function persistNotices(f: { inbox: RoleMessage[]; receipts: HostReceiptJournal }): Promise<void> {
+  for (const message of f.inbox) await f.receipts.appendConversationNotice(message);
+}
+const payloadKind = (message: RoleMessage) => (message.payload as { kind?: string }).kind;
+const idle = [{ role: "coordinator", status: "idle" }, { role: "developer", status: "done" }];
+
+describe.skipIf(process.platform !== "linux")("Conversation notices and watchdog end to end", () => {
+  it("shows a Coordinator decision with numbered options and a deadline, and a numbered answer wakes the Coordinator", async () => {
+    const f = await fixture(); const runtime = f.runtime();
+    const receipt = await runtime.requestUserDecision(f.coordinator, "coordinator", parseUserDecisionToolInput({ runId: RUN, taskId: TASK,
+      question: "Which storage backend should we use?", options: ["SQLite", "Postgres"], expiresInMinutes: 30 }));
+    const approvalId = (receipt as unknown as { approvalId: string }).approvalId;
+    await runtime.flushOutbound();
+    const host = await f.chat(runtime);
+    await host.receiveHerdr(await promptOf(runtime));
+    await persistNotices(f);
+    const notice = (await f.receipts.unsurfacedConversationNotices()).find(item => item.messageId === decisionMessageId(approvalId))!;
+    const rendered = renderConversationNotice(notice);
+    expect(rendered).toMatchObject({ kind: "user_decision", approvalId, requestedByRole: "coordinator" });
+    expect(rendered.display).toContain(`[${approvalId}] Coordinator cần bạn quyết định`);
+    expect(rendered.display).toContain("Which storage backend should we use?");
+    expect(rendered.display).toContain("1. SQLite\n2. Postgres");
+    expect(rendered.display).toMatch(/Hạn: \d{4}-\d{2}-\d{2}T/);
+    expect(rendered.display).toContain(`Trả lời: ${approvalId}: <số lựa chọn>`);
+
+    const response = await reply(host, `${approvalId}: 1`);
+    expect(response.ok).toBe(true);
+    expect(response.value.approvalDecision).toMatchObject({ approvalId, decision: "approved", metadata: { selectedOption: "SQLite" } });
+    await runtime.receiveHerdr((await outbound(runtime)).find(entry => entry.message.type === "approval.decision")!.message);
+    await runtime.flushOutbound();
+    const wake = (await outbound(runtime)).filter(entry => entry.message.type === "task.status" && entry.message.recipient.role === "coordinator");
+    expect(wake).toHaveLength(1);
+    expect(wake[0]!.message.payload).toMatchObject({ kind: "user_decision_answer", approvalId, outcome: "approved", selectedOption: "SQLite" });
+    expect(wake[0]!.status).not.toBe("cancelled");
+  });
+
+  it("recreates a lost decision notice from the pending request and keeps the decision answerable", async () => {
+    const f = await fixture(); const runtime = f.runtime();
+    const approvalId = await request(runtime, f.developer);
+    await runtime.flushOutbound(); // delivered to Conversation, but the notice receipt never landed
+    const host = await f.chat(runtime);
+    expect(await f.receipts.conversationNoticeStates()).toEqual([]);
+    const snapshot = await runtime.watchdogSnapshot(SESSION);
+    const requestedAt = Date.parse(snapshot[0]!.pendingDecisions[0]!.requestedAt);
+    expect(evaluateWatchdog({ now: requestedAt + 61_000, runs: snapshot, notices: [], panes: idle })).toEqual([
+      { kind: "reconcile_notice", runId: RUN, approvalId, messageId: decisionMessageId(approvalId) }
+    ]);
+    // Same order as the host: Gateway registration first, then the notice receipt built from the pending request.
+    await host.reconcileApprovals();
+    const pending = snapshot.flatMap(item => item.pendingDecisionRequests).find(item => item.request.approvalId === approvalId)!;
+    const message = buildDecisionRequestMessage({ request: pending.request, correlationId: pending.correlationId,
+      sender: { role: "runtime" }, conversation: { role: "conversation" } });
+    expect(await f.receipts.appendConversationNotice(message)).toBe(true);
+    expect(await f.receipts.appendConversationNotice(message)).toBe(false);
+    const notice = (await f.receipts.unsurfacedConversationNotices()).find(item => item.messageId === decisionMessageId(approvalId))!;
+    expect(renderConversationNotice(notice).display).toContain("Developer cần bạn quyết định");
+    expect((await reply(host, `${approvalId}: 2`)).ok).toBe(true);
+  });
+
+  it("resurfaces an undisplayed decision on the watchdog schedule and reports it blocked after three resends", async () => {
+    const f = await fixture(); const runtime = f.runtime();
+    const approvalId = await request(runtime, f.developer);
+    await runtime.flushOutbound();
+    await persistNotices(f);
+    const id = decisionMessageId(approvalId);
+    await f.receipts.markConversationNoticesSurfaced([id]);
+    const stateOf = async () => (await f.receipts.conversationNoticeStates()).find(item => item.messageId === id)!;
+    const watch = async (now: number): Promise<WatchdogAction[]> => evaluateWatchdog({ now, runs: await runtime.watchdogSnapshot(SESSION),
+      notices: await f.receipts.conversationNoticeStates(), panes: idle });
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const state = await stateOf();
+      expect(await watch(Date.parse(state.since) + 30_000)).toEqual([]);
+      expect(await watch(Date.parse(state.since) + 61_000)).toEqual([{ kind: "resurface", runId: RUN, approvalId, messageId: id, attempt }]);
+      expect(await f.receipts.resurfaceConversationNotice(id)).toBe(attempt);
+      expect((await f.receipts.unsurfacedConversationNotices()).map(item => item.messageId).filter(messageId => messageId === id)).toEqual([id]);
+      await f.receipts.markConversationNoticesSurfaced([id]); // Conversation shows it again, and it is still not displayed
+    }
+    const last = await stateOf();
+    expect(await watch(Date.parse(last.since) + 61_000)).toEqual([{ kind: "blocked", runId: RUN, approvalId, messageId: id, resends: 3 }]);
+    await runtime.reportWorkflowBlocked(RUN, approvalId, 3);
+    await runtime.reportWorkflowBlocked(RUN, approvalId, 3);
+    await runtime.flushOutbound();
+    const blocked = f.inbox.filter(message => payloadKind(message) === "workflow_blocked");
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]!.payload).toMatchObject({ approvalId, reason: `Conversation chưa hiển thị câu hỏi ${approvalId} sau 3 lần gửi lại` });
+    await persistNotices(f);
+    expect((await f.receipts.unsurfacedConversationNotices()).some(item => renderConversationNotice(item).kind === "blocked")).toBe(true);
+  });
+
+  it("reports a stalled run once per episode", async () => {
+    const f = await fixture(); const runtime = f.runtime();
+    const facts = (await runtime.watchdogSnapshot(SESSION))[0]!;
+    expect(facts).toMatchObject({ runId: RUN, live: true, awaitingHuman: false, activeHandoff: false, pendingDecisions: [] });
+    const actions = evaluateWatchdog({ now: facts.lastActivityAt + 181_000, runs: [facts], notices: [], panes: idle });
+    expect(actions).toHaveLength(1);
+    const stall = actions[0] as Extract<WatchdogAction, { kind: "stalled" }>;
+    expect(stall.kind).toBe("stalled");
+    await runtime.reportRunStalled(RUN, stall.episodeKey);
+    await runtime.reportRunStalled(RUN, stall.episodeKey);
+    await runtime.flushOutbound();
+    const stalls = f.inbox.filter(message => payloadKind(message) === "run_stalled");
+    expect(stalls).toHaveLength(1);
+    expect(stalls[0]!.payload).toMatchObject({ runId: RUN, idleSince: new Date(facts.lastActivityAt).toISOString() });
+    expect((stalls[0]!.payload as { options: string[] }).options).toHaveLength(2);
+  });
+
+  it("refuses a unit_test proposal without a configured runner, tells Conversation why, and leaves the criteria untouched", async () => {
+    const f = await fixture(); const runtime = f.runtime();
+    const specification = draft("api"), before = structuredClone(specification);
+    const verification = new HostVerification(() => runtime, () => { throw new Error("artifact store not used"); }, undefined, []);
+    let rejection: WorkflowRejection | undefined, message = "";
+    try {
+      guardWorkflowProposal({ phase: "verification", specification, configuredMethods: verification.configuredMethods(),
+        check: () => verification.assertSupported(specification, undefined) });
+    } catch (error) {
+      expect(error).toBeInstanceOf(WorkflowProposalRejected);
+      rejection = (error as WorkflowProposalRejected).rejection; message = (error as Error).message;
+    }
+    expect(rejection).toMatchObject({ code: "missing_behavioral_runner", methods: ["unit_test"], criteria: ["ac-1"] });
+    expect(JSON.parse(message)).toEqual(rejection);
+
+    await runtime.reportWorkflowRejected(RUN, rejection!);
+    await runtime.reportWorkflowRejected(RUN, rejection!);
+    await runtime.flushOutbound();
+    const rejected = f.inbox.filter(item => payloadKind(item) === "workflow_rejected");
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.payload).toMatchObject({ code: "missing_behavioral_runner", reason: rejection!.reason, runId: RUN });
+    expect((rejected[0]!.payload as { options: string[] }).options).toEqual(rejection!.options);
+
+    await persistNotices(f);
+    const notice = (await f.receipts.unsurfacedConversationNotices()).find(item => renderConversationNotice(item).display.includes("Chủ dự án cấu hình runner"))!;
+    const rendered = renderConversationNotice(notice);
+    expect(rendered.kind).toBe("blocked");
+    expect(rendered.display).toContain("1. Chủ dự án cấu hình runner");
+    expect(rendered.display).toContain("3. Hủy run này.");
+
+    expect(specification).toEqual(before);
+    expect(specification.acceptanceCriteria[0]!.verificationMethod).toBe("unit_test");
+    const inspected = await runtime.inspect(RUN) as unknown as { status: string; definition?: unknown };
+    expect(inspected.status).toBe("intake");
+    expect(inspected.definition).toBeUndefined();
   });
 });
