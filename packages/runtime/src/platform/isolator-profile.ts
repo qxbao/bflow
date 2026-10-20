@@ -90,13 +90,14 @@ function isWithin(root: string, path: string): boolean {
 
 function validateOwnerAndMode(
   stat: Awaited<ReturnType<typeof lstat>>,
-  privateEntry: boolean
+  privateEntry: boolean,
+  path: string
 ): void {
   if (process.getuid !== undefined && stat.uid !== process.getuid())
-    throw new ProfileFailure("validation", "profile entry is not owned by the current user");
+    throw new ProfileFailure("validation", `profile entry is not owned by the current user: ${path}`);
   const mode = typeof stat.mode === "bigint" ? Number(stat.mode) : stat.mode;
   if (privateEntry && process.platform !== "win32" && (mode & 0o077) !== 0)
-    throw new ProfileFailure("validation", "profile entry is accessible to other users");
+    throw new ProfileFailure("validation", `profile entry is accessible to other users: ${path}`);
 }
 
 function filesystemIdentity(stat: {
@@ -127,14 +128,14 @@ async function requireDirectory(
   const before = await lstat(path);
   if (!before.isDirectory() || before.isSymbolicLink())
     throw new ProfileFailure("validation", "profile directory is missing or is not a real directory");
-  validateOwnerAndMode(before, privateEntry);
+  validateOwnerAndMode(before, privateEntry, path);
   const handle = await open(path, NO_FOLLOW_DIRECTORY_FLAGS);
   try {
     const opened = await handle.stat();
     const identity = filesystemIdentity(opened);
     if (!opened.isDirectory() || !sameFilesystemIdentity(identity, filesystemIdentity(before)))
       throw new ProfileFailure("validation", "profile directory changed while it was being validated");
-    validateOwnerAndMode(opened, privateEntry);
+    validateOwnerAndMode(opened, privateEntry, path);
     const canonical = await realpath(path);
     const after = await lstat(path);
     if (!sameFilesystemIdentity(identity, filesystemIdentity(after)) || after.isSymbolicLink())
@@ -179,7 +180,7 @@ async function readProfileFile(
     const opened = await handle.stat();
     if (!opened.isFile() || opened.size > maxBytes)
       throw new ProfileFailure("validation", "profile metadata is not a bounded regular file");
-    validateOwnerAndMode(opened, false);
+    validateOwnerAndMode(opened, false, path);
     const identity = filesystemIdentity(opened);
     const canonical = await realpath(path);
     if (!isWithin(containmentRoot, canonical))
@@ -297,7 +298,7 @@ export class IsolatorProfileResolver {
 
       const directories = new Map<string, { readonly canonical: string; readonly identity: IsolatorProfileFilesystemIdentity }>();
       for (const name of REQUIRED_DIRECTORIES)
-        directories.set(name, await requireDirectory(join(profileRoot, name), profileRoot));
+        directories.set(name, await requireDirectory(join(profileRoot, name), profileRoot, false));
       const homeEntry = directories.get("home")!;
       const home = homeEntry.canonical;
 

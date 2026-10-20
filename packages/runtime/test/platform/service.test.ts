@@ -449,7 +449,7 @@ describe("DefaultPlatformReadinessService", () => {
     }
   });
 
-  it.each(["profile root", "home", "profile.env", "claude config root", "codex config root", "agy config root"] as const)(
+  it.each(["profile root", "home", "cache", "profile.env", "claude config root", "codex config root", "agy config root"] as const)(
     "blocks a symlinked %s before provider execution",
     async kind => {
       const provider = kind === "codex config root" ? "codex" : kind === "agy config root" ? "agy" : "claude";
@@ -471,6 +471,12 @@ describe("DefaultPlatformReadinessService", () => {
         await mkdir(externalHome, { mode: 0o700 });
         await rm(home, { recursive: true });
         await symlink(externalHome, home);
+      } else if (kind === "cache") {
+        const cache = join(profileRoot, "cache");
+        const externalCache = join(baseDir, "external-cache");
+        await mkdir(externalCache, { mode: 0o700 });
+        await rm(cache, { recursive: true });
+        await symlink(externalCache, cache);
       } else if (kind === "profile.env") {
         const metadata = join(profileRoot, "profile.env");
         const externalMetadata = join(baseDir, "external-profile.env");
@@ -496,6 +502,32 @@ describe("DefaultPlatformReadinessService", () => {
       }
     }
   );
+
+  it("rejects a profile root accessible to other users before provider execution", async () => {
+    const stateRoot = join(baseDir, "isolator-state");
+    const { profileRoot } = await createIsolatorProfile(stateRoot, "claude", "work");
+    await chmod(profileRoot, 0o755);
+    const restore = useIsolatorState(stateRoot);
+    const runner = createFakeProviderRunner({ scenario: "healthy" });
+    const run = vi.spyOn(runner, "run");
+    try {
+      const { service } = buildService({ runner });
+      const result = await service.prepareSession(identity, [requirement({
+        provider: "claude",
+        profileName: "work",
+        mcpServiceIds: []
+      })]);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value.report.ready).toBe(false);
+        expect(result.value.report.roles[0]?.message).toContain(`profile entry is accessible to other users: ${profileRoot}`);
+        expect(result.value.launches).toEqual([]);
+      }
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
 
   it("rejects FIFO and oversized profile metadata without blocking or probing providers", async () => {
     const stateRoot = join(baseDir, "isolator-state");
@@ -897,6 +929,29 @@ describe("DefaultPlatformReadinessService", () => {
       const result = await service.prepareSession(identity, [requirement({
         provider: "claude",
         profileName: "work",
+        mcpServiceIds: []
+      })]);
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value.report.ready).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it("accepts owner-owned profile children with original permissive modes under a private profile root", async () => {
+    const stateRoot = join(baseDir, "isolator-state");
+    const { profileRoot } = await createIsolatorProfile(stateRoot, "codex", "personal");
+    for (const directory of ["home", "config", "cache", "data", "state", "tmp"])
+      await chmod(join(profileRoot, directory), 0o775);
+    expect((await stat(profileRoot)).mode & 0o777).toBe(0o700);
+
+    const restore = useIsolatorState(stateRoot);
+    const runner = createFakeProviderRunner({ scenario: "healthy" });
+    try {
+      const { service } = buildService({ runner });
+      const result = await service.prepareSession(identity, [requirement({
+        provider: "codex",
+        profileName: "personal",
         mcpServiceIds: []
       })]);
       expect(result.ok).toBe(true);
