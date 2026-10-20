@@ -86,11 +86,17 @@ export async function executeSetupCommand(
   args: SetupCommandArgs,
   context?: CliContext,
   onProgress?: ((step: string) => void) | undefined,
-  observer?: { detail(message: string): void; confirm<T>(action: () => Promise<T>): Promise<T> } | undefined
+  observer?: { detail(message: string): void; important?(message: string): void; units?(completed: number, total: number, label: string): void; confirm<T>(action: () => Promise<T>): Promise<T> } | undefined
 ): Promise<SetupCommandOutput> {
   const diagnostics: string[] = [];
   const progress = (step: string) => { try { onProgress?.(step); } catch { /* presentation must not affect setup */ } };
   const detail = (message: string) => { try { observer?.detail(message); } catch { /* observational only */ } };
+  const important = (message: string) => {
+    try {
+      if (observer?.important) observer.important(message);
+      else observer?.detail(message);
+    } catch { /* observational only */ }
+  };
 
   // 1. Resolve Platform
   progress("Checking machine platform and setup scope...");
@@ -112,9 +118,10 @@ export async function executeSetupCommand(
     detail(`Running ${command}`);
     try {
       const result = await baseRunner.run(argv, options);
-      detail(`${command}: ${result.timedOut ? "timed out" : `exit ${result.exitCode ?? "unknown"}`} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
+      const observe = result.timedOut || result.exitCode !== 0 ? important : detail;
+      observe(`${command}: ${result.timedOut ? "timed out" : `exit ${result.exitCode ?? "unknown"}`} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
       return result;
-    } catch (error) { detail(`${command}: interrupted or failed`); throw error; }
+    } catch (error) { important(`${command}: interrupted or failed`); throw error; }
   } };
   const readOnly = args.mode === "check" || args.mode === "dry_run";
   const store = new SetupStateStore(platform.paths, {
@@ -232,7 +239,7 @@ export async function executeSetupCommand(
       // Isolated setup must never write the real provider homes; the isolation is passed explicitly, not via global state.
       ...(isolatedRoot ? { isolation: isolatedProviderHomes(isolatedRoot) } : {}),
       ...(context?.setup?.machineConfig || existsSync(configPath) ? { config: machineConfig } : {}),
-      registry: installerRegistry });
+      registry: installerRegistry, onUnits: (completed, total, label) => { try { observer?.units?.(completed, total, label); } catch {} } });
     machineConfig = defaults.config;
     installerRegistry = defaults.registry;
     inventory = defaults.inventory;
@@ -288,7 +295,7 @@ export async function executeSetupCommand(
         apply: async (request, options) => {
           progress(`Installing ${request.step.componentId}...`);
           const result = await installer.apply(request, options);
-          detail(`${request.step.componentId}: ${result.ok ? "installation receipt received" : "installation failed"}`);
+          (result.ok ? detail : important)(`${request.step.componentId}: ${result.ok ? "installation receipt received" : "installation failed"}`);
           return result;
         } });
     }
@@ -304,7 +311,9 @@ export async function executeSetupCommand(
       apply: async (ctx: Parameters<SetupComponent["apply"]>[0]) => {
         progress(`${SETUP_COMPONENT_LABELS[component.componentId] ?? readableLabel(component.componentId)}...`);
         const result = await component.apply(ctx);
-        for (const diagnostic of result.diagnostics) detail(diagnostic);
+        for (const diagnostic of result.diagnostics) {
+          (/\b(warn(?:ing)?|fail(?:ed|ure)?|blocked|unknown|interrupted|unsupported|requires?|missing)\b/i.test(diagnostic) ? important : detail)(diagnostic);
+        }
         return result;
       } }));
   };

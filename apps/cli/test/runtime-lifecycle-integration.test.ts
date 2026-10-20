@@ -936,7 +936,7 @@ describe("Task 3: Full 11-Scenario Integration Test Suite & Platform v3 Lifecycl
       expect(doctorHumanRes.ok).toBe(true);
       expect(doctorHumanRes.stdout).toContain("Component Groups:");
       expect(doctorHumanRes.stdout).toContain("[runtime]");
-      expect(doctorHumanRes.stdout).toContain("[agent_providers]");
+      expect(doctorHumanRes.stdout).toContain("[agent providers]");
       expect(doctorHumanRes.stdout).toContain("[mcp]");
       expect(doctorHumanRes.stdout).toContain("[tools]");
       expect(doctorHumanRes.stdout).toContain("[skills]");

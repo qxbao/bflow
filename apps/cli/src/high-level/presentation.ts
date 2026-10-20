@@ -1,47 +1,91 @@
 import type { CliCommandName } from "../types.js";
 import type { HighLevelCommandName, HighLevelEnvelope, HighLevelOutput } from "./envelope.js";
-import { bold, cyan, dim, extractSafeDetails, fieldLabel, formatProgressStep, formatTargetPaths, green, humanLine, humanText,
-  readableLabel, red, resolveActionableRemediation, sanitizeIdentifier, statusTag, yellow } from "../presentation.js";
+import { bold, cyan, dim, extractSafeDetails, fieldLabel, formatProgressStep, formatTargetPaths, green, humanText,
+  readableLabel, red, resolveActionableRemediation, statusTag, yellow } from "../presentation.js";
+
+const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value)
+  ? value as Record<string, unknown> : {};
+// Redact complete values before bounding or joining them. Keep literal spaces in paths and IDs.
+const text = (value: unknown, max = 300) => humanText(value, max).replace(/[\n\t]/g, " ");
+const healthy = (record: Record<string, unknown>) => record.healthy !== false &&
+  ["healthy", "present", "passed", "ready"].includes(String(record.status ?? record.state));
+const supportsResume = (command: HighLevelCommandName) => ["task.implement", "git.prepare", "skills.sync"].includes(command);
+
+function reconciliationNext(command: HighLevelCommandName): string {
+  return "Inspect and reconcile the existing receipt before repeating any work; preserve the original arguments and idempotency key."
+    + (supportsResume(command) ? " Use --resume to reconcile that invocation." : " Use --json to inspect the full receipt; obtain operator guidance if its state remains uncertain.");
+}
+
+function closedVerificationCycle(data: Record<string, unknown>): boolean {
+  const cycle = object(data.cycle);
+  const iteration = cycle.iteration ?? cycle.currentIteration;
+  return cycle.status === "escalated" || cycle.status === "aborted" ||
+    (typeof iteration === "number" && typeof cycle.maxIterations === "number" && iteration >= cycle.maxIterations);
+}
+
+function verificationNext(data: Record<string, unknown>): string {
+  const verification = object(data.verification), cycle = object(data.cycle);
+  if (closedVerificationCycle(data))
+    return "Review the evidence with the Coordinator and human operator; this verification cycle is closed or its iteration limit is exhausted. A human decision is required before further work.";
+  if (verification.status === "blocked")
+    return "Resolve the reported runner, gate or prerequisite blockers with the Coordinator; review the evidence before requesting further verification.";
+  if (verification.status === "inconclusive")
+    return "Review missing or inconclusive evidence and runner diagnostics with the Coordinator before requesting further verification.";
+  if (cycle.status === "rework_required")
+    return "Review failed criteria and evidence with the Coordinator, prepare the required repair record, then request the next permitted verification iteration.";
+  return "Review failed criteria, evidence and the cycle state with the Coordinator before requesting further verification.";
+}
+
+function mcpNext(data: Record<string, unknown>): string {
+  const config = object(data.config), gateway = object(data.gateway);
+  const backends = Array.isArray(data.backends) ? data.backends.map(object) : [];
+  const actions: string[] = [];
+  if (config.state === "invalid") actions.push("Review the reported config file and repair it against the approved schema/setup plan");
+  if (config.state === "absent" || gateway.configured === false) actions.push("Review bflow setup --plan for the missing configuration");
+  if (gateway.reachable !== true) actions.push("Diagnose the shared Gateway connection and its setup/doctor report");
+  if (backends.some(backend => backend.state === "invalid")) actions.push("Check executable pin integrity against the approved setup plan before restoring the pinned binary");
+  if (backends.some(backend => !healthy(backend) && backend.state !== "invalid")) actions.push("Inspect the reported backend diagnostics and Gateway health before checking readiness again");
+  return actions.length ? `${actions.join(". ")}.` : "Inspect the full MCP report with --json and diagnose the reported readiness state.";
+}
 
 function summaryLines(command: HighLevelCommandName, value: unknown, useColor: boolean): string[] {
   const data = value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
   const lines: string[] = [];
   // Keep literal spaces in copyable filesystem paths; only flatten line breaks/tabs.
-  const text = (v: unknown, n = 180) => humanText(v, n).replace(/[\n\t]/g, " ");
   const add = (label: string, value: unknown, max = 180) => {
     if (value === undefined || value === null || typeof value === "object") return;
     lines.push(`  ${label}: ${typeof value === "boolean" ? (value ? "yes" : "no") : text(value, max) || "(empty)"}`);
   };
-  const list = (label: string, items: unknown, render: (item: unknown) => string) => {
+  const list = (label: string, items: unknown, render: (item: unknown) => string, limit = 10) => {
     if (!Array.isArray(items)) return;
     if (items.length === 0) { lines.push(`  ${label}: none`); return; }
     lines.push(`  ${label}:`);
-    for (const item of items.slice(0, 10)) lines.push(`    - ${humanText(render(item), 450)}`);
-    if (items.length > 10) lines.push(`    … ${items.length - 10} more`);
+    for (const item of items.slice(0, limit)) lines.push(`    - ${text(render(item), 1200)}`);
+    if (items.length > limit) lines.push(`    … ${items.length - limit} more; use --json for the full report`);
   };
-  const object = (v: unknown): Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {};
   const records = (label: string, items: unknown, name: (v: Record<string, unknown>) => unknown,
     details: (v: Record<string, unknown>) => Record<string, unknown>) => {
     if (!Array.isArray(items)) return;
-    lines.push(`  ${label} (${items.length}):`);
+    const all = items.map(object);
+    const findings = all.filter(record => !healthy(record));
+    const healthyCount = all.length - findings.length;
+    lines.push(`  ${label} (${items.length}):${healthyCount ? ` ${healthyCount} healthy${findings.length ? `; ${findings.length} need attention` : ""}` : ""}`);
     if (!items.length) lines.push("    None configured.");
-    for (const item of items.slice(0, 20)) {
-      const record = object(item);
+    // Unhealthy/unknown entries and their diagnostics never compete with healthy entries for a display cap.
+    for (const record of findings) {
       lines.push(`    - ${text(name(record), 120)} ${statusTag(record.status ?? record.state, useColor)}`);
       for (const [key, value] of Object.entries(details(record))) {
         if (value === null || value === undefined || value === "") continue;
         if (Array.isArray(value)) {
-          for (const entry of value.slice(0, 10)) lines.push(`        ${key}: ${text(entry, 300)}`);
-          if (value.length > 10) lines.push(`        … ${value.length - 10} more; use --json for details`);
-        } else lines.push(`        ${key}: ${text(value, 300)}`);
+          for (const entry of value) lines.push(`        ${key}: ${text(entry, 300)}`);
+        } else lines.push(`        ${key}: ${text(value, key === "Path" ? 1024 : 350)}`);
       }
     }
-    if (items.length > 20) lines.push(`    … ${items.length - 20} more; use --json for details`);
   };
   switch (command) {
     case "repo.inspect": {
       const repo = object(data.repository), git = object(data.git), project = object(data.project);
-      add("Root", repo.root); add("Branch", git.branch ?? (git.detached === true ? "detached HEAD" : undefined)); add("HEAD", typeof git.head === "string" ? git.head.slice(0, 12) : undefined);
+      add("Root", repo.root, 1024); add("Branch", git.branch ?? (git.detached === true ? "detached HEAD" : undefined)); add("HEAD", typeof git.head === "string" ? git.head.slice(0, 12) : undefined);
       add("Working tree", typeof git.dirty === "boolean" ? (git.dirty ? "has changes" : "clean") : undefined);
       add("Commits", git.hasCommits === false ? "none yet" : undefined);
       add("Git operation", git.inProgressOperation);
@@ -56,17 +100,17 @@ function summaryLines(command: HighLevelCommandName, value: unknown, useColor: b
       const graph = object(data.graph), trace = object(data.traceability);
       add("Specification", data.specId); add("Traceability", typeof trace.valid === "boolean" ? (trace.valid ? "valid" : "incomplete") : undefined);
       add("Tasks", Array.isArray(graph.tasks) ? graph.tasks.length : graph.taskCount);
-      add("Plan file", data.path); add("Written", data.written); add("Preview", data.written === false ? "no files changed" : undefined);
+      add("Plan file", data.path, 1024); add("Written", data.written); add("Preview", data.written === false ? "no files changed" : undefined);
       list("Task graph", graph.tasks, item => {
         const task = object(item);
         const id = text(task.id ?? task.taskId ?? "task", 100);
         const deps = Array.isArray(task.dependsOn) ? task.dependsOn.map(x => text(x, 80)).join(", ") || "none" : "none";
         return `${id} (depends on: ${deps})`;
       });
-      list("Unmapped criteria", trace.orphanCriterionIds, x => text(x, 100));
-      list("Unmapped workflow tasks", trace.unmappedWorkflowTaskIds, x => text(x, 100));
-      list("Unknown task mappings", trace.unknownMappedTaskIds, x => text(x, 100));
-      list("Unknown criteria", trace.unknownCriterionIds, x => text(x, 100));
+      list("Unmapped criteria", trace.orphanCriterionIds, x => text(x, 100), Infinity);
+      list("Unmapped workflow tasks", trace.unmappedWorkflowTaskIds, x => text(x, 100), Infinity);
+      list("Unknown task mappings", trace.unknownMappedTaskIds, x => text(x, 100), Infinity);
+      list("Unknown criteria", trace.unknownCriterionIds, x => text(x, 100), Infinity);
       const mappings = object(trace.criterionToTasks);
       list("Criterion mappings", Object.entries(mappings), entry => {
         const [criterion, tasks] = entry as [string, unknown];
@@ -76,11 +120,11 @@ function summaryLines(command: HighLevelCommandName, value: unknown, useColor: b
     }
     case "task.implement": {
       const assignment = object(data.assignment), strategy = object(data.testStrategy), decision = object(strategy.tddDecision ?? data.tddDecision);
-      add("Task", data.taskKey ?? data.taskId); add("Worktree", data.worktreePath); add("Branch", data.branchName);
+      add("Task", data.taskKey ?? data.taskId); add("Worktree", data.worktreePath, 1024); add("Branch", data.branchName);
       if (Object.keys(assignment).length) {
         add("TDD", object(assignment.tdd).mode ?? object(assignment.tdd).classification ?? decision.mode ?? decision.classification);
         add("Assignment", readableLabel(assignment.status ?? "awaiting_runtime_dispatch"));
-        lines.push("  Next: Runtime/Coordinator must issue the leased assignment; this command does not dispatch an agent");
+        lines.push("  Dispatch: Runtime/Coordinator must issue the leased assignment; this command does not dispatch an agent");
       } else add("TDD", decision.mode ?? decision.classification);
       break;
     }
@@ -91,20 +135,49 @@ function summaryLines(command: HighLevelCommandName, value: unknown, useColor: b
       const counts: Record<string, number> = {};
       for (const finding of findings) { const severity = String(object(finding).severity ?? "unspecified"); counts[severity] = (counts[severity] ?? 0) + 1; }
       if (findings.length) add("Findings", Object.entries(counts).map(([k, n]) => `${k} ${n}`).join(", "));
-      list("Findings", findings, item => {
+      const evidence = Array.isArray(verification.evidenceArtifacts) ? verification.evidenceArtifacts.map(object) : [];
+      const evidenceRef = (id: unknown) => {
+        const artifact = evidence.find(artifact => artifact.artifactId === id);
+        return text(artifact?.uri ?? id, 1000);
+      };
+      const criteria = Array.isArray(verification.evaluatedCriteria) ? verification.evaluatedCriteria.map(object).filter(criterion => criterion.passed !== true) : [];
+      if (criteria.length) list("Failed criteria", criteria, item => {
+        const criterion = object(item);
+        return `${text(criterion.criterionId, 150)}: ${text(criterion.summary, 300)}`;
+      }, Infinity);
+      for (const criterion of criteria) {
+        if (criterion.evidenceArtifactId) lines.push(`    Evidence (${text(criterion.criterionId, 150)}): ${evidenceRef(criterion.evidenceArtifactId)}`);
+      }
+      // Put errors and warnings first, while retaining every finding and its reference.
+      const priority = (item: unknown) => object(item).severity === "error" ? 0 : object(item).severity === "warning" ? 1 : 2;
+      if (findings.length) lines.push("  Findings:");
+      for (const item of [...findings].sort((a, b) => priority(a) - priority(b))) {
         const f = object(item);
-        return `${text(f.severity ?? "finding", 40)}: ${text(f.message ?? f.title ?? f.check ?? "No message", 220)}`;
-      });
+        lines.push(`    - ${text(f.severity ?? "finding", 40)}${f.code ? ` [${text(f.code, 120)}]` : ""}: ${text(f.message ?? f.title ?? f.check ?? "No message", 350)}`);
+        if (f.location) lines.push(`        Location: ${text(f.location, 1024)}`);
+        if (f.artifactId) lines.push(`        Evidence: ${evidenceRef(f.artifactId)}`);
+      }
       const cycle = object(data.cycle);
-      if (Object.keys(cycle).length) add("Verification cycle", `${readableLabel(cycle.status ?? "unknown")}, iteration ${cycle.iteration ?? "?"}/${cycle.maxIterations ?? "?"}`);
+      if (Object.keys(cycle).length) add("Verification cycle", `${readableLabel(cycle.status ?? "unknown")}, iteration ${cycle.iteration ?? cycle.currentIteration ?? "?"}/${cycle.maxIterations ?? "?"}`);
+      const escalation = object(cycle.escalation);
+      add("Escalation", escalation.reason); add("Approval request", escalation.approvalRequestId);
+      if (Array.isArray(data.pendingMessages)) for (const message of data.pendingMessages) {
+        if (object(message).type !== "verification.escalation") continue;
+        const payload = object(object(message).payload);
+        add("Escalation", payload.reason, 350); add("Escalation target", payload.target); add("Approval request", payload.approvalRequestId);
+      }
       break;
     }
     case "git.prepare": {
       const integration = object(data.integration), verification = object(data.workflowVerification);
       add("Integration", integration.status ?? integration.outcome); add("Branch", integration.branchName);
+      add("Worktree", integration.worktreePath, 1024);
       add("Head", integration.headCommitHash); add("Workflow verification", verification.required === true ? "requested through Runtime" : verification.required === false ? "not requested" : undefined);
       const conflict = object(integration.conflict);
-      if (Object.keys(conflict).length) add("Conflict", `${conflict.taskKey ?? "task"}: ${Array.isArray(conflict.paths) ? conflict.paths.map(x => text(x, 100)).join(", ") : "review integration record"}`);
+      if (Object.keys(conflict).length) {
+        add("Conflict", conflict.taskKey ?? "review integration record");
+        list("Conflicting paths", conflict.paths, path => text(path, 1024), Infinity);
+      }
       const preview = object(data.preview);
       if (Object.keys(preview).length) {
         add("Integration ID", preview.integrationId); add("Base revision", preview.baseRevision);
@@ -114,11 +187,11 @@ function summaryLines(command: HighLevelCommandName, value: unknown, useColor: b
           const deps = Array.isArray(task.dependsOn) ? task.dependsOn.map(x => text(x, 80)).join(", ") || "none" : "none";
           return `${text(task.taskKey ?? task.taskId ?? "task", 100)} (depends on: ${deps})`;
         });
-        list("Task readiness", data.tasks, item => {
+        const tasks = Array.isArray(data.tasks) ? [...data.tasks].sort((a, b) => Number(object(a).ready === true) - Number(object(b).ready === true)) : data.tasks;
+        list("Task readiness", tasks, item => {
           const task = object(item);
           return `${text(task.taskId ?? task.taskKey ?? "task", 100)}: ${text(task.status ?? "unknown", 60)}; branch ${text(task.branchName ?? "unknown", 100)}; head ${text(task.headCommitHash ?? "unknown", 16)}; ${task.clean === true ? "clean" : task.clean === false ? "has changes" : "cleanliness unknown"}; ${task.ready === true ? "ready" : "not ready"}`;
-        });
-        lines.push("  Next: Review the preview, then rerun with --yes to collect submissions and prepare integration");
+        }, Infinity);
       } else add("Publication", "No push or protected-branch merge was performed");
       break;
     }
@@ -131,7 +204,7 @@ function summaryLines(command: HighLevelCommandName, value: unknown, useColor: b
     case "mcp.status": {
       const gateway = object(data.gateway), config = object(data.config);
       add("Gateway", gateway.reachable === true ? "reachable" : gateway.reachable === false ? `unavailable${gateway.reason ? `: ${text(gateway.reason)}` : ""}` : "unknown");
-      add("Config", `${config.state ?? "unknown"}${config.path ? ` (${text(config.path)})` : ""}`);
+      add("Config", config.state ?? "unknown"); add("Config path", config.path, 1024);
       add("Config issue", config.reason);
       records("Backends", data.backends, b => b.serviceId ?? b.id ?? "backend",
         b => ({ Local: b.local, Gateway: b.gateway, Reason: b.reason }));
@@ -147,13 +220,12 @@ function summaryLines(command: HighLevelCommandName, value: unknown, useColor: b
       add("Providers", Array.isArray(data.providers) ? data.providers.join(", ") : data.provider);
       add("Targets", Array.isArray(data.targets) ? data.targets.length : undefined);
       add("Machine-wide targets", data.machineWide);
-      add("Manifest digest", data.digest);
       add("Changed paths", Array.isArray(data.ownedPaths) ? data.ownedPaths.length : undefined);
       list("Providers", data.providers, x => text(x, 100));
       if (Array.isArray(data.targets)) {
         lines.push("  Target locations:", ...formatTargetPaths(data.targets.filter((x): x is string => typeof x === "string"), "    ", { skillBundles: true }));
       }
-      list("Diagnostics", data.diagnostics, x => text(x, 180));
+      list("Diagnostics", data.diagnostics, x => text(x, 350), Infinity);
       break;
     }
   }
@@ -184,49 +256,57 @@ export function formatHighLevelHuman(envelope: HighLevelEnvelope, useColor = fal
   const marker = waiting ? "[WAIT]" : failed ? "[FAIL]" : "[OK]";
   const markerColor = waiting ? yellow : failed ? red : green;
   const title = `${heading}: ${readableLabel(output.outcome)} ${marker}`;
-  const lines = [useColor ? markerColor(bold(title), true) : title,
-    `  Command status: ${statusTag(envelope.result.status, useColor)}`,
-    `  Exit code: ${envelope.exitCode}`];
-  const ids = { commandId: envelope.result.commandId, correlationId: envelope.result.correlationId, ...output.ids };
+  const lines = [useColor ? markerColor(bold(title), true) : title];
+  const ids = { runId: output.ids.runId, taskId: output.ids.taskId,
+    ...((waiting || failed || output.replayed || dataRecord.reconciled === true) ? { idempotencyKey: output.ids.idempotencyKey } : {}) };
   for (const [key, value] of Object.entries(ids)) {
-    if (value) lines.push(dim(`  ${fieldLabel(key)}: ${sanitizeIdentifier(value)}`, useColor));
+    if (value) lines.push(dim(`  ${fieldLabel(key)}: ${text(value, 1024)}`, useColor));
   }
   if (output.replayed) lines.push("  Notice: Replayed receipt; no work repeated.");
-  if (output.steps.length > 0) {
-    lines.push("  Steps:");
-    for (const [index, step] of output.steps.slice(0, 20).entries()) {
-      lines.push(`    ${formatProgressStep(readableLabel(step.id), useColor, index + 1)} ${statusTag(step.status, useColor)}`);
-      if (step.message) lines.push(dim(`        ${humanText(step.message, 220)}`, useColor));
-    }
-    if (output.steps.length > 20) lines.push(`    … ${output.steps.length - 20} more steps`);
-  }
+  if (dataRecord.reconciled === true) lines.push("  Notice: Existing state reconciled; no work repeated.");
   lines.push(...summaryLines(envelope.command, output.data, useColor));
+  const importantSteps = output.steps.filter(step => !["succeeded", "reused"].includes(step.status)
+    && !(envelope.command === "skills.sync" && ["already_synced", "preview"].includes(output.outcome) && step.id === "sync" && step.status === "skipped"));
+  if (importantSteps.length) {
+    lines.push("  Steps needing attention:");
+    for (const [index, step] of importantSteps.entries()) {
+      lines.push(`    ${formatProgressStep(text(readableLabel(step.id), 150), useColor, index + 1)} ${statusTag(step.status, useColor)}`);
+      if (step.message) lines.push(dim(`        ${text(step.message, 350)}`, useColor));
+    }
+  }
   if (envelope.result.error) {
     const error = envelope.result.error;
     lines.push(`${useColor ? red(bold(`Error [${error.code}]:`), true) : `Error [${error.code}]:`} ${humanText(error.message, 350)}`);
     if (error.details !== undefined) {
       const details = extractSafeDetails(error.details);
-      if (details) for (const [key, value] of Object.entries(details)) lines.push(`  ${fieldLabel(key)}: ${humanLine(value, 240)}`);
+      if (details) for (const [key, value] of Object.entries(details)) lines.push(`  ${fieldLabel(key)}: ${text(value, 350)}`);
     }
     const reason = extractSafeDetails(error.details)?.reason;
-    const next = reason === "file_not_found" ? "Check the input path and pass an existing file; use --help to review the required arguments."
+    const next = output.outcome === "reconciliation_required" || error.code === "unknown_delivery" || reason === "interrupted" ? reconciliationNext(envelope.command)
+      : envelope.command === "verify" && closedVerificationCycle(dataRecord) ? verificationNext(dataRecord)
+      : reason === "file_not_found" ? "Check the input path and pass an existing file; use --help to review the required arguments."
       : reason === "invalid_json" || reason === "invalid_workflow" || reason === "invalid_plan" ? "Fix the input JSON to match the documented schema, then rerun the command."
       : reason === "permission_required" ? "Review the requested scope and provide the explicit approval flag only when authorized."
-      : reason === "interrupted" || error.code === "unknown_delivery" ? "Inspect the existing receipt, then rerun the same invocation with --resume where supported; preserve the original arguments and idempotency key."
       : reason === "busy" ? "Wait for the active invocation to finish, then retry with the same request."
       : resolveActionableRemediation(error, commandForRemediation(envelope.command));
-    lines.push(`  ${useColor ? cyan("Next:", true) : "Next:"} ${humanText(next, 240)}`);
+    lines.push(`  ${useColor ? cyan("Next:", true) : "Next:"} ${text(next, 1000)}`);
   } else {
-    const next = output.outcome === "approval_required"
+    const next = output.outcome === "reconciliation_required" ? reconciliationNext(envelope.command)
+      : output.outcome === "approval_required"
       ? envelope.command === "skills.sync" ? (dataRecord.machineWide === true
         ? "Review the listed targets, then rerun with --allow-machine-scope to authorize machine-wide writes."
         : "Review the listed targets and request the explicit approval required for this synchronization.")
-        : "Review the preview and provide the command's explicit approval flag when authorized."
-      : output.outcome === "not_passed" ? "Review each finding and its evidence, address blockers, then rerun verification."
-      : output.outcome === "not_ready" ? "Resolve the reported readiness findings and rerun the check."
+        : envelope.command === "git.prepare" ? "Review the preview and task readiness, resolve blockers, then use --yes to authorize collecting submissions and preparing integration."
+          : "Review the preview and provide the command's explicit approval flag when authorized."
+      : output.outcome === "not_passed" && envelope.command === "verify" ? verificationNext(dataRecord)
+      : output.outcome === "not_passed" ? "Review each finding and its evidence with the Coordinator before requesting further verification."
+      : output.outcome === "not_ready" ? envelope.command === "mcp.status" ? mcpNext(dataRecord) : "Resolve the reported readiness findings and rerun the check."
       : output.outcome === "conflict_detected" ? "Inspect the integration conflict and resolve it before requesting workflow verification."
       : undefined;
-    if (next) lines.push(`  ${useColor ? cyan("Next:", true) : "Next:"} ${humanText(next, 240)}`);
+    if (next) lines.push(`  ${useColor ? cyan("Next:", true) : "Next:"} ${text(next, 1000)}`);
   }
+  if (failed || waiting || output.replayed || dataRecord.reconciled === true || importantSteps.length > 0 ||
+    ["tool.status", "mcp.status", "agent.check", "verify"].includes(envelope.command))
+    lines.push("  Use --json for the full command report.");
   return lines.join("\n");
 }

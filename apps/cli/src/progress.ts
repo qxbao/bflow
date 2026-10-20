@@ -13,14 +13,16 @@ export interface ProgressOptions {
 export class CliProgress {
   private number = 0;
   private detailText = "";
+  private inspectedUnits: readonly [number, number] | undefined;
   private waiting = false;
   private frame = 0;
   private timer: ReturnType<typeof setInterval> | undefined;
   private liveLine = false;
   private stopped = false;
   private eventLabel: string | undefined;
-  private readonly deferredUpdates: { kind: "step" | "detail" | "event"; message: string }[] = [];
+  private readonly deferredUpdates: { kind: "step" | "detail" | "event" | "important" | "units"; message: string; units?: readonly [number, number] }[] = [];
   private omittedUpdates = 0;
+  private readonly deferredImportant = new Set<string>();
   private readonly raw: ((chunk: string) => void) | undefined;
 
   constructor(private readonly options: ProgressOptions) {
@@ -50,8 +52,12 @@ export class CliProgress {
   private draw(): void {
     // ASCII skeleton works without color and across terminal font sets.
     const frames = ["=     ", "==    ", " ===  ", "  === ", "    ==", "     ="];
-    const skeleton = `[${frames[this.frame++ % frames.length]}]`;
-    const label = this.waiting ? "Waiting for your confirmation" : "Working";
+    // A unit counter is emitted only by loops with a known enumerated total.
+    const units = this.inspectedUnits;
+    const filled = units ? Math.floor(units[0] / units[1] * 6) : undefined;
+    const skeleton = filled === undefined ? `[${frames[this.frame++ % frames.length]}]`
+      : `[${"#".repeat(filled)}${"-".repeat(6 - filled)}]`;
+    const label = this.waiting ? "Waiting for your confirmation" : units ? "Inspected" : "Working";
     const columns = Math.max(2, (this.options.columns?.() ?? process.stderr.columns) || 80);
     // Keep the one mutable line from wrapping, including in narrow terminals.
     const text = `    ${skeleton} ${label} · ${this.detailText}`;
@@ -72,18 +78,23 @@ export class CliProgress {
   private start(): void {
     if (!this.raw) return;
     this.draw();
+    if (this.timer) return;
     this.timer = setInterval(() => this.draw(), 100);
     this.timer.unref();
   }
 
-  private defer(kind: "step" | "detail" | "event", message: string): boolean {
+  private defer(kind: "step" | "detail" | "event" | "important" | "units", message: string, units?: readonly [number, number]): boolean {
     if (!this.waiting) return false;
-    // A slow human response must not create an unbounded log buffer.
+    if (kind === "important" || kind === "event" && /: (failed|blocked|skipped)$/.test(message)) {
+      this.deferredImportant.add(humanLine(message, 240));
+      return true;
+    }
+    // Coalesce repeated failures separately; bound ordinary observations during a slow human response.
     if (this.deferredUpdates.length === 50) {
       this.deferredUpdates.shift();
       this.omittedUpdates++;
     }
-    this.deferredUpdates.push({ kind, message: humanLine(message, 240) });
+    this.deferredUpdates.push({ kind, message: humanLine(message, 240), ...(units ? { units } : {}) });
     return true;
   }
 
@@ -92,21 +103,42 @@ export class CliProgress {
     if (this.defer("step", message)) return;
     this.clear();
     this.eventLabel = undefined;
+    this.inspectedUnits = undefined;
     this.number++;
     this.line(formatProgressStep(message, this.options.color, this.number));
     this.detailText = "Waiting for the current operation";
-    this.line(dim(`    ${this.detailText}`, Boolean(this.options.color)));
     this.start();
   }
 
   detail(message: string): void {
     if (!this.options.enabled || this.stopped) return;
     if (this.defer("detail", message)) return;
-    this.clear();
-    this.detailText = humanLine(message, 240);
-    this.line(dim(`    ${this.detailText}`, Boolean(this.options.color)));
+    const clean = humanLine(message, 240);
+    if (clean === this.detailText && !this.inspectedUnits) return;
+    this.inspectedUnits = undefined;
+    this.detailText = clean;
     this.start();
   }
+
+  /** Observed units of a known list, never a duration estimate or success verdict. */
+  units(completed: number, total: number, label: string): void {
+    if (!this.options.enabled || this.stopped) return;
+    if (!Number.isSafeInteger(completed) || !Number.isSafeInteger(total) || total <= 0 || completed < 0 || completed > total) return;
+    if (this.defer("units", label, [completed, total])) return;
+    const clean = humanLine(`${completed}/${total} ${label}`, 240);
+    if (clean === this.detailText && this.inspectedUnits?.[0] === completed && this.inspectedUnits[1] === total) return;
+    this.inspectedUnits = [completed, total];
+    this.detailText = clean;
+    this.start();
+  }
+
+  important(message: string): void {
+    if (!this.options.enabled || this.stopped || this.defer("important", message)) return;
+    this.clear();
+    this.line(`    ${humanLine(message, 240)}`);
+  }
+
+  get awaitingInput(): boolean { return this.waiting; }
 
   event(message: string): void {
     if (!this.options.enabled || this.stopped) return;
@@ -116,7 +148,8 @@ export class CliProgress {
     if (!match || this.eventLabel !== label) this.step(label);
     this.eventLabel = label;
     if (match && match[2] !== "starting" && match[2] !== "checking") {
-      this.detail(message);
+      if (["failed", "blocked", "skipped"].includes(match[2]!)) this.important(message);
+      else this.detail(message);
       this.clear();
       this.eventLabel = undefined;
     }
@@ -129,18 +162,22 @@ export class CliProgress {
     this.waiting = true;
     this.number++;
     this.line(formatProgressStep("Waiting for your confirmation", this.options.color, this.number));
-    this.line(dim("    Review the setup plan below; enter y to approve or N to decline.", Boolean(this.options.color)));
-    // Skeleton above the prompt remains static while the user types.
-    this.line(dim("    [      ] Awaiting input", Boolean(this.options.color)));
+    // The caller owns the exact review text and prompt, including approval scope.
     try { return await action(); }
     finally {
       this.waiting = false;
       const updates = this.deferredUpdates.splice(0);
+      const important = [...this.deferredImportant];
+      this.deferredImportant.clear();
       const omitted = this.omittedUpdates;
       this.omittedUpdates = 0;
       if (!this.stopped) {
+        for (const message of important) this.important(message);
         if (omitted) this.detail(`${omitted} progress updates omitted while awaiting input`);
-        for (const update of updates) this[update.kind](update.message);
+        for (const update of updates) {
+          if (update.kind === "units" && update.units) this.units(update.units[0], update.units[1], update.message);
+          else if (update.kind !== "units") this[update.kind](update.message);
+        }
       }
     }
   }
@@ -149,6 +186,7 @@ export class CliProgress {
     this.clear();
     this.stopped = true;
     this.deferredUpdates.length = 0;
+    this.deferredImportant.clear();
     this.omittedUpdates = 0;
   }
 }

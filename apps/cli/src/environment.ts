@@ -87,6 +87,7 @@ export interface EnvironmentDependencies {
     readonly versionIncompatible?: boolean;
   };
   readonly onProgress?: ((step: string) => void) | undefined;
+  readonly onProgressDetail?: ((detail: string) => void) | undefined;
 }
 export interface EnvironmentStatus {
   readonly workspaceRoot: string;
@@ -165,6 +166,13 @@ export class EnvironmentLifecycle {
   private progress(message: string) {
     try { this.dependencies.onProgress?.(message); } catch {}
   }
+  private progressDetail(message: string) {
+    try {
+      if (this.dependencies.onProgressDetail) this.dependencies.onProgressDetail(message);
+      else this.dependencies.onProgress?.(message);
+    } catch {}
+  }
+
   private statePath(repository: RepositoryIdentity, name: string) { return resolve(repository.root, ".bflow/state", name); }
   private async readJson(repository: RepositoryIdentity, name: string): Promise<unknown | null> {
     try { return JSON.parse(await readFile(this.statePath(repository, name), "utf8")) as unknown; }
@@ -638,10 +646,24 @@ export class EnvironmentLifecycle {
 
         // Step 10: confirm_roles_ready
         let reportedWaiting = false;
+        let lastStartupObservation: string | undefined;
+        const observeStartup = (message: string) => {
+          if (message === lastStartupObservation) return;
+          lastStartupObservation = message;
+          this.progressDetail(message);
+        };
         let reportedActivating = false;
         while (true) {
+          const startupObservations: string[] = [];
           const nativeReady = !integration.requiresNativeSession || manifest.panes.filter(p => p.permanent).every(p => p.session);
-          if (!nativeReady) deadline.context = `Waiting for native-session hooks: ${manifest.panes.filter(p => p.permanent && !p.session).map(p => `${p.role} (${p.paneId})`).join(", ")}. Inspect this session with herdr --session ${repository.sessionName} session attach ${repository.sessionName}; resolve its provider dialogs, then bflow up. State was preserved.`;
+          if ((!nativeReady || !this.ready(manifest, config)) && !reportedWaiting) {
+            this.progress("Waiting for role transport and native readiness...");
+            reportedWaiting = true;
+          }
+          if (!nativeReady) {
+            deadline.context = `Waiting for native-session hooks: ${manifest.panes.filter(p => p.permanent && !p.session).map(p => `${p.role} (${p.paneId})`).join(", ")}. Inspect this session with herdr --session ${repository.sessionName} session attach ${repository.sessionName}; resolve its provider dialogs, then bflow up. State was preserved.`;
+            startupObservations.push(`Waiting for native-session hooks: ${manifest.panes.filter(p => p.permanent && !p.session).map(p => p.role).join(", ")}`);
+          }
           await this.saveManifest(repository, { ...manifest, status: manifest.status === "up" && (!this.ready(manifest, config) || !nativeReady) ? "initializing" : manifest.status });
 
           for (const p of manifest.panes) {
@@ -670,6 +692,7 @@ export class EnvironmentLifecycle {
                 if (!(error instanceof EnvironmentError) || error.contractError.details === null || typeof error.contractError.details !== "object" ||
                     Array.isArray(error.contractError.details) || error.contractError.details.stage !== "native_startup") throw error;
                 deadline.context = `${error.message} Run bflow status/doctor; resolve startup in its named pane, then bflow up, or bflow down --yes for a checked restart. Do not delete .bflow.`;
+                observeStartup(deadline.context);
                 await deadline.pause(); continue;
               }
             }
@@ -684,13 +707,13 @@ export class EnvironmentLifecycle {
             const roleName = missingOrStarting.role;
             const p = manifest.panes.find(pane => pane.role === roleName);
             const details = !p ? `missing pane for role '${roleName}'` : `role '${roleName}' in state '${p.transportState}'`;
+            startupObservations.push(`Waiting for required roles: ${details}`);
             deadline.context = `timed out waiting for required roles to become ready (${details}). Remediation: Run 'bflow doctor' to inspect provider startup or 'bflow down --yes' to clean up.`;
           }
 
-          if (!reportedWaiting) {
-            this.progress("Waiting for role transport and native readiness...");
-            reportedWaiting = true;
-          }
+          // Native and transport observations share one mutable terminal line.
+          // Deduplicate the combined current state so a resolved blocker cannot remain visible.
+          observeStartup(startupObservations.join("; "));
           await deadline.pause();
           manifestRaw = unwrap(await deadline.call((opts) => integration.manager.getManifest(repository.sessionName, opts)));
           if (manifestRaw === null) fail("Role manager lost the startup manifest; startup outcome is unresolved");
@@ -1007,6 +1030,7 @@ export class EnvironmentLifecycle {
       } finally { if (integration !== suppliedIntegration) await deadline.call(() => integration.close?.() ?? Promise.resolve()); }
   }
   async status(): Promise<EnvironmentStatus> {
+    this.progress("Reading repository configuration and saved session state...");
     const repository = await identifyRepository(this.cwd, this.runner);
     const issues: string[] = [];
     let config: EnvironmentConfig;
@@ -1021,12 +1045,14 @@ export class EnvironmentLifecycle {
       if (intent && ["server_starting", "manager_pending", "stopping"].includes(intent.phase))
         issues.push(`Environment operation '${intent.phase}' was interrupted. ${intent.phase === 'stopping' ? 'Run bflow down --yes to finish shutdown, then bflow up.' : 'Run bflow up to reconcile existing panes; if there is no recoverable receipt, bflow down --yes stops the partial startup.'} Preserve .bflow.`);
     } catch (error) { issues.push(String(error)); }
+    this.progress("Checking session server and dependencies...");
     try { server = await this.probe(repository, config) ? "running" : "stopped"; } catch (error) { issues.push(String(error)); }
     for (const executable of new Set([config.environment.herdrBinary, ...config.environment.roles.map((r) => r.cli)])) {
       try { await this.command(repository, executable, ["--version"]); }
       catch (error) { issues.push(`Missing/unavailable dependency '${executable}': ${String(error)}`); }
     }
     if (server === "running") {
+      this.progress("Reconciling live role observations...");
       const integration = await new Deadline(5000).call(() => this.integration(repository, config)).catch((error: unknown) => { issues.push(String(error)); return undefined; });
       if (integration) try {
         const deadline = new Deadline(5000);
@@ -1039,6 +1065,7 @@ export class EnvironmentLifecycle {
     return { workspaceRoot: repository.root, sessionName: repository.sessionName, server, configuration: "valid", manifest, liveObservation, issues };
   }
   async doctor(): Promise<EnvironmentDoctorReport> {
+    this.progress("Reading repository configuration for diagnostics...");
     const repository = await identifyRepository(this.cwd, this.runner);
     let config: EnvironmentConfig | null = null;
     try { config = await readEnvironmentConfig(repository); } catch {}

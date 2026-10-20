@@ -101,7 +101,9 @@ export async function runDoctorDiagnostics(
   options: DoctorDiagnosticsOptions
 ): Promise<EnvironmentDoctorReport> {
   const { repository, config, runner, dependencies } = options;
+  const progress = (phase: string) => { try { dependencies?.onProgress?.(phase); } catch { /* observational only */ } };
   const env = namedSessionEnvironment(repository.sessionName, options.env);
+  progress("Checking Runtime and lifecycle health...");
   const runtimeChecks: DoctorDetailedCheck[] = [];
   const agentProviderChecks: DoctorDetailedCheck[] = [];
   const mcpChecks: DoctorDetailedCheck[] = [];
@@ -575,6 +577,7 @@ export async function runDoctorDiagnostics(
   });
 
   // ==========================================
+  progress("Checking agent providers and authentication...");
   // Group 2: agent_providers
   // ==========================================
 
@@ -883,6 +886,7 @@ export async function runDoctorDiagnostics(
   });
 
   // ==========================================
+  progress("Checking shared MCP services...");
   // Group 3: mcp
   // ==========================================
 
@@ -1054,6 +1058,7 @@ export async function runDoctorDiagnostics(
   }
 
   // ==========================================
+  progress("Checking installed tools...");
   // Group 4: tools
   // ==========================================
 
@@ -1146,6 +1151,7 @@ export async function runDoctorDiagnostics(
   }
 
   // ==========================================
+  progress("Checking approved skills...");
   // Group 5: skills
   // ==========================================
 

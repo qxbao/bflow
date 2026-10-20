@@ -44,6 +44,7 @@ export async function createDefaultSetupConfiguration(options: {
   registry?: ToolInstallerRegistry;
   projectRoot?: string;
   isolation?: IsolatedProviderHomes;
+  onUnits?: (completed: number, total: number, label: string) => void;
 }): Promise<{ config: MachineConfig; registry: ToolInstallerRegistry; diagnostics: string[];
   inventory: DefaultSetupInventory[]; launchRequirements: DefaultSetupLaunchRequirement[];
   additionalToolObservations: (platform: PlatformProfile, config: MachineConfig) => Promise<ToolObservation[]> }> {
@@ -147,7 +148,15 @@ export async function createDefaultSetupConfiguration(options: {
   }
   const additionalToolObservations = async (currentPlatform: PlatformProfile, currentConfig: MachineConfig): Promise<ToolObservation[]> => {
     const observations: ToolObservation[] = [];
-    for (const pin of currentConfig.toolPins) {
+    const candidates = currentConfig.toolPins.filter(pin => pin.toolId === "superpowers" ||
+      ["gitnexus", "chrome-devtools-mcp", "mempalace"].includes(pin.toolId) && registry.get(pin.installerId) === installer &&
+      catalog.pins.some((candidate: { toolId: string; installerId: string; version: string; source: string; integrity: string }) =>
+        candidate.toolId === pin.toolId && candidate.installerId === pin.installerId && candidate.version === pin.version &&
+        candidate.source === pin.source && candidate.integrity === pin.integrity));
+    const count = () => { try { options.onUnits?.(observations.length, candidates.length, "Tool pins inspected"); } catch {} };
+    const record = (observation: ToolObservation) => { observations.push(observation); count(); };
+    count();
+    for (const pin of candidates) {
       const native = pin.toolId === "superpowers";
       const managedMcpPin = (pin.toolId === "gitnexus" || pin.toolId === "chrome-devtools-mcp" || pin.toolId === "mempalace")
         ? catalog.pins.find((candidate: { toolId: string; installerId: string; version: string; source: string; integrity: string }) =>
@@ -158,10 +167,10 @@ export async function createDefaultSetupConfiguration(options: {
       const observation: ToolObservation = { toolId: pin.toolId, status: "missing", resolvedPath: null, realPath: null,
         version: null, binaryDigest: null, pathMissingDir: null, required: true, diagnostics: [] };
       if (managedMcpPin) observation.diagnostics.push("Gateway requires the exact verified managed installation; an external CLI does not establish the approved launch identity.");
-      if (!resolved) { observation.diagnostics.push("No native provider installer registered for this explicit pin"); observations.push(observation); continue; }
+      if (!resolved) { observation.diagnostics.push("No native provider installer registered for this explicit pin"); record(observation); continue; }
       const inspector = native ? nativeInspectors.get(pin.installerId) : new leaf.ManagedToolInstaller({
         managedRoot: join(currentPlatform.paths.data, "tools"), pins: [managedMcpPin] });
-      if (!inspector) { observation.diagnostics.push("No read-only native inspection is registered for this operator pin"); observations.push(observation); continue; }
+      if (!inspector) { observation.diagnostics.push("No read-only native inspection is registered for this operator pin"); record(observation); continue; }
       const receipt = await inspector.inspect({ schemaVersion: 3, toolId: pin.toolId, installerId: pin.installerId,
         version: pin.version, source: pin.source, integrity: pin.integrity, destination: join(currentPlatform.paths.data, "tools", pin.toolId),
         scope: { kind: "machine", machineId: currentPlatform.machineId },
@@ -192,7 +201,7 @@ export async function createDefaultSetupConfiguration(options: {
         }
         else if (receipt.value.status === "unknown") observation.status = "probe_failed";
       }
-      observations.push(observation);
+      record(observation);
     }
     return observations;
   };

@@ -35,6 +35,9 @@ import {
 import type { EnvironmentStatus } from "./environment.js";
 import { formatCodexHookSetupOutput } from "./codex-hook-setup.js";
 import { renderPreview } from "@bflow/machine-setup";
+import { boundReadinessReport, summarizeReadinessReport } from "./readiness-output.js";
+import { formatDoctorReport } from "./doctor-output.js";
+import { docsFailureRemediation } from "./docs-output.js";
 
 export interface FormatterOptions {
   readonly color?: boolean | undefined;
@@ -85,6 +88,7 @@ function formatDocsOutput(output: import("./docs-command.js").DocsCommandOutput,
     if (failure.availableVersions?.length) lines.push(`  Available versions: ${failure.availableVersions.map(sanitizeIdentifier).join(", ")}`);
     if (output.access.mode === "none" && output.access.reason) lines.push(`  Access: ${sanitizeIdentifier(output.access.reason)}`);
     for (const warning of output.warnings) lines.push(`  Warning: ${sanitizeIdentifier(warning)}`);
+    lines.push(`  Next: ${docsFailureRemediation(failure)}`);
     return lines.join("\n");
   }
   if (output.search) {
@@ -97,13 +101,14 @@ function formatDocsOutput(output: import("./docs-command.js").DocsCommandOutput,
       lines.push(`  - ${sanitizeIdentifier(candidate.id)}  ${sanitizeIdentifier(candidate.title)}${candidate.reputation ? `  [${sanitizeIdentifier(candidate.reputation)}]` : ""}${versions}`);
     }
     for (const warning of output.warnings) lines.push(`  Warning: ${sanitizeIdentifier(warning)}`);
+    if (search.selection !== "no_match") lines.push("Next: Use 'bflow docs lookup --library-id <id> --query <question>' with a listed library ID.");
     return lines.join("\n");
   }
   if (output.lookup) {
     const lookup = output.lookup;
     lines.push(`Documentation for ${sanitizeIdentifier(lookup.libraryTitle ?? lookup.libraryId)} (${sanitizeIdentifier(lookup.libraryId)})`);
     lines.push(`  Version: requested ${lookup.requestedVersion ? sanitizeIdentifier(lookup.requestedVersion) : "none"} (${lookup.versionSource}), documentation ${lookup.versionUsed ? sanitizeIdentifier(lookup.versionUsed) : "unversioned"} (${lookup.versionMatch})`);
-    lines.push(`  Source: Context7 via the shared Gateway; cache ${lookup.cache.hit ? "hit" : lookup.cache.stored ? "miss, stored" : "miss"}; retrieved ${sanitizeIdentifier(lookup.retrievedAt)}`);
+    lines.push("  Source: Context7 via the shared Gateway");
     for (const warning of output.warnings) lines.push(`  Warning: ${sanitizeIdentifier(warning)}`);
     // Retrieved text is untrusted: drop terminal control characters (including escape sequences) before it reaches a terminal.
     lines.push("", lookup.content.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ""));
@@ -154,9 +159,12 @@ function formatHighLevelOutput(output: HighLevelCommandOutput, useColor = false)
   const statusStr = output.status.toUpperCase();
   const statusPaint = output.status === "succeeded" ? green : output.status === "failed" || output.status === "unknown" ? red : yellow;
   lines.push(`${useColor ? cyan(bold("Command:"), true) : "Command:"}   ${humanText(output.command, 100)}`);
-  lines.push(`${useColor ? cyan(bold("Status:"), true) : "Status:"}    ${useColor ? statusPaint(statusStr, true) : statusStr}`);
-  lines.push(`Command ID: ${humanText(output.commandId, 100)}`);
-  lines.push(`Correlation ID:    ${humanText(output.correlationId, 100)}`);
+  if (output.status !== "succeeded") lines.push(`${useColor ? cyan(bold("Status:"), true) : "Status:"}    ${useColor ? statusPaint(statusStr, true) : statusStr}`);
+  if (output.status === "unknown") {
+    lines.push(`Command ID: ${humanText(output.commandId, 100)}`);
+    lines.push(`Correlation ID: ${humanText(output.correlationId, 100)}`);
+    lines.push(`Idempotency key: ${humanText(output.idempotencyKey, 4096)}`);
+  }
   if (output.runId) {
     lines.push(`Run ID:    ${humanText(output.runId, 100)}`);
   }
@@ -170,15 +178,15 @@ function formatHighLevelOutput(output: HighLevelCommandOutput, useColor = false)
     lines.push(`Notice:    Resumed from step '${humanText(output.resumedFromStep, 100)}'`);
   }
 
-  if (output.steps && output.steps.length > 0) {
+  const attentionSteps = output.steps?.filter(step => step.status !== "succeeded" || step.error);
+  if (attentionSteps && attentionSteps.length > 0) {
     lines.push("");
     lines.push("Steps:");
-    for (const [index, step] of output.steps.entries()) {
+    for (const [index, step] of attentionSteps.entries()) {
       const stepStatus = step.status.toUpperCase();
       const mutating = step.mutating ? " [mutating]" : "";
       const paint = step.status === "succeeded" ? green : step.status === "failed" ? red : yellow;
       lines.push(`  ${formatProgressStep(readableLabel(step.name || step.stepId), useColor, index + 1)} [${useColor ? paint(stepStatus, true) : stepStatus}]${mutating}`);
-      lines.push(dim(`      ${humanText(step.stepId, 100)}`, useColor));
       if (step.error) {
         lines.push(`      ${useColor ? red("Error:", true) : "Error:"} [${humanText(step.error.code, 60)}] ${humanText(step.error.message, 220)}`);
       }
@@ -379,20 +387,18 @@ function formatWorkflowRun(snapshot: WorkflowRunSnapshot, useColor = false): str
     ? `CANCELLING (Cancellation requested)`
     : snapshot.status.toUpperCase();
   lines.push(`Status:   ${formatStatusTag(statusStr, useColor)}`);
-  lines.push(`Version:  ${snapshot.version}`);
-  lines.push(`Created:  ${snapshot.createdAt}`);
-  lines.push(`Updated:  ${snapshot.updatedAt}`);
   lines.push("");
   lines.push("Tasks:");
   for (const t of snapshot.tasks) {
     const rawTag = `[${t.status.toUpperCase()}]`;
     const tag = useColor ? formatStatusTag(t.status, true) : rawTag;
     const cleanTaskId = sanitizeIdentifier(t.taskId);
-    let taskLine = `  - ${cleanTaskId.padEnd(14)} ${useColor ? `[${tag}]` : rawTag} (gen: ${t.generation}, attempt: ${t.attempt})`;
+    let taskLine = `  - ${cleanTaskId.padEnd(14)} ${useColor ? `[${tag}]` : rawTag}`;
     if (t.blockage) {
       const cleanCode = humanText(t.blockage.code, 50);
       const cleanMsg = t.blockage.message ? ` - ${humanText(t.blockage.message, 150)}` : "";
       taskLine += ` [Blockage: ${cleanCode}${cleanMsg}]`;
+      taskLine += ` (generation ${t.generation}, attempt ${t.attempt})`;
     }
     lines.push(taskLine);
   }
@@ -408,6 +414,10 @@ function formatWorkflowRun(snapshot: WorkflowRunSnapshot, useColor = false): str
       lines.push(`  To record human approval: bflow approve ${sanitizeIdentifier(waitTask?.taskId ?? "<task-id>")} --run ${sanitizeIdentifier(snapshot.runId)}`);
     }
     lines.push(`  To resume the run: bflow resume ${sanitizeIdentifier(snapshot.runId)}`);
+  } else if (snapshot.status === "running") {
+    lines.push("", `Next: bflow status ${sanitizeIdentifier(snapshot.runId)}`);
+  } else if (snapshot.status === "failed") {
+    lines.push("", "Next: Review the failed tasks and their evidence before requesting another attempt.");
   }
 
   return lines.join("\n");
@@ -458,72 +468,18 @@ function formatInitOutput(output: InitCommandOutput, useColor = false): string {
   lines.push(`  ${sanitizeIdentifier(output.configPath)}`);
   lines.push("");
   lines.push(`Project Name:  ${sanitizeIdentifier(output.config.projectName)}`);
-  lines.push(`Runtime ID:    ${sanitizeIdentifier(output.config.runtimeId)}`);
-  lines.push(`Run Store:     ${sanitizeIdentifier(output.config.storage.runStorePath)}`);
-  lines.push(`Artifacts:     ${sanitizeIdentifier(output.config.storage.artifactStoreRoot)}`);
-  lines.push(`Registry:      ${sanitizeIdentifier(output.config.storage.registryStateFile)}`);
   lines.push(`Default Tasks: ${output.config.defaultWorkflow.tasks.map((t) => sanitizeIdentifier(t.id)).join(" -> ")}`);
   lines.push("");
   lines.push("Next action:");
   lines.push("  Run 'bflow up' to start the environment.");
-  lines.push("  Note: Default provider is Codex. 'bflow up' starts panes only when the host's provider preflight reports every required role ready; see README.md for details.");
-  return lines.join("\n");
-}
-
-function formatDoctorReport(report: EnvironmentDoctorReport, useColor = false): string {
-  const passed = report.checks.filter((c) => c.status === "passed").length;
-  const failed = report.checks.filter((c) => c.status === "failed").length;
-  const warn = report.checks.filter((c) => c.status === "warn").length;
-  const total = report.checks.length;
-
-  const lines: string[] = [];
-  if (report.healthy) {
-    const okMarker = useColor ? green(bold("[OK]"), true) : "[OK]";
-    if (warn > 0) {
-      lines.push(`${okMarker} Environment healthy (${passed} passed, ${warn} warning(s))`);
-    } else {
-      lines.push(`${okMarker} Environment healthy (all ${total} checks passed)`);
-    }
-  } else {
-    const failMarker = useColor ? red(bold("[FAIL]"), true) : "[FAIL]";
-    lines.push(`${failMarker} Environment unhealthy (${failed} check(s) failed, ${passed} passed${warn > 0 ? `, ${warn} warning(s)` : ""})`);
-  }
-  lines.push(`Repository: ${sanitizeIdentifier(report.workspaceRoot)}`);
-  lines.push(`Session:    ${sanitizeIdentifier(report.sessionId ?? "none")}`);
-  lines.push("");
-  lines.push("Checks:");
-  for (const check of report.checks) {
-    const grouped = report.metadata?.["groups"] !== undefined;
-    const tag = grouped ? check.status.toUpperCase()
-      : check.status === "passed" ? "PASS" : check.status === "failed" ? "FAIL" : "WARN";
-    const paddedTag = grouped ? tag : tag.padEnd(6);
-    const coloredTag = useColor
-      ? check.status === "passed"
-        ? green(paddedTag, true)
-        : check.status === "failed"
-        ? red(paddedTag, true)
-        : yellow(paddedTag, true)
-      : paddedTag;
-    const cleanName = humanText(check.name, 100);
-    const cleanMsg = humanText(check.message, 250);
-    lines.push(`  ${coloredTag} ${cleanName}: ${cleanMsg}`);
-    if (check.remediation) {
-      const cleanRemediation = humanText(check.remediation, 250);
-      const nextLabel = useColor ? cyan("Next:") : "Next:";
-      lines.push(`         ${nextLabel} ${cleanRemediation}`);
-    }
-  }
-  lines.push("");
-  lines.push(`Summary: ${passed} passed, ${failed} failed${warn > 0 ? `, ${warn} warning(s)` : ""} (${total} total)`);
+  lines.push("  Default provider is Codex; required provider checks run before startup.");
   return lines.join("\n");
 }
 
 export function formatEnvironmentStatus(status: EnvironmentStatus, useColor = false): string {
   const lines: string[] = [];
-  const statusMarker = status.configuration === "valid"
-    ? (useColor ? green(bold("[OK]"), true) : "[OK]")
-    : (useColor ? red(bold("[FAIL]"), true) : "[FAIL]");
-  lines.push(`${statusMarker} Repository Environment Status`);
+  // This is an observation, not an authenticated readiness verdict.
+  lines.push("Repository Environment Status");
   lines.push(`Repository:              ${sanitizeIdentifier(status.workspaceRoot)}`);
   lines.push(`Session:                 ${sanitizeIdentifier(status.sessionName)}`);
   lines.push(`Server:                  ${useColor ? formatStatusTag(status.server, true) : status.server}`);
@@ -540,7 +496,7 @@ export function formatEnvironmentStatus(status: EnvironmentStatus, useColor = fa
       const cleanRole = sanitizeIdentifier(pane.role);
       const paddedRole = cleanRole.padEnd(16);
       const coloredState = useColor ? formatStatusTag(stateStr, true) : stateStr;
-      lines.push(`  - ${paddedRole} [${coloredState}] (${sanitizeIdentifier(pane.workspaceId)}/${sanitizeIdentifier(pane.tabId)}/${sanitizeIdentifier(pane.paneId)}, agent ${sanitizeIdentifier(pane.agentId)})`);
+      lines.push(`  - ${paddedRole} [${coloredState}]`);
     }
   }
   if (status.issues.length > 0) {
@@ -551,6 +507,12 @@ export function formatEnvironmentStatus(status: EnvironmentStatus, useColor = fa
       lines.push(`  - ${useColor ? yellow(cleanIssue, true) : cleanIssue}`);
     }
   }
+  lines.push("");
+  if (status.configuration === "valid" && status.server === "stopped" && (!status.manifest || status.manifest.status === "down") && !status.issues.length)
+    lines.push("Next: Run 'bflow up' to start this repository environment.");
+  else if (status.server === "running" && status.manifest?.status === "up" && status.liveObservation && !status.issues.length)
+    lines.push("Next: Run 'bflow attach' to open Conversation.");
+  else lines.push("Next: Run 'bflow doctor' to diagnose the current environment.");
   return lines.join("\n");
 }
 
@@ -567,7 +529,7 @@ export function formatUpOutput(manifest: SessionManifest, useColor = false): str
     const stateStr = pane.transportState.toUpperCase();
     const cleanRole = sanitizeIdentifier(pane.role);
     const coloredState = useColor ? formatStatusTag(stateStr, true) : stateStr;
-    lines.push(`  - ${cleanRole.padEnd(14)} [${coloredState}] (${sanitizeIdentifier(pane.paneId)}, agent ${sanitizeIdentifier(pane.agentId)})`);
+    lines.push(`  - ${cleanRole.padEnd(14)} [${coloredState}]`);
   }
   lines.push("");
   lines.push("Next: run 'bflow attach' to interact with the Conversation Agent.");
@@ -605,23 +567,26 @@ export function formatDownOutput(data: SessionManifest | EnvironmentStatus, useC
 
 function formatSetupOutput(output: SetupCommandOutput, useColor = false): string {
   const lines: string[] = [];
+  const shownDiagnostics = new Set(output.diagnostics);
   const positive = (value: string) => useColor ? green(value, true) : value;
   const warning = (value: string) => useColor ? yellow(value, true) : value;
   const heading = (value: string) => useColor ? cyan(value, true) : value;
+  const concise = output.outcome === "healthy" || output.outcome === "applied";
+  if (output.outcome) lines.push(`${concise ? positive("[OK]") : warning("[ATTENTION]")} Setup ${readableLabel(output.outcome)}`);
   lines.push(`${heading("Setup Mode:")}         ${readableLabel(output.mode).toUpperCase()}`);
-  lines.push(`${heading("Machine ID:")}         ${sanitizeIdentifier(output.machineId)}`);
-  lines.push(`${heading("Operating System:")}   ${sanitizeIdentifier(output.os)}`);
-  lines.push(`${heading("Service Manager:")}    ${sanitizeIdentifier(output.serviceManagerKind)}`);
-  if (output.serviceUnitNamespace) {
+  if (!concise) {
+    lines.push(`${heading("Operating System:")}   ${sanitizeIdentifier(output.os)}`);
+    lines.push(`${heading("Service Manager:")}    ${sanitizeIdentifier(output.serviceManagerKind)}`);
+  }
+  if (output.serviceUnitNamespace && !concise) {
     const prefix = output.serviceManagerKind === "launchd" ? "dev.bflow." : "bflow-";
     lines.push(`${heading("Service Units:")}      ${sanitizeIdentifier(`${prefix}${output.serviceUnitNamespace}-<service>`)} (isolated namespace)`);
   }
-  if (output.outcome) lines.push(`${heading("Setup Result:")}       ${readableLabel(output.outcome)}`);
   if (output.plan) {
-    lines.push(`${heading("Plan ID:")}            ${sanitizeIdentifier(output.plan.planId)} (revision ${output.plan.revision})`);
+    if (!concise) lines.push(`${heading("Plan ID:")}            ${sanitizeIdentifier(output.plan.planId)} (revision ${output.plan.revision})`);
     lines.push(`${heading("Plan Steps:")}         ${output.plan.steps.length}`);
     const showPreview = output.preview && (output.mode === "dry_run" || output.outcome === "approval_declined");
-    for (const [index, step] of (showPreview ? [] : output.plan.steps).entries()) {
+    for (const [index, step] of (showPreview || concise ? [] : output.plan.steps).entries()) {
       const receipt = output.receipts?.find(r => r.stepId === step.stepId) ??
         (output.receipt?.stepId === step.stepId ? output.receipt : undefined);
       const approval = !receipt && step.requiresApproval ? ` ${warning("[requires approval]")}` : "";
@@ -631,14 +596,17 @@ function formatSetupOutput(output: SetupCommandOutput, useColor = false): string
       const paintedStatus = receipt?.status === "applied" || receipt?.status === "already_satisfied" ? positive(status)
         : receipt?.status === "failed" ? (useColor ? red(status) : status) : warning(status);
       lines.push(`  ${formatProgressStep(label, useColor, index + 1)} [${paintedStatus}]${approval}`);
-      for (const diagnostic of receipt?.diagnostics ?? []) lines.push(dim(`      ${humanText(diagnostic, 250)}`, useColor));
+      for (const diagnostic of receipt?.diagnostics ?? []) {
+        lines.push(dim(`      ${humanText(diagnostic, 250)}`, useColor));
+        shownDiagnostics.add(diagnostic);
+      }
     }
   }
   if (output.preview && (output.mode === "dry_run" || output.outcome === "approval_declined")) {
     // The same grouped scope is visible in a dry run and at the approval prompt.
     lines.push("", formatSetupPreview(renderPreview(output.preview), useColor));
   }
-  if (output.receipt) {
+  if (output.receipt && !concise) {
     const receiptStatus = output.receipt.status === "applied" || output.receipt.status === "already_satisfied"
         ? positive(readableLabel(output.receipt.status)) : output.receipt.status === "failed"
         ? (useColor ? red(readableLabel(output.receipt.status), true) : readableLabel(output.receipt.status)) : warning(readableLabel(output.receipt.status));
@@ -646,8 +614,9 @@ function formatSetupOutput(output: SetupCommandOutput, useColor = false): string
   }
   if (output.tools && output.tools.length > 0) {
     lines.push("");
-    lines.push("Tools:");
-    for (const tool of output.tools) {
+    const healthyTools = output.tools.filter(tool => ["present", "installed", "ready", "healthy", "available"].includes(tool.status.toLowerCase()));
+    lines.push(`Tools: ${healthyTools.length} ready${healthyTools.length < output.tools.length ? `, ${output.tools.length - healthyTools.length} need attention` : ""}`);
+    for (const tool of concise ? output.tools.filter(tool => !healthyTools.includes(tool)) : output.tools) {
       const ver = tool.version ? ` (${sanitizeIdentifier(tool.version)})` : "";
       const status = ["present", "installed", "ready", "healthy", "available"].includes(tool.status.toLowerCase())
         ? positive(readableLabel(tool.status))
@@ -662,10 +631,10 @@ function formatSetupOutput(output: SetupCommandOutput, useColor = false): string
   lines.push(`  Catalog Loaded:   ${output.skills.catalogLoaded ? "yes" : "no"}`);
   lines.push(`  Skill Count:      ${output.skills.skillCount}`);
   if (output.skills.installedSkillCount !== undefined) lines.push(`  Installed Skills: ${output.skills.installedSkillCount}`);
-  lines.push(`  Store Root:       ${sanitizeIdentifier(output.skills.storeRoot)}`);
+  if (!concise || !output.skills.catalogLoaded) lines.push(`  Store Root:       ${sanitizeIdentifier(output.skills.storeRoot)}`);
 
   if (output.doctor) {
-    const failed = output.doctor.checks.filter(check => check.status === "failed");
+    const failed = output.doctor.checks.filter(check => check.status === "failed" || check.status === "warning");
     lines.push("");
     lines.push(`Machine checks: ${output.doctor.healthy ? positive("passed") : warning("failed")}`);
     for (const check of failed) {
@@ -674,60 +643,30 @@ function formatSetupOutput(output: SetupCommandOutput, useColor = false): string
     }
   }
 
-  if (output.diagnostics && output.diagnostics.length > 0) {
+  const diagnostics = [...new Set(output.diagnostics)].filter(diagnostic => !concise || diagnostic !== "Setup completed successfully");
+  if (diagnostics.length > 0) {
     lines.push("");
     lines.push("Diagnostics:");
-    for (const diag of output.diagnostics) {
+    for (const diag of diagnostics) {
       lines.push(dim(`  - ${humanText(diag, 250)}`, useColor));
     }
   }
-  return lines.join("\n");
-}
-
-function formatDoctorGroups(groups: unknown, useColor = false): string[] {
-  const lines: string[] = [];
-  lines.push("");
-  lines.push("Component Groups:");
-
-  const renderItem = (item: any) => {
-    if (!item || typeof item !== "object") return;
-    const status = humanText(item.status ?? "unknown").toUpperCase();
-    const component = humanText(item.component ?? item.name ?? item.toolId ?? item.checkId ?? "unknown");
-    const ver = item.detected_version ?? item.version ?? item.detectedVersion;
-    const verStr = ver ? ` (version: ${humanText(ver)})` : "";
-    const statusColor = status === "PASSED" || status === "READY" || status === "HEALTHY" ? green : status === "FAILED" || status === "BLOCKED" ? red : yellow;
-    lines.push(`  - [${useColor ? statusColor(status, true) : status}] ${component}${verStr}`);
-    if (item.reason ?? item.message) {
-      lines.push(`      Reason: ${humanText(item.reason ?? item.message)}`);
-    }
-    if (item.remediation) {
-      lines.push(`      ${useColor ? cyan("Remediation:", true) : "Remediation:"} ${humanText(item.remediation)}`);
-    }
-    if (item.repair_command ?? item.repairCommand) {
-      lines.push(`      Repair: ${humanText(item.repair_command ?? item.repairCommand)}`);
-    }
-  };
-
-  if (Array.isArray(groups)) {
-    for (const group of groups) {
-      if (group && typeof group === "object") {
-        const title = group.group ?? group.name ?? group.title ?? "Group";
-        lines.push(`\n[${useColor ? cyan(humanText(title), true) : humanText(title)}]`);
-        const items = Array.isArray(group.items) ? group.items : Array.isArray(group.checks) ? group.checks : [group];
-        for (const item of items) renderItem(item);
-      }
-    }
-  } else if (groups && typeof groups === "object") {
-    for (const [groupName, groupContent] of Object.entries(groups)) {
-      lines.push(`\n[${useColor ? cyan(humanText(groupName), true) : humanText(groupName)}]`);
-      if (Array.isArray(groupContent)) {
-        for (const item of groupContent) renderItem(item);
-      } else if (groupContent && typeof groupContent === "object") {
-        renderItem(groupContent);
-      }
+  // Applied receipts may still carry journal-write warnings or reconciliation evidence.
+  // Preserve these even when the successful step inventory is condensed.
+  const receiptDiagnostics: string[] = [];
+  for (const receipt of [...(output.receipts ?? []), ...(output.receipt ? [output.receipt] : [])]) {
+    for (const diagnostic of receipt.diagnostics) {
+      if (shownDiagnostics.has(diagnostic)) continue;
+      shownDiagnostics.add(diagnostic);
+      receiptDiagnostics.push(`  - ${sanitizeIdentifier(receipt.stepId)}: ${humanText(diagnostic, 250)}`);
     }
   }
-  return lines;
+  if (receiptDiagnostics.length) lines.push("", "Receipt diagnostics:", ...receiptDiagnostics);
+  lines.push("");
+  if (concise) lines.push("Next: Run 'bflow doctor' in your repository to check readiness.");
+  else if (output.outcome === "changes_pending" || output.outcome === "approval_declined") lines.push("Next: Review 'bflow setup --plan', then run 'bflow setup --apply' when you intend to apply it.");
+  else lines.push("Next: Resolve the reported blockers and run 'bflow setup --check' to inspect setup state.");
+  return lines.join("\n");
 }
 
 export function formatCommandSuccess(
@@ -790,12 +729,7 @@ export function formatCommandSuccess(
   }
 
   if (isDoctorReport(data)) {
-    const lines = [formatDoctorReport(data, useColor)];
-    const groups = data.metadata?.["groups"];
-    if (command === "doctor" && groups) {
-      lines.push(...formatDoctorGroups(groups, useColor));
-    }
-    return lines.join("\n");
+    return formatDoctorReport(data, useColor);
   }
 
   if (command === "attach") {
@@ -868,14 +802,14 @@ export function formatCommandError(
 
   // Clean, redact sensitive credentials, and bound untrusted messages
   const redactedMessage = redactSensitive(stripAnsi(error.message));
-  // Startup reports contain independently useful failures for every role. Keep the
-  // report bounded, but do not apply the generic five-line/350-character summary.
+  // Sanitize and bound the full report before grouping shared causes for humans.
   const isReadinessReport = redactedMessage.startsWith("Provider readiness is not satisfied; no panes were started.\n");
   const report = redactedMessage.split("\n").filter(line => !/^\s+at\s+/.test(line));
-  const cleanMessage = isReadinessReport
-    ? report.slice(0, 256).join("\n").slice(0, 64_000).trimEnd() +
-      (report.length > 256 || redactedMessage.length > 64_000 ? "\n... [truncated; inspect the JSON error report]" : "")
+  const boundedMessage = isReadinessReport
+    ? boundReadinessReport(report.join("\n"))
     : boundMessage(redactedMessage);
+  const summary = isReadinessReport ? summarizeReadinessReport(boundedMessage) : undefined;
+  const cleanMessage = summary === undefined ? boundedMessage : boundReadinessReport(summary);
 
   const errorTag = useColor ? red(bold(`Error [${error.code}]:`), true) : `Error [${error.code}]:`;
   let out = `${errorTag} ${cleanMessage}`;

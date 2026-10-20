@@ -27,6 +27,12 @@ export interface HighLevelContext {
   readonly runtime?: RuntimeService | undefined;
   readonly signal?: AbortSignal | undefined;
   readonly onProgress?: ((step: string) => void) | undefined;
+  readonly onUnits?: ((completed: number, total: number, label: string) => void) | undefined;
+}
+
+/** Human observations cannot change command outcomes or receipts. */
+export function reportUnits(ctx: HighLevelContext, completed: number, total: number, label: string): void {
+  try { ctx.onUnits?.(completed, total, label); } catch { /* observational only */ }
 }
 
 export type HighLevelHandler = (args: ParsedHighLevelArgs, ctx: HighLevelContext, identity: CommandIdentity) => Promise<CommandReport>;
