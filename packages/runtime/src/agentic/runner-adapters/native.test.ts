@@ -162,7 +162,7 @@ it("exposes all three installed native adapters for a monorepo and isolates task
   const tools = await fixture({ "bin/go": "tool", "bin/python3": "tool", "bin/cargo": "tool", "bin/rustc": "tool", "lib/.keep": "", "pkg/.keep": "" });
   for (const name of ["go", "python3", "cargo", "rustc"]) await chmod(join(tools.root, "bin", name), 0o755);
   const home = (await fixture({ ".keep": "" })).root;
-  const context = await fixture({ "services/go/go.mod": "module example/go\ngo 1.23", "services/go/math_test.go": "", "services/python/pyproject.toml": "[project]\nname='py'", "services/python/tests/test_math.py": "", "services/rust/Cargo.toml": "[package]\nname='rust'", "services/rust/Cargo.lock": "", "services/rust/src/lib.rs": "", "package.json": "{}" });
+  const context = await fixture({ "services/go/go.mod": "module example/go\ngo 1.23", "services/go/math_test.go": "", "services/python/pyproject.toml": "[project]\nname='py'", "services/python/tests/test_math.py": "", "services/rust/Cargo.toml": "[package]\nname='rust'", "services/rust/Cargo.lock": "", "services/rust/src/lib.rs": "", ".cargo/config.toml": "", "package.json": "{}" });
   await mkdir(join(context.root, "services/python/.venv/bin"), { recursive: true });
   await symlink(join(tools.root, "bin/python3"), join(context.root, "services/python/.venv/bin/python"));
   await mkdir(join(context.root, "services/python/.venv/lib/python3.12/site-packages/pytest"), { recursive: true });
@@ -170,6 +170,7 @@ it("exposes all three installed native adapters for a monorepo and isolates task
   const host = fakeHost(home, join(tools.root, "bin/go"), async (path, args) => path.endsWith("/go") ? args[0] === "version" ? "go version go1.23.4 linux/amd64" : tools.root : path.endsWith("cargo") ? "cargo 1.83.0" : path.endsWith("rustc") ? "rustc 1.83.0" : "Python 3.12.3");
   const profiles = (await Promise.all(createNativeAdapters(host).map(adapter => adapter.detect(context)))).flatMap(result => result.runners);
   expect(profiles.map(profile => [profile.adapterId, profile.projectDirectory])).toEqual([["python", "services/python"], ["go", "services/go"], ["rust", "services/rust"]]);
+  expect(profiles[2]!.protectedPaths).toContain(".cargo/config.toml");
   for (const profile of profiles) expect(() => profile.bind({ testNames: ["wrong"], testPaths: ["other/test.py"] }, "/tmp/r")).toThrow("runner_identity_invalid");
 });
 

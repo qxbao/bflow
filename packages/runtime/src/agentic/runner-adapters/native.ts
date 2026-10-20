@@ -88,7 +88,11 @@ async function mounts(paths: string[], host: NativeHost): Promise<RunnerMount[]>
   return result.filter((value): value is RunnerMount => value !== undefined && !within("/usr", value.source));
 }
 function configs(context: AdapterContext, project: string, names: RegExp): string[] {
-  return context.files.filter(path => names.test(basename(path)) && (project === "." || path.startsWith(`${project}/`))).sort();
+  return context.files.filter(path => {
+    if (!names.test(basename(path))) return false;
+    const directory = dirname(path), parent = basename(directory) === ".cargo" ? dirname(directory) : directory;
+    return project === "." || path.startsWith(`${project}/`) || parent === "." || project === parent || project.startsWith(`${parent}/`);
+  }).sort();
 }
 function projects(context: AdapterContext, marker: RegExp): string[] {
   return [...new Set(context.files.filter(path => marker.test(basename(path))).map(path => dirname(path)))].sort();
