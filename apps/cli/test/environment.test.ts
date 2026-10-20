@@ -669,6 +669,8 @@ describe("P12 repository environment lifecycle", () => {
   it.each([null, "true"])("reports the exact config path for invalid role.required %j before shutdown", async required => {
     const path = join(dir, ".bflow/config.yml");
     const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
+    const reviewerIndex = config.environment.roles.findIndex(role => role.role === "reviewer");
+    expect(reviewerIndex).toBeGreaterThanOrEqual(0);
     const raw = { ...config, environment: { ...config.environment, roles: config.environment.roles.map(role =>
       role.role === "reviewer" ? { ...role, required } : role) } };
     const content = renderEnvironmentConfigYaml(raw);
@@ -680,7 +682,7 @@ describe("P12 repository environment lifecycle", () => {
       expect(result.error?.code).toBe("validation");
       const output = json ? JSON.parse(result.stdout).error.message : result.stderr;
       expect(output).toContain(".bflow/config.yml");
-      expect(output).toContain("environment.roles[5].required");
+      expect(output).toContain(`environment.roles[${reviewerIndex}].required`);
       expect(output).toContain("Expected boolean");
       if (!json) expect(output).toContain("Inspect .bflow/config.yml");
     }
