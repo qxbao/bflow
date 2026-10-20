@@ -52,6 +52,10 @@ export interface RunRecord {
   workflowVerificationPending?: boolean; coreCreated: boolean; cancelled: boolean; error?: string; maxIterations: number;
   /** Specialist/Coordinator user decisions keyed by approvalId; separate from the single design/task `approval` slot. */
   userDecisions?: Record<string, UserDecisionRecord>;
+  /** Earlier admitted revisions of the requirement, oldest first. Absent in journals written before requirement changes. */
+  delegationHistory?: DelegationRequest[];
+  /** Approvals a later requirement revision made obsolete; their decisions are refused with the revision that superseded them. */
+  supersededApprovals?: { approvalId: string; supersededByRevision: number }[];
 }
 export interface UserDecisionRecord {
   request: ApprovalRequest; role: AgentRole; agentId: string; paneId: string; taskId: string;
@@ -100,7 +104,8 @@ export interface Outbound {
 }
 export interface JournalState {
   version: 1; repository: string; runs: RunRecord[]; outbound: Outbound[];
-  inbox: { message: RoleMessage; status: "received" | "applied" }[];
+  /** "rejected" is terminal and carries Runtime's reason: the message was refused by admission and must never be retried. */
+  inbox: { message: RoleMessage; status: "received" | "applied" | "rejected"; reason?: string }[];
   pendingCore: AppendEventsRequest[];
   /** attempts/lastError/stuck: bounded retry bookkeeping for a durable verification outcome that cannot be finished yet. */
   pendingVerifications: { job: JsonValue; outcome: JsonValue; attempts?: number; lastError?: string; stuck?: boolean }[];
@@ -126,6 +131,10 @@ function parseState(input: unknown, repository: string): JournalState {
     if (run.workflowSpec) parseSpec(run.workflowSpec);
     if (run.approval) run.approval = ApprovalRequestSchema.parse(run.approval);
     if (run.userDecisions !== undefined) parseUserDecisions(run.userDecisions, run.runId);
+    if (run.delegationHistory !== undefined) run.delegationHistory = run.delegationHistory.map(item => DelegationRequestSchema.parse(item));
+    if (run.supersededApprovals !== undefined) for (const item of run.supersededApprovals) {
+      textField(item.approvalId); if (!Number.isSafeInteger(item.supersededByRevision) || item.supersededByRevision < 2) throw new Error("Invalid superseded approval");
+    }
     if (run.decision) run.decision = ApprovalDecisionSchema.parse(run.decision);
     if (run.approvalKind && !["design", "delivery", "action", "task"].includes(run.approvalKind)) throw new Error("Invalid approval kind");
     for (const task of run.tasks) {
@@ -190,7 +199,8 @@ function parseState(input: unknown, repository: string): JournalState {
   }
   for (const item of state.inbox) {
     item.message = RoleMessageSchema.parse(item.message);
-    if (!["received", "applied"].includes(item.status)) throw new Error("Invalid inbox status");
+    if (!["received", "applied", "rejected"].includes(item.status)) throw new Error("Invalid inbox status");
+    if (item.reason !== undefined) textField(item.reason);
   }
   for (const pending of state.pendingVerifications) {
     const job = record(pending.job); const outcome = record(pending.outcome);
