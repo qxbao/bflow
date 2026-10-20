@@ -429,7 +429,13 @@ export class LaunchdServiceManager extends FileServiceManager {
   protected async activate(def: ServiceDefinition, unit: string): Promise<string[]> {
     const target = `${this.domain}/${this.labelOf(def.serviceId)}`;
     await this.exec(["launchctl", "bootout", target], true);
-    const d = await this.exec(["launchctl", "bootstrap", this.domain!, unit]);
+    // bootout returns before launchd finishes tearing the job down; an immediate bootstrap then fails with
+    // "Input/output error" (exit 5). Retry with a short backoff so re-applying over a loaded service converges.
+    let d = await this.exec(["launchctl", "bootstrap", this.domain!, unit]);
+    for (let attempt = 1; d !== null && attempt <= BOOTSTRAP_RETRIES; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, BOOTSTRAP_RETRY_DELAY_MS * attempt));
+      d = await this.exec(["launchctl", "bootstrap", this.domain!, unit]);
+    }
     return d === null ? [] : [d];
   }
 
@@ -443,6 +449,9 @@ export class LaunchdServiceManager extends FileServiceManager {
     return [];
   }
 }
+
+const BOOTSTRAP_RETRIES = 5;
+const BOOTSTRAP_RETRY_DELAY_MS = 400;
 
 export class WindowsUnverifiedServiceManager implements ServiceManager {
   readonly kind = "windows-unverified" as const;
