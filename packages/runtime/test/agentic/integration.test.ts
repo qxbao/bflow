@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, rm, realpath } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { copyIsolatedNodeDependencies } from "../helpers/isolated-node-dependencies.js";
 import { join, relative } from "node:path";
@@ -408,6 +408,57 @@ describe.skipIf((await probeBehavioralSandbox()).status !== "ready")("connected 
   }, 120_000);
 });
 
+
+describe("Runtime task activity log integration", () => {
+  it("records committed admission, assignment and status transitions without tick polling noise", async () => {
+    const f = await fixture();
+    const activityPath = join(f.root, "task-activity.jsonl");
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    await f.runtime.tick();
+    const read = async () => (await readFile(activityPath, "utf8")).trim().split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
+    const initial = await read();
+    expect(initial.some(item => item.kind === "admission" && item.runId === "run-1")).toBe(true);
+    expect(initial.some(item => item.kind === "assignment" && item.action === "task.assignment" && item.taskId === "implement")).toBe(true);
+    const count = initial.length;
+    await f.runtime.tick();
+    const afterDeliveryReconcile = await read();
+    expect(afterDeliveryReconcile.length).toBeLessThanOrEqual(count + 2);
+    await f.runtime.tick();
+    const afterQuietTick = await read();
+    expect(afterQuietTick.map((item: any) => item.action).slice(afterDeliveryReconcile.length)).toEqual([]);
+    const dispatched = (await f.runtime.inspect() as any).outbound.find((item: any) => item.message.type === "task.assignment");
+    expect(dispatched.status).toBe("accepted");
+  });
+
+  it("provides native tool diagnostic assignment context without acquiring Runtime.inspect", async () => {
+    const f = await fixture();
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    const assigned = (await f.runtime.inspect() as any).outbound.find((item: any) => item.message.type === "task.assignment");
+    const developer = f.panes.bindings.find(binding => binding.paneId === assigned.handle.target.paneId)!;
+    const inspect = vi.spyOn(f.runtime, "inspect");
+    expect(f.runtime.taskLogAssignmentContext(developer)).toMatchObject({ runId: "run-1", taskId: "implement", attemptId: assigned.attemptId });
+    expect(inspect).not.toHaveBeenCalled();
+  });
+
+  it("records accepted task specifications and newly accepted conditional TDD evidence phases", async () => {
+    const f = await fixture({ tdd: true });
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    const read = async () => (await readFile(join(f.root, "task-activity.jsonl"), "utf8")).trim().split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
+    expect(await read()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "specification", action: "task_specification_accepted", runId: "run-1", taskId: "implement", outcome: expect.stringContaining("required") })
+    ]));
+    await f.runtime.tick();
+    await f.evidence("implement", "red"); await f.evidence("implement", "green"); await f.evidence("implement", "refactor");
+    const entries = await read();
+    expect(entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "tdd", action: "tdd_evidence_accepted:red", runId: "run-1", taskId: "implement" }),
+      expect.objectContaining({ kind: "tdd", action: "tdd_evidence_accepted:green", runId: "run-1", taskId: "implement" }),
+      expect.objectContaining({ kind: "tdd", action: "tdd_evidence_accepted:refactor", runId: "run-1", taskId: "implement" })
+    ]));
+    expect(JSON.stringify(entries.filter((item: any) => item.kind === "tdd"))).not.toContain("verificationId");
+    expect(JSON.stringify(entries.filter((item: any) => item.kind === "tdd"))).not.toContain("evidenceArtifacts");
+  });
+});
 
 describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () => {
   it("loads a runner added after composition and ignores unselected language profiles when freezing a task plan", async () => {

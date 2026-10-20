@@ -14,6 +14,9 @@ import { buildDecisionRequestMessage, buildUserDecisionRequest, USER_DECISION_EX
 import { captureIntegratedChange } from "./integration-change.js";
 import { CoreSession } from "./core-session.js";
 import { redactString } from "../resilience/redaction.js";
+import { TaskActivityLog } from "./task-activity-log.js";
+import { taskLogAssignmentContextFromSnapshot, taskLogBusinessTaskId, type TaskLogAssignment } from "./task-log-tools.js";
+import { join } from "node:path";
 import { CONVERSATION_DELIVERY_MAX_ATTEMPTS, DISPATCH_FAILURE_NOTICE_ATTEMPTS, HerdrOutbox, NOT_READY_FAILURE_MS, unwrap } from "./outbox.js";
 import type { AgenticRuntimePorts, Integration, VerificationPlan } from "./ports.js";
 import type { WorkflowRejection } from "./workflow-rejection.js";
@@ -95,8 +98,11 @@ const REJECTED_REVISION_OPTIONS = ["Gửi revision mới hợp lệ", "Tạo run
 /** Durable single-writer orchestration. No LLM calls, polling artifacts, or synchronous inter-agent waits. */
 export class AgenticWorkflowRuntime {
   private readonly journal: AgenticJournal;
+  private taskLogAssignmentSnapshot: Record<string, unknown>[] = [];
+  readonly activityLog: TaskActivityLog;
   constructor(readonly ports: AgenticRuntimePorts, options: { journalDirectory: string; repositoryPath: string }) {
     this.journal = new AgenticJournal(options.journalDirectory, options.repositoryPath);
+    this.activityLog = TaskActivityLog.open(join(options.journalDirectory, "../task-activity.jsonl"));
   }
   private quiesced = false;
   /** Stop new scheduling before lifecycle checkpointing; retain in-flight receipts and worktrees. */
@@ -120,17 +126,93 @@ export class AgenticWorkflowRuntime {
         runtimeId: `p19-${digest(this.journal.repository).slice(0, 16)}`, configuration: {}, recoveryMode: true, initializedAt: this.now()
       })));
       SessionManifestSchema.parse(unwrap(await this.ports.panes.getManifest()));
+      await this.journal.exclusive(async state => { this.refreshTaskLogAssignmentSnapshot(state); });
     })();
     return this.initialization;
   }
   private now(): string { return (this.ports.clock?.() ?? new Date()).toISOString(); }
+  /** Lock-free best-effort diagnostic context derived only from the latest committed journal snapshot. */
+  taskLogAssignmentContext(binding: PaneBinding): TaskLogAssignment | undefined {
+    return taskLogAssignmentContextFromSnapshot(this.taskLogAssignmentSnapshot, binding);
+  }
+  private refreshTaskLogAssignmentSnapshot(state: JournalState): void {
+    this.taskLogAssignmentSnapshot = state.outbound.flatMap(item => item.handle && ["accepted", "released"].includes(item.status)
+      ? [{ status: item.status, taskId: taskLogBusinessTaskId(item), attemptId: item.attemptId, message: { run_id: item.message.run_id }, handle: item.handle }]
+      : []);
+  }
   private async transaction<T>(action: (state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox) => Promise<T>): Promise<T> {
     return this.journal.exclusive(async (state, save) => {
-      const core = new CoreSession(this.ports, state, save);
+      this.refreshTaskLogAssignmentSnapshot(state);
+      let previous = structuredClone(state);
+      const logChanges = async () => {
+        const oldEvents = new Set(previous.pendingCore.flatMap(batch => batch.events.map(event => event.eventId)));
+        for (const batch of state.pendingCore) for (const event of batch.events) if (!oldEvents.has(event.eventId) && event.type !== "command.completed") {
+          const payload = typeof event.payload === "object" && event.payload !== null && !Array.isArray(event.payload) ? event.payload as Record<string, unknown> : {};
+          const kind = event.type.startsWith("approval.") ? "approval" : event.type.startsWith("quality_gate.") ? "verification" :
+            event.type === "agent.delivery_uncertain" ? "error" : event.type === "agent.delivery_reconciled" ? "recovery" :
+              event.type.startsWith("agent.") ? "transport" : event.type.startsWith("task.dispatch") ? "assignment" : "progress";
+          const outcome = typeof payload.to === "string" ? payload.to : typeof payload.status === "string" ? payload.status : undefined;
+          await this.activityLog.record({ kind, role: "runtime", action: event.type, runId: event.runId,
+            ...(event.taskId ? { taskId: event.taskId } : {}), ...(typeof payload.attemptId === "string" ? { attemptId: payload.attemptId } : {}),
+            ...(outcome ? { outcome } : {}) });
+        }
+        const oldRuns = new Map(previous.runs.map(run => [run.runId, run.status]));
+        for (const run of state.runs) {
+          const before = oldRuns.get(run.runId);
+          if (before === undefined) await this.activityLog.record({ kind: "admission", role: "runtime", action: "run_admitted", runId: run.runId, outcome: run.status });
+          else if (before !== run.status) await this.activityLog.record({ kind: run.status === "cancelled" ? "cancellation" : run.status === "awaiting_approval" ? "approval" : ["completed", "failed", "escalated"].includes(run.status) ? "result" : "progress",
+            role: "runtime", action: "run_status_changed", runId: run.runId, outcome: `${before} -> ${run.status}` });
+          const beforeRun = previous.runs.find(item => item.runId === run.runId);
+          if (run.error && beforeRun?.error !== run.error)
+            await this.activityLog.record({ kind: "error", role: "runtime", action: "run_error_recorded", runId: run.runId, outcome: "A Runtime workflow error was recorded; inspect the authorized run diagnostics." });
+          for (const task of run.tasks) {
+            const beforeTask = beforeRun?.tasks.find(item => item.taskId === task.taskId);
+            if (!beforeTask) await this.activityLog.record({ kind: "specification", role: "runtime", action: "task_specification_accepted",
+              runId: run.runId, taskId: task.taskId, outcome: `${task.spec.specification.level}/${task.spec.strategy.tddDecision.mode}` });
+            if (!beforeTask || beforeTask.result?.requestId !== task.result?.requestId || beforeTask.result?.status !== task.result?.status) {
+              if (task.result) await this.activityLog.record({ kind: task.result.status === "blocked" || task.result.status === "failed" || task.result.status === "timed_out" ? "error" : "transport",
+                role: "runtime", action: `agent_result:${task.result.status}`, runId: run.runId, taskId: task.taskId, attemptId: task.result.attemptId,
+                outcome: "Authenticated result received; independent acceptance may still be pending" });
+            }
+            if (beforeTask?.cycle?.status !== task.cycle?.status || beforeTask?.cycle?.history.length !== task.cycle?.history.length)
+              await this.activityLog.record({ kind: "verification", role: "runtime", action: "verification_cycle_changed", runId: run.runId, taskId: task.taskId,
+                outcome: task.cycle?.status ?? "started" });
+            const beforeEvidence = Array.isArray(beforeTask?.spec.strategy.metadata?.tddEvidence) ? beforeTask.spec.strategy.metadata.tddEvidence : [];
+            const currentEvidence = Array.isArray(task.spec.strategy.metadata?.tddEvidence) ? task.spec.strategy.metadata.tddEvidence : [];
+            const priorEvidenceIds = new Set(beforeEvidence.flatMap(item => typeof item === "object" && item !== null && !Array.isArray(item) && typeof item.verificationId === "string" ? [item.verificationId] : []));
+            for (const evidence of currentEvidence) {
+              if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) continue;
+              const receipt = evidence as Record<string, unknown>, phase = typeof receipt.metadata === "object" && receipt.metadata !== null && !Array.isArray(receipt.metadata)
+                ? (receipt.metadata as Record<string, unknown>).conditionalTdd : undefined;
+              const phaseName = phase && typeof phase === "object" && !Array.isArray(phase) ? (phase as Record<string, unknown>).phase : undefined;
+              if (typeof receipt.verificationId === "string" && !priorEvidenceIds.has(receipt.verificationId) && typeof phaseName === "string")
+                await this.activityLog.record({ kind: "tdd", role: "runtime", action: `tdd_evidence_accepted:${phaseName}`, runId: run.runId, taskId: task.taskId });
+            }
+          }
+          if (beforeRun && JSON.stringify(beforeRun.decision) !== JSON.stringify(run.decision) && run.decision)
+            await this.activityLog.record({ kind: "approval", role: "runtime", action: "approval_decision_recorded", runId: run.runId, outcome: run.decision.decision });
+        }
+        const oldOut = new Map(previous.outbound.map(item => [item.message.message_id, item]));
+        for (const item of state.outbound) {
+          const before = oldOut.get(item.message.message_id);
+          if (before?.status === item.status && before?.error === item.error) continue;
+          const type = item.message.type;
+          await this.activityLog.record({ kind: type === "task.assignment" ? "assignment" : type === "verification.requested" ? "verification" : type === "approval.request" ? "approval" : "planning",
+            role: "runtime", action: before ? `${type}:${before.status}->${item.status}` : type,
+            ...(item.message.run_id ? { runId: item.message.run_id } : {}), taskId: taskLogBusinessTaskId(item) ?? item.taskId, attemptId: item.attemptId, outcome: item.status });
+        }
+        const oldInbox = new Set(previous.inbox.map(item => item.message.message_id));
+        for (const item of state.inbox) if (!oldInbox.has(item.message.message_id)) await this.activityLog.record({
+          kind: item.message.type.includes("approval") ? "approval" : item.message.type.includes("verification") || item.message.type === "review.verdict" ? "verification" : item.message.type === "implementation.submitted" ? "transport" : "progress",
+          role: item.message.sender.role, action: item.message.type, ...(item.message.run_id ? { runId: item.message.run_id } : {}), outcome: item.status });
+        previous = structuredClone(state);
+      };
+      const saveAndLog = async () => { await save(); this.refreshTaskLogAssignmentSnapshot(state); await logChanges(); };
+      const core = new CoreSession(this.ports, state, saveAndLog);
       await core.restore();
-      const outbox = new HerdrOutbox(this.ports, state, save);
-      await this.recoverPhaseFailures(state, save, outbox);
-      return action(state, save, core, outbox);
+      const outbox = new HerdrOutbox(this.ports, state, saveAndLog);
+      await this.recoverPhaseFailures(state, saveAndLog, outbox);
+      return action(state, saveAndLog, core, outbox);
     });
   }
   private run(state: JournalState, runId: string): RunRecord {

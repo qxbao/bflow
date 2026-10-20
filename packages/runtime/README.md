@@ -453,6 +453,14 @@ custom native host process (không phải AI model), và chỉ dừng session te
 
 ## Khôi phục session, quản lý context, observability và resilience
 
+### Activity log của task
+
+Runtime ghi một JSONL activity log tại `task-activity.jsonl` trong private Runtime state đã được resolve (thường là `.bflow/state/agentic/task-activity.jsonl`; khi workspace cần state riêng tư bên ngoài repo, dùng vị trí private được pin thay thế). Retention mặc định giữ tối đa 1000 entries và 512 KiB. Log giữ các milestone đã quan sát như admission, thay đổi trạng thái, assignment, verification, approval và kết quả agent đã xác thực. Đây là bản ghi chẩn đoán có giới hạn; nó không lưu prompt, argv, tool input/output hay private model reasoning. Terminal output và nhãn transport vẫn là dữ liệu không tin cậy; Herdr `done` không chứng minh task thành công.
+
+Trong một host đã activate, pane `task-log` hiển thị các dòng mới nhất trong tab Logs. Các role có thể gọi `read_task_log`; Conversation và Coordinator đọc theo session/run, còn specialist phải lọc theo run/task được giao. `log_task_step` ghi một dòng tiến độ ngắn gắn với assignment hiện tại. Các dòng tự báo cáo và log không phải approval, receipt hay verification evidence. Nội dung đã được redaction, chuẩn hóa một dòng, giới hạn kích thước/dung lượng; lỗi ghi log không làm thay đổi kết quả nghiệp vụ.
+
+Viewer đọc đủ snapshot trong giới hạn lưu trữ, giữ các lần xuất hiện lặp và không phát lại lịch sử khi file được thay thế nguyên tử. Bản ghi mới có ID riêng; khóa lọc theo run/task gốc được giữ riêng với chuỗi hiển thị đã rút gọn hoặc redaction. Khi Herdr khởi động lại và dùng lại pane ID cho terminal khác, Runtime bỏ binding cũ và tạo pane log mới, giữ nguyên terminal thay thế. Việc đóng pane yêu cầu process-info khớp đúng pane và chỉ có tiến trình viewer dự kiến ở foreground.
+
 `@bflow/runtime` cũng export các dịch vụ độ tin cậy cục bộ tùy chọn cho các repository thật:
 
 - **Session Recovery (`SessionRecoveryService`)**: Phân biệt `graceful_shutdown`, `crash` và `transient_disconnect` qua `bflow down` / `bflow up`; flush và khử trùng lặp state của `AgenticJournal` và SQLite `RunStore`; khôi phục các run chưa hoàn tất từ aggregate checkpoint cộng event tail; reconcile SQLite với các pane/role Herdr để phát hiện các sai lệch `agent_lost`, `agent_replaced` và `orphan_agent`; thu hồi lease cũ; kiểm tra Git worktree/commit mà không dùng lệnh hủy hoại; cấm gửi lại prompt mù quáng khi lần thực thi trước không chắc chắn (`unknown_delivery` hoặc worktree bị sửa); và không bao giờ đánh dấu task succeeded khi không có `AgentResult` có tương quan, đã xác minh và các gate đạt.
