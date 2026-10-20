@@ -237,16 +237,25 @@ async function detectRust(context: AdapterContext, host: NativeHost): Promise<Ad
   let version: string;
   try { cargo = await realpath(cargo); rustc = await realpath(rustc); if (within(context.root, cargo) || within(context.root, rustc)) throw new Error("repository toolchain rejected"); version = (await host.probe(cargo, ["--version"])).trim(); if (!/^cargo 1\.\d+\.\d+/.test(version) || !/^rustc 1\.\d+\.\d+/.test((await host.probe(rustc, ["--version"])).trim())) throw new Error("invalid Rust toolchain"); }
   catch { return { runners, notes: ["rust: runner_toolchain_setup_required: cargo/rustc probe failed"] }; }
+  let target: string;
+  try {
+    const verbose = (await host.probe(rustc, ["-vV"])).replace(/\r\n/g, "\n");
+    const hosts = [...verbose.matchAll(/^host: (.*)$/gm)];
+    if (hosts.length !== 1 || !hosts[0]?.[1] || hosts[0][1].length > 128 || !/^[a-z0-9_]+(?:-[a-z0-9_]+){2,}$/.test(hosts[0][1])) throw new Error("invalid Rust host target");
+    target = hosts[0][1];
+  } catch { return { runners, notes: ["rust: runner_toolchain_setup_required: Rust host target probe failed"] }; }
   // Debian/Ubuntu's /usr/bin/cc commonly traverses /etc/alternatives, which is
   // deliberately absent from the sandbox. Pin its canonical executable instead
   // of exposing global alternatives/configuration. Never select a repository tool.
   const linker = await executable(host, "cc", context.root) ?? await executable(host, "gcc", context.root) ?? await executable(host, "clang", context.root);
   if (!linker) return { runners, notes: ["rust: runner_toolchain_setup_required: C linker is unavailable"] };
+  // A target-specific linker preserves protected build.rustflags/target.rustflags;
+  // setting RUSTFLAGS or CARGO_ENCODED_RUSTFLAGS would override those settings.
   const toolchain = dirname(dirname(cargo)), cargoHome = host.environment.CARGO_HOME ?? join(host.home, ".cargo");
   const paths = [join(toolchain, "bin"), join(toolchain, "lib"), linker];
   const dependencies = await cacheMounts(["src", "cache", "index"].map(part => join(cargoHome, "registry", part)), host);
   for (const project of roots) runners.push({ adapterId: "rust", version, executable: cargo, projectDirectory: project, format: "rust_libtest", mounts: [...await mounts(paths, host), ...dependencies],
-    environment: { CARGO_NET_OFFLINE: "true", CARGO_TARGET_DIR: "/tmp/bflow-cargo-target", CARGO_HOME: cargoHome, RUSTC: rustc, RUSTDOC: join(dirname(rustc), "rustdoc"), RUST_BACKTRACE: "0", CARGO_ENCODED_RUSTFLAGS: `-Clinker=${linker}` },
+    environment: { CARGO_NET_OFFLINE: "true", CARGO_TARGET_DIR: "/tmp/bflow-cargo-target", CARGO_HOME: cargoHome, RUSTC: rustc, RUSTDOC: join(dirname(rustc), "rustdoc"), RUST_BACKTRACE: "0", [`CARGO_TARGET_${target.toUpperCase().replaceAll("-", "_")}_LINKER`]: linker },
     protectedPaths: configs(context, project, /^(?:Cargo\.(?:toml|lock)|config(?:\.toml)?|rust-toolchain(?:\.toml)?|build\.rs)$/),
     nameRule: "Exact stable Rust libtest identity, including module::test; exactly one identity per measurement.",
     bind(value) {

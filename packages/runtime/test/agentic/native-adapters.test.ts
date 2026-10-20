@@ -23,6 +23,7 @@ async function hostTool(name: string): Promise<{ path: string; home: string }> {
 function fakeHost(home: string, toolPath: string, probe: NativeHost["probe"]): NativeHost {
   return { home, environment: { PATH: dirname(toolPath) }, probe };
 }
+function rustVersion(args: string[]): string { return args[0] === "-vV" ? "rustc 1.83.0 (build)\nhost: x86_64-unknown-linux-gnu\nrelease: 1.83.0\n" : "rustc 1.83.0 (build)"; }
 function runner(value: AdapterRunner | undefined): AdapterRunner { if (!value) throw new Error("expected runner"); return value; }
 
 describe("Python native runner", () => {
@@ -139,7 +140,7 @@ describe("Rust native runner", () => {
     await mkdir(join(tool.home, ".cargo/registry/src"), { recursive: true });
     await writeFile(join(tool.home, ".cargo/credentials.toml"), "secret-not-mounted");
     const context = await fixture({ "Cargo.toml": "[package]\nname='math'\nversion='0.1.0'", "Cargo.lock": "", ".cargo/config.toml": "", "build.rs": "", "src/lib.rs": "", "tests/math.rs": "" });
-    return { context, host: fakeHost(tool.home, tool.path, async exe => exe.endsWith("rustc") ? "rustc 1.83.0 (build)" : "cargo 1.83.0 (build)") };
+    return { context, host: fakeHost(tool.home, tool.path, async (exe, args) => exe.endsWith("rustc") ? rustVersion(args) : "cargo 1.83.0 (build)") };
   }
   it("selects one exact libtest name, locks offline dependencies and excludes credentials", async () => {
     const { context, host } = await rust();
@@ -163,10 +164,36 @@ describe("Rust native runner", () => {
     await symlink(join(alternatives, "cc"), join(compilerPath, "cc"));
     host.environment.PATH = `${bin}:${compilerPath}`;
     const profile = runner((await createNativeAdapters(host)[2]!.detect(context)).runners[0]);
-    expect(profile.environment.CARGO_ENCODED_RUSTFLAGS).toBe(`-Clinker=${compiler}`);
+    expect(profile.environment.CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER).toBe(compiler);
     expect(profile.mounts.map(value => value.source)).toContain(compiler);
     expect(profile.mounts.map(value => value.source)).not.toContain(alternatives);
     for (const mount of profile.mounts) await validateRunnerMount(mount, context.root);
+  });
+  it("preserves protected repository rustflags while pinning only the host-target linker", async () => {
+    const { context, host } = await rust();
+    await writeFile(join(context.root, ".cargo/config.toml"), '[build]\nrustflags = ["--cfg", "fixture_flag"]\n[target.x86_64-unknown-linux-gnu]\nrustflags = ["--cfg", "fixture_target_flag"]\n');
+    host.environment.RUSTFLAGS = "--cfg untrusted_host_flag";
+    host.environment.CARGO_ENCODED_RUSTFLAGS = "--cfg=untrusted_host_flag";
+    const profile = runner((await createNativeAdapters(host)[2]!.detect(context)).runners[0]);
+    expect(profile.protectedPaths).toContain(".cargo/config.toml");
+    expect(profile.environment.CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER).toBe(join(host.environment.PATH!, "cc"));
+    expect(Object.keys(profile.environment).filter(name => /RUSTFLAGS$/.test(name))).toEqual([]);
+  });
+  it.each(["", "host: x86_64-unknown-linux-gnu\nhost: aarch64-unknown-linux-gnu", "host: ../untrusted-target", "host: x86_64-unknown-linux-gnu=bad", "host: bad", "host: " + "a".repeat(129)])("rejects an invalid or ambiguous Rust host target: %s", async verbose => {
+    const { context, host } = await rust();
+    const probe = host.probe;
+    host.probe = async (exe, args) => args[0] === "-vV" ? verbose : probe(exe, args);
+    const result = await createNativeAdapters(host)[2]!.detect(context);
+    expect(result.runners).toEqual([]);
+    expect(result.notes.join()).toContain("runner_toolchain_setup_required: Rust host target probe failed");
+  });
+  it("reports a setup requirement when the Rust host-target probe fails", async () => {
+    const { context, host } = await rust();
+    const probe = host.probe;
+    host.probe = async (exe, args) => { if (args[0] === "-vV") throw new Error("host target unavailable"); return probe(exe, args); };
+    const result = await createNativeAdapters(host)[2]!.detect(context);
+    expect(result.runners).toEqual([]);
+    expect(result.notes.join()).toContain("runner_toolchain_setup_required: Rust host target probe failed");
   });
   it("reports a setup requirement instead of a runnable Rust profile when the linker is absent or repository-owned", async () => {
     const { context, host } = await rust();
@@ -212,7 +239,7 @@ it("exposes all three installed native adapters for a monorepo and isolates task
   await symlink(join(tools.root, "bin/python3"), join(context.root, "services/python/.venv/bin/python"));
   await mkdir(join(context.root, "services/python/.venv/lib/python3.12/site-packages/pytest"), { recursive: true });
   await writeFile(join(context.root, "services/python/.venv/lib/python3.12/site-packages/pytest/__init__.py"), "");
-  const host = fakeHost(home, join(tools.root, "bin/go"), async (path, args) => path.endsWith("/go") ? args[0] === "version" ? "go version go1.23.4 linux/amd64" : tools.root : path.endsWith("cargo") ? "cargo 1.83.0" : path.endsWith("rustc") ? "rustc 1.83.0" : "Python 3.12.3");
+  const host = fakeHost(home, join(tools.root, "bin/go"), async (path, args) => path.endsWith("/go") ? args[0] === "version" ? "go version go1.23.4 linux/amd64" : tools.root : path.endsWith("cargo") ? "cargo 1.83.0" : path.endsWith("rustc") ? rustVersion(args) : "Python 3.12.3");
   const profiles = (await Promise.all(createNativeAdapters(host).map(adapter => adapter.detect(context)))).flatMap(result => result.runners);
   expect(profiles.map(profile => [profile.adapterId, profile.projectDirectory])).toEqual([["python", "services/python"], ["go", "services/go"], ["rust", "services/rust"]]);
   expect(profiles[2]!.protectedPaths).toContain(".cargo/config.toml");
@@ -224,7 +251,7 @@ it("omits Cargo index caches containing credential-bearing Git configuration", a
   await chmod(join(tools.root, "bin/cargo"), 0o755); await chmod(join(tools.root, "bin/rustc"), 0o755); await chmod(join(tools.root, "bin/cc"), 0o755);
   const home = (await fixture({ ".cargo/registry/index/private/.git/config": '[remote "origin"]\nurl = https://private-token@example.test/index', ".cargo/credentials.toml": "private-token" })).root;
   const context = await fixture({ "Cargo.toml": "[package]\nname='math'" });
-  const host = fakeHost(home, join(tools.root, "bin/cargo"), async path => path.endsWith("rustc") ? "rustc 1.83.0" : "cargo 1.83.0");
+  const host = fakeHost(home, join(tools.root, "bin/cargo"), async (path, args) => path.endsWith("rustc") ? rustVersion(args) : "cargo 1.83.0");
   const profile = runner((await createNativeAdapters(host)[2]!.detect(context)).runners[0]);
   expect(profile.mounts.some(value => value.source.startsWith(home))).toBe(false);
 });
