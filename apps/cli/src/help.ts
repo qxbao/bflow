@@ -19,6 +19,7 @@ Commands:
   approve         Record human approval, rejection, or rework request for a task
   resume          Resume an active or waiting workflow run
   cancel          Cancel an active workflow run or task
+  iso             Run an isolated provider profile through the bundled ai-isolator
   docs            Look up current library documentation through the shared Context7 service
   help            Show help for a command
 
@@ -33,6 +34,7 @@ Agents and scripts should pass --json and use the process exit code; human outpu
 
 Examples:
   bflow init
+  bflow iso help
   bflow setup --check
   bflow run "Add user authentication feature"
   bflow repo inspect

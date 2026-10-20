@@ -1,0 +1,1255 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+VERSION="0.4.4"
+APP_NAME="ai-isolator"
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Use the same Windows/macOS portability layer as ai-sdlc when available.
+# Git Bash supplies bash and translates POSIX paths for native .exe CLIs; the
+# helper also selects a real Python instead of the Microsoft Store alias.
+PORTABLE_SH="$SCRIPT_ROOT/runtime/provision/shell/portable.sh"
+if [[ -f "$PORTABLE_SH" ]]; then
+  # shellcheck source=/dev/null
+  . "$PORTABLE_SH"
+fi
+if declare -F _portable_py >/dev/null 2>&1; then
+  ISOLATOR_PY="$(_portable_py 2>/dev/null || true)"
+fi
+ISOLATOR_PY="${ISOLATOR_PY:-$(command -v python3 2>/dev/null || command -v python 2>/dev/null || printf '%s' python3)}"
+
+# ---------- màu / giao diện ----------
+if [[ -t 1 && "${NO_COLOR:-}" == "" ]]; then
+  C_RESET='\033[0m'; C_BOLD='\033[1m'; C_DIM='\033[2m'
+  C_CYAN='\033[36m'; C_GREEN='\033[32m'; C_YELLOW='\033[33m'; C_RED='\033[31m'; C_BLUE='\033[34m'
+else
+  C_RESET=''; C_BOLD=''; C_DIM=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_BLUE=''
+fi
+
+info()  { printf "%bℹ%b %s\n" "$C_CYAN" "$C_RESET" "$*"; }
+ok()    { printf "%b✓%b %s\n" "$C_GREEN" "$C_RESET" "$*"; }
+warn()  { printf "%b!%b %s\n" "$C_YELLOW" "$C_RESET" "$*" >&2; }
+fail()  { printf "%b✗%b %s\n" "$C_RED" "$C_RESET" "$*" >&2; }
+
+header() {
+  printf "\n%b%s%b %b%s%b\n" "$C_BOLD" "$APP_NAME" "$C_RESET" "$C_DIM" "v$VERSION" "$C_RESET"
+  printf "%b%s%b\n\n" "$C_DIM" "────────────────────────────────────────" "$C_RESET"
+}
+
+spinner_pid=""
+spinner_start() {
+  local msg="$1"
+  if [[ ! -t 1 ]]; then
+    printf "%s...\n" "$msg"
+    return 0
+  fi
+  (
+    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏') i=0
+    while :; do
+      printf "\r%b%s%b %s" "$C_CYAN" "${frames[$i]}" "$C_RESET" "$msg"
+      i=$(( (i + 1) % ${#frames[@]} ))
+      sleep 0.08
+    done
+  ) &
+  spinner_pid=$!
+}
+
+spinner_stop() {
+  local status="${1:-ok}" msg="${2:-Xong}"
+  if [[ -n "$spinner_pid" ]]; then
+    kill "$spinner_pid" 2>/dev/null || true
+    wait "$spinner_pid" 2>/dev/null || true
+    spinner_pid=""
+    printf "\r\033[2K"
+  fi
+  if [[ "$status" == "ok" ]]; then ok "$msg"; else fail "$msg"; fi
+}
+
+cleanup_spinner() {
+  if [[ -n "${spinner_pid:-}" ]]; then
+    kill "$spinner_pid" 2>/dev/null || true
+  fi
+}
+
+# ---------- đường dẫn ----------
+REAL_HOME="${HOME:?chưa đặt HOME}"
+STATE_ROOT="${AI_ISOLATOR_HOME:-$REAL_HOME/.local/share/ai-isolator}"
+PROFILES_DIR="$STATE_ROOT/profiles"
+mkdir -p "$PROFILES_DIR"
+REAL_CODEX_HOME="${CODEX_HOME:-$REAL_HOME/.codex}"
+CODEX_SKILLS_SOURCE="${AI_ISOLATOR_CODEX_SKILLS_SOURCE:-$REAL_CODEX_HOME/skills}"
+
+CODEX_LB_DETECTED_URL=""
+CODEX_LB_DETECTED_SOURCE=""
+CODEX_LB_PROBED=0
+CODEX_BACKEND_PREPARED_KEY=""
+
+cleanup_all() {
+  cleanup_spinner
+}
+trap cleanup_all EXIT INT TERM
+
+usage() {
+  cat <<EOF_USAGE
+$APP_NAME — profile HOME/XDG tách biệt cho Codex và Claude
+
+Cách dùng:
+  $APP_NAME codex  [--name NAME] [--no-login] [--no-lb | --lb URL] [--] [ARGS...]
+  $APP_NAME claude [--name NAME] [--no-login] [--] [ARGS...]
+  $APP_NAME run <codex|claude> [--name NAME] [--no-lb | --lb URL] [--] [ARGS...]
+  $APP_NAME login <codex|claude> [--name NAME]
+  $APP_NAME status
+  $APP_NAME sync-skills [--name NAME | --all] [--source PATH]
+  $APP_NAME remove <codex|claude> [--name NAME]
+  $APP_NAME --help
+  $APP_NAME --version
+
+Ví dụ:
+  $APP_NAME codex
+  $APP_NAME codex --name work
+  $APP_NAME codex --name work --no-lb
+  $APP_NAME codex --name work --lb http://127.0.0.1:8080
+  $APP_NAME claude --name personal
+  $APP_NAME run codex --name work
+  $APP_NAME login claude --name personal
+  $APP_NAME status
+  $APP_NAME sync-skills --all
+
+Lần chạy đầu:
+  1. Tạo profile tách biệt.
+  2. Dò thấy Codex LB thì hỏi một lần có liên kết profile Codex này với nó không.
+  3. Hỏi một lần cho mỗi profile có thêm lệnh khởi chạy vào RC của shell không.
+     Tên mặc định: <công-cụ>-<profile>, vd codex-personal.
+  4. Profile dùng đăng nhập Codex/Claude trực tiếp thì hỏi có đăng nhập ngay không.
+     Profile Codex đã liên kết Codex LB bỏ hẳn bước đăng nhập Codex gốc.
+     Enter = Có; trả lời n thì thoát sạch.
+
+Liên kết Codex LB:
+  Profile Codex đã liên kết nhớ URL LB trong siêu dữ liệu của profile. Các lần
+  sau dùng đúng LB đó và DỪNG nếu nó không sẵn sàng. Chọn không liên kết thì
+  profile được đánh dấu direct, tự dò sau này không bất ngờ chuyển hướng nó.
+  --lb URL và --no-lb chỉ đè cho lần chạy đó.
+
+  Thứ tự tự dò:
+    1. --lb URL
+    2. AI_ISOLATOR_CODEX_LB_URL
+    3. Cấu hình Codex sẵn có (~/.codex/config.toml)
+    4. Container Docker có tên/image giống codex-lb
+    5. Tiến trình codex-lb cục bộ (kể cả biến môi trường PORT của nó)
+    6. http://127.0.0.1:2455
+
+Lệnh khởi chạy profile:
+  RC hỗ trợ: bash, fish, zsh, csh, ksh.
+  ai-isolator nhận diện shell cha và hỏi một lần cho mỗi profile có thêm lệnh
+  khởi chạy riêng (vd 'codex-personal') không. Lệnh đó chạy:
+
+    ai-isolator run codex --name personal
+
+  Đối số thêm được chuyển nguyên cho Codex/Claude. RC được sửa ngay. Tiến trình
+  ngoài không đổi được shell cha nên lệnh nạp lại một dòng được in cho terminal
+  hiện tại; terminal mới tự nạp.
+
+Mô hình cách ly:
+  Mỗi profile có HOME, XDG_CONFIG_HOME, XDG_CACHE_HOME, XDG_DATA_HOME và
+  XDG_STATE_HOME riêng; khoá/token cá nhân (OPENAI_API_KEY, ANTHROPIC_API_KEY,
+  ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, …) bị gỡ khỏi môi trường. Quyền
+  truy cập tệp không đổi: CLI được bọc giữ nguyên quyền đọc/ghi Unix của bạn.
+
+Biến môi trường:
+  AI_ISOLATOR_HOME          Đổi thư mục lưu trữ
+                            (mặc định: ~/.local/share/ai-isolator)
+  AI_ISOLATOR_CODEX_LB_URL  URL gốc codex-lb tường minh, vd http://127.0.0.1:2455
+  AI_ISOLATOR_SHELL         Đè nhận diện shell: bash|fish|zsh|csh|ksh
+  AI_ISOLATOR_DEFAULT_ALIAS Đè tên lệnh khởi chạy đề xuất
+                            (mặc định: <công-cụ>-<profile>)
+  CODEX_LB_API_KEY          Chuyển tiếp nếu shell của bạn đã đặt
+  NO_COLOR                  Tắt màu ANSI
+EOF_USAGE
+}
+
+version() { printf "%s %s\n" "$APP_NAME" "$VERSION"; }
+
+die_usage() { fail "$1"; printf "\n" >&2; usage >&2; exit 2; }
+
+validate_tool() {
+  case "$1" in codex|claude) ;; *) die_usage "Công cụ không hỗ trợ: $1" ;; esac
+}
+
+validate_name() {
+  [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]] || die_usage "Tên profile không hợp lệ '$1' (cho phép: A-Z a-z 0-9 . _ -)"
+}
+
+profile_key() { printf "%s--%s" "$1" "$2"; }
+profile_dir() { printf "%s/%s" "$PROFILES_DIR" "$(profile_key "$1" "$2")"; }
+
+ensure_binary() {
+  command -v "$1" >/dev/null 2>&1 || {
+    fail "không tìm thấy '$1' trong PATH."
+    exit 127
+  }
+}
+
+init_profile() {
+  local tool="$1" name="$2" dir
+  dir="$(profile_dir "$tool" "$name")"
+  if [[ -d "$dir" ]]; then
+    if [[ "$tool" == "codex" ]]; then
+      sync_codex_profile_mcp "$dir"
+      sync_codex_profile_skills "$dir" >/dev/null 2>&1 || true
+    fi
+    return 0
+  fi
+
+  spinner_start "Đang tạo profile $tool/$name"
+  mkdir -p \
+    "$dir/home" \
+    "$dir/config" \
+    "$dir/cache" \
+    "$dir/data" \
+    "$dir/state" \
+    "$dir/tmp"
+
+  cat > "$dir/profile.env" <<EOF_PROFILE
+AI_ISOLATOR_TOOL=$tool
+AI_ISOLATOR_PROFILE=$name
+AI_ISOLATOR_CREATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF_PROFILE
+  chmod 700 "$dir" "$dir/home" "$dir/config" "$dir/cache" "$dir/data" "$dir/state" "$dir/tmp" 2>/dev/null || true
+  spinner_stop ok "Đã tạo profile $tool/$name"
+  if [[ "$tool" == "codex" ]]; then
+    sync_codex_profile_mcp "$dir"
+    sync_codex_profile_skills "$dir" >/dev/null 2>&1 || true
+  fi
+}
+
+sync_codex_profile_mcp() {
+  # ai-sdlc init cài MCP MỘT lần vào REAL_HOME. Chỉ chép bảng MCP TOML sang config của profile
+  # (runtime.dispatch.shell.mcp_config.sync_codex_mcp_servers); không `codex mcp add` cho từng profile.
+  local dir="$1"
+  PYTHONPATH="$SCRIPT_ROOT" "$ISOLATOR_PY" - "$dir/home" "$REAL_HOME" <<'PY' >/dev/null 2>&1 || true
+import sys
+from pathlib import Path
+from runtime.dispatch.shell.mcp_config import sync_codex_mcp_servers
+sync_codex_mcp_servers(Path(sys.argv[1]), Path(sys.argv[2]))
+PY
+}
+
+sync_codex_profile_skills() {
+  local dir="$1" source="$CODEX_SKILLS_SOURCE" target="$dir/home/.codex/skills"
+  [[ -d "$source" ]] || return 0
+  mkdir -p "$target"
+  "$ISOLATOR_PY" - "$source" "$target" <<'PY'
+import shutil
+import sys
+from pathlib import Path
+
+source, target = map(Path, sys.argv[1:])
+shutil.copytree(source, target, dirs_exist_ok=True, symlinks=False, ignore_dangling_symlinks=True)
+PY
+}
+
+sync_codex_skills_for_profile() {
+  local name="$1" dir
+  validate_name "$name"
+  dir="$(profile_dir codex "$name")"
+  [[ -d "$dir" ]] || { warn "Profile codex/$name không tồn tại."; return 1; }
+  if [[ ! -d "$CODEX_SKILLS_SOURCE" ]]; then
+    warn "Không tìm thấy global Codex skills: $CODEX_SKILLS_SOURCE"
+    return 0
+  fi
+  sync_codex_profile_skills "$dir"
+  ok "Đã đồng bộ global Codex skills vào codex/$name"
+}
+
+sync_codex_skills_all() {
+  local dir base name found=0
+  shopt -s nullglob
+  for dir in "$PROFILES_DIR"/codex--*; do
+    [[ -d "$dir" ]] || continue
+    found=1
+    base="$(basename "$dir")"
+    name="${base#codex--}"
+    sync_codex_skills_for_profile "$name"
+  done
+  shopt -u nullglob
+  [[ "$found" -eq 1 ]] || info "Chưa có profile Codex nào."
+}
+
+# Chạy lệnh với HOME tách biệt, giữ cwd và quyền truy cập tệp như cũ.
+# Danh sách `env -u` phải bằng `_ISOLATOR_SECRET_ENV` trong runtime/dispatch/shell/runner.py (test ghim hai bên).
+with_profile_env() {
+  local tool="$1" name="$2"; shift 2
+  local dir
+  dir="$(profile_dir "$tool" "$name")"
+
+  HOME="$dir/home" \
+  XDG_CONFIG_HOME="$dir/config" \
+  XDG_CACHE_HOME="$dir/cache" \
+  XDG_DATA_HOME="$dir/data" \
+  XDG_STATE_HOME="$dir/state" \
+  TMPDIR="$dir/tmp" \
+  AI_ISOLATOR=1 \
+  AI_ISOLATOR_HOME="$STATE_ROOT" \
+  AI_ISOLATOR_REAL_HOME="$REAL_HOME" \
+  AI_ISOLATOR_TOOL="$tool" \
+  AI_ISOLATOR_PROFILE="$name" \
+  env -u OPENAI_API_KEY \
+      -u CODEX_API_KEY \
+      -u CODEX_ACCESS_TOKEN \
+      -u CODEX_HOME \
+      -u ANTHROPIC_API_KEY \
+      -u CLAUDE_CODE_OAUTH_TOKEN \
+      -u ANTHROPIC_AUTH_TOKEN \
+      -u ANTHROPIC_BASE_URL \
+      "$@"
+}
+
+prompt_login() {
+  local answer
+  if [[ ! -t 0 ]]; then
+    warn "Shell không tương tác: bỏ qua câu hỏi đăng nhập. Chạy '$APP_NAME login ...' sau."
+    return 1
+  fi
+  printf "%b?%b Đăng nhập profile này ngay? %b[Y/n]%b " "$C_BLUE" "$C_RESET" "$C_BOLD" "$C_RESET"
+  IFS= read -r answer || true
+  case "${answer:-Y}" in
+    Y|y|YES|Yes|yes|'') return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+prompt_yes_default() {
+  local prompt="$1" answer
+  [[ -t 0 ]] || return 1
+  printf "%b?%b %s %b[Y/n]%b " "$C_BLUE" "$C_RESET" "$prompt" "$C_BOLD" "$C_RESET"
+  IFS= read -r answer || true
+  case "${answer:-Y}" in
+    Y|y|YES|Yes|yes|'') return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+prompt_value() {
+  local prompt="$1" default="$2" answer
+  printf "%b?%b %s %b[%s]%b " "$C_BLUE" "$C_RESET" "$prompt" "$C_BOLD" "$default" "$C_RESET" >&2
+  IFS= read -r answer || true
+  printf '%s' "${answer:-$default}"
+}
+
+resolve_script_path() {
+  local src="${BASH_SOURCE[0]}"
+  if [[ "$src" != /* ]]; then
+    if [[ "$src" == */* ]]; then
+      src="$(cd "$(dirname "$src")" 2>/dev/null && pwd -P)/$(basename "$src")"
+    else
+      src="$(command -v -- "$src" 2>/dev/null || printf '%s' "$src")"
+    fi
+  fi
+  if command -v readlink >/dev/null 2>&1; then
+    readlink -f -- "$src" 2>/dev/null || printf '%s' "$src"
+  else
+    printf '%s' "$src"
+  fi
+}
+
+shell_single_quote() {
+  local value="$1"
+  value=${value//\'/\'\\\'\'}
+  printf "'%s'" "$value"
+}
+
+detect_parent_shell() {
+  local shell_name="${AI_ISOLATOR_SHELL:-}" comm=""
+  if [[ -z "$shell_name" ]] && command -v ps >/dev/null 2>&1; then
+    comm="$(ps -p "$PPID" -o comm= 2>/dev/null | awk '{$1=$1; print}' || true)"
+    comm="${comm##*/}"
+    comm="${comm#-}"
+    case "$comm" in
+      bash|fish|zsh|csh|tcsh|ksh|mksh|pdksh)
+        shell_name="$comm"
+        ;;
+    esac
+  fi
+  if [[ -z "$shell_name" && -n "${SHELL:-}" ]]; then
+    shell_name="${SHELL##*/}"
+  fi
+  case "$shell_name" in
+    tcsh) shell_name="csh" ;;
+    mksh|pdksh) shell_name="ksh" ;;
+  esac
+  case "$shell_name" in
+    bash|fish|zsh|csh|ksh) printf '%s' "$shell_name"; return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+shell_rc_path() {
+  local shell_name="$1"
+  case "$shell_name" in
+    bash) printf '%s/.bashrc' "$REAL_HOME" ;;
+    zsh)
+      if [[ -n "${ZDOTDIR:-}" ]]; then printf '%s/.zshrc' "$ZDOTDIR"; else printf '%s/.zshrc' "$REAL_HOME"; fi
+      ;;
+    fish) printf '%s/fish/config.fish' "${XDG_CONFIG_HOME:-$REAL_HOME/.config}" ;;
+    csh) printf '%s/.cshrc' "$REAL_HOME" ;;
+    ksh)
+      if [[ -n "${ENV:-}" && "${ENV:-}" == /* ]]; then printf '%s' "$ENV"; else printf '%s/.kshrc' "$REAL_HOME"; fi
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_alias_name() {
+  [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]]
+}
+
+profile_shell_asked_file() {
+  printf '%s/shell-link.asked' "$(profile_dir "$1" "$2")"
+}
+
+profile_shell_conf_file() {
+  printf '%s/shell-link.conf' "$(profile_dir "$1" "$2")"
+}
+
+profile_shell_marker() {
+  printf '%s/%s' "$1" "$2"
+}
+
+remove_legacy_global_alias_block() {
+  local rc="$1" tmp
+  [[ -f "$rc" ]] || return 0
+  tmp="${rc}.ai-isolator-legacy.$$"
+  awk '
+    $0 == "# >>> ai-isolator >>>" {skip=1; next}
+    $0 == "# <<< ai-isolator <<<" {skip=0; next}
+    !skip {print}
+  ' "$rc" > "$tmp"
+  cat "$tmp" > "$rc"
+  rm -f "$tmp"
+}
+
+remove_profile_alias_block() {
+  local rc="$1" tool="$2" name="$3" tmp marker_begin marker_end
+  [[ -f "$rc" ]] || return 0
+  marker_begin="# >>> ai-isolator profile $(profile_shell_marker "$tool" "$name") >>>"
+  marker_end="# <<< ai-isolator profile $(profile_shell_marker "$tool" "$name") <<<"
+  tmp="${rc}.ai-isolator.$$"
+  awk -v b="$marker_begin" -v e="$marker_end" '
+    $0 == b {skip=1; next}
+    $0 == e {skip=0; next}
+    !skip {print}
+  ' "$rc" > "$tmp"
+  cat "$tmp" > "$rc"
+  rm -f "$tmp"
+}
+
+profile_alias_default() {
+  local tool="$1" name="$2" value
+  value="${AI_ISOLATOR_DEFAULT_ALIAS:-$tool-$name}"
+  # Giữ tên mặc định dùng được trên mọi shell hỗ trợ.
+  value="${value//./-}"
+  printf '%s' "$value"
+}
+
+rc_name_conflict() {
+  local rc="$1" alias_name="$2" tool="$3" name="$4"
+  [[ -r "$rc" ]] || return 1
+
+  # Bỏ qua khối do chính profile này quản lý, rồi tìm alias/hàm cùng tên đã có sẵn.
+  local begin end
+  begin="# >>> ai-isolator profile $(profile_shell_marker "$tool" "$name") >>>"
+  end="# <<< ai-isolator profile $(profile_shell_marker "$tool" "$name") <<<"
+  awk -v b="$begin" -v e="$end" -v a="$alias_name" '
+    $0 == b {skip=1; next}
+    $0 == e {skip=0; next}
+    skip {next}
+    $0 ~ "^[[:space:]]*alias[[:space:]]+" a "([=[:space:]]|$)" {found=1}
+    $0 ~ "^[[:space:]]*function[[:space:]]+" a "([[:space:](]|$)" {found=1}
+    $0 ~ "^[[:space:]]*" a "[[:space:]]*\\(\\)[[:space:]]*\\{" {found=1}
+    END {exit(found ? 0 : 1)}
+  ' "$rc"
+}
+
+launcher_name_conflicts() {
+  local alias_name="$1" rc="$2" tool="$3" name="$4"
+  if command -v -- "$alias_name" >/dev/null 2>&1; then
+    return 0
+  fi
+  rc_name_conflict "$rc" "$alias_name" "$tool" "$name"
+}
+
+write_profile_shell_alias() {
+  local shell_name="$1" rc="$2" alias_name="$3" target="$4" tool="$5" name="$6"
+  local command_text qcommand marker
+  mkdir -p "$(dirname "$rc")"
+  touch "$rc"
+  # v0.3.x dùng một khối alias ai-isolator chung. Gỡ khối cũ đó khi thêm lệnh khởi chạy riêng đầu tiên.
+  remove_legacy_global_alias_block "$rc"
+  remove_profile_alias_block "$rc" "$tool" "$name"
+
+  command_text="$(shell_single_quote "$target") run $tool --name $name"
+  qcommand="$(shell_single_quote "$command_text")"
+  marker="$(profile_shell_marker "$tool" "$name")"
+
+  {
+    printf '\n# >>> ai-isolator profile %s >>>\n' "$marker"
+    case "$shell_name" in
+      fish|csh) printf 'alias %s %s\n' "$alias_name" "$qcommand" ;;
+      bash|zsh|ksh) printf 'alias %s=%s\n' "$alias_name" "$qcommand" ;;
+    esac
+    printf '# <<< ai-isolator profile %s <<<\n' "$marker"
+  } >> "$rc"
+}
+
+shell_reload_command() {
+  local shell_name="$1" rc="$2" qrc
+  qrc="$(shell_single_quote "$rc")"
+  case "$shell_name" in
+    bash|zsh|fish|csh) printf 'source %s' "$qrc" ;;
+    ksh) printf '. %s' "$qrc" ;;
+  esac
+}
+
+save_profile_shell_conf() {
+  local tool="$1" name="$2" shell_name="$3" rc="$4" alias_name="$5" target="$6"
+  cat > "$(profile_shell_conf_file "$tool" "$name")" <<EOF_SHELL_CONF
+shell=$shell_name
+rc=$rc
+alias=$alias_name
+target=$target
+EOF_SHELL_CONF
+}
+
+profile_launcher_name() {
+  local tool="$1" name="$2" conf key value
+  conf="$(profile_shell_conf_file "$tool" "$name")"
+  [[ -r "$conf" ]] || return 1
+  while IFS='=' read -r key value; do
+    [[ "$key" == "alias" ]] && { printf '%s' "$value"; return 0; }
+  done < "$conf"
+  return 1
+}
+
+maybe_offer_profile_shell_link() {
+  local tool="$1" name="$2"
+  local asked conf shell_name rc alias_name target reload_cmd default_alias
+  asked="$(profile_shell_asked_file "$tool" "$name")"
+  conf="$(profile_shell_conf_file "$tool" "$name")"
+
+  [[ -e "$asked" ]] && return 0
+  [[ -t 0 ]] || return 0
+
+  if ! shell_name="$(detect_parent_shell)"; then
+    warn "Không nhận diện được shell cha; chưa thêm lệnh khởi chạy cho profile."
+    return 0
+  fi
+  rc="$(shell_rc_path "$shell_name")"
+  default_alias="$(profile_alias_default "$tool" "$name")"
+
+  printf "\n"
+  if ! prompt_yes_default "Thêm lệnh khởi chạy $tool/$name vào RC của $shell_name ($rc)?"; then
+    printf 'declined\n' > "$asked"
+    ok "Bỏ qua lệnh khởi chạy cho $tool/$name"
+    return 0
+  fi
+
+  while :; do
+    alias_name="$(prompt_value "Tên lệnh khởi chạy" "$default_alias")"
+    if ! validate_alias_name "$alias_name"; then
+      warn "Tên lệnh phải khớp [A-Za-z_][A-Za-z0-9_-]*"
+      continue
+    fi
+    if launcher_name_conflicts "$alias_name" "$rc" "$tool" "$name"; then
+      warn "'$alias_name' đã tồn tại. Chọn tên khác."
+      continue
+    fi
+    break
+  done
+
+  target="$(resolve_script_path)"
+  spinner_start "Đang thêm $tool/$name thành $alias_name"
+  if write_profile_shell_alias "$shell_name" "$rc" "$alias_name" "$target" "$tool" "$name"; then
+    save_profile_shell_conf "$tool" "$name" "$shell_name" "$rc" "$alias_name" "$target"
+    # Gỡ siêu dữ liệu shell chung của v0.3.x sau khi chuyển xong.
+    rm -f "$STATE_ROOT/.shell-setup-asked" "$STATE_ROOT/shell-integration.conf" 2>/dev/null || true
+    printf 'installed\n' > "$asked"
+    spinner_stop ok "Đã thêm '$alias_name' cho $tool/$name"
+  else
+    spinner_stop fail "Không sửa được $rc"
+    return 1
+  fi
+
+  printf "  %bLệnh:%b %s → %s run %s --name %s\n" \
+    "$C_DIM" "$C_RESET" "$alias_name" "$target" "$tool" "$name"
+  reload_cmd="$(shell_reload_command "$shell_name" "$rc")"
+  info "Terminal mới tự nạp '$alias_name'."
+  printf "  %bTerminal hiện tại:%b %s\n" "$C_DIM" "$C_RESET" "$reload_cmd"
+  printf "  %bLưu ý:%b tiến trình ngoài không tự source được shell cha.\n" "$C_DIM" "$C_RESET"
+}
+
+# ---------- dò codex-lb ----------
+normalize_lb_root() {
+  local url="$1"
+  url="${url%/}"
+  url="${url%/backend-api/codex}"
+  url="${url%/v1}"
+  printf "%s" "$url"
+}
+
+http_ready() {
+  local root="$1"
+  root="$(normalize_lb_root "$root")"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS --connect-timeout 0.35 --max-time 0.8 "$root/health/ready" >/dev/null 2>&1
+    return $?
+  fi
+
+  if command -v wget >/dev/null 2>&1; then
+    wget -q -T 1 -O /dev/null "$root/health/ready" >/dev/null 2>&1
+    return $?
+  fi
+
+  # Không có curl/wget: dự phòng thuần bash, chỉ cho localhost.
+  if [[ "$root" =~ ^http://(127\.0\.0\.1|localhost):([0-9]+)$ ]]; then
+    local host="${BASH_REMATCH[1]}" port="${BASH_REMATCH[2]}" status=""
+    if exec 9<>"/dev/tcp/$host/$port" 2>/dev/null; then
+      printf 'GET /health/ready HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n' "$host" >&9
+      IFS= read -r -t 1 status <&9 || true
+      exec 9>&- 9<&-
+      [[ "$status" =~ ^HTTP/[0-9.]+[[:space:]]+200([[:space:]]|$) ]]
+      return $?
+    fi
+  fi
+
+  return 1
+}
+
+set_detected_lb() {
+  local root="$1" source="$2"
+  root="$(normalize_lb_root "$root")"
+  if http_ready "$root"; then
+    CODEX_LB_DETECTED_URL="$root"
+    CODEX_LB_DETECTED_SOURCE="$source"
+    return 0
+  fi
+  return 1
+}
+
+detect_lb_from_existing_codex_config() {
+  # Dùng lại endpoint codex-lb đã khai trong config Codex thật của người dùng —
+  # bắt được cổng tuỳ chỉnh, máy trong LAN và URL qua reverse proxy.
+  local config="${CODEX_HOME:-$REAL_HOME/.codex}/config.toml"
+  [[ -r "$config" ]] || return 1
+
+  local url=""
+  url="$(awk '
+    /^[[:space:]]*base_url[[:space:]]*=/ {
+      line=$0
+      sub(/^[^=]*=[[:space:]]*/, "", line)
+      gsub(/^[[:space:]]*"|"[[:space:]]*$/, "", line)
+      if (line ~ /\/backend-api\/codex\/?$/) { print line; exit }
+    }
+  ' "$config" 2>/dev/null || true)"
+
+  [[ -n "$url" ]] || return 1
+  set_detected_lb "$url" "codex-config:$config"
+}
+
+detect_lb_from_docker() {
+  command -v docker >/dev/null 2>&1 || return 1
+  local line name image ports hostport
+  while IFS=$'\t' read -r name image ports; do
+    [[ -n "$name$image" ]] || continue
+    if [[ "$name" != *codex-lb* && "$image" != *codex-lb* ]]; then
+      continue
+    fi
+
+    # Docker công bố cổng theo khuôn:
+    # 0.0.0.0:8080->2455/tcp, [::]:8080->2455/tcp
+    hostport="$(printf '%s\n' "$ports" | grep -oE '([0-9]{1,5})->2455/tcp' | head -n1 | cut -d- -f1 || true)"
+    if [[ -n "$hostport" ]] && set_detected_lb "http://127.0.0.1:$hostport" "docker:$name"; then
+      return 0
+    fi
+  done < <(docker ps --format '{{.Names}}\t{{.Image}}\t{{.Ports}}' 2>/dev/null || true)
+  return 1
+}
+
+detect_lb_from_process() {
+  command -v pgrep >/dev/null 2>&1 || return 1
+  local pid env_port
+  while IFS= read -r pid; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    [[ "$pid" != "$$" ]] || continue
+    env_port=""
+    if [[ -r "/proc/$pid/environ" ]]; then
+      env_port="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^PORT=//p' | head -n1 || true)"
+    fi
+    if [[ "$env_port" =~ ^[0-9]+$ ]] && set_detected_lb "http://127.0.0.1:$env_port" "process:$pid"; then
+      return 0
+    fi
+    if set_detected_lb "http://127.0.0.1:2455" "process:$pid"; then
+      return 0
+    fi
+  done < <(pgrep -f '(^|[/[:space:]])(codex-lb|codex_lb)([[:space:]]|$)' 2>/dev/null || true)
+  return 1
+}
+
+detect_codex_lb() {
+  local explicit="${1:-}"
+  CODEX_LB_DETECTED_URL=""
+  CODEX_LB_DETECTED_SOURCE=""
+  CODEX_LB_PROBED=1
+
+  if [[ -n "$explicit" ]]; then
+    set_detected_lb "$explicit" "explicit" && return 0
+    return 1
+  fi
+
+  if [[ -n "${AI_ISOLATOR_CODEX_LB_URL:-}" ]]; then
+    set_detected_lb "$AI_ISOLATOR_CODEX_LB_URL" "env" && return 0
+    return 1
+  fi
+
+  detect_lb_from_existing_codex_config && return 0
+  detect_lb_from_docker && return 0
+  detect_lb_from_process && return 0
+  set_detected_lb "http://127.0.0.1:2455" "default-port" && return 0
+  return 1
+}
+
+# Cờ -c phải bằng `isolator_codex_backend_args` trong runtime/dispatch/shell/runner.py (test ghim hai bên).
+codex_lb_overrides() {
+  local root="$1"
+  local backend="$(normalize_lb_root "$root")/backend-api/codex"
+  CODEX_LB_ARGS=(
+    -c 'model_provider="codex-lb"'
+    -c 'model_providers.codex-lb.name="openai"'
+    -c "model_providers.codex-lb.base_url=\"$backend\""
+    -c 'model_providers.codex-lb.wire_api="responses"'
+    -c 'model_providers.codex-lb.supports_websockets=true'
+    -c 'model_providers.codex-lb.requires_openai_auth=false'
+    -c 'model_providers.codex-lb.http_headers={"x-openai-actor-authorization"="codex-lb"}'
+  )
+  if [[ -n "${CODEX_LB_API_KEY:-}" ]]; then
+    CODEX_LB_ARGS+=( -c 'model_providers.codex-lb.env_key="CODEX_LB_API_KEY"' )
+  fi
+}
+
+show_lb_detected() {
+  ok "Đã dò thấy Codex LB"
+  printf "  %bEndpoint%b  %s/backend-api/codex\n" "$C_DIM" "$C_RESET" "$CODEX_LB_DETECTED_URL"
+  printf "  %bNguồn%b     %s\n" "$C_DIM" "$C_RESET" "$CODEX_LB_DETECTED_SOURCE"
+}
+
+
+profile_lb_mode_file() { printf '%s/codex-lb.mode' "$(profile_dir codex "$1")"; }
+profile_lb_url_file()  { printf '%s/codex-lb.url'  "$(profile_dir codex "$1")"; }
+
+profile_lb_mode() {
+  local file
+  file="$(profile_lb_mode_file "$1")"
+  if [[ -r "$file" ]]; then
+    cat "$file"
+  else
+    printf 'unset'
+  fi
+}
+
+profile_lb_url() {
+  local file
+  file="$(profile_lb_url_file "$1")"
+  [[ -r "$file" ]] && cat "$file" || true
+}
+
+link_profile_to_lb() {
+  local name="$1" root="$2"
+  root="$(normalize_lb_root "$root")"
+  printf 'linked\n' > "$(profile_lb_mode_file "$name")"
+  printf '%s\n' "$root" > "$(profile_lb_url_file "$name")"
+  ok "Đã liên kết codex/$name với Codex LB"
+  printf "  %b↳%b %s/backend-api/codex\n" "$C_DIM" "$C_RESET" "$root"
+}
+
+mark_profile_direct() {
+  local name="$1"
+  printf 'direct\n' > "$(profile_lb_mode_file "$name")"
+  rm -f "$(profile_lb_url_file "$name")"
+  ok "codex/$name sẽ dùng Codex trực tiếp"
+}
+
+prompt_link_lb() {
+  local name="$1"
+  prompt_yes_default "Liên kết codex/$name với Codex LB này?"
+}
+
+prepare_linked_codex_lb() {
+  local name="$1" root
+  root="$(profile_lb_url "$name")"
+  if [[ -z "$root" ]]; then
+    fail "codex/$name đánh dấu đã liên kết nhưng thiếu URL LB."
+    return 69
+  fi
+
+  spinner_start "Đang kiểm Codex LB đã liên kết"
+  if set_detected_lb "$root" "profile-link:$name"; then
+    spinner_stop ok "Codex LB đã liên kết sẵn sàng"
+    printf "  %b↳%b %s/backend-api/codex\n" "$C_DIM" "$C_RESET" "$CODEX_LB_DETECTED_URL"
+    return 0
+  fi
+  spinner_stop fail "Codex LB đã liên kết không sẵn sàng"
+  printf "  %bProfile:%b codex/%s\n" "$C_DIM" "$C_RESET" "$name" >&2
+  printf "  %bEndpoint:%b %s/backend-api/codex\n" "$C_DIM" "$C_RESET" "$root" >&2
+  return 69
+}
+
+# Chốt backend cho profile Codex trong lần gọi này. Chế độ auto theo quyết định đã lưu của
+# profile; --lb / --no-lb tường minh chỉ đè cho lần chạy hiện tại.
+prepare_codex_profile_backend() {
+  local name="$1" lb_mode="$2" lb_url="$3" allow_prompt="${4:-0}"
+  local mode
+
+  CODEX_LB_DETECTED_URL=""
+  CODEX_LB_DETECTED_SOURCE=""
+  CODEX_LB_PROBED=1
+  CODEX_BACKEND_PREPARED_KEY="$name|$lb_mode|$lb_url"
+
+  if [[ "$lb_mode" == "off" ]]; then
+    info "Tắt Codex LB cho lần chạy này (--no-lb)"
+    return 1
+  fi
+
+  if [[ -n "$lb_url" ]]; then
+    spinner_start "Đang kiểm Codex LB được yêu cầu"
+    if set_detected_lb "$lb_url" "explicit"; then
+      spinner_stop ok "Codex LB được yêu cầu sẵn sàng"
+      printf "  %b↳%b %s/backend-api/codex\n" "$C_DIM" "$C_RESET" "$CODEX_LB_DETECTED_URL"
+      return 0
+    fi
+    spinner_stop fail "Codex LB được yêu cầu không sẵn sàng"
+    return 69
+  fi
+
+  mode="$(profile_lb_mode "$name")"
+  case "$mode" in
+    linked)
+      prepare_linked_codex_lb "$name"
+      return $?
+      ;;
+    direct)
+      info "Backend của profile: Codex trực tiếp"
+      return 1
+      ;;
+  esac
+
+  spinner_start "Đang dò Codex LB"
+  if detect_codex_lb ""; then
+    spinner_stop ok "Đã dò thấy Codex LB"
+    printf "  %b↳%b %s/backend-api/codex %b(%s)%b\n" \
+      "$C_DIM" "$C_RESET" "$CODEX_LB_DETECTED_URL" "$C_DIM" "$CODEX_LB_DETECTED_SOURCE" "$C_RESET"
+
+    if [[ "$allow_prompt" -eq 1 && -t 0 ]]; then
+      printf "\n"
+      if prompt_link_lb "$name"; then
+        printf "\n"
+        link_profile_to_lb "$name" "$CODEX_LB_DETECTED_URL"
+        return 0
+      fi
+      printf "\n"
+      mark_profile_direct "$name"
+      CODEX_LB_DETECTED_URL=""
+      CODEX_LB_DETECTED_SOURCE=""
+      return 1
+    fi
+
+    info "Thấy LB nhưng codex/$name chưa liên kết; dùng Codex trực tiếp."
+    CODEX_LB_DETECTED_URL=""
+    CODEX_LB_DETECTED_SOURCE=""
+    return 1
+  fi
+
+  spinner_stop ok "Không thấy Codex LB — dùng Codex trực tiếp"
+  return 1
+}
+
+prepare_codex_lb() {
+  local lb_mode="$1" lb_url="$2"
+
+  if [[ "$lb_mode" == "off" ]]; then
+    CODEX_LB_PROBED=1
+    CODEX_LB_DETECTED_URL=""
+    CODEX_LB_DETECTED_SOURCE=""
+    info "Tắt Codex LB (--no-lb)"
+    return 1
+  fi
+
+  spinner_start "Đang dò Codex LB"
+  if detect_codex_lb "$lb_url"; then
+    spinner_stop ok "Codex LB sẵn sàng"
+    printf "  %b↳%b %s/backend-api/codex %b(%s)%b\n" \
+      "$C_DIM" "$C_RESET" "$CODEX_LB_DETECTED_URL" "$C_DIM" "$CODEX_LB_DETECTED_SOURCE" "$C_RESET"
+    return 0
+  fi
+
+  if [[ -n "$lb_url" || -n "${AI_ISOLATOR_CODEX_LB_URL:-}" ]]; then
+    spinner_stop fail "Codex LB đã cấu hình không sẵn sàng"
+    return 69
+  fi
+
+  spinner_stop ok "Không thấy Codex LB — dùng Codex trực tiếp"
+  return 1
+}
+
+# ---------- đăng nhập / chạy ----------
+login_profile() {
+  local tool="$1" name="$2"
+  ensure_binary "$tool"
+  init_profile "$tool" "$name"
+
+  info "Đăng nhập cho: $tool/$name"
+  local rc=0
+  set +e
+  case "$tool" in
+    codex)
+      if [[ "$(profile_lb_mode "$name")" == "linked" ]]; then
+        ok "codex/$name đã liên kết Codex LB; không cần đăng nhập Codex gốc."
+        rc=0
+      else
+        with_profile_env "$tool" "$name" codex login
+        rc=$?
+      fi
+      ;;
+    claude)
+      if claude auth --help >/dev/null 2>&1; then
+        with_profile_env "$tool" "$name" claude auth login
+      else
+        warn "Claude CLI này không có 'auth login'. Mở Claude trong profile tách biệt thay thế."
+        with_profile_env "$tool" "$name" claude
+      fi
+      rc=$?
+      ;;
+  esac
+  set -e
+  return "$rc"
+}
+
+ensure_direct_profile_authenticated() {
+  local tool="$1" name="$2"
+
+  # Codex đã liên kết LB cố ý bỏ qua đăng nhập OpenAI/Codex gốc.
+  if [[ "$tool" == "codex" && "$(profile_lb_mode "$name")" == "linked" ]]; then
+    return 0
+  fi
+
+  local auth
+  auth="$(profile_auth_state "$tool" "$name")"
+  [[ "$auth" == "logged-in" ]] && return 0
+
+  warn "$tool/$name chưa đăng nhập; không mở màn hình đăng nhập của CLI."
+  printf "%bĐăng nhập tường minh:%b %s login %s --name %s\n" "$C_DIM" "$C_RESET" "$APP_NAME" "$tool" "$name"
+  return 78
+}
+
+run_profile() {
+  local tool="$1" name="$2" lb_mode="$3" lb_url="$4"; shift 4
+  ensure_binary "$tool"
+  init_profile "$tool" "$name"
+
+  info "Profile: $tool/$name"
+  info "HOME: $(profile_dir "$tool" "$name")/home"
+
+  local -a launch=("$tool")
+  if [[ "$tool" == "codex" ]]; then
+    local lb_rc=0
+    if [[ "$CODEX_BACKEND_PREPARED_KEY" != "$name|$lb_mode|$lb_url" ]]; then
+      prepare_codex_profile_backend "$name" "$lb_mode" "$lb_url" 0 || lb_rc=$?
+    fi
+    if [[ "$lb_rc" -eq 69 ]]; then
+      return 69
+    fi
+    if [[ -n "$CODEX_LB_DETECTED_URL" ]]; then
+      codex_lb_overrides "$CODEX_LB_DETECTED_URL"
+      launch+=("${CODEX_LB_ARGS[@]}")
+    fi
+  fi
+
+  printf "\n"
+  launch+=("$@")
+
+  set +e
+  with_profile_env "$tool" "$name" "${launch[@]}"
+  local rc=$?
+  set -e
+  return "$rc"
+}
+
+profile_auth_state() {
+  local tool="$1" name="$2"
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    printf "binary-missing"
+    return
+  fi
+
+  case "$tool" in
+    codex)
+      if [[ "$(profile_lb_mode "$name")" == "linked" ]]; then
+        printf "via-lb"
+      elif with_profile_env "$tool" "$name" codex login status >/dev/null 2>&1; then
+        printf "logged-in"
+      else
+        printf "not-logged-in"
+      fi
+      ;;
+    claude)
+      if with_profile_env "$tool" "$name" claude auth status --text >/dev/null 2>&1; then
+        printf "logged-in"
+      else
+        printf "unknown/not-logged-in"
+      fi
+      ;;
+  esac
+}
+
+show_status() {
+  header
+
+  printf "%bCodex LB%b\n" "$C_BOLD" "$C_RESET"
+  spinner_start "Đang thăm dò Codex LB"
+  if detect_codex_lb ""; then
+    spinner_stop ok "trực tuyến"
+    printf "  %-10s %s\n" "Endpoint" "$CODEX_LB_DETECTED_URL/backend-api/codex"
+    printf "  %-10s %s\n\n" "Nguồn" "$CODEX_LB_DETECTED_SOURCE"
+  else
+    spinner_stop ok "không thấy"
+    printf "  %bKhông có Codex LB nào truy cập được.%b\n\n" "$C_DIM" "$C_RESET"
+  fi
+
+  printf "%bProfiles%b\n" "$C_BOLD" "$C_RESET"
+  printf "%b%-9s %-17s %-21s %-12s %-18s%b\n" "$C_BOLD" "CÔNG CỤ" "PROFILE" "ĐĂNG NHẬP" "BACKEND" "LỆNH" "$C_RESET"
+  printf "%s\n" "---------------------------------------------------------------------------------"
+
+  local found=0 dir base tool name auth backend mode launcher
+  shopt -s nullglob
+  for dir in "$PROFILES_DIR"/*; do
+    [[ -d "$dir" ]] || continue
+    found=1
+    base="$(basename "$dir")"
+    tool="${base%%--*}"
+    name="${base#*--}"
+    auth="$(profile_auth_state "$tool" "$name")"
+    backend="n/a"
+    if [[ "$tool" == "codex" ]]; then
+      mode="$(profile_lb_mode "$name")"
+      case "$mode" in
+        linked) backend="lb-linked" ;;
+        direct) backend="direct" ;;
+        *) backend="undecided" ;;
+      esac
+    fi
+    launcher="$(profile_launcher_name "$tool" "$name" 2>/dev/null || printf '-')"
+    printf "%-9s %-17s %-21s %-12s %-18s\n" "$tool" "$name" "$auth" "$backend" "$launcher"
+    if [[ "$tool" == "codex" && "$backend" == "lb-linked" ]]; then
+      printf "  %b↳ LB:%b %s/backend-api/codex\n" "$C_DIM" "$C_RESET" "$(profile_lb_url "$name")"
+    fi
+  done
+  shopt -u nullglob
+
+  if [[ "$found" -eq 0 ]]; then
+    printf "%bChưa có profile nào.%b\n" "$C_DIM" "$C_RESET"
+    printf "Tạo bằng: %s codex --name personal\n" "$APP_NAME"
+  fi
+  printf "\n%bLưu trữ:%b %s\n" "$C_DIM" "$C_RESET" "$STATE_ROOT"
+}
+
+remove_profile() {
+  local tool="$1" name="$2" dir
+  dir="$(profile_dir "$tool" "$name")"
+  [[ -d "$dir" ]] || { warn "Profile $tool/$name không tồn tại."; return 0; }
+  local shell_conf shell_name="" shell_rc="" key value
+  shell_conf="$(profile_shell_conf_file "$tool" "$name")"
+  if [[ -r "$shell_conf" ]]; then
+    while IFS='=' read -r key value; do
+      case "$key" in
+        shell) shell_name="$value" ;;
+        rc) shell_rc="$value" ;;
+      esac
+    done < "$shell_conf"
+    if [[ -n "$shell_rc" ]]; then
+      remove_profile_alias_block "$shell_rc" "$tool" "$name" || true
+    fi
+  fi
+  rm -rf "$dir"
+  ok "Đã xoá profile $tool/$name"
+  [[ -n "$shell_rc" ]] && info "Đã gỡ khối lệnh khởi chạy của nó khỏi $shell_rc"
+}
+
+parse_tool_opts() {
+  local tool="$1"; shift
+  PROFILE_NAME="default"
+  NO_LOGIN=0
+  LB_MODE="auto"
+  LB_URL=""
+  PASS_ARGS=()
+
+  while (($#)); do
+    case "$1" in
+      --name)
+        (($# >= 2)) || die_usage "--name cần một giá trị"
+        PROFILE_NAME="$2"; shift 2 ;;
+      --no-login)
+        NO_LOGIN=1; shift ;;
+      --no-lb)
+        [[ "$tool" == "codex" ]] || die_usage "--no-lb chỉ dùng cho codex"
+        LB_MODE="off"; LB_URL=""; shift ;;
+      --lb)
+        [[ "$tool" == "codex" ]] || die_usage "--lb chỉ dùng cho codex"
+        (($# >= 2)) || die_usage "--lb cần một URL"
+        LB_MODE="auto"; LB_URL="$2"; shift 2 ;;
+      --)
+        shift; PASS_ARGS=("$@"); break ;;
+      -h|--help)
+        usage; exit 0 ;;
+      *)
+        PASS_ARGS+=("$1"); shift ;;
+    esac
+  done
+  validate_name "$PROFILE_NAME"
+}
+
+main() {
+  local cmd="${1:-}"
+  case "$cmd" in
+    ''|-h|--help|help)
+      usage
+      ;;
+    -V|--version|version)
+      version
+      ;;
+    status)
+      [[ $# -eq 1 ]] || die_usage "status không nhận đối số"
+      show_status
+      ;;
+    sync-skills)
+      shift
+      local sync_name="" sync_all=0 sync_source=""
+      while (($#)); do
+        case "$1" in
+          --name)
+            (($# >= 2)) || die_usage "--name cần một giá trị"
+            sync_name="$2"; shift 2 ;;
+          --all) sync_all=1; shift ;;
+          --source)
+            (($# >= 2)) || die_usage "--source cần một đường dẫn"
+            sync_source="$2"; shift 2 ;;
+          -h|--help) usage; exit 0 ;;
+          *) die_usage "Đối số lạ cho sync-skills: $1" ;;
+        esac
+      done
+      [[ -n "$sync_name" || "$sync_all" -eq 1 ]] || die_usage "sync-skills cần --name NAME hoặc --all"
+      [[ -z "$sync_name" || "$sync_all" -eq 0 ]] || die_usage "sync-skills chỉ nhận một trong --name/--all"
+      [[ -z "$sync_source" ]] || CODEX_SKILLS_SOURCE="$sync_source"
+      if [[ "$sync_all" -eq 1 ]]; then
+        sync_codex_skills_all
+      else
+        sync_codex_skills_for_profile "$sync_name"
+      fi
+      ;;
+    codex|claude)
+      local tool="$cmd"; shift
+      parse_tool_opts "$tool" "$@"
+      ensure_binary "$tool"
+      local dir existed=0
+      dir="$(profile_dir "$tool" "$PROFILE_NAME")"
+      [[ -d "$dir" ]] && existed=1
+      header
+      init_profile "$tool" "$PROFILE_NAME"
+
+      # Chốt/liên kết backend Codex trước khi đăng nhập. Liên kết lưu là thuộc tính của profile;
+      # --lb/--no-lb chỉ đè một lần.
+      if [[ "$tool" == "codex" ]]; then
+        printf "\n"
+        local lb_rc=0
+        prepare_codex_profile_backend "$PROFILE_NAME" "$LB_MODE" "$LB_URL" 1 || lb_rc=$?
+        [[ "$lb_rc" -ne 69 ]] || exit 69
+      fi
+
+      # Thêm đúng profile này thành lệnh shell (vd codex-personal). Mỗi profile hỏi nhiều nhất một lần.
+      maybe_offer_profile_shell_link "$tool" "$PROFILE_NAME"
+
+      # Profile Codex đang đi qua Codex LB không cần đăng nhập Codex gốc: LB giữ nhóm tài khoản phía trên.
+      local native_login_required=1
+      if [[ "$tool" == "codex" && -n "$CODEX_LB_DETECTED_URL" ]]; then
+        native_login_required=0
+        ok "Codex LB lo xác thực cho codex/$PROFILE_NAME; bỏ qua đăng nhập Codex gốc."
+      fi
+
+      if [[ "$existed" -eq 0 && "$NO_LOGIN" -eq 0 && "$native_login_required" -eq 1 ]]; then
+        printf "\n"
+        if prompt_login; then
+          printf "\n"
+          if ! login_profile "$tool" "$PROFILE_NAME"; then
+            warn "Đăng nhập không thành công. Profile đã tạo nhưng CLI sẽ không được mở."
+            printf "%bChạy sau:%b %s run %s --name %s\n" "$C_DIM" "$C_RESET" "$APP_NAME" "$tool" "$PROFILE_NAME"
+            exit 1
+          fi
+        else
+          printf "\n"
+          ok "Đã tạo profile, chưa đăng nhập"
+          printf "%bKhông mở %s.%b\n" "$C_DIM" "$tool" "$C_RESET"
+          printf "%bĐăng nhập sau:%b %s login %s --name %s\n" "$C_DIM" "$C_RESET" "$APP_NAME" "$tool" "$PROFILE_NAME"
+          exit 0
+        fi
+      elif [[ "$NO_LOGIN" -eq 1 && "$native_login_required" -eq 1 ]]; then
+        ok "Bỏ qua đăng nhập gốc (--no-login); không mở profile $tool chưa đăng nhập."
+        exit 0
+      fi
+
+      # Profile direct có sẵn cũng có thể chưa đăng nhập (vd lần đầu đã từ chối đăng nhập).
+      # Không bao giờ để Codex/Claude ngầm rơi vào màn hình đăng nhập của chính nó.
+      if [[ "$native_login_required" -eq 1 ]]; then
+        ensure_direct_profile_authenticated "$tool" "$PROFILE_NAME" || exit $?
+      fi
+
+      printf "\n"
+      run_profile "$tool" "$PROFILE_NAME" "$LB_MODE" "$LB_URL" ${PASS_ARGS[@]+"${PASS_ARGS[@]}"}
+      ;;
+    run)
+      (($# >= 2)) || die_usage "run cần <codex|claude>"
+      local tool="$2"; validate_tool "$tool"; shift 2
+      parse_tool_opts "$tool" "$@"
+      ensure_binary "$tool"
+      init_profile "$tool" "$PROFILE_NAME"
+      local run_lb_rc=0
+      if [[ "$tool" == "codex" ]]; then
+        prepare_codex_profile_backend "$PROFILE_NAME" "$LB_MODE" "$LB_URL" 0 || run_lb_rc=$?
+        [[ "$run_lb_rc" -ne 69 ]] || exit 69
+      fi
+      if [[ "$tool" != "codex" || -z "$CODEX_LB_DETECTED_URL" ]]; then
+        ensure_direct_profile_authenticated "$tool" "$PROFILE_NAME" || exit $?
+      fi
+      run_profile "$tool" "$PROFILE_NAME" "$LB_MODE" "$LB_URL" ${PASS_ARGS[@]+"${PASS_ARGS[@]}"}
+      ;;
+    login)
+      (($# >= 2)) || die_usage "login cần <codex|claude>"
+      local tool="$2"; validate_tool "$tool"; shift 2
+      parse_tool_opts "$tool" "$@"
+      ((${#PASS_ARGS[@]} == 0)) || die_usage "login không nhận đối số CLI phía sau"
+      [[ "$LB_MODE" == "auto" && -z "$LB_URL" ]] || die_usage "login không nhận --lb/--no-lb"
+      header
+      login_profile "$tool" "$PROFILE_NAME"
+      ;;
+    remove)
+      (($# >= 2)) || die_usage "remove cần <codex|claude>"
+      local tool="$2"; validate_tool "$tool"; shift 2
+      parse_tool_opts "$tool" "$@"
+      ((${#PASS_ARGS[@]} == 0)) || die_usage "remove không nhận đối số CLI phía sau"
+      [[ "$LB_MODE" == "auto" && -z "$LB_URL" ]] || die_usage "remove không nhận --lb/--no-lb"
+      remove_profile "$tool" "$PROFILE_NAME"
+      ;;
+    *)
+      die_usage "Lệnh lạ: $cmd"
+      ;;
+  esac
+}
+
+main "$@"

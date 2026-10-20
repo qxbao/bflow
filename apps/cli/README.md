@@ -422,3 +422,38 @@ and pane manifests remain repository-local. An old host config from an unstarted
 privacy-check failure is retained without reusing its token; prior host/run/platform
 authority requires reconciliation before relocation. Explicit legacy storage paths
 and other commands' independently configured stores are not rewritten.
+
+## Isolated provider profiles
+
+`bflow iso <command> [arguments]` runs the bundled ai-isolator engine. Use
+`bflow help iso` for examples. Provider launch arguments after the engine command
+are passed directly to Bash as individual arguments, so provider flags such as
+`--json` and `--help` are not consumed by Bflow. The executable preserves the
+current directory, environment, terminal input/output, and provider exit status.
+
+Commands include `codex`, `claude`, and `agy` profile launch; `run <provider>`;
+`login <provider>`; `status` (lists profiles, with Agy authentication unverified);
+`remove <provider>`; `help`; and `version`. Codex-only `sync-skills` takes
+`--name NAME` or `--all`, with optional `--source PATH`.
+
+The package ships `isolation/bin/ai-isolator` beside both `src` and `dist`; the
+CLI resolves it relative to its own module, independent of the caller's working
+directory. Bash is required on PATH; the engine uses Python 3.11 or newer and
+curl or wget for MCP synchronization and linked-provider checks. POSIX `ps` is
+used to stop provider descendants when Bflow receives SIGTERM. On Windows
+this requires a Bash environment such as Git Bash; native Windows execution is
+not provided, and process-tree signal cleanup through Git Bash is unverified.
+
+Profiles use the ai-isolator state layout under
+`${AI_ISOLATOR_HOME:-$HOME/.local/share/ai-isolator}` and can be reused by the
+standalone `ai-isolator` command when it points at the same state root. The
+original ai-isolator v0.4.4 supports two-way profile compatibility with Codex and
+Claude. Agy support is additive in Bflow and is not supported by that original
+version. `bflow iso login agy --name personal` opens Agy's native onboarding UI
+in the isolated profile. `bflow iso status` lists profiles and marks Agy
+authentication as unverified because the engine does not probe Agy auth or
+models. The isolation engine manages only its marked shell aliases and
+profile-owned state;
+it does not make Bflow workflows isolated or assert provider/runtime readiness.
+Review profile and shell configuration before use. No provider account credentials
+are bundled or copied by the CLI.

@@ -8,6 +8,7 @@ import { formatCommandError } from "./formatters.js";
 import { parseCliArgs } from "./parser.js";
 import { toContractError } from "./presentation.js";
 import { composeCliRuntime } from "./runtime.js";
+import { isIsoInvocation, runIsolator } from "./iso.js";
 import {
   CLI_EXIT_CODES,
   type CliCommandName,
@@ -51,6 +52,13 @@ export async function main(
     stdout: (msg) => process.stdout.write(msg + "\n"),
     stderr: (msg) => process.stderr.write(msg + "\n")
   };
+
+  // Keep provider flags, TTY streams, and its exit code outside bflow's parser and buffer.
+  if (isIsoInvocation(args)) {
+    const result = await runIsolator(args.slice(1), context);
+    process.exitCode = result.exitCode;
+    return result;
+  }
 
   const isJson = args.some((a) => a === "--json" || a === "-j") || Boolean(context?.presentation?.json);
   const cmdCandidate = args.find((a) => !a.startsWith("-"));
