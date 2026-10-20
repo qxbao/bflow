@@ -30,5 +30,5 @@ it("applies credential-tree rejection before granting Darwin dependency reads", 
   const root = await fixture(), modules = join(root, "node_modules"); await mkdir(modules);
   await writeFile(join(modules, ".npmrc"), "fixture credential must never be granted");
   Object.defineProperty(process, "platform", { value: "darwin" });
-  await expect(sandboxBehavior({ ...command, dependencyRoots: [modules] }, root, [])).rejects.toThrow();
+  await expect(sandboxBehavior({ ...command, dependencyRoots: [modules] }, root, [])).rejects.toThrow("Credential material in dependency tree");
 });
