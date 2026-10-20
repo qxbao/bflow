@@ -22,6 +22,7 @@ import { readHostConfiguration, type HostConfiguration, type RoleLaunchDescripto
 import { digest, json, record, textField } from "./journal.js";
 import { COORDINATOR_TOOLS } from "./tools.js";
 import { USER_DECISION_TOOL, buildDecisionRequestMessage, guardDirectUserInteraction, parseUserDecisionToolInput } from "./decision-routing.js";
+import { AdmissionRejectedError, isNonRetryableDeliveryError } from "./runtime.js";
 import { openAgenticWorkspace, type AgenticWorkspaceHandle } from "./workspace.js";
 import { unwrap } from "./outbox.js";
 import { HostVerification, HostBehavioralFailure, DEFAULT_HOST_CHECKS } from "./host-verification.js";
@@ -214,6 +215,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const nativeDeliver = async (message: RoleMessage, operationId = message.message_id) => {
     const sender = (await principal(AgentRoleSchema.parse(message.sender.role), textField(message.sender.pane_id)));
     if (message.sender.agent_id !== sender.agentId) throw new Error("Role message sender does not match authenticated pane");
+    // Runtime already refused this message; it is never typed into a pane again.
+    const refusal = await workspace?.runtime.inboundRejection(message.message_id);
+    if (refusal !== undefined) throw new AdmissionRejectedError(refusal);
     const previous = await receipts.nativeDelivery(operationId);
     if (previous) {
       const semanticMessage = (value: RoleMessage) => ({ ...value, message_id: undefined, occurred_at: undefined, idempotency_key: undefined });
@@ -234,14 +238,23 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         socket.on("data", chunk => { output += String(chunk); if (output.length > 1024 * 1024) { socket.destroy(); reject(new Error("Oversized native response")); }
           if (output.includes("\n")) { socket.end(); try { const response = record(JSON.parse(output.split("\n")[0]!)); if (response.error) reject(new Error(JSON.stringify(response.error))); else accept(); } catch (error) { reject(error); } } });
       });
-      // The plugin action is asynchronous. Wait for signed ingress acknowledgement, never resend.
+      // The plugin action is asynchronous. Wait for signed ingress acknowledgement, never resend. A refusal by Runtime
+      // arrives through the same ingress, so it is checked on a slower cadence than the acknowledgement itself.
       const deadline = Date.now() + 15_000;
+      let refusalCheckAt = 0;
       while (Date.now() < deadline) {
         if (deliveredMessageIds.has(message.message_id)) return json({ delivered: true, messageId: message.message_id });
+        if (Date.now() >= refusalCheckAt) {
+          refusalCheckAt = Date.now() + 250;
+          const refused = await workspace?.runtime.inboundRejection(message.message_id);
+          if (refused !== undefined) throw new AdmissionRejectedError(refused);
+        }
         await new Promise(accept => setTimeout(accept, 30));
       }
       throw new Error("Native delivery acknowledgement is uncertain; inspect/reconcile before replay");
     } catch (error) {
+      // A refusal is a settled answer, not an unknown delivery: no uncertain report and no resend.
+      if (isNonRetryableDeliveryError(error)) throw error;
       // Intent is recorded but no acknowledgement was observed: the delivery is unknown. Surface it; never resend here.
       await workspace?.runtime.reportUncertainNativeDelivery(message, operationId, redactString(String(error))).catch(() => undefined);
       throw error;
@@ -962,6 +975,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         } catch (error) {
           const reason = redactString(String(error));
           inboundError = reason; process.stderr.write(`Bflow inbound: ${reason}\n`);
+          // Runtime refused it and its notice is the report: retrying or dropping it again would only add a second one.
+          if (isNonRetryableDeliveryError(error)) { physicalPrompts.shift(); continue; }
           head.attempts++;
           if (head.attempts < MAX_INBOUND_ATTEMPTS) { head.retryAt = Date.now() + 250 * 2 ** head.attempts; break; }
           // Dropped only after bounded retries, and never silently: Runtime's run notice, or a direct receipt when that fails.
@@ -1084,6 +1099,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const host = requireWorkspace();
     for (const { operationId, message } of await receipts.unacknowledgedNativeDeliveries()) {
       if (reportedUncertain.has(operationId)) continue;
+      // A refused delivery is settled by Runtime's refusal notice: it is not uncertain and is never resent.
+      if (await host.runtime.inboundRejection(message.message_id) !== undefined) { reportedUncertain.add(operationId); continue; }
       await host.runtime.reportUncertainNativeDelivery(message, operationId, "Native delivery acknowledgement was not observed; the message was not resent and needs reconciliation");
       reportedUncertain.add(operationId);
     }

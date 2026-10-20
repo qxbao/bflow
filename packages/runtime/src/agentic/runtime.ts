@@ -6,7 +6,7 @@ import {
   SpecificationSchema, TestStrategySchema, VerificationCycleSchema, VerificationResultSchema,
   WorkflowDefinitionSchema, type AgentExecutionHandle, type ApprovalDecision, type ApprovalRequest,
   type ArtifactReference, type JsonValue, type RoleMessage, type QualityGate, type QualityGateResult, type Specification,
-  type PaneBinding, type TaskDefinition, type AgentRole, type WorkflowDefinition
+  type PaneBinding, type TaskDefinition, type AgentRole, type WorkflowDefinition, type DelegationRequest
 } from "@bflow/contracts";
 import { AgenticJournal, digest, isConversationDelivery, json, record, strings, textField, type JournalState,
   type Outbound, type RunRecord, type SpecRecord, type TaskRecord, type UserDecisionRecord } from "./journal.js";
@@ -49,6 +49,36 @@ function specialistBlockage(payload: unknown): string | undefined {
   const text = ["reason", "message", "headline"].map(key => objectField(payload, key)).find((item): item is string => typeof item === "string" && item.trim() !== "");
   return redactString(text ?? "Specialist reported the task as blocked");
 }
+
+/**
+ * Runtime refused an inbound request for a reason that retrying cannot change (stale or foreign revision, terminal run, superseded
+ * approval). Hosts must not resend it, and must not report it as an uncertain delivery: its refusal is already a Conversation notice.
+ */
+export class AdmissionRejectedError extends Error {
+  readonly retryable = false;
+  constructor(message: string) { super(message); this.name = "AdmissionRejectedError"; }
+}
+export function isNonRetryableDeliveryError(error: unknown): boolean { return error instanceof AdmissionRejectedError; }
+/** Kinds of delivery problem. One user-facing notice per (message, class); retries and reconciliation reuse it. */
+type FailureClass = "transport_uncertain" | "undeliverable" | "inbound_failed";
+/** The admitted revision of a requirement. A request without metadata.revision is revision 1. */
+function revisionOf(delegation: DelegationRequest): number {
+  const value = delegation.metadata?.revision;
+  return typeof value === "number" && Number.isSafeInteger(value) ? value : 1;
+}
+/** A Conversation transcript notice reports the uncertain and dropped paths with the same wording; those are one failure class. */
+function inboundFailureClass(reason: string): FailureClass { return /uncertain|acknowledg/i.test(reason) ? "transport_uncertain" : "inbound_failed"; }
+/** A Conversation → Coordinator delegation that opens or revises a run. Cancellation requests travel the same type and are handled apart. */
+function isConversationHandoff(message: RoleMessage): boolean {
+  return message.type === "delegation.request" && message.sender.role === "conversation" && message.recipient.role === "coordinator" &&
+    objectField(objectField(message.payload, "metadata"), "action") !== "cancel";
+}
+function supersededReason(run: RunRecord, approvalId: string): string | undefined {
+  const item = run.supersededApprovals?.find(entry => entry.approvalId === approvalId);
+  return item === undefined ? undefined : `Approval superseded by requirement revision ${item.supersededByRevision}`;
+}
+type Admission = { kind: "new" } | { kind: "duplicate" } | { kind: "revision"; revision: number } | { kind: "rejected"; reason: string };
+const REJECTED_REVISION_OPTIONS = ["Gửi revision mới hợp lệ", "Tạo run mới", "Hủy run"];
 
 /** Durable single-writer orchestration. No LLM calls, polling artifacts, or synchronous inter-agent waits. */
 export class AgenticWorkflowRuntime {
@@ -129,13 +159,20 @@ export class AgenticWorkflowRuntime {
         sdlcStatus: run.status, result: message.payload, next: "Call inspect to read the durable inbox, then continue the workflow or report a blocker." },
       artifact_references: message.artifact_references, occurred_at: this.now(), idempotency_key: messageId }), "coordinator");
   }
-  /** Surfaces a delivery failure to the user through Conversation. Idempotent per (run, message, reason). */
-  private surfaceFailure(state: JournalState, outbox: HerdrOutbox, run: RunRecord, subject: string, reason: string,
-    options: string[] = DELIVERY_FAILURE_OPTIONS): void {
+  /**
+   * Surfaces a delivery failure to the user through Conversation. Idempotent per (message, failure class): every retry, reconciliation
+   * and dropped-report of the same message reuses the first notice instead of adding one with a different reason text.
+   */
+  private surfaceFailure(state: JournalState, outbox: HerdrOutbox, run: RunRecord, messageId: string, failureClass: FailureClass,
+    subject: string, reason: string, options: string[] = DELIVERY_FAILURE_OPTIONS): void {
     const text = `${subject}: ${reason}. The run is waiting and will not continue until this is resolved.`;
     this.emit(state, outbox, run, "conversation.progress", { kind: "delivery_failure", runId: run.runId, sdlcStatus: run.status,
       headline: `Herdr delivery failed: ${subject}`, reason: text, blockageReason: text, options },
-      `delivery-failure:${digest([subject, reason])}`);
+      `delivery-failure:${digest([messageId, failureClass])}`);
+  }
+  /** A message Runtime refused at admission. Its refusal is the notice, so no delivery-failure report may be added for it. */
+  private refused(state: JournalState, messageId: string): boolean {
+    return state.inbox.some(item => item.message.message_id === messageId && item.status === "rejected");
   }
   /** Called by the host when an authenticated inbound message could not be applied; the failure must not stay silent. */
   async reportInboundFailure(input: unknown, reason: string): Promise<void> {
@@ -144,10 +181,19 @@ export class AgenticWorkflowRuntime {
     const data = message.data;
     await this.transaction(async (state, save, _core, outbox) => {
       const run = state.runs.find(item => item.runId === data.run_id);
-      if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) return;
-      this.surfaceFailure(state, outbox, run, `${data.type} from ${data.sender.role} to ${data.recipient.role} (${data.message_id})`, redactString(reason));
+      if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || this.refused(state, data.message_id)) return;
+      const text = redactString(reason);
+      this.surfaceFailure(state, outbox, run, data.message_id, inboundFailureClass(text),
+        `${data.type} from ${data.sender.role} to ${data.recipient.role} (${data.message_id})`, text);
       await save();
     });
+  }
+  /**
+   * Read-only: why Runtime refused an inbound message, or undefined. Hosts consult it before retrying or reporting a delivery, so a
+   * refused message is never resent. It takes the journal lock itself, so it must not run inside another Runtime transaction.
+   */
+  async inboundRejection(messageId: string): Promise<string | undefined> {
+    return this.journal.exclusive(async state => state.inbox.find(item => item.message.message_id === messageId && item.status === "rejected")?.reason);
   }
   /** Each stuck outbound handoff is reported once per distinct error; reports about reports are never created. */
   private surfaceOutboundFailures(state: JournalState, outbox: HerdrOutbox): boolean {
@@ -163,19 +209,102 @@ export class AgenticWorkflowRuntime {
       const run = state.runs.find(item => item.runId === out.message.run_id);
       if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) continue;
       const before = state.outbound.length;
-      this.surfaceFailure(state, outbox, run, `${out.message.type} to ${out.message.recipient.role} (${out.message.message_id})`,
-        redactString(out.error), uncertain ? UNCERTAIN_DELIVERY_OPTIONS : DELIVERY_FAILURE_OPTIONS);
+      this.surfaceFailure(state, outbox, run, out.message.message_id, uncertain ? "transport_uncertain" : "undeliverable",
+        `${out.message.type} to ${out.message.recipient.role} (${out.message.message_id})`, redactString(out.error),
+        uncertain ? UNCERTAIN_DELIVERY_OPTIONS : DELIVERY_FAILURE_OPTIONS);
       changed ||= state.outbound.length !== before;
     }
     return changed;
   }
-  /** Trusted local host enqueues a message; actual inter-agent delivery always uses Herdr. */
+  /**
+   * Trusted local host enqueues a message; actual inter-agent delivery always uses Herdr. A Conversation requirement revision or
+   * approval decision is admitted here, before it can reach the Coordinator pane: a refused one is never enqueued.
+   */
   async queueHerdr(input: unknown): Promise<JsonValue> {
     if (this.quiesced) throw new Error("Runtime is quiesced");
     const message = RoleMessageSchema.parse(input);
-    return this.transaction(async (_state, save, _core, outbox) => {
+    return this.transaction(async (state, save, _core, outbox) => {
+      if (isConversationHandoff(message)) {
+        const delegation = DelegationRequestSchema.parse(message.payload);
+        const admission = this.admitDelegation(state, delegation, this.inFlightDelegations(state, delegation.runId));
+        // A duplicate carries already-admitted content, so a later turn re-sending it is still delivered; the outbox dedupes by message id.
+        if (admission.kind === "rejected") { this.notifyRejection(state, outbox, message, admission.reason); await save(); throw new AdmissionRejectedError(admission.reason); }
+      }
+      if (message.type === "approval.decision") {
+        const run = state.runs.find(item => item.runId === message.run_id);
+        const reason = run && supersededReason(run, ApprovalDecisionSchema.parse(message.payload).approvalId);
+        if (reason !== undefined) throw new AdmissionRejectedError(reason);
+      }
       const out = outbox.enqueue(message); await save(); return json(out.message);
     });
+  }
+  /**
+   * Decides whether a Conversation delegation opens a run, repeats one already known, revises the run's requirement, or is refused.
+   * `inFlight` holds the revisions already handed to Runtime but not yet received, so a stale revision cannot slip in behind a newer one.
+   */
+  private admitDelegation(state: JournalState, delegation: DelegationRequest, inFlight: DelegationRequest[]): Admission {
+    const run = state.runs.find(item => item.runId === delegation.runId);
+    const known = [...(run ? [run.delegation] : []), ...inFlight];
+    if (known.some(item => digest(item) === digest(delegation))) return { kind: "duplicate" };
+    if (!known.length) return { kind: "new" };
+    const latest = known.reduce((current, item) => revisionOf(item) >= revisionOf(current) ? item : current);
+    const rejected = (reason: string): Admission => ({ kind: "rejected", reason });
+    if (run && (run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status))) return rejected(`Run is ${run.cancelled ? "cancelled" : run.status}; requirement revisions are not accepted`);
+    if (latest.sessionId !== delegation.sessionId || latest.correlationId !== delegation.correlationId) return rejected("Requirement change belongs to another correlation or session");
+    if (delegation.metadata?.isRequirementChange !== true) return rejected("Run already belongs to another delegation; only a requirement change may revise it");
+    const incoming = revisionOf(delegation), current = revisionOf(latest);
+    if (incoming === current) return rejected(`Requirement revision ${incoming} is already admitted with different content`);
+    if (incoming < current) return rejected(`Stale requirement revision ${incoming} (current ${current})`);
+    // Tasks already in Core were planned against the old criteria; re-planning them safely is not supported, so the user starts over.
+    if (run?.coreCreated) return rejected("Run already executing tasks; cancel it and start a new run");
+    return { kind: "revision", revision: incoming };
+  }
+  /** Revisions of this run that Runtime still owes Conversation delivery for. Refused and cancelled ones do not count. */
+  private inFlightDelegations(state: JournalState, runId: string | undefined): DelegationRequest[] {
+    if (runId === undefined) return [];
+    const refused = new Set(state.inbox.filter(item => item.status === "rejected").map(item => item.message.message_id));
+    return state.outbound.filter(out => out.message.run_id === runId && isConversationHandoff(out.message) && out.status !== "cancelled" &&
+      !refused.has(out.message.message_id)).map(out => DelegationRequestSchema.parse(out.message.payload));
+  }
+  /** One user-facing notice per refused handoff, with the cause and the ways forward. Idempotent by message id. */
+  private notifyRejection(state: JournalState, outbox: HerdrOutbox, message: RoleMessage, reason: string): void {
+    const id = `p19-${digest([message.run_id, "delegation-rejected", message.message_id])}`;
+    if (state.outbound.some(out => out.message.message_id === id)) return;
+    outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: message.correlation_id, causation_id: message.message_id,
+      run_id: message.run_id, sender: { role: "runtime" }, recipient: { role: "conversation" }, type: "conversation.progress",
+      payload: { kind: "delegation_rejected", runId: message.run_id, reason, blockageReason: reason, headline: `Yêu cầu bị từ chối: ${reason}`,
+        options: REJECTED_REVISION_OPTIONS }, artifact_references: [], occurred_at: this.now(), idempotency_key: id }));
+  }
+  /**
+   * Admits a requirement revision: the run keeps its earlier delegation in history and plans again from the new criteria. The pending
+   * design approval and pending user decisions are superseded; Conversation hears about them once, with their approval ids.
+   */
+  private admitRevision(state: JournalState, outbox: HerdrOutbox, run: RunRecord, delegation: DelegationRequest): void {
+    const revision = revisionOf(delegation);
+    const superseded: { approvalId: string; supersededByRevision: number }[] = [];
+    if (run.approval) superseded.push({ approvalId: run.approval.approvalId, supersededByRevision: revision });
+    // Work built from the old criteria that was never sent is withdrawn. Anything already sent stays: Runtime never recalls it.
+    for (const out of state.outbound) if (out.status === "queued" && out.message.run_id === run.runId && out.message.type === "delegation.request" &&
+        out.message.sender.role === "coordinator" && !["coordinator", "conversation"].includes(out.message.recipient.role)) {
+      out.status = "cancelled"; out.error = `Superseded by requirement revision ${revision}`;
+    }
+    for (const entry of Object.values(run.userDecisions ?? {})) if (entry.status === "pending") {
+      entry.status = "cancelled"; superseded.push({ approvalId: entry.request.approvalId, supersededByRevision: revision });
+      // The asker is waiting for an answer that can no longer come; it is resumed with the outcome instead of waiting forever.
+      this.resumeUserDecisionAsker(outbox, run, entry, { kind: "user_decision_answer", approvalId: entry.request.approvalId, outcome: "cancelled",
+        reason: `Requirement revision ${revision} superseded this question` });
+    }
+    if (superseded.length) {
+      run.supersededApprovals = [...(run.supersededApprovals ?? []), ...superseded];
+      const approvalIds = superseded.map(item => item.approvalId);
+      this.emit(state, outbox, run, "conversation.progress", { kind: "approval_superseded", runId: run.runId, approvalIds, supersededByRevision: revision,
+        headline: `Phê duyệt đang chờ bị thay thế bởi revision ${revision}: ${approvalIds.join(", ")}` },
+      `approval-superseded:${revision}`, "conversation");
+    }
+    run.delegationHistory = [...(run.delegationHistory ?? []), run.delegation];
+    run.delegation = delegation;
+    delete run.definition; delete run.workflowSpec; delete run.baseRevision; delete run.approval; delete run.approvalKind;
+    run.tasks = []; run.status = "intake"; delete run.error;
   }
   async flushOutbound(): Promise<void> {
     await this.initialize();
@@ -394,7 +523,9 @@ export class AgenticWorkflowRuntime {
       const old = state.inbox.find(item => item.message.message_id === message.message_id || item.message.idempotency_key === message.idempotency_key);
       if (old && digest(old.message) !== digest(message)) throw new Error("Conflicting inbound idempotency key");
       if (old?.status === "applied") return json({ duplicate: true });
-      const inbox = old ?? { message, status: "received" as const };
+      // A refused message stays refused: a redelivery is answered with the same reason, never re-admitted against newer state.
+      if (old?.status === "rejected") throw new AdmissionRejectedError(old.reason ?? "Inbound message was refused");
+      const inbox: JournalState["inbox"][number] = old ?? { message, status: "received" };
       if (!old) { state.inbox.push(inbox); await save(); }
       if (message.type === "conversation.intake" || message.type === "conversation.clarification") {
         // Dialogue-only traffic has no DelegationRequest and must never create a workflow.
@@ -414,15 +545,23 @@ export class AgenticWorkflowRuntime {
           await this.cancelRun(state, save, core, outbox, target, cancellation.reason ?? "User requested cancellation");
           inbox.status = "applied"; await save(); return json({ cancellationRequested: true });
         }
+        const admission = this.admitDelegation(state, delegation, []);
+        if (admission.kind === "rejected") {
+          inbox.status = "rejected"; inbox.reason = admission.reason;
+          this.notifyRejection(state, outbox, message, admission.reason); await save();
+          throw new AdmissionRejectedError(admission.reason);
+        }
         let run = state.runs.find(item => item.runId === message.run_id);
-        if (run && digest(run.delegation) !== digest(delegation)) throw new Error("Run already belongs to another delegation");
+        if (admission.kind === "revision") this.admitRevision(state, outbox, run!, delegation);
         if (!run) {
           run = { runId: delegation.runId!, delegation, status: "intake", tasks: [], coreCreated: false,
             cancelled: false, maxIterations: 3 };
           state.runs.push(run);
         }
-        this.emit(state, outbox, run, "delegation.accepted", { delegationId: delegation.delegationId,
-          sdlcStatus: "intake", headline: "Coordinator accepted the objective" }, "accepted");
+        // Revision 1 keeps the historical message key, so journals written before requirement changes are unaffected.
+        const revision = revisionOf(delegation);
+        this.emit(state, outbox, run, "delegation.accepted", { delegationId: delegation.delegationId, revision,
+          sdlcStatus: "intake", headline: "Coordinator accepted the objective" }, revision > 1 ? `accepted:r${revision}` : "accepted");
       } else {
         const run = this.run(state, message.run_id!);
         if (message.correlation_id !== run.delegation.correlationId) throw new Error("Wrong run correlation");
@@ -430,6 +569,8 @@ export class AgenticWorkflowRuntime {
         if (message.type === "approval.decision") {
           if (message.sender.role !== "conversation") throw new Error("Approval must return via Conversation");
           const decision = ApprovalDecisionSchema.parse(message.payload);
+          const reason = supersededReason(run, decision.approvalId);
+          if (reason !== undefined) { inbox.status = "rejected"; inbox.reason = reason; await save(); throw new AdmissionRejectedError(reason); }
           if (run.userDecisions?.[decision.approvalId] !== undefined) await this.answerUserDecision(state, save, outbox, run, decision);
           else await this.applyDecision(state, save, core, outbox, run, decision);
         } else if (message.type === "execution.receipt") {
@@ -1547,9 +1688,9 @@ export class AgenticWorkflowRuntime {
     if (!message.run_id) return;
     await this.transaction(async (state, save, _core, outbox) => {
       const run = state.runs.find(item => item.runId === message.run_id);
-      if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) return;
+      if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || this.refused(state, message.message_id)) return;
       const subject = `native delivery ${operationId} (${message.type} to ${message.recipient.role}, ${message.message_id})`;
-      this.surfaceFailure(state, outbox, run, subject, redactString(reason));
+      this.surfaceFailure(state, outbox, run, message.message_id, "transport_uncertain", subject, redactString(reason));
       if (message.recipient.role !== "coordinator" && message.sender.role !== "coordinator") {
         const wakeId = `p19-wake-${digest([run.runId, "delivery-failure", operationId])}`;
         if (!state.outbound.some(out => out.message.message_id === wakeId)) {

@@ -75,7 +75,7 @@ const APPROVAL_PAYLOAD = z.object({
 }).passthrough();
 
 /** Kinds that name a run which cannot progress without the user. Runtime-authored failures carry `blockageReason` instead of `reason`. */
-const BLOCKED_KINDS = ["workflow_blocked", "run_stalled", "workflow_rejected", "delivery_failure", "coordinator_no_response",
+const BLOCKED_KINDS = ["workflow_blocked", "run_stalled", "workflow_rejected", "delivery_failure", "delegation_rejected", "coordinator_no_response",
   "developer_no_response", "specialist_no_response", "verification_stuck"] as const;
 const BLOCKED_PAYLOAD = z.object({
   kind: z.enum(BLOCKED_KINDS),
@@ -89,6 +89,7 @@ const BLOCKED_LABEL: Record<(typeof BLOCKED_KINDS)[number], string> = {
   run_stalled: "run bị treo",
   workflow_rejected: "workflow bị từ chối",
   delivery_failure: "gửi tin nhắn thất bại",
+  delegation_rejected: "yêu cầu cập nhật bị từ chối",
   coordinator_no_response: "Coordinator không phản hồi",
   developer_no_response: "Developer không phản hồi",
   specialist_no_response: "vai trò chuyên môn không phản hồi",
