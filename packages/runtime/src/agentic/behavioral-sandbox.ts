@@ -68,7 +68,6 @@ export async function sandboxBehavior(command: BoundBehavioralCommand, checkout:
   if (!(await lstat(binary)).isFile()) throw new Error("Behavioral executable must resolve to a regular file");
   args.push("--ro-bind", binary, command.executable);
   const checkoutMounts = await checkoutDependencyMounts(command, checkout);
-  await validateDependencyTrees([...(command.dependencyRoots ?? []), ...checkoutMounts.map(([from]) => from)], command.dependencySource);
   for (const path of command.dependencyRoots ?? []) {
     // Only dependency trees can be imported; mounting a project or a home would
     // expose host state and turn this into an ineffective read-only wrapper.
@@ -76,6 +75,7 @@ export async function sandboxBehavior(command: BoundBehavioralCommand, checkout:
       throw new Error("Behavioral dependency roots must be canonical node_modules directories");
     args.push("--ro-bind", path, path);
   }
+  await validateDependencyTrees([...(command.dependencyRoots ?? []), ...checkoutMounts.map(([from]) => from)], command.dependencySource);
   // Runtime-detected dependencies keep their repository-relative layout (pnpm relative symlinks resolve inside the checkout).
   for (const [from, to] of checkoutMounts) args.push("--ro-bind", from, to);
   for (const mount of command.adapter?.mounts ?? []) {
@@ -124,7 +124,7 @@ export async function validateRunnerMount(mount: RunnerMount, checkout: string):
       for (const entry of await readdir(directory, { withFileTypes: true })) {
         if (++count > 100000) throw new Error("Toolchain/cache inspection exceeds bounds");
         const path = join(directory, entry.name);
-        if (secret.test(path) || /^(?:auth\.json|token|tokens|passwords|id_rsa|id_ed25519)$/.test(entry.name)) throw new Error("Credential material in toolchain/cache mount");
+        if (secret.test(path) || (/^(?:auth\.json|tokens|passwords|id_rsa|id_ed25519)$/.test(entry.name) || entry.name === "token" && !entry.isDirectory())) throw new Error("Credential material in toolchain/cache mount");
         if (entry.isDirectory()) pending.push(path);
         else if (entry.isSymbolicLink()) {
           const real = await realpath(path).catch(() => "");

@@ -92,7 +92,6 @@ describe.skipIf(process.platform !== "linux" || (await probeBehavioralSandbox())
     const f = await fixture(), dependencies = join(f.root, "node_modules"), packageDirectory = join(dependencies, "trusted-fixture");
     await mkdir(packageDirectory, { recursive: true });
     const modulePath = join(packageDirectory, "index.cjs"); await writeFile(modulePath, "module.exports=42;\n");
-    await symlink(f.secret, join(packageDirectory, "host-secret-link"));
     // Use a disposable copy so this attack fixture never risks the host's real Node binary.
     const executable = join(f.root, "disposable-node"); await copyFile(await realpath(process.execPath), executable, constants.COPYFILE_FICLONE); await chmod(executable, 0o700);
     const before = await stat(executable);
@@ -101,7 +100,6 @@ describe.skipIf(process.platform !== "linux" || (await probeBehavioralSandbox())
       assert.throws(()=>fs.writeFileSync(${JSON.stringify(modulePath)},'module.exports=0'),error=>error.code==='EROFS');
       assert.throws(()=>fs.chmodSync(${JSON.stringify(modulePath)},0o777));
       assert.throws(()=>fs.unlinkSync(${JSON.stringify(modulePath)}));
-      assert.throws(()=>fs.readFileSync(${JSON.stringify(join(packageDirectory, "host-secret-link"))}));
       assert.throws(()=>fs.writeFileSync(process.execPath,'compromised'));
       assert.throws(()=>fs.chmodSync(process.execPath,0o777),error=>error.code==='EROFS');
       assert.throws(()=>fs.utimesSync(process.execPath,new Date(0),new Date(0)),error=>error.code==='EROFS');
@@ -110,6 +108,8 @@ describe.skipIf(process.platform !== "linux" || (await probeBehavioralSandbox())
     expect(await readFile(modulePath, "utf8")).toBe("module.exports=42;\n");
     expect((await stat(executable)).size).toBe(before.size); expect((await stat(executable)).mtimeMs).toBe(before.mtimeMs);
     expect(await readFile(f.secret, "utf8")).toBe("private host credential fixture");
+    await symlink(f.secret, join(packageDirectory, "host-secret-link"));
+    await expect(sandboxBehavior({ ...f.command, executable, dependencyRoots: [dependencies] }, f.cwd, f.command.args)).rejects.toThrow("Dependency symlink escapes");
   });
   it("rejects noncanonical or non-node_modules dependency mounts and unavailable executables without fallback", async () => {
     const f = await fixture(); await mkdir(join(f.root, "dependencies"));

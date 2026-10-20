@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { copyIsolatedNodeDependencies } from "../helpers/isolated-node-dependencies.js";
 import { HostVerification } from "../../src/agentic/host-verification.js";
 import type { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import { bindRunnerProfile, measureBehavior, type RunnerProfile } from "../../src/agentic/behavioral-runner.js";
@@ -149,7 +150,7 @@ for (const candidate of cases) describe(`production independent measurement: ${c
     }
     const fixture = candidate.fixture(phase), repo = await repository(fixture.files);
     if (candidate.dependency) {
-      await cp(await realpath(installedDependencies), join(repo.cwd, "node_modules"), { recursive: true, verbatimSymlinks: true });
+      await copyIsolatedNodeDependencies(installedDependencies, join(repo.cwd, "node_modules"));
     }
     const detected = await detectTestRunners(repo.cwd);
     const profile = detected.status === "detected" ? detected.profiles.find(value => value.method === "unit_test" && candidate.select(value)) : undefined;

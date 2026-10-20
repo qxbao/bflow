@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { copyIsolatedNodeDependencies } from "../helpers/isolated-node-dependencies.js";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { probeBehavioralSandbox } from "../../src/agentic/sandbox-readiness.js";
@@ -29,7 +30,11 @@ async function fixture(taskType = "bugfix", reporter: "node_tap" | "vitest_json"
   await writeFile(join(cwd, "source.cjs"), "module.exports=x=>x+1;\n"); git("add", "."); git("commit", "-m", "baseline"); const base = git("rev-parse", "HEAD");
   const commit = (message: string) => { git("add", "."); git("commit", "-m", message); return git("rev-parse", "HEAD"); };
   await writeFile(join(cwd, "test/behavior.test.cjs"), reporter === "vitest_json" ? vitestSource : testSource); const redRevision = commit("failing acceptance test");
-  const command = parseBehavioralCommands([{ id: "node-unit", command: "owner:test-unit", executable: process.execPath, args: reporter === "vitest_json" ? [vitestCli, "run", "--globals", "--reporter=json", "--no-cache", "--maxWorkers=1", "--minWorkers=1", "test/behavior.test.cjs"] : ["--test", "--test-reporter=tap", "test/behavior.test.cjs"], ...(reporter === "vitest_json" ? { reporter, dependencyRoots: [fileURLToPath(new URL("../../../../node_modules", import.meta.url))] } : {}), method: "unit_test", levels: ["unit", "regression"], testNames: [testName], testPaths: ["test/behavior.test.cjs"],
+  const sourceDependencies = fileURLToPath(new URL("../../../../node_modules", import.meta.url));
+  const dependencies = join(root, "node_modules");
+  if (reporter === "vitest_json") await copyIsolatedNodeDependencies(sourceDependencies, dependencies);
+  const stagedVitest = join(dependencies, relative(sourceDependencies, vitestCli));
+  const command = parseBehavioralCommands([{ id: "node-unit", command: "owner:test-unit", executable: process.execPath, args: reporter === "vitest_json" ? [stagedVitest, "run", "--globals", "--reporter=json", "--no-cache", "--maxWorkers=1", "--minWorkers=1", "test/behavior.test.cjs"] : ["--test", "--test-reporter=tap", "test/behavior.test.cjs"], ...(reporter === "vitest_json" ? { reporter, dependencyRoots: [dependencies] } : {}), method: "unit_test", levels: ["unit", "regression"], testNames: [testName], testPaths: ["test/behavior.test.cjs"],
     // A nested Vitest needs more than 3 s to start under full-suite load; deadline handling is covered with timeoutMs: 1 below.
     timeoutMs: reporter === "vitest_json" ? 15_000 : 3000 }])[0]!;
   const policyAssessment = assessment(taskType);

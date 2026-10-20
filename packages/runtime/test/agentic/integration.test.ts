@@ -1,6 +1,7 @@
 import { mkdtemp, mkdir, writeFile, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { copyIsolatedNodeDependencies } from "../helpers/isolated-node-dependencies.js";
+import { join, relative } from "node:path";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID, generateKeyPairSync } from "node:crypto";
@@ -233,9 +234,14 @@ async function automaticRunners(): Promise<TestRunnerSource> {
 }
 async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json", maxIterations = 3, automatic = false) {
   const testPath = "test/double.test.cjs", sourcePath = "src/double.cjs";
+  const dependencies = await realpath(await mkdtemp(join(tmpdir(), "bflow-integration-deps-")));
+  cleanups.push(() => rm(dependencies, { recursive: true, force: true }));
+  const sourceDependencies = await realpath("node_modules"), staged = join(dependencies, "node_modules");
+  if (reporter === "vitest_json") await copyIsolatedNodeDependencies(sourceDependencies, staged);
+  const vitest = join(staged, relative(sourceDependencies, createRequire(import.meta.url).resolve("vitest/vitest.mjs")));
   const command = parseBehavioralCommands([{ id: "real-regression", command: "owner:double-regression", executable: process.execPath,
-    args: reporter === "node_tap" ? ["--test", "--test-reporter=tap", testPath] : [createRequire(import.meta.url).resolve("vitest/vitest.mjs"), "run", "--globals", "--reporter=json", "--no-cache", "--maxWorkers=1", "--minWorkers=1", testPath],
-    ...(reporter === "vitest_json" ? { reporter, dependencyRoots: [await realpath("node_modules")] } : {}), method: "integration_test", levels: ["integration", "regression"],
+    args: reporter === "node_tap" ? ["--test", "--test-reporter=tap", testPath] : [vitest, "run", "--globals", "--reporter=json", "--no-cache", "--maxWorkers=1", "--minWorkers=1", testPath],
+    ...(reporter === "vitest_json" ? { reporter, dependencyRoots: [staged] } : {}), method: "integration_test", levels: ["integration", "regression"],
     testPaths: [testPath], testNames: [phaseTestName], timeoutMs: 10_000 }])[0]!;
   const runners = automatic ? await automaticRunners() : undefined;
   const f = await fixture({ behavioral: automatic ? { ...command, command: "auto:integration" } : command, runners });
