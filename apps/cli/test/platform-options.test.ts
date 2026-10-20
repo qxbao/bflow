@@ -102,6 +102,7 @@ describe("buildHostPlatformOptions", () => {
 
   it("selects provider defaults independently and preserves profile inheritance for the dynamic Developer", async () => {
     const input = configure(environment => {
+      environment.roles = environment.roles.filter(role => role.role !== "developer");
       Object.assign(environment, { defaults: {
         codex: { "profile-name": "work" },
         claude: { "profile-name": "personal" },
@@ -192,7 +193,7 @@ describe("buildHostPlatformOptions", () => {
   });
 
   it("adds a Developer template using the Coordinator's provider when none is configured", async () => {
-    const input = configure(environment => { environment.roles = environment.roles.map(role => ({ ...role, cli: role.role === "coordinator" ? "agy" : "claude" })); });
+    const input = configure(environment => { environment.roles = environment.roles.filter(role => role.role !== "developer").map(role => ({ ...role, cli: role.role === "coordinator" ? "agy" : "claude" })); });
     const options = await buildHostPlatformOptions(input, { context, fileExists: absent });
     const developer = options.roles.find(role => role.role === "developer");
     expect(developer).toMatchObject({ provider: "agy", required: false });
@@ -201,6 +202,7 @@ describe("buildHostPlatformOptions", () => {
 
   it("carries role model and effort settings and inherits them for an implicit Developer template", async () => {
     const input = configure(environment => {
+      environment.roles = environment.roles.filter(role => role.role !== "developer");
       environment.roles = environment.roles.map(role => role.role === "coordinator"
         ? { ...role, model: "codex-main", effort: "xhigh" as const }
         : role);
@@ -215,10 +217,13 @@ describe("buildHostPlatformOptions", () => {
       environment.roles = environment.roles.map(role => role.role === "coordinator"
         ? { ...role, model: "coordinator-model", effort: "high" as const }
           : role);
-      environment.roles.push({ role: "developer", cli: "claude", required: true, model: "developer-model", effort: "xhigh" });
+      environment.roles = environment.roles.map(role => role.role === "developer"
+        ? { ...role, cli: "claude", model: "developer-model", effort: "xhigh" as const }
+        : role);
     });
     const options = await buildHostPlatformOptions(input, { context, fileExists: absent });
-    expect(options.roles.find(role => role.role === "developer")).toMatchObject({ model: "developer-model", effort: "xhigh" });
+    expect(options.roles.filter(role => role.role === "developer")).toHaveLength(1);
+    expect(options.roles.find(role => role.role === "developer")).toMatchObject({ provider: "claude", model: "developer-model", effort: "xhigh", required: false });
   });
 
   it("requires a coordinator role", async () => {

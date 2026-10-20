@@ -910,12 +910,21 @@ describe("DefaultPlatformReadinessService", () => {
     const stateRoot = join(baseDir, "engine-state");
     const realHome = join(baseDir, "engine-home");
     await mkdir(realHome, { mode: 0o700 });
+    const bin = join(baseDir, "engine-bin");
+    await mkdir(bin, { mode: 0o700 });
+    // Profile creation checks for a CLI even with --no-login, but must never launch it.
+    await writeFile(join(bin, "claude"), "#!/bin/sh\necho 'unexpected Claude launch' >&2\nexit 99\n", { mode: 0o700 });
     const engine = join(import.meta.dirname, "../../../..", "apps", "cli", "isolation", "bin", "ai-isolator");
     const generated = spawnSync("bash", [
       "-c", 'umask 002; exec "$@"', "bflow-iso-test", engine, "claude", "--name", "work", "--no-login"
     ], {
       cwd: baseDir,
-      env: { ...process.env, HOME: realHome, AI_ISOLATOR_HOME: stateRoot, AI_ISOLATOR_SHELL: "bash" },
+      env: {
+        HOME: realHome,
+        PATH: `${bin}:/usr/bin:/bin`,
+        AI_ISOLATOR_HOME: stateRoot,
+        AI_ISOLATOR_SHELL: "bash"
+      },
       encoding: "utf8"
     });
     expect(generated.status, generated.stderr).toBe(0);

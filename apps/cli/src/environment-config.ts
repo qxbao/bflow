@@ -151,7 +151,7 @@ export function defaultEnvironmentConfig(repository: RepositoryIdentity, name?: 
     environment: {
       repositoryId: repository.id, workspaceRoot: repository.root, sessionName: repository.sessionName,
       herdrBinary: "herdr",
-      roles: ["conversation", "coordinator", "planner", "architect", "specifier", "reviewer", "qa"].map((role) => ({ role: AgentRoleSchema.parse(role), cli: provider, required: true })),
+      roles: ["conversation", "coordinator", "planner", "architect", "specifier", "developer", "reviewer", "qa"].map((role) => ({ role: AgentRoleSchema.parse(role), cli: provider, required: role !== "developer" })),
       sdd: { minimumLevel: "lightweight", approvalRequired: true }, tdd: { policy: "conditional" },
       verification: { maxIterations: 3, onExhausted: "require_human" }, concurrency: { maxConcurrency: 2 },
       startupTimeoutMs: 300_000, shutdownTimeoutMs: 30_000,

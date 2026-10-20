@@ -78,6 +78,7 @@ export function renderEnvironmentConfigYaml(value: unknown): string {
     .replace(/^projectName:/m, "# Storage paths and repository identity live below the frequently edited agent choices.\nprojectName:");
   return [
     "# Bflow repository configuration. Change agent choices first; the provider default model is used when omitted.",
+    "# Developer is a dynamic task/worktree template; it does not create a permanent startup pane.",
     "# A dynamically spawned Developer role without an explicit entry inherits the Coordinator's provider/model/effort/profile.",
     "# effort is optional (minimal, low, medium, high, xhigh, max); valid values depend on the provider.",
     "# Agy encodes effort in the model name, so do not set effort for an agy role.",

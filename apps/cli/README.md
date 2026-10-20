@@ -152,8 +152,10 @@ persistent P19 host; P12 không triển khai logic Coordinator hay workflow poli
 Khóa trùng lặp, nhiều document, khóa mapping không phải chuỗi, tag tường minh,
 merge key và alias vòng hoặc quá mức đều bị từ chối. Một config được sao chép/di chuyển sang
 checkout khác sẽ fail xác thực định danh thay vì gắn vào repository gốc. Một
-Developer role được spawn động mà không có role entry riêng
-kế thừa provider, model và effort của Coordinator.
+Config mặc định có entry `developer` với provider đã chọn khi init và `required: false`.
+Entry này là mẫu khởi chạy động trong worktree của task, không tạo pane thường trực khi
+`bflow up`. Có thể đặt CLI/model/effort/profile riêng cho Developer. Nếu bỏ entry này,
+Developer kế thừa provider, model, effort và profile của Coordinator.
 
 Định danh session là `bf-` cộng 20 ký tự hex của SHA-256 trên
 checkout root chuẩn tắc và thư mục Git tuyệt đối. Do đó các repository có basename giống nhau

@@ -145,8 +145,13 @@ describe("P12 repository environment lifecycle", () => {
     }));
     await writeFile(path, renderEnvironmentConfigYaml(config));
     runner.authenticated = false;
+    const profileLifecycle = new EnvironmentLifecycle(dir, {
+      runner, env: { PATH: "" },
+      providerOverrides: { codex: { available: true } },
+      integration: { manager: fixture.manager, runtime: mockRuntime(), quiesce: async () => ({ ok: true, value: undefined }) }
+    });
 
-    await expect(lifecycle.up()).rejects.toThrow("not authenticated");
+    await expect(profileLifecycle.up()).rejects.toThrow("not authenticated");
     expect(runner.authCommands).toEqual(["codex login status"]);
   });
 
@@ -200,7 +205,7 @@ describe("P12 repository environment lifecycle", () => {
   linuxIt("does not require a dynamic Developer template to have a permanent startup pane", async () => {
     const path = join(dir, ".bflow/config.yml");
     const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
-    config.environment.roles.push({ role: "developer", cli: "codex", required: true });
+    expect(config.environment.roles.find(role => role.role === "developer")).toMatchObject({ cli: "codex", required: false });
     await writeFile(path, renderEnvironmentConfigYaml(config));
     const manifest = await lifecycle.up();
     expect(manifest.status).toBe("up");
@@ -496,7 +501,11 @@ describe("P12 repository environment lifecycle", () => {
       expect((await runCli(["init", "--provider", "claude"], { cwd: other })).ok).toBe(true);
       const path = join(other, ".bflow/config.yml");
       const before = await readFile(path, "utf8");
-      expect(EnvironmentConfigSchema.parse(parseConfigYaml(before)).environment.roles.every(role => role.cli === "claude")).toBe(true);
+      const config = EnvironmentConfigSchema.parse(parseConfigYaml(before));
+      expect(config.environment.roles.every(role => role.cli === "claude")).toBe(true);
+      expect(config.environment.roles.filter(role => role.role === "developer")).toEqual([
+        { role: "developer", cli: "claude", required: false }
+      ]);
       expect((await runCli(["init", "--provider", "codex"], { cwd: other })).ok).toBe(true);
       expect(await readFile(path, "utf8")).toBe(before);
     } finally { await rm(other, { recursive: true, force: true }); }
