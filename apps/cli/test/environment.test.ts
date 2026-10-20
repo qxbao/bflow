@@ -155,20 +155,39 @@ describe("P12 repository environment lifecycle", () => {
     const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
     config.environment.allowProviderFallback = true;
     config.environment.defaults = { claude: { "profile-name": "fallback-profile" } };
-    config.environment.roles = config.environment.roles.map(role => role.role === "conversation"
-      ? { ...role, cli: "claude", required: true }
-      : role.role === "coordinator"
+    config.environment.roles = config.environment.roles.map(role =>
+      role.role === "conversation" || role.role === "coordinator"
         ? { ...role, required: true, fallbackCli: "claude" }
         : { ...role, required: false });
     await writeFile(path, renderEnvironmentConfigYaml(config));
     runner.authenticated = false;
     const fallbackLifecycle = new EnvironmentLifecycle(dir, {
       runner, integration: { manager: fixture.manager, runtime: mockRuntime(), quiesce: async () => ({ ok: true, value: undefined }) },
-      providerOverrides: { codex: { available: false } }
+      providerOverrides: { codex: { available: false }, claude: { available: true, authenticated: false } }
     });
 
     expect((await fallbackLifecycle.up()).status).toBe("up");
+    expect(runner.requests.some(request => ["codex", "claude", "agy"].includes(request.executable))).toBe(false);
     expect(runner.authCommands).toEqual([]);
+  });
+
+  linuxIt("checks fallback provider presence after applying the fallback profile default", async () => {
+    const path = join(dir, ".bflow/config.yml");
+    const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
+    config.environment.allowProviderFallback = true;
+    config.environment.defaults = { claude: { "profile-name": "fallback-profile" } };
+    config.environment.roles = config.environment.roles.map(role =>
+      role.role === "conversation" || role.role === "coordinator"
+        ? { ...role, required: true, fallbackCli: "claude" }
+        : { ...role, required: false });
+    await writeFile(path, renderEnvironmentConfigYaml(config));
+    const fallbackLifecycle = new EnvironmentLifecycle(dir, {
+      runner, integration: { manager: fixture.manager, runtime: mockRuntime(), quiesce: async () => ({ ok: true, value: undefined }) },
+      providerOverrides: { codex: { available: false }, claude: { available: false } }
+    });
+
+    await expect(fallbackLifecycle.up()).rejects.toThrow("Missing fallback agent provider executable 'claude'");
+    expect(fixture.manager.up).not.toHaveBeenCalled();
   });
   linuxIt("does not shut down a healthy preexisting session when startup validation fails before mutation", async () => {
     await lifecycle.up();

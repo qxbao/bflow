@@ -324,38 +324,47 @@ export class EnvironmentLifecycle {
       const hasSelectedProfile = (role: EnvironmentRoleConfig) =>
         role["profile-name"] !== undefined ||
         selectedProfiles?.[role.cli as "claude" | "codex" | "agy"]?.["profile-name"] !== undefined;
+      const providerAvailable = async (role: EnvironmentRoleConfig, cli: "claude" | "codex" | "agy") => {
+        const override = this.dependencies.providerOverrides?.[cli];
+        if (override?.available !== undefined) return override.available;
+        if (override?.readiness === "missing_binary") return false;
+        if (cliAvailableCache.has(cli)) return cliAvailableCache.get(cli)!;
+        let available: boolean;
+        if (hasSelectedProfile(role)) {
+          const path = this.env[process.platform === "win32" ? "Path" : "PATH"] ?? this.env["PATH"] ?? "";
+          available = await findExecutable(cli, path.split(delimiter), process.platform) !== null;
+        } else {
+          const probe = await this.runner.run({
+            executable: cli,
+            args: ["--version"],
+            cwd: repository.root,
+            env: namedSessionEnvironment(repository.sessionName),
+            timeoutMs: Math.min(5000, deadline.remaining())
+          }).catch(() => null);
+          available = probe !== null && probe.exitCode === 0;
+        }
+        cliAvailableCache.set(cli, available);
+        return available;
+      };
       for (const role of rolesToRun) {
         if (role.required ?? true) {
           const cli = role.cli as "claude" | "codex" | "agy";
-          const override = this.dependencies.providerOverrides?.[cli];
-          let available = override?.available;
-          if (available === undefined) {
-            if (override?.readiness === "missing_binary") {
-              available = false;
-            } else if (cliAvailableCache.has(cli)) {
-              available = cliAvailableCache.get(cli)!;
-            } else if (hasSelectedProfile(role)) {
-              const path = this.env[process.platform === "win32" ? "Path" : "PATH"] ?? this.env["PATH"] ?? "";
-              available = await findExecutable(cli, path.split(delimiter), process.platform) !== null;
-              cliAvailableCache.set(cli, available);
-            } else {
-              const probe = await this.runner.run({
-                executable: cli,
-                args: ["--version"],
-                cwd: repository.root,
-                env: namedSessionEnvironment(repository.sessionName),
-                timeoutMs: Math.min(5000, deadline.remaining())
-              }).catch(() => null);
-              available = probe !== null && probe.exitCode === 0;
-              cliAvailableCache.set(cli, available);
-            }
-          }
+          let available = await providerAvailable(role, cli);
           if (!available) {
             if (config.environment.allowProviderFallback === true && role.fallbackCli) {
               const previousProvider = role.cli;
               fallbackNotices.push(`Role '${role.role}' fell back from '${role.cli}' to '${role.fallbackCli}'.`);
               role.cli = role.fallbackCli;
               if (role.cli !== previousProvider) delete role["profile-name"];
+              const fallbackProvider = role.cli as "claude" | "codex" | "agy";
+              available = await providerAvailable(role, fallbackProvider);
+              if (!available) {
+                const displayName = fallbackProvider === "codex" ? "OpenAI Codex CLI ('codex')" :
+                  fallbackProvider === "claude" ? "Claude Code CLI ('claude')" : "Antigravity CLI ('agy')";
+                const remediation = `Install ${displayName} and ensure it is on PATH, then run 'bflow doctor'.`;
+                fail(`Missing fallback agent provider executable '${fallbackProvider}'. ${remediation}`,
+                  { component: `provider:${fallbackProvider}`, remediation });
+              }
             } else {
               const displayName = cli === "codex" ? "OpenAI Codex CLI ('codex')" : cli === "claude" ? "Claude Code CLI ('claude')" : "Antigravity CLI ('agy')";
               const remediation = `Install ${displayName} and ensure it is on PATH, then run 'bflow doctor'.`;
