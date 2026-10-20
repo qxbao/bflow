@@ -26,6 +26,18 @@ const FINAL_TASK = "workflow-verification";
 const VERIFICATION_RETRY_PREFIX = "Verification delivery/storage requires reconciliation:";
 const VERIFICATION_ATTEMPT_LIMIT = 3;
 const RUN_STEP_FAILURE_PREFIX = "Run step failed:";
+/**
+ * Stop observations per cancelled execution before it is reported for manual reconciliation. Bounded so an unresponsive pane is
+ * never polled forever, and never resent: an interrupt is issued once and only observed afterwards.
+ */
+export const CANCEL_STOP_OBSERVATION_LIMIT = 5;
+// Short: the wait runs inside tick(), which holds the journal lock.
+const CANCEL_STOP_OBSERVATION_WAIT_MS = 500;
+/** A live execution that cancellation must stop: Developer or specialist work, never a Conversation or Coordinator message. */
+function isStoppableExecution(out: Outbound): boolean {
+  return ["task.assignment", "verification.requested", "delegation.request"].includes(out.message.type) &&
+    !["coordinator", "conversation"].includes(out.message.recipient.role);
+}
 const DELIVERY_FAILURE_OPTIONS = ["Check the recipient role pane in Herdr; delivery retries automatically once it is ready",
   "Restart the role with `bflow up` if its pane is gone", "Cancel this run"];
 const UNCERTAIN_DELIVERY_OPTIONS = ["Ask Coordinator to reconcile the uncertain handoff (reconcile_delivery) before any resend", "Cancel this run"];
@@ -1356,7 +1368,11 @@ export class AgenticWorkflowRuntime {
             if (run.error?.startsWith(RUN_STEP_FAILURE_PREFIX)) delete run.error;
           } catch (error) { this.recordRunStepFailure(state, outbox, run, error); }
         }
-        if (!this.quiesced) { await outbox.flush((out, handle) => this.bind(state, core, out, handle)); this.surfaceOutboundFailures(state, outbox); }
+        if (!this.quiesced) {
+          // Before the flush, so a run's final cancellation notice is delivered in this same tick.
+          await this.reconcileCancellations(state, save, core, outbox);
+          await outbox.flush((out, handle) => this.bind(state, core, out, handle)); this.surfaceOutboundFailures(state, outbox);
+        }
         await save(); return jobs;
       } finally { this.activeState = undefined; }
     });
@@ -1581,6 +1597,8 @@ export class AgenticWorkflowRuntime {
   }
   private async cancelRun(state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox,
     run: RunRecord, reason: string): Promise<void> {
+    // A repeated cancel after reconciliation must not add a second cancellation notice.
+    if (run.cancelReconciled) return;
     if (!run.cancelled) { run.cancelled = true; run.status = "cancelled"; run.error = textField(reason); await save(); }
     if (run.coreCreated) {
       const snapshot = await core.snapshot(run.runId);
@@ -1592,27 +1610,116 @@ export class AgenticWorkflowRuntime {
       }
     }
     for (const waiter of this.gateWaiters.values()) if (waiter.runId === run.runId) waiter.reject(new Error("Run cancellation requested"));
-    for (const out of state.outbound.filter(item => item.message.run_id === run.runId &&
-      ["task.assignment", "verification.requested", "delegation.request"].includes(item.message.type) &&
-      !["coordinator", "conversation"].includes(item.message.recipient.role))) {
+    for (const out of state.outbound.filter(item => item.message.run_id === run.runId && isStoppableExecution(item))) {
       if (out.status === "queued") { out.status = "cancelled"; continue; }
       if (out.status === "sending") out.status = "unknown_delivery";
-      if (out.status === "accepted" && out.handle && !out.cancelRequested) {
-        try { await outbox.renew(out); } catch (error) { out.error = `Cancellation lease unresolved: ${String(error)}`; await save(); continue; }
-        out.cancelRequested = true; await save();
-        // An accepted interrupt is not confirmation of stop. Keep leases/worktrees and Core cancelling state.
-        const version = run.coreCreated ? (await core.snapshot(run.runId)).version : 0;
-        const request = CancellationRequestSchema.parse({ schemaVersion: 1, cancellationId: `cancel-${digest(out.message.message_id)}`,
-          runId: run.runId, taskId: out.taskId, requestedBy: "runtime", requestedAt: this.now(), expectedVersion: version,
-          reason, idempotencyKey: `cancel:${out.message.message_id}` });
-        const response = await this.ports.transport.cancel(out.handle, request);
-        out.error = response.ok ? "Interrupt requested; stop unconfirmed" : response.error.message;
-      }
+      if (out.status === "accepted" && out.handle) await this.requestStop(core, outbox, save, run, out, reason);
     }
     if (run.integrationKey) await this.ports.policies.git.cancelIntegration(run.integrationKey);
     for (const task of run.tasks) for (const tree of task.worktrees) await this.ports.policies.git.cancelTask(tree.key);
-    this.progress(state, outbox, run, "Run cancelled; execution stop and retained worktrees require reconciliation");
+    this.progress(state, outbox, run, "Run cancelled; stop confirmation and worktree reconciliation are in progress");
     await save();
+  }
+  /**
+   * Interrupts one accepted execution, at most once: a repeated interrupt could be delivered again to the provider CLI. An accepted
+   * interrupt is not confirmation of stop, so the lease, worktree and Core cancelling state wait for stopObserved.
+   */
+  private async requestStop(core: CoreSession, outbox: HerdrOutbox, save: () => Promise<void>, run: RunRecord, out: Outbound,
+    reason: string): Promise<void> {
+    if (!out.handle || out.cancelRequested) return;
+    try { await outbox.renew(out); } catch (error) { out.error = `Cancellation lease unresolved: ${String(error)}`; await save(); return; }
+    out.cancelRequested = true; await save();
+    const version = run.coreCreated ? (await core.snapshot(run.runId)).version : 0;
+    const request = CancellationRequestSchema.parse({ schemaVersion: 1, cancellationId: `cancel-${digest(out.message.message_id)}`,
+      runId: run.runId, taskId: out.taskId, requestedBy: "runtime", requestedAt: this.now(), expectedVersion: version,
+      reason, idempotencyKey: `cancel:${out.message.message_id}` });
+    const response = await this.ports.transport.cancel(out.handle, request);
+    out.error = response.ok ? "Interrupt requested; stop unconfirmed" : response.error.message;
+  }
+  /**
+   * Herdr `done` is turn completion and a timeout or error is no evidence either, so only an observed `idle` or `cancelled` from
+   * the bound execution proves the stop. Herdr's own cancel acknowledgement reports stopConfirmed:false and is never used here.
+   */
+  private async stopObserved(out: Outbound): Promise<boolean> {
+    const handle = out.handle!;
+    const observed = await this.ports.transport.wait(handle, { until: ["idle", "cancelled"], timeoutMs: CANCEL_STOP_OBSERVATION_WAIT_MS });
+    return observed.ok && ["idle", "cancelled"].includes(observed.value.state) && observed.value.correlationVerified &&
+      observed.value.handle.executionId === handle.executionId;
+  }
+  /**
+   * Reconciles every cancelled run that has not yet reported its final outcome. Each pass observes; it never resends and never
+   * assumes a stop. Stop-unconfirmed executions are bounded by CANCEL_STOP_OBSERVATION_LIMIT, after which they are reported for
+   * manual reconciliation. Core is completed only when every execution is proven stopped, and worktrees are removed only then.
+   */
+  private async reconcileCancellations(state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox): Promise<void> {
+    for (const run of state.runs.filter(item => item.cancelled && !item.cancelReconciled)) {
+      const executions = state.outbound.filter(out => out.message.run_id === run.runId && isStoppableExecution(out));
+      let waiting = false;
+      for (const out of executions.filter(item => item.status === "accepted" && item.handle)) {
+        const attempts = out.cancelObservations ?? 0;
+        try {
+          if (!out.cancelRequested) await this.requestStop(core, outbox, save, run, out, run.error ?? "Run cancelled");
+          else if (attempts < CANCEL_STOP_OBSERVATION_LIMIT && await this.stopObserved(out)) { await outbox.release(out); continue; }
+          // Interrupts and lease renewals count as attempts too, so a pane that never accepts a stop still reaches the bound.
+          if (attempts < CANCEL_STOP_OBSERVATION_LIMIT && out.status === "accepted") out.cancelObservations = attempts + 1;
+        } catch (error) {
+          out.error = `Cancellation observation failed: ${String(error)}`;
+          if (attempts < CANCEL_STOP_OBSERVATION_LIMIT) out.cancelObservations = attempts + 1;
+        }
+        await save();
+        if ((out.cancelObservations ?? 0) < CANCEL_STOP_OBSERVATION_LIMIT && out.status === "accepted") waiting = true;
+      }
+      if (waiting) continue;
+      await this.finishCancellation(state, save, core, outbox, run, executions);
+    }
+  }
+  /** Final, idempotent report for one cancelled run. Core and worktree cleanup happen only when no execution remains unconfirmed. */
+  private async finishCancellation(state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox,
+    run: RunRecord, executions: Outbound[]): Promise<void> {
+    const unresolved: string[] = [];
+    for (const out of executions) {
+      if (out.status === "accepted" && out.handle) unresolved.push(`${out.message.recipient.role} execution ${out.handle.executionId} for ${out.taskId} is not confirmed stopped after ${CANCEL_STOP_OBSERVATION_LIMIT} observations; lease ${out.lease?.leaseId ?? "none"} is retained`);
+      else if (["sending", "unknown_delivery"].includes(out.status)) unresolved.push(`${out.message.recipient.role} delivery for ${out.taskId} is uncertain (${out.message.message_id})`);
+    }
+    const released = executions.filter(out => out.cancelRequested && out.status === "released" && out.lease).length;
+    if (run.coreCreated && unresolved.length === 0) {
+      try { await this.confirmCoreStops(run, core, executions); }
+      catch (error) { unresolved.push(`Core could not record the stop: ${String(error)}`); }
+    }
+    // Worktrees are never removed here: GitPolicy exposes no cleanup, and cancelled work is kept for inspection. They are reported by path.
+    const retained = run.tasks.flatMap(task => task.worktrees).map(tree => tree.worktreePath);
+    if (run.integrationKey) retained.push((await this.ports.policies.git.getIntegration(run.integrationKey)).worktreePath);
+    const coreCancelling = run.coreCreated && (await core.snapshot(run.runId)).status === "cancelling";
+    const worktreeText = `0 worktree(s) removed, ${retained.length} retained${retained.length ? `: ${retained.join(", ")}` : ""}`;
+    const headline = unresolved.length
+      ? `Run cancelled: manual reconciliation required; ${unresolved.length} item(s) not confirmed stopped`
+      : `Run cancelled: fully stopped, ${released} lease(s) released, ${worktreeText}`;
+    const reason = unresolved.length
+      ? [...unresolved, ...(coreCancelling ? ["Core run stays cancelling until these are reconciled"] : []), `Worktrees: ${worktreeText}`,
+        "Options: inspect the role pane in Herdr and stop the process manually, then cancel again only to re-report; leases expire at their TTL",
+        "Options: keep the retained worktrees for inspection or remove them yourself after confirming they hold no needed work"].join("; ")
+      : worktreeText;
+    this.emit(state, outbox, run, "conversation.progress", { sdlcStatus: run.status, headline, reason,
+      ...(unresolved.length ? { blockageReason: reason } : {}) }, "cancel-reconciled", "conversation");
+    run.cancelReconciled = true;
+    await save();
+  }
+  /** Completes Core cancellation through the engine: bound executions first, then unbound tasks, which the engine only accepts last. */
+  private async confirmCoreStops(run: RunRecord, core: CoreSession, executions: Outbound[]): Promise<void> {
+    const cancellationId = `cancel-${digest(run.runId)}`;
+    const stoppedAt = this.now();
+    const confirm = (executionId: string | undefined) => core.mutate(run.runId, current => this.ports.engine.confirmCancellationStop({
+      runId: run.runId, expectedVersion: current.version, idempotencyKey: `cancel-stop:${run.runId}:${executionId ?? "unbound"}`,
+      confirmation: { schemaVersion: 1, cancellationId, ...(executionId !== undefined ? { executionId } : {}), stoppedAt, terminalStatus: "cancelled" }
+    }));
+    const snapshot = await core.snapshot(run.runId);
+    if (snapshot.status !== "cancelling") return;
+    for (const task of snapshot.tasks.filter(item => item.status === "cancelling" && item.agentExecution !== undefined)) {
+      const executionId = task.agentExecution!.executionId;
+      if (!executions.some(out => out.cancelRequested && out.status === "released" && out.handle?.executionId === executionId)) throw new Error(`Execution ${executionId} has no stop evidence`);
+      await confirm(executionId);
+    }
+    if ((await core.snapshot(run.runId)).tasks.some(item => item.status === "cancelling" && item.agentExecution === undefined)) await confirm(undefined);
   }
   /**
    * Host-reported Stop of a specialist turn. A role that still owes an answer (an accepted assignment or delegation with no

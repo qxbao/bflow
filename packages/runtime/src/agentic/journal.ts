@@ -56,6 +56,8 @@ export interface RunRecord {
   delegationHistory?: DelegationRequest[];
   /** Approvals a later requirement revision made obsolete; their decisions are refused with the revision that superseded them. */
   supersededApprovals?: { approvalId: string; supersededByRevision: number }[];
+  /** Set once the run's single final cancellation notice is queued; absent in journals written before cancellation reconciliation. */
+  cancelReconciled?: boolean;
 }
 export interface UserDecisionRecord {
   request: ApprovalRequest; role: AgentRole; agentId: string; paneId: string; taskId: string;
@@ -93,6 +95,8 @@ export interface Outbound {
   selector: string; taskId: string; attemptId: string; capabilities: string[];
   assignment?: AgentAssignment; lease?: AgentLease; request?: AgentRequest; handle?: AgentExecutionHandle;
   error?: string; cancelRequested?: boolean;
+  /** Stop observations made for a cancelled execution; bounded so an unresponsive pane is reported instead of polled forever. */
+  cancelObservations?: number;
   phaseFailureEvidence?: ArtifactReference;
   phaseFailure?: { summary: string; repairable: boolean; applied: boolean };
   /** A control notice borrows its task assignment's lease; it never owns capacity. */
@@ -132,6 +136,7 @@ function parseState(input: unknown, repository: string): JournalState {
     if (run.approval) run.approval = ApprovalRequestSchema.parse(run.approval);
     if (run.userDecisions !== undefined) parseUserDecisions(run.userDecisions, run.runId);
     if (run.delegationHistory !== undefined) run.delegationHistory = run.delegationHistory.map(item => DelegationRequestSchema.parse(item));
+    if (run.cancelReconciled !== undefined && typeof run.cancelReconciled !== "boolean") throw new Error("Invalid cancellation reconciliation flag");
     if (run.supersededApprovals !== undefined) for (const item of run.supersededApprovals) {
       textField(item.approvalId); if (!Number.isSafeInteger(item.supersededByRevision) || item.supersededByRevision < 2) throw new Error("Invalid superseded approval");
     }
@@ -154,6 +159,7 @@ function parseState(input: unknown, repository: string): JournalState {
     if (out.notReadySince !== undefined) { textField(out.notReadySince); if (!Number.isFinite(Date.parse(out.notReadySince))) throw new Error("Invalid not-ready timestamp"); }
     if (out.nextAttemptAt !== undefined) { textField(out.nextAttemptAt); if (!Number.isFinite(Date.parse(out.nextAttemptAt))) throw new Error("Invalid retry timestamp"); }
     if (out.deliveryAttempts !== undefined && (!Number.isSafeInteger(out.deliveryAttempts) || out.deliveryAttempts < 0)) throw new Error("Invalid delivery attempts");
+    if (out.cancelObservations !== undefined && (!Number.isSafeInteger(out.cancelObservations) || out.cancelObservations < 0)) throw new Error("Invalid cancellation observations");
     if (out.coordinatorResponseBaseline !== undefined && (!Number.isSafeInteger(out.coordinatorResponseBaseline) || out.coordinatorResponseBaseline < 0 || out.coordinatorResponseBaseline > state.outbound.length))
       throw new Error("Invalid Coordinator response baseline");
     if (out.assignment) out.assignment = AgentAssignmentSchema.parse(out.assignment);
