@@ -87,7 +87,10 @@ export interface HighLevelRunResult {
 
 function groupHelp(group: string): string {
   const specs = ENTRIES.filter(entry => entry.spec.words[0] === group).map(entry => entry.spec);
-  return specs.map(spec => getHighLevelHelp(spec.name)).join("\n\n");
+  return [`Usage: bflow ${group} <command> [options]`, "", "Commands:",
+    ...specs.map(spec => `  bflow ${spec.words.join(" ")}  ${spec.behavior.summary}`),
+    "", `Run 'bflow ${group} <command> --help' for command options.`,
+    "Exit codes: 0 success, 1 failed, 2 usage, 3 not ready, 4 not found, 5 approval required, 6 conflict, 7 unknown (reconcile the receipt before retrying)."].join("\n");
 }
 
 
@@ -200,7 +203,8 @@ export async function runHighLevelCli(argv: readonly string[], options: HighLeve
     if (progress) progress(`bflow ${entry.spec.words.join(" ")}: starting`);
     const context: HighLevelContext = {
       cwd: options.cwd ?? process.cwd(), io: options.io, clock, services, runtime: options.runtime, signal: options.signal,
-      ...(progress !== undefined ? { onProgress: progress } : {})
+      ...(progress !== undefined ? { onProgress: progress,
+        onUnits: (completed: number, total: number, label: string) => renderer.units(completed, total, label) } : {})
     };
     report = await entry.handler(parsed, context, identity);
   } catch (error) {

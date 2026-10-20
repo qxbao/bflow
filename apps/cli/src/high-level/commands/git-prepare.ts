@@ -19,6 +19,7 @@ import {
   resolveInput,
   runJournaled,
   StepLog,
+  reportUnits,
   type HighLevelHandler
 } from "../context.js";
 import type { HighLevelResources } from "../services.js";
@@ -108,7 +109,11 @@ export const gitPrepare: HighLevelHandler = async (args, ctx, identity) => {
         artifactRoot: args.strings.get("--artifact-root"), storeId: args.strings.get("--artifact-store-id") }));
       const inspections = await log.check("inspect-worktrees", async () => {
         const out = [];
-        for (const item of prepared) out.push(await inspectTask(await resources!.git.getTask(item.taskKey)));
+        reportUnits(ctx, 0, prepared.length, "Task worktrees inspected");
+        for (const item of prepared) {
+          out.push(await inspectTask(await resources!.git.getTask(item.taskKey)));
+          reportUnits(ctx, out.length, prepared.length, "Task worktrees inspected");
+        }
         return out;
       }, value => value);
       const notReady = inspections.filter(i => !i.ready);

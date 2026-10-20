@@ -502,7 +502,7 @@ const HELP_MAP: Record<CliCommandName, string> = {
   down: "Usage: bflow down [--yes] [--force] [--timeout <milliseconds>] [--json]\nCheckpoint active work and gracefully stop only this repository session. --yes confirms unsafe work. --force includes confirmation and stops the owned named session directly when pane cleanup is stuck. Both modes require the Runtime shutdown barrier and valid checkpoints; state and worktrees are preserved.",
   attach: "Usage: bflow attach [--json]\nFocus Conversation and attach to an existing repository session. Run up first.",
   recover: "Usage: bflow recover --yes [--json]\nStop old Bflow commands first. Migrates only an empty legacy lock; preserves project state, agents and worktrees. Then run bflow up or bflow down --yes.",
-  doctor: "Usage: bflow doctor [--json]\nCheck configuration, dependencies, named session and P13 integration.",
+  doctor: "Usage: bflow doctor [--json]\nCheck configuration, dependencies, provider readiness and this repository's agent session.",
   init: INIT_HELP,
   "config-migrate": CONFIG_MIGRATE_HELP,
   setup: SETUP_HELP,

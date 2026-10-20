@@ -106,9 +106,11 @@ session startup. Insufficient launch budget fails locally before dispatch. Start
 errors and automatic-cleanup outcomes are printed on separate lines.
 `down` reopens the existing host with its persisted platform and policy, even if
 the desired configuration has changed since startup.
-Startup readiness errors retain the per-role diagnostic report (up to 256 lines /
-64,000 characters) after terminal sanitization and credential redaction, and direct
-hook failures point to the hook-only plan command.
+Human startup readiness errors group identical causes by provider, list affected roles
+and blocked checks once, and keep different causes, optional roles and cleanup outcomes visible.
+Hook failures point to the read-only hook plan command. Unrecognized report layouts retain
+their original diagnostics. Terminal sanitization, credential redaction and output bounds
+(256 lines / 64,000 characters) apply before and after grouping; JSON keeps the complete original report.
 Credential redaction also covers opaque command-line flags, environment assignments and JSON credential fields,
 including quoted values whose closing quote is missing from truncated subprocess output.
 
@@ -175,16 +177,19 @@ Bflow CLI formats human terminal output using a dedicated presentation engine wi
 7. **Custom I/O Collectors**: Caller-supplied `io` collectors (e.g. in test suites or programmatic embeds) default to plain, non-interactive output unless explicitly opting in via `context.presentation`.
 
 ### Real-Time Observational Progress
-- Lifecycle and long-running commands (`up`, `down`, `attach`, `init`, etc.) stream real-time progress steps to human interactive `stderr` only.
+- Lifecycle and long-running commands (including `status`, `doctor`, documentation requests and hook review) stream real-time progress to human interactive `stderr` only.
 - Progress steps use sequential `[1]`, `[2]`, … markers (bold cyan when color is active). Setup plan summaries and both high-level command formatters use the same numbered layout and readable component labels.
 - Setup approval and dry-run previews group content-addressed skill bundles by store directory and count. Other targets retain their directory and file names, including repository changes; approval, elevation, blocked-platform flags, manual actions and command previews remain visible. `bflow setup --plan --json` includes the complete `data.preview` inventory with every bundle digest and exact target path.
 - `skills sync` uses the same target grouping. High-level commands show labeled identifiers and readable verdicts; tool/provider/backend checks put diagnostics and remediation on separate lines. Empty inventories are explicit. Human formatting does not change JSON verdicts, exit codes or approval requirements.
-- Indented, dim detail logs stream beneath the active step. Setup reports process start/exit/timing and component diagnostics; command arguments and raw provider output are excluded from these process observations.
-- Interactive executable output shows an animated loading skeleton while work is pending. Before setup confirmation, it clears the animation and shows an awaiting-input skeleton above the prompt; redraws pause while the user types. Late progress observations are buffered until input finishes (the latest 50, with an omission count when exceeded). Timers and mutable lines are cleared on completion or error, and animations are disabled during Herdr attach.
+- Ordinary process observations update one transient line instead of accumulating permanent logs. Failures, warnings, blocked steps and important diagnostics remain visible; command arguments and raw provider output are excluded from process observations.
+- Inspections of enumerated tool pins, MCP backends and Git worktrees display count-based bars (for example `[##----] 1/3`). Counts mean inspected units, including negative observations; they never prove readiness or success. Provider/network/verification waits use an indeterminate animation without estimated percentages.
+- Before any confirmation, animations stop while the caller shows the exact existing approval preview and reads input. Late ordinary observations are bounded to the latest 50; important diagnostics are retained separately. Timers and mutable lines clear before final output or errors, and animations remain disabled during Herdr attach.
 - Pipes, JSON, help/version and default custom collectors remain static. Embedders can provide `CliIo.progress` for transient lines and `CliIo.stderrRaw` for raw animated chunks when explicitly opting into interactive presentation.
 - Progress reporting is strictly informational (emitting in-flight phase transitions only) and never emits premature conclusive success claims (e.g. `Environment ready` or `Environment stopped`). Conclusive success is reported exclusively by command formatters after underlying operations, state persistence, and resource cleanup succeed.
 - `FORCE_COLOR` never enables progress streaming; progress strictly requires an interactive `stderr` stream (`isTTY: true && TERM !== "dumb"`).
 - Help and version commands never emit progress.
+- Final human output leads with the business outcome and the next action. Routine command IDs, numeric exit codes, successful internal steps, pane/process coordinates, repeated doctor checks and healthy inventory details stay in JSON. Run/task IDs, uncertain-delivery keys, approval scope, failed verification criteria/evidence and warning/error remediation remain visible.
+- Doctor shows one grouped report with healthy/skipped counts and actionable checks; status reports live versus persisted observations without claiming readiness from configuration validity. Verification escalation calls for human review rather than another automatic iteration. Documentation failures provide distinct credential, version, library, access, network and rate-limit guidance.
 
 ### Actionable Error Format
 Human error output follows a bounded, actionable format:

@@ -386,7 +386,7 @@ describe("Presentation & Formatting Engine", () => {
       expect(plain).not.toContain("all 3 checks passed");
 
       const colored = formatCommandSuccess("doctor", reportWithWarn, false, { color: true });
-      expect(colored).toContain("\x1b[33mWARN  \x1b[0m");
+      expect(colored).toContain("\x1b[33mWARN\x1b[0m");
       expect(colored).toContain("Next:");
     });
 
@@ -403,7 +403,7 @@ describe("Presentation & Formatting Engine", () => {
 
       const plain = formatCommandSuccess("doctor", reportUnhealthy, false);
       expect(plain).toContain("[FAIL] Environment unhealthy (1 check(s) failed, 1 passed)");
-      expect(plain).toContain("FAIL   server: Herdr server not running");
+      expect(plain).toContain("[FAIL] server: Herdr server not running");
     });
 
     it("formats down output only claiming stopped when actually stopped", () => {

@@ -7,7 +7,7 @@ const COMMON = `Common options:
   -h, --help                 Show this help
 
 Exit codes: 0 success/ready/passed, 1 failed, 2 invalid arguments, 3 not ready or not passed,
-4 not found, 5 permission or approval required, 6 conflict/busy, 7 unknown state (use --resume).`;
+4 not found, 5 permission or approval required, 6 conflict/busy, 7 unknown state (reconcile the receipt before retrying).`;
 
 const HELP: Record<HighLevelCommandName, string> = {
   "repo.inspect": `Usage: bflow repo inspect [options]
@@ -15,7 +15,7 @@ const HELP: Record<HighLevelCommandName, string> = {
 Inspect the Git repository, worktrees, project structure and bflow context. Read-only.`,
   "task.plan": `Usage: bflow task plan --spec <file> [--workflow <file> | --write [--out <file>] [--force]] [options]
 
-Create or check the task graph of a specification (P15 traceability).
+Create or check a specification's task graph and acceptance-criterion coverage.
 With --workflow, checks that workflow against the specification. Otherwise derives a task graph
 (one Developer task per traced task ID, no inferred dependencies) and previews it; --write
 persists it to .bflow/plans/<spec-id>.workflow.json. Replacing different content needs --force.
@@ -30,7 +30,7 @@ Options:
 
 Prepare a task for implementation: validate the approved specification and its stored artifact,
 resolve the task and its acceptance criteria, resolve the conditional TDD policy, create the
-task worktree (P18), prepare the Developer assignment request and observe execution state.
+task worktree, prepare the Developer assignment request and observe execution state.
 Dispatch stays with Runtime/Coordinator (lease + fencing token); this command never starts an agent.
 
 Options:
@@ -47,7 +47,7 @@ Options:
   --resume                    Reconcile an interrupted invocation`,
   "verify": `Usage: bflow verify <task-id> --run <run-id> --plan <file> [options]
 
-Run the checks of a VerificationPlan through the P17 Verification Engine with the configured
+Run the checks of a VerificationPlan through the Verification Engine with the configured
 independent gates, collect evidence into the ArtifactStore and return the VerificationResult.
 Without a runner for a check the result is 'blocked', never 'passed'.
 

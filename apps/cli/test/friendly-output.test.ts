@@ -99,12 +99,16 @@ describe("friendly CLI output", () => {
       data: { targets: bundles, machineWide: true } };
     const plain = render(report);
     expect(plain).toContain("approval required [WAIT]");
-    expect(plain).toContain("Command status: [WAITING USER]");
-    expect(plain).toContain("Correlation ID: corr-readable");
+    expect(plain).not.toContain("Command status:");
+    expect(plain).not.toContain("Correlation ID:");
     expect(plain).toContain(`Idempotency key: ${report.idempotencyKey}`);
     expect(plain).toContain("32 pinned skill bundles");
     expect(plain).not.toMatch(/status=|exit=|commandId=|approval_required/);
     expect(plain).toContain("--allow-machine-scope");
+    expect(plain).toContain("Machine-wide targets: yes");
+    const json = buildEnvelope(identity, report, "2026-10-19T00:00:00Z");
+    expect(json.result.correlationId).toBe("corr-readable");
+    expect(json.result.output).toMatchObject({ ids: { idempotencyKey: report.idempotencyKey }, data: { targets: bundles } });
     expect(stripAnsi(render(report, true))).toBe(plain);
     expect(render({ ...report, outcome: "reconciliation_required", status: "unknown", exitCode: 7 })).toContain("reconciliation required [WAIT]");
   });
@@ -125,7 +129,7 @@ describe("friendly CLI output", () => {
     const root = "/work/my  project";
     expect(render({ ...common, command: "repo.inspect", data: { repository: { root } } })).toContain(`Root: ${root}`);
     expect(render({ ...common, command: "task.implement", data: { worktreePath: root + "/task  one" } })).toContain(`Worktree: ${root}/task  one`);
-    expect(render({ ...common, command: "tool.status", data: { tools: [{ toolId: "node", status: "present", path: root + "/bin/node" }] } })).toContain(`Path: ${root}/bin/node`);
+    expect(render({ ...common, command: "tool.status", data: { tools: [{ toolId: "node", status: "version_mismatch", path: root + "/bin/node" }] } })).toContain(`Path: ${root}/bin/node`);
   });
 
   it("lists each high-level command once in global help and gives examples the parser accepts", () => {
