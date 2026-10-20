@@ -5,7 +5,19 @@ import { redactString } from "../resilience/redaction.js";
  * Structured reasons a Coordinator's workflow proposal is refused before any state changes.
  * The options are informational text for the user. Nothing here is applied automatically.
  */
-export type WorkflowRejectionCode = "missing_behavioral_runner" | "unsupported_verification" | "policy_violation";
+export type WorkflowRejectionCode = "missing_behavioral_runner" | "unsupported_verification" | "policy_violation" |
+  "no_test_runner_detected" | "missing_test_paths" | "missing_test_mapping" | "unknown_test_command" | "unsupported_method";
+
+/**
+ * Coordinator-fixable refusals: the structured error is the instruction for the Coordinator, so Conversation gets no notice.
+ * Only the remaining classes (including `no_test_runner_detected`) are reported to the user.
+ */
+export const AGENT_FIXABLE_REJECTIONS: readonly WorkflowRejectionCode[] = ["missing_test_paths", "missing_test_mapping", "unknown_test_command", "unsupported_method"];
+
+/** Whether Runtime should tell Conversation (and through it the user) about this refusal. */
+export function reportsToUser(rejection: WorkflowRejection): boolean {
+  return !AGENT_FIXABLE_REJECTIONS.includes(rejection.code);
+}
 
 export interface WorkflowRejection {
   code: WorkflowRejectionCode;
@@ -49,8 +61,7 @@ export function describeWorkflowRejection(input: {
       reason: `Chưa có runner kiểm thử hành vi do chủ dự án cấu hình cho phương pháp ${methods.join(", ")} (tiêu chí ${ids.join(", ")}).`,
       methods, criteria: ids,
       options: [
-        `Chủ dự án cấu hình runner cho ${methods.join(", ")} trong .bflow/verification.json (xem docs/verification-runners.md). ` +
-          "Cấu hình được ghim theo digest khi host được tạo: sửa file sau đó bị từ chối, nên phải dừng host và đối chiếu/di chuyển trạng thái theo quy trình quản trị; không xóa journal để bỏ qua.",
+        "Coordinator đề xuất lại đặc tả dùng phương pháp đã có runner (unit_test → auto:unit, integration_test → auto:integration).",
         `Người dùng phê duyệt một đặc tả đã sửa, chuyển tiêu chí ${ids.join(", ")} sang manual_review. Coordinator không tự đổi tiêu chí.`,
         "Hủy run này."
       ]

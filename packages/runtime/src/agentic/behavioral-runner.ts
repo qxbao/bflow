@@ -8,7 +8,7 @@ import { QualityGateDefinitionSchema, type QualityGateDefinition } from "@bflow/
 import type { QualityCommandOutcome } from "@bflow/quality-gates";
 import { digest, record, textField } from "./journal.js";
 import { parseVitestJson } from "./vitest-json.js";
-import { sandboxBehavior } from "./behavioral-sandbox.js";
+import { assertCheckoutDependencyRoot, sandboxBehavior } from "./behavioral-sandbox.js";
 
 export interface BehavioralCommand {
   id: string; command: string; executable: string; args: string[];
@@ -17,12 +17,42 @@ export interface BehavioralCommand {
   testNames: string[]; testPaths: string[]; reporter?: "node_tap" | "vitest_json"; timeoutMs: number; maxOutputBytes?: number;
   dependencyRoots?: string[];
 }
+/**
+ * Runtime-detected runner (no owner file): executable/argv/prepare come only from Runtime's own repository detection, never
+ * from a role message. Test identities are bound per task from the accepted strategy and the task's committed test files.
+ */
+export interface RunnerProfile {
+  id: string; command: string; executable: string; args: string[];
+  method: BehavioralCommand["method"]; levels: BehavioralCommand["levels"]; reporter: NonNullable<BehavioralCommand["reporter"]>;
+  timeoutMs: number; maxOutputBytes?: number;
+  /** Repository-relative `node_modules` directories mounted read-only at the same relative path inside the measurement checkout. */
+  checkoutDependencyRoots: string[];
+  /** Absolute repository root the dependency roots are read from. */
+  dependencySource: string;
+  /** Optional sandboxed build before the tests (e.g. `tsc -b`); it may only create git-ignored files. */
+  prepare?: { args: string[]; timeoutMs: number };
+  source: "detected";
+}
+/** Detection outcome; `unsupported` carries a user-facing reason and what an agent or Runtime could do about it. */
+export type RunnerDetection =
+  | { status: "detected"; profiles: RunnerProfile[]; notes: string[] }
+  | { status: "unsupported"; reason: string; remediation: string[] };
+export type BoundBehavioralCommand = BehavioralCommand & Partial<Pick<RunnerProfile, "checkoutDependencyRoots" | "dependencySource" | "prepare">>;
 const permittedLevels: Record<BehavioralCommand["method"], readonly string[]> = {
   unit_test: ["unit", "property", "regression"], integration_test: ["integration", "regression", "smoke"], e2e_test: ["e2e", "regression", "smoke"]
 };
+/** Bound test files must live in a test directory or carry a test/spec suffix; owner configuration is not restricted this way. */
+export const testFilePattern = /(^|\/)(test|tests|__tests__)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
 function strings(value: unknown, name: string, nonempty = true): string[] {
   if (!Array.isArray(value) || nonempty && !value.length || value.some(item => typeof item !== "string" || !item.length || item.includes("\0"))) throw new Error(`Invalid behavioral ${name}`);
   return [...value];
+}
+/** Shared identity rules for owner configuration and Runtime-bound profiles. */
+function assertTestIdentities(testNames: readonly string[], testPaths: readonly string[]): void {
+  if (new Set(testNames).size !== testNames.length || new Set(testPaths).size !== testPaths.length || testPaths.some(path => path.startsWith("/") || path.includes("\\") || path.includes(":") || path.split("/").some(part => !part || part === "." || part === ".."))) throw new Error("Behavioral test identities/paths must be unique and safe");
+}
+function assertExecutionBounds(timeoutMs: unknown, maxOutputBytes: unknown): void {
+  if (!Number.isSafeInteger(timeoutMs) || Number(timeoutMs) < 1 || Number(timeoutMs) > 300_000 || maxOutputBytes !== undefined && (!Number.isSafeInteger(maxOutputBytes) || Number(maxOutputBytes) < 1 || Number(maxOutputBytes) > 4_194_304)) throw new Error("Invalid behavioral execution bounds");
 }
 /** This configuration is trusted owner input, never a role message or executable shell string. */
 export function parseBehavioralCommands(input: unknown): BehavioralCommand[] {
@@ -40,8 +70,8 @@ export function parseBehavioralCommands(input: unknown): BehavioralCommand[] {
     const args = strings(value.args, "argv", false), testNames = strings(value.testNames, "test names"), testPaths = strings(value.testPaths, "test paths");
     const dependencyRoots = value.dependencyRoots === undefined ? undefined : strings(value.dependencyRoots, "dependency roots", false);
     if (dependencyRoots?.some(path => !isAbsolute(path) || path.split("/").some(part => part === ".." || part === ".") || !path.endsWith("/node_modules"))) throw new Error("Behavioral dependency roots must be absolute node_modules directories");
-    if (new Set(testNames).size !== testNames.length || new Set(testPaths).size !== testPaths.length || testPaths.some(path => path.startsWith("/") || path.includes("\\") || path.includes(":") || path.split("/").some(part => !part || part === "." || part === ".."))) throw new Error("Behavioral test identities/paths must be unique and safe");
-    if (!Number.isSafeInteger(value.timeoutMs) || Number(value.timeoutMs) < 1 || Number(value.timeoutMs) > 300_000 || value.maxOutputBytes !== undefined && (!Number.isSafeInteger(value.maxOutputBytes) || Number(value.maxOutputBytes) < 1 || Number(value.maxOutputBytes) > 4_194_304)) throw new Error("Invalid behavioral execution bounds");
+    assertTestIdentities(testNames, testPaths);
+    assertExecutionBounds(value.timeoutMs, value.maxOutputBytes);
     return { id, command, executable, args, method, levels, testNames, testPaths, ...(dependencyRoots === undefined ? {} : { dependencyRoots }), ...(value.reporter === undefined ? {} : { reporter: value.reporter as NonNullable<BehavioralCommand["reporter"]> }), timeoutMs: Number(value.timeoutMs), ...(value.maxOutputBytes === undefined ? {} : { maxOutputBytes: Number(value.maxOutputBytes) }) };
   });
   if (new Set(commands.map(value => value.id)).size !== commands.length || new Set(commands.map(value => value.command)).size !== commands.length) throw new Error("Duplicate behavioral command identity");
@@ -49,6 +79,32 @@ export function parseBehavioralCommands(input: unknown): BehavioralCommand[] {
   // including bounded checkout/setup/cleanup for every configured command.
   if (commands.reduce((total, command) => total + command.timeoutMs + 90_000, 0) > 540_000) throw new Error("Aggregate behavioral execution budget exceeds the host deadline");
   return commands;
+}
+/** Binds a Runtime-detected profile to test identities from the accepted strategy and the task's committed test files. */
+export function bindRunnerProfile(profile: RunnerProfile, identities: { testNames: string[]; testPaths: string[] }): BoundBehavioralCommand {
+  if (profile.source !== "detected") throw new Error("Runner profiles must be Runtime-detected");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(profile.id) || profile.command.length === 0 || profile.executable.includes("\0") || !isAbsolute(profile.executable)) throw new Error("Runner profile executable must be absolute and id must be safe");
+  if (!["unit_test", "integration_test", "e2e_test"].includes(profile.method)) throw new Error("Unsupported behavioral method");
+  const levels = strings(profile.levels, "levels") as BehavioralCommand["levels"];
+  if (levels.some(level => !permittedLevels[profile.method].includes(level))) throw new Error("Behavioral test levels do not match method");
+  if (profile.reporter !== "node_tap" && profile.reporter !== "vitest_json") throw new Error("Unsupported behavioral reporter");
+  const args = strings(profile.args, "argv", false);
+  const testNames = strings(identities.testNames, "test names"), testPaths = strings(identities.testPaths, "test paths");
+  assertTestIdentities(testNames, testPaths);
+  if (testPaths.some(path => !testFilePattern.test(path))) throw new Error("Behavioral test paths must be committed test files");
+  // A dependency-free repository (for example node --test without node_modules) has no roots to mount.
+  const checkoutDependencyRoots = strings(profile.checkoutDependencyRoots, "checkout dependency roots", false);
+  for (const path of checkoutDependencyRoots) assertCheckoutDependencyRoot(path);
+  if (!isAbsolute(profile.dependencySource) || profile.dependencySource.includes("\0")) throw new Error("Behavioral dependency source must be an absolute repository path");
+  assertExecutionBounds(profile.timeoutMs, profile.maxOutputBytes);
+  if (profile.prepare !== undefined) assertExecutionBounds(profile.prepare.timeoutMs, undefined);
+  return {
+    id: profile.id, command: profile.command, executable: profile.executable, args: [...args, ...testPaths],
+    method: profile.method, levels, testNames, testPaths, reporter: profile.reporter, timeoutMs: profile.timeoutMs,
+    ...(profile.maxOutputBytes === undefined ? {} : { maxOutputBytes: profile.maxOutputBytes }),
+    checkoutDependencyRoots, dependencySource: profile.dependencySource,
+    ...(profile.prepare === undefined ? {} : { prepare: { args: strings(profile.prepare.args, "prepare argv"), timeoutMs: profile.prepare.timeoutMs } })
+  };
 }
 export function behavioralChecks(commands: readonly BehavioralCommand[]): QualityGateDefinition[] {
   return commands.map(command => QualityGateDefinitionSchema.parse({ id: `host-behavioral-${command.id}`, name: `Independent ${command.id}`, evaluator: "host-behavioral-command", required: true,
@@ -85,8 +141,13 @@ export interface BehavioralMeasurement {
   testBlobs: Record<string, string>; testNames: string[]; testResults: { name: string; passed: boolean }[]; tests: number; passed: number; failed: number; targetFailure: boolean;
   outcome: QualityCommandOutcome;
 }
+/** Bounded diagnostic tail for a failed prepare step. */
+function outputTail(outcome: QualityCommandOutcome): string {
+  const stderr = outcome.stderr.trim().slice(-1_000), stdout = outcome.stdout.trim().slice(-1_000);
+  return [stderr ? `stderr: ${stderr}` : "", stdout ? `stdout: ${stdout}` : ""].filter(Boolean).map(part => ` ${part}`).join("");
+}
 /** Runs only committed bytes in a new detached worktree; it has no host credentials or inherited Node/Git overrides. */
-export async function measureBehavior(command: BehavioralCommand, cwd: string, revision: string): Promise<BehavioralMeasurement> {
+export async function measureBehavior(command: BoundBehavioralCommand, cwd: string, revision: string): Promise<BehavioralMeasurement> {
   await assertPinnedRevision(cwd, revision);
   const testBlobs: Record<string, string> = {};
   for (const path of command.testPaths) {
@@ -100,7 +161,22 @@ export async function measureBehavior(command: BehavioralCommand, cwd: string, r
   try {
     await verificationGit(cwd, ["worktree", "add", "--detach", checkout, revision]); added = true;
     const module = await import(new URL("../../../quality-gates/dist/index.js", import.meta.url).href);
+    const runner = module.createQualityCommandRunner();
     const env: Record<string, string> = { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", HOME: temporary, TMPDIR: temporary };
+    const maxOutputBytes = command.maxOutputBytes ?? 1_048_576;
+    // A Runtime-detected profile may run a sandboxed build first (e.g. `tsc -b`); it gets the same boundary, its own deadline, and may only leave git-ignored outputs.
+    if (command.prepare) {
+      const prepareSandbox = await sandboxBehavior(command, checkout, command.prepare.args).catch(error => {
+        throw new Error(`Behavioral runner infrastructure failure (prepare): ${String(error)}`, { cause: error });
+      });
+      const prepared = await runner.run({ ...prepareSandbox, cwd: checkout, env, timeoutMs: command.prepare.timeoutMs, maxOutputBytes });
+      if (!prepared.ok) throw new Error(`Behavioral runner infrastructure failure (prepare): ${prepared.error.message}`);
+      const prepareOutcome = prepared.value as QualityCommandOutcome;
+      const failure = prepareOutcome.spawnError ?? (prepareOutcome.stderr.startsWith("bwrap:") ? prepareOutcome.stderr.trim()
+        : prepareOutcome.timedOut ? "deadline exceeded" : prepareOutcome.aborted ? "aborted" : prepareOutcome.signal ? `signal ${prepareOutcome.signal}`
+        : prepareOutcome.exitCode !== 0 ? `exit ${prepareOutcome.exitCode}` : undefined);
+      if (failure !== undefined) throw new Error(`Behavioral runner infrastructure failure (prepare): ${failure}${outputTail(prepareOutcome)}`);
+    }
     // The official JSON reporter omits runtime errors. A fixed host companion attests its onFinished errors argument.
     const reporter = command.reporter === "vitest_json" ? join(temporary, "vitest-runtime-reporter.mjs") : undefined;
     if (reporter) {
@@ -113,12 +189,15 @@ export async function measureBehavior(command: BehavioralCommand, cwd: string, r
     const sandbox = await sandboxBehavior(command, checkout, args, reporter).catch(error => {
       throw new Error(`Behavioral runner infrastructure failure (sandbox preparation): ${String(error)}`, { cause: error });
     });
-    const result = await module.createQualityCommandRunner().run({ ...sandbox, cwd: checkout, env, timeoutMs: command.timeoutMs, maxOutputBytes: command.maxOutputBytes ?? 1_048_576 });
+    const result = await runner.run({ ...sandbox, cwd: checkout, env, timeoutMs: command.timeoutMs, maxOutputBytes });
     if (!result.ok) throw new Error(`Behavioral command invocation failed: ${result.error.message}`);
     const outcome = result.value as QualityCommandOutcome;
     if (outcome.stderr.startsWith("bwrap:")) throw new Error(`Behavioral sandbox failed: ${outcome.stderr.trim()}`);
+    // Tracked files must match the revision and no non-ignored untracked file may exist. Prepared checkouts may also hold
+    // git-ignored outputs (build output, dependency mountpoints), so only owner commands keep the strict ignored-file check.
     await assertPinnedRevision(checkout, revision);
-    if (await verificationGit(checkout, ["status", "--porcelain=v1", "--ignored=matching", "--untracked-files=all", "-z"])) throw new Error("Behavioral execution generated files outside the committed revision");
+    const relaxed = command.prepare !== undefined || command.checkoutDependencyRoots !== undefined;
+    if (!relaxed && await verificationGit(checkout, ["status", "--porcelain=v1", "--ignored=matching", "--untracked-files=all", "-z"])) throw new Error("Behavioral execution generated files outside the committed revision");
     await assertPinnedRevision(cwd, revision);
     return { sourceRevision: revision, command: command.command, commandId: command.id, method: command.method, testBlobs, ...(command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames) : parseNodeTap(outcome, command.testNames)), outcome };
   } finally {

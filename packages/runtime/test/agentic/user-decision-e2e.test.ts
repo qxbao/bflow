@@ -15,6 +15,7 @@ import { buildDecisionRequestMessage, parseUserDecisionToolInput } from "../../s
 import { renderConversationNotice } from "../../src/agentic/conversation-notice-render.js";
 import { decisionMessageId, evaluateWatchdog, type WatchdogAction } from "../../src/agentic/run-watchdog.js";
 import { HostVerification } from "../../src/agentic/host-verification.js";
+import { TestRunnerSource } from "../../src/agentic/task-commands.js";
 import { WorkflowProposalRejected, guardWorkflowProposal, type WorkflowRejection } from "../../src/agentic/workflow-rejection.js";
 import type { AgenticRuntimePorts } from "../../src/agentic/ports.js";
 import { FakeAgentTransport } from "../helpers/fake-transport.js";
@@ -601,10 +602,15 @@ describe.skipIf(process.platform !== "linux")("Conversation notices and watchdog
     expect((stalls[0]!.payload as { options: string[] }).options).toHaveLength(2);
   });
 
-  it("refuses a unit_test proposal without a configured runner, tells Conversation why, and leaves the criteria untouched", async () => {
+  it("refuses a unit_test proposal when no runner is detected, tells Conversation why, and leaves the criteria untouched", async () => {
     const f = await fixture(); const runtime = f.runtime();
     const specification = draft("api"), before = structuredClone(specification);
-    const verification = new HostVerification(() => runtime, () => { throw new Error("artifact store not used"); }, undefined, []);
+    // An empty repository has no test runner: detection is unsupported and Conversation gets the single informational notice.
+    const root = await realpath(await mkdtemp(join(tmpdir(), "no-runner-")));
+    const runners = new TestRunnerSource([], root);
+    await runners.refresh();
+    try {
+    const verification = new HostVerification(() => runtime, () => { throw new Error("artifact store not used"); }, undefined, runners);
     let rejection: WorkflowRejection | undefined, message = "";
     try {
       guardWorkflowProposal({ phase: "verification", specification, configuredMethods: verification.configuredMethods(),
@@ -613,7 +619,8 @@ describe.skipIf(process.platform !== "linux")("Conversation notices and watchdog
       expect(error).toBeInstanceOf(WorkflowProposalRejected);
       rejection = (error as WorkflowProposalRejected).rejection; message = (error as Error).message;
     }
-    expect(rejection).toMatchObject({ code: "missing_behavioral_runner", methods: ["unit_test"], criteria: ["ac-1"] });
+    expect(rejection).toMatchObject({ code: "no_test_runner_detected" });
+    expect(rejection!.options).toEqual(["Coordinator thêm task thiết lập test runner (vitest) rồi đề xuất lại workflow", "Hủy run"]);
     expect(JSON.parse(message)).toEqual(rejection);
 
     await runtime.reportWorkflowRejected(RUN, rejection!);
@@ -621,20 +628,22 @@ describe.skipIf(process.platform !== "linux")("Conversation notices and watchdog
     await runtime.flushOutbound();
     const rejected = f.inbox.filter(item => payloadKind(item) === "workflow_rejected");
     expect(rejected).toHaveLength(1);
-    expect(rejected[0]!.payload).toMatchObject({ code: "missing_behavioral_runner", reason: rejection!.reason, runId: RUN });
+    expect(rejected[0]!.payload).toMatchObject({ code: "no_test_runner_detected", reason: rejection!.reason, runId: RUN });
     expect((rejected[0]!.payload as { options: string[] }).options).toEqual(rejection!.options);
 
     await persistNotices(f);
-    const notice = (await f.receipts.unsurfacedConversationNotices()).find(item => renderConversationNotice(item).display.includes("Chủ dự án cấu hình runner"))!;
+    const notice = (await f.receipts.unsurfacedConversationNotices()).find(item => renderConversationNotice(item).display.includes("thiết lập test runner"))!;
     const rendered = renderConversationNotice(notice);
     expect(rendered.kind).toBe("blocked");
-    expect(rendered.display).toContain("1. Chủ dự án cấu hình runner");
-    expect(rendered.display).toContain("3. Hủy run này.");
+    expect(rendered.display).toContain("1. Coordinator thêm task thiết lập test runner");
+    expect(rendered.display).toContain("2. Hủy run");
+    expect(rendered.display).not.toContain("verification.json");
 
     expect(specification).toEqual(before);
     expect(specification.acceptanceCriteria[0]!.verificationMethod).toBe("unit_test");
     const inspected = await runtime.inspect(RUN) as unknown as { status: string; definition?: unknown };
     expect(inspected.status).toBe("intake");
     expect(inspected.definition).toBeUndefined();
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 });

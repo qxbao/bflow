@@ -4,11 +4,13 @@ import { promisify } from "node:util";
 import {
   ArtifactReferenceSchema, ArtifactWriteOptionsSchema, QualityGateContextSchema, QualityGateDefinitionSchema,
   PaneBindingSchema, QualityGateResultSchema, SpecificationSchema, TestStrategySchema, VerificationResultSchema,
-  type ArtifactStore, type JsonValue, type PaneBinding, type QualityGate, type QualityGateResult, type VerificationResult
+  type ArtifactStore, type JsonValue, type PaneBinding, type QualityGate, type QualityGateResult, type Specification, type TestStrategy, type VerificationResult
 } from "@bflow/contracts";
-import { digest, json, record, textField } from "./journal.js";
+import { digest, json, record, strings, textField } from "./journal.js";
 import { unwrap } from "./outbox.js";
-import { behavioralChecks, measureBehavior, parseBehavioralCommands, type BehavioralCommand } from "./behavioral-runner.js";
+import { behavioralChecks, measureBehavior, parseBehavioralCommands, testFilePattern, type BehavioralCommand, type BoundBehavioralCommand } from "./behavioral-runner.js";
+import { AUTOMATIC_RUNNERS, TestRunnerSource, automaticChecks, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
+import { WorkflowProposalRejected, type WorkflowRejectionCode } from "./workflow-rejection.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
 const execute = promisify(execFile);
 const whitespaceCommand = "git diff --check";
@@ -40,9 +42,31 @@ export class HostVerification {
   private readonly gateRecords = new Map<string, QualityGateResult>();
   private readonly evidenceReceipts = new Map<string, string>();
   private readonly evidenceRecords = new Map<string, VerificationResult>();
-  private readonly commands: BehavioralCommand[];
+  readonly runners: TestRunnerSource;
   constructor(private readonly runtime: () => AgenticWorkflowRuntime, private readonly store: () => ArtifactStore,
-    private readonly receipts?: HostVerificationReceipts, commands: readonly BehavioralCommand[] = []) { this.commands = parseBehavioralCommands(commands); }
+    private readonly receipts?: HostVerificationReceipts, runners: TestRunnerSource | readonly BehavioralCommand[] = []) {
+    this.runners = runners instanceof TestRunnerSource ? runners : new TestRunnerSource(parseBehavioralCommands(runners));
+  }
+  /** Ownership of a task from its run definition; undefined for workflow-level checks. */
+  private ownedPathsOf(run: Record<string, unknown>, taskId?: string): string[] | undefined {
+    if (taskId === undefined || run.definition === null || typeof run.definition !== "object") return undefined;
+    const definitionTasks = (run.definition as Record<string, unknown>).tasks;
+    const tasks = Array.isArray(definitionTasks) ? definitionTasks.filter(item => item !== null && typeof item === "object").map(record) : [];
+    const task = tasks.find(item => item.id === taskId);
+    return task ? strings(record(task.metadata).ownedPaths) : undefined;
+  }
+  /** Fresh dossier and ownership for a run's task (or the workflow when taskId is absent), read outside the journal lock. */
+  private async dossierFor(runId: string, taskId?: string) {
+    const run = record(await this.runtime().inspect(runId));
+    const tasks = Array.isArray(run.tasks) ? run.tasks.map(record) : [];
+    const task = taskId === undefined ? undefined : tasks.find(item => item.taskId === taskId);
+    if (taskId !== undefined && !task) throw new Error("Unknown task");
+    const dossier = record(task ? task.spec : run.workflowSpec);
+    return { run, specification: SpecificationSchema.parse(dossier.specification), strategy: TestStrategySchema.parse(dossier.strategy), ownedPaths: this.ownedPathsOf(run, taskId) };
+  }
+  private resolve(input: { specification: Specification; strategy: TestStrategy; ownedPaths?: readonly string[] | undefined }): BoundBehavioralCommand[] {
+    return resolveTaskCommands({ owner: this.runners.owner, profiles: this.runners.profiles, ...input });
+  }
   async authenticateGate(result: QualityGateResult): Promise<boolean> { return this.receipts ? this.receipts.authenticateGate(result) : this.gateReceipts.get(result.evaluationId) === digest(result); }
   async authenticateEvidence(result: VerificationResult): Promise<boolean> { return this.receipts ? this.receipts.authenticateEvidence(result) : this.evidenceReceipts.get(result.verificationId) === digest(result); }
   private async trustGate(result: QualityGateResult) { await this.receipts?.recordGate(result); this.gateReceipts.set(result.evaluationId, digest(result)); this.gateRecords.set(result.evaluationId, result); }
@@ -91,10 +115,14 @@ export class HostVerification {
       } catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
     } };
   }
-  behavioralChecks() { return behavioralChecks(this.commands); }
-  /** Verification methods the owner configured for this host; fixed at host creation (see docs/verification-runners.md). */
-  configuredMethods(): string[] { return [...new Set(this.commands.map(command => command.method))]; }
-  /** Fail closed at proposal ingress; unsupported verification methods require another trusted runner. */
+  /** Owner-configured checks always; automatic checks only when no owner file exists (static definitions, bound at plan time). */
+  behavioralChecks() { return [...behavioralChecks(this.runners.owner), ...(this.runners.automatic ? automaticChecks() : [])]; }
+  /** Methods with a runner: owner-configured, or Runtime-detected. Fixed per owner configuration; detection may refresh. */
+  configuredMethods(): string[] { return [...new Set([...this.runners.owner.map(command => command.method), ...this.runners.profiles.map(profile => profile.method)])]; }
+  /**
+   * Fail closed at proposal ingress. Owner mode keeps the explicit owner checks. Automatic mode fails with structured
+   * rejections: `no_test_runner_detected` is reported to the user; the other codes are Coordinator-fixable and silent.
+   */
   assertSupported(input: unknown, strategyInput?: unknown) {
     const spec = SpecificationSchema.parse(input);
     const active = spec.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived");
@@ -104,22 +132,68 @@ export class HostVerification {
       return;
     }
     if (active.some(criterion => criterion.verificationMethod === "manual_review")) throw new Error("Mixed manual and behavioral TDD criteria require separate tasks with complete independent evidence");
-    for (const criterion of automated) if (!this.commands.some(command => command.method === criterion.verificationMethod)) throw new Error(`No owner-configured behavioral runner for ${criterion.verificationMethod}`);
+    if (this.runners.automatic) return this.assertDetectedSupported(spec, automated, strategyInput);
+    for (const criterion of automated) if (!this.runners.owner.some(command => command.method === criterion.verificationMethod)) throw new Error(`No owner-configured behavioral runner for ${criterion.verificationMethod}`);
     if (strategyInput !== undefined) {
       const strategy = TestStrategySchema.parse(strategyInput);
       for (const criterion of automated) {
         const mapping = strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id);
-        if (!mapping?.testNames.length || !this.commands.some(command => strategy.targetCommands.includes(command.command) && command.method === criterion.verificationMethod && mapping.testNames.every(name => command.testNames.includes(name)))) throw new Error(`No complete owner-configured test mapping for ${criterion.id}`);
+        if (!mapping?.testNames.length || !this.runners.owner.some(command => strategy.targetCommands.includes(command.command) && command.method === criterion.verificationMethod && mapping.testNames.every(name => command.testNames.includes(name)))) throw new Error(`No complete owner-configured test mapping for ${criterion.id}`);
       }
-      for (const command of strategy.targetCommands) if (!this.commands.some(config => config.command === command)) throw new Error(`No owner-configured argv for ${command}`);
+      for (const command of strategy.targetCommands) if (!this.runners.owner.some(config => config.command === command)) throw new Error(`No owner-configured argv for ${command}`);
       if (strategy.coverageThresholdPercent !== undefined) throw new Error("Configured behavioral reporters do not measure aggregate coverage");
     }
   }
+  private assertDetectedSupported(spec: Specification, automated: Specification["acceptanceCriteria"], strategyInput: unknown) {
+    const detection = this.runners.current;
+    if (detection?.status !== "detected") {
+      const reason = detection?.status === "unsupported" ? detection.reason : "Test runner detection has not run yet";
+      throw new WorkflowProposalRejected({ code: "no_test_runner_detected", reason, options: [
+        "Coordinator thêm task thiết lập test runner (vitest) rồi đề xuất lại workflow", "Hủy run"] });
+    }
+    const reject = (code: WorkflowRejectionCode, reason: string): never => { throw new WorkflowProposalRejected({ code, reason, options: [] }); };
+    const profiles = detection.profiles, labels = profiles.map(profile => profile.command).join(", ");
+    const testPaths = spec.affectedPaths.filter(path => testFilePattern.test(path));
+    const ids = automated.map(criterion => criterion.id).join(", ");
+    if (!testPaths.length) reject("missing_test_paths", `Automated acceptance criteria (${ids}) need their committed test files listed in specification.affectedPaths. Add the exact test file paths (for example packages/x/test/feature.test.ts) to affectedPaths and propose again.`);
+    const strategy = strategyInput === undefined ? undefined : TestStrategySchema.parse(strategyInput);
+    for (const criterion of automated) {
+      const profile = profiles.find(item => item.method === criterion.verificationMethod);
+      if (!profile) reject("unsupported_method", `Criterion ${criterion.id} uses ${criterion.verificationMethod}, which has no detected runner (detected: ${labels || "none"}). Only unit_test and integration_test are supported automatically; the Coordinator cannot change verificationMethod, so report this to the user through Conversation.`);
+      if (!strategy) continue;
+      const mapping = strategy.criterionMappings.find(item => item.criterionId === criterion.id);
+      if (!mapping?.testNames.length) reject("missing_test_mapping", `Criterion ${criterion.id} has no criterionMappings entry with test names. Set criterionMappings to [{"criterionId":"${criterion.id}","testNames":[...]}] using the exact names the runner reports (vitest: describe titles plus the test title joined by one space; node --test: the test title).`);
+      if (!strategy.targetCommands.includes(profile!.command)) reject("unknown_test_command", `Criterion ${criterion.id} needs ${profile!.command} among the strategy targetCommands. Add {"method":"${profile!.method}","command":"${profile!.command}","level":"${profile!.levels[0]}"} to the specification infrastructure.commands and propose again.`);
+    }
+    if (strategy) {
+      for (const command of strategy.targetCommands) if (!profiles.some(profile => profile.command === command)) reject("unknown_test_command", `targetCommands contains '${command}', which is not a detected runner label (${labels}). Use only detected labels, or remove the command, and propose again.`);
+      if (strategy.coverageThresholdPercent !== undefined) throw new Error("Configured behavioral reporters do not measure aggregate coverage");
+    }
+  }
+  /** Gate for one owner command, bound to the owner configuration (unchanged behaviour). */
+  private ownerGate(command: BehavioralCommand): QualityGate {
+    return this.gate(`host-behavioral-${command.id}`, async () => command);
+  }
+  /** Gate for one automatic runner: the test identities come from this task's accepted specification and ownership. */
+  private automaticGate(runner: AutomaticRunner): QualityGate {
+    return this.gate(`host-behavioral-${runner.id}`, async context => {
+      const dossier = await this.dossierFor(context.runId, context.taskId);
+      const bound = this.resolve(dossier).find(command => command.command === runner.command);
+      if (!bound) throw new Error(`${runner.command} has no test identities for this task: check criterion mappings, affectedPaths test files and ownership`);
+      return bound;
+    });
+  }
   behavioralGates(): QualityGate[] {
-    return this.commands.map(command => ({ id: `host-behavioral-${command.id}`, evaluate: async raw => {
+    return [...this.runners.owner.map(command => this.ownerGate(command)),
+      ...(this.runners.automatic ? AUTOMATIC_RUNNERS.map(runner => this.automaticGate(runner)) : [])];
+  }
+  private gate(id: string, resolveCommand: (context: { runId: string; taskId?: string | undefined }) => Promise<BoundBehavioralCommand>): QualityGate {
+    return { id, evaluate: async raw => {
       try {
         const context = QualityGateContextSchema.parse(raw), config = record(context.definition.configuration), input = record(context.input);
-        if (context.definition.id !== `host-behavioral-${command.id}` || config.command !== command.command || config.method !== command.method ||
+        if (context.definition.id !== id) throw new Error("Behavioral check does not match owner configuration");
+        const command = await resolveCommand(context);
+        if (config.command !== command.command || config.method !== command.method ||
             !Array.isArray(config.testNames) || config.testNames.some(name => !command.testNames.includes(String(name)))) throw new Error("Behavioral check does not match owner configuration");
         const measured = await measureBehavior(command, textField(input.sourceWorktreePath), textField(input.sourceRevision));
         const result = QualityGateResultSchema.parse({ gateId: context.definition.id, runId: context.runId, taskId: context.taskId, evaluationId: randomUUID(),
@@ -132,7 +206,7 @@ export class HostVerification {
         await this.trustGate(result);
         return { ok: true, value: result };
       } catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
-    } }));
+    } };
   }
   /** Execute an independent phase; no test command, revision or verdict is accepted from the agent. */
   async behavioralEvidence(binding: PaneBinding, input: unknown) {
@@ -154,7 +228,7 @@ export class HostVerification {
     if (target.agentId === binding.agentId || target.paneId === binding.paneId) throw new Error("Implementer cannot verify its own change");
     const cwd = textField(target.worktreePath), revision = (await this.git(cwd, ["rev-parse", "HEAD"])).trim(), startedAt = new Date().toISOString();
     const criteria = spec.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived");
-    const commands = this.commands.filter(command => strategy.targetCommands.includes(command.command));
+    const commands = this.resolve({ specification: spec, strategy, ownedPaths: this.ownedPathsOf(run, taskId) });
     if (!commands.length || criteria.some(criterion => criterion.verificationMethod === "manual_review")) throw new Error("This strategy requires independent alternative evidence");
     const verificationId = `host-behavioral-${digest([runId, taskId, strategy.tddDecision.decisionId, phase, revision, commands])}`;
     const replay = this.receipts ? await this.receipts.getEvidence(verificationId) : this.evidenceRecords.get(verificationId);

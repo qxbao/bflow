@@ -17,6 +17,58 @@ export function isProviderInputEmpty(provider: string, visibleText: string): boo
   return isCurrentLayoutEmpty(lines) || isBoxedLayoutEmpty(lines);
 }
 
+/**
+ * ANSI snapshot → plain text with the `❯` prompt line's faint (SGR 2) runs removed. After every turn Claude shows its next-prompt
+ * suggestion as dim ghost text after `❯`, which a text snapshot cannot tell from a typed draft; a typed draft renders normally,
+ * so it survives and still fails the empty check. Every other line only loses its escape sequences.
+ */
+export function stripGhostSuggestion(ansiText: string): string {
+  return ansiText.split(/\r?\n/).map(line => {
+    const prompt = line.includes("❯");
+    let out = "", faint = false;
+    for (let index = 0; index < line.length;) {
+      const csi = /^\x1b\[([0-9;:]*)([@-~])/.exec(line.slice(index));
+      if (csi) {
+        if (csi[2] === "m") faint = sgrFaint(csi[1]!, faint);
+        index += csi[0].length; continue;
+      }
+      if (line[index] === "\x1b") { index++; continue; }
+      if (!prompt || !faint) out += line[index];
+      index++;
+    }
+    return out;
+  }).join("\n");
+}
+
+/** Faint state after one SGR sequence; skips extended-colour arguments so `38;2;…` never reads as faint. */
+function sgrFaint(parameters: string, faint: boolean): boolean {
+  const codes = parameters === "" ? [0] : parameters.split(/[;:]/).map(code => Number(code || 0));
+  for (let index = 0; index < codes.length; index++) {
+    const code = codes[index]!;
+    if (code === 38 || code === 48 || code === 58) { index += codes[index + 1] === 5 ? 2 : codes[index + 1] === 2 ? 4 : 1; continue; }
+    if (code === 0 || code === 22) faint = false;
+    else if (code === 2) faint = true;
+  }
+  return faint;
+}
+
+/** Nudge retry backoff while a notice stays unsurfaced (pane busy, typed nudge lost): 5 s, 10 s, 20 s, then 60 s. */
+export const NUDGE_BACKOFF_MS = [5_000, 10_000, 20_000, 60_000] as const;
+export interface NudgeState { readonly key: string; readonly attempts: number; readonly nextAt: number }
+/** A different set of waiting notices is new work: it is nudged immediately instead of inheriting an older backoff. */
+export function nudgeDue(state: NudgeState | undefined, key: string, now: number): boolean {
+  return state === undefined || state.key !== key || now >= state.nextAt;
+}
+export function afterNudge(state: NudgeState | undefined, key: string, now: number): NudgeState {
+  const attempts = state?.key === key ? state.attempts + 1 : 1;
+  return { key, attempts, nextAt: now + NUDGE_BACKOFF_MS[Math.min(attempts - 1, NUDGE_BACKOFF_MS.length - 1)]! };
+}
+/** Inbox check period; `BFLOW_INBOX_CHECK_MS` overrides it within 500 ms–30 s. */
+export function inboxCheckIntervalMs(value: string | undefined): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 500 && parsed <= 30_000 ? parsed : 2_000;
+}
+
 function isCurrentLayoutEmpty(lines: string[]): boolean {
   const prompt = lines.map((line, index) => ({ line, index })).filter(item => /^\s*❯/u.test(item.line)).pop();
   if (!prompt) return false;

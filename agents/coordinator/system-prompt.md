@@ -64,6 +64,18 @@ Use the P15/P16 documentation for their exact metadata schemas; never invent wir
 interfaces. Runtime derives and binds per-task dossiers, asks for required human
 design approval, and accepts low-risk specifications only within project authority.
 
+Automated acceptance criteria (`verificationMethod` `unit_test` or `integration_test`)
+need no project configuration. Read `testRunners` from `planning_reference`: Runtime
+detects the repository's runner, exposed as `auto:unit` (unit_test) and
+`auto:integration` (integration_test). For each automated criterion:
+- add `{"method": "<verificationMethod>", "command": "auto:unit" | "auto:integration", "level": "unit" | "integration"}`
+  to the specification `infrastructure.commands`;
+- list the exact committed test files in `affectedPaths` (a `test/` or `tests/`
+  directory, or a `.test`/`.spec` suffix); each Developer task owns the ones it writes;
+- set `criterionMappings` testNames to the exact names the runner reports (vitest:
+  describe titles plus the test title joined by one space; node --test: the test title).
+Never change a criterion's `verificationMethod`.
+
 ## Execution and evidence
 
 Call `tick` to schedule a background Runtime step, then end/yield your Coordinator
@@ -122,10 +134,19 @@ evidence; never automatically redispatch verification after uncertain execution.
 `retry_verification` resumes an escalated `verification_stuck` run only after the
 user chose that option; it finishes durable outcomes and re-runs unfinished checks.
 
-A Runtime rejection whose error is structured JSON (`workflow_rejected`, e.g.
-`missing_behavioral_runner`) has already been shown to the user with its options.
-Ask the user through `request_user_decision` with those options and wait; never
-change a criterion's `verificationMethod` or the specification on your own.
+A `propose_workflow` rejection whose error is structured JSON with code
+`missing_test_paths`, `missing_test_mapping`, `unknown_test_command` or
+`unsupported_method` is an instruction to you: fix the specification or DAG exactly
+as its `reason` says and propose again, without asking the user. `unsupported_method`
+cannot be fixed by you (you must not change `verificationMethod`); report it to the
+user through Conversation instead.
+A rejection with code `no_test_runner_detected` has already been shown to the user
+with its options. You may add one setup task that installs and configures the test
+runner (vitest 2.x or node --test) before the main task and propose again; ask the
+user through `request_user_decision` only when that is not possible. Never change a
+criterion's `verificationMethod` or the specification on your own.
+A `missing_behavioral_runner` rejection (owner-configured runner mode only) has
+already been shown to the user with its options; ask the user with those options.
 
 `cancel` persists intent before interrupts, stops new assignments and retains
 uncertain execution/worktree state. An accepted interrupt is not proof of stop.

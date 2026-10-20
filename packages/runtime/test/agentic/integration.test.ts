@@ -18,7 +18,8 @@ import { loadAgenticPolicies, type PanePolicy } from "../../src/agentic/ports.js
 import { createAgenticConversationHost } from "../../src/agentic/conversation.js";
 import { HostDevelopment } from "../../src/agentic/host-development.js";
 import { DEFAULT_HOST_CHECKS, HostBehavioralFailure, HostVerification } from "../../src/agentic/host-verification.js";
-import { parseBehavioralCommands, type BehavioralCommand } from "../../src/agentic/behavioral-runner.js";
+import { parseBehavioralCommands, type BehavioralCommand, type RunnerProfile } from "../../src/agentic/behavioral-runner.js";
+import { TestRunnerSource } from "../../src/agentic/task-commands.js";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
 import { FakeAgentTransport } from "../helpers/fake-transport.js";
 import { draft, workflow } from "../../../specification/test/fixtures.js";
@@ -50,7 +51,7 @@ class Panes implements PanePolicy {
   async releaseDeveloper() { return { ok: true as const, value: undefined }; }
 }
 
-async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean; humanApproval?: boolean; behavioral?: BehavioralCommand } = {}) {
+async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean; humanApproval?: boolean; behavioral?: BehavioralCommand; runners?: TestRunnerSource } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-p19-")));
   const repository = join(root, "repo"); await mkdir(repository); git(repository, "init", "-b", "main");
   git(repository, "config", "user.name", "Test"); git(repository, "config", "user.email", "test@example.test");
@@ -103,7 +104,7 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
   } }));
   let runtime: AgenticWorkflowRuntime;
   const receipts = new HostReceiptJournal(join(root, "host-receipts"), repository, "session-1");
-  const verification = new HostVerification(() => runtime, () => artifacts, receipts, options.behavioral ? [options.behavioral] : []);
+  const verification = new HostVerification(() => runtime, () => artifacts, receipts, options.runners ?? (options.behavioral ? [options.behavioral] : []));
   if (options.behavioral) checks.splice(0, checks.length, ...DEFAULT_HOST_CHECKS, ...verification.behavioralChecks());
   const actualGates = options.behavioral ? [
     ...DEFAULT_HOST_CHECKS.filter(check => (check.configuration as any).kind === "review").map(check => ({ id: check.id,
@@ -130,7 +131,7 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
   runtime = new AgenticWorkflowRuntime(ports, runtimeOptions);
   const spec: Specification = draft(options.complex ? "api" : options.behavioral ? "bugfix" : "documentation");
   const time = new Date().toISOString(); spec.createdAt = time; spec.updatedAt = time;
-  spec.affectedPaths = options.behavioral ? ["src", "test"] : ["guide.md", ...(options.parallel ? ["other.md"] : [])];
+  spec.affectedPaths = options.behavioral ? ["src", "test", ...(options.runners ? ["test/double.test.cjs"] : [])] : ["guide.md", ...(options.parallel ? ["other.md"] : [])];
   spec.traceabilityTaskIds = options.parallel ? ["implement", "other"] : ["implement"];
   if (options.complex) { (spec.metadata!.sdd as any).assessment.modules = ["one", "two"]; }
   const sdd = spec.metadata!.sdd as any; sdd.traceability[0].taskIds = spec.traceabilityTaskIds;
@@ -217,19 +218,29 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
 }
 
 const phaseTestName = "ac-1: The requested outcome is independently verifiable";
-async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json", maxIterations = 3) {
+/** Runtime-detected profile without owner configuration; detection itself is stubbed, execution is real. */
+async function automaticRunners(): Promise<TestRunnerSource> {
+  const profile: RunnerProfile = { id: "auto-integration", command: "auto:integration", executable: process.execPath,
+    args: ["--test", "--test-reporter=tap"], method: "integration_test", levels: ["integration", "regression"], reporter: "node_tap",
+    timeoutMs: 10_000, checkoutDependencyRoots: [], dependencySource: process.cwd(), source: "detected" };
+  const runners = new TestRunnerSource([], process.cwd(), async () => ({ status: "detected", profiles: [profile], notes: [] }));
+  await runners.refresh();
+  return runners;
+}
+async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json", maxIterations = 3, automatic = false) {
   const testPath = "test/double.test.cjs", sourcePath = "src/double.cjs";
   const command = parseBehavioralCommands([{ id: "real-regression", command: "owner:double-regression", executable: process.execPath,
     args: reporter === "node_tap" ? ["--test", "--test-reporter=tap", testPath] : [createRequire(import.meta.url).resolve("vitest/vitest.mjs"), "run", "--globals", "--reporter=json", "--no-cache", "--maxWorkers=1", "--minWorkers=1", testPath],
     ...(reporter === "vitest_json" ? { reporter, dependencyRoots: [await realpath("node_modules")] } : {}), method: "integration_test", levels: ["integration", "regression"],
     testPaths: [testPath], testNames: [phaseTestName], timeoutMs: 10_000 }])[0]!;
-  const f = await fixture({ behavioral: command });
+  const runners = automatic ? await automaticRunners() : undefined;
+  const f = await fixture({ behavioral: automatic ? { ...command, command: "auto:integration" } : command, runners });
   await f.runtime.proposeWorkflow("run-1", f.spec, f.def, maxIterations); await f.runtime.tick();
   const original = (await f.runtime.inspect() as any).outbound.find((item: any) => item.message.type === "task.assignment");
   expect(original.status).toBe("accepted");
   const developer = f.panes.bindings.find(binding => binding.paneId === original.handle.target.paneId)!;
   const qa = f.panes.bindings.find(binding => binding.role === "qa")!;
-  const development = new HostDevelopment(() => f.runtime, [command]);
+  const development = new HostDevelopment(() => f.runtime, runners ?? [command]);
   const testSource = reporter === "node_tap" ? `const {test}=require('node:test'); const assert=require('node:assert/strict'); const double=require('../src/double.cjs'); test(${JSON.stringify(phaseTestName)},()=>assert.equal(double(2),4));\n` :
     `const double=require('../src/double.cjs'); it(${JSON.stringify(phaseTestName)},()=>expect(double(2)).toBe(4));\n`;
   const receipt = createSignedBindingReceipt({ issuerId: "native-test-host", receiptId: randomUUID(), handle: original.handle,
@@ -306,6 +317,13 @@ async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json", maxIt
 
 // AgenticJournal persists changes under Linux flock; these integration cases exercise that boundary.
 describe.skipIf(process.platform !== "linux")("connected independent policy phases", () => {
+  it("freezes Red test files bound by an automatic runner profile exactly like owner test files", async () => {
+    const f = await connectedPhaseFixture("node_tap", 3, true);
+    await f.addTests();
+    expect((await f.measure("red")).status).toBe("failed");
+    expect(await f.runtime.authorizeImplementation("run-1", "implement")).toMatchObject({ authorized: true });
+    await expect(f.edit(f.testPath)).rejects.toThrow("frozen");
+  });
   it.each(["node_tap", "vitest_json"] as const)("%s follows real Red/Green/Refactor through QA, borrowed notices, gates and human delivery", async reporter => {
     const f = await connectedPhaseFixture(reporter);
     expect((await f.dossier()).strategy.tddDecision.mode).toBe("required");

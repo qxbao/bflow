@@ -35,9 +35,9 @@ describe("workflow proposal rejection", () => {
     expect(rejection).toMatchObject({ code: "missing_behavioral_runner", methods: ["unit_test"], criteria: ["ac-1"] });
     expect(rejection.reason).toContain("unit_test");
     expect(rejection.options).toHaveLength(3);
-    expect(rejection.options[0]).toContain(".bflow/verification.json");
-    expect(rejection.options[0]).toContain("docs/verification-runners.md");
-    expect(rejection.options[0]).toContain("không xóa journal");
+    expect(rejection.options[0]).toContain("auto:unit");
+    expect(rejection.options[0]).not.toContain(".bflow/verification.json");
+    expect(rejection.options[0]).not.toContain("journal");
     expect(rejection.options[1]).toContain("manual_review");
     expect(rejection.options[2]).toBe("Hủy run này.");
   });
