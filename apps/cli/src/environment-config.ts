@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { lstatSync } from "node:fs";
 import { mkdir, open, readFile } from "node:fs/promises";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, relative, resolve } from "node:path";
 import { AgentRoleSchema, WorkflowDefinitionSchema } from "@bflow/contracts";
 import { createDefaultRepositoryConfig, loadRepositoryConfig, resolveReadableConfigPath } from "./config.js";
 import { parseConfigYaml, renderEnvironmentConfigYaml } from "./config-format.js";
@@ -159,33 +159,41 @@ function integer(value: unknown, max: number): value is number {
 }
 export async function readEnvironmentConfig(repository: RepositoryIdentity): Promise<EnvironmentConfig> {
   const path = resolveReadableConfigPath(repository.root);
-  const base = await loadRepositoryConfig(path);
-  if (!base.ok) throw new Error(base.error.message);
-  const raw: unknown = parseConfigYaml(await readFile(path, "utf8"));
-  const env = record(record(raw)["environment"]);
-  if (env["repositoryId"] !== repository.id || env["workspaceRoot"] !== repository.root || env["sessionName"] !== repository.sessionName)
-    throw new Error("Configuration belongs to another repository or was moved. Reconcile its repository identity before use.");
-  if (typeof env["herdrBinary"] !== "string" || !env["herdrBinary"].trim()) throw new Error("Invalid Herdr executable");
-  const rawRoles = env["roles"];
-  if (!Array.isArray(rawRoles) || !rawRoles.length) throw new Error("Missing role configuration");
-  const roles = rawRoles.map((value: unknown) => {
-    return EnvironmentRoleConfigSchema.parse(value);
-  });
-  if (new Set(roles.map((r) => r.role)).size !== roles.length || !["conversation", "coordinator"].every((r) => roles.some((role) => role.role === r && (role.required ?? true))))
-    throw new Error("Unique roles and required conversation/coordinator roles are mandatory");
-  const sdd = record(env["sdd"]);
-  const tdd = record(env["tdd"]);
-  const verification = record(env["verification"]);
-  const concurrency = record(env["concurrency"]);
-  if ((sdd["minimumLevel"] !== "lightweight" && sdd["minimumLevel"] !== "full") || typeof sdd["approvalRequired"] !== "boolean" || tdd["policy"] !== "conditional" ||
-      !integer(verification["maxIterations"], 100) || verification["onExhausted"] !== "require_human" || !integer(concurrency["maxConcurrency"], 64) ||
-      !integer(env["startupTimeoutMs"], 600_000) || !integer(env["shutdownTimeoutMs"], 600_000)) throw new Error("Invalid SDLC policies, concurrency or timeouts");
-  WorkflowDefinitionSchema.parse(base.value.defaultWorkflow);
-  const parsedEnv = EnvironmentConfigEnvironmentSchema.parse({
-    ...env,
-    roles
-  });
-  return { ...base.value, environment: parsedEnv };
+  try {
+    const base = await loadRepositoryConfig(path);
+    if (!base.ok) throw new Error(base.error.message);
+    const raw: unknown = parseConfigYaml(await readFile(path, "utf8"));
+    const env = record(record(raw)["environment"]);
+    if (env["repositoryId"] !== repository.id || env["workspaceRoot"] !== repository.root || env["sessionName"] !== repository.sessionName)
+      throw new Error("Configuration belongs to another repository or was moved. Reconcile its repository identity before use.");
+    if (typeof env["herdrBinary"] !== "string" || !env["herdrBinary"].trim()) throw new Error("Invalid Herdr executable");
+    const rawRoles = env["roles"];
+    if (!Array.isArray(rawRoles) || !rawRoles.length) throw new Error("Missing role configuration");
+    const roles = rawRoles.map((value: unknown, index: number) => {
+      return EnvironmentRoleConfigSchema.parse(value, { path: ["environment", "roles", index] });
+    });
+    if (new Set(roles.map((r) => r.role)).size !== roles.length || !["conversation", "coordinator"].every((r) => roles.some((role) => role.role === r && (role.required ?? true))))
+      throw new Error("Unique roles and required conversation/coordinator roles are mandatory");
+    const sdd = record(env["sdd"]);
+    const tdd = record(env["tdd"]);
+    const verification = record(env["verification"]);
+    const concurrency = record(env["concurrency"]);
+    if ((sdd["minimumLevel"] !== "lightweight" && sdd["minimumLevel"] !== "full") || typeof sdd["approvalRequired"] !== "boolean" || tdd["policy"] !== "conditional" ||
+        !integer(verification["maxIterations"], 100) || verification["onExhausted"] !== "require_human" || !integer(concurrency["maxConcurrency"], 64) ||
+        !integer(env["startupTimeoutMs"], 600_000) || !integer(env["shutdownTimeoutMs"], 600_000)) throw new Error("Invalid SDLC policies, concurrency or timeouts");
+    WorkflowDefinitionSchema.parse(base.value.defaultWorkflow);
+    const parsedEnv = EnvironmentConfigEnvironmentSchema.parse({
+      ...env,
+      roles
+    }, { path: ["environment"] });
+    return { ...base.value, environment: parsedEnv };
+  } catch (error) {
+    if (!(error instanceof z.ZodError)) throw error;
+    const issue = error.issues[0]!;
+    const field = issue.path.reduce<string>((result, part) => typeof part === "number"
+      ? `${result}[${part}]` : `${result}${result ? "." : ""}${part}`, "");
+    throw new Error(`Invalid ${relative(repository.root, path)}: ${field}: ${issue.message}`);
+  }
 }
 
 export async function initializeEnvironmentConfig(options: {

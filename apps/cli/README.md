@@ -229,9 +229,13 @@ locator when present) to the host, and it never reads or prints launch environme
 values. The host
 survives CLI process exit and owns scheduling, authenticated message ingress, run
 queries and shutdown checkpoints. `doctor` and environment `status` inspect
-topology without starting a daemon. `up` checks `codex login status` or Claude's
-structured `auth status`; it does not print provider account diagnostics or infer
-authentication from an idle pane. First-use provider trust prompts can still block
+topology without starting a daemon. `up` and `doctor` check `codex login status`,
+Claude's structured `auth status`, or Agy's read-only `models` command. Agy has no
+`auth status` or `auth login` subcommand; complete its login flow by running `agy`
+interactively. A successful Agy check requires a returned model list, while network,
+policy and authentication failures remain distinct. The host still verifies actual
+execution readiness before launching roles; model access alone is not readiness.
+The CLI does not print provider account diagnostics or infer authentication from an idle pane. First-use provider trust prompts can still block
 startup and require operator action in that named session.
 
 P13 receives an argv runner that explicitly selects this repository's named

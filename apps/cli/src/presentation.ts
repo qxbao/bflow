@@ -305,6 +305,11 @@ export function resolveActionableRemediation(
   if (msg.includes("Run bflow recover --yes")) {
     return "Stop any old Bflow lifecycle commands, then run 'bflow recover --yes' to migrate the legacy lock.";
   }
+  if (msg.includes("Agent provider 'agy'") || msg.includes("Agy access check failed")) {
+    if (msg.includes("blocked")) return "Resolve the provider policy/workspace block and verify with 'bflow agent check agy' or 'bflow doctor'.";
+    if (msg.includes("not authenticated")) return "Run 'agy' interactively and complete its login flow, then verify with 'agy models' and 'bflow doctor'.";
+    return "Run 'agy models' in this repository to inspect provider access, then rerun 'bflow doctor'.";
+  }
   if (msg.includes("Run claude auth login") || msg.includes("Run codex login") || msg.includes("auth login")) {
     return "Authenticate using 'claude auth login' or 'codex login' before running 'bflow up'.";
   }

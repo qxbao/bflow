@@ -164,6 +164,59 @@ describe("P12 repository environment lifecycle", () => {
     expect(runner.running.has(repository.sessionName)).toBe(false);
     expect(runner.running.has("other-repository")).toBe(true);
   });
+  linuxIt("uses supported Agy models for up and doctor while retaining the host readiness gate", async () => {
+    const path = join(dir, ".bflow/config.yml");
+    const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
+    config.environment.roles = config.environment.roles.map(role => ({ ...role, cli: "agy" }));
+    await writeFile(path, renderEnvironmentConfigYaml(config));
+    const original = runner.run.bind(runner);
+    vi.spyOn(runner, "run").mockImplementation(async request => request.executable !== "agy" ? original(request) :
+      (runner.requests.push(request), request.args.join(" ") === "models"
+        ? { exitCode: 0, stdout: "gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n", stderr: "Fetching available models..." }
+        : request.args.join(" ") === "--version" ? { exitCode: 0, stdout: "agy 1.4.2", stderr: "" }
+        : { exitCode: 2, stdout: "", stderr: `Error: unexpected argument "${request.args[0]}".` }));
+    const prepareRoles = vi.fn(async () => { throw new Error("host readiness sentinel"); });
+    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, prepareRoles,
+      runtime: mockRuntime(), quiesce: async () => ({ ok: true, value: undefined }) } });
+    await expect(composed.up()).rejects.toThrow("host readiness sentinel");
+    expect(prepareRoles).toHaveBeenCalledOnce();
+    expect(fixture.manager.up).not.toHaveBeenCalled();
+    const report = await composed.doctor();
+    expect(report.checks.find(check => check.checkId === "auth-agy")?.status).toBe("passed");
+    const requests = runner.requests.filter(request => request.executable === "agy");
+    expect(requests.filter(request => request.args.join(" ") === "models")).toHaveLength(2);
+    expect(requests.some(request => request.args[0] === "auth" || request.args[0] === "status")).toBe(false);
+  });
+  linuxIt.each([
+    ["mixed model list and policy denial", 0, "gemini-3.8-flash-high\tGemini 3.8 Flash\n", "blocked by workspace policy", "agent provider 'agy' is blocked"],
+    ["mixed model list and auth denial", 0, "gemini-3.8-flash-high\tGemini 3.8 Flash\n", "not logged in", "not authenticated"],
+    ["network failure", 1, "", "connection refused token=private-sentinel", "access check failed"],
+    ["explicit authentication failure", 1, "", "not logged in token=private-sentinel", "not authenticated"],
+    ["policy block", 1, JSON.stringify({ status: "blocked", reason: "Workspace policy restriction" }), "", "blocked"],
+    ["explicit JSON rejection", 0, JSON.stringify({ authenticated: false }), "", "not authenticated"],
+    ["empty output", 0, "", "", "access check failed"],
+    ["incomplete output", 0, "Fetching available models...", "", "access check failed"]
+  ])("does not treat Agy %s as successful access", async (_label, exitCode, stdout, stderr, expected) => {
+    const path = join(dir, ".bflow/config.yml");
+    const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
+    config.environment.roles = config.environment.roles.map(role => ({ ...role, cli: "agy" }));
+    await writeFile(path, renderEnvironmentConfigYaml(config));
+    const original = runner.run.bind(runner);
+    vi.spyOn(runner, "run").mockImplementation(async request => request.executable === "agy" && request.args[0] !== "--version"
+      ? { exitCode, stdout, stderr } : original(request));
+    const result = await runCli(["up"], { cwd: dir, environment: { runner, integration: { manager: fixture.manager } } });
+    expect(result.ok).toBe(false);
+    expect(result.stderr.toLowerCase()).toContain(expected);
+    expect(result.stderr).not.toContain("private-sentinel");
+    expect(result.stderr).not.toContain("agy auth login");
+    expect(result.stderr).not.toContain("claude auth login");
+    expect(result.stderr).not.toContain("codex login");
+    const report = await lifecycle.doctor();
+    expect(report.checks.find(check => check.checkId === "auth-agy")?.status).toBe("failed");
+    expect(JSON.stringify(report)).not.toContain("private-sentinel");
+    expect(fixture.manager.up).not.toHaveBeenCalled();
+    expect(runner.requests.some(request => request.args[0] === "server")).toBe(false);
+  });
   linuxIt("requires an authenticated Claude status payload rather than accepting exit zero alone", async () => {
     const path = join(dir, ".bflow/config.yml");
     const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
@@ -525,6 +578,39 @@ describe("P12 repository environment lifecycle", () => {
     expect(recovered.ok).toBe(true); expect(JSON.parse(recovered.stdout).command).toBe("recover");
     expect(await readFile(join(dir, ".bflow/config.yml"), "utf8")).toBe(config);
     expect((await lifecycle.up()).status).toBe("up");
+  });
+  it.each([null, "true"])("reports the exact config path for invalid role.required %j before shutdown", async required => {
+    const path = join(dir, ".bflow/config.yml");
+    const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
+    const raw = { ...config, environment: { ...config.environment, roles: config.environment.roles.map(role =>
+      role.role === "reviewer" ? { ...role, required } : role) } };
+    const content = renderEnvironmentConfigYaml(raw);
+    await writeFile(path, content);
+    for (const json of [false, true]) {
+      const result = await runCli(["down", ...(json ? ["--json"] : [])], { cwd: dir,
+        environment: { runner, integration: { manager: fixture.manager } } });
+      expect(result.ok).toBe(false);
+      expect(result.error?.code).toBe("validation");
+      const output = json ? JSON.parse(result.stdout).error.message : result.stderr;
+      expect(output).toContain(".bflow/config.yml");
+      expect(output).toContain("environment.roles[5].required");
+      expect(output).toContain("Expected boolean");
+      if (!json) expect(output).toContain("Inspect .bflow/config.yml");
+    }
+    expect(await readFile(path, "utf8")).toBe(content);
+    expect(fixture.manager.down).not.toHaveBeenCalled();
+    expect(runner.requests.filter(request => request.executable !== "git")).toEqual([]);
+  });
+  it("reports the exact config path for an invalid nested permission boolean", async () => {
+    const path = join(dir, ".bflow/config.yml");
+    const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
+    await writeFile(path, renderEnvironmentConfigYaml({ ...config, environment: { ...config.environment,
+      permissions: { trustedWorkspace: null } } }));
+    const result = await runCli(["down", "--json"], { cwd: dir,
+      environment: { runner, integration: { manager: fixture.manager } } });
+    expect(result.error?.message).toContain("environment.permissions.trustedWorkspace");
+    expect(result.error?.message).toContain("Expected boolean, received null");
+    expect(fixture.manager.down).not.toHaveBeenCalled();
   });
   linuxIt("requires confirmation for active runs and does not stop agents", async () => {
     await lifecycle.up();

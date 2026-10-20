@@ -1,3 +1,4 @@
+import { AGY_LOGIN_REMEDIATION, probeAgyAccess } from "./agy-access.js";
 import { access, readFile } from "node:fs/promises";
 import { constants, existsSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
@@ -671,8 +672,9 @@ export async function runDoctorDiagnostics(
         authReason = `Provider '${provider}' reports authenticated; transport idle alone is not authentication evidence`;
       } else {
         authStatus = "fail";
-        authReason = `Agent provider '${provider}' is not authenticated. Run '${provider === "codex" ? "codex login" : provider === "claude" ? "claude auth login" : "agy auth login"}' and verify with 'bflow doctor'.`;
-        authRemediation = `Run '${provider === "codex" ? "codex login" : provider === "claude" ? "claude auth login" : "agy auth login"}' and verify with 'bflow doctor'.`;
+        authRemediation = provider === "agy" ? AGY_LOGIN_REMEDIATION
+          : `Run '${provider === "codex" ? "codex login" : "claude auth login"}' and verify with 'bflow doctor'.`;
+        authReason = `Agent provider '${provider}' is not authenticated. ${authRemediation}`;
       }
     } else {
       if (provider === "codex") {
@@ -733,27 +735,10 @@ export async function runDoctorDiagnostics(
           authRemediation = "Run 'claude auth login' and verify with 'bflow doctor'.";
         }
       } else if (provider === "agy") {
-        try {
-          const authRes = await runner.run({
-            executable: "agy",
-            args: ["auth", "status"],
-            cwd: repository.root,
-            env,
-            timeoutMs: 5000
-          });
-          if (authRes.exitCode === 0) {
-            authStatus = "pass";
-            authReason = "Provider 'agy' reports authenticated.";
-          } else {
-            authStatus = "fail";
-            authReason = "Agent provider 'agy' is not authenticated.";
-            authRemediation = "Run 'agy auth login' and verify with 'bflow doctor'.";
-          }
-        } catch {
-          authStatus = "fail";
-          authReason = "Agent provider 'agy' is not authenticated.";
-          authRemediation = "Run 'agy auth login' and verify with 'bflow doctor'.";
-        }
+        const access = await probeAgyAccess(runner, { cwd: repository.root, env, timeoutMs: 45_000 });
+        authStatus = access.status === "available" ? "pass" : "fail";
+        authReason = access.message;
+        authRemediation = access.remediation;
       }
     }
 
