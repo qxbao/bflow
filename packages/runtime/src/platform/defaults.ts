@@ -65,7 +65,9 @@ export function createProviderAdapterFactory(options: ProviderAdapterFactoryOpti
       ...(context.liveObservation !== undefined ? { liveObservation: context.liveObservation } : {}),
       ...(context.hostMcpServers !== undefined ? { hostMcpServers: context.hostMcpServers } : {}),
       ...(context.hostHooks !== undefined ? { hostHooks: context.hostHooks } : {}),
-      ...(context.mcpTokenEnvironmentNames !== undefined ? { mcpTokenEnvironmentNames: context.mcpTokenEnvironmentNames } : {})
+      ...(context.mcpTokenEnvironmentNames !== undefined ? { mcpTokenEnvironmentNames: context.mcpTokenEnvironmentNames } : {}),
+      ...(context.isolatorEnvironment !== undefined ? { isolatorEnvironment: { ...context.isolatorEnvironment } } : {}),
+      ...(context.codexBackendUrl !== undefined ? { codexBackendUrl: context.codexBackendUrl } : {})
     };
     switch (provider) {
       case "claude":
@@ -98,6 +100,7 @@ export interface PlatformReadinessServiceOptions {
   readonly signer: LaunchAttestationSigner;
   /** Trusted Codex process-home selectors propagated to every launch, including dynamic Developers. */
   readonly codexLaunchEnvironment?: Readonly<Record<string, string>>;
+  readonly isolatorStateRoot?: string;
   readonly providerFactory?: ProviderAdapterFactory | undefined;
   readonly now?: (() => Date) | undefined;
   readonly rolePrompt?: ((role: AgentRole) => string | undefined) | undefined;
@@ -132,6 +135,7 @@ export function createPlatformReadinessService(options: PlatformReadinessService
     nativeSessionHookCommand: options.nativeSessionHookCommand,
     hostLaunch: options.hostLaunch,
     codexLaunchEnvironment: options.codexLaunchEnvironment,
+    ...(options.isolatorStateRoot !== undefined ? { isolatorStateRoot: options.isolatorStateRoot } : {}),
     now
   });
 }

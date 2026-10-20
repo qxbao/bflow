@@ -34,6 +34,7 @@ export interface RoleSkillSelection {
 export interface RolePlatformRequirement {
   readonly role: AgentRole;
   readonly provider: AgentProviderId;
+  readonly profileName?: string;
   readonly required: boolean;
   readonly model?: string;
   readonly effort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -153,6 +154,10 @@ export interface GatewayRegistrationPort {
 export interface ProviderAdapterContext {
   /** Trusted machine process environment selectors, never sourced from repository role config. */
   readonly launchEnvironment?: Readonly<Record<string, string>>;
+  /** Trusted ai-isolator profile environment, resolved by Runtime from machine state. */
+  readonly isolatorEnvironment?: Readonly<Record<string, string>>;
+  /** Validated linked Codex backend URL, absent for direct/unset profiles. */
+  readonly codexBackendUrl?: string;
   readonly rolePrompt?: string;
   readonly model?: string;
   readonly effort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";

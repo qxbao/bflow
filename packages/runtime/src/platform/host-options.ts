@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import { z } from "zod";
 import {
   AgentHealthCheckSchema, AgentProviderIdSchema, AgentRoleSchema, IdentifierSchema, IsoDateTimeSchema,
@@ -12,6 +13,7 @@ import {
 export const PlatformRoleOptionSchema = z.object({
   role: AgentRoleSchema,
   provider: AgentProviderIdSchema,
+  profileName: z.string().min(1).regex(/^[A-Za-z0-9._-]+$/).optional(),
   required: z.boolean(),
   model: z.string().trim().min(1).optional(),
   effort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).optional(),
@@ -37,6 +39,8 @@ export const AgenticHostPlatformOptionsSchema = z.object({
   schemaVersion: z.literal(3),
   machineId: IdentifierSchema,
   repositoryId: IdentifierSchema,
+  /** Trusted machine AI-isolator state root. Never derived from repository role configuration. */
+  isolatorStateRoot: z.string().min(1).refine(isAbsolute, "isolatorStateRoot must be absolute").optional(),
   /** One entry per role; a `developer` entry is the template for dynamic Developer launches. */
   roles: z.array(PlatformRoleOptionSchema).min(1),
   /** Root of the machine skill bundle store (`FileSkillStore`). */

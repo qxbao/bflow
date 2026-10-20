@@ -7,7 +7,12 @@ import { createFakeProviderRunner, type ProviderCommandRunner } from "@bflow/age
 import type { AgentRole, ContractError, MCPClientRegistration, OperationResult } from "@bflow/contracts";
 import type { PlatformReadinessService, PreparedRoleLaunch, RolePlatformRequirement } from "../../src/platform/index.js";
 import { tokenEnvironmentName } from "../../src/platform/gateway-registrations.js";
-import type { PlatformRoleOption, AgenticHostPlatformOptions } from "../../src/platform/host-options.js";
+import {
+  AgenticHostPlatformOptionsSchema,
+  PlatformRoleOptionSchema,
+  type PlatformRoleOption,
+  type AgenticHostPlatformOptions
+} from "../../src/platform/host-options.js";
 import {
   HostPlatformSession, skillSupportedCommands, HostPlatformStatusSchema, launchMaterial, liveObservation, requirementFor,
   createHostProviderFactoryOptions, createHostProviderAdapterFactory
@@ -27,6 +32,27 @@ const platform: AgenticHostPlatformOptions = {
   roles: [roleOption("conversation", "codex"), roleOption("coordinator", "codex"), roleOption("developer", "codex", false)],
   skillsStoreRoot: "/var/lib/bflow/skills-store", approvedBuiltinSkillDigests: []
 };
+
+describe("profile selection ingress", () => {
+  it("accepts safe profile names and rejects path/control characters", () => {
+    expect(PlatformRoleOptionSchema.safeParse({ ...roleOption("coordinator", "codex"), profileName: "lead-1" }).success).toBe(true);
+    expect(PlatformRoleOptionSchema.safeParse({ ...roleOption("coordinator", "codex"), profileName: "p".repeat(129) }).success).toBe(true);
+    for (const profileName of ["", " ", "../work", "nested/name", "line\nbreak", "name\u0000"]) {
+      expect(PlatformRoleOptionSchema.safeParse({ ...roleOption("coordinator", "codex"), profileName }).success).toBe(false);
+    }
+  });
+
+  it("accepts only an absolute trusted isolator state root", () => {
+    expect(AgenticHostPlatformOptionsSchema.safeParse({
+      ...platform,
+      isolatorStateRoot: "/machine/ai-isolator"
+    }).success).toBe(true);
+    expect(AgenticHostPlatformOptionsSchema.safeParse({
+      ...platform,
+      isolatorStateRoot: "relative/ai-isolator"
+    }).success).toBe(false);
+  });
+});
 
 describe("Codex hook trust propagation", () => {
   it("uses one explicit managed environment for inspection and launch without the outer Orca endpoint", () => {
@@ -365,6 +391,38 @@ describe("P30 host platform composition", () => {
     expect(JSON.parse(await readFile(join(root, "platform-generation.json"), "utf8"))).toEqual({ generation: 1 });
     expect((await host.prepare()).report.ready).toBe(true);
     expect(JSON.parse(await readFile(join(root, "platform-generation.json"), "utf8"))).toEqual({ generation: 2 });
+  });
+
+  it("uses only the resolved Developer profile option and never infers one for an explicit role", async () => {
+    const service = fakeService();
+    const { host, root, options } = await session(service);
+    const roles = [
+      roleOption("conversation", "codex"),
+      { ...roleOption("coordinator", "codex"), profileName: "lead" },
+      roleOption("developer", "codex", false)
+    ];
+    const explicitHost = new HostPlatformSession({ ...options, service, platform: { ...platform, roles } });
+    await explicitHost.prepare();
+    await explicitHost.allocateDeveloper("explicit-dev", join(root, "explicit-worktree"));
+    expect(service.developerRequirements.at(-1)?.profileName).toBeUndefined();
+
+    const crossProviderHost = new HostPlatformSession({
+      ...options,
+      service,
+      platform: { ...platform, roles: [...roles.slice(0, 2), { ...roles[2]!, provider: "claude" }] }
+    });
+    await crossProviderHost.prepare();
+    await crossProviderHost.allocateDeveloper("cross-provider-dev", join(root, "cross-provider-worktree"));
+    expect(service.developerRequirements.at(-1)?.profileName).toBeUndefined();
+
+    const synthesizedHost = new HostPlatformSession({
+      ...options,
+      service,
+      platform: { ...platform, roles: [...roles.slice(0, 2), { ...roles[2]!, profileName: "work" }] }
+    });
+    await synthesizedHost.prepare();
+    await synthesizedHost.allocateDeveloper("synthesized-dev", join(root, "synthesized-worktree"));
+    expect(service.developerRequirements.at(-1)?.profileName).toBe("work");
   });
 
   it("returns a not-ready report with no launch material when a required role is blocked", async () => {
