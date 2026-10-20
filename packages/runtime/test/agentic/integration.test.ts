@@ -14,10 +14,11 @@ import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 import { createSignedBindingReceipt } from "../../src/agentic/receipt-host.js";
 import { CoordinatorTools } from "../../src/agentic/tools.js";
 import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
-import { loadAgenticPolicies, type PanePolicy } from "../../src/agentic/ports.js";
+import { loadAgenticPolicies, type AgenticRuntimePorts, type PanePolicy } from "../../src/agentic/ports.js";
 import { createAgenticConversationHost } from "../../src/agentic/conversation.js";
 import { HostDevelopment } from "../../src/agentic/host-development.js";
 import { DEFAULT_HOST_CHECKS, HostBehavioralFailure, HostVerification } from "../../src/agentic/host-verification.js";
+import { probeBehavioralSandbox } from "../../src/agentic/sandbox-readiness.js";
 import { parseBehavioralCommands, type BehavioralCommand, type RunnerProfile } from "../../src/agentic/behavioral-runner.js";
 import { TestRunnerSource } from "../../src/agentic/task-commands.js";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
@@ -51,7 +52,7 @@ class Panes implements PanePolicy {
   async releaseDeveloper() { return { ok: true as const, value: undefined }; }
 }
 
-async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean; humanApproval?: boolean; behavioral?: BehavioralCommand; runners?: TestRunnerSource } = {}) {
+async function fixture(options: { dynamicGate?: boolean; parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean; humanApproval?: boolean; behavioral?: BehavioralCommand; runners?: TestRunnerSource } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-p19-")));
   const repository = join(root, "repo"); await mkdir(repository); git(repository, "init", "-b", "main");
   git(repository, "config", "user.name", "Test"); git(repository, "config", "user.email", "test@example.test");
@@ -114,12 +115,15 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
     } }))
   ] : options.remoteReview ? gates.map(gate => gate.id === "review" ? { id: gate.id,
     evaluate: (...args: Parameters<QualityGate["evaluate"]>) => runtime.herdrQualityGate(gate.id).evaluate(...args) } : gate) : gates;
-  const policies = await loadAgenticPolicies({ repositoryPath: repository, artifactStore: artifacts, gates: actualGates,
+  let dynamicReady = false;
+  const policies = await loadAgenticPolicies({ repositoryPath: repository, artifactStore: artifacts,
+    gates: options.dynamicGate ? actualGates.filter(gate => gate.id !== "regression") : actualGates,
+    ...(options.dynamicGate ? { dynamicGates: () => dynamicReady ? actualGates.filter(gate => gate.id === "regression") : [] } : {}),
     loadSpecification: id => runtime.loadSpecification(id), authorizeApprover: decision => ["coordinator", "human-1"].includes(decision.decidedBy) });
   // Conversation-bound messages are delivered through the trusted inbox, never through transport or the input box.
   const conversationInbox: RoleMessage[] = [];
   let conversationReentry: ((message: RoleMessage) => Promise<unknown>) | undefined;
-  const ports = { engine, runStore: store, artifactStore: artifacts, registry, transport, panes, policies,
+  const ports: AgenticRuntimePorts = { engine, runStore: store, artifactStore: artifacts, registry, transport, panes, policies,
     deliverToConversation: async (message: RoleMessage) => { conversationInbox.push(message); await conversationReentry?.(message); },
     roleCapabilities: { developer: ["implementation"], coordinator: ["coordination"], conversation: ["conversation"], specifier: ["specification"], architect: ["architecture"], planner: ["planning"], reviewer: ["review"], qa: ["verification", ...(options.behavioral ? ["testing"] : [])], tester: ["testing"] },
     taskChecks: checks, workflowChecks: checks,
@@ -209,7 +213,7 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
     }
     await runtime.receiveHerdr(envelope("approval.decision", approved));
   }
-  return { root, repository, get runtime() { return runtime; }, ports, privateKey, publicKey, runtimeOptions, panes, transport, conversationInbox,
+  return { enableDynamicGate: () => { dynamicReady = true; }, root, repository, get runtime() { return runtime; }, ports, privateKey, publicKey, runtimeOptions, panes, transport, conversationInbox,
     reenterOnConversationDelivery(action: (message: RoleMessage) => Promise<unknown>) { conversationReentry = action; }, spec, def, envelope, inspect, dossier, evidence, submit, approve, verification, receipts,
     calls, localReview: (context: QualityGateContext) => gates.find(gate => gate.id === "review")!.evaluate(context), setFailReview: (value: boolean) => { failReview = value; },
     setReviewerExecutor: (value: string) => { reviewerExecutorId = value; },
@@ -222,7 +226,7 @@ const phaseTestName = "ac-1: The requested outcome is independently verifiable";
 async function automaticRunners(): Promise<TestRunnerSource> {
   const profile: RunnerProfile = { id: "auto-integration", command: "auto:integration", executable: process.execPath,
     args: ["--test", "--test-reporter=tap"], method: "integration_test", levels: ["integration", "regression"], reporter: "node_tap",
-    timeoutMs: 10_000, checkoutDependencyRoots: [], dependencySource: process.cwd(), source: "detected" };
+    timeoutMs: 10_000, checkoutDependencyRoots: [], dependencySource: process.cwd(), definitionBlobs: {}, source: "detected" };
   const runners = new TestRunnerSource([], process.cwd(), async () => ({ status: "detected", profiles: [profile], notes: [] }));
   await runners.refresh();
   return runners;
@@ -316,7 +320,7 @@ async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json", maxIt
 }
 
 // AgenticJournal persists changes under Linux flock; these integration cases exercise that boundary.
-describe.skipIf(process.platform !== "linux")("connected independent policy phases", () => {
+describe.skipIf((await probeBehavioralSandbox()).status !== "ready")("connected independent policy phases", () => {
   it("freezes Red test files bound by an automatic runner profile exactly like owner test files", async () => {
     const f = await connectedPhaseFixture("node_tap", 3, true);
     await f.addTests();
@@ -400,6 +404,19 @@ describe.skipIf(process.platform !== "linux")("connected independent policy phas
 
 
 describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () => {
+  it("loads a runner added after composition and ignores unselected language profiles when freezing a task plan", async () => {
+    const f = await fixture({ tdd: true, dynamicGate: true });
+    f.ports.behavioralChecks = () => [{ ...f.ports.taskChecks.find(check => check.id === "regression")!, id: "unselected-polyglot",
+      metadata: { bindAcceptedCriteria: true, bindMethodTestNames: true },
+      configuration: { kind: "deterministic", method: "integration_test", command: "auto:integration:go", criterionIds: [], testNames: [], role: "quality_gate", levels: ["integration"] } }];
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    await f.evidence("implement", "red"); await f.evidence("implement", "green"); await f.evidence("implement", "refactor");
+    f.enableDynamicGate(); await f.submit(); await f.runtime.tick(); await f.runtime.tick();
+    const run = await f.inspect(); expect(run.tasks[0].cycle.status).toBe("passed");
+    expect(run.tasks[0].verificationPlan.checks.some((check: any) => check.id === "unselected-polyglot")).toBe(false);
+    expect(f.calls.some(context => context.definition.id === "regression")).toBe(true);
+  });
+
   it("conversation-only creates no workflow", async () => {
     const f = await fixture();
     const before = await f.runtime.inspect() as any;

@@ -6,13 +6,13 @@ import { redactString } from "../resilience/redaction.js";
  * The options are informational text for the user. Nothing here is applied automatically.
  */
 export type WorkflowRejectionCode = "missing_behavioral_runner" | "unsupported_verification" | "policy_violation" |
-  "no_test_runner_detected" | "missing_test_paths" | "missing_test_mapping" | "unknown_test_command" | "unsupported_method";
+  "no_test_runner_detected" | "runner_setup_required" | "verification_sandbox_unavailable" | "missing_test_paths" | "missing_test_mapping" | "unknown_test_command" | "unsupported_method";
 
 /**
  * Coordinator-fixable refusals: the structured error is the instruction for the Coordinator, so Conversation gets no notice.
  * Only the remaining classes (including `no_test_runner_detected`) are reported to the user.
  */
-export const AGENT_FIXABLE_REJECTIONS: readonly WorkflowRejectionCode[] = ["missing_test_paths", "missing_test_mapping", "unknown_test_command", "unsupported_method"];
+export const AGENT_FIXABLE_REJECTIONS: readonly WorkflowRejectionCode[] = ["runner_setup_required", "missing_test_paths", "missing_test_mapping", "unknown_test_command", "unsupported_method"];
 
 /** Whether Runtime should tell Conversation (and through it the user) about this refusal. */
 export function reportsToUser(rejection: WorkflowRejection): boolean {
