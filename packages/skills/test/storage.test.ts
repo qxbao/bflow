@@ -291,20 +291,33 @@ describe("private immutable SkillFileStore", () => {
 
   it("rejects symlink bundle resources, document links and FIFO documents", async () => {
     const storage = store();
+    const outside = join(sandbox, "outside.json");
+    const outsideBytes = Buffer.from('{"outside":"owned fixture"}\n');
+    const outsideMode = 0o640;
+    await writeFile(outside, outsideBytes);
+    await chmod(outside, outsideMode);
+    const expectOutsideUnchanged = async () => {
+      expect(await readFile(outside)).toEqual(outsideBytes);
+      expect((await lstat(outside)).mode & 0o777).toBe(outsideMode);
+    };
     const digest = await storage.putBundle(files);
     const resource = join(storage.root, "bundles", digest, "SKILL.md");
     await rm(resource);
-    await symlink("/etc/passwd", resource);
+    await symlink(outside, resource);
     await expect(storage.getBundle(digest)).rejects.toThrow("symlink");
+    await expectOutsideUnchanged();
     const doc = join(storage.root, "docs", "evil.json");
-    await symlink("/etc/passwd", doc);
+    await symlink(outside, doc);
     await expect(storage.readDocument("evil")).rejects.toThrow();
+    await expectOutsideUnchanged();
     await expect(storage.writeImmutableDocument("evil", {})).rejects.toThrow();
+    await expectOutsideUnchanged();
     await rm(doc);
     execFileSync("mkfifo", [doc]);
     await expect(storage.readDocument("evil")).rejects.toThrow(
       "bounded regular file",
     );
+    await expectOutsideUnchanged();
   });
 
   it("publishes concurrent bundles/documents atomically with one winner on conflict", async () => {
