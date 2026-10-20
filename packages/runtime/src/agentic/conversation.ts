@@ -17,6 +17,8 @@ export interface AgenticConversationHost {
   receiveRuntime(input: unknown): Promise<unknown>;
   setBusy(busy: boolean): Promise<unknown>;
   flush(): Promise<unknown>;
+  /** Registers Runtime-pending approvals Conversation missed; read-only toward Runtime, never decides anything. */
+  reconcileApprovals(): Promise<unknown>;
 }
 /** Compose the actual P14 Gateway with P19's durable Herdr outbox, retaining P14 dialogue/queue policies. */
 export async function createAgenticConversationHost(options: {
@@ -129,12 +131,36 @@ export async function createAgenticConversationHost(options: {
     const refreshed = await gateway.initializeOrRecoverSession();
     if (!refreshed.ok) throw new Error(refreshed.error.message);
   }
+  /** Asks Runtime what is pending for this session and registers what Conversation lacks. Warnings stay until a later reconcile clears them. */
+  let approvalWarnings: string[] = [];
+  const reconcileApprovals = async () => {
+    try {
+      const pending = await runtime.pendingApprovals({ sessionId: manifest.conversationSessionId });
+      const result = await gateway.reconcilePendingApprovals(pending);
+      if (!result.ok) throw new Error(result.error.message);
+      if (result.value.busy) return result.value;
+      const runOf = new Map(pending.map(item => [item.request.approvalId, item.request.runId]));
+      approvalWarnings = result.value.rejected.map((item: { approvalId: string; reason: string }) =>
+        `Runtime đang chờ quyết định của người dùng (${item.approvalId}${runOf.has(item.approvalId) ? `, run ${runOf.get(item.approvalId)}` : ""}) ` +
+        `nhưng Conversation không đăng ký được: ${item.reason}.`);
+      return result.value;
+    } catch (error) {
+      approvalWarnings = [`Không truy vấn được approval đang chờ từ Runtime: ${error instanceof Error ? error.message : String(error)}.`];
+      throw error;
+    }
+  };
+  const withWarnings = (result: unknown) =>
+    approvalWarnings.length && result && typeof result === "object" ? { ...(result as object), approvalWarnings } : result;
   return {
-    handleUserTurn: input => gateway.handleUserTurn(input),
+    reconcileApprovals,
+    async handleUserTurn(input) {
+      await reconcileApprovals().catch(() => undefined);
+      return withWarnings(await gateway.handleUserTurn(input));
+    },
     async getContext() {
       const context = gateway.getContextSnapshot();
       return json({ session: context.session, pendingClarifications: context.pendingClarifications,
-        pendingApprovals: context.pendingApprovals, workflows: context.workflows,
+        pendingApprovals: context.pendingApprovals, approvalWarnings, workflows: context.workflows,
         runIdToCorrelationId: context.runIdToCorrelationId, agentBusy: context.agentBusy,
         messages: context.messages.slice(-20).map((input: unknown) => {
           const { metadata: _metadata, ...message } = ConversationMessageSchema.parse(input); return message;
@@ -164,8 +190,22 @@ export async function createAgenticConversationHost(options: {
         item.kind === "user_turn" && item.input?.messageId === parsed.messageId);
       if (queued) return { ok: true, value: { sessionId: context.session.sessionId, recognizedIntent: "approval_response",
         sessionStatus: context.session.status, queuedBecauseBusy: true, substantiveUpdate: false } };
-      if (Object.keys(context.pendingApprovals).length === 0) return undefined;
-      const classified = module.classifyTrustedApprovalReply(parsed, context);
+      // A lost approval.request must not strand the user's answer: ask Runtime what is pending before classifying.
+      const named = /(?<![\w-])apr-[A-Za-z0-9_-]+/.exec(parsed.content)?.[0];
+      let current = context;
+      if (named !== undefined || Object.keys(context.pendingApprovals).length === 0) {
+        await reconcileApprovals().catch(() => undefined);
+        current = gateway.getContextSnapshot();
+      }
+      if (named !== undefined && !current.pendingApprovals[named]) {
+        const rest = parsed.content.replace(named, "").replace(/^[\s:,-]+|[\s:,.!?-]+$/gu, "");
+        // Only a short reply shaped like "apr-...: answer" is an approval attempt; longer text is ordinary discussion for Chat.
+        if (rest.length > 0 && rest.length <= 40) return { ok: false, error: { code: "not_found", retryable: false,
+          message: `Không tìm thấy approval ${named} đang chờ trong session này${current.session.activeRunId ? ` (run ${current.session.activeRunId})` : ""}; câu trả lời chưa được ghi nhận.` +
+            (approvalWarnings.length ? ` ${approvalWarnings.join(" ")}` : "") } };
+      }
+      if (Object.keys(current.pendingApprovals).length === 0) return undefined;
+      const classified = module.classifyTrustedApprovalReply(parsed, current);
       if (!classified?.ok) return undefined;
       return gateway.handleUserTurn(parsed);
     },

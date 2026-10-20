@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { z } from "zod";
 import {
   ApprovalRequestSchema,
   CancellationRequestSchema,
@@ -39,6 +40,7 @@ import {
 } from "./safety.js";
 import {
   UserTurnInputSchema,
+  type ApprovalReconciliation,
   type ConversationContextSnapshot,
   type CoordinatorUpdateOutcome,
   type ExtractedRequirementDraft,
@@ -1350,6 +1352,59 @@ export class ConversationGateway {
         await this.flushPendingInboundQueue(options);
       }
     }
+  }
+
+  /**
+   * Registers approvals the Runtime reports as pending but this Conversation never recorded (e.g. a lost
+   * `approval.request`). Idempotent. Registration only makes the prompt answerable: it never decides anything,
+   * and the answer still needs authenticated user provenance. Entries for another session, a run bound to another
+   * correlation, an already decided, expired or conflicting request are rejected and reported, never silently dropped.
+   */
+  async reconcilePendingApprovals(rawEntries: readonly unknown[]): Promise<OperationResult<ApprovalReconciliation>> {
+    if (!this.snapshot) {
+      const initResult = await this.initializeOrRecoverSession();
+      if (!initResult.ok) return initResult;
+    }
+    const outcome: { registered: string[]; alreadyKnown: string[]; rejected: { approvalId: string; reason: string }[] } = { registered: [], alreadyKnown: [], rejected: [] };
+    if (this.isProcessingTurn || this.isFlushingQueue) return { ok: true, value: { ...outcome, busy: true } };
+    const now = this.getNow();
+    const pending = { ...this.snapshot!.pendingApprovals };
+    let active = [...this.snapshot!.session.activeApprovalIds];
+    const workflows = { ...this.snapshot!.workflows };
+    const runMap = { ...this.snapshot!.runIdToCorrelationId };
+    let activeRunId = this.snapshot!.session.activeRunId;
+    for (const raw of rawEntries) {
+      const entry = z.object({ request: ApprovalRequestSchema, correlationId: z.string().min(1) }).safeParse(raw);
+      if (!entry.success) { outcome.rejected.push({ approvalId: "unknown", reason: "Runtime trả về approval không hợp lệ theo schema" }); continue; }
+      const { request, correlationId } = entry.data;
+      const reject = (reason: string) => { outcome.rejected.push({ approvalId: request.approvalId, reason }); };
+      if (request.sessionId !== this.config.sessionId) { reject("approval thuộc session khác"); continue; }
+      if (this.snapshot!.approvalDecisions[request.approvalId]) { reject("approval đã được quyết định"); continue; }
+      if (isUserDecisionRequest(request) && request.expiresAt !== undefined && Date.parse(now) >= Date.parse(request.expiresAt)) { reject("approval đã hết hạn"); continue; }
+      const existing = pending[request.approvalId];
+      if (existing) {
+        if (!isDeepStrictEqual(existing, request)) { reject("approval đã đăng ký nhưng nội dung khác với Runtime"); continue; }
+        outcome.alreadyKnown.push(request.approvalId); continue;
+      }
+      const mapped = runMap[request.runId];
+      if (mapped !== undefined && mapped !== correlationId) { reject(`run ${request.runId} đang gắn với workflow khác`); continue; }
+      // Runtime is authoritative for runs of this session; like a live approval.request, a missing workflow still registers.
+      const workflow = workflows[correlationId];
+      if (workflow?.runId !== undefined && workflow.runId !== request.runId) delete runMap[workflow.runId];
+      if (activeRunId === undefined || (workflow && activeRunId === workflow.runId)) activeRunId = request.runId;
+      runMap[request.runId] = correlationId;
+      pending[request.approvalId] = request;
+      if (!active.includes(request.approvalId)) active = [...active, request.approvalId];
+      if (workflow) workflows[correlationId] = { ...workflow, runId: request.runId,
+        activeApprovalIds: workflow.activeApprovalIds.includes(request.approvalId) ? workflow.activeApprovalIds : [...workflow.activeApprovalIds, request.approvalId], updatedAt: now };
+      outcome.registered.push(request.approvalId);
+    }
+    if (outcome.registered.length === 0) return { ok: true, value: outcome };
+    const saved = await this.persistUpdatedSnapshot({ ...this.snapshot!, pendingApprovals: pending, workflows, runIdToCorrelationId: runMap,
+      session: { ...this.snapshot!.session, status: "awaiting_user_approval", activeApprovalIds: active,
+        ...(activeRunId !== undefined ? { activeRunId } : {}), updatedAt: now } });
+    if (!saved.ok) return saved;
+    return { ok: true, value: outcome };
   }
 
   /**

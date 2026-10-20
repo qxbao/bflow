@@ -548,6 +548,32 @@ describe("P12 repository environment lifecycle", () => {
     expect(runner.running.has(repository.sessionName)).toBe(true);
     expect(runner.requests.some(r => r.args[0] === "session" && r.args[1] === "stop")).toBe(false);
   });
+  linuxIt("force down stops a host daemon that rejects the protocol, but plain down does not", async () => {
+    await lifecycle.up();
+    const events: string[] = [];
+    const incompatible = () => ({ ok: false as const, error: { code: "transport_unavailable" as const, retryable: true, message: "Error: Error: Unknown host operation" } });
+    const make = () => new EnvironmentLifecycle(dir, { runner, integration: {
+      manager: fixture.manager, runtime: mockRuntime(), quiesce: async () => incompatible(),
+      shutdownHost: async () => { events.push("graceful-host"); },
+      terminateIncompatibleHost: async () => { events.push("terminate-host"); }
+    } });
+    await expect(make().down(true, 3000)).rejects.toThrow("Unknown host operation");
+    expect(runner.running.has(repository.sessionName)).toBe(true);
+    const stopped = await make().down(false, 3000, true);
+    expect(stopped.status).toBe("down");
+    expect(events).toEqual(["terminate-host"]);
+    expect(runner.running.has(repository.sessionName)).toBe(false);
+    expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("down");
+    expect((await lifecycle.up()).status).toBe("up");
+    const unactivated = new EnvironmentLifecycle(dir, { runner, integration: {
+      manager: fixture.manager, runtime: mockRuntime(),
+      quiesce: async () => ({ ok: false, error: { code: "transport_unavailable", retryable: true, message: "Error: Persisted agentic work requires activation/reconciliation before safe shutdown" } }),
+      terminateIncompatibleHost: async () => { events.push("terminate-unactivated"); }
+    } });
+    await expect(unactivated.down(true, 3000)).rejects.toThrow("requires activation");
+    expect((await unactivated.down(false, 3000, true)).status).toBe("down");
+    expect(events.at(-1)).toBe("terminate-unactivated");
+  });
   linuxIt("force down cannot bypass failed aggregate checkpoint persistence", async () => {
     await lifecycle.up();
     const forced = new EnvironmentLifecycle(dir, { runner, integration: {

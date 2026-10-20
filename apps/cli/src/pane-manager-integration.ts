@@ -281,6 +281,12 @@ export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, r
     quiesce: async options => { await stopStartupChecks(); return (await connect()).quiesce(options); },
     checkpoint: async (command, options) => (await connect()).checkpoint(command, options),
     shutdownHost: async () => { await stopStartupChecks(); await (await connect()).shutdown(); },
+    terminateIncompatibleHost: async () => {
+      await stopStartupChecks();
+      const owner = await connect();
+      if (!owner.terminateOwner) throw new Error("This host cannot be terminated by the CLI; preserve state and inspect bflow doctor");
+      await owner.terminateOwner();
+    },
     async close() { await stopStartupChecks(); if (host) await (await host).close(); }
   };
 }

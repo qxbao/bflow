@@ -235,7 +235,7 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       publicKeys: options.bindingReceiptKeys ?? {}, receive: async message => {
         const result = message.recipient.role === "conversation" ? await conversation!.receiveHerdr(message) : await runtime.receiveHerdr(message);
         await options.onNativeDelivery?.(message); return result;
-      } }) : undefined;
+      }, failed: (message, error) => runtime.reportInboundFailure(message, String(error)) }) : undefined;
     return { runtime, conversation, tools, async close() { await tools.drain(); await ingress?.close(); artifactStore.close(); runStore.close(); } };
   } catch (error) { artifactStore?.close(); runStore.close(); throw error; }
 }

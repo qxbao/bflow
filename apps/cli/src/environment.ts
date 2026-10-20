@@ -32,6 +32,8 @@ export interface EnvironmentIntegration {
   readonly activate?: (manifest: SessionManifest, options: OperationOptions) => Promise<void>;
   /** Stop the host only after checkpoint, pane and named-session shutdown succeeds. */
   readonly shutdownHost?: () => Promise<void>;
+  /** Force only: stop a host daemon that rejects this CLI's protocol ("Unknown host operation"). */
+  readonly terminateIncompatibleHost?: () => Promise<void>;
   readonly close?: () => Promise<void>;
 }
 
@@ -795,7 +797,41 @@ export class EnvironmentLifecycle {
     this.progress("Inspecting session state and running workflows...");
     const repository = await identifyRepository(this.cwd, this.runner);
     const config = await readEnvironmentConfig(repository);
-    return this.locked(repository, () => this.downLocked(repository, config, confirmed || force, timeoutMs, this.dependencies.signal, undefined, force));
+    try {
+      return await this.locked(repository, () => this.downLocked(repository, config, confirmed || force, timeoutMs, this.dependencies.signal, undefined, force));
+    } catch (error) {
+      // Only a host that cannot run the barrier at all is bypassed: an incompatible build, or an unactivated host that
+      // refuses to quiesce over persisted work. Journal/run store stay on disk and the next `up` reconciles them.
+      // Genuine barrier/checkpoint failures on an active host still abort a forced stop.
+      if (!force || !/Unknown host operation|requires activation\/reconciliation before safe shutdown/.test(error instanceof Error ? error.message : String(error))) throw error;
+    }
+    this.progress("Host daemon cannot run the shutdown barrier; force-stopping it. Durable state is preserved and the next 'bflow up' reconciles it.");
+    return this.locked(repository, () => this.forceStopIncompatibleHost(repository, config, timeoutMs));
+  }
+  private async forceStopIncompatibleHost(repository: RepositoryIdentity, config: EnvironmentConfig, timeoutMs?: number): Promise<SessionManifest | EnvironmentStatus> {
+    const deadline = new Deadline(timeoutMs ?? config.environment.shutdownTimeoutMs, this.dependencies.signal);
+    const saved = await this.savedManifest(repository);
+    const integration = await deadline.call(() => this.integration(repository, config));
+    if (!integration?.terminateIncompatibleHost) fail("The incompatible host cannot be stopped by this CLI; state was preserved. Run bflow doctor.");
+    try {
+      await this.writeIntent(repository, "stopping");
+      if (await this.probe(repository, config, deadline)) {
+        this.progress("Force-stopping this repository's Herdr session...");
+        try { await this.command(repository, config.environment.herdrBinary, ["session", "stop", repository.sessionName, "--json"], deadline); }
+        catch (error) { if (await this.probe(repository, config, deadline)) throw error; }
+        while (await this.probe(repository, config, deadline)) await deadline.pause();
+      }
+      this.progress("Stopping incompatible host process...");
+      await deadline.call(() => integration.terminateIncompatibleHost!());
+      await this.writeIntent(repository, "down");
+      this.cleanupMcpSession(repository);
+      if (!saved) return { workspaceRoot: repository.root, sessionName: repository.sessionName, server: "stopped" as const,
+        configuration: "valid" as const, manifest: null, liveObservation: true, issues: [] };
+      const at = new Date().toISOString();
+      return await this.saveManifest(repository, { ...saved, status: "down", updatedAt: at, stoppedAt: at,
+        panes: saved.panes.map(pane => ({ ...pane, transportState: "cancelled", lastHeartbeatAt: at })),
+        metadata: { ...saved.metadata, shutdownMode: "force_incompatible_host" } });
+    } finally { await deadline.call(() => integration.close?.() ?? Promise.resolve()); }
   }
   private async downLocked(repository: RepositoryIdentity, config: EnvironmentConfig, confirmed: boolean, timeoutMs?: number, signal?: AbortSignal,
     suppliedIntegration?: EnvironmentIntegration, force = false): Promise<SessionManifest | EnvironmentStatus> {
