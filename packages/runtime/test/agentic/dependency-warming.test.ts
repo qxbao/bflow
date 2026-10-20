@@ -47,6 +47,15 @@ it("network warming mounts only Runtime cache, public system files and narrow to
   const writes = invocation.args.flatMap((arg, index) => arg === "--bind" ? [invocation.args.slice(index + 1, index + 3)] : []);
   expect(writes).toEqual([["/tmp/bflow-cache-owned", "/cache"]]);
 });
+it("avoids devpts setup so the helper can enter the user namespace that owns the network", () => {
+  const invocation = npmWarmInvocation("/tmp/bflow-cache-owned", "/usr/bin/bwrap", "/opt/node/bin/node", "/opt/node/lib/node_modules/npm");
+  // bwrap --dev creates devpts, then a second user namespace that cannot administer
+  // the network namespace owned by its parent. Noninteractive npm needs no PTY.
+  expect(invocation.args).not.toContain("--dev");
+  const devices = invocation.args.flatMap((arg, index) => arg === "--dev-bind" ? [invocation.args.slice(index + 1, index + 3)] : []);
+  expect(devices).toEqual([["/dev/null", "/dev/null"], ["/dev/zero", "/dev/zero"], ["/dev/random", "/dev/random"], ["/dev/urandom", "/dev/urandom"]]);
+  expect(invocation.args.join(" ")).toContain("--tmpfs /dev");
+});
 it("rejects a symlinked manifest instead of reading files outside the root", async () => {
   const root = await mkdtemp(join(tmpdir(), "bflow-warm-test-")); cleanups.push(root);
   await writeFile(join(root, "actual.json"), JSON.stringify(manifest));
@@ -108,9 +117,17 @@ async function processFixture(helperSource: string) {
   return {root, invocation:{executable:join(root,"bwrap"),args:["--unshare-all"],env:{PATH:"/usr/bin:/bin"}}, helper:join(root,"slirp")};
 }
 it("waits for the helper readiness byte before unblocking the sandbox and reaps the helper", async () => {
-  const f=await processFixture("const ready=fs.createWriteStream(null,{fd:3});ready.end('1');fs.createReadStream(null,{fd:4}).resume();");
+  // Match slirp's write(readyfd, "1", 1); close(readyfd), with the helper alive.
+  const f=await processFixture("fs.writeSync(3,Buffer.from([0x31]));fs.closeSync(3);fs.createReadStream(null,{fd:4}).resume();");
   await runNpmWarmSandbox(f.invocation,f.helper,f.root,5000);
   expect(await readFile(join(f.root,"started"),"utf8")).toBe("started");
+  const pid=Number(await readFile(join(f.root,"helper-pid"),"utf8"));
+  expect(()=>process.kill(pid,0)).toThrow();
+});
+it.each([{bytes:[0x00]}, {bytes:[0x01]}, {bytes:[0xb1]}, {bytes:[0x32]}, {bytes:[0x31, 0x31]}])("rejects malformed helper readiness bytes $bytes without releasing npm", async ({bytes}) => {
+  const f=await processFixture(`fs.writeSync(3,Buffer.from(${JSON.stringify(bytes)}));fs.closeSync(3);fs.createReadStream(null,{fd:4}).resume();`);
+  await expect(runNpmWarmSandbox(f.invocation,f.helper,f.root,5000)).rejects.toThrow(/handshake exceeds bound|did not attest readiness/);
+  await expect(readFile(join(f.root,"started"))).rejects.toMatchObject({code:"ENOENT"});
   const pid=Number(await readFile(join(f.root,"helper-pid"),"utf8"));
   expect(()=>process.kill(pid,0)).toThrow();
 });

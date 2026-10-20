@@ -70,7 +70,9 @@ export interface NpmWarmInvocation { executable: string; args: string[]; env: Re
 /** Separate unshared network namespace. A capability-probed slirp4netns helper supplies egress only after readiness.
  * The host loopback and DNS proxy are disabled; a Runtime-owned resolver uses fixed public DNS (1.1.1.1).
  * No checkout, host home, credential config or sockets are mounted. Only the owned cache is host-writable.
- * /tmp is anonymous sandbox memory. npm and Node are trusted installed tools, dependencies never execute. */
+ * /tmp is anonymous sandbox memory. npm and Node are trusted installed tools, dependencies never execute.
+ * Avoid --dev/devpts: unprivileged bwrap otherwise creates a nested user namespace after mounting devpts.
+ * slirp must enter the user namespace that owns the network namespace, not that nested namespace. */
 export function npmWarmInvocation(cacheRoot: string, sandboxExecutable: string, nodeBinary: string, npmRoot: string): NpmWarmInvocation {
   for (const path of [cacheRoot, sandboxExecutable, nodeBinary, npmRoot]) if (!isAbsolute(path) || path.includes("\0") || resolve(path) !== path) throw new Error("Npm warming paths must be canonical absolute paths");
   const home = resolve(homedir());
@@ -79,7 +81,10 @@ export function npmWarmInvocation(cacheRoot: string, sandboxExecutable: string, 
     executable: sandboxExecutable,
     args: ["--unshare-all", "--info-fd", "3", "--block-fd", "4", "--die-with-parent", "--new-session", "--cap-drop", "ALL",
       "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin", "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
-      "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--dir", "/tmp/home",
+      "--proc", "/proc", "--tmpfs", "/dev",
+      "--dev-bind", "/dev/null", "/dev/null", "--dev-bind", "/dev/zero", "/dev/zero",
+      "--dev-bind", "/dev/random", "/dev/random", "--dev-bind", "/dev/urandom", "/dev/urandom",
+      "--tmpfs", "/tmp", "--dir", "/tmp/home",
       "--ro-bind", join(cacheRoot, "resolv.conf"), "/etc/resolv.conf", "--ro-bind", "/etc/ssl/certs", "/etc/ssl/certs",
       "--ro-bind", nodeBinary, "/runtime/bin/node", "--ro-bind", npmRoot, "/runtime/npm",
       "--bind", cacheRoot, "/cache", "--ro-bind", join(cacheRoot, "package.json"), "/cache/package.json", "--ro-bind", join(cacheRoot, "package-lock.json"), "/cache/package-lock.json",
@@ -248,7 +253,7 @@ export async function runNpmWarmSandbox(invocation: NpmWarmInvocation, helperExe
     const helperExit = new Promise<never>((_resolve, reject) => { helper!.once("close", () => reject(new Error("Warming network helper exited before npm completed"))); });
     void helperExit.catch(() => undefined);
     const ready = await Promise.race([readHandshake(helper, 3, 1), helperExit, prematureExit, failure]);
-    if (ready.toString("ascii") !== "1") throw new Error("Warming network helper did not attest readiness");
+    if (ready.length !== 1 || ready[0] !== 0x31) throw new Error("Warming network helper did not attest readiness");
     fdStream(sandbox, 4).end("1");
     await Promise.race([sandboxDone, helperExit, failure]);
   } finally {
