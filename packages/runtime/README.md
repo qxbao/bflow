@@ -630,3 +630,7 @@ cạn budget; người dùng có thể mở Conversation và hỏi trạng thái
 Xem `WORKFLOW-LIVENESS-AUDIT.md` và `WORKFLOW-LIVENESS-HANDOFF.md` cho nguồn gốc sự cố và
 ranh giới nghiệm thu. Có local regression tests; live provider/full SDLC acceptance không được
 suy ra từ fake transport, receipt, hoặc test Herdr native actor.
+
+Để yêu cầu tiếp tục run bị chặn trong Conversation, dùng `tiếp tục` hoặc `resume <run-id>`.
+Host kiểm tra input người dùng thật và session trước khi chuyển yêu cầu tới Runtime; thao tác
+này không thay thế một approval đang chờ và không tạo workflow mới.

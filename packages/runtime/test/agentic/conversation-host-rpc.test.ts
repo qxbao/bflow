@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RoleMessageSchema, SessionManifestSchema } from "@bflow/contracts";
+import { DelegationRequestSchema, RoleMessageSchema, SessionManifestSchema } from "@bflow/contracts";
 import { ensureAgenticHost } from "../../dist/agentic/host-controller.js";
 import { callHost } from "../../src/agentic/host-protocol.js";
 
@@ -90,6 +90,30 @@ describe.skipIf(process.platform !== "linux")("Conversation decisions through th
     expect(outbound).toHaveLength(1);
     expect(outbound[0]!.message).toMatchObject({ sender: { role: "conversation" }, recipient: { role: "coordinator" }, type: "delegation.request",
       payload: { objective: decision.requirementDraft.objective, metadata: { codeChangesAuthorized: false } } });
+    const { AgenticJournal, digest } = await import("../../src/agentic/journal.js");
+    const { availableTools } = await import("../../src/agentic/host.js");
+    const admitted = DelegationRequestSchema.parse(outbound[0]!.message.payload);
+    const journal = new AgenticJournal(join(root, ".bflow/state/agentic/journal"), root);
+    const sourceMessageId = "blocked-source", actionId = `next-${digest([admitted.runId, sourceMessageId])}`;
+    await expect.poll(async () => {
+      try { await journal.exclusive(async (state, save) => {
+      if (state.runs.some(run => run.runId === admitted.runId)) return;
+      state.runs.push({ runId: admitted.runId!, delegation: admitted, status: "escalated", tasks: [], coreCreated: false,
+        cancelled: false, maxIterations: 3, pendingAction: { actionId, kind: "resume_coordinator", owner: "coordinator",
+          reason: "Read capability repaired", sourceMessageId, createdAt: at, state: "pending", previousStatus: "specifying", recovery: "manual" } });
+      await save();
+      }); return true; } catch (error) { if (String(error).includes("runtime busy")) return false; throw error; }
+    }, { timeout: 10_000, interval: 25 }).toBe(true);
+    await callHost(coordinator.socketPath, coordinator.token, "provider_tools_list", { paneId: "pane-coordinator",
+      toolNames: availableTools("coordinator").map(tool => tool.name) });
+    await expect(invoke("resume_run", { runId: admitted.runId, messageId: received.messageId })).rejects.toThrow(/explicit|resume request/i);
+    await expect(invoke("resume_run", { runId: admitted.runId, messageId: "fabricated" })).rejects.toThrow();
+    const resumeTurn = await callHost(chat.socketPath, chat.token, "user_prompt", { paneId: "pane-chat", hook: {
+      hook_event_name: "UserPromptSubmit", session_id: "native-chat", prompt: "tiếp tục" } }) as { messageId: string };
+    const resumed = await invoke("resume_run", { runId: admitted.runId, messageId: resumeTurn.messageId });
+    expect(resumed).toMatchObject({ queued: true, actionId });
+    expect(await invoke("resume_run", { runId: admitted.runId, messageId: resumeTurn.messageId })).toEqual(resumed);
+    expect((await readOutbound()).filter(item => (item.message.payload as any)?.kind === "resume_run")).toHaveLength(1);
     const calls = (await readFile(join(root, "herdr-calls.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
     expect(calls.some(args => args[0] === "agent" && args[1] === "prompt")).toBe(false);
   }, 20_000);

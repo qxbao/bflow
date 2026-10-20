@@ -369,6 +369,16 @@ export class HostReceiptJournal {
     for (const id of await this.receiptIds("conversation-turn")) turns.push(TrustedConversationTurnSchema.parse(await this.read("conversation-turn", id)));
     return turns.sort((a, b) => a.sequence - b.sequence);
   }
+  /** An operational resume is a real user request, not an approval or a model-supplied provenance flag. */
+  async authorizeConversationResume(binding: PaneBinding, messageId: string, runId: string): Promise<void> {
+    const turn = (await this.conversationTurns()).at(-1);
+    if (binding.role !== "conversation" || !turn || turn.messageId !== messageId ||
+        this.bindingIdentity(turn.binding) !== this.bindingIdentity(binding))
+      throw new Error("Resume requires the current authenticated Conversation user message");
+    const request = /^(?:tiếp tục|resume|continue)(?:\s+(?:run\s+)?([A-Za-z0-9][A-Za-z0-9._:-]*))?[.!]?$/iu.exec(turn.content.trim());
+    if (!request || request[1] !== undefined && request[1] !== runId)
+      throw new Error("An explicit resume request is required: reply 'tiếp tục' or 'resume <run-id>' in Conversation");
+  }
   async recordConversationTurn(turn: TrustedConversationTurn): Promise<void> { await this.write("conversation-turn", turn.messageId, turn); }
   async conversationDecision(messageId: string): Promise<{ decision: JsonValue; result?: JsonValue } | undefined> {
     const value = await this.read("conversation-result", messageId) ?? await this.read("conversation-intent", messageId);

@@ -81,3 +81,15 @@ may observe unknown delivery, and does not prove authenticated task completion.
   network filesystems and power-loss guarantees. Existing P02-RA01/P03-RA01 remain with their owners.
 - No claim that every task succeeds or that flow can never stop. The demonstrated guarantees are
   the particular durable obligations, bounded retries, safe waits and recovery boundaries above.
+
+## Private integration decision: Conversation resume
+
+The requested same-run resume needs a user-interface route as well as the Coordinator tool.
+Conversation now exposes an operational `resume_run` facade. Host accepts it only for the latest
+owned physical UserPromptSubmit receipt containing an explicit `tiếp tục`, `resume` or `continue`
+request (with an optional matching run ID), and a run in the same Conversation session. It reads
+the current action from Runtime, rather than trusting model-supplied action authority, then uses
+the same capability/approval/cancellation/unknown-delivery/idempotency checks. A stale, fabricated
+or unrelated user message cannot authorize it. This does not approve a human gate or directly
+dispatch a specialist. Existing public schemas remain unchanged; older clients simply do not
+expose this new private host tool until their session is relaunched.
