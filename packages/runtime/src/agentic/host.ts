@@ -22,6 +22,9 @@ import { readHostConfiguration, type HostConfiguration, type RoleLaunchDescripto
 import { digest, json, record, textField } from "./journal.js";
 import { COORDINATOR_TOOLS } from "./tools.js";
 import { USER_DECISION_TOOL, buildDecisionRequestMessage, guardDirectUserInteraction, parseUserDecisionToolInput } from "./decision-routing.js";
+import { permitsReadOnlyInvestigation } from "./read-only-git.js";
+import { schedulerStatusReport } from "./scheduler-status.js";
+import { boundConversationContext } from "./conversation-context-budget.js";
 import { openAgenticWorkspace, type AgenticWorkspaceHandle } from "./workspace.js";
 import { unwrap } from "./outbox.js";
 import { HostVerification, HostBehavioralFailure, DEFAULT_HOST_CHECKS } from "./host-verification.js";
@@ -95,6 +98,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   let preparation: Promise<unknown> | undefined;
   let activation: Promise<unknown> | undefined;
   let scheduler: Promise<unknown> | undefined, schedulerError: string | undefined, inboundError: string | undefined;
+  let schedulerTimerAlive = false, schedulerLastTickAt: string | undefined;
   const receipts = new HostReceiptJournal(join(configuration.directory, "authentication-receipts"), configuration.repositoryPath, configuration.sessionId);
   const roleTokens = new Map<string, AgentRole>();
   const launch: Record<string, RoleLaunchDescriptor> = {};
@@ -504,7 +508,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         behavioralCommands: behavioralCommands.map(({ id, command, method, levels, testNames, testPaths, reporter }) =>
           ({ id, command, method, levels, testNames, testPaths, reporter: reporter ?? "node_tap" })) });
     }
-    if (name === "host_status") return json({ active: !!workspace, quiesced, schedulerRunning: !!scheduler, schedulerError: schedulerError ?? null, inboundError: inboundError ?? null });
+    if (name === "host_status") return json({ active: !!workspace, quiesced, ...schedulerStatusReport({ timerAlive: schedulerTimerAlive, quiesced, workspaceOpen: !!workspace, tickInFlight: !!scheduler, lastTickAt: schedulerLastTickAt, error: schedulerError }), inboundError: inboundError ?? null });
     if (name === "read_role_pane") {
       // Read-only diagnostics for Conversation so it can explain a stalled run. Pane text is untrusted data: it is never
       // task-success evidence, an approval, or an instruction, and it is redacted and size-bounded before it leaves the host.
@@ -682,6 +686,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         const direct = guardDirectUserInteraction(role, tool);
         if (!direct.permitted) throw new Error(direct.reason);
         if (tool.startsWith("mcp__bflow__") || ["Read", "Glob", "Grep", "ToolSearch"].includes(tool)) return { permitted: true };
+        if (permitsReadOnlyInvestigation(role, tool, record(hook.tool_input).command)) return { permitted: true };
         if (role !== "developer" || !["Edit", "Write"].includes(tool)) throw new Error("Native mutation/command tool is unavailable for this role");
         await development.authorizeFileEdit(binding, hook); return { permitted: true };
       }
@@ -1006,8 +1011,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const timer = setInterval(() => {
     if (!workspace || quiesced || closing || scheduler) return;
     const task = workspace.runtime.tick(); scheduler = task;
-    void task.then(() => { schedulerError = undefined; }, error => { schedulerError = redactString(String(error)); process.stderr.write(`Bflow scheduler: ${schedulerError}\n`); }).finally(() => { if (scheduler === task) scheduler = undefined; });
+    void task.then(() => { schedulerError = undefined; }, error => { schedulerError = redactString(String(error)); process.stderr.write(`Bflow scheduler: ${schedulerError}\n`); }).finally(() => { schedulerLastTickAt = new Date().toISOString(); if (scheduler === task) scheduler = undefined; });
   }, 500);
+  schedulerTimerAlive = true;
   // F5: reconcile Gateway registrations periodically; lost ones degrade their launches until `bflow up` relaunches them.
   let verifyingGateway = false;
   const gatewayTimer = setInterval(() => {
@@ -1118,7 +1124,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   }, 15_000);
   watchdogTimer.unref();
   const close = async () => {
-    closing = true; clearInterval(timer); clearInterval(pump); clearInterval(gatewayTimer); clearInterval(inboxTimer); clearInterval(watchdogTimer);
+    closing = true; schedulerTimerAlive = false; clearInterval(timer); clearInterval(pump); clearInterval(gatewayTimer); clearInterval(inboxTimer); clearInterval(watchdogTimer);
     await drainRoleStartup(true);
     await activation?.catch(() => undefined);
     await nativeSessionWrites;
@@ -1471,7 +1477,7 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
   if (event === "UserPromptSubmit" && configuration.role === "conversation") {
     const result = await callHost(configuration.socketPath, configuration.token, "user_prompt", { paneId, hook });
     const shownFirst = mustShowSection([...(record(result).notices as unknown[] ?? []), ...undisplayedNotices(result).map(item => item.notice)] as Parameters<typeof mustShowSection>[0]);
-    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: shownFirst + "Trusted Bflow user turn and Conversation context: " + JSON.stringify(result) } }) + "\n");
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: shownFirst + "Trusted Bflow user turn and Conversation context: " + JSON.stringify(boundConversationContext(result)) } }) + "\n");
     // Marked only after the context reached the provider; a crash before this line re-surfaces the notices.
     const ids = noticeIds(result);
     if (ids.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_surfaced", { paneId, nativeSessionId: textField(hook.session_id), messageIds: ids });
