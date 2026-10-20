@@ -95,17 +95,45 @@ export function renderUserDecisionPrompt(payload: Record<string, unknown>): stri
     ...(taskId ? [`- **Tác vụ:** ${taskId}`] : []),
     `- **Câu hỏi:** ${question}`,
     ...(context ? [`- **Ngữ cảnh:** ${wrapUntrustedRepositoryContent(context)}`] : []),
-    ...(expiresAt ? [`- **Hết hạn:** ${expiresAt}`] : []),
+    `- **Hết hạn:** ${expiresAt ? formatDeadline(expiresAt) : NO_DEADLINE_TEXT}`,
     ""
   ];
   if (options) {
     lines.push("Các lựa chọn:");
     options.forEach((option, index) => lines.push(`${index + 1}. ${option}`));
-    lines.push("", "👉 Trả lời bằng số (ví dụ `1`) hoặc đúng nội dung lựa chọn. Bạn cũng có thể trả lời `từ chối <lý do>`.");
+    lines.push(
+      "",
+      `👉 Cú pháp trả lời: \`${approvalId}: <số>\` (ví dụ \`${approvalId}: 1\`) hoặc \`${approvalId}: <nội dung lựa chọn>\`.`,
+      `Nếu chỉ có một câu hỏi đang chờ, có thể chỉ trả lời \`<số>\`. Để từ chối: \`${approvalId}: từ chối <lý do>\`.`
+    );
   } else {
-    lines.push("👉 Trả lời trực tiếp bằng nội dung quyết định của bạn, hoặc `từ chối <lý do>`.");
+    lines.push(
+      `👉 Trả lời trực tiếp bằng nội dung quyết định của bạn, theo cú pháp \`${approvalId}: <nội dung quyết định>\`. Để từ chối: \`${approvalId}: từ chối <lý do>\`.`
+    );
   }
   return lines.join("\n");
+}
+
+/** Deadline text shown when a user decision carries no expiry. */
+export const NO_DEADLINE_TEXT = "Không có hạn — đang chờ bạn trả lời";
+
+function formatDeadline(expiresAt: string): string {
+  const millis = Date.parse(expiresAt);
+  return Number.isNaN(millis) ? expiresAt : new Date(millis).toISOString();
+}
+
+/**
+ * Renders one pending approval for a user-facing status report. User decisions get the full question
+ * rendering; design/task approvals keep their one-line form.
+ */
+export function renderPendingApprovalForStatus(request: {
+  readonly approvalId: string; readonly reason: string; readonly requestedBy: string; readonly metadata?: unknown;
+  readonly expiresAt?: string | undefined; readonly target?: unknown;
+}, indent = "  "): string[] {
+  if (!isUserDecisionRequest(request)) {
+    return [`${indent}- **\`${request.approvalId}\`**: ${request.reason} (gửi bởi ${request.requestedBy})`];
+  }
+  return renderUserDecisionPrompt({ ...request }).split("\n").map((line) => (line === "" ? "" : `${indent}${line}`));
 }
 
 /**

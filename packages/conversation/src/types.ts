@@ -419,6 +419,8 @@ export interface ApprovalReconciliation {
   readonly registered: readonly string[];
   readonly alreadyKnown: readonly string[];
   readonly rejected: readonly { readonly approvalId: string; readonly reason: string }[];
+  /** Full user-facing question text for each registered user decision (same rendering as a live approval.request). */
+  readonly userDecisionPrompts?: readonly string[];
   /** Gateway was mid-turn; nothing changed and the caller may retry. */
   readonly busy?: boolean;
 }

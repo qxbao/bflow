@@ -314,6 +314,76 @@ describe("P30 T8 conversation user-decision relay", () => {
       return { gateway, transport, correlationId: start.value.correlationId };
     }
 
+    it.each([
+      { label: "with an expiry", expiresAt: "2031-03-04T05:06:07.000Z", deadline: "Hết hạn:** 2031-03-04T05:06:07.000Z" },
+      { label: "without an expiry", expiresAt: undefined, deadline: "Hết hạn:** Không có hạn — đang chờ bạn trả lời" }
+    ])("status report shows the full pending user decision $label", async ({ expiresAt, deadline }) => {
+      const request = userDecisionRequest({ runId: "run-status-1", expiresAt });
+      const { gateway } = await openGatewayWithDecision(request);
+      const correlationId = gateway.getContextSnapshot().runIdToCorrelationId["run-status-1"]!;
+      const status = await gateway.handleUserTurn({
+        sessionId: SESSION_ID,
+        messageId: "human-status-targeted",
+        content: "Trạng thái hiện tại",
+        provenance: { origin: "user", authenticatedUser: true },
+        conversationDecision: { intent: "status_query", targetCorrelationId: correlationId }
+      } as UserTurnInput);
+      expect(status.ok, status.ok ? "" : status.error.message).toBe(true);
+      if (!status.ok) return;
+      const text = status.value.agentReply.content;
+      expect(text).toContain(request.approvalId);
+      expect(text).toContain("developer");
+      expect(text).toContain("Which storage backend?");
+      expect(text).toContain("1. SQLite");
+      expect(text).toContain("2. Postgres");
+      expect(text).toContain(deadline);
+      expect(text).toContain(`\`${request.approvalId}: <số>\``);
+    });
+
+    it("includes the full question in the untargeted status summary", async () => {
+      const request = userDecisionRequest({ runId: "run-status-2" });
+      const { gateway } = await openGatewayWithDecision(request);
+      const status = await gateway.handleUserTurn({
+        sessionId: SESSION_ID,
+        messageId: "human-status-untargeted",
+        content: "Tình hình hiện tại",
+        provenance: { origin: "user", authenticatedUser: true },
+        conversationDecision: { intent: "status_query" }
+      } as UserTurnInput);
+      expect(status.ok, status.ok ? "" : status.error.message).toBe(true);
+      if (status.ok) expect(status.value.agentReply.content).toContain("Which storage backend?");
+    });
+
+    it("returns the full question text for a user decision registered by reconciliation", async () => {
+      const transport = new MockHerdrAgentTransport();
+      const gateway = new ConversationGateway({
+        sessionId: SESSION_ID,
+        herdrSessionId: `herdr-${SESSION_ID}`,
+        conversationAgentId: "chat",
+        paneId: "pane-chat",
+        bridge: new HerdrConversationBridge({
+          transport,
+          sessionId: SESSION_ID,
+          conversationAgentId: "chat",
+          conversationPaneId: "pane-chat",
+          coordinatorTarget: { transport: "herdr", agentId: "coordinator", paneId: "pane-coordinator" }
+        }),
+        contextStore: new InMemoryConversationContextStore()
+      });
+      await gateway.initializeOrRecoverSession();
+      const request = userDecisionRequest({ runId: "run-reconcile-1" });
+      const outcome = await gateway.reconcilePendingApprovals([{ request, correlationId: "corr-reconcile-1" }]);
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.value.registered).toEqual([request.approvalId]);
+      const prompt = outcome.value.userDecisionPrompts?.[0] ?? "";
+      expect(prompt).toContain(request.approvalId);
+      expect(prompt).toContain("Which storage backend?");
+      expect(prompt).toContain("1. SQLite");
+      expect(prompt).toContain("2. Postgres");
+      expect(prompt).toContain(`Hết hạn:** ${request.expiresAt}`);
+    });
+
     it("sends the user's option reply to Coordinator as a user-scoped approval.decision", async () => {
       const request = userDecisionRequest({ runId: "run-gw-1" });
       const { gateway, transport } = await openGatewayWithDecision(request);
