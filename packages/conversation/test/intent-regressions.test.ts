@@ -259,3 +259,45 @@ describe("Conversation authority and intent regressions", () => {
     }
   });
 });
+
+describe("Turn correlation with pending clarifications", () => {
+  const STALE_REQUEST = "Thêm tính năng mới";
+  const INDEPENDENT_REQUEST = "Sửa lỗi parser trong packages/parser khi chuỗi rỗng phải trả lỗi";
+  const CONVERSATION_REQUEST = "Soạn sẵn prompt để tôi gửi cho session mới";
+
+  it.each([false, true])("keeps a conversation-only turn off a stale pending clarification while a run is active (explicit correlation=%s)", async explicit => {
+    const { turn, gateway, transport } = await setup();
+    const stale = await turn(STALE_REQUEST);
+    const run = await turn(INDEPENDENT_REQUEST);
+    if (!stale.ok || !run.ok) throw new Error("setup failed");
+    expect(run.value.recognizedIntent).toBe("workflow_request");
+    expect(transport.sentRequests).toHaveLength(1);
+    expect(gateway.getContextSnapshot().pendingClarifications[stale.value.correlationId]).toBeDefined();
+
+    const result = await turn(CONVERSATION_REQUEST, explicit ? { correlationId: stale.value.correlationId } : {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.recognizedIntent).toBe("conversation_only");
+    expect(result.value.correlationId).not.toBe(stale.value.correlationId);
+    expect(result.value.correlationId).not.toBe(run.value.correlationId);
+  });
+
+  it("gives an independent new request its own correlation despite a stale pending clarification", async () => {
+    const { turn } = await setup();
+    const stale = await turn(STALE_REQUEST);
+    const next = await turn(INDEPENDENT_REQUEST);
+    if (!stale.ok || !next.ok) throw new Error("setup failed");
+    expect(next.value.recognizedIntent).toBe("workflow_request");
+    expect(next.value.correlationId).not.toBe(stale.value.correlationId);
+  });
+
+  it.each([false, true])("still reuses the clarification correlation for a scope answer (correlated=%s)", async correlated => {
+    const { turn } = await setup();
+    const stale = await turn(STALE_REQUEST);
+    if (!stale.ok) throw new Error("setup failed");
+    const answer = await turn("Phạm vi packages/billing, hóa đơn phải giữ nguyên đơn vị tiền tệ",
+      correlated ? { correlationId: stale.value.correlationId } : {});
+    expect(answer.ok).toBe(true);
+    if (answer.ok) expect(answer.value.correlationId).toBe(stale.value.correlationId);
+  });
+});

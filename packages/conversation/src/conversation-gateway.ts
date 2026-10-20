@@ -28,7 +28,7 @@ import {
 import { HerdrConversationBridge } from "./herdr-bridge.js";
 import { classifyUserIntent } from "./intent-classifier.js";
 import { resolveChatDecision } from "./chat-decision.js";
-import { isUserDecisionRequest, userDecisionExpiredApprovalId } from "./user-decision.js";
+import { isUserDecisionRequest, renderUserDecisionPrompt, userDecisionExpiredApprovalId } from "./user-decision.js";
 import {
   formatCoordinatorMessageForUser,
   formatStatusSummaryForUser
@@ -523,14 +523,15 @@ export class ConversationGateway {
         (this.snapshot!.pendingClarifications[input.correlationId] !== undefined || this.snapshot!.workflows[input.correlationId] !== undefined);
       let correlationId = classification.targetCorrelationId ??
         (isIndependentRequest && inputCorrelationInUse ? undefined : input.correlationId);
-      if (!correlationId && classification.intent !== "workflow_request" && classification.intent !== "clarify") {
-        // Replies may use current conversation context; fresh clarifications get their own id.
-        const activeClarifications = Object.keys(this.snapshot!.pendingClarifications);
-        if (activeClarifications.length > 0) {
-          correlationId = activeClarifications[0];
-        }
+      // A pending clarification's correlation is reused only when the classifier identified this turn
+      // as answering it (classification.targetCorrelationId). Any other turn must not adopt it.
+      if (correlationId !== undefined && correlationId !== classification.targetCorrelationId &&
+          this.snapshot!.pendingClarifications[correlationId] !== undefined) {
+        correlationId = undefined;
       }
-      if (!correlationId && classification.intent !== "workflow_request" && classification.intent !== "clarify" && this.snapshot!.session.activeRunId) {
+      if (!correlationId && (classification.intent === "status_query" || classification.intent === "approval_response") &&
+          this.snapshot!.session.activeRunId) {
+        // Status and approval turns address the active run, not a clarification.
         correlationId = this.snapshot!.runIdToCorrelationId[this.snapshot!.session.activeRunId];
       }
       if (!correlationId) {
@@ -1365,7 +1366,7 @@ export class ConversationGateway {
       const initResult = await this.initializeOrRecoverSession();
       if (!initResult.ok) return initResult;
     }
-    const outcome: { registered: string[]; alreadyKnown: string[]; rejected: { approvalId: string; reason: string }[] } = { registered: [], alreadyKnown: [], rejected: [] };
+    const outcome: { registered: string[]; alreadyKnown: string[]; rejected: { approvalId: string; reason: string }[]; userDecisionPrompts: string[] } = { registered: [], alreadyKnown: [], rejected: [], userDecisionPrompts: [] };
     if (this.isProcessingTurn || this.isFlushingQueue) return { ok: true, value: { ...outcome, busy: true } };
     const now = this.getNow();
     const pending = { ...this.snapshot!.pendingApprovals };
@@ -1398,6 +1399,7 @@ export class ConversationGateway {
       if (workflow) workflows[correlationId] = { ...workflow, runId: request.runId,
         activeApprovalIds: workflow.activeApprovalIds.includes(request.approvalId) ? workflow.activeApprovalIds : [...workflow.activeApprovalIds, request.approvalId], updatedAt: now };
       outcome.registered.push(request.approvalId);
+      if (isUserDecisionRequest(request)) outcome.userDecisionPrompts.push(renderUserDecisionPrompt(request));
     }
     if (outcome.registered.length === 0) return { ok: true, value: outcome };
     const saved = await this.persistUpdatedSnapshot({ ...this.snapshot!, pendingApprovals: pending, workflows, runIdToCorrelationId: runMap,

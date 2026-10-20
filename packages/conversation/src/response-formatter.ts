@@ -1,5 +1,5 @@
 import { ConversationMessageSchema } from "@bflow/contracts";
-import { isUserDecisionRequest, renderUserDecisionExpiredNotice, renderUserDecisionPrompt, userDecisionExpiredApprovalId } from "./user-decision.js";
+import { isUserDecisionRequest, renderPendingApprovalForStatus, renderUserDecisionExpiredNotice, renderUserDecisionPrompt, userDecisionExpiredApprovalId } from "./user-decision.js";
 
 import type {
   ConversationContextSnapshot,
@@ -436,6 +436,12 @@ export function formatStatusSummaryForUser(
 
     if (wf.activeApprovalIds.length > 0) {
       lines.push(`- 🔔 **Phê duyệt đang chờ xử lý:** ${wf.activeApprovalIds.join(", ")}`);
+      for (const id of wf.activeApprovalIds) {
+        const request = context.pendingApprovals[id];
+        if (request !== undefined && isUserDecisionRequest(request)) {
+          lines.push(...renderPendingApprovalForStatus(request, "  "));
+        }
+      }
     }
 
     return lines.join("\n");
@@ -475,9 +481,11 @@ export function formatStatusSummaryForUser(
   if (pendingApprovals.length > 0) {
     lines.push(`\n🔔 **Phê duyệt đang chờ bạn xử lý (${pendingApprovals.length}):**`);
     for (const apr of pendingApprovals) {
-      lines.push(`  - **\`${apr.approvalId}\`**: ${apr.reason} (gửi bởi ${apr.requestedBy})`);
+      lines.push(...renderPendingApprovalForStatus(apr, "  "));
     }
-    lines.push("  👉 Gõ `apr-...: approve` để duyệt hoặc `apr-...: reject <lý do>` để từ chối đúng yêu cầu.");
+    if (pendingApprovals.some((apr) => !isUserDecisionRequest(apr))) {
+      lines.push("  👉 Gõ `apr-...: approve` để duyệt hoặc `apr-...: reject <lý do>` để từ chối đúng yêu cầu.");
+    }
   }
 
   const pendingClarifications = Object.values(context.pendingClarifications);
