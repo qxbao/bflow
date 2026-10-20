@@ -23,27 +23,44 @@ async function blobs(cwd: string, revision: string, extra: readonly string[] = [
   const projectBase = (path: string) => {
     let directory = dirname(path);
     while (true) {
-      if (["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"].some(name => tracked[posix.join(directory, name)])) return directory;
+      if (["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"].some(name => tracked[posix.join(directory, name)]) || Object.keys(tracked).some(file => dirname(file) === directory && /\.(?:csproj|fsproj|vbproj)$/.test(file))) return directory;
       const parent = dirname(directory); if (parent === directory) return dirname(path); directory = parent;
     }
   };
   const pending = Object.keys(found).map(path => ({ path, base: projectBase(path), imported: false })), visited = new Set<string>();
+  // MSBuild imports these files implicitly from the nearest ancestor of each project.
+  for (const project of Object.keys(tracked).filter(file => /\.(?:csproj|fsproj|vbproj)$/.test(file))) {
+    for (const name of ["Directory.Build.props", "Directory.Build.targets"]) {
+      let directory = dirname(project);
+      while (true) {
+        const candidate = posix.join(directory, name);
+        if (tracked[candidate]) { pending.push({ path: candidate, base: dirname(project), imported: true }); break; }
+        const parent = dirname(directory); if (parent === directory) break; directory = parent;
+      }
+    }
+  }
   while (pending.length) {
     const { path, base, imported } = pending.pop()!;
-    if (visited.has(path)) continue; visited.add(path);
+    const key = JSON.stringify([path, base]);
+    if (visited.has(key)) continue;
+    if (!imported && /\.(?:gradle(?:\.kts)?|props|targets)$/.test(path) && !/^(?:build|settings)\.gradle(?:\.kts)?$/.test(posix.basename(path))) continue;
     if (!/\.(?:gradle(?:\.kts)?|props|targets|[cfv]sproj|cmake)$|(?:^|\/)(?:CMakeLists\.txt|Makefile|GNUmakefile)$/.test(path) && !imported) continue;
+    visited.add(key);
     if (visited.size > 2000) throw new Error("Execution definition dependency closure exceeds bounds");
     const source = (await execute("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "show", `${revision}:${path}`], { cwd, env, timeout: 30000, maxBuffer: 1048576 })).stdout;
-    if (/\.gradle(?:\.kts)?$/.test(path) && /apply\s*(?:\(\s*from\s*=|from\s*:)\s*(?![\s"'])\S/.test(source)) throw new Error("Dynamic execution imports require a reviewed static runner setup");
+    if ((imported || /\.gradle(?:\.kts)?$/.test(path)) && /apply\s*(?:\(\s*from\s*=|from\s*:)\s*(?![\s"'])\S/.test(source)) throw new Error("Dynamic execution imports require a reviewed static runner setup");
     const references: { path: string; projectRelative: boolean }[] = [];
-    if (/\.gradle(?:\.kts)?$/.test(path) && /apply\s*(?:\(\s*from\s*=|from\s*:)\s*["'][^"']+["']\s*\+/.test(source)) throw new Error("Concatenated execution imports require a reviewed static runner setup");
+    if ((imported || /\.gradle(?:\.kts)?$/.test(path)) && /apply\s*(?:\(\s*from\s*=|from\s*:)\s*["'][^"']+["']\s*\+/.test(source)) throw new Error("Concatenated execution imports require a reviewed static runner setup");
     for (const match of source.matchAll(/apply\s*(?:\(\s*from\s*=\s*|from\s*:\s*)["']([^"']+)["']/g)) references.push({ path: match[1]!, projectRelative: true });
-    for (const match of source.matchAll(/<Import\b[^>]*\bProject\s*=\s*["']([^"']+)["']/gi)) references.push({ path: match[1]!.replace(/\$\((?:MSBuildThisFileDirectory|MSBuildProjectDirectory)\)[\\/]?/g, ""), projectRelative: false });
+    for (const match of source.matchAll(/<Import\b[^>]*\bProject\s*=\s*["']([^"']+)["']/gi)) {
+      const value = match[1]!;
+      references.push({ path: value.replace(/^\$\((?:MSBuildThisFileDirectory|MSBuildProjectDirectory)\)[\\/]?/, ""), projectRelative: value.startsWith("$(MSBuildProjectDirectory)") });
+    }
     for (const importedReference of references) {
       const reference = importedReference.path;
       if (/[\0\r\n$*?{}]/.test(reference) || isAbsolute(reference)) throw new Error("Execution definition imports must resolve to pinned repository files");
       const normalized = reference.replaceAll("\\", "/");
-      const anchors = importedReference.projectRelative ? [base, dirname(path)] : [dirname(path), base];
+      const anchors = [importedReference.projectRelative ? base : dirname(path)];
       const candidates = [...new Set(anchors.map(anchor => posix.normalize(posix.join(anchor, normalized))))];
       const dependency = candidates.find(candidate => !candidate.startsWith("../") && tracked[candidate] !== undefined);
       if (!dependency) throw new Error("Execution definition import is not a committed repository file");

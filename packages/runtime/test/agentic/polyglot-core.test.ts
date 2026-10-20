@@ -183,3 +183,56 @@ it("resolves nested Gradle apply paths against the owning project, including cus
   expect(detection.status).toBe("detected"); if (detection.status !== "detected") throw new Error("missing pin");
   expect(detection.profiles[0]!.definitionBlobs).toHaveProperty("second.custom");
 });
+it("resolves MSBuildProjectDirectory from the project root instead of a same-name imported-file decoy", async () => {
+  const cwd = await root();
+  const git = (...args: string[]) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", ...args], { cwd, encoding: "utf8" }).trim();
+  git("init", "-b", "main"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.test");
+  await mkdir(join(cwd, "build-support"));
+  await writeFile(join(cwd, "Tests.csproj"), '<Project><Import Project="build-support/common.props"/></Project>');
+  await writeFile(join(cwd, "build-support/common.props"), '<Project><Import Project="$(MSBuildProjectDirectory)/checks.custom"/></Project>');
+  await writeFile(join(cwd, "checks.custom"), "actual runner definition\n");
+  await writeFile(join(cwd, "build-support/checks.custom"), "same-name decoy\n");
+  git("add", "."); git("commit", "-m", "original");
+  const originalRevision = git("rev-parse", "HEAD");
+  const detection = await pinRunnerDefinitions(cwd, { status: "detected", profiles: [profile(cwd)], notes: [] });
+  expect(detection.status).toBe("detected"); if (detection.status !== "detected") throw new Error("missing pin");
+  expect(detection.profiles[0]!.definitionBlobs).toHaveProperty("checks.custom");
+  const command = { ...bindRunnerProfile(detection.profiles[0]!, { testNames: ["target"], testPaths: ["tests/a.test.js"] }), originalRevision };
+  await writeFile(join(cwd, "checks.custom"), "disable tests\n"); git("add", "."); git("commit", "-m", "task mutation");
+  await expect(assertRunnerProvenance(command, cwd, git("rev-parse", "HEAD"))).rejects.toThrow("original revision");
+});
+it.each(["shared.custom", "shared.gradle"])("pins %s helper imports separately for every consuming Gradle project", async shared => {
+  const cwd = await root();
+  const git = (...args: string[]) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", ...args], { cwd, encoding: "utf8" }).trim();
+  git("init", "-b", "main"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.test");
+  for (const project of ["a", "b"]) {
+    await mkdir(join(cwd, project));
+    await writeFile(join(cwd, project, "build.gradle"), `apply from: '../${shared}'\n`);
+    await writeFile(join(cwd, project, "checks.custom"), `${project} original definition\n`);
+  }
+  await writeFile(join(cwd, shared), "apply from: 'checks.custom'\n"); git("add", "."); git("commit", "-m", "shared original definitions");
+  const originalRevision = git("rev-parse", "HEAD");
+  const detection = await pinRunnerDefinitions(cwd, { status: "detected", profiles: [profile(cwd)], notes: [] });
+  expect(detection.status).toBe("detected"); if (detection.status !== "detected") throw new Error("missing pin");
+  expect(detection.profiles[0]!.definitionBlobs).toHaveProperty("a/checks.custom");
+  expect(detection.profiles[0]!.definitionBlobs).toHaveProperty("b/checks.custom");
+  const command = { ...bindRunnerProfile(detection.profiles[0]!, { testNames: ["target"], testPaths: ["tests/a.test.js"] }), originalRevision };
+  await writeFile(join(cwd, "a/checks.custom"), "synthesize report\n"); git("add", "."); git("commit", "-m", "mutate one project import");
+  await expect(assertRunnerProvenance(command, cwd, git("rev-parse", "HEAD"))).rejects.toThrow("original revision");
+});
+it("pins implicit MSBuild Directory.Build imports in each child project context", async () => {
+  const cwd = await root();
+  const git = (...args: string[]) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", ...args], { cwd, encoding: "utf8" }).trim();
+  git("init", "-b", "main"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.test");
+  await writeFile(join(cwd, "Directory.Build.props"), '<Project><Import Project="$(MSBuildProjectDirectory)/checks.custom"/></Project>');
+  await writeFile(join(cwd, "checks.custom"), "root decoy\n");
+  for (const project of ["a", "b"]) {
+    await mkdir(join(cwd, project)); await writeFile(join(cwd, project, "Tests.csproj"), "<Project/>");
+    await writeFile(join(cwd, project, "checks.custom"), `${project} execution definition\n`);
+  }
+  git("add", "."); git("commit", "-m", "implicit original definitions");
+  const detection = await pinRunnerDefinitions(cwd, { status: "detected", profiles: [profile(cwd)], notes: [] });
+  expect(detection.status).toBe("detected"); if (detection.status !== "detected") throw new Error("missing pin");
+  expect(detection.profiles[0]!.definitionBlobs).toHaveProperty("a/checks.custom");
+  expect(detection.profiles[0]!.definitionBlobs).toHaveProperty("b/checks.custom");
+});
