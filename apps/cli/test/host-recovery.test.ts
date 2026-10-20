@@ -45,7 +45,8 @@ describe.skipIf(process.platform === "win32")("persistent host recovery", () => 
     expect(await readFile(path, "utf8")).toBe(before);
   });
 
-  it("finds external private authority for status, quiesce and shutdown after a non-POSIX startup", async () => {
+  // The fstat spy resolves descriptors through /proc/self/fd, which only exists on Linux.
+  it.skipIf(process.platform !== "linux")("finds external private authority for status, quiesce and shutdown after a non-POSIX startup", async () => {
     const input = await repository();
     const stateHome = await mkdtemp("/tmp/bflow-private-recovery-");
     cleanup.push(() => rm(stateHome, { recursive: true, force: true }));

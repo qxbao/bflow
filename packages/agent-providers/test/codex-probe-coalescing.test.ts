@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -15,7 +15,7 @@ let home: string;
 let workspace: string;
 let state: string;
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "bflow-coalesce-"));
+  root = await realpath(await mkdtemp(join(tmpdir(), "bflow-coalesce-")));
   binary = join(root, "codex");
   home = join(root, "home");
   workspace = join(root, "workspace");

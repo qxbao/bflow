@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { executeSetupCommand, runCli, formatCommandSuccess } from "../src/index.js";
@@ -9,7 +9,7 @@ afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, {
 const plan = { schemaVersion: 3, planId: "setup-outcomes", machineId: "test-machine", revision: 1,
   planDigest: "a".repeat(64), createdAt: new Date().toISOString(), idempotencyKey: "setup-outcomes", steps: [] };
 async function context(report: Record<string, unknown>) {
-  const root = await mkdtemp(join(tmpdir(), "bflow-setup-outcomes-")); roots.push(root);
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-setup-outcomes-"))); roots.push(root);
   return { cwd: root, setup: { isolatedRoot: join(root, "home"), machineSetup: { run: async () => ({ plan, observations: [], diagnostics: [], receipts: [], ...report }) } } };
 }
 
@@ -48,7 +48,7 @@ describe("standard setup composition", () => {
     const { detectPlatform, defaultHostEnvironment, defaultMachineConfig, ToolInstallerRegistry } = await import("@bflow/machine-setup");
     const { execFile } = await import("node:child_process");
     const { promisify } = await import("node:util");
-    const root = await mkdtemp(join(tmpdir(), "bflow-real-setup-")); roots.push(root);
+    const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-real-setup-"))); roots.push(root);
     const bin = join(root, "fixtures"); await mkdir(bin);
     for (const name of ["node", "git", "pnpm", "herdr"]) await writeFile(join(bin, name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     const platform = detectPlatform({ ...defaultHostEnvironment(), homeDir: root,
@@ -66,7 +66,7 @@ describe("standard setup composition", () => {
     expect(output.receipts?.find(r => r.stepId === "resolve_skills:role-skills")?.status).toBe("applied");
     expect(output.receipts?.find(r => r.stepId === "configure:environment-manifest")?.status).toBe("applied");
     expect(output.doctor?.healthy).toBe(true);
-    const shell = await readFile(join(root, ".bashrc"), "utf8");
+    const shell = await readFile(join(root, platform.os === "darwin" ? ".bash_profile" : ".bashrc"), "utf8");
     expect(shell).toContain(platform.paths.managedBin);
     const other = join(root, "unrelated"); await mkdir(other);
     const result = await promisify(execFile)(join(platform.paths.managedBin, "bflow"), ["--version"], { cwd: other });
