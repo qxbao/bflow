@@ -19,17 +19,26 @@ describe("bundled isolation engine", () => {
     const home = mkdtempSync(resolve(tmpdir(), "bflow-iso-engine-"));
     try {
       const futureBflowHome = resolve(home, "not-created-yet");
+      const sentinelBin = resolve(home, "sentinel-bin");
+      const executed = resolve(home, "help-command-executions");
+      mkdirSync(sentinelBin);
+      for (const command of ["login", "status", "unverified"]) {
+        writeFileSync(resolve(sentinelBin, command), `#!/usr/bin/env bash\nprintf '%s\\n' '${command}' >> '${executed}'\n`);
+        chmodSync(resolve(sentinelBin, command), 0o755);
+      }
       const env = {
         ...process.env,
         HOME: home,
         AI_ISOLATOR_HOME: resolve(home, "state"),
         BFLOW_HOME: futureBflowHome,
-        PATH: process.env.PATH ?? "",
+        PATH: `${sentinelBin}:${process.env.PATH ?? ""}`,
       };
       const help = spawnSync("bash", [enginePath, "--help"], { cwd: home, env, encoding: "utf8" });
       const version = spawnSync("bash", [enginePath, "--version"], { cwd: home, env, encoding: "utf8" });
       expect(help.status).toBe(0);
       expect(help.stdout).toContain("bflow iso codex");
+      expect(help.stderr).toBe("");
+      expect(existsSync(executed)).toBe(false);
       expect(version.status).toBe(0);
       expect(version.stdout.trim()).toBe("bflow iso 0.4.4");
       expect(existsSync(resolve(home, "state"))).toBe(false);

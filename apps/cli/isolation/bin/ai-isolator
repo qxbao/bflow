@@ -190,8 +190,8 @@ Liên kết Codex LB:
     6. http://127.0.0.1:2455
 
 Agy:
-  Agy không cung cấp lệnh kiểm tra trạng thái đăng nhập. `login agy` mở UI
-  onboarding trong HOME tách biệt; `status` hiển thị `unverified` và không chạy
+Agy không cung cấp lệnh kiểm tra trạng thái đăng nhập. \`login agy\` mở UI
+onboarding trong HOME tách biệt; \`status\` hiển thị \`unverified\` và không chạy
   mô hình hay lệnh xác thực.
 
 Lệnh khởi chạy profile:
