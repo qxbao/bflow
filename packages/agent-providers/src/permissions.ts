@@ -5,6 +5,10 @@ import type {
 } from "@bflow/contracts";
 import type { DetectedProviderCapabilities } from "./types.js";
 
+/** Roles that investigate read-only and may run the git reads below (mirrors the Runtime host guard). */
+const INVESTIGATION_ROLES: ReadonlySet<string> = new Set(["planner", "specifier", "architect", "reviewer", "qa"]);
+const READ_ONLY_GIT_PATTERNS = ["log", "show", "diff", "status", "branch"].map(command => `Bash(git ${command}:*)`);
+
 export interface CompiledPermissionResult {
   readonly supported: boolean;
   readonly code: string;
@@ -186,10 +190,11 @@ function compileClaudePermissions(
   } else {
     tools = "Read,Glob,Grep,Edit,Write";
   }
-  flags.push("--tools", tools);
-
+  // Read-only investigation roles may run git reads; dontAsk refuses every other Bash call, and the host guard re-checks each one.
+  const gitReads = tools && INVESTIGATION_ROLES.has(role) ? READ_ONLY_GIT_PATTERNS : [];
+  flags.push("--tools", gitReads.length ? `${tools},Bash` : tools);
   const mcpPatterns = (options.mcpServerNames ?? []).map((name) => `mcp__${name}__*`);
-  const allowedTools = [tools, ...mcpPatterns].filter(Boolean);
+  const allowedTools = [tools, ...gitReads, ...mcpPatterns].filter(Boolean);
   flags.push("--allowedTools", allowedTools.join(","));
 
   const disallowedList: string[] = [];
