@@ -2,6 +2,7 @@ import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { validateRunnerMount } from "../../src/agentic/behavioral-sandbox.js";
 import { createNativeAdapters, type NativeHost } from "../../src/agentic/runner-adapters/native.js";
 import type { AdapterContext, AdapterRunner } from "../../src/agentic/runner-adapter.js";
 
@@ -81,6 +82,7 @@ describe("Go native runner", () => {
   async function go(files: Record<string, string> = {}): Promise<{ context: AdapterContext; host: NativeHost }> {
     const tool = await hostTool("go");
     await mkdir(join(dirname(dirname(tool.path)), "pkg"));
+    await mkdir(join(dirname(dirname(tool.path)), "src"));
     const context = await fixture({ "go.mod": "module example.org/math\n\ngo 1.23\n", "go.sum": "", "math_test.go": "", "sub/math_test.go": "", ...files });
     const host = fakeHost(tool.home, tool.path, async (_exe, args) => args[0] === "version" ? "go version go1.23.4 linux/amd64" : dirname(dirname(tool.path)));
     await mkdir(join(tool.home, "go/pkg/mod"), { recursive: true });
@@ -94,6 +96,17 @@ describe("Go native runner", () => {
     expect(profile.mounts.map(value => value.source)).toContain(join(host.home, "go/pkg/mod"));
     expect(profile.bind({ testNames: ["example.org/math/sub.TestAdd/a+b"], testPaths: ["sub/math_test.go"] }, "/tmp/r").args).toEqual(["test", "-json", "-count=1", "-vet=off", "-run", "^TestAdd$/^a\\+b$", "./sub"]);
     expect(profile.protectedPaths).toEqual(["go.mod", "go.sum"]);
+  });
+  it("imports only Go build inputs instead of unrelated toolchain credentials and fixtures", async () => {
+    const { context, host } = await go();
+    const goroot = await host.probe("go", ["env", "GOROOT"]);
+    await mkdir(join(goroot, "test/passwords"), { recursive: true });
+    await writeFile(join(goroot, "auth.json"), "host-secret-not-imported");
+    await writeFile(join(goroot, "go.env"), "GOTOOLCHAIN=auto\n");
+    const profile = runner((await createNativeAdapters(host)[1]!.detect(context)).runners[0]);
+    expect(profile.mounts.map(value => value.source).sort()).toEqual([
+      join(goroot, "go.env"), join(goroot, "pkg"), join(goroot, "src"), join(host.home, "go/pkg/mod")
+    ].sort());
   });
   it("supports exact top-level unions and examples without running all suite tests", async () => {
     const { context, host } = await go();
@@ -121,6 +134,7 @@ describe("Rust native runner", () => {
   async function rust(): Promise<{ context: AdapterContext; host: NativeHost }> {
     const tool = await hostTool("cargo");
     await writeFile(join(dirname(tool.path), "rustc"), "host rustc"); await chmod(join(dirname(tool.path), "rustc"), 0o755);
+    await writeFile(join(dirname(tool.path), "cc"), "host compiler"); await chmod(join(dirname(tool.path), "cc"), 0o755);
     await mkdir(join(dirname(dirname(tool.path)), "lib"));
     await mkdir(join(tool.home, ".cargo/registry/src"), { recursive: true });
     await writeFile(join(tool.home, ".cargo/credentials.toml"), "secret-not-mounted");
@@ -136,6 +150,37 @@ describe("Rust native runner", () => {
     expect(profile.protectedPaths).toEqual([".cargo/config.toml", "Cargo.lock", "Cargo.toml", "build.rs"]);
     expect(profile.bind({ testNames: ["tests::addition"], testPaths: ["src/lib.rs"] }, "/tmp/r").args).toEqual(["test", "--offline", "--locked", "--lib", "--", "tests::addition", "--exact", "--test-threads=1"]);
     expect(profile.bind({ testNames: ["addition"], testPaths: ["tests/math.rs"] }, "/tmp/r").args).toContain("math");
+  });
+  it("pins the canonical linker when cc traverses an unmounted alternatives directory", async () => {
+    const { context, host } = await rust();
+    const bin = host.environment.PATH!;
+    const compiler = (await fixture({ "bin/gcc-13": "compiler" })).root + "/bin/gcc-13";
+    await chmod(compiler, 0o755);
+    const alternatives = (await fixture({ ".keep": "" })).root;
+    await symlink(compiler, join(alternatives, "cc"));
+    await rm(join(bin, "cc"));
+    const compilerPath = (await fixture({ "bin/.keep": "" })).root + "/bin";
+    await symlink(join(alternatives, "cc"), join(compilerPath, "cc"));
+    host.environment.PATH = `${bin}:${compilerPath}`;
+    const profile = runner((await createNativeAdapters(host)[2]!.detect(context)).runners[0]);
+    expect(profile.environment.CARGO_ENCODED_RUSTFLAGS).toBe(`-Clinker=${compiler}`);
+    expect(profile.mounts.map(value => value.source)).toContain(compiler);
+    expect(profile.mounts.map(value => value.source)).not.toContain(alternatives);
+    for (const mount of profile.mounts) await validateRunnerMount(mount, context.root);
+  });
+  it("reports a setup requirement instead of a runnable Rust profile when the linker is absent or repository-owned", async () => {
+    const { context, host } = await rust();
+    await rm(join(host.environment.PATH!, "cc"));
+    for (const repoLinker of [false, true]) {
+      if (repoLinker) {
+        await mkdir(join(context.root, "bin")); await writeFile(join(context.root, "bin/cc"), "untrusted repository compiler");
+        await chmod(join(context.root, "bin/cc"), 0o755);
+        host.environment.PATH += `:${join(context.root, "bin")}`;
+      }
+      const result = await createNativeAdapters(host)[2]!.detect(context);
+      expect(result.runners).toEqual([]);
+      expect(result.notes.join()).toContain("runner_toolchain_setup_required: C linker is unavailable");
+    }
   });
   it("rejects ambiguous targets and multiple name filters", async () => {
     const { context, host } = await rust();
@@ -159,8 +204,8 @@ it("reports separate missing toolchains in a polyglot manifest inventory", async
 });
 
 it("exposes all three installed native adapters for a monorepo and isolates task selection", async () => {
-  const tools = await fixture({ "bin/go": "tool", "bin/python3": "tool", "bin/cargo": "tool", "bin/rustc": "tool", "lib/.keep": "", "pkg/.keep": "" });
-  for (const name of ["go", "python3", "cargo", "rustc"]) await chmod(join(tools.root, "bin", name), 0o755);
+  const tools = await fixture({ "bin/go": "tool", "bin/python3": "tool", "bin/cargo": "tool", "bin/rustc": "tool", "bin/cc": "tool", "lib/.keep": "", "pkg/.keep": "" });
+  for (const name of ["go", "python3", "cargo", "rustc", "cc"]) await chmod(join(tools.root, "bin", name), 0o755);
   const home = (await fixture({ ".keep": "" })).root;
   const context = await fixture({ "services/go/go.mod": "module example/go\ngo 1.23", "services/go/math_test.go": "", "services/python/pyproject.toml": "[project]\nname='py'", "services/python/tests/test_math.py": "", "services/rust/Cargo.toml": "[package]\nname='rust'", "services/rust/Cargo.lock": "", "services/rust/src/lib.rs": "", ".cargo/config.toml": "", "package.json": "{}" });
   await mkdir(join(context.root, "services/python/.venv/bin"), { recursive: true });
@@ -175,8 +220,8 @@ it("exposes all three installed native adapters for a monorepo and isolates task
 });
 
 it("omits Cargo index caches containing credential-bearing Git configuration", async () => {
-  const tools = await fixture({ "bin/cargo": "tool", "bin/rustc": "tool", "lib/.keep": "" });
-  await chmod(join(tools.root, "bin/cargo"), 0o755); await chmod(join(tools.root, "bin/rustc"), 0o755);
+  const tools = await fixture({ "bin/cargo": "tool", "bin/rustc": "tool", "bin/cc": "tool", "lib/.keep": "" });
+  await chmod(join(tools.root, "bin/cargo"), 0o755); await chmod(join(tools.root, "bin/rustc"), 0o755); await chmod(join(tools.root, "bin/cc"), 0o755);
   const home = (await fixture({ ".cargo/registry/index/private/.git/config": '[remote "origin"]\nurl = https://private-token@example.test/index', ".cargo/credentials.toml": "private-token" })).root;
   const context = await fixture({ "Cargo.toml": "[package]\nname='math'" });
   const host = fakeHost(home, join(tools.root, "bin/cargo"), async path => path.endsWith("rustc") ? "rustc 1.83.0" : "cargo 1.83.0");

@@ -185,7 +185,9 @@ async function detectGo(context: AdapterContext, host: NativeHost): Promise<Adap
     goroot = (await host.probe(binary, ["env", "GOROOT"])).trim();
     if (!isAbsolute(goroot) || !await exists(join(goroot, "pkg"))) throw new Error("invalid GOROOT");
   } catch { return { runners, notes: ["go: runner_toolchain_setup_required: Go toolchain probe failed"] }; }
-  const toolMounts = await mounts([goroot], host);
+  // A distribution also contains docs, its own tests and unrelated metadata. Only
+  // import inputs required to compile programs; the go executable is bound separately.
+  const toolMounts = await mounts([join(goroot, "src"), join(goroot, "pkg"), join(goroot, "go.env")], host);
   for (const project of roots) {
     const text = await safeText(join(context.root, project, "go.mod"));
     const module = /^module\s+(?:"([^"\r\n]+)"|([^\s]+))/m.exec(text)?.slice(1).find(Boolean);
@@ -235,11 +237,16 @@ async function detectRust(context: AdapterContext, host: NativeHost): Promise<Ad
   let version: string;
   try { cargo = await realpath(cargo); rustc = await realpath(rustc); if (within(context.root, cargo) || within(context.root, rustc)) throw new Error("repository toolchain rejected"); version = (await host.probe(cargo, ["--version"])).trim(); if (!/^cargo 1\.\d+\.\d+/.test(version) || !/^rustc 1\.\d+\.\d+/.test((await host.probe(rustc, ["--version"])).trim())) throw new Error("invalid Rust toolchain"); }
   catch { return { runners, notes: ["rust: runner_toolchain_setup_required: cargo/rustc probe failed"] }; }
+  // Debian/Ubuntu's /usr/bin/cc commonly traverses /etc/alternatives, which is
+  // deliberately absent from the sandbox. Pin its canonical executable instead
+  // of exposing global alternatives/configuration. Never select a repository tool.
+  const linker = await executable(host, "cc", context.root) ?? await executable(host, "gcc", context.root) ?? await executable(host, "clang", context.root);
+  if (!linker) return { runners, notes: ["rust: runner_toolchain_setup_required: C linker is unavailable"] };
   const toolchain = dirname(dirname(cargo)), cargoHome = host.environment.CARGO_HOME ?? join(host.home, ".cargo");
-  const paths = [join(toolchain, "bin"), join(toolchain, "lib")];
+  const paths = [join(toolchain, "bin"), join(toolchain, "lib"), linker];
   const dependencies = await cacheMounts(["src", "cache", "index"].map(part => join(cargoHome, "registry", part)), host);
   for (const project of roots) runners.push({ adapterId: "rust", version, executable: cargo, projectDirectory: project, format: "rust_libtest", mounts: [...await mounts(paths, host), ...dependencies],
-    environment: { CARGO_NET_OFFLINE: "true", CARGO_TARGET_DIR: "/tmp/bflow-cargo-target", CARGO_HOME: cargoHome, RUSTC: rustc, RUSTDOC: join(dirname(rustc), "rustdoc"), RUST_BACKTRACE: "0" },
+    environment: { CARGO_NET_OFFLINE: "true", CARGO_TARGET_DIR: "/tmp/bflow-cargo-target", CARGO_HOME: cargoHome, RUSTC: rustc, RUSTDOC: join(dirname(rustc), "rustdoc"), RUST_BACKTRACE: "0", CARGO_ENCODED_RUSTFLAGS: `-Clinker=${linker}` },
     protectedPaths: configs(context, project, /^(?:Cargo\.(?:toml|lock)|config(?:\.toml)?|rust-toolchain(?:\.toml)?|build\.rs)$/),
     nameRule: "Exact stable Rust libtest identity, including module::test; exactly one identity per measurement.",
     bind(value) {
