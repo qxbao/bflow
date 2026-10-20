@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { missingOfflineFixturePrerequisites } from "../helpers/offline-fixture-cache.js";
 import { copyIsolatedNodeDependencies } from "../helpers/isolated-node-dependencies.js";
 import { HostVerification } from "../../src/agentic/host-verification.js";
 import type { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
@@ -157,6 +158,11 @@ for (const candidate of cases) describe(`production independent measurement: ${c
     if (!profile && !candidate.dependency && candidate.id !== "node --test") { context.skip(); return; } // Toolchain or ready test environment is unavailable.
     expect(profile, detected.status === "unsupported" ? detected.reason : detected.notes.join("; ")).toBeDefined();
     if (!profile) throw new Error("installed runner was not detected");
+    const missing = profile.adapter ? await missingOfflineFixturePrerequisites(profile.adapter) : [];
+    if (missing.length) {
+      console.info(`${candidate.id}: offline fixture prerequisites unavailable: ${missing.join(", ")}`);
+      context.skip(); return;
+    }
     const command = bindRunnerProfile(profile, { testNames: fixture.names, testPaths: fixture.paths });
     if (phase === "infrastructure error") {
       await expect(measureBehavior(command, repo.cwd, repo.revision)).rejects.toThrow();

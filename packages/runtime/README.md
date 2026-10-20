@@ -622,3 +622,14 @@ Giới hạn: kế thừa environment của hook, mở rộng header `${VAR}` c�
 chỉ được xác minh bằng các hook spawn cục bộ và config đã render, không phải provider hay Herdr live.
 
 Legacy JS and owner commands also have a deny-default macOS Seatbelt backend (see the runner architecture document). Native polyglot adapter mounts/reports and dependency warming remain Linux-only; macOS was not measured on this integration host.
+
+The polyglot measurement fixtures require both an installed toolchain and the pinned
+fixture dependencies in its selected offline cache. Tests inventory Maven/Gradle/NuGet
+prerequisites before measurement and explicitly skip unavailable environments; once a
+measurement starts, missing transitive dependencies and all infrastructure errors fail.
+Installed SDKs alone do not prove measurement readiness. Linux test dependencies are
+staged without pnpm workspace links; production dependency escape checks remain enabled.
+PHPUnit uses an ini-free PHP invocation with explicit public extensions, and Rust pins
+its canonical C linker without importing host alternatives configuration. Dependency
+warming avoids devpts so its network namespace stays owned by the user namespace entered
+by slirp; the helper must return exactly its documented readiness byte before npm starts.
