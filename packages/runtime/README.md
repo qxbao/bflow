@@ -95,9 +95,11 @@ into Runtime. The Gateway deduplicates by `message_id`, so a failed or interrupt
 requeued and retried, ending in the terminal `delivered` status. Each applied
 message is kept as a durable notice (summary capped at 4096 characters) until the model has
 seen it: in the next user turn's hook context, in a Stop-hook `block` reason, or after a
-host-typed `[bflow]` inbox nudge. A 30-second reminder shows a Herdr notification and sends
-the nudge only when the Conversation agent is idle and its Claude input box is verifiably
-empty; other providers and unrecognised layouts fail closed. Notices are delivery evidence
+host-typed `[bflow]` inbox nudge. The inbox is checked every 2 s (`BFLOW_INBOX_CHECK_MS`,
+500 ms–30 s): it shows a Herdr notification and sends the nudge only when the Conversation
+agent is idle and its Claude input box is verifiably empty. The box is read as ANSI so Claude's
+faint (SGR 2) next-prompt suggestion counts as empty while a typed draft does not. An unsurfaced
+notice is re-nudged after 5/10/20/60 s; other providers and unrecognised layouts fail closed. Notices are delivery evidence
 only, never task success, and the nudge never creates a user turn or approval. The empty-input
 detection, notification and Stop-hook continuation are not live-verified.
 

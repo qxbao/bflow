@@ -14,8 +14,9 @@ import {
   type AgentProviderId, type AgentRole, type PaneBinding, type RoleMessage, type SessionManifest, type RunStore, type OperationOptions
 } from "@bflow/contracts";
 import { authenticateNativeHerdrMessage } from "./herdr-ingress.js";
-import { BFLOW_INBOX_NUDGE, afterReminder, isProviderInputEmpty, reminderDue, type ReminderState } from "./conversation-inbox.js";
-import { isUserFacingNotice, lastAssistantText, mustShowSection, notificationBody, renderConversationNotice, type NoticeLike } from "./conversation-notice-render.js";
+import { BFLOW_INBOX_NUDGE, inboxCheckIntervalMs } from "./conversation-inbox.js";
+import { ConversationInboxNotifier, type ConversationInboxPorts } from "./conversation-inbox-notifier.js";
+import { lastAssistantText, mustShowSection, renderConversationNotice, type NoticeLike } from "./conversation-notice-render.js";
 import { callHost } from "./host-protocol.js";
 import { readHostConfiguration, type HostConfiguration, type RoleLaunchDescriptor } from "./host-controller.js";
 import { digest, json, record, textField } from "./journal.js";
@@ -1008,42 +1009,27 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }, error => { process.stderr.write(`Bflow Gateway check: ${redactString(String(error))}\n`); }).finally(() => { verifyingGateway = false; });
   }, 30_000);
   gatewayTimer.unref();
-  // Inbox reminder: user decisions and blocks are re-shown with backoff until displayed; other new notices notify once.
-  // The nudge is typed only into a verifiably idle, empty input box.
-  const reminders = new Map<string, ReminderState>();
+  // Inbox reminder and idle wake-up (conversation-inbox-notifier.ts): the nudge is typed only into a verifiably idle, empty input box.
+  const inbox = new ConversationInboxNotifier();
   let remindingInbox = false;
   const conversationProvider = platformRoles.find(option => option.role === "conversation")?.provider ?? "claude";
+  const inboxPorts: ConversationInboxPorts = { provider: conversationProvider,
+    unsurfacedNotices: () => receipts.unsurfacedConversationNotices(), undisplayedNotices: () => receipts.undisplayedUserFacingNotices(),
+    conversationPaneId: async () => unwrap(await requireWorkspace().runtime.ports.panes.getRoleBinding("conversation"))?.paneId,
+    agentStatus: async paneId => (await observeAgent(paneId)).status,
+    readPaneAnsi: paneId => herdr(["pane", "read", paneId, "--source", "visible", "--format", "ansi"]),
+    notify: async (title, body) => {
+      try { await herdr(["notification", "show", title, "--body", body, "--sound", "request"]); }
+      catch (error) { process.stderr.write(`Bflow inbox notification: ${redactString(String(error))}\n`); }
+    },
+    prompt: async (paneId, text) => { await herdr(["agent", "prompt", paneId, text]); },
+    now: () => Date.now() };
   const inboxTimer = setInterval(() => {
     if (!workspace || quiesced || closing || remindingInbox) return;
     remindingInbox = true;
-    void (async () => {
-      const unsurfaced = await receipts.unsurfacedConversationNotices();
-      const undisplayed = await receipts.undisplayedUserFacingNotices();
-      if (!unsurfaced.length && !undisplayed.length) return;
-      const now = Date.now(), due: { id: string; body: string }[] = [];
-      for (const notice of [...undisplayed, ...unsurfaced.filter(item => !undisplayed.some(other => other.messageId === item.messageId))]) {
-        const rendered = renderConversationNotice(notice), userFacing = isUserFacingNotice(rendered);
-        const state = reminders.get(notice.messageId);
-        if (userFacing ? reminderDue(state, now) : state === undefined) {
-          due.push({ id: notice.messageId, body: userFacing ? notificationBody(rendered) : rendered.display });
-          reminders.set(notice.messageId, userFacing ? afterReminder(state, now) : { shows: 1, nextAt: Number.POSITIVE_INFINITY });
-        }
-      }
-      if (due.length) {
-        try { await herdr(["notification", "show", `Bflow: ${due.length} cập nhật mới`, "--body", due.map(item => item.body).join("\n---\n").slice(0, 1200), "--sound", "request"]); }
-        catch (error) { process.stderr.write(`Bflow inbox notification: ${redactString(String(error))}\n`); }
-      }
-      // Nudge for unsurfaced notices, or for user-facing notices that were just re-shown.
-      if (!unsurfaced.length && !due.some(item => undisplayed.some(notice => notice.messageId === item.id))) return;
-      const pane = unwrap(await requireWorkspace().runtime.ports.panes.getRoleBinding("conversation"));
-      if (!pane) return;
-      // Re-checked immediately before submission; any doubt (busy, draft, unknown layout) skips the nudge.
-      const agent = await observeAgent(pane.paneId);
-      if (agent.status !== "idle" || !isProviderInputEmpty(conversationProvider, await herdr(["pane", "read", pane.paneId, "--source", "visible", "--format", "text"]))) return;
-      await herdr(["agent", "prompt", pane.paneId, BFLOW_INBOX_NUDGE]);
-    })().catch(error => { process.stderr.write(`Bflow inbox: ${redactString(String(error))}\n`); })
+    void inbox.tick(inboxPorts).catch(error => { process.stderr.write(`Bflow inbox: ${redactString(String(error))}\n`); })
       .finally(() => { remindingInbox = false; });
-  }, 30_000);
+  }, inboxCheckIntervalMs(process.env.BFLOW_INBOX_CHECK_MS));
   inboxTimer.unref();
   // Hang watchdog (decisions in run-watchdog.ts): recreates lost user-decision notices, resurfaces undisplayed ones and reports
   // runs that are not working. Actions run one at a time outside the journal lock; each Runtime report is its own transaction.
@@ -1066,9 +1052,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           await host.conversation.reconcileApprovals().catch(() => undefined);
           await receipts.appendConversationNotice(buildDecisionRequestMessage({ request: pending.request, correlationId: pending.correlationId,
             sender: { role: "runtime" }, conversation: { role: "conversation" } }));
-          reminders.delete(action.messageId);
+          inbox.forget(action.messageId);
         } else if (action.kind === "resurface") {
-          if (await receipts.resurfaceConversationNotice(action.messageId) !== undefined) reminders.delete(action.messageId);
+          if (await receipts.resurfaceConversationNotice(action.messageId) !== undefined) inbox.forget(action.messageId);
         } else {
           const key = action.kind === "stalled" ? `stalled:${action.episodeKey}` : `blocked:${action.messageId}`;
           if (watchdogReported.has(key)) continue;
