@@ -79,7 +79,8 @@ const cases: RunnerCase[] = [
     fixture: phase => ({ files: {
       "Cargo.toml": '[package]\nname="bflow-measure-fixture"\nversion="0.0.0"\nedition="2021"\n',
       "Cargo.lock": 'version = 3\n\n[[package]]\nname = "bflow-measure-fixture"\nversion = "0.0.0"\n',
-      "src/lib.rs": `pub fn value() -> i32 { ${phase === "infrastructure error" ? 'panic!("runtime infrastructure")' : phase === "pass" ? "4" : "5"} }\n#[cfg(test)] mod tests;\n`,
+      ".cargo/config.toml": '[build]\nrustflags=["--cfg", "bflow_fixture"]\n',
+      "src/lib.rs": `#[cfg(not(bflow_fixture))] compile_error!("repository build flags were lost");\npub fn value() -> i32 { ${phase === "infrastructure error" ? 'panic!("runtime infrastructure")' : phase === "pass" ? "4" : "5"} }\n#[cfg(test)] mod tests;\n`,
       "src/tests.rs": '#[test]\nfn target() { assert_eq!(crate::value(), 4); }\n#[test]\nfn unmapped() { panic!("must not execute"); }\n'
     }, names: ["tests::target"], paths: ["src/tests.rs"] })
   },
