@@ -46,7 +46,6 @@ class FakeLifecycleProcessRunner implements EnvironmentProcessRunner {
   missing = new Set<string>();
   authenticated = true;
   claudeStatus: unknown = { loggedIn: true };
-  agyStatus: unknown = { loggedIn: true };
   agyStderr = "";
   agyBlocked = false;
   serverStarts = 0;
@@ -95,7 +94,7 @@ class FakeLifecycleProcessRunner implements EnvironmentProcessRunner {
       return { exitCode: 0, stdout: JSON.stringify(this.claudeStatus), stderr: "" };
     }
     if (request.executable === "agy") {
-      if (args === "auth status") {
+      if (args === "models") {
         if (this.agyBlocked) {
           return {
             exitCode: 1,
@@ -103,7 +102,7 @@ class FakeLifecycleProcessRunner implements EnvironmentProcessRunner {
             stderr: this.agyStderr || "blocked by workspace policy"
           };
         }
-        return { exitCode: this.authenticated ? 0 : 1, stdout: JSON.stringify(this.agyStatus), stderr: this.agyStderr };
+        return { exitCode: this.authenticated ? 0 : 1, stdout: "gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n", stderr: this.agyStderr };
       }
       if (args === "status --json") {
         if (this.agyBlocked) {

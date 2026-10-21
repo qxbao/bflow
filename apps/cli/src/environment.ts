@@ -1,3 +1,4 @@
+import { AGY_LOGIN_REMEDIATION, probeAgyAccess } from "./agy-access.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { existsSync, readdirSync } from "node:fs";
@@ -396,8 +397,9 @@ export class EnvironmentLifecycle {
           fail(`Missing required agent provider executable '${cli}'. ${remediation}`, { component: `provider:${cli}`, remediation });
         }
         if (override?.authenticated === false) {
-          const authCmd = cli === "codex" ? "codex login" : cli === "claude" ? "claude auth login" : "agy auth login";
-          fail(`Agent provider '${cli}' is not authenticated. Run '${authCmd}' and verify with 'bflow doctor'.`, { component: `provider:${cli}` });
+          const remediation = cli === "agy" ? AGY_LOGIN_REMEDIATION
+            : `Run '${cli === "codex" ? "codex login" : "claude auth login"}' and verify with 'bflow doctor'.`;
+          fail(`Agent provider '${cli}' is not authenticated. ${remediation}`, { component: `provider:${cli}`, remediation });
         }
         if (override?.authenticated === undefined) {
           if (cli === "codex") {
@@ -428,44 +430,13 @@ export class EnvironmentLifecycle {
               fail("Agent provider 'claude' is not authenticated. Run 'claude auth login' and verify with 'bflow doctor'.", { component: "provider:claude" });
             }
           } else if (cli === "agy") {
-            const result = await this.runner.run({
-              executable: "agy",
-              args: ["auth", "status"],
-              cwd: repository.root,
-              env: namedSessionEnvironment(repository.sessionName),
-              timeoutMs: Math.min(5000, deadline.remaining())
+            const access = await probeAgyAccess(this.runner, {
+              cwd: repository.root, env: namedSessionEnvironment(repository.sessionName),
+              timeoutMs: Math.min(45_000, deadline.remaining()), signal: deadline.signal
             });
-            let isBlocked = false;
-            let blockedReason = "";
-            let isUnauth = result.exitCode !== 0;
-
-            if (result.stderr && result.stderr.toLowerCase().includes("blocked")) {
-              isBlocked = true;
-              blockedReason = result.stderr.trim();
-            }
-
-            try {
-              const data = JSON.parse(result.stdout);
-              if (data && typeof data === "object") {
-                if (data.blocked === true || data.status === "blocked") {
-                  isBlocked = true;
-                  if (data.reason) blockedReason = data.reason;
-                }
-                if (data.loggedIn === false || data.authenticated === false) {
-                  isUnauth = true;
-                }
-              }
-            } catch {}
-
-            if (isBlocked) {
-              fail(`Agent provider 'agy' is blocked${blockedReason ? `: ${blockedReason}` : ""}. Remediation: Resolve the provider policy/workspace block and verify with 'bflow agent check agy' or 'bflow doctor'.`, {
-                component: "provider:agy",
-                remediation: "Resolve the provider policy/workspace block and verify with 'bflow agent check agy' or 'bflow doctor'."
-              });
-            }
-            if (isUnauth) {
-              fail("Agent provider 'agy' is not authenticated. Run 'agy auth login' and verify with 'bflow doctor'.", { component: "provider:agy" });
-            }
+            if (access.status !== "available") fail(`${access.message} Remediation: ${access.remediation}`, {
+              component: "provider:agy", remediation: access.remediation
+            });
           }
         }
       }
@@ -585,32 +556,7 @@ export class EnvironmentLifecycle {
             remediation: `Resolve the provider policy/workspace block and verify with 'bflow agent check ${cli}' or 'bflow doctor'.`
           });
         }
-        if (cli === "agy" && override === undefined) {
-          const probe = await this.runner.run({
-            executable: "agy",
-            args: ["status", "--json"],
-            cwd: repository.root,
-            env: namedSessionEnvironment(repository.sessionName),
-            timeoutMs: 5000
-          }).catch(() => null);
-          if (probe) {
-            let isBlocked = probe.exitCode !== 0 && probe.stderr.toLowerCase().includes("blocked");
-            let blockedReason = probe.stderr.trim();
-            try {
-              const data = JSON.parse(probe.stdout);
-              if (data && typeof data === "object" && (data.blocked === true || data.status === "blocked")) {
-                isBlocked = true;
-                if (data.reason) blockedReason = data.reason;
-              }
-            } catch {}
-            if (isBlocked) {
-              fail(`Agent provider 'agy' is blocked${blockedReason ? `: ${blockedReason}` : ""}. Remediation: Resolve the provider policy/workspace block and verify with 'bflow agent check agy' or 'bflow doctor'.`, {
-                component: "provider:agy",
-                remediation: "Resolve the provider policy/workspace block and verify with 'bflow agent check agy' or 'bflow doctor'."
-              });
-            }
-          }
-        }
+
       }
 
       this.progress("Composing session lifecycle integration...");

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { measureBehavior, parseBehavioralCommands } from "../../src/agentic/behavioral-runner.js";
+import { pinRunnerDefinitions } from "../../src/agentic/runner-provenance.js";
 import { sandboxBehavior } from "../../src/agentic/behavioral-sandbox.js";
 import { tmpdir } from "node:os";
 
@@ -94,7 +95,7 @@ describe.skipIf(process.platform !== "darwin")("macOS Seatbelt behavioral sandbo
     const f = await fixture(), dependencies = join(f.root, "node_modules"), packageDirectory = join(dependencies, "trusted-fixture");
     await mkdir(packageDirectory, { recursive: true });
     const modulePath = join(packageDirectory, "index.cjs"); await writeFile(modulePath, "module.exports=42;\n");
-    await symlink(f.secret, join(packageDirectory, "host-secret-link"));
+
     // Use a disposable copy so this attack fixture never risks the host's real Node binary.
     const executable = join(f.root, "disposable-node"); await copyFile(await realpath(process.execPath), executable, constants.COPYFILE_FICLONE); await chmod(executable, 0o700);
     const before = await stat(executable);
@@ -103,7 +104,7 @@ describe.skipIf(process.platform !== "darwin")("macOS Seatbelt behavioral sandbo
       assert.throws(()=>fs.writeFileSync(${JSON.stringify(modulePath)},'module.exports=0'));
       assert.throws(()=>fs.chmodSync(${JSON.stringify(modulePath)},0o777));
       assert.throws(()=>fs.unlinkSync(${JSON.stringify(modulePath)}));
-      assert.throws(()=>fs.readFileSync(${JSON.stringify(join(packageDirectory, "host-secret-link"))}));
+
       assert.throws(()=>fs.writeFileSync(process.execPath,'compromised'));
       assert.throws(()=>fs.chmodSync(process.execPath,0o777));
       assert.throws(()=>fs.utimesSync(process.execPath,new Date(0),new Date(0)));
@@ -112,6 +113,8 @@ describe.skipIf(process.platform !== "darwin")("macOS Seatbelt behavioral sandbo
     expect(await readFile(modulePath, "utf8")).toBe("module.exports=42;\n");
     expect((await stat(executable)).size).toBe(before.size); expect((await stat(executable)).mtimeMs).toBe(before.mtimeMs);
     expect(await readFile(f.secret, "utf8")).toBe("private host credential fixture");
+    await symlink(f.secret, join(packageDirectory, "host-secret-link"));
+    await expect(sandboxBehavior({ ...f.command, executable, dependencyRoots: [dependencies] }, f.cwd, f.command.args)).rejects.toThrow();
   });
   it("clones checkout dependency roots read-only", async () => {
     const f = await fixture(), source = join(f.root, "deps"), nodeModules = join(source, "node_modules");
@@ -122,7 +125,9 @@ describe.skipIf(process.platform !== "darwin")("macOS Seatbelt behavioral sandbo
       assert.throws(()=>fs.writeFileSync('node_modules/dep/index.js','module.exports=0'));
       assert.throws(()=>fs.writeFileSync('node_modules/dep/new.cjs','x'));
     `);
-    const command = { ...f.command, dependencySource: source, checkoutDependencyRoots: ["node_modules"] };
+    const pinned = await pinRunnerDefinitions(f.cwd, { status: "detected", notes: [], profiles: [{ ...f.command, reporter: "node_tap", source: "detected", dependencySource: source, checkoutDependencyRoots: ["node_modules"] }] });
+    if (pinned.status !== "detected") throw new Error("Fixture definitions not pinned");
+    const command = { ...f.command, dependencySource: source, checkoutDependencyRoots: ["node_modules"], definitionBlobs: pinned.profiles[0]!.definitionBlobs };
     expect((await measureBehavior(command, f.cwd, revision)).failed).toBe(0);
     expect(await readFile(join(nodeModules, "dep", "index.js"), "utf8")).toBe("module.exports=7;\n");
   });

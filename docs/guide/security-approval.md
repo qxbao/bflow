@@ -1,104 +1,74 @@
-# Security & Approval
+# Bảo mật & Phê duyệt (Security & Approval)
 
-Repository config/template không được chứa token, API key, cookie, password,
-private signing key hoặc credential-bearing URL. Đưa credentials vào cơ chế
-provider/host bên ngoài source control. `.bflow/.gitignore` do init tạo có các
-rule cho state/logs/secrets/env/data/artifacts/registry/DB; ignore không mã hóa dữ
-liệu và không gỡ secret đã từng commit. Artifact và logs cũng có thể nhạy cảm.
+Tệp cấu hình repository và các tệp mẫu tuyệt đối không được chứa mã khóa bí mật (token), khóa API (API key), cookie phiên, mật khẩu, khóa ký riêng tư (private signing key) hay các URL chứa thông tin xác thực. Mọi thông tin đăng nhập và xác thực phải được quản lý bên ngoài kho mã nguồn thông qua cơ chế của nhà cung cấp hoặc máy chủ host. 
 
-Chỉ dùng template/agent/host module đáng tin. `BFLOW_ENVIRONMENT_MODULE` là ESM
-có quyền thực thi code, do operator chọn qua environment, không lấy từ repo
-config. `HERDR_CONFIG_PATH` là config Herdr riêng; Bflow config.yml cho phép chọn
-provider/model/effort theo role nhưng không quản lý credential provider. Prompt có thể đi qua argv/process inspection; không
-nhúng bí mật vào requirement/instruction.
+Tệp `.bflow/.gitignore` do lệnh `init` tự động khởi tạo đã bao gồm các quy tắc loại trừ cho thư mục trạng thái, nhật ký log, biến môi trường, dữ liệu tạm, artifact, registry và cơ sở dữ liệu. Cần lưu ý rằng việc bỏ qua qua gitignore không có tác dụng mã hóa dữ liệu và không thể tự động gỡ bỏ các bí mật đã từng bị commit vào lịch sử Git trước đó. Ngoài ra, bản thân các artifact và tệp nhật ký cũng có thể chứa thông tin nhạy cảm cần được bảo vệ.
 
-Các gate độc lập và danh tính human phải do trusted host thực thi. Không thay
-authentication bằng callback luôn `true`, agent-supplied `humanOverrideApproved`
-hoặc một chữ "approved" trong terminal. Các mẫu đều là draft, không có artifact
-URI/approval receipt giả và không tự cấp quyền implementation.
+---
 
-| Điểm chặn | Consumer thực thi |
-| --- | --- |
-| Spec/design acceptance và project implementation approval | P15/P19, human decision bind dossier bundle qua Conversation |
-| Required TDD trước ghi implementation | P16/P19 và host write boundary, cần independent Red |
-| Task `requiresApproval: true` | Core/P19 chặn completion/dependent dispatch theo decision đúng task revision/generation |
-| Independent task/workflow verification | P17 với trusted host checks/Reviewer/QA, exact revision/evidence |
-| Delivery approval | P19, sau post-integration verification và kiểm tra clean pinned revision |
+## 1. Ranh giới tin cậy của Host và Phân quyền
 
-V2 nhận approval qua Conversation Gateway và trusted `authorizeHuman` của host.
-Các giá trị `ApprovalStatus` gồm pending/approved/changes_requested/rejected/
-expired/cancelled/superseded. Rejection dừng scheduling tiếp; changes_requested
-không bỏ rework/iteration bounds. Một approval không cấp quyền cho hành động khác.
+Chỉ sử dụng các mẫu template, tiến trình agent và module host thực sự đáng tin cậy:
+- Biến môi trường `BFLOW_ENVIRONMENT_MODULE` chỉ định module ESM có toàn quyền thực thi mã nguồn, biến này do người vận hành trực tiếp thiết lập trong môi trường máy chủ và không bao giờ được đọc từ cấu hình repository.
+- Đường dẫn `HERDR_CONFIG_PATH` trỏ tới tệp cấu hình riêng của Herdr. Tệp `config.yml` của Bflow cho phép tùy chọn provider, model và effort cho từng vai trò nhưng tuyệt đối không quản lý thông tin xác thực của provider.
+- Các câu lệnh prompt có thể bị lộ khi kiểm tra danh sách tiến trình (`argv`/process inspection); tuyệt đối không nhúng thông tin bí mật vào yêu cầu nghiệp vụ hay chỉ dẫn prompt.
 
-Legacy CLI có cú pháp đã triển khai:
+Mọi cổng kiểm soát độc lập và danh tính người phê duyệt bắt buộc phải do host tin cậy trực tiếp thẩm định. Hệ thống không chấp nhận việc giả mạo xác thực thông qua callback luôn trả về `true`, cờ tự khai báo `humanOverrideApproved` của agent, hay một dòng chữ "approved" đơn thuần trên terminal. Các tệp mẫu đều là bản thảo sơ bộ, không chứa URI artifact hay biên nhận phê duyệt giả lập và không tự cấp quyền triển khai mã nguồn.
 
-```sh
+---
+
+## 2. Các điểm chốt chặn kiểm soát (Governance Checkpoints)
+
+| Điểm chốt chặn | Thành phần thực thi có thẩm quyền |
+| :--- | :--- |
+| **Nghiệm thu Đặc tả / Thiết kế và Phê duyệt Triển khai** | Tầng P15 và P19; quyết định của con người liên kết với hồ sơ (dossier bundle) thông qua Conversation Agent. |
+| **Bắt buộc TDD trước khi viết mã nguồn** | Tầng P16, P19 và ranh giới quyền ghi của host; bắt buộc phải có trạng thái kiểm thử Red độc lập. |
+| **Tác vụ có cờ `requiresApproval: true`** | Core Engine và P19; ngăn chặn việc hoàn tất tác vụ hoặc phân phối tác vụ phụ thuộc cho tới khi có quyết định phê duyệt chính xác theo phiên bản và thế hệ tác vụ. |
+| **Xác minh tác vụ và quy trình độc lập** | Tầng P17 kết hợp các lệnh kiểm tra tin cậy của host, vai trò Reviewer và QA, dựa trên đúng phiên bản Git và bằng chứng khách quan. |
+| **Phê duyệt bàn giao thành phẩm (Delivery Approval)** | Tầng P19; chỉ được kích hoạt sau khi hoàn tất xác minh sau tích hợp và kiểm tra phiên bản mã nguồn đã sạch sẽ (clean pinned revision). |
+
+Kiến trúc v2 tiếp nhận quyết định phê duyệt thông qua Conversation Gateway và phương thức `authorizeHuman` tin cậy của host. Danh mục trạng thái phê duyệt (`ApprovalStatus`) bao gồm: `pending`, `approved`, `changes_requested`, `rejected`, `expired`, `cancelled`, `superseded`:
+- Quyết định từ chối (`rejected`) sẽ lập tức dừng mọi kế hoạch điều phối tiếp theo.
+- Quyết định yêu cầu sửa đổi (`changes_requested`) không làm mất đi các giới hạn số lần sửa đổi và lặp lại.
+- Quyết định phê duyệt cho một tác vụ cụ thể không có giá trị cấp quyền tự động cho các hành động khác.
+
+---
+
+## 3. Lệnh phê duyệt của CLI Runtime cũ
+
+```bash
 bflow approve review --run run-123 --decision approved --by alice
-bflow approve review --run run-123 --decision changes_requested --by alice --reason "Bổ sung bằng chứng edge case"
+bflow approve review --run run-123 --decision changes_requested --by alice --reason "Bổ sung bằng chứng cho trường hợp biên"
 ```
 
-Phải dùng task/run/revision/generation có thật, đúng approval đang chờ. `--by`
-không phải đăng nhập/SSO. Command này ghi legacy task decision, không phải API
-approval dossier P19. Không dùng CLI legacy để bỏ host approval authentication.
+Lệnh này bắt buộc phải áp dụng cho đúng tác vụ, lượt chạy, phiên bản và thế hệ đang chờ phê duyệt thực tế. Cần lưu ý rằng tham số `--by` chỉ mang tính chất ghi nhận danh tính người thực hiện chứ không phải cơ chế đăng nhập một lần (SSO). Lệnh này ghi nhận quyết định tác vụ thuộc Runtime cũ, không phải là API phê duyệt hồ sơ dossier của P19.
 
-## Duyệt hook global của Codex
+---
 
-Operator duyệt hook bằng một luồng setup riêng, trước khi chạy role Codex:
+## 4. Phê duyệt hook toàn cục của Codex (Codex Global Hooks)
 
-```sh
+Người vận hành cần xem xét và phê duyệt hook toàn cục thông qua quy trình thiết lập riêng biệt trước khi khởi chạy các vai trò sử dụng Codex:
+
+```bash
 bflow setup --codex-hooks --plan
 bflow setup --codex-hooks --apply
 bflow setup --codex-hooks --check
 ```
 
-`--plan` chỉ đọc và hiển thị event, command, file phụ thuộc, SHA-256 và digest của
-toàn bộ snapshot. `--apply` hiển thị bản review rồi hỏi xác nhận trong terminal.
-Khi không có terminal tương tác, phải truyền cả `--yes` và digest vừa review:
+- Cờ `--plan` chỉ thực hiện đọc và hiển thị danh sách sự kiện, câu lệnh, tệp phụ thuộc, mã băm SHA-256 cùng mã tổng hợp (digest) của toàn bộ snapshot.
+- Cờ `--apply` hiển thị chi tiết nội dung cần rà soát và yêu cầu người dùng xác nhận trực tiếp trong terminal. Khi chạy trong môi trường không có terminal tương tác, bắt buộc phải truyền đồng thời cờ `--yes` và mã digest đã được rà soát:
+  ```bash
+  bflow setup --codex-hooks --apply --yes --hook-digest <snapshot-digest>
+  ```
 
-```sh
-bflow setup --codex-hooks --apply --yes --hook-digest <snapshot-digest>
-```
+Lệnh `setup --yes` thông thường sẽ không tự động duyệt hook. Chế độ hook không cài đặt thêm công cụ hay plugin, không can thiệp vào cấu hình toàn cục của provider và không thực thi hook trong quá trình rà soát. Cờ `--check` sẽ trả về mã thoát khác 0 nếu hook chưa được phê duyệt hoặc không được hỗ trợ.
 
-`setup --yes` thông thường không duyệt hook. Hook mode không cài tool/plugin,
-không sửa config global của provider và không chạy hook trong lúc review.
-`--check` trả exit code khác 0 nếu hook chưa được duyệt hoặc không hỗ trợ.
+Bản ghi phê duyệt được lưu trữ an toàn trong vùng trạng thái riêng của Bflow tại `${XDG_STATE_HOME:-$HOME/.local/state}/bflow/codex-hook-approvals.json` với quyền tệp `0600` và thư mục cha được bảo mật tuyệt đối. 
 
-Phê duyệt được lưu trong state riêng của Bflow tại
-`${XDG_STATE_HOME:-$HOME/.local/state}/bflow/codex-hook-approvals.json`, với file
-`0600` và thư mục cha private. Setup cô lập qua `BFLOW_HOME` dùng
-`$BFLOW_HOME/state/codex-hook-approvals.json` cùng Codex home cô lập. Record gắn
-với đúng Codex home và digest; repo config không chọn được trust store này.
+---
 
-`up`, probe và launch dùng cùng `HOME`/`CODEX_HOME` đã kiểm tra. Thay đổi command,
-hook, script, interpreter được pin hoặc đường dẫn Orca sẽ làm snapshot cũ không
-khớp. Bflow kiểm tra trước probe, trước khi trả launch profile và khi activation.
-Metadata native `hooks.state` không thay thế phê duyệt Bflow. Chỉ phần hook thực
-thi của TOML được đưa vào digest; credential và cấu hình MCP không được đưa vào.
+## 5. Ranh giới thực thi và hạn chế an toàn
 
-Dạng shell chưa hỗ trợ, nguồn file có quyền ghi theo nhóm/người khác, hoặc state
-không private tiếp tục bị chặn. Operator cần kiểm tra quyền của đúng file/thư mục
-được báo rồi chạy lại plan; Bflow không tự chmod Codex home. Orca chỉ được hỗ trợ
-với command wrapper và nội dung script đã nhận diện; bản Orca mới chưa nhận diện
-cần cập nhật bộ kiểm tra. Nếu `ORCA_AGENT_HOOK_ENDPOINT` chọn file shell động,
-luồng này vẫn chặn và không đọc nội dung token trong file đó.
-
-Phê duyệt cho phép chạy đúng hook đã review trong quyền hiện có của role; nó
-không cấp thêm quyền, không bỏ các gate SDLC và không chứng minh sandbox toàn
-process hay tính bất biến của mọi dependency gián tiếp. Hook approval không phải
-task/spec/delivery approval qua Conversation.
-
-Quyết định tương thích: theo yêu cầu project owner, đây là cấu hình setup/provider
-bổ sung. Giữ nguyên `@bflow/contracts`, event/checkpoint codec và permission modes;
-không có migration database. Cập nhật CLI, provider và Runtime cùng nhau, dừng host
-cũ trước khi đổi platform configuration. Bằng chứng hiện tại là source và local
-tests; chưa phải live Codex/Herdr hoặc full SDLC acceptance.
-
-Leaf packages không hứa hẹn sandbox hostile same-user. Read-only role flags,
-filesystem permissions, branch ownership và command policy cần host kiểm tra;
-prompt không cưỡng chế OS permission. Network filesystems, distributed leases,
-multi-host và power-loss guarantees vẫn chưa được chứng minh.
-
-Runtime không có tool tự deploy, push, merge protected branch, đổi secret hoặc
-access. Không suy ra các quyền đó từ approval task. Worktree cleanup cần writer
-đã dừng và scope sạch; `unknown_delivery`/accepted interrupt không chứng minh điều
-kiện này. Xem [Session Recovery](session-recovery.md).
+- **Thực thi phân quyền**: Các cờ vai trò chỉ đọc (`read-only`), quyền trên hệ thống tệp tin, quyền sở hữu nhánh Git và chính sách lệnh bắt buộc phải do host trực tiếp kiểm tra và thực thi; các câu lệnh trong prompt không thể thay thế cho cơ chế kiểm soát quyền của hệ điều hành.
+- **Hạ tầng phân tán**: Các cam kết vận hành trên hệ thống tệp tin mạng (NFS/SMB), phân bổ lease phân tán, môi trường đa máy chủ (multi-host) và đảm bảo an toàn dữ liệu khi mất nguồn đột ngột hiện chưa được kiểm chứng đầy đủ.
+- **Giới hạn quyền tự động**: Workflow Runtime không cung cấp công cụ tự động triển khai (deploy), tự động push hoặc tự động merge vào các nhánh được bảo vệ, cũng như không tự ý thay đổi thông tin bí mật. Không được suy diễn các quyền hạn này từ quyết định phê duyệt tác vụ thông thường. Xem thêm tại [Khôi phục phiên làm việc (Session Recovery)](session-recovery.md).

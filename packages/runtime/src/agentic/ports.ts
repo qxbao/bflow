@@ -100,6 +100,7 @@ export interface AgenticRuntimePorts {
   maxConcurrency?: number;
   /** The concrete host can route P16 alternative-evidence requests to its measurement tools. */
   automaticAlternativeEvidence?: boolean;
+  behavioralChecks?: (specification: Specification, strategy: TestStrategy, originalRevision?: string) => readonly QualityGateDefinition[];
   taskChecks: readonly QualityGateDefinition[];
   workflowChecks: readonly QualityGateDefinition[];
   clock?: () => Date;
@@ -112,6 +113,7 @@ export interface AgenticCompositionOptions {
   artifactStore: ArtifactStore; repositoryPath: string; gates: readonly QualityGate[];
   loadSpecification(specId: string): Promise<Specification>;
   authorizeApprover(decision: ApprovalDecision, humanRequired: boolean): boolean | Promise<boolean>;
+  dynamicGates?: () => readonly QualityGate[];
   clock?: () => Date;
 }
 /** Loads the actual reviewed P15–P18 packages; no alternate policy implementations. */
@@ -120,13 +122,32 @@ export async function loadAgenticPolicies(options: AgenticCompositionOptions): P
   const tdd = await import(new URL("../../../test-strategy/dist/index.js", import.meta.url).href);
   const verification = await import(new URL("../../../verification/dist/index.js", import.meta.url).href);
   const git = await import(new URL("../../../git-orchestrator/dist/index.js", import.meta.url).href);
+  const engines = new Map<string, VerificationPolicy>();
+  const activePlans = new Set<string>();
+  const engineFor = (plan: VerificationPlan): VerificationPolicy => {
+    let engine = engines.get(plan.planId);
+    if (!engine) {
+      const gates = [...options.gates, ...(options.dynamicGates?.() ?? [])];
+      engine = new verification.VerificationEngine({ artifactStore: options.artifactStore,
+        gates, loadSpecification: options.loadSpecification,
+        ...(options.clock ? { clock: () => options.clock!().toISOString() } : {}) }) as VerificationPolicy;
+      engines.set(plan.planId, engine);
+    }
+    return engine;
+  };
   return {
     specification: new spec.SpecificationEngine({ artifactStore: options.artifactStore,
       authorizeApprover: options.authorizeApprover, ...(options.clock ? { clock: options.clock } : {}) }),
     strategy: new tdd.TestStrategyResolver(),
-    verification: new verification.VerificationEngine({ artifactStore: options.artifactStore,
-      gates: options.gates, loadSpecification: options.loadSpecification,
-      ...(options.clock ? { clock: () => options.clock!().toISOString() } : {}) }),
+    verification: {
+      start: (plan, cycleId) => engineFor(plan).start(plan, cycleId),
+      verify: async (plan, cycle, change, input) => {
+        if (activePlans.has(plan.planId)) throw new Error("Verification plan already has an active independent execution");
+        activePlans.add(plan.planId);
+        try { return await engineFor(plan).verify(plan, cycle, change, input); }
+        finally { activePlans.delete(plan.planId); engines.delete(plan.planId); }
+      }
+    },
     git: await git.GitIntegrationEngine.open({ repositoryPath: options.repositoryPath, artifactStore: options.artifactStore }),
     classifyChange: spec.classifyChange, createVerificationPlan: verification.createVerificationPlan,
     recordEvidence: tdd.recordEvidence, assertReadyToImplement: tdd.assertReadyToImplement,

@@ -22,8 +22,8 @@ export class HostDevelopment {
     this.runners = runners instanceof TestRunnerSource ? runners : new TestRunnerSource(parseBehavioralCommands(runners));
   }
   /** The same resolver as Verification: owner commands and automatic profiles, bound to this task's identities and ownership. */
-  private commandsFor(task: { spec: { specification: Specification; strategy: TestStrategy } }, ownedPaths: string[]) {
-    return resolveTaskCommands({ owner: this.runners.owner, profiles: this.runners.profiles, strategy: task.spec.strategy,
+  private commandsFor(task: { spec: { specification: Specification; strategy: TestStrategy }; worktrees?: { baseCommitHash: string }[] }, ownedPaths: string[]) {
+    return resolveTaskCommands({ owner: this.runners.owner, profiles: this.runners.profilesForRevision(task.worktrees?.at(-1)?.baseCommitHash), strategy: task.spec.strategy,
       specification: task.spec.specification, ownedPaths });
   }
   private async git(cwd: string, args: string[]) {
@@ -67,7 +67,7 @@ export class HostDevelopment {
     await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async (task, definition) => {
       this.scope(path, strings(record(definition.metadata).ownedPaths), strings(record(definition.metadata).forbiddenPaths ?? []));
       const strategy = task.spec.strategy;
-      const tests = this.commandsFor(task, strings(record(definition.metadata).ownedPaths)).flatMap(command => command.testPaths);
+      const tests = this.commandsFor(task, strings(record(definition.metadata).ownedPaths)).flatMap(command => [...command.testPaths, ...Object.keys(command.definitionBlobs ?? {})]);
       const isTest = tests.some(test => test === path);
       const evidence = strategy.metadata?.tddEvidence;
       if (strategy.tddDecision.mode === "required" && Array.isArray(evidence) && evidence.length && isTest)
@@ -87,11 +87,12 @@ export class HostDevelopment {
     const context = await this.identity(binding, input);
     const selected = await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async (task, definition) => ({
       commands: this.commandsFor(task, strings(record(definition.metadata).ownedPaths)),
-      head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim()
+      head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
+      originalRevision: task.worktrees.at(-1)!.baseCommitHash
     }));
     if (!selected.commands.length) throw new Error("No automated checks for this task: configure an owner command or make the accepted criteria and test files resolvable");
     const measurements = [];
-    for (const command of selected.commands) measurements.push(await measureBehavior(command, context.cwd, selected.head));
+    for (const command of selected.commands) measurements.push(await measureBehavior(command.checkoutDependencyRoots === undefined ? command : { ...command, originalRevision: selected.originalRevision }, context.cwd, selected.head));
     return json({ independentAcceptanceEvidence: false, sourceRevision: selected.head, measurements });
   }
   async commit(binding: PaneBinding, input: unknown) {
@@ -111,7 +112,7 @@ export class HostDevelopment {
         const path = line.slice(3); this.scope(path, owned, forbidden); return path;
       });
       if (!paths.length) return json({ committed: false, head: expected });
-      const tests = this.commandsFor(task, owned).flatMap(command => command.testPaths);
+      const tests = this.commandsFor(task, owned).flatMap(command => [...command.testPaths, ...Object.keys(command.definitionBlobs ?? {})]);
       if (task.spec.strategy.tddDecision.mode === "required") {
         const evidence = task.spec.strategy.metadata?.tddEvidence;
         if (Array.isArray(evidence) && evidence.length && paths.some(path => tests.includes(path)))

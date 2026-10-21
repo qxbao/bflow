@@ -3,9 +3,11 @@ import {
   readFile as nodeReadFile,
   readdir as nodeReaddir,
   realpath as nodeRealpath,
+  rm as nodeRm,
   stat as nodeStat
 } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
+import type { RunnerAdapter } from "./runner-adapter.js";
 import type { RunnerDetection, RunnerProfile } from "./behavioral-runner.js";
 
 /** Narrow filesystem port so detection can run against fixtures or fakes. Only read operations are used. */
@@ -47,8 +49,7 @@ const SHELL_UNSAFE = /[;&|$`<>(){}*?!~'"\\\r\n\t\0]/;
 const SAFE_RELATIVE_PATH = /^[A-Za-z0-9_][A-Za-z0-9._-]*(\/[A-Za-z0-9_][A-Za-z0-9._-]*)*$/;
 
 const REMEDIATION = [
-  "Coordinator thêm một task thiết lập vitest (devDependency + cấu hình) trước task chính",
-  "Hoặc chủ dự án khai báo .bflow/verification.json (tuỳ chọn, ghi đè)"
+  "Coordinator thêm task thiết lập runner phù hợp hệ sinh thái và gửi qua review trước task chính"
 ];
 
 function unsupported(reason: string, remediation: string[] = REMEDIATION): RunnerDetection {
@@ -198,8 +199,8 @@ async function detect(repositoryRoot: string, nodeExecutable: string, fs: Detect
       vitestProblem = "vitest được khai báo nhưng chưa cài đặt (not installed); cần cài dependencies trước";
     } else {
       const version = typeof installedManifest?.version === "string" ? installedManifest.version : "";
-      if (majorVersion(version) !== 2) {
-        return unsupported(`vitest ${version || "không xác định (unknown version)"} chưa được hỗ trợ; chỉ hỗ trợ vitest 2.x / vitest ${version || "unknown"} is unsupported; only vitest 2.x is supported`);
+      if (![1, 2, 3].includes(majorVersion(version) ?? 0)) {
+        return unsupported(`vitest ${version || "không xác định (unknown version)"} chưa được hỗ trợ; chỉ hỗ trợ vitest 1.x/2.x/3.x / vitest ${version || "unknown"} is unsupported; only vitest 1.x/2.x/3.x are supported`);
       }
       const entry = "node_modules/vitest/vitest.mjs";
       const entryStat = await statOrUndefined(fs, join(root, entry), true);
@@ -267,17 +268,38 @@ async function detect(repositoryRoot: string, nodeExecutable: string, fs: Detect
   return { status: "detected", profiles, notes };
 }
 
+const warmedDependencySources = new Set<string>();
+/** Host teardown removes only temporary caches created by this Runtime process. */
+export async function disposeDetectedDependencies(): Promise<void> {
+  for (const root of warmedDependencySources) { await nodeRm(root, { recursive: true, force: true }); warmedDependencySources.delete(root); }
+}
+
 /**
  * Trusted, deterministic detection of a repository test runner. Runs no processes and no shell,
  * never invokes package scripts, and fails closed with `unsupported` whenever a rule is not met.
  */
 export async function detectTestRunners(
   repositoryRoot: string,
-  options: { nodeExecutable?: string; fs?: DetectionFs } = {}
+  options: { nodeExecutable?: string; fs?: DetectionFs; adapters?: readonly RunnerAdapter[] } = {}
 ): Promise<RunnerDetection> {
   const fs = options.fs ?? defaultFs;
   try {
-    return await detect(repositoryRoot, options.nodeExecutable ?? process.execPath, fs);
+    let javascriptDependencySource: string | undefined;
+    let javascript = await detect(repositoryRoot, options.nodeExecutable ?? process.execPath, fs);
+    if (!options.fs && javascript.status === "unsupported") {
+      // Only a Runtime-owned, lock-verified public npm cache can be created automatically. Other ecosystems remain offline.
+      const { warmNpmDependencies } = await import("./dependency-warming.js");
+      const warmed = await warmNpmDependencies(repositoryRoot);
+      if (warmed.status === "ready") {
+        warmedDependencySources.add(warmed.dependencySource);
+        javascriptDependencySource = warmed.dependencySource;
+        javascript = await detect(warmed.dependencySource, options.nodeExecutable ?? process.execPath, fs);
+        if (javascript.status === "detected") javascript.notes.push("Dependencies warmed in a separate no-script network sandbox; measurement remains offline");
+      }
+    }
+    if (options.fs) return javascript;
+    const { detectRunnerCatalog } = await import("./runner-catalog.js");
+    return await detectRunnerCatalog(repositoryRoot, javascript, options.adapters, javascriptDependencySource);
   } catch (error) {
     return unsupported(`Phát hiện runner thất bại / Test runner detection failed: ${errorMessage(error)}`);
   }

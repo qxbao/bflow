@@ -212,26 +212,31 @@ Next: <specific actionable next step>
 
 ## Kết hợp host mặc định và topology vật lý
 
-P13 được kết hợp tự động qua `PaneManagerLifecycleAdapter`. Nó điều hợp
-`initializeTopology` / `reconcileTopology` cho lifecycle `up`,
-`focusConversationPane` cho `attach`, và `inspectTopologyHealth` theo sau là
-các lần đọc manifest đã xác thực schema cho `getManifest` / `doctorSession`.
-Trước khi P13 khởi động các role, tích hợp mặc định chuẩn bị persistent Runtime
-host và lấy các role prompt tin cậy, cấu hình MCP và các provider lifecycle
-hook. Readiness không gắn với tên provider: provider preflight của host
-báo `ready`, `blocked` hoặc `unsupported` cho từng role cùng lý do của adapter, và
-`up` trả về báo cáo đó trước khi bất kỳ pane nào được tạo khi một role bắt buộc chưa
-ready. Các role được chuẩn bị với v3 launch profile khởi động với launch
-argument của provider; các host không có profile sẽ quay về cách inject prompt Claude/Codex cũ.
-`bflow up` gửi các platform option theo phạm vi machine (machine, repository, role
-provider, permission mode, skill pin, builtin skill store và bộ định vị Gateway
-khi có) tới host, và không bao giờ đọc hay in giá trị môi trường launch. Host
-tồn tại sau khi process CLI thoát và sở hữu việc lập lịch, ingress message đã xác thực, truy vấn
-run và shutdown checkpoint. `doctor` và `status` môi trường kiểm tra
-topology mà không khởi động daemon. `up` kiểm tra `codex login status` hoặc
-`auth status` có cấu trúc của Claude; nó không in chẩn đoán tài khoản provider hay suy ra
-xác thực từ một pane đang idle. Các prompt tin cậy lần đầu của provider vẫn có thể chặn
-khởi động và yêu cầu hành động của operator trong session có tên đó.
+P13 is composed automatically through `PaneManagerLifecycleAdapter`. It adapts
+`initializeTopology` / `reconcileTopology` to lifecycle `up`,
+`focusConversationPane` to `attach`, and `inspectTopologyHealth` followed by
+schema-validated manifest reads to `getManifest` / `doctorSession`.
+Before P13 starts roles, the default integration prepares the persistent Runtime
+host and obtains trusted role prompts, MCP configuration and provider lifecycle
+hooks. Readiness is not keyed to a provider name: the host's provider preflight
+reports `ready`, `blocked` or `unsupported` per role with the adapter's reason, and
+`up` returns that report before any pane is created when a required role is not
+ready. Roles prepared with a v3 launch profile start with their provider's launch
+arguments; hosts without one fall back to the legacy Claude/Codex prompt injection.
+`bflow up` sends the machine-scoped platform options (machine, repository, role
+providers, permission modes, skill pins, the builtin skill store and the Gateway
+locator when present) to the host, and it never reads or prints launch environment
+values. The host
+survives CLI process exit and owns scheduling, authenticated message ingress, run
+queries and shutdown checkpoints. `doctor` and environment `status` inspect
+topology without starting a daemon. `up` and `doctor` check `codex login status`,
+Claude's structured `auth status`, or Agy's read-only `models` command. Agy has no
+`auth status` or `auth login` subcommand; complete its login flow by running `agy`
+interactively. A successful Agy check requires a returned model list, while network,
+policy and authentication failures remain distinct. The host still verifies actual
+execution readiness before launching roles; model access alone is not readiness.
+The CLI does not print provider account diagnostics or infer authentication from an idle pane. First-use provider trust prompts can still block
+startup and require operator action in that named session.
 
 P13 nhận một argv runner chọn tường minh session có tên của repository này. Không có
 môi trường process toàn cục nào bị thay đổi. Tên CLI của role phải là các loại Herdr
@@ -339,14 +344,15 @@ Các đường dẫn XDG/profile dài có thể vượt giới hạn đường d
 lỗi của Herdr; operator có thể chọn `XDG_CONFIG_HOME` ngắn hơn một cách nhất quán
 cho môi trường của mình. Bflow không đoán hay chuyển hướng đường dẫn socket.
 
-Không cần cấu hình verification. Agentic `up` phát hiện test runner của repository
-(vitest 2.x hoặc `node --test`, kèm bước build `tsc` tùy chọn) và dùng nó cho các tiêu chí
-`unit_test` và `integration_test`. Nếu không phát hiện được, Conversation hiển thị một
-thông báo và Coordinator có thể thêm một setup task; không cần restart host khi runner
-đã được cài. Owner vẫn có thể thêm `.bflow/verification.json` như một ghi đè nâng cao tùy chọn
-cho các lệnh Node TAP hoặc Vitest; host pin thẩm quyền đó, và Coordinator
-không thể chọn lệnh shell tùy ý. Các phép đo yêu cầu Linux Bubblewrap. Xem
-[verification runners](../../docs/verification-runners.md).
+Runtime tự phát hiện các adapter JS/TS, Python, Go, Rust, JVM, .NET, Ruby, PHP và CTest
+cho tiêu chí `unit_test`, `integration_test` và `e2e_test`, với label và quy tắc tên test
+trong `planning_reference`. Thiếu runner/reporter của hệ sinh thái đã nhận diện được trả
+về Coordinator để tạo setup task có review; phát hiện được làm mới khi revision thay đổi.
+Owner vẫn có thể dùng `.bflow/verification.json` làm ghi đè Node TAP/Vitest tùy chọn.
+Executable và argv do Runtime quyết định, kết quả từng test có cấu trúc là bắt buộc.
+Phép đo yêu cầu sandbox: Linux Bubblewrap hoặc macOS Seatbelt cho các runner JS/owner
+được hỗ trợ. Mount/cache/report của adapter native và làm ấm dependency còn giới hạn Linux.
+Không có fallback chạy ngoài sandbox. Xem [ma trận và giới hạn verification](../../docs/verification-runners.md).
 
 Chat/Coordinator nạp đầy đủ các prompt gốc đã cài trước lượt đầu tiên.
 Claude dùng một prompt file cục bộ theo launch; các file launch của Codex dùng

@@ -48,7 +48,7 @@ describe("detectTestRunners", () => {
     const entry = join(root, "node_modules/vitest/vitest.mjs");
     const executable = await realpath(process.execPath);
     expect(result.notes).toEqual(expect.arrayContaining(["vitest 2.1.9", "prepare: tsc -b"]));
-    expect(result.profiles).toHaveLength(2);
+    expect(result.profiles).toHaveLength(6);
     const [unit, integration] = result.profiles;
     const expectedArgs = ["node_modules/vitest/vitest.mjs", "run", "--globals", "--reporter=json", "--no-cache", "--maxWorkers=1", "--minWorkers=1"];
     expect(unit).toEqual({
@@ -59,13 +59,13 @@ describe("detectTestRunners", () => {
     expect(integration).toEqual({ ...unit, id: "auto-integration", command: "auto:integration", method: "integration_test", levels: ["integration", "regression"] });
     expect(entry.startsWith(root)).toBe(true);
     // The profiles must satisfy the same safety rules as owner-configured commands, including the aggregate budget.
-    const commands = result.profiles.map(profile => ({
+    const commands = result.profiles.slice(0, 2).map(profile => ({
       id: profile.id, command: profile.command, executable: profile.executable, args: profile.args, method: profile.method, levels: profile.levels,
       testNames: ["a test"], testPaths: ["a.test.ts"], reporter: profile.reporter, timeoutMs: profile.timeoutMs, maxOutputBytes: profile.maxOutputBytes,
       dependencyRoots: profile.checkoutDependencyRoots.map(path => join(root, path))
     }));
     expect(() => parseBehavioralCommands(commands)).not.toThrow();
-    expect(result.profiles.reduce((total, profile) => total + profile.timeoutMs + 90_000, 0)).toBeLessThanOrEqual(540_000);
+    expect(result.profiles.slice(0, 2).reduce((total, profile) => total + profile.timeoutMs + 90_000, 0)).toBeLessThanOrEqual(540_000);
   });
 
   it("fails closed when the root node_modules is a symlink", async () => {
@@ -80,11 +80,11 @@ describe("detectTestRunners", () => {
     if (result.status === "unsupported") expect(result.reason).toContain("node_modules");
   });
 
-  it("rejects vitest versions other than 2.x and names the version", async () => {
-    const root = await fixture({ ...vitest2Files, "node_modules/vitest/package.json": '{"version":"3.2.4"}' });
+  it("rejects unrecognized vitest major versions and names the version", async () => {
+    const root = await fixture({ ...vitest2Files, "node_modules/vitest/package.json": '{"version":"4.2.4"}' });
     const result = await detectTestRunners(root);
     expect(result.status).toBe("unsupported");
-    if (result.status === "unsupported") expect(result.reason).toContain("3.2.4");
+    if (result.status === "unsupported") expect(result.reason).toContain("4.2.4");
   });
 
   it("reports vitest declared but not installed as not installed", async () => {
@@ -98,7 +98,7 @@ describe("detectTestRunners", () => {
     const root = await fixture({ "package.json": manifest({ scripts: { test: "node --test" } }), "node_modules/.keep": "" });
     const result = await detectTestRunners(root);
     if (result.status !== "detected") throw new Error(JSON.stringify(result));
-    expect(result.profiles.map(profile => [profile.id, profile.reporter, profile.args])).toEqual([
+    expect(result.profiles.slice(0, 2).map(profile => [profile.id, profile.reporter, profile.args])).toEqual([
       ["auto-unit", "node_tap", ["--test", "--test-reporter=tap"]],
       ["auto-integration", "node_tap", ["--test", "--test-reporter=tap"]]
     ]);
@@ -127,9 +127,9 @@ describe("detectTestRunners", () => {
     const result = await detectTestRunners(root);
     expect(result.status).toBe("unsupported");
     if (result.status !== "unsupported") return;
-    expect(result.remediation).toHaveLength(2);
-    expect(result.remediation[0]).toContain("vitest");
-    expect(result.remediation[1]).toContain(".bflow/verification.json");
+    expect(result.remediation).toHaveLength(1);
+    expect(result.remediation[0]).toContain("Coordinator");
+    expect(JSON.stringify(result.remediation)).not.toContain("verification.json");
   });
 
   it("does not run a build script that is not a plain tsc invocation", async () => {

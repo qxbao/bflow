@@ -105,43 +105,43 @@ về việc giao nhận, không bao giờ là task thành công, và lần nhắ
 
 ### Hiển thị notice của Conversation, notice từ chối và hang watchdog
 
-- **Notice quyết định có cấu trúc.** Một notice quyết định của người dùng lưu các trường có giới hạn (approval id, role,
-  câu hỏi tối đa 2000 ký tự, tối đa 10 option mỗi option 500 ký tự, deadline) bên cạnh
-  summary 4096 ký tự, để một câu hỏi dài vẫn có thể trả lời được. Các receipt được ghi trước khi có trường này
-  vẫn hiển thị từ summary của chúng, hoặc suy giảm thành một cập nhật chung nói rằng nó đã bị cắt ngắn.
-- **Xác nhận hiển thị.** Một quyết định hoặc block của người dùng đã được hiển thị chỉ được tính là đã hiển thị khi
-  lượt Conversation cuối cùng nêu tên nó (approval id của nó). Các notice chưa hiển thị bị block lại khi Stop tối đa
-  hai lần và được hiển thị lại với reminder backoff. Văn bản assistant cuối được đọc ngược về
-  prompt người dùng thật gần nhất, bỏ qua các mục tool-result.
-- **Đề xuất workflow bị từ chối.** Các kiểm tra trước của `propose_workflow` (project policy, rồi hỗ trợ
-  verification) trả về lỗi có cấu trúc `{ code, reason, methods?, criteria?, options }` cho
-  Coordinator. Cùng lý do đó đến Conversation dưới dạng notice `workflow_rejected`, ngoài mọi
-  journal transaction. Các code hướng tới người dùng: `no_test_runner_detected` (phát hiện tự động không tìm thấy
-  runner được hỗ trợ; option: Coordinator thêm một setup task, hoặc run bị hủy), cùng với
-  `unsupported_verification` và `policy_violation`; `missing_behavioral_runner` chỉ còn cho các runner
-  do owner cấu hình. Các code Coordinator có thể tự sửa được trả về Coordinator dưới dạng lỗi tool
-  và không bao giờ gửi tới Conversation: `missing_test_paths` (không có file test trong `affectedPaths`),
-  `missing_test_mapping` (một criterion không có tên test được ánh xạ), `unknown_test_command` (một target
-  command không phải là label được phát hiện, hoặc label thiếu trong `infrastructure.commands`) và
-  `unsupported_method` (không có runner cho method của criterion). Các option chỉ mang tính thông tin; không có gì
-  được áp dụng tự động, và specification cùng các criterion của nó không bao giờ bị Runtime thay đổi.
-  Phát hiện tự động được thử lại ở mỗi đề xuất khi còn chưa được hỗ trợ, nên không cần khởi động lại host.
-  Một runner do owner cấu hình (`.bflow/verification.json`, ghi đè tùy chọn) được pin khi host được
-  tạo (`docs/verification-runners.md`), nên thay đổi file đó về sau đòi hỏi quiesce host.
-- **Hang watchdog** (`src/agentic/run-watchdog.ts`, `evaluateWatchdog` thuần túy; host timer mỗi 15 s).
-  Nó (a) tạo lại receipt notice của một quyết định người dùng đang chờ từ request đang chờ khi chưa có,
-  sau 60 giây, rồi đăng ký lại với Conversation; (b) hiển thị lại một quyết định người dùng vẫn
-  chưa hiển thị trong 60 giây, tối đa ba lần, sau đó mỗi approval phát ra một notice `workflow_blocked`;
-  (c) báo cáo một run đang sống là `run_stalled` một lần mỗi episode, khi nó không có quyết định đang chờ,
-  human gate hay handoff chưa terminal, mọi role pane đều là `idle`, `done` hoặc `unknown`, và
-  không có hoạt động nào ngoài Conversation trong 180 giây. Herdr `done` hoặc `idle` chỉ có nghĩa
-  "không làm việc", không bao giờ là thành công. Hoạt động là `occurred_at` của các thông điệp không phải Conversation của run,
-  lùi về thời điểm delegation. Giới hạn: một pane không đọc được bị coi là đang làm việc, và một design
-  approval chưa bao giờ đến Conversation không được watchdog reconcile. Việc hiển thị lại tính cả
-  các notice chưa hiển thị, nên một pane Conversation bận có thể chạm tới notice blocked.
-- **Chưa xác minh live.** Host timer, các thông báo Herdr và xác nhận hiển thị Stop-hook
-  phụ thuộc vào session Herdr và Claude Code live. Các test bao phủ logic thuần túy, các receipt epoch, các báo cáo Runtime
-  và wiring Gateway với fake transport; bản thân host closure chỉ được type-check.
+- **Structured decision notices.** A user decision notice stores bounded fields (approval id, role,
+  question up to 2000 characters, at most 10 options of 500 characters, deadline) beside the
+  4096-character summary, so a long question stays answerable. Receipts written before this field
+  still render from their summary, or degrade to a generic update that says it was cut short.
+- **Display acknowledgement.** A surfaced user decision or block counts as displayed only when the
+  final Conversation turn names it (its approval id). Undisplayed notices are re-blocked on Stop at
+  most twice and re-shown with reminder backoff. Last assistant text is read back to the last
+  genuine user prompt, skipping tool-result entries.
+- **Rejected workflow proposals.** `propose_workflow` pre-checks (project policy, then verification
+  support) return a structured error `{ code, reason, methods?, criteria?, options }` to the
+  Coordinator. The same reason reaches Conversation as a `workflow_rejected` notice, outside any
+  journal transaction. User-facing codes: `no_test_runner_detected` (unknown ecosystem found no
+  supported runner; options: the Coordinator adds a setup task, or the run is cancelled), plus
+  `unsupported_verification` and `policy_violation`; `missing_behavioral_runner` remains only for
+  owner-configured runners. Coordinator-fixable codes are returned to the Coordinator as the tool error
+  and are never sent to Conversation: `runner_setup_required` (a recognized ecosystem needs a reviewed runner/reporter setup task), `missing_test_paths` (no test file in `affectedPaths`),
+  `missing_test_mapping` (a criterion has no mapped test names), `unknown_test_command` (a target
+  command is not a detected label, or the label is missing from `infrastructure.commands`) and
+  `unsupported_method` (no runner for the criterion's method). The options are informational; nothing
+  is applied automatically, and the specification and its criteria are never changed by Runtime.
+  Automatic detection is retried on each proposal while unsupported and refreshed after repository HEAD changes. Dynamic checks/gates use the same VerificationEngine when each plan is frozen, so no host restart is needed.
+  An owner-configured runner (`.bflow/verification.json`, optional override) is pinned when the host is
+  created (`docs/verification-runners.md`), so changing that file later requires quiescing the host.
+- **Hang watchdog** (`src/agentic/run-watchdog.ts`, pure `evaluateWatchdog`; host timer every 15 s).
+  It (a) recreates a pending user decision's notice receipt from the pending request when none exists,
+  after 60 seconds, then re-registers with Conversation; (b) resurfaces a user decision that stays
+  undisplayed for 60 seconds, at most three times, after which one `workflow_blocked` notice is emitted
+  per approval; (c) reports a live run as `run_stalled` once per episode, when it has no pending
+  decision, human gate or non-terminal handoff, every role pane is `idle`, `done` or `unknown`, and
+  there has been no non-Conversation activity for 180 seconds. A Herdr `done` or `idle` means only
+  "not working", never success. Activity is the `occurred_at` of non-Conversation messages for the run,
+  falling back to the delegation time. Limits: an unreadable pane is treated as working, and a design
+  approval that never reached Conversation is not reconciled by the watchdog. Resurfacing counts
+  unsurfaced notices as well, so a busy Conversation pane can reach the blocked notice.
+- **Not live-verified.** The host timer, the Herdr notifications and the Stop-hook display acknowledgement
+  depend on a live Herdr and Claude Code session. Tests cover the pure logic, the receipt epochs, the Runtime
+  reports and the Gateway wiring with a fake transport; the host closure itself is only type-checked.
 
 ## Policy và vòng đời
 
@@ -453,6 +453,14 @@ custom native host process (không phải AI model), và chỉ dừng session te
 
 ## Khôi phục session, quản lý context, observability và resilience
 
+### Activity log của task
+
+Runtime ghi một JSONL activity log tại `task-activity.jsonl` trong private Runtime state đã được resolve (thường là `.bflow/state/agentic/task-activity.jsonl`; khi workspace cần state riêng tư bên ngoài repo, dùng vị trí private được pin thay thế). Retention mặc định giữ tối đa 1000 entries và 512 KiB. Log giữ các milestone đã quan sát như admission, thay đổi trạng thái, assignment, verification, approval và kết quả agent đã xác thực. Đây là bản ghi chẩn đoán có giới hạn; nó không lưu prompt, argv, tool input/output hay private model reasoning. Terminal output và nhãn transport vẫn là dữ liệu không tin cậy; Herdr `done` không chứng minh task thành công.
+
+Trong một host đã activate, pane `task-log` hiển thị các dòng mới nhất trong tab Logs. Các role có thể gọi `read_task_log`; Conversation và Coordinator đọc theo session/run, còn specialist phải lọc theo run/task được giao. `log_task_step` ghi một dòng tiến độ ngắn gắn với assignment hiện tại. Các dòng tự báo cáo và log không phải approval, receipt hay verification evidence. Nội dung đã được redaction, chuẩn hóa một dòng, giới hạn kích thước/dung lượng; lỗi ghi log không làm thay đổi kết quả nghiệp vụ.
+
+Viewer đọc đủ snapshot trong giới hạn lưu trữ, giữ các lần xuất hiện lặp và không phát lại lịch sử khi file được thay thế nguyên tử. Bản ghi mới có ID riêng; khóa lọc theo run/task gốc được giữ riêng với chuỗi hiển thị đã rút gọn hoặc redaction. Khi Herdr khởi động lại và dùng lại pane ID cho terminal khác, Runtime bỏ binding cũ và tạo pane log mới, giữ nguyên terminal thay thế. Việc đóng pane yêu cầu process-info khớp đúng pane và chỉ có tiến trình viewer dự kiến ở foreground.
+
 `@bflow/runtime` cũng export các dịch vụ độ tin cậy cục bộ tùy chọn cho các repository thật:
 
 - **Session Recovery (`SessionRecoveryService`)**: Phân biệt `graceful_shutdown`, `crash` và `transient_disconnect` qua `bflow down` / `bflow up`; flush và khử trùng lặp state của `AgenticJournal` và SQLite `RunStore`; khôi phục các run chưa hoàn tất từ aggregate checkpoint cộng event tail; reconcile SQLite với các pane/role Herdr để phát hiện các sai lệch `agent_lost`, `agent_replaced` và `orphan_agent`; thu hồi lease cũ; kiểm tra Git worktree/commit mà không dùng lệnh hủy hoại; cấm gửi lại prompt mù quáng khi lần thực thi trước không chắc chắn (`unknown_delivery` hoặc worktree bị sửa); và không bao giờ đánh dấu task succeeded khi không có `AgentResult` có tương quan, đã xác minh và các gate đạt.
@@ -494,10 +502,30 @@ pnpm exec vitest run packages/runtime/test/scenarios/09-session-recovery-reliabi
 
 ## Verification của host đã cấu hình và xác thực bền vững
 
-Claude host mặc định nay hỗ trợ các lệnh Node TAP và Vitest 2.1 do owner cấu hình,
-các phase conditional-TDD độc lập, các file Red test đóng băng, các Developer commit bị ràng buộc
-và các lần sửa phase có giới hạn. Các lệnh behavioral chạy trong các namespace Linux Bubblewrap
-bắt buộc với dependency chỉ đọc tường minh; không có fallback không sandbox. Xem [cấu hình runner](../../docs/verification-runners.md).
+The default host discovers Runtime-private adapters for JS/TS (Vitest 1/2/3,
+Jest, Mocha, Node TAP), Python/pytest, Go, Rust, Maven/Gradle, .NET, Ruby
+(RSpec/Minitest), PHPUnit and configured CTest. Unit/integration/E2E labels expose
+exact naming rules through planning_reference; nested JS and multiple language projects can coexist. Criterion names are partitioned per selected runner and retained by the independent gates.
+Owner-configured Node TAP/Vitest commands remain an optional override.
+
+Executable/argv, offline settings, mounts and parsers come from Runtime. Manifest,
+script, runner configuration, imported Gradle/MSBuild definitions and helper blobs are pinned to the committed original
+revision; selected test files freeze after independent Red. Structured leaf results,
+assertion/error discrimination and independent Quality Gates remain mandatory.
+
+Linux Bubblewrap is discovered on PATH and actually probed. `up` exposes structured
+sandbox unavailability; measurement never falls back to host execution. External
+toolchains/caches mount narrowly and read-only, without whole homes or credentials.
+Only public integrity-pinned npm lock v2/v3 warming is implemented, in a separate
+no-script network sandbox with capability-probed slirp4netns egress, disabled host loopback/DNS proxy and an owned writable cache; measurement
+then remains offline. Other ecosystems require installed dependencies/caches.
+
+See [runner architecture, matrix and threat model](../../docs/verification-runners.md)
+for exact formats, platform limits and agent setup routing. Evidence on the implementation
+host is source plus local parser/fixture tests: the real Bubblewrap namespace probe is
+blocked (`RTM_NEWADDR: Operation not permitted`), so successful sandbox measurements
+and live Herdr/provider behavior are **not verified**. Native Windows/container
+backends, macOS polyglot adapter mounts, Elixir/Swift/Dart adapters and universal safe dependency warming remain open.
 
 Các receipt fsync riêng tư bảo tồn nguồn gốc human-hook, các quan sát review độc lập,
 xác thực gate/evidence và native send intent/acknowledgement.
@@ -600,6 +628,19 @@ từng launch và pane.
 
 Giới hạn: kế thừa environment của hook, mở rộng header `${VAR}` của Claude và `bearer_token_env_var` của Codex
 chỉ được xác minh bằng các hook spawn cục bộ và config đã render, không phải provider hay Herdr live.
+
+Legacy JS and owner commands also have a deny-default macOS Seatbelt backend (see the runner architecture document). Native polyglot adapter mounts/reports and dependency warming remain Linux-only; macOS was not measured on this integration host.
+
+The polyglot measurement fixtures require both an installed toolchain and the pinned
+fixture dependencies in its selected offline cache. Tests inventory Maven/Gradle/NuGet
+prerequisites before measurement and explicitly skip unavailable environments; once a
+measurement starts, missing transitive dependencies and all infrastructure errors fail.
+Installed SDKs alone do not prove measurement readiness. Linux test dependencies are
+staged without pnpm workspace links; production dependency escape checks remain enabled.
+PHPUnit uses an ini-free PHP invocation with explicit public extensions, and Rust pins
+its canonical C linker without importing host alternatives configuration. Dependency
+warming avoids devpts so its network namespace stays owned by the user namespace entered
+by slirp; the helper must return exactly its documented readiness byte before npm starts.
 
 ## Workflow liveness và capability recovery
 

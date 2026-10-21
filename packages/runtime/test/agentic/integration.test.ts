@@ -1,6 +1,7 @@
-import { mkdtemp, mkdir, writeFile, rm, realpath } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { copyIsolatedNodeDependencies } from "../helpers/isolated-node-dependencies.js";
+import { join, relative } from "node:path";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID, generateKeyPairSync } from "node:crypto";
@@ -14,10 +15,11 @@ import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 import { createSignedBindingReceipt } from "../../src/agentic/receipt-host.js";
 import { CoordinatorTools } from "../../src/agentic/tools.js";
 import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
-import { loadAgenticPolicies, type PanePolicy } from "../../src/agentic/ports.js";
+import { loadAgenticPolicies, type AgenticRuntimePorts, type PanePolicy } from "../../src/agentic/ports.js";
 import { createAgenticConversationHost } from "../../src/agentic/conversation.js";
 import { HostDevelopment } from "../../src/agentic/host-development.js";
 import { DEFAULT_HOST_CHECKS, HostBehavioralFailure, HostVerification } from "../../src/agentic/host-verification.js";
+import { probeBehavioralSandbox } from "../../src/agentic/sandbox-readiness.js";
 import { parseBehavioralCommands, type BehavioralCommand, type RunnerProfile } from "../../src/agentic/behavioral-runner.js";
 import { TestRunnerSource } from "../../src/agentic/task-commands.js";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
@@ -52,7 +54,7 @@ class Panes implements PanePolicy {
   async releaseDeveloper() { return { ok: true as const, value: undefined }; }
 }
 
-async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean; humanApproval?: boolean; behavioral?: BehavioralCommand; runners?: TestRunnerSource } = {}) {
+async function fixture(options: { dynamicGate?: boolean; parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean; humanApproval?: boolean; behavioral?: BehavioralCommand; runners?: TestRunnerSource } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-p19-")));
   const repository = join(root, "repo"); await mkdir(repository); git(repository, "init", "-b", "main");
   git(repository, "config", "user.name", "Test"); git(repository, "config", "user.email", "test@example.test");
@@ -115,12 +117,15 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
     } }))
   ] : options.remoteReview ? gates.map(gate => gate.id === "review" ? { id: gate.id,
     evaluate: (...args: Parameters<QualityGate["evaluate"]>) => runtime.herdrQualityGate(gate.id).evaluate(...args) } : gate) : gates;
-  const policies = await loadAgenticPolicies({ repositoryPath: repository, artifactStore: artifacts, gates: actualGates,
+  let dynamicReady = false;
+  const policies = await loadAgenticPolicies({ repositoryPath: repository, artifactStore: artifacts,
+    gates: options.dynamicGate ? actualGates.filter(gate => gate.id !== "regression") : actualGates,
+    ...(options.dynamicGate ? { dynamicGates: () => dynamicReady ? actualGates.filter(gate => gate.id === "regression") : [] } : {}),
     loadSpecification: id => runtime.loadSpecification(id), authorizeApprover: decision => ["coordinator", "human-1"].includes(decision.decidedBy) });
   // Conversation-bound messages are delivered through the trusted inbox, never through transport or the input box.
   const conversationInbox: RoleMessage[] = [];
   let conversationReentry: ((message: RoleMessage) => Promise<unknown>) | undefined;
-  const ports = { engine, runStore: store, artifactStore: artifacts, registry, transport, panes, policies,
+  const ports: AgenticRuntimePorts = { engine, runStore: store, artifactStore: artifacts, registry, transport, panes, policies,
     deliverToConversation: async (message: RoleMessage) => { conversationInbox.push(message); await conversationReentry?.(message); },
     roleCapabilities: { developer: ["implementation"], coordinator: ["coordination", "repository.read"], conversation: ["conversation"], specifier: ["specification", "repository.read"], architect: ["architecture", "repository.read"], planner: ["planning", "repository.read"], reviewer: ["review", "repository.read"], qa: ["verification", "repository.read", ...(options.behavioral ? ["testing"] : [])], tester: ["testing", "repository.read"] },
     taskChecks: checks, workflowChecks: checks,
@@ -210,7 +215,7 @@ async function fixture(options: { parallel?: boolean; tdd?: boolean; complex?: b
     }
     await runtime.receiveHerdr(envelope("approval.decision", approved));
   }
-  return { root, repository, get runtime() { return runtime; }, ports, privateKey, publicKey, runtimeOptions, panes, transport, conversationInbox,
+  return { enableDynamicGate: () => { dynamicReady = true; }, root, repository, get runtime() { return runtime; }, ports, privateKey, publicKey, runtimeOptions, panes, transport, conversationInbox,
     reenterOnConversationDelivery(action: (message: RoleMessage) => Promise<unknown>) { conversationReentry = action; }, spec, def, envelope, inspect, dossier, evidence, submit, approve, verification, receipts,
     calls, localReview: (context: QualityGateContext) => gates.find(gate => gate.id === "review")!.evaluate(context), setFailReview: (value: boolean) => { failReview = value; },
     setReviewerExecutor: (value: string) => { reviewerExecutorId = value; },
@@ -223,16 +228,21 @@ const phaseTestName = "ac-1: The requested outcome is independently verifiable";
 async function automaticRunners(): Promise<TestRunnerSource> {
   const profile: RunnerProfile = { id: "auto-integration", command: "auto:integration", executable: process.execPath,
     args: ["--test", "--test-reporter=tap"], method: "integration_test", levels: ["integration", "regression"], reporter: "node_tap",
-    timeoutMs: 10_000, checkoutDependencyRoots: [], dependencySource: process.cwd(), source: "detected" };
+    timeoutMs: 10_000, checkoutDependencyRoots: [], dependencySource: process.cwd(), definitionBlobs: {}, source: "detected" };
   const runners = new TestRunnerSource([], process.cwd(), async () => ({ status: "detected", profiles: [profile], notes: [] }));
   await runners.refresh();
   return runners;
 }
 async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json", maxIterations = 3, automatic = false) {
   const testPath = "test/double.test.cjs", sourcePath = "src/double.cjs";
+  const dependencies = await realpath(await mkdtemp(join(tmpdir(), "bflow-integration-deps-")));
+  cleanups.push(() => rm(dependencies, { recursive: true, force: true }));
+  const sourceDependencies = await realpath("node_modules"), staged = join(dependencies, "node_modules");
+  if (reporter === "vitest_json") await copyIsolatedNodeDependencies(sourceDependencies, staged);
+  const vitest = join(staged, relative(sourceDependencies, createRequire(import.meta.url).resolve("vitest/vitest.mjs")));
   const command = parseBehavioralCommands([{ id: "real-regression", command: "owner:double-regression", executable: process.execPath,
-    args: reporter === "node_tap" ? ["--test", "--test-reporter=tap", testPath] : [createRequire(import.meta.url).resolve("vitest/vitest.mjs"), "run", "--globals", "--reporter=json", "--no-cache", "--maxWorkers=1", "--minWorkers=1", testPath],
-    ...(reporter === "vitest_json" ? { reporter, dependencyRoots: [await realpath("node_modules")] } : {}), method: "integration_test", levels: ["integration", "regression"],
+    args: reporter === "node_tap" ? ["--test", "--test-reporter=tap", testPath] : [vitest, "run", "--globals", "--reporter=json", "--no-cache", "--maxWorkers=1", "--minWorkers=1", testPath],
+    ...(reporter === "vitest_json" ? { reporter, dependencyRoots: [staged] } : {}), method: "integration_test", levels: ["integration", "regression"],
     testPaths: [testPath], testNames: [phaseTestName], timeoutMs: 10_000 }])[0]!;
   const runners = automatic ? await automaticRunners() : undefined;
   const f = await fixture({ behavioral: automatic ? { ...command, command: "auto:integration" } : command, runners });
@@ -317,7 +327,7 @@ async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json", maxIt
 }
 
 // AgenticJournal persists changes under Linux flock; these integration cases exercise that boundary.
-describe.skipIf(process.platform !== "linux")("connected independent policy phases", () => {
+describe.skipIf((await probeBehavioralSandbox()).status !== "ready")("connected independent policy phases", () => {
   it("freezes Red test files bound by an automatic runner profile exactly like owner test files", async () => {
     const f = await connectedPhaseFixture("node_tap", 3, true);
     await f.addTests();
@@ -400,7 +410,71 @@ describe.skipIf(process.platform !== "linux")("connected independent policy phas
 });
 
 
+describe("Runtime task activity log integration", () => {
+  it("records committed admission, assignment and status transitions without tick polling noise", async () => {
+    const f = await fixture();
+    const activityPath = join(f.root, "task-activity.jsonl");
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    await f.runtime.tick();
+    const read = async () => (await readFile(activityPath, "utf8")).trim().split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
+    const initial = await read();
+    expect(initial.some(item => item.kind === "admission" && item.runId === "run-1")).toBe(true);
+    expect(initial.some(item => item.kind === "assignment" && item.action === "task.assignment" && item.taskId === "implement")).toBe(true);
+    const count = initial.length;
+    await f.runtime.tick();
+    const afterDeliveryReconcile = await read();
+    expect(afterDeliveryReconcile.length).toBeLessThanOrEqual(count + 2);
+    await f.runtime.tick();
+    const afterQuietTick = await read();
+    expect(afterQuietTick.map((item: any) => item.action).slice(afterDeliveryReconcile.length)).toEqual([]);
+    const dispatched = (await f.runtime.inspect() as any).outbound.find((item: any) => item.message.type === "task.assignment");
+    expect(dispatched.status).toBe("accepted");
+  });
+
+  it("provides native tool diagnostic assignment context without acquiring Runtime.inspect", async () => {
+    const f = await fixture();
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    const assigned = (await f.runtime.inspect() as any).outbound.find((item: any) => item.message.type === "task.assignment");
+    const developer = f.panes.bindings.find(binding => binding.paneId === assigned.handle.target.paneId)!;
+    const inspect = vi.spyOn(f.runtime, "inspect");
+    expect(f.runtime.taskLogAssignmentContext(developer)).toMatchObject({ runId: "run-1", taskId: "implement", attemptId: assigned.attemptId });
+    expect(inspect).not.toHaveBeenCalled();
+  });
+
+  it("records accepted task specifications and newly accepted conditional TDD evidence phases", async () => {
+    const f = await fixture({ tdd: true });
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    const read = async () => (await readFile(join(f.root, "task-activity.jsonl"), "utf8")).trim().split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
+    expect(await read()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "specification", action: "task_specification_accepted", runId: "run-1", taskId: "implement", outcome: expect.stringContaining("required") })
+    ]));
+    await f.runtime.tick();
+    await f.evidence("implement", "red"); await f.evidence("implement", "green"); await f.evidence("implement", "refactor");
+    const entries = await read();
+    expect(entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "tdd", action: "tdd_evidence_accepted:red", runId: "run-1", taskId: "implement" }),
+      expect.objectContaining({ kind: "tdd", action: "tdd_evidence_accepted:green", runId: "run-1", taskId: "implement" }),
+      expect.objectContaining({ kind: "tdd", action: "tdd_evidence_accepted:refactor", runId: "run-1", taskId: "implement" })
+    ]));
+    expect(JSON.stringify(entries.filter((item: any) => item.kind === "tdd"))).not.toContain("verificationId");
+    expect(JSON.stringify(entries.filter((item: any) => item.kind === "tdd"))).not.toContain("evidenceArtifacts");
+  });
+});
+
 describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () => {
+  it("loads a runner added after composition and ignores unselected language profiles when freezing a task plan", async () => {
+    const f = await fixture({ tdd: true, dynamicGate: true });
+    f.ports.behavioralChecks = () => [{ ...f.ports.taskChecks.find(check => check.id === "regression")!, id: "unselected-polyglot",
+      metadata: { bindAcceptedCriteria: true, bindMethodTestNames: true },
+      configuration: { kind: "deterministic", method: "integration_test", command: "auto:integration:go", criterionIds: [], testNames: [], role: "quality_gate", levels: ["integration"] } }];
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    await f.evidence("implement", "red"); await f.evidence("implement", "green"); await f.evidence("implement", "refactor");
+    f.enableDynamicGate(); await f.submit(); await f.runtime.tick(); await f.runtime.tick();
+    const run = await f.inspect(); expect(run.tasks[0].cycle.status).toBe("passed");
+    expect(run.tasks[0].verificationPlan.checks.some((check: any) => check.id === "unselected-polyglot")).toBe(false);
+    expect(f.calls.some(context => context.definition.id === "regression")).toBe(true);
+  });
+
   it("conversation-only creates no workflow", async () => {
     const f = await fixture();
     const before = await f.runtime.inspect() as any;
