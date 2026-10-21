@@ -134,6 +134,9 @@ có nghĩa là xóa `.bflow` hay tuyên bố các workflow task đang hoạt đ�
 Mọi lệnh đều hỗ trợ `--json`. Timeout tính bằng mili giây, 1–600000. `doctor` trả về
 báo cáo chẩn đoán ngay cả khi không khỏe; `ok: true` của JSON envelope nghĩa là
 báo cáo đã được tạo, còn `data.healthy` và exit code cho biết sức khỏe môi trường.
+Khi manifest đã ở trạng thái `down`, doctor báo session đã dừng và không coi các bản ghi
+pane `cancelled` do cleanup là lỗi readiness hiện tại. Pane lỗi trong session đang hoạt động
+và các trạng thái lỗi khác vẫn được báo; session đã dừng không chứng minh workflow thành công.
 `status` tương tự trả về exit 1 khi cấu hình không hợp lệ. `status <run-id>` hoặc
 các bộ lọc status giữ nguyên các lệnh workflow-run hiện có. Các
 `.bflow/config.yaml` và `.bflow/config.json` tường minh hiện có vẫn đọc được để tương thích khi
