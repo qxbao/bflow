@@ -141,6 +141,9 @@ describe.skipIf(process.platform !== "linux")("default durable host lifecycle an
     const coordinatorOriginal = await readFile(new URL("../../../../agents/coordinator/system-prompt.md", import.meta.url), "utf8");
     expect(first.roleLaunch.conversation!.systemPrompt).toContain(chatOriginal);
     expect(first.roleLaunch.coordinator!.systemPrompt).toContain(coordinatorOriginal);
+    expect(first.roleLaunch.conversation!.systemPrompt).toContain("read_task_log");
+    expect(first.roleLaunch.conversation!.systemPrompt).not.toContain("log_task_step");
+    expect(first.roleLaunch.coordinator!.systemPrompt).toContain("log_task_step");
     const config = JSON.parse(await readFile(first.roleLaunch.coordinator!.mcpConfigFile,"utf8"));
     expect(config.mcpServers.bflow.args[1]).toBe("mcp");
     await f.controller.close();
@@ -173,7 +176,8 @@ describe.skipIf(process.platform !== "linux")("default durable host lifecycle an
     });
     const response=result.trim().split("\n").map(line=>JSON.parse(line));
     const names=response[1].result.tools.map((tool:{name:string})=>tool.name);
-    expect(names).toContain("host_status"); expect(names).not.toContain("propose_workflow"); expect(names).not.toContain("approve");
+    expect(names).toContain("host_status"); expect(names).toContain("read_task_log"); expect(names).not.toContain("log_task_step");
+    expect(names).not.toContain("propose_workflow"); expect(names).not.toContain("approve");
     const roleConfig=JSON.parse(await readFile(args[2]!,"utf8"));
     await expect(callHost(roleConfig.socketPath,roleConfig.token,"quiesce")).rejects.toThrow("Role cannot call host lifecycle");
     await expect(callHost(roleConfig.socketPath,"forged-token","user_prompt",{hook:{prompt:"approve",hook_event_name:"UserPromptSubmit"}})).rejects.toThrow("authentication");
