@@ -119,6 +119,30 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
     expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision"]);
   });
 
+  it("reports a trusted approval failure on Stop without asking for an ordinary decision or automatic retry", async () => {
+    const f = await fixture({ conversation_pending_decision: { approvalFailure: {
+      messageId: "failed-approval", error: "Herdr unavailable", note: "The approval was NOT recorded and nothing was applied." }, attempt: 1 } });
+    const result = await f.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1" });
+    expect(result.stdout).not.toBe("");
+    const blocked = JSON.parse(result.stdout);
+    expect(blocked.decision).toBe("block");
+    expect(blocked.reason).toContain("Herdr unavailable");
+    expect(blocked.reason).toContain("NOT recorded");
+    expect(blocked.reason).toContain("Do not call conversation_decide");
+    expect(blocked.reason).not.toContain("Call conversation_decide now");
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision"]);
+  });
+
+  it("requires the explicit original ID when Stop resumes a suspended ordinary turn", async () => {
+    const f = await fixture({ conversation_pending_decision: { messageId: "user-original", content: "Original approved work", requiresExplicitMessageId: true, attempt: 1 } });
+    const result = await f.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1" });
+    const reason = JSON.parse(result.stdout).reason;
+    expect(reason).toContain("explicitly");
+    expect(reason).toContain("user-original");
+    expect(reason).toContain("newer corrections or cancellation");
+    expect(reason).not.toContain("messageId may be omitted");
+  });
+
   it("acknowledges a Codex display from last_assistant_message and does not rely on a Claude transcript", async () => {
     const undisplayed = { ...decisionNotice, surfacedAt: "2026-10-20T03:17:00.000Z", reblocks: 0 };
     const f = await fixture({ conversation_notices: { notices: [decisionNotice], undisplayed: [undisplayed] } }, "codex");

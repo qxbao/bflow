@@ -950,6 +950,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (["conversation_notices", "conversation_runtime_nudge"].includes(method)) return { notices: await receipts.unsurfacedConversationNotices(), undisplayed: await receipts.undisplayedUserFacingNotices() };
         if (method === "conversation_pending_decision") {
           // One bounded refusal is reserved per call, so a provider that ignores the Stop block cannot loop.
+          const failure = await conversationIntake.pendingApprovalFailure(binding);
+          if (failure) {
+            const attempt = await receipts.reserveDecisionReblock(failure.messageId);
+            if (attempt !== undefined) return { approvalFailure: failure, attempt };
+          }
           const pending = await conversationIntake.pendingDecision(binding);
           const attempt = pending ? await receipts.reserveDecisionReblock(pending.messageId) : undefined;
           return pending && attempt !== undefined ? { ...pending, attempt } : {};
@@ -1705,9 +1710,18 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
       // is refused with the exact instruction; the host reserves at most MAX_DECISION_REBLOCKS refusals per turn (Claude and Codex
       // both accept `decision: "block"` with a reason on Stop).
       const pending = record(await callHost(configuration.socketPath, configuration.token, "conversation_pending_decision", { paneId, nativeSessionId: session }));
+      const approvalFailure = record(pending.approvalFailure ?? {});
+      if (typeof approvalFailure.messageId === "string") {
+        process.stdout.write(JSON.stringify({ decision: "block", reason: `Bflow trusted approval failed (messageId=${approvalFailure.messageId}): ` +
+          `${approvalFailure.note} Runtime error: ${approvalFailure.error}. Report this trusted failure to the user. ` +
+          "Do not call conversation_decide or resume_run for this approval, and do not approve or retry automatically." }) + "\n");
+        return;
+      }
       if (typeof pending.messageId === "string") {
         const resume = parseConversationResumeRequest(String(pending.content ?? ""));
-        const instruction = resume ? "has no recorded Conversation decision. For this explicit resume request, call resume_run with the existing runId, " +
+        const instruction = pending.requiresExplicitMessageId === true ? `is an unfinished trusted turn suspended by a Runtime nudge. Consider the user's newer corrections or cancellation first. ` +
+          `Call conversation_decide using messageId=${pending.messageId} explicitly for this original turn; never use resume_run or approve from this old input. ` :
+          resume ? "has no recorded Conversation decision. For this explicit resume request, call resume_run with the existing runId, " +
           "then record conversation_only using conversation_decide; do not create a new workflow or change acceptance criteria. " :
           "has no recorded decision, so nothing reached the Coordinator. Call conversation_decide now; messageId may be omitted, " +
           "the host binds your latest trusted user turn. Use workflow_request to start work, clarify for missing details, conversation_only " +
@@ -1777,7 +1791,10 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
         "Call conversation_decide first (messageId optional; if given, use exactly this one). ") :
         "Do not call conversation_decide for this turn; explain the trusted result or approval failure and display the notices. ") : "";
     const shownFirst = mustShowSection([...(record(result).notices as unknown[] ?? []), ...undisplayedNotices(result).map(item => item.notice)] as Parameters<typeof mustShowSection>[0]);
-    const prefix = header + shownFirst + "Trusted Bflow user turn and Conversation context: ";
+    const recoveryGuidance = Array.isArray(record(result).recoverableUserTurns) && (record(result).recoverableUserTurns as unknown[]).length ?
+      "Unfinished trusted user turns suspended by an earlier Runtime nudge are listed as recoverableUserTurns. Consider the current user's corrections or cancellation first. " +
+      "After deciding this current turn, explicitly provide each original messageId to conversation_decide with the appropriate decision; never silently execute, approve, or resume from an older turn. " : "";
+    const prefix = header + recoveryGuidance + shownFirst + "Trusted Bflow user turn and Conversation context: ";
     // The JSON budget is what remains after the prefix, so the whole additionalContext stays within CONVERSATION_CONTEXT_BUDGET.
     process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: prefix + JSON.stringify(boundConversationContext(result, CONVERSATION_CONTEXT_BUDGET - Buffer.byteLength(prefix))) } }) + "\n");
     // Marked only after the context reached the provider; a crash before this line re-surfaces the notices.

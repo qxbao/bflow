@@ -13,7 +13,7 @@ import { redactString } from "../resilience/redaction.js";
 import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
 import { ApprovalNoticeSchema, UserDecisionNoticeSchema, approvalNoticeFields, isUserFacingNotice, renderConversationNotice, userDecisionNoticeFields } from "./conversation-notice-render.js";
 
-type Kind = "runtime-nudge" | "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "decision-reblock" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled";
+type Kind = "approval-failure" | "runtime-nudge" | "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "decision-reblock" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled";
 export interface HumanHookProvenance {
   origin: "UserPromptSubmit"; binding: PaneBinding; nativeSessionId: string;
   conversationSessionId: string; userId: string; messageId: string; promptDigest: string;
@@ -44,6 +44,8 @@ const NotificationFailureSchema = z.object({ messageIds: z.array(z.string().min(
 export const MAX_NOTICE_REBLOCKS = 2;
 /** A Conversation Stop is refused at most this many times for one user turn that never reached conversation_decide. */
 export const MAX_DECISION_REBLOCKS = 2;
+const ApprovalFailureReceiptSchema = z.object({ messageId: z.string().min(1), attempt: z.number().int().positive(),
+  error: z.string().min(1).max(2000), note: z.string().min(1).max(2000) }).strict();
 const ConversationDecisionReceiptSchema = z.object({ messageId: z.string().min(1), decision: JsonValueSchema,
   result: JsonValueSchema.optional() }).strict();
 export interface HostObservation {
@@ -101,6 +103,7 @@ export class HostReceiptJournal {
         throw new Error("Conversation turn has mismatched trusted hook provenance");
       return json(turn);
     }
+    if (kind === "approval-failure") return json(ApprovalFailureReceiptSchema.parse(input));
     if (kind === "runtime-nudge") {
       return json(z.object({ bindingDigest: z.string().regex(/^[0-9a-f]{64}$/), sequence: z.number().int().nonnegative() }).strict().parse(input));
     }
@@ -171,7 +174,8 @@ export class HostReceiptJournal {
     const payload = this.parsePayload(kind, value.payload);
     const envelope = { version: 1 as const, repository: this.repository, sessionId: this.sessionId, kind, id, payload };
     if (value.checksum !== digest(envelope)) throw new Error("Host receipt integrity mismatch");
-    if (kind === "runtime-nudge" && digest([record(payload).bindingDigest, record(payload).sequence]) !== id ||
+    if (kind === "approval-failure" && digest([record(payload).messageId, record(payload).attempt]) !== id ||
+        kind === "runtime-nudge" && digest([record(payload).bindingDigest, record(payload).sequence]) !== id ||
         kind.startsWith("conversation-") && record(payload).messageId !== id ||
         kind === "human" && ApprovalDecisionSchema.parse(record(payload).decision).approvalId !== id ||
         kind === "gate" && QualityGateResultSchema.parse(payload).evaluationId !== id ||
@@ -413,6 +417,29 @@ export class HostReceiptJournal {
   async isConversationRuntimeNudge(binding: PaneBinding): Promise<boolean> {
     const boundary = await this.conversationNudgeBoundary(binding);
     return await this.read("runtime-nudge", boundary.id) !== undefined;
+  }
+  async wasConversationTurnNudged(input: TrustedConversationTurn): Promise<boolean> {
+    const turn = TrustedConversationTurnSchema.parse(input);
+    if (turn.binding.sessionId !== this.sessionId) throw new Error("Foreign Conversation turn");
+    return await this.read("runtime-nudge", digest([this.conversationBindingIdentity(turn.binding), turn.sequence])) !== undefined;
+  }
+  private async approvalFailures(messageId: string) {
+    const failures: z.infer<typeof ApprovalFailureReceiptSchema>[] = [];
+    for (const id of await this.receiptIds("approval-failure")) {
+      const failure = ApprovalFailureReceiptSchema.parse(await this.read("approval-failure", id));
+      if (failure.messageId === messageId) failures.push(failure);
+    }
+    return failures.sort((a, b) => a.attempt - b.attempt);
+  }
+  /** A failed physical approval hook is reportable context, never an approval or an ordinary model decision. */
+  async recordApprovalFailure(messageId: string, failure: { error: string; note: string }): Promise<void> {
+    if (!(await this.conversationTurns()).some(turn => turn.messageId === messageId)) throw new Error("Unknown trusted approval turn");
+    const attempt = ((await this.approvalFailures(messageId)).at(-1)?.attempt ?? 0) + 1;
+    await this.write("approval-failure", digest([messageId, attempt]), { messageId, attempt, ...failure });
+  }
+  async conversationApprovalFailure(messageId: string): Promise<{ messageId: string; error: string; note: string } | undefined> {
+    const failure = (await this.approvalFailures(messageId)).at(-1);
+    return failure === undefined ? undefined : { messageId: failure.messageId, error: failure.error, note: failure.note };
   }
   async assertConversationUserTurn(binding: PaneBinding): Promise<void> {
     if (await this.isConversationRuntimeNudge(binding))

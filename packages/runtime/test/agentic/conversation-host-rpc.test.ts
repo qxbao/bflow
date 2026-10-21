@@ -97,9 +97,8 @@ describe.skipIf(process.platform !== "linux")("Native role schemas and Conversat
     const { root, chat, hostDirectory } = await hostFixture();
     const invoke = (name: string, args: unknown) => callHost(chat.socketPath, chat.token, "role_call", { paneId: "pane-chat", name, arguments: args });
     const received = await callHost(chat.socketPath, chat.token, "user_prompt", { paneId: "pane-chat", hook: {
-      hook_event_name: "UserPromptSubmit", session_id: "native-chat", prompt: "tiếp tục" } }) as { messageId: string };
+      hook_event_name: "UserPromptSubmit", session_id: "native-chat", prompt: "Yêu cầu gốc chưa được xử lý" } }) as { messageId: string };
     const decision = { intent: "conversation_only", directReply: "Existing turn recorded" };
-    await invoke("conversation_decide", { decision });
     const nudge = execFileSync(process.execPath, [fileURLToPath(new URL("../../dist/agentic/host.js", import.meta.url)),
       "hook", join(hostDirectory, "conversation.json"), "UserPromptSubmit"], { input: JSON.stringify({ hook_event_name: "UserPromptSubmit",
         session_id: "native-chat", prompt: "[bflow] Có cập nhật mới từ Runtime" }),
@@ -110,10 +109,16 @@ describe.skipIf(process.platform !== "linux")("Native role schemas and Conversat
     await expect(callHost(chat.socketPath, chat.token, "tool_guard", { paneId: "pane-chat", hook: {
       hook_event_name: "PreToolUse", session_id: "native-chat", tool_name: "mcp__bflow__conversation_decide" } })).rejects.toThrow(/Runtime nudge/);
     expect(JSON.parse(nudge).hookSpecificOutput.additionalContext).toContain("requiresConversationDecision=false");
-    await callHost(chat.socketPath, chat.token, "user_prompt", { paneId: "pane-chat", hook: {
-      hook_event_name: "UserPromptSubmit", session_id: "native-chat", prompt: "Cảm ơn" } });
+    const fresh = await callHost(chat.socketPath, chat.token, "user_prompt", { paneId: "pane-chat", hook: {
+      hook_event_name: "UserPromptSubmit", session_id: "native-chat", prompt: "Báo trạng thái trước" } });
+    expect(fresh).toMatchObject({ recoverableUserTurns: [{ messageId: received.messageId, content: "Yêu cầu gốc chưa được xử lý" }] });
     const completed = await invoke("conversation_decide", { decision });
     expect(await invoke("conversation_decide", { decision })).toEqual(completed);
+    expect(await callHost(chat.socketPath, chat.token, "conversation_pending_decision", { paneId: "pane-chat", nativeSessionId: "native-chat" }))
+      .toMatchObject({ messageId: received.messageId, requiresExplicitMessageId: true });
+    const recovered = await invoke("conversation_decide", { messageId: received.messageId, decision });
+    expect(await invoke("conversation_decide", { messageId: received.messageId, decision })).toEqual(recovered);
+    await expect(invoke("resume_run", { runId: "run-existing", messageId: received.messageId })).rejects.toThrow("current authenticated");
     const { HostReceiptJournal } = await import("../../src/agentic/host-receipts.js");
     const receipts = new HostReceiptJournal(join(hostDirectory, "authentication-receipts"), root, "chat-rpc");
     expect(await receipts.conversationTurns()).toHaveLength(2);

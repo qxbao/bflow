@@ -85,6 +85,17 @@ describe("trusted raw turns and model decision receipts", () => {
     expect(await f.reopen().pendingDecision(f.binding)).toBeUndefined();
     expect(await f.journal().conversationDecision("user-unfinished")).toBeUndefined();
     expect(f.applied).toEqual([]);
+    const next = await f.reopen().receive(f.binding, f.turn("user-new", "Báo trạng thái trước, đừng đổi phạm vi"));
+    expect(next).toMatchObject({ recoverableUserTurns: [{ messageId: "user-unfinished", content: f.turn("user-unfinished").content }] });
+    const recovered = { messageId: "user-unfinished", decision: { intent: "conversation_only", directReply: "Original request considered with current correction" } };
+    await expect(f.reopen().decide(f.binding, recovered)).rejects.toThrow("latest trusted input");
+    await f.reopen().decide(f.binding, { decision: { intent: "conversation_only", directReply: "New correction recorded" } });
+    expect(await f.reopen().pendingDecision(f.binding)).toMatchObject({ messageId: "user-unfinished", requiresExplicitMessageId: true });
+    const result = await f.reopen().decide(f.binding, recovered);
+    expect(await f.reopen().decide(f.binding, recovered)).toEqual(result);
+    expect(f.applied.map(value => (value as { messageId: string }).messageId)).toEqual(["user-new", "user-unfinished"]);
+    expect(await f.reopen().pendingDecision(f.binding)).toBeUndefined();
+    expect(await f.journal().humanDecisions()).toEqual([]);
   });
   it("binds a decision without messageId to the pane's latest trusted turn and reports undecided turns", async () => {
     const f = await fixture();
@@ -162,10 +173,39 @@ describe("trusted raw turns and model decision receipts", () => {
     await expect(f.intake.receive(f.binding, f.turn("user-approve", "approve"))).resolves.toMatchObject({ approvalFailed: true,
       approvalFailure: { error: expect.stringContaining("\"code\":\"transport\"") } });
     expect(await f.journal().conversationDecision("user-approve")).toBeUndefined();
+    expect(await f.reopen().pendingDecision(f.binding)).toBeUndefined();
+    expect(await f.reopen().pendingApprovalFailure(f.binding)).toMatchObject({ messageId: "user-approve", error: expect.stringContaining("Herdr unavailable") });
+    await expect(f.reopen().decide(f.binding, { decision: { intent: "conversation_only", directReply: "Approve" } })).rejects.toThrow("Trusted approval failed");
     await expect(f.reopen().receive(f.binding, f.turn("user-approve", "approve"))).resolves.toMatchObject({
       requiresConversationDecision: false, result: { ok: true } });
     expect(await f.journal().conversationDecision("user-approve")).toMatchObject({ decision: { intent: "trusted_approval" }, result: { ok: true } });
     expect(calls).toBe(2);
+    expect(await f.reopen().pendingApprovalFailure(f.binding)).toBeUndefined();
+  });
+  it("never recovers failed approvals or old operational resume authority as ordinary suspended input", async () => {
+    const f = await fixture(); let approvalCalls = 0;
+    f.port.handleTrustedApproval = async input => {
+      if ((input as { content: string }).content !== "approve") return undefined;
+      approvalCalls++;
+      return { ok: false, error: { message: `Transport failure ${approvalCalls}` } };
+    };
+    await f.intake.receive(f.binding, f.turn("failed-approval", "approve"));
+    await f.intake.runtimeNudge(f.binding);
+    expect(await f.reopen().pendingApprovalFailure(f.binding)).toBeUndefined();
+    const current = await f.reopen().receive(f.binding, f.turn("current-user", "Báo trạng thái"));
+    expect(current).not.toHaveProperty("recoverableUserTurns");
+    await expect(f.reopen().decide(f.binding, { messageId: "failed-approval", decision: { intent: "conversation_only", directReply: "approve" } }))
+      .rejects.toThrow("Trusted approval failed");
+    expect(approvalCalls).toBe(1);
+    await f.intake.receive(f.binding, f.turn("old-resume", "resume run-existing"));
+    await f.intake.runtimeNudge(f.binding);
+    const next = await f.reopen().receive(f.binding, f.turn("next-user", "Báo trạng thái"));
+    expect(next).not.toHaveProperty("recoverableUserTurns");
+    await expect(f.journal().authorizeConversationResume(f.binding, "old-resume", "run-existing")).rejects.toThrow("current authenticated");
+    await expect(f.reopen().decide(f.binding, { messageId: "old-resume", decision: { intent: "conversation_only", directReply: "resume" } }))
+      .rejects.toThrow("Stale user turn");
+    expect(f.applied).toEqual([]);
+    expect(await f.journal().humanDecisions()).toEqual([]);
   });
   it("keeps a queued trusted approval pending and resumes it through the port instead of Chat", async () => {
     const f = await fixture(); let state: "queued" | "committed" = "queued";
@@ -236,6 +276,11 @@ describe("Chat decisions through the real Conversation facade and durable Runtim
     let intake = new HostConversationIntake(f.journal(), () => chat);
     const input = f.turn("user-workflow", "Yêu cầu workflow loại spike: khảo sát quyền MCP, chỉ đọc");
     await intake.receive(f.binding, input);
+    await intake.runtimeNudge(f.binding);
+    await expect(intake.decide(f.binding, { messageId: input.messageId, decision: {} })).rejects.toThrow("Runtime nudge");
+    const next = await intake.receive(f.binding, f.turn("user-status", "Báo trạng thái trước"));
+    expect(next).toMatchObject({ recoverableUserTurns: [{ messageId: input.messageId, content: input.content }] });
+    await intake.decide(f.binding, { decision: { intent: "conversation_only", directReply: "Current user request considered" } });
     const decision = { intent: "workflow_request", requirementDraft: { title: "Khảo sát quyền MCP", objective: "Liệt kê quyền MCP của từng role",
       kind: "spike", sddLevel: "lightweight", priority: "normal", scopeDefined: true, isLargeTask: false, affectedPaths: [],
       acceptanceCriteriaDescriptions: ["Bảng role/server/cấu hình/cơ chế chặn; chỉ đọc"], isRequirementChange: false } };
