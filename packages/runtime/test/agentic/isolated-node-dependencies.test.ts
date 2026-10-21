@@ -7,7 +7,7 @@ import { validateDependencyTrees } from "../../src/agentic/behavioral-sandbox.js
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 it("stages pnpm third-party links without importing workspace files and rebases absolute internal links", async () => {
- const root = await mkdtemp(join(tmpdir(), "bflow-test-tool-deps-")); roots.push(root);
+ const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-test-tool-deps-"))); roots.push(root);
  const source=join(root,"node_modules"),target=join(root,"staged/node_modules"),workspace=join(root,"packages/private");
  await mkdir(join(source,".pnpm/tool"),{recursive:true}); await mkdir(workspace,{recursive:true});
  await writeFile(join(source,".pnpm/tool/index.js"),"module.exports=42"); await writeFile(join(workspace,"secret"),"fixture");
@@ -20,7 +20,7 @@ it("stages pnpm third-party links without importing workspace files and rebases 
 });
 it("can launch the staged installed Vitest tool without exposing workspace links", async () => {
  const { execFile } = await import("node:child_process"), { promisify } = await import("node:util"), { fileURLToPath } = await import("node:url"), { relative } = await import("node:path"), { createRequire } = await import("node:module");
- const root = await mkdtemp(join(tmpdir(), "bflow-installed-tool-deps-")); roots.push(root);
+ const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-installed-tool-deps-"))); roots.push(root);
  const source=await realpath(fileURLToPath(new URL("../../../../node_modules",import.meta.url))),target=join(root,"node_modules");
  await copyIsolatedNodeDependencies(source,target); await validateDependencyTrees([target]);
  const cli=join(target,relative(source,createRequire(import.meta.url).resolve("vitest/vitest.mjs")));

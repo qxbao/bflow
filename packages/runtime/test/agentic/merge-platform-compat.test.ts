@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -9,7 +9,7 @@ vi.mock("../../src/agentic/sandbox-readiness.js", () => ({ probeBehavioralSandbo
 const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
 const roots: string[] = [];
 afterEach(async () => { Object.defineProperty(process, "platform", platform); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
-async function fixture() { const root = await mkdtemp(join(tmpdir(), "bflow-platform-merge-")); roots.push(root); return root; }
+async function fixture() { const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-platform-merge-"))); roots.push(root); return root; }
 const command: BoundBehavioralCommand = { id: "fixture", command: "owner:fixture", executable: process.execPath, args: [], method: "unit_test", levels: ["unit"], testNames: ["target"], testPaths: ["test.js"], timeoutMs: 1000 };
 it("retains allowlisted Node flags in nested JS projects without forwarding arbitrary loaders", async () => {
   const root = await fixture(); await mkdir(join(root, "nested"));

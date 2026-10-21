@@ -11,8 +11,8 @@ export async function probeBehavioralSandbox(repositoryRoot = process.cwd()): Pr
     try {
       const executable = "/usr/bin/sandbox-exec";
       await access(executable, constants.X_OK);
-      // Probe actual deny-default execution, not only an installed deprecated launcher.
-      await execute(executable, ["-p", '(version 1)(deny default)(allow process-exec (literal "/usr/bin/true"))(allow file-read* (literal "/usr/bin/true") (subpath "/usr/lib") (subpath "/System") (subpath "/private/var/db/dyld"))(allow file-read-metadata)(allow sysctl-read)', "--", "/usr/bin/true"], { env: { PATH: "/usr/bin:/bin", LANG: "C" }, timeout: 10_000, maxBuffer: 16384 });
+      // Probe actual deny-default execution of the real measurement profile, not only an installed deprecated launcher.
+      await (await import("./behavioral-sandbox-darwin.js")).probeSeatbeltProfile();
       return { status: "ready", executable, platform: "darwin" };
     } catch { return { status: "unsupported", code: "verification_sandbox_unavailable", reason: "No usable Seatbelt sandbox; isolated verification is unavailable on this host" }; }
   }
