@@ -14,7 +14,7 @@ import { availableTools } from "../../src/agentic/host.js";
 describe("Chat-owned Conversation decisions", () => {
   it("advertises a structured decision tool only to Conversation", () => {
     expect(availableTools("conversation").find(tool => tool.name === "conversation_decide")?.inputSchema)
-      .toMatchObject({ required: ["messageId", "decision"], additionalProperties: false });
+      .toMatchObject({ required: ["decision"], additionalProperties: false });
     expect(availableTools("coordinator").some(tool => tool.name === "conversation_decide")).toBe(false);
   });
 });
@@ -53,6 +53,24 @@ describe("trusted raw turns and model decision receipts", () => {
     expect(f.applied).toEqual([{ sessionId: "chat-session", messageId: "user-1", content: f.turn("user-1").content, occurredAt: expect.any(String),
       provenance: { origin: "user", authenticatedUser: true, userId: "human", paneId: "chat-pane", channel: "herdr_attach" },
       conversationDecision: decision }]);
+  });
+  it("binds a decision without messageId to the pane's latest trusted turn and reports undecided turns", async () => {
+    const f = await fixture();
+    await f.intake.receive(f.binding, f.turn("user-1"));
+    await f.intake.decide(f.binding, { messageId: "user-1", decision: { intent: "conversation_only", directReply: "First" } });
+    await f.intake.receive(f.binding, f.turn("user-2", "Tích hợp nốt Context7 đi"));
+    expect(await f.reopen().pendingDecision(f.binding)).toEqual({ messageId: "user-2", content: "Tích hợp nốt Context7 đi" });
+    const decision = { intent: "conversation_only", directReply: "Second" };
+    await f.reopen().decide(f.binding, { decision });
+    expect(f.applied.at(-1)).toMatchObject({ messageId: "user-2", content: "Tích hợp nốt Context7 đi", conversationDecision: decision });
+    expect(await f.reopen().pendingDecision(f.binding)).toBeUndefined();
+    // An explicit stale messageId is still refused; omission never reaches an older turn.
+    await f.intake.receive(f.binding, f.turn("user-3", "Thêm một việc"));
+    await expect(f.reopen().decide(f.binding, { messageId: "user-2", decision: { intent: "conversation_only", directReply: "Other" } }))
+      .rejects.toThrow("Conflicting Conversation decision");
+    const other = PaneBindingSchema.parse({ ...f.binding, paneId: "other-pane", session: { ...f.binding.session!, value: "native-other" } });
+    await expect(f.reopen().decide(other, { decision })).rejects.toThrow("No trusted user turn");
+    expect(await f.reopen().pendingDecision(f.binding)).toEqual({ messageId: "user-3", content: "Thêm một việc" });
   });
   it("replays the exact durable result without applying twice and rejects conflicting decisions", async () => {
     const f = await fixture(); await f.intake.receive(f.binding, f.turn("user-1"));

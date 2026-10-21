@@ -139,15 +139,15 @@ describe.skipIf(process.platform === "win32")("Conversation inbox hooks", () => 
     const result = await f.invoke("Stop", JSON.stringify({ hook_event_name: "Stop", session_id: "native-1", stop_hook_active: false }));
     expect(result.code).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({ decision: "block", reason: expect.stringContaining("Bflow Runtime updates") });
-    expect(f.calls.map(call => call.method)).toEqual(["conversation_notices", "conversation_notices_surfaced"]);
-    expect(f.calls[1]!.params).toMatchObject({ messageIds: ["notice-1"], nativeSessionId: "native-1" });
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision", "conversation_notices", "conversation_notices_surfaced"]);
+    expect(f.calls[2]!.params).toMatchObject({ messageIds: ["notice-1"], nativeSessionId: "native-1" });
   });
   it("stays silent on Stop with no unsurfaced notices, even when stop_hook_active is set", async () => {
     const f = await fixture("conversation", "claude", { conversation_notices: { notices: [] } });
     const result = await f.invoke("Stop", JSON.stringify({ hook_event_name: "Stop", session_id: "native-1", stop_hook_active: true }));
     expect(result.code).toBe(0);
     expect(result.stdout).toBe("");
-    expect(f.calls.map(call => call.method)).toEqual(["conversation_notices"]);
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision", "conversation_notices"]);
   });
   it("never blocks a non-Claude Stop, leaving notices for the next user turn", async () => {
     const f = await fixture("conversation", "codex", { conversation_notices: { notices: [notice] } });

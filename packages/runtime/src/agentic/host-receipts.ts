@@ -13,7 +13,7 @@ import { redactString } from "../resilience/redaction.js";
 import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
 import { ApprovalNoticeSchema, UserDecisionNoticeSchema, approvalNoticeFields, isUserFacingNotice, renderConversationNotice, userDecisionNoticeFields } from "./conversation-notice-render.js";
 
-type Kind = "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled";
+type Kind = "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "decision-reblock" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled";
 export interface HumanHookProvenance {
   origin: "UserPromptSubmit"; binding: PaneBinding; nativeSessionId: string;
   conversationSessionId: string; userId: string; messageId: string; promptDigest: string;
@@ -42,6 +42,8 @@ const NoticeResurfacedSchema = z.object({ messageId: z.string().min(1), attempt:
 const NotificationFailureSchema = z.object({ messageIds: z.array(z.string().min(1)).min(1).max(100), reason: z.string().min(1).max(2000), failedAt: z.string().datetime() }).strict();
 /** A user-facing notice is re-blocked on Stop at most this many times before it is left for the reminder watchdog. */
 export const MAX_NOTICE_REBLOCKS = 2;
+/** A Conversation Stop is refused at most this many times for one user turn that never reached conversation_decide. */
+export const MAX_DECISION_REBLOCKS = 2;
 const ConversationDecisionReceiptSchema = z.object({ messageId: z.string().min(1), decision: JsonValueSchema,
   result: JsonValueSchema.optional() }).strict();
 export interface HostObservation {
@@ -136,6 +138,7 @@ export class HostReceiptJournal {
     if (kind === "notice-reblock") return json(NoticeReblockSchema.parse(input));
     if (kind === "notice-resurfaced") return json(NoticeResurfacedSchema.parse(input));
     if (kind === "notification-failure") return json(NotificationFailureSchema.parse(input));
+    if (kind === "decision-reblock") return json(z.object({ messageId: z.string().min(1), attempt: z.number().int().min(1).max(MAX_DECISION_REBLOCKS), reblockedAt: z.string().datetime() }).strict().parse(input));
     if (kind === "notice-nudge") return json(z.object({ messageId: z.string().min(1), attempt: z.number().int().min(1).max(3), attemptedAt: z.string().datetime() }).strict().parse(input));
     if (kind === "native-intent" || kind === "native-ack") return json(RoleMessageSchema.parse(input));
     if (kind === "gate") return json(QualityGateResultSchema.parse(input));
@@ -372,14 +375,23 @@ export class HostReceiptJournal {
     return turns.sort((a, b) => a.sequence - b.sequence);
   }
   /** An operational resume is a real user request, not an approval or a model-supplied provenance flag. */
-  async authorizeConversationResume(binding: PaneBinding, messageId: string, runId: string): Promise<void> {
+  async authorizeConversationResume(binding: PaneBinding, messageId: string | undefined, runId: string): Promise<void> {
     const turn = (await this.conversationTurns()).at(-1);
-    if (binding.role !== "conversation" || !turn || turn.messageId !== messageId ||
+    if (binding.role !== "conversation" || !turn || messageId !== undefined && turn.messageId !== messageId ||
         this.bindingIdentity(turn.binding) !== this.bindingIdentity(binding))
       throw new Error("Resume requires the current authenticated Conversation user message");
     const request = parseConversationResumeRequest(turn.content);
     if (!request || request.runId !== undefined && request.runId !== runId)
       throw new Error("An explicit resume request is required: reply 'tiếp tục' or 'resume <run-id>' in Conversation");
+  }
+  /** Reserve the next bounded Stop refusal for an undecided user turn; false once the budget is spent (it survives restart). */
+  async reserveDecisionReblock(messageId: string): Promise<number | undefined> {
+    for (let attempt = 1; attempt <= MAX_DECISION_REBLOCKS; attempt++) {
+      const id = `${textField(messageId)}:${attempt}`;
+      if (await this.read("decision-reblock", id) !== undefined) continue;
+      return await this.write("decision-reblock", id, { messageId, attempt, reblockedAt: new Date().toISOString() }) ? attempt : undefined;
+    }
+    return undefined;
   }
   async recordConversationTurn(turn: TrustedConversationTurn): Promise<void> { await this.write("conversation-turn", turn.messageId, turn); }
   async conversationDecision(messageId: string): Promise<{ decision: JsonValue; result?: JsonValue } | undefined> {

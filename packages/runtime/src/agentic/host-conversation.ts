@@ -11,7 +11,8 @@ interface ConversationIntakePort {
   handleUserTurn(input: unknown): Promise<unknown>;
   handleTrustedApproval(input: unknown): Promise<unknown | undefined>;
 }
-const DecisionCallSchema = z.object({ messageId: z.string().min(1), decision: JsonValueSchema }).strict();
+/** messageId is optional: the host binds the decision to this pane's latest authenticated user turn, so a model never has to copy it. */
+const DecisionCallSchema = z.object({ messageId: z.string().min(1).optional(), decision: JsonValueSchema }).strict();
 const ReceivedTurnSchema = z.object({ messageId: z.string().min(1), conversationSessionId: z.string().min(1),
   content: z.string().min(1), userId: z.string().min(1) }).strict();
 const TRUSTED_APPROVAL = json({ intent: "trusted_approval" });
@@ -74,27 +75,43 @@ export class HostConversationIntake {
         context: await this.conversation().getContext() });
     });
   }
+  /**
+   * The pane's latest authenticated user turn when it still has no recorded decision. A Stop hook uses it to refuse ending the
+   * turn silently: every ordinary user turn must reach conversation_decide (conversation_only is a valid decision).
+   */
+  pendingDecision(principal: PaneBinding): Promise<{ messageId: string; content: string } | undefined> {
+    return this.exclusive(async () => {
+      const binding = PaneBindingSchema.parse(principal);
+      if (binding.role !== "conversation" || !binding.session) throw new Error("Only authenticated Conversation has user turns");
+      const turn = (await this.receipts.conversationTurns()).filter(value => identity(value.binding) === identity(binding)).at(-1);
+      if (!turn || await this.receipts.conversationDecision(turn.messageId) !== undefined) return undefined;
+      return { messageId: turn.messageId, content: turn.content };
+    });
+  }
   decide(principal: PaneBinding, input: unknown): Promise<JsonValue> {
     return this.exclusive(async () => {
       const binding = PaneBindingSchema.parse(principal), args = DecisionCallSchema.parse(input);
       if (binding.role !== "conversation" || !binding.session) throw new Error("Only authenticated Conversation may decide user intent");
-      const turns = await this.receipts.conversationTurns(), turn = turns.find(value => value.messageId === args.messageId);
-      if (!turn) throw new Error("Unknown trusted user turn");
+      const turns = await this.receipts.conversationTurns();
+      const turn = args.messageId === undefined ? turns.filter(value => identity(value.binding) === identity(binding)).at(-1)
+        : turns.find(value => value.messageId === args.messageId);
+      if (!turn) throw new Error(args.messageId === undefined ? "No trusted user turn has been recorded for this Conversation pane" : "Unknown trusted user turn");
+      const messageId = turn.messageId;
       if (identity(turn.binding) !== identity(binding)) throw new Error("Conversation decision pane/native session changed");
       const decision = json(await this.conversation().parseDecision(args.decision));
-      const previous = await this.receipts.conversationDecision(args.messageId);
+      const previous = await this.receipts.conversationDecision(messageId);
       if (previous && digest(previous.decision) !== digest(decision)) throw new Error("Conflicting Conversation decision for user turn");
       if (previous?.result !== undefined) return previous.result;
       if (!previous && turns.some(value => value.sequence > turn.sequence && identity(value.binding) === identity(binding)))
         throw new Error("Stale user turn; decide the latest trusted input");
       if (!previous) await this.conversation().validateDecision(decision);
-      await this.receipts.recordConversationIntent(args.messageId, decision);
+      await this.receipts.recordConversationIntent(messageId, decision);
       // Gateway binds deterministic message/run/outbox ids to this trusted messageId and reconciles retries.
       const result = json(await this.conversation().handleUserTurn({ ...this.userInput(turn), conversationDecision: decision }));
       if (record(result).ok !== true) throw new Error(`Conversation decision failed: ${JSON.stringify(record(result).error)}`);
       // A durable FIFO acknowledgement is pending work, not a completed Chat decision.
       if (record(record(result).value).queuedBecauseBusy === true) return result;
-      await this.receipts.recordConversationResult(args.messageId, decision, result);
+      await this.receipts.recordConversationResult(messageId, decision, result);
       return result;
     });
   }

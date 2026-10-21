@@ -81,6 +81,13 @@ describe("private durable host authentication receipts", () => {
     expect(await f.reopen().authenticateEvidence({ ...evidence, metadata: { sourceRevision: "b".repeat(40) } })).toBe(false);
     await expect(f.journal.putObservation("review", "review-id", { ...observation, binding: { ...f.binding, bindingId: "changed" } })).rejects.toThrow("immutable");
   });
+  it("bounds Stop refusals for an undecided Conversation turn across restart", async () => {
+    const f = await fixture();
+    expect(await f.journal.reserveDecisionReblock("user-1")).toBe(1);
+    expect(await f.reopen().reserveDecisionReblock("user-1")).toBe(2);
+    expect(await f.reopen().reserveDecisionReblock("user-1")).toBeUndefined();
+    expect(await f.reopen().reserveDecisionReblock("user-2")).toBe(1);
+  });
   it("serializes competing immutable writes and refuses symlinked receipt files", async () => {
     const f = await fixture();
     const results = await Promise.allSettled([f.journal.recordHuman(f.decision, f.provenance),

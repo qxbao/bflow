@@ -17,7 +17,7 @@ const decisionNotice = {
 };
 
 /** A fake host socket answering each RPC from `replies`; a real Claude Stop hook process runs against it. */
-async function fixture(replies: Record<string, unknown>) {
+async function fixture(replies: Record<string, unknown>, provider = "claude") {
   const root = await mkdtemp("/tmp/bf-notice-hook-");
   cleanup.push(() => rm(root, { recursive: true, force: true }));
   const socketPath = join(root, "host.sock"), calls: { method: string; params: any }[] = [];
@@ -34,7 +34,7 @@ async function fixture(replies: Record<string, unknown>) {
   await new Promise<void>(accept => server.listen(socketPath, accept));
   cleanup.push(() => new Promise<void>(accept => server.close(() => accept())));
   const path = join(root, "role.json");
-  await writeFile(path, JSON.stringify({ socketPath, token: "role-token", role: "conversation", provider: "claude", sessionId: "session", herdrBinary: "unused" }), { mode: 0o600 });
+  await writeFile(path, JSON.stringify({ socketPath, token: "role-token", role: "conversation", provider, sessionId: "session", herdrBinary: "unused" }), { mode: 0o600 });
   const transcript = (lines: unknown[]) => { const file = join(root, "transcript.jsonl"); return writeFile(file, lines.map(line => JSON.stringify(line)).join("\n")).then(() => file); };
   return { calls, transcript, invoke: async (event: string, input: object) => {
     const child = spawn(process.execPath, [fileURLToPath(new URL("../../dist/agentic/host.js", import.meta.url)), "hook", path, event], {
@@ -66,7 +66,7 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
     expect(block.reason).toContain("Dùng schema v2 hay giữ v1?\n1. Schema v2\n2. Giữ v1");
     expect(block.reason).toContain(`Trả lời: ${APPROVAL_ID}: <số lựa chọn>`);
     expect(block.reason).toContain("Bflow Runtime updates");
-    expect(f.calls.map(call => call.method)).toEqual(["conversation_notices", "conversation_notices_surfaced"]);
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision", "conversation_notices", "conversation_notices_surfaced"]);
   });
 
   it("re-blocks a surfaced decision the final turn did not name, at most twice", async () => {
@@ -75,13 +75,13 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
     const transcript = await f.transcript([{ type: "user", message: { content: "hi" } }, assistantTurn("Đã xem, không có gì mới.")]);
     const result = await f.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1", transcript_path: transcript });
     expect(JSON.parse(result.stdout).reason.startsWith("MUST SHOW TO USER VERBATIM:")).toBe(true);
-    expect(f.calls.map(call => call.method)).toEqual(["conversation_notices", "conversation_notices_reblocked"]);
-    expect(f.calls[1]!.params.messageIds).toEqual([decisionNotice.messageId]);
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision", "conversation_notices", "conversation_notices_reblocked"]);
+    expect(f.calls[2]!.params.messageIds).toEqual([decisionNotice.messageId]);
 
     const exhausted = await fixture({ conversation_notices: { notices: [], undisplayed: [{ ...undisplayed, reblocks: 2 }] } });
     const quiet = await exhausted.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1", transcript_path: transcript });
     expect(quiet.stdout).toBe("");
-    expect(exhausted.calls.map(call => call.method)).toEqual(["conversation_notices"]);
+    expect(exhausted.calls.map(call => call.method)).toEqual(["conversation_pending_decision", "conversation_notices"]);
   });
 
   it("records the display once the final Conversation turn names the approval id, and stays silent", async () => {
@@ -92,8 +92,8 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
     const result = await f.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1", transcript_path: transcript });
     expect(result.code).toBe(0);
     expect(result.stdout).toBe("");
-    expect(f.calls.map(call => call.method)).toEqual(["conversation_notices", "conversation_notices_displayed"]);
-    expect(f.calls[1]!.params.messageIds).toEqual([decisionNotice.messageId]);
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision", "conversation_notices", "conversation_notices_displayed"]);
+    expect(f.calls[2]!.params.messageIds).toEqual([decisionNotice.messageId]);
   });
 
   it("ignores the approval id in an earlier turn when the final turn does not show it", async () => {
@@ -103,6 +103,31 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
     const result = await f.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1", transcript_path: transcript });
     expect(JSON.parse(result.stdout).decision).toBe("block");
     expect(f.calls.map(call => call.method)).not.toContain("conversation_notices_displayed");
+  });
+
+  it.each(["codex", "claude"])("refuses a %s Stop while the latest user turn never reached conversation_decide", async provider => {
+    const f = await fixture({ conversation_pending_decision: { messageId: "user-c77c", content: "Tích hợp nốt Context7 đi", attempt: 1 },
+      conversation_notices: { notices: [decisionNotice], undisplayed: [] } }, provider);
+    const result = await f.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1", stop_hook_active: false, last_assistant_message: "Hook chưa cung cấp messageId" });
+    expect(result.code).toBe(0);
+    const block = JSON.parse(result.stdout);
+    expect(block.decision).toBe("block");
+    expect(block.reason).toContain("messageId=user-c77c");
+    expect(block.reason).toContain("Tích hợp nốt Context7 đi");
+    expect(block.reason).toContain("Call conversation_decide now");
+    // Notices wait for the next Stop; the decision refusal is the only output of this one.
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision"]);
+  });
+
+  it("acknowledges a Codex display from last_assistant_message and does not rely on a Claude transcript", async () => {
+    const undisplayed = { ...decisionNotice, surfacedAt: "2026-10-20T03:17:00.000Z", reblocks: 0 };
+    const f = await fixture({ conversation_notices: { notices: [decisionNotice], undisplayed: [undisplayed] } }, "codex");
+    const result = await f.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1", stop_hook_active: false,
+      transcript_path: null, last_assistant_message: `Coordinator hỏi bạn: Dùng schema v2 hay giữ v1? Trả lời ${APPROVAL_ID}: 1` });
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision", "conversation_notices", "conversation_notices_displayed"]);
+    expect(f.calls[2]!.params.messageIds).toEqual([decisionNotice.messageId]);
   });
 
   it("puts the MUST SHOW section first in the inbox nudge context", async () => {
@@ -118,7 +143,7 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
     const f = await fixture({ user_prompt: { messageId: "user-1", notices: [decisionNotice], undisplayed: [] } });
     const result = await f.invoke("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "hello" });
     const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
-    expect(context.startsWith("Trusted Bflow user turn: messageId=user-1; requiresConversationDecision=false. ")).toBe(true);
+    expect(context.startsWith("Trusted Bflow user turn: messageId=user-1; requiresConversationDecision=false. Call conversation_decide first")).toBe(true);
     expect(context.indexOf("MUST SHOW TO USER VERBATIM:")).toBeLessThan(context.indexOf("Trusted Bflow user turn and Conversation context:"));
     expect(context).toContain("Trusted Bflow user turn and Conversation context:");
   });

@@ -675,6 +675,12 @@ Xem `WORKFLOW-LIVENESS-AUDIT.md` và `WORKFLOW-LIVENESS-HANDOFF.md` cho nguồn 
 ranh giới nghiệm thu. Có local regression tests; live provider/full SDLC acceptance không được
 suy ra từ fake transport, receipt, hoặc test Herdr native actor.
 
+`conversation_decide` và `resume_run` của Conversation không bắt model chép `messageId`: host gắn quyết định vào lượt
+người dùng mới nhất đã xác thực của đúng pane (nếu model truyền `messageId` thì vẫn phải khớp). Một lượt người dùng
+kết thúc mà chưa có quyết định sẽ bị hook Stop từ chối, tối đa hai lần mỗi lượt, cho cả Claude và Codex. Codex ghi nhận
+notice đã hiển thị qua `last_assistant_message` của Stop. Khi khởi động, host không chấm lại các lần dừng của Coordinator
+thuộc session trước.
+
 Để yêu cầu tiếp tục run bị chặn trong Conversation, dùng `tiếp tục` hoặc `resume <run-id>`.
 Host kiểm tra input người dùng thật và session trước khi chuyển yêu cầu tới Runtime; thao tác
 này không thay thế một approval đang chờ và không tạo workflow mới.
