@@ -9,7 +9,7 @@ import {
   type PaneBinding, type TaskDefinition, type AgentRole, type WorkflowDefinition, type DelegationRequest
 } from "@bflow/contracts";
 import { AgenticJournal, digest, isConversationDelivery, json, record, strings, textField, type JournalState,
-  type Outbound, type RunRecord, type SpecRecord, type TaskRecord, type UserDecisionRecord } from "./journal.js";
+  type ConflictResolverAttempt, type Outbound, type RunRecord, type SpecRecord, type TaskRecord, type UserDecisionRecord } from "./journal.js";
 import { buildDecisionRequestMessage, buildUserDecisionRequest, USER_DECISION_EXPIRED_KIND, validateUserDecisionAnswer, type UserDecisionToolInput } from "./decision-routing.js";
 import { captureIntegratedChange } from "./integration-change.js";
 import { CoreSession } from "./core-session.js";
@@ -22,10 +22,29 @@ import { RoleCapabilityPreflightError, type AgenticRuntimePorts, type Integratio
 import type { WorkflowRejection } from "./workflow-rejection.js";
 import type { RunFacts } from "./run-watchdog.js";
 import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
+import { describeValidationError, INVALID_ROLE_MESSAGE_LIMIT, isMessageContentFailure } from "./role-message-feedback.js";
 
 const VERIFICATION_GATE = "p19-independent-task-verification";
 const TERMINAL_RUN_STATUSES: readonly string[] = ["completed", "failed", "cancelled", "escalated"];
 /** Terminal specialist `task.status` values (every agents/<role>/system-prompt.md); each discharges the correlated handoff's result obligation. */
+/** Automatic Developer resolver attempts per P18 conflict before the run escalates to a human. */
+export const CONFLICT_RESOLVER_ATTEMPTS = 2;
+const CONFLICT_RESOLUTION_KIND = "conflict_resolution";
+const CONFLICT_ESCALATION = "Git integration conflict requires an assigned resolver; worktree preserved";
+/** Runtime-authored Developer assignment on a preserved P18 integration worktree; it has no Core task. */
+export function isConflictResolverAssignment(message: RoleMessage): boolean {
+  return message.type === "task.assignment" && message.payload !== null && typeof message.payload === "object" && !Array.isArray(message.payload) &&
+    (message.payload as Record<string, unknown>).kind === CONFLICT_RESOLUTION_KIND;
+}
+/** Read-only specialists the Coordinator may delegate to; each needs its own bound pane, or an explicit capable fallback. */
+const SPECIALIST_ROLES: readonly string[] = ["specifier", "architect", "planner", "security", "reviewer", "qa", "tester"];
+/** Used only when the requested role has no pane in this session and the fallback pane has every required capability. */
+const SPECIALIST_FALLBACKS: Readonly<Record<string, string>> = { security: "reviewer", tester: "qa" };
+/** Synchronous refusal of a specialist request that could not be routed to any bound pane; the run itself is not changed. */
+export class SpecialistUnavailableError extends Error {
+  readonly code = "specialist_unavailable";
+  constructor(message: string, readonly requestedRole: string, readonly boundRoles: readonly string[]) { super(message); this.name = "SpecialistUnavailableError"; }
+}
 const TERMINAL_TASK_STATUS_RESULTS: readonly string[] = ["blocked", "failed", "completed", "succeeded", "inconclusive"];
 /** Follow-up runs a human `changes_requested` may create from one original run before the next one escalates normally. */
 const MAX_FOLLOW_UP_RUNS = 5;
@@ -37,6 +56,37 @@ function nextAttemptKey(key: string): string {
 /** Automatic-resume budget carried from the run's previous Coordinator action, so successive capability blockers share one bound. */
 function inheritedResumeAttempts(run: RunRecord): number {
   return run.pendingAction?.kind === "resume_coordinator" ? run.pendingAction.resumeAttempts ?? 0 : 0;
+}
+/** Automatic resumes of one blocker lineage before it waits for the user (the journal codec also caps it). */
+const AUTO_RESUME_LIMIT = 3;
+/** Explicit user resumes ("tiếp tục <run-id>") of one blocker lineage; separate from, and still allowed after, the automatic budget. */
+const MANUAL_RESUME_LIMIT = 3;
+/** Minimum wait before automatic resume n+1 (n = attempts already spent), from the episode start or the previous resume. */
+const AUTO_RESUME_BACKOFF_MS: readonly number[] = [30_000, 60_000, 120_000];
+/** Budget and backoff anchor an automatic-resume episode inherits from the Coordinator action it follows, so resume -> stop cannot loop. */
+function inheritedAutoResume(run: RunRecord): { resumeAttempts: number; lastResumedAt?: string; manualResumeAttempts?: number } {
+  const prior = run.pendingAction?.kind === "resume_coordinator" ? run.pendingAction : undefined;
+  return { resumeAttempts: prior?.resumeAttempts ?? 0, ...(prior?.lastResumedAt === undefined ? {} : { lastResumedAt: prior.lastResumedAt }),
+    ...inheritedManualResume(run) };
+}
+/** The explicit-resume count of the lineage, carried into every follow-up action so the user's bound cannot be reset by a recurrence. */
+function inheritedManualResume(run: RunRecord): { manualResumeAttempts?: number } {
+  const prior = run.pendingAction?.kind === "resume_coordinator" ? run.pendingAction : undefined;
+  return prior?.manualResumeAttempts === undefined ? {} : { manualResumeAttempts: prior.manualResumeAttempts };
+}
+/** What an invalid message answers: its causation (the assignment), else everything uncorrelated from the same sender pane. */
+function invalidMessageSource(message: RoleMessage): string {
+  return message.causation_id ?? `uncorrelated:${message.sender.pane_id ?? message.sender.agent_id ?? "unknown"}`;
+}
+/** Earliest time Runtime may automatically resume this action. */
+function autoResumeDueAt(action: NonNullable<RunRecord["pendingAction"]>): number {
+  const anchor = Math.max(Date.parse(action.createdAt), action.lastResumedAt === undefined ? -Infinity : Date.parse(action.lastResumedAt));
+  const attempts = action.resumeAttempts ?? 0;
+  return anchor + AUTO_RESUME_BACKOFF_MS[Math.min(attempts, AUTO_RESUME_BACKOFF_MS.length - 1)]!;
+}
+/** User-visible description of an automatic resume episode, carried on its blocker notice. */
+function automaticResumeNotice(action: NonNullable<RunRecord["pendingAction"]>): JsonValue {
+  return { attempt: (action.resumeAttempts ?? 0) + 1, limit: AUTO_RESUME_LIMIT, notBefore: new Date(autoResumeDueAt(action)).toISOString() };
 }
 /** A cycle stopped by an environment/timeout `blocked` or missing-evidence `inconclusive` result; exhausted or failed verdicts stay final. */
 function retryableVerificationCycle(cycle: { status: string; history: readonly { status: string }[] }): boolean {
@@ -360,6 +410,64 @@ export class AgenticWorkflowRuntime {
   private refused(state: JournalState, messageId: string): boolean {
     return state.inbox.some(item => item.message.message_id === messageId && item.status === "rejected");
   }
+  /**
+   * Counts one invalid RoleMessage of `role` for one assignment/causation `sourceId` and returns the new count. A replay of the
+   * same inbound envelope (`messageId` already counted) is not counted again, so restarts and redeliveries keep the count exact.
+   */
+  private countInvalidMessage(run: RunRecord, role: string, sourceId: string, messageId?: string): number {
+    const key = `${role}:${sourceId}`;
+    const ledger = run.invalidMessages ??= [];
+    let entry = ledger.find(item => item.key === key);
+    if (entry && messageId !== undefined && entry.messageIds.includes(messageId)) return entry.count;
+    if (!entry) { entry = { key, count: 0, messageIds: [] }; ledger.push(entry); if (ledger.length > 50) ledger.shift(); }
+    entry.count = Math.min(1000, entry.count + 1);
+    if (messageId !== undefined) entry.messageIds = [...entry.messageIds, messageId].slice(-10);
+    return entry.count;
+  }
+  /**
+   * After INVALID_ROLE_MESSAGE_LIMIT invalid messages for one assignment the run is handed to the Coordinator (reassign, change
+   * role or report a blocker) as a bounded `auto_resume` action. A pending human gate is never bypassed: the run then only
+   * records the reason. Returns whether the run was escalated.
+   */
+  private escalateInvalidMessages(run: RunRecord, sourceMessageId: string, reason: string, createdAt = this.now()): boolean {
+    if (run.status === "awaiting_approval" || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) return false;
+    const previousStatus = run.status, inherited = inheritedAutoResume(run);
+    run.error = reason.slice(0, 2000); run.status = "escalated";
+    run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
+      reason: run.error, sourceMessageId, createdAt, state: "pending", previousStatus, ...inherited, recovery: "auto_resume" };
+    return true;
+  }
+  /**
+   * Returns a refused message's validation error to the agent that sent it, through Herdr, so it can fix and resend. A Developer
+   * holding an active assignment is reached by a task notice under that assignment's lease; other roles by a Runtime task.status.
+   * Conversation is never addressed. Idempotent per (run, key, attempt). Returns whether a notice was queued.
+   */
+  private returnValidationError(state: JournalState, outbox: HerdrOutbox, run: RunRecord, rejected: RoleMessage, key: string,
+    attempt: number, error: string): boolean {
+    const role = rejected.sender.role;
+    if (role === "conversation" || role === "runtime" || role === "user") return false;
+    const id = `invalid-feedback-${digest([run.runId, key, attempt])}`;
+    if (state.outbound.some(out => out.message.message_id === id)) return true;
+    const payload = json({ kind: "role_message_rejected", status: "rejected", runId: run.runId, rejectedMessageId: rejected.message_id,
+      rejectedType: rejected.type, attempt, limit: INVALID_ROLE_MESSAGE_LIMIT, errors: error,
+      next: `Runtime refused your ${rejected.type} (${rejected.message_id}): ${error}. Fix these fields and send a schema-valid message again ` +
+        `with send_role_message (attempt ${attempt} of ${INVALID_ROLE_MESSAGE_LIMIT}); keep the original correlation_id and causation_id.` });
+    const base = { schema_version: 2 as const, message_id: id, correlation_id: run.delegation.correlationId, causation_id: rejected.message_id,
+      run_id: run.runId, type: "task.status" as const, payload, artifact_references: [], occurred_at: this.now(), idempotency_key: id };
+    const assignment = role === "developer" ? [...state.outbound].reverse().find(out => out.message.type === "task.assignment" &&
+      out.message.run_id === run.runId && out.status === "accepted" && out.handle !== undefined &&
+      (rejected.sender.pane_id === undefined || out.handle.target.paneId === rejected.sender.pane_id)) : undefined;
+    try {
+      if (assignment?.handle) outbox.enqueueTaskNotice(RoleMessageSchema.parse({ ...base, sender: { role: "coordinator" },
+        recipient: { role: "developer", agent_id: assignment.handle.target.agentId, pane_id: assignment.handle.target.paneId } }), assignment);
+      // A Developer whose assignment still holds its writer lease cannot take a second lease; it is reached only by a task notice.
+      else if (role === "developer" && state.outbound.some(out => out.message.type === "task.assignment" && out.message.run_id === run.runId &&
+          out.status === "accepted")) return false;
+      else outbox.enqueue(RoleMessageSchema.parse({ ...base, sender: { role: "runtime" },
+        recipient: { role, ...(rejected.sender.agent_id ? { agent_id: rejected.sender.agent_id } : {}), ...(rejected.sender.pane_id ? { pane_id: rejected.sender.pane_id } : {}) } }), role);
+      return true;
+    } catch { return false; }
+  }
   /** Called by the host when an authenticated inbound message could not be applied; the failure must not stay silent. */
   async reportInboundFailure(input: unknown, reason: string): Promise<void> {
     const message = RoleMessageSchema.safeParse(input);
@@ -369,6 +477,27 @@ export class AgenticWorkflowRuntime {
       const run = state.runs.find(item => item.runId === data.run_id);
       if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || this.refused(state, data.message_id)) return;
       const text = redactString(reason);
+      // The message's own content failed validation: retrying the same envelope cannot help, but the sender can fix it. Return the
+      // readable error to the sender; only the INVALID_ROLE_MESSAGE_LIMIT-th invalid message for one assignment involves the
+      // Coordinator (bounded auto_resume). Transport/uncertain failures keep the delivery-failure path below.
+      if (isMessageContentFailure(text) && inboundFailureClass(text) !== "transport_uncertain" &&
+          !["conversation", "runtime", "user"].includes(data.sender.role)) {
+        const sourceId = invalidMessageSource(data), key = `${data.sender.role}:${sourceId}`;
+        const attempt = this.countInvalidMessage(run, data.sender.role, sourceId, data.message_id);
+        const error = describeValidationError(text);
+        // Deterministic content refusal: journal it as rejected so redelivery/replay is answered without re-counting.
+        const inbox = state.inbox.find(item => item.message.message_id === data.message_id);
+        if (inbox && inbox.status === "received") { inbox.status = "rejected"; inbox.reason = `Invalid ${data.type} content: ${error}`.slice(0, 2000); }
+        if (attempt < INVALID_ROLE_MESSAGE_LIMIT) {
+          this.returnValidationError(state, outbox, run, data, key, attempt, error);
+          await save(); return;
+        }
+        this.escalateInvalidMessages(run, data.message_id, `${data.type} from ${data.sender.role} was invalid ${attempt} times for ${sourceId}: ${error}`,
+          data.occurred_at ?? this.now());
+        this.surfaceFailure(state, outbox, run, data.message_id, "inbound_failed",
+          `${data.type} from ${data.sender.role} to ${data.recipient.role} (${data.message_id})`, text, INBOUND_FAILURE_OPTIONS);
+        await save(); return;
+      }
       if (inboundFailureFinal(text) && run.status !== "awaiting_approval" && !Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
         const previousStatus = run.status;
         run.error = `${data.type} ingress failed: ${text}`.slice(0, 2000);
@@ -382,32 +511,44 @@ export class AgenticWorkflowRuntime {
       await save();
     });
   }
-  /** Authenticated host report for a schema-invalid native RoleMessage rejected before transport intent. */
-  async reportRoleToolFailure(bindingInput: unknown, rawMessage: unknown, reasonInput: string): Promise<void> {
+  /**
+   * Authenticated host report for a schema-invalid native RoleMessage rejected before transport intent. The host returns the
+   * readable validation error to the agent as the synchronous tool error, so it can fix and resend in the same turn; Runtime only
+   * counts the attempt per (run, sender role, assignment). The INVALID_ROLE_MESSAGE_LIMIT-th invalid message for one assignment
+   * hands the run to the Coordinator as a bounded `auto_resume` action and tells Conversation once. Returns the attempt
+   * accounting, or undefined when the pane holds no live assignment.
+   */
+  async reportRoleToolFailure(bindingInput: unknown, rawMessage: unknown, reasonInput: string):
+    Promise<{ attempt: number; limit: number; escalated: boolean } | undefined> {
     const binding = PaneBindingSchema.parse(bindingInput);
     const raw = objectField(rawMessage, "message") ?? rawMessage;
     const claimedRunId = objectField(raw, "run_id");
     const claimedMessageId = objectField(raw, "message_id");
-    await this.transaction(async (state, save, _core, outbox) => {
-      const source = state.outbound.find(out => out.handle?.target.paneId === binding.paneId && out.handle.target.agentId === binding.agentId &&
+    const claimedCausation = objectField(raw, "causation_id");
+    return this.transaction(async (state, save, _core, outbox) => {
+      const candidates = state.outbound.filter(out => out.handle?.target.paneId === binding.paneId && out.handle.target.agentId === binding.agentId &&
         out.message.recipient.role === binding.role && ["accepted", "released"].includes(out.status) &&
         (typeof claimedRunId !== "string" || out.message.run_id === claimedRunId));
+      // The assignment the agent answers: the one its message claims as causation, else the latest one bound to this pane.
+      const source = candidates.find(out => out.message.message_id === claimedCausation) ?? candidates.at(-1);
       const run = state.runs.find(item => item.runId === (source?.message.run_id ?? claimedRunId));
-      if (!run || !source || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) return;
+      if (!run || !source || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) return undefined;
       const messageId = typeof claimedMessageId === "string" && claimedMessageId.length <= 200 ? claimedMessageId : `invalid-role-message-${digest([binding.paneId, source.message.message_id, reasonInput])}`;
-      const reason = `Rejected invalid ${binding.role} RoleMessage before transport: ${redactString(reasonInput)}`.slice(0, 2000);
-      const previousStatus = run.status;
-      if (run.status !== "awaiting_approval" && !Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
-        run.error = reason; run.status = "escalated";
-        run.pendingAction = { actionId: `next-${digest([run.runId, messageId])}`, kind: "resume_coordinator", owner: "coordinator",
-          reason, sourceMessageId: messageId, createdAt: this.now(), state: "pending", previousStatus, recovery: "manual", resumeAttempts: 0 };
-      }
+      // Every tool call is a distinct attempt (an agent may reuse its message_id when retrying), so no message-id dedupe here.
+      const attempt = this.countInvalidMessage(run, binding.role, source.message.message_id);
+      if (attempt < INVALID_ROLE_MESSAGE_LIMIT) { await save(); return { attempt, limit: INVALID_ROLE_MESSAGE_LIMIT, escalated: false }; }
+      const reason = `Rejected invalid ${binding.role} RoleMessage before transport ${attempt} times for ${source.message.message_id}: ${describeValidationError(reasonInput)}`.slice(0, 2000);
+      const escalated = this.escalateInvalidMessages(run, messageId, reason);
+      const automatic = escalated && (run.pendingAction?.resumeAttempts ?? 0) < AUTO_RESUME_LIMIT;
       this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId,
         sdlcStatus: run.status, owner: "coordinator", ...(run.pendingAction === undefined ? {} : { actionId: run.pendingAction.actionId }),
-        headline: "Agent result was rejected before delivery", reason, blockageReason: reason,
+        headline: automatic ? `${binding.role} sent ${attempt} invalid messages; Runtime hands the assignment back to Coordinator automatically`
+          : "Agent result was rejected before delivery", reason, blockageReason: reason,
+        ...(automatic ? { automaticResume: automaticResumeNotice(run.pendingAction!) } : {}),
         options: ["Ask Coordinator to send a schema-valid result or explain the blocker", "Cancel run"] },
-      `invalid-role-message:${digest([run.runId, messageId])}`, "conversation");
+      `invalid-role-message:${digest([run.runId, messageId, attempt])}`, "conversation");
       await save();
+      return { attempt, limit: INVALID_ROLE_MESSAGE_LIMIT, escalated };
     });
   }
   /**
@@ -474,7 +615,7 @@ export class AgenticWorkflowRuntime {
       run.pendingAction = { actionId: `next-${digest([run.runId, out.message.message_id])}`, kind: "resume_coordinator", owner: "coordinator",
         reason, sourceMessageId: out.message.message_id, relatedMessageIds: runFailures.slice(1).map(failure => failure.message.message_id),
         createdAt: existing?.createdAt ?? this.now(), state: "pending", previousStatus: existing?.previousStatus ?? previousStatus,
-        resumeAttempts: existing?.resumeAttempts ?? 0, recovery: "capability_repair" };
+        resumeAttempts: existing?.resumeAttempts ?? 0, ...inheritedManualResume(run), recovery: "capability_repair" };
       // A recurrence after a resume is a new episode of the same unsent message and is surfaced again.
       const episode = run.pendingAction.resumeAttempts ? [run.pendingAction.resumeAttempts] : [];
       const messageId = `capability-blocked-${digest([run.runId, out.message.message_id, ...episode])}`;
@@ -566,7 +707,7 @@ export class AgenticWorkflowRuntime {
     const action = run.pendingAction!;
     run.status = action.previousStatus ?? "specifying";
     if (run.error === action.reason) delete run.error;
-    action.state = "queued"; action.resumeAttempts = (action.resumeAttempts ?? 0) + 1; delete action.previousStatus;
+    action.state = "queued"; action.resumeAttempts = Math.min(AUTO_RESUME_LIMIT, (action.resumeAttempts ?? 0) + 1); action.lastResumedAt = this.now(); delete action.previousStatus;
     run.resumeReceipts = [...(run.resumeReceipts ?? []).filter(item => item.actionId !== action.actionId), { actionId: action.actionId, messageId }].slice(-50);
   }
   private admitRevision(state: JournalState, outbox: HerdrOutbox, run: RunRecord, delegation: DelegationRequest): void {
@@ -777,6 +918,8 @@ export class AgenticWorkflowRuntime {
   /**
    * A live run has no pending decision, handoff or human gate, and its role panes are not working, with no activity since idleSince.
    * Herdr idle/done only means "not working" here, never task success. Once per episode (episodeKey changes with activity).
+   * A holder (an accepted assignment still owing its result) is first reminded once through Herdr; a holder still silent in a
+   * later episode, or a stall without any holder, becomes a bounded `auto_resume` Coordinator action.
    */
   async reportRunStalled(runId: string, episodeKey: string): Promise<void> {
     await this.transaction(async (state, save, _core, outbox) => {
@@ -791,22 +934,31 @@ export class AgenticWorkflowRuntime {
         (this.outboundOwesResult(state, run, out) || out.message.recipient.role === "coordinator" && out.status === "accepted" && out.handle !== undefined));
       const holder = holders.find(out => out.message.recipient.role === "developer") ??
         holders.find(out => out.message.recipient.role !== "coordinator") ?? holders[0];
+      // First stall of a holder: remind that exact holder once through Herdr to send its result or report blocked. The reminder
+      // is new activity, so the next stall episode starts after it; a holder still silent then is handed to the Coordinator.
+      if (holder?.handle && !this.holderReminded(state, run, holder) && this.remindHolder(outbox, run, holder, idleSince)) {
+        await save(); return;
+      }
       const previousStatus = run.status;
       const sourceMessageId = holder?.message.message_id ?? run.delegation.messageId;
       const reasonForAction = holder
         ? `${holder.message.recipient.role} pane ${holder.handle!.target.paneId} holds accepted ${holder.message.type} for task ${holder.taskId} since ${idleSince} but has no correlated result.`
         : `No run-local work, wait, or next action was recorded after ${idleSince}.`;
+      const inherited = inheritedAutoResume(run);
       run.error = reasonForAction.slice(0, 2000);
       run.status = "escalated";
+      // Automatic and bounded (B0): the Coordinator is woken to reassign or report the blocker; the user decides only once
+      // the automatic budget is spent.
       run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
-        reason: run.error, sourceMessageId, createdAt: this.now(), state: "pending", previousStatus, resumeAttempts: 0, recovery: "manual" };
+        reason: run.error, sourceMessageId, createdAt: this.now(), state: "pending", previousStatus, ...inherited, recovery: "auto_resume" };
+      const automatic = (run.pendingAction.resumeAttempts ?? 0) < AUTO_RESUME_LIMIT ? { automaticResume: automaticResumeNotice(run.pendingAction) } : {};
       if (holder?.handle) {
         const role = holder.message.recipient.role;
         const kind = role === "developer" ? "developer_no_response" : role === "coordinator" ? "coordinator_no_response" : "run_stalled";
         const reason = `${role} pane ${holder.handle.target.paneId} holds accepted ${holder.message.type} for task ${holder.taskId} since ${idleSince} ` +
-          "but is not working and has reported no result. Herdr idle/done only means not working, never task success.";
+          "but is not working and has reported no result, even after a reminder. Herdr idle/done only means not working, never task success.";
         this.emit(state, outbox, run, "conversation.progress", { kind, runId, reason, idleSince, role, paneId: holder.handle.target.paneId,
-          owner: "coordinator", actionId: run.pendingAction.actionId,
+          owner: "coordinator", actionId: run.pendingAction.actionId, ...automatic,
           options: ["Ask Coordinator to inspect the run and re-dispatch the task or report the blocker", "Cancel this run"],
           headline: `Run may be stuck: ${role} stopped without a result (${runId})` },
         `run-stalled:${episodeKey}`, "conversation");
@@ -815,10 +967,41 @@ export class AgenticWorkflowRuntime {
       const reason = `Không có tiến triển từ ${idleSince} và các pane vai trò không ở trạng thái đang làm việc. ` +
         "Trạng thái idle/done của Herdr không chứng minh công việc đã thành công.";
       this.emit(state, outbox, run, "conversation.progress", { kind: "run_stalled", runId, reason, idleSince, owner: "coordinator", actionId: run.pendingAction.actionId,
-        options: ["Yêu cầu Coordinator tiếp tục hoặc giải thích trạng thái", "Hủy run"], headline: `Run có thể bị treo: ${runId}` },
+        ...automatic, options: ["Yêu cầu Coordinator tiếp tục hoặc giải thích trạng thái", "Hủy run"], headline: `Run có thể bị treo: ${runId}` },
       `run-stalled:${episodeKey}`, "conversation");
       await save();
     });
+  }
+  private holderReminderId(run: RunRecord, holder: Outbound): string { return `stall-reminder-${digest([run.runId, holder.message.message_id])}`; }
+  /** One reminder per held assignment; a reminder is never itself reminded. */
+  private holderReminded(state: JournalState, run: RunRecord, holder: Outbound): boolean {
+    if (objectField(holder.message.payload, "kind") === "result_reminder") return true;
+    const id = this.holderReminderId(run, holder);
+    return state.outbound.some(out => out.message.message_id === id);
+  }
+  /**
+   * Queues the idempotent Herdr reminder to the exact holder: send the correlated result or report blocked. A Developer whose
+   * assignment still holds its writer lease is reached by a task notice under that lease. It asks for a result; it never is one.
+   * Returns false when the holder cannot be reached this way (the caller then hands the run to the Coordinator).
+   */
+  private remindHolder(outbox: HerdrOutbox, run: RunRecord, holder: Outbound, idleSince: string): boolean {
+    const id = this.holderReminderId(run, holder), role = holder.message.recipient.role, target = holder.handle!.target;
+    const payload = json({ kind: "result_reminder", runId: run.runId, taskId: holder.taskId, sourceMessageId: holder.message.message_id,
+      messageType: holder.message.type, idleSince,
+      next: `Runtime has no result for ${holder.message.type} ${holder.message.message_id} (task ${holder.taskId}) since ${idleSince}. ` +
+        `Send your structured result now with send_role_message (causation_id ${holder.message.message_id}), or report task.status with ` +
+        "payload.status \"blocked\" and the reason. An idle or finished turn is not a result." });
+    const base = { schema_version: 2 as const, message_id: id, correlation_id: run.delegation.correlationId, causation_id: holder.message.message_id,
+      run_id: run.runId, type: "task.status" as const, payload, artifact_references: [], occurred_at: this.now(), idempotency_key: id };
+    try {
+      if (holder.message.type === "task.assignment" && holder.status === "accepted") {
+        if (role !== "developer") return false;
+        outbox.enqueueTaskNotice(RoleMessageSchema.parse({ ...base, sender: { role: "coordinator" },
+          recipient: { role: "developer", agent_id: target.agentId, pane_id: target.paneId } }), holder);
+      } else outbox.enqueue(RoleMessageSchema.parse({ ...base, sender: { role: "runtime" },
+        recipient: { role, agent_id: target.agentId, ...(target.paneId ? { pane_id: target.paneId } : {}) } }), role);
+      return true;
+    } catch { return false; }
   }
   async loadSpecification(specId: string): Promise<Specification> {
     return this.transaction(async state => {
@@ -840,7 +1023,9 @@ export class AgenticWorkflowRuntime {
   }
   /**
    * An authenticated envelope refused by its own content (no idempotency_key, wrong recipient). Retrying the same envelope cannot
-   * succeed, so it is journaled as rejected once, the run is escalated to Coordinator and the user hears the exact refusal.
+   * succeed, so it is journaled as rejected once. An agent sender gets the exact refusal back through Herdr to resend a valid
+   * message; after INVALID_ROLE_MESSAGE_LIMIT refusals for one assignment (or for a non-agent sender) the run is escalated to the
+   * Coordinator and the user hears the exact refusal.
    */
   private async refuseInbound(message: RoleMessage, detail: string): Promise<never> {
     const headline = `Handoff refused: ${message.type} from ${message.sender.role} ${detail}`;
@@ -852,11 +1037,24 @@ export class AgenticWorkflowRuntime {
       state.inbox.push({ message, status: "rejected", reason });
       const run = state.runs.find(item => item.runId === message.run_id);
       if (run && !run.cancelled && !TERMINAL_RUN_STATUSES.includes(run.status)) {
+        const agentSender = !["conversation", "runtime", "user"].includes(message.sender.role);
+        const sourceId = invalidMessageSource(message);
+        // An agent's refused message goes back to that agent to fix and resend; only the INVALID_ROLE_MESSAGE_LIMIT-th refusal for
+        // one assignment involves the Coordinator, automatically and bounded. The rejected inbox entry dedupes redeliveries.
+        const attempt = agentSender ? this.countInvalidMessage(run, message.sender.role, sourceId, message.message_id) : INVALID_ROLE_MESSAGE_LIMIT;
+        if (agentSender && attempt < INVALID_ROLE_MESSAGE_LIMIT) {
+          this.returnValidationError(state, outbox, run, message, `${message.sender.role}:${sourceId}`, attempt, `${message.type} ${detail}`);
+          await save();
+          throw new AdmissionRejectedError(reason);
+        }
         if (run.status !== "awaiting_approval" && !Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
-          const previousStatus = run.status;
-          run.error = reason; run.status = "escalated";
-          run.pendingAction = { actionId: `next-${digest([run.runId, message.message_id])}`, kind: "resume_coordinator", owner: "coordinator",
-            reason, sourceMessageId: message.message_id, createdAt: this.now(), state: "pending", previousStatus, recovery: "manual", resumeAttempts: 0 };
+          if (agentSender) this.escalateInvalidMessages(run, message.message_id, `${reason} (${attempt} refused messages for ${sourceId})`);
+          else {
+            const previousStatus = run.status;
+            run.error = reason; run.status = "escalated";
+            run.pendingAction = { actionId: `next-${digest([run.runId, message.message_id])}`, kind: "resume_coordinator", owner: "coordinator",
+              reason, sourceMessageId: message.message_id, createdAt: this.now(), state: "pending", previousStatus, recovery: "manual", resumeAttempts: 0 };
+          }
         }
         this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId, sdlcStatus: run.status, owner: "coordinator",
           ...(run.pendingAction === undefined ? {} : { actionId: run.pendingAction.actionId }), headline, reason, blockageReason: reason,
@@ -949,7 +1147,7 @@ export class AgenticWorkflowRuntime {
             expectedVersion: snapshot.version, verification: { receipt, evidence, verifiedAt: message.occurred_at ?? receipt.observedAt },
             occurredAt: message.occurred_at ?? receipt.observedAt, idempotencyKey: `verify-binding:${receipt.receiptId}` }));
         } else if (message.type === "implementation.submitted") {
-          await this.submit(state, save, core, outbox, run, message);
+          if (!this.resolverReport(state, outbox, run, message)) await this.submit(state, save, core, outbox, run, message);
         } else if (message.type === "verification.result") {
           const result = VerificationResultSchema.parse(message.payload);
           if (!["tester", "qa"].includes(message.sender.role) || result.runId !== run.runId || result.verificationScope === "workflow")
@@ -991,6 +1189,8 @@ export class AgenticWorkflowRuntime {
           await this.cancelRun(state, save, core, outbox, run, textField(record(message.payload).reason));
         } else if (!["spec.draft", "task.status", "review.verdict", "verification.escalation"].includes(message.type)) {
           throw new Error(`Unsupported inbound message ${message.type}`);
+        } else if (message.type === "task.status" && message.sender.role === "developer" && this.resolverReport(state, outbox, run, message)) {
+          // Handled: a resolver report ends its own attempt; Runtime assigns the next resolver or escalates on the next tick.
         } else {
           const blockage = message.sender.role !== "coordinator" ? specialistBlockage(message.payload) : undefined;
           if (blockage !== undefined) this.reportSpecialistBlocked(state, outbox, run, message, blockage);
@@ -1044,16 +1244,21 @@ export class AgenticWorkflowRuntime {
         // its bounded attempt budget carries over from the action this blocker follows, so resume -> blocked cannot loop.
         const capabilityBlocker = /repository|read-only tool|native mutation|exec_command|resource enumeration/i.test(blockage) &&
           state.outbound.some(out => out.message.run_id === run.runId && out.status === "failed" && out.error?.includes(RoleCapabilityPreflightError.name));
+        // Any other Coordinator blocker resumes automatically with backoff on the same inherited budget; a blocker that needs a
+        // human answer goes through request_user_decision instead, and a pending decision/approval never auto-resumes (see above).
         run.pendingAction = { actionId: `next-${digest([run.runId, parsed.message_id])}`, kind: "resume_coordinator", owner: "coordinator",
-          reason: reason.slice(0, 2000), sourceMessageId: parsed.message_id, createdAt: parsed.occurred_at ?? this.now(),
-          state: "pending", previousStatus: run.status, resumeAttempts: capabilityBlocker ? inheritedResumeAttempts(run) : 0, recovery: capabilityBlocker ? "capability_repair" : "manual" };
+          reason: reason.slice(0, 2000), sourceMessageId: parsed.message_id, createdAt: this.now(),
+          state: "pending", previousStatus: run.status, ...inheritedAutoResume(run), recovery: capabilityBlocker ? "capability_repair" : "auto_resume" };
         run.status = "escalated";
         if (!options.notificationAlreadyRecorded) {
           const noticeId = `coordinator-blocked-${digest([run.runId, parsed.message_id])}`;
+          const automatic = !capabilityBlocker && (run.pendingAction.resumeAttempts ?? 0) < AUTO_RESUME_LIMIT;
           outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: noticeId, correlation_id: run.delegation.correlationId,
             causation_id: parsed.message_id, run_id: run.runId, sender: { role: "runtime" }, recipient: { role: "conversation" },
             type: "conversation.progress", payload: { kind: "workflow_blocked", runId: run.runId, sdlcStatus: run.status,
-              headline: "Workflow đang chờ khắc phục blocker", reason, blockageReason: reason, fromRole: "coordinator",
+              headline: automatic ? "Workflow bị chặn; Runtime sẽ tự tiếp tục Coordinator sau thời gian chờ" : "Workflow đang chờ khắc phục blocker",
+              reason, blockageReason: reason, fromRole: "coordinator", actionId: run.pendingAction.actionId,
+              ...(automatic ? { automaticResume: automaticResumeNotice(run.pendingAction) } : {}),
               options: ["Khắc phục capability rồi yêu cầu tiếp tục run", "Hủy run"] },
             artifact_references: [], occurred_at: this.now(), idempotency_key: noticeId }), "conversation");
         }
@@ -1064,7 +1269,7 @@ export class AgenticWorkflowRuntime {
   }
 
   /** Resume only a recorded recoverable Coordinator blocker. The stable action identity prevents duplicate wakeups on retry/restart. */
-  async resumeBlockedRun(runIdInput: string, actionIdInput: string): Promise<JsonValue> {
+  async resumeBlockedRun(runIdInput: string, actionIdInput: string, options: { automatic?: boolean } = {}): Promise<JsonValue> {
     const runId = textField(runIdInput), actionId = textField(actionIdInput);
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId), action = run.pendingAction;
@@ -1074,7 +1279,9 @@ export class AgenticWorkflowRuntime {
       const retryUnsent = action?.actionId === actionId && action.state === "pending" &&
         [action.sourceMessageId, ...(action.relatedMessageIds ?? [])].every(id => state.outbound.some(out =>
           out.message.message_id === id && out.status === "failed" && out.error?.includes(RoleCapabilityPreflightError.name)));
-      if (priorResume && !retryUnsent) return json({ queued: true, messageId: priorResume.messageId, actionId });
+      // A receipt answers a repeated call for the episode it settled; the same identity pending again (a recurrence) is a new episode.
+      const recurred = run.status === "escalated" && action?.actionId === actionId && action.state === "pending";
+      if (priorResume && !retryUnsent && !recurred) return json({ queued: true, messageId: priorResume.messageId, actionId });
       // A still-unknown native delivery (legacy escalated record) resumes by waking the Coordinator to reconcile; it is never resent.
       if (run.status !== "escalated" || !action || action.actionId !== actionId || !["resume_coordinator", "reconcile_delivery"].includes(action.kind)) {
         const prior = state.outbound.find(item => item.message.message_id === `resume-${digest([runId, actionId])}`);
@@ -1084,7 +1291,14 @@ export class AgenticWorkflowRuntime {
       if (Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
           run.approval !== undefined && (!run.decision || run.decision.approvalId !== run.approval.approvalId))
         throw new Error("A pending approval or user decision must be resolved before resume");
-      if ((action.resumeAttempts ?? 0) >= 3) throw new Error("Bounded resume attempts are exhausted; cancel or request operator intervention");
+      if (options.automatic && (action.resumeAttempts ?? 0) >= AUTO_RESUME_LIMIT) throw new Error("Bounded resume attempts are exhausted; cancel or request operator intervention");
+      // An explicit user resume has its own bound and is still allowed once the automatic budget is spent.
+      if (!options.automatic && (action.manualResumeAttempts ?? 0) >= MANUAL_RESUME_LIMIT)
+        throw new Error(`Explicit resume budget is exhausted (${MANUAL_RESUME_LIMIT} user resumes of this blocker); cancel the run or request operator intervention`);
+      // Re-checked under the journal lock: the classification/backoff may have changed since the automatic pass selected it.
+      if (options.automatic && (action.state !== "pending" || !["auto_resume", "capability_repair"].includes(action.recovery ?? "manual") ||
+          action.recovery === "auto_resume" && Date.parse(this.now()) < autoResumeDueAt(action)))
+        throw new Error("No matching recoverable blocker to resume automatically");
       if (state.outbound.some(item => item.message.run_id === runId && item.status === "unknown_delivery"))
         throw new Error("Unknown delivery must be reconciled before resume");
       const failureIds = [action.sourceMessageId, ...(action.relatedMessageIds ?? [])];
@@ -1128,12 +1342,22 @@ export class AgenticWorkflowRuntime {
           correlation_id: run.delegation.correlationId, causation_id: action.sourceMessageId, run_id: runId,
           sender: { role: "runtime" }, recipient: { role: "coordinator" }, type: "task.status",
           payload: { kind: "resume_run", actionId: action.actionId, reason: action.reason,
-            next: "Inspect the durable blocker, confirm the required capability is now available, then continue this same run through Runtime." },
+            ...(options.automatic ? { automatic: true, attempt: (action.resumeAttempts ?? 0) + 1, limit: AUTO_RESUME_LIMIT } : {}),
+            next: options.automatic
+              ? "Runtime resumed this run automatically (bounded). Inspect the durable blocker, then record the next workflow action through Runtime; if only a human can decide, use request_user_decision instead of stopping."
+              : "Inspect the durable blocker, confirm the required capability is now available, then continue this same run through Runtime." },
           artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }), "coordinator");
       }
       const verificationRetry = run.error?.startsWith(VERIFICATION_RETRY_PREFIX) === true;
       action.state = "queued";
-      action.resumeAttempts = (action.resumeAttempts ?? 0) + 1;
+      action.lastResumedAt = this.now();
+      if (options.automatic) action.resumeAttempts = (action.resumeAttempts ?? 0) + 1;
+      else {
+        // The user's resume grants a fresh automatic budget, with backoff counted from now, so the run can recover itself again.
+        action.manualResumeAttempts = (action.manualResumeAttempts ?? 0) + 1;
+        action.resumeAttempts = 0;
+        if (action.kind === "resume_coordinator" && (action.recovery === undefined || action.recovery === "manual")) action.recovery = "auto_resume";
+      }
       run.status = action.previousStatus ?? "specifying";
       if (verificationRetry) this.prepareVerificationRetry(state, run); // same as retry_verification
       delete action.previousStatus;
@@ -1147,36 +1371,70 @@ export class AgenticWorkflowRuntime {
     });
   }
 
-  /** Restart recovery: resume each persisted capability/no-next-action episode at most once after checking the current Coordinator pane. */
+  /**
+   * Bounded automatic recovery pass, run at host restart and periodically by the host watchdog. Resumes an escalated, uncancelled
+   * run whose pending Coordinator action is classified `auto_resume` (after its 30s/60s/120s backoff) or `capability_repair` (once a
+   * capability proof passes), while no approval or user decision is pending and no delivery is unknown. A verification
+   * delivery/storage escalation re-runs the existing retry_verification path; every other one wakes the Coordinator with the
+   * existing idempotent `resume_run` (keyed by actionId). Each resume spends the persisted `resumeAttempts` budget (limit 3):
+   * once spent, the action becomes `manual` and Conversation is told once, with how to resume it explicitly. An explicit user
+   * resume has its own bound (`manualResumeAttempts`, 3) and grants a fresh automatic budget. Human decisions are never answered here.
+   */
   async resumeRecoverableRuns(): Promise<JsonValue> {
-    if (!this.ports.roleCapabilities.coordinator?.includes("repository.read")) return json({ resumed: 0, reason: "repository.read unavailable" });
+    if (this.quiesced) return json({ resumed: 0, reason: "quiesced" });
+    const coordinatorReadable = this.ports.roleCapabilities.coordinator?.includes("repository.read") === true;
     const candidates = await this.transaction(async (state, save, _core, outbox) => {
-      const repairable = state.runs.filter(run => run.status === "escalated" && !run.cancelled &&
-        run.pendingAction?.kind === "resume_coordinator" && run.pendingAction.recovery === "capability_repair" && run.pendingAction.state === "pending");
-      let notified = false;
-      for (const run of repairable.filter(item => (item.pendingAction!.resumeAttempts ?? 0) >= 3)) {
+      const now = Date.parse(this.now());
+      const recoverable = state.runs.filter(run => run.status === "escalated" && !run.cancelled && !run.supersededBy &&
+        run.pendingAction?.kind === "resume_coordinator" && run.pendingAction.state === "pending" &&
+        ["auto_resume", "capability_repair"].includes(run.pendingAction.recovery ?? "manual"));
+      let changed = false;
+      for (const run of recoverable.filter(item => (item.pendingAction!.resumeAttempts ?? 0) >= AUTO_RESUME_LIMIT)) {
         // Budget spent: stop automatic resumes and say so once; an explicit user resume/cancel decides from here.
-        const before = state.outbound.length, actionId = run.pendingAction!.actionId;
+        const action = run.pendingAction!, actionId = action.actionId, manual = action.manualResumeAttempts ?? 0;
+        const manualLeft = Math.max(0, MANUAL_RESUME_LIMIT - manual);
         this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId, sdlcStatus: run.status, owner: "coordinator",
-          actionId, reason: run.pendingAction!.reason, blockageReason: run.pendingAction!.reason,
-          headline: "Automatic resume stopped after 3 attempts; the same blocker keeps recurring",
-          options: ["Khắc phục nguyên nhân (capability/pane) với operator; run không tự tiếp tục nữa", "Hủy run"] }, `auto-resume-exhausted:${actionId}`, "conversation");
-        notified ||= state.outbound.length !== before;
+          actionId, reason: action.reason, blockageReason: action.reason, manualResumesLeft: manualLeft,
+          headline: manualLeft > 0
+            ? `Automatic resume stopped after 3 attempts; the same blocker keeps recurring. Type \`tiếp tục ${run.runId}\` to resume it (${manualLeft} of ${MANUAL_RESUME_LIMIT} user resumes left)`
+            : `Automatic resume stopped after 3 attempts; the same blocker keeps recurring. All ${MANUAL_RESUME_LIMIT} user resumes are used: fix the cause with an operator or cancel`,
+          options: manualLeft > 0
+            ? [`Gõ \`tiếp tục ${run.runId}\` để Runtime tiếp tục run (còn ${manualLeft}/${MANUAL_RESUME_LIMIT} lần)`, "Khắc phục nguyên nhân (capability/pane) với operator", "Hủy run"]
+            : ["Khắc phục nguyên nhân (capability/pane) với operator; run không tự tiếp tục nữa", "Hủy run"] },
+          // Each user-granted automatic budget that runs out again is a new, separately reported exhaustion.
+          manual === 0 ? `auto-resume-exhausted:${actionId}` : `auto-resume-exhausted:${actionId}:${manual}`, "conversation");
+        action.recovery = "manual";
+        changed = true;
       }
-      if (notified) await save();
-      return repairable.filter(run => (run.pendingAction!.resumeAttempts ?? 0) < 3).map(run => ({ runId: run.runId, actionId: run.pendingAction!.actionId }));
+      if (changed) await save();
+      return recoverable.filter(run => {
+        const action = run.pendingAction!;
+        if ((action.resumeAttempts ?? 0) >= AUTO_RESUME_LIMIT) return false;
+        // Human gates and unknown deliveries are durable waits: never answered, resent or bypassed automatically.
+        if (Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
+            run.approval !== undefined && (!run.decision || run.decision.approvalId !== run.approval.approvalId)) return false;
+        if (state.outbound.some(item => item.message.run_id === run.runId && item.status === "unknown_delivery")) return false;
+        return action.recovery !== "auto_resume" || now >= autoResumeDueAt(action);
+      }).map(run => ({ runId: run.runId, actionId: run.pendingAction!.actionId,
+        verificationRetry: run.error?.startsWith(VERIFICATION_RETRY_PREFIX) === true && run.pendingAction!.recovery === "auto_resume" }));
     });
     let resumed = 0;
     for (const candidate of candidates) {
-      const pane = unwrap(await this.ports.panes.getRoleBinding("coordinator"));
-      if (!pane) continue;
-      const health = unwrap(await this.ports.panes.inspectRoleHealth("coordinator"));
-      if (!health.readyForPrompt || !health.occupantMatches || health.paneId !== pane.paneId) continue;
-      try { await this.resumeBlockedRun(candidate.runId, candidate.actionId); resumed++; }
-      catch (error) {
+      try {
+        if (candidate.verificationRetry) {
+          // Same transition as the Coordinator's retry_verification tool; Runtime then re-runs the verification itself.
+          await this.retryVerification(candidate.runId, { automatic: true, actionId: candidate.actionId }); resumed++; continue;
+        }
+        if (!coordinatorReadable) continue;
+        const pane = unwrap(await this.ports.panes.getRoleBinding("coordinator"));
+        if (!pane) continue;
+        const health = unwrap(await this.ports.panes.inspectRoleHealth("coordinator"));
+        if (!health.readyForPrompt || !health.occupantMatches || health.paneId !== pane.paneId) continue;
+        await this.resumeBlockedRun(candidate.runId, candidate.actionId, { automatic: true }); resumed++;
+      } catch (error) {
         // Unknown delivery, cancellation/approval, stale role binding and capability proof failures remain durable waits.
-        // Startup recovery is best-effort per action: one unresolved run must not abort host activation or block other runs.
-        if (error instanceof RoleCapabilityPreflightError || /Unknown delivery|pending approval|matching recoverable blocker|no verified role capability|capability is unavailable/i.test(String(error))) continue;
+        // Recovery is best-effort per action: one unresolved run must not abort host activation or block other runs.
+        if (error instanceof RoleCapabilityPreflightError || /Unknown delivery|pending approval|matching recoverable blocker|no verified role capability|capability is unavailable|No verification awaiting retry|exhausted|quiesced/i.test(String(error))) continue;
         throw error;
       }
     }
@@ -1261,6 +1519,8 @@ export class AgenticWorkflowRuntime {
   /** Lease release frees transport capacity; it does not discharge the correlated business result obligation. */
   private outboundOwesResult(state: JournalState, run: RunRecord, out: Outbound): boolean {
     if (this.supersededAttempt(state, out)) return false;
+    const resolver = this.currentResolver(run, out);
+    if (resolver) return resolver.attempt.status === "assigned" && !!out.handle && ["accepted", "released"].includes(out.status);
     if (out.message.run_id !== run.runId || !out.handle || !["accepted", "released"].includes(out.status) ||
         ["coordinator", "conversation"].includes(out.message.recipient.role) ||
         !["delegation.request", "task.assignment", "verification.requested"].includes(out.message.type) || out.parentAssignmentId) return false;
@@ -1281,15 +1541,20 @@ export class AgenticWorkflowRuntime {
       ? prior.sourceMessageId : message.message_id;
     run.error = reason;
     run.status = "escalated";
+    // Automatic, bounded: the budget and backoff anchor carry over from the action this stop follows (resume -> stop cannot loop).
     run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
       reason: reason.slice(0, 2000), sourceMessageId, createdAt: prior?.createdAt ?? this.now(), state: "pending", previousStatus,
-      resumeAttempts: prior?.resumeAttempts ?? 0, recovery: "manual" };
+      resumeAttempts: prior?.resumeAttempts ?? 0, ...(prior?.lastResumedAt === undefined ? {} : { lastResumedAt: prior.lastResumedAt }),
+      ...inheritedManualResume(run), recovery: "auto_resume" };
     const messageId = `coordinator-no-next-action-${digest([run.runId, run.pendingAction.actionId])}`;
     if (state.outbound.some(out => out.message.message_id === messageId)) return;
+    const automatic = (run.pendingAction.resumeAttempts ?? 0) < AUTO_RESUME_LIMIT;
     outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: messageId, correlation_id: run.delegation.correlationId,
       causation_id: message.message_id, run_id: message.run_id, sender: { role: "runtime" }, recipient: { role: "conversation" },
       type: "conversation.progress", payload: { kind: "coordinator_no_response", runId: run.runId, owner: "coordinator",
-        actionId: run.pendingAction.actionId, headline: "Coordinator stopped without a workflow next action", reason, blockageReason: reason,
+        actionId: run.pendingAction.actionId, reason, blockageReason: reason,
+        headline: automatic ? "Coordinator stopped without a workflow next action; Runtime will resume it automatically" : "Coordinator stopped without a workflow next action",
+        ...(automatic ? { automaticResume: automaticResumeNotice(run.pendingAction) } : {}),
         options: ["Khắc phục blocker rồi yêu cầu Coordinator tiếp tục run", "Hủy run"] },
       artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }));
   }
@@ -1304,21 +1569,46 @@ export class AgenticWorkflowRuntime {
       await save(); return json({ queued: true });
     });
   }
-  async requestSpecialist(runId: string, role: string, objective: string, requiredCapabilities: string[]): Promise<JsonValue> {
+  /** Specialist roles with a pane bound in this session, with the capabilities the owner configured for them. */
+  private async boundSpecialistRoles(): Promise<{ role: string; capabilities: string[] }[]> {
+    const bound: { role: string; capabilities: string[] }[] = [];
+    for (const role of SPECIALIST_ROLES)
+      if (unwrap(await this.ports.panes.getRoleBinding(role))?.role === role) bound.push({ role, capabilities: [...(this.ports.roleCapabilities[role] ?? [])] });
+    return bound;
+  }
+  private async specialistUnavailable(role: string, detail: string): Promise<never> {
+    const bound = await this.boundSpecialistRoles();
+    throw new SpecialistUnavailableError(`${detail}. Nothing was dispatched and the run is unchanged; choose one of the roles with a bound pane: ${
+      bound.length ? bound.map(item => `${item.role} [${item.capabilities.join(", ")}]`).join("; ") : "none"}`, role, bound.map(item => item.role));
+  }
+  async requestSpecialist(runId: string, requestedRole: string, objective: string, requiredCapabilities: string[]): Promise<JsonValue> {
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId); this.live(run);
-      if (!["specifier", "architect", "planner", "security", "reviewer", "qa", "tester"].includes(role)) throw new Error("Not a specialist role");
-      const pane = unwrap(await this.ports.panes.getRoleBinding(role));
+      if (!SPECIALIST_ROLES.includes(requestedRole)) return this.specialistUnavailable(requestedRole, `${requestedRole} is not a specialist role`);
+      let role = requestedRole, fallbackFrom: string | undefined;
+      let pane = unwrap(await this.ports.panes.getRoleBinding(role));
+      if (!pane) {
+        // A role absent from this session is a synchronous tool refusal, not a run escalation: the Coordinator re-plans in the same turn.
+        const fallback = SPECIALIST_FALLBACKS[requestedRole];
+        const fallbackPane = fallback ? unwrap(await this.ports.panes.getRoleBinding(fallback)) : null;
+        const capable = fallback !== undefined && [...requiredCapabilities, "repository.read"].every(cap => this.ports.roleCapabilities[fallback]?.includes(cap));
+        if (!fallback || !fallbackPane || !capable)
+          return this.specialistUnavailable(requestedRole, `${requestedRole} has no bound role pane in this session${
+            fallback ? ` and its fallback ${fallback} ${fallbackPane ? `lacks required capabilities ${[...requiredCapabilities, "repository.read"].filter(cap => !this.ports.roleCapabilities[fallback]?.includes(cap)).join(", ")}` : "has no bound pane either"}` : ""}`);
+        role = fallback; pane = fallbackPane; fallbackFrom = requestedRole;
+        objective = `[Fallback: requested role ${requestedRole} has no pane in this session; ${role} performs this ${requestedRole} work.]\n${objective}`;
+      }
       const missingCapabilities = [...requiredCapabilities, "repository.read"].filter(cap => !this.ports.roleCapabilities[role]?.includes(cap));
-      if (!pane || missingCapabilities.length) {
+      if (missingCapabilities.length) {
+        // A real pane missing a configured capability is a repairable session defect, not a planning choice.
         const parsedRole = AgentRoleSchema.parse(role);
         const sourceMessageId = `capability-preflight-${digest([runId, role, objective, requiredCapabilities])}`;
-        const reason = `${role} dispatch preflight failed: ${pane ? `missing capabilities ${missingCapabilities.join(", ")}` : "no bound role pane is available"}`;
+        const reason = `${role} dispatch preflight failed: missing capabilities ${missingCapabilities.join(", ")}`;
         const previousStatus = run.status;
         run.error = reason.slice(0, 2000); run.status = "escalated";
         run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
-          reason: run.error, sourceMessageId, createdAt: this.now(), state: "pending", previousStatus, resumeAttempts: pane ? inheritedResumeAttempts(run) : 0,
-          recovery: pane ? "capability_repair" : "manual", requiredRole: parsedRole, requiredCapabilities: [...new Set([...requiredCapabilities, "repository.read"])] };
+          reason: run.error, sourceMessageId, createdAt: this.now(), state: "pending", previousStatus, resumeAttempts: inheritedResumeAttempts(run), ...inheritedManualResume(run),
+          recovery: "capability_repair", requiredRole: parsedRole, requiredCapabilities: [...new Set([...requiredCapabilities, "repository.read"])] };
         const pendingAction = run.pendingAction;
         this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId, sdlcStatus: run.status,
           owner: "coordinator", actionId: pendingAction.actionId, reason: run.error, blockageReason: run.error,
@@ -1333,7 +1623,8 @@ export class AgenticWorkflowRuntime {
         key = nextAttemptKey(key);
       const delegation = DelegationRequestSchema.parse({ ...run.delegation, delegationId: `delegation-${digest([runId, key])}`,
         messageId: `p19-${digest([runId, key])}`, requestedBy: "coordinator", targetRole: role, objective,
-        idempotencyKey: key, requestedAt: this.now() });
+        idempotencyKey: key, requestedAt: this.now(),
+        ...(fallbackFrom ? { metadata: { ...run.delegation.metadata, specialistFallback: { requestedRole: fallbackFrom, actingRole: role } } } : {}) });
       const out = this.emit(state, outbox, run, "delegation.request", delegation, key, pane.role, run.delegation.inputArtifacts);
       out.capabilities = [...new Set([...strings(requiredCapabilities), "repository.read"])];
       if (!this.ports.roleCapabilities[role]?.includes("repository.read")) {
@@ -1345,7 +1636,7 @@ export class AgenticWorkflowRuntime {
       }
       if (run.pendingAction?.kind === "coordinator_continuation") delete run.pendingAction;
       run.status = role === "planner" ? "planning" : "specifying";
-      await save(); return json(out.message);
+      await save(); return json(fallbackFrom ? { ...out.message, fallback: { requestedRole: fallbackFrom, actingRole: role } } : out.message);
     });
   }
   async assess(specificationInput: unknown): Promise<JsonValue> {
@@ -1353,9 +1644,13 @@ export class AgenticWorkflowRuntime {
     const assessment = record(spec.metadata?.sdd).assessment;
     const classification = this.ports.policies.classifyChange(assessment, spec.affectedPaths);
     const unresolved = strings(record(assessment).unresolvedQuestions);
+    // Only roles with a pane bound in this session can receive request_specialist; the rest would be refused.
+    const availableRoles = await this.boundSpecialistRoles(), bound = new Set(availableRoles.map(item => item.role));
+    const suggested = unresolved.length ? ["specifier"] : classification.complexity === "complex" ? ["architect", "planner"] : [];
     return json({ ...classification, clarificationRequired: unresolved.length > 0,
-      suggestedRoles: unresolved.length ? ["specifier"] : classification.complexity === "complex" ? ["architect", "planner"] : [],
-      availableCapabilities: this.ports.roleCapabilities });
+      suggestedRoles: suggested.filter(role => bound.has(role)),
+      availableRoles, roleFallbacks: Object.fromEntries(Object.entries(SPECIALIST_FALLBACKS).filter(([role, fallback]) => !bound.has(role) && bound.has(fallback))),
+      availableCapabilities: Object.fromEntries(Object.entries(this.ports.roleCapabilities).filter(([role]) => !SPECIALIST_ROLES.includes(role) || bound.has(role))) });
   }
 
   async proposeWorkflow(runId: string, specificationInput: unknown, definitionInput: unknown, maxIterations = 3): Promise<JsonValue> {
@@ -1675,7 +1970,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     }
   }
   private async bind(state: JournalState, core: CoreSession, out: Outbound, handle: AgentExecutionHandle): Promise<void> {
-    if (out.message.type !== "task.assignment") return;
+    if (out.message.type !== "task.assignment" || isConflictResolverAssignment(out.message)) return; // a resolver is not a Core task
     const run = this.run(state, handle.runId);
     if (!run.coreCreated) throw new Error("Assignment lacks Core run");
     const snapshot = await core.snapshot(run.runId);
@@ -2061,19 +2356,26 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     // Resumable: an authorized resume (Conversation "tiếp tục" / Coordinator resume_run) performs the bounded verification retry.
     if (!(run.pendingAction?.state === "pending" && run.pendingAction.kind === "resume_coordinator")) {
       const sourceMessageId = `verification-retry-${digest([run.runId, taskId, reason])}`;
+      // Automatic, bounded: Runtime re-runs retry_verification itself after backoff, sharing the inherited budget.
       run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
         reason: reason.slice(0, 2000), sourceMessageId, createdAt: this.now(), state: "pending", previousStatus,
-        resumeAttempts: inheritedResumeAttempts(run), recovery: "manual" };
+        ...inheritedAutoResume(run), recovery: "auto_resume" };
     }
+    const action = run.pendingAction!;
+    const automatic = action.recovery === "auto_resume" && (action.resumeAttempts ?? 0) < AUTO_RESUME_LIMIT;
     this.emit(state, outbox, run, "conversation.progress", { kind: "verification_stuck", runId: run.runId, taskId, reason,
-      actionId: run.pendingAction!.actionId, options: VERIFICATION_RETRY_OPTIONS, headline: `Verification needs attention: ${taskId}`, sdlcStatus: run.status },
+      actionId: action.actionId, options: VERIFICATION_RETRY_OPTIONS, sdlcStatus: run.status,
+      headline: automatic ? `Verification needs attention: ${taskId}; Runtime retries it automatically` : `Verification needs attention: ${taskId}`,
+      ...(automatic ? { automaticResume: automaticResumeNotice(action) } : {}) },
       `verification-stuck:${digest([run.runId, taskId, reason])}`, "conversation");
     const wakeId = `p19-wake-${digest([run.runId, "verification-stuck", taskId, reason])}`;
     if (!state.outbound.some(out => out.message.message_id === wakeId)) outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: wakeId,
       correlation_id: run.delegation.correlationId, causation_id: run.pendingAction!.sourceMessageId, run_id: run.runId, sender: { role: "runtime" },
       recipient: { role: "coordinator" }, type: "task.status", payload: { kind: "verification_stuck", runId: run.runId, taskId, reason,
         actionId: run.pendingAction!.actionId, sdlcStatus: run.status,
-        next: "Independent verification could not finish (environment/timeout/evidence). Report it with the retry/cancel options; the user's resume (or retry_verification once the user chose it) re-runs it." },
+        next: automatic
+          ? "Independent verification could not finish (environment/timeout/evidence). Runtime retries it automatically with backoff (bounded); report it to the user and do not call retry_verification yourself."
+          : "Independent verification could not finish (environment/timeout/evidence). Report it with the retry/cancel options; the user's resume (or retry_verification once the user chose it) re-runs it." },
       artifact_references: [], occurred_at: this.now(), idempotency_key: wakeId }), "coordinator");
   }
   /** Bounded retries for a durable verification outcome that cannot be finished. Other entries and runs are unaffected. */
@@ -2101,19 +2403,27 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
    * Explicit retry for a run escalated by a verification delivery/storage failure. Durable outcomes are finished as they are;
    * a verification that never produced an outcome is re-run. Idempotent gate messages keep this from resending requests.
    */
-  async retryVerification(runId: string): Promise<JsonValue> {
+  async retryVerification(runId: string, options: { automatic?: boolean; actionId?: string } = {}): Promise<JsonValue> {
     return this.transaction(async (state, save, _core, outbox) => {
       if (this.quiesced) throw new Error("Runtime is quiesced");
       const run = this.run(state, runId);
       if (run.cancelled || run.status !== "escalated" || !run.error?.startsWith(VERIFICATION_RETRY_PREFIX))
         throw new Error("No verification awaiting retry for this run");
       const action = run.pendingAction;
+      if (options.automatic) {
+        // Re-checked under the lock: only the selected, still-automatic, due action is retried, and never past a human gate.
+        if (action?.kind !== "resume_coordinator" || action.state !== "pending" || action.actionId !== options.actionId ||
+            action.recovery !== "auto_resume" || Date.parse(this.now()) < autoResumeDueAt(action)) throw new Error("No verification awaiting retry for this run");
+        if (Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
+            run.approval !== undefined && (!run.decision || run.decision.approvalId !== run.approval.approvalId))
+          throw new Error("A pending approval or user decision must be resolved before resume");
+      }
       if (action?.kind === "resume_coordinator" && action.state === "pending") {
         if ((action.resumeAttempts ?? 0) >= 3) throw new Error("Bounded verification retries are exhausted; cancel or request operator intervention");
-        action.state = "queued"; action.resumeAttempts = (action.resumeAttempts ?? 0) + 1; delete action.previousStatus;
+        action.state = "queued"; action.resumeAttempts = (action.resumeAttempts ?? 0) + 1; action.lastResumedAt = this.now(); delete action.previousStatus;
       }
       const retained = this.prepareVerificationRetry(state, run);
-      this.progress(state, outbox, run, "Verification retry requested");
+      this.progress(state, outbox, run, options.automatic ? "Verification retried automatically" : "Verification retry requested");
       await save();
       return json({ retried: true, runId, resumedOutcomes: retained });
     });
@@ -2274,15 +2584,168 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       // P18 requests travel through Herdr to Coordinator, with the original durable identity.
       outbox.enqueue(parsed);
     }
-    if (integration.status === "conflict") {
-      run.status = "escalated"; run.error = "Git integration conflict requires an assigned resolver; worktree preserved";
-      this.progress(state, outbox, run, run.error); return;
-    }
+    if (!await this.settleConflictResolvers(state, save, outbox, run)) return; // a previous resolver pane is still active
+    if (integration.status === "conflict") { await this.assignConflictResolver(state, save, outbox, run, integration); return; }
     if (integration.status !== "awaiting_verification" || run.workflowChange) return;
     run.workflowChange = await captureIntegratedChange({ artifactStore: this.ports.artifactStore, runId: run.runId,
       taskId: FINAL_TASK, worktreePath: integration.worktreePath, branchName: integration.branchName,
       baseRevision: run.baseRevision!, headCommitHash: integration.expectedHead });
     run.status = "verifying"; await save();
+  }
+  private escalateConflict(state: JournalState, outbox: HerdrOutbox, run: RunRecord, detail?: string): void {
+    run.status = "escalated";
+    run.error = `${CONFLICT_ESCALATION}${detail ? ` (${detail})` : ""}`.slice(0, 2000);
+    this.progress(state, outbox, run, run.error);
+  }
+  /**
+   * P18 stopped on a merge conflict and preserved the integration worktree. Runtime assigns a Developer resolver on that same
+   * worktree through the ordinary Developer allocation, lease/fence and Herdr dispatch, at most CONFLICT_RESOLVER_ATTEMPTS times per
+   * conflict. Runtime never resolves a conflict itself (no ours/theirs); only a committed resolution accepted by P18 moves on.
+   */
+  private async assignConflictResolver(state: JournalState, save: () => Promise<void>, outbox: HerdrOutbox, run: RunRecord, integration: Integration): Promise<void> {
+    const request = [...integration.requests].reverse().map(item => RoleMessageSchema.parse(item))
+      .find(item => item.type === "task.status" && objectField(item.payload, "reason") === "merge_conflict");
+    if (!request) { this.escalateConflict(state, outbox, run, "P18 reported no conflict detail"); return; }
+    const detail = record(request.payload);
+    let resolution = run.conflictResolution;
+    if (!resolution || resolution.conflictId !== request.message_id) {
+      resolution = run.conflictResolution = { conflictId: request.message_id, integrationKey: integration.key, taskKey: textField(detail.taskKey),
+        conflictPaths: strings(detail.conflictPaths), worktreePath: integration.worktreePath, branchName: integration.branchName,
+        ...(typeof detail.incomingCommitHash === "string" ? { incomingCommitHash: detail.incomingCommitHash } : {}), attempts: [] };
+      await save();
+    }
+    if (resolution.attempts.some(attempt => attempt.status === "assigned")) return; // the current resolver owns the worktree
+    if (resolution.attempts.length >= CONFLICT_RESOLVER_ATTEMPTS) {
+      this.escalateConflict(state, outbox, run, `automatic Developer resolver failed ${resolution.attempts.length} attempts: ${resolution.attempts.at(-1)?.reason ?? "no accepted resolution"}`);
+      return;
+    }
+    const number = resolution.attempts.length + 1;
+    const taskId = `conflict-${digest([run.runId, resolution.conflictId]).slice(0, 16)}`, attemptId = `${taskId}-attempt-${number}`;
+    const agentName = `dev-${digest([run.runId, attemptId]).slice(0, 20)}`;
+    const allocation = await this.ports.panes.allocateDeveloper({ taskId: `${run.runId}-${taskId}`, runId: run.runId,
+      worktreePath: resolution.worktreePath, branchName: resolution.branchName, agentName });
+    if (!allocation.ok) {
+      if (allocation.error.code === "conflict" && allocation.error.retryable) { // capacity: retried on a later tick
+        run.error = `Conflict resolver allocation pending: ${allocation.error.message}`;
+        this.progress(state, outbox, run, run.error); await save(); return;
+      }
+      this.escalateConflict(state, outbox, run, `resolver allocation failed: ${allocation.error.message}`); await save(); return;
+    }
+    const pane = PaneBindingSchema.parse(allocation.value);
+    if (pane.worktreePath !== resolution.worktreePath || pane.agentId !== agentName) throw new Error("Conflict resolver allocation mismatch");
+    const paths = resolution.conflictPaths.join(", ") || "(see git status)";
+    const messageId = `conflict-resolver-${digest([run.runId, resolution.conflictId, number])}`;
+    outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: messageId, correlation_id: run.delegation.correlationId,
+      causation_id: request.message_id, run_id: run.runId, sender: { role: "coordinator" },
+      recipient: { role: "developer", agent_id: pane.agentId, pane_id: pane.paneId }, type: "task.assignment",
+      payload: json({ kind: CONFLICT_RESOLUTION_KIND, runId: run.runId, taskId, attempt: number, maxAttempts: CONFLICT_RESOLVER_ATTEMPTS,
+        objective: `Resolve the Git merge conflict in ${paths} on the preserved integration worktree ${resolution.worktreePath} (branch ${resolution.branchName}).`,
+        conflictPaths: resolution.conflictPaths, taskKey: resolution.taskKey, incomingCommitHash: resolution.incomingCommitHash ?? null,
+        worktree: { worktreePath: resolution.worktreePath, branchName: resolution.branchName },
+        previousFailures: resolution.attempts.map(attempt => attempt.reason ?? "no accepted resolution"),
+        specification: run.workflowSpec?.specification ?? run.tasks[0]?.spec.specification ?? null,
+        instruction: "Edit only the conflicted files so both sides' intent is preserved and no conflict markers remain, then use the host commit tool " +
+          "to conclude the merge. Runtime submits that commit to P18 accept_conflict_resolution and runs workflow verification. Never discard a side " +
+          "wholesale or reset the merge. If you cannot resolve it, send task.status with status \"failed\" and the reason." }),
+      artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }), pane.bindingId, taskId, attemptId, ["implementation"]);
+    resolution.attempts.push({ messageId, taskId, attemptId, agentName, status: "assigned" });
+    run.status = "implementing";
+    run.error = `Resolving Git integration conflict in ${paths}: Developer resolver attempt ${number}/${CONFLICT_RESOLVER_ATTEMPTS} assigned; worktree preserved`;
+    this.progress(state, outbox, run, run.error);
+    await save();
+  }
+  /** Releases the pane and lease of each ended resolver attempt once its pane is observed idle; false while one is still active. */
+  private async settleConflictResolvers(state: JournalState, save: () => Promise<void>, outbox: HerdrOutbox, run: RunRecord): Promise<boolean> {
+    for (const attempt of run.conflictResolution?.attempts ?? []) {
+      if (attempt.status === "assigned" || attempt.settled) continue;
+      const out = state.outbound.find(item => item.message.message_id === attempt.messageId);
+      if (out?.status === "accepted") {
+        const health = unwrap(await this.ports.panes.inspectRoleHealth(out.selector));
+        if (!health.readyForPrompt || !health.occupantMatches) return false; // the resolver may still be writing
+        await outbox.release(out);
+      } else if (out?.status === "queued") { out.status = "cancelled"; }
+      else if (out && ["sending", "unknown_delivery"].includes(out.status)) return false; // reconcile first; never resend
+      unwrap(await this.ports.panes.releaseDeveloper({ taskId: `${run.runId}-${attempt.taskId}`, closePane: false, removeWorktree: false }));
+      attempt.settled = true; await save();
+    }
+    return true;
+  }
+  private currentResolver(run: RunRecord, out: Outbound | undefined) {
+    const attempt = out && run.conflictResolution?.attempts.find(item => item.messageId === out.message.message_id);
+    return attempt && run.conflictResolution ? { resolution: run.conflictResolution, attempt } : undefined;
+  }
+  private failConflictResolver(state: JournalState, outbox: HerdrOutbox, run: RunRecord, attempt: ConflictResolverAttempt, reason: string): void {
+    if (attempt.status !== "assigned") return;
+    attempt.status = "failed"; attempt.reason = redactString(reason).slice(0, 1000);
+    const exhausted = (run.conflictResolution?.attempts.length ?? 0) >= CONFLICT_RESOLVER_ATTEMPTS;
+    this.progress(state, outbox, run, `Conflict resolver attempt ${attempt.attemptId} ended without an accepted resolution: ${attempt.reason}${
+      exhausted ? "; escalating" : "; assigning another resolver"}`);
+  }
+  /** A resolver's own correlated report. A failure ends its attempt; it is never success evidence by itself. */
+  private resolverReport(state: JournalState, outbox: HerdrOutbox, run: RunRecord, message: RoleMessage): boolean {
+    const out = state.outbound.find(item => item.message.message_id === message.causation_id);
+    const current = this.currentResolver(run, out);
+    if (!current || !out) return false;
+    if (!out.handle || message.sender.role !== "developer" || message.sender.agent_id !== out.handle.target.agentId ||
+        message.sender.pane_id !== out.handle.target.paneId) throw new Error("Resolver report is not correlated to its assignment");
+    const status = String(objectField(message.payload, "status"));
+    if (message.type === "implementation.submitted") {
+      const result = AgentResultSchema.parse(message.payload);
+      if (result.status !== "succeeded" || current.attempt.status === "assigned")
+        this.failConflictResolver(state, outbox, run, current.attempt, result.error?.message ?? result.blockage?.message ??
+          (result.status === "succeeded" ? "Submitted without a committed resolution accepted by P18" : `Resolver reported ${result.status}`));
+    } else if (["blocked", "failed", "cancelled", "inconclusive"].includes(status)) {
+      this.failConflictResolver(state, outbox, run, current.attempt, specialistBlockage({ ...record(message.payload), status: "failed" }) ?? `Resolver reported ${status}`);
+    }
+    return true;
+  }
+  /** Trusted local tool guard for a conflict resolver: the current lease, pane, session and preserved worktree own the edit. */
+  async withConflictResolverWorkspace<T>(bindingInput: PaneBinding, runId: string, taskId: string,
+    use: (resolution: { conflictPaths: string[]; branchName: string; worktreePath: string; taskKey: string; incomingCommitHash?: string;
+      attempt: number; maxAttempts: number; previousFailures: string[] }) => Promise<T>): Promise<T> {
+    const binding = PaneBindingSchema.parse(bindingInput);
+    return this.transaction(async (state, _save, _core, outbox) => {
+      const { resolution, attempt } = await this.ownedResolver(state, outbox, binding, runId, taskId);
+      return use({ conflictPaths: [...resolution.conflictPaths], branchName: resolution.branchName, worktreePath: resolution.worktreePath, taskKey: resolution.taskKey,
+        ...(resolution.incomingCommitHash ? { incomingCommitHash: resolution.incomingCommitHash } : {}),
+        attempt: resolution.attempts.indexOf(attempt) + 1, maxAttempts: CONFLICT_RESOLVER_ATTEMPTS,
+        previousFailures: resolution.attempts.filter(item => item.status === "failed").map(item => item.reason ?? "no accepted resolution") });
+    });
+  }
+  private async ownedResolver(state: JournalState, outbox: HerdrOutbox, binding: PaneBinding, runId: string, taskId: string) {
+    if (this.quiesced || binding.role !== "developer") throw new Error("Developer writes are quiesced or unauthorized");
+    const run = this.run(state, runId); this.live(run);
+    const resolution = run.conflictResolution, attempt = resolution?.attempts.find(item => item.taskId === taskId && item.status === "assigned");
+    const out = attempt && state.outbound.find(item => item.message.message_id === attempt.messageId);
+    if (!resolution || !attempt || !out?.handle || out.status !== "accepted" || out.handle.target.agentId !== binding.agentId ||
+        out.handle.target.paneId !== binding.paneId || out.handle.target.worktreePath !== binding.worktreePath ||
+        binding.worktreePath !== resolution.worktreePath || digest(out.handle.target.session) !== digest(binding.session))
+      throw new Error("No current conflict resolver assignment owns this integration worktree");
+    await outbox.renew(out); // current lease and fencing token, immediately before the write
+    return { run, resolution, attempt, out };
+  }
+  /**
+   * The resolver's commit goes through the host commit tool; Runtime then asks P18 to accept that exact commit (the same
+   * validation as accept_conflict_resolution). A rejected resolution ends the attempt; the next one or an escalation follows.
+   */
+  async commitConflictResolution(bindingInput: PaneBinding, runId: string, taskId: string,
+    commit: (resolution: { conflictPaths: string[]; branchName: string; worktreePath: string }) => Promise<string | undefined>): Promise<JsonValue> {
+    const binding = PaneBindingSchema.parse(bindingInput);
+    return this.transaction(async (state, save, _core, outbox) => {
+      const { run, resolution, attempt } = await this.ownedResolver(state, outbox, binding, runId, taskId);
+      const head = await commit({ conflictPaths: [...resolution.conflictPaths], branchName: resolution.branchName, worktreePath: resolution.worktreePath });
+      if (!head) return json({ committed: false });
+      attempt.commitHash = head; await save();
+      try {
+        const integration = await this.ports.policies.git.acceptConflictResolution(resolution.integrationKey, { taskKey: resolution.taskKey, resolutionCommitHash: head });
+        attempt.status = "accepted"; run.status = "implementing"; delete run.error;
+        this.progress(state, outbox, run, "Committed conflict resolution accepted; workflow verification required");
+        await save(); return json({ committed: true, accepted: true, head, integrationStatus: integration.status });
+      } catch (error) {
+        this.failConflictResolver(state, outbox, run, attempt, `P18 rejected the resolution commit: ${String(error)}`);
+        await save(); return json({ committed: true, accepted: false, head, reason: attempt.reason ?? String(error) });
+      }
+    });
   }
   async reconcileDelivery(messageId: string): Promise<JsonValue> {
     return this.transaction(async (state, save, core, outbox) => {
@@ -2300,8 +2763,11 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   async acceptConflictResolution(runId: string, taskKey: string, resolutionCommitHash: string): Promise<JsonValue> {
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId);
-      if (run.cancelled || !run.integrationKey || run.status !== "escalated" || !run.error?.startsWith("Git integration conflict")) throw new Error("No pending conflict");
+      const resolving = run.conflictResolution?.attempts.find(attempt => attempt.status === "assigned");
+      if (run.cancelled || !run.integrationKey || !(run.status === "escalated" && run.error?.startsWith("Git integration conflict") ||
+          resolving && !TERMINAL_RUN_STATUSES.includes(run.status))) throw new Error("No pending conflict");
       const integration = await this.ports.policies.git.acceptConflictResolution(run.integrationKey, { taskKey, resolutionCommitHash });
+      if (resolving) { resolving.status = "accepted"; resolving.commitHash = resolutionCommitHash; }
       run.status = "implementing"; delete run.error;
       this.progress(state, outbox, run, "Committed conflict resolution accepted; workflow verification required");
       await save(); return json(integration);

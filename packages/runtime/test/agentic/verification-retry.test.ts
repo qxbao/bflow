@@ -56,7 +56,9 @@ describe.skipIf(process.platform !== "linux")("blocked verification retry", () =
     const exhausted = await f.run();
     expect(exhausted).toMatchObject({ status: "escalated", pendingAction: { state: "pending", resumeAttempts: 3 } });
     await expect(f.runtime.retryVerification("run-1")).rejects.toThrow(/exhausted/);
-    await expect(f.runtime.resumeBlockedRun("run-1", exhausted.pendingAction!.actionId)).rejects.toThrow(/exhausted/);
+    // An explicit user resume has its own budget: it is still allowed and grants a fresh automatic budget.
+    await expect(f.runtime.resumeBlockedRun("run-1", exhausted.pendingAction!.actionId)).resolves.toMatchObject({ queued: true });
+    expect(await f.run()).toMatchObject({ status: "verifying", pendingAction: { state: "queued", resumeAttempts: 0, manualResumeAttempts: 1 } });
   }, 120_000);
 
   it("a real failed verdict is not treated as a retryable environment block", async () => {

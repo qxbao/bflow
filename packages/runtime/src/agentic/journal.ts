@@ -60,15 +60,58 @@ export interface RunRecord {
   pendingAction?: {
     actionId: string; kind: "coordinator_continuation" | "resume_coordinator" | "reconcile_delivery"; owner: "coordinator";
     reason: string; sourceMessageId: string; createdAt: string; state: "pending" | "queued"; previousStatus?: SdlcWorkStatus; resumeAttempts?: number;
-    relatedMessageIds?: string[]; recovery?: "capability_repair" | "manual" | "reconcile_delivery";
+    relatedMessageIds?: string[];
+    /**
+     * `auto_resume`: Runtime resumes this blocker itself with backoff, sharing the bounded `resumeAttempts` budget; once spent it
+     * becomes `manual`. `capability_repair` resumes only after a positive capability proof. Absent/`manual`: waits for a human.
+     */
+    recovery?: "auto_resume" | "capability_repair" | "manual" | "reconcile_delivery";
+    /** Last time this episode (or the action it inherited its budget from) was resumed; the automatic-resume backoff anchor. */
+    lastResumedAt?: string;
+    /** Explicit user resumes of this blocker lineage (bounded separately from `resumeAttempts`); absent in older journals means 0. */
+    manualResumeAttempts?: number;
     requiredRole?: AgentRole; requiredCapabilities?: string[];
   };
   /** Durable idempotency ledger for recoverable resumes, retained even after the blocker is cleared. */
   resumeReceipts?: { actionId: string; messageId: string }[];
+  /**
+   * Invalid RoleMessages per (sender role, assignment/causation) key. Bounded; `messageIds` dedupes replays of one inbound
+   * envelope. Absent in older journals (no invalid messages counted).
+   */
+  invalidMessages?: { key: string; count: number; messageIds: string[] }[];
   /** Set once the run's single final cancellation notice is queued; absent in journals written before cancellation reconciliation. */
   cancelReconciled?: boolean;
   /** Set when a human `changes_requested` continued this run as a follow-up run; the parent is terminal and never resumed. */
   supersededBy?: string;
+  /** Bounded automatic Developer resolver episode for the current P18 merge conflict; absent in journals written before it. */
+  conflictResolution?: ConflictResolutionRecord;
+}
+/** One P18 conflict (identified by its deterministic request message) and the resolver attempts assigned for it. */
+export interface ConflictResolutionRecord {
+  conflictId: string; integrationKey: string; taskKey: string; conflictPaths: string[];
+  worktreePath: string; branchName: string; incomingCommitHash?: string;
+  attempts: ConflictResolverAttempt[];
+}
+export interface ConflictResolverAttempt {
+  messageId: string; taskId: string; attemptId: string; agentName: string;
+  /** assigned: the Developer owns the preserved worktree; accepted: P18 accepted its commit; failed: the attempt ended without acceptance. */
+  status: "assigned" | "accepted" | "failed"; reason?: string; commitHash?: string;
+  /** The Developer pane and lease were released after the pane was observed idle. */
+  settled?: boolean;
+}
+function parseConflictResolution(value: unknown): void {
+  const item = record(value);
+  for (const key of ["conflictId", "integrationKey", "taskKey", "worktreePath", "branchName"]) textField(item[key]);
+  strings(item.conflictPaths);
+  if (item.incomingCommitHash !== undefined) textField(item.incomingCommitHash);
+  if (!Array.isArray(item.attempts) || item.attempts.length > 2) throw new Error("Invalid conflict resolver attempts");
+  for (const attempt of item.attempts.map(record)) {
+    for (const key of ["messageId", "taskId", "attemptId", "agentName"]) textField(attempt[key]);
+    if (!["assigned", "accepted", "failed"].includes(String(attempt.status))) throw new Error("Invalid conflict resolver attempt status");
+    if (attempt.reason !== undefined) textField(attempt.reason);
+    if (attempt.commitHash !== undefined && !/^[a-f0-9]{40}$/.test(String(attempt.commitHash))) throw new Error("Invalid conflict resolution commit");
+    if (attempt.settled !== undefined && typeof attempt.settled !== "boolean") throw new Error("Invalid conflict resolver settlement");
+  }
 }
 export interface UserDecisionRecord {
   request: ApprovalRequest; role: AgentRole; agentId: string; paneId: string; taskId: string;
@@ -152,7 +195,7 @@ function parseState(input: unknown, repository: string): JournalState {
       throw new Error("Invalid follow-up supersession");
     if (run.pendingAction !== undefined) {
       const action = record(run.pendingAction);
-      const allowed = new Set(["actionId", "kind", "owner", "reason", "sourceMessageId", "createdAt", "state", "previousStatus", "resumeAttempts", "relatedMessageIds", "recovery", "requiredRole", "requiredCapabilities"]);
+      const allowed = new Set(["actionId", "kind", "owner", "reason", "sourceMessageId", "createdAt", "state", "previousStatus", "resumeAttempts", "relatedMessageIds", "recovery", "lastResumedAt", "manualResumeAttempts", "requiredRole", "requiredCapabilities"]);
       if (Object.keys(action).some(key => !allowed.has(key))) throw new Error("Invalid durable workflow next action fields");
       textField(action.actionId); textField(action.reason); textField(action.sourceMessageId); textField(action.createdAt);
       if (String(action.reason).length > 2000 || !Number.isFinite(Date.parse(String(action.createdAt))) ||
@@ -167,8 +210,12 @@ function parseState(input: unknown, repository: string): JournalState {
         throw new Error("Invalid durable workflow resume limit");
       if (action.relatedMessageIds !== undefined && (!Array.isArray(action.relatedMessageIds) || action.relatedMessageIds.length > 100 ||
           action.relatedMessageIds.some(id => typeof id !== "string" || !id))) throw new Error("Invalid related capability failure identities");
-      if (action.recovery !== undefined && !["capability_repair", "manual", "reconcile_delivery"].includes(String(action.recovery)))
+      if (action.recovery !== undefined && !["auto_resume", "capability_repair", "manual", "reconcile_delivery"].includes(String(action.recovery)))
         throw new Error("Invalid workflow recovery classification");
+      if (action.lastResumedAt !== undefined && !Number.isFinite(Date.parse(textField(action.lastResumedAt))))
+        throw new Error("Invalid durable workflow resume time");
+      if (action.manualResumeAttempts !== undefined && (!Number.isInteger(action.manualResumeAttempts) || Number(action.manualResumeAttempts) < 0 ||
+          Number(action.manualResumeAttempts) > 3)) throw new Error("Invalid durable workflow user resume limit");
       if (action.requiredRole !== undefined) AgentRoleSchema.parse(action.requiredRole);
       if (action.requiredCapabilities !== undefined) strings(action.requiredCapabilities);
     }
@@ -177,9 +224,20 @@ function parseState(input: unknown, repository: string): JournalState {
       for (const receipt of run.resumeReceipts) { textField(receipt.actionId); textField(receipt.messageId); }
       if (new Set(run.resumeReceipts.map(item => item.actionId)).size !== run.resumeReceipts.length) throw new Error("Duplicate resume receipt identity");
     }
+    if (run.invalidMessages !== undefined) {
+      if (!Array.isArray(run.invalidMessages) || run.invalidMessages.length > 50) throw new Error("Invalid message failure ledger");
+      for (const entry of run.invalidMessages) {
+        textField(entry.key);
+        if (!Number.isSafeInteger(entry.count) || entry.count < 1 || entry.count > 1000) throw new Error("Invalid message failure count");
+        if (!Array.isArray(entry.messageIds) || entry.messageIds.length > 10) throw new Error("Invalid message failure identities");
+        strings(entry.messageIds);
+      }
+      if (new Set(run.invalidMessages.map(item => item.key)).size !== run.invalidMessages.length) throw new Error("Duplicate message failure key");
+    }
     if (run.supersededApprovals !== undefined) for (const item of run.supersededApprovals) {
       textField(item.approvalId); if (!Number.isSafeInteger(item.supersededByRevision) || item.supersededByRevision < 2) throw new Error("Invalid superseded approval");
     }
+    if (run.conflictResolution !== undefined) parseConflictResolution(run.conflictResolution);
     if (run.decision) run.decision = ApprovalDecisionSchema.parse(run.decision);
     if (run.approvalKind && !["design", "delivery", "action", "task"].includes(run.approvalKind)) throw new Error("Invalid approval kind");
     for (const task of run.tasks) {
