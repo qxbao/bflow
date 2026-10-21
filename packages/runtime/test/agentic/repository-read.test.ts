@@ -1,9 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { access, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { RepositoryReadInputSchema, repositoryRead } from "../../src/agentic/repository-read.js";
+import { verificationGit } from "../../src/agentic/behavioral-runner.js";
 
 const roots: string[] = [];
 async function repo(): Promise<string> {
@@ -19,6 +20,18 @@ function git(root: string, ...args: string[]): string {
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
+
+async function asDifferentOwner<T>(action: () => Promise<T>): Promise<T> {
+  const shim = await mkdtemp(join(tmpdir(), "bflow-git-owner-shim-"));
+  roots.push(shim);
+  const actual = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+  const script = `#!/bin/sh\nGIT_TEST_ASSUME_DIFFERENT_OWNER=1 exec '${actual.replaceAll("'", "'\\''")}' "$@"\n`;
+  const bin = join(shim, "git"); await writeFile(bin, script); await chmod(bin, 0o755);
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${shim}:${oldPath ?? ""}`;
+  try { return await action(); }
+  finally { if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath; }
+}
 
 describe("repository reader input schema", () => {
   it("accepts only the documented operations and rejects extra fields and unsafe values", () => {
@@ -149,11 +162,13 @@ describe("repositoryRead", () => {
     git(root, "-c", "commit.gpgsign=false", "commit", "-qm", "baseline");
     git(root, "config", "filter.probe.clean", `node ${hook}`);
     await writeFile(join(root, "source.txt"), "changed longer\n");
-    for (const action of ["status", "diff"] as const) {
-      await rm(sentinel, { force: true });
-      await expect(repositoryRead(root, { op: "git", action })).rejects.toThrow(/unsupported/);
-      await expect(access(sentinel)).rejects.toThrow();
-    }
+    await asDifferentOwner(async () => {
+      for (const action of ["status", "diff"] as const) {
+        await rm(sentinel, { force: true });
+        await expect(repositoryRead(root, { op: "git", action })).rejects.toThrow(/unsupported/);
+        await expect(access(sentinel)).rejects.toThrow();
+      }
+    });
   });
 
   it("supports a linked worktree only through validated gitfile/common-dir metadata", async () => {
@@ -167,7 +182,78 @@ describe("repositoryRead", () => {
     const linked = join(root, "..", `bflow-reader-linked-${Date.now()}`);
     roots.push(linked);
     git(root, "worktree", "add", "--detach", linked);
-    const result = await repositoryRead(linked, { op: "git", action: "head" }) as { output: string };
-    expect(result.output).toMatch(/^[0-9a-f]{40,64}$/);
+    await asDifferentOwner(async () => {
+      for (const action of ["status", "log", "head", "files", "diff"] as const)
+        expect(await repositoryRead(linked, { op: "git", action, limit: 5 })).toMatchObject({ op: "git", action });
+    });
+  });
+
+  it("reader trusts only the exact canonical session root for all five safe Git summaries", async () => {
+    const root = await repo(), outside = await repo(), home = await mkdtemp(join(tmpdir(), "bflow-git-owner-home-")); roots.push(home);
+    for (const path of [root, outside]) {
+      git(path, "init", "-q"); git(path, "config", "user.name", "Reader Test"); git(path, "config", "user.email", "reader@example.invalid");
+      await writeFile(join(path, "source.txt"), "safe source\n"); git(path, "add", "source.txt");
+      git(path, "-c", "commit.gpgsign=false", "commit", "-qm", "initial");
+    }
+    await writeFile(join(root, "source.txt"), "changed source\n");
+    const global = join(home, ".gitconfig");
+    await writeFile(global, `[safe]\n\tdirectory = ${outside}\n`);
+    const original = await readFile(global, "utf8");
+    const oldHome = process.env.HOME, oldCount = process.env.GIT_CONFIG_COUNT, oldKey = process.env.GIT_CONFIG_KEY_0, oldValue = process.env.GIT_CONFIG_VALUE_0;
+    process.env.HOME = home;
+    process.env.GIT_CONFIG_COUNT = "1"; process.env.GIT_CONFIG_KEY_0 = "safe.directory"; process.env.GIT_CONFIG_VALUE_0 = outside;
+    try {
+      await asDifferentOwner(async () => {
+        for (const action of ["status", "log", "head", "files", "diff"] as const) {
+          const result = await repositoryRead(root, { op: "git", action, limit: 5 }) as { output: string };
+          if (action === "status" || action === "files" || action === "diff") expect(result.output).toContain("source.txt");
+          else expect(result.output).toMatch(action === "head" ? /^[0-9a-f]{40,64}$/ : /initial/);
+        }
+      });
+    } finally {
+      if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+      if (oldCount === undefined) delete process.env.GIT_CONFIG_COUNT; else process.env.GIT_CONFIG_COUNT = oldCount;
+      if (oldKey === undefined) delete process.env.GIT_CONFIG_KEY_0; else process.env.GIT_CONFIG_KEY_0 = oldKey;
+      if (oldValue === undefined) delete process.env.GIT_CONFIG_VALUE_0; else process.env.GIT_CONFIG_VALUE_0 = oldValue;
+    }
+    expect(await readFile(global, "utf8")).toBe(original);
+  });
+
+  it("verificationGit trusts only its exact canonical cwd and ignores inherited/global safe.directory", async () => {
+    const root = await repo(), outside = await repo(), home = await mkdtemp(join(tmpdir(), "bflow-git-verify-home-")); roots.push(home);
+    for (const path of [root, outside]) {
+      git(path, "init", "-q"); git(path, "config", "user.name", "Reader Test"); git(path, "config", "user.email", "reader@example.invalid");
+      await writeFile(join(path, "source.txt"), "safe source\n"); git(path, "add", "source.txt");
+      git(path, "-c", "commit.gpgsign=false", "commit", "-qm", "initial");
+    }
+    const global = join(home, ".gitconfig"); await writeFile(global, `[safe]\n\tdirectory = ${outside}\n`);
+    const original = await readFile(global, "utf8");
+    const oldHome = process.env.HOME, oldCount = process.env.GIT_CONFIG_COUNT, oldKey = process.env.GIT_CONFIG_KEY_0, oldValue = process.env.GIT_CONFIG_VALUE_0;
+    process.env.HOME = home; process.env.GIT_CONFIG_COUNT = "1"; process.env.GIT_CONFIG_KEY_0 = "safe.directory"; process.env.GIT_CONFIG_VALUE_0 = outside;
+    try {
+      await asDifferentOwner(async () => {
+        await expect(verificationGit(root, ["rev-parse", "HEAD"]).then(value => value.trim())).resolves.toMatch(/^[0-9a-f]{40,64}$/);
+        await expect(verificationGit(root, ["-C", outside, "rev-parse", "HEAD"])).rejects.toThrow(/dubious ownership/);
+      });
+    } finally {
+      if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+      if (oldCount === undefined) delete process.env.GIT_CONFIG_COUNT; else process.env.GIT_CONFIG_COUNT = oldCount;
+      if (oldKey === undefined) delete process.env.GIT_CONFIG_KEY_0; else process.env.GIT_CONFIG_KEY_0 = oldKey;
+      if (oldValue === undefined) delete process.env.GIT_CONFIG_VALUE_0; else process.env.GIT_CONFIG_VALUE_0 = oldValue;
+    }
+    expect(await readFile(global, "utf8")).toBe(original);
+  });
+
+  it("verificationGit applies exact trust recursively to a newly created detached worktree", async () => {
+    const root = await repo();
+    git(root, "init", "-q"); git(root, "config", "user.name", "Reader Test"); git(root, "config", "user.email", "reader@example.invalid");
+    await writeFile(join(root, "README.md"), "base\n"); git(root, "add", "README.md"); git(root, "-c", "commit.gpgsign=false", "commit", "-qm", "base");
+    const linked = join(root, "..", `bflow-owner-verify-linked-${Date.now()}`); roots.push(linked);
+    const head = git(root, "rev-parse", "HEAD").trim();
+    await asDifferentOwner(async () => {
+      await expect(verificationGit(root, ["worktree", "add", "--detach", linked, head])).resolves.toBeDefined();
+      await expect(verificationGit(linked, ["rev-parse", "HEAD"]).then(value => value.trim())).resolves.toBe(head);
+      await expect(verificationGit(linked, ["rev-parse", "HEAD"]).then(value => value.trim())).resolves.toMatch(/^[0-9a-f]{40,64}$/);
+    });
   });
 });

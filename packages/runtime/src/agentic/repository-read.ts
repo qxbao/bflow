@@ -176,6 +176,9 @@ function safeGitEnvironment(): NodeJS.ProcessEnv {
 
 async function runGit(root: string, args: string[], maxBuffer = MAX_GIT_OUTPUT): Promise<string> {
   const config = [
+    // Global/system config is intentionally hidden. Re-authorize only this canonical, host-supplied session root,
+    // replacing any safe.directory values even if a future environment change exposes Git config overrides.
+    "-c", "safe.directory=", "-c", `safe.directory=${root}`,
     "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-c", "core.pager=cat",
     "-c", "color.ui=false", "-c", "diff.external=", "-c", "diff.trustExitCode=false", "-c", "core.hooksPath=/dev/null"
   ];

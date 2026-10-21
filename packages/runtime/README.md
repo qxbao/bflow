@@ -654,6 +654,13 @@ fail closed khi repository cấu hình filter có thể chạy chương trình. 
 pane/native session, launch, Bflow tools/list, repository/Git và manifest trước lease/transport.
 Quyền ghi của Developer, Conditional TDD, verification và human gates vẫn theo các đường hiện có.
 
+Quyền truy cập provider tới workspace được xác minh riêng trong `bflow up`. Khi chạy Git, Runtime
+không đọc global/system configuration để quyết định ownership: mỗi subprocess canonicalize đúng
+repository root (hoặc checkout verification mới tạo), reset các giá trị `safe.directory` kế thừa,
+rồi chỉ tin đường dẫn đó trong process hiện tại. Điều này cho phép đọc repo do UID khác sở hữu mà
+không thêm trust vào user-global Git config; nested repo/đường dẫn khác không được trust theo root
+này. Runtime runner xác minh detached worktree bằng trust riêng cho checkout đó.
+
 Coordinator gửi blocker tới Conversation phải được Runtime ghi nhận trước khi giao nguyên
 RoleMessage đã xác thực. Run có thể chuyển sang `escalated` kèm `pendingAction`, owner,
 nguyên nhân và phase để tiếp tục. `resume_run` chỉ tiếp tục action khớp, kiểm tra lại capability,
