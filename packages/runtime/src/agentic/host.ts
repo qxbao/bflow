@@ -70,6 +70,41 @@ async function readRoleConfiguration(path: string): Promise<RoleConfiguration> {
 }
 function shellQuote(value: string): string { return "'" + value.replaceAll("'", "'\\''") + "'"; }
 const NATIVE_HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "PreToolUse"] as const;
+/**
+ * Launch-local hook runner. PreToolUse is fail-closed even when the Node entry cannot run its own handler (crash, missing
+ * module, signal): any status other than 0 (decision on stdout) or 2 (block) becomes exit 2 with a stderr reason, which
+ * both Claude and Codex treat as a block. Codex ignores an exit-2 block without a non-empty stderr reason.
+ */
+export function hookRunnerScript(nodePath: string, executable: string, rolePath: string): string {
+  const invoke = `${shellQuote(nodePath)} ${shellQuote(executable)} hook ${shellQuote(rolePath)} "$@"`;
+  return [
+    "#!/bin/sh",
+    'if [ "$1" = PreToolUse ]; then',
+    `  ${invoke}`,
+    "  status=$?",
+    '  if [ "$status" -ne 0 ] && [ "$status" -ne 2 ]; then',
+    '    echo "Bflow PreToolUse guard exited with status $status; tool call denied" >&2',
+    "    exit 2",
+    "  fi",
+    '  exit "$status"',
+    "fi",
+    `exec ${invoke}`,
+    ""
+  ].join("\n");
+}
+
+/**
+ * Fail-closed PreToolUse refusal for hook failures: exit 2 blocks in Claude and Codex, which read the reason from stderr
+ * (Codex requires it to be non-empty); the deny JSON on stdout is kept for readers that parse it.
+ */
+function denyPreToolUseOnFailure(error: unknown): void {
+  const reason = redactString(String(error)).trim() || "Bflow PreToolUse guard failed";
+  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny",
+    permissionDecisionReason: reason } }) + "\n");
+  process.stderr.write(`Bflow PreToolUse guard denied the tool call: ${reason}\n`);
+  process.exitCode = 2;
+}
+
 function hookCommandFor(rolePath: string, event: string, hookRunner?: string): string {
   if (hookRunner) return `${shellQuote(hookRunner)} ${shellQuote(event)}`;
   return [process.execPath, fileURLToPath(import.meta.url), "hook", rolePath, event].map(shellQuote).join(" ");
@@ -149,7 +184,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const hookRunnerPath = useShortHook
       ? join(shortHookDir, `${role}.sh`)
       : join(configuration.directory, `${role}.hook.sh`);
-    const hookScriptContent = `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(executable)} hook ${shellQuote(path)} "$@"\n`;
+    const hookScriptContent = hookRunnerScript(process.execPath, executable, path);
     await privateFile(hookRunnerPath, hookScriptContent, 0o700);
     hookRunners.set(role, hookRunnerPath);
     const provider: AgentProviderId = platformRoles.find(option => option.role === role)?.provider ?? "claude";
@@ -1640,10 +1675,9 @@ export async function runProviderHook(configuration: RoleConfiguration, event: s
   try { await handleProviderHook(configuration, event, roleConfigPath); }
   catch (error) {
     if (event !== "PreToolUse") throw error;
-    // A malformed hook must deny explicitly; providers can treat a plain hook
-    // process failure as nonblocking and otherwise execute an unguarded tool.
-    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny",
-      permissionDecisionReason: redactString(String(error)) } }) + "\n");
+    // A malformed hook must deny explicitly; providers treat a plain hook
+    // process failure as nonblocking and would otherwise execute an unguarded tool.
+    denyPreToolUseOnFailure(error);
   }
 }
 
@@ -1795,5 +1829,15 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const mode = process.argv[2], path = process.argv[3];
   const task = !path ? Promise.reject(new Error("Host configuration path required")) : mode === "daemon" ? readHostConfiguration(path).then(runAgenticHost)
     : readRoleConfiguration(path).then(configuration => mode === "mcp" ? runRoleMcp(configuration, path) :mode === "hook" ? runProviderHook(configuration, textField(process.argv[4]), path) : Promise.reject(new Error("Unknown host mode")));
-  task.catch(error => { process.stderr.write(redactString(String(error)) + "\n"); process.exitCode = 1; });
+  // A PreToolUse hook fails closed even before its handler runs (missing/corrupt role configuration, wrong mode).
+  const toolGate = mode === "hook" && process.argv[4] === "PreToolUse";
+  // Exit only after the refusal is flushed: pipe writes are asynchronous on some platforms.
+  if (toolGate) process.once("uncaughtException", error => {
+    denyPreToolUseOnFailure(error);
+    process.stdout.write("", () => process.stderr.write("", () => process.exit(2)));
+  });
+  task.catch(error => {
+    if (toolGate) { denyPreToolUseOnFailure(error); return; }
+    process.stderr.write(redactString(String(error)) + "\n"); process.exitCode = 1;
+  });
 }
