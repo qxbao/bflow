@@ -430,7 +430,6 @@ function hasWorkingSandbox(): boolean {
 // These are explicit coverage gaps on hosts without a toolchain, never fake-runner evidence.
 for (const { id, tool, files } of [
   { id: "gradle", tool: "gradle", files: { "build.gradle": "plugins { id 'java' }" } },
-  { id: "dotnet", tool: "dotnet", files: { "Test.csproj": "<Project><IsTestProject>true</IsTestProject></Project>" } },
   { id: "ruby", tool: "rspec", files: { Gemfile: 'gem "rspec"' } },
   { id: "phpunit", tool: "phpunit", files: { "composer.json": '{"require-dev":{"phpunit/phpunit":"*"}}' } },
   { id: "ctest", tool: "ctest", files: { "CTestTestfile.cmake": "" } }
@@ -442,6 +441,25 @@ for (const { id, tool, files } of [
     expect(result.runners[0]!.version).toMatch(/\d+\.\d+/);
   });
 }
+
+it.skipIf(!hasTool("dotnet"))("dotnet: verifies an SDK toolchain and reports runtime-only installs as unavailable", async () => {
+  const tool = execFileSync("/bin/sh", ["-c", "command -v dotnet"], { encoding: "utf8", env: { PATH: process.env.PATH ?? "/usr/bin:/bin" } }).trim();
+  const home = await mkdtemp(join(tmpdir(), "bflow-dotnet-sdk-probe-")); temporary.push(home);
+  const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, DOTNET_CLI_HOME: home,
+    DOTNET_NOLOGO: "1", DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1", DOTNET_CLI_TELEMETRY_OPTOUT: "1", LANG: "C", LC_ALL: "C" };
+  const listed = execFileSync(tool, ["--list-sdks"], { cwd: "/", env, encoding: "utf8", timeout: 10_000, maxBuffer: 16_384 });
+  const sdkVersions = listed.split(/\r?\n/).map(line => /^([0-9]+\.[0-9]+\.[0-9]+(?:-[^\s]+)?)\s+\[[^\]]+\]\s*$/.exec(line)?.[1]).filter((item): item is string => item !== undefined);
+  const context = await fixture({ "Test.csproj": "<Project><IsTestProject>true</IsTestProject></Project>" });
+  const result = await managedAdapters.find(adapter => adapter.id === "dotnet")!.detect(context);
+  if (sdkVersions.length === 0) {
+    expect(result.runners).toEqual([]);
+    expect(result.notes.join(" ")).toContain("runner_toolchain_unavailable");
+    return;
+  }
+  expect(result.runners[0], result.notes.join(" ")).toBeDefined();
+  expect(result.runners[0]!.version).toMatch(/^\d+\.\d+(?:\.\d+)?/);
+  expect(sdkVersions).toContain(result.runners[0]!.version);
+});
 
 export async function runManagedSandbox(runner: AdapterRunner, root: string, args: string[], helpersDirectory?: string) {
   const sandboxArgs = ["--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin", "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--bind", root, root, "--chdir", join(root, runner.projectDirectory)];
