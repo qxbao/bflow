@@ -213,9 +213,10 @@ function blockedNotice(notice: NoticeLike, payload: z.infer<typeof BLOCKED_PAYLO
   const runId = payload.runId ?? notice.runId;
   const options = (payload.options ?? []).map((text, index) => ({ number: index + 1, text }));
   const headline = `⚠️ [${notice.messageId}] ${capitalise(BLOCKED_LABEL[payload.kind])}${runId ? ` (run ${runId})` : ""}: ${payload.reason}`;
-  const reply = options.length ? "Trả lời: <số lựa chọn>, hoặc nêu rõ cách xử lý" : "Hãy cho Conversation biết cách xử lý";
+  // Options describe possible actions; they are not selectable replies. Only the exact resume/cancel phrases are accepted.
+  const reply = runId ? `Trả lời "tiếp tục ${runId}" sau khi khắc phục, hoặc "hủy ${runId}" để hủy run.` : "Hãy cho Conversation biết cách xử lý";
   return { messageId: notice.messageId, kind: "blocked", ...(runId ? { runId } : {}), ackToken: notice.messageId, headline, reply,
-    options, display: [headline, ...options.map(option => `${option.number}. ${option.text}`), reply].join("\n") };
+    options, display: [headline, ...options.map(option => `- ${option.text}`), reply].join("\n") };
 }
 
 /** Blocked payload with its reason: Runtime-authored failures use blockageReason (or headline) instead of reason. */

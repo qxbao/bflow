@@ -2,7 +2,7 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { HostReceiptJournal, MAX_NOTICE_REBLOCKS } from "../../src/agentic/host-receipts.js";
+import { HostReceiptJournal, MAX_NOTICE_REBLOCKS, parseConversationResumeRequest } from "../../src/agentic/host-receipts.js";
 import { isProviderInputEmpty, reminderDelayMs, reminderDue, afterReminder } from "../../src/agentic/conversation-inbox.js";
 import { lastAssistantText, mustShowSection, notificationBody, renderConversationNotice } from "../../src/agentic/conversation-notice-render.js";
 
@@ -82,7 +82,16 @@ describe("Conversation notice rendering", () => {
     const rendered = renderConversationNotice(notice("blocked-1", "conversation.progress", payload));
     expect(rendered).toMatchObject({ kind: "blocked", ackToken: "blocked-1", runId: "run-42" });
     expect(rendered.display).toContain("Developer không phản hồi");
-    expect(rendered.display).toContain("1. Thử lại\n2. Dừng run");
+    expect(rendered.display).toContain("- Thử lại\n- Dừng run");
+    expect(rendered.display).not.toContain("<số lựa chọn>");
+    expect(rendered.reply).toBe(`Trả lời "tiếp tục run-42" sau khi khắc phục, hoặc "hủy run-42" để hủy run.`);
+  });
+  it("accepts the exact resume phrase a blocked notice suggests", () => {
+    const rendered = renderConversationNotice(notice("blocked-2", "conversation.progress", { kind: "workflow_blocked", reason: "Handoff refused", options: ["Ask Coordinator to resend"], runId: "run-7" }));
+    expect(rendered.display).toContain("tiếp tục run-7");
+    expect(parseConversationResumeRequest(`tiếp tục ${rendered.runId}`)).toEqual({ runId: "run-7" });
+    expect(renderConversationNotice(notice("blocked-3", "conversation.progress", { kind: "workflow_blocked", reason: "x", options: ["Retry"] })).reply)
+      .not.toContain("<số lựa chọn>");
   });
   it("keeps other notices as short headlines", () => {
     const rendered = renderConversationNotice(notice("progress-1", "conversation.progress", { headline: "x" }));

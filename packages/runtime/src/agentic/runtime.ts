@@ -68,6 +68,7 @@ function isStoppableExecution(out: Outbound): boolean {
 const DELIVERY_FAILURE_OPTIONS = ["Check the recipient role pane in Herdr; delivery retries automatically once it is ready",
   "Restart the role with `bflow up` if its pane is gone", "Cancel this run"];
 const UNCERTAIN_DELIVERY_OPTIONS = ["Ask Coordinator to reconcile the uncertain handoff (reconcile_delivery) before any resend", "Cancel this run"];
+const INBOUND_FAILURE_OPTIONS = ["Ask Coordinator to inspect the failed handoff and request a schema-valid resend from the sender", "Cancel this run"];
 const VERIFICATION_RETRY_OPTIONS = ["Retry verification for this run (Coordinator retry_verification)", "Cancel this run"];
 /** Structural blockers that never clear on their own; the user hears about them at once. */
 const STRUCTURAL_DELIVERY_BLOCKERS = /^(Recipient pane unavailable|No capable agent in recipient pane|Pinned request or recipient changed|Recipient [\w-]+ not ready since )/;
@@ -375,8 +376,9 @@ export class AgenticWorkflowRuntime {
         run.pendingAction = { actionId: `next-${digest([run.runId, data.message_id])}`, kind: "resume_coordinator", owner: "coordinator",
           reason: run.error, sourceMessageId: data.message_id, createdAt: data.occurred_at ?? this.now(), state: "pending", previousStatus, resumeAttempts: 0, recovery: "manual" };
       }
-      this.surfaceFailure(state, outbox, run, data.message_id, inboundFailureClass(text),
-        `${data.type} from ${data.sender.role} to ${data.recipient.role} (${data.message_id})`, text);
+      const failureClass = inboundFailureClass(text);
+      this.surfaceFailure(state, outbox, run, data.message_id, failureClass,
+        `${data.type} from ${data.sender.role} to ${data.recipient.role} (${data.message_id})`, text, failureClass === "transport_uncertain" ? UNCERTAIN_DELIVERY_OPTIONS : INBOUND_FAILURE_OPTIONS);
       await save();
     });
   }
@@ -831,15 +833,45 @@ export class AgenticWorkflowRuntime {
   /** Called only for envelopes received through the Herdr host integration. */
   async receiveHerdr(input: unknown): Promise<JsonValue> {
     const message = RoleMessageSchema.parse(input);
-    if (!message.idempotency_key) throw new Error("Inbound handoff lacks idempotency key");
     if (!await this.ports.authenticateMessage(message)) throw new Error("Unauthenticated Herdr envelope");
+    if (message.idempotency_key === undefined) return this.refuseInbound(message, "lacks idempotency_key");
+    if (!["coordinator", "runtime"].includes(message.recipient.role)) return this.refuseInbound(message, `was addressed to ${message.recipient.role}`);
     return this.applyAuthenticatedHerdrMessage(message, false);
+  }
+  /**
+   * An authenticated envelope refused by its own content (no idempotency_key, wrong recipient). Retrying the same envelope cannot
+   * succeed, so it is journaled as rejected once, the run is escalated to Coordinator and the user hears the exact refusal.
+   */
+  private async refuseInbound(message: RoleMessage, detail: string): Promise<never> {
+    const headline = `Handoff refused: ${message.type} from ${message.sender.role} ${detail}`;
+    const reason = `${headline}. No retry of the same envelope can succeed; the sender must resend a schema-valid message.`;
+    return this.transaction(async (state, save, _core, outbox) => {
+      const old = state.inbox.find(item => item.message.message_id === message.message_id);
+      if (old?.status === "rejected") throw new AdmissionRejectedError(old.reason ?? reason);
+      if (old) throw new AdmissionRejectedError(reason);
+      state.inbox.push({ message, status: "rejected", reason });
+      const run = state.runs.find(item => item.runId === message.run_id);
+      if (run && !run.cancelled && !TERMINAL_RUN_STATUSES.includes(run.status)) {
+        if (run.status !== "awaiting_approval" && !Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
+          const previousStatus = run.status;
+          run.error = reason; run.status = "escalated";
+          run.pendingAction = { actionId: `next-${digest([run.runId, message.message_id])}`, kind: "resume_coordinator", owner: "coordinator",
+            reason, sourceMessageId: message.message_id, createdAt: this.now(), state: "pending", previousStatus, recovery: "manual", resumeAttempts: 0 };
+        }
+        this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId, sdlcStatus: run.status, owner: "coordinator",
+          ...(run.pendingAction === undefined ? {} : { actionId: run.pendingAction.actionId }), headline, reason, blockageReason: reason,
+          options: [`Ask Coordinator to have ${message.sender.role} resend a schema-valid message`, "Cancel run"] },
+          `invalid-inbound:${digest([run.runId, message.message_id])}`, "conversation");
+      }
+      await save();
+      throw new AdmissionRejectedError(reason);
+    });
   }
   /** Replays only the exact journaled received envelope whose authentication succeeded before its durable write-ahead. */
   private async applyAuthenticatedHerdrMessage(message: RoleMessage, requireReceivedReceipt: boolean): Promise<JsonValue> {
     return this.transaction(async (state, save, core, outbox) => {
       if (!["coordinator", "runtime"].includes(message.recipient.role)) throw new Error("Wrong inbound recipient");
-      const old = state.inbox.find(item => item.message.message_id === message.message_id || item.message.idempotency_key === message.idempotency_key);
+      const old = state.inbox.find(item => item.message.message_id === message.message_id || (message.idempotency_key !== undefined && item.message.idempotency_key === message.idempotency_key));
       if (old && digest(old.message) !== digest(message)) throw new Error("Conflicting inbound idempotency key");
       if (requireReceivedReceipt && (!old || old.status !== "received")) throw new Error("Trusted ingress replay requires the exact durable received receipt");
       if (old?.status === "applied") return json({ duplicate: true });
@@ -994,7 +1026,7 @@ export class AgenticWorkflowRuntime {
     return this.transaction(async (state, save, _core, outbox) => {
       const run = state.runs.find(item => item.runId === parsed.run_id);
       if (!run || parsed.correlation_id !== run.delegation.correlationId || run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) return;
-      const existing = state.inbox.find(item => item.message.message_id === parsed.message_id || item.message.idempotency_key === parsed.idempotency_key);
+      const existing = state.inbox.find(item => item.message.message_id === parsed.message_id || (parsed.idempotency_key !== undefined && item.message.idempotency_key === parsed.idempotency_key));
       if (existing && digest(existing.message) !== digest(parsed)) throw new Error("Conflicting Coordinator outcome idempotency key");
       if (existing?.status === "applied") return;
       if (!existing) { state.inbox.push({ message: parsed, status: "received" }); await save(); }

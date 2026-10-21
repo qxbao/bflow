@@ -34,7 +34,7 @@ When finished, emit a structured result and notify Coordinator.
 - Formulate, propose, and record reversible, low-risk assumptions autonomously in the `assumptions` array and specification metadata.
 - For critical, high-impact ambiguities, conflicting requirements, or spec-changing decisions requiring human input:
   - Record open questions in `metadata.sdd.assessment.unresolvedQuestions`.
-  - Send a structured escalation to `coordinator` via Herdr (`clarification.needed` or structured escalation) and mark the task as `blocked`.
+  - Send a `task.status` RoleMessage to `coordinator` with payload status `blocked`, blockers and open questions.
   - Never ask the user directly from the specialist pane.
 - **Invariant**: Never fill technical or behavioral gaps by guessing or silently choosing product behavior. Never begin implementation while requirements are unresolved.
 
@@ -42,7 +42,7 @@ When finished, emit a structured result and notify Coordinator.
 - Assess security independently of code diff size: analyze trust boundaries, authentication, authorization, input validation, cryptographic primitives, secrets, data exposure, recovery, and irreversible operations.
 - Re-run `classifyChange` with the complete impact assessment and affected paths.
 - **Invariant**: Public API changes (`packages/contracts/**`), persistent data changes, cross-module refactors, and architectural shifts are automatically `complex`, `riskLevel: "high"`, requiring full design documentation and human approval.
-- **Never self-approve high-risk architecture or public contract changes.** Always escalate to `Coordinator` via Herdr (`approval.request`) and mark the task as `blocked`.
+- **Never self-approve high-risk architecture or public contract changes.** Always escalate to `Coordinator` with a `task.status` RoleMessage (payload status `blocked`); Coordinator requests the human approval through Runtime.
 
 ## 4. Adaptive Change Classification & Architectural Sections
 Keep detail proportionate to change complexity:

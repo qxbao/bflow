@@ -1,3 +1,6 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { RoleMessage } from "@bflow/contracts";
 import {
@@ -522,8 +525,17 @@ You are the sole user-facing interface. Conduct user clarification dialogue, enf
       expect(res.error?.message).toMatch(/cannot send messages directly to user/);
     });
 
+    it("rejects custom message types outside the RoleMessage enum", () => {
+      for (const type of ["escalation.notice", "task.blocked", "clarification.needed"]) {
+        const res = validateHerdrRoleHandoff(makeValidRoleMessage({ type: type as any, sender: { role: "developer", agentId: "dev-1" },
+          recipient: { role: "coordinator", agentId: "coord-1" } }));
+        expect(res.ok).toBe(false);
+        expect(res.error?.message).toMatch(/Invalid RoleMessage envelope/);
+      }
+    });
+
     it("ensures specialist escalations target coordinator", () => {
-      const escalationTypes = ["escalation.notice", "task.blocked", "clarification.needed"];
+      const escalationTypes = ["verification.escalation"];
       for (const type of escalationTypes) {
         // Targets coordinator: valid
         const msgToCoord = makeValidRoleMessage({
@@ -839,5 +851,19 @@ You are the sole user-facing interface. Conduct user clarification dialogue, enf
         expect(defended.value.actionTaken).toBe("approved");
       }
     });
+  });
+});
+
+describe("7. role prompts never instruct invented message types", () => {
+  const repo = fileURLToPath(new URL("../../../", import.meta.url));
+  const markdownFiles = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap(entry =>
+    entry.isDirectory() ? markdownFiles(join(dir, entry.name)) : entry.name.endsWith(".md") ? [join(dir, entry.name)] : []);
+  it("keeps agent, specification and host prompts on the RoleMessage enum", () => {
+    const sources = [...markdownFiles(join(repo, "agents")), join(repo, "packages/specification/src/prompts.ts"),
+      join(repo, "packages/runtime/src/agentic/host.ts")];
+    for (const file of sources) {
+      const text = readFileSync(file, "utf8");
+      for (const invented of ["task.blocked", "escalation.notice", "clarification.needed"]) expect(text, file).not.toContain(invented);
+    }
   });
 });

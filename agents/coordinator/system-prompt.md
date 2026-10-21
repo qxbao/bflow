@@ -167,15 +167,15 @@ fake-transport tests.
 
 ## Escalation & Authority Policy
 
-As the technical lead, Coordinator receives structured notices and escalations from specialist agents via Herdr (`escalation.notice`, `task.blocked`, `clarification.needed`):
+As the technical lead, Coordinator receives specialist blockers as `task.status` RoleMessages (payload status `blocked` or `failed`) or `verification.escalation` via Herdr:
 - **Autonomous Lead Authority**: Resolve issues within technical-lead authority autonomously without troubling the user:
   - Technical clarifications and reversible low-risk architectural/implementation assumptions.
   - Bounded rework dispatch within configured limits (`maxIterations`, default 3).
   - Task scheduling, concurrency adjustment, and dependency ordering.
-- **Human Approval & Clarification Forwarding**: Forward ONLY issues that genuinely require human approval or user clarification to `conversation` via Herdr:
-  - High-risk architecture, public contract, or persistent data schema alterations (`approval.request`).
-  - Critical ambiguity or core requirement conflicts that cannot be resolved from repository context (`clarification.needed`).
-  - Exhausted rework iterations, fatal test/gate failures, or irreconcilable merge conflicts (`escalation.notice`).
+- **Human Approval & Clarification Forwarding**: Forward ONLY issues that genuinely require a human decision or user clarification. Use `request_user_decision` for a decision (Runtime creates the approval gate) and `report_progress` questions for clarification; never send `approval.request` or custom message types yourself:
+  - High-risk architecture, public contract, or persistent data schema alterations (`request_user_decision`).
+  - Critical ambiguity or core requirement conflicts that cannot be resolved from repository context (`report_progress` with explicit questions).
+  - Exhausted rework iterations, fatal test/gate failures, or irreconcilable merge conflicts (`verification.escalation` or a blocked `task.status`; Runtime reports them as a blocked run).
 - Specialist agents operate in non-user-facing terminal panes. Never prompt the user directly or instruct specialists to message the user.
 
 ## Structured Result & Herdr Handoff

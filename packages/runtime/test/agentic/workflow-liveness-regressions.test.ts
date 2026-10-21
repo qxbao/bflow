@@ -6,7 +6,7 @@ import { FileAgentRegistry } from "@bflow/agent-registry";
 import { ApprovalDecisionSchema, ApprovalRequestSchema, DelegationRequestSchema, PaneBindingSchema, RoleMessageSchema,
   type OperationResult, type PaneBinding, type RoleMessage } from "@bflow/contracts";
 import { AgenticJournal, digest, type JournalState, type RunRecord } from "../../src/agentic/journal.js";
-import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
+import { AdmissionRejectedError, AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import { RoleCapabilityPreflightError, type AgenticRuntimePorts, type PanePolicy } from "../../src/agentic/ports.js";
 import { isCoordinatorTrigger, parseConversationResumeRequest } from "../../src/agentic/host-receipts.js";
 import { routeNativeConversationMessage } from "../../src/agentic/workspace.js";
@@ -458,5 +458,73 @@ describe("workflow liveness recovery boundaries", () => {
       expect(await f.runtime.inspect("run-1")).toMatchObject({ status: "escalated", supersededBy: "run-1-r2" });
       expect(f.transport.sentRequests.filter(request => request.role === "developer")).toEqual([]);
     });
+  });
+});
+
+/** An authenticated envelope without idempotency_key, as a native Architect/Analyst result can arrive from a non-conforming send. */
+function keylessEnvelope(id: string, runId = "run-1"): RoleMessage {
+  const { idempotency_key: _key, ...rest } = envelope(id, runId, { role: "coordinator" }, { sender: { role: "architect", agent_id: "architect-agent", pane_id: "pane-architect" } });
+  return rest as RoleMessage;
+}
+
+describe("inbound handoff refusals are message-intrinsic", () => {
+  it("refuses an authenticated keyless handoff once, escalates the run and never reports it as uncertain delivery", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const keyless = keylessEnvelope("keyless-1");
+    const first = await f.runtime.receiveHerdr(keyless).then(() => undefined, (failure: unknown) => failure);
+    expect(first).toBeInstanceOf(AdmissionRejectedError);
+    expect(String(first)).toContain("task.status from architect lacks idempotency_key");
+    expect(await f.runtime.inboundRejection("keyless-1")).toContain("lacks idempotency_key");
+    const state = await f.inspect();
+    expect(state.runs.find(item => item.runId === "run-1")).toMatchObject({ status: "escalated", pendingAction: { kind: "resume_coordinator", state: "pending" } });
+    const blocked = await f.notices("workflow_blocked");
+    expect(blocked).toHaveLength(1);
+    const payload = blocked[0]!.message.payload as { headline: string; options: string[] };
+    expect(payload.headline).toContain("idempotency_key");
+    expect(JSON.stringify(payload.options)).not.toMatch(/pane|ready|retr/i);
+    expect(await f.notices("delivery_failure")).toHaveLength(0);
+    // Redelivery gets the same deterministic refusal and adds no second notice.
+    const again = await f.runtime.receiveHerdr(keyless).then(() => undefined, (failure: unknown) => failure);
+    expect(again).toBeInstanceOf(AdmissionRejectedError);
+    expect(String(again)).toBe(String(first));
+    expect(await f.notices("workflow_blocked")).toHaveLength(1);
+    expect(await f.notices("delivery_failure")).toHaveLength(0);
+  });
+
+  it("refuses an envelope addressed to a non-Runtime recipient with its exact reason", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const misaddressed = envelope("misaddressed-1", "run-1", { role: "developer" }, { sender: { role: "coordinator", agent_id: "coordinator-agent", pane_id: "pane-coordinator" } });
+    await expect(f.runtime.receiveHerdr(misaddressed)).rejects.toThrow("Handoff refused: task.status from coordinator was addressed to developer");
+    expect(await f.runtime.inboundRejection("misaddressed-1")).toContain("was addressed to developer");
+  });
+
+  it("keeps an unauthenticated keyless envelope a plain error that is never journaled", async () => {
+    const f = await fixture({ authenticate: async () => false, runs: [run("run-1", "specifying")] });
+    const error = await f.runtime.receiveHerdr(keylessEnvelope("forged-keyless")).then(() => undefined, (failure: unknown) => failure);
+    expect(error).not.toBeInstanceOf(AdmissionRejectedError);
+    expect(String(error)).toContain("Unauthenticated Herdr envelope");
+    const state = await f.inspect();
+    expect(state.inbox.some(item => item.message.message_id === "forged-keyless")).toBe(false);
+    expect(await f.runtime.inboundRejection("forged-keyless")).toBeUndefined();
+  });
+
+  it("does not match an unrelated keyless inbox entry when the incoming envelope has no idempotency_key", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    await f.runtime.receiveHerdr(keylessEnvelope("keyless-a")).catch(() => undefined);
+    const apply = (f.runtime as unknown as { applyAuthenticatedHerdrMessage(message: RoleMessage, requireReceived: boolean): Promise<unknown> })
+      .applyAuthenticatedHerdrMessage.bind(f.runtime);
+    const outcome = await apply(keylessEnvelope("keyless-b"), false).then(() => "applied", (failure: unknown) => String(failure));
+    expect(outcome).not.toMatch(/Conflicting inbound/);
+  });
+
+  it("surfaces a non-transport inbound failure with handoff options rather than pane-delivery options", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    await f.runtime.reportInboundFailure(envelope("draft-x", "run-1", { role: "coordinator" }, { sender: { role: "architect", agent_id: "architect-agent", pane_id: "pane-architect" } }),
+      "Error: Conversation host is not ready");
+    const [notice] = await f.notices("delivery_failure");
+    expect(notice).toBeDefined();
+    const options = (notice!.message.payload as { options: string[] }).options;
+    expect(JSON.stringify(options)).not.toMatch(/Check the recipient role pane/);
+    expect(options).toContain("Cancel this run");
   });
 });
