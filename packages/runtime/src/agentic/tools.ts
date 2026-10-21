@@ -12,8 +12,8 @@ export const COORDINATOR_ROLE_PROFILE = AgentRoleProfileSchema.parse({
 export const COORDINATOR_TOOLS = [
   { name: "inspect", description: "Read durable SDLC state, inbox, assignments, evidence and uncertain handoffs." },
   { name: "report_progress", description: "Send progress or clarification questions to Conversation through Herdr." },
-  { name: "assess", description: "Evaluate the actual P15 complexity policy and available role capabilities." },
-  { name: "request_specialist", description: "Queue a capability-constrained specialist delegation through Herdr." },
+  { name: "assess", description: "Evaluate the actual P15 complexity policy; availableRoles lists only specialist roles with a pane bound in this session, with their capabilities." },
+  { name: "request_specialist", description: "Queue a capability-constrained specialist delegation through Herdr. A role with no bound pane falls back security->reviewer and tester->qa when that pane has every required capability (the objective and result say so). Otherwise the call fails immediately with the roles that do have panes; nothing is dispatched and the run is unchanged, so choose another role in this turn. A bound pane missing a capability blocks the run for capability repair." },
   { name: "propose_workflow", description: "Submit draft Specification and implementation DAG; Runtime enforces SDD, approvals and TDD policy." },
   { name: "tick", description: "Schedule a background Runtime step and return immediately; yield the Coordinator turn so Herdr replies can arrive." },
   { name: "tick_status", description: "Read host scheduler status without waiting for another agent's turn." },

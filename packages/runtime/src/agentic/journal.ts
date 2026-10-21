@@ -69,6 +69,35 @@ export interface RunRecord {
   cancelReconciled?: boolean;
   /** Set when a human `changes_requested` continued this run as a follow-up run; the parent is terminal and never resumed. */
   supersededBy?: string;
+  /** Bounded automatic Developer resolver episode for the current P18 merge conflict; absent in journals written before it. */
+  conflictResolution?: ConflictResolutionRecord;
+}
+/** One P18 conflict (identified by its deterministic request message) and the resolver attempts assigned for it. */
+export interface ConflictResolutionRecord {
+  conflictId: string; integrationKey: string; taskKey: string; conflictPaths: string[];
+  worktreePath: string; branchName: string; incomingCommitHash?: string;
+  attempts: ConflictResolverAttempt[];
+}
+export interface ConflictResolverAttempt {
+  messageId: string; taskId: string; attemptId: string; agentName: string;
+  /** assigned: the Developer owns the preserved worktree; accepted: P18 accepted its commit; failed: the attempt ended without acceptance. */
+  status: "assigned" | "accepted" | "failed"; reason?: string; commitHash?: string;
+  /** The Developer pane and lease were released after the pane was observed idle. */
+  settled?: boolean;
+}
+function parseConflictResolution(value: unknown): void {
+  const item = record(value);
+  for (const key of ["conflictId", "integrationKey", "taskKey", "worktreePath", "branchName"]) textField(item[key]);
+  strings(item.conflictPaths);
+  if (item.incomingCommitHash !== undefined) textField(item.incomingCommitHash);
+  if (!Array.isArray(item.attempts) || item.attempts.length > 2) throw new Error("Invalid conflict resolver attempts");
+  for (const attempt of item.attempts.map(record)) {
+    for (const key of ["messageId", "taskId", "attemptId", "agentName"]) textField(attempt[key]);
+    if (!["assigned", "accepted", "failed"].includes(String(attempt.status))) throw new Error("Invalid conflict resolver attempt status");
+    if (attempt.reason !== undefined) textField(attempt.reason);
+    if (attempt.commitHash !== undefined && !/^[a-f0-9]{40}$/.test(String(attempt.commitHash))) throw new Error("Invalid conflict resolution commit");
+    if (attempt.settled !== undefined && typeof attempt.settled !== "boolean") throw new Error("Invalid conflict resolver settlement");
+  }
 }
 export interface UserDecisionRecord {
   request: ApprovalRequest; role: AgentRole; agentId: string; paneId: string; taskId: string;
@@ -180,6 +209,7 @@ function parseState(input: unknown, repository: string): JournalState {
     if (run.supersededApprovals !== undefined) for (const item of run.supersededApprovals) {
       textField(item.approvalId); if (!Number.isSafeInteger(item.supersededByRevision) || item.supersededByRevision < 2) throw new Error("Invalid superseded approval");
     }
+    if (run.conflictResolution !== undefined) parseConflictResolution(run.conflictResolution);
     if (run.decision) run.decision = ApprovalDecisionSchema.parse(run.decision);
     if (run.approvalKind && !["design", "delivery", "action", "task"].includes(run.approvalKind)) throw new Error("Invalid approval kind");
     for (const task of run.tasks) {
