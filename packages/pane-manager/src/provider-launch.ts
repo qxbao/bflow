@@ -16,6 +16,11 @@ export interface ProviderRoleLaunchOptions {
   readonly mcpServers?: Readonly<Record<string, RoleMcpServer>>;
   /** Already vetted, launch-local native SessionStart command. Does not install global hooks. */
   readonly nativeSessionHookCommand?: string;
+  /**
+   * True only when the launch settings install the trusted host PreToolUse guard. Claude then gets `Bash` for every role
+   * except Conversation; the hook's deny overrides allow rules, so the host allowlist is the single shell gate.
+   */
+  readonly hostToolGuard?: boolean;
 }
 
 export interface ProviderRoleLaunchFiles {
@@ -63,11 +68,14 @@ export function buildProviderRoleLaunch(options: ProviderRoleLaunchOptions): rea
     // tools; native repository reads would also expose host state/secrets.
     const tools = spec.topologyRole === "chat" || spec.topologyRole === "coordinator"
       ? "" : spec.readOnlyWorkspace ? "Read,Glob,Grep" : "Read,Glob,Grep,Edit,Write";
-    // Read-only investigation roles may run git reads; dontAsk refuses every other Bash call, and the host guard re-checks each one.
-    const gitReads = tools && INVESTIGATION_ROLES.has(options.role) ? READ_ONLY_GIT_PATTERNS : [];
+    // With the host PreToolUse guard every role except Conversation gets Bash (dontAsk would refuse it unless allowed; the
+    // hook's deny overrides the allow rule). Without the guard only investigation roles keep narrow git read patterns.
+    const shellPatterns = spec.topologyRole === "chat" ? []
+      : options.hostToolGuard === true ? ["Bash"]
+      : tools && INVESTIGATION_ROLES.has(options.role) ? READ_ONLY_GIT_PATTERNS : [];
     return ["--restricted", "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands",
-      "--permission-mode", "dontAsk", "--tools", gitReads.length ? `${tools},Bash` : tools,
-      "--allowedTools", [tools, ...gitReads, ...Object.keys(servers).map(name => `mcp__${name}__*`)].filter(Boolean).join(","),
+      "--permission-mode", "dontAsk", "--tools", shellPatterns.length ? [tools, "Bash"].filter(Boolean).join(",") : tools,
+      "--allowedTools", [tools, ...shellPatterns, ...Object.keys(servers).map(name => `mcp__${name}__*`)].filter(Boolean).join(","),
       // Claude applies Read(path) to all read tools and Edit(path) to all file writes.
       "--disallowedTools", ["Read", "Edit"].flatMap(tool =>
         ["./.bflow/**", "./.git/**", "~/.claude/**", "~/.codex/**", "~/.ssh/**", "~/.aws/**", "~/.config/**"].map(pattern => `${tool}(${pattern})`)).join(","),
@@ -94,7 +102,8 @@ export async function buildProviderRoleLaunchFromFiles(options: ProviderRoleLaun
     throw new Error("Trusted host MCP config must contain mcpServers");
   if (!settings || typeof settings !== "object" || !settings.hooks || typeof settings.hooks !== "object" || Array.isArray(settings.hooks))
     throw new Error("Trusted host settings must contain lifecycle hooks");
-  const args = [...buildProviderRoleLaunch({ ...options, mcpServers: mcp.mcpServers })];
+  const hostToolGuard = Array.isArray(settings.hooks.PreToolUse) && settings.hooks.PreToolUse.length > 0;
+  const args = [...buildProviderRoleLaunch({ ...options, mcpServers: mcp.mcpServers, hostToolGuard })];
   const promptFile = options.mcpConfigFile + ".system-prompt.txt";
   const file = await open(promptFile, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
   try { await file.writeFile(options.systemPrompt); } finally { await file.close(); }

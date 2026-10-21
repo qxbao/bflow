@@ -78,4 +78,41 @@ describe("explicit provider role launch policy", () => {
       expect(codex.some(arg => arg.startsWith("developer_instructions="))).toBe(false);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
+  it("gives every Claude role except Conversation Bash only when the host PreToolUse guard is installed", () => {
+    for (const role of ["coordinator", "architect", "reviewer", "tester", "developer"] as const) {
+      const args = buildProviderRoleLaunch({ agentKind: "claude", role, systemPrompt: "Bounded role.", mcpServers: server, hostToolGuard: true });
+      expect(args[args.indexOf("--tools") + 1]!.split(","), role).toContain("Bash");
+      const allowed = args[args.indexOf("--allowedTools") + 1]!.split(",");
+      // A bare Bash allow keeps dontAsk from auto-refusing; the hook's deny overrides it, so no git-only patterns remain.
+      expect(allowed, role).toContain("Bash");
+      expect(allowed.filter(tool => tool.startsWith("Bash(")), role).toEqual([]);
+      expect(args[args.indexOf("--permission-mode") + 1]).toBe("dontAsk");
+    }
+    expect(buildProviderRoleLaunch({ agentKind: "claude", role: "coordinator", systemPrompt: "Lead.", hostToolGuard: true })
+      .includes("Bash")).toBe(true);
+    const chat = buildProviderRoleLaunch({ agentKind: "claude", role: "conversation", systemPrompt: "Chat.", mcpServers: server, hostToolGuard: true });
+    expect(chat[chat.indexOf("--tools") + 1]).toBe("");
+    expect(chat[chat.indexOf("--allowedTools") + 1]).not.toContain("Bash");
+  });
+  it("enables the guarded Bash launch from trusted files only when they install a PreToolUse hook", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "bflow-launch-guard-"));
+    const mcpConfigFile = join(directory, "mcp.json"), hooksSettingsFile = join(directory, "settings.json");
+    const hook = (event: string) => [{ hooks: [{ type: "command", command: `/trusted/host hook ${event}` }] }];
+    try {
+      await writeFile(mcpConfigFile, JSON.stringify({ mcpServers: server }));
+      const options = { role: "developer" as const, systemPrompt: "Implement.", mcpConfigFile, hooksSettingsFile, agentKind: "claude" as const };
+      await writeFile(hooksSettingsFile, JSON.stringify({ hooks: { SessionStart: hook("SessionStart"), PreToolUse: hook("PreToolUse") } }));
+      const guarded = await buildProviderRoleLaunchFromFiles(options);
+      expect(guarded[guarded.indexOf("--tools") + 1]).toBe("Read,Glob,Grep,Edit,Write,Bash");
+      expect(guarded[guarded.indexOf("--allowedTools") + 1]!.split(",")).toContain("Bash");
+      await writeFile(hooksSettingsFile, JSON.stringify({ hooks: { SessionStart: hook("SessionStart") } }));
+      const unguarded = await buildProviderRoleLaunchFromFiles(options);
+      expect(unguarded[unguarded.indexOf("--tools") + 1]).not.toContain("Bash");
+      expect(unguarded[unguarded.indexOf("--allowedTools") + 1]).not.toContain("Bash");
+      await writeFile(hooksSettingsFile, JSON.stringify({ hooks: { PreToolUse: hook("PreToolUse") } }));
+      const chat = await buildProviderRoleLaunchFromFiles({ ...options, role: "conversation" });
+      expect(chat[chat.indexOf("--tools") + 1]).toBe("");
+      expect(chat[chat.indexOf("--allowedTools") + 1]).not.toContain("Bash");
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
 });
