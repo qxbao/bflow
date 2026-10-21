@@ -4,6 +4,7 @@ import { chmod, lstat, unlink } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
 import { RoleMessageSchema, canonicalReceiptJson, type RoleMessage } from "@bflow/contracts";
 import { record, textField } from "./journal.js";
+import { nativeEnvelopeIssues } from "./native-delivery-status.js";
 
 const authenticated = new AsyncLocalStorage<string>();
 /** Use only as a host authentication callback; an agent cannot supply this context. */
@@ -23,6 +24,8 @@ export async function startHerdrReceiptIngress(options: {
   receive(message: RoleMessage): Promise<unknown>;
   /** Called only for a signature-verified message whose processing failed, so the failure can be surfaced instead of vanishing. */
   failed?(message: RoleMessage, error: unknown): Promise<void>;
+  /** Only after signature verification, and before Runtime receive or any business write. */
+  rejected?(message: RoleMessage): Promise<void>;
 }): Promise<{ close(): Promise<void> }> {
   // Refuse to steal an existing socket, including a potentially live host's endpoint.
   try { await lstat(options.socketPath); throw new Error("Herdr receipt endpoint already exists; reconcile its owner"); }
@@ -48,6 +51,13 @@ export async function startHerdrReceiptIngress(options: {
         const publicKey = createPublicKey(key);
         if (publicKey.asymmetricKeyType !== "ed25519" || !verify(null, Buffer.from(canonicalReceiptJson(message)), publicKey, Buffer.from(signature, "base64")))
           throw new Error("Invalid native Herdr message signature");
+        const issues = nativeEnvelopeIssues(message);
+        if (issues.length) {
+          // Keep native-required fields strict. Persist the observed refusal before responding, never promote a timeout to refusal.
+          await options.rejected?.(message);
+          socket.end(JSON.stringify({ ok: false, code: "native_envelope_rejected", issues }) + "\n");
+          return;
+        }
         try { await authenticated.run(canonicalReceiptJson(message), () => options.receive(message)); }
         catch (error) { await options.failed?.(message, error).catch(() => undefined); throw error; }
         socket.end(JSON.stringify({ ok: true, messageId: message.message_id }) + "\n");

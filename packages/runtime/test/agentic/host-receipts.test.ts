@@ -137,8 +137,16 @@ describe("private durable host authentication receipts", () => {
         payload: { ...bindingReceipt, signature: { algorithm: "ed25519", value: Buffer.alloc(64).toString("base64") } } });
       await f.journal.recordNativeIntent("binding:operation", bindingMessage);
       const attested = RoleMessageSchema.parse({ ...bindingMessage, payload: bindingReceipt });
+      const { inspectNativeDelivery } = await import("../../src/agentic/native-delivery-status.js");
+      expect(await inspectNativeDelivery(f.journal, "binding:operation", [{ message: attested, status: "applied" }]))
+        .toMatchObject({ delivery: "applied", inbox: "applied", resendAllowed: false });
       expect((await send(sign(null, Buffer.from(canonicalReceiptJson(attested)), pair.privateKey).toString("base64"), attested)).ok).toBe(true);
       expect((await f.reopen().nativeDelivery("binding:operation"))?.status).toBe("acknowledged");
+      const legacy = RoleMessageSchema.parse({ ...bindingMessage, message_id: "legacy-binding", idempotency_key: undefined });
+      await f.journal.recordNativeIntent("legacy:binding", legacy);
+      await f.journal.recordNativeRejection({ ...legacy, payload: bindingReceipt });
+      expect(await inspectNativeDelivery(f.journal, "legacy:binding", []))
+        .toMatchObject({ delivery: "rejected_before_admission", resendAllowed: false });
     } finally { await ingress.close(); }
   });
 });

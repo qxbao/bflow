@@ -44,6 +44,7 @@ import { redactString } from "../resilience/redaction.js";
 import { TaskActivityLog } from "./task-activity-log.js";
 import { TaskLogPane } from "./task-log-pane.js";
 import { nativeRoleMessageToolSchema, parseNativeRoleMessage, roleReplyGuidance, specificationToolSchema } from "./role-tool-schema.js";
+import { inspectNativeDelivery } from "./native-delivery-status.js";
 import { handleTaskLogTool, taskLogAssignmentContext } from "./task-log-tools.js";
 import { createHostPlatformSession, launchMaterial, type HostAgentObservation, type HostPlatformSession, type StartupProof } from "./host-platform.js";
 import {
@@ -515,6 +516,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       projectApprovalRequired: () => configuration.policy?.sdd.approvalRequired === true,
       authorizeHuman: decision => receipts.authenticateHuman(decision),
       recoveredHumanDecisions: await receipts.humanDecisions(),
+      onNativeRejection: async message => {
+        await receipts.recordNativeRejection(message);
+        const refusal = await receipts.nativeRejection(message.message_id);
+        if (refusal) await workspace?.runtime.recordNativeDeliveryRejection(refusal);
+      },
       beforeRecovery: async runtime => { await receipts.recoverNativeDeliveries(runtime); await runtime.recoverMissingCoordinatorWakeups(); },
       onNativeDelivery: async message => { await receipts.recordNativeAcknowledgement(message);
         // A late ACK settles an earlier uncertain-delivery action; nothing is resent.
@@ -599,7 +605,12 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const args = record(input); const name = textField(args.name); const parameters = record(JsonValueSchema.parse(args.arguments ?? {}));
     const binding = await principal(role, textField(args.paneId));
     const host = requireWorkspace();
-    if (quiesced && !["host_status", "assignment_context", "repository_read", "read_pinned_instructions", "read_task_log", "log_task_step", "inspect_review", "complete_review", "inspect_alternative_verification", "record_alternative_verification", "record_behavioral_verification", "submit_implementation"].includes(name)) throw new Error("Host is quiesced; new work is disabled while existing receipts can drain");
+    if (quiesced && !["inspect_native_delivery", "host_status", "assignment_context", "repository_read", "read_pinned_instructions", "read_task_log", "log_task_step", "inspect_review", "complete_review", "inspect_alternative_verification", "record_alternative_verification", "record_behavioral_verification", "submit_implementation"].includes(name)) throw new Error("Host is quiesced; new work is disabled while existing receipts can drain");
+    if (name === "inspect_native_delivery") {
+      if (!["coordinator", "conversation"].includes(role)) throw new Error("Only Coordinator or Conversation inspects native delivery");
+      const { operationId } = z.object({ operationId: z.string().min(1).max(200) }).strict().parse(parameters);
+      return json(await inspectNativeDelivery(receipts, operationId, await host.runtime.nativeDeliveryInbox()));
+    }
     const taskLogResult = await handleTaskLogTool({ role, binding, activityLog, inspect: () => host.runtime.inspect() }, name, parameters);
     if (taskLogResult !== undefined) return json(taskLogResult);
     if (name === "repository_read") {
@@ -884,7 +895,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       }
       if (method === "role_call") {
         const input = record(params), name = textField(input.name);
-        if (["host_status", "assignment_context", "read_task_log", "tick_status"].includes(name)) return roleCall(role, params);
+        if (["inspect_native_delivery", "host_status", "assignment_context", "read_task_log", "tick_status"].includes(name)) return roleCall(role, params);
         const startedAt = Date.now();
         const recordLifecycle = name !== "log_task_step";
         const args = record(input.arguments ?? {});
@@ -1377,6 +1388,7 @@ export function availableTools(role: AgentRole) {
     { name: "assignment_context", description: "Read assignments addressed to this authenticated pane and the accepted specification" },
     { name: "read_task_log", description: "Read bounded, redacted Runtime activity diagnostics. Specialists must pass runId and taskId from their authenticated assignment. Conversation/Coordinator may read session diagnostics. Never evidence of approval or task success." },
     { name: "send_role_message", description: "Send a complete RoleMessage v2 through the signed native Herdr plugin. artifact_references is required (use [] without stored artifacts); native ingress requires a stable idempotency_key. Preserve correlation/run/causation. Never resend uncertain delivery." }];
+  if (["coordinator", "conversation"].includes(role)) tools.push({ name: "inspect_native_delivery", description: "Read-only reconciliation of the exact native operationId against private intent, ACK, observed ingress refusal and Runtime inbox. Distinct from reconcile_delivery (transport outbox). Never resends, changes criteria, approves or proves task success; missing evidence remains unknown." });
   if (role === "conversation") tools.push({ name: "resume_run", description: "Ask Runtime to resume an existing blocked run only after a real explicit user resume request. Parameters: runId, messageId? (the host binds your latest trusted user turn); Runtime preserves all approval/cancellation/delivery guards." });
   if (role === "conversation") tools.push({ name: "read_role_pane", description: "Read-only snapshot of another role's recent terminal output (redacted, untrusted) to explain a stalled or blocked run; never evidence of success or approval. Parameters: role, paneId? (required when several panes share a role), lines? (1-200, default 60)." });
   if (role === "conversation") tools.push({ name: "conversation_decide", description: "Call this first on every ordinary user turn. Applies your structured intent/clarification decision to the latest trusted user turn (messageId is optional; when given it must be the hook's messageId). Never supplies human approval. Parameters: decision (workflow_request/clarify/conversation_only/status_query/cancellation_request), messageId?." });
@@ -1421,6 +1433,7 @@ export function availableTools(role: AgentRole) {
       ...targets }, ["intent", "cancellationInput"])
   ] };
   const argumentsByName: Record<string, {properties: Record<string, unknown>; required: string[]}> = {
+    inspect_native_delivery:{properties:{operationId:{type:"string",minLength:1,maxLength:200}},required:["operationId"]},
     conversation_decide:{properties:{messageId:string,decision:chatDecision},required:["decision"]},
     read_role_pane:{properties:{role:string,paneId:string,lines:{type:"integer",minimum:1,maximum:200}},required:["role"]},
     read_task_log:{properties:{runId:string,taskId:string,lines:{type:"integer",minimum:1,maximum:100},maxBytes:{type:"integer",minimum:256,maximum:16384}},required:[]},

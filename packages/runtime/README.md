@@ -93,6 +93,13 @@ resume, thay đổi yêu cầu và dispatch công việc mới phải chờ đ�
 đúng intent của nó. Kết quả specialist đến muộn trong lúc pause chỉ được nhận nếu trùng
 toàn bộ native intent và assignment đã bind; việc nhận này không resume hay phê duyệt run.
 `resume_run` tiếp tục run hiện hữu, không xác nhận giao nhận hay cho phép resend.
+`inspect_native_delivery(operationId)` của Coordinator/Conversation đối soát chỉ đọc native intent,
+ACK, refusal trước admission và Runtime inbox. Tool này khác `reconcile_delivery` của transport outbox:
+nó không gửi lại, resume, sửa criteria hoặc xác nhận task thành công. Intent cũ thiếu key nhưng không
+có receipt từ chối vẫn là `unknown_delivery`; không tạo hồi tố bằng chứng `not_delivered` từ lỗi schema.
+Signed native ingress lưu riêng refusal khi `idempotency_key` không hợp lệ trước khi gọi Runtime;
+chữ ký sai và lỗi xảy ra sau admission không tạo loại bằng chứng này. Restart chỉ giải quyết intent
+khớp refusal đã quan sát, giữ nguyên blocker nghiệp vụ và các human gate; không tự giao assignment mới.
 Watchdog phân biệt delivery `accepted`/`released`, thời điểm transport accepted và thời điểm
 run ngừng có hoạt động; thông báo chứa role/pane/task/attempt. Cảnh báo hoặc resume không
 phải bằng chứng cho phép tạo attempt mới. Stop phải khớp agent, native session và thời điểm.

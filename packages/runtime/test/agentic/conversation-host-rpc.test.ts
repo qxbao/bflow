@@ -64,6 +64,11 @@ describe.skipIf(process.platform !== "linux")("Native role schemas and Conversat
     expect(launches.roleLaunch.architect!.systemPrompt).toContain('"artifact_references":[]');
     expect(launches.roleLaunch.architect!.systemPrompt).toContain('"idempotency_key":"stable-reply-key"');
     const coordinatorCall = (name: string, args: unknown) => callHost(coordinator.socketPath, coordinator.token, "role_call", { paneId: "pane-coordinator", name, arguments: args });
+    await expect(coordinatorCall("inspect_native_delivery", { operationId: "missing" })).resolves.toMatchObject({ delivery: "not_found", resendAllowed: false });
+    const activity = await readFile(join(root, ".bflow/state/agentic/task-activity.jsonl"), "utf8").catch(error => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return ""; throw error;
+    });
+    expect(activity).not.toContain("inspect_native_delivery:");
     const reply = { schema_version: 2, message_id: "native-validation", correlation_id: "corr-validation", run_id: "run-validation",
       sender: { role: "coordinator" }, recipient: { role: "runtime" }, type: "task.status", payload: {},
       artifact_references: [], idempotency_key: "native-validation" };
@@ -84,6 +89,7 @@ describe.skipIf(process.platform !== "linux")("Native role schemas and Conversat
     cleanups.push(() => new Promise<void>((accept, reject) => native.close(error => error ? reject(error) : accept())));
     await expect(coordinatorCall("send_role_message", { message: reply })).rejects.toThrow("before acknowledgement");
     await expect(coordinatorCall("send_role_message", { message: reply })).rejects.toThrow("uncertain");
+    await expect(coordinatorCall("inspect_native_delivery", { operationId: reply.message_id })).resolves.toMatchObject({ delivery: "unknown_delivery", inbox: "absent", resendAllowed: false });
     expect(nativeCalls).toBe(1);
     const { HostReceiptJournal } = await import("../../src/agentic/host-receipts.js");
     const receipts = new HostReceiptJournal(join(hostDirectory, "authentication-receipts"), root, sessionId);

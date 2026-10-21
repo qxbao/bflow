@@ -4,16 +4,17 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { join, resolve } from "node:path";
 import {
-  AgentBindingReceiptSchema, ApprovalDecisionSchema, JsonValueSchema, PaneBindingSchema, QualityGateContextSchema,
+  ApprovalDecisionSchema, JsonValueSchema, PaneBindingSchema, QualityGateContextSchema,
   QualityGateResultSchema, RoleMessageSchema, VerificationResultSchema,
   type ApprovalDecision, type JsonValue, type PaneBinding, type QualityGateResult, type RoleMessage, type VerificationResult
 } from "@bflow/contracts";
 import { digest, json, record, strings, textField } from "./journal.js";
 import { redactString } from "../resilience/redaction.js";
 import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
+import { nativeEnvelopeIssues, nativeMessageFingerprint, NativeRejectionSchema } from "./native-delivery-status.js";
 import { ApprovalNoticeSchema, UserDecisionNoticeSchema, approvalNoticeFields, isUserFacingNotice, renderConversationNotice, userDecisionNoticeFields } from "./conversation-notice-render.js";
 
-type Kind = "approval-failure" | "runtime-nudge" | "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "decision-reblock" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled";
+type Kind = "native-rejection" | "approval-failure" | "runtime-nudge" | "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "decision-reblock" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled";
 export interface HumanHookProvenance {
   origin: "UserPromptSubmit"; binding: PaneBinding; nativeSessionId: string;
   conversationSessionId: string; userId: string; messageId: string; promptDigest: string;
@@ -146,6 +147,7 @@ export class HostReceiptJournal {
     if (kind === "notification-failure") return json(NotificationFailureSchema.parse(input));
     if (kind === "decision-reblock") return json(z.object({ messageId: z.string().min(1), attempt: z.number().int().min(1).max(MAX_DECISION_REBLOCKS), reblockedAt: z.string().datetime() }).strict().parse(input));
     if (kind === "notice-nudge") return json(z.object({ messageId: z.string().min(1), attempt: z.number().int().min(1).max(3), attemptedAt: z.string().datetime() }).strict().parse(input));
+    if (kind === "native-rejection") return json(NativeRejectionSchema.parse(input));
     if (kind === "native-intent" || kind === "native-ack") return json(RoleMessageSchema.parse(input));
     if (kind === "gate") return json(QualityGateResultSchema.parse(input));
     if (kind === "evidence") return json(VerificationResultSchema.parse(input));
@@ -174,7 +176,8 @@ export class HostReceiptJournal {
     const payload = this.parsePayload(kind, value.payload);
     const envelope = { version: 1 as const, repository: this.repository, sessionId: this.sessionId, kind, id, payload };
     if (value.checksum !== digest(envelope)) throw new Error("Host receipt integrity mismatch");
-    if (kind === "approval-failure" && digest([record(payload).messageId, record(payload).attempt]) !== id ||
+    if (kind === "native-rejection" && RoleMessageSchema.parse(record(payload).message).message_id !== id ||
+        kind === "approval-failure" && digest([record(payload).messageId, record(payload).attempt]) !== id ||
         kind === "runtime-nudge" && digest([record(payload).bindingDigest, record(payload).sequence]) !== id ||
         kind.startsWith("conversation-") && record(payload).messageId !== id ||
         kind === "human" && ApprovalDecisionSchema.parse(record(payload).decision).approvalId !== id ||
@@ -185,8 +188,13 @@ export class HostReceiptJournal {
       throw new Error("Host receipt identity mismatch");
     return { ...envelope, checksum: textField(value.checksum) };
   }
-  private async read(kind: Kind, id: string): Promise<JsonValue | undefined> {
-    await this.prepare();
+  private async read(kind: Kind, id: string, createDirectory = true): Promise<JsonValue | undefined> {
+    if (createDirectory) await this.prepare();
+    else {
+      let stat;
+      try { stat = await lstat(this.directory); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+      if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.()) throw new Error("Unsafe host receipt directory");
+    }
     let file;
     try { file = await open(join(this.directory, this.filename(kind, id)), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
@@ -324,7 +332,7 @@ export class HostReceiptJournal {
     const uncertain: { operationId: string; message: RoleMessage }[] = [];
     for (const operationId of await this.receiptIds("native-intent")) {
       const delivery = await this.nativeDelivery(operationId);
-      if (delivery?.status === "unknown_delivery") uncertain.push({ operationId, message: delivery.message });
+      if (delivery?.status === "unknown_delivery" && !await this.nativeRejection(delivery.message.message_id)) uncertain.push({ operationId, message: delivery.message });
     }
     return uncertain;
   }
@@ -332,14 +340,19 @@ export class HostReceiptJournal {
   async recoverNativeDeliveries(runtime: {
     recordNativeDeliveryIntent(message: RoleMessage, operationId: string): Promise<void>;
     reconcileNativeDelivery(messageId: string): Promise<boolean>;
+    recordNativeDeliveryRejection(input: unknown): Promise<void>;
   }): Promise<void> {
     for (const operationId of await this.receiptIds("native-intent")) {
       const delivery = await this.nativeDelivery(operationId);
       if (!delivery) continue;
+      const rejected = await this.nativeRejection(delivery.message.message_id);
+      if (rejected) { await runtime.recordNativeDeliveryRejection(rejected); continue; }
       if (delivery.status === "unknown_delivery") await runtime.recordNativeDeliveryIntent(delivery.message, operationId);
       // Re-read after the Runtime write: a signed ACK may have arrived concurrently. nativeDelivery checks exact
       // immutable intent/ACK ownership, permitting only the native host's binding-receipt signature replacement.
-      if ((await this.nativeDelivery(operationId))?.status === "acknowledged")
+      const current = await this.nativeDelivery(operationId), refusal = await this.nativeRejection(delivery.message.message_id);
+      if (refusal) await runtime.recordNativeDeliveryRejection(refusal);
+      else if (current?.status === "acknowledged")
         await runtime.reconcileNativeDelivery(delivery.message.message_id);
     }
   }
@@ -632,15 +645,26 @@ export class HostReceiptJournal {
   async getGate(id: string): Promise<QualityGateResult | undefined> { const value = await this.read("gate", id); return value === undefined ? undefined : QualityGateResultSchema.parse(value); }
   async recordNativeIntent(operationId: string, message: RoleMessage): Promise<boolean> { return this.write("native-intent", operationId, message); }
   async recordNativeAcknowledgement(message: RoleMessage): Promise<void> { const parsed = RoleMessageSchema.parse(message); await this.write("native-ack", parsed.message_id, parsed); }
+  /** Trusted signed ingress callback only; no model-supplied refusal can reach this method. */
+  async recordNativeRejection(messageInput: RoleMessage): Promise<void> {
+    const message = RoleMessageSchema.parse(messageInput), issues = nativeEnvelopeIssues(message);
+    const rejection = NativeRejectionSchema.parse({ code: "native_envelope_rejected", message, issues });
+    await this.write("native-rejection", message.message_id, rejection);
+  }
+  async nativeRejection(messageId: string) {
+    const value = await this.read("native-rejection", textField(messageId), false);
+    return value === undefined ? undefined : NativeRejectionSchema.parse(value);
+  }
   async nativeDelivery(operationId: string): Promise<{ message: RoleMessage; status: "unknown_delivery" | "acknowledged" } | undefined> {
-    const value = await this.read("native-intent", operationId); if (value === undefined) return undefined;
-    const message = RoleMessageSchema.parse(value), acknowledgement = await this.read("native-ack", message.message_id);
+    const value = await this.read("native-intent", operationId, false); if (value === undefined) return undefined;
+    const message = RoleMessageSchema.parse(value), acknowledgement = await this.read("native-ack", message.message_id, false);
     // The native plugin replaces only the placeholder binding-receipt signature after
     // checking the physical occupant. The signed ingress envelope is otherwise exact.
-    const comparable = (value: RoleMessage) => value.type === "execution.receipt"
-      ? { ...value, payload: { ...AgentBindingReceiptSchema.parse(value.payload), signature: undefined } } : value;
-    if (acknowledgement !== undefined && digest(comparable(RoleMessageSchema.parse(acknowledgement))) !== digest(comparable(message)))
+    if (acknowledgement !== undefined && nativeMessageFingerprint(RoleMessageSchema.parse(acknowledgement)) !== nativeMessageFingerprint(message))
       throw new Error("Native acknowledgement conflicts with delivery intent");
+    const rejection = await this.nativeRejection(message.message_id);
+    if (rejection && (nativeMessageFingerprint(rejection.message) !== nativeMessageFingerprint(message) || acknowledgement !== undefined))
+      throw new Error("Native refusal conflicts with delivery intent or acknowledgement");
     return { message, status: acknowledgement === undefined ? "unknown_delivery" : "acknowledged" };
   }
   async authenticateEvidence(input: VerificationResult): Promise<boolean> { const result = VerificationResultSchema.parse(input); return digest(await this.read("evidence", result.verificationId)) === digest(result); }

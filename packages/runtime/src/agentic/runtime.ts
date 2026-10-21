@@ -22,6 +22,7 @@ import { RoleCapabilityPreflightError, type AgenticRuntimePorts, type Integratio
 import type { WorkflowRejection } from "./workflow-rejection.js";
 import type { RunFacts } from "./run-watchdog.js";
 import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
+import { nativeMessageFingerprint, NativeRejectionSchema } from "./native-delivery-status.js";
 
 const VERIFICATION_GATE = "p19-independent-task-verification";
 const TERMINAL_RUN_STATUSES: readonly string[] = ["completed", "failed", "cancelled", "escalated"];
@@ -696,6 +697,10 @@ export class AgenticWorkflowRuntime {
     return this.transaction(async state => json(runId ? this.run(state, runId) : {
       runs: state.runs, outbound: state.outbound, inbox: state.inbox
     }));
+  }
+  /** Read-only receipt view: no Core restore, coroutine recovery or semantic writes as part of diagnostics. */
+  async nativeDeliveryInbox(): Promise<JournalState["inbox"]> {
+    return this.journal.exclusive(async state => structuredClone(state.inbox));
   }
   /**
    * Read-only: approvals this session's runs are still waiting on (design/task approval and specialist user decisions).
@@ -2531,6 +2536,20 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   async recordNativeDeliveryIntent(input: unknown, operationId: string): Promise<void> {
     const message = RoleMessageSchema.parse(input);
     await this.transaction(async (state, save) => { if (this.retainNativeIntent(state, message, operationId)) await save(); });
+  }
+  /** Trusted private ingress evidence only. Settles an inadmissible envelope, never an assignment or human gate. */
+  async recordNativeDeliveryRejection(input: unknown): Promise<void> {
+    const refusal = NativeRejectionSchema.parse(input);
+    await this.transaction(async (state, save) => {
+      const run = state.runs.find(item => item.runId === refusal.message.run_id && item.delegation.correlationId === refusal.message.correlation_id);
+      if (!run?.nativeDeliveries) return;
+      const prior = run.nativeDeliveries.find(entry => entry.message.message_id === refusal.message.message_id);
+      if (!prior) return;
+      if (nativeMessageFingerprint(prior.message) !== nativeMessageFingerprint(refusal.message)) throw new Error("Native refusal ownership mismatch");
+      if (state.inbox.some(item => item.message.message_id === refusal.message.message_id)) throw new Error("Native refusal conflicts with admitted message");
+      run.nativeDeliveries = run.nativeDeliveries.filter(entry => entry !== prior);
+      await save();
+    });
   }
   /**
    * A native delivery whose acknowledgement was not observed. Conversation and the Coordinator see `delivery_failure` with the

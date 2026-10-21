@@ -37,6 +37,7 @@ export interface OpenAgenticWorkspaceOptions {
   onHumanDecision?: (decision: ApprovalDecision) => Promise<void>;
   recoveredHumanDecisions?: readonly ApprovalDecision[];
   onNativeDelivery?: (message: RoleMessage) => Promise<void>;
+  onNativeRejection?: (message: RoleMessage) => Promise<void>;
   /** Restore private native intent/ACK facts before the first automatic resume or scheduler dispatch. */
   beforeRecovery?: (runtime: AgenticWorkflowRuntime) => Promise<void>;
   /** Provider launch configuration used for dynamic Developer panes. */
@@ -257,7 +258,8 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
           ? await routeNativeConversationMessage(runtime, conversation!, message)
           : await runtime.receiveHerdr(message);
         await options.onNativeDelivery?.(message); return result;
-      }, failed: (message, error) => runtime.reportInboundFailure(message, String(error)) }) : undefined;
+      }, ...(options.onNativeRejection ? { rejected: options.onNativeRejection } : {}),
+      failed: (message, error) => runtime.reportInboundFailure(message, String(error)) }) : undefined;
     return { runtime, conversation, tools, async close() { await tools.drain(); await ingress?.close(); artifactStore.close(); runStore.close(); } };
   } catch (error) { artifactStore?.close(); runStore.close(); throw error; }
 }
