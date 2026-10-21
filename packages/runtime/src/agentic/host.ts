@@ -24,6 +24,7 @@ import { digest, json, record, textField } from "./journal.js";
 import { COORDINATOR_TOOLS } from "./tools.js";
 import { USER_DECISION_TOOL, buildDecisionRequestMessage, guardDirectUserInteraction, parseUserDecisionToolInput } from "./decision-routing.js";
 import { AdmissionRejectedError, isNonRetryableDeliveryError } from "./runtime.js";
+import { describeValidationError } from "./role-message-feedback.js";
 import { permitsReadOnlyInvestigation } from "./read-only-git.js";
 import { repositoryRead, RepositoryReadInputSchema } from "./repository-read.js";
 import { RoleCapabilityPreflightError } from "./ports.js";
@@ -668,8 +669,16 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       let message: RoleMessage;
       try { message = prepareRoleToolMessage(binding, parameters.message); }
       catch (error) {
-        await host.runtime.reportRoleToolFailure(binding, parameters.message, redactString(String(error)));
-        throw error;
+        // The readable validation error is this tool call's synchronous result, so the agent can fix and resend in the same turn.
+        const detail = describeValidationError(error);
+        const outcome = await host.runtime.reportRoleToolFailure(binding, parameters.message, detail);
+        const guidance = outcome === undefined ? "Fix these fields and call send_role_message again."
+          : outcome.attempt < outcome.limit
+            ? `Attempt ${outcome.attempt} of ${outcome.limit}: fix these fields and call send_role_message again in this turn, keeping correlation_id and causation_id.`
+            : outcome.escalated
+              ? `Attempt ${outcome.attempt} of ${outcome.limit}: Runtime handed this assignment back to Coordinator; stop and end your turn.`
+              : `Attempt ${outcome.attempt} of ${outcome.limit}: fix these fields before sending again.`;
+        throw new Error(`Invalid RoleMessage: ${detail}. ${guidance}`);
       }
       if (message.sender.role !== role || message.sender.agent_id !== binding.agentId || message.sender.pane_id !== binding.paneId) throw new Error("Cannot impersonate another role");
       if (role === "conversation" && message.type === "delegation.request") throw new Error("Use conversation_decide for Conversation delegation");

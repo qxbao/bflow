@@ -74,6 +74,11 @@ export interface RunRecord {
   };
   /** Durable idempotency ledger for recoverable resumes, retained even after the blocker is cleared. */
   resumeReceipts?: { actionId: string; messageId: string }[];
+  /**
+   * Invalid RoleMessages per (sender role, assignment/causation) key. Bounded; `messageIds` dedupes replays of one inbound
+   * envelope. Absent in older journals (no invalid messages counted).
+   */
+  invalidMessages?: { key: string; count: number; messageIds: string[] }[];
   /** Set once the run's single final cancellation notice is queued; absent in journals written before cancellation reconciliation. */
   cancelReconciled?: boolean;
   /** Set when a human `changes_requested` continued this run as a follow-up run; the parent is terminal and never resumed. */
@@ -189,6 +194,16 @@ function parseState(input: unknown, repository: string): JournalState {
       if (!Array.isArray(run.resumeReceipts) || run.resumeReceipts.length > 50) throw new Error("Invalid resume receipt ledger");
       for (const receipt of run.resumeReceipts) { textField(receipt.actionId); textField(receipt.messageId); }
       if (new Set(run.resumeReceipts.map(item => item.actionId)).size !== run.resumeReceipts.length) throw new Error("Duplicate resume receipt identity");
+    }
+    if (run.invalidMessages !== undefined) {
+      if (!Array.isArray(run.invalidMessages) || run.invalidMessages.length > 50) throw new Error("Invalid message failure ledger");
+      for (const entry of run.invalidMessages) {
+        textField(entry.key);
+        if (!Number.isSafeInteger(entry.count) || entry.count < 1 || entry.count > 1000) throw new Error("Invalid message failure count");
+        if (!Array.isArray(entry.messageIds) || entry.messageIds.length > 10) throw new Error("Invalid message failure identities");
+        strings(entry.messageIds);
+      }
+      if (new Set(run.invalidMessages.map(item => item.key)).size !== run.invalidMessages.length) throw new Error("Duplicate message failure key");
     }
     if (run.supersededApprovals !== undefined) for (const item of run.supersededApprovals) {
       textField(item.approvalId); if (!Number.isSafeInteger(item.supersededByRevision) || item.supersededByRevision < 2) throw new Error("Invalid superseded approval");
