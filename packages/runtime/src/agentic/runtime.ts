@@ -22,6 +22,7 @@ import { RoleCapabilityPreflightError, type AgenticRuntimePorts, type Integratio
 import type { WorkflowRejection } from "./workflow-rejection.js";
 import type { RunFacts } from "./run-watchdog.js";
 import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
+import { describeValidationError, INVALID_ROLE_MESSAGE_LIMIT, isMessageContentFailure } from "./role-message-feedback.js";
 
 const VERIFICATION_GATE = "p19-independent-task-verification";
 const TERMINAL_RUN_STATUSES: readonly string[] = ["completed", "failed", "cancelled", "escalated"];
@@ -72,6 +73,10 @@ function inheritedAutoResume(run: RunRecord): { resumeAttempts: number; lastResu
 function inheritedManualResume(run: RunRecord): { manualResumeAttempts?: number } {
   const prior = run.pendingAction?.kind === "resume_coordinator" ? run.pendingAction : undefined;
   return prior?.manualResumeAttempts === undefined ? {} : { manualResumeAttempts: prior.manualResumeAttempts };
+}
+/** What an invalid message answers: its causation (the assignment), else everything uncorrelated from the same sender pane. */
+function invalidMessageSource(message: RoleMessage): string {
+  return message.causation_id ?? `uncorrelated:${message.sender.pane_id ?? message.sender.agent_id ?? "unknown"}`;
 }
 /** Earliest time Runtime may automatically resume this action. */
 function autoResumeDueAt(action: NonNullable<RunRecord["pendingAction"]>): number {
@@ -405,6 +410,64 @@ export class AgenticWorkflowRuntime {
   private refused(state: JournalState, messageId: string): boolean {
     return state.inbox.some(item => item.message.message_id === messageId && item.status === "rejected");
   }
+  /**
+   * Counts one invalid RoleMessage of `role` for one assignment/causation `sourceId` and returns the new count. A replay of the
+   * same inbound envelope (`messageId` already counted) is not counted again, so restarts and redeliveries keep the count exact.
+   */
+  private countInvalidMessage(run: RunRecord, role: string, sourceId: string, messageId?: string): number {
+    const key = `${role}:${sourceId}`;
+    const ledger = run.invalidMessages ??= [];
+    let entry = ledger.find(item => item.key === key);
+    if (entry && messageId !== undefined && entry.messageIds.includes(messageId)) return entry.count;
+    if (!entry) { entry = { key, count: 0, messageIds: [] }; ledger.push(entry); if (ledger.length > 50) ledger.shift(); }
+    entry.count = Math.min(1000, entry.count + 1);
+    if (messageId !== undefined) entry.messageIds = [...entry.messageIds, messageId].slice(-10);
+    return entry.count;
+  }
+  /**
+   * After INVALID_ROLE_MESSAGE_LIMIT invalid messages for one assignment the run is handed to the Coordinator (reassign, change
+   * role or report a blocker) as a bounded `auto_resume` action. A pending human gate is never bypassed: the run then only
+   * records the reason. Returns whether the run was escalated.
+   */
+  private escalateInvalidMessages(run: RunRecord, sourceMessageId: string, reason: string, createdAt = this.now()): boolean {
+    if (run.status === "awaiting_approval" || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) return false;
+    const previousStatus = run.status, inherited = inheritedAutoResume(run);
+    run.error = reason.slice(0, 2000); run.status = "escalated";
+    run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
+      reason: run.error, sourceMessageId, createdAt, state: "pending", previousStatus, ...inherited, recovery: "auto_resume" };
+    return true;
+  }
+  /**
+   * Returns a refused message's validation error to the agent that sent it, through Herdr, so it can fix and resend. A Developer
+   * holding an active assignment is reached by a task notice under that assignment's lease; other roles by a Runtime task.status.
+   * Conversation is never addressed. Idempotent per (run, key, attempt). Returns whether a notice was queued.
+   */
+  private returnValidationError(state: JournalState, outbox: HerdrOutbox, run: RunRecord, rejected: RoleMessage, key: string,
+    attempt: number, error: string): boolean {
+    const role = rejected.sender.role;
+    if (role === "conversation" || role === "runtime" || role === "user") return false;
+    const id = `invalid-feedback-${digest([run.runId, key, attempt])}`;
+    if (state.outbound.some(out => out.message.message_id === id)) return true;
+    const payload = json({ kind: "role_message_rejected", status: "rejected", runId: run.runId, rejectedMessageId: rejected.message_id,
+      rejectedType: rejected.type, attempt, limit: INVALID_ROLE_MESSAGE_LIMIT, errors: error,
+      next: `Runtime refused your ${rejected.type} (${rejected.message_id}): ${error}. Fix these fields and send a schema-valid message again ` +
+        `with send_role_message (attempt ${attempt} of ${INVALID_ROLE_MESSAGE_LIMIT}); keep the original correlation_id and causation_id.` });
+    const base = { schema_version: 2 as const, message_id: id, correlation_id: run.delegation.correlationId, causation_id: rejected.message_id,
+      run_id: run.runId, type: "task.status" as const, payload, artifact_references: [], occurred_at: this.now(), idempotency_key: id };
+    const assignment = role === "developer" ? [...state.outbound].reverse().find(out => out.message.type === "task.assignment" &&
+      out.message.run_id === run.runId && out.status === "accepted" && out.handle !== undefined &&
+      (rejected.sender.pane_id === undefined || out.handle.target.paneId === rejected.sender.pane_id)) : undefined;
+    try {
+      if (assignment?.handle) outbox.enqueueTaskNotice(RoleMessageSchema.parse({ ...base, sender: { role: "coordinator" },
+        recipient: { role: "developer", agent_id: assignment.handle.target.agentId, pane_id: assignment.handle.target.paneId } }), assignment);
+      // A Developer whose assignment still holds its writer lease cannot take a second lease; it is reached only by a task notice.
+      else if (role === "developer" && state.outbound.some(out => out.message.type === "task.assignment" && out.message.run_id === run.runId &&
+          out.status === "accepted")) return false;
+      else outbox.enqueue(RoleMessageSchema.parse({ ...base, sender: { role: "runtime" },
+        recipient: { role, ...(rejected.sender.agent_id ? { agent_id: rejected.sender.agent_id } : {}), ...(rejected.sender.pane_id ? { pane_id: rejected.sender.pane_id } : {}) } }), role);
+      return true;
+    } catch { return false; }
+  }
   /** Called by the host when an authenticated inbound message could not be applied; the failure must not stay silent. */
   async reportInboundFailure(input: unknown, reason: string): Promise<void> {
     const message = RoleMessageSchema.safeParse(input);
@@ -414,6 +477,27 @@ export class AgenticWorkflowRuntime {
       const run = state.runs.find(item => item.runId === data.run_id);
       if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || this.refused(state, data.message_id)) return;
       const text = redactString(reason);
+      // The message's own content failed validation: retrying the same envelope cannot help, but the sender can fix it. Return the
+      // readable error to the sender; only the INVALID_ROLE_MESSAGE_LIMIT-th invalid message for one assignment involves the
+      // Coordinator (bounded auto_resume). Transport/uncertain failures keep the delivery-failure path below.
+      if (isMessageContentFailure(text) && inboundFailureClass(text) !== "transport_uncertain" &&
+          !["conversation", "runtime", "user"].includes(data.sender.role)) {
+        const sourceId = invalidMessageSource(data), key = `${data.sender.role}:${sourceId}`;
+        const attempt = this.countInvalidMessage(run, data.sender.role, sourceId, data.message_id);
+        const error = describeValidationError(text);
+        // Deterministic content refusal: journal it as rejected so redelivery/replay is answered without re-counting.
+        const inbox = state.inbox.find(item => item.message.message_id === data.message_id);
+        if (inbox && inbox.status === "received") { inbox.status = "rejected"; inbox.reason = `Invalid ${data.type} content: ${error}`.slice(0, 2000); }
+        if (attempt < INVALID_ROLE_MESSAGE_LIMIT) {
+          this.returnValidationError(state, outbox, run, data, key, attempt, error);
+          await save(); return;
+        }
+        this.escalateInvalidMessages(run, data.message_id, `${data.type} from ${data.sender.role} was invalid ${attempt} times for ${sourceId}: ${error}`,
+          data.occurred_at ?? this.now());
+        this.surfaceFailure(state, outbox, run, data.message_id, "inbound_failed",
+          `${data.type} from ${data.sender.role} to ${data.recipient.role} (${data.message_id})`, text, INBOUND_FAILURE_OPTIONS);
+        await save(); return;
+      }
       if (inboundFailureFinal(text) && run.status !== "awaiting_approval" && !Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
         const previousStatus = run.status;
         run.error = `${data.type} ingress failed: ${text}`.slice(0, 2000);
@@ -427,32 +511,44 @@ export class AgenticWorkflowRuntime {
       await save();
     });
   }
-  /** Authenticated host report for a schema-invalid native RoleMessage rejected before transport intent. */
-  async reportRoleToolFailure(bindingInput: unknown, rawMessage: unknown, reasonInput: string): Promise<void> {
+  /**
+   * Authenticated host report for a schema-invalid native RoleMessage rejected before transport intent. The host returns the
+   * readable validation error to the agent as the synchronous tool error, so it can fix and resend in the same turn; Runtime only
+   * counts the attempt per (run, sender role, assignment). The INVALID_ROLE_MESSAGE_LIMIT-th invalid message for one assignment
+   * hands the run to the Coordinator as a bounded `auto_resume` action and tells Conversation once. Returns the attempt
+   * accounting, or undefined when the pane holds no live assignment.
+   */
+  async reportRoleToolFailure(bindingInput: unknown, rawMessage: unknown, reasonInput: string):
+    Promise<{ attempt: number; limit: number; escalated: boolean } | undefined> {
     const binding = PaneBindingSchema.parse(bindingInput);
     const raw = objectField(rawMessage, "message") ?? rawMessage;
     const claimedRunId = objectField(raw, "run_id");
     const claimedMessageId = objectField(raw, "message_id");
-    await this.transaction(async (state, save, _core, outbox) => {
-      const source = state.outbound.find(out => out.handle?.target.paneId === binding.paneId && out.handle.target.agentId === binding.agentId &&
+    const claimedCausation = objectField(raw, "causation_id");
+    return this.transaction(async (state, save, _core, outbox) => {
+      const candidates = state.outbound.filter(out => out.handle?.target.paneId === binding.paneId && out.handle.target.agentId === binding.agentId &&
         out.message.recipient.role === binding.role && ["accepted", "released"].includes(out.status) &&
         (typeof claimedRunId !== "string" || out.message.run_id === claimedRunId));
+      // The assignment the agent answers: the one its message claims as causation, else the latest one bound to this pane.
+      const source = candidates.find(out => out.message.message_id === claimedCausation) ?? candidates.at(-1);
       const run = state.runs.find(item => item.runId === (source?.message.run_id ?? claimedRunId));
-      if (!run || !source || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) return;
+      if (!run || !source || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) return undefined;
       const messageId = typeof claimedMessageId === "string" && claimedMessageId.length <= 200 ? claimedMessageId : `invalid-role-message-${digest([binding.paneId, source.message.message_id, reasonInput])}`;
-      const reason = `Rejected invalid ${binding.role} RoleMessage before transport: ${redactString(reasonInput)}`.slice(0, 2000);
-      const previousStatus = run.status;
-      if (run.status !== "awaiting_approval" && !Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
-        run.error = reason; run.status = "escalated";
-        run.pendingAction = { actionId: `next-${digest([run.runId, messageId])}`, kind: "resume_coordinator", owner: "coordinator",
-          reason, sourceMessageId: messageId, createdAt: this.now(), state: "pending", previousStatus, recovery: "manual", resumeAttempts: 0 };
-      }
+      // Every tool call is a distinct attempt (an agent may reuse its message_id when retrying), so no message-id dedupe here.
+      const attempt = this.countInvalidMessage(run, binding.role, source.message.message_id);
+      if (attempt < INVALID_ROLE_MESSAGE_LIMIT) { await save(); return { attempt, limit: INVALID_ROLE_MESSAGE_LIMIT, escalated: false }; }
+      const reason = `Rejected invalid ${binding.role} RoleMessage before transport ${attempt} times for ${source.message.message_id}: ${describeValidationError(reasonInput)}`.slice(0, 2000);
+      const escalated = this.escalateInvalidMessages(run, messageId, reason);
+      const automatic = escalated && (run.pendingAction?.resumeAttempts ?? 0) < AUTO_RESUME_LIMIT;
       this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId,
         sdlcStatus: run.status, owner: "coordinator", ...(run.pendingAction === undefined ? {} : { actionId: run.pendingAction.actionId }),
-        headline: "Agent result was rejected before delivery", reason, blockageReason: reason,
+        headline: automatic ? `${binding.role} sent ${attempt} invalid messages; Runtime hands the assignment back to Coordinator automatically`
+          : "Agent result was rejected before delivery", reason, blockageReason: reason,
+        ...(automatic ? { automaticResume: automaticResumeNotice(run.pendingAction!) } : {}),
         options: ["Ask Coordinator to send a schema-valid result or explain the blocker", "Cancel run"] },
-      `invalid-role-message:${digest([run.runId, messageId])}`, "conversation");
+      `invalid-role-message:${digest([run.runId, messageId, attempt])}`, "conversation");
       await save();
+      return { attempt, limit: INVALID_ROLE_MESSAGE_LIMIT, escalated };
     });
   }
   /**
@@ -822,6 +918,8 @@ export class AgenticWorkflowRuntime {
   /**
    * A live run has no pending decision, handoff or human gate, and its role panes are not working, with no activity since idleSince.
    * Herdr idle/done only means "not working" here, never task success. Once per episode (episodeKey changes with activity).
+   * A holder (an accepted assignment still owing its result) is first reminded once through Herdr; a holder still silent in a
+   * later episode, or a stall without any holder, becomes a bounded `auto_resume` Coordinator action.
    */
   async reportRunStalled(runId: string, episodeKey: string): Promise<void> {
     await this.transaction(async (state, save, _core, outbox) => {
@@ -836,22 +934,31 @@ export class AgenticWorkflowRuntime {
         (this.outboundOwesResult(state, run, out) || out.message.recipient.role === "coordinator" && out.status === "accepted" && out.handle !== undefined));
       const holder = holders.find(out => out.message.recipient.role === "developer") ??
         holders.find(out => out.message.recipient.role !== "coordinator") ?? holders[0];
+      // First stall of a holder: remind that exact holder once through Herdr to send its result or report blocked. The reminder
+      // is new activity, so the next stall episode starts after it; a holder still silent then is handed to the Coordinator.
+      if (holder?.handle && !this.holderReminded(state, run, holder) && this.remindHolder(outbox, run, holder, idleSince)) {
+        await save(); return;
+      }
       const previousStatus = run.status;
       const sourceMessageId = holder?.message.message_id ?? run.delegation.messageId;
       const reasonForAction = holder
         ? `${holder.message.recipient.role} pane ${holder.handle!.target.paneId} holds accepted ${holder.message.type} for task ${holder.taskId} since ${idleSince} but has no correlated result.`
         : `No run-local work, wait, or next action was recorded after ${idleSince}.`;
+      const inherited = inheritedAutoResume(run);
       run.error = reasonForAction.slice(0, 2000);
       run.status = "escalated";
+      // Automatic and bounded (B0): the Coordinator is woken to reassign or report the blocker; the user decides only once
+      // the automatic budget is spent.
       run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
-        reason: run.error, sourceMessageId, createdAt: this.now(), state: "pending", previousStatus, resumeAttempts: 0, recovery: "manual" };
+        reason: run.error, sourceMessageId, createdAt: this.now(), state: "pending", previousStatus, ...inherited, recovery: "auto_resume" };
+      const automatic = (run.pendingAction.resumeAttempts ?? 0) < AUTO_RESUME_LIMIT ? { automaticResume: automaticResumeNotice(run.pendingAction) } : {};
       if (holder?.handle) {
         const role = holder.message.recipient.role;
         const kind = role === "developer" ? "developer_no_response" : role === "coordinator" ? "coordinator_no_response" : "run_stalled";
         const reason = `${role} pane ${holder.handle.target.paneId} holds accepted ${holder.message.type} for task ${holder.taskId} since ${idleSince} ` +
-          "but is not working and has reported no result. Herdr idle/done only means not working, never task success.";
+          "but is not working and has reported no result, even after a reminder. Herdr idle/done only means not working, never task success.";
         this.emit(state, outbox, run, "conversation.progress", { kind, runId, reason, idleSince, role, paneId: holder.handle.target.paneId,
-          owner: "coordinator", actionId: run.pendingAction.actionId,
+          owner: "coordinator", actionId: run.pendingAction.actionId, ...automatic,
           options: ["Ask Coordinator to inspect the run and re-dispatch the task or report the blocker", "Cancel this run"],
           headline: `Run may be stuck: ${role} stopped without a result (${runId})` },
         `run-stalled:${episodeKey}`, "conversation");
@@ -860,10 +967,41 @@ export class AgenticWorkflowRuntime {
       const reason = `Không có tiến triển từ ${idleSince} và các pane vai trò không ở trạng thái đang làm việc. ` +
         "Trạng thái idle/done của Herdr không chứng minh công việc đã thành công.";
       this.emit(state, outbox, run, "conversation.progress", { kind: "run_stalled", runId, reason, idleSince, owner: "coordinator", actionId: run.pendingAction.actionId,
-        options: ["Yêu cầu Coordinator tiếp tục hoặc giải thích trạng thái", "Hủy run"], headline: `Run có thể bị treo: ${runId}` },
+        ...automatic, options: ["Yêu cầu Coordinator tiếp tục hoặc giải thích trạng thái", "Hủy run"], headline: `Run có thể bị treo: ${runId}` },
       `run-stalled:${episodeKey}`, "conversation");
       await save();
     });
+  }
+  private holderReminderId(run: RunRecord, holder: Outbound): string { return `stall-reminder-${digest([run.runId, holder.message.message_id])}`; }
+  /** One reminder per held assignment; a reminder is never itself reminded. */
+  private holderReminded(state: JournalState, run: RunRecord, holder: Outbound): boolean {
+    if (objectField(holder.message.payload, "kind") === "result_reminder") return true;
+    const id = this.holderReminderId(run, holder);
+    return state.outbound.some(out => out.message.message_id === id);
+  }
+  /**
+   * Queues the idempotent Herdr reminder to the exact holder: send the correlated result or report blocked. A Developer whose
+   * assignment still holds its writer lease is reached by a task notice under that lease. It asks for a result; it never is one.
+   * Returns false when the holder cannot be reached this way (the caller then hands the run to the Coordinator).
+   */
+  private remindHolder(outbox: HerdrOutbox, run: RunRecord, holder: Outbound, idleSince: string): boolean {
+    const id = this.holderReminderId(run, holder), role = holder.message.recipient.role, target = holder.handle!.target;
+    const payload = json({ kind: "result_reminder", runId: run.runId, taskId: holder.taskId, sourceMessageId: holder.message.message_id,
+      messageType: holder.message.type, idleSince,
+      next: `Runtime has no result for ${holder.message.type} ${holder.message.message_id} (task ${holder.taskId}) since ${idleSince}. ` +
+        `Send your structured result now with send_role_message (causation_id ${holder.message.message_id}), or report task.status with ` +
+        "payload.status \"blocked\" and the reason. An idle or finished turn is not a result." });
+    const base = { schema_version: 2 as const, message_id: id, correlation_id: run.delegation.correlationId, causation_id: holder.message.message_id,
+      run_id: run.runId, type: "task.status" as const, payload, artifact_references: [], occurred_at: this.now(), idempotency_key: id };
+    try {
+      if (holder.message.type === "task.assignment" && holder.status === "accepted") {
+        if (role !== "developer") return false;
+        outbox.enqueueTaskNotice(RoleMessageSchema.parse({ ...base, sender: { role: "coordinator" },
+          recipient: { role: "developer", agent_id: target.agentId, pane_id: target.paneId } }), holder);
+      } else outbox.enqueue(RoleMessageSchema.parse({ ...base, sender: { role: "runtime" },
+        recipient: { role, agent_id: target.agentId, ...(target.paneId ? { pane_id: target.paneId } : {}) } }), role);
+      return true;
+    } catch { return false; }
   }
   async loadSpecification(specId: string): Promise<Specification> {
     return this.transaction(async state => {
@@ -885,7 +1023,9 @@ export class AgenticWorkflowRuntime {
   }
   /**
    * An authenticated envelope refused by its own content (no idempotency_key, wrong recipient). Retrying the same envelope cannot
-   * succeed, so it is journaled as rejected once, the run is escalated to Coordinator and the user hears the exact refusal.
+   * succeed, so it is journaled as rejected once. An agent sender gets the exact refusal back through Herdr to resend a valid
+   * message; after INVALID_ROLE_MESSAGE_LIMIT refusals for one assignment (or for a non-agent sender) the run is escalated to the
+   * Coordinator and the user hears the exact refusal.
    */
   private async refuseInbound(message: RoleMessage, detail: string): Promise<never> {
     const headline = `Handoff refused: ${message.type} from ${message.sender.role} ${detail}`;
@@ -897,11 +1037,24 @@ export class AgenticWorkflowRuntime {
       state.inbox.push({ message, status: "rejected", reason });
       const run = state.runs.find(item => item.runId === message.run_id);
       if (run && !run.cancelled && !TERMINAL_RUN_STATUSES.includes(run.status)) {
+        const agentSender = !["conversation", "runtime", "user"].includes(message.sender.role);
+        const sourceId = invalidMessageSource(message);
+        // An agent's refused message goes back to that agent to fix and resend; only the INVALID_ROLE_MESSAGE_LIMIT-th refusal for
+        // one assignment involves the Coordinator, automatically and bounded. The rejected inbox entry dedupes redeliveries.
+        const attempt = agentSender ? this.countInvalidMessage(run, message.sender.role, sourceId, message.message_id) : INVALID_ROLE_MESSAGE_LIMIT;
+        if (agentSender && attempt < INVALID_ROLE_MESSAGE_LIMIT) {
+          this.returnValidationError(state, outbox, run, message, `${message.sender.role}:${sourceId}`, attempt, `${message.type} ${detail}`);
+          await save();
+          throw new AdmissionRejectedError(reason);
+        }
         if (run.status !== "awaiting_approval" && !Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
-          const previousStatus = run.status;
-          run.error = reason; run.status = "escalated";
-          run.pendingAction = { actionId: `next-${digest([run.runId, message.message_id])}`, kind: "resume_coordinator", owner: "coordinator",
-            reason, sourceMessageId: message.message_id, createdAt: this.now(), state: "pending", previousStatus, recovery: "manual", resumeAttempts: 0 };
+          if (agentSender) this.escalateInvalidMessages(run, message.message_id, `${reason} (${attempt} refused messages for ${sourceId})`);
+          else {
+            const previousStatus = run.status;
+            run.error = reason; run.status = "escalated";
+            run.pendingAction = { actionId: `next-${digest([run.runId, message.message_id])}`, kind: "resume_coordinator", owner: "coordinator",
+              reason, sourceMessageId: message.message_id, createdAt: this.now(), state: "pending", previousStatus, recovery: "manual", resumeAttempts: 0 };
+          }
         }
         this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId, sdlcStatus: run.status, owner: "coordinator",
           ...(run.pendingAction === undefined ? {} : { actionId: run.pendingAction.actionId }), headline, reason, blockageReason: reason,

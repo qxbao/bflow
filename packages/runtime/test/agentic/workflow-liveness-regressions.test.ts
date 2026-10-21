@@ -469,27 +469,40 @@ function keylessEnvelope(id: string, runId = "run-1"): RoleMessage {
 }
 
 describe("inbound handoff refusals are message-intrinsic", () => {
-  it("refuses an authenticated keyless handoff once, escalates the run and never reports it as uncertain delivery", async () => {
+  it("refuses an authenticated keyless handoff once, returns the refusal to its sender and never reports it as uncertain delivery", async () => {
     const f = await fixture({ runs: [run("run-1", "specifying")] });
     const keyless = keylessEnvelope("keyless-1");
     const first = await f.runtime.receiveHerdr(keyless).then(() => undefined, (failure: unknown) => failure);
     expect(first).toBeInstanceOf(AdmissionRejectedError);
     expect(String(first)).toContain("task.status from architect lacks idempotency_key");
     expect(await f.runtime.inboundRejection("keyless-1")).toContain("lacks idempotency_key");
-    const state = await f.inspect();
-    expect(state.runs.find(item => item.runId === "run-1")).toMatchObject({ status: "escalated", pendingAction: { kind: "resume_coordinator", state: "pending" } });
+    let state = await f.inspect();
+    // B2: a first refusal goes back to the architect to resend; the run is not escalated and the user is not interrupted.
+    expect(state.runs.find(item => item.runId === "run-1")).toMatchObject({ status: "specifying" });
+    const feedback = state.outbound.filter(out => (out.message.payload as { kind?: string }).kind === "role_message_rejected");
+    expect(feedback).toHaveLength(1);
+    expect(feedback[0]!.message).toMatchObject({ sender: { role: "runtime" }, recipient: { role: "architect" }, causation_id: "keyless-1",
+      payload: { attempt: 1, limit: 3, errors: expect.stringContaining("lacks idempotency_key") } });
+    expect(await f.notices("workflow_blocked")).toHaveLength(0);
+    expect(await f.notices("delivery_failure")).toHaveLength(0);
+    // Redelivery gets the same deterministic refusal and is neither counted nor answered twice.
+    const again = await f.runtime.receiveHerdr(keyless).then(() => undefined, (failure: unknown) => failure);
+    expect(again).toBeInstanceOf(AdmissionRejectedError);
+    expect(String(again)).toBe(String(first));
+    state = await f.inspect();
+    expect(state.outbound.filter(out => (out.message.payload as { kind?: string }).kind === "role_message_rejected")).toHaveLength(1);
+    expect(await f.notices("workflow_blocked")).toHaveLength(0);
+    expect(await f.notices("delivery_failure")).toHaveLength(0);
+    // The third refused message for the same causation hands the run to the Coordinator automatically, with one user notice.
+    for (const id of ["keyless-2", "keyless-3"]) await f.runtime.receiveHerdr(keylessEnvelope(id)).catch(() => undefined);
+    state = await f.inspect();
+    expect(state.runs.find(item => item.runId === "run-1")).toMatchObject({ status: "escalated",
+      pendingAction: { kind: "resume_coordinator", state: "pending", recovery: "auto_resume", sourceMessageId: "keyless-3" } });
     const blocked = await f.notices("workflow_blocked");
     expect(blocked).toHaveLength(1);
     const payload = blocked[0]!.message.payload as { headline: string; options: string[] };
     expect(payload.headline).toContain("idempotency_key");
     expect(JSON.stringify(payload.options)).not.toMatch(/pane|ready|retr/i);
-    expect(await f.notices("delivery_failure")).toHaveLength(0);
-    // Redelivery gets the same deterministic refusal and adds no second notice.
-    const again = await f.runtime.receiveHerdr(keyless).then(() => undefined, (failure: unknown) => failure);
-    expect(again).toBeInstanceOf(AdmissionRejectedError);
-    expect(String(again)).toBe(String(first));
-    expect(await f.notices("workflow_blocked")).toHaveLength(1);
-    expect(await f.notices("delivery_failure")).toHaveLength(0);
   });
 
   it("refuses an envelope addressed to a non-Runtime recipient with its exact reason", async () => {

@@ -198,10 +198,22 @@ describe("run watchdog facts", () => {
       panes: [{ role: "coordinator", paneId: "pane-coordinator", status: "working" }, { role: "developer", paneId: "pane-developer", status: "idle" }] })).toEqual([
         expect.objectContaining({ kind: "stalled", runId: "run-1" })]);
 
+    // B5: the first stall reminds the holder once through Herdr; the run stays live and the user is not asked anything yet.
     await f.runtime.reportRunStalled("run-1", `run-1@${Date.parse(T0)}`);
+    await f.runtime.reportRunStalled("run-1", `run-1@${Date.parse(T0)}`);
+    expect(await f.notices("developer_no_response")).toHaveLength(0);
+    expect((await f.runtime.inspect("run-1") as unknown as RunRecord)).toMatchObject({ status: "implementing" });
+    const reminders = (await f.runtime.inspect() as unknown as JournalState).outbound.filter(out => (out.message.payload as { kind?: string }).kind === "result_reminder");
+    expect(reminders).toHaveLength(1);
+    expect(reminders[0]!.message).toMatchObject({ recipient: { role: "developer", pane_id: "pane-developer" }, causation_id: "assign-dev" });
+    f.panes.busy.delete("developer");
+    await f.runtime.flushOutbound();
+    // Still no result in the next episode: the Coordinator is resumed automatically (bounded), and the user sees why.
+    await f.runtime.reportRunStalled("run-1", "run-1@after-reminder");
     const reports = await f.notices("developer_no_response");
     expect(reports).toHaveLength(1);
-    expect(reports[0]!.message.payload).toMatchObject({ role: "developer", paneId: "pane-developer", options: expect.any(Array) });
+    expect(reports[0]!.message.payload).toMatchObject({ role: "developer", paneId: "pane-developer", options: expect.any(Array), automaticResume: { attempt: 1 } });
+    expect(await f.runtime.inspect("run-1")).toMatchObject({ status: "escalated", pendingAction: { recovery: "auto_resume", sourceMessageId: "assign-dev" } });
   });
 
   it("does not count a queued handoff as activity once its recipient has been not-ready past the window", async () => {
@@ -342,12 +354,18 @@ describe("specialist blockers and run-step isolation", () => {
     await f.runtime.queueHerdr(message("coordinator-assignment", { recipient: { role: "coordinator" } }));
     await f.runtime.flushOutbound();
     const before = f.transport.sentRequests.length;
-    await f.runtime.reportRoleToolFailure(f.panes.bindings.find(pane => pane.role === "coordinator")!,
+    const report = () => f.runtime.reportRoleToolFailure(f.panes.bindings.find(pane => pane.role === "coordinator")!,
       { message: { message_id: "invalid-escalation", run_id: "run-1", type: "escalation.notice" } },
       "RoleMessageSchema rejected unknown type escalation.notice");
+    // B2: the first two invalid sends are returned to the agent (synchronous tool error); the run keeps going.
+    expect(await report()).toEqual({ attempt: 1, limit: 3, escalated: false });
+    expect(await report()).toEqual({ attempt: 2, limit: 3, escalated: false });
+    expect(await f.runtime.inspect("run-1")).toMatchObject({ status: "implementing" });
+    expect(await f.notices("workflow_blocked")).toHaveLength(0);
+    expect(await report()).toEqual({ attempt: 3, limit: 3, escalated: true });
     const persisted = await f.runtime.inspect("run-1") as unknown as RunRecord;
     expect(persisted).toMatchObject({ status: "escalated", error: expect.stringContaining("Rejected invalid coordinator RoleMessage"),
-      pendingAction: { kind: "resume_coordinator", recovery: "manual", sourceMessageId: "invalid-escalation" } });
+      pendingAction: { kind: "resume_coordinator", recovery: "auto_resume", sourceMessageId: "invalid-escalation" } });
     expect(await f.notices("workflow_blocked")).toHaveLength(1);
     expect(f.transport.sentRequests).toHaveLength(before); // Invalid payload is never forwarded or treated as a result.
     const restarted = new AgenticWorkflowRuntime(f.runtime.ports, { journalDirectory: f.journal.directory, repositoryPath: f.journal.repository });
