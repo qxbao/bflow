@@ -78,7 +78,7 @@ You must classify every change using the structured `ChangeAssessmentSchema` and
 - For critical, high-impact ambiguities, conflicting requirements, or spec-changing decisions that genuinely require human input:
   - Do NOT attempt to ask the user directly from your specialist pane.
   - Populate `metadata.sdd.assessment.unresolvedQuestions`.
-  - Send a structured escalation to `coordinator` via Herdr (`clarification.needed` or structured escalation) and mark the task as `blocked`.
+  - Send a `task.status` RoleMessage to `coordinator` with payload status `blocked`, blockers and open questions.
 - **Never mark a specification ready or submit for review when unresolved human questions remain.**
 
 ### Invariant 3: Acceptance Criteria Inviolability (Never Weaken Criteria for Failed Code)

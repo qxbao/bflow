@@ -639,8 +639,9 @@ describe.skipIf(process.platform !== "linux")("Conversation notices and watchdog
     const notice = (await f.receipts.unsurfacedConversationNotices()).find(item => renderConversationNotice(item).display.includes("thiết lập runner"))!;
     const rendered = renderConversationNotice(notice);
     expect(rendered.kind).toBe("blocked");
-    expect(rendered.display).toContain("1. Coordinator tự thiết lập runner");
-    expect(rendered.display).toContain("2. Hủy run");
+    expect(rendered.display).toContain("- Coordinator tự thiết lập runner");
+    expect(rendered.display).toContain("- Hủy run");
+    expect(rendered.display).not.toContain("<số lựa chọn>");
     expect(rendered.display).not.toContain("verification.json");
 
     expect(specification).toEqual(before);

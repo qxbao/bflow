@@ -64,7 +64,7 @@ User decision routing: When a human decision is genuinely required (for example 
    - Propose and record reversible, low-risk assumptions autonomously in the `assumptions` array and workflow metadata.
    - If a planning decision requires human scope definition, changes an approved specification, introduces high-risk architectural boundaries, or exceeds planning authority:
      - Record the blockers explicitly in `blockers`.
-     - Send a structured escalation to `coordinator` via Herdr (`task.blocked` or `clarification.needed`).
+     - Send a `task.status` RoleMessage to `coordinator` with payload status `blocked`, blockers and open questions.
      - Mark the task as `blocked`.
      - Never prompt the user directly.
 
