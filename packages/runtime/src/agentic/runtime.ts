@@ -2443,11 +2443,15 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   }
   /** Trusted local tool guard for a conflict resolver: the current lease, pane, session and preserved worktree own the edit. */
   async withConflictResolverWorkspace<T>(bindingInput: PaneBinding, runId: string, taskId: string,
-    use: (resolution: { conflictPaths: string[]; branchName: string; worktreePath: string; taskKey: string }) => Promise<T>): Promise<T> {
+    use: (resolution: { conflictPaths: string[]; branchName: string; worktreePath: string; taskKey: string; incomingCommitHash?: string;
+      attempt: number; maxAttempts: number; previousFailures: string[] }) => Promise<T>): Promise<T> {
     const binding = PaneBindingSchema.parse(bindingInput);
     return this.transaction(async (state, _save, _core, outbox) => {
-      const { resolution } = await this.ownedResolver(state, outbox, binding, runId, taskId);
-      return use({ conflictPaths: [...resolution.conflictPaths], branchName: resolution.branchName, worktreePath: resolution.worktreePath, taskKey: resolution.taskKey });
+      const { resolution, attempt } = await this.ownedResolver(state, outbox, binding, runId, taskId);
+      return use({ conflictPaths: [...resolution.conflictPaths], branchName: resolution.branchName, worktreePath: resolution.worktreePath, taskKey: resolution.taskKey,
+        ...(resolution.incomingCommitHash ? { incomingCommitHash: resolution.incomingCommitHash } : {}),
+        attempt: resolution.attempts.indexOf(attempt) + 1, maxAttempts: CONFLICT_RESOLVER_ATTEMPTS,
+        previousFailures: resolution.attempts.filter(item => item.status === "failed").map(item => item.reason ?? "no accepted resolution") });
     });
   }
   private async ownedResolver(state: JournalState, outbox: HerdrOutbox, binding: PaneBinding, runId: string, taskId: string) {

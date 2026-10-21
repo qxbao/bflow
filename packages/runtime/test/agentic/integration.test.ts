@@ -1411,3 +1411,32 @@ describe("Runtime Stop and uncertain delivery notices", () => {
     expect(f.transport.sentRequests.slice(sentBefore).filter(request => request.role === "architect")).toEqual([]);
   });
 });
+
+// Runs on every platform (real Git in a realpath'd temporary repository): the resolver's Developer tools.
+describe("Conflict resolver Developer tools", () => {
+  it("gives the resolver its context through assignment_context/workspace_status and refuses Core-task tools clearly", async () => {
+    const f = await fixture({ parallel: true, conflict: true });
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    await f.evidence("implement"); await f.evidence("other");
+    await f.submit("implement", "first branch\n"); await f.submit("other", "second branch\n");
+    await f.runtime.tick(); await f.runtime.tick();
+    const assignment = (await f.runtime.inspect() as any).outbound.find((out: any) => out.message.type === "task.assignment" && out.message.payload.kind === "conflict_resolution");
+    expect(assignment.status).toBe("accepted");
+    const resolver = f.panes.bindings.find(binding => binding.paneId === assignment.handle.target.paneId)!;
+    const worktree = resolver.worktreePath!, head = git(worktree, "rev-parse", "HEAD");
+    const development = new HostDevelopment(() => f.runtime, []);
+    const context = await development.conflictResolutionContext(resolver) as any; // host assignment_context payload
+    expect(context).toMatchObject({ kind: "conflict_resolution", runId: "run-1", taskId: assignment.taskId, worktreePath: worktree,
+      conflictPaths: ["guide.md"], unmergedPaths: ["guide.md"], base: head, head, mergeInProgress: true, attempt: 1, maxAttempts: 2 });
+    expect(context.incomingCommitHash).toMatch(/^[a-f0-9]{40}$/);
+    expect(context.rules.join(" ")).toMatch(/conflictPaths.*ours or theirs.*commit_changes/s);
+    expect(await development.status(resolver, {})).toEqual(context); // workspace_status
+    expect(await development.check(resolver, {})).toMatchObject({ applicable: false, independentAcceptanceEvidence: false });
+    for (const tool of ["request_verification", "authorize_implementation", "submit_implementation"])
+      await expect(development.refuseForResolver(resolver, tool)).rejects.toThrow(`${tool} is not used for a conflict resolution assignment; edit only the conflicted files, commit the resolution with commit_changes, then end your turn`);
+    // An ordinary Core-task Developer pane is not affected by the resolver guard.
+    const coreDeveloper = f.panes.bindings.find(binding => binding.role === "developer" && binding.paneId !== resolver.paneId)!;
+    await expect(development.refuseForResolver(coreDeveloper, "request_verification")).resolves.toBeUndefined();
+    expect(await development.conflictResolutionContext(coreDeveloper)).toBeUndefined();
+  });
+});

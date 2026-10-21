@@ -7,9 +7,18 @@ import { measureBehavior, parseBehavioralCommands, type BehavioralCommand } from
 import { TestRunnerSource, resolveTaskCommands } from "./task-commands.js";
 import { isConflictResolverAssignment, type AgenticWorkflowRuntime } from "./runtime.js";
 import { json, record, strings, textField } from "./journal.js";
-import type { Specification, TestStrategy } from "@bflow/contracts";
+import type { JsonValue, Specification, TestStrategy } from "@bflow/contracts";
 
 const execute = promisify(execFile);
+/** Rules every conflict resolver receives in assignment_context and workspace_status. */
+export const CONFLICT_RESOLVER_RULES: readonly string[] = [
+  "Edit only the files listed in conflictPaths; every other path is refused.",
+  "Combine both sides' intent; never take ours or theirs wholesale without checking what the other side changed.",
+  "Remove every conflict marker; never reset, abort or restart the merge.",
+  "Commit the resolution with commit_changes (expectedHead = head); it concludes the merge and Runtime submits it to P18 accept_conflict_resolution.",
+  "request_verification, authorize_implementation and submit_implementation do not apply; after commit_changes, end your turn.",
+  "If you cannot resolve it, send task.status with status \"failed\" and the reason to coordinator (causation_id = assignment message_id)."
+];
 const covers = (prefix: string, path: string) => prefix === path || path.startsWith(prefix + "/");
 const safe = (path: string) => !isAbsolute(path) && !path.includes("\\") && !path.includes("\0") &&
   path.split("/").every(segment => segment !== "" && segment !== "." && segment !== "..");
@@ -61,6 +70,32 @@ export class HostDevelopment {
     if (!safe(path) || !owned.some(prefix => covers(prefix, path)) || [...forbidden, ".git", ".bflow"].some(prefix => covers(prefix, path)))
       throw new Error(`Path '${path}' is outside the accepted task ownership`);
   }
+  /** The current resolver assignment of this pane, or undefined when the pane holds an ordinary Core task (or none). */
+  private async resolverIdentity(binding: PaneBinding) {
+    try { const context = await this.identity(binding, {}); return context.resolver ? context : undefined; }
+    catch { return undefined; }
+  }
+  /** Full working context for a conflict resolver: files, worktree, revisions and the rules it must follow. */
+  async conflictResolutionContext(binding: PaneBinding): Promise<JsonValue | undefined> {
+    const context = await this.resolverIdentity(binding);
+    if (!context) return undefined;
+    return this.runtime().withConflictResolverWorkspace(context.binding, context.runId, context.taskId, async resolution => {
+      let mergeHead: string | null = null;
+      try { mergeHead = (await this.git(context.cwd, ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"])).trim() || null; } catch { mergeHead = null; }
+      const unmerged = (await this.git(context.cwd, ["diff", "--name-only", "--diff-filter=U", "-z"])).split("\0").filter(Boolean);
+      return json({ kind: "conflict_resolution", runId: context.runId, taskId: context.taskId, worktreePath: context.cwd,
+        branch: (await this.git(context.cwd, ["branch", "--show-current"])).trim(), expectedBranch: resolution.branchName,
+        base: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(), head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
+        incomingCommitHash: resolution.incomingCommitHash ?? mergeHead, mergeInProgress: mergeHead !== null,
+        conflictPaths: resolution.conflictPaths, unmergedPaths: unmerged, attempt: resolution.attempt, maxAttempts: resolution.maxAttempts,
+        previousFailures: resolution.previousFailures, rules: CONFLICT_RESOLVER_RULES });
+    });
+  }
+  /** Core-task-only tools refuse a resolver with an actionable message instead of a missing-task error. */
+  async refuseForResolver(binding: PaneBinding, tool: string): Promise<void> {
+    if (await this.resolverIdentity(binding))
+      throw new Error(`${tool} is not used for a conflict resolution assignment; edit only the conflicted files, commit the resolution with commit_changes, then end your turn`);
+  }
   async authorizeFileEdit(binding: PaneBinding, input: unknown): Promise<void> {
     const context = await this.identity(binding, {}), hook = record(input), toolInput = record(hook.tool_input);
     if (!["Edit", "Write"].includes(String(hook.tool_name))) throw new Error("Only scoped file-edit tools are supported");
@@ -85,9 +120,7 @@ export class HostDevelopment {
   }
   async status(binding: PaneBinding, input: unknown) {
     const context = await this.identity(binding, input);
-    if (context.resolver) return this.runtime().withConflictResolverWorkspace(context.binding, context.runId, context.taskId, async resolution =>
-      json({ runId: context.runId, taskId: context.taskId, conflictResolution: true, head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
-        branch: (await this.git(context.cwd, ["branch", "--show-current"])).trim(), worktreePath: context.cwd, conflictPaths: resolution.conflictPaths }));
+    if (context.resolver) return (await this.conflictResolutionContext(binding))!;
     return this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async task =>
       json({ runId: context.runId, taskId: context.taskId, head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
         branch: (await this.git(context.cwd, ["branch", "--show-current"])).trim(), worktreePath: context.cwd,
@@ -96,7 +129,8 @@ export class HostDevelopment {
   /** Useful Developer feedback, deliberately not authenticated QA evidence. */
   async check(binding: PaneBinding, input: unknown) {
     const context = await this.identity(binding, input);
-    if (context.resolver) throw new Error("A conflict resolution has no task checks; independent workflow verification runs after P18 accepts the committed resolution");
+    if (context.resolver) return json({ applicable: false, independentAcceptanceEvidence: false,
+      reason: "check_work does not apply to a conflict resolution: it has no task test plan. Commit the resolution with commit_changes; Runtime then runs independent workflow verification on the integrated result." });
     const selected = await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async (task, definition) => ({
       commands: this.commandsFor(task, strings(record(definition.metadata).ownedPaths)),
       head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
