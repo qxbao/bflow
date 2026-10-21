@@ -57,7 +57,7 @@ export function isCoordinatorTrigger(message: RoleMessage): boolean {
   return WAKE_KINDS.includes(String((message.payload as Record<string, unknown>).kind));
 }
 /** Runtime wake-ups that the Coordinator must answer through Runtime tools; each one's turn is tracked for a no-response Stop. */
-const WAKE_KINDS = ["specialist_result_ready", "specialist_no_response", "delivery_failure", "resume_run"];
+const WAKE_KINDS = ["specialist_result_ready", "specialist_no_response", "delivery_failure", "resume_run", "verification_stuck", "changes_requested"];
 
 /**
  * A durable Conversation notice for a delivery or inbound failure that Runtime could not record itself. It is idempotent by the
@@ -375,8 +375,8 @@ export class HostReceiptJournal {
     if (binding.role !== "conversation" || !turn || turn.messageId !== messageId ||
         this.bindingIdentity(turn.binding) !== this.bindingIdentity(binding))
       throw new Error("Resume requires the current authenticated Conversation user message");
-    const request = /^(?:tiếp tục|resume|continue)(?:\s+(?:run\s+)?([A-Za-z0-9][A-Za-z0-9._:-]*))?[.!]?$/iu.exec(turn.content.trim());
-    if (!request || request[1] !== undefined && request[1] !== runId)
+    const request = parseConversationResumeRequest(turn.content);
+    if (!request || request.runId !== undefined && request.runId !== runId)
       throw new Error("An explicit resume request is required: reply 'tiếp tục' or 'resume <run-id>' in Conversation");
   }
   async recordConversationTurn(turn: TrustedConversationTurn): Promise<void> { await this.write("conversation-turn", turn.messageId, turn); }
@@ -432,9 +432,11 @@ export class HostReceiptJournal {
   async recordConversationDeliveryFailure(messageIds: readonly string[], reason: string): Promise<void> {
     const ids = [...new Set(messageIds.map(value => textField(value)))].slice(0, 100);
     for (const id of ids) if (await this.read("conversation-notice", id) === undefined) throw new Error("Unknown Conversation notice");
-    const failedAt = new Date().toISOString();
-    const key = `${ids.sort().join(",")}:${failedAt}`;
-    await this.write("notification-failure", key, { messageIds: ids, reason: redactString(reason).slice(0, 2000), failedAt });
+    // One receipt per (notices, failure class): a repeating failure (e.g. unsupported OS notification) must not grow the store.
+    const text = redactString(reason).slice(0, 2000);
+    const key = `${ids.sort().join(",")}:${digest(text.replace(/\d+/g, "#"))}`;
+    if (await this.read("notification-failure", key) !== undefined) return;
+    await this.write("notification-failure", key, { messageIds: ids, reason: text, failedAt: new Date().toISOString() });
   }
   async conversationDeliveryFailures(): Promise<{ messageIds: string[]; reason: string; failedAt: string }[]> {
     const failures: { messageIds: string[]; reason: string; failedAt: string }[] = [];
@@ -564,4 +566,16 @@ export class HostReceiptJournal {
       ...(raw.context ? { context: QualityGateContextSchema.parse(raw.context) } : {}),
       ...(raw.runId ? { runId: textField(raw.runId) } : {}), ...(raw.taskId ? { taskId: textField(raw.taskId) } : {}) };
   }
+}
+
+/** Fixed polite words allowed around the resume keyword; any other word (a negation or another instruction) refuses the request. */
+const RESUME_PREFIX = "(?:(?:ok(?:e|ay)?|được|hãy|vui lòng|please)[\\s,]+){0,2}";
+const RESUME_SUFFIX_WORDS = "đi|nhé|nha|giúp mình|giúp em|giúp tôi|please|pls";
+const RESUME_REQUEST = new RegExp(`^${RESUME_PREFIX}(?:tiếp tục|resume|continue)` +
+  `(?:\\s+(?:run\\s+)?(?!(?:${RESUME_SUFFIX_WORDS})(?:[\\s,.!]|$))([A-Za-z0-9][A-Za-z0-9._:-]*))?` +
+  `(?:[\\s,]+(?:${RESUME_SUFFIX_WORDS})){0,2}\\s*[.!]?$`, "iu");
+/** An explicit user request to resume, optionally naming the exact run: "tiếp tục", "ok tiếp tục nhé", "Continue run-1 please". */
+export function parseConversationResumeRequest(content: string): { runId?: string } | undefined {
+  const match = RESUME_REQUEST.exec(content.trim());
+  return match ? (match[1] === undefined ? {} : { runId: match[1] }) : undefined;
 }

@@ -67,6 +67,8 @@ export interface RunRecord {
   resumeReceipts?: { actionId: string; messageId: string }[];
   /** Set once the run's single final cancellation notice is queued; absent in journals written before cancellation reconciliation. */
   cancelReconciled?: boolean;
+  /** Set when a human `changes_requested` continued this run as a follow-up run; the parent is terminal and never resumed. */
+  supersededBy?: string;
 }
 export interface UserDecisionRecord {
   request: ApprovalRequest; role: AgentRole; agentId: string; paneId: string; taskId: string;
@@ -146,6 +148,8 @@ function parseState(input: unknown, repository: string): JournalState {
     if (run.userDecisions !== undefined) parseUserDecisions(run.userDecisions, run.runId);
     if (run.delegationHistory !== undefined) run.delegationHistory = run.delegationHistory.map(item => DelegationRequestSchema.parse(item));
     if (run.cancelReconciled !== undefined && typeof run.cancelReconciled !== "boolean") throw new Error("Invalid cancellation reconciliation flag");
+    if (run.supersededBy !== undefined && (textField(run.supersededBy) === run.runId || run.status !== "escalated" || run.pendingAction))
+      throw new Error("Invalid follow-up supersession");
     if (run.pendingAction !== undefined) {
       const action = record(run.pendingAction);
       const allowed = new Set(["actionId", "kind", "owner", "reason", "sourceMessageId", "createdAt", "state", "previousStatus", "resumeAttempts", "relatedMessageIds", "recovery", "requiredRole", "requiredCapabilities"]);

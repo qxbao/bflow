@@ -242,6 +242,13 @@ function privateGitPath(path: string): boolean {
   return path.split(/[\\/]/).some(segment => EXCLUDED_SEGMENTS.has(segment.toLowerCase()) || SECRET_NAME.test(segment));
 }
 
+/** HEAD names a branch whose ref does not exist yet (exit 1 of show-ref); a corrupt or unreadable ref is not unborn. */
+async function unbornHead(root: string): Promise<boolean> {
+  const ref = (await runGit(root, ["symbolic-ref", "-q", "HEAD"]).catch(() => "")).trim();
+  if (!/^refs\/heads\/[^\s]+$/.test(ref)) return false;
+  return runGit(root, ["show-ref", "--verify", "--quiet", ref]).then(() => false, error => (error as { code?: unknown }).code === 1);
+}
+
 async function gitRead(root: string, action: "status" | "log" | "head" | "files" | "diff", limit: number): Promise<JsonValue> {
   await validateGitMetadata(root);
   if (action === "status" || action === "diff") await assertNoConfiguredFilters(root);
@@ -263,10 +270,15 @@ async function gitRead(root: string, action: "status" | "log" | "head" | "files"
       break;
     }
     case "log":
-      output = await runGit(root, ["log", `-${limit}`, "--format=%h %s", "--no-show-signature", "--no-decorate"]);
-      break;
     case "head":
-      output = await runGit(root, ["rev-parse", "--verify", "HEAD"]);
+      try {
+        output = await runGit(root, action === "head" ? ["rev-parse", "--verify", "HEAD"]
+          : ["log", `-${limit}`, "--format=%h %s", "--no-show-signature", "--no-decorate"]);
+      } catch (error) {
+        // A fresh `git init` has no commit yet: report it explicitly instead of failing every read probe.
+        if (await unbornHead(root)) return { op: "git", action, output: "", unborn: true };
+        throw error;
+      }
       break;
     case "files": {
       const raw = await runGit(root, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], MAX_GIT_OUTPUT);

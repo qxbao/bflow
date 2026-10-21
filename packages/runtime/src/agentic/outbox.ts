@@ -12,6 +12,8 @@ export const NOT_READY_FAILURE_MS = 5 * 60_000;
 export const CONVERSATION_DELIVERY_MAX_ATTEMPTS = 5;
 /** Consecutive dispatch failures before a queued message is surfaced to Conversation (it keeps retrying). */
 export const DISPATCH_FAILURE_NOTICE_ATTEMPTS = 5;
+/** Backoff between consecutive capability preflight failures of one unsent message; the next failure after these marks it failed. */
+export const PREFLIGHT_RETRY_DELAYS_MS: readonly number[] = [0, 2_000, 8_000, 30_000];
 
 export function unwrap<T>(result: OperationResult<T>): T {
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
@@ -128,7 +130,13 @@ export class HerdrOutbox {
       catch (error) {
         out.error = String(error);
         out.deliveryAttempts = (out.deliveryAttempts ?? 0) + 1;
-        if (error instanceof RoleCapabilityPreflightError) out.status = "failed";
+        if (error instanceof RoleCapabilityPreflightError) {
+          // A preflight probe can fail transiently (pane query, git timeout, skill I/O): retry the unsent intent with backoff,
+          // and only then fail it into the durable resumable blocker. No lease or transport side effect happened yet.
+          const delay = PREFLIGHT_RETRY_DELAYS_MS[out.deliveryAttempts - 1];
+          if (delay === undefined) { out.status = "failed"; delete out.nextAttemptAt; }
+          else out.nextAttemptAt = new Date(Date.parse(this.now()) + delay).toISOString();
+        }
         await this.save();
       }
     }
@@ -167,9 +175,9 @@ export class HerdrOutbox {
       return;
     }
     if (out.status !== "queued") return;
+    if (out.nextAttemptAt !== undefined && Date.parse(out.nextAttemptAt) > Date.parse(this.now())) return; // backoff after a failed write/preflight
     // Never call the Gateway here: it may drain a queued user turn that enqueues back into this locked journal.
     if (isConversationDelivery(out)) {
-      if (out.nextAttemptAt !== undefined && Date.parse(out.nextAttemptAt) > Date.parse(this.now())) return; // backoff after a failed write
       out.status = "sending"; await this.save(); return;
     }
     if (out.parentAssignmentId) {
@@ -266,7 +274,7 @@ export class HerdrOutbox {
       if (receipt.status === "accepted") {
         if (digest(receipt.handle.target) !== digest(out.request.target) || receipt.handle.idempotencyKey !== out.request.idempotency.key)
           throw new Error("Transport binding mismatch");
-        out.handle = receipt.handle; out.status = "accepted"; delete out.error; delete out.deliveryAttempts;
+        out.handle = receipt.handle; out.status = "accepted"; delete out.error; delete out.deliveryAttempts; delete out.nextAttemptAt;
         await this.save();
         if (!out.parentAssignmentId) await onBound(out, receipt.handle);
       } else if (receipt.status === "unknown_delivery") {

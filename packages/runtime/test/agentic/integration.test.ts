@@ -21,6 +21,7 @@ import { DEFAULT_HOST_CHECKS, HostBehavioralFailure, HostVerification } from "..
 import { parseBehavioralCommands, type BehavioralCommand, type RunnerProfile } from "../../src/agentic/behavioral-runner.js";
 import { TestRunnerSource } from "../../src/agentic/task-commands.js";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
+import { digest } from "../../src/agentic/journal.js";
 import { FakeAgentTransport } from "../helpers/fake-transport.js";
 import { draft, workflow } from "../../../specification/test/fixtures.js";
 
@@ -657,6 +658,31 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
       await ticking; expect((await f.inspect()).tasks[0].cycle.status).toBe("passed");
     } catch (error) { await ticking; throw error; }
   });
+  it("re-requests a Reviewer check after a late verdict instead of reusing evidence that predates the retry", async () => {
+    const f = await fixture({ remoteReview: true });
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    const definition = (f.ports as any).taskChecks.find((check: any) => check.id === "review");
+    const context = { runId: "run-1", taskId: "implement", attemptId: "attempt-review-retry", artifacts: [], input: { scope: "task" },
+      definition: { ...definition, timeout: { ...definition.timeout, executionTimeoutMs: 20_000 } } };
+    const gate = f.runtime.herdrQualityGate("review");
+    const requests = async () => ((await f.runtime.inspect()) as any).outbound.filter((out: any) => out.message.type === "verification.requested");
+    const verdict = (request: any) => f.envelope("review.verdict", { gateId: "review", runId: "run-1", taskId: "implement", evaluationId: randomUUID(),
+      status: "passed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString() },
+      { sender: { role: "reviewer", agent_id: request.handle.target.agentId, pane_id: request.handle.target.paneId }, causation_id: request.message.message_id });
+    // First evaluation gives up (timeout/abort) while the Reviewer is still working; its verdict lands afterwards.
+    const first = new AbortController();
+    const abandoned = gate.evaluate(context as any, { signal: first.signal });
+    await expect.poll(async () => (await requests()).filter((out: any) => out.handle).length, { timeout: 10_000 }).toBe(1);
+    first.abort(); await expect(abandoned).rejects.toThrow(/aborted/);
+    const [late] = await requests();
+    await f.runtime.receiveHerdr(verdict(late));
+    // The retry cannot reuse that verdict (it predates the new execution window), so it asks again under a new deterministic key.
+    const retried = gate.evaluate(context as any);
+    await expect.poll(async () => (await requests()).filter((out: any) => out.handle).length, { timeout: 10_000 }).toBe(2);
+    const fresh = (await requests()).find((out: any) => out.message.message_id !== late.message.message_id);
+    await f.runtime.receiveHerdr(verdict(fresh));
+    await expect(retried).resolves.toMatchObject({ ok: true, value: { gateId: "review", status: "passed" } });
+  });
   it("reconciliation permits resend only after a proven not_delivered result", async () => {
     const f = await fixture(); f.panes.busy.add("conversation");
     f.transport.customSendHandler = () => ({ ok: false, error: { code: "timeout", retryable: true, message: "uncertain" } });
@@ -780,6 +806,98 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
     await f.restart().recoverMissingCoordinatorWakeups();
     expect((await f.runtime.inspect() as any).inbox.find((item: any) => item.message.message_id === message.message_id).status).toBe("applied");
     expect(await authenticateNativeHerdrMessage(message)).toBe(false);
+  });
+
+  it("never escalates Runtime-owned workflow verification on a Coordinator Stop or its startup replay", async () => {
+    const f = await fixture(); await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    await f.evidence("implement"); await f.submit();
+    const verify = f.ports.policies.verification.verify.bind(f.ports.policies.verification);
+    let entered!: () => void, release!: () => void;
+    const inWorkflowVerification = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    vi.spyOn(f.ports.policies.verification, "verify").mockImplementation(async (...args) => {
+      if (args[0].taskId === "workflow-verification") { entered(); await gate; }
+      return verify(...args);
+    });
+    const ticking = (async () => { for (let i = 0; i < 4 && !(await f.inspect()).workflowCycle?.status?.match(/passed/); i++) await f.runtime.tick(); })();
+    await inWorkflowVerification;
+    expect(await f.inspect()).toMatchObject({ status: "verifying", workflowVerificationPending: true });
+    const message = f.envelope("delegation.request", (await f.inspect()).delegation, { message_id: "turn-during-verification", idempotency_key: "turn-during-verification" });
+    await f.runtime.queueHerdr(message); await f.runtime.flushOutbound();
+    const binding = f.panes.bindings.find(p => p.role === "coordinator")!;
+    await f.runtime.coordinatorTurnStopped(message, binding);
+    await f.runtime.coordinatorTurnStopped(message, binding); // host startup replays every durable Stop receipt
+    expect((await f.inspect()).status).toBe("verifying");
+    expect((await f.inspect()).pendingAction).toBeUndefined();
+    expect((await f.runtime.watchdogSnapshot("session-1"))[0]).toMatchObject({ runtimeWork: true });
+    await f.runtime.reportRunStalled("run-1", "run-1@long-check"); // a check suite longer than the stall window is not a stall
+    expect((await f.inspect()).status).toBe("verifying");
+    release(); await ticking;
+    expect((await f.inspect()).workflowCycle.status).toBe("passed");
+    await f.runtime.coordinatorTurnStopped(message, binding); // stale replay after the Runtime-owned phase
+    expect((await f.runtime.inspect() as any).outbound.filter((out: any) => out.message.payload.kind === "coordinator_no_response")).toEqual([]);
+    expect((await f.inspect()).status).not.toBe("escalated");
+  });
+  it("retains a verification outcome that finishes while the run is paused and applies it once after resume", async () => {
+    const f = await fixture(); await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    await f.evidence("implement"); await f.submit();
+    (f.ports as any).preflightRoleCapabilities = async () => undefined;
+    const journal = (f.runtime as any).journal;
+    const actionId = `next-${digest(["run-1", "pause-source"])}`;
+    const verify = f.ports.policies.verification.verify.bind(f.ports.policies.verification);
+    let calls = 0;
+    vi.spyOn(f.ports.policies.verification, "verify").mockImplementation(async (...args) => {
+      if (args[0].taskId === "implement") {
+        calls++;
+        // Another role's capability blocker pauses the run while Runtime is still verifying.
+        await journal.exclusive(async (state: any, save: any) => {
+          const run = state.runs.find((item: any) => item.runId === "run-1");
+          run.status = "escalated"; run.error = "Coordinator blocked: capability";
+          run.pendingAction = { actionId, kind: "resume_coordinator", owner: "coordinator", reason: "capability", sourceMessageId: "pause-source",
+            createdAt: new Date().toISOString(), state: "pending", previousStatus: "verifying", resumeAttempts: 0, recovery: "manual" };
+          await save();
+        });
+      }
+      return verify(...args);
+    });
+    await f.runtime.tick(); await f.runtime.tick();
+    const pending = async () => journal.exclusive(async (state: any) => state.pendingVerifications.length);
+    expect(await f.inspect()).toMatchObject({ status: "escalated", tasks: [expect.objectContaining({ verificationPending: true })] });
+    expect((await f.inspect()).tasks[0].cycle.status).not.toBe("passed");
+    expect(await pending()).toBe(1);
+    await expect(f.submit("implement", null)).rejects.toThrow(new RegExp(`paused awaiting resume of action ${actionId}; retry this same call after the run resumes`));
+    await f.runtime.resumeBlockedRun("run-1", actionId);
+    await f.runtime.tick();
+    expect((await f.inspect()).tasks[0].cycle.status).toBe("passed");
+    expect(await pending()).toBe(0);
+    expect(calls).toBe(1);
+  });
+  it("reruns a verification that failed while the run was paused once it is resumed", async () => {
+    const f = await fixture(); await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    await f.evidence("implement"); await f.submit();
+    (f.ports as any).preflightRoleCapabilities = async () => undefined;
+    const journal = (f.runtime as any).journal, actionId = `next-${digest(["run-1", "pause-source"])}`;
+    const verify = f.ports.policies.verification.verify.bind(f.ports.policies.verification);
+    let fail = true;
+    vi.spyOn(f.ports.policies.verification, "verify").mockImplementation(async (...args) => {
+      if (fail && args[0].taskId === "implement") {
+        fail = false;
+        await journal.exclusive(async (state: any, save: any) => {
+          const run = state.runs.find((item: any) => item.runId === "run-1");
+          run.status = "escalated";
+          run.pendingAction = { actionId, kind: "resume_coordinator", owner: "coordinator", reason: "capability", sourceMessageId: "pause-source",
+            createdAt: new Date().toISOString(), state: "pending", previousStatus: "verifying", resumeAttempts: 0, recovery: "manual" };
+          await save();
+        });
+        throw new Error("Injected verifier interruption");
+      }
+      return verify(...args);
+    });
+    await f.runtime.tick();
+    expect((await f.inspect()).tasks[0].verificationPending).toBe(false);
+    await f.runtime.resumeBlockedRun("run-1", actionId);
+    await f.runtime.tick(); await f.runtime.tick();
+    expect((await f.inspect()).tasks[0].cycle.status).toBe("passed");
   });
 
   it("recovers a verifier job lost after pending persistence and before invocation", async () => {

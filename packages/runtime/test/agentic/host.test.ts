@@ -178,6 +178,36 @@ describe.skipIf(process.platform !== "linux")("default durable host lifecycle an
     await expect(callHost(roleConfig.socketPath,roleConfig.token,"quiesce")).rejects.toThrow("Role cannot call host lifecycle");
     await expect(callHost(roleConfig.socketPath,"forged-token","user_prompt",{hook:{prompt:"approve",hook_event_name:"UserPromptSubmit"}})).rejects.toThrow("authentication");
   });
+  it("always answers MCP tools/list with the role tools even when the host cannot yet record the tools/list proof", async () => {
+    const f = await fixture(), launches = await f.controller.prepare();
+    const config = JSON.parse(await readFile(launches.roleLaunch.coordinator!.mcpConfigFile,"utf8"));
+    const args = config.mcpServers.bflow.args as string[];
+    // No native session is observable for this pane yet (the SessionStart hook has not reported it), so the host refuses the proof.
+    const { output, errors } = await new Promise<{ output: string; errors: string }>((accept,reject)=> {
+      const child = spawn(process.execPath,args,{env:{...process.env,HERDR_PANE_ID:"early-pane"},stdio:["pipe","pipe","pipe"]}); let output="", errors="";
+      child.stdout.on("data",chunk=>output+=String(chunk)); child.stderr.on("data",chunk=>errors+=String(chunk)); child.once("error",reject);
+      child.once("exit",code=>code===0?accept({output,errors}):reject(new Error(errors)));
+      child.stdin.write(JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/list"})+"\n");
+      setTimeout(()=>child.stdin.end(),1_500);
+    });
+    const response = JSON.parse(output.trim().split("\n")[0]!);
+    expect(response.result.isError).toBeUndefined();
+    expect(response.result.tools.map((tool:{name:string})=>tool.name)).toContain("host_status");
+    expect(errors).toContain("Bflow provider tools/list not recorded");
+  });
+  it("retries recording the provider tools/list proof with bounded backoff and stops when superseded", async () => {
+    const { recordProviderToolsList } = await import("../../src/agentic/host.js");
+    let calls = 0;
+    const eventually = recordProviderToolsList(async () => { if (++calls < 3) throw new Error("no compatible observed Herdr native session"); }, [0, 5, 5, 5]);
+    expect(await eventually.done).toBe(true); expect(calls).toBe(3);
+    let never = 0;
+    const bounded = recordProviderToolsList(async () => { never++; throw new Error("still unavailable"); }, [0, 1, 1]);
+    expect(await bounded.done).toBe(false); expect(never).toBe(3);
+    let stale = 0;
+    const older = recordProviderToolsList(async () => { stale++; throw new Error("not yet"); }, [0, 20, 20]);
+    recordProviderToolsList(async () => undefined, [0], older);
+    expect(await older.done).toBe(false); expect(stale).toBe(1);
+  });
   it("reports the actual Claude SessionStart through Herdr's native session API and ignores subagent hooks", async () => {
     const f=await fixture(), launches=await f.controller.prepare();
     const config=JSON.parse(await readFile(launches.roleLaunch.conversation!.mcpConfigFile,"utf8"));

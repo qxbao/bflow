@@ -22,6 +22,8 @@ export interface RunFacts {
   acceptedRoles?: readonly string[];
   /** Exact per-pane obligations; role names alone merge concurrent same-role assignments and hide dead work. */
   acceptedPanes?: readonly { role: string; paneId: string }[];
+  /** Runtime itself owns the work (task/workflow verification or a durable outcome to apply); no pane is expected to be working. */
+  runtimeWork?: boolean;
   /** Pending user decisions (specialist questions) of the run. */
   pendingDecisions: readonly { approvalId: string; requestedAt: string }[];
 }
@@ -87,7 +89,7 @@ export function evaluateWatchdog(input: WatchdogInput): WatchdogAction[] {
     }
     // A pending human gate, handoff or question is waiting, not stalled. Inspect only this run's accepted holders;
     // an unrelated busy pane in the same session cannot hide a dead run.
-    if (run.awaitingHuman || run.activeHandoff || run.pendingDecisions.length > 0) continue;
+    if (run.awaitingHuman || run.activeHandoff || run.runtimeWork || run.pendingDecisions.length > 0) continue;
     const acceptedPanes = run.acceptedPanes ?? [];
     if (acceptedPanes.length > 0) {
       if (acceptedPanes.some(holder => input.panes.some(pane => pane.role === holder.role && pane.paneId === holder.paneId && !NOT_WORKING.has(pane.status)))) continue;

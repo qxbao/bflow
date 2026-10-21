@@ -69,7 +69,8 @@ async function fixture(options: { runs?: RunRecord[]; preflight?: (binding: Pane
   const registry = new FileAgentRegistry({ stateFile: join(root, "registry.json") });
   const conversationNotices: RoleMessage[] = [];
   const roleCapabilities: Record<string, string[]> = Object.fromEntries(panes.bindings.map(pane => [pane.role, pane.role === "conversation" ? ["conversation"] : ["repository.read"]]));
-  const ports = { clock: () => new Date(T0), authenticateMessage: async () => true, authorizeHuman: async () => true,
+  let now = Date.parse(T0);
+  const ports = { clock: () => new Date(now), authenticateMessage: async () => true, authorizeHuman: async () => true,
     deliverToConversation: async (message: RoleMessage) => { conversationNotices.push(message); }, transport, registry, panes, roleCapabilities,
     preflightRoleCapabilities: options.preflight ?? (async () => undefined), engine: {}, runStore: {}, artifactStore: {}, policies: {},
     taskChecks: [], workflowChecks: [] } as unknown as AgenticRuntimePorts;
@@ -81,7 +82,9 @@ async function fixture(options: { runs?: RunRecord[]; preflight?: (binding: Pane
   const inspect = async () => await runtime.inspect() as unknown as JournalState;
   const notices = async (kind: string) => (await inspect()).outbound.filter(out => out.message.recipient.role === "conversation" &&
     (out.message.payload as { kind?: string }).kind === kind);
-  return { root, panes, transport, registry, journal, runtime, makeRuntime, inspect, notices, conversationNotices };
+  /** Flushes through the bounded capability-preflight retry backoff so a persistent failure becomes the durable blocker. */
+  const flushPreflight = async () => { for (let attempt = 0; attempt < 5; attempt++) { await runtime.flushOutbound(); now += 60_000; } };
+  return { root, panes, transport, registry, journal, runtime, makeRuntime, inspect, notices, conversationNotices, flushPreflight };
 }
 
 describe("root acceptance of durable next actions", () => {
@@ -168,10 +171,10 @@ describe("root acceptance of durable next actions", () => {
       if (!ready) throw new RoleCapabilityPreflightError("Read proof revoked");
     } });
     await f.runtime.queueHerdr(envelope("repair-race", "run-1", { role: "coordinator" }));
-    await f.runtime.flushOutbound();
+    await f.flushPreflight();
     const actionId = (await f.runtime.inspect("run-1") as unknown as RunRecord).pendingAction!.actionId;
     ready = true; await f.runtime.resumeBlockedRun("run-1", actionId);
-    ready = false; await f.runtime.flushOutbound();
+    ready = false; await f.flushPreflight();
     expect(f.transport.sentRequests).toHaveLength(0);
     ready = true; await f.runtime.resumeBlockedRun("run-1", actionId); await f.runtime.flushOutbound();
     expect(f.transport.sentRequests).toHaveLength(1);
@@ -209,7 +212,7 @@ describe("root acceptance of durable next actions", () => {
     let ready = false;
     const f = await fixture({ runs: [], preflight: async () => { if (!ready) throw new RoleCapabilityPreflightError("Coordinator reader unavailable"); } });
     const request = delegationEnvelope();
-    await f.runtime.queueHerdr(request); await f.runtime.flushOutbound();
+    await f.runtime.queueHerdr(request); await f.flushPreflight();
     const current = await f.runtime.inspect("run-1") as unknown as RunRecord;
     expect(current).toMatchObject({ status: "escalated", coreCreated: false, pendingAction: { recovery: "capability_repair" } });
     expect(f.transport.sentRequests).toHaveLength(0);

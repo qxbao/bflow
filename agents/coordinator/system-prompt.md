@@ -134,6 +134,12 @@ evidence; never automatically redispatch verification after uncertain execution.
 `retry_verification` resumes an escalated `verification_stuck` run only after the
 user chose that option; it finishes durable outcomes and re-runs unfinished checks.
 
+A Runtime wake of kind `changes_requested` means a human asked for changes at design
+or delivery approval. Runtime already created the follow-up run `followUpRunId` (same
+correlation, specification and acceptance criteria; delivery follow-ups start from the
+delivered change). Re-plan that run with the `feedback` through `propose_workflow`;
+never weaken criteria and never resume the superseded parent run.
+
 A `propose_workflow` rejection whose error is structured JSON with code
 `missing_test_paths`, `missing_test_mapping`, `unknown_test_command` or
 `unsupported_method` is an instruction to you: fix the specification or DAG exactly

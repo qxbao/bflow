@@ -32,6 +32,15 @@ describe("repository reader input schema", () => {
 });
 
 describe("repositoryRead", () => {
+  it("reports an unborn HEAD of a fresh git init explicitly for head and log, but still fails on broken metadata", async () => {
+    const root = await repo();
+    git(root, "init", "-b", "main");
+    expect(await repositoryRead(root, { op: "git", action: "head", limit: 1 })).toEqual({ op: "git", action: "head", output: "", unborn: true });
+    expect(await repositoryRead(root, { op: "git", action: "log", limit: 5 })).toEqual({ op: "git", action: "log", output: "", unborn: true });
+    expect(await repositoryRead(root, { op: "list", path: ".", limit: 1 })).toMatchObject({ op: "list" });
+    await writeFile(join(root, ".git/HEAD"), "ref: refs/heads/main\n0000\n");
+    await expect(repositoryRead(root, { op: "git", action: "head", limit: 1 })).rejects.toThrow();
+  });
   it("reads UTF-8 source by bounded byte offset and limit", async () => {
     const root = await repo();
     await writeFile(join(root, "src.ts"), "0123456789", "utf8");

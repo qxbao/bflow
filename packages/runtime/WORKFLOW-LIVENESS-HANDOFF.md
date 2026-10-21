@@ -103,3 +103,24 @@ remain distinct. This lets first-dispatch capability failure produce the same re
 as later failures, with no invented Core state. Legacy journals without intake retain their
 explicit ingress-failure notice rather than fabricating a received result. Requirement revision,
 approval, cancellation and duplicate-delegation tests exercise this ordering.
+
+## Review remediation (F1–F15)
+
+Code review found paths where the liveness changes could stall a flow; each now has a local regression test.
+
+- MCP `tools/list` always answers with the role tools; the preflight proof is recorded afterwards with bounded, unref'd
+  retries (the provider may list tools before its SessionStart hook reports the native session). Preflight still fails closed.
+- Coordinator status to Conversation is journaled only for a matching live run; other authenticated updates are delivered unchanged.
+- Runtime-owned progression (live Core, task/workflow verification, retained outcomes) is a next action for Stop and the
+  watchdog; stale startup Stop replays are superseded by the latest Stop per run; stall holders use `outboundOwesResult`.
+- Transient inbound failures and transient capability preflight failures (bounded backoff) no longer escalate.
+- A run paused for resume keeps in-flight results and verification outcomes and applies them after resume; host tools get
+  a retryable "paused awaiting resume" error instead of a terminal one.
+- `inconclusive` and correlated terminal `task.status` discharge a handoff; an identical specialist request after a
+  stopped holder becomes a new deterministic attempt that supersedes the dead obligation.
+- Native delivery uncertainty records a no-resend reconciliation action without escalating and is settled by a late ACK or
+  Runtime application; legacy escalated records resume by waking the Coordinator, never by resending.
+- Automatic capability-repair resume requires a recorded preflight failure and shares one bounded budget per episode.
+- Unborn HEAD (fresh `git init`) is reported explicitly by the repository reader. Natural "tiếp tục"/"continue" phrasings
+  are accepted from a fixed polite-word set; negations or other instructions are refused. OS notification failures are
+  bounded and deduplicated per notice and failure class.

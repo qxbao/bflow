@@ -21,6 +21,9 @@ export interface ConversationInboxPorts {
   now(): number;
 }
 
+/** OS notification attempts per notice before the advisory notification is given up (e.g. `herdr notification show` unsupported). */
+export const MAX_NOTIFICATION_FAILURES = 3;
+
 export type InboxTickOutcome = "idle" | "notified" | "nudged" | "nudge_backoff" | "nudge_exhausted" | "pane_unavailable" | "pane_busy" | "input_not_empty" | "delivery_failed";
 
 /**
@@ -31,10 +34,14 @@ export type InboxTickOutcome = "idle" | "notified" | "nudged" | "nudge_backoff" 
 export class ConversationInboxNotifier {
   private readonly reminders = new Map<string, ReminderState>();
   private readonly retryNotifications = new Set<string>();
+  /** Consecutive OS notification failures per notice; the advisory notification stops after MAX_NOTIFICATION_FAILURES (the nudge is separate). */
+  private readonly notificationFailures = new Map<string, number>();
   private nudge: NudgeState | undefined;
 
   /** A recreated or resurfaced notice is new work: it is re-notified and nudged on the next pass. */
-  forget(messageId: string): void { this.reminders.delete(messageId); this.retryNotifications.delete(messageId); this.nudge = undefined; }
+  forget(messageId: string): void {
+    this.reminders.delete(messageId); this.retryNotifications.delete(messageId); this.notificationFailures.delete(messageId); this.nudge = undefined;
+  }
 
   async tick(ports: ConversationInboxPorts): Promise<InboxTickOutcome> {
     const unsurfaced = await ports.unsurfacedNotices(), undisplayed = await ports.undisplayedNotices();
@@ -53,15 +60,18 @@ export class ConversationInboxNotifier {
       catch (error) {
         notificationSucceeded = false;
         for (const item of due) {
-          this.reminders.set(item.id, { shows: (this.reminders.get(item.id)?.shows ?? 0) + 1, nextAt: now + 60_000 });
-          this.retryNotifications.add(item.id);
+          const failures = (this.notificationFailures.get(item.id) ?? 0) + 1;
+          this.notificationFailures.set(item.id, failures);
+          const exhausted = failures >= MAX_NOTIFICATION_FAILURES;
+          this.reminders.set(item.id, { shows: (this.reminders.get(item.id)?.shows ?? 0) + 1, nextAt: exhausted ? Number.POSITIVE_INFINITY : now + 60_000 });
+          if (exhausted) this.retryNotifications.delete(item.id); else this.retryNotifications.add(item.id);
         }
         await ports.recordDeliveryFailure?.(due.map(item => item.id), String(error));
         // The OS notification is advisory; still attempt the separate safe Conversation wake below.
       }
       if (notificationSucceeded) {
         for (const item of due) {
-          this.retryNotifications.delete(item.id);
+          this.retryNotifications.delete(item.id); this.notificationFailures.delete(item.id);
           const notice = [...undisplayed, ...unsurfaced].find(candidate => candidate.messageId === item.id);
           this.reminders.set(item.id, notice && isUserFacingNotice(renderConversationNotice(notice))
             ? afterReminder(this.reminders.get(item.id), now) : { shows: (this.reminders.get(item.id)?.shows ?? 0) + 1, nextAt: now + 60_000 });

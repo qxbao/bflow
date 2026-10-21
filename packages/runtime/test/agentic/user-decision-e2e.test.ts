@@ -596,9 +596,13 @@ describe.skipIf(process.platform !== "linux")("Conversation notices and watchdog
     await runtime.reportRunStalled(RUN, stall.episodeKey);
     await runtime.reportRunStalled(RUN, stall.episodeKey);
     await runtime.flushOutbound();
-    const stalls = f.inbox.filter(message => payloadKind(message) === "run_stalled");
+    // The fixture's Developer handoff is released (pane idle) but never answered: lease release is transport capacity, not a
+    // result, so the stall names that holder exactly as RunFacts/the watchdog action do (holders: ["developer"]).
+    expect(stall.holders).toEqual(["developer"]);
+    const stalls = f.inbox.filter(message => payloadKind(message) === "developer_no_response");
     expect(stalls).toHaveLength(1);
-    expect(stalls[0]!.payload).toMatchObject({ runId: RUN, idleSince: new Date(facts.lastActivityAt).toISOString() });
+    expect(f.inbox.filter(message => payloadKind(message) === "run_stalled")).toEqual([]);
+    expect(stalls[0]!.payload).toMatchObject({ runId: RUN, role: "developer", idleSince: new Date(facts.lastActivityAt).toISOString() });
     expect((stalls[0]!.payload as { options: string[] }).options).toHaveLength(2);
   });
 

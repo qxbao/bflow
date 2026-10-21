@@ -7,7 +7,7 @@ import { AgenticJournal } from "../../src/agentic/journal.js";
 import { HerdrOutbox } from "../../src/agentic/outbox.js";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
 import { BFLOW_INBOX_NUDGE, isProviderInputEmpty } from "../../src/agentic/conversation-inbox.js";
-import { ConversationInboxNotifier } from "../../src/agentic/conversation-inbox-notifier.js";
+import { ConversationInboxNotifier, MAX_NOTIFICATION_FAILURES } from "../../src/agentic/conversation-inbox-notifier.js";
 import type { AgenticRuntimePorts } from "../../src/agentic/ports.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -100,6 +100,27 @@ describe("Conversation notice inbox", () => {
     expect(prompted).toBe(1);
     expect(await receipts.conversationDeliveryFailures()).toMatchObject([{ messageIds: ["blocked-notification"], reason: "Error: notification service unavailable" }]);
     expect(await receipts.unsurfacedConversationNotices()).toHaveLength(1);
+  });
+});
+
+describe("bounded advisory notification failures", () => {
+  it("stops retrying an unsupported OS notification and keeps one failure receipt per notice and failure class", async () => {
+    const receipts = new HostReceiptJournal(join(await directory(), "receipts"), REPOSITORY, "session-1");
+    await receipts.appendConversationNotice(notice("blocked-unsupported", { kind: "workflow_blocked", reason: "Architect cannot read source" }));
+    let notified = 0, now = 10_000;
+    const notifier = new ConversationInboxNotifier();
+    const ports = { provider: "claude", unsurfacedNotices: () => receipts.unsurfacedConversationNotices(),
+      undisplayedNotices: () => receipts.undisplayedUserFacingNotices(), conversationPaneId: async () => "pane-conversation",
+      agentStatus: async () => "working", readPaneAnsi: async () => "", prompt: async () => undefined,
+      notify: async () => { notified++; throw new Error(`notification show unsupported (exit ${notified})`); },
+      recordDeliveryFailure: (ids: readonly string[], reason: string) => receipts.recordConversationDeliveryFailure(ids, reason), now: () => now };
+    for (let minute = 0; minute < 20; minute++) { await notifier.tick(ports); now += 61_000; }
+    expect(notified).toBe(MAX_NOTIFICATION_FAILURES);
+    expect(await receipts.conversationDeliveryFailures()).toHaveLength(1);
+    notifier.forget("blocked-unsupported"); // a recreated notice is new work
+    await notifier.tick(ports);
+    expect(notified).toBe(MAX_NOTIFICATION_FAILURES + 1);
+    expect(await receipts.conversationDeliveryFailures()).toHaveLength(1);
   });
 });
 

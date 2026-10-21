@@ -220,6 +220,42 @@ describe("run watchdog facts", () => {
   });
 });
 
+describe("Runtime-owned work and terminal specialist statuses", () => {
+  it("never reports a run stalled while Runtime itself owns verification, however long its checks run", async () => {
+    const f = await fixture({ runs: [run("run-1", "verifying", { workflowVerificationPending: true })] });
+    f.advance(30 * MINUTE);
+    const facts = await f.runtime.watchdogSnapshot("session-1");
+    expect(facts.map(item => item.runtimeWork)).toEqual([true]);
+    expect(evaluateWatchdog({ now: f.now(), runs: facts, notices: [], panes: [{ role: "coordinator", paneId: "pane-coordinator", status: "idle" }] })).toEqual([]);
+    for (const runId of ["run-1"]) {
+      await f.runtime.reportRunStalled(runId, `${runId}@${Date.parse(T0)}`); // the host acts on an older snapshot: recheck in the transaction
+      expect(await f.runtime.inspect(runId)).toMatchObject({ status: "verifying" });
+      expect((await f.runtime.inspect(runId) as unknown as RunRecord).pendingAction).toBeUndefined();
+      expect(await f.notices("run_stalled", runId)).toEqual([]);
+    }
+  });
+
+  it("discharges a handoff answered by a correlated terminal task.status (inconclusive/completed) for watchdog and specialist Stop", async () => {
+    for (const status of ["inconclusive", "completed"]) {
+      const f = await fixture();
+      await f.runtime.queueHerdr(message(`ask-${status}`, { type: "delegation.request", payload: { objective: "Investigate" }, recipient: { role: "architect" } }));
+      await f.runtime.flushOutbound();
+      const out = await f.outboundOf(`ask-${status}`);
+      expect(out.status).toBe("accepted");
+      await f.runtime.receiveHerdr(message(`answer-${status}`, { causation_id: out.message.message_id, type: "task.status",
+        sender: { role: "architect", agent_id: "architect-agent", pane_id: "pane-architect" }, payload: { status, summary: "Evidence is insufficient" } }));
+      const state = await f.runtime.inspect() as unknown as JournalState;
+      const owes = (f.runtime as unknown as { outboundOwesResult(state: JournalState, run: RunRecord, out: Outbound): boolean }).outboundOwesResult;
+      expect(owes.call(f.runtime, state, state.runs[0]!, state.outbound.find(item => item.message.message_id === `ask-${status}`)!)).toBe(false);
+      expect((await f.runtime.watchdogSnapshot("session-1"))[0]!.acceptedRoles).toEqual([]);
+      await f.runtime.specialistTurnStopped(f.panes.bindings.find(pane => pane.role === "architect")!, "architect");
+      expect((await f.runtime.inspect() as unknown as JournalState).outbound.filter(item =>
+        (item.message.payload as { kind?: string }).kind === "specialist_no_response")).toEqual([]);
+      expect((await f.runtime.inspect("run-1") as unknown as RunRecord).status).toBe("implementing");
+    }
+  });
+});
+
 describe("specialist blockers and run-step isolation", () => {
   it("persists a Coordinator blocker before Conversation delivery and exposes an idempotent resume action", async () => {
     const f = await fixture();
@@ -283,6 +319,10 @@ describe("specialist blockers and run-step isolation", () => {
     const f = await fixture({ capabilityAllowed: false });
     await f.runtime.queueHerdr(message("preflight-1", { recipient: { role: "coordinator" } }));
     await f.runtime.flushOutbound();
+    // A first failure may be transient: the unsent intent stays queued with backoff, without a blocker yet.
+    expect(await f.outboundOf("preflight-1")).toMatchObject({ status: "queued", deliveryAttempts: 1, nextAttemptAt: expect.any(String) });
+    expect((await f.runtime.inspect("run-1") as unknown as RunRecord).status).toBe("implementing");
+    for (let attempt = 0; attempt < 4; attempt++) { f.advance(MINUTE); await f.runtime.flushOutbound(); }
     expect(f.transport.sentRequests).toHaveLength(0);
     const blocked = await f.runtime.inspect("run-1") as unknown as RunRecord;
     expect(blocked).toMatchObject({ status: "escalated", pendingAction: { kind: "resume_coordinator", state: "pending" } });
