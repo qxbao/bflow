@@ -68,6 +68,8 @@ export interface RunRecord {
     recovery?: "auto_resume" | "capability_repair" | "manual" | "reconcile_delivery";
     /** Last time this episode (or the action it inherited its budget from) was resumed; the automatic-resume backoff anchor. */
     lastResumedAt?: string;
+    /** Explicit user resumes of this blocker lineage (bounded separately from `resumeAttempts`); absent in older journals means 0. */
+    manualResumeAttempts?: number;
     requiredRole?: AgentRole; requiredCapabilities?: string[];
   };
   /** Durable idempotency ledger for recoverable resumes, retained even after the blocker is cleared. */
@@ -159,7 +161,7 @@ function parseState(input: unknown, repository: string): JournalState {
       throw new Error("Invalid follow-up supersession");
     if (run.pendingAction !== undefined) {
       const action = record(run.pendingAction);
-      const allowed = new Set(["actionId", "kind", "owner", "reason", "sourceMessageId", "createdAt", "state", "previousStatus", "resumeAttempts", "relatedMessageIds", "recovery", "lastResumedAt", "requiredRole", "requiredCapabilities"]);
+      const allowed = new Set(["actionId", "kind", "owner", "reason", "sourceMessageId", "createdAt", "state", "previousStatus", "resumeAttempts", "relatedMessageIds", "recovery", "lastResumedAt", "manualResumeAttempts", "requiredRole", "requiredCapabilities"]);
       if (Object.keys(action).some(key => !allowed.has(key))) throw new Error("Invalid durable workflow next action fields");
       textField(action.actionId); textField(action.reason); textField(action.sourceMessageId); textField(action.createdAt);
       if (String(action.reason).length > 2000 || !Number.isFinite(Date.parse(String(action.createdAt))) ||
@@ -178,6 +180,8 @@ function parseState(input: unknown, repository: string): JournalState {
         throw new Error("Invalid workflow recovery classification");
       if (action.lastResumedAt !== undefined && !Number.isFinite(Date.parse(textField(action.lastResumedAt))))
         throw new Error("Invalid durable workflow resume time");
+      if (action.manualResumeAttempts !== undefined && (!Number.isInteger(action.manualResumeAttempts) || Number(action.manualResumeAttempts) < 0 ||
+          Number(action.manualResumeAttempts) > 3)) throw new Error("Invalid durable workflow user resume limit");
       if (action.requiredRole !== undefined) AgentRoleSchema.parse(action.requiredRole);
       if (action.requiredCapabilities !== undefined) strings(action.requiredCapabilities);
     }

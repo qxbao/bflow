@@ -38,14 +38,22 @@ function nextAttemptKey(key: string): string {
 function inheritedResumeAttempts(run: RunRecord): number {
   return run.pendingAction?.kind === "resume_coordinator" ? run.pendingAction.resumeAttempts ?? 0 : 0;
 }
-/** Bound shared by automatic and explicit resumes of one blocker lineage (the journal codec also caps it). */
+/** Automatic resumes of one blocker lineage before it waits for the user (the journal codec also caps it). */
 const AUTO_RESUME_LIMIT = 3;
+/** Explicit user resumes ("tiếp tục <run-id>") of one blocker lineage; separate from, and still allowed after, the automatic budget. */
+const MANUAL_RESUME_LIMIT = 3;
 /** Minimum wait before automatic resume n+1 (n = attempts already spent), from the episode start or the previous resume. */
 const AUTO_RESUME_BACKOFF_MS: readonly number[] = [30_000, 60_000, 120_000];
 /** Budget and backoff anchor an automatic-resume episode inherits from the Coordinator action it follows, so resume -> stop cannot loop. */
-function inheritedAutoResume(run: RunRecord): { resumeAttempts: number; lastResumedAt?: string } {
+function inheritedAutoResume(run: RunRecord): { resumeAttempts: number; lastResumedAt?: string; manualResumeAttempts?: number } {
   const prior = run.pendingAction?.kind === "resume_coordinator" ? run.pendingAction : undefined;
-  return { resumeAttempts: prior?.resumeAttempts ?? 0, ...(prior?.lastResumedAt === undefined ? {} : { lastResumedAt: prior.lastResumedAt }) };
+  return { resumeAttempts: prior?.resumeAttempts ?? 0, ...(prior?.lastResumedAt === undefined ? {} : { lastResumedAt: prior.lastResumedAt }),
+    ...inheritedManualResume(run) };
+}
+/** The explicit-resume count of the lineage, carried into every follow-up action so the user's bound cannot be reset by a recurrence. */
+function inheritedManualResume(run: RunRecord): { manualResumeAttempts?: number } {
+  const prior = run.pendingAction?.kind === "resume_coordinator" ? run.pendingAction : undefined;
+  return prior?.manualResumeAttempts === undefined ? {} : { manualResumeAttempts: prior.manualResumeAttempts };
 }
 /** Earliest time Runtime may automatically resume this action. */
 function autoResumeDueAt(action: NonNullable<RunRecord["pendingAction"]>): number {
@@ -493,7 +501,7 @@ export class AgenticWorkflowRuntime {
       run.pendingAction = { actionId: `next-${digest([run.runId, out.message.message_id])}`, kind: "resume_coordinator", owner: "coordinator",
         reason, sourceMessageId: out.message.message_id, relatedMessageIds: runFailures.slice(1).map(failure => failure.message.message_id),
         createdAt: existing?.createdAt ?? this.now(), state: "pending", previousStatus: existing?.previousStatus ?? previousStatus,
-        resumeAttempts: existing?.resumeAttempts ?? 0, recovery: "capability_repair" };
+        resumeAttempts: existing?.resumeAttempts ?? 0, ...inheritedManualResume(run), recovery: "capability_repair" };
       // A recurrence after a resume is a new episode of the same unsent message and is surfaced again.
       const episode = run.pendingAction.resumeAttempts ? [run.pendingAction.resumeAttempts] : [];
       const messageId = `capability-blocked-${digest([run.runId, out.message.message_id, ...episode])}`;
@@ -585,7 +593,7 @@ export class AgenticWorkflowRuntime {
     const action = run.pendingAction!;
     run.status = action.previousStatus ?? "specifying";
     if (run.error === action.reason) delete run.error;
-    action.state = "queued"; action.resumeAttempts = (action.resumeAttempts ?? 0) + 1; action.lastResumedAt = this.now(); delete action.previousStatus;
+    action.state = "queued"; action.resumeAttempts = Math.min(AUTO_RESUME_LIMIT, (action.resumeAttempts ?? 0) + 1); action.lastResumedAt = this.now(); delete action.previousStatus;
     run.resumeReceipts = [...(run.resumeReceipts ?? []).filter(item => item.actionId !== action.actionId), { actionId: action.actionId, messageId }].slice(-50);
   }
   private admitRevision(state: JournalState, outbox: HerdrOutbox, run: RunRecord, delegation: DelegationRequest): void {
@@ -1098,7 +1106,9 @@ export class AgenticWorkflowRuntime {
       const retryUnsent = action?.actionId === actionId && action.state === "pending" &&
         [action.sourceMessageId, ...(action.relatedMessageIds ?? [])].every(id => state.outbound.some(out =>
           out.message.message_id === id && out.status === "failed" && out.error?.includes(RoleCapabilityPreflightError.name)));
-      if (priorResume && !retryUnsent) return json({ queued: true, messageId: priorResume.messageId, actionId });
+      // A receipt answers a repeated call for the episode it settled; the same identity pending again (a recurrence) is a new episode.
+      const recurred = run.status === "escalated" && action?.actionId === actionId && action.state === "pending";
+      if (priorResume && !retryUnsent && !recurred) return json({ queued: true, messageId: priorResume.messageId, actionId });
       // A still-unknown native delivery (legacy escalated record) resumes by waking the Coordinator to reconcile; it is never resent.
       if (run.status !== "escalated" || !action || action.actionId !== actionId || !["resume_coordinator", "reconcile_delivery"].includes(action.kind)) {
         const prior = state.outbound.find(item => item.message.message_id === `resume-${digest([runId, actionId])}`);
@@ -1108,7 +1118,10 @@ export class AgenticWorkflowRuntime {
       if (Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
           run.approval !== undefined && (!run.decision || run.decision.approvalId !== run.approval.approvalId))
         throw new Error("A pending approval or user decision must be resolved before resume");
-      if ((action.resumeAttempts ?? 0) >= 3) throw new Error("Bounded resume attempts are exhausted; cancel or request operator intervention");
+      if (options.automatic && (action.resumeAttempts ?? 0) >= AUTO_RESUME_LIMIT) throw new Error("Bounded resume attempts are exhausted; cancel or request operator intervention");
+      // An explicit user resume has its own bound and is still allowed once the automatic budget is spent.
+      if (!options.automatic && (action.manualResumeAttempts ?? 0) >= MANUAL_RESUME_LIMIT)
+        throw new Error(`Explicit resume budget is exhausted (${MANUAL_RESUME_LIMIT} user resumes of this blocker); cancel the run or request operator intervention`);
       // Re-checked under the journal lock: the classification/backoff may have changed since the automatic pass selected it.
       if (options.automatic && (action.state !== "pending" || !["auto_resume", "capability_repair"].includes(action.recovery ?? "manual") ||
           action.recovery === "auto_resume" && Date.parse(this.now()) < autoResumeDueAt(action)))
@@ -1164,8 +1177,14 @@ export class AgenticWorkflowRuntime {
       }
       const verificationRetry = run.error?.startsWith(VERIFICATION_RETRY_PREFIX) === true;
       action.state = "queued";
-      action.resumeAttempts = (action.resumeAttempts ?? 0) + 1;
       action.lastResumedAt = this.now();
+      if (options.automatic) action.resumeAttempts = (action.resumeAttempts ?? 0) + 1;
+      else {
+        // The user's resume grants a fresh automatic budget, with backoff counted from now, so the run can recover itself again.
+        action.manualResumeAttempts = (action.manualResumeAttempts ?? 0) + 1;
+        action.resumeAttempts = 0;
+        if (action.kind === "resume_coordinator" && (action.recovery === undefined || action.recovery === "manual")) action.recovery = "auto_resume";
+      }
       run.status = action.previousStatus ?? "specifying";
       if (verificationRetry) this.prepareVerificationRetry(state, run); // same as retry_verification
       delete action.previousStatus;
@@ -1185,7 +1204,8 @@ export class AgenticWorkflowRuntime {
    * capability proof passes), while no approval or user decision is pending and no delivery is unknown. A verification
    * delivery/storage escalation re-runs the existing retry_verification path; every other one wakes the Coordinator with the
    * existing idempotent `resume_run` (keyed by actionId). Each resume spends the persisted `resumeAttempts` budget (limit 3):
-   * once spent, the action becomes `manual` and Conversation is told once. Human decisions are never answered here.
+   * once spent, the action becomes `manual` and Conversation is told once, with how to resume it explicitly. An explicit user
+   * resume has its own bound (`manualResumeAttempts`, 3) and grants a fresh automatic budget. Human decisions are never answered here.
    */
   async resumeRecoverableRuns(): Promise<JsonValue> {
     if (this.quiesced) return json({ resumed: 0, reason: "quiesced" });
@@ -1198,11 +1218,18 @@ export class AgenticWorkflowRuntime {
       let changed = false;
       for (const run of recoverable.filter(item => (item.pendingAction!.resumeAttempts ?? 0) >= AUTO_RESUME_LIMIT)) {
         // Budget spent: stop automatic resumes and say so once; an explicit user resume/cancel decides from here.
-        const action = run.pendingAction!, actionId = action.actionId;
+        const action = run.pendingAction!, actionId = action.actionId, manual = action.manualResumeAttempts ?? 0;
+        const manualLeft = Math.max(0, MANUAL_RESUME_LIMIT - manual);
         this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId, sdlcStatus: run.status, owner: "coordinator",
-          actionId, reason: action.reason, blockageReason: action.reason,
-          headline: "Automatic resume stopped after 3 attempts; the same blocker keeps recurring",
-          options: ["Khắc phục nguyên nhân (capability/pane) với operator; run không tự tiếp tục nữa", "Hủy run"] }, `auto-resume-exhausted:${actionId}`, "conversation");
+          actionId, reason: action.reason, blockageReason: action.reason, manualResumesLeft: manualLeft,
+          headline: manualLeft > 0
+            ? `Automatic resume stopped after 3 attempts; the same blocker keeps recurring. Type \`tiếp tục ${run.runId}\` to resume it (${manualLeft} of ${MANUAL_RESUME_LIMIT} user resumes left)`
+            : `Automatic resume stopped after 3 attempts; the same blocker keeps recurring. All ${MANUAL_RESUME_LIMIT} user resumes are used: fix the cause with an operator or cancel`,
+          options: manualLeft > 0
+            ? [`Gõ \`tiếp tục ${run.runId}\` để Runtime tiếp tục run (còn ${manualLeft}/${MANUAL_RESUME_LIMIT} lần)`, "Khắc phục nguyên nhân (capability/pane) với operator", "Hủy run"]
+            : ["Khắc phục nguyên nhân (capability/pane) với operator; run không tự tiếp tục nữa", "Hủy run"] },
+          // Each user-granted automatic budget that runs out again is a new, separately reported exhaustion.
+          manual === 0 ? `auto-resume-exhausted:${actionId}` : `auto-resume-exhausted:${actionId}:${manual}`, "conversation");
         action.recovery = "manual";
         changed = true;
       }
@@ -1342,7 +1369,8 @@ export class AgenticWorkflowRuntime {
     // Automatic, bounded: the budget and backoff anchor carry over from the action this stop follows (resume -> stop cannot loop).
     run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
       reason: reason.slice(0, 2000), sourceMessageId, createdAt: prior?.createdAt ?? this.now(), state: "pending", previousStatus,
-      resumeAttempts: prior?.resumeAttempts ?? 0, ...(prior?.lastResumedAt === undefined ? {} : { lastResumedAt: prior.lastResumedAt }), recovery: "auto_resume" };
+      resumeAttempts: prior?.resumeAttempts ?? 0, ...(prior?.lastResumedAt === undefined ? {} : { lastResumedAt: prior.lastResumedAt }),
+      ...inheritedManualResume(run), recovery: "auto_resume" };
     const messageId = `coordinator-no-next-action-${digest([run.runId, run.pendingAction.actionId])}`;
     if (state.outbound.some(out => out.message.message_id === messageId)) return;
     const automatic = (run.pendingAction.resumeAttempts ?? 0) < AUTO_RESUME_LIMIT;
@@ -1379,7 +1407,7 @@ export class AgenticWorkflowRuntime {
         const previousStatus = run.status;
         run.error = reason.slice(0, 2000); run.status = "escalated";
         run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
-          reason: run.error, sourceMessageId, createdAt: this.now(), state: "pending", previousStatus, resumeAttempts: pane ? inheritedResumeAttempts(run) : 0,
+          reason: run.error, sourceMessageId, createdAt: this.now(), state: "pending", previousStatus, resumeAttempts: pane ? inheritedResumeAttempts(run) : 0, ...inheritedManualResume(run),
           recovery: pane ? "capability_repair" : "manual", requiredRole: parsedRole, requiredCapabilities: [...new Set([...requiredCapabilities, "repository.read"])] };
         const pendingAction = run.pendingAction;
         this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId, sdlcStatus: run.status,

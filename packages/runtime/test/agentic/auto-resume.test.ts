@@ -88,10 +88,11 @@ async function fixture(runs: RunRecord[] = [run("run-1", "specifying")]) {
     /** A Runtime process restart: a fresh instance over the same durable journal. */
     restart: () => { f.runtime = open(); return f.runtime; },
     advance: (ms: number) => { now += ms; },
+    now: () => now,
     record: async (runId = "run-1") => await f.runtime.inspect(runId) as unknown as RunRecord,
     outbound: async () => (await f.runtime.inspect() as unknown as { outbound: Outbound[] }).outbound,
     resumeWakes: async () => (await f.outbound()).filter(out => (out.message.payload as { kind?: string }).kind === "resume_run"),
-    exhaustedNotices: async () => (await f.outbound()).filter(out => out.message.recipient.role === "conversation" &&
+    exhaustedNotices: async () => (await f.outbound() as (Outbound & { message: { payload: { headline?: string } } })[]).filter(out => out.message.recipient.role === "conversation" &&
       /Automatic resume stopped after 3 attempts/.test(String((out.message.payload as { headline?: string }).headline))),
     coordinator: () => panes.bindings.find(pane => pane.role === "coordinator")!,
     /** Deliver a message to the Coordinator pane and report that its turn stopped without a workflow next action. */
@@ -171,7 +172,44 @@ describe("bounded automatic resume", () => {
     expect(exhausted).toMatchObject({ status: "escalated", pendingAction: { recovery: "manual", resumeAttempts: 3, state: "pending" } });
     expect(await f.exhaustedNotices()).toHaveLength(1);
     expect(await f.resumeWakes()).toHaveLength(3);
-    await expect(f.runtime.resumeBlockedRun("run-1", exhausted.pendingAction!.actionId)).rejects.toThrow(/exhausted/);
+    expect(String((await f.exhaustedNotices())[0]!.message.payload.headline)).toContain("Type `tiếp tục run-1` to resume it (3 of 3 user resumes left)");
+  });
+
+  it("lets the user resume after the automatic budget is spent, re-arms automatic resume, bounds user resumes, and keeps both counters across restart", async () => {
+    const f = await fixture();
+    const exhaustAutomatic = async () => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        f.advance(120 * SECOND);
+        expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 1 }); // automatic resume runs (again)
+        await f.stopWithoutAction((await f.resumeWakes()).at(-1)!.message);
+      }
+      f.advance(120 * SECOND);
+      expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 0 });
+      return f.record();
+    };
+    await f.runtime.queueHerdr(coordinatorWake("wake-1"));
+    await f.stopWithoutAction(coordinatorWake("wake-1"));
+    let exhausted = await exhaustAutomatic();
+    expect(exhausted.pendingAction).toMatchObject({ recovery: "manual", resumeAttempts: 3 });
+    expect(exhausted.pendingAction!.manualResumeAttempts).toBeUndefined();
+    for (let round = 1; round <= 3; round++) {
+      f.restart(); // both counters are durable
+      expect((await f.record()).pendingAction).toMatchObject({ recovery: "manual", resumeAttempts: 3, ...(round > 1 ? { manualResumeAttempts: round - 1 } : {}) });
+      await expect(f.runtime.resumeBlockedRun("run-1", exhausted.pendingAction!.actionId)).resolves.toMatchObject({ queued: true });
+      expect(await f.record()).toMatchObject({ status: "specifying",
+        pendingAction: { state: "queued", recovery: "auto_resume", resumeAttempts: 0, manualResumeAttempts: round, lastResumedAt: new Date(f.now()).toISOString() } });
+      await f.stopWithoutAction((await f.resumeWakes()).at(-1)!.message);
+      expect(await f.record()).toMatchObject({ status: "escalated", pendingAction: { recovery: "auto_resume", resumeAttempts: 0, manualResumeAttempts: round, state: "pending" } });
+      exhausted = await exhaustAutomatic();
+      expect(exhausted.pendingAction).toMatchObject({ recovery: "manual", resumeAttempts: 3, manualResumeAttempts: round });
+      const notices = await f.exhaustedNotices();
+      expect(notices).toHaveLength(round + 1); // one per spent automatic budget
+      expect(String(notices.at(-1)!.message.payload.headline)).toContain(round < 3 ? `(${3 - round} of 3 user resumes left)` : "All 3 user resumes are used");
+    }
+    f.restart();
+    await expect(f.runtime.resumeBlockedRun("run-1", exhausted.pendingAction!.actionId)).rejects.toThrow(/Explicit resume budget is exhausted/);
+    expect(await f.record()).toMatchObject({ status: "escalated", pendingAction: { state: "pending", recovery: "manual", resumeAttempts: 3, manualResumeAttempts: 3 } });
+    expect(await f.resumeWakes()).toHaveLength(3 + 3 * 4);
   });
 
   it("B8: re-runs the existing retry_verification automatically with backoff, bounded to 3 retries", async () => {
