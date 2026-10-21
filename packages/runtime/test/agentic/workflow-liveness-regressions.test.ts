@@ -90,6 +90,118 @@ async function fixture(options: { runs?: RunRecord[]; preflight?: (binding: Pane
 }
 
 describe("workflow liveness recovery boundaries", () => {
+  it("does not treat a watchdog warning or resume as proof that an accepted specialist attempt stopped", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const first = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
+    await f.runtime.flushOutbound();
+    await f.runtime.reportRunStalled("run-1", "episode-1");
+    const action = (await f.inspect()).runs[0]!.pendingAction!;
+    await f.runtime.resumeBlockedRun("run-1", action.actionId);
+    const retried = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
+    expect(retried.message_id).toBe(first.message_id);
+    await f.runtime.flushOutbound();
+    expect(f.transport.sentRequests.filter(req => req.role === "architect")).toHaveLength(1);
+    expect((await f.inspect()).runs[0]!.tasks).toEqual([]);
+  });
+
+  it("retains native uncertainty across a schema blocker, restart and repeated reports; resume cannot hide it", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const assignment = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
+    await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
+    const binding = f.panes.bindings.find(pane => pane.role === "architect")!;
+    const reply = envelope("corrected-reply", "run-1", { role: "coordinator" }, {
+      sender: { role: binding.role, agent_id: binding.agentId, pane_id: binding.paneId },
+      causation_id: assignment.message_id, type: "spec.draft", payload: { summary: "Findings" }
+    });
+    await f.runtime.reportRoleToolFailure(binding, { ...reply, artifact_references: undefined }, "artifact_references: Required");
+    await f.runtime.reportUncertainNativeDelivery(reply, "native-result", "ACK not observed");
+    const restarted = f.makeRuntime();
+    await restarted.reportUncertainNativeDelivery(reply, "native-result", "ACK still not observed");
+    const current = await restarted.inspect("run-1") as unknown as RunRecord;
+    await expect(restarted.resumeBlockedRun("run-1", current.pendingAction!.actionId)).rejects.toThrow(/Unknown.*delivery/i);
+    expect(await f.notices("delivery_failure")).toHaveLength(1);
+    expect(f.transport.sentRequests.filter(req => req.role === "architect")).toHaveLength(1);
+    expect(await restarted.reconcileNativeDelivery(reply.message_id)).toBe(true);
+    await restarted.resumeBlockedRun("run-1", current.pendingAction!.actionId);
+    await restarted.receiveHerdr(reply);
+    await restarted.receiveHerdr(reply);
+    await restarted.recoverMissingCoordinatorWakeups();
+    await restarted.recoverMissingCoordinatorWakeups();
+    const state = await f.inspect();
+    expect(state.inbox.filter(item => item.message.message_id === reply.message_id && item.status === "applied")).toHaveLength(1);
+    expect(state.outbound.filter(out => out.message.message_id === `p19-wake-${digest(["run-1", reply.message_id])}`)).toHaveLength(1);
+    expect(state.runs[0]!.delegation.acceptanceCriteria).toEqual(delegation().acceptanceCriteria);
+    expect(state.runs).toHaveLength(1);
+    expect(f.transport.sentRequests.filter(req => req.role === "architect")).toHaveLength(1);
+  });
+
+  it("does not attach a startup or stale-session Stop to an assignment of another native session", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const first = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
+    await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
+    const binding = f.panes.bindings.find(pane => pane.role === "architect")!;
+    await f.runtime.specialistTurnStopped({ ...binding, session: { ...binding.session!, value: "other-session" } }, "architect");
+    await f.runtime.specialistTurnStopped(binding, "architect", T0); // startup Stop precedes this accepted handle
+    expect(await f.notices("specialist_no_response")).toEqual([]);
+    await f.runtime.reportRoleToolFailure({ ...binding, session: { ...binding.session!, value: "other-session" } },
+      { run_id: "run-1", message_id: "old-invalid-output", causation_id: first.message_id }, "artifact_references: Required");
+    expect((await f.inspect()).runs[0]!.status).toBe("specifying");
+    const retried = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
+    expect(retried.message_id).toBe(first.message_id);
+  });
+
+  it("watchdog reports the actual delivery state, task, attempt and acceptance time once per episode", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []);
+    await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
+    const accepted = (await f.inspect()).outbound.find(out => out.message.recipient.role === "architect")!;
+    await f.runtime.reportRunStalled("run-1", "episode-1");
+    await f.runtime.reportRunStalled("run-1", "episode-1");
+    const notices = await f.notices("run_stalled");
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.message.payload).toMatchObject({ role: "architect", paneId: "pane-architect", taskId: accepted.taskId,
+      attemptId: accepted.attemptId, acceptedAt: accepted.handle!.acceptedAt, deliveryStatus: "released" });
+    expect(String((notices[0]!.message.payload as { reason: string }).reason)).toContain("transport accepted at");
+  });
+
+  it("accepts a late exact native specialist result during a schema pause without approving or resuming the run", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const assignment = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
+    await f.runtime.flushOutbound();
+    const binding = f.panes.bindings.find(pane => pane.role === "architect")!;
+    const reply = envelope("late-native-result", "run-1", { role: "coordinator" }, { type: "spec.draft", causation_id: assignment.message_id,
+      sender: { role: "architect", agent_id: binding.agentId, pane_id: binding.paneId }, payload: { summary: "Impact analysis" } });
+    await f.runtime.reportRoleToolFailure(binding, { ...reply, artifact_references: undefined }, "artifact_references: Required");
+    const actionId = (await f.inspect()).runs[0]!.pendingAction!.actionId;
+    await f.runtime.recordNativeDeliveryIntent(reply, "native-late");
+    await expect(f.runtime.receiveHerdr(reply)).resolves.toEqual({ accepted: true });
+    await f.runtime.reconcileNativeDelivery(reply.message_id);
+    expect(await f.runtime.inspect("run-1")).toMatchObject({ status: "escalated", pendingAction: { actionId, state: "pending" }, tasks: [] });
+    await f.runtime.resumeBlockedRun("run-1", actionId);
+    expect((await f.inspect()).runs[0]!.delegation).toEqual(delegation());
+    expect(f.transport.sentRequests.filter(req => req.role === "architect")).toHaveLength(1);
+  });
+
+  it("keeps two native intents independent, immutable and blocking every new work dispatch until both settle", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const reply = envelope("native-1", "run-1", { role: "coordinator" }, { sender: { role: "architect" }, type: "spec.draft" });
+    await f.runtime.recordNativeDeliveryIntent(reply, "op-1");
+    await f.runtime.recordNativeDeliveryIntent({ ...reply, message_id: "native-2", idempotency_key: "native-2" }, "op-2");
+    await expect(f.runtime.recordNativeDeliveryIntent({ ...reply, payload: { changed: true } }, "op-1")).rejects.toThrow(/Conflicting/);
+    await expect(f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", [])).rejects.toThrow(/Unknown.*delivery/i);
+    // queueHerdr callers cannot bypass the dispatch guard with a differently named assignment.
+    await f.runtime.queueHerdr(envelope("another-assignment", "run-1", { role: "architect" }, { type: "delegation.request", sender: { role: "coordinator" } }));
+    await f.runtime.flushOutbound();
+    expect(f.transport.sentRequests).toHaveLength(0);
+    await f.runtime.reconcileNativeDelivery("native-1");
+    await f.runtime.flushOutbound();
+    expect(f.transport.sentRequests).toHaveLength(0);
+    expect((await f.inspect()).runs[0]!.nativeDeliveries).toHaveLength(1);
+    await f.runtime.reconcileNativeDelivery("native-2");
+    await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
+    expect(f.transport.sentRequests.filter(req => req.role === "architect")).toHaveLength(1);
+  });
+
   it("coalesces simultaneous capability failures for one run and reloads the durable action", async () => {
     const f = await fixture({ preflight: async binding => {
       if (binding.role === "architect" || binding.role === "planner") throw new RoleCapabilityPreflightError(`${binding.role} tools unavailable`);

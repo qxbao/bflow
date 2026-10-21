@@ -247,6 +247,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       throw new Error("Native delivery is uncertain; reconcile the original operation before retrying");
     }
     if (!await receipts.recordNativeIntent(operationId, message)) throw new Error("Native delivery already started; reconcile before retrying");
+    await workspace?.runtime.recordNativeDeliveryIntent(message, operationId);
     try {
       const socketPath = textField(record(JSON.parse(await herdr(["status", "server", "--json"]))).socket);
       await new Promise<void>((accept, reject) => {
@@ -535,6 +536,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     });
     // Stops of an earlier host session are not re-judged here: the new Coordinator has had no turn yet, so a missing next action
     // from a previous session is not "no response". Unsettled Stops of this session are reconciled by the normal Stop loop.
+    for (const { operationId, message } of await receipts.unacknowledgedNativeDeliveries())
+      await workspace.runtime.recordNativeDeliveryIntent(message, operationId);
     await workspace.runtime.resumeRecoverableRuns();
     manifest = accepted;
     await taskLogPane.ensure(accepted.herdrWorkspaceId);
@@ -1204,7 +1207,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       for (const stopped of await receipts.pendingSpecialistStops()) {
         const key = digest(["specialist", stopped.stopId]);
         try {
-          await requireWorkspace().runtime.specialistTurnStopped(stopped.binding, stopped.binding.role);
+          await requireWorkspace().runtime.specialistTurnStopped(stopped.binding, stopped.binding.role, stopped.observedAt);
           await receipts.completeSpecialistStop(stopped.stopId); stopAttempts.delete(key);
         } catch (error) {
           retryNeeded = true; inboundError = redactString(String(error)); process.stderr.write(`Bflow stop: ${inboundError}\n`);

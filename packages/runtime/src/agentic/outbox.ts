@@ -184,6 +184,11 @@ export class HerdrOutbox {
       try { this.noticeParent(out); } catch (error) { out.status = "cancelled"; out.error = String(error); await this.save(); return; }
     }
     const run = this.state.runs.find(item => item.runId === out.message.run_id);
+    if (run?.nativeDeliveries?.length && ["delegation.request", "task.assignment", "verification.requested"].includes(out.message.type)) {
+      out.error = "Unknown native delivery must be reconciled before another work dispatch";
+      await this.save(); return;
+    }
+    if (out.error === "Unknown native delivery must be reconciled before another work dispatch") delete out.error;
     if (run && (run.cancelled || ["completed", "failed", "escalated"].includes(run.status)) &&
         (out.message.type === "task.assignment" || out.message.type === "delegation.request" && out.message.sender.role === "coordinator")) {
       if (out.lease) await this.release(out);

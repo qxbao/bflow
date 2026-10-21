@@ -65,6 +65,8 @@ export interface RunRecord {
   };
   /** Durable idempotency ledger for recoverable resumes, retained even after the blocker is cleared. */
   resumeReceipts?: { actionId: string; messageId: string }[];
+  /** Private native-host intents not yet acknowledged/applied. Independent of the current business blocker or human gate. */
+  nativeDeliveries?: { operationId: string; message: RoleMessage }[];
   /** Set once the run's single final cancellation notice is queued; absent in journals written before cancellation reconciliation. */
   cancelReconciled?: boolean;
   /** Set when a human `changes_requested` continued this run as a follow-up run; the parent is terminal and never resumed. */
@@ -146,6 +148,16 @@ function parseState(input: unknown, repository: string): JournalState {
     if (run.workflowSpec) parseSpec(run.workflowSpec);
     if (run.approval) run.approval = ApprovalRequestSchema.parse(run.approval);
     if (run.userDecisions !== undefined) parseUserDecisions(run.userDecisions, run.runId);
+    if (run.nativeDeliveries !== undefined) {
+      if (!Array.isArray(run.nativeDeliveries)) throw new Error("Invalid native delivery journal");
+      const operations = new Set<string>(), messages = new Set<string>();
+      for (const entry of run.nativeDeliveries) {
+        textField(entry.operationId); entry.message = RoleMessageSchema.parse(entry.message);
+        if (entry.message.run_id !== run.runId || entry.message.correlation_id !== run.delegation.correlationId ||
+            operations.has(entry.operationId) || messages.has(entry.message.message_id)) throw new Error("Invalid native delivery ownership");
+        operations.add(entry.operationId); messages.add(entry.message.message_id);
+      }
+    }
     if (run.delegationHistory !== undefined) run.delegationHistory = run.delegationHistory.map(item => DelegationRequestSchema.parse(item));
     if (run.cancelReconciled !== undefined && typeof run.cancelReconciled !== "boolean") throw new Error("Invalid cancellation reconciliation flag");
     if (run.supersededBy !== undefined && (textField(run.supersededBy) === run.runId || run.status !== "escalated" || run.pendingAction))

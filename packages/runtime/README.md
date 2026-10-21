@@ -87,7 +87,17 @@ thực nghiêm ngặt và kiểm tra các ràng buộc giữa trường tại in
 Native intent thiếu ACK giữ trạng thái uncertain và chặn gửi lại cùng operation.
 `reconcile_delivery` chỉ đối soát Runtime outbox; chưa có API xác nhận `not_delivered`
 cho native intent. ACK/application đến muộn có thể giải quyết trạng thái uncertain;
-`resume_run` chỉ đánh thức Coordinator, không xác nhận giao nhận hay cho phép resend.
+Runtime giữ riêng các native intent chưa xác nhận trong journal, kể cả khi run đã bị
+schema blocker hoặc đang chờ phê duyệt. Host khôi phục các intent cũ trước khi tự resume;
+resume, thay đổi yêu cầu và dispatch công việc mới phải chờ đối soát. Một ACK chỉ giải quyết
+đúng intent của nó. Kết quả specialist đến muộn trong lúc pause chỉ được nhận nếu trùng
+toàn bộ native intent và assignment đã bind; việc nhận này không resume hay phê duyệt run.
+`resume_run` tiếp tục run hiện hữu, không xác nhận giao nhận hay cho phép resend.
+Watchdog phân biệt delivery `accepted`/`released`, thời điểm transport accepted và thời điểm
+run ngừng có hoạt động; thông báo chứa role/pane/task/attempt. Cảnh báo hoặc resume không
+phải bằng chứng cho phép tạo attempt mới. Stop phải khớp agent, native session và thời điểm.
+Conversation nudge `[bflow]` không được dùng lại user turn trước đó để quyết định hoặc resume;
+user turn thật tiếp theo có boundary riêng và vẫn phải được xử lý đúng một lần.
 Các kiểm thử schema, host RPC và receipt ở đây là kiểm thử cục bộ, không phải nghiệm thu Herdr/provider live.
 
 Host tương quan bền vững các quan sát prompt/Stop của Coordinator với đúng delegation

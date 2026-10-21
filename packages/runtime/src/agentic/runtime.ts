@@ -386,10 +386,15 @@ export class AgenticWorkflowRuntime {
     const raw = objectField(rawMessage, "message") ?? rawMessage;
     const claimedRunId = objectField(raw, "run_id");
     const claimedMessageId = objectField(raw, "message_id");
+    const claimedCause = objectField(raw, "causation_id"), claimedCorrelation = objectField(raw, "correlation_id");
     await this.transaction(async (state, save, _core, outbox) => {
-      const source = state.outbound.find(out => out.handle?.target.paneId === binding.paneId && out.handle.target.agentId === binding.agentId &&
+      const sources = state.outbound.filter(out => out.handle?.target.paneId === binding.paneId && out.handle.target.agentId === binding.agentId &&
+        out.handle.target.workspaceId === binding.workspaceId && out.handle.target.tabId === binding.tabId && digest(out.handle.target.session) === digest(binding.session) &&
         out.message.recipient.role === binding.role && ["accepted", "released"].includes(out.status) &&
-        (typeof claimedRunId !== "string" || out.message.run_id === claimedRunId));
+        (typeof claimedRunId !== "string" || out.message.run_id === claimedRunId) &&
+        (typeof claimedCause !== "string" || out.message.message_id === claimedCause) &&
+        (typeof claimedCorrelation !== "string" || out.message.correlation_id === claimedCorrelation));
+      const source = sources.length === 1 ? sources[0] : undefined; // Never guess which attempt an invalid output belongs to.
       const run = state.runs.find(item => item.runId === (source?.message.run_id ?? claimedRunId));
       if (!run || !source || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) return;
       const messageId = typeof claimedMessageId === "string" && claimedMessageId.length <= 200 ? claimedMessageId : `invalid-role-message-${digest([binding.paneId, source.message.message_id, reasonInput])}`;
@@ -522,6 +527,7 @@ export class AgenticWorkflowRuntime {
     const known = [...(run ? [run.delegation] : []), ...inFlight];
     if (known.some(item => digest(item) === digest(delegation))) return { kind: "duplicate" };
     if (!known.length) return { kind: "new" };
+    if (run?.nativeDeliveries?.length) return { kind: "rejected", reason: "Unknown native delivery must be reconciled before changing this run's requirements" };
     const latest = known.reduce((current, item) => revisionOf(item) >= revisionOf(current) ? item : current);
     const rejected = (reason: string): Admission => ({ kind: "rejected", reason });
     // A run paused for a resumable blocker (often a needed clarification) still accepts the user's revised requirement.
@@ -725,7 +731,7 @@ export class AgenticWorkflowRuntime {
         out.message.run_id === run.runId && out.message.type === "conversation.clarification" && ["queued", "sending", "delivered"].includes(out.status)),
       // Accepted handoffs are not activity by themselves (their pane must be observed working); a queued one stuck on a
       // not-ready or structurally blocked recipient is reported by its own notice, not treated as work in progress.
-      activeHandoff: handoffs.some(out => ["sending", "unknown_delivery"].includes(out.status) ||
+      activeHandoff: (run.nativeDeliveries?.length ?? 0) > 0 || handoffs.some(out => ["sending", "unknown_delivery"].includes(out.status) ||
         out.status === "queued" && !(out.notReadySince !== undefined && now - Date.parse(out.notReadySince) >= NOT_READY_FAILURE_MS) &&
           !(out.error !== undefined && STRUCTURAL_DELIVERY_BLOCKERS.test(out.error))),
       acceptedRoles: [...new Set(holders.map(out => out.message.recipient.role))],
@@ -791,8 +797,11 @@ export class AgenticWorkflowRuntime {
         holders.find(out => out.message.recipient.role !== "coordinator") ?? holders[0];
       const previousStatus = run.status;
       const sourceMessageId = holder?.message.message_id ?? run.delegation.messageId;
+      const obligation = holder ? `${holder.message.recipient.role} pane ${holder.handle!.target.paneId} owes a correlated result for ${holder.message.type} ` +
+        `task ${holder.taskId}, attempt ${holder.attemptId}; transport accepted at ${holder.handle!.acceptedAt}, delivery state ${holder.status}; ` +
+        `run activity idle since ${idleSince}` : undefined;
       const reasonForAction = holder
-        ? `${holder.message.recipient.role} pane ${holder.handle!.target.paneId} holds accepted ${holder.message.type} for task ${holder.taskId} since ${idleSince} but has no correlated result.`
+        ? `${obligation}, but no correlated result has been applied.`
         : `No run-local work, wait, or next action was recorded after ${idleSince}.`;
       run.error = reasonForAction.slice(0, 2000);
       run.status = "escalated";
@@ -801,11 +810,12 @@ export class AgenticWorkflowRuntime {
       if (holder?.handle) {
         const role = holder.message.recipient.role;
         const kind = role === "developer" ? "developer_no_response" : role === "coordinator" ? "coordinator_no_response" : "run_stalled";
-        const reason = `${role} pane ${holder.handle.target.paneId} holds accepted ${holder.message.type} for task ${holder.taskId} since ${idleSince} ` +
-          "but is not working and has reported no result. Herdr idle/done only means not working, never task success.";
+        const reason = `${obligation}, but is not working and has no applied result. Herdr idle/done only means not working, never task success. ` +
+          "Inspect original delivery and result receipts before considering another attempt.";
         this.emit(state, outbox, run, "conversation.progress", { kind, runId, reason, idleSince, role, paneId: holder.handle.target.paneId,
+          taskId: holder.taskId, attemptId: holder.attemptId, acceptedAt: holder.handle.acceptedAt, deliveryStatus: holder.status,
           owner: "coordinator", actionId: run.pendingAction.actionId,
-          options: ["Ask Coordinator to inspect the run and re-dispatch the task or report the blocker", "Cancel this run"],
+          options: ["Ask Coordinator to inspect original delivery/result receipts and report a safe recovery action", "Cancel this run"],
           headline: `Run may be stuck: ${role} stopped without a result (${runId})` },
         `run-stalled:${episodeKey}`, "conversation");
         await save(); return;
@@ -885,7 +895,17 @@ export class AgenticWorkflowRuntime {
       } else {
         const run = this.run(state, message.run_id!);
         if (message.correlation_id !== run.delegation.correlationId) throw new Error("Wrong run correlation");
-        this.live(run);
+        // A known native result may arrive after a schema failure paused its run. Admit only the exact immutable
+        // intent and bound specialist reply; keep the pause and human gates. This breaks the ACK/resume deadlock
+        // without authorizing new work, task success, or arbitrary late messages during an escalation.
+        const lateNativeResult = resumablyPaused(run) && !run.cancelled && message.recipient.role === "coordinator" &&
+          ["spec.draft", "task.status", "verification.escalation"].includes(message.type) &&
+          run.nativeDeliveries?.some(entry => digest(entry.message) === digest(message)) &&
+          state.outbound.some(out => out.message.message_id === message.causation_id && out.message.run_id === run.runId &&
+            out.message.type === "delegation.request" && ["accepted", "released"].includes(out.status) &&
+            out.message.recipient.role === message.sender.role && out.handle?.target.agentId === message.sender.agent_id &&
+            out.handle?.target.paneId === message.sender.pane_id);
+        if (!lateNativeResult) this.live(run);
         if (message.type === "approval.decision") {
           if (message.sender.role !== "conversation") throw new Error("Approval must return via Conversation");
           const decision = ApprovalDecisionSchema.parse(message.payload);
@@ -1036,6 +1056,8 @@ export class AgenticWorkflowRuntime {
     const runId = textField(runIdInput), actionId = textField(actionIdInput);
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId), action = run.pendingAction;
+      if (run.nativeDeliveries?.length || state.outbound.some(item => item.message.run_id === runId && ["sending", "unknown_delivery"].includes(item.status) && !isConversationDelivery(item)))
+        throw new Error("Unknown delivery must be reconciled before resume");
       if (run.supersededBy) throw new AdmissionRejectedError(`Run ${runId} continued as follow-up run ${run.supersededBy}; resume or inspect ${run.supersededBy}`);
       if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) throw new Error(`Run is ${run.status}; it cannot be resumed`);
       const priorResume = run.resumeReceipts?.find(item => item.actionId === actionId);
@@ -1212,13 +1234,10 @@ export class AgenticWorkflowRuntime {
     return false;
   }
 
-  /** An accepted specialist handoff still owing its result whose holder demonstrably stopped (no-result Stop, watchdog episode or resume since). */
+  /** A matching host Stop and released capacity are required; a warning or resume is never proof of stop. */
   private stoppedWithoutResult(state: JournalState, run: RunRecord, out: Outbound): boolean {
-    if (!this.outboundOwesResult(state, run, out)) return false;
-    const id = out.message.message_id, index = state.outbound.indexOf(out);
-    return state.outbound.some(item => item.message.message_id === `p19-wake-${digest([run.runId, `specialist_no_response:${id}`])}`) ||
-      run.pendingAction?.sourceMessageId === id || (run.pendingAction?.relatedMessageIds ?? []).includes(id) ||
-      state.outbound.some((item, position) => position > index && item.message.run_id === run.runId && objectField(item.message.payload, "kind") === "resume_run");
+    if (out.status !== "released" || run.nativeDeliveries?.length || !this.outboundOwesResult(state, run, out)) return false;
+    return state.outbound.some(item => item.message.message_id === `p19-wake-${digest([run.runId, `specialist_no_response:${out.message.message_id}`])}`);
   }
   /** A specialist attempt replaced by a newer attempt of the same Coordinator request no longer owes a result. */
   private supersededAttempt(state: JournalState, out: Outbound): boolean {
@@ -1275,6 +1294,8 @@ export class AgenticWorkflowRuntime {
   async requestSpecialist(runId: string, role: string, objective: string, requiredCapabilities: string[]): Promise<JsonValue> {
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId); this.live(run);
+      if (run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === runId && ["sending", "unknown_delivery"].includes(out.status) && !isConversationDelivery(out)))
+        throw new Error("Unknown delivery must be reconciled before requesting another specialist assignment");
       if (!["specifier", "architect", "planner", "security", "reviewer", "qa", "tester"].includes(role)) throw new Error("Not a specialist role");
       const pane = unwrap(await this.ports.panes.getRoleBinding(role));
       const missingCapabilities = [...requiredCapabilities, "repository.read"].filter(cap => !this.ports.roleCapabilities[role]?.includes(cap));
@@ -1333,6 +1354,7 @@ export class AgenticWorkflowRuntime {
     if (!Number.isInteger(maxIterations) || maxIterations < 1 || maxIterations > 10) throw new Error("Invalid verification limit");
     return this.transaction(async (state, save, core, outbox) => {
       const run = this.run(state, runId); this.live(run);
+      if (run.nativeDeliveries?.length) throw new Error("Unknown native delivery must be reconciled before proposing a workflow");
       if (run.definition) {
         if (digest(run.definition.metadata?.proposalFingerprint) === digest(digest([draft, proposed, maxIterations]))) {
           // An identical retry re-attempts a design step that is still pending (e.g. a failed autonomous approval); it never succeeds silently.
@@ -1929,6 +1951,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       try {
         for (const run of state.runs) {
           if (this.quiesced) break;
+          if (run.nativeDeliveries?.length) continue;
           if (run.cancelled || ["completed", "failed", "cancelled", "escalated", "awaiting_approval", "intake", "clarifying", "specifying", "planning"].includes(run.status)) continue;
           // One run's failure is recorded on that run; the other runs and the outbox flush below still proceed.
           try {
@@ -2412,26 +2435,22 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
    * applied message from it since) makes Conversation see `developer_no_response` / `specialist_no_response` and wakes the
    * Coordinator once per assignment. Herdr Stop is operational evidence only, never task success.
    */
-  async specialistTurnStopped(bindingInput: unknown, roleInput: unknown): Promise<void> {
+  async specialistTurnStopped(bindingInput: unknown, roleInput: unknown, observedAt = new Date().toISOString()): Promise<void> {
     const binding = PaneBindingSchema.parse(bindingInput), role = textField(roleInput);
     if (binding.role !== role || role === "conversation" || role === "coordinator") throw new Error("Specialist Stop requires a non-Conversation specialist binding");
     await this.transaction(async (state, save, _core, outbox) => {
       let changed = false;
       for (const out of [...state.outbound]) {
-        if (out.message.recipient.role !== role || out.handle?.target.paneId !== binding.paneId || !["accepted", "released"].includes(out.status)) continue;
+        if (out.message.recipient.role !== role || out.handle?.target.paneId !== binding.paneId || out.handle.target.agentId !== binding.agentId ||
+            digest(out.handle.target.session) !== digest(binding.session) || out.handle.target.workspaceId !== binding.workspaceId ||
+            out.handle.target.tabId !== binding.tabId || Date.parse(out.handle.acceptedAt) > Date.parse(observedAt) ||
+            !Number.isFinite(Date.parse(observedAt)) || !["accepted", "released"].includes(out.status)) continue;
         if (!["task.assignment", "delegation.request"].includes(out.message.type) || !out.message.run_id) continue;
         const run = state.runs.find(item => item.runId === out.message.run_id);
         if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || run.status === "awaiting_approval") continue;
         // Waiting on a user decision it asked for through Runtime is a legitimate idle turn, not a missing answer.
         if (Object.values(run.userDecisions ?? {}).some(item => item.role === role && item.status === "pending")) continue;
-        const sentAt = out.message.occurred_at ?? "";
-        // Same discharge rule as outboundOwesResult: a correlated terminal task.status is a result, not progress.
-        const answered = state.inbox.some(item => item.status === "applied" && item.message.sender.role === role && item.message.run_id === run.runId &&
-          (!["task.status", "conversation.progress"].includes(item.message.type) &&
-            (item.message.causation_id === out.message.message_id || (item.message.occurred_at ?? "") >= sentAt) ||
-           item.message.type === "task.status" && item.message.causation_id === out.message.message_id &&
-            TERMINAL_TASK_STATUS_RESULTS.includes(String(objectField(item.message.payload, "status")))));
-        if (answered) continue;
+        if (!this.outboundOwesResult(state, run, out) || run.nativeDeliveries?.length) continue;
         const kind = role === "developer" ? "developer_no_response" : "specialist_no_response";
         const reason = `${role} ended its turn for ${out.message.type} (${out.message.message_id}) without a structured result`;
         this.emit(state, outbox, run, "conversation.progress", { kind, runId: run.runId, reason, headline: `${role} không trả kết quả: ${out.message.type}`,
@@ -2474,6 +2493,10 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   private settleNativeDeliveries(state: JournalState, acknowledgedId?: string): boolean {
     let changed = false;
     for (const run of state.runs) {
+      const previous = run.nativeDeliveries ?? [];
+      const pending = previous.filter(entry => entry.message.message_id !== acknowledgedId && !state.inbox.some(item =>
+        item.status === "applied" && digest(item.message) === digest(entry.message)));
+      if (pending.length !== previous.length) { run.nativeDeliveries = pending; changed = true; }
       const action = run.pendingAction;
       if (!action || action.kind !== "reconcile_delivery" || action.state !== "pending" || run.cancelled) continue;
       if (action.sourceMessageId !== acknowledgedId && !state.inbox.some(item => item.message.message_id === action.sourceMessageId && item.status === "applied")) continue;
@@ -2484,6 +2507,21 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     }
     return changed;
   }
+  private retainNativeIntent(state: JournalState, message: RoleMessage, operationId: string): RunRecord | undefined {
+    const run = state.runs.find(item => item.runId === message.run_id);
+    if (!run || message.correlation_id !== run.delegation.correlationId || this.refused(state, message.message_id)) return undefined;
+    const pending = run.nativeDeliveries ?? (run.nativeDeliveries = []);
+    const prior = pending.find(entry => entry.operationId === operationId || entry.message.message_id === message.message_id);
+    if (prior && (prior.operationId !== operationId || digest(prior.message) !== digest(message))) throw new Error("Conflicting native delivery intent");
+    if (!prior && !state.inbox.some(item => item.status === "applied" && digest(item.message) === digest(message)))
+      pending.push({ operationId: textField(operationId), message });
+    return run;
+  }
+  /** Trusted host write-ahead before native invocation. No transport or business success is inferred. */
+  async recordNativeDeliveryIntent(input: unknown, operationId: string): Promise<void> {
+    const message = RoleMessageSchema.parse(input);
+    await this.transaction(async (state, save) => { if (this.retainNativeIntent(state, message, operationId)) await save(); });
+  }
   /**
    * A native delivery whose acknowledgement was not observed. Conversation and the Coordinator see `delivery_failure` with the
    * operation id. The message is never resent here; reconciliation decides what happened.
@@ -2492,8 +2530,10 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     const message = RoleMessageSchema.parse(input);
     if (!message.run_id) return;
     await this.transaction(async (state, save, _core, outbox) => {
-      const run = state.runs.find(item => item.runId === message.run_id);
-      if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || this.refused(state, message.message_id)) return;
+      const run = this.retainNativeIntent(state, message, operationId);
+      if (!run) return;
+      // Preserve uncertainty even while a schema blocker/human gate pauses the run. Business status cannot erase a transport intent.
+      if (run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) && !resumablyPaused(run)) { await save(); return; }
       const subject = `native delivery ${operationId} (${message.type} to ${message.recipient.role}, ${message.message_id})`;
       // Not an escalation: a native ACK can arrive after the host deadline while the message is applied normally. The durable
       // action records the no-resend reconciliation (cleared by the late ACK/application) without making the run terminal.
