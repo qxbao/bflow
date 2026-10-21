@@ -38,6 +38,25 @@ function nextAttemptKey(key: string): string {
 function inheritedResumeAttempts(run: RunRecord): number {
   return run.pendingAction?.kind === "resume_coordinator" ? run.pendingAction.resumeAttempts ?? 0 : 0;
 }
+/** Bound shared by automatic and explicit resumes of one blocker lineage (the journal codec also caps it). */
+const AUTO_RESUME_LIMIT = 3;
+/** Minimum wait before automatic resume n+1 (n = attempts already spent), from the episode start or the previous resume. */
+const AUTO_RESUME_BACKOFF_MS: readonly number[] = [30_000, 60_000, 120_000];
+/** Budget and backoff anchor an automatic-resume episode inherits from the Coordinator action it follows, so resume -> stop cannot loop. */
+function inheritedAutoResume(run: RunRecord): { resumeAttempts: number; lastResumedAt?: string } {
+  const prior = run.pendingAction?.kind === "resume_coordinator" ? run.pendingAction : undefined;
+  return { resumeAttempts: prior?.resumeAttempts ?? 0, ...(prior?.lastResumedAt === undefined ? {} : { lastResumedAt: prior.lastResumedAt }) };
+}
+/** Earliest time Runtime may automatically resume this action. */
+function autoResumeDueAt(action: NonNullable<RunRecord["pendingAction"]>): number {
+  const anchor = Math.max(Date.parse(action.createdAt), action.lastResumedAt === undefined ? -Infinity : Date.parse(action.lastResumedAt));
+  const attempts = action.resumeAttempts ?? 0;
+  return anchor + AUTO_RESUME_BACKOFF_MS[Math.min(attempts, AUTO_RESUME_BACKOFF_MS.length - 1)]!;
+}
+/** User-visible description of an automatic resume episode, carried on its blocker notice. */
+function automaticResumeNotice(action: NonNullable<RunRecord["pendingAction"]>): JsonValue {
+  return { attempt: (action.resumeAttempts ?? 0) + 1, limit: AUTO_RESUME_LIMIT, notBefore: new Date(autoResumeDueAt(action)).toISOString() };
+}
 /** A cycle stopped by an environment/timeout `blocked` or missing-evidence `inconclusive` result; exhausted or failed verdicts stay final. */
 function retryableVerificationCycle(cycle: { status: string; history: readonly { status: string }[] }): boolean {
   return cycle.status === "escalated" && ["blocked", "inconclusive"].includes(cycle.history.at(-1)?.status ?? "");
@@ -566,7 +585,7 @@ export class AgenticWorkflowRuntime {
     const action = run.pendingAction!;
     run.status = action.previousStatus ?? "specifying";
     if (run.error === action.reason) delete run.error;
-    action.state = "queued"; action.resumeAttempts = (action.resumeAttempts ?? 0) + 1; delete action.previousStatus;
+    action.state = "queued"; action.resumeAttempts = (action.resumeAttempts ?? 0) + 1; action.lastResumedAt = this.now(); delete action.previousStatus;
     run.resumeReceipts = [...(run.resumeReceipts ?? []).filter(item => item.actionId !== action.actionId), { actionId: action.actionId, messageId }].slice(-50);
   }
   private admitRevision(state: JournalState, outbox: HerdrOutbox, run: RunRecord, delegation: DelegationRequest): void {
@@ -1044,16 +1063,21 @@ export class AgenticWorkflowRuntime {
         // its bounded attempt budget carries over from the action this blocker follows, so resume -> blocked cannot loop.
         const capabilityBlocker = /repository|read-only tool|native mutation|exec_command|resource enumeration/i.test(blockage) &&
           state.outbound.some(out => out.message.run_id === run.runId && out.status === "failed" && out.error?.includes(RoleCapabilityPreflightError.name));
+        // Any other Coordinator blocker resumes automatically with backoff on the same inherited budget; a blocker that needs a
+        // human answer goes through request_user_decision instead, and a pending decision/approval never auto-resumes (see above).
         run.pendingAction = { actionId: `next-${digest([run.runId, parsed.message_id])}`, kind: "resume_coordinator", owner: "coordinator",
-          reason: reason.slice(0, 2000), sourceMessageId: parsed.message_id, createdAt: parsed.occurred_at ?? this.now(),
-          state: "pending", previousStatus: run.status, resumeAttempts: capabilityBlocker ? inheritedResumeAttempts(run) : 0, recovery: capabilityBlocker ? "capability_repair" : "manual" };
+          reason: reason.slice(0, 2000), sourceMessageId: parsed.message_id, createdAt: this.now(),
+          state: "pending", previousStatus: run.status, ...inheritedAutoResume(run), recovery: capabilityBlocker ? "capability_repair" : "auto_resume" };
         run.status = "escalated";
         if (!options.notificationAlreadyRecorded) {
           const noticeId = `coordinator-blocked-${digest([run.runId, parsed.message_id])}`;
+          const automatic = !capabilityBlocker && (run.pendingAction.resumeAttempts ?? 0) < AUTO_RESUME_LIMIT;
           outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: noticeId, correlation_id: run.delegation.correlationId,
             causation_id: parsed.message_id, run_id: run.runId, sender: { role: "runtime" }, recipient: { role: "conversation" },
             type: "conversation.progress", payload: { kind: "workflow_blocked", runId: run.runId, sdlcStatus: run.status,
-              headline: "Workflow đang chờ khắc phục blocker", reason, blockageReason: reason, fromRole: "coordinator",
+              headline: automatic ? "Workflow bị chặn; Runtime sẽ tự tiếp tục Coordinator sau thời gian chờ" : "Workflow đang chờ khắc phục blocker",
+              reason, blockageReason: reason, fromRole: "coordinator", actionId: run.pendingAction.actionId,
+              ...(automatic ? { automaticResume: automaticResumeNotice(run.pendingAction) } : {}),
               options: ["Khắc phục capability rồi yêu cầu tiếp tục run", "Hủy run"] },
             artifact_references: [], occurred_at: this.now(), idempotency_key: noticeId }), "conversation");
         }
@@ -1064,7 +1088,7 @@ export class AgenticWorkflowRuntime {
   }
 
   /** Resume only a recorded recoverable Coordinator blocker. The stable action identity prevents duplicate wakeups on retry/restart. */
-  async resumeBlockedRun(runIdInput: string, actionIdInput: string): Promise<JsonValue> {
+  async resumeBlockedRun(runIdInput: string, actionIdInput: string, options: { automatic?: boolean } = {}): Promise<JsonValue> {
     const runId = textField(runIdInput), actionId = textField(actionIdInput);
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId), action = run.pendingAction;
@@ -1085,6 +1109,10 @@ export class AgenticWorkflowRuntime {
           run.approval !== undefined && (!run.decision || run.decision.approvalId !== run.approval.approvalId))
         throw new Error("A pending approval or user decision must be resolved before resume");
       if ((action.resumeAttempts ?? 0) >= 3) throw new Error("Bounded resume attempts are exhausted; cancel or request operator intervention");
+      // Re-checked under the journal lock: the classification/backoff may have changed since the automatic pass selected it.
+      if (options.automatic && (action.state !== "pending" || !["auto_resume", "capability_repair"].includes(action.recovery ?? "manual") ||
+          action.recovery === "auto_resume" && Date.parse(this.now()) < autoResumeDueAt(action)))
+        throw new Error("No matching recoverable blocker to resume automatically");
       if (state.outbound.some(item => item.message.run_id === runId && item.status === "unknown_delivery"))
         throw new Error("Unknown delivery must be reconciled before resume");
       const failureIds = [action.sourceMessageId, ...(action.relatedMessageIds ?? [])];
@@ -1128,12 +1156,16 @@ export class AgenticWorkflowRuntime {
           correlation_id: run.delegation.correlationId, causation_id: action.sourceMessageId, run_id: runId,
           sender: { role: "runtime" }, recipient: { role: "coordinator" }, type: "task.status",
           payload: { kind: "resume_run", actionId: action.actionId, reason: action.reason,
-            next: "Inspect the durable blocker, confirm the required capability is now available, then continue this same run through Runtime." },
+            ...(options.automatic ? { automatic: true, attempt: (action.resumeAttempts ?? 0) + 1, limit: AUTO_RESUME_LIMIT } : {}),
+            next: options.automatic
+              ? "Runtime resumed this run automatically (bounded). Inspect the durable blocker, then record the next workflow action through Runtime; if only a human can decide, use request_user_decision instead of stopping."
+              : "Inspect the durable blocker, confirm the required capability is now available, then continue this same run through Runtime." },
           artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }), "coordinator");
       }
       const verificationRetry = run.error?.startsWith(VERIFICATION_RETRY_PREFIX) === true;
       action.state = "queued";
       action.resumeAttempts = (action.resumeAttempts ?? 0) + 1;
+      action.lastResumedAt = this.now();
       run.status = action.previousStatus ?? "specifying";
       if (verificationRetry) this.prepareVerificationRetry(state, run); // same as retry_verification
       delete action.previousStatus;
@@ -1147,36 +1179,62 @@ export class AgenticWorkflowRuntime {
     });
   }
 
-  /** Restart recovery: resume each persisted capability/no-next-action episode at most once after checking the current Coordinator pane. */
+  /**
+   * Bounded automatic recovery pass, run at host restart and periodically by the host watchdog. Resumes an escalated, uncancelled
+   * run whose pending Coordinator action is classified `auto_resume` (after its 30s/60s/120s backoff) or `capability_repair` (once a
+   * capability proof passes), while no approval or user decision is pending and no delivery is unknown. A verification
+   * delivery/storage escalation re-runs the existing retry_verification path; every other one wakes the Coordinator with the
+   * existing idempotent `resume_run` (keyed by actionId). Each resume spends the persisted `resumeAttempts` budget (limit 3):
+   * once spent, the action becomes `manual` and Conversation is told once. Human decisions are never answered here.
+   */
   async resumeRecoverableRuns(): Promise<JsonValue> {
-    if (!this.ports.roleCapabilities.coordinator?.includes("repository.read")) return json({ resumed: 0, reason: "repository.read unavailable" });
+    if (this.quiesced) return json({ resumed: 0, reason: "quiesced" });
+    const coordinatorReadable = this.ports.roleCapabilities.coordinator?.includes("repository.read") === true;
     const candidates = await this.transaction(async (state, save, _core, outbox) => {
-      const repairable = state.runs.filter(run => run.status === "escalated" && !run.cancelled &&
-        run.pendingAction?.kind === "resume_coordinator" && run.pendingAction.recovery === "capability_repair" && run.pendingAction.state === "pending");
-      let notified = false;
-      for (const run of repairable.filter(item => (item.pendingAction!.resumeAttempts ?? 0) >= 3)) {
+      const now = Date.parse(this.now());
+      const recoverable = state.runs.filter(run => run.status === "escalated" && !run.cancelled && !run.supersededBy &&
+        run.pendingAction?.kind === "resume_coordinator" && run.pendingAction.state === "pending" &&
+        ["auto_resume", "capability_repair"].includes(run.pendingAction.recovery ?? "manual"));
+      let changed = false;
+      for (const run of recoverable.filter(item => (item.pendingAction!.resumeAttempts ?? 0) >= AUTO_RESUME_LIMIT)) {
         // Budget spent: stop automatic resumes and say so once; an explicit user resume/cancel decides from here.
-        const before = state.outbound.length, actionId = run.pendingAction!.actionId;
+        const action = run.pendingAction!, actionId = action.actionId;
         this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId, sdlcStatus: run.status, owner: "coordinator",
-          actionId, reason: run.pendingAction!.reason, blockageReason: run.pendingAction!.reason,
+          actionId, reason: action.reason, blockageReason: action.reason,
           headline: "Automatic resume stopped after 3 attempts; the same blocker keeps recurring",
           options: ["Khắc phục nguyên nhân (capability/pane) với operator; run không tự tiếp tục nữa", "Hủy run"] }, `auto-resume-exhausted:${actionId}`, "conversation");
-        notified ||= state.outbound.length !== before;
+        action.recovery = "manual";
+        changed = true;
       }
-      if (notified) await save();
-      return repairable.filter(run => (run.pendingAction!.resumeAttempts ?? 0) < 3).map(run => ({ runId: run.runId, actionId: run.pendingAction!.actionId }));
+      if (changed) await save();
+      return recoverable.filter(run => {
+        const action = run.pendingAction!;
+        if ((action.resumeAttempts ?? 0) >= AUTO_RESUME_LIMIT) return false;
+        // Human gates and unknown deliveries are durable waits: never answered, resent or bypassed automatically.
+        if (Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
+            run.approval !== undefined && (!run.decision || run.decision.approvalId !== run.approval.approvalId)) return false;
+        if (state.outbound.some(item => item.message.run_id === run.runId && item.status === "unknown_delivery")) return false;
+        return action.recovery !== "auto_resume" || now >= autoResumeDueAt(action);
+      }).map(run => ({ runId: run.runId, actionId: run.pendingAction!.actionId,
+        verificationRetry: run.error?.startsWith(VERIFICATION_RETRY_PREFIX) === true && run.pendingAction!.recovery === "auto_resume" }));
     });
     let resumed = 0;
     for (const candidate of candidates) {
-      const pane = unwrap(await this.ports.panes.getRoleBinding("coordinator"));
-      if (!pane) continue;
-      const health = unwrap(await this.ports.panes.inspectRoleHealth("coordinator"));
-      if (!health.readyForPrompt || !health.occupantMatches || health.paneId !== pane.paneId) continue;
-      try { await this.resumeBlockedRun(candidate.runId, candidate.actionId); resumed++; }
-      catch (error) {
+      try {
+        if (candidate.verificationRetry) {
+          // Same transition as the Coordinator's retry_verification tool; Runtime then re-runs the verification itself.
+          await this.retryVerification(candidate.runId, { automatic: true, actionId: candidate.actionId }); resumed++; continue;
+        }
+        if (!coordinatorReadable) continue;
+        const pane = unwrap(await this.ports.panes.getRoleBinding("coordinator"));
+        if (!pane) continue;
+        const health = unwrap(await this.ports.panes.inspectRoleHealth("coordinator"));
+        if (!health.readyForPrompt || !health.occupantMatches || health.paneId !== pane.paneId) continue;
+        await this.resumeBlockedRun(candidate.runId, candidate.actionId, { automatic: true }); resumed++;
+      } catch (error) {
         // Unknown delivery, cancellation/approval, stale role binding and capability proof failures remain durable waits.
-        // Startup recovery is best-effort per action: one unresolved run must not abort host activation or block other runs.
-        if (error instanceof RoleCapabilityPreflightError || /Unknown delivery|pending approval|matching recoverable blocker|no verified role capability|capability is unavailable/i.test(String(error))) continue;
+        // Recovery is best-effort per action: one unresolved run must not abort host activation or block other runs.
+        if (error instanceof RoleCapabilityPreflightError || /Unknown delivery|pending approval|matching recoverable blocker|no verified role capability|capability is unavailable|No verification awaiting retry|exhausted|quiesced/i.test(String(error))) continue;
         throw error;
       }
     }
@@ -1281,15 +1339,19 @@ export class AgenticWorkflowRuntime {
       ? prior.sourceMessageId : message.message_id;
     run.error = reason;
     run.status = "escalated";
+    // Automatic, bounded: the budget and backoff anchor carry over from the action this stop follows (resume -> stop cannot loop).
     run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
       reason: reason.slice(0, 2000), sourceMessageId, createdAt: prior?.createdAt ?? this.now(), state: "pending", previousStatus,
-      resumeAttempts: prior?.resumeAttempts ?? 0, recovery: "manual" };
+      resumeAttempts: prior?.resumeAttempts ?? 0, ...(prior?.lastResumedAt === undefined ? {} : { lastResumedAt: prior.lastResumedAt }), recovery: "auto_resume" };
     const messageId = `coordinator-no-next-action-${digest([run.runId, run.pendingAction.actionId])}`;
     if (state.outbound.some(out => out.message.message_id === messageId)) return;
+    const automatic = (run.pendingAction.resumeAttempts ?? 0) < AUTO_RESUME_LIMIT;
     outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: messageId, correlation_id: run.delegation.correlationId,
       causation_id: message.message_id, run_id: message.run_id, sender: { role: "runtime" }, recipient: { role: "conversation" },
       type: "conversation.progress", payload: { kind: "coordinator_no_response", runId: run.runId, owner: "coordinator",
-        actionId: run.pendingAction.actionId, headline: "Coordinator stopped without a workflow next action", reason, blockageReason: reason,
+        actionId: run.pendingAction.actionId, reason, blockageReason: reason,
+        headline: automatic ? "Coordinator stopped without a workflow next action; Runtime will resume it automatically" : "Coordinator stopped without a workflow next action",
+        ...(automatic ? { automaticResume: automaticResumeNotice(run.pendingAction) } : {}),
         options: ["Khắc phục blocker rồi yêu cầu Coordinator tiếp tục run", "Hủy run"] },
       artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }));
   }
@@ -2061,19 +2123,26 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     // Resumable: an authorized resume (Conversation "tiếp tục" / Coordinator resume_run) performs the bounded verification retry.
     if (!(run.pendingAction?.state === "pending" && run.pendingAction.kind === "resume_coordinator")) {
       const sourceMessageId = `verification-retry-${digest([run.runId, taskId, reason])}`;
+      // Automatic, bounded: Runtime re-runs retry_verification itself after backoff, sharing the inherited budget.
       run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
         reason: reason.slice(0, 2000), sourceMessageId, createdAt: this.now(), state: "pending", previousStatus,
-        resumeAttempts: inheritedResumeAttempts(run), recovery: "manual" };
+        ...inheritedAutoResume(run), recovery: "auto_resume" };
     }
+    const action = run.pendingAction!;
+    const automatic = action.recovery === "auto_resume" && (action.resumeAttempts ?? 0) < AUTO_RESUME_LIMIT;
     this.emit(state, outbox, run, "conversation.progress", { kind: "verification_stuck", runId: run.runId, taskId, reason,
-      actionId: run.pendingAction!.actionId, options: VERIFICATION_RETRY_OPTIONS, headline: `Verification needs attention: ${taskId}`, sdlcStatus: run.status },
+      actionId: action.actionId, options: VERIFICATION_RETRY_OPTIONS, sdlcStatus: run.status,
+      headline: automatic ? `Verification needs attention: ${taskId}; Runtime retries it automatically` : `Verification needs attention: ${taskId}`,
+      ...(automatic ? { automaticResume: automaticResumeNotice(action) } : {}) },
       `verification-stuck:${digest([run.runId, taskId, reason])}`, "conversation");
     const wakeId = `p19-wake-${digest([run.runId, "verification-stuck", taskId, reason])}`;
     if (!state.outbound.some(out => out.message.message_id === wakeId)) outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: wakeId,
       correlation_id: run.delegation.correlationId, causation_id: run.pendingAction!.sourceMessageId, run_id: run.runId, sender: { role: "runtime" },
       recipient: { role: "coordinator" }, type: "task.status", payload: { kind: "verification_stuck", runId: run.runId, taskId, reason,
         actionId: run.pendingAction!.actionId, sdlcStatus: run.status,
-        next: "Independent verification could not finish (environment/timeout/evidence). Report it with the retry/cancel options; the user's resume (or retry_verification once the user chose it) re-runs it." },
+        next: automatic
+          ? "Independent verification could not finish (environment/timeout/evidence). Runtime retries it automatically with backoff (bounded); report it to the user and do not call retry_verification yourself."
+          : "Independent verification could not finish (environment/timeout/evidence). Report it with the retry/cancel options; the user's resume (or retry_verification once the user chose it) re-runs it." },
       artifact_references: [], occurred_at: this.now(), idempotency_key: wakeId }), "coordinator");
   }
   /** Bounded retries for a durable verification outcome that cannot be finished. Other entries and runs are unaffected. */
@@ -2101,19 +2170,27 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
    * Explicit retry for a run escalated by a verification delivery/storage failure. Durable outcomes are finished as they are;
    * a verification that never produced an outcome is re-run. Idempotent gate messages keep this from resending requests.
    */
-  async retryVerification(runId: string): Promise<JsonValue> {
+  async retryVerification(runId: string, options: { automatic?: boolean; actionId?: string } = {}): Promise<JsonValue> {
     return this.transaction(async (state, save, _core, outbox) => {
       if (this.quiesced) throw new Error("Runtime is quiesced");
       const run = this.run(state, runId);
       if (run.cancelled || run.status !== "escalated" || !run.error?.startsWith(VERIFICATION_RETRY_PREFIX))
         throw new Error("No verification awaiting retry for this run");
       const action = run.pendingAction;
+      if (options.automatic) {
+        // Re-checked under the lock: only the selected, still-automatic, due action is retried, and never past a human gate.
+        if (action?.kind !== "resume_coordinator" || action.state !== "pending" || action.actionId !== options.actionId ||
+            action.recovery !== "auto_resume" || Date.parse(this.now()) < autoResumeDueAt(action)) throw new Error("No verification awaiting retry for this run");
+        if (Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
+            run.approval !== undefined && (!run.decision || run.decision.approvalId !== run.approval.approvalId))
+          throw new Error("A pending approval or user decision must be resolved before resume");
+      }
       if (action?.kind === "resume_coordinator" && action.state === "pending") {
         if ((action.resumeAttempts ?? 0) >= 3) throw new Error("Bounded verification retries are exhausted; cancel or request operator intervention");
-        action.state = "queued"; action.resumeAttempts = (action.resumeAttempts ?? 0) + 1; delete action.previousStatus;
+        action.state = "queued"; action.resumeAttempts = (action.resumeAttempts ?? 0) + 1; action.lastResumedAt = this.now(); delete action.previousStatus;
       }
       const retained = this.prepareVerificationRetry(state, run);
-      this.progress(state, outbox, run, "Verification retry requested");
+      this.progress(state, outbox, run, options.automatic ? "Verification retried automatically" : "Verification retry requested");
       await save();
       return json({ retried: true, runId, resumedOutcomes: retained });
     });

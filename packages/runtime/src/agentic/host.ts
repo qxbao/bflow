@@ -1256,8 +1256,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const watchdogReported = new Set<string>();
   const runWatchdog = async () => {
     const host = requireWorkspace(), now = Date.now();
-    // Capability repair is the only automatic resume class. Runtime verifies the current authenticated role session and
-    // reuses its immutable unsent handoff; manual business blockers and unknown deliveries remain waiting for action.
+    // Bounded automatic resume pass: `auto_resume` blockers (no-next-action stops, Coordinator blockers, verification
+    // delivery/storage escalations) after backoff, and `capability_repair` once the current role session proves the capability.
+    // Approvals, user decisions, cancellation, manual blockers and unknown deliveries remain waiting for action.
     await host.runtime.resumeRecoverableRuns();
     const runs = await host.runtime.watchdogSnapshot(manifest!.conversationSessionId);
     if (!runs.some(run => run.live)) return;

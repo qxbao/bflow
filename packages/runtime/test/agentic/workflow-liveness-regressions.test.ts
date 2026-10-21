@@ -302,7 +302,7 @@ describe("workflow liveness recovery boundaries", () => {
     expect(f.transport.sentRequests.filter(request => request.instruction.includes("wake-during-approval"))).toHaveLength(1);
   });
 
-  it("does not auto-resume a blocker that merely mentions the repository and keeps the automatic budget across episodes", async () => {
+  it("does not treat a blocker that merely mentions the repository as capability repair and keeps the automatic budget across episodes", async () => {
     const f = await fixture({ runs: [run("run-1", "specifying")] });
     const coordinator = { role: "coordinator", agent_id: "coordinator-agent", pane_id: "pane-coordinator" };
     const blocked = (id: string, reason: string) => RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: "correlation-run-1",
@@ -310,7 +310,8 @@ describe("workflow liveness recovery boundaries", () => {
       artifact_references: [], occurred_at: T0, idempotency_key: id });
     await f.runtime.observeCoordinatorOutcome(blocked("free-text", "The repository has no tests for this module"));
     const manual = await f.runtime.inspect("run-1") as unknown as RunRecord;
-    expect(manual.pendingAction).toMatchObject({ recovery: "manual", resumeAttempts: 0 });
+    // A non-capability Coordinator blocker resumes automatically, but only after its backoff (none has elapsed here).
+    expect(manual.pendingAction).toMatchObject({ recovery: "auto_resume", resumeAttempts: 0 });
     expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 0 });
     // A capability blocker backed by a recorded preflight failure carries the automatic budget of the episode it follows.
     let ready = false;
