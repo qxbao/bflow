@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, expect, it } from "vitest";
@@ -10,7 +10,7 @@ import { bindRunnerProfile } from "../../src/agentic/behavioral-runner.js";
 import { detectTestRunners } from "../../src/agentic/runner-detection.js";
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
-async function fixture(files: Record<string, string>) { const root = await mkdtemp(join(tmpdir(), "js-declared-")); roots.push(root); for (const [path, text] of Object.entries(files)) { await mkdir(dirname(join(root, path)), { recursive: true }); await writeFile(join(root, path), text); } return root; }
+async function fixture(files: Record<string, string>) { const root = await realpath(await mkdtemp(join(tmpdir(), "js-declared-"))); roots.push(root); for (const [path, text] of Object.entries(files)) { await mkdir(dirname(join(root, path)), { recursive: true }); await writeFile(join(root, path), text); } return root; }
 it.each(["jest", "mocha"] as const)("detects %s installed metadata and selects exact names and files without shell argv", async id => {
   const entry = id === "jest" ? "jest/bin/jest.js" : "mocha/bin/mocha.js";
   const root = await fixture({ "package.json": JSON.stringify({ devDependencies: { [id]: "*" } }), [`node_modules/${id}/package.json`]: '{"version":"29.7.0"}', [`node_modules/${entry}`]: "" });

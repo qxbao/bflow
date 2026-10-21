@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { lstat, mkdir, realpath } from "node:fs/promises";
+import { lstat, mkdir, readdir, realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { BoundBehavioralCommand } from "./behavioral-runner.js";
@@ -30,6 +31,18 @@ const BASE_PROFILE = `(version 1)
 (allow file-read* file-write* (subpath (param "SCRATCH")))
 `;
 
+/**
+ * Executes `/usr/bin/true` under the exact base profile used for measurements. Readiness must prove the real policy:
+ * a hand-written minimal profile aborts dyld on current macOS (it also needs "/" and /dev/null), which made a working
+ * sandbox look unavailable.
+ */
+export async function probeSeatbeltProfile(): Promise<void> {
+  const scratch = await realpath(tmpdir());
+  const params: [string, string][] = [["EXECUTABLE", "/usr/bin/true"], ["CHECKOUT", scratch], ["SCRATCH", scratch]];
+  await run(SANDBOX_EXEC, ["-p", BASE_PROFILE, ...params.flatMap(([key, value]) => ["-D", `${key}=${value}`]), "--", "/usr/bin/true"],
+    { env: { PATH: "/usr/bin:/bin", LANG: "C" }, timeout: 10_000, maxBuffer: 16384 });
+}
+
 /** Scratch directory the sandboxed process may write to (its TMPDIR); a sibling of the checkout, never the checkout. */
 export function darwinScratchDirectory(checkout: string): string {
   return join(dirname(checkout), "tmp");
@@ -53,8 +66,12 @@ async function cloneDependencyRoots(command: BoundBehavioralCommand, checkout: s
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; await mkdir(current); }
     }
     if (await realpath(current) !== join(realCheckout, rel)) throw new Error("Behavioral checkout dependency mountpoint escapes the checkout");
-    // -c: clonefile(2) copy-on-write, -R without -L keeps symlinks as links, `from/.` fills the existing mountpoint.
-    await run("/bin/cp", ["-c", "-R", `${from}/.`, `${current}/`], { timeout: 120_000 });
+    // A measurement sandboxes up to twice (prepare, then tests) over one checkout. The tree is read-only inside the
+    // sandbox, so a populated mountpoint is the earlier clone; copying over it would fail on read-only files.
+    if ((await readdir(current)).length === 0) {
+      // -c: clonefile(2) copy-on-write, -R without -L keeps symlinks as links, `from/.` fills the mountpoint.
+      await run("/bin/cp", ["-c", "-R", `${from}/.`, `${current}/`], { timeout: 120_000 });
+    }
     // Seatbelt matches resolved paths, so the policy must name the real location (/private/var, not /var).
     targets.push(join(realCheckout, rel));
   }

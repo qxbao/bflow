@@ -145,7 +145,7 @@ describe("bundled isolation engine", () => {
         AI_ISOLATOR_TEST_SELECTION: selected,
         PATH: `${bin}:/usr/bin:/bin`,
       };
-      const result = spawnSync("/usr/bin/bash", [enginePath, "codex", "--name", "test", "--no-lb", "--no-login"], {
+      const result = spawnSync("bash", [enginePath, "codex", "--name", "test", "--no-lb", "--no-login"], {
         cwd: home,
         env,
         encoding: "utf8",
@@ -171,7 +171,7 @@ describe("bundled isolation engine", () => {
       writeFileSync(resolve(bin, "codex"), "#!/usr/bin/env bash\nexit 0\n");
       chmodSync(resolve(bin, "codex"), 0o755);
       const env = { ...process.env, HOME: home, AI_ISOLATOR_HOME: resolve(home, "state"), PATH: `${bin}:/usr/bin:/bin` };
-      const result = spawnSync("/usr/bin/bash", [enginePath, "codex", "--name", "test", "--no-lb", "--no-login"], {
+      const result = spawnSync("bash", [enginePath, "codex", "--name", "test", "--no-lb", "--no-login"], {
         cwd: home,
         env,
         encoding: "utf8",
@@ -191,9 +191,9 @@ describe("bundled isolation engine", () => {
       writeFileSync(resolve(bin, "claude"), "#!/usr/bin/env bash\nexit 0\n");
       chmodSync(resolve(bin, "claude"), 0o755);
       const env = { ...process.env, HOME: home, AI_ISOLATOR_HOME: resolve(home, "state"), PATH: `${bin}:/usr/bin:/bin` };
-      const create = spawnSync("/usr/bin/bash", [enginePath, "claude", "--name", "remove-me", "--no-login"], { cwd: home, env, encoding: "utf8" });
-      const remove = spawnSync("/usr/bin/bash", [enginePath, "remove", "claude", "--name", "remove-me"], { cwd: home, env, encoding: "utf8" });
-      const removeAgain = spawnSync("/usr/bin/bash", [enginePath, "remove", "claude", "--name", "remove-me"], { cwd: home, env, encoding: "utf8" });
+      const create = spawnSync("bash", [enginePath, "claude", "--name", "remove-me", "--no-login"], { cwd: home, env, encoding: "utf8" });
+      const remove = spawnSync("bash", [enginePath, "remove", "claude", "--name", "remove-me"], { cwd: home, env, encoding: "utf8" });
+      const removeAgain = spawnSync("bash", [enginePath, "remove", "claude", "--name", "remove-me"], { cwd: home, env, encoding: "utf8" });
       expect(create.status).toBe(0);
       expect(remove.status).toBe(0);
       expect(removeAgain.status).toBe(0);
@@ -222,7 +222,7 @@ exit 0
         CLAUDE_TEST_LOG: log,
         PATH: `${bin}:/usr/bin:/bin`,
       };
-      const result = spawnSync("/usr/bin/bash", [enginePath, "run", "claude", "--name", "isolated", "--", "--version"], {
+      const result = spawnSync("bash", [enginePath, "run", "claude", "--name", "isolated", "--", "--version"], {
         cwd: home,
         env,
         encoding: "utf8",
@@ -258,7 +258,7 @@ exit 0
         CLAUDE_CONFIG_DIR: resolve(home, "external-claude"),
         PATH: `${bin}:/usr/bin:/bin`,
       };
-      const result = spawnSync("/usr/bin/bash", [enginePath, "codex", "--name", "bflow", "--no-lb", "--no-login"], {
+      const result = spawnSync("bash", [enginePath, "codex", "--name", "bflow", "--no-lb", "--no-login"], {
         cwd: home,
         env,
         encoding: "utf8",
@@ -271,7 +271,7 @@ exit 0
       expect(existsSync(resolve(home, ".local/share/ai-isolator/profiles/codex--explicit"))).toBe(false);
 
       const explicitState = resolve(home, "explicit-isolator");
-      const explicit = spawnSync("/usr/bin/bash", [enginePath, "codex", "--name", "explicit", "--no-lb", "--no-login"], {
+      const explicit = spawnSync("bash", [enginePath, "codex", "--name", "explicit", "--no-lb", "--no-login"], {
         cwd: home,
         env: { ...env, AI_ISOLATOR_HOME: explicitState },
         encoding: "utf8",
@@ -311,14 +311,14 @@ exit 0
         PATH: `${bin}:/usr/bin:/bin`,
       };
 
-      const ordinary = spawnSync("/usr/bin/bash", [enginePath, "codex", "--name", "shared", "--no-lb", "--no-login"], {
+      const ordinary = spawnSync("bash", [enginePath, "codex", "--name", "shared", "--no-lb", "--no-login"], {
         cwd: activeHome, env, encoding: "utf8",
       });
       expect(ordinary.status, ordinary.stderr).toBe(0);
       const profileHome = resolve(sharedState, "profiles/codex--shared/home");
       expect(readFileSync(resolve(profileHome, ".codex/config.toml"), "utf8")).toContain("real-home-tool");
 
-      const isolatedSource = spawnSync("/usr/bin/bash", [enginePath, "codex", "--name", "shared", "--no-lb", "--no-login"], {
+      const isolatedSource = spawnSync("bash", [enginePath, "codex", "--name", "shared", "--no-lb", "--no-login"], {
         cwd: activeHome, env: { ...env, BFLOW_HOME: bflow }, encoding: "utf8",
       });
       expect(isolatedSource.status, isolatedSource.stderr).toBe(0);
@@ -361,7 +361,7 @@ exit 0
         BFLOW_HOME: "",
         PATH: `${bin}:/usr/bin:/bin`,
       };
-      const codex = spawnSync("/usr/bin/bash", [enginePath, "codex", "--name", "nested", "--no-lb", "--no-login"], {
+      const codex = spawnSync("bash", [enginePath, "codex", "--name", "nested", "--no-lb", "--no-login"], {
         cwd: activeHome, env, encoding: "utf8",
       });
       expect(codex.status, codex.stderr).toBe(0);
@@ -369,7 +369,7 @@ exit 0
       expect(codexConfig).toContain("real-codex");
       expect(codexConfig).not.toContain("parent-codex");
 
-      const claude = spawnSync("/usr/bin/bash", [enginePath, "claude", "--name", "nested", "--no-login"], {
+      const claude = spawnSync("bash", [enginePath, "claude", "--name", "nested", "--no-login"], {
         cwd: activeHome, env, encoding: "utf8",
       });
       expect(claude.status, claude.stderr).toBe(0);
@@ -400,7 +400,7 @@ exit 0
       chmodSync(resolve(bin, "codex"), 0o755);
       const state = resolve(home, "state");
       const env = { ...process.env, HOME: home, AI_ISOLATOR_HOME: state, CODEX_HOME: "", BFLOW_HOME: "", PATH: `${bin}:/usr/bin:/bin` };
-      const create = spawnSync("/usr/bin/bash", [enginePath, "codex", "--name", "hooks", "--no-lb", "--no-login"], {
+      const create = spawnSync("bash", [enginePath, "codex", "--name", "hooks", "--no-lb", "--no-login"], {
         cwd: home, env, encoding: "utf8",
       });
       expect(create.status, create.stderr).toBe(0);
@@ -417,7 +417,7 @@ exit 0
       mkdirSync(resolve(localHome, ".codex"), { recursive: true });
       writeFileSync(resolve(state, "profiles/codex--local/profile.env"), "AI_ISOLATOR_TOOL=codex\nAI_ISOLATOR_PROFILE=local\n");
       writeFileSync(resolve(localHome, ".codex/hooks.json"), '{"local":"preserve"}\n');
-      const existing = spawnSync("/usr/bin/bash", [enginePath, "run", "codex", "--name", "local", "--no-lb", "--no-login"], {
+      const existing = spawnSync("bash", [enginePath, "run", "codex", "--name", "local", "--no-lb", "--no-login"], {
         cwd: home, env, encoding: "utf8",
       });
       expect(existing.status, existing.stderr).toBe(0);

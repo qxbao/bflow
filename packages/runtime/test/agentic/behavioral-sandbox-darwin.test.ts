@@ -131,11 +131,23 @@ describe.skipIf(process.platform !== "darwin")("macOS Seatbelt behavioral sandbo
     expect((await measureBehavior(command, f.cwd, revision)).failed).toBe(0);
     expect(await readFile(join(nodeModules, "dep", "index.js"), "utf8")).toBe("module.exports=7;\n");
   });
+  it("sandboxes a prepare step and the test run over one checkout without re-cloning read-only dependencies", async () => {
+    const f = await fixture(), source = join(f.root, "deps"), nodeModules = join(source, "node_modules");
+    await mkdir(join(nodeModules, "dep"), { recursive: true });
+    const readOnly = join(nodeModules, "dep", "index.js"); await writeFile(readOnly, "module.exports=1;\n", { mode: 0o444 });
+    await writeFile(join(f.cwd, ".gitignore"), "node_modules\n");
+    const revision = await f.commit("assert.equal(1,1);");
+    const checkout = join(f.root, "checkout"); f.git("worktree", "add", "--detach", checkout, revision);
+    cleanup.push(async () => { f.git("worktree", "remove", "--force", checkout); });
+    const command = { ...f.command, dependencySource: source, checkoutDependencyRoots: ["node_modules"] };
+    await sandboxBehavior(command, checkout, ["--version"]);
+    await expect(sandboxBehavior(command, checkout, f.command.args)).resolves.toMatchObject({ executable: "/usr/bin/sandbox-exec" });
+  });
   it("rejects noncanonical or non-node_modules dependency roots and unavailable executables without fallback", async () => {
     const f = await fixture(); await mkdir(join(f.root, "dependencies"));
     await symlink(join(f.root, "dependencies"), join(f.root, "node_modules"));
-    await expect(sandboxBehavior({ ...f.command, dependencyRoots: [join(f.root, "node_modules")] }, f.cwd, f.command.args)).rejects.toThrow("canonical node_modules");
-    await expect(sandboxBehavior({ ...f.command, dependencyRoots: [f.root] }, f.cwd, f.command.args)).rejects.toThrow("canonical node_modules");
+    await expect(sandboxBehavior({ ...f.command, dependencyRoots: [join(f.root, "node_modules")] }, f.cwd, f.command.args)).rejects.toThrow(/canonical/);
+    await expect(sandboxBehavior({ ...f.command, dependencyRoots: [f.root] }, f.cwd, f.command.args)).rejects.toThrow(/canonical/);
     const revision = await f.commit(`assert.fail('must not run without the configured executable');`);
     await expect(measureBehavior({ ...f.command, executable: join(f.root, "missing-node") }, f.cwd, revision)).rejects.toThrow();
     expect(f.git("worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1);
