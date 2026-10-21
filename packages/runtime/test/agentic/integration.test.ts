@@ -975,8 +975,19 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
     expect(await f.inspect()).toMatchObject({ status: "escalated", tasks: [expect.objectContaining({ verificationPending: true })] });
     expect((await f.inspect()).tasks[0].cycle.status).not.toBe("passed");
     expect(await pending()).toBe(1);
-    await expect(f.submit("implement", null)).rejects.toThrow(new RegExp(`paused awaiting resume of action ${actionId}; retry this same call after the run resumes`));
+    const before = await f.runtime.inspect() as any;
+    const original = before.inbox.find((item: any) => item.message.type === "implementation.submitted").message;
+    // Redelivery must preserve the result payload; it is received while paused, never applied as new business work.
+    const redelivery = { ...original, message_id: "paused-implementation-redelivery", idempotency_key: "paused-implementation-redelivery" };
+    expect(await f.runtime.receiveHerdr(redelivery)).toMatchObject({ received: true, deferred: true });
+    expect(await f.inspect()).toMatchObject({ status: "escalated", pendingAction: { actionId },
+      tasks: [expect.objectContaining({ verificationPending: true, result: before.runs[0].tasks[0].result })] });
+    expect((await f.inspect()).tasks[0].cycle.status).not.toBe("passed");
+    expect(await pending()).toBe(1);
     await f.runtime.resumeBlockedRun("run-1", actionId);
+    await f.runtime.recoverMissingCoordinatorWakeups();
+    expect((await f.runtime.inspect() as any).inbox.filter((item: any) => item.message.message_id === redelivery.message_id)
+      .map((item: any) => item.status)).toEqual(["applied"]);
     await f.runtime.tick();
     expect((await f.inspect()).tasks[0].cycle.status).toBe("passed");
     expect(await pending()).toBe(0);
@@ -1137,7 +1148,10 @@ it.skipIf(process.platform !== "linux")("recovers the exact failed phase after a
   })));
   await expect(f.runtime.recordPhaseFailure(qa, queued.messageId, "Actual assertion failure", true)).rejects.toThrow("crash after released checkpoint");
   spy.mockRestore();
-  const reopened = f.restart(), restored = await reopened.inspect() as any;
+  const reopened = f.restart(), beforeRecovery = await reopened.inspect() as any;
+  expect(beforeRecovery.outbound.find((out: any) => out.message.message_id === queued.messageId).phaseFailure.applied).toBe(false);
+  await reopened.recoverMissingCoordinatorWakeups();
+  const restored = await reopened.inspect() as any;
   const failed = restored.outbound.find((out: any) => out.message.message_id === queued.messageId);
   expect(failed).toMatchObject({ status: "released", error: "policy_phase_failed:Actual assertion failure", phaseFailure: { applied: true } });
   expect(restored.outbound.filter((out: any) => out.parentAssignmentId === assignment.message.message_id)).toHaveLength(1);
