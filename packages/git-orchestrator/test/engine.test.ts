@@ -466,4 +466,39 @@ describe.skipIf(process.platform !== "linux")("GitIntegrationEngine using real i
     await expect(integration([{ taskKey: a.task.key, dependsOn: ["missing"] }], "integration-unknown")).rejects.toThrow(/depend|unknown|missing/i);
     expect(await git(repository, "rev-parse", "main")).toBe(base);
   });
+  describe("repair attempts based on the previous attempt's head", () => {
+    async function attempt(taskId: string, attemptId: string, baseRevision: string, contents: string) {
+      const task = await engine.prepareTask(request(taskId, { attemptId, baseRevision }));
+      await writeFile(join(task.worktreePath, "src", `${taskId}.txt`), contents);
+      await git(task.worktreePath, "add", "-A"); await git(task.worktreePath, "commit", "-m", `${taskId} ${attemptId}`);
+      return { task, changes: await engine.collectTask(task.key) };
+    }
+    it("integrates attempt 2 whose base is the unmerged head of attempt 1", async () => {
+      const first = await attempt("task-a", "attempt-1", base, "first\n");
+      const second = await attempt("task-a", "attempt-2", first.changes.headCommitHash, "second\n");
+      const result = await integration([{ taskKey: second.task.key }]);
+      expect(result.status).toBe("awaiting_verification"); expect(result.merged).toEqual([second.task.key]);
+      expect(await readFile(join(result.worktreePath, "src", "task-a.txt"), "utf8")).toBe("second\n");
+      await git(result.worktreePath, "merge-base", "--is-ancestor", first.changes.headCommitHash, "HEAD");
+      expect(await git(repository, "rev-parse", "main")).toBe(base);
+    });
+    it("integrates a three-attempt repair chain", async () => {
+      const first = await attempt("task-a", "attempt-1", base, "first\n");
+      const second = await attempt("task-a", "attempt-2", first.changes.headCommitHash, "second\n");
+      const third = await attempt("task-a", "attempt-3", second.changes.headCommitHash, "third\n");
+      const result = await integration([{ taskKey: third.task.key }]);
+      expect(result.status).toBe("awaiting_verification");
+      expect(await readFile(join(result.worktreePath, "src", "task-a.txt"), "utf8")).toBe("third\n");
+    });
+    it("still refuses a base that is another task's unmerged commit or unrelated history", async () => {
+      const other = await attempt("task-b", "attempt-1", base, "other\n");
+      const dependent = await attempt("task-a", "attempt-1", other.changes.headCommitHash, "dependent\n");
+      await expect(integration([{ taskKey: dependent.task.key }], "integration-cross")).rejects.toThrow(/not yet in integration history/);
+      await git(repository, "checkout", "-b", "side", base);
+      await writeFile(join(repository, "README.md"), "side\n"); await git(repository, "commit", "-am", "side"); await git(repository, "checkout", "main");
+      const side = await git(repository, "rev-parse", "side");
+      const unrelated = await attempt("task-c", "attempt-1", side, "unrelated\n");
+      await expect(integration([{ taskKey: unrelated.task.key }], "integration-unrelated")).rejects.toThrow(/not yet in integration history/);
+    });
+  });
 });

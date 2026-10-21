@@ -37,6 +37,8 @@ function orderedTasks(tasks: z.output<typeof IntegrationRequestSchema>["tasks"])
   tasks.forEach(task => visit(task.taskKey));
   return order;
 }
+/** Bound on walking earlier attempts of one task when resolving a repair attempt's root base. */
+const MAX_REPAIR_CHAIN = 32;
 const under = (path: string, prefix: string) => path === prefix || path.startsWith(prefix + "/");
 function scopeCheck(task: TaskRecord, paths: readonly string[]): void {
   for (const path of paths) {
@@ -301,6 +303,19 @@ export class GitIntegrationEngine {
     delete record.currentTask; delete record.beforeMerge; record.conflictPaths = []; record.status = "ready"; await this.save(state);
   }
 
+  /** Base of the first attempt in a chain of same-run, same-task attempts, each based on the previous attempt's recorded head. */
+  private repairRoot(state: State, task: TaskRecord): string {
+    let base = task.baseCommitHash;
+    const seen = new Set([task.key]);
+    for (let depth = 0; depth < MAX_REPAIR_CHAIN; depth++) {
+      const earlier = Object.values(state.tasks).find(other => !seen.has(other.key) && other.request.runId === task.request.runId &&
+        other.request.taskId === task.request.taskId && (other.changeSet?.headCommitHash ?? other.headCommitHash) === base);
+      if (!earlier) return base;
+      seen.add(earlier.key); base = earlier.baseCommitHash;
+    }
+    throw new GitOrchestrationError("repair_chain", "Repair attempt chain is too long");
+  }
+
   private async resume(state: State, record: IntegrationRecord): Promise<IntegrationRecord> {
     requireCondition(record.status !== "cancelled" && record.status !== "cleaned", "inactive_integration", "Integration is cancelled or cleaned");
     if (record.status === "creating") { await this.provision(record); record.status = "ready"; await this.save(state); }
@@ -334,7 +349,11 @@ export class GitIntegrationEngine {
       } else {
         await assertClean(record.worktreePath);
         requireCondition(await resolveCommit(record.worktreePath, "HEAD") === record.expectedHead, "integration_drift", "Integration branch changed outside the engine");
-        requireCondition(await succeeds(record.worktreePath, ["merge-base", "--is-ancestor", snapshot.baseCommitHash, record.expectedHead]), "missing_dependency", "Task base is not yet in integration history");
+        // A repair attempt is based on the previous attempt's (unmerged) head; its chain must root in integration history.
+        // Merging the repair head brings in the earlier attempts' commits. A base from another task is never followed.
+        requireCondition(await succeeds(record.worktreePath, ["merge-base", "--is-ancestor", snapshot.baseCommitHash, record.expectedHead]) ||
+          await succeeds(record.worktreePath, ["merge-base", "--is-ancestor", this.repairRoot(state, task), record.expectedHead]),
+          "missing_dependency", "Task base is not yet in integration history");
         record.currentTask = taskKey; record.beforeMerge = record.expectedHead; record.status = "merging"; await this.save(state);
       }
       try {

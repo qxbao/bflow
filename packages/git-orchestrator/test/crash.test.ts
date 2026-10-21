@@ -14,8 +14,8 @@ afterEach(async () => { for (const path of temporaryDirectories.splice(0)) await
 
 // This process-crash contract depends on the production journal's Linux flock lock.
 describe.skipIf(process.platform !== "linux")("SIGKILL at persisted merge boundaries", () => {
-  for (const point of ["before", "after", "during"] as const) {
-    it(`reconciles a process killed ${point} the Git merge without duplicate commits or lost evidence`, async () => {
+  for (const repair of [false, true]) for (const point of ["before", "after", "during"] as const) {
+    it(`reconciles a process killed ${point} the Git merge${repair ? " of a repair attempt based on the previous attempt's head" : ""} without duplicate commits or lost evidence`, async () => {
       const temporary = await mkdtemp(join(tmpdir(), "bflow-p18-crash-")); temporaryDirectories.push(temporary);
       const repository = join(temporary, "repo"), artifacts = join(temporary, "artifacts");
       await mkdir(repository); await command(repository, "init", "-b", "main");
@@ -29,8 +29,16 @@ describe.skipIf(process.platform !== "linux")("SIGKILL at persisted merge bounda
       const store = storeResult.value;
       try {
         const engine = await GitIntegrationEngine.open({ repositoryPath: repository, artifactStore: store });
+        let attemptBase = base, firstHead: string | undefined;
+        if (repair) { // Attempt 1 is reworked and never merged; attempt 2 is based on its head.
+          const first = await engine.prepareTask({ runId: "crash-run", taskId: "task", attemptId: "attempt-0", developerId: "developer",
+            ownedPaths: ["new.txt"], baseRevision: base });
+          await writeFile(join(first.worktreePath, "new.txt"), "first\n");
+          await command(first.worktreePath, "add", "."); await command(first.worktreePath, "-c", "commit.gpgSign=false", "commit", "-m", "first");
+          firstHead = (await engine.collectTask(first.key)).headCommitHash; attemptBase = firstHead;
+        }
         const task = await engine.prepareTask({ runId: "crash-run", taskId: "task", attemptId: "attempt", developerId: "developer",
-          ownedPaths: ["new.txt"], baseRevision: base });
+          ownedPaths: ["new.txt"], baseRevision: attemptBase });
         await writeFile(join(task.worktreePath, "new.txt"), "implementation\n");
         await command(task.worktreePath, "add", "."); await command(task.worktreePath, "-c", "commit.gpgSign=false", "commit", "-m", "implementation");
         const changes = await engine.collectTask(task.key);
@@ -72,6 +80,7 @@ describe.skipIf(process.platform !== "linux")("SIGKILL at persisted merge bounda
         expect(await command(result.worktreePath, "rev-list", "--count", "--merges", `${base}..HEAD`)).toBe("1");
         expect(await command(result.worktreePath, "merge-base", "--is-ancestor", changes.headCommitHash, "HEAD")).toBe("");
         expect(await readFile(join(result.worktreePath, "new.txt"), "utf8")).toBe("implementation\n");
+        if (firstHead) expect(await command(result.worktreePath, "merge-base", "--is-ancestor", firstHead, "HEAD")).toBe("");
       } finally { store.close(); }
     });
   }
