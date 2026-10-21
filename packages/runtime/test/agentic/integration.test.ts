@@ -5,7 +5,7 @@ import { join, relative } from "node:path";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID, generateKeyPairSync } from "node:crypto";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentResultSchema, ApprovalDecisionSchema, RoleMessageSchema, VerificationResultSchema,
   type AgentRequest, type PaneBinding, type Specification, type QualityGate, type QualityGateContext } from "@bflow/contracts";
 import { DeterministicWorkflowEngine } from "@bflow/core";
@@ -779,21 +779,57 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
     expect((await f.inspect()).status).toBe("failed");
     expect(f.transport.sentRequests.filter(req => req.role === "developer")).toHaveLength(1);
   });
-  it("preserves each parallel task approval across restart before workflow delivery", async () => {
-    const f = await fixture({ parallel: true });
-    f.def.tasks.forEach(task => { task.requiresApproval = true; });
+  describe("parallel task approval recovery", () => {
+    let f: Awaited<ReturnType<typeof fixture>>;
+    beforeEach(async () => {
+      f = await fixture({ parallel: true });
+      f.def.tasks.forEach(task => { task.requiresApproval = true; });
+      await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+      await f.evidence("implement"); await f.evidence("other"); await f.submit(); await f.submit("other", "second file\n");
+      await f.runtime.tick();
+    });
+    it("preserves each parallel task approval across restart before workflow delivery", async () => {
+      expect((await f.inspect()).approval.target).toEqual({ type: "task", taskId: "implement" });
+      await f.restart().tick();
+      expect((await f.inspect()).approval.target).toEqual({ type: "task", taskId: "implement" });
+      await f.approve(); await f.runtime.tick();
+      expect((await f.inspect()).status).toBe("awaiting_approval");
+      expect((await f.inspect()).approval.target).toEqual({ type: "task", taskId: "other" });
+      await f.approve(); await f.runtime.tick();
+      expect((await f.inspect()).approvalKind).toBe("delivery");
+      await f.approve(); expect((await f.inspect()).status).toBe("completed");
+    });
+  });
+  it("defers an authenticated native binding while paused and verifies it once after resume without task success", async () => {
+    const f = await fixture();
+    f.ports.preflightRoleCapabilities = async (binding, required) => {
+      expect(unwrap(await f.panes.getRoleBinding(binding.role))?.bindingId).toBe(binding.bindingId);
+      for (const capability of required) expect(f.ports.roleCapabilities[binding.role]).toContain(capability);
+    };
     await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
-    await f.evidence("implement"); await f.evidence("other"); await f.submit(); await f.submit("other", "second file\n");
-    await f.runtime.tick();
-    expect((await f.inspect()).approval.target).toEqual({ type: "task", taskId: "implement" });
-    await f.restart().tick();
-    expect((await f.inspect()).approval.target).toEqual({ type: "task", taskId: "implement" });
-    await f.approve(); await f.runtime.tick();
-    expect((await f.inspect()).status).toBe("awaiting_approval");
-    expect((await f.inspect()).approval.target).toEqual({ type: "task", taskId: "other" });
-    await f.approve(); await f.runtime.tick();
-    expect((await f.inspect()).approvalKind).toBe("delivery");
-    await f.approve(); expect((await f.inspect()).status).toBe("completed");
+    const source = (await f.runtime.inspect() as any).outbound.find((out: any) => out.message.type === "task.assignment");
+    const handle = source.handle;
+    const receipt = createSignedBindingReceipt({ receiptId: "paused-binding", issuerId: "native-test-host", handle,
+      observedAt: new Date().toISOString(), privateKey: f.privateKey,
+      correlation: handle.correlation }); // The fixture transport already verified this exact token; never re-correlate it.
+    const signed = f.envelope("execution.receipt", receipt, { message_id: "paused-binding-envelope", idempotency_key: "paused-binding-key",
+      causation_id: source.message.message_id, sender: { role: "developer", agent_id: handle.target.agentId, pane_id: handle.target.paneId } });
+    const placeholder = RoleMessageSchema.parse({ ...signed, payload: { ...receipt, signature: { algorithm: "ed25519", value: Buffer.alloc(64).toString("base64") } } });
+    const binding = f.panes.bindings.find(pane => pane.paneId === handle.target.paneId)!;
+    await f.runtime.reportRoleToolFailure(binding, { ...signed, artifact_references: undefined }, "artifact_references: Required");
+    const actionId = (await f.inspect()).pendingAction.actionId;
+    await f.runtime.recordNativeDeliveryIntent(placeholder, "paused-binding-operation");
+    expect(await f.runtime.receiveHerdr(signed)).toMatchObject({ received: true, deferred: true });
+    expect(unwrap(await f.ports.engine.getSnapshot("run-1"))!.tasks[0]!.bindingVerification).toBeUndefined();
+    expect((await f.inspect()).status).toBe("escalated");
+    await f.runtime.reportUncertainNativeDelivery(placeholder, "paused-binding-operation", "Stale native ACK observation");
+    expect((await f.inspect()).nativeDeliveries).toEqual([]);
+    await f.runtime.resumeBlockedRun("run-1", actionId);
+    await f.runtime.recoverMissingCoordinatorWakeups(); await f.runtime.recoverMissingCoordinatorWakeups();
+    const task = unwrap(await f.ports.engine.getSnapshot("run-1"))!.tasks[0]!;
+    expect(task.status).toBe("running"); expect(task.bindingVerification?.receipt.receiptId).toBe("paused-binding");
+    expect((await f.inspect()).tasks[0].result).toBeUndefined();
+    expect(f.transport.sentRequests.filter(request => request.role === "developer")).toHaveLength(1);
   });
   it("does not revive human rejection with a parallel verification outcome", async () => {
     const f = await fixture({ parallel: true });

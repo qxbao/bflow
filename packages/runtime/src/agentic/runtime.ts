@@ -694,7 +694,7 @@ export class AgenticWorkflowRuntime {
     } };
   }
   async inspect(runId?: string): Promise<JsonValue> {
-    return this.transaction(async state => json(runId ? this.run(state, runId) : {
+    return this.journal.exclusive(async state => json(runId ? this.run(state, runId) : {
       runs: state.runs, outbound: state.outbound, inbox: state.inbox
     }));
   }
@@ -857,6 +857,7 @@ export class AgenticWorkflowRuntime {
       if (!["coordinator", "runtime"].includes(message.recipient.role)) throw new Error("Wrong inbound recipient");
       const old = state.inbox.find(item => item.message.message_id === message.message_id || item.message.idempotency_key === message.idempotency_key);
       if (old && digest(old.message) !== digest(message)) throw new Error("Conflicting inbound idempotency key");
+      this.assertNativeMessageConsistent(state, message);
       if (requireReceivedReceipt && (!old || old.status !== "received")) throw new Error("Trusted ingress replay requires the exact durable received receipt");
       if (old?.status === "applied") return json({ duplicate: true });
       // A refused message stays refused: a redelivery is answered with the same reason, never re-admitted against newer state.
@@ -901,6 +902,12 @@ export class AgenticWorkflowRuntime {
       } else {
         const run = this.run(state, message.run_id!);
         if (message.correlation_id !== run.delegation.correlationId) throw new Error("Wrong run correlation");
+        // Signature-verified reception is durable before semantic work. An exact bound execution outcome can
+        // acknowledge delivery while a different business action pauses the run; validators apply only after resume.
+        if (this.defersPausedNativeOutcome(state, run, message)) {
+          this.settleNativeDeliveries(state);
+          await save(); return json({ received: true, deferred: true });
+        }
         // A known native result may arrive after a schema failure paused its run. Admit only the exact immutable
         // intent and bound specialist reply; keep the pause and human gates. This breaks the ACK/resume deadlock
         // without authorizing new work, task success, or arbitrary late messages during an escalation.
@@ -1005,11 +1012,25 @@ export class AgenticWorkflowRuntime {
   private acceptsPausedNativeReply(state: JournalState, run: RunRecord, message: RoleMessage): boolean {
     return resumablyPaused(run) && !run.cancelled && message.recipient.role === "coordinator" &&
       ["spec.draft", "task.status", "verification.escalation"].includes(message.type) &&
-      (run.nativeDeliveries?.some(entry => digest(entry.message) === digest(message)) ?? false) &&
+      (run.nativeDeliveries?.some(entry => nativeMessageFingerprint(entry.message) === nativeMessageFingerprint(message)) ?? false) &&
       state.outbound.some(out => out.message.message_id === message.causation_id && out.message.run_id === run.runId &&
         out.message.type === "delegation.request" && ["accepted", "released"].includes(out.status) &&
         out.message.recipient.role === message.sender.role && out.handle?.target.agentId === message.sender.agent_id &&
         out.handle?.target.paneId === message.sender.pane_id);
+  }
+
+  private defersPausedNativeOutcome(state: JournalState, run: RunRecord, message: RoleMessage): boolean {
+    if (!resumablyPaused(run) || run.cancelled || run.supersededBy || !message.idempotency_key ||
+        !["execution.receipt", "implementation.submitted", "verification.result", "review.verdict"].includes(message.type)) return false;
+    const source = state.outbound.find(out => out.message.message_id === message.causation_id && out.message.run_id === run.runId &&
+      ["accepted", "released"].includes(out.status) && out.message.recipient.role === message.sender.role &&
+      out.handle?.target.agentId === message.sender.agent_id && out.handle?.target.paneId === message.sender.pane_id);
+    if (!source || source.message.type !== (["execution.receipt", "implementation.submitted"].includes(message.type) ? "task.assignment" : "verification.requested")) return false;
+    if (message.type === "execution.receipt") AgentBindingReceiptSchema.parse(message.payload);
+    else if (message.type === "implementation.submitted") AgentResultSchema.parse(message.payload);
+    else if (message.type === "verification.result") VerificationResultSchema.parse(message.payload);
+    else QualityGateResultSchema.parse(message.payload);
+    return state.inbox.some(item => item.status === "received" && nativeMessageFingerprint(item.message) === nativeMessageFingerprint(message));
   }
 
   /**
@@ -1249,6 +1270,7 @@ export class AgenticWorkflowRuntime {
   /** A matching host Stop and released capacity are required; a warning or resume is never proof of stop. */
   private stoppedWithoutResult(state: JournalState, run: RunRecord, out: Outbound): boolean {
     if (out.status !== "released" || run.nativeDeliveries?.length || !this.outboundOwesResult(state, run, out)) return false;
+    if (out.stopObservedAt !== undefined) return true;
     return state.outbound.some(item => item.message.message_id === `p19-wake-${digest([run.runId, `specialist_no_response:${out.message.message_id}`])}` &&
       objectField(item.message.payload, "stoppedExecutionId") === out.handle!.executionId &&
       Date.parse(String(objectField(item.message.payload, "stopObservedAt"))) >= Date.parse(out.handle!.acceptedAt));
@@ -2461,6 +2483,13 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
             !Number.isFinite(Date.parse(observedAt)) || !["accepted", "released"].includes(out.status)) continue;
         if (!["task.assignment", "delegation.request"].includes(out.message.type) || !out.message.run_id) continue;
         const run = state.runs.find(item => item.runId === out.message.run_id);
+        // Retain physical Stop independently of delivery reconciliation; host may settle this Stop receipt now.
+        // A later retry still requires released capacity, no uncertain deliveries, and an unanswered assignment.
+        if (run && !run.cancelled && (!TERMINAL_RUN_STATUSES.includes(run.status) || resumablyPaused(run)) &&
+            out.message.type === "delegation.request" && this.outboundOwesResult(state, run, out) &&
+            !Object.values(run.userDecisions ?? {}).some(item => item.role === role && item.status === "pending") && out.stopObservedAt === undefined) {
+          out.stopObservedAt = observedAt; changed = true;
+        }
         if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || run.status === "awaiting_approval") continue;
         // Waiting on a user decision it asked for through Runtime is a legitimate idle turn, not a missing answer.
         if (Object.values(run.userDecisions ?? {}).some(item => item.role === role && item.status === "pending")) continue;
@@ -2509,12 +2538,15 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     let changed = false;
     for (const run of state.runs) {
       const previous = run.nativeDeliveries ?? [];
-      const pending = previous.filter(entry => entry.message.message_id !== acknowledgedId && !state.inbox.some(item =>
-        item.status === "applied" && digest(item.message) === digest(entry.message)));
+      const pending = previous.filter(entry => entry.message.message_id !== acknowledgedId && !this.durablyReceivedNative(state, entry.message));
       if (pending.length !== previous.length) { run.nativeDeliveries = pending; changed = true; }
       const action = run.pendingAction;
       if (!action || action.kind !== "reconcile_delivery" || action.state !== "pending" || run.cancelled) continue;
-      if (action.sourceMessageId !== acknowledgedId && !state.inbox.some(item => item.message.message_id === action.sourceMessageId && item.status === "applied")) continue;
+      const intent = previous.find(entry => entry.message.message_id === action.sourceMessageId);
+      const received = intent ? this.durablyReceivedNative(state, intent.message) : state.inbox.some(item =>
+        item.message.message_id === action.sourceMessageId && item.message.run_id === run.runId &&
+        item.message.correlation_id === run.delegation.correlationId && item.message.idempotency_key !== undefined && ["received", "applied"].includes(item.status));
+      if (action.sourceMessageId !== acknowledgedId && !received) continue;
       // Legacy journals escalated native uncertainty; restore the phase it interrupted.
       if (run.status === "escalated" && action.previousStatus) run.status = action.previousStatus;
       if (run.error === action.reason) delete run.error;
@@ -2522,13 +2554,26 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     }
     return changed;
   }
+  private durablyReceivedNative(state: JournalState, message: RoleMessage): boolean {
+    return message.idempotency_key !== undefined && state.inbox.some(item => ["received", "applied"].includes(item.status) &&
+      nativeMessageFingerprint(item.message) === nativeMessageFingerprint(message));
+  }
+  private assertNativeMessageConsistent(state: JournalState, message: RoleMessage): void {
+    const matches = (other: RoleMessage) => other.message_id === message.message_id ||
+      message.idempotency_key !== undefined && other.idempotency_key === message.idempotency_key;
+    const known = [...state.inbox.map(item => item.message),
+      ...state.runs.flatMap(run => (run.nativeDeliveries ?? []).map(entry => entry.message))];
+    if (known.some(other => matches(other) && nativeMessageFingerprint(other) !== nativeMessageFingerprint(message)))
+      throw new Error("Conflicting native delivery message");
+  }
   private retainNativeIntent(state: JournalState, message: RoleMessage, operationId: string): RunRecord | undefined {
+    this.assertNativeMessageConsistent(state, message);
     const run = state.runs.find(item => item.runId === message.run_id);
     if (!run || message.correlation_id !== run.delegation.correlationId || this.refused(state, message.message_id)) return undefined;
     const pending = run.nativeDeliveries ?? (run.nativeDeliveries = []);
     const prior = pending.find(entry => entry.operationId === operationId || entry.message.message_id === message.message_id);
     if (prior && (prior.operationId !== operationId || digest(prior.message) !== digest(message))) throw new Error("Conflicting native delivery intent");
-    if (!prior && !state.inbox.some(item => item.status === "applied" && digest(item.message) === digest(message)))
+    if (!prior && !this.durablyReceivedNative(state, message))
       pending.push({ operationId: textField(operationId), message });
     return run;
   }
@@ -2559,6 +2604,11 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     const message = RoleMessageSchema.parse(input);
     if (!message.run_id) return;
     await this.transaction(async (state, save, _core, outbox) => {
+      this.assertNativeMessageConsistent(state, message);
+      if (this.durablyReceivedNative(state, message)) {
+        if (this.settleNativeDeliveries(state)) await save();
+        return;
+      }
       const run = this.retainNativeIntent(state, message, operationId);
       if (!run) return;
       // Preserve uncertainty even while a schema blocker/human gate pauses the run. Business status cannot erase a transport intent.

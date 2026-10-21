@@ -12,6 +12,7 @@ import { AgenticJournal, digest } from "../../src/agentic/journal.js";
 import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import type { AgenticRuntimePorts } from "../../src/agentic/ports.js";
 import { draft } from "../../../specification/test/fixtures.js";
+import { createSignedBindingReceipt } from "../../src/agentic/receipt-host.js";
 
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
@@ -46,12 +47,41 @@ describe("native delivery reconciliation", () => {
   it("requires exact applied inbox data or ACK, and keeps received/conflicting rows inconclusive", async () => {
     const f = await fixture(), message = { ...f.message, idempotency_key: "stable" };
     await f.receipts.recordNativeIntent("operation", message);
-    expect(await inspectNativeDelivery(f.receipts, "operation", [{ message, status: "received" }])).toMatchObject({ delivery: "unknown_delivery", inbox: "received", resendAllowed: false });
+    expect(await inspectNativeDelivery(f.receipts, "operation", [{ message, status: "received" }])).toMatchObject({ delivery: "received", inbox: "received", resendAllowed: false });
     expect(await inspectNativeDelivery(f.receipts, "operation", [{ message: { ...message, payload: {} }, status: "applied" }]))
       .toMatchObject({ delivery: "unknown_delivery", inbox: "conflicting", resendAllowed: false });
     expect(await inspectNativeDelivery(f.receipts, "operation", [{ message, status: "applied" }])).toMatchObject({ delivery: "applied", resendAllowed: false });
     await f.receipts.recordNativeAcknowledgement(message);
     expect(await inspectNativeDelivery(f.receipts, "operation", [])).toMatchObject({ delivery: "acknowledged", resendAllowed: false });
+  });
+
+  it("does not resurrect a binding intent from a stale report after its signed replacement was durably received", async () => {
+    const f = await fixture(), now = new Date().toISOString(), journalDirectory = join(f.root, "journal");
+    const pair = generateKeyPairSync("ed25519");
+    const receipt = createSignedBindingReceipt({ receiptId: "binding", issuerId: "host", observedAt: now,
+      privateKey: pair.privateKey.export({ type: "pkcs8", format: "pem" }).toString(), correlation: { token: "assignment", provenance: "transport", verified: true },
+      handle: { executionId: "execution", requestId: "request", attemptId: "attempt", runId: "run", taskId: "task", idempotencyKey: "assignment",
+        target: { transport: "herdr", agentId: "developer", paneId: "developer-pane" }, correlation: { token: "assignment", provenance: "transport", verified: true }, acceptedAt: now } });
+    const signed = RoleMessageSchema.parse({ ...f.message, message_id: "binding-envelope", idempotency_key: "binding-key", type: "execution.receipt",
+      sender: { role: "developer", agent_id: "developer", pane_id: "developer-pane" }, causation_id: "assignment", payload: receipt });
+    const placeholder = RoleMessageSchema.parse({ ...signed, payload: { ...receipt, signature: { algorithm: "ed25519", value: Buffer.alloc(64).toString("base64") } } });
+    const delegation = DelegationRequestSchema.parse({ schemaVersion: 2, delegationId: "delegation", messageId: "intake", correlationId: "correlation", sessionId: "session",
+      runId: "run", requestedBy: "conversation", targetRole: "coordinator", title: "Original work", objective: "Original scope", specificationId: "spec", sddLevel: "full",
+      acceptanceCriteria: draft().acceptanceCriteria, inputArtifacts: [], priority: "normal", requestedAt: now, idempotencyKey: "intake" });
+    const journal = new AgenticJournal(journalDirectory, f.root);
+    await journal.exclusive(async (state, save) => {
+      state.runs.push({ runId: "run", delegation, status: "implementing", tasks: [], coreCreated: false, cancelled: false, maxIterations: 3 });
+      state.inbox.push({ message: signed, status: "applied" }); await save();
+    });
+    const runtime = new AgenticWorkflowRuntime({} as AgenticRuntimePorts, { journalDirectory, repositoryPath: f.root });
+    await expect(runtime.recordNativeDeliveryIntent({ ...placeholder, payload: { ...receipt, receiptId: "different-binding" } }, "new-operation"))
+      .rejects.toThrow(/Conflicting native delivery/);
+    await runtime.reportUncertainNativeDelivery(placeholder, "binding-operation", "Stale watchdog snapshot after ACK");
+    await runtime.recoverMissingCoordinatorWakeups();
+    const state = await journal.exclusive(async state => structuredClone(state));
+    expect(state.runs[0]!.nativeDeliveries ?? []).toEqual([]);
+    expect(state.runs[0]!.pendingAction).toBeUndefined();
+    expect(state.outbound).toEqual([]);
   });
 
   it("refuses conflicting observed refusal evidence instead of allowing it to release a mismatched intent", async () => {

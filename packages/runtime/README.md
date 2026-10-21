@@ -100,6 +100,12 @@ có receipt từ chối vẫn là `unknown_delivery`; không tạo hồi tố b�
 Signed native ingress lưu riêng refusal khi `idempotency_key` không hợp lệ trước khi gọi Runtime;
 chữ ký sai và lỗi xảy ra sau admission không tạo loại bằng chứng này. Restart chỉ giải quyết intent
 khớp refusal đã quan sát, giữ nguyên blocker nghiệp vụ và các human gate; không tự giao assignment mới.
+Inbox `received` có xác thực là bằng chứng giao nhận bền vững, chưa phải kết quả nghiệp vụ được chấp nhận.
+Khi run pause, outcome của execution đã bind được giữ ở `received` và phản hồi deferred; chỉ sau resume
+mới chạy lại đầy đủ validator/gate để apply một lần. Báo cáo ACK cũ dùng cùng fingerprint cho phép thay
+chữ ký binding của native host, nên không tạo lại intent đã nhận. Stop của specialist cũng được giữ riêng
+theo execution ngay khi còn uncertainty; chỉ retry khi delivery đã rõ, capacity đã release và chưa có result.
+`inspect` chỉ đọc journal, không tự restore Core hay chạy các thao tác recovery nghiệp vụ.
 Watchdog phân biệt delivery `accepted`/`released`, thời điểm transport accepted và thời điểm
 run ngừng có hoạt động; thông báo chứa role/pane/task/attempt. Cảnh báo hoặc resume không
 phải bằng chứng cho phép tạo attempt mới. Stop phải khớp agent, native session và thời điểm.

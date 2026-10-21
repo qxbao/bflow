@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import {
   AgentAssignmentSchema, AgentExecutionHandleSchema, AgentLeaseSchema, AgentRequestSchema, AgentRoleSchema,
   AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
-  DelegationRequestSchema, GitChangeSetSchema, JsonValueSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema, ReleaseAgentLeaseRequestSchema,
+  DelegationRequestSchema, GitChangeSetSchema, IsoDateTimeSchema, JsonValueSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema, ReleaseAgentLeaseRequestSchema,
   SdlcWorkStatusSchema, SpecificationSchema, TestStrategySchema, VerificationCycleSchema,
   VerificationResultSchema, WorkflowDefinitionSchema, type AgentAssignment, type AgentExecutionHandle, type AgentLease,
   type AgentRequest, type AgentResult, type AppendEventsRequest, type ApprovalDecision,
@@ -108,6 +108,8 @@ export interface Outbound {
   selector: string; taskId: string; attemptId: string; capabilities: string[];
   assignment?: AgentAssignment; lease?: AgentLease; request?: AgentRequest; handle?: AgentExecutionHandle;
   error?: string; cancelRequested?: boolean;
+  /** Host-observed terminal turn for this exact pinned specialist execution; never task success. */
+  stopObservedAt?: string;
   /** Stop observations made for a cancelled execution; bounded so an unresponsive pane is reported instead of polled forever. */
   cancelObservations?: number;
   phaseFailureEvidence?: ArtifactReference;
@@ -218,6 +220,11 @@ function parseState(input: unknown, repository: string): JournalState {
     if (out.request) out.request = AgentRequestSchema.parse(out.request);
     if (out.lease) out.lease = AgentLeaseSchema.parse(out.lease);
     if (out.handle) out.handle = AgentExecutionHandleSchema.parse(out.handle);
+    if (out.stopObservedAt !== undefined) {
+      IsoDateTimeSchema.parse(out.stopObservedAt);
+      if (!out.handle || out.message.type !== "delegation.request" || Date.parse(out.stopObservedAt) < Date.parse(out.handle.acceptedAt))
+        throw new Error("Invalid specialist Stop observation");
+    }
     if (out.phaseFailureEvidence) out.phaseFailureEvidence = ArtifactReferenceSchema.parse(out.phaseFailureEvidence);
     if (out.phaseFailure) {
       textField(out.phaseFailure.summary);
