@@ -76,6 +76,48 @@ quanh một RoleMessage theo schema đã export. Nó vẫn yêu cầu đúng th�
 pane người nhận và native session trước khi có Herdr ingress đã ký; văn xuôi xung quanh,
 nhiều wrapper và envelope bị thay đổi không thể tạo handoff đáng tin cậy.
 
+Tool `send_role_message` công bố các trường của RoleMessage v2 và yêu cầu
+`artifact_references` (dùng `[]` nếu chưa có artifact đã lưu). Native ingress còn yêu cầu
+`idempotency_key` ổn định; host kiểm tra trước khi ghi native intent hoặc gọi plugin.
+Host không tự thêm mảng artifact hoặc tạo khóa cho payload thiếu trường. Prompt của role
+có ví dụ envelope đã được xác thực; `assess` và `propose_workflow` công bố các trường của
+Specification v2, kể cả criterion `status`/`evidenceArtifactIds`. Các Zod contract vẫn xác
+thực nghiêm ngặt và kiểm tra các ràng buộc giữa trường tại ingress.
+
+Native intent thiếu ACK giữ trạng thái uncertain và chặn gửi lại cùng operation.
+`reconcile_delivery` chỉ đối soát Runtime outbox; chưa có API xác nhận `not_delivered`
+cho native intent. ACK/application đến muộn có thể giải quyết trạng thái uncertain;
+Runtime giữ riêng các native intent chưa xác nhận trong journal, kể cả khi run đã bị
+schema blocker hoặc đang chờ phê duyệt. Host khôi phục các intent cũ trước khi tự resume;
+resume, thay đổi yêu cầu và dispatch công việc mới phải chờ đối soát. Một ACK chỉ giải quyết
+đúng intent của nó. Kết quả specialist đến muộn trong lúc pause chỉ được nhận nếu trùng
+toàn bộ native intent và assignment đã bind; việc nhận này không resume hay phê duyệt run.
+`resume_run` tiếp tục run hiện hữu, không xác nhận giao nhận hay cho phép resend.
+`inspect_native_delivery(operationId)` của Coordinator/Conversation đối soát chỉ đọc native intent,
+ACK, refusal trước admission và Runtime inbox. Tool này khác `reconcile_delivery` của transport outbox:
+nó không gửi lại, resume, sửa criteria hoặc xác nhận task thành công. Intent cũ thiếu key nhưng không
+có receipt từ chối vẫn là `unknown_delivery`; không tạo hồi tố bằng chứng `not_delivered` từ lỗi schema.
+Signed native ingress lưu riêng refusal khi `idempotency_key` không hợp lệ trước khi gọi Runtime;
+chữ ký sai và lỗi xảy ra sau admission không tạo loại bằng chứng này. Restart chỉ giải quyết intent
+khớp refusal đã quan sát, giữ nguyên blocker nghiệp vụ và các human gate; không tự giao assignment mới.
+Inbox `received` có xác thực là bằng chứng giao nhận bền vững, chưa phải kết quả nghiệp vụ được chấp nhận.
+Khi run pause, outcome của execution đã bind được giữ ở `received` và phản hồi deferred; chỉ sau resume
+mới chạy lại đầy đủ validator/gate để apply một lần. Báo cáo ACK cũ dùng cùng fingerprint cho phép thay
+chữ ký binding của native host, nên không tạo lại intent đã nhận. Stop của specialist cũng được giữ riêng
+theo execution ngay khi còn uncertainty; chỉ retry khi delivery đã rõ, capacity đã release và chưa có result.
+`inspect` chỉ đọc journal, không tự restore Core hay chạy các thao tác recovery nghiệp vụ.
+Inbox `rejected` sau admission cũng giải quyết đúng native intent đã nhận và bị từ chối; không giải quyết
+nghĩa vụ trả kết quả của assignment hoặc cho phép gửi lại envelope đó. Native ingress vẫn kiểm tra đầy đủ
+envelope, kể cả array `artifact_references` và key; producer mới có thể dùng `message_id` làm key ổn định
+trước khi ghi intent. Không chuẩn hóa hoặc sửa lại intent cũ khi recovery. Retry verification tự động và
+tường minh đều giữ guard đối với native uncertainty và outbox `sending`/`unknown_delivery`.
+Watchdog phân biệt delivery `accepted`/`released`, thời điểm transport accepted và thời điểm
+run ngừng có hoạt động; thông báo chứa role/pane/task/attempt. Cảnh báo hoặc resume không
+phải bằng chứng cho phép tạo attempt mới. Stop phải khớp agent, native session và thời điểm.
+Conversation nudge `[bflow]` không được dùng lại user turn trước đó để quyết định hoặc resume;
+user turn thật tiếp theo có boundary riêng và vẫn phải được xử lý đúng một lần.
+Các kiểm thử schema, host RPC và receipt ở đây là kiểm thử cục bộ, không phải nghiệm thu Herdr/provider live.
+
 Host tương quan bền vững các quan sát prompt/Stop của Coordinator với đúng delegation
 đó. Một lượt kết thúc mà không có phản hồi có cấu trúc tiếp theo sẽ xếp hàng một thông báo
 tắc nghẽn có tương quan tới Conversation qua Herdr outbox hiện có. Điều này

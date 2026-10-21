@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import {
   AgentAssignmentSchema, AgentExecutionHandleSchema, AgentLeaseSchema, AgentRequestSchema, AgentRoleSchema,
   AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
-  DelegationRequestSchema, GitChangeSetSchema, JsonValueSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema, ReleaseAgentLeaseRequestSchema,
+  DelegationRequestSchema, GitChangeSetSchema, IsoDateTimeSchema, JsonValueSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema, ReleaseAgentLeaseRequestSchema,
   SdlcWorkStatusSchema, SpecificationSchema, TestStrategySchema, VerificationCycleSchema,
   VerificationResultSchema, WorkflowDefinitionSchema, type AgentAssignment, type AgentExecutionHandle, type AgentLease,
   type AgentRequest, type AgentResult, type AppendEventsRequest, type ApprovalDecision,
@@ -74,6 +74,8 @@ export interface RunRecord {
   };
   /** Durable idempotency ledger for recoverable resumes, retained even after the blocker is cleared. */
   resumeReceipts?: { actionId: string; messageId: string }[];
+  /** Private native-host intents not yet acknowledged/applied. Independent of the current business blocker or human gate. */
+  nativeDeliveries?: { operationId: string; message: RoleMessage }[];
   /**
    * Invalid RoleMessages per (sender role, assignment/causation) key. Bounded; `messageIds` dedupes replays of one inbound
    * envelope. Absent in older journals (no invalid messages counted).
@@ -149,6 +151,8 @@ export interface Outbound {
   selector: string; taskId: string; attemptId: string; capabilities: string[];
   assignment?: AgentAssignment; lease?: AgentLease; request?: AgentRequest; handle?: AgentExecutionHandle;
   error?: string; cancelRequested?: boolean;
+  /** Host-observed terminal turn for this exact pinned specialist execution; never task success. */
+  stopObservedAt?: string;
   /** Stop observations made for a cancelled execution; bounded so an unresponsive pane is reported instead of polled forever. */
   cancelObservations?: number;
   phaseFailureEvidence?: ArtifactReference;
@@ -189,6 +193,16 @@ function parseState(input: unknown, repository: string): JournalState {
     if (run.workflowSpec) parseSpec(run.workflowSpec);
     if (run.approval) run.approval = ApprovalRequestSchema.parse(run.approval);
     if (run.userDecisions !== undefined) parseUserDecisions(run.userDecisions, run.runId);
+    if (run.nativeDeliveries !== undefined) {
+      if (!Array.isArray(run.nativeDeliveries)) throw new Error("Invalid native delivery journal");
+      const operations = new Set<string>(), messages = new Set<string>();
+      for (const entry of run.nativeDeliveries) {
+        textField(entry.operationId); entry.message = RoleMessageSchema.parse(entry.message);
+        if (entry.message.run_id !== run.runId || entry.message.correlation_id !== run.delegation.correlationId ||
+            operations.has(entry.operationId) || messages.has(entry.message.message_id)) throw new Error("Invalid native delivery ownership");
+        operations.add(entry.operationId); messages.add(entry.message.message_id);
+      }
+    }
     if (run.delegationHistory !== undefined) run.delegationHistory = run.delegationHistory.map(item => DelegationRequestSchema.parse(item));
     if (run.cancelReconciled !== undefined && typeof run.cancelReconciled !== "boolean") throw new Error("Invalid cancellation reconciliation flag");
     if (run.supersededBy !== undefined && (textField(run.supersededBy) === run.runId || run.status !== "escalated" || run.pendingAction))
@@ -264,6 +278,11 @@ function parseState(input: unknown, repository: string): JournalState {
     if (out.request) out.request = AgentRequestSchema.parse(out.request);
     if (out.lease) out.lease = AgentLeaseSchema.parse(out.lease);
     if (out.handle) out.handle = AgentExecutionHandleSchema.parse(out.handle);
+    if (out.stopObservedAt !== undefined) {
+      IsoDateTimeSchema.parse(out.stopObservedAt);
+      if (!out.handle || out.message.type !== "delegation.request" || Date.parse(out.stopObservedAt) < Date.parse(out.handle.acceptedAt))
+        throw new Error("Invalid specialist Stop observation");
+    }
     if (out.phaseFailureEvidence) out.phaseFailureEvidence = ArtifactReferenceSchema.parse(out.phaseFailureEvidence);
     if (out.phaseFailure) {
       textField(out.phaseFailure.summary);

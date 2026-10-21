@@ -117,6 +117,31 @@ async function fixture(runs: RunRecord[] = [run("run-1", "specifying")]) {
 }
 
 describe("bounded automatic resume", () => {
+  it.each(["native", "sending", "unknown_delivery"] as const)("keeps verification retries blocked by %s uncertainty under both automatic and explicit retry", async kind => {
+    const f = await fixture();
+    await f.escalateVerification();
+    const intent = coordinatorWake("uncertain-result");
+    if (kind === "native") await f.runtime.recordNativeDeliveryIntent(intent, "native-operation");
+    else {
+      await f.runtime.queueHerdr(intent);
+      for (let pass = 0; pass < 3; pass++) await f.runtime.flushOutbound();
+      await f.journal.exclusive(async (state, save) => {
+        const out = state.outbound.find(out => out.message.message_id === intent.message_id)!;
+        expect(out.request).toBeDefined();
+        out.status = kind;
+        await save();
+      });
+    }
+    f.advance(30 * SECOND);
+    const before = await f.record();
+    const sent = f.transport.sentRequests.length;
+    expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 0 });
+    await expect(f.runtime.retryVerification("run-1")).rejects.toThrow(/Unknown delivery/);
+    await expect(f.runtime.retryVerification("run-1", { automatic: true, actionId: before.pendingAction!.actionId })).rejects.toThrow(/Unknown delivery/);
+    expect(await f.record()).toEqual(before);
+    expect(f.transport.sentRequests).toHaveLength(sent);
+  });
+
   it("B6: resumes a non-capability Coordinator blocker after its backoff through the idempotent resume_run wake", async () => {
     const f = await fixture();
     await f.runtime.observeCoordinatorOutcome(coordinatorBlocked("blocked-1", "Waiting for the architect analysis to settle"));

@@ -1,0 +1,48 @@
+import { describe, expect, it } from "vitest";
+import { RoleMessageSchema, SpecificationSchema } from "@bflow/contracts";
+import { availableTools } from "../../src/agentic/host.js";
+import { parseNativeRoleMessage, roleReplyExample, roleReplyGuidance } from "../../src/agentic/role-tool-schema.js";
+
+// These are the schemas actually returned by the provider MCP tools/list path.
+const input = (role: "architect" | "coordinator", name: string) =>
+  availableTools(role).find(tool => tool.name === name)!.inputSchema as any;
+
+describe("native role tool schema guidance", () => {
+  it("creates a contract-valid Architect reply example without inventing stored references", () => {
+    const example = roleReplyExample("architect");
+    expect(RoleMessageSchema.parse(example)).toEqual(example);
+    expect(parseNativeRoleMessage(example)).toMatchObject({ sender: { role: "architect" }, recipient: { role: "coordinator" }, artifact_references: [], idempotency_key: "stable-reply-key" });
+    expect(roleReplyGuidance("architect")).toContain(JSON.stringify(example));
+    for (const field of ["artifact_references", "idempotency_key"]) {
+      const invalid = { ...example } as Record<string, unknown>;
+      delete invalid[field];
+      expect(() => parseNativeRoleMessage(invalid)).toThrow(field);
+    }
+    expect(() => parseNativeRoleMessage({ ...example, unexpected: true })).toThrow("unexpected");
+    expect(() => parseNativeRoleMessage({ ...example, recipient: { role: "architect" } })).toThrow("different");
+  });
+  it("advertises the full strict RoleMessage envelope and native idempotency requirement", () => {
+    const schema = input("architect", "send_role_message").properties.message;
+    expect(schema.required).toEqual(expect.arrayContaining(["schema_version", "message_id", "correlation_id", "sender", "recipient", "type", "payload", "artifact_references", "idempotency_key"]));
+    expect(schema.additionalProperties).toBe(false);
+    expect(schema.properties.artifact_references).toMatchObject({ type: "array", items: { type: "object" } });
+    expect(schema.properties.schema_version).toMatchObject({ const: 2 });
+    expect(schema.properties.sender.properties.role.anyOf).toEqual(expect.arrayContaining([expect.objectContaining({ enum: expect.arrayContaining(["architect"]) })]));
+    expect(schema.properties.idempotency_key).toMatchObject({ type: "string", minLength: 1 });
+    expect(Object.keys(schema.properties).sort()).toEqual(Object.keys(RoleMessageSchema.innerType().shape).sort());
+  });
+
+  it("advertises Specification v2 including strict nested criteria for assess and propose_workflow", () => {
+    for (const name of ["assess", "propose_workflow"]) {
+      const schema = input("coordinator", name).properties.specification;
+      expect(schema.required).toEqual(expect.arrayContaining(["schemaVersion", "specId", "sessionId", "level", "summary", "problemStatement", "scope", "status", "createdBy", "createdAt", "updatedAt"]));
+      expect(schema.properties.schemaVersion).toMatchObject({ const: 2 });
+      expect(schema.additionalProperties).toBe(false);
+      expect(Object.keys(schema.properties).sort()).toEqual(Object.keys(SpecificationSchema.innerType().shape).sort());
+      expect(schema.properties.acceptanceCriteria.items.required).toEqual(expect.arrayContaining(["id", "description", "status", "evidenceArtifactIds"]));
+      expect(schema.properties.acceptanceCriteria.items.additionalProperties).toBe(false);
+      expect(schema.properties.scope.required).toEqual(["inScope", "outOfScope"]);
+      expect(schema.properties.version).toMatchObject({ type: "integer", exclusiveMinimum: 0 });
+    }
+  });
+});

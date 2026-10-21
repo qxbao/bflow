@@ -121,6 +121,24 @@ async function fixture(runs: RunRecord[] = [run("run-1", "specifying")]) {
 const invalidResult = (id: string, causation: string) => fromArchitect(id, causation, "verification.result", { status: "passed" });
 
 describe("B2: invalid RoleMessages go back to their sender", () => {
+  it("settles only the exact native intent after durable content refusal, retaining other uncertainty across restart", async () => {
+    const f = await fixture(), request = await f.askArchitect();
+    const invalid = invalidResult("native-invalid", request.message.message_id);
+    const other = fromArchitect("other-native", request.message.message_id, "spec.draft", { summary: "Other outcome" });
+    await f.runtime.recordNativeDeliveryIntent(invalid, "invalid-operation");
+    await f.runtime.recordNativeDeliveryIntent(other, "other-operation");
+    await f.deliver(invalid);
+    expect((await f.state()).inbox.find(item => item.message.message_id === invalid.message_id)?.status).toBe("rejected");
+    expect((await f.record()).nativeDeliveries).toEqual([{ operationId: "other-operation", message: other }]);
+    f.restart();
+    await f.runtime.reportUncertainNativeDelivery(invalid, "invalid-operation", "Stale native observation");
+    await f.runtime.recoverMissingCoordinatorWakeups();
+    expect((await f.record()).nativeDeliveries).toEqual([{ operationId: "other-operation", message: other }]);
+    expect(f.sentTo("architect")).toHaveLength(1);
+    expect((await f.state()).outbound.find(item => item.message.message_id === request.message.message_id)?.status).toBe("released");
+    await expect(f.runtime.requestSpecialist("run-1", "architect", "Another request", ["architecture"])).rejects.toThrow(/Unknown delivery/);
+  });
+
   it("formats schema issues as field paths with their messages", () => {
     const parsed = RoleMessageSchema.safeParse({ schema_version: 2, message_id: "m", correlation_id: "c", sender: { role: "architect" },
       recipient: { role: "coordinator" }, type: "escalation.notice", payload: {}, artifact_references: [] });

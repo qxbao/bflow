@@ -37,6 +37,9 @@ export interface OpenAgenticWorkspaceOptions {
   onHumanDecision?: (decision: ApprovalDecision) => Promise<void>;
   recoveredHumanDecisions?: readonly ApprovalDecision[];
   onNativeDelivery?: (message: RoleMessage) => Promise<void>;
+  onNativeRejection?: (message: RoleMessage) => Promise<void>;
+  /** Restore private native intent/ACK facts before the first automatic resume or scheduler dispatch. */
+  beforeRecovery?: (runtime: AgenticWorkflowRuntime) => Promise<void>;
   /** Provider launch configuration used for dynamic Developer panes. */
   roleLaunch?: Record<string, { systemPrompt: string; mcpConfigFile: string; hooksSettingsFile: string }>;
   /** P30: per-task Developer launch material from the platform readiness service; absent for legacy hosts. */
@@ -242,6 +245,7 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       ...(options.projectApprovalRequired ? { projectApprovalRequired: options.projectApprovalRequired } : {})
     }, { journalDirectory: resolve(directory, "journal"), repositoryPath: repository });
     await runtime.initialize();
+    await options.beforeRecovery?.(runtime);
     conversation = await createAgenticConversationHost({ runtime, manifest, contextDirectory: resolve(directory, "conversation"),
       ...(options.onHumanDecision ? { onHumanDecision: options.onHumanDecision } : {}),
       ...(options.recoveredHumanDecisions ? { recoveredHumanDecisions: options.recoveredHumanDecisions } : {}) });
@@ -254,7 +258,8 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
           ? await routeNativeConversationMessage(runtime, conversation!, message)
           : await runtime.receiveHerdr(message);
         await options.onNativeDelivery?.(message); return result;
-      }, failed: (message, error) => runtime.reportInboundFailure(message, String(error)) }) : undefined;
+      }, ...(options.onNativeRejection ? { rejected: options.onNativeRejection } : {}),
+      failed: (message, error) => runtime.reportInboundFailure(message, String(error)) }) : undefined;
     return { runtime, conversation, tools, async close() { await tools.drain(); await ingress?.close(); artifactStore.close(); runStore.close(); } };
   } catch (error) { artifactStore?.close(); runStore.close(); throw error; }
 }

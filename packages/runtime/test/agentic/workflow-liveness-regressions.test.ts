@@ -9,8 +9,11 @@ import { AgenticJournal, digest, type JournalState, type RunRecord } from "../..
 import { AdmissionRejectedError, AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import { RoleCapabilityPreflightError, type AgenticRuntimePorts, type PanePolicy } from "../../src/agentic/ports.js";
 import { isCoordinatorTrigger, parseConversationResumeRequest } from "../../src/agentic/host-receipts.js";
+import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
 import { routeNativeConversationMessage } from "../../src/agentic/workspace.js";
 import { FakeAgentTransport } from "../helpers/fake-transport.js";
+import { CoreSession } from "../../src/agentic/core-session.js";
+import { vi } from "vitest";
 import { draft } from "../../../specification/test/fixtures.js";
 
 const T0 = "2026-10-20T10:00:00.000Z";
@@ -89,7 +92,258 @@ async function fixture(options: { runs?: RunRecord[]; preflight?: (binding: Pane
   return { root, panes, transport, registry, journal, runtime, makeRuntime, inspect, notices, conversationNotices, flushPreflight };
 }
 
+async function exhaustSchemaAttempts(runtime: AgenticWorkflowRuntime, binding: PaneBinding, message: unknown, reason: string) {
+  let outcome;
+  for (let attempt = 0; attempt < 3; attempt++) outcome = await runtime.reportRoleToolFailure(binding, message, reason);
+  expect(outcome).toMatchObject({ attempt: 3, limit: 3, escalated: true });
+}
+
 describe("workflow liveness recovery boundaries", () => {
+  it("inspects durable state without recovering Core or performing pending business work", async () => {
+    const f = await fixture();
+    const restore = vi.spyOn(CoreSession.prototype, "restore").mockRejectedValue(new Error("Recovery must not run during a status read"));
+    try {
+      await expect(f.runtime.inspect("run-1")).resolves.toMatchObject({ runId: "run-1", status: "implementing" });
+      await expect(f.runtime.inspect()).resolves.toMatchObject({ runs: [{ runId: "run-1" }] });
+      expect(restore).not.toHaveBeenCalled();
+    } finally { restore.mockRestore(); }
+  });
+
+  it("durably receives a known native review while paused, then applies it once after authorized resume", async () => {
+    const f = await fixture();
+    f.runtime.ports.authenticateGateResult = async () => true;
+    const request = envelope("review-request", "run-1", { role: "reviewer" }, { type: "verification.requested", payload: { definition: { id: "review-gate" }, taskId: "review-task" } });
+    await f.runtime.queueHerdr(request); await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
+    const binding = f.panes.bindings.find(pane => pane.role === "reviewer")!;
+    const reply = envelope("review-result", "run-1", { role: "coordinator" }, { type: "review.verdict", causation_id: request.message_id,
+      sender: { role: binding.role, agent_id: binding.agentId, pane_id: binding.paneId },
+      payload: { gateId: "review-gate", runId: "run-1", taskId: "review-task", evaluationId: "evaluation", status: "passed", findings: [], producedArtifacts: [], evaluatedAt: T0 } });
+    await exhaustSchemaAttempts(f.runtime, binding, { ...reply, artifact_references: undefined }, "artifact_references: Required");
+    const pending = (await f.inspect()).runs[0]!.pendingAction!;
+    await f.runtime.recordNativeDeliveryIntent(reply, "review-operation");
+    await expect(f.runtime.receiveHerdr(reply)).resolves.toMatchObject({ received: true, deferred: true });
+    let state = await f.inspect();
+    expect(state.runs[0]).toMatchObject({ status: "escalated", pendingAction: pending });
+    expect(state.inbox.find(item => item.message.message_id === reply.message_id)?.status).toBe("received");
+    expect(state.runs[0]!.nativeDeliveries).toEqual([]);
+    const restarted = f.makeRuntime();
+    await restarted.reportUncertainNativeDelivery(reply, "review-operation", "Stale ACK snapshot");
+    await restarted.recoverMissingCoordinatorWakeups();
+    expect((await f.inspect()).runs[0]!.nativeDeliveries).toEqual([]);
+    await restarted.resumeBlockedRun("run-1", pending.actionId);
+    await restarted.recoverMissingCoordinatorWakeups(); await restarted.recoverMissingCoordinatorWakeups();
+    state = await f.inspect();
+    expect(state.inbox.filter(item => item.message.message_id === reply.message_id).map(item => item.status)).toEqual(["applied"]);
+    expect(f.transport.sentRequests.filter(item => item.role === "reviewer")).toHaveLength(1);
+    expect(state.runs[0]!.delegation.acceptanceCriteria).toEqual(delegation().acceptanceCriteria);
+  });
+
+  it.each(["payload", "causation", "message_id"] as const)("does not settle an uncertain intent from a conflicting signed reply with changed %s", async field => {
+    const f = await fixture();
+    const request = envelope("review-conflict-request", "run-1", { role: "reviewer" }, { type: "verification.requested" });
+    await f.runtime.queueHerdr(request); await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
+    const binding = f.panes.bindings.find(pane => pane.role === "reviewer")!;
+    const original = envelope("review-conflict-result", "run-1", { role: "coordinator" }, { type: "review.verdict", causation_id: request.message_id,
+      sender: { role: binding.role, agent_id: binding.agentId, pane_id: binding.paneId },
+      payload: { gateId: "review-gate", runId: "run-1", taskId: "review-task", evaluationId: "original-evaluation", status: "passed", findings: [], producedArtifacts: [], evaluatedAt: T0 } });
+    await exhaustSchemaAttempts(f.runtime, binding, { ...original, artifact_references: undefined }, "artifact_references: Required");
+    const actionId = (await f.inspect()).runs[0]!.pendingAction!.actionId;
+    await f.runtime.recordNativeDeliveryIntent(original, "original-operation");
+    const changed = field === "payload" ? { ...original, payload: { ...original.payload as object, evaluationId: "different-evaluation" } }
+      : field === "causation" ? { ...original, causation_id: "another-request" }
+      : { ...original, message_id: "another-message-with-the-same-key" };
+    await expect(f.runtime.receiveHerdr(changed)).rejects.toThrow(/Conflicting native delivery/);
+    const state = await f.inspect();
+    expect(state.inbox.some(item => item.message.message_id === original.message_id)).toBe(false);
+    expect(state.runs[0]!.nativeDeliveries).toEqual([{ operationId: "original-operation", message: original }]);
+    await expect(f.runtime.resumeBlockedRun("run-1", actionId)).rejects.toThrow(/Unknown.*delivery/);
+  });
+
+  it("retains exact Specialist Stop evidence while another native delivery is unresolved", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const first = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
+    await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
+    const unrelated = envelope("unrelated-native", "run-1", { role: "coordinator" }, { sender: { role: "planner" } });
+    await f.runtime.recordNativeDeliveryIntent(unrelated, "other-operation");
+    await f.runtime.specialistTurnStopped(f.panes.bindings.find(pane => pane.role === "architect")!, "architect");
+    await expect(f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", [])).rejects.toThrow(/Unknown.*delivery/);
+    const restarted = f.makeRuntime();
+    await restarted.reconcileNativeDelivery(unrelated.message_id);
+    const next = await restarted.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
+    expect(next.message_id).not.toBe(first.message_id);
+    expect((await restarted.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage).message_id).toBe(next.message_id);
+    await restarted.flushOutbound();
+    expect(f.transport.sentRequests.filter(item => item.role === "architect")).toHaveLength(2);
+  });
+
+  it("does not treat a watchdog warning or resume as proof that an accepted specialist attempt stopped", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const first = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
+    await f.runtime.flushOutbound();
+    await f.runtime.reportRunStalled("run-1", "reminder-episode");
+    await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
+    await f.runtime.reportRunStalled("run-1", "episode-1");
+    const action = (await f.inspect()).runs[0]!.pendingAction!;
+    await f.runtime.resumeBlockedRun("run-1", action.actionId);
+    const retried = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
+    expect(retried.message_id).toBe(first.message_id);
+    await f.runtime.flushOutbound();
+    const sent = f.transport.sentRequests.filter(req => req.role === "architect").map(req => RoleMessageSchema.parse(req.context));
+    expect(sent.filter(message => message.type === "delegation.request")).toHaveLength(1);
+    expect(sent.filter(message => (message.payload as { kind?: string }).kind === "result_reminder")).toHaveLength(1);
+    expect((await f.inspect()).runs[0]!.tasks).toEqual([]);
+  });
+
+  it("does not use a legacy uncorrelated no-response wake as permission for a replacement attempt", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const first = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
+    await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
+    await f.runtime.queueHerdr(envelope(`p19-wake-${digest(["run-1", `specialist_no_response:${first.message_id}`])}`, "run-1", { role: "coordinator" },
+      { causation_id: first.message_id, payload: { kind: "specialist_no_response", fromRole: "architect", sourceMessageId: first.message_id } }));
+    expect((await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage).message_id).toBe(first.message_id);
+  });
+
+  it("retains native uncertainty across a schema blocker, restart and repeated reports; resume cannot hide it", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const assignment = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
+    await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
+    const binding = f.panes.bindings.find(pane => pane.role === "architect")!;
+    const reply = envelope("corrected-reply", "run-1", { role: "coordinator" }, {
+      sender: { role: binding.role, agent_id: binding.agentId, pane_id: binding.paneId },
+      causation_id: assignment.message_id, type: "spec.draft", payload: { summary: "Findings" }
+    });
+    await exhaustSchemaAttempts(f.runtime, binding, { ...reply, artifact_references: undefined }, "artifact_references: Required");
+    await f.runtime.reportUncertainNativeDelivery(reply, "native-result", "ACK not observed");
+    const restarted = f.makeRuntime();
+    await restarted.reportUncertainNativeDelivery(reply, "native-result", "ACK still not observed");
+    const current = await restarted.inspect("run-1") as unknown as RunRecord;
+    await expect(restarted.resumeBlockedRun("run-1", current.pendingAction!.actionId)).rejects.toThrow(/Unknown.*delivery/i);
+    expect(await f.notices("delivery_failure")).toHaveLength(1);
+    expect(f.transport.sentRequests.filter(req => req.role === "architect")).toHaveLength(1);
+    expect(await restarted.reconcileNativeDelivery(reply.message_id)).toBe(true);
+    await restarted.resumeBlockedRun("run-1", current.pendingAction!.actionId);
+    await restarted.receiveHerdr(reply);
+    await restarted.receiveHerdr(reply);
+    await restarted.recoverMissingCoordinatorWakeups();
+    await restarted.recoverMissingCoordinatorWakeups();
+    const state = await f.inspect();
+    expect(state.inbox.filter(item => item.message.message_id === reply.message_id && item.status === "applied")).toHaveLength(1);
+    expect(state.outbound.filter(out => out.message.message_id === `p19-wake-${digest(["run-1", reply.message_id])}`)).toHaveLength(1);
+    expect(state.runs[0]!.delegation.acceptanceCriteria).toEqual(delegation().acceptanceCriteria);
+    expect(state.runs).toHaveLength(1);
+    expect(f.transport.sentRequests.filter(req => req.role === "architect")).toHaveLength(1);
+  });
+
+  it("does not attach a startup or stale-session Stop to an assignment of another native session", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const first = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
+    await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
+    const binding = f.panes.bindings.find(pane => pane.role === "architect")!;
+    await f.runtime.specialistTurnStopped({ ...binding, session: { ...binding.session!, value: "other-session" } }, "architect");
+    await f.runtime.specialistTurnStopped(binding, "architect", T0); // startup Stop precedes this accepted handle
+    expect(await f.notices("specialist_no_response")).toEqual([]);
+    const invalidBefore = (await f.inspect()).runs[0]!.invalidMessages;
+    await expect(f.runtime.reportRoleToolFailure({ ...binding, session: { ...binding.session!, value: "other-session" } },
+      { run_id: "run-1", message_id: "old-invalid-output", causation_id: first.message_id }, "artifact_references: Required")).resolves.toBeUndefined();
+    expect((await f.inspect()).runs[0]!.invalidMessages).toEqual(invalidBefore);
+    expect((await f.inspect()).runs[0]!.status).toBe("specifying");
+    const retried = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
+    expect(retried.message_id).toBe(first.message_id);
+  });
+
+  it("watchdog reports the actual delivery state, task, attempt and acceptance time once per episode", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []);
+    await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
+    const accepted = (await f.inspect()).outbound.find(out => out.message.recipient.role === "architect")!;
+    await f.runtime.reportRunStalled("run-1", "reminder-episode");
+    await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
+    await f.runtime.reportRunStalled("run-1", "episode-1");
+    await f.runtime.reportRunStalled("run-1", "episode-1");
+    const notices = await f.notices("run_stalled");
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.message.payload).toMatchObject({ role: "architect", paneId: "pane-architect", taskId: accepted.taskId,
+      attemptId: accepted.attemptId, acceptedAt: accepted.handle!.acceptedAt, deliveryStatus: "released" });
+    expect(String((notices[0]!.message.payload as { reason: string }).reason)).toContain("transport accepted at");
+  });
+
+  it.each(["completed", "blocked"])("accepts a late exact native specialist %s result during a schema pause without approving or resuming the run", async status => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const assignment = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
+    await f.runtime.flushOutbound();
+    const binding = f.panes.bindings.find(pane => pane.role === "architect")!;
+    const reply = envelope("late-native-result", "run-1", { role: "coordinator" }, { type: "spec.draft", causation_id: assignment.message_id,
+      sender: { role: "architect", agent_id: binding.agentId, pane_id: binding.paneId }, payload: { status, summary: "Impact analysis" } });
+    await exhaustSchemaAttempts(f.runtime, binding, { ...reply, artifact_references: undefined }, "artifact_references: Required");
+    const actionId = (await f.inspect()).runs[0]!.pendingAction!.actionId;
+    await f.runtime.recordNativeDeliveryIntent(reply, "native-late");
+    await expect(f.runtime.receiveHerdr(reply)).resolves.toEqual({ accepted: true });
+    await f.runtime.reconcileNativeDelivery(reply.message_id);
+    expect(await f.runtime.inspect("run-1")).toMatchObject({ status: "escalated", pendingAction: { actionId, state: "pending" }, tasks: [] });
+    await f.runtime.resumeBlockedRun("run-1", actionId);
+    expect((await f.inspect()).runs[0]!.delegation).toEqual(delegation());
+    expect(f.transport.sentRequests.filter(req => req.role === "architect")).toHaveLength(1);
+  });
+
+  it("replays an exact received native reply after restart while retaining the schema pause", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const assignment = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
+    await f.runtime.flushOutbound();
+    const binding = f.panes.bindings.find(pane => pane.role === "architect")!;
+    const reply = envelope("crash-before-native-apply", "run-1", { role: "coordinator" }, { type: "spec.draft", causation_id: assignment.message_id,
+      sender: { role: "architect", agent_id: binding.agentId, pane_id: binding.paneId }, payload: { summary: "Findings" } });
+    await exhaustSchemaAttempts(f.runtime, binding, { ...reply, artifact_references: undefined }, "artifact_references: Required");
+    await f.runtime.recordNativeDeliveryIntent(reply, "native-crash");
+    await f.journal.exclusive(async (state, save) => { state.inbox.push({ message: reply, status: "received" }); await save(); });
+    const restarted = f.makeRuntime();
+    await restarted.recoverMissingCoordinatorWakeups(); await restarted.recoverMissingCoordinatorWakeups();
+    const state = await f.inspect();
+    expect(state.inbox.find(item => item.message.message_id === reply.message_id)?.status).toBe("applied");
+    expect(state.runs[0]!).toMatchObject({ status: "escalated", pendingAction: { kind: "resume_coordinator", state: "pending" } });
+    expect(state.runs[0]!.nativeDeliveries).toEqual([]);
+    expect(state.outbound.filter(out => out.message.message_id === `p19-wake-${digest(["run-1", reply.message_id])}`)).toHaveLength(1);
+  });
+
+  it("recovers private native intents and durable ACKs before any capability-repair resume", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const binding = f.panes.bindings.find(pane => pane.role === "architect")!;
+    await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []); await f.runtime.flushOutbound();
+    await exhaustSchemaAttempts(f.runtime, binding, { run_id: "run-1", message_id: "invalid-output" }, "artifact_references: Required");
+    await f.journal.exclusive(async (state, save) => { state.runs[0]!.pendingAction!.recovery = "capability_repair"; await save(); });
+    const receipts = new HostReceiptJournal(join(f.root, "native-receipts"), join(f.root, "repo"), "session-1");
+    const reply = envelope("native-host-only", "run-1", { role: "coordinator" }, { type: "spec.draft", sender: { role: "architect" } });
+    await receipts.recordNativeIntent("host-operation", reply);
+    const restarted = f.makeRuntime();
+    await receipts.recoverNativeDeliveries(restarted);
+    expect(await restarted.resumeRecoverableRuns()).toMatchObject({ resumed: 0 });
+    // Crash after private host ACK write but before Runtime reconciliation; the next restart must consume that ACK.
+    await receipts.recordNativeAcknowledgement(reply);
+    const restartedAgain = f.makeRuntime();
+    await receipts.recoverNativeDeliveries(restartedAgain);
+    expect((await restartedAgain.inspect("run-1") as unknown as RunRecord).nativeDeliveries).toEqual([]);
+    expect(await restartedAgain.resumeRecoverableRuns()).toMatchObject({ resumed: 1 });
+  });
+
+  it("keeps two native intents independent, immutable and blocking every new work dispatch until both settle", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const reply = envelope("native-1", "run-1", { role: "coordinator" }, { sender: { role: "architect" }, type: "spec.draft" });
+    await f.runtime.recordNativeDeliveryIntent(reply, "op-1");
+    await f.runtime.recordNativeDeliveryIntent({ ...reply, message_id: "native-2", idempotency_key: "native-2" }, "op-2");
+    await expect(f.runtime.recordNativeDeliveryIntent({ ...reply, payload: { changed: true } }, "op-1")).rejects.toThrow(/Conflicting/);
+    await expect(f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", [])).rejects.toThrow(/Unknown.*delivery/i);
+    // queueHerdr callers cannot bypass the dispatch guard with a differently named assignment.
+    await f.runtime.queueHerdr(envelope("another-assignment", "run-1", { role: "architect" }, { type: "delegation.request", sender: { role: "coordinator" } }));
+    await f.runtime.flushOutbound();
+    expect(f.transport.sentRequests).toHaveLength(0);
+    await f.runtime.reconcileNativeDelivery("native-1");
+    await f.runtime.flushOutbound();
+    expect(f.transport.sentRequests).toHaveLength(0);
+    expect((await f.inspect()).runs[0]!.nativeDeliveries).toHaveLength(1);
+    await f.runtime.reconcileNativeDelivery("native-2");
+    await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
+    expect(f.transport.sentRequests.filter(req => req.role === "architect")).toHaveLength(1);
+  });
+
   it("coalesces simultaneous capability failures for one run and reloads the durable action", async () => {
     const f = await fixture({ preflight: async binding => {
       if (binding.role === "architect" || binding.role === "planner") throw new RoleCapabilityPreflightError(`${binding.role} tools unavailable`);

@@ -4,16 +4,17 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { join, resolve } from "node:path";
 import {
-  AgentBindingReceiptSchema, ApprovalDecisionSchema, JsonValueSchema, PaneBindingSchema, QualityGateContextSchema,
+  ApprovalDecisionSchema, JsonValueSchema, PaneBindingSchema, QualityGateContextSchema,
   QualityGateResultSchema, RoleMessageSchema, VerificationResultSchema,
   type ApprovalDecision, type JsonValue, type PaneBinding, type QualityGateResult, type RoleMessage, type VerificationResult
 } from "@bflow/contracts";
 import { digest, json, record, strings, textField } from "./journal.js";
 import { redactString } from "../resilience/redaction.js";
 import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
+import { nativeEnvelopeIssues, nativeMessageFingerprint, NativeRejectionSchema } from "./native-delivery-status.js";
 import { ApprovalNoticeSchema, UserDecisionNoticeSchema, approvalNoticeFields, isUserFacingNotice, renderConversationNotice, userDecisionNoticeFields } from "./conversation-notice-render.js";
 
-type Kind = "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "decision-reblock" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled";
+type Kind = "native-rejection" | "approval-failure" | "runtime-nudge" | "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "decision-reblock" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled";
 export interface HumanHookProvenance {
   origin: "UserPromptSubmit"; binding: PaneBinding; nativeSessionId: string;
   conversationSessionId: string; userId: string; messageId: string; promptDigest: string;
@@ -44,6 +45,8 @@ const NotificationFailureSchema = z.object({ messageIds: z.array(z.string().min(
 export const MAX_NOTICE_REBLOCKS = 2;
 /** A Conversation Stop is refused at most this many times for one user turn that never reached conversation_decide. */
 export const MAX_DECISION_REBLOCKS = 2;
+const ApprovalFailureReceiptSchema = z.object({ messageId: z.string().min(1), attempt: z.number().int().positive(),
+  error: z.string().min(1).max(2000), note: z.string().min(1).max(2000) }).strict();
 const ConversationDecisionReceiptSchema = z.object({ messageId: z.string().min(1), decision: JsonValueSchema,
   result: JsonValueSchema.optional() }).strict();
 export interface HostObservation {
@@ -101,6 +104,10 @@ export class HostReceiptJournal {
         throw new Error("Conversation turn has mismatched trusted hook provenance");
       return json(turn);
     }
+    if (kind === "approval-failure") return json(ApprovalFailureReceiptSchema.parse(input));
+    if (kind === "runtime-nudge") {
+      return json(z.object({ bindingDigest: z.string().regex(/^[0-9a-f]{64}$/), sequence: z.number().int().nonnegative() }).strict().parse(input));
+    }
     if (kind === "conversation-intent" || kind === "conversation-result") {
       const receipt = ConversationDecisionReceiptSchema.parse(input);
       if ((kind === "conversation-result") !== (receipt.result !== undefined)) throw new Error("Invalid Conversation decision receipt");
@@ -140,6 +147,7 @@ export class HostReceiptJournal {
     if (kind === "notification-failure") return json(NotificationFailureSchema.parse(input));
     if (kind === "decision-reblock") return json(z.object({ messageId: z.string().min(1), attempt: z.number().int().min(1).max(MAX_DECISION_REBLOCKS), reblockedAt: z.string().datetime() }).strict().parse(input));
     if (kind === "notice-nudge") return json(z.object({ messageId: z.string().min(1), attempt: z.number().int().min(1).max(3), attemptedAt: z.string().datetime() }).strict().parse(input));
+    if (kind === "native-rejection") return json(NativeRejectionSchema.parse(input));
     if (kind === "native-intent" || kind === "native-ack") return json(RoleMessageSchema.parse(input));
     if (kind === "gate") return json(QualityGateResultSchema.parse(input));
     if (kind === "evidence") return json(VerificationResultSchema.parse(input));
@@ -168,7 +176,10 @@ export class HostReceiptJournal {
     const payload = this.parsePayload(kind, value.payload);
     const envelope = { version: 1 as const, repository: this.repository, sessionId: this.sessionId, kind, id, payload };
     if (value.checksum !== digest(envelope)) throw new Error("Host receipt integrity mismatch");
-    if (kind.startsWith("conversation-") && record(payload).messageId !== id ||
+    if (kind === "native-rejection" && RoleMessageSchema.parse(record(payload).message).message_id !== id ||
+        kind === "approval-failure" && digest([record(payload).messageId, record(payload).attempt]) !== id ||
+        kind === "runtime-nudge" && digest([record(payload).bindingDigest, record(payload).sequence]) !== id ||
+        kind.startsWith("conversation-") && record(payload).messageId !== id ||
         kind === "human" && ApprovalDecisionSchema.parse(record(payload).decision).approvalId !== id ||
         kind === "gate" && QualityGateResultSchema.parse(payload).evaluationId !== id ||
         kind === "evidence" && VerificationResultSchema.parse(payload).verificationId !== id ||
@@ -177,8 +188,13 @@ export class HostReceiptJournal {
       throw new Error("Host receipt identity mismatch");
     return { ...envelope, checksum: textField(value.checksum) };
   }
-  private async read(kind: Kind, id: string): Promise<JsonValue | undefined> {
-    await this.prepare();
+  private async read(kind: Kind, id: string, createDirectory = true): Promise<JsonValue | undefined> {
+    if (createDirectory) await this.prepare();
+    else {
+      let stat;
+      try { stat = await lstat(this.directory); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+      if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.()) throw new Error("Unsafe host receipt directory");
+    }
     let file;
     try { file = await open(join(this.directory, this.filename(kind, id)), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
@@ -316,9 +332,29 @@ export class HostReceiptJournal {
     const uncertain: { operationId: string; message: RoleMessage }[] = [];
     for (const operationId of await this.receiptIds("native-intent")) {
       const delivery = await this.nativeDelivery(operationId);
-      if (delivery?.status === "unknown_delivery") uncertain.push({ operationId, message: delivery.message });
+      if (delivery?.status === "unknown_delivery" && !await this.nativeRejection(delivery.message.message_id)) uncertain.push({ operationId, message: delivery.message });
     }
     return uncertain;
+  }
+  /** Replay private transport facts before Runtime startup recovery; never resend any envelope or apply business outcomes. */
+  async recoverNativeDeliveries(runtime: {
+    recordNativeDeliveryIntent(message: RoleMessage, operationId: string): Promise<void>;
+    reconcileNativeDelivery(messageId: string): Promise<boolean>;
+    recordNativeDeliveryRejection(input: unknown): Promise<void>;
+  }): Promise<void> {
+    for (const operationId of await this.receiptIds("native-intent")) {
+      const delivery = await this.nativeDelivery(operationId);
+      if (!delivery) continue;
+      const rejected = await this.nativeRejection(delivery.message.message_id);
+      if (rejected) { await runtime.recordNativeDeliveryRejection(rejected); continue; }
+      if (delivery.status === "unknown_delivery") await runtime.recordNativeDeliveryIntent(delivery.message, operationId);
+      // Re-read after the Runtime write: a signed ACK may have arrived concurrently. nativeDelivery checks exact
+      // immutable intent/ACK ownership, permitting only the native host's binding-receipt signature replacement.
+      const current = await this.nativeDelivery(operationId), refusal = await this.nativeRejection(delivery.message.message_id);
+      if (refusal) await runtime.recordNativeDeliveryRejection(refusal);
+      else if (current?.status === "acknowledged")
+        await runtime.reconcileNativeDelivery(delivery.message.message_id);
+    }
   }
   /** Authenticated direct Coordinator-to-Conversation workflow outcomes, including those from before Runtime journaling was added. */
   async acknowledgedCoordinatorConversationOutcomes(): Promise<RoleMessage[]> {
@@ -374,11 +410,60 @@ export class HostReceiptJournal {
     for (const id of await this.receiptIds("conversation-turn")) turns.push(TrustedConversationTurnSchema.parse(await this.read("conversation-turn", id)));
     return turns.sort((a, b) => a.sequence - b.sequence);
   }
+  private conversationBindingIdentity(binding: PaneBinding): string {
+    return digest({ ...binding, transportState: undefined, lastHeartbeatAt: undefined });
+  }
+  private async conversationNudgeBoundary(principal: PaneBinding) {
+    const binding = PaneBindingSchema.parse(principal);
+    if (binding.role !== "conversation" || binding.sessionId !== this.sessionId || !binding.session)
+      throw new Error("Only authenticated Conversation has Runtime nudge boundaries");
+    const identity = this.conversationBindingIdentity(binding);
+    const turn = (await this.conversationTurns()).filter(value => this.conversationBindingIdentity(value.binding) === identity).at(-1);
+    const sequence = turn?.sequence ?? 0;
+    return { bindingDigest: identity, sequence, id: digest([identity, sequence]) };
+  }
+  /** A private host receipt fences the previous human turn until a new physical user turn arrives; no approval or decision is created. */
+  async recordConversationRuntimeNudge(binding: PaneBinding): Promise<void> {
+    const boundary = await this.conversationNudgeBoundary(binding);
+    await this.write("runtime-nudge", boundary.id, { bindingDigest: boundary.bindingDigest, sequence: boundary.sequence });
+  }
+  async isConversationRuntimeNudge(binding: PaneBinding): Promise<boolean> {
+    const boundary = await this.conversationNudgeBoundary(binding);
+    return await this.read("runtime-nudge", boundary.id) !== undefined;
+  }
+  async wasConversationTurnNudged(input: TrustedConversationTurn): Promise<boolean> {
+    const turn = TrustedConversationTurnSchema.parse(input);
+    if (turn.binding.sessionId !== this.sessionId) throw new Error("Foreign Conversation turn");
+    return await this.read("runtime-nudge", digest([this.conversationBindingIdentity(turn.binding), turn.sequence])) !== undefined;
+  }
+  private async approvalFailures(messageId: string) {
+    const failures: z.infer<typeof ApprovalFailureReceiptSchema>[] = [];
+    for (const id of await this.receiptIds("approval-failure")) {
+      const failure = ApprovalFailureReceiptSchema.parse(await this.read("approval-failure", id));
+      if (failure.messageId === messageId) failures.push(failure);
+    }
+    return failures.sort((a, b) => a.attempt - b.attempt);
+  }
+  /** A failed physical approval hook is reportable context, never an approval or an ordinary model decision. */
+  async recordApprovalFailure(messageId: string, failure: { error: string; note: string }): Promise<void> {
+    if (!(await this.conversationTurns()).some(turn => turn.messageId === messageId)) throw new Error("Unknown trusted approval turn");
+    const attempt = ((await this.approvalFailures(messageId)).at(-1)?.attempt ?? 0) + 1;
+    await this.write("approval-failure", digest([messageId, attempt]), { messageId, attempt, ...failure });
+  }
+  async conversationApprovalFailure(messageId: string): Promise<{ messageId: string; error: string; note: string } | undefined> {
+    const failure = (await this.approvalFailures(messageId)).at(-1);
+    return failure === undefined ? undefined : { messageId: failure.messageId, error: failure.error, note: failure.note };
+  }
+  async assertConversationUserTurn(binding: PaneBinding): Promise<void> {
+    if (await this.isConversationRuntimeNudge(binding))
+      throw new Error("Runtime nudge requires no Conversation decision or resume. Report the supplied notices; do not ask the user to repeat.");
+  }
   /** An operational resume is a real user request, not an approval or a model-supplied provenance flag. */
   async authorizeConversationResume(binding: PaneBinding, messageId: string | undefined, runId: string): Promise<void> {
+    await this.assertConversationUserTurn(binding);
     const turn = (await this.conversationTurns()).at(-1);
     if (binding.role !== "conversation" || !turn || messageId !== undefined && turn.messageId !== messageId ||
-        this.bindingIdentity(turn.binding) !== this.bindingIdentity(binding))
+        this.conversationBindingIdentity(turn.binding) !== this.conversationBindingIdentity(binding))
       throw new Error("Resume requires the current authenticated Conversation user message");
     const request = parseConversationResumeRequest(turn.content);
     if (!request || request.runId !== undefined && request.runId !== runId)
@@ -560,15 +645,26 @@ export class HostReceiptJournal {
   async getGate(id: string): Promise<QualityGateResult | undefined> { const value = await this.read("gate", id); return value === undefined ? undefined : QualityGateResultSchema.parse(value); }
   async recordNativeIntent(operationId: string, message: RoleMessage): Promise<boolean> { return this.write("native-intent", operationId, message); }
   async recordNativeAcknowledgement(message: RoleMessage): Promise<void> { const parsed = RoleMessageSchema.parse(message); await this.write("native-ack", parsed.message_id, parsed); }
+  /** Trusted signed ingress callback only; no model-supplied refusal can reach this method. */
+  async recordNativeRejection(messageInput: RoleMessage): Promise<void> {
+    const message = RoleMessageSchema.parse(messageInput), issues = nativeEnvelopeIssues(message);
+    const rejection = NativeRejectionSchema.parse({ code: "native_envelope_rejected", message, issues });
+    await this.write("native-rejection", message.message_id, rejection);
+  }
+  async nativeRejection(messageId: string) {
+    const value = await this.read("native-rejection", textField(messageId), false);
+    return value === undefined ? undefined : NativeRejectionSchema.parse(value);
+  }
   async nativeDelivery(operationId: string): Promise<{ message: RoleMessage; status: "unknown_delivery" | "acknowledged" } | undefined> {
-    const value = await this.read("native-intent", operationId); if (value === undefined) return undefined;
-    const message = RoleMessageSchema.parse(value), acknowledgement = await this.read("native-ack", message.message_id);
+    const value = await this.read("native-intent", operationId, false); if (value === undefined) return undefined;
+    const message = RoleMessageSchema.parse(value), acknowledgement = await this.read("native-ack", message.message_id, false);
     // The native plugin replaces only the placeholder binding-receipt signature after
     // checking the physical occupant. The signed ingress envelope is otherwise exact.
-    const comparable = (value: RoleMessage) => value.type === "execution.receipt"
-      ? { ...value, payload: { ...AgentBindingReceiptSchema.parse(value.payload), signature: undefined } } : value;
-    if (acknowledgement !== undefined && digest(comparable(RoleMessageSchema.parse(acknowledgement))) !== digest(comparable(message)))
+    if (acknowledgement !== undefined && nativeMessageFingerprint(RoleMessageSchema.parse(acknowledgement)) !== nativeMessageFingerprint(message))
       throw new Error("Native acknowledgement conflicts with delivery intent");
+    const rejection = await this.nativeRejection(message.message_id);
+    if (rejection && (nativeMessageFingerprint(rejection.message) !== nativeMessageFingerprint(message) || acknowledgement !== undefined))
+      throw new Error("Native refusal conflicts with delivery intent or acknowledgement");
     return { message, status: acknowledgement === undefined ? "unknown_delivery" : "acknowledged" };
   }
   async authenticateEvidence(input: VerificationResult): Promise<boolean> { const result = VerificationResultSchema.parse(input); return digest(await this.read("evidence", result.verificationId)) === digest(result); }

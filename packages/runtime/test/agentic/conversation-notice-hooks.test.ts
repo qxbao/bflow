@@ -119,6 +119,30 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
     expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision"]);
   });
 
+  it("reports a trusted approval failure on Stop without asking for an ordinary decision or automatic retry", async () => {
+    const f = await fixture({ conversation_pending_decision: { approvalFailure: {
+      messageId: "failed-approval", error: "Herdr unavailable", note: "The approval was NOT recorded and nothing was applied." }, attempt: 1 } });
+    const result = await f.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1" });
+    expect(result.stdout).not.toBe("");
+    const blocked = JSON.parse(result.stdout);
+    expect(blocked.decision).toBe("block");
+    expect(blocked.reason).toContain("Herdr unavailable");
+    expect(blocked.reason).toContain("NOT recorded");
+    expect(blocked.reason).toContain("Do not call conversation_decide");
+    expect(blocked.reason).not.toContain("Call conversation_decide now");
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision"]);
+  });
+
+  it("requires the explicit original ID when Stop resumes a suspended ordinary turn", async () => {
+    const f = await fixture({ conversation_pending_decision: { messageId: "user-original", content: "Original approved work", requiresExplicitMessageId: true, attempt: 1 } });
+    const result = await f.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1" });
+    const reason = JSON.parse(result.stdout).reason;
+    expect(reason).toContain("explicitly");
+    expect(reason).toContain("user-original");
+    expect(reason).toContain("newer corrections or cancellation");
+    expect(reason).not.toContain("messageId may be omitted");
+  });
+
   it("acknowledges a Codex display from last_assistant_message and does not rely on a Claude transcript", async () => {
     const undisplayed = { ...decisionNotice, surfacedAt: "2026-10-20T03:17:00.000Z", reblocks: 0 };
     const f = await fixture({ conversation_notices: { notices: [decisionNotice], undisplayed: [undisplayed] } }, "codex");
@@ -131,19 +155,48 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
   });
 
   it("puts the MUST SHOW section first in the inbox nudge context", async () => {
-    const f = await fixture({ conversation_notices: { notices: [decisionNotice], undisplayed: [] } });
+    const f = await fixture({ conversation_runtime_nudge: { notices: [decisionNotice], undisplayed: [] } });
     const result = await f.invoke("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "[bflow] Có cập nhật mới từ Runtime" });
     const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
     expect(context).toContain("not a user message and not an approval");
+    expect(context).toContain("requiresConversationDecision=false");
+    expect(context).toContain("Do not call conversation_decide");
+    expect(context).toContain("do not ask the user to repeat");
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_runtime_nudge", "conversation_notices_surfaced"]);
     expect(context.indexOf("MUST SHOW TO USER VERBATIM:")).toBeLessThan(context.indexOf("Dùng schema v2"));
     expect(context.indexOf("MUST SHOW TO USER VERBATIM:")).toBeLessThan(context.indexOf("Runtime updates:"));
+  });
+
+  it("directs an explicit resume turn and its Stop reminder to the existing run", async () => {
+    const f = await fixture({ user_prompt: { messageId: "user-resume", requiresConversationDecision: true, notices: [], undisplayed: [] },
+      conversation_pending_decision: { messageId: "user-resume", content: "resume run-existing", attempt: 1 } });
+    const result = await f.invoke("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "resume run-existing" });
+    const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
+    expect(context).toContain("resume_run");
+    expect(context).toContain("conversation_only");
+    expect(context).not.toContain("Call conversation_decide first");
+    const stopped = await f.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1" });
+    const reason = JSON.parse(stopped.stdout).reason;
+    expect(reason).toContain("resume_run");
+    expect(reason).toContain("existing runId");
+    expect(reason).not.toContain("nothing reached the Coordinator");
+  });
+
+  it("requires exactly one decision for an ordinary physical user turn", async () => {
+    const f = await fixture({ user_prompt: { messageId: "user-real", requiresConversationDecision: true, notices: [], undisplayed: [] } });
+    const result = await f.invoke("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "hello" });
+    const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
+    expect(context).toContain("requiresConversationDecision=true. Call conversation_decide first");
+    expect(f.calls.map(call => call.method)).toEqual(["user_prompt"]);
   });
 
   it("shows user decisions in the user-turn context before the Conversation JSON", async () => {
     const f = await fixture({ user_prompt: { messageId: "user-1", notices: [decisionNotice], undisplayed: [] } });
     const result = await f.invoke("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "hello" });
     const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
-    expect(context.startsWith("Trusted Bflow user turn: messageId=user-1; requiresConversationDecision=false. Call conversation_decide first")).toBe(true);
+    expect(context.startsWith("Trusted Bflow user turn: messageId=user-1; requiresConversationDecision=false.")).toBe(true);
+    expect(context).not.toContain("Call conversation_decide first");
+    expect(context).toContain("Do not call conversation_decide");
     expect(context.indexOf("MUST SHOW TO USER VERBATIM:")).toBeLessThan(context.indexOf("Trusted Bflow user turn and Conversation context:"));
     expect(context).toContain("Trusted Bflow user turn and Conversation context:");
   });
