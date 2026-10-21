@@ -563,12 +563,16 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
         if (probeOutcome.exitCode !== 0 || probeOutcome.failure !== undefined || !probeOutcome.started) {
           const diagnostic = executionProbeFailureDiagnostic(probeOutcome);
           const lower = diagnostic.toLowerCase();
+          const missingEnvironmentVariable = /\bmissing environment variable\s*:/i.test(diagnostic);
           let probeCode = "probe_failed";
           let probeRemediation = "Verify account quotas, network connectivity, and provider permissions.";
 
-          if (probeOutcome.failure === "timeout" || lower.includes("timed out") || lower.includes("timeout")) {
+          if (probeOutcome.failure === "timeout" || (!missingEnvironmentVariable && (lower.includes("timed out") || lower.includes("timeout")))) {
             probeCode = "timeout";
             probeRemediation = "Increase startupTimeoutMs in .bflow/config.yml or verify provider network latency.";
+          } else if (missingEnvironmentVariable) {
+            probeCode = "environment_variable_missing";
+            probeRemediation = "Export the named variable in the same terminal that runs bflow up, then restart the session.";
           } else if (/\b(?:permission denied|untrusted|insufficient permissions)\b/.test(lower)) {
             probeCode = "permission_denied";
             probeRemediation = "Grant workspace trust or adjust permission profile.";

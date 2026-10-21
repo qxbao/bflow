@@ -132,6 +132,12 @@ cùng UID.
 
 ## Isolator Profiles and Linked Codex Backends
 
+Failed execution probes prefer a terminal CLI `ERROR:`/`FATAL:` over asynchronous timestamped
+worker logs, so an incidental MCP authentication log cannot hide a missing provider environment
+variable. `environment_variable_missing` remains blocked and asks the operator to export the
+named variable in the same terminal that starts Bflow. A successful ping with incidental MCP
+logs does not establish the readiness of required MCP services; their independent checks remain.
+
 The trusted host may pass `ProviderAdapterOptions.isolatorEnvironment` after resolving an existing
 AI Isolator profile. The adapter does not read repository environment files or resolve profile
 names itself. With this option set, provider version, help, authentication, MCP inventory and

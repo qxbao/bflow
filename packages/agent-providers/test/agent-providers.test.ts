@@ -700,6 +700,57 @@ describe("@bflow/agent-providers", () => {
   });
 
   describe("5. All 8 Failure Scenarios", () => {
+    const firecrawlAuthLog = '2026-10-21T03:23:21.702902Z ERROR rmcp::transport::worker: AuthRequired Bearer opaqueCredential123';
+    const missingLbKey = 'ERROR: Missing environment variable: `CODEX_LB_API_KEY`.';
+
+    it.each([
+      ["", `${missingLbKey}\n${firecrawlAuthLog}`],
+      ["", `${firecrawlAuthLog}\n${missingLbKey}`],
+      [missingLbKey, firecrawlAuthLog]
+    ])("reports the missing environment variable ahead of asynchronous MCP auth logs (%s, %s)", async (stdout, stderr) => {
+      const runner = createFakeProviderRunner({ customHandler: invocation => invocation.args.includes("exec")
+        ? { exitCode: 1, started: true, stdout, stderr } : undefined });
+      const adapter = new CodexProviderAdapter({ runner, executablePath: fakeBinaryPath, codexHomeDirectory: testCodexHome });
+      const result = await adapter.checkHealth({ schemaVersion: 3, environment: createTestEnvironment("codex"), stage: "preflight", requestedAt: new Date().toISOString() });
+      if (!result.ok) throw new Error("Expected a validated health result");
+      expect(result.value.status).toBe("blocked");
+      const check = result.value.checks.find(item => item.check === "authentication");
+      expect(check?.message).toContain('Missing environment variable: `CODEX_LB_API_KEY`');
+      expect(check?.message).not.toContain("AuthRequired");
+      expect(check?.code).toBe("environment_variable_missing");
+      expect(check?.remediation).toMatch(/export.*same terminal/i);
+      expect(JSON.stringify(result)).not.toContain("opaqueCredential123");
+    });
+
+    it("keeps an upstream rate limit ahead of an incidental MCP authentication error", async () => {
+      const runner = createFakeProviderRunner({ customHandler: invocation => invocation.args.includes("exec")
+        ? { exitCode: 1, started: true, stdout: "", stderr: `ERROR: upstream returned 429 Too Many Requests\n${firecrawlAuthLog}` } : undefined });
+      const adapter = new CodexProviderAdapter({ runner, executablePath: fakeBinaryPath, codexHomeDirectory: testCodexHome });
+      const result = await adapter.checkHealth({ schemaVersion: 3, environment: createTestEnvironment("codex"), stage: "preflight", requestedAt: new Date().toISOString() });
+      if (!result.ok) throw new Error("Expected a validated health result");
+      expect(result.value.status).toBe("blocked");
+      expect(result.value.checks.find(item => item.check === "authentication")).toMatchObject({ code: "probe_failed", message: expect.stringContaining("429 Too Many Requests") });
+    });
+
+    it("accepts a successful model ping despite incidental MCP authentication logs", async () => {
+      const runner = createFakeProviderRunner({ customHandler: invocation => invocation.args.includes("exec")
+        ? { exitCode: 0, started: true, stdout: "pong", stderr: firecrawlAuthLog } : undefined });
+      const adapter = new CodexProviderAdapter({ runner, executablePath: fakeBinaryPath, codexHomeDirectory: testCodexHome });
+      const result = await adapter.checkHealth({ schemaVersion: 3, environment: createTestEnvironment("codex"), stage: "preflight", requestedAt: new Date().toISOString() });
+      if (!result.ok) throw new Error("Expected a validated health result");
+      expect(result.value.checks.find(item => item.check === "authentication")).toMatchObject({ status: "passed", code: "auth_ok" });
+    });
+
+    it("preserves authoritative runner timeout over missing-variable output", async () => {
+      const runner = createFakeProviderRunner({ customHandler: invocation => invocation.args.includes("exec")
+        ? { exitCode: null, started: true, failure: "timeout", stdout: "", stderr: missingLbKey } : undefined });
+      const adapter = new CodexProviderAdapter({ runner, executablePath: fakeBinaryPath, codexHomeDirectory: testCodexHome });
+      const result = await adapter.checkHealth({ schemaVersion: 3, environment: createTestEnvironment("codex"), stage: "preflight", requestedAt: new Date().toISOString() });
+      if (!result.ok) throw new Error("Expected a validated health result");
+      expect(result.value.status).toBe("blocked");
+      expect(result.value.checks.find(item => item.check === "authentication")).toMatchObject({ code: "timeout", remediation: expect.stringContaining("startupTimeoutMs") });
+    });
+
     it.each([
       ["I will check authentication.\ntokens used\n123", "ERROR: upstream returned 429 Too Many Requests", "probe_failed"],
       ["", "OpenAI Codex\nprovider: auth-proxy\nERROR: connection reset by peer", "probe_failed"],

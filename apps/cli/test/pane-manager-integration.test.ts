@@ -192,6 +192,44 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     expect(host.shutdown).toHaveBeenCalledTimes(1);
     expect(runner.session(input.repository.sessionName).running).toBe(false);
   });
+
+  linuxIt("reports a stopped session without treating cancelled cleanup records as unhealthy panes", async () => {
+    const environment = lifecycle();
+    await environment.up();
+    await environment.down(true);
+    const adapter = new PaneManagerLifecycleAdapter(input, runner);
+    const report = await adapter.doctorSession({ workspaceRoot: dir });
+    expect(report.healthy).toBe(true);
+    expect(report.checks).toContainEqual(expect.objectContaining({ checkId: "p13-stopped", status: "passed", message: expect.stringContaining("stopped") }));
+    expect(report.checks.some(check => check.checkId.startsWith("pane-"))).toBe(false);
+  });
+
+  linuxIt.each(["cancelled", "blocked", "disconnected"] as const)("retains %s pane failures in an active session", async transportState => {
+    await lifecycle().up();
+    const path = join(dir, `.bflow/state/panes/${input.repository.sessionName}.manifest.json`);
+    const manifest = SessionManifestSchema.parse(JSON.parse(await readFile(path, "utf8")));
+    manifest.panes[0]!.transportState = transportState;
+    await writeFile(path, JSON.stringify(manifest));
+    // Offline observation must retain the stored active-session failure.
+    runner.session(input.repository.sessionName).running = false;
+    const report = await new PaneManagerLifecycleAdapter(input, runner).doctorSession({ workspaceRoot: dir });
+    expect(report.healthy).toBe(false);
+    expect(report.checks).toContainEqual(expect.objectContaining({ status: "failed", message: expect.stringContaining(transportState) }));
+    expect(report.checks.some(check => check.checkId === "p13-stopped")).toBe(false);
+  });
+
+  linuxIt("retains unexpected disconnected pane evidence even in a stopped manifest", async () => {
+    const environment = lifecycle();
+    await environment.up();
+    await environment.down(true);
+    const path = join(dir, `.bflow/state/panes/${input.repository.sessionName}.manifest.json`);
+    const manifest = SessionManifestSchema.parse(JSON.parse(await readFile(path, "utf8")));
+    manifest.panes[0]!.transportState = "disconnected";
+    await writeFile(path, JSON.stringify(manifest));
+    const report = await new PaneManagerLifecycleAdapter(input, runner).doctorSession({ workspaceRoot: dir });
+    expect(report.healthy).toBe(false);
+    expect(report.checks).toContainEqual(expect.objectContaining({ status: "failed", message: expect.stringContaining("disconnected") }));
+  });
   it("passes cancellation to the P13 process runner without starting on an already-aborted signal", async () => {
     const controller = new AbortController(); controller.abort();
     const fake = { run: vi.fn() };

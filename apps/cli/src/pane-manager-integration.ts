@@ -161,8 +161,16 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
       { checkId: "runtime-shutdown", name: "Runtime graceful shutdown", status: "warn", message: "Pane shutdown is available; the provider host must quiesce and persist aggregate checkpoints before it is called." }];
     if (!current.ok) checks.push({ checkId: "p13-manifest", name: "P13 manifest", status: "failed", message: current.error.message });
     else if (!current.value) checks.push({ checkId: "p13-manifest", name: "P13 manifest", status: "warn", message: "No topology manifest yet. Run bflow up." });
-    else for (const pane of current.value.panes) checks.push({ checkId: `pane-${pane.bindingId}`.slice(0, 200), name: `${pane.role}: ${pane.paneId}`,
-      status: ["idle", "done", "working"].includes(pane.transportState) ? "passed" : "failed", message: `Agent ${pane.agentId}: ${pane.transportState}` });
+    else {
+      const stopped = current.value.status === "down";
+      if (stopped) checks.push({ checkId: "p13-stopped", name: "Session lifecycle", status: "passed",
+        message: "Session is stopped; cancelled pane records describe completed shutdown, not current readiness." });
+      for (const pane of current.value.panes) {
+        if (stopped && pane.transportState === "cancelled") continue;
+        checks.push({ checkId: `pane-${pane.bindingId}`.slice(0, 200), name: `${pane.role}: ${pane.paneId}`,
+          status: ["idle", "done", "working"].includes(pane.transportState) ? "passed" : "failed", message: `Agent ${pane.agentId}: ${pane.transportState}` });
+      }
+    }
     return EnvironmentDoctorReportSchema.parse({ schemaVersion: 2, workspaceRoot: root, sessionId: this.input.repository.sessionName,
       healthy: !checks.some((check) => check.status === "failed"), checks, checkedAt: new Date().toISOString() });
   }

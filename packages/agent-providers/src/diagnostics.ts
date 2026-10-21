@@ -46,8 +46,18 @@ export function executionProbeFailureDiagnostic(outcome: ProviderCommandOutcome)
   // Redact the complete streams first: quoted credentials can span multiple lines.
   const streams = [outcome.stderr, outcome.stdout, outcome.cause ?? ""].map(output =>
     redactDiagnosticText(output).split(/\r?\n/).map(line => line.trim()).filter(Boolean));
-  // Prefer stderr's concrete error over model commentary written to stdout.
-  const error = streams.map(lines => {
+  // A terminal CLI error explains its exit; timestamped worker logs can arrive
+  // afterwards (for example an optional MCP authentication failure).
+  const terminalError = streams.map(lines => {
+    let index = lines.length - 1;
+    while (index >= 0 && !/^(?:error|fatal)\s*:/i.test(lines[index]!)) index -= 1;
+    if (index < 0) return undefined;
+    const continuation = lines.slice(index + 1, index + 8);
+    const nextLog = continuation.findIndex(line => /^\d{4}-\d{2}-\d{2}T/.test(line));
+    return [lines[index], ...continuation.slice(0, nextLog < 0 ? undefined : nextLog)].join(" ");
+  }).find(line => line !== undefined);
+  // Otherwise prefer stderr's concrete error over model commentary in stdout.
+  const error = terminalError ?? streams.map(lines => {
     let index = lines.length - 1;
     while (index >= 0 && !/(?:^|\s)(?:error|fatal)\b|"error"\s*:/i.test(lines[index]!)) index -= 1;
     // Preserve continuation lines, including pretty-printed JSON error.message/code.
