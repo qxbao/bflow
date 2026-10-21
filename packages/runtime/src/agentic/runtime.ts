@@ -302,7 +302,8 @@ export class AgenticWorkflowRuntime {
     // `received` is the durable inbox write-ahead before semantic application. The envelope was parsed and authenticated
     // before that write. Reapply all business validators, deferring blocked/terminal runs until an authorized resume.
     const received = await this.transaction(async state => state.inbox.filter(item => item.status === "received" &&
-        !state.runs.some(run => run.runId === item.message.run_id && (run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status))))
+        !state.runs.some(run => run.runId === item.message.run_id && (run.cancelled ||
+          TERMINAL_RUN_STATUSES.includes(run.status) && !this.acceptsPausedNativeReply(state, run, item.message))))
       .map(item => RoleMessageSchema.parse(item.message)));
     let replayed = 0;
     for (const message of received) {
@@ -898,14 +899,7 @@ export class AgenticWorkflowRuntime {
         // A known native result may arrive after a schema failure paused its run. Admit only the exact immutable
         // intent and bound specialist reply; keep the pause and human gates. This breaks the ACK/resume deadlock
         // without authorizing new work, task success, or arbitrary late messages during an escalation.
-        const lateNativeResult = resumablyPaused(run) && !run.cancelled && message.recipient.role === "coordinator" &&
-          ["spec.draft", "task.status", "verification.escalation"].includes(message.type) &&
-          run.nativeDeliveries?.some(entry => digest(entry.message) === digest(message)) &&
-          state.outbound.some(out => out.message.message_id === message.causation_id && out.message.run_id === run.runId &&
-            out.message.type === "delegation.request" && ["accepted", "released"].includes(out.status) &&
-            out.message.recipient.role === message.sender.role && out.handle?.target.agentId === message.sender.agent_id &&
-            out.handle?.target.paneId === message.sender.pane_id);
-        if (!lateNativeResult) this.live(run);
+        if (!this.acceptsPausedNativeReply(state, run, message)) this.live(run);
         if (message.type === "approval.decision") {
           if (message.sender.role !== "conversation") throw new Error("Approval must return via Conversation");
           const decision = ApprovalDecisionSchema.parse(message.payload);
@@ -992,12 +986,25 @@ export class AgenticWorkflowRuntime {
 
   /** A specialist blocker is visible to the user, not only to the Coordinator. Idempotent per message. */
   private reportSpecialistBlocked(state: JournalState, outbox: HerdrOutbox, run: RunRecord, message: RoleMessage, blockage: string): void {
-    run.error = `Specialist ${message.sender.role} blocked: ${blockage}`.slice(0, 2000);
-    run.pendingAction = { actionId: `next-${digest([run.runId, message.message_id])}`, kind: "coordinator_continuation", owner: "coordinator",
-      reason: run.error, sourceMessageId: message.message_id, createdAt: message.occurred_at ?? this.now(), state: "pending" };
-    this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId, reason: run.error, fromRole: message.sender.role,
+    const reason = `Specialist ${message.sender.role} blocked: ${blockage}`.slice(0, 2000);
+    if (!resumablyPaused(run)) {
+      run.error = reason;
+      run.pendingAction = { actionId: `next-${digest([run.runId, message.message_id])}`, kind: "coordinator_continuation", owner: "coordinator",
+        reason, sourceMessageId: message.message_id, createdAt: message.occurred_at ?? this.now(), state: "pending" };
+    }
+    this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId, reason, fromRole: message.sender.role,
       options: ["Ask Coordinator to resolve the blocker (answer it or re-plan the task)", "Cancel this run"],
-      headline: `Workflow blocked: ${run.error}`, sdlcStatus: run.status }, `specialist-blocked:${message.message_id}`, "conversation");
+      headline: `Workflow blocked: ${reason}`, sdlcStatus: run.status }, `specialist-blocked:${message.message_id}`, "conversation");
+  }
+
+  private acceptsPausedNativeReply(state: JournalState, run: RunRecord, message: RoleMessage): boolean {
+    return resumablyPaused(run) && !run.cancelled && message.recipient.role === "coordinator" &&
+      ["spec.draft", "task.status", "verification.escalation"].includes(message.type) &&
+      (run.nativeDeliveries?.some(entry => digest(entry.message) === digest(message)) ?? false) &&
+      state.outbound.some(out => out.message.message_id === message.causation_id && out.message.run_id === run.runId &&
+        out.message.type === "delegation.request" && ["accepted", "released"].includes(out.status) &&
+        out.message.recipient.role === message.sender.role && out.handle?.target.agentId === message.sender.agent_id &&
+        out.handle?.target.paneId === message.sender.pane_id);
   }
 
   /**
@@ -1237,7 +1244,9 @@ export class AgenticWorkflowRuntime {
   /** A matching host Stop and released capacity are required; a warning or resume is never proof of stop. */
   private stoppedWithoutResult(state: JournalState, run: RunRecord, out: Outbound): boolean {
     if (out.status !== "released" || run.nativeDeliveries?.length || !this.outboundOwesResult(state, run, out)) return false;
-    return state.outbound.some(item => item.message.message_id === `p19-wake-${digest([run.runId, `specialist_no_response:${out.message.message_id}`])}`);
+    return state.outbound.some(item => item.message.message_id === `p19-wake-${digest([run.runId, `specialist_no_response:${out.message.message_id}`])}` &&
+      objectField(item.message.payload, "stoppedExecutionId") === out.handle!.executionId &&
+      Date.parse(String(objectField(item.message.payload, "stopObservedAt"))) >= Date.parse(out.handle!.acceptedAt));
   }
   /** A specialist attempt replaced by a newer attempt of the same Coordinator request no longer owes a result. */
   private supersededAttempt(state: JournalState, out: Outbound): boolean {
@@ -2461,6 +2470,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: wakeId, correlation_id: run.delegation.correlationId,
             causation_id: out.message.message_id, run_id: run.runId, sender: { role: "runtime" }, recipient: { role: "coordinator" }, type: "task.status",
             payload: { kind: "specialist_no_response", fromRole: role, sourceMessageId: out.message.message_id, sdlcStatus: run.status, reason,
+              stoppedExecutionId: out.handle.executionId, stopObservedAt: observedAt,
               next: "The specialist ended without a result. Reassign the work through Runtime, or report a blocker; do not treat its idle pane as success." },
             artifact_references: [], occurred_at: this.now(), idempotency_key: wakeId }), "coordinator");
         }

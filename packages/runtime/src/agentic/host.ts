@@ -515,6 +515,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       projectApprovalRequired: () => configuration.policy?.sdd.approvalRequired === true,
       authorizeHuman: decision => receipts.authenticateHuman(decision),
       recoveredHumanDecisions: await receipts.humanDecisions(),
+      beforeRecovery: async runtime => { await receipts.recoverNativeDeliveries(runtime); await runtime.recoverMissingCoordinatorWakeups(); },
       onNativeDelivery: async message => { await receipts.recordNativeAcknowledgement(message);
         // A late ACK settles an earlier uncertain-delivery action; nothing is resent.
         await workspace?.runtime.reconcileNativeDelivery(message.message_id).catch(error =>
@@ -536,8 +537,6 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     });
     // Stops of an earlier host session are not re-judged here: the new Coordinator has had no turn yet, so a missing next action
     // from a previous session is not "no response". Unsettled Stops of this session are reconciled by the normal Stop loop.
-    for (const { operationId, message } of await receipts.unacknowledgedNativeDeliveries())
-      await workspace.runtime.recordNativeDeliveryIntent(message, operationId);
     await workspace.runtime.resumeRecoverableRuns();
     manifest = accepted;
     await taskLogPane.ensure(accepted.herdrWorkspaceId);

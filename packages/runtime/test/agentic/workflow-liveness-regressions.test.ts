@@ -9,6 +9,7 @@ import { AgenticJournal, digest, type JournalState, type RunRecord } from "../..
 import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import { RoleCapabilityPreflightError, type AgenticRuntimePorts, type PanePolicy } from "../../src/agentic/ports.js";
 import { isCoordinatorTrigger, parseConversationResumeRequest } from "../../src/agentic/host-receipts.js";
+import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
 import { routeNativeConversationMessage } from "../../src/agentic/workspace.js";
 import { FakeAgentTransport } from "../helpers/fake-transport.js";
 import { draft } from "../../../specification/test/fixtures.js";
@@ -104,6 +105,15 @@ describe("workflow liveness recovery boundaries", () => {
     expect((await f.inspect()).runs[0]!.tasks).toEqual([]);
   });
 
+  it("does not use a legacy uncorrelated no-response wake as permission for a replacement attempt", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const first = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
+    await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
+    await f.runtime.queueHerdr(envelope(`p19-wake-${digest(["run-1", `specialist_no_response:${first.message_id}`])}`, "run-1", { role: "coordinator" },
+      { causation_id: first.message_id, payload: { kind: "specialist_no_response", fromRole: "architect", sourceMessageId: first.message_id } }));
+    expect((await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage).message_id).toBe(first.message_id);
+  });
+
   it("retains native uncertainty across a schema blocker, restart and repeated reports; resume cannot hide it", async () => {
     const f = await fixture({ runs: [run("run-1", "specifying")] });
     const assignment = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
@@ -164,13 +174,13 @@ describe("workflow liveness recovery boundaries", () => {
     expect(String((notices[0]!.message.payload as { reason: string }).reason)).toContain("transport accepted at");
   });
 
-  it("accepts a late exact native specialist result during a schema pause without approving or resuming the run", async () => {
+  it.each(["completed", "blocked"])("accepts a late exact native specialist %s result during a schema pause without approving or resuming the run", async status => {
     const f = await fixture({ runs: [run("run-1", "specifying")] });
     const assignment = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
     await f.runtime.flushOutbound();
     const binding = f.panes.bindings.find(pane => pane.role === "architect")!;
     const reply = envelope("late-native-result", "run-1", { role: "coordinator" }, { type: "spec.draft", causation_id: assignment.message_id,
-      sender: { role: "architect", agent_id: binding.agentId, pane_id: binding.paneId }, payload: { summary: "Impact analysis" } });
+      sender: { role: "architect", agent_id: binding.agentId, pane_id: binding.paneId }, payload: { status, summary: "Impact analysis" } });
     await f.runtime.reportRoleToolFailure(binding, { ...reply, artifact_references: undefined }, "artifact_references: Required");
     const actionId = (await f.inspect()).runs[0]!.pendingAction!.actionId;
     await f.runtime.recordNativeDeliveryIntent(reply, "native-late");
@@ -180,6 +190,45 @@ describe("workflow liveness recovery boundaries", () => {
     await f.runtime.resumeBlockedRun("run-1", actionId);
     expect((await f.inspect()).runs[0]!.delegation).toEqual(delegation());
     expect(f.transport.sentRequests.filter(req => req.role === "architect")).toHaveLength(1);
+  });
+
+  it("replays an exact received native reply after restart while retaining the schema pause", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const assignment = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
+    await f.runtime.flushOutbound();
+    const binding = f.panes.bindings.find(pane => pane.role === "architect")!;
+    const reply = envelope("crash-before-native-apply", "run-1", { role: "coordinator" }, { type: "spec.draft", causation_id: assignment.message_id,
+      sender: { role: "architect", agent_id: binding.agentId, pane_id: binding.paneId }, payload: { summary: "Findings" } });
+    await f.runtime.reportRoleToolFailure(binding, { ...reply, artifact_references: undefined }, "artifact_references: Required");
+    await f.runtime.recordNativeDeliveryIntent(reply, "native-crash");
+    await f.journal.exclusive(async (state, save) => { state.inbox.push({ message: reply, status: "received" }); await save(); });
+    const restarted = f.makeRuntime();
+    await restarted.recoverMissingCoordinatorWakeups(); await restarted.recoverMissingCoordinatorWakeups();
+    const state = await f.inspect();
+    expect(state.inbox.find(item => item.message.message_id === reply.message_id)?.status).toBe("applied");
+    expect(state.runs[0]!).toMatchObject({ status: "escalated", pendingAction: { kind: "resume_coordinator", state: "pending" } });
+    expect(state.runs[0]!.nativeDeliveries).toEqual([]);
+    expect(state.outbound.filter(out => out.message.message_id === `p19-wake-${digest(["run-1", reply.message_id])}`)).toHaveLength(1);
+  });
+
+  it("recovers private native intents and durable ACKs before any capability-repair resume", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const binding = f.panes.bindings.find(pane => pane.role === "architect")!;
+    await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []); await f.runtime.flushOutbound();
+    await f.runtime.reportRoleToolFailure(binding, { run_id: "run-1", message_id: "invalid-output" }, "artifact_references: Required");
+    await f.journal.exclusive(async (state, save) => { state.runs[0]!.pendingAction!.recovery = "capability_repair"; await save(); });
+    const receipts = new HostReceiptJournal(join(f.root, "native-receipts"), join(f.root, "repo"), "session-1");
+    const reply = envelope("native-host-only", "run-1", { role: "coordinator" }, { type: "spec.draft", sender: { role: "architect" } });
+    await receipts.recordNativeIntent("host-operation", reply);
+    const restarted = f.makeRuntime();
+    await receipts.recoverNativeDeliveries(restarted);
+    expect(await restarted.resumeRecoverableRuns()).toMatchObject({ resumed: 0 });
+    // Crash after private host ACK write but before Runtime reconciliation; the next restart must consume that ACK.
+    await receipts.recordNativeAcknowledgement(reply);
+    const restartedAgain = f.makeRuntime();
+    await receipts.recoverNativeDeliveries(restartedAgain);
+    expect((await restartedAgain.inspect("run-1") as unknown as RunRecord).nativeDeliveries).toEqual([]);
+    expect(await restartedAgain.resumeRecoverableRuns()).toMatchObject({ resumed: 1 });
   });
 
   it("keeps two native intents independent, immutable and blocking every new work dispatch until both settle", async () => {

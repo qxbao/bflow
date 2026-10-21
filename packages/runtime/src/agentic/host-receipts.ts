@@ -324,6 +324,21 @@ export class HostReceiptJournal {
     }
     return uncertain;
   }
+  /** Replay private transport facts before Runtime startup recovery; never resend any envelope or apply business outcomes. */
+  async recoverNativeDeliveries(runtime: {
+    recordNativeDeliveryIntent(message: RoleMessage, operationId: string): Promise<void>;
+    reconcileNativeDelivery(messageId: string): Promise<boolean>;
+  }): Promise<void> {
+    for (const operationId of await this.receiptIds("native-intent")) {
+      const delivery = await this.nativeDelivery(operationId);
+      if (!delivery) continue;
+      if (delivery.status === "unknown_delivery") await runtime.recordNativeDeliveryIntent(delivery.message, operationId);
+      // Re-read after the Runtime write: a signed ACK may have arrived concurrently. nativeDelivery checks exact
+      // immutable intent/ACK ownership, permitting only the native host's binding-receipt signature replacement.
+      if ((await this.nativeDelivery(operationId))?.status === "acknowledged")
+        await runtime.reconcileNativeDelivery(delivery.message.message_id);
+    }
+  }
   /** Authenticated direct Coordinator-to-Conversation workflow outcomes, including those from before Runtime journaling was added. */
   async acknowledgedCoordinatorConversationOutcomes(): Promise<RoleMessage[]> {
     const values: RoleMessage[] = [];
