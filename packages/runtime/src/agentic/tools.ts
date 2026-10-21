@@ -1,6 +1,11 @@
-import { AgentRoleProfileSchema, JsonValueSchema, type AgentRole, type JsonValue } from "@bflow/contracts";
+import { AgentRoleProfileSchema, JsonValueSchema, SpecificationSchema, type AgentRole, type JsonValue } from "@bflow/contracts";
+import { z } from "zod";
 import { record, strings, textField } from "./journal.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
+
+// Keep tool-argument paths distinct from the nested public contract fields. The Runtime
+// also validates direct callers; provider discovery is guidance, never ingress proof.
+const AssessArgumentsSchema = z.object({ specification: SpecificationSchema }).strict();
 
 export const COORDINATOR_ROLE_PROFILE = AgentRoleProfileSchema.parse({
   role: "coordinator", title: "Bflow Technical Coordinator", description: "Adaptive planning through the authoritative Workflow Runtime",
@@ -50,7 +55,7 @@ export class CoordinatorTools {
     switch (name) {
       case "inspect": return this.runtime.inspect(args.runId === undefined ? undefined : textField(args.runId));
       case "report_progress": return this.runtime.reportProgress(textField(args.runId), textField(args.headline), args.questions === undefined ? [] : strings(args.questions));
-      case "assess": return this.runtime.assess(args.specification);
+      case "assess": return this.runtime.assess(AssessArgumentsSchema.parse(args).specification);
       case "request_specialist": return this.runtime.requestSpecialist(textField(args.runId), textField(args.role), textField(args.objective), strings(args.requiredCapabilities));
       case "propose_workflow": return this.runtime.proposeWorkflow(textField(args.runId), args.specification, args.definition,
         args.maxIterations === undefined ? 3 : Number(args.maxIterations));
