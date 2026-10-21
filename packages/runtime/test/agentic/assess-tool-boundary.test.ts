@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
+import { PaneBindingSchema } from "@bflow/contracts";
 import { classifyChange } from "../../../specification/src/classification.js";
 import { draft } from "../../../specification/test/fixtures.js";
 import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
@@ -14,7 +15,13 @@ afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, {
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "bflow-assess-boundary-")); roots.push(root);
   // assess is read-only: its only dependency is the real classification policy.
-  const ports = { policies: { classifyChange }, roleCapabilities: { architect: ["repository.read"] } } as unknown as AgenticRuntimePorts;
+  const bindings = ["architect", "planner"].map(role => PaneBindingSchema.parse({ schemaVersion: 2, bindingId: `binding-${role}`,
+    sessionId: "session-1", role, paneGroup: "coordination", agentId: `${role}-agent`, workspaceId: "workspace", tabId: "tab",
+    paneId: `pane-${role}`, provider: "test", agentKind: "test", cwd: root, isolationMode: "dedicated_pane", readOnlyWorkspace: true,
+    transportState: "idle", boundAt: "2026-10-21T10:00:00.000Z" }));
+  const ports = { policies: { classifyChange }, roleCapabilities: { architect: ["repository.read"], planner: ["repository.read"] },
+    panes: { getRoleBinding: async (role: string) => ({ ok: true, value: bindings.find(binding => binding.role === role) ?? null }) }
+  } as unknown as AgenticRuntimePorts;
   const runtime = new AgenticWorkflowRuntime(ports, { journalDirectory: join(root, "journal"), repositoryPath: root });
   const assess = vi.spyOn(runtime, "assess");
   return { tools: new CoordinatorTools(runtime), assess };

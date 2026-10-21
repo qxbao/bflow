@@ -27,6 +27,19 @@ export interface PermissionCompilerOptions {
   readonly cwd: string;
   readonly mcpServerNames?: readonly string[];
   readonly osSandboxPath?: string;
+  /**
+   * True only when the launch installs the Bflow host PreToolUse hook. Claude then gets `Bash` for every role except
+   * Conversation: the hook's deny takes precedence over allow rules, so the host's tokenized allowlist is the single gate.
+   */
+  readonly hostToolGuard?: boolean;
+}
+
+/** Permission options derived from resolved host launch material (MCP server names and the PreToolUse guard hook). */
+export function hostLaunchPermissionOptions(material: {
+  readonly mcpServers: Readonly<Record<string, unknown>>;
+  readonly hooks: Readonly<Partial<Record<string, unknown>>>;
+}): Pick<PermissionCompilerOptions, "mcpServerNames" | "hostToolGuard"> {
+  return { mcpServerNames: Object.keys(material.mcpServers), hostToolGuard: material.hooks["PreToolUse"] !== undefined };
 }
 
 const PROTECTED_PATHS = [
@@ -190,11 +203,15 @@ function compileClaudePermissions(
   } else {
     tools = "Read,Glob,Grep,Edit,Write";
   }
-  // Read-only investigation roles may run git reads; dontAsk refuses every other Bash call, and the host guard re-checks each one.
-  const gitReads = tools && INVESTIGATION_ROLES.has(role) ? READ_ONLY_GIT_PATTERNS : [];
-  flags.push("--tools", gitReads.length ? `${tools},Bash` : tools);
+  // With the host PreToolUse guard, every role except Conversation gets Bash: dontAsk would refuse an unlisted call, so
+  // `Bash` is allowed and the hook (whose deny overrides allow rules) enforces the host's read-only/build allowlist.
+  // Without that hook, only investigation roles keep the narrow git read patterns as the sole gate.
+  const shellPatterns = role === "conversation" ? []
+    : options.hostToolGuard === true ? ["Bash"]
+    : tools && INVESTIGATION_ROLES.has(role) ? READ_ONLY_GIT_PATTERNS : [];
+  flags.push("--tools", shellPatterns.length ? [tools, "Bash"].filter(Boolean).join(",") : tools);
   const mcpPatterns = (options.mcpServerNames ?? []).map((name) => `mcp__${name}__*`);
-  const allowedTools = [tools, ...gitReads, ...mcpPatterns].filter(Boolean);
+  const allowedTools = [tools, ...shellPatterns, ...mcpPatterns].filter(Boolean);
   flags.push("--allowedTools", allowedTools.join(","));
 
   const disallowedList: string[] = [];

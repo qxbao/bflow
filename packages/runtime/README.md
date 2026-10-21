@@ -106,6 +106,11 @@ mới chạy lại đầy đủ validator/gate để apply một lần. Báo cá
 chữ ký binding của native host, nên không tạo lại intent đã nhận. Stop của specialist cũng được giữ riêng
 theo execution ngay khi còn uncertainty; chỉ retry khi delivery đã rõ, capacity đã release và chưa có result.
 `inspect` chỉ đọc journal, không tự restore Core hay chạy các thao tác recovery nghiệp vụ.
+Inbox `rejected` sau admission cũng giải quyết đúng native intent đã nhận và bị từ chối; không giải quyết
+nghĩa vụ trả kết quả của assignment hoặc cho phép gửi lại envelope đó. Native ingress vẫn kiểm tra đầy đủ
+envelope, kể cả array `artifact_references` và key; producer mới có thể dùng `message_id` làm key ổn định
+trước khi ghi intent. Không chuẩn hóa hoặc sửa lại intent cũ khi recovery. Retry verification tự động và
+tường minh đều giữ guard đối với native uncertainty và outbox `sending`/`unknown_delivery`.
 Watchdog phân biệt delivery `accepted`/`released`, thời điểm transport accepted và thời điểm
 run ngừng có hoạt động; thông báo chứa role/pane/task/attempt. Cảnh báo hoặc resume không
 phải bằng chứng cho phép tạo attempt mới. Stop phải khớp agent, native session và thời điểm.

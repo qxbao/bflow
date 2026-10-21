@@ -75,7 +75,6 @@ describe.skipIf(process.platform !== "linux")("Native role schemas and Conversat
     const { artifact_references: _refs, ...withoutReferences } = reply;
     await expect(coordinatorCall("send_role_message", { message: withoutReferences })).rejects.toThrow("artifact_references");
     const { idempotency_key: _key, ...withoutKey } = reply;
-    await expect(coordinatorCall("send_role_message", { message: withoutKey })).rejects.toThrow("idempotency_key");
     expect((await readdir(join(hostDirectory, "authentication-receipts"))).filter(name => name.startsWith("native-intent-"))).toEqual([]);
     const { draft } = await import("../../../specification/test/fixtures.js");
     const v2 = draft("documentation");
@@ -87,7 +86,8 @@ describe.skipIf(process.platform !== "linux")("Native role schemas and Conversat
     const native = createServer(socket => socket.once("data", () => { nativeCalls++; socket.destroy(); }));
     await new Promise<void>(accept => native.listen(join(root, "herdr.sock"), accept));
     cleanups.push(() => new Promise<void>((accept, reject) => native.close(error => error ? reject(error) : accept())));
-    await expect(coordinatorCall("send_role_message", { message: reply })).rejects.toThrow("before acknowledgement");
+    // The producer derives a stable key before writing a new intent; uncertain retries still preserve the exact envelope.
+    await expect(coordinatorCall("send_role_message", { message: withoutKey })).rejects.toThrow("before acknowledgement");
     await expect(coordinatorCall("send_role_message", { message: reply })).rejects.toThrow("uncertain");
     await expect(coordinatorCall("inspect_native_delivery", { operationId: reply.message_id })).resolves.toMatchObject({ delivery: "unknown_delivery", inbox: "absent", resendAllowed: false });
     expect(nativeCalls).toBe(1);
@@ -152,6 +152,17 @@ describe.skipIf(process.platform !== "linux")("Native role schemas and Conversat
     const { root, chat, coordinator, at } = await hostFixture();
     await expect(callHost(chat.socketPath, chat.token, "tool_guard", { paneId: "pane-chat", hook: {
       hook_event_name: "PreToolUse", session_id: "native-chat", tool_name: "mcp__bflow__conversation_decide" } })).resolves.toEqual({ permitted: true });
+    // Native shell: Codex exec_command and Claude Bash share the read-only allowlist; Conversation has no native shell.
+    const guard = (config: { socketPath: string; token: string }, paneId: string, session: string, tool: string, toolInput: unknown) =>
+      callHost(config.socketPath, config.token, "tool_guard", { paneId, hook: { hook_event_name: "PreToolUse", session_id: session, tool_name: tool, tool_input: toolInput } });
+    await expect(guard(coordinator, "pane-coordinator", "native-coordinator", "exec_command", { cmd: "rg -n 'foo|bar' packages | head -20" })).resolves.toEqual({ permitted: true });
+    await expect(guard(coordinator, "pane-coordinator", "native-coordinator", "Bash", { command: "git log --oneline -5" })).resolves.toEqual({ permitted: true });
+    await expect(guard(coordinator, "pane-coordinator", "native-coordinator", "shell", { command: ["bash", "-lc", "cat README.md"] })).resolves.toEqual({ permitted: true });
+    await expect(guard(coordinator, "pane-coordinator", "native-coordinator", "exec_command", { cmd: "cat README.md; rm -rf ." })).rejects.toThrow("';' (command chaining)");
+    await expect(guard(coordinator, "pane-coordinator", "native-coordinator", "Bash", { command: "npm test" })).rejects.toThrow("program 'npm' is not allowlisted for the coordinator role");
+    await expect(guard(coordinator, "pane-coordinator", "native-coordinator", "Edit", { file_path: "a" })).rejects.toThrow("Native mutation tool 'Edit' is unavailable for the coordinator role");
+    await expect(guard(chat, "pane-chat", "native-chat", "exec_command", { cmd: "ls" })).rejects.toThrow("Conversation has no native shell");
+    await expect(guard(chat, "pane-chat", "native-chat", "Bash", { command: "git status" })).rejects.toThrow("Conversation has no native shell");
     const prompt = "Yêu cầu workflow loại spike, sddLevel lightweight: khảo sát quyền MCP của từng role. Chỉ đọc.";
     const received = await callHost(chat.socketPath, chat.token, "user_prompt", { paneId: "pane-chat", hook: {
       hook_event_name: "UserPromptSubmit", session_id: "native-chat", prompt } }) as { messageId: string; requiresConversationDecision: boolean };

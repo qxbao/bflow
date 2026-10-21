@@ -38,7 +38,8 @@ export async function inspectNativeDelivery(receipts: Pick<HostReceiptJournal, "
   const conflict = rows.some(row => nativeMessageFingerprint(row.message) !== nativeMessageFingerprint(message));
   const inbox = conflict ? "conflicting" : rows.find(row => row.status === "applied")?.status ?? rows[0]?.status ?? "absent";
   const delivery = conflict ? "unknown_delivery" : native.status === "acknowledged" ? "acknowledged"
-    : inbox === "applied" ? "applied" : inbox === "received" ? "received" : rejection ? "rejected_before_admission" : "unknown_delivery";
+    : inbox === "applied" ? "applied" : inbox === "received" ? "received" : inbox === "rejected" ? "rejected_after_admission"
+    : rejection ? "rejected_before_admission" : "unknown_delivery";
   if (rejection && inbox !== "absent") throw new Error("Pre-admission rejection conflicts with Runtime inbox evidence");
   return { operationId, messageId: message.message_id, ...(message.run_id ? { runId: message.run_id } : {}),
     correlationId: message.correlation_id, ...(message.causation_id ? { causationId: message.causation_id } : {}),

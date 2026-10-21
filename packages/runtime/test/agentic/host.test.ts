@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { ensureAgenticHost } from "../../dist/agentic/host-controller.js";
+import { prepareRoleToolMessage } from "../../src/agentic/host.js";
 import { callHost } from "../../src/agentic/host-protocol.js";
 import { LAUNCH_REACHABILITY_DIRECTORY, readLaunchReachability } from "../../src/agentic/tool-reachability.js";
 import { openSqliteRunStore } from "@bflow/persistence";
@@ -532,5 +533,34 @@ describe.skipIf(process.platform !== "linux")("P30 platform host", () => {
     const revoked = [{ ...bootstrapReachability[0], ok: false, discoveredTools: [], code: "unauthorized" }];
     await send(revoked);
     expect((await readLaunchReachability(reachabilityDirectory, "launch-precedence"))?.reported.toolReachability).toEqual(revoked);
+  });
+});
+
+describe("send_role_message pre-transport normalization", () => {
+  const developer = { role: "developer" as const, agentId: "developer-agent", paneId: "pane-developer" };
+  const base = { schema_version: 2, message_id: "msg-1", correlation_id: "correlation-run-1", run_id: "run-1", sender: { role: "developer" },
+    recipient: { role: "coordinator" }, type: "task.status", payload: { status: "completed" }, artifact_references: [] };
+  it("fills the authenticated identity and defaults idempotency_key to message_id", () => {
+    expect(prepareRoleToolMessage(developer, base)).toMatchObject({ idempotency_key: "msg-1",
+      sender: { role: "developer", agent_id: "developer-agent", pane_id: "pane-developer" } });
+  });
+  it("keeps a supplied idempotency_key unchanged", () => {
+    expect(prepareRoleToolMessage(developer, { ...base, idempotency_key: "key-1" }).idempotency_key).toBe("key-1");
+  });
+  it("refuses a specialist addressing anything other than coordinator, even when the envelope schema allows the recipient", () => {
+    expect(() => prepareRoleToolMessage(developer, { ...base, recipient: { role: "runtime" } })).toThrow(/Specialists may address only coordinator/);
+    expect(() => prepareRoleToolMessage(developer, { ...base, recipient: { role: "reviewer" } })).toThrow(/specialist roles may only send messages to coordinator or runtime/);
+  });
+  it("refuses messages addressed to the user before transport", () => {
+    expect(() => prepareRoleToolMessage({ ...developer, role: "coordinator", agentId: "coordinator-agent", paneId: "pane-coordinator" },
+      { ...base, sender: { role: "coordinator" }, recipient: { role: "user" } })).toThrow(/user can only receive messages from conversation/);
+  });
+  it("refuses Coordinator addressing a specialist directly; Runtime owns dispatch", () => {
+    expect(() => prepareRoleToolMessage({ ...developer, role: "coordinator", agentId: "coordinator-agent", paneId: "pane-coordinator" },
+      { ...base, sender: { role: "coordinator" }, recipient: { role: "architect" } })).toThrow(/request_specialist/);
+  });
+  it("refuses approval.request from any role; only Runtime creates approvals", () => {
+    expect(() => prepareRoleToolMessage({ ...developer, role: "coordinator", agentId: "coordinator-agent", paneId: "pane-coordinator" },
+      { ...base, sender: { role: "coordinator" }, recipient: { role: "conversation" }, type: "approval.request", payload: {} })).toThrow(/Only Runtime creates approval requests/);
   });
 });

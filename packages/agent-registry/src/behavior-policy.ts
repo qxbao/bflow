@@ -546,17 +546,6 @@ export function validateHerdrRoleHandoff(message: unknown): OperationResult<Role
     return ok(parseResult.data);
   }
 
-  // Support extended notice types in inter-agent handoff while validating envelope shape
-  const allowedCustomTypes = ["escalation.notice", "task.blocked", "clarification.needed"];
-  if (allowedCustomTypes.includes(messageType)) {
-    const substituteMessage = { ...normalizedMessage, type: "verification.escalation" };
-    const substituteResult = RoleMessageSchema.safeParse(substituteMessage);
-    if (substituteResult.success) {
-      return ok({ ...substituteResult.data, type: messageType } as unknown as RoleMessage);
-    }
-    return fail(validation(`Invalid RoleMessage envelope: ${substituteResult.error.message}`));
-  }
-
   return fail(validation(`Invalid RoleMessage envelope: ${parseResult.error.message}`));
 }
 

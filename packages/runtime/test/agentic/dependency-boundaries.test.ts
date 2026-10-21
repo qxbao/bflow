@@ -1,11 +1,11 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { validateRunnerMount, validateDependencyTrees } from "../../src/agentic/behavioral-sandbox.js";
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
-async function fixture() { const root = await mkdtemp(join(tmpdir(), "bflow-dependency-boundary-")); roots.push(root); return root; }
+async function fixture() { const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-dependency-boundary-"))); roots.push(root); return root; }
 it("permits source directories named token while rejecting credential files", async () => {
   const root = await fixture(); await mkdir(join(root, "go/token"), { recursive: true });
   await writeFile(join(root, "go/token/token.go"), "package token\n");

@@ -32,7 +32,7 @@ import {
 import { createHealthCheck, executionProbeFailureDiagnostic } from "./diagnostics.js";
 import { validateProviderEnvironment } from "./environment.js";
 import { type LaunchMaterialFailure, resolveLaunchMaterial, type ResolvedLaunchMaterial } from "./launch-material.js";
-import { compileProviderPermissions } from "./permissions.js";
+import { compileProviderPermissions, hostLaunchPermissionOptions } from "./permissions.js";
 import { createProviderProcessRunner } from "./runner.js";
 import type {
   DetectedProviderCapabilities,
@@ -834,7 +834,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       capabilities,
       {
         cwd: environment.cwd,
-        mcpServerNames: Object.keys(this.resolveHostLaunchMaterial(capabilities).mcpServers),
+        ...hostLaunchPermissionOptions(this.resolveHostLaunchMaterial(capabilities)),
         ...(this.options.osSandboxPath !== undefined ? { osSandboxPath: this.options.osSandboxPath } : {})
       }
     );
@@ -1466,7 +1466,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       capabilities,
       {
         cwd: environment.cwd,
-        mcpServerNames: Object.keys(this.resolveHostLaunchMaterial(capabilities).mcpServers),
+        ...hostLaunchPermissionOptions(this.resolveHostLaunchMaterial(capabilities)),
         ...(this.options.osSandboxPath !== undefined ? { osSandboxPath: this.options.osSandboxPath } : {})
       }
     );

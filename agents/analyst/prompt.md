@@ -34,7 +34,7 @@ When finished, emit a structured result and notify Coordinator.
 - Clarify requirements by searching repository context, existing tests, and contracts. Propose and record reversible, low-risk assumptions autonomously in `assumptions` array and metadata.
 - For critical or high-impact ambiguities, conflicting requirements, or spec-changing decisions requiring human input:
   - Record open questions in `metadata.sdd.assessment.unresolvedQuestions`.
-  - Send a structured escalation to `coordinator` via Herdr (`clarification.needed` or structured escalation) and mark the task as `blocked`.
+  - Send a `task.status` RoleMessage to `coordinator` with payload status `blocked`, blockers and open questions.
   - Never ask the user directly from the specialist pane.
 - **Invariant**: Never mark a specification ready or submit for review while core human questions remain unresolved. Never guess product behavior.
 

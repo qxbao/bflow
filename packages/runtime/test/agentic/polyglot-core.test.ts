@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, mkdir, writeFile, symlink } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, symlink, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
@@ -10,7 +10,7 @@ import { probeBehavioralSandbox } from "../../src/agentic/sandbox-readiness.js";
 import { validateRunnerMount } from "../../src/agentic/behavioral-sandbox.js";
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
-async function root() { const path = await mkdtemp(join(tmpdir(), "polyglot-core-")); roots.push(path); return path; }
+async function root() { const path = await realpath(await mkdtemp(join(tmpdir(), "polyglot-core-"))); roots.push(path); return path; }
 function profile(path: string): RunnerProfile { return { id: "auto-unit", command: "auto:unit", executable: process.execPath, args: ["--test"], reporter: "node_tap", method: "unit_test", levels: ["unit"], timeoutMs: 1000, checkoutDependencyRoots: [], dependencySource: path, source: "detected" }; }
 it("pins Makefile, package scripts and runner configuration to original revision and rejects changes/additions", async () => {
   const cwd = await root();

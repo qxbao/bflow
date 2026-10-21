@@ -1657,9 +1657,11 @@ describe("@bflow/agent-providers", () => {
       });
 
       const permitted = res.value.argv[res.value.argv.indexOf("--allowedTools") + 1]!.split(",");
-      expect(permitted).toEqual(["Read", "Glob", "Grep", "Edit", "Write", "mcp__bflow__*", "mcp__gateway-dev__*"]);
+      // The installed PreToolUse hook is the shell gate, so Bash is allowed for dontAsk and checked by the host guard.
+      expect(permitted).toEqual(["Read", "Glob", "Grep", "Edit", "Write", "Bash", "mcp__bflow__*", "mcp__gateway-dev__*"]);
+      expect(res.value.argv[res.value.argv.indexOf("--tools") + 1]).toBe("Read,Glob,Grep,Edit,Write,Bash");
       const permissions = JSON.parse(await readFile(res.value.configFiles[2]!.path, "utf8")).permissions;
-      expect(permissions.allow).toEqual(["Read,Glob,Grep,Edit,Write", "mcp__bflow__*", "mcp__gateway-dev__*"]);
+      expect(permissions.allow).toEqual(["Read,Glob,Grep,Edit,Write", "Bash", "mcp__bflow__*", "mcp__gateway-dev__*"]);
 
       const settings = JSON.parse(await readFile(res.value.configFiles[2]!.path, "utf8")) as { hooks: unknown };
       const hook = (command: string) => [{ hooks: [{ type: "command", command, timeout: 30 }] }];

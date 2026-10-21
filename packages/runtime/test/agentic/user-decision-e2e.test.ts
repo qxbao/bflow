@@ -599,10 +599,21 @@ describe.skipIf(process.platform !== "linux")("Conversation notices and watchdog
     // The fixture's Developer handoff is released (pane idle) but never answered: lease release is transport capacity, not a
     // result, so the stall names that holder exactly as RunFacts/the watchdog action do (holders: ["developer"]).
     expect(stall.holders).toEqual(["developer"]);
+    // B5: the first episode only reminds that holder once through Herdr; the user is not interrupted yet.
+    expect(f.transport.sentRequests.filter(request => request.instruction.includes("result_reminder"))).toHaveLength(1);
+    expect(f.inbox.filter(message => payloadKind(message) === "developer_no_response")).toEqual([]);
+    // The holder stays silent through the next episode: Conversation hears it once, and the Coordinator resumes automatically.
+    const later = (await runtime.watchdogSnapshot(SESSION))[0]!;
+    const next = evaluateWatchdog({ now: later.lastActivityAt + 181_000, runs: [later], notices: [], panes: idle })[0] as Extract<WatchdogAction, { kind: "stalled" }>;
+    expect(next).toMatchObject({ kind: "stalled", holders: ["developer"] });
+    expect(next.episodeKey).not.toBe(stall.episodeKey);
+    await runtime.reportRunStalled(RUN, next.episodeKey);
+    await runtime.reportRunStalled(RUN, next.episodeKey);
+    await runtime.flushOutbound();
     const stalls = f.inbox.filter(message => payloadKind(message) === "developer_no_response");
     expect(stalls).toHaveLength(1);
     expect(f.inbox.filter(message => payloadKind(message) === "run_stalled")).toEqual([]);
-    expect(stalls[0]!.payload).toMatchObject({ runId: RUN, role: "developer", idleSince: new Date(facts.lastActivityAt).toISOString() });
+    expect(stalls[0]!.payload).toMatchObject({ runId: RUN, role: "developer", idleSince: new Date(later.lastActivityAt).toISOString() });
     expect((stalls[0]!.payload as { options: string[] }).options).toHaveLength(2);
   });
 
@@ -639,8 +650,9 @@ describe.skipIf(process.platform !== "linux")("Conversation notices and watchdog
     const notice = (await f.receipts.unsurfacedConversationNotices()).find(item => renderConversationNotice(item).display.includes("thiết lập runner"))!;
     const rendered = renderConversationNotice(notice);
     expect(rendered.kind).toBe("blocked");
-    expect(rendered.display).toContain("1. Coordinator tự thiết lập runner");
-    expect(rendered.display).toContain("2. Hủy run");
+    expect(rendered.display).toContain("- Coordinator tự thiết lập runner");
+    expect(rendered.display).toContain("- Hủy run");
+    expect(rendered.display).not.toContain("<số lựa chọn>");
     expect(rendered.display).not.toContain("verification.json");
 
     expect(specification).toEqual(before);

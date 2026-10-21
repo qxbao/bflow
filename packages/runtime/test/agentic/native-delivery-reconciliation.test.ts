@@ -48,6 +48,8 @@ describe("native delivery reconciliation", () => {
     const f = await fixture(), message = { ...f.message, idempotency_key: "stable" };
     await f.receipts.recordNativeIntent("operation", message);
     expect(await inspectNativeDelivery(f.receipts, "operation", [{ message, status: "received" }])).toMatchObject({ delivery: "received", inbox: "received", resendAllowed: false });
+    expect(await inspectNativeDelivery(f.receipts, "operation", [{ message, status: "rejected", reason: "Invalid payload" }]))
+      .toMatchObject({ delivery: "rejected_after_admission", inbox: "rejected", resendAllowed: false });
     expect(await inspectNativeDelivery(f.receipts, "operation", [{ message: { ...message, payload: {} }, status: "applied" }]))
       .toMatchObject({ delivery: "unknown_delivery", inbox: "conflicting", resendAllowed: false });
     expect(await inspectNativeDelivery(f.receipts, "operation", [{ message, status: "applied" }])).toMatchObject({ delivery: "applied", resendAllowed: false });

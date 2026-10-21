@@ -6,7 +6,7 @@ import { FileAgentRegistry } from "@bflow/agent-registry";
 import { ApprovalDecisionSchema, ApprovalRequestSchema, DelegationRequestSchema, PaneBindingSchema, RoleMessageSchema,
   type OperationResult, type PaneBinding, type RoleMessage } from "@bflow/contracts";
 import { AgenticJournal, digest, type JournalState, type RunRecord } from "../../src/agentic/journal.js";
-import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
+import { AdmissionRejectedError, AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import { RoleCapabilityPreflightError, type AgenticRuntimePorts, type PanePolicy } from "../../src/agentic/ports.js";
 import { isCoordinatorTrigger, parseConversationResumeRequest } from "../../src/agentic/host-receipts.js";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
@@ -92,6 +92,12 @@ async function fixture(options: { runs?: RunRecord[]; preflight?: (binding: Pane
   return { root, panes, transport, registry, journal, runtime, makeRuntime, inspect, notices, conversationNotices, flushPreflight };
 }
 
+async function exhaustSchemaAttempts(runtime: AgenticWorkflowRuntime, binding: PaneBinding, message: unknown, reason: string) {
+  let outcome;
+  for (let attempt = 0; attempt < 3; attempt++) outcome = await runtime.reportRoleToolFailure(binding, message, reason);
+  expect(outcome).toMatchObject({ attempt: 3, limit: 3, escalated: true });
+}
+
 describe("workflow liveness recovery boundaries", () => {
   it("inspects durable state without recovering Core or performing pending business work", async () => {
     const f = await fixture();
@@ -112,7 +118,7 @@ describe("workflow liveness recovery boundaries", () => {
     const reply = envelope("review-result", "run-1", { role: "coordinator" }, { type: "review.verdict", causation_id: request.message_id,
       sender: { role: binding.role, agent_id: binding.agentId, pane_id: binding.paneId },
       payload: { gateId: "review-gate", runId: "run-1", taskId: "review-task", evaluationId: "evaluation", status: "passed", findings: [], producedArtifacts: [], evaluatedAt: T0 } });
-    await f.runtime.reportRoleToolFailure(binding, { ...reply, artifact_references: undefined }, "artifact_references: Required");
+    await exhaustSchemaAttempts(f.runtime, binding, { ...reply, artifact_references: undefined }, "artifact_references: Required");
     const pending = (await f.inspect()).runs[0]!.pendingAction!;
     await f.runtime.recordNativeDeliveryIntent(reply, "review-operation");
     await expect(f.runtime.receiveHerdr(reply)).resolves.toMatchObject({ received: true, deferred: true });
@@ -140,7 +146,7 @@ describe("workflow liveness recovery boundaries", () => {
     const original = envelope("review-conflict-result", "run-1", { role: "coordinator" }, { type: "review.verdict", causation_id: request.message_id,
       sender: { role: binding.role, agent_id: binding.agentId, pane_id: binding.paneId },
       payload: { gateId: "review-gate", runId: "run-1", taskId: "review-task", evaluationId: "original-evaluation", status: "passed", findings: [], producedArtifacts: [], evaluatedAt: T0 } });
-    await f.runtime.reportRoleToolFailure(binding, { ...original, artifact_references: undefined }, "artifact_references: Required");
+    await exhaustSchemaAttempts(f.runtime, binding, { ...original, artifact_references: undefined }, "artifact_references: Required");
     const actionId = (await f.inspect()).runs[0]!.pendingAction!.actionId;
     await f.runtime.recordNativeDeliveryIntent(original, "original-operation");
     const changed = field === "payload" ? { ...original, payload: { ...original.payload as object, evaluationId: "different-evaluation" } }
@@ -174,13 +180,17 @@ describe("workflow liveness recovery boundaries", () => {
     const f = await fixture({ runs: [run("run-1", "specifying")] });
     const first = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
     await f.runtime.flushOutbound();
+    await f.runtime.reportRunStalled("run-1", "reminder-episode");
+    await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
     await f.runtime.reportRunStalled("run-1", "episode-1");
     const action = (await f.inspect()).runs[0]!.pendingAction!;
     await f.runtime.resumeBlockedRun("run-1", action.actionId);
     const retried = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
     expect(retried.message_id).toBe(first.message_id);
     await f.runtime.flushOutbound();
-    expect(f.transport.sentRequests.filter(req => req.role === "architect")).toHaveLength(1);
+    const sent = f.transport.sentRequests.filter(req => req.role === "architect").map(req => RoleMessageSchema.parse(req.context));
+    expect(sent.filter(message => message.type === "delegation.request")).toHaveLength(1);
+    expect(sent.filter(message => (message.payload as { kind?: string }).kind === "result_reminder")).toHaveLength(1);
     expect((await f.inspect()).runs[0]!.tasks).toEqual([]);
   });
 
@@ -202,7 +212,7 @@ describe("workflow liveness recovery boundaries", () => {
       sender: { role: binding.role, agent_id: binding.agentId, pane_id: binding.paneId },
       causation_id: assignment.message_id, type: "spec.draft", payload: { summary: "Findings" }
     });
-    await f.runtime.reportRoleToolFailure(binding, { ...reply, artifact_references: undefined }, "artifact_references: Required");
+    await exhaustSchemaAttempts(f.runtime, binding, { ...reply, artifact_references: undefined }, "artifact_references: Required");
     await f.runtime.reportUncertainNativeDelivery(reply, "native-result", "ACK not observed");
     const restarted = f.makeRuntime();
     await restarted.reportUncertainNativeDelivery(reply, "native-result", "ACK still not observed");
@@ -232,8 +242,10 @@ describe("workflow liveness recovery boundaries", () => {
     await f.runtime.specialistTurnStopped({ ...binding, session: { ...binding.session!, value: "other-session" } }, "architect");
     await f.runtime.specialistTurnStopped(binding, "architect", T0); // startup Stop precedes this accepted handle
     expect(await f.notices("specialist_no_response")).toEqual([]);
-    await f.runtime.reportRoleToolFailure({ ...binding, session: { ...binding.session!, value: "other-session" } },
-      { run_id: "run-1", message_id: "old-invalid-output", causation_id: first.message_id }, "artifact_references: Required");
+    const invalidBefore = (await f.inspect()).runs[0]!.invalidMessages;
+    await expect(f.runtime.reportRoleToolFailure({ ...binding, session: { ...binding.session!, value: "other-session" } },
+      { run_id: "run-1", message_id: "old-invalid-output", causation_id: first.message_id }, "artifact_references: Required")).resolves.toBeUndefined();
+    expect((await f.inspect()).runs[0]!.invalidMessages).toEqual(invalidBefore);
     expect((await f.inspect()).runs[0]!.status).toBe("specifying");
     const retried = await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []) as unknown as RoleMessage;
     expect(retried.message_id).toBe(first.message_id);
@@ -244,6 +256,8 @@ describe("workflow liveness recovery boundaries", () => {
     await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []);
     await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
     const accepted = (await f.inspect()).outbound.find(out => out.message.recipient.role === "architect")!;
+    await f.runtime.reportRunStalled("run-1", "reminder-episode");
+    await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
     await f.runtime.reportRunStalled("run-1", "episode-1");
     await f.runtime.reportRunStalled("run-1", "episode-1");
     const notices = await f.notices("run_stalled");
@@ -260,7 +274,7 @@ describe("workflow liveness recovery boundaries", () => {
     const binding = f.panes.bindings.find(pane => pane.role === "architect")!;
     const reply = envelope("late-native-result", "run-1", { role: "coordinator" }, { type: "spec.draft", causation_id: assignment.message_id,
       sender: { role: "architect", agent_id: binding.agentId, pane_id: binding.paneId }, payload: { status, summary: "Impact analysis" } });
-    await f.runtime.reportRoleToolFailure(binding, { ...reply, artifact_references: undefined }, "artifact_references: Required");
+    await exhaustSchemaAttempts(f.runtime, binding, { ...reply, artifact_references: undefined }, "artifact_references: Required");
     const actionId = (await f.inspect()).runs[0]!.pendingAction!.actionId;
     await f.runtime.recordNativeDeliveryIntent(reply, "native-late");
     await expect(f.runtime.receiveHerdr(reply)).resolves.toEqual({ accepted: true });
@@ -278,7 +292,7 @@ describe("workflow liveness recovery boundaries", () => {
     const binding = f.panes.bindings.find(pane => pane.role === "architect")!;
     const reply = envelope("crash-before-native-apply", "run-1", { role: "coordinator" }, { type: "spec.draft", causation_id: assignment.message_id,
       sender: { role: "architect", agent_id: binding.agentId, pane_id: binding.paneId }, payload: { summary: "Findings" } });
-    await f.runtime.reportRoleToolFailure(binding, { ...reply, artifact_references: undefined }, "artifact_references: Required");
+    await exhaustSchemaAttempts(f.runtime, binding, { ...reply, artifact_references: undefined }, "artifact_references: Required");
     await f.runtime.recordNativeDeliveryIntent(reply, "native-crash");
     await f.journal.exclusive(async (state, save) => { state.inbox.push({ message: reply, status: "received" }); await save(); });
     const restarted = f.makeRuntime();
@@ -294,7 +308,7 @@ describe("workflow liveness recovery boundaries", () => {
     const f = await fixture({ runs: [run("run-1", "specifying")] });
     const binding = f.panes.bindings.find(pane => pane.role === "architect")!;
     await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", []); await f.runtime.flushOutbound();
-    await f.runtime.reportRoleToolFailure(binding, { run_id: "run-1", message_id: "invalid-output" }, "artifact_references: Required");
+    await exhaustSchemaAttempts(f.runtime, binding, { run_id: "run-1", message_id: "invalid-output" }, "artifact_references: Required");
     await f.journal.exclusive(async (state, save) => { state.runs[0]!.pendingAction!.recovery = "capability_repair"; await save(); });
     const receipts = new HostReceiptJournal(join(f.root, "native-receipts"), join(f.root, "repo"), "session-1");
     const reply = envelope("native-host-only", "run-1", { role: "coordinator" }, { type: "spec.draft", sender: { role: "architect" } });
@@ -542,7 +556,7 @@ describe("workflow liveness recovery boundaries", () => {
     expect(f.transport.sentRequests.filter(request => request.instruction.includes("wake-during-approval"))).toHaveLength(1);
   });
 
-  it("does not auto-resume a blocker that merely mentions the repository and keeps the automatic budget across episodes", async () => {
+  it("does not treat a blocker that merely mentions the repository as capability repair and keeps the automatic budget across episodes", async () => {
     const f = await fixture({ runs: [run("run-1", "specifying")] });
     const coordinator = { role: "coordinator", agent_id: "coordinator-agent", pane_id: "pane-coordinator" };
     const blocked = (id: string, reason: string) => RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: "correlation-run-1",
@@ -550,7 +564,8 @@ describe("workflow liveness recovery boundaries", () => {
       artifact_references: [], occurred_at: T0, idempotency_key: id });
     await f.runtime.observeCoordinatorOutcome(blocked("free-text", "The repository has no tests for this module"));
     const manual = await f.runtime.inspect("run-1") as unknown as RunRecord;
-    expect(manual.pendingAction).toMatchObject({ recovery: "manual", resumeAttempts: 0 });
+    // A non-capability Coordinator blocker resumes automatically, but only after its backoff (none has elapsed here).
+    expect(manual.pendingAction).toMatchObject({ recovery: "auto_resume", resumeAttempts: 0 });
     expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 0 });
     // A capability blocker backed by a recorded preflight failure carries the automatic budget of the episode it follows.
     let ready = false;
@@ -698,5 +713,86 @@ describe("workflow liveness recovery boundaries", () => {
       expect(await f.runtime.inspect("run-1")).toMatchObject({ status: "escalated", supersededBy: "run-1-r2" });
       expect(f.transport.sentRequests.filter(request => request.role === "developer")).toEqual([]);
     });
+  });
+});
+
+/** An authenticated envelope without idempotency_key, as a native Architect/Analyst result can arrive from a non-conforming send. */
+function keylessEnvelope(id: string, runId = "run-1"): RoleMessage {
+  const { idempotency_key: _key, ...rest } = envelope(id, runId, { role: "coordinator" }, { sender: { role: "architect", agent_id: "architect-agent", pane_id: "pane-architect" } });
+  return rest as RoleMessage;
+}
+
+describe("inbound handoff refusals are message-intrinsic", () => {
+  it("refuses an authenticated keyless handoff once, returns the refusal to its sender and never reports it as uncertain delivery", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const keyless = keylessEnvelope("keyless-1");
+    const first = await f.runtime.receiveHerdr(keyless).then(() => undefined, (failure: unknown) => failure);
+    expect(first).toBeInstanceOf(AdmissionRejectedError);
+    expect(String(first)).toContain("task.status from architect lacks idempotency_key");
+    expect(await f.runtime.inboundRejection("keyless-1")).toContain("lacks idempotency_key");
+    let state = await f.inspect();
+    // B2: a first refusal goes back to the architect to resend; the run is not escalated and the user is not interrupted.
+    expect(state.runs.find(item => item.runId === "run-1")).toMatchObject({ status: "specifying" });
+    const feedback = state.outbound.filter(out => (out.message.payload as { kind?: string }).kind === "role_message_rejected");
+    expect(feedback).toHaveLength(1);
+    expect(feedback[0]!.message).toMatchObject({ sender: { role: "runtime" }, recipient: { role: "architect" }, causation_id: "keyless-1",
+      payload: { attempt: 1, limit: 3, errors: expect.stringContaining("lacks idempotency_key") } });
+    expect(await f.notices("workflow_blocked")).toHaveLength(0);
+    expect(await f.notices("delivery_failure")).toHaveLength(0);
+    // Redelivery gets the same deterministic refusal and is neither counted nor answered twice.
+    const again = await f.runtime.receiveHerdr(keyless).then(() => undefined, (failure: unknown) => failure);
+    expect(again).toBeInstanceOf(AdmissionRejectedError);
+    expect(String(again)).toBe(String(first));
+    state = await f.inspect();
+    expect(state.outbound.filter(out => (out.message.payload as { kind?: string }).kind === "role_message_rejected")).toHaveLength(1);
+    expect(await f.notices("workflow_blocked")).toHaveLength(0);
+    expect(await f.notices("delivery_failure")).toHaveLength(0);
+    // The third refused message for the same causation hands the run to the Coordinator automatically, with one user notice.
+    for (const id of ["keyless-2", "keyless-3"]) await f.runtime.receiveHerdr(keylessEnvelope(id)).catch(() => undefined);
+    state = await f.inspect();
+    expect(state.runs.find(item => item.runId === "run-1")).toMatchObject({ status: "escalated",
+      pendingAction: { kind: "resume_coordinator", state: "pending", recovery: "auto_resume", sourceMessageId: "keyless-3" } });
+    const blocked = await f.notices("workflow_blocked");
+    expect(blocked).toHaveLength(1);
+    const payload = blocked[0]!.message.payload as { headline: string; options: string[] };
+    expect(payload.headline).toContain("idempotency_key");
+    expect(JSON.stringify(payload.options)).not.toMatch(/pane|ready|retr/i);
+  });
+
+  it("refuses an envelope addressed to a non-Runtime recipient with its exact reason", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    const misaddressed = envelope("misaddressed-1", "run-1", { role: "developer" }, { sender: { role: "coordinator", agent_id: "coordinator-agent", pane_id: "pane-coordinator" } });
+    await expect(f.runtime.receiveHerdr(misaddressed)).rejects.toThrow("Handoff refused: task.status from coordinator was addressed to developer");
+    expect(await f.runtime.inboundRejection("misaddressed-1")).toContain("was addressed to developer");
+  });
+
+  it("keeps an unauthenticated keyless envelope a plain error that is never journaled", async () => {
+    const f = await fixture({ authenticate: async () => false, runs: [run("run-1", "specifying")] });
+    const error = await f.runtime.receiveHerdr(keylessEnvelope("forged-keyless")).then(() => undefined, (failure: unknown) => failure);
+    expect(error).not.toBeInstanceOf(AdmissionRejectedError);
+    expect(String(error)).toContain("Unauthenticated Herdr envelope");
+    const state = await f.inspect();
+    expect(state.inbox.some(item => item.message.message_id === "forged-keyless")).toBe(false);
+    expect(await f.runtime.inboundRejection("forged-keyless")).toBeUndefined();
+  });
+
+  it("does not match an unrelated keyless inbox entry when the incoming envelope has no idempotency_key", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    await f.runtime.receiveHerdr(keylessEnvelope("keyless-a")).catch(() => undefined);
+    const apply = (f.runtime as unknown as { applyAuthenticatedHerdrMessage(message: RoleMessage, requireReceived: boolean): Promise<unknown> })
+      .applyAuthenticatedHerdrMessage.bind(f.runtime);
+    const outcome = await apply(keylessEnvelope("keyless-b"), false).then(() => "applied", (failure: unknown) => String(failure));
+    expect(outcome).not.toMatch(/Conflicting inbound/);
+  });
+
+  it("surfaces a non-transport inbound failure with handoff options rather than pane-delivery options", async () => {
+    const f = await fixture({ runs: [run("run-1", "specifying")] });
+    await f.runtime.reportInboundFailure(envelope("draft-x", "run-1", { role: "coordinator" }, { sender: { role: "architect", agent_id: "architect-agent", pane_id: "pane-architect" } }),
+      "Error: Conversation host is not ready");
+    const [notice] = await f.notices("delivery_failure");
+    expect(notice).toBeDefined();
+    const options = (notice!.message.payload as { options: string[] }).options;
+    expect(JSON.stringify(options)).not.toMatch(/Check the recipient role pane/);
+    expect(options).toContain("Cancel this run");
   });
 });

@@ -135,7 +135,7 @@ async function processFixture(helperSource: string) {
   await program("slirp", `import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(join(root,"helper-pid"))},String(process.pid));${helperSource}`);
   return {root, invocation:{executable:join(root,"bwrap"),args:["--unshare-all"],env:{PATH:"/usr/bin:/bin"}}, helper:join(root,"slirp")};
 }
-it("waits for the helper readiness byte before unblocking the sandbox and reaps the helper", async () => {
+it.skipIf(process.platform !== "linux")("waits for the helper readiness byte before unblocking the sandbox and reaps the helper", async () => {
   // Match slirp's write(readyfd, "1", 1); close(readyfd), with the helper alive.
   const f=await processFixture("fs.writeSync(3,Buffer.from([0x31]));fs.closeSync(3);fs.createReadStream(null,{fd:4}).resume();");
   await runNpmWarmSandbox(f.invocation,f.helper,f.root,5000);
@@ -143,7 +143,7 @@ it("waits for the helper readiness byte before unblocking the sandbox and reaps 
   const pid=Number(await readFile(join(f.root,"helper-pid"),"utf8"));
   expect(()=>process.kill(pid,0)).toThrow();
 });
-it.each([{bytes:[0x00]}, {bytes:[0x01]}, {bytes:[0xb1]}, {bytes:[0x32]}, {bytes:[0x31, 0x31]}])("rejects malformed helper readiness bytes $bytes without releasing npm", async ({bytes}) => {
+it.skipIf(process.platform !== "linux").each([{bytes:[0x00]}, {bytes:[0x01]}, {bytes:[0xb1]}, {bytes:[0x32]}, {bytes:[0x31, 0x31]}])("rejects malformed helper readiness bytes $bytes without releasing npm", async ({bytes}) => {
   const f=await processFixture(`fs.writeSync(3,Buffer.from(${JSON.stringify(bytes)}));fs.closeSync(3);fs.createReadStream(null,{fd:4}).resume();`);
   await expect(runNpmWarmSandbox(f.invocation,f.helper,f.root,5000)).rejects.toThrow(/handshake exceeds bound|did not attest readiness/);
   await expect(readFile(join(f.root,"started"))).rejects.toMatchObject({code:"ENOENT"});
@@ -155,7 +155,7 @@ it("rejects an empty helper readiness pipe without releasing the sandbox", async
   await expect(runNpmWarmSandbox(f.invocation,f.helper,f.root,5000)).rejects.toThrow();
   await expect(readFile(join(f.root,"started"))).rejects.toMatchObject({code:"ENOENT"});
 });
-it("bounds a hung bootstrap and kills both process trees", async () => {
+it.skipIf(process.platform !== "linux")("bounds a hung bootstrap and kills both process trees", async () => {
   const f=await processFixture("setInterval(()=>{},1000);");
   await expect(runNpmWarmSandbox(f.invocation,f.helper,f.root,1000)).rejects.toThrow(/deadline/);
   const pid=Number(await readFile(join(f.root,"sandbox-pid"),"utf8"));
@@ -181,7 +181,7 @@ it.skipIf(process.platform !== "linux" || readiness.status!=="ready" || networkR
   }finally{await Promise.all([new Promise(resolve=>abstract.close(resolve)),new Promise(resolve=>tcp.close(resolve))]);}
 });
 
-it("requires actual helper capability output including disable-dns", async () => {
+it.skipIf(process.platform !== "linux")("requires actual helper capability output including disable-dns", async () => {
   const root=await realpath(await mkdtemp(join(tmpdir(),"bflow-slirp-probe-")));cleanups.push(root);
   const previous=process.env.PATH;
   try{
