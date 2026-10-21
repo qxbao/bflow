@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { DelegationRequestSchema, RoleMessageSchema, SessionManifestSchema } from "@bflow/contracts";
 import { ensureAgenticHost } from "../../dist/agentic/host-controller.js";
@@ -9,51 +10,90 @@ import { callHost } from "../../src/agentic/host-protocol.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
-describe.skipIf(process.platform !== "linux")("Conversation decisions through the real host RPC", () => {
+async function hostFixture() {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-chat-rpc-")));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  execFileSync("git", ["init", "-b", "main"], { cwd: root, stdio: "pipe" });
+  execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "-m", "fixture baseline"], { cwd: root, stdio: "pipe" });
+  const sessionId = "chat-rpc", binary = join(root, "herdr-fixture.mjs");
+  await writeFile(binary, [
+    '#!/usr/bin/env node',
+    'import { appendFileSync } from "node:fs";',
+    'import { dirname, join } from "node:path";',
+    'import { fileURLToPath } from "node:url";',
+    'const root = dirname(fileURLToPath(import.meta.url)); const args = process.argv.slice(2); const rest = args[0] === "--session" ? args.slice(2) : args;',
+    'appendFileSync(join(root,"herdr-calls.jsonl"), JSON.stringify(rest)+"\\n");',
+    'if(rest[0]==="--version") console.log("herdr test-fixture");',
+    'else if(rest[0]==="api") console.log("protocol: 22\\nschema_version: 1");',
+    'else if(rest[0]==="plugin" && rest[1]==="config-dir") console.log(join(root,"plugin"));',
+    'else if(rest[0]==="agent" && rest[1]==="get") { const conversation=rest[2]==="pane-chat"; console.log(JSON.stringify({result:{agent:{name:conversation?"chat":"coordinator",pane_id:rest[2],workspace_id:"workspace",tab_id:"tab",agent_status:"working",agent_session:{source:"herdr:claude",kind:"id",value:conversation?"native-chat":"native-coordinator"}}}})); }',
+    'else if(rest[0]==="pane" && rest[1]==="read") console.log("coordinator waiting for architect reply token=sk-ant-abcdefghijklmnopqrstuvwxyz0123456789");',
+    'else if(rest[0]==="pane") process.exitCode=1;',
+    'else console.log(JSON.stringify({running:false,socket:join(root,"herdr.sock")}));'
+  ].join("\n"), { mode: 0o700 });
+  const controller = await ensureAgenticHost({ repositoryPath: root, sessionId, herdrBinary: binary });
+  cleanups.push(async () => { await controller.quiesce(); await controller.shutdown(); });
+  const launches = await controller.prepare(), hostDirectory = join(root, ".bflow/state/host", sessionId);
+  expect(launches.roleLaunch.conversation!.systemPrompt).toContain("conversation_decide");
+  const chat = JSON.parse(await readFile(join(hostDirectory, "conversation.json"), "utf8"));
+  const coordinator = JSON.parse(await readFile(join(hostDirectory, "coordinator.json"), "utf8"));
+  const at = new Date().toISOString();
+  const manifest = SessionManifestSchema.parse({ schemaVersion: 2, sessionId, workspaceRoot: root, projectName: "chat-rpc",
+    herdrWorkspaceId: "workspace", herdrTabId: "tab", status: "up", conversationSessionId: "chat-session", activeRunIds: [],
+    attachTarget: { role: "conversation", paneId: "pane-chat" }, createdAt: at, updatedAt: at,
+    panes: ["conversation", "coordinator"].map(role => ({ schemaVersion: 2, bindingId: `binding-${role}`, sessionId, role,
+      agentId: role === "conversation" ? "chat" : "coordinator", paneId: role === "conversation" ? "pane-chat" : "pane-coordinator",
+      workspaceId: "workspace", tabId: "tab", provider: "claude", agentKind: "claude", cwd: root, permanent: true, readOnlyWorkspace: true,
+      isolationMode: "dedicated_pane", transportState: "idle", boundAt: at,
+      session: { source: "herdr:claude", kind: "id", value: role === "conversation" ? "native-chat" : "native-coordinator" } })) });
+  const manifestDirectory = join(root, ".bflow/state/panes"); await mkdir(manifestDirectory, { recursive: true });
+  await writeFile(join(manifestDirectory, `${sessionId}.manifest.json`), JSON.stringify(manifest));
+  for (const [role, config] of [["conversation", chat], ["coordinator", coordinator]] as const) {
+    const binding = manifest.panes.find(pane => pane.role === role)!;
+    await callHost(config.socketPath, config.token, "provider_started", { paneId: binding.paneId, nativeSessionId: binding.session!.value });
+    await callHost(config.socketPath, config.token, "native_session", { paneId: binding.paneId, sessionId: binding.session!.value });
+  }
+  expect(await controller.activate(manifest)).toEqual({ ok: true, value: undefined });
+  return { root, sessionId, hostDirectory, launches, chat, coordinator, at };
+}
+
+describe.skipIf(process.platform !== "linux")("Native role schemas and Conversation through the real host RPC", () => {
+  it("rejects malformed native envelopes before intent, accepts v2 assessment, and never repeats uncertain delivery", async () => {
+    const { root, sessionId, hostDirectory, launches, coordinator } = await hostFixture();
+    expect(launches.roleLaunch.architect!.systemPrompt).toContain('"artifact_references":[]');
+    expect(launches.roleLaunch.architect!.systemPrompt).toContain('"idempotency_key":"stable-reply-key"');
+    const coordinatorCall = (name: string, args: unknown) => callHost(coordinator.socketPath, coordinator.token, "role_call", { paneId: "pane-coordinator", name, arguments: args });
+    const reply = { schema_version: 2, message_id: "native-validation", correlation_id: "corr-validation", run_id: "run-validation",
+      sender: { role: "coordinator" }, recipient: { role: "runtime" }, type: "task.status", payload: {},
+      artifact_references: [], idempotency_key: "native-validation" };
+    const { artifact_references: _refs, ...withoutReferences } = reply;
+    await expect(coordinatorCall("send_role_message", { message: withoutReferences })).rejects.toThrow("artifact_references");
+    const { idempotency_key: _key, ...withoutKey } = reply;
+    await expect(coordinatorCall("send_role_message", { message: withoutKey })).rejects.toThrow("idempotency_key");
+    expect((await readdir(join(hostDirectory, "authentication-receipts"))).filter(name => name.startsWith("native-intent-"))).toEqual([]);
+    const { draft } = await import("../../../specification/test/fixtures.js");
+    const v2 = draft("documentation");
+    await expect(coordinatorCall("assess", { specification: v2 })).resolves.toMatchObject({ complexity: "trivial", clarificationRequired: false });
+    await expect(coordinatorCall("assess", { specification: { schemaVersion: "1", id: "old-id", description: "old shape", sddLevel: "lightweight", acceptanceCriteria: v2.acceptanceCriteria.map(({ status: _status, evidenceArtifactIds: _ids, ...criterion }) => criterion) } })).rejects.toThrow();
+    // A valid [] reaches native delivery. Losing its acknowledgement reserves the original operation;
+    // a repeated call must not invoke the plugin again, even after reopening the receipt journal.
+    let nativeCalls = 0;
+    const native = createServer(socket => socket.once("data", () => { nativeCalls++; socket.destroy(); }));
+    await new Promise<void>(accept => native.listen(join(root, "herdr.sock"), accept));
+    cleanups.push(() => new Promise<void>((accept, reject) => native.close(error => error ? reject(error) : accept())));
+    await expect(coordinatorCall("send_role_message", { message: reply })).rejects.toThrow("before acknowledgement");
+    await expect(coordinatorCall("send_role_message", { message: reply })).rejects.toThrow("uncertain");
+    expect(nativeCalls).toBe(1);
+    const { HostReceiptJournal } = await import("../../src/agentic/host-receipts.js");
+    const receipts = new HostReceiptJournal(join(hostDirectory, "authentication-receipts"), root, sessionId);
+    expect(await receipts.nativeDelivery(reply.message_id)).toMatchObject({ status: "unknown_delivery", message: { ...reply,
+      sender: { role: "coordinator", agent_id: "coordinator", pane_id: "pane-coordinator" } } });
+    await expect(coordinatorCall("send_role_message", { message: { ...reply, idempotency_key: "replacement-key" } })).rejects.toThrow("uncertain");
+    expect(nativeCalls).toBe(1);
+  }, 20_000);
+
   it("records raw Vietnamese input, delegates only on Chat's decision, and blocks model approvals/direct delegation", async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-chat-rpc-")));
-    cleanups.push(() => rm(root, { recursive: true, force: true }));
-    execFileSync("git", ["init", "-b", "main"], { cwd: root, stdio: "pipe" });
-    execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "-m", "fixture baseline"], { cwd: root, stdio: "pipe" });
-    const sessionId = "chat-rpc", binary = join(root, "herdr-fixture.mjs");
-    await writeFile(binary, [
-      '#!/usr/bin/env node',
-      'import { appendFileSync } from "node:fs";',
-      'import { dirname, join } from "node:path";',
-      'import { fileURLToPath } from "node:url";',
-      'const root = dirname(fileURLToPath(import.meta.url)); const args = process.argv.slice(2); const rest = args[0] === "--session" ? args.slice(2) : args;',
-      'appendFileSync(join(root,"herdr-calls.jsonl"), JSON.stringify(rest)+"\\n");',
-      'if(rest[0]==="--version") console.log("herdr test-fixture");',
-      'else if(rest[0]==="api") console.log("protocol: 22\\nschema_version: 1");',
-      'else if(rest[0]==="plugin" && rest[1]==="config-dir") console.log(join(root,"plugin"));',
-      'else if(rest[0]==="agent" && rest[1]==="get") { const conversation=rest[2]==="pane-chat"; console.log(JSON.stringify({result:{agent:{name:conversation?"chat":"coordinator",pane_id:rest[2],workspace_id:"workspace",tab_id:"tab",agent_status:"working",agent_session:{source:"herdr:claude",kind:"id",value:conversation?"native-chat":"native-coordinator"}}}})); }',
-      'else if(rest[0]==="pane" && rest[1]==="read") console.log("coordinator waiting for architect reply token=sk-ant-abcdefghijklmnopqrstuvwxyz0123456789");',
-      'else if(rest[0]==="pane") process.exitCode=1;',
-      'else console.log(JSON.stringify({running:false,socket:join(root,"herdr.sock")}));'
-    ].join("\n"), { mode: 0o700 });
-    const controller = await ensureAgenticHost({ repositoryPath: root, sessionId, herdrBinary: binary });
-    cleanups.push(async () => { await controller.quiesce(); await controller.shutdown(); });
-    const launches = await controller.prepare(), hostDirectory = join(root, ".bflow/state/host", sessionId);
-    expect(launches.roleLaunch.conversation!.systemPrompt).toContain("conversation_decide");
-    const chat = JSON.parse(await readFile(join(hostDirectory, "conversation.json"), "utf8"));
-    const coordinator = JSON.parse(await readFile(join(hostDirectory, "coordinator.json"), "utf8"));
-    const at = new Date().toISOString();
-    const manifest = SessionManifestSchema.parse({ schemaVersion: 2, sessionId, workspaceRoot: root, projectName: "chat-rpc",
-      herdrWorkspaceId: "workspace", herdrTabId: "tab", status: "up", conversationSessionId: "chat-session", activeRunIds: [],
-      attachTarget: { role: "conversation", paneId: "pane-chat" }, createdAt: at, updatedAt: at,
-      panes: ["conversation", "coordinator"].map(role => ({ schemaVersion: 2, bindingId: `binding-${role}`, sessionId, role,
-        agentId: role === "conversation" ? "chat" : "coordinator", paneId: role === "conversation" ? "pane-chat" : "pane-coordinator",
-        workspaceId: "workspace", tabId: "tab", provider: "claude", agentKind: "claude", cwd: root, permanent: true, readOnlyWorkspace: true,
-        isolationMode: "dedicated_pane", transportState: "idle", boundAt: at,
-        session: { source: "herdr:claude", kind: "id", value: role === "conversation" ? "native-chat" : "native-coordinator" } })) });
-    const manifestDirectory = join(root, ".bflow/state/panes"); await mkdir(manifestDirectory, { recursive: true });
-    await writeFile(join(manifestDirectory, `${sessionId}.manifest.json`), JSON.stringify(manifest));
-    for (const [role, config] of [["conversation", chat], ["coordinator", coordinator]] as const) {
-      const binding = manifest.panes.find(pane => pane.role === role)!;
-      await callHost(config.socketPath, config.token, "provider_started", { paneId: binding.paneId, nativeSessionId: binding.session!.value });
-      await callHost(config.socketPath, config.token, "native_session", { paneId: binding.paneId, sessionId: binding.session!.value });
-    }
-    expect(await controller.activate(manifest)).toEqual({ ok: true, value: undefined });
+    const { root, chat, coordinator, at } = await hostFixture();
     await expect(callHost(chat.socketPath, chat.token, "tool_guard", { paneId: "pane-chat", hook: {
       hook_event_name: "PreToolUse", session_id: "native-chat", tool_name: "mcp__bflow__conversation_decide" } })).resolves.toEqual({ permitted: true });
     const prompt = "Yêu cầu workflow loại spike, sddLevel lightweight: khảo sát quyền MCP của từng role. Chỉ đọc.";

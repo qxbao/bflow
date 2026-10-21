@@ -76,6 +76,20 @@ quanh một RoleMessage theo schema đã export. Nó vẫn yêu cầu đúng th�
 pane người nhận và native session trước khi có Herdr ingress đã ký; văn xuôi xung quanh,
 nhiều wrapper và envelope bị thay đổi không thể tạo handoff đáng tin cậy.
 
+Tool `send_role_message` công bố các trường của RoleMessage v2 và yêu cầu
+`artifact_references` (dùng `[]` nếu chưa có artifact đã lưu). Native ingress còn yêu cầu
+`idempotency_key` ổn định; host kiểm tra trước khi ghi native intent hoặc gọi plugin.
+Host không tự thêm mảng artifact hoặc tạo khóa cho payload thiếu trường. Prompt của role
+có ví dụ envelope đã được xác thực; `assess` và `propose_workflow` công bố các trường của
+Specification v2, kể cả criterion `status`/`evidenceArtifactIds`. Các Zod contract vẫn xác
+thực nghiêm ngặt và kiểm tra các ràng buộc giữa trường tại ingress.
+
+Native intent thiếu ACK giữ trạng thái uncertain và chặn gửi lại cùng operation.
+`reconcile_delivery` chỉ đối soát Runtime outbox; chưa có API xác nhận `not_delivered`
+cho native intent. ACK/application đến muộn có thể giải quyết trạng thái uncertain;
+`resume_run` chỉ đánh thức Coordinator, không xác nhận giao nhận hay cho phép resend.
+Các kiểm thử schema, host RPC và receipt ở đây là kiểm thử cục bộ, không phải nghiệm thu Herdr/provider live.
+
 Host tương quan bền vững các quan sát prompt/Stop của Coordinator với đúng delegation
 đó. Một lượt kết thúc mà không có phản hồi có cấu trúc tiếp theo sẽ xếp hàng một thông báo
 tắc nghẽn có tương quan tới Conversation qua Herdr outbox hiện có. Điều này

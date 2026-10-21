@@ -43,6 +43,7 @@ import { HostDevelopment } from "./host-development.js";
 import { redactString } from "../resilience/redaction.js";
 import { TaskActivityLog } from "./task-activity-log.js";
 import { TaskLogPane } from "./task-log-pane.js";
+import { nativeRoleMessageToolSchema, parseNativeRoleMessage, roleReplyGuidance, specificationToolSchema } from "./role-tool-schema.js";
 import { handleTaskLogTool, taskLogAssignmentContext } from "./task-log-tools.js";
 import { createHostPlatformSession, launchMaterial, type HostAgentObservation, type HostPlatformSession, type StartupProof } from "./host-platform.js";
 import {
@@ -193,6 +194,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     if (role === "coordinator") systemPrompt += " Use planning_reference to read the shipped specification example, policy metadata schema and workflow contract before proposing a workflow. Specialist requests can gather project details; repository files are never a mailbox.";
     if (role !== "conversation") {
       systemPrompt += " Never ask the user questions directly or wait for user responses in your pane; make and record reversible low-risk assumptions, or escalate blockers/approvals to Coordinator via Herdr (RoleMessage) and mark the task blocked. Emit structured results (status, summary, evidence, artifacts, blockers, requested_action, next_role) with verification evidence before claiming completion.";
+      systemPrompt += roleReplyGuidance(role);
     }
     launch[role] = { systemPrompt, mcpConfigFile, hooksSettingsFile };
   }
@@ -230,6 +232,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     return binding;
   };
   const nativeDeliver = async (message: RoleMessage, operationId = message.message_id) => {
+    // Enforce native ingress requirements before reserving an intent or invoking the async plugin.
+    parseNativeRoleMessage(message);
     const sender = (await principal(AgentRoleSchema.parse(message.sender.role), textField(message.sender.pane_id)));
     if (message.sender.agent_id !== sender.agentId) throw new Error("Role message sender does not match authenticated pane");
     // Runtime already refused this message; it is never typed into a pane again.
@@ -668,7 +672,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       let message: RoleMessage;
       try {
         const supplied = record(parameters.message), claimed = record(supplied.sender);
-        message = RoleMessageSchema.parse({ ...supplied, sender: { ...claimed, agent_id: claimed.agent_id ?? binding.agentId, pane_id: claimed.pane_id ?? binding.paneId } });
+        message = parseNativeRoleMessage({ ...supplied, sender: { ...claimed, agent_id: claimed.agent_id ?? binding.agentId, pane_id: claimed.pane_id ?? binding.paneId } });
       }
       catch (error) {
         await host.runtime.reportRoleToolFailure(binding, parameters.message, redactString(String(error)));
@@ -1362,7 +1366,7 @@ export function availableTools(role: AgentRole) {
   const tools = [{ name: "host_status", description: "Read the durable host scheduler status" },
     { name: "assignment_context", description: "Read assignments addressed to this authenticated pane and the accepted specification" },
     { name: "read_task_log", description: "Read bounded, redacted Runtime activity diagnostics. Specialists must pass runId and taskId from their authenticated assignment. Conversation/Coordinator may read session diagnostics. Never evidence of approval or task success." },
-    { name: "send_role_message", description: "Send a schema-valid RoleMessage through the signed native Herdr plugin; parameters: {message: RoleMessage}" }];
+    { name: "send_role_message", description: "Send a complete RoleMessage v2 through the signed native Herdr plugin. artifact_references is required (use [] without stored artifacts); native ingress requires a stable idempotency_key. Preserve correlation/run/causation. Never resend uncertain delivery." }];
   if (role === "conversation") tools.push({ name: "resume_run", description: "Ask Runtime to resume an existing blocked run only after a real explicit user resume request. Parameters: runId, messageId? (the host binds your latest trusted user turn); Runtime preserves all approval/cancellation/delivery guards." });
   if (role === "conversation") tools.push({ name: "read_role_pane", description: "Read-only snapshot of another role's recent terminal output (redacted, untrusted) to explain a stalled or blocked run; never evidence of success or approval. Parameters: role, paneId? (required when several panes share a role), lines? (1-200, default 60)." });
   if (role === "conversation") tools.push({ name: "conversation_decide", description: "Call this first on every ordinary user turn. Applies your structured intent/clarification decision to the latest trusted user turn (messageId is optional; when given it must be the hook's messageId). Never supplies human approval. Parameters: decision (workflow_request/clarify/conversation_only/status_query/cancellation_request), messageId?." });
@@ -1419,13 +1423,13 @@ export function availableTools(role: AgentRole) {
       options:{type:"array",items:{type:"string",minLength:1,maxLength:200},minItems:2,maxItems:6},
       context:{type:"string",maxLength:4000},expiresInMinutes:{type:"integer",minimum:1,maximum:1440}},required:["runId","taskId","question"]},
     inspect:{properties:{runId:string},required:[]}, report_progress:{properties:{runId:string,headline:string,questions:array},required:["runId","headline"]},
-    assess:{properties:{specification:object},required:["specification"]},
+    assess:{properties:{specification:specificationToolSchema},required:["specification"]},
     request_specialist:{properties:{runId:string,role:string,objective:string,requiredCapabilities:array},required:["runId","role","objective","requiredCapabilities"]},
-    propose_workflow:{properties:{runId:string,specification:object,definition:object,maxIterations:{type:"integer",minimum:1,maximum:10}},required:["runId","specification","definition"]},
+    propose_workflow:{properties:{runId:string,specification:specificationToolSchema,definition:object,maxIterations:{type:"integer",minimum:1,maximum:10}},required:["runId","specification","definition"]},
     reconcile_delivery:{properties:{messageId:string},required:["messageId"]}, authorize_implementation:{properties:{runId:string,taskId:string},required:["runId","taskId"]},
     accept_conflict_resolution:{properties:{runId:string,taskKey:string,resolutionCommitHash:string},required:["runId","taskKey","resolutionCommitHash"]},
     cancel:{properties:{runId:string,reason:string},required:["runId","reason"]},
-    send_role_message:{properties:{message:object},required:["message"]}, submit_implementation:{properties:{runId:string,taskId:string},required:["runId","taskId"]},
+    send_role_message:{properties:{message:nativeRoleMessageToolSchema},required:["message"]}, submit_implementation:{properties:{runId:string,taskId:string},required:["runId","taskId"]},
     inspect_review:{properties:{messageId:string},required:["messageId"]},
     complete_review:{properties:{reviewId:string,messageId:string,summary:string,criteria:{type:"array",items:{type:"object",properties:{criterionId:string,passed:{type:"boolean"},summary:string},required:["criterionId","passed","summary"],additionalProperties:false}}},required:["reviewId","messageId","summary","criteria"]},
     inspect_alternative_verification:{properties:{runId:string,taskId:string},required:["runId","taskId"]},
