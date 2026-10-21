@@ -464,7 +464,7 @@ describe("native platform profile synchronization", () => {
     put(fakeAgy, "#!/usr/bin/env bash\nexit 0\n");
     chmodSync(fakeAgy, 0o755);
     put(resolve(s.sourceHome, ".gemini/config/mcp_config.json"), '{"mcpServers":{"native":{"command":"x"}}}');
-    const result = spawnSync("/usr/bin/bash", [engine, "agy", "--name", "later", "--no-login"], {
+    const result = spawnSync("bash", [engine, "agy", "--name", "later", "--no-login"], {
       cwd: s.root,
       encoding: "utf8",
       env: {

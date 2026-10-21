@@ -57,7 +57,7 @@ exit "\${FAKE_AGY_EXIT:-0}"
 }
 
 function invoke(s: ReturnType<typeof sandbox>, ...args: string[]) {
-  return spawnSync("/usr/bin/bash", [engine, ...args], { cwd: s.root, env: s.env, encoding: "utf8" });
+  return spawnSync("bash", [engine, ...args], { cwd: s.root, env: s.env, encoding: "utf8" });
 }
 
 afterEach(() => {
