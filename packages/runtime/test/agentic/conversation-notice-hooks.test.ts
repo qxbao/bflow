@@ -131,19 +131,48 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
   });
 
   it("puts the MUST SHOW section first in the inbox nudge context", async () => {
-    const f = await fixture({ conversation_notices: { notices: [decisionNotice], undisplayed: [] } });
+    const f = await fixture({ conversation_runtime_nudge: { notices: [decisionNotice], undisplayed: [] } });
     const result = await f.invoke("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "[bflow] Có cập nhật mới từ Runtime" });
     const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
     expect(context).toContain("not a user message and not an approval");
+    expect(context).toContain("requiresConversationDecision=false");
+    expect(context).toContain("Do not call conversation_decide");
+    expect(context).toContain("do not ask the user to repeat");
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_runtime_nudge", "conversation_notices_surfaced"]);
     expect(context.indexOf("MUST SHOW TO USER VERBATIM:")).toBeLessThan(context.indexOf("Dùng schema v2"));
     expect(context.indexOf("MUST SHOW TO USER VERBATIM:")).toBeLessThan(context.indexOf("Runtime updates:"));
+  });
+
+  it("directs an explicit resume turn and its Stop reminder to the existing run", async () => {
+    const f = await fixture({ user_prompt: { messageId: "user-resume", requiresConversationDecision: true, notices: [], undisplayed: [] },
+      conversation_pending_decision: { messageId: "user-resume", content: "resume run-existing", attempt: 1 } });
+    const result = await f.invoke("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "resume run-existing" });
+    const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
+    expect(context).toContain("resume_run");
+    expect(context).toContain("conversation_only");
+    expect(context).not.toContain("Call conversation_decide first");
+    const stopped = await f.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1" });
+    const reason = JSON.parse(stopped.stdout).reason;
+    expect(reason).toContain("resume_run");
+    expect(reason).toContain("existing runId");
+    expect(reason).not.toContain("nothing reached the Coordinator");
+  });
+
+  it("requires exactly one decision for an ordinary physical user turn", async () => {
+    const f = await fixture({ user_prompt: { messageId: "user-real", requiresConversationDecision: true, notices: [], undisplayed: [] } });
+    const result = await f.invoke("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "hello" });
+    const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
+    expect(context).toContain("requiresConversationDecision=true. Call conversation_decide first");
+    expect(f.calls.map(call => call.method)).toEqual(["user_prompt"]);
   });
 
   it("shows user decisions in the user-turn context before the Conversation JSON", async () => {
     const f = await fixture({ user_prompt: { messageId: "user-1", notices: [decisionNotice], undisplayed: [] } });
     const result = await f.invoke("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "hello" });
     const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
-    expect(context.startsWith("Trusted Bflow user turn: messageId=user-1; requiresConversationDecision=false. Call conversation_decide first")).toBe(true);
+    expect(context.startsWith("Trusted Bflow user turn: messageId=user-1; requiresConversationDecision=false.")).toBe(true);
+    expect(context).not.toContain("Call conversation_decide first");
+    expect(context).toContain("Do not call conversation_decide");
     expect(context.indexOf("MUST SHOW TO USER VERBATIM:")).toBeLessThan(context.indexOf("Trusted Bflow user turn and Conversation context:"));
     expect(context).toContain("Trusted Bflow user turn and Conversation context:");
   });

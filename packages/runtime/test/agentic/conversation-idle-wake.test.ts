@@ -90,7 +90,7 @@ async function nudgeHook(receipts: HostReceiptJournal) {
       if (!input.includes("\n")) return;
       const call = JSON.parse(input.split("\n")[0]!);
       methods.push(call.method);
-      const value = call.method === "conversation_notices"
+      const value = call.method === "conversation_runtime_nudge"
         ? { notices: await receipts.unsurfacedConversationNotices(), undisplayed: await receipts.undisplayedUserFacingNotices() }
         : call.method === "conversation_notices_surfaced" ? (await receipts.markConversationNoticesSurfaced(call.params.messageIds), { recorded: true })
         : { recorded: true };
@@ -133,10 +133,11 @@ describe.skipIf(process.platform === "win32")("Idle Conversation wake-up (incide
     const hook = await nudgeHook(receipts);
     expect(hook.code).toBe(0);
     const context = JSON.parse(hook.stdout).hookSpecificOutput.additionalContext as string;
-    expect(context.startsWith("Trusted Bflow inbox nudge, not a user message and not an approval. MUST SHOW TO USER VERBATIM:")).toBe(true);
+    expect(context.startsWith("Trusted Bflow inbox nudge, not a user message and not an approval. requiresConversationDecision=false.")).toBe(true);
+    expect(context.indexOf("MUST SHOW TO USER VERBATIM:")).toBeLessThan(context.indexOf(decision.approvalId));
     expect(context).toContain(decision.approvalId);
     expect(context).toContain("Cấu hình runner unit_test thế nào?\n1. Dùng pnpm test\n2. Tạm dừng run");
-    expect(hook.methods).toEqual(["conversation_notices", "conversation_notices_surfaced"]);
+    expect(hook.methods).toEqual(["conversation_runtime_nudge", "conversation_notices_surfaced"]);
 
     // Once surfaced there is nothing left to nudge.
     state.now = 60_000;

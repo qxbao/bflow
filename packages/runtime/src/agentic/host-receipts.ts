@@ -13,7 +13,7 @@ import { redactString } from "../resilience/redaction.js";
 import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
 import { ApprovalNoticeSchema, UserDecisionNoticeSchema, approvalNoticeFields, isUserFacingNotice, renderConversationNotice, userDecisionNoticeFields } from "./conversation-notice-render.js";
 
-type Kind = "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "decision-reblock" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled";
+type Kind = "runtime-nudge" | "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "decision-reblock" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled";
 export interface HumanHookProvenance {
   origin: "UserPromptSubmit"; binding: PaneBinding; nativeSessionId: string;
   conversationSessionId: string; userId: string; messageId: string; promptDigest: string;
@@ -101,6 +101,9 @@ export class HostReceiptJournal {
         throw new Error("Conversation turn has mismatched trusted hook provenance");
       return json(turn);
     }
+    if (kind === "runtime-nudge") {
+      return json(z.object({ bindingDigest: z.string().regex(/^[0-9a-f]{64}$/), sequence: z.number().int().nonnegative() }).strict().parse(input));
+    }
     if (kind === "conversation-intent" || kind === "conversation-result") {
       const receipt = ConversationDecisionReceiptSchema.parse(input);
       if ((kind === "conversation-result") !== (receipt.result !== undefined)) throw new Error("Invalid Conversation decision receipt");
@@ -168,7 +171,8 @@ export class HostReceiptJournal {
     const payload = this.parsePayload(kind, value.payload);
     const envelope = { version: 1 as const, repository: this.repository, sessionId: this.sessionId, kind, id, payload };
     if (value.checksum !== digest(envelope)) throw new Error("Host receipt integrity mismatch");
-    if (kind.startsWith("conversation-") && record(payload).messageId !== id ||
+    if (kind === "runtime-nudge" && digest([record(payload).bindingDigest, record(payload).sequence]) !== id ||
+        kind.startsWith("conversation-") && record(payload).messageId !== id ||
         kind === "human" && ApprovalDecisionSchema.parse(record(payload).decision).approvalId !== id ||
         kind === "gate" && QualityGateResultSchema.parse(payload).evaluationId !== id ||
         kind === "evidence" && VerificationResultSchema.parse(payload).verificationId !== id ||
@@ -374,11 +378,37 @@ export class HostReceiptJournal {
     for (const id of await this.receiptIds("conversation-turn")) turns.push(TrustedConversationTurnSchema.parse(await this.read("conversation-turn", id)));
     return turns.sort((a, b) => a.sequence - b.sequence);
   }
+  private conversationBindingIdentity(binding: PaneBinding): string {
+    return digest({ ...binding, transportState: undefined, lastHeartbeatAt: undefined });
+  }
+  private async conversationNudgeBoundary(principal: PaneBinding) {
+    const binding = PaneBindingSchema.parse(principal);
+    if (binding.role !== "conversation" || binding.sessionId !== this.sessionId || !binding.session)
+      throw new Error("Only authenticated Conversation has Runtime nudge boundaries");
+    const identity = this.conversationBindingIdentity(binding);
+    const turn = (await this.conversationTurns()).filter(value => this.conversationBindingIdentity(value.binding) === identity).at(-1);
+    const sequence = turn?.sequence ?? 0;
+    return { bindingDigest: identity, sequence, id: digest([identity, sequence]) };
+  }
+  /** A private host receipt fences the previous human turn until a new physical user turn arrives; no approval or decision is created. */
+  async recordConversationRuntimeNudge(binding: PaneBinding): Promise<void> {
+    const boundary = await this.conversationNudgeBoundary(binding);
+    await this.write("runtime-nudge", boundary.id, { bindingDigest: boundary.bindingDigest, sequence: boundary.sequence });
+  }
+  async isConversationRuntimeNudge(binding: PaneBinding): Promise<boolean> {
+    const boundary = await this.conversationNudgeBoundary(binding);
+    return await this.read("runtime-nudge", boundary.id) !== undefined;
+  }
+  async assertConversationUserTurn(binding: PaneBinding): Promise<void> {
+    if (await this.isConversationRuntimeNudge(binding))
+      throw new Error("Runtime nudge requires no Conversation decision or resume. Report the supplied notices; do not ask the user to repeat.");
+  }
   /** An operational resume is a real user request, not an approval or a model-supplied provenance flag. */
   async authorizeConversationResume(binding: PaneBinding, messageId: string | undefined, runId: string): Promise<void> {
+    await this.assertConversationUserTurn(binding);
     const turn = (await this.conversationTurns()).at(-1);
     if (binding.role !== "conversation" || !turn || messageId !== undefined && turn.messageId !== messageId ||
-        this.bindingIdentity(turn.binding) !== this.bindingIdentity(binding))
+        this.conversationBindingIdentity(turn.binding) !== this.conversationBindingIdentity(binding))
       throw new Error("Resume requires the current authenticated Conversation user message");
     const request = parseConversationResumeRequest(turn.content);
     if (!request || request.runId !== undefined && request.runId !== runId)

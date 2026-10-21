@@ -2,7 +2,7 @@ import { z } from "zod";
 import { JsonValueSchema, PaneBindingSchema, type JsonValue, type PaneBinding } from "@bflow/contracts";
 import { digest, json, record } from "./journal.js";
 import { redactString } from "../resilience/redaction.js";
-import { HostReceiptJournal, type TrustedConversationTurn } from "./host-receipts.js";
+import { HostReceiptJournal, parseConversationResumeRequest, type TrustedConversationTurn } from "./host-receipts.js";
 
 interface ConversationIntakePort {
   getContext(): Promise<unknown>;
@@ -75,6 +75,9 @@ export class HostConversationIntake {
         context: await this.conversation().getContext() });
     });
   }
+  runtimeNudge(principal: PaneBinding): Promise<void> {
+    return this.exclusive(() => this.receipts.recordConversationRuntimeNudge(principal));
+  }
   /**
    * The pane's latest authenticated user turn when it still has no recorded decision. A Stop hook uses it to refuse ending the
    * turn silently: every ordinary user turn must reach conversation_decide (conversation_only is a valid decision).
@@ -83,6 +86,7 @@ export class HostConversationIntake {
     return this.exclusive(async () => {
       const binding = PaneBindingSchema.parse(principal);
       if (binding.role !== "conversation" || !binding.session) throw new Error("Only authenticated Conversation has user turns");
+      if (await this.receipts.isConversationRuntimeNudge(binding)) return undefined;
       const turn = (await this.receipts.conversationTurns()).filter(value => identity(value.binding) === identity(binding)).at(-1);
       if (!turn || await this.receipts.conversationDecision(turn.messageId) !== undefined) return undefined;
       return { messageId: turn.messageId, content: turn.content };
@@ -92,6 +96,7 @@ export class HostConversationIntake {
     return this.exclusive(async () => {
       const binding = PaneBindingSchema.parse(principal), args = DecisionCallSchema.parse(input);
       if (binding.role !== "conversation" || !binding.session) throw new Error("Only authenticated Conversation may decide user intent");
+      await this.receipts.assertConversationUserTurn(binding);
       const turns = await this.receipts.conversationTurns();
       const turn = args.messageId === undefined ? turns.filter(value => identity(value.binding) === identity(binding)).at(-1)
         : turns.find(value => value.messageId === args.messageId);
@@ -99,6 +104,8 @@ export class HostConversationIntake {
       const messageId = turn.messageId;
       if (identity(turn.binding) !== identity(binding)) throw new Error("Conversation decision pane/native session changed");
       const decision = json(await this.conversation().parseDecision(args.decision));
+      if (parseConversationResumeRequest(turn.content) && record(decision).intent === "workflow_request")
+        throw new Error("An explicit resume request must use resume_run with the existing runId, then conversation_only; preserve the existing acceptance criteria.");
       const previous = await this.receipts.conversationDecision(messageId);
       if (previous && digest(previous.decision) !== digest(decision)) throw new Error("Conflicting Conversation decision for user turn");
       if (previous?.result !== undefined) return previous.result;

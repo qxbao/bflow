@@ -54,6 +54,38 @@ describe("trusted raw turns and model decision receipts", () => {
       provenance: { origin: "user", authenticatedUser: true, userId: "human", paneId: "chat-pane", channel: "herdr_attach" },
       conversationDecision: decision }]);
   });
+  it("persists Runtime nudge boundaries without reusing previous user authorization", async () => {
+    const f = await fixture();
+    await f.intake.receive(f.binding, f.turn("user-1", "tiếp tục"));
+    const decision = { intent: "conversation_only", directReply: "Resuming" };
+    await f.intake.decide(f.binding, { decision });
+    await f.intake.runtimeNudge(f.binding);
+    const refreshed = { ...f.binding, transportState: "working" as const, lastHeartbeatAt: new Date().toISOString() };
+    await f.reopen().runtimeNudge(refreshed);
+    await expect(f.reopen().decide(refreshed, { decision })).rejects.toThrow("Runtime nudge");
+    await expect(f.reopen().decide(f.binding, { messageId: "user-1", decision })).rejects.toThrow("Runtime nudge");
+    await expect(f.journal().authorizeConversationResume(refreshed, "user-1", "run-existing")).rejects.toThrow("Runtime nudge");
+    expect(await f.reopen().pendingDecision(f.binding)).toBeUndefined();
+    expect(await f.journal().conversationTurns()).toHaveLength(1);
+    expect(await f.journal().humanDecisions()).toEqual([]);
+    expect(f.applied).toHaveLength(1);
+    await f.intake.receive(refreshed, f.turn("user-2", "tiếp tục"));
+    await expect(f.journal().authorizeConversationResume(refreshed, "user-2", "run-existing")).resolves.toBeUndefined();
+    expect(await f.reopen().pendingDecision(refreshed)).toMatchObject({ messageId: "user-2" });
+    const args = { decision: { intent: "conversation_only", directReply: "New user turn" } };
+    const result = await f.intake.decide(refreshed, args);
+    expect(await f.reopen().decide(refreshed, args)).toEqual(result);
+    expect(f.applied).toHaveLength(2);
+  });
+  it("does not demand a decision for an older undecided turn during a Runtime nudge", async () => {
+    const f = await fixture();
+    await f.intake.receive(f.binding, f.turn("user-unfinished"));
+    expect(await f.intake.pendingDecision(f.binding)).toMatchObject({ messageId: "user-unfinished" });
+    await f.intake.runtimeNudge(f.binding);
+    expect(await f.reopen().pendingDecision(f.binding)).toBeUndefined();
+    expect(await f.journal().conversationDecision("user-unfinished")).toBeUndefined();
+    expect(f.applied).toEqual([]);
+  });
   it("binds a decision without messageId to the pane's latest trusted turn and reports undecided turns", async () => {
     const f = await fixture();
     await f.intake.receive(f.binding, f.turn("user-1"));
