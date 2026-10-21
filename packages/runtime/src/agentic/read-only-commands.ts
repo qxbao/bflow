@@ -14,36 +14,52 @@ export type NativeCommandDecision = { readonly permitted: true } | { readonly pe
 export const NATIVE_SHELL_TOOLS: ReadonlySet<string> = new Set(["Bash", "exec_command", "shell", "local_shell", "shell_command"]);
 
 /** Role prompt text describing the read-only shell surface (every role except Conversation). */
-export const NATIVE_READ_GUIDANCE = "The native shell (Bash or exec_command) runs only read-only commands: rg, grep, ls, cat, head, tail, wc, tree, stat, file, find (no -exec/-delete/-fprint/-ok), sed -n with print-only scripts, and git log/show/diff/status/branch/ls-files/ls-tree/grep/rev-parse/blame/cat-file -p/describe; `|` pipes are allowed when every segment is allowlisted. Never use ; & && || $ backticks ( ) < > \\ newlines or unquoted globs, and do not read .bflow or provider credential directories. A refusal names the rejected command or token.";
+export const NATIVE_READ_GUIDANCE = "The native shell (Bash or exec_command) runs only read-only commands: rg, grep, ls, cat, head, tail, wc, tree, stat, file, find (no -exec/-delete/-fprint/-ok), sed -n with print-only scripts, and git log/show/diff/status/branch/ls-files/ls-tree/grep/rev-parse/blame/cat-file -p/describe; `|` pipes are allowed when every segment is allowlisted. Never use ; & && || backticks ( ) < > or newlines; $ \\ and glob/brace characters are accepted only inside single quotes (e.g. rg 'foo$'), and do not read .bflow or provider credential directories. A refusal names the rejected command or token.";
 
 const REFUSAL_PREFIX = "Native command refused (read-only tool allowlist)";
 const refuse = (reason: string): NativeCommandDecision => ({ permitted: false, reason: `${REFUSAL_PREFIX}: ${reason}` });
 const PERMIT: NativeCommandDecision = { permitted: true };
 
-/** Shell metacharacters that chain, background, substitute, redirect, escape or start a new line; refused even inside quotes. */
-const FORBIDDEN_CHARACTERS: readonly [string, string][] = [
+/** Shell metacharacters that chain, background, substitute, redirect, escape or start a new line. */
+const METACHARACTER_LABELS: ReadonlyMap<string, string> = new Map([
   [";", "';' (command chaining)"], ["&", "'&' (background/chaining)"], ["$", "'$' (expansion/substitution)"],
   ["`", "'`' (command substitution)"], ["(", "'(' (subshell/substitution)"], [")", "')' (subshell/substitution)"],
   ["<", "'<' (redirection)"], [">", "'>' (redirection)"], ["\\", "'\\' (escape)"], ["\n", "a newline"], ["\r", "a carriage return"]
-];
+]);
+/** Refused everywhere, even inside single quotes, where a shell would keep them literal: kept conservative on purpose. */
+const ALWAYS_FORBIDDEN = new Set([";", "&", "`", "(", ")", "<", ">", "\n", "\r"]);
+/** Still active inside double quotes (expansion, substitution, escape). Inside single quotes they are literal. */
+const DOUBLE_QUOTE_FORBIDDEN = new Set(["$", "\\"]);
 /** Unquoted characters a shell expands into other words (globs, braces, tilde, comments); quoted they are literal. */
 const UNQUOTED_EXPANSIONS = new Set(["*", "?", "[", "]", "{", "}", "~", "#", "!"]);
+const forbidden = (character: string, context: string): { error: string } =>
+  ({ error: `forbidden shell metacharacter ${METACHARACTER_LABELS.get(character)!}${context}` });
 /** Path segments of provider credentials and Bflow host state that native reads must not name. */
 const PROTECTED_SEGMENTS = new Set([".bflow", ".ssh", ".aws", ".gnupg", ".claude", ".codex", ".gemini", ".config", ".netrc", ".npmrc"]);
 
 type Tokenized = { readonly segments: readonly string[][] } | { readonly error: string };
 
-/** Splits a command into pipeline segments of quote-removed words, exactly as a POSIX shell would for this restricted grammar. */
+/**
+ * Splits a command into pipeline segments of quote-removed words, exactly as a POSIX shell would for this restricted grammar.
+ * Single quotes make `$ \ * ? [ ] { } |` literal; double quotes still refuse `$` and `\`; `; & ` ( ) < >` and line breaks
+ * are refused in every context.
+ */
 export function tokenizeCommand(command: string): Tokenized {
-  for (const [character, label] of FORBIDDEN_CHARACTERS) if (command.includes(character)) return { error: `forbidden shell metacharacter ${label}` };
   const segments: string[][] = [];
   let words: string[] = [], word = "", inWord = false, quote: "'" | '"' | undefined;
   const endWord = (): void => { if (inWord) words.push(word); word = ""; inWord = false; };
   for (const character of command) {
-    if (quote) {
-      if (character === quote) quote = undefined; else word += character;
+    if (ALWAYS_FORBIDDEN.has(character)) return forbidden(character, quote ? " (refused even inside quotes)" : "");
+    if (quote === "'") {
+      if (character === "'") quote = undefined; else word += character;
       continue;
     }
+    if (quote === '"') {
+      if (DOUBLE_QUOTE_FORBIDDEN.has(character)) return forbidden(character, " inside double quotes (use single quotes for a literal)");
+      if (character === '"') quote = undefined; else word += character;
+      continue;
+    }
+    if (METACHARACTER_LABELS.has(character)) return forbidden(character, "");
     if (character === "'" || character === '"') { quote = character; inWord = true; continue; }
     if (character === " " || character === "\t") { endWord(); continue; }
     if (character === "|") {
@@ -108,8 +124,9 @@ function checkFind(args: readonly string[]): string | undefined {
 }
 
 /** One sed command restricted to printing: optional address range, then p, =, l, or s/// with print-only flags. */
-const SED_ADDRESS = String.raw`(?:\d+(?:~\d+)?|/[^/]*/)`;
-const SED_SAFE_SCRIPT = new RegExp(`^(?:${SED_ADDRESS}(?:,(?:${SED_ADDRESS}|\\+\\d+))?)?!?(?:[p=l]|s/[^/]*/[^/]*/[gpiI0-9]*)$`);
+// Backslashes are excluded so an escaped delimiter can never shift where sed sees the command or its flags.
+const SED_ADDRESS = String.raw`(?:\d+(?:~\d+)?|\$|/[^/\\]*/)`;
+const SED_SAFE_SCRIPT = new RegExp(`^(?:${SED_ADDRESS}(?:,(?:${SED_ADDRESS}|\\+\\d+))?)?!?(?:[p=l]|s/[^/\\\\]*/[^/\\\\]*/[gpiI0-9]*)$`);
 function checkSed(args: readonly string[]): string | undefined {
   let quiet = false;
   const scripts: string[] = [], operands: string[] = [];

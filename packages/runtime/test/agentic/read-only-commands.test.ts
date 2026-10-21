@@ -46,7 +46,14 @@ describe("native read-only command allowlist", () => {
     "git describe --tags --always",
     "rg -l createRun packages | head -5",
     "git log --oneline | grep fix | wc -l",
-    "cat package.json | sed -n '1,5p'"
+    "cat package.json | sed -n '1,5p'",
+    "rg 'foo$' packages",
+    "grep -E '^a.*b' packages/runtime/src/agentic/host.ts",
+    "rg -n 'createRun\\.run' packages",
+    "rg '[A-Z]{3}?' src",
+    "find . -name '*.test.ts' -path '*agentic*'",
+    "sed -n '$p' package.json",
+    "rg '\"$x\"' src"
   ])("permits %s for every role except Conversation", command => {
     for (const role of NON_CONVERSATION) expect(permits(role, command), `${role}: ${command}`).toBe(true);
     expect(permits("conversation", command)).toBe(false);
@@ -58,7 +65,22 @@ describe("native read-only command allowlist", () => {
     ["cat a && rm b", "'&'"],
     ["cat a || rm b", "'||'"],
     ["cat $HOME/x", "'$' (expansion/substitution)"],
-    ["rg 'foo$' src", "'$'"],
+    ["rg \"foo$\" src", "'$' (expansion/substitution) inside double quotes"],
+    ["rg \"a\\b\" src", "'\\' (escape) inside double quotes"],
+    ["rg 'a'$x src", "'$' (expansion/substitution)"],
+    ["rg 'a'\\$x src", "'\\' (escape)"],
+    ["rg \"'$x'\" src", "inside double quotes"],
+    ["rg $'a' src", "'$'"],
+    ["rg 'a;b' src", "';' (command chaining) (refused even inside quotes)"],
+    ["rg 'a`id`' src", "'`' (command substitution) (refused even inside quotes)"],
+    ["rg '(a)' src", "'(' (subshell/substitution) (refused even inside quotes)"],
+    ["rg 'a>b' src", "'>' (redirection) (refused even inside quotes)"],
+    ["rg 'a\nb' src", "a newline"],
+    ["rg 'foo$ src", "unterminated quote"],
+    ["rg \"foo src", "unterminated quote"],
+    ["rg 'a'\"b src", "unterminated quote"],
+    ["rg 'a' *.ts", "unquoted shell expansion character '*'"],
+    ["ls '*'.ts *", "unquoted shell expansion character '*'"],
     ["cat `id`", "'`' (command substitution)"],
     ["cat (a)", "'(' (subshell/substitution)"],
     ["cat a)", "')'"],
@@ -105,6 +127,9 @@ describe("native read-only command allowlist", () => {
     ["sed -n '1e id' a", "not a print-only command"],
     ["sed -n -e '1p' -e 'w x' a", "not a print-only command"],
     ["sed -n -f script.sed a", "script file"],
+    ["sed -n 's/a\\/b/w x/' a", "not a print-only command"],
+    ["sed -n 's/a\\/b/p' a", "not a print-only command"],
+    ["sed -n '/a\\/p' a", "not a print-only command"],
     ["rg --pre sh foo", "rg option '--pre'"],
     ["rg --pre=./x foo", "rg option '--pre=./x'"],
     ["rg -z foo", "rg option '-z'"],
@@ -252,6 +277,11 @@ describe("native shell tool inputs", () => {
     expect(tokenizeCommand("rg 'a|b' src | head -3")).toEqual({ segments: [["rg", "a|b", "src"], ["head", "-3"]] });
     expect(tokenizeCommand("git log --out\"\"put=x")).toEqual({ segments: [["git", "log", "--output=x"]] });
     expect(tokenizeCommand("cat ''")).toEqual({ segments: [["cat", ""]] });
+    // Single quotes keep $ \ globs and braces literal; mixed quoting concatenates into one word as in a shell.
+    expect(tokenizeCommand("rg 'a$\\*{x}' src")).toEqual({ segments: [["rg", "a$\\*{x}", "src"]] });
+    expect(tokenizeCommand("rg 'a'\"b\"c src")).toEqual({ segments: [["rg", "abc", "src"]] });
+    expect(tokenizeCommand("rg \"it's\" src")).toEqual({ segments: [["rg", "it's", "src"]] });
+    expect(tokenizeCommand("rg '\"$x\"' src")).toEqual({ segments: [["rg", "\"$x\"", "src"]] });
   });
 
   it("does not rely on shell access for Coordinator or Architect repository investigation", async () => {
