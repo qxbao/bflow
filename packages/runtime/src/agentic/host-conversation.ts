@@ -63,6 +63,9 @@ export class HostConversationIntake {
       await this.receipts.recordConversationTurn(trusted);
       const saved = await this.receipts.conversationDecision(turn.messageId);
       if (saved?.result !== undefined) return this.reply(binding, { messageId: turn.messageId, requiresConversationDecision: false, result: saved.result });
+      const failed = await this.receipts.conversationApprovalFailure(turn.messageId);
+      if (failed) return this.reply(binding, { messageId: turn.messageId, requiresConversationDecision: false, approvalFailed: true,
+        approvalFailure: { error: failed.error, note: failed.note } });
       const trustedApproval = saved !== undefined && digest(saved.decision) === digest(TRUSTED_APPROVAL);
       if (saved && !trustedApproval) return this.reply(binding, { messageId: turn.messageId, requiresConversationDecision: true, decision: saved.decision });
       // This callback is executed only inside the authenticated physical-user hook. Models cannot invoke it.
@@ -112,9 +115,15 @@ export class HostConversationIntake {
       if (binding.role !== "conversation" || !binding.session) throw new Error("Only authenticated Conversation has user turns");
       if (await this.receipts.isConversationRuntimeNudge(binding)) return undefined;
       const turn = (await this.receipts.conversationTurns()).filter(value => identity(value.binding) === identity(binding)).at(-1);
-      if (turn && await this.receipts.conversationDecision(turn.messageId) === undefined &&
-          await this.receipts.conversationApprovalFailure(turn.messageId) === undefined)
-        return { messageId: turn.messageId, content: turn.content };
+      const latest = turn ? await this.receipts.conversationDecision(turn.messageId) : undefined;
+      if (turn && latest?.result === undefined) {
+        // An ordinary intent is not a committed correction/cancellation; retain its exact retry ahead of older work.
+        if (await this.receipts.conversationApprovalFailure(turn.messageId) === undefined &&
+            (!latest || digest(latest.decision) !== digest(TRUSTED_APPROVAL)))
+          return { messageId: turn.messageId, content: turn.content };
+        // A pending/failed trusted approval cannot become an ordinary decision or authorize older work.
+        return undefined;
+      }
       const recovered = (await this.recoverableTurns(binding)).find(value => value.messageId !== turn?.messageId);
       return recovered === undefined ? undefined : { messageId: recovered.messageId, content: recovered.content, requiresExplicitMessageId: true };
     });
@@ -138,12 +147,11 @@ export class HostConversationIntake {
       const previous = await this.receipts.conversationDecision(messageId);
       if (previous && digest(previous.decision) !== digest(decision)) throw new Error("Conflicting Conversation decision for user turn");
       if (previous?.result !== undefined) return previous.result;
-      if (!previous && turns.some(value => value.sequence > turn.sequence && identity(value.binding) === identity(binding))) {
+      if (turns.some(value => value.sequence > turn.sequence && identity(value.binding) === identity(binding))) {
         const latest = turns.filter(value => identity(value.binding) === identity(binding)).at(-1)!;
         const recoverable = args.messageId !== undefined && (await this.recoverableTurns(binding)).some(value => value.messageId === messageId);
-        if (!recoverable) throw new Error("Stale user turn; decide the latest trusted input");
-        if (await this.receipts.conversationDecision(latest.messageId) === undefined &&
-            await this.receipts.conversationApprovalFailure(latest.messageId) === undefined)
+        if (!previous && !recoverable) throw new Error("Stale user turn; decide the latest trusted input");
+        if ((await this.receipts.conversationDecision(latest.messageId))?.result === undefined)
           throw new Error("Decide the latest trusted input before recovering a suspended user turn; consider newer corrections or cancellation");
       }
       if (!previous) await this.conversation().validateDecision(decision);

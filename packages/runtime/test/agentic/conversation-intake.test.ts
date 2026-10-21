@@ -97,6 +97,38 @@ describe("trusted raw turns and model decision receipts", () => {
     expect(await f.reopen().pendingDecision(f.binding)).toBeUndefined();
     expect(await f.journal().humanDecisions()).toEqual([]);
   });
+  it.each([{ mode: "failed", priorIntent: false }, { mode: "queued", priorIntent: false }, { mode: "queued", priorIntent: true }] as const)(
+    "keeps the newer $mode decision ahead of an older suspended turn (prior intent: $priorIntent) until its result commits", async ({ mode, priorIntent }) => {
+    const f = await fixture();
+    const oldArgs = { messageId: "older", decision: { intent: "conversation_only", directReply: "Resolve the original with the correction" } };
+    await f.intake.receive(f.binding, f.turn("older", "Implement the original request"));
+    if (priorIntent) await f.journal().recordConversationIntent("older", oldArgs.decision);
+    await f.intake.runtimeNudge(f.binding);
+    await f.reopen().receive(f.binding, f.turn("newer", "Consider this correction before doing the old work"));
+    let ready = false;
+    f.port.handleUserTurn = async input => {
+      if ((input as { messageId: string }).messageId === "newer" && !ready) {
+        if (mode === "failed") throw new Error("Latest correction was not applied");
+        return { ok: true, value: { recognizedIntent: "conversation_only", queuedBecauseBusy: true } };
+      }
+      f.applied.push(input);
+      return { ok: true, value: { recognizedIntent: "conversation_only", queuedBecauseBusy: false } };
+    };
+    const latestArgs = { decision: { intent: "conversation_only", directReply: "Apply the current correction first" } };
+    if (mode === "failed") await expect(f.intake.decide(f.binding, latestArgs)).rejects.toThrow("Latest correction was not applied");
+    else expect(await f.intake.decide(f.binding, latestArgs)).toMatchObject({ value: { queuedBecauseBusy: true } });
+    expect(await f.journal().conversationDecision("newer")).toEqual({ decision: latestArgs.decision });
+    expect.soft(await f.reopen().pendingDecision(f.binding)).toMatchObject({ messageId: "newer" });
+    await expect(f.reopen().decide(f.binding, oldArgs)).rejects.toThrow("latest trusted input");
+    expect(f.applied).toEqual([]);
+    ready = true;
+    const current = await f.reopen().decide(f.binding, { ...latestArgs, messageId: "newer" });
+    expect(await f.reopen().decide(f.binding, latestArgs)).toEqual(current);
+    if (!priorIntent) expect(await f.reopen().pendingDecision(f.binding)).toMatchObject({ messageId: "older", requiresExplicitMessageId: true });
+    const recovered = await f.reopen().decide(f.binding, oldArgs);
+    expect(await f.reopen().decide(f.binding, oldArgs)).toEqual(recovered);
+    expect(f.applied.map(value => (value as { messageId: string }).messageId)).toEqual(["newer", "older"]);
+  });
   it("binds a decision without messageId to the pane's latest trusted turn and reports undecided turns", async () => {
     const f = await fixture();
     await f.intake.receive(f.binding, f.turn("user-1"));
@@ -164,21 +196,29 @@ describe("trusted raw turns and model decision receipts", () => {
     expect(approvalCalls).toBe(0);
     await expect(f.reopen().decide(f.binding, { messageId: "user-resume", decision })).resolves.toMatchObject({ ok: true });
   });
-  it("journals no final result for a failed trusted approval, so the same turn can be retried", async () => {
+  it("replays a failed trusted approval unchanged and requires a new physical user ID for another attempt", async () => {
     const f = await fixture(); let calls = 0;
     f.port.handleTrustedApproval = async () => ++calls === 1
       ? { ok: false, error: { code: "transport", retryable: true, message: "Herdr unavailable" } }
       : { ok: true, value: { recognizedIntent: "approval_response", queuedBecauseBusy: false } };
-    // The failure is returned as context for the provider hook (not thrown, so the hook is never silent), and nothing is recorded.
-    await expect(f.intake.receive(f.binding, f.turn("user-approve", "approve"))).resolves.toMatchObject({ approvalFailed: true,
+    // A failed hook is reportable context, not a committed approval. Replaying its physical message ID cannot retry the operation.
+    const failed = await f.intake.receive(f.binding, f.turn("user-approve", "approve"));
+    expect(failed).toMatchObject({ approvalFailed: true,
       approvalFailure: { error: expect.stringContaining("\"code\":\"transport\"") } });
     expect(await f.journal().conversationDecision("user-approve")).toBeUndefined();
     expect(await f.reopen().pendingDecision(f.binding)).toBeUndefined();
     expect(await f.reopen().pendingApprovalFailure(f.binding)).toMatchObject({ messageId: "user-approve", error: expect.stringContaining("Herdr unavailable") });
     await expect(f.reopen().decide(f.binding, { decision: { intent: "conversation_only", directReply: "Approve" } })).rejects.toThrow("Trusted approval failed");
-    await expect(f.reopen().receive(f.binding, f.turn("user-approve", "approve"))).resolves.toMatchObject({
+    expect(await f.reopen().receive(f.binding, f.turn("user-approve", "approve"))).toEqual(failed);
+    expect(await f.reopen().receive(f.binding, f.turn("user-approve", "approve"))).toEqual(failed);
+    expect(calls).toBe(1);
+    expect(await f.journal().conversationDecision("user-approve")).toBeUndefined();
+    expect(await f.journal().humanDecisions()).toEqual([]);
+    await expect(f.reopen().receive(f.binding, f.turn("user-approve-new", "approve"))).resolves.toMatchObject({
       requiresConversationDecision: false, result: { ok: true } });
-    expect(await f.journal().conversationDecision("user-approve")).toMatchObject({ decision: { intent: "trusted_approval" }, result: { ok: true } });
+    expect(await f.journal().conversationDecision("user-approve-new")).toMatchObject({ decision: { intent: "trusted_approval" }, result: { ok: true } });
+    expect(await f.reopen().receive(f.binding, f.turn("user-approve", "approve"))).toEqual(failed);
+    expect(await f.journal().conversationDecision("user-approve")).toBeUndefined();
     expect(calls).toBe(2);
     expect(await f.reopen().pendingApprovalFailure(f.binding)).toBeUndefined();
   });
@@ -295,6 +335,7 @@ describe("Chat decisions through the real Conversation facade and durable Runtim
     chat = await createAgenticConversationHost({ runtime, manifest, contextDirectory: join(f.directory, "context") });
     intake = new HostConversationIntake(f.journal(), () => chat);
     await intake.receive(f.binding, f.turn("user-newer", "Tiến độ thế nào?"));
+    await intake.decide(f.binding, { decision: { intent: "conversation_only", directReply: "Newer user input considered before replay" } });
     const recovered = await intake.decide(f.binding, { messageId: input.messageId, decision });
     expect(recovered).toMatchObject({ ok: true, value: { recognizedIntent: "workflow_request" } });
     const after = await runtime.inspect() as unknown as { outbound: unknown[] };
