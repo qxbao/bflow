@@ -157,11 +157,16 @@ describe.skipIf(process.platform === "win32")("Conversation inbox hooks", () => 
     expect(f.calls.map(call => call.method)).not.toContain("conversation_notices_surfaced");
   });
   it("answers the inbox nudge without creating a user turn", async () => {
-    const f = await fixture("conversation", "claude", { conversation_notices: { notices: [notice] } });
+    const f = await fixture("conversation", "claude", { conversation_runtime_nudge: { notices: [notice] } });
     const result = await f.invoke("UserPromptSubmit", JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: BFLOW_INBOX_NUDGE }));
     expect(result.code).toBe(0);
-    expect(f.calls.map(call => call.method)).toEqual(["conversation_notices", "conversation_notices_surfaced"]);
-    expect(JSON.parse(result.stdout).hookSpecificOutput.additionalContext).toContain("not a user message and not an approval");
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_runtime_nudge", "conversation_notices_surfaced"]);
+    const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext;
+    expect(context).toContain("not a user message and not an approval");
+    expect(context).toContain("notice-1");
+    expect(f.calls[1]!.params).toMatchObject({ messageIds: ["notice-1"], nativeSessionId: "native-1" });
+    expect(f.calls.map(call => call.method)).not.toContain("user_prompt");
+    expect(f.calls.map(call => call.method)).not.toContain("conversation_decide");
   });
   it("keeps a large Conversation turn context within the provider hook output cap", async () => {
     const messages = Array.from({ length: 20 }, (_, index) => ({ messageId: `m-${index}`, sender: "user", content: "x".repeat(900) }));

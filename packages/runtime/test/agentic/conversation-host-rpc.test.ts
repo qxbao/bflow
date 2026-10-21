@@ -142,7 +142,7 @@ describe.skipIf(process.platform !== "linux")("Native role schemas and Conversat
     expect(state.outbound).toEqual([]);
   }, 20_000);
 
-  it("records raw Vietnamese input, delegates only on Chat's decision, and blocks model approvals/direct delegation", async () => {
+  it("enforces Conversation permissions and redacted read-only pane scope", async () => {
     const { root, chat, coordinator, at } = await hostFixture();
     await expect(callHost(chat.socketPath, chat.token, "tool_guard", { paneId: "pane-chat", hook: {
       hook_event_name: "PreToolUse", session_id: "native-chat", tool_name: "mcp__bflow__conversation_decide" } })).resolves.toEqual({ permitted: true });
@@ -173,6 +173,23 @@ describe.skipIf(process.platform !== "linux")("Native role schemas and Conversat
       acceptanceCriteriaDescriptions: ["Bảng role/server/nơi cấu hình/cơ chế chặn, chỉ đọc"], isRequirementChange: false } };
     await expect(callHost(coordinator.socketPath, coordinator.token, "role_call", { paneId: "pane-coordinator", name: "conversation_decide",
       arguments: { messageId: received.messageId, decision } })).rejects.toThrow("Only Conversation");
+  }, 20_000);
+
+  it("records raw Vietnamese input and delegates/resumes exactly once on the existing run", async () => {
+    const { root, chat, coordinator, at } = await hostFixture();
+    const prompt = "Yêu cầu workflow loại spike, sddLevel lightweight: khảo sát quyền MCP của từng role. Chỉ đọc.";
+    const received = await callHost(chat.socketPath, chat.token, "user_prompt", { paneId: "pane-chat", hook: {
+      hook_event_name: "UserPromptSubmit", session_id: "native-chat", prompt } }) as { messageId: string; requiresConversationDecision: boolean };
+    expect(received.requiresConversationDecision).toBe(true);
+    const readOutbound = async (): Promise<{ message: Record<string, unknown> }[]> => {
+      try { return JSON.parse(await readFile(join(root, ".bflow/state/agentic/journal/state.json"), "utf8")).outbound; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+    };
+    expect(await readOutbound()).toEqual([]);
+    const invoke = (name: string, args: unknown) => callHost(chat.socketPath, chat.token, "role_call", { paneId: "pane-chat", name, arguments: args });
+    const decision = { intent: "workflow_request", requirementDraft: { title: "Khảo sát quyền MCP", objective: "Liệt kê quyền MCP theo từng role",
+      kind: "spike", sddLevel: "lightweight", priority: "normal", scopeDefined: true, isLargeTask: false, affectedPaths: [],
+      acceptanceCriteriaDescriptions: ["Bảng role/server/nơi cấu hình/cơ chế chặn, chỉ đọc"], isRequirementChange: false } };
     const accepted = await invoke("conversation_decide", { messageId: received.messageId, decision });
     expect(accepted).toMatchObject({ ok: true, value: { recognizedIntent: "workflow_request" } });
     expect(await invoke("conversation_decide", { messageId: received.messageId, decision })).toEqual(accepted);
