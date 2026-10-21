@@ -93,6 +93,33 @@ describe.skipIf(process.platform !== "linux")("Native role schemas and Conversat
     expect(nativeCalls).toBe(1);
   }, 20_000);
 
+  it("fences Runtime nudge tools from historical human turns and accepts the next real turn once", async () => {
+    const { root, chat, hostDirectory } = await hostFixture();
+    const invoke = (name: string, args: unknown) => callHost(chat.socketPath, chat.token, "role_call", { paneId: "pane-chat", name, arguments: args });
+    const received = await callHost(chat.socketPath, chat.token, "user_prompt", { paneId: "pane-chat", hook: {
+      hook_event_name: "UserPromptSubmit", session_id: "native-chat", prompt: "tiếp tục" } }) as { messageId: string };
+    const decision = { intent: "conversation_only", directReply: "Existing turn recorded" };
+    await invoke("conversation_decide", { decision });
+    const nudge = execFileSync(process.execPath, [fileURLToPath(new URL("../../dist/agentic/host.js", import.meta.url)),
+      "hook", join(hostDirectory, "conversation.json"), "UserPromptSubmit"], { input: JSON.stringify({ hook_event_name: "UserPromptSubmit",
+        session_id: "native-chat", prompt: "[bflow] Có cập nhật mới từ Runtime" }),
+      env: { ...process.env, HERDR_PANE_ID: "pane-chat", HERDR_SOCKET_PATH: "" }, encoding: "utf8" });
+    await expect(invoke("conversation_decide", { decision })).rejects.toThrow(/Runtime nudge/);
+    await expect(invoke("conversation_decide", { messageId: received.messageId, decision })).rejects.toThrow(/Runtime nudge/);
+    await expect(invoke("resume_run", { runId: "run-existing" })).rejects.toThrow(/Runtime nudge/);
+    await expect(callHost(chat.socketPath, chat.token, "tool_guard", { paneId: "pane-chat", hook: {
+      hook_event_name: "PreToolUse", session_id: "native-chat", tool_name: "mcp__bflow__conversation_decide" } })).rejects.toThrow(/Runtime nudge/);
+    expect(JSON.parse(nudge).hookSpecificOutput.additionalContext).toContain("requiresConversationDecision=false");
+    await callHost(chat.socketPath, chat.token, "user_prompt", { paneId: "pane-chat", hook: {
+      hook_event_name: "UserPromptSubmit", session_id: "native-chat", prompt: "Cảm ơn" } });
+    const completed = await invoke("conversation_decide", { decision });
+    expect(await invoke("conversation_decide", { decision })).toEqual(completed);
+    const { HostReceiptJournal } = await import("../../src/agentic/host-receipts.js");
+    const receipts = new HostReceiptJournal(join(hostDirectory, "authentication-receipts"), root, "chat-rpc");
+    expect(await receipts.conversationTurns()).toHaveLength(2);
+    expect(await receipts.humanDecisions()).toEqual([]);
+  }, 20_000);
+
   it("keeps an explicit user resume request out of new workflow creation", async () => {
     const { root, chat } = await hostFixture();
     await callHost(chat.socketPath, chat.token, "user_prompt", { paneId: "pane-chat", hook: {
@@ -111,7 +138,7 @@ describe.skipIf(process.platform !== "linux")("Native role schemas and Conversat
   }, 20_000);
 
   it("records raw Vietnamese input, delegates only on Chat's decision, and blocks model approvals/direct delegation", async () => {
-    const { root, chat, coordinator, at, hostDirectory } = await hostFixture();
+    const { root, chat, coordinator, at } = await hostFixture();
     await expect(callHost(chat.socketPath, chat.token, "tool_guard", { paneId: "pane-chat", hook: {
       hook_event_name: "PreToolUse", session_id: "native-chat", tool_name: "mcp__bflow__conversation_decide" } })).resolves.toEqual({ permitted: true });
     const prompt = "Yêu cầu workflow loại spike, sddLevel lightweight: khảo sát quyền MCP của từng role. Chỉ đọc.";
@@ -149,18 +176,6 @@ describe.skipIf(process.platform !== "linux")("Native role schemas and Conversat
     expect(outbound[0]!.message).toMatchObject({ sender: { role: "conversation" }, recipient: { role: "coordinator" }, type: "delegation.request",
       payload: { objective: decision.requirementDraft.objective, metadata: { codeChangesAuthorized: false } } });
     await expect(invoke("resume_run", { runId: "run-unknown", messageId: received.messageId })).rejects.toThrow(/explicit|resume request/i);
-    // A Runtime nudge starts no human turn. Even a model ignoring the hook cannot replay or replace the old user's decision.
-    const nudge = () => execFileSync(process.execPath, [fileURLToPath(new URL("../../dist/agentic/host.js", import.meta.url)),
-      "hook", join(hostDirectory, "conversation.json"), "UserPromptSubmit"], { input: JSON.stringify({ hook_event_name: "UserPromptSubmit",
-        session_id: "native-chat", prompt: "[bflow] Có cập nhật mới từ Runtime" }),
-      env: { ...process.env, HERDR_PANE_ID: "pane-chat", HERDR_SOCKET_PATH: "" }, encoding: "utf8" });
-    const context = JSON.parse(nudge()).hookSpecificOutput.additionalContext;
-    await expect(invoke("conversation_decide", { decision })).rejects.toThrow(/Runtime nudge/);
-    expect(context).toContain("requiresConversationDecision=false");
-    await expect(invoke("conversation_decide", { messageId: received.messageId, decision })).rejects.toThrow(/Runtime nudge/);
-    await expect(callHost(chat.socketPath, chat.token, "tool_guard", { paneId: "pane-chat", hook: {
-      hook_event_name: "PreToolUse", session_id: "native-chat", tool_name: "mcp__bflow__conversation_decide" } })).rejects.toThrow(/Runtime nudge/);
-    expect((await readOutbound()).filter(item => item.message.type === "delegation.request")).toHaveLength(1);
     const { AgenticJournal, digest } = await import("../../src/agentic/journal.js");
     const { availableTools } = await import("../../src/agentic/host.js");
     const admitted = DelegationRequestSchema.parse(outbound[0]!.message.payload);
@@ -179,7 +194,7 @@ describe.skipIf(process.platform !== "linux")("Native role schemas and Conversat
     }, { timeout: 10_000, interval: 25 }).toBe(true);
     await callHost(coordinator.socketPath, coordinator.token, "provider_tools_list", { paneId: "pane-coordinator",
       toolNames: availableTools("coordinator").map(tool => tool.name) });
-    await expect(invoke("resume_run", { runId: admitted.runId, messageId: received.messageId })).rejects.toThrow(/Runtime nudge/);
+    await expect(invoke("resume_run", { runId: admitted.runId, messageId: received.messageId })).rejects.toThrow(/explicit|resume request/i);
     await expect(invoke("resume_run", { runId: admitted.runId, messageId: "fabricated" })).rejects.toThrow();
     const resumeTurn = await callHost(chat.socketPath, chat.token, "user_prompt", { paneId: "pane-chat", hook: {
       hook_event_name: "UserPromptSubmit", session_id: "native-chat", prompt: "tiếp tục" } }) as { messageId: string };
@@ -191,8 +206,6 @@ describe.skipIf(process.platform !== "linux")("Native role schemas and Conversat
       .rejects.toThrow(/resume_run/);
     const completedResume = await invoke("conversation_decide", { decision: { intent: "conversation_only", directReply: "Run resumed" } });
     expect(await invoke("conversation_decide", { decision: { intent: "conversation_only", directReply: "Run resumed" } })).toEqual(completedResume);
-    nudge();
-    await expect(invoke("resume_run", { runId: admitted.runId })).rejects.toThrow(/Runtime nudge/);
     expect((await readOutbound()).filter(item => item.message.type === "delegation.request")).toHaveLength(1);
     const calls = (await readFile(join(root, "herdr-calls.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
     expect(calls.some(args => args[0] === "agent" && args[1] === "prompt")).toBe(false);
