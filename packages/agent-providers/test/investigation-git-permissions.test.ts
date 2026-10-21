@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CURRENT_PLATFORM_SCHEMA_VERSION, type AgentRole, type PermissionProfile } from "@bflow/contracts";
-import { compileProviderPermissions } from "../src/permissions.js";
+import { compileProviderPermissions, hostLaunchPermissionOptions } from "../src/permissions.js";
 import type { DetectedProviderCapabilities } from "../src/types.js";
 
 const cwd = "/work/repo";
@@ -30,7 +30,26 @@ describe("Claude permissions for read-only investigation roles", () => {
     expect(allowed.filter(tool => tool.startsWith("Bash"))).toEqual(["log", "show", "diff", "status", "branch"].map(command => `Bash(git ${command}:*)`));
     expect(allowed).not.toContain("Bash");
   });
-  it.each<AgentRole>(["tester", "developer", "conversation", "coordinator"])("gives %s no Bash", async role => {
+  it.each<AgentRole>(["coordinator", "planner", "specifier", "architect", "developer", "reviewer", "qa", "tester"])(
+    "gives %s Bash through the host PreToolUse guard", async role => {
+    const result = await compileProviderPermissions("claude", profile, role, capabilities, { cwd, mcpServerNames: ["bflow"], hostToolGuard: true });
+    expect(flag(result.flags, "--tools").split(",")).toContain("Bash");
+    const allowed = flag(result.flags, "--allowedTools").split(",");
+    expect(allowed).toContain("Bash");
+    expect(allowed.filter(tool => tool.startsWith("Bash("))).toEqual([]);
+    expect(result.allowedTools).toContain("Bash");
+    expect(flag(result.flags, "--permission-mode")).toBe("dontAsk");
+  });
+  it("never gives Conversation Bash, even with the host guard", async () => {
+    const result = await compileProviderPermissions("claude", profile, "conversation", capabilities, { cwd, mcpServerNames: ["bflow"], hostToolGuard: true });
+    expect(flag(result.flags, "--tools")).toBe("");
+    expect(flag(result.flags, "--allowedTools")).not.toContain("Bash");
+  });
+  it("derives the guard from launch material that installs PreToolUse", () => {
+    expect(hostLaunchPermissionOptions({ mcpServers: { bflow: {} }, hooks: { PreToolUse: [{}] } })).toEqual({ mcpServerNames: ["bflow"], hostToolGuard: true });
+    expect(hostLaunchPermissionOptions({ mcpServers: {}, hooks: { SessionStart: [{}] } })).toEqual({ mcpServerNames: [], hostToolGuard: false });
+  });
+  it.each<AgentRole>(["tester", "developer", "conversation", "coordinator"])("gives %s no Bash without the host guard", async role => {
     const result = await compileProviderPermissions("claude", profile, role, capabilities, { cwd });
     expect(flag(result.flags, "--tools")).not.toContain("Bash");
     expect(flag(result.flags, "--allowedTools")).not.toContain("Bash");

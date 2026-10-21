@@ -77,9 +77,61 @@ describe.skipIf(process.platform === "win32")("provider hook ingress", () => {
   ])("denies tools on malformed hook input: %s", async input => {
     const f = await fixture("developer");
     const result = await f.invoke("PreToolUse", input);
-    expect(result.code).toBe(0);
+    // Exit 2 with a stderr reason blocks in both Claude and Codex; the stdout deny stays for JSON readers.
+    expect(result.code).toBe(2);
     expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(result.stderr).toContain("Bflow PreToolUse guard denied the tool call");
     expect(f.calls).toEqual([]);
+  });
+});
+
+const hostEntry = fileURLToPath(new URL("../../dist/agentic/host.js", import.meta.url));
+async function run(command: string, args: string[], input = "{}"): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, HERDR_PANE_ID: "pane-1" } });
+  let stdout = "", stderr = "";
+  child.stdout.on("data", chunk => stdout += String(chunk));
+  child.stderr.on("data", chunk => stderr += String(chunk));
+  const done = new Promise<{ code: number | null; stdout: string; stderr: string }>((accept, reject) => {
+    child.once("error", reject); child.once("exit", code => accept({ code, stdout, stderr }));
+  });
+  child.stdin.end(input);
+  return done;
+}
+
+describe.skipIf(process.platform === "win32")("fail-closed PreToolUse hook entry", () => {
+  const tool = JSON.stringify({ hook_event_name: "PreToolUse", session_id: "native-1", tool_name: "Bash", tool_input: { command: "rm -rf ." } });
+  it.each([
+    ["a missing role configuration", async () => "/tmp/bf-hook-missing-" + process.pid + "/role.json"],
+    ["a corrupt role configuration", async () => {
+      const root = await mkdtemp("/tmp/bf-hook-bad-"); cleanup.push(() => rm(root, { recursive: true, force: true }));
+      const path = join(root, "role.json"); await writeFile(path, "{not json", { mode: 0o600 }); return path;
+    }]
+  ])("denies with exit 2 and a deny JSON on %s", async (_label, configPath) => {
+    const result = await run(process.execPath, [hostEntry, "hook", await configPath(), "PreToolUse"], tool);
+    expect(result.code).toBe(2);
+    expect(JSON.parse(result.stdout.trim()).hookSpecificOutput).toMatchObject({ hookEventName: "PreToolUse", permissionDecision: "deny" });
+    expect(result.stderr.trim()).not.toBe("");
+  });
+  it("keeps non-tool hooks on their ordinary failure status", async () => {
+    const result = await run(process.execPath, [hostEntry, "hook", "/tmp/bf-hook-missing-" + process.pid + "/role.json", "Stop"]);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+  });
+  it("maps a crashing hook process to a blocking exit 2 in the launch runner", async () => {
+    const { hookRunnerScript } = await import("../../dist/agentic/host.js");
+    const root = await mkdtemp("/tmp/bf-hook-runner-"); cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const crashing = join(root, "crash.mjs"), runner = join(root, "role.sh");
+    await writeFile(crashing, "process.exit(1);\n");
+    await writeFile(runner, hookRunnerScript(process.execPath, crashing, join(root, "role.json")), { mode: 0o700 });
+    const blocked = await run(runner, ["PreToolUse"], tool);
+    expect(blocked.code).toBe(2);
+    expect(blocked.stderr).toContain("Bflow PreToolUse guard exited with status 1; tool call denied");
+    const other = await run(runner, ["Stop"]);
+    expect(other.code).toBe(1);
+    await writeFile(crashing, "process.stdout.write('{\"ok\":1}'); process.exit(2);\n");
+    expect((await run(runner, ["PreToolUse"], tool)).code).toBe(2);
+    await writeFile(crashing, "process.exit(0);\n");
+    expect((await run(runner, ["PreToolUse"], tool)).code).toBe(0);
   });
 });
 

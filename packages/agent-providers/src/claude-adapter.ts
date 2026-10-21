@@ -3,7 +3,7 @@ import type {
   AgentProviderDescriptor
 } from "@bflow/contracts";
 import { BaseProviderAdapter } from "./base-adapter.js";
-import { compileProviderPermissions } from "./permissions.js";
+import { compileProviderPermissions, hostLaunchPermissionOptions } from "./permissions.js";
 import type {
   DetectedProviderCapabilities,
   ProviderAdapterOptions
@@ -85,7 +85,7 @@ export class ClaudeProviderAdapter extends BaseProviderAdapter {
       capabilities,
       {
         cwd: environment.cwd,
-        mcpServerNames: Object.keys(this.resolveHostLaunchMaterial(capabilities).mcpServers),
+        ...hostLaunchPermissionOptions(this.resolveHostLaunchMaterial(capabilities)),
         ...(this.options.osSandboxPath !== undefined ? { osSandboxPath: this.options.osSandboxPath } : {})
       }
     );
