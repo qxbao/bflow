@@ -137,6 +137,49 @@ describe("private durable host authentication receipts", () => {
 });
 
 describe("durable Coordinator turn observations", () => {
+  it("recovers handled stops without mistaking their acknowledgements for stop observations", async () => {
+    const f = await fixture();
+    const binding = { ...f.binding, role: "coordinator" as const, agentId: "coordinator", paneId: "coordinator-pane" };
+    const message = RoleMessageSchema.parse({ schema_version: 2, message_id: "turn", correlation_id: "correlation", run_id: "run",
+      sender: { role: "conversation" }, recipient: { role: "coordinator" }, type: "delegation.request", payload: {}, artifact_references: [], idempotency_key: "turn" });
+    await f.journal.startCoordinatorTurn(binding, message);
+    await f.journal.stopCoordinatorTurn(binding);
+    const stopped = (await f.journal.pendingCoordinatorStops())[0]!;
+    await f.journal.completeCoordinatorStop(stopped);
+
+    expect(await f.reopen().coordinatorStopObservations()).toEqual([stopped]);
+    expect(await f.reopen().pendingCoordinatorStops()).toEqual([]);
+
+    const next = { ...message, message_id: "next-turn", idempotency_key: "next-turn" };
+    await f.reopen().startCoordinatorTurn(binding, next);
+    await f.reopen().stopCoordinatorTurn(binding);
+    expect((await f.reopen().coordinatorStopObservations()).map(item => item.message.message_id)).toEqual(["turn", "next-turn"]);
+    expect((await f.reopen().pendingCoordinatorStops()).map(item => item.message.message_id)).toEqual(["next-turn"]);
+  });
+  it("rejects stop observations stored under a different canonical filename", async () => {
+    const f = await fixture();
+    const binding = { ...f.binding, role: "coordinator" as const };
+    const message = RoleMessageSchema.parse({ schema_version: 2, message_id: "turn", correlation_id: "correlation", run_id: "run",
+      sender: { role: "conversation" }, recipient: { role: "coordinator" }, type: "delegation.request", payload: {}, artifact_references: [], idempotency_key: "turn" });
+    await f.journal.startCoordinatorTurn(binding, message);
+    await f.journal.stopCoordinatorTurn(binding);
+    const name = (await readdir(f.directory)).find(name => /^coordinator-stop-[a-f0-9]{64}\.json$/.test(name))!;
+    await writeFile(join(f.directory, `coordinator-stop-${digest("other-stop")}.json`), await readFile(join(f.directory, name)), { mode: 0o600 });
+    await expect(f.reopen().coordinatorStopObservations()).rejects.toThrow("Host receipt filename identity mismatch");
+  });
+  it("rejects tampered stop observations during recovery", async () => {
+    const f = await fixture();
+    const binding = { ...f.binding, role: "coordinator" as const };
+    const message = RoleMessageSchema.parse({ schema_version: 2, message_id: "turn", correlation_id: "correlation", run_id: "run",
+      sender: { role: "conversation" }, recipient: { role: "coordinator" }, type: "delegation.request", payload: {}, artifact_references: [], idempotency_key: "turn" });
+    await f.journal.startCoordinatorTurn(binding, message);
+    await f.journal.stopCoordinatorTurn(binding);
+    const name = (await readdir(f.directory)).find(name => /^coordinator-stop-[a-f0-9]{64}\.json$/.test(name))!;
+    const path = join(f.directory, name), receipt = JSON.parse(await readFile(path, "utf8"));
+    receipt.payload.sequence += 1;
+    await writeFile(path, JSON.stringify(receipt));
+    await expect(f.reopen().coordinatorStopObservations()).rejects.toThrow("Host receipt integrity mismatch");
+  });
   it("ignores startup/foreign stops and recovers one exact stopped delegation after reopen", async () => {
     const f = await fixture();
     const binding = { ...f.binding, role: "coordinator" as const, agentId: "coordinator", paneId: "coordinator-pane" };

@@ -212,8 +212,10 @@ export class HostReceiptJournal {
   private bindingIdentity(binding: PaneBinding): string { return digest({ ...binding, transportState: undefined }); }
   private async receiptIds(kind: Kind): Promise<string[]> {
     await this.prepare(); const ids: string[] = [];
+    // Kinds can share a prefix, e.g. coordinator-stop and coordinator-stop-handled.
+    const pattern = new RegExp(`^${kind}-[a-f0-9]{64}\\.json$`);
     for (const name of await readdir(this.directory)) {
-      if (!name.startsWith(`${kind}-`) || !name.endsWith(".json")) continue;
+      if (!pattern.test(name)) continue;
       const file = await open(join(this.directory, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       let id: string;
       try { const stat = await file.stat(); if (!stat.isFile() || stat.size > 16 * 1024 * 1024) throw new Error("Unsafe host receipt file");

@@ -532,6 +532,9 @@ xác thực gate/evidence và native send intent/acknowledgement.
 Restart khôi phục các approval và receipt đáng tin cậy mà không coi dialogue đã cache
 hay việc hoàn thành transport là thẩm quyền. Đối số lease renew/release và kết quả phase
 thất bại được ghi trước các side effect, với recovery idempotent chính xác.
+Khi khôi phục Coordinator Stop, host phân biệt chính xác receipt `coordinator-stop`
+và `coordinator-stop-handled`; giữ nguyên cả hai để restart không phát lại Stop đã xử lý.
+Các kiểm tra định danh file, phạm vi session và checksum vẫn áp dụng.
 Các task notice mượn lease assignment đang hoạt động và không thể reserve/release một
 Developer slot thứ hai. Đây là các đảm bảo crash process cục bộ dưới mô hình tin cậy
 Linux/filesystem đã nêu, không phải bằng chứng fault-campaign AI live hay power-loss.
