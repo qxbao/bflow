@@ -33,6 +33,8 @@ class FakeGatewayControl implements GatewayControlPort {
   /** Fails the next list with this error without touching state. */
   failNextList: ContractError | undefined;
   listCalls = 0;
+  /** The real Gateway control answers `validation` for a registration it does not know (e.g. after its restart). */
+  unknownRevokeCode: "not_found" | "validation" = "not_found";
 
   /** Simulates a Gateway daemon restart: every registration and its bearer token is gone. */
   restart(): void {
@@ -67,7 +69,7 @@ class FakeGatewayControl implements GatewayControlPort {
       return failWith(failure);
     }
     if (!this.registrations.has(registrationId)) {
-      return failWith({ code: "not_found", retryable: false, message: "registration not found" });
+      return failWith({ code: this.unknownRevokeCode, retryable: false, message: "registration not found" });
     }
     this.registrations.delete(registrationId);
     return ok(undefined);
@@ -496,6 +498,35 @@ describe("GatewayRegistrationManager", () => {
       const verified = await gateway.verifyRegistrations(identity);
 
       expect(verified.ok && verified.value.lost).toEqual([{ registrationId: id, role: "developer", taskId: "task-1" }]);
+      expect(JSON.parse(await readLedger()).entries[id].state).toBe("lost");
+    });
+
+    it("retires lost registrations the restarted Gateway no longer lists without calling revoke", async () => {
+      const gateway = manager();
+      expect((await gateway.ensureForRole(identity, request())).ok).toBe(true);
+      expect((await gateway.ensureForRole(identity, coordinatorRequest())).ok).toBe(true);
+      const ids = [...control.registrations.keys()];
+      control.restart();
+      control.unknownRevokeCode = "validation";
+      expect((await gateway.verifyRegistrations(identity)).ok).toBe(true);
+
+      expect(await manager().revokeSession(identity)).toEqual({ ok: true, value: undefined });
+
+      expect(control.revokeCalls).toEqual([]);
+      const entries = JSON.parse(await readLedger()).entries;
+      for (const id of ids) expect(entries[id].state).toBe("revoked");
+    });
+
+    it("keeps an unconfirmed entry when the Gateway listing is uncertain", async () => {
+      const gateway = manager();
+      expect((await gateway.ensureForRole(identity, request())).ok).toBe(true);
+      const id = [...control.registrations.keys()][0] ?? "";
+      control.restart();
+      expect((await gateway.verifyRegistrations(identity)).ok).toBe(true);
+      const failure: ContractError = { code: "transport_unavailable", retryable: true, message: "gateway unreachable" };
+      control.failNextList = failure;
+
+      expect(await manager().revokeSession(identity)).toEqual({ ok: false, error: failure });
       expect(JSON.parse(await readLedger()).entries[id].state).toBe("lost");
     });
 
