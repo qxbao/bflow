@@ -1673,7 +1673,7 @@ export class ConversationGateway {
         }
       } else if (message.type === "delegation.accepted") {
         nextSessionStatus = "reporting_progress";
-        if (workflow) {
+        if (workflow && workflow.sdlcStatus !== "cancelled") {
           updatedWorkflows[correlationId] = {
             ...workflow,
             sdlcStatus: "planning",
@@ -1701,7 +1701,7 @@ export class ConversationGateway {
           const updatedWorkflow: WorkflowRequestContext = {
             ...workflow,
             sdlcStatus: safeSdlcStatus,
-            completedVerified: isExplicitlyVerifiedCompleted ? true : workflow.completedVerified,
+            completedVerified: safeSdlcStatus === "cancelled" ? false : isExplicitlyVerifiedCompleted ? true : workflow.completedVerified,
             ...(blockageReason ? { blockedReason: blockageReason } : workflow.blockedReason ? { blockedReason: workflow.blockedReason } : {}),
             ...(failureReason ? { failureReason } : workflow.failureReason ? { failureReason: workflow.failureReason } : {}),
             ...(formatted.snapshot ? { lastProgress: formatted.snapshot } : workflow.lastProgress ? { lastProgress: workflow.lastProgress } : {}),
@@ -1723,7 +1723,7 @@ export class ConversationGateway {
           }
         }
       } else if (message.type === "verification.escalation") {
-        if (workflow) {
+        if (workflow && workflow.sdlcStatus !== "cancelled") {
           updatedWorkflows[correlationId] = {
             ...workflow,
             sdlcStatus: "escalated",

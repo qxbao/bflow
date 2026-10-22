@@ -374,6 +374,12 @@ describe("Chat decides intent; Gateway validates and executes", () => {
     expect(snapshot.workflows[second.value.correlationId]?.completedVerified).toBe(false);
     expect(snapshot.workflows["corr-runtime-only"]?.runId).toBe("run-runtime-only");
     expect(snapshot.workflows["corr-foreign"]).toBeUndefined();
+    for (const [type, payload] of [["delegation.accepted", {}], ["conversation.progress", { sdlcStatus: "completed", verified: true, headline: "Late completion" }],
+      ["verification.escalation", { escalated: true }]] as const) {
+      await gateway.handleCoordinatorRoleMessage({ schema_version: 2, message_id: `late-${type}`, correlation_id: first.value.correlationId,
+        run_id: first.value.runId, sender: { role: "runtime" }, recipient: { role: "conversation" }, type, payload, artifact_references: [] });
+      expect(gateway.getContextSnapshot().workflows[first.value.correlationId]).toMatchObject({ sdlcStatus: "cancelled", completedVerified: false });
+    }
     const restored = new ConversationGateway(config);
     await restored.initializeOrRecoverSession();
     const late = await restored.handleUserTurn({ sessionId: "session-chat", content: "apr-stale: Yes", provenance: { origin: "user", authenticatedUser: true } });
