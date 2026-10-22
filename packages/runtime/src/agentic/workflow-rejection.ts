@@ -6,14 +6,16 @@ import { redactString } from "../resilience/redaction.js";
  * The options are informational text for the user. Nothing here is applied automatically.
  */
 export const WorkflowRejectionCodeSchema = z.enum(["missing_behavioral_runner", "unsupported_verification", "policy_violation",
-  "no_test_runner_detected", "runner_setup_required", "verification_sandbox_unavailable", "missing_test_paths", "missing_test_mapping", "unknown_test_command", "unsupported_method"]);
+  "no_test_runner_detected", "runner_setup_required", "verification_sandbox_unavailable", "missing_test_paths", "missing_test_mapping", "unknown_test_command", "unsupported_method",
+  "invalid_specification"]);
 export type WorkflowRejectionCode = z.infer<typeof WorkflowRejectionCodeSchema>;
 
 /**
  * Coordinator-fixable refusals: the structured error is the instruction for the Coordinator, so Conversation gets no notice.
  * Only the remaining classes (including `no_test_runner_detected`) are reported to the user.
  */
-export const AGENT_FIXABLE_REJECTIONS: readonly WorkflowRejectionCode[] = ["runner_setup_required", "missing_test_paths", "missing_test_mapping", "unknown_test_command", "unsupported_method"];
+export const AGENT_FIXABLE_REJECTIONS: readonly WorkflowRejectionCode[] = ["runner_setup_required", "missing_test_paths", "missing_test_mapping", "unknown_test_command", "unsupported_method",
+  "invalid_specification"];
 
 /** Whether Runtime should tell Conversation (and through it the user) about this refusal. */
 export function reportsToUser(rejection: WorkflowRejection): boolean {
@@ -43,11 +45,24 @@ export class WorkflowProposalRejected extends Error {
   }
 }
 
-/** Classifies a refused proposal. `phase` says which pre-check failed: project policy, or verification support. */
+/** Pre-checks of a proposal, in order: specification and definition schemas (with strategy resolution), project policy, verification support. */
+export type WorkflowProposalPhase = "specification" | "policy" | "verification";
+
+/** One line per issue with its full path, instead of the raw issue JSON whose empty path names no field. */
+function errorText(error: unknown): string {
+  if (error instanceof z.ZodError) return error.issues.map(issue => `${issue.path.length ? issue.path.join(".") : "(root)"}: ${issue.message}`).join("; ");
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Classifies a refused proposal. `phase` says which pre-check failed. */
 export function describeWorkflowRejection(input: {
-  error: unknown; phase: "policy" | "verification"; specification: unknown; configuredMethods: readonly string[];
+  error: unknown; phase: WorkflowProposalPhase; specification: unknown; configuredMethods: readonly string[];
 }): WorkflowRejection {
-  const original = redactString(input.error instanceof Error ? input.error.message : String(input.error));
+  const original = redactString(errorText(input.error));
+  // A malformed specification is the Coordinator's to correct: the reason names each invalid field.
+  if (input.phase === "specification") return { code: "invalid_specification",
+    reason: `Specification or workflow definition is not schema-valid; correct these fields and propose again: ${original}`,
+    options: ["Coordinator sửa các trường đặc tả được nêu rồi gửi lại", "Hủy run này"] };
   if (input.phase === "policy") return { code: "policy_violation", reason: `Đặc tả không đúng chính sách dự án: ${original}`,
     options: ["Coordinator sửa đặc tả theo chính sách dự án rồi gửi lại", "Hủy run này"] };
   const specification = typeof input.specification === "object" && input.specification !== null ? input.specification as Record<string, unknown> : {};
@@ -76,7 +91,7 @@ export function describeWorkflowRejection(input: {
  * Runs one pre-check of a workflow proposal. Any failure becomes a WorkflowProposalRejected carrying the structured reason.
  * The check must not mutate the specification it inspects.
  */
-export function guardWorkflowProposal(input: { phase: "policy" | "verification"; specification: unknown; configuredMethods: readonly string[];
+export function guardWorkflowProposal(input: { phase: WorkflowProposalPhase; specification: unknown; configuredMethods: readonly string[];
   check: () => void }): void {
   try { input.check(); }
   catch (error) {

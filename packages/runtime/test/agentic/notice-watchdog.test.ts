@@ -7,7 +7,8 @@ import { draft } from "../../../specification/test/fixtures.js";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
 import { renderConversationNotice } from "../../src/agentic/conversation-notice-render.js";
 import { decisionMessageId, evaluateWatchdog, type RunFacts, type WatchdogAction } from "../../src/agentic/run-watchdog.js";
-import { WorkflowProposalRejected, describeWorkflowRejection, guardWorkflowProposal } from "../../src/agentic/workflow-rejection.js";
+import { z } from "zod";
+import { WorkflowProposalRejected, describeWorkflowRejection, guardWorkflowProposal, reportsToUser } from "../../src/agentic/workflow-rejection.js";
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
@@ -49,6 +50,19 @@ describe("workflow proposal rejection", () => {
     expect(configured).not.toHaveProperty("methods");
     const manual = describeWorkflowRejection({ error: new Error("x"), phase: "verification", specification: draft("documentation"), configuredMethods: [] });
     expect(manual).not.toHaveProperty("methods");
+  });
+
+  it("returns a schema-invalid specification to the Coordinator as invalid_specification with path-qualified issues", () => {
+    const { error } = z.object({ metadata: z.object({ conditionalTdd: z.object({ taskId: z.string() }) }) }).safeParse({ metadata: {} });
+    const rejection = describeWorkflowRejection({ error, phase: "specification", specification: draft("api"), configuredMethods: [] });
+    expect(rejection.code).toBe("invalid_specification");
+    expect(rejection.reason).toContain("metadata.conditionalTdd: Required");
+    expect(rejection.reason).not.toContain("\"path\"");
+    expect(reportsToUser(rejection)).toBe(false);
+    const plain = describeWorkflowRejection({ error: new Error("Invalid Specification.metadata.conditionalTdd assessment."), phase: "specification",
+      specification: draft("api"), configuredMethods: ["unit_test"] });
+    expect(plain).toMatchObject({ code: "invalid_specification" });
+    expect(plain.reason).toContain("metadata.conditionalTdd");
   });
 
   it("reports project policy failures as policy_violation", () => {

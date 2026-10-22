@@ -181,6 +181,9 @@ describe("Bflow Agent Behavioral Policies & Autonomous Non-User-Facing Execution
       expect(chatPrompt).toContain('metadata.kind: "user_decision"');
       expect(chatPrompt).toMatch(/Chuyển tiếp câu hỏi quyết định/);
       expect(chatPrompt).toMatch(/tuyệt đối không tự chọn lựa chọn mặc định/);
+      // The pane shows only assistant text: a directReply that is never written out is invisible to the user.
+      expect(chatPrompt).toMatch(/không thấy tham số hay kết quả tool/);
+      expect(chatPrompt).toMatch(/Không bịa nguyên nhân lỗi/);
     });
 
     it("verifies role-specific invariant policies across non-chat roles", async () => {

@@ -163,6 +163,11 @@ deadline, split the implementation into dependency-ordered tasks per runner/veri
 cannot be fixed by you (you must not change `verificationMethod`); report it to the
 user through Conversation instead. If `runner_setup_required` occurs for an unsupported
 ecosystem, schedule a reviewed setup task for that runner.
+`invalid_specification` lists every invalid field by its full path (for example
+`metadata.conditionalTdd: Required`): add or correct exactly those fields and propose
+again. `metadata.sdd` and `metadata.conditionalTdd` are separate required objects; copy
+the `conditionalTdd` shape from the `planning_reference` specification template. Never
+resubmit an unchanged proposal after the same rejection.
 A rejection with code `no_test_runner_detected` has already been shown to the user
 with its options. You may add one setup task that installs and configures the test
 runner (vitest 2.x or node --test) before the main task and propose again; ask the

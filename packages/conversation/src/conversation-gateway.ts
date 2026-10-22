@@ -27,7 +27,7 @@ import {
 import { HerdrConversationBridge } from "./herdr-bridge.js";
 import { classifyUserIntent } from "./intent-classifier.js";
 import { resolveChatDecision } from "./chat-decision.js";
-import { closeClarificationsForApproval, expireStaleClarifications } from "./clarification-lifecycle.js";
+import { closeClarificationsForApproval, closeSettledApprovalClarifications, expireStaleClarifications } from "./clarification-lifecycle.js";
 import { closedApprovalNotice, isTerminalRunStatus, supersededApprovals } from "./approval-lifecycle.js";
 import {
   isUserDecisionRequest,
@@ -254,6 +254,9 @@ export class ConversationGateway {
     if (loadResult.value !== null) {
       this.snapshot = loadResult.value;
       this.config.bridge.restoreDeliveryRecords(this.snapshot.deliveryRecords);
+      // Questions about approvals that were decided or closed are answered; recovering them would re-ask a settled decision.
+      const settled = closeSettledApprovalClarifications(this.snapshot, this.getNow());
+      if (settled !== this.snapshot) return this.persistUpdatedSnapshot(settled);
       return { ok: true, value: this.snapshot };
     }
 
@@ -563,8 +566,8 @@ export class ConversationGateway {
         };
       }
 
-      // Clarifications idle past their TTL are closed before any reply can be matched to them.
-      const unexpired = expireStaleClarifications(this.snapshot!, now);
+      // Clarifications idle past their TTL, or about an already settled approval, are closed before any reply can be matched to them.
+      const unexpired = closeSettledApprovalClarifications(expireStaleClarifications(this.snapshot!, now), now);
       if (unexpired !== this.snapshot) {
         const pruned = await this.persistUpdatedSnapshot(unexpired);
         if (!pruned.ok) return pruned;
