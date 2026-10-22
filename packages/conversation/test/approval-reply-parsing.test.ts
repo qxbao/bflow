@@ -7,6 +7,7 @@ import {
   MockHerdrAgentTransport,
   classifyTrustedApprovalReply,
   closeClarificationsForApproval,
+  closeSettledApprovalClarifications,
   explainUnrecordedApprovalReply,
   type ConversationContextSnapshot,
   type PendingClarificationContext,
@@ -193,5 +194,64 @@ describe("clarifications about a decided approval", () => {
     const after = second.getContextSnapshot();
     expect(after.pendingClarifications["corr-stale"]).toBeUndefined();
     expect(after.session.unresolvedQuestions.join("\n")).not.toContain(APR_B);
+  });
+
+  it("closes clarifications about approvals that were already decided or closed, and keeps those about pending ones", () => {
+    const decided = clarification("corr-decided", APR_B, `Bạn mới gửi mã ${APR_B} mà chưa kèm số lựa chọn.`);
+    const closedOne = clarification("corr-closed", "Hỏi lại", `Bạn chọn gì cho ${DESIGN}?`);
+    const pending = clarification("corr-pending", APR_A, `Bạn chọn gì cho ${APR_A}?`);
+    const base = contextWith(userDecision(APR_A));
+    const snapshot = { ...base,
+      approvalDecisions: { [APR_B]: { approvalId: APR_B, decision: "approved" } },
+      closedApprovals: { [DESIGN]: { approvalId: DESIGN, runId: "run-1", status: "expired", reason: "run ended", closedAt: "2026-10-22T00:00:00.000Z" } },
+      pendingClarifications: { [decided.correlationId]: decided, [closedOne.correlationId]: closedOne, [pending.correlationId]: pending },
+      session: { ...base.session, status: "awaiting_user_clarification",
+        unresolvedQuestions: [...decided.unresolvedQuestions, ...closedOne.unresolvedQuestions, ...pending.unresolvedQuestions] } } as unknown as ConversationContextSnapshot;
+    const pruned = closeSettledApprovalClarifications(snapshot, "2026-10-22T01:00:00.000Z");
+    expect(Object.keys(pruned.pendingClarifications)).toEqual(["corr-pending"]);
+    expect(pruned.session.unresolvedQuestions).toEqual(pending.unresolvedQuestions);
+    expect(closeSettledApprovalClarifications(pruned, "2026-10-22T02:00:00.000Z")).toBe(pruned);
+  });
+
+  it("drops a clarification persisted before its approval was decided when the session is recovered", async () => {
+    const store = new InMemoryConversationContextStore();
+    const gateway = () => new ConversationGateway({
+      sessionId: SESSION_ID, herdrSessionId: `herdr-${SESSION_ID}`, conversationAgentId: "chat", paneId: "pane-chat",
+      bridge: new HerdrConversationBridge({ transport: new MockHerdrAgentTransport(), sessionId: SESSION_ID, conversationAgentId: "chat",
+        conversationPaneId: "pane-chat", coordinatorTarget: { transport: "herdr", agentId: "coordinator", paneId: "pane-coordinator" } }),
+      contextStore: store
+    });
+    const first = gateway();
+    await first.initializeOrRecoverSession();
+    const start = await first.handleUserTurn({ sessionId: SESSION_ID, content: "Triển khai lưu trữ trong packages/storage",
+      provenance: { origin: "user", authenticatedUser: true } });
+    if (!start.ok) throw new Error(start.error.message);
+    const request = userDecision(APR_B);
+    const prompted = await first.handleCoordinatorRoleMessage({
+      schema_version: 2, message_id: `decision-${APR_B}`, correlation_id: start.value.correlationId, run_id: request.runId,
+      sender: { role: "runtime", agent_id: "runtime" }, recipient: { role: "conversation", agent_id: "chat", pane_id: "pane-chat" },
+      type: "approval.request", payload: JSON.parse(JSON.stringify(request)) as unknown, artifact_references: []
+    } as RoleMessage);
+    if (!prompted.ok) throw new Error(prompted.error.message);
+    const reply = await first.handleUserTurn({ sessionId: SESSION_ID, messageId: "human-reply", content: `${APR_B}: 1`,
+      provenance: { origin: "user", authenticatedUser: true } });
+    if (!reply.ok) throw new Error(reply.error.message);
+    // State written by a version that did not close clarifications on decision: the question outlives its decided approval.
+    const stale = clarification("corr-stale", APR_B, `Bạn mới gửi mã ${APR_B} mà chưa kèm số lựa chọn.`);
+    const snapshot = first.getContextSnapshot();
+    expect(snapshot.approvalDecisions[APR_B]).toBeDefined();
+    const saved = await store.save({ ...snapshot, pendingClarifications: { ...snapshot.pendingClarifications, [stale.correlationId]: stale },
+      session: { ...snapshot.session, status: "awaiting_user_clarification", unresolvedQuestions: [...snapshot.session.unresolvedQuestions, ...stale.unresolvedQuestions] } });
+    if (!saved.ok) throw new Error(saved.error.message);
+
+    const second = gateway();
+    const recovered = await second.initializeOrRecoverSession();
+    expect(recovered.ok).toBe(true);
+    const after = second.getContextSnapshot();
+    expect(after.pendingClarifications["corr-stale"]).toBeUndefined();
+    expect(after.session.unresolvedQuestions.join("\n")).not.toContain(APR_B);
+    expect(after.session.status).not.toBe("awaiting_user_clarification");
+    const persisted = await store.load(SESSION_ID);
+    expect(persisted.ok && persisted.value?.pendingClarifications["corr-stale"]).toBeFalsy();
   });
 });

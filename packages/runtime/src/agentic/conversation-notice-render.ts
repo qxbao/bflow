@@ -56,6 +56,8 @@ export interface RenderedNotice {
   expiresAt?: string;
   /** Identity the displayed-acknowledgement check looks for in the Conversation transcript. */
   ackToken?: string;
+  /** For updates and blocks: content that, shown together with the run id, also proves display after reformatting. */
+  ackText?: string;
   headline: string;
   reply?: string;
   display: string;
@@ -170,7 +172,7 @@ function updateNotice(notice: NoticeLike): RenderedNotice {
   const note = truncated ? " — nội dung bị cắt ngắn, không hiển thị đầy đủ" : "";
   // Substantive progress needs display recovery too. Its text is an acknowledgement token, never approval authority.
   return { messageId: notice.messageId, kind: "update", ...(notice.runId ? { runId: notice.runId } : {}), headline,
-    ...(ackToken ? { ackToken } : {}),
+    ...(ackToken && text ? { ackToken, ackText: text } : {}),
     display: `${headline}${note}` };
 }
 
@@ -221,7 +223,10 @@ function blockedNotice(notice: NoticeLike, payload: z.infer<typeof BLOCKED_PAYLO
   const headline = `⚠️ [${notice.messageId}] ${capitalise(BLOCKED_LABEL[payload.kind])}${runId ? ` (run ${runId})` : ""}: ${payload.reason}`;
   // Options describe possible actions; they are not selectable replies. Only the exact resume/cancel phrases are accepted.
   const reply = runId ? `Trả lời "tiếp tục ${runId}" sau khi khắc phục, hoặc "hủy ${runId}" để hủy run.` : "Hãy cho Conversation biết cách xử lý";
-  return { messageId: notice.messageId, kind: "blocked", ...(runId ? { runId } : {}), ackToken: notice.messageId, headline, reply,
+  // The reason's prose before any structured detail: agents often reformat the JSON detail but keep this sentence.
+  const lead = payload.reason.split(/[\n[{]/u)[0]!.trim();
+  return { messageId: notice.messageId, kind: "blocked", ...(runId ? { runId } : {}), ackToken: notice.messageId,
+    ...(lead.length >= 20 ? { ackText: lead } : {}), headline, reply,
     options, display: [headline, ...options.map(option => `- ${option.text}`), reply].join("\n") };
 }
 
@@ -265,7 +270,26 @@ export function notificationBody(notice: RenderedNotice, max = 400): string {
 export function mustShowSection(notices: readonly NoticeLike[]): string {
   const rendered = notices.map(renderConversationNotice).sort((a, b) => noticePriority(a) - noticePriority(b));
   if (!rendered.length) return "";
-  return "MUST SHOW TO USER VERBATIM:\n" + rendered.map(notice => notice.display).join("\n\n") + "\n\n";
+  return "MUST SHOW TO USER VERBATIM:\n" + rendered.map(notice => notice.display).join("\n\n") +
+    "\n\n(Copy the lines above into your reply unchanged, including every [id] marker and run id; display is checked by them.)\n\n";
+}
+
+/** Markdown emphasis/code markers and whitespace runs removed, so bolding or wrapping a line does not hide it. */
+function plain(text: string): string {
+  return text.replace(/[*_`]/gu, "").replace(/\s+/gu, " ").trim();
+}
+
+/**
+ * Whether the final Conversation text shows this notice. Decisions and approvals must name their approval id. Updates and
+ * blocks are also shown by their unique message id, or by their run id together with their exact text: a stale or other-run
+ * headline never acknowledges a different notice. Advisory only: display never grants approval authority.
+ */
+export function noticeDisplayed(notice: RenderedNotice, shown: string): boolean {
+  if (notice.ackToken === undefined) return false;
+  if (shown.includes(notice.ackToken)) return true;
+  if (notice.kind !== "update" && notice.kind !== "blocked") return false;
+  if (shown.includes(notice.messageId)) return true;
+  return notice.runId !== undefined && notice.ackText !== undefined && shown.includes(notice.runId) && plain(shown).includes(plain(notice.ackText));
 }
 
 /** A genuine user prompt: a string, or a user entry with a text block. Tool results are user-role entries without text. */

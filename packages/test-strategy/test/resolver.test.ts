@@ -238,3 +238,22 @@ describe("risk-based conditional TDD", () => {
     expect(resolver.validateAgainstSpecification(strategy, s)).toBeDefined();
   });
 });
+
+describe("assessment ingress errors", () => {
+  it("names metadata.conditionalTdd when the assessment is missing", () => {
+    const s = spec();
+    const withoutAssessment = { ...s, metadata: { sdd: (s.metadata as Record<string, unknown>).conditionalTdd } };
+    let caught: unknown;
+    try { resolver.resolve(withoutAssessment); } catch (error) { caught = error; }
+    expect(caught).toBeInstanceOf(Error);
+    const message = (caught as Error).message;
+    expect(message).toContain("metadata.conditionalTdd");
+    expect(message).not.toMatch(/"path":\s*\[\s*\]/);
+  });
+
+  it("prefixes nested assessment issues with their full specification path", () => {
+    const a = assessment();
+    const broken = { ...spec(a), metadata: { conditionalTdd: { ...a, testability: { level: "automated" } } } };
+    expect(() => resolver.resolve(broken)).toThrow(/metadata\.conditionalTdd\.testability\.rationale/);
+  });
+});

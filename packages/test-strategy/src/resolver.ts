@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { MetadataSchema, SpecificationSchema, TddDecisionSchema, TestStrategySchema } from "@bflow/contracts";
 import type { TestStrategy } from "@bflow/contracts";
-import { AssessmentSchema, PolicySnapshotSchema } from "./schema.js";
+import { AssessmentSchema, PolicySnapshotSchema, type Assessment } from "./schema.js";
 import { evaluatePolicy } from "./policy.js";
 
 /** Key-order independent comparison also used for idempotent evidence receipts. */
@@ -12,6 +12,19 @@ export function canonical(value: unknown): string {
       .map(([key, v]) => `${JSON.stringify(key)}:${canonical(v)}`).join(",")}}`;
   }
   return JSON.stringify(value) ?? "null";
+}
+
+/**
+ * Parses the P16 assessment carried by `Specification.metadata.conditionalTdd`. Issues are reported with their full
+ * specification path, so a proposal missing the assessment (for example one that only carries `metadata.sdd`) is told
+ * which field to add instead of receiving a path-less "expected object, received undefined".
+ */
+function parseAssessment(input: unknown): Assessment {
+  const parsed = AssessmentSchema.safeParse(input);
+  if (parsed.success) return parsed.data;
+  const issues = parsed.error.issues.map(issue => `${["metadata", "conditionalTdd", ...issue.path].join(".")}: ${issue.message}`);
+  const missing = input === undefined ? " The P16 conditional TDD assessment is required beside metadata.sdd." : "";
+  throw new Error(`Invalid Specification.metadata.conditionalTdd assessment.${missing} ${issues.join("; ")}`);
 }
 
 export class TestStrategyResolver {
@@ -35,7 +48,7 @@ export class TestStrategyResolver {
       if (!spec.artifactRef) throw new Error("artifactRef is required when specification is approved");
     }
 
-    const assessment = AssessmentSchema.parse(spec.metadata?.conditionalTdd);
+    const assessment = parseAssessment(spec.metadata?.conditionalTdd);
     const policy = evaluatePolicy(assessment, spec.acceptanceCriteria, spec.affectedPaths, spec.riskLevel);
     const digest = createHash("sha256").update(canonical({
       specId: spec.specId, runId: spec.runId, version: spec.version,

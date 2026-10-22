@@ -177,7 +177,9 @@ về việc giao nhận, không bao giờ là task thành công, và lần nhắ
   and are never sent to Conversation: `runner_setup_required` (a recognized ecosystem needs a reviewed runner/reporter setup task), `missing_test_paths` (no test file in `affectedPaths`),
   `missing_test_mapping` (missing or ambiguous identities, owned test scope, or task execution budget), `unknown_test_command` (a target
   command is not a detected label, or the label is missing from `infrastructure.commands`) and
-  `unsupported_method` (no runner for the criterion's method). The options are informational; nothing
+  `unsupported_method` (no runner for the criterion's method) and `invalid_specification` (the specification,
+  workflow definition or P16 `metadata.conditionalTdd` assessment fails its schema; the reason lists each invalid
+  field by full path). The options are informational; nothing
   is applied automatically, and the specification and its criteria are never changed by Runtime.
   Whole-spec runner binding checks individual command budgets; before admitting a DAG, Runtime
   resolves each task's actual strategy and ownership, requires every automated criterion to bind,

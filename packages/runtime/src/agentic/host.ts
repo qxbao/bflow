@@ -10,14 +10,14 @@ import { z } from "zod";
 import { codexStartupPrompt } from "@bflow/agent-providers";
 import {
   AgentBindingReceiptSchema, AgentExecutionHandleSchema, AgentProviderIdSchema, AgentResultSchema, AgentRoleSchema, ApprovalDecisionSchema, DelegationRequestSchema,
-  JsonValueSchema, RoleMessageSchema, RunQuerySchema, SessionManifestSchema,
+  JsonValueSchema, RoleMessageSchema, RunQuerySchema, SessionManifestSchema, SpecificationSchema, WorkflowDefinitionSchema,
   type AgentProviderId, type AgentRole, type PaneBinding, type RoleMessage, type SessionManifest, type RunStore, type OperationOptions
 } from "@bflow/contracts";
 import { authenticateNativeHerdrMessage } from "./herdr-ingress.js";
 import { BFLOW_INBOX_NUDGE, inboxCheckIntervalMs } from "./conversation-inbox.js";
 import { ConversationInboxNotifier, type ConversationInboxPorts } from "./conversation-inbox-notifier.js";
 import { probeBehavioralSandbox } from "./sandbox-readiness.js";
-import { lastAssistantText, mustShowSection, renderConversationNotice, type NoticeLike } from "./conversation-notice-render.js";
+import { lastAssistantText, mustShowSection, noticeDisplayed, renderConversationNotice, type NoticeLike, type RenderedNotice } from "./conversation-notice-render.js";
 import { callHost } from "./host-protocol.js";
 import { readHostConfiguration, type HostConfiguration, type RoleLaunchDescriptor } from "./host-controller.js";
 import { digest, json, record, textField } from "./journal.js";
@@ -852,11 +852,18 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const spec = record(parameters.specification), configuredMethods = verification.configuredMethods();
       const runId = typeof parameters.runId === "string" ? parameters.runId : undefined;
       try {
+        // Schema and conditional-TDD assessment errors name the exact fields and stay with the Coordinator, which can correct them.
+        let strategy: unknown;
+        guardWorkflowProposal({ phase: "specification", specification: spec, configuredMethods, check: () => {
+          SpecificationSchema.parse(spec);
+          if (parameters.definition !== undefined) WorkflowDefinitionSchema.parse(parameters.definition);
+          strategy = host.runtime.ports.policies.strategy.resolve(spec);
+        } });
         guardWorkflowProposal({ phase: "policy", specification: spec, configuredMethods, check: () => {
           if (configuration.policy?.sdd.minimumLevel === "full" && spec.level !== "full") throw new Error("Project policy requires a full specification");
         } });
         guardWorkflowProposal({ phase: "verification", specification: spec, configuredMethods, check: () =>
-          verification.assertSupported(spec, host.runtime.ports.policies.strategy.resolve(spec), parameters.definition) });
+          verification.assertSupported(spec, strategy, parameters.definition) });
       } catch (error) {
         // Outside any journal transaction: Conversation learns why, and the Coordinator receives the same structured reason as its tool error.
         // Coordinator-fixable refusals stay with the Coordinator (structured tool error only); user notices are for the rest.
@@ -1468,7 +1475,7 @@ export function availableTools(role: AgentRole) {
   if (["coordinator", "conversation"].includes(role)) tools.push({ name: "inspect_native_delivery", description: "Read-only reconciliation of the exact native operationId against private intent, ACK, observed ingress refusal and Runtime inbox. Distinct from reconcile_delivery (transport outbox). Never resends, changes criteria, approves or proves task success; missing evidence remains unknown." });
   if (role === "conversation") tools.push({ name: "resume_run", description: "Ask Runtime to resume an existing blocked run only after a real explicit user resume request. Parameters: runId, messageId? (the host binds your latest trusted user turn); Runtime preserves all approval/cancellation/delivery guards." });
   if (role === "conversation") tools.push({ name: "read_role_pane", description: "Read-only snapshot of another role's recent terminal output (redacted, untrusted) to explain a stalled or blocked run; never evidence of success or approval. Parameters: role, paneId? (required when several panes share a role), lines? (1-200, default 60)." });
-  if (role === "conversation") tools.push({ name: "conversation_decide", description: "Call this first on every ordinary user turn. Applies your structured intent/clarification decision to the latest trusted user turn (messageId is optional; when given it must be the hook's messageId). Never supplies human approval. Parameters: decision (workflow_request/clarify/conversation_only/status_query/cancellation_request), messageId?." });
+  if (role === "conversation") tools.push({ name: "conversation_decide", description: "Call this first on every ordinary user turn. Applies your structured intent/clarification decision to the latest trusted user turn (messageId is optional; when given it must be the hook's messageId). Never supplies human approval. The user never sees tool inputs or results: after this call, write the complete directReply (or clarifying questions) in your own reply text, verbatim, never only a summary of it. Parameters: decision (workflow_request/clarify/conversation_only/status_query/cancellation_request), messageId?." });
   if (role !== "conversation") tools.push({ name: "log_task_step", description: "Record one brief observable progress step for your authenticated run/task; specialists must supply taskId and Coordinator may omit it. Parameters: runId, taskId?, action. No private reasoning or secrets." });
   if (role !== "conversation") tools.push({ name: USER_DECISION_TOOL, description: "Ask the user a decision through Runtime and Conversation, then end your turn; parameters: runId, taskId, question, options?, context?, expiresInMinutes?" });
   if (role === "coordinator") tools.push(...COORDINATOR_TOOLS,
@@ -1743,11 +1750,11 @@ function noticeIds(reply: unknown): string[] {
 }
 
 /** Surfaced user-facing notices not yet shown to the user, with their Stop re-block count. */
-function undisplayedNotices(reply: unknown): { notice: Record<string, unknown>; messageId: string; reblocks: number; ackToken?: string }[] {
+function undisplayedNotices(reply: unknown): { notice: Record<string, unknown>; rendered: RenderedNotice; messageId: string; reblocks: number; ackToken?: string }[] {
   return z.object({ undisplayed: z.array(z.object({ messageId: z.string().min(1), reblocks: z.number().int().min(0).optional() }).passthrough()).optional() })
     .passthrough().parse(reply).undisplayed?.map(item => {
       const notice = item as Record<string, unknown>, rendered = renderConversationNotice(item as unknown as NoticeLike);
-      return { notice, messageId: item.messageId, reblocks: item.reblocks ?? 0, ...(rendered.ackToken === undefined ? {} : { ackToken: rendered.ackToken }) };
+      return { notice, rendered, messageId: item.messageId, reblocks: item.reblocks ?? 0, ...(rendered.ackToken === undefined ? {} : { ackToken: rendered.ackToken }) };
     }) ?? [];
 }
 
@@ -1831,7 +1838,7 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
       // Display acknowledgement: a surfaced user decision or block counts as shown only when the final Conversation turn names it.
       // Codex supplies the final text as last_assistant_message; its rollout format is not a Claude transcript.
       const shown = typeof hook.last_assistant_message === "string" ? hook.last_assistant_message : await transcriptAssistantText(hook.transcript_path);
-      const displayed = undisplayed.filter(item => item.ackToken !== undefined && shown.includes(item.ackToken));
+      const displayed = undisplayed.filter(item => noticeDisplayed(item.rendered, shown));
       if (displayed.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_displayed", { paneId, nativeSessionId: session, messageIds: displayed.map(item => item.messageId) });
       // Codex reports the final assistant text on Stop; both supported hooks accept the same bounded display refusal.
       if (configuration.provider !== "claude" && !(configuration.provider === "codex" && typeof hook.last_assistant_message === "string")) return;

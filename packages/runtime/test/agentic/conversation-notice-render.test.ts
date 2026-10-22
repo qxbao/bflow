@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { HostReceiptJournal, MAX_NOTICE_REBLOCKS, parseConversationResumeRequest } from "../../src/agentic/host-receipts.js";
 import { isProviderInputEmpty, reminderDelayMs, reminderDue, afterReminder } from "../../src/agentic/conversation-inbox.js";
-import { lastAssistantText, mustShowSection, notificationBody, renderConversationNotice } from "../../src/agentic/conversation-notice-render.js";
+import { lastAssistantText, mustShowSection, noticeDisplayed, notificationBody, renderConversationNotice } from "../../src/agentic/conversation-notice-render.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const action of cleanups.splice(0).reverse()) await action(); });
@@ -97,6 +97,28 @@ describe("Conversation notice rendering", () => {
     const rendered = renderConversationNotice(notice("progress-1", "conversation.progress", { headline: "x" }));
     expect(rendered).toMatchObject({ kind: "update" });
     expect(rendered.ackToken).toBe("[progress-1] x");
+  });
+  it("counts a reformatted update as displayed only when it names this notice or its run and exact text", () => {
+    // Observed in conv-bf-daac1a7e8152c8d655d6: the agent dropped the [id] marker and bolded the headline, and was re-blocked twice.
+    const rendered = renderConversationNotice(notice("p19-7631", "delegation.accepted", { headline: "Coordinator accepted the objective" }));
+    expect(noticeDisplayed(rendered, rendered.display)).toBe(true);
+    expect(noticeDisplayed(rendered, "ℹ️ **Cập nhật** · run `run-42`:\n\n**Coordinator accepted the objective** ✅")).toBe(true);
+    expect(noticeDisplayed(rendered, "Cập nhật p19-7631 đã nhận")).toBe(true);
+    expect(noticeDisplayed(rendered, "ℹ️ Coordinator đã chấp nhận mục tiêu · run run-42")).toBe(false);
+    expect(noticeDisplayed(rendered, "Coordinator accepted the objective (run run-99)")).toBe(false);
+    expect(noticeDisplayed(renderConversationNotice({ messageId: "notice-1" }), "notice-1")).toBe(false);
+  });
+  it("counts a blocked notice as displayed when its run and leading reason are shown, even with the detail reformatted", () => {
+    const reason = "Đặc tả không được hỗ trợ bởi cấu hình kiểm thử hiện tại: [\n  {\n    \"code\": \"invalid_type\"\n  }\n]";
+    const rendered = renderConversationNotice(notice("p19-2f63", "conversation.progress", { kind: "workflow_rejected", reason, options: ["Hủy run này"], runId: "run-42" }));
+    expect(rendered.kind).toBe("blocked");
+    expect(noticeDisplayed(rendered, "⚠️ **Workflow bị từ chối** (run `run-42`)\n\n**Lỗi**: Đặc tả không được hỗ trợ bởi cấu hình kiểm thử hiện tại:\n```\n{ \"code\": \"invalid_type\" }\n```")).toBe(true);
+    expect(noticeDisplayed(rendered, "Workflow bị từ chối (run run-42)")).toBe(false);
+  });
+  it("still requires the approval id for decisions and approvals", () => {
+    const rendered = renderConversationNotice(notice("decision-" + APPROVAL_ID, "approval.request", decisionPayload));
+    expect(noticeDisplayed(rendered, `Câu hỏi ${APPROVAL_ID}`)).toBe(true);
+    expect(noticeDisplayed(rendered, `${rendered.question} (run run-42)`)).toBe(false);
   });
   it("tolerates partial notices from a host reply", () => {
     expect(renderConversationNotice({ messageId: "notice-1" }).display).toContain("Cập nhật từ runtime (notice)");

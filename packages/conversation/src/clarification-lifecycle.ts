@@ -63,3 +63,17 @@ export function closeClarificationsForApproval(
     session: { ...snapshot.session, status, unresolvedQuestions, updatedAt: nowIso }
   };
 }
+
+/**
+ * Closes clarifications about approvals the session already decided or closed. A decision recorded before
+ * closeClarificationsForApproval existed, or a run that ended while its question was open, would otherwise
+ * leave the question in the context forever and make the agent re-ask an answered decision.
+ * Returns the same snapshot object when nothing matched.
+ */
+export function closeSettledApprovalClarifications(snapshot: ConversationContextSnapshot, nowIso: string): ConversationContextSnapshot {
+  const settled = [...Object.keys(snapshot.approvalDecisions ?? {}), ...Object.keys(snapshot.closedApprovals ?? {})]
+    .filter(approvalId => snapshot.pendingApprovals[approvalId] === undefined);
+  let current = snapshot;
+  for (const approvalId of settled) current = closeClarificationsForApproval(current, approvalId, nowIso);
+  return current;
+}
