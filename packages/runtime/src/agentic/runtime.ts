@@ -359,8 +359,8 @@ export class AgenticWorkflowRuntime {
     // `received` is the durable inbox write-ahead before semantic application. The envelope was parsed and authenticated
     // before that write. Reapply all business validators, deferring blocked/terminal runs until an authorized resume.
     const received = await this.transaction(async state => state.inbox.filter(item => item.status === "received" &&
-        !state.runs.some(run => run.runId === item.message.run_id && (run.cancelled ||
-          TERMINAL_RUN_STATUSES.includes(run.status) && !this.acceptsPausedNativeReply(state, run, item.message))))
+        (isCancellationHandoff(item.message) || !state.runs.some(run => run.runId === item.message.run_id && (run.cancelled ||
+          TERMINAL_RUN_STATUSES.includes(run.status) && !this.acceptsPausedNativeReply(state, run, item.message)))))
       .map(item => RoleMessageSchema.parse(item.message)));
     let replayed = 0;
     for (const message of received) {
@@ -780,7 +780,15 @@ export class AgenticWorkflowRuntime {
    */
   private async drainCancellationControls(state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox): Promise<void> {
     // Older journals may already mark cancellation reconciled while still retaining unsent work or approvals.
-    for (const run of state.runs.filter(item => item.cancelled)) this.closeCancelledRunDecisions(state, outbox, run);
+    for (const run of state.runs.filter(item => item.cancelled)) {
+      try { await this.closeCancelledRunDecisions(state, save, outbox, run); }
+      catch (error) {
+        const reason = `Cancellation lease cleanup requires reconciliation: ${redactString(String(error))}`;
+        this.emit(state, outbox, run, "conversation.progress", { sdlcStatus: run.status,
+          headline: "Cancellation requires reconciliation", reason, blockageReason: reason }, "cancel-lease-cleanup-failed", "conversation");
+        await save();
+      }
+    }
     for (const out of state.outbound.filter(item => item.status === "queued" && !item.handle && isCancellationHandoff(item.message))) {
       let applying = false;
       try {
@@ -1195,8 +1203,13 @@ export class AgenticWorkflowRuntime {
         if (manifest.conversationSessionId !== delegation.sessionId) throw new Error("Cross-session delegation");
         if (delegation.metadata?.action === "cancel") {
           const { run: target, request: cancellation } = await this.cancellationTarget(state, message);
-          await this.cancelRun(state, save, core, outbox, target, cancellation.reason ?? "User requested cancellation");
-          inbox.status = "applied"; await save(); return json({ cancellationRequested: true });
+          try { await this.cancelRun(state, save, core, outbox, target, cancellation.reason ?? "User requested cancellation"); }
+          catch (error) {
+            // Preserve the authenticated received receipt and the partial cleanup failure across restart.
+            inbox.reason = `Cancellation processing failed: ${redactString(String(error))}`;
+            await save(); throw error;
+          }
+          inbox.status = "applied"; delete inbox.reason; await save(); return json({ cancellationRequested: true });
         }
         const admission = this.admitDelegation(state, delegation, []);
         if (admission.kind === "rejected") {
@@ -2955,7 +2968,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     });
   }
   /** Cancellation invalidates every unsent work/wake/approval; uncertain deliveries keep their reconciliation receipts. */
-  private closeCancelledRunDecisions(state: JournalState, outbox: HerdrOutbox, run: RunRecord): void {
+  private async closeCancelledRunDecisions(state: JournalState, save: () => Promise<void>, outbox: HerdrOutbox, run: RunRecord): Promise<void> {
     if (!run.cancelled) return;
     for (const entry of Object.values(run.userDecisions ?? {})) if (entry.status === "pending") {
       entry.status = "cancelled";
@@ -2963,24 +2976,36 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     }
     if (run.approval && (!run.decision || run.decision.approvalId !== run.approval.approvalId))
       run.approval = ApprovalRequestSchema.parse({ ...run.approval, status: "cancelled" });
-    for (const out of state.outbound.filter(item => item.message.run_id === run.runId && item.status === "queued" &&
+    let failure: unknown;
+    for (const out of state.outbound.filter(item => item.message.run_id === run.runId &&
+        (item.status === "queued" || item.status === "cancelled" && item.lease !== undefined && !item.parentAssignmentId) &&
         !isCancellationHandoff(item.message) && (item.message.recipient.role !== "conversation" || item.message.type === "approval.request"))) {
       out.status = "cancelled"; out.error = "Run cancelled; unsent work or approval is no longer actionable";
+      await save();
+      // Safely queued work never reached the provider. Release its own durable lease, while a task notice retains its parent's lease.
+      if (out.lease && !out.parentAssignmentId) {
+        try { await outbox.release(out); }
+        catch (error) {
+          out.error = `Cancellation lease release unresolved: ${redactString(String(error))}`;
+          await save(); failure ??= error;
+        }
+      }
     }
+    if (failure !== undefined) throw failure;
   }
   private async cancelRun(state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox,
     run: RunRecord, reason: string): Promise<void> {
     // Completed and failed runs remain authoritative terminal outcomes; cancellation is a safe no-op.
     if (!run.cancelled && ["completed", "failed"].includes(run.status)) return;
-    this.closeCancelledRunDecisions(state, outbox, run);
+    if (!run.cancelled) { run.cancelled = true; run.status = "cancelled"; run.error = textField(reason); await save(); }
+    for (const waiter of this.gateWaiters.values()) if (waiter.runId === run.runId) waiter.reject(new Error("Run cancellation requested"));
+    await this.closeCancelledRunDecisions(state, save, outbox, run);
     // A repeated success adds no final notice. A distinct request may retry previously failed idempotent local cleanup.
     if (run.cancelReconciled && !state.outbound.some(item => item.message.run_id === run.runId && isCancellationHandoff(item.message) &&
-        item.status === "failed" && item.error?.startsWith("Cancellation processing failed:"))) { await save(); return; }
-    if (!run.cancelled) { run.cancelled = true; run.status = "cancelled"; run.error = textField(reason); await save(); }
-    this.closeCancelledRunDecisions(state, outbox, run);
+        item.status === "failed" && item.error?.startsWith("Cancellation processing failed:")) &&
+        !state.inbox.some(item => item.message.run_id === run.runId && item.status === "received" && isCancellationHandoff(item.message))) { await save(); return; }
     this.progress(state, outbox, run, "Run cancelled; stop confirmation and worktree reconciliation are in progress");
     await save();
-    for (const waiter of this.gateWaiters.values()) if (waiter.runId === run.runId) waiter.reject(new Error("Run cancellation requested"));
     if (run.coreCreated) {
       const snapshot = await core.snapshot(run.runId);
       if (!["succeeded", "failed", "cancelled", "cancelling"].includes(snapshot.status)) {
@@ -3064,6 +3089,10 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     const unresolved: string[] = (run.nativeDeliveries ?? []).map(item => `Native delivery ${item.operationId} is uncertain (${item.message.message_id}); no mutation was resent`);
     for (const out of state.outbound.filter(item => item.message.run_id === run.runId && isCancellationHandoff(item.message) && item.status === "failed" && item.error?.startsWith("Cancellation processing failed:")))
       unresolved.push(out.error ?? `Cancellation control ${out.message.message_id} failed`);
+    for (const item of state.inbox.filter(entry => entry.message.run_id === run.runId && entry.status === "received" && isCancellationHandoff(entry.message)))
+      unresolved.push(item.reason ?? `Authenticated cancellation ${item.message.message_id} is received but cleanup is not applied`);
+    for (const out of state.outbound.filter(item => item.message.run_id === run.runId && item.status === "cancelled" && item.lease && !item.parentAssignmentId))
+      unresolved.push(out.error ?? `Unsent ${out.message.message_id} still owns lease ${out.lease!.leaseId}`);
     for (const out of state.outbound.filter(item => item.message.run_id === run.runId && item.message.recipient.role !== "conversation" &&
         !isStoppableExecution(item) && ["sending", "unknown_delivery"].includes(item.status)))
       unresolved.push(`${out.message.recipient.role} delivery is uncertain (${out.message.message_id}); no mutation was resent`);

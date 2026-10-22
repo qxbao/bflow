@@ -159,6 +159,10 @@ export class HerdrOutbox {
     // A Conversation inbox write-ahead stays "sending": Runtime applies it after this locked pass.
     if (out.status === "sending" && !isConversationDelivery(out)) { out.status = "unknown_delivery"; await this.save(); }
     if (out.status === "accepted" && out.handle) {
+      const cancelledRun = this.state.runs.find(run => run.runId === out.message.run_id)?.cancelled;
+      if (cancelledRun && ["task.assignment", "delegation.request", "verification.requested"].includes(out.message.type) &&
+          !["conversation", "coordinator"].includes(out.message.recipient.role))
+        return; // Cancellation reconciliation owns stop proof and lease release for this exact execution; pane readiness is insufficient.
       if (!out.parentAssignmentId) await onBound(out, out.handle);
       if (out.message.type === "task.assignment") {
         const run = this.state.runs.find(item => item.runId === out.message.run_id);

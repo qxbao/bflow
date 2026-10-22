@@ -417,4 +417,78 @@ describe("trusted cancellation control bypasses work dispatch waits", () => {
     expect(state.outbound.some((out: any) => out.message.payload.reason?.includes("Integration record unavailable"))).toBe(true);
   });
 
+
+  it("releases a persisted safely queued Coordinator lease so another run can acquire the role", async () => {
+    const f = await fixture(); const journal = new AgenticJournal(join(f.root, "journal"), f.repository);
+    unwrap(await f.ports.registry.upsert({ agentId: "coordinator", role: "coordinator", transport: "herdr", enabled: true,
+      priority: 0, maxConcurrentTasks: 1, capabilities: ["coordination", "repository.read"], settings: {} }));
+    const lease = unwrap(await f.ports.registry.acquireLease({ leaseId: "queued-coordinator-lease", agentId: "coordinator", runId: "run-1",
+      taskId: "old-intake", attemptId: "old-intake", ttlMs: 300_000, requestedAt: new Date().toISOString(), idempotencyKey: "acquire-queued" }));
+    const initial = (await f.state()).inbox.find((item: any) => item.message.message_id === "intake-1").message;
+    await journal.exclusive(async (state, save) => {
+      state.outbound.push({ message: initial, status: "queued", selector: "coordinator", taskId: "old-intake", attemptId: "old-intake", capabilities: [], lease });
+      await save();
+    });
+    const unavailable = await f.ports.registry.acquireLease({ leaseId: "next-coordinator-before", agentId: "coordinator", runId: "run-2",
+      taskId: "next-intake", attemptId: "next-intake", ttlMs: 300_000, requestedAt: new Date().toISOString(), idempotencyKey: "acquire-next-before" });
+    expect(unavailable.ok).toBe(false);
+    await f.runtime.queueHerdr(cancellation());
+    const old = (await f.state()).outbound.find((out: any) => out.message.message_id === "intake-1");
+    expect(old.status).toBe("released");
+    expect(old.leaseRelease).toBeUndefined();
+    const next = await f.ports.registry.acquireLease({ leaseId: "next-coordinator-after", agentId: "coordinator", runId: "run-2",
+      taskId: "next-intake", attemptId: "next-intake", ttlMs: 300_000, requestedAt: new Date().toISOString(), idempotencyKey: "acquire-next-after" });
+    expect(next.ok).toBe(true);
+    expect(f.transport.sentRequests).toHaveLength(0);
+  });
+
+  it("retains an authenticated legacy cleanup failure across restart and never claims fully stopped", async () => {
+    const f = await fixture(); const journal = new AgenticJournal(join(f.root, "journal"), f.repository);
+    await journal.exclusive(async (state, save) => { state.runs[0]!.integrationKey = "retained-integration"; await save(); });
+    let calls = 0;
+    f.ports.policies.git.cancelIntegration = async () => { calls++; throw new Error("Injected legacy cleanup failure"); };
+    f.ports.policies.git.getIntegration = async () => ({ worktreePath: "/tmp/retained-integration" }) as any;
+    const message = cancellation("run-1", "legacy");
+    await expect(f.runtime.receiveHerdr(message)).rejects.toThrow("Injected legacy cleanup failure");
+    let state = await f.state();
+    expect(state.runs[0]).toMatchObject({ cancelled: true, status: "cancelled" });
+    expect(state.inbox.find((entry: any) => entry.message.message_id === message.message_id)).toMatchObject({ status: "received",
+      reason: expect.stringContaining("Injected legacy cleanup failure"), message });
+    const restarted = new AgenticWorkflowRuntime(f.ports, { journalDirectory: join(f.root, "journal"), repositoryPath: f.repository });
+    await restarted.tick();
+    expect(calls).toBe(2);
+    state = await restarted.inspect() as any;
+    expect(state.inbox.find((entry: any) => entry.message.message_id === message.message_id).status).toBe("received");
+    const final = state.outbound.find((out: any) => out.message.message_id === finalNoticeId);
+    expect(final.message.payload.headline).toContain("manual reconciliation required");
+    expect(final.message.payload.reason).toContain("Injected legacy cleanup failure");
+    expect(f.transport.sentRequests).toHaveLength(0);
+    expect(f.transport.cancelledHandles).toHaveLength(0);
+    expect(state.outbound.some((out: any) => out.message.message_id === message.message_id)).toBe(false);
+  });
+
+
+  it.each(["done", "uncorrelated_idle"])("retains a cancelled specialist lease when pane health is ready but stop observation is %s", async observation => {
+    const f = await fixture();
+    const waiting = f.runtime.herdrQualityGate("review").evaluate({ runId: "run-1", taskId: "review-task", attemptId: "review-attempt", artifacts: [], input: {},
+      definition: { id: "review", name: "review", evaluator: "review", required: true, configuration: { role: "reviewer" },
+        timeout: { executionTimeoutMs: 20_000, onTimeout: "block" } } });
+    const failed = expect(waiting).rejects.toThrow("Run cancellation requested");
+    await expect.poll(async () => (await f.state()).outbound.some((out: any) => out.message.type === "verification.requested" && out.status === "accepted"), { timeout: 10_000 }).toBe(true);
+    const before = (await f.state()).outbound.find((out: any) => out.message.type === "verification.requested");
+    await f.runtime.queueHerdr(cancellation()); await failed;
+    // The same pane now reports idle for a replacement native session. This is not stop proof for the old execution.
+    f.panes.bindings.find(p => p.role === "reviewer")!.session = { source: "test", kind: "id", value: "replacement-reviewer" };
+    f.transport.customWaitHandler = handle => ({ ok: true, value: { handle, state: observation === "done" ? "done" : "idle",
+      correlationVerified: observation === "done", observedAt: new Date().toISOString() } });
+    await f.runtime.tick();
+    let state = await f.state();
+    expect(state.outbound.find((out: any) => out.message.message_id === before.message.message_id)).toMatchObject({ status: "accepted", handle: before.handle });
+    for (let tick = 1; tick < CANCEL_STOP_OBSERVATION_LIMIT; tick++) await f.runtime.tick();
+    state = await f.state();
+    expect(state.outbound.find((out: any) => out.message.message_id === before.message.message_id)).toMatchObject({ status: "accepted", cancelObservations: CANCEL_STOP_OBSERVATION_LIMIT });
+    expect((await finalNotices(f))[0].message.payload.headline).toContain("manual reconciliation required");
+    expect(f.transport.cancelledHandles).toHaveLength(1);
+  });
+
 });
