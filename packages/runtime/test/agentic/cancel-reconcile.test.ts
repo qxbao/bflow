@@ -3,13 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
-import { RoleMessageSchema, type PaneBinding, type QualityGate, type Specification } from "@bflow/contracts";
+import { AgentRequestSchema, RoleMessageSchema, type PaneBinding, type QualityGate, type Specification } from "@bflow/contracts";
 import { DeterministicWorkflowEngine } from "@bflow/core";
 import { FileAgentRegistry } from "@bflow/agent-registry";
 import { openSqliteRunStore } from "@bflow/persistence";
 import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 import { AgenticWorkflowRuntime, CANCEL_STOP_OBSERVATION_LIMIT } from "../../src/agentic/runtime.js";
-import { digest } from "../../src/agentic/journal.js";
+import { AgenticJournal, digest } from "../../src/agentic/journal.js";
 import { loadAgenticPolicies, type PanePolicy } from "../../src/agentic/ports.js";
 import { FakeAgentTransport } from "../helpers/fake-transport.js";
 import { draft, workflow } from "../../../specification/test/fixtures.js";
@@ -204,4 +204,217 @@ describe("cancellation reconciliation: exactly one final notice per run", () => 
     const headlines = await f.cancelHeadlines();
     expect(headlines).toEqual(["Run cancelled; stop confirmation and worktree reconciliation are in progress"]);
   });
+});
+
+
+/** Existing single-run contracts also carry each member of a host-owned cancellation batch. */
+function cancellation(runId = "run-1", suffix = "1", sessionId = "session-1") {
+  const at = new Date().toISOString();
+  return RoleMessageSchema.parse({ schema_version: 2, message_id: `cancel-control-${suffix}`, correlation_id: `cancel-correlation-${suffix}`,
+    run_id: runId, sender: { role: "conversation", agent_id: "conversation", pane_id: "pane-conversation" },
+    recipient: { role: "coordinator", agent_id: "coordinator", pane_id: "pane-coordinator" }, type: "delegation.request",
+    payload: { schemaVersion: 2, delegationId: `cancel-delegation-${suffix}`, messageId: `cancel-control-${suffix}`,
+      correlationId: `cancel-correlation-${suffix}`, sessionId, runId, requestedBy: "conversation", targetRole: "coordinator",
+      title: "Cancel existing run", objective: "User requested cancellation", specificationId: "cancel-spec", sddLevel: "lightweight",
+      acceptanceCriteria: [{ id: "ac-cancel", description: "Cancel", category: "functional", verificationMethod: "manual_review", required: true,
+        status: "pending", evidenceArtifactIds: [] }], inputArtifacts: [], priority: "critical", requestedAt: at, idempotencyKey: `cancel-control-${suffix}`,
+      metadata: { action: "cancel", targetRunId: runId, cancellationRequest: { schemaVersion: 1, cancellationId: `cancel-${suffix}`, runId,
+        requestedBy: "conversation", requestedAt: at, expectedVersion: 1, reason: "User requested cancellation", idempotencyKey: `cancel-control-${suffix}` } } },
+    artifact_references: [], occurred_at: at, idempotency_key: `cancel-control-${suffix}` });
+}
+
+describe("trusted cancellation control bypasses work dispatch waits", () => {
+  it("recovers a queued cancellation after restart despite unknown native delivery and a new busy Coordinator binding", async () => {
+    const f = await fixture();
+    const journal = new AgenticJournal(join(f.root, "journal"), f.repository);
+    const message = cancellation();
+    await journal.exclusive(async (state, save) => {
+      state.outbound.push({ message, status: "queued", selector: "coordinator", taskId: "legacy-cancel", attemptId: "legacy-cancel", capabilities: [] });
+      state.runs[0]!.nativeDeliveries = [{ operationId: "unknown-mutation", message: RoleMessageSchema.parse({ schema_version: 2,
+        message_id: "native-unknown", correlation_id: "correlation-1", run_id: "run-1", sender: { role: "coordinator" },
+        recipient: { role: "specifier" }, type: "task.status", payload: { action: "unknown" }, artifact_references: [], idempotency_key: "native-unknown" }) }];
+      state.outbound.find(out => out.message.message_id === message.message_id)!.error = "Unknown native delivery must be reconciled before another work dispatch";
+      await save();
+    });
+    f.panes.bindings.find(p => p.role === "coordinator")!.session = { source: "test", kind: "id", value: "new-generation" };
+    f.panes.busy.add("coordinator");
+    const restarted = new AgenticWorkflowRuntime(f.ports, { journalDirectory: join(f.root, "journal"), repositoryPath: f.repository });
+    await restarted.tick();
+    const state = await restarted.inspect() as any;
+    expect(state.runs[0]).toMatchObject({ cancelled: true, status: "cancelled" });
+    expect(state.runs[0].nativeDeliveries).toHaveLength(1);
+    expect(state.outbound.find((out: any) => out.message.message_id === message.message_id)).toMatchObject({ status: "delivered" });
+    expect(state.inbox.some((item: any) => item.message.message_id === message.message_id)).toBe(false);
+    expect(f.transport.sentRequests.some(request => request.context && (request.context as any).message_id === message.message_id)).toBe(false);
+    const final = state.outbound.find((out: any) => out.message.message_id === finalNoticeId);
+    expect(final.message.payload.headline).toContain("manual reconciliation required");
+    expect(final.message.payload.reason).toContain("unknown-mutation");
+    await restarted.queueHerdr(message); await restarted.tick();
+    expect((await restarted.inspect() as any).outbound.filter((out: any) => out.message.message_id === finalNoticeId)).toHaveLength(1);
+  });
+
+  it.each(["completed", "failed"])("safely ignores cancellation of an already %s run", async status => {
+    const f = await fixture(); const journal = new AgenticJournal(join(f.root, "journal"), f.repository);
+    await journal.exclusive(async (state, save) => { state.runs[0]!.status = status as "completed" | "failed"; await save(); });
+    const message = cancellation(); await f.runtime.queueHerdr(message); await f.runtime.flushOutbound();
+    expect((await f.state()).runs[0]).toMatchObject({ status, cancelled: false });
+    expect((await f.state()).outbound.find((out: any) => out.message.message_id === message.message_id).status).toBe("delivered");
+    expect(f.transport.cancelledHandles).toHaveLength(0);
+  });
+
+  it("rejects foreign-session cancellation at enqueue and isolates a foreign control recovered from an older journal", async () => {
+    const f = await fixture(); const foreign = cancellation("run-1", "foreign", "other-session");
+    await expect(f.runtime.queueHerdr(foreign)).rejects.toThrow("Foreign cancellation");
+    const journal = new AgenticJournal(join(f.root, "journal"), f.repository);
+    await journal.exclusive(async (state, save) => {
+      state.outbound.push({ message: foreign, status: "queued", selector: "coordinator", taskId: "foreign", attemptId: "foreign", capabilities: [] });
+      await save();
+    });
+    await f.runtime.flushOutbound();
+    const state = await f.state();
+    expect(state.runs[0].cancelled).toBe(false);
+    expect(state.outbound.find((out: any) => out.message.message_id === foreign.message_id)).toMatchObject({ status: "failed", error: expect.stringContaining("Foreign cancellation") });
+    expect(f.transport.sentRequests.some(request => (request.context as any)?.message_id === foreign.message_id)).toBe(false);
+  });
+
+  it("closes pending user decisions before reconciliation and refuses late approvals without resuming a specialist", async () => {
+    const f = await fixture(); const developer = await f.dispatch();
+    const binding = f.panes.bindings.find(p => p.role === "developer")!;
+    const receipt = await f.runtime.requestUserDecision(binding, "developer", { runId: "run-1", taskId: "implement", question: "Continue?", options: ["Yes", "No"] }) as any;
+    const request = (await f.state()).runs[0].userDecisions[receipt.approvalId].request;
+    const late = RoleMessageSchema.parse({ schema_version: 2, message_id: "late-answer", correlation_id: "correlation-1", run_id: "run-1",
+      sender: { role: "conversation" }, recipient: { role: "coordinator" }, type: "approval.decision", payload: { schemaVersion: 2,
+        approvalId: request.approvalId, runId: request.runId, sessionId: request.sessionId, target: request.target, revision: request.revision,
+        generation: request.generation, decision: "approved", decidedBy: "human-1", decidedAt: new Date().toISOString(), feedbackArtifacts: [],
+        idempotencyKey: "late-answer", metadata: { selectedOption: "Yes" } }, artifact_references: [], idempotency_key: "late-answer" });
+    await f.runtime.queueHerdr(late);
+    await f.runtime.queueHerdr(cancellation());
+    expect((await f.state()).runs[0].userDecisions[receipt.approvalId].status).toBe("cancelled");
+    f.panes.busy.add("coordinator"); await f.runtime.flushOutbound();
+    const state = await f.state();
+    expect(state.runs[0].userDecisions[receipt.approvalId].status).toBe("cancelled");
+    expect(await f.runtime.pendingApprovals({ sessionId: "session-1" })).toEqual([]);
+    expect(state.outbound.find((out: any) => out.message.message_id === "late-answer").status).toBe("cancelled");
+    expect(state.outbound.filter((out: any) => out.message.type === "approval.request" && out.status === "queued")).toHaveLength(0);
+    await expect(f.runtime.queueHerdr({ ...late, message_id: "new-late-answer", idempotency_key: "new-late-answer" })).rejects.toThrow("approval is no longer actionable");
+    await expect(f.runtime.receiveHerdr(late)).rejects.toThrow("Run is cancelled");
+    expect(f.transport.cancelledHandles).toHaveLength(1);
+    expect(f.transport.cancelledHandles[0].executionId).toBe(developer.handle.executionId);
+    expect(state.outbound.some((out: any) => out.message.payload.kind === "user_decision_answer")).toBe(false);
+  });
+
+  it("processes later run cancellations when one member fails, preserving the partial failure and uncertain interrupt receipt", async () => {
+    const f = await fixture(); await f.dispatch();
+    const journal = new AgenticJournal(join(f.root, "journal"), f.repository);
+    await journal.exclusive(async (state, save) => {
+      const original = state.runs[0]!;
+      state.runs.push({ ...structuredClone(original), runId: "run-2", coreCreated: false, tasks: [], status: "intake",
+        delegation: { ...original.delegation, runId: "run-2", correlationId: "correlation-2", messageId: "intake-2", delegationId: "delegation-2", idempotencyKey: "intake-2" } });
+      await save();
+    });
+    f.ports.policies.git.cancelTask = async () => { throw new Error("Injected worktree cancellation failure"); };
+    await f.runtime.queueHerdr(cancellation()); await f.runtime.queueHerdr(cancellation("run-2", "2"));
+    await f.runtime.tick();
+    const state = await f.state();
+    expect(state.runs.map((run: any) => [run.runId, run.cancelled])).toEqual([["run-1", true], ["run-2", true]]);
+    expect(state.outbound.find((out: any) => out.message.message_id === "cancel-control-1")).toMatchObject({ status: "failed", error: expect.stringContaining("Injected worktree") });
+    expect(state.outbound.find((out: any) => out.message.message_id === "cancel-control-2").status).toBe("delivered");
+    expect(f.transport.cancelledHandles).toHaveLength(1);
+    for (let tick = 0; tick < CANCEL_STOP_OBSERVATION_LIMIT + 1; tick++) await f.runtime.tick();
+    const notices = await finalNotices(f);
+    expect(notices[0].message.payload.headline).toContain("manual reconciliation required");
+    expect(notices[0].message.payload.reason).toContain("Injected worktree");
+    expect(f.transport.cancelledHandles).toHaveLength(1);
+    f.ports.policies.git.cancelTask = async () => undefined;
+    await f.runtime.queueHerdr(cancellation("run-1", "retry"));
+    const recovered = await f.state();
+    expect(recovered.outbound.find((out: any) => out.message.message_id === "cancel-control-1").status).toBe("delivered");
+    expect(recovered.outbound.some((out: any) => out.message.payload.headline === "Cancellation cleanup retry completed")).toBe(true);
+    expect(f.transport.cancelledHandles).toHaveLength(1);
+  });
+
+
+  it("cancels while a Reviewer gate is awaiting its result, without waiting for the scheduler tick", async () => {
+    const f = await fixture();
+    const gate = f.runtime.herdrQualityGate("review");
+    const waiting = gate.evaluate({ runId: "run-1", taskId: "review-task", attemptId: "review-attempt", artifacts: [], input: {},
+      definition: { id: "review", name: "review", evaluator: "review", required: true, configuration: { role: "reviewer" },
+        timeout: { executionTimeoutMs: 20_000, onTimeout: "block" } } });
+    const failed = expect(waiting).rejects.toThrow("Run cancellation requested");
+    await expect.poll(async () => (await f.state()).outbound.some((out: any) => out.message.type === "verification.requested" && out.status === "accepted"), { timeout: 10_000 }).toBe(true);
+    await f.runtime.queueHerdr(cancellation());
+    await failed;
+    expect((await f.state()).runs[0].cancelled).toBe(true);
+    expect(f.transport.cancelledHandles).toHaveLength(1);
+  });
+
+  it("fences old queued intake and Coordinator wakes even when cancellation was already reconciled", async () => {
+    const f = await fixture(); const journal = new AgenticJournal(join(f.root, "journal"), f.repository);
+    const initial = (await f.state()).inbox.find((item: any) => item.message.message_id === "intake-1").message;
+    await journal.exclusive(async (state, save) => {
+      state.runs[0]!.cancelled = true; state.runs[0]!.status = "cancelled"; state.runs[0]!.cancelReconciled = true;
+      state.outbound.push({ message: initial, status: "queued", selector: "coordinator", taskId: "old-intake", attemptId: "old-intake", capabilities: [] });
+      state.outbound.push({ message: RoleMessageSchema.parse({ ...initial, message_id: "old-wake", idempotency_key: "old-wake", type: "task.status",
+        sender: { role: "runtime" }, payload: { kind: "specialist_result_ready" } }), status: "queued", selector: "coordinator", taskId: "old-wake", attemptId: "old-wake", capabilities: [] });
+      await save();
+    });
+    await f.runtime.flushOutbound();
+    const state = await f.state();
+    expect(state.outbound.find((out: any) => out.message.message_id === "intake-1").status).toBe("cancelled");
+    expect(state.outbound.find((out: any) => out.message.message_id === "old-wake").status).toBe("cancelled");
+    expect(f.transport.sentRequests).toHaveLength(0);
+  });
+
+
+  it("consumes a proven queued old request after binding restart but retains uncertain cancellation delivery", async () => {
+    const f = await fixture(); const journal = new AgenticJournal(join(f.root, "journal"), f.repository);
+    const queued = cancellation("run-1", "pinned"), uncertain = cancellation("run-1", "uncertain");
+    const request = (message: typeof queued) => AgentRequestSchema.parse({ requestId: `request-${message.message_id}`, attemptId: `attempt-${message.message_id}`,
+      runId: "run-1", taskId: `message-${message.message_id}`, role: "coordinator", target: { transport: "herdr", agentId: "coordinator", paneId: "pane-coordinator",
+        workspaceId: "workspace-1", tabId: "tab-1", session: { source: "test", kind: "id", value: "old-generation" } },
+      instruction: JSON.stringify(message), workingDirectory: "/tmp", inputs: [], context: message, attempt: 1,
+      retry: { maxAttempts: 1, strategy: "fixed", initialDelayMs: 0, maxDelayMs: 0, jitter: false }, timeout: { executionTimeoutMs: 300_000, onTimeout: "block" },
+      idempotency: { key: message.idempotency_key, scope: "agent-request", fingerprint: digest(message) }, createdAt: message.occurred_at });
+    await journal.exclusive(async (state, save) => {
+      for (const [message, status] of [[queued, "queued"], [uncertain, "unknown_delivery"]] as const)
+        state.outbound.push({ message, status, selector: "coordinator", taskId: `message-${message.message_id}`, attemptId: `attempt-${message.message_id}`,
+          capabilities: [], request: request(message) });
+      await save();
+    });
+    f.panes.bindings.find(p => p.role === "coordinator")!.session = { source: "test", kind: "id", value: "new-generation" };
+    f.panes.busy.add("coordinator");
+    await f.runtime.flushOutbound();
+    const state = await f.state();
+    expect(state.runs[0].cancelled).toBe(true);
+    expect(state.outbound.find((out: any) => out.message.message_id === queued.message_id)).toMatchObject({ status: "delivered", request: request(queued) });
+    expect(state.outbound.find((out: any) => out.message.message_id === uncertain.message_id)).toMatchObject({ status: "unknown_delivery", request: request(uncertain) });
+    expect(f.transport.sentRequests).toHaveLength(0);
+    expect(f.transport.reconciledRequests).toHaveLength(0);
+    await f.runtime.tick();
+    const final = (await finalNotices(f))[0];
+    expect(final.message.payload.headline).toContain("manual reconciliation required");
+    expect(final.message.payload.reason).toContain(uncertain.message_id);
+  });
+
+
+  it("keeps reconciling later cancellations when one run's retained integration cannot be read", async () => {
+    const f = await fixture(); const journal = new AgenticJournal(join(f.root, "journal"), f.repository);
+    await journal.exclusive(async (state, save) => {
+      const original = state.runs[0]!;
+      state.runs.push({ ...structuredClone(original), runId: "run-2", delegation: { ...original.delegation, runId: "run-2",
+        correlationId: "correlation-2", messageId: "intake-2", delegationId: "delegation-2", idempotencyKey: "intake-2" } });
+      original.integrationKey = "missing-integration";
+      await save();
+    });
+    f.ports.policies.git.cancelIntegration = async () => { throw new Error("Integration cleanup unavailable"); };
+    f.ports.policies.git.getIntegration = async () => { throw new Error("Integration record unavailable"); };
+    await f.runtime.queueHerdr(cancellation()); await f.runtime.queueHerdr(cancellation("run-2", "2"));
+    await f.runtime.tick();
+    const state = await f.state();
+    expect(state.runs[0]).toMatchObject({ cancelled: true, status: "cancelled" });
+    expect(state.runs[0].cancelReconciled).not.toBe(true);
+    expect(state.runs[1]).toMatchObject({ cancelled: true, status: "cancelled", cancelReconciled: true });
+    expect(state.outbound.some((out: any) => out.message.payload.reason?.includes("Integration record unavailable"))).toBe(true);
+  });
+
 });
