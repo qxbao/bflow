@@ -8,6 +8,7 @@ export function resolveChatDecision(
   const invalid = (message: string): OperationResult<IntentClassificationResult> => ({ ok: false,
     error: { code: "validation", retryable: false, message } });
   const terminal = (status: string) => ["completed", "failed", "cancelled"].includes(status);
+  let cancellationRunIds: string[] | undefined;
   let targetCorrelationId = "targetCorrelationId" in decision ? decision.targetCorrelationId : undefined;
   let targetRunId = "targetRunId" in decision ? decision.targetRunId : undefined;
 
@@ -37,13 +38,20 @@ export function resolveChatDecision(
       return invalid("Unknown pending clarification in the Chat decision");
     }
   } else if (decision.intent === "cancellation_request") {
-    const workflow = Object.values(context.workflows).find(item => item.runId === decision.cancellationInput.runId);
-    if (!workflow || terminal(workflow.sdlcStatus) || (targetRunId && targetRunId !== workflow.runId) ||
-        (targetCorrelationId && targetCorrelationId !== workflow.correlationId)) {
-      return invalid("Cancellation must identify one existing unfinished workflow");
+    const cancel = decision.cancellationInput;
+    cancellationRunIds = "runId" in cancel ? [cancel.runId] : "runIds" in cancel ? [...cancel.runIds] :
+      [...new Set(Object.values(context.workflows).filter(item => item.sessionId === context.session.sessionId).map(item => item.runId).filter((id): id is string => id !== undefined))];
+    for (const runId of cancellationRunIds) {
+      const workflow = Object.values(context.workflows).find(item => item.runId === runId);
+      if (!workflow || workflow.sessionId !== context.session.sessionId || (targetRunId && (cancellationRunIds.length !== 1 || targetRunId !== workflow.runId)) ||
+          (targetCorrelationId && (cancellationRunIds.length !== 1 || targetCorrelationId !== workflow.correlationId))) {
+        return invalid("Cancellation must identify existing workflows in the current session");
+      }
     }
-    targetRunId = workflow.runId;
-    targetCorrelationId = workflow.correlationId;
+    if (cancellationRunIds.length === 1) {
+      targetRunId = cancellationRunIds[0];
+      targetCorrelationId = Object.values(context.workflows).find(item => item.runId === targetRunId)!.correlationId;
+    }
   } else if (decision.intent === "status_query" && (targetRunId || targetCorrelationId)) {
     const workflow = targetCorrelationId ? context.workflows[targetCorrelationId] :
       Object.values(context.workflows).find(item => item.runId === targetRunId);
@@ -60,8 +68,8 @@ export function resolveChatDecision(
     ...(decision.intent === "clarify" ? { clarifyingQuestions: decision.clarifyingQuestions } : {}),
     ...(decision.intent === "conversation_only" ? { directReply: decision.directReply } : {}),
     ...(decision.intent === "cancellation_request" ? { cancellationInput: {
-      runId: decision.cancellationInput.runId,
-      ...(decision.cancellationInput.taskId ? { taskId: decision.cancellationInput.taskId } : {}),
+      runIds: cancellationRunIds!,
+      ...("taskId" in decision.cancellationInput && decision.cancellationInput.taskId ? { taskId: decision.cancellationInput.taskId } : {}),
       ...(decision.cancellationInput.reason ? { reason: decision.cancellationInput.reason } : {})
     } } : {}),
     ...(targetCorrelationId ? { targetCorrelationId } : {}),

@@ -8,6 +8,9 @@ import {
   ApprovalRequestSchema,
   ArtifactReferenceSchema,
   ConversationMessageSchema,
+  CancellationRequestSchema,
+  ContractErrorSchema,
+  DelegationRequestSchema,
   ConversationSessionSchema,
   IdempotencyKeySchema,
   IdentifierSchema,
@@ -158,6 +161,13 @@ export interface ExtractedRequirementDraft {
   readonly targetCorrelationId?: string | undefined;
 }
 
+export const ChatCancellationInputSchema = z.union([
+  z.object({ runId: IdentifierSchema, taskId: IdentifierSchema.optional(), reason: z.string().trim().min(1).optional() }).strict(),
+  z.object({ runIds: z.array(IdentifierSchema).min(1).refine(ids => new Set(ids).size === ids.length, "Duplicate cancellation run IDs"),
+    reason: z.string().trim().min(1).optional() }).strict(),
+  z.object({ scope: z.literal("session_existing"), reason: z.string().trim().min(1).optional() }).strict()
+]);
+
 /** Private Chat/host intake protocol. Governance approvals are deliberately absent. */
 export const ChatDecisionSchema = z.discriminatedUnion("intent", [
   z.object({ intent: z.literal("conversation_only"), directReply: z.string().trim().min(1) }).strict(),
@@ -166,8 +176,7 @@ export const ChatDecisionSchema = z.discriminatedUnion("intent", [
   z.object({ intent: z.literal("workflow_request"), requirementDraft: ExtractedRequirementDraftSchema,
     targetCorrelationId: IdentifierSchema.optional(), targetRunId: IdentifierSchema.optional() }).strict(),
   z.object({ intent: z.literal("status_query"), targetCorrelationId: IdentifierSchema.optional(), targetRunId: IdentifierSchema.optional() }).strict(),
-  z.object({ intent: z.literal("cancellation_request"), cancellationInput: z.object({ runId: IdentifierSchema,
-    taskId: IdentifierSchema.optional(), reason: z.string().trim().min(1).optional() }).strict(),
+  z.object({ intent: z.literal("cancellation_request"), cancellationInput: ChatCancellationInputSchema,
     targetCorrelationId: IdentifierSchema.optional(), targetRunId: IdentifierSchema.optional() }).strict()
 ]);
 
@@ -182,6 +191,7 @@ export interface ExtractedApprovalInput {
 }
 
 export interface ExtractedCancellationInput {
+  readonly runIds?: readonly string[];
   readonly runId?: string;
   readonly taskId?: string;
   readonly reason?: string;
@@ -455,9 +465,23 @@ export interface ClosedApproval {
   readonly closedAt: string;
 }
 
+/** Private durable Conversation plan. Existing public request schemas remain unchanged. */
+export const CancellationBatchSchema = z.object({
+  input: UserTurnInputSchema,
+  items: z.array(z.object({
+    runId: IdentifierSchema,
+    status: z.enum(["pending", "attempting", "queued", "blocked"]),
+    request: CancellationRequestSchema,
+    delegation: DelegationRequestSchema,
+    error: ContractErrorSchema.optional()
+  }).strict())
+}).strict();
+export type CancellationBatch = z.infer<typeof CancellationBatchSchema>;
+
 export const ConversationContextSnapshotSchema = z
   .object({
     schemaVersion: z.literal(2),
+    cancellationBatches: z.record(IdentifierSchema, CancellationBatchSchema).optional(),
     session: ConversationSessionSchema,
     messages: z.array(ConversationMessageSchema),
     workflows: z.record(IdentifierSchema, WorkflowRequestContextSchema),
@@ -478,6 +502,7 @@ export const ConversationContextSnapshotSchema = z
   .strict();
 
 export interface ConversationContextSnapshot {
+  readonly cancellationBatches?: Readonly<Record<string, CancellationBatch>> | undefined;
   readonly schemaVersion: 2;
   readonly session: ConversationSession;
   readonly messages: readonly ConversationMessage[];

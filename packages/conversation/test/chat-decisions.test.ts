@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ConversationGateway, HerdrConversationBridge, InMemoryConversationContextStore, MockHerdrAgentTransport
 } from "../src/index.js";
@@ -168,7 +168,7 @@ describe("Chat decides intent; Gateway validates and executes", () => {
     expect(transport.sentRoleMessages).toHaveLength(1);
   });
 
-  it("rejects a queued action whose target has ended and continues processing the FIFO", async () => {
+  it("accepts cancellation while the role is busy and continues processing the FIFO", async () => {
     const { gateway, turn, config, transport } = await setup();
     const first = await turn("Khảo sát MCP", spike("Khảo sát MCP"));
     if (!first.ok || !first.value.runId) throw new Error("setup failed");
@@ -185,15 +185,14 @@ describe("Chat decides intent; Gateway validates and executes", () => {
     const drained = await gateway.setAgentBusyState(false);
     expect(drained.ok).toBe(true);
     expect(gateway.getContextSnapshot().pendingInboundQueue).toHaveLength(0);
-    expect(transport.sentRoleMessages).toHaveLength(2);
+    expect(transport.sentRoleMessages).toHaveLength(3);
     const replay = async (instance: ConversationGateway) => instance.handleUserTurn({ sessionId: "session-chat",
       messageId: "queued-cancel", content: "Hủy workflow", conversationDecision: cancellation } as never);
     const rejected = await replay(gateway);
-    expect(rejected).toMatchObject({ ok: true, value: { recognizedIntent: "conversation_only",
-      rejectedDecision: { code: "validation" }, agentReply: { intent: "error_report" } } });
+    expect(rejected).toMatchObject({ ok: true, value: { recognizedIntent: "cancellation_request" } });
     const recovered = new ConversationGateway(config);
-    expect(await replay(recovered)).toMatchObject({ ok: true, value: { rejectedDecision: { code: "validation" } } });
-    expect(transport.sentRoleMessages).toHaveLength(2);
+    expect(await replay(recovered)).toMatchObject({ ok: true, value: { recognizedIntent: "cancellation_request" } });
+    expect(transport.sentRoleMessages).toHaveLength(3);
   });
 
   it("replays a committed decision after recovery without a second handoff", async () => {
@@ -268,11 +267,143 @@ describe("Chat decides intent; Gateway validates and executes", () => {
     expect(transport.sentRoleMessages).toHaveLength(2);
   });
 
+  it("freezes one session cancellation batch, keeps enqueue distinct from cancellation, and replays it", async () => {
+    const { turn, gateway, config, transport } = await setup();
+    const first = await turn("Khảo sát MCP", spike("Khảo sát MCP"));
+    const second = await turn("Khảo sát khác", spike("Khảo sát khác"));
+    if (!first.ok || !second.ok) throw new Error("setup failed");
+    const decision = { intent: "cancellation_request", cancellationInput: { runIds: [first.value.runId, second.value.runId] } };
+    const result = await turn("Hủy hết các run cũ", decision, { messageId: "batch-cancel" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.agentReply.metadata?.cancellationBatch).toMatchObject({ items: [
+      { runId: first.value.runId, status: "queued" }, { runId: second.value.runId, status: "queued" }
+    ] });
+    expect(gateway.getContextSnapshot().workflows[first.value.correlationId]?.sdlcStatus).toBe("intake");
+    const cancellations = transport.sentRoleMessages.filter(message => message.type === "delegation.request" &&
+      (message.payload as Record<string, unknown>).metadata &&
+      ((message.payload as Record<string, unknown>).metadata as Record<string, unknown>).action === "cancel");
+    expect(cancellations).toHaveLength(2);
+    expect(new Set(cancellations.map(message => message.message_id)).size).toBe(2);
+    const recovered = new ConversationGateway(config);
+    const replay = await recovered.handleUserTurn({ sessionId: "session-chat", messageId: "batch-cancel", content: "Hủy hết các run cũ", conversationDecision: decision } as never);
+    expect(replay.ok && replay.value.agentReply).toEqual(result.value.agentReply);
+    expect(transport.sentRoleMessages).toHaveLength(4);
+    expect((await recovered.handleUserTurn({ sessionId: "session-chat", messageId: "batch-cancel", content: "Hủy hết các run cũ",
+      conversationDecision: { intent: "cancellation_request", cancellationInput: { runId: first.value.runId } } } as never)).ok).toBe(false);
+  });
+
+  it("continues a cancellation batch after a failed item and reconciles cancelled runs instead of claiming they stopped", async () => {
+    const { turn, gateway, config, transport } = await setup();
+    const runs = ["A", "B", "C"];
+    const created = [];
+    for (const title of runs) {
+      const item = await turn(title, spike(title));
+      if (!item.ok) throw new Error("setup failed");
+      created.push(item.value);
+    }
+    await gateway.handleCoordinatorRoleMessage({ schema_version: 2, message_id: "terminal-cancel", correlation_id: created[0]!.correlationId,
+      run_id: created[0]!.runId, sender: { role: "runtime" }, recipient: { role: "conversation" }, type: "conversation.progress",
+      payload: { sdlcStatus: "cancelled", summary: "Cancelled by Runtime" }, artifact_references: [] });
+    const send = config.bridge.handOffToCoordinator.bind(config.bridge);
+    vi.spyOn(config.bridge, "handOffToCoordinator").mockImplementationOnce(async () => ({ ok: false,
+      error: { code: "transport_unavailable", retryable: true, message: "Queue unavailable" } })).mockImplementation(send);
+    const result = await turn("Hủy các run", { intent: "cancellation_request", cancellationInput: { runIds: created.map(item => item.runId) } });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.agentReply.metadata?.cancellationBatch).toMatchObject({ items: [
+      { status: "blocked" }, { status: "queued" }, { status: "queued" }
+    ] });
+    expect(transport.sentRoleMessages).toHaveLength(5);
+  });
+
+  it("recovers an interrupted enqueue without resend and keeps the original session target set", async () => {
+    const { turn, gateway, config, transport, store } = await setup();
+    const first = await turn("A", spike("A"));
+    const second = await turn("B", spike("B"));
+    if (!first.ok || !second.ok) throw new Error("setup failed");
+    const save = store.save.bind(store);
+    let fail = true;
+    vi.spyOn(store, "save").mockImplementation(async snapshot => {
+      if (fail && snapshot.cancellationBatches?.["interrupted-cancel"]?.items[0]?.status === "queued") {
+        fail = false;
+        return { ok: false, error: { code: "corruption", retryable: false, message: "Interrupted before receipt persistence" } };
+      }
+      return save(snapshot);
+    });
+    const decision = { intent: "cancellation_request", cancellationInput: { scope: "session_existing" } };
+    expect((await turn("Hủy hết các run cũ", decision, { messageId: "interrupted-cancel" })).ok).toBe(false);
+    expect(transport.sentRoleMessages).toHaveLength(3);
+    const recovered = new ConversationGateway(config);
+    await recovered.initializeOrRecoverSession();
+    const newer = await recovered.handleUserTurn({ sessionId: "session-chat", messageId: "newer", content: "C", conversationDecision: spike("C") } as never);
+    expect(newer.ok).toBe(true);
+    const replay = await recovered.handleUserTurn({ sessionId: "session-chat", messageId: "interrupted-cancel", content: "Hủy hết các run cũ", conversationDecision: decision } as never);
+    expect(replay.ok).toBe(true);
+    if (!replay.ok) return;
+    expect(replay.value.agentReply.metadata?.cancellationBatch).toMatchObject({ items: [
+      { runId: first.value.runId, status: "blocked", error: { code: "unknown_delivery" } }, { runId: second.value.runId, status: "queued" }
+    ] });
+    expect(transport.sentRoleMessages).toHaveLength(5);
+    expect(gateway.getContextSnapshot().workflows[first.value.correlationId]?.sdlcStatus).toBe("intake");
+  });
+
+  it("reconciles Runtime-only runs and closes stale approval projections without fabricating success", async () => {
+    const { turn, gateway, config } = await setup();
+    const first = await turn("A", spike("A"));
+    const second = await turn("B", spike("B"));
+    if (!first.ok || !second.ok || !first.value.delegationRequest || !second.value.delegationRequest) throw new Error("setup failed");
+    const request = { schemaVersion: 2, approvalId: "apr-stale", runId: first.value.runId, sessionId: "session-chat", status: "pending",
+      target: { type: "run" }, revision: 1, generation: 0, requestedBy: "coordinator", requestedAt: new Date().toISOString(),
+      reason: "Continue?", evidence: [], idempotencyKey: "stale-decision", metadata: { kind: "user_decision", question: "Continue?", options: ["Yes", "No"] } };
+    expect((await gateway.reconcilePendingApprovals([{ request, correlationId: first.value.correlationId }])).ok).toBe(true);
+    const missing = { ...second.value.delegationRequest, runId: "run-runtime-only", correlationId: "corr-runtime-only" };
+    const foreign = { ...missing, runId: "run-foreign", correlationId: "corr-foreign", sessionId: "session-foreign" };
+    const result = await gateway.reconcileRuntimeRuns([
+      { runId: first.value.runId, delegation: first.value.delegationRequest, status: "cancelled", cancelled: true },
+      { runId: second.value.runId, delegation: second.value.delegationRequest, status: "completed", cancelled: false },
+      { runId: missing.runId, delegation: missing, status: "specifying", cancelled: false },
+      { runId: foreign.runId, delegation: foreign, status: "intake", cancelled: false }
+    ]);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.rejected).toHaveLength(1);
+    const snapshot = gateway.getContextSnapshot();
+    expect(snapshot.pendingApprovals).toEqual({});
+    expect(snapshot.session.activeApprovalIds).toEqual([]);
+    expect(snapshot.closedApprovals?.["apr-stale"]).toMatchObject({ status: "expired" });
+    expect(snapshot.workflows[second.value.correlationId]?.completedVerified).toBe(false);
+    expect(snapshot.workflows["corr-runtime-only"]?.runId).toBe("run-runtime-only");
+    expect(snapshot.workflows["corr-foreign"]).toBeUndefined();
+    const restored = new ConversationGateway(config);
+    await restored.initializeOrRecoverSession();
+    const late = await restored.handleUserTurn({ sessionId: "session-chat", content: "apr-stale: Yes", provenance: { origin: "user", authenticatedUser: true } });
+    expect(late.ok && late.value.approvalDecision).toBeUndefined();
+    expect((await restored.reconcilePendingApprovals([{ request, correlationId: first.value.correlationId }])).ok).toBe(true);
+    expect(restored.getContextSnapshot().pendingApprovals).toEqual({});
+    const batch = await restored.handleUserTurn({ sessionId: "session-chat", messageId: "cancel-runtime-only", content: "Hủy hết",
+      conversationDecision: { intent: "cancellation_request", cancellationInput: { scope: "session_existing" } } } as never);
+    expect(batch.ok && batch.value.agentReply.metadata?.cancellationBatch).toMatchObject({ items: [
+      { runId: first.value.runId }, { runId: second.value.runId }, { runId: "run-runtime-only" }
+    ] });
+  });
+
+  it("refuses an unknown or foreign run before any batch item is sent", async () => {
+    const { turn, transport } = await setup();
+    const first = await turn("Khảo sát MCP", spike("Khảo sát MCP"));
+    if (!first.ok) throw new Error("setup failed");
+    const result = await turn("Hủy các run", { intent: "cancellation_request", cancellationInput: { runIds: [first.value.runId, "run-other-session"] } });
+    expect(result.ok).toBe(false);
+    expect(transport.sentRoleMessages).toHaveLength(1);
+  });
+
   it.each([
     { intent: "approval_response", approvalInput: { decision: "approved" } },
     { intent: "workflow_request" },
     { ...spike("Khảo sát MCP"), targetCorrelationId: "corr-unknown" },
     { intent: "cancellation_request", cancellationInput: { runId: "run-missing" } },
+    { intent: "cancellation_request", cancellationInput: { runIds: [] } },
+    { intent: "cancellation_request", cancellationInput: { runIds: ["run-a", "run-a"] } },
+    { intent: "cancellation_request", cancellationInput: { runId: "run-a", scope: "session_existing" } },
     { intent: "clarify", clarifyingQuestions: [] }
   ])("rejects malformed or invalid-target decisions without dispatch: %j", async decision => {
     const { turn, transport } = await setup();

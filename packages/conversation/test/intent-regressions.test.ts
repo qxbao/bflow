@@ -89,7 +89,7 @@ describe("Conversation authority and intent regressions", () => {
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value.cancellationRequest?.runId).toBe(old.value.runId);
     const snapshot = gateway.getContextSnapshot();
-    expect(snapshot.workflows[old.value.correlationId]?.sdlcStatus).toBe("cancelled");
+    expect(snapshot.workflows[old.value.correlationId]?.sdlcStatus).toBe("intake");
     expect(snapshot.workflows[active.value.correlationId]?.sdlcStatus).not.toBe("cancelled");
     expect(transport.sentRoleMessages).toHaveLength(4);
     expect(transport.sentRoleMessages[2]?.correlation_id).toBe(old.value.correlationId);
@@ -105,7 +105,7 @@ describe("Conversation authority and intent regressions", () => {
     expect(result.ok).toBe(true);
     if (old.ok && result.ok) {
       expect(result.value.cancellationRequest?.runId).toBe(old.value.runId);
-      expect(gateway.getContextSnapshot().workflows[old.value.correlationId]?.sdlcStatus).toBe("cancelled");
+      expect(gateway.getContextSnapshot().workflows[old.value.correlationId]?.sdlcStatus).toBe("intake");
     }
   });
 

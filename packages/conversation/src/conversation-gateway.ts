@@ -7,13 +7,13 @@ import {
   ContractErrorSchema,
   ConversationMessageSchema,
   DelegationRequestSchema,
+  SdlcWorkStatusSchema,
   type AgentTransportState,
   type ApprovalRequest,
   type ConversationMessage,
   type ConversationSession,
   type ConversationSessionStatus,
   type ContractError,
-  type JsonValue,
   type OperationOptions,
   type OperationResult,
   type SdlcWorkStatus
@@ -51,6 +51,7 @@ import {
   MAX_QUEUE_PROCESSING_ATTEMPTS,
   UserTurnInputSchema,
   type ApprovalReconciliation,
+  type CancellationBatch,
   type ClosedApproval,
   type DeadLetterItem,
   type QueueProcessingFailure,
@@ -434,9 +435,15 @@ export class ConversationGateway {
       }
     }
 
+    const frozenBatch = input.messageId ? this.snapshot!.cancellationBatches?.[input.messageId] : undefined;
+    if (frozenBatch && (frozenBatch.input.content !== input.content ||
+        !isDeepStrictEqual(frozenBatch.input.conversationDecision, input.conversationDecision))) {
+      return { ok: false, error: { code: "validation", retryable: false, message: "Conflicting Chat decision for a pending cancellation batch" } };
+    }
+
     // 1. Busy-State Queueing (Requirement 10): Zero message loss
     const shouldQueue =
-      (this.isProcessingTurn || this.isFlushingQueue || this.snapshot!.agentBusy === true) &&
+      (this.isProcessingTurn || this.isFlushingQueue || (this.snapshot!.agentBusy === true && input.conversationDecision?.intent !== "cancellation_request")) &&
       !this.isDrainingSingleQueueItem;
 
     if (shouldQueue) {
@@ -564,7 +571,12 @@ export class ConversationGateway {
       }
 
       // 4. Classify user intent
-      const classificationResult = input.conversationDecision
+      const classificationResult = frozenBatch
+        ? { ok: true as const, value: { intent: "cancellation_request" as const, confidence: 1, rationale: "Resume frozen cancellation plan",
+            clarifyingQuestions: [], cancellationInput: { runIds: frozenBatch.items.map(item => item.runId) },
+            ...(frozenBatch.items.length === 1 ? { targetRunId: frozenBatch.items[0]!.runId,
+              targetCorrelationId: frozenBatch.items[0]!.delegation.correlationId } : {}) } }
+        : input.conversationDecision
         ? resolveChatDecision(input.conversationDecision, this.snapshot!)
         : classifyUserIntent(input, this.snapshot!);
       if (!classificationResult.ok) {
@@ -1221,183 +1233,100 @@ export class ConversationGateway {
 
         case "cancellation_request": {
           const cancelInput = classification.cancellationInput;
-          const targetRunId =
-            cancelInput?.runId ??
-            classification.targetRunId ??
-            this.snapshot!.session.activeRunId;
-
-          if (!targetRunId) {
-            return {
-              ok: false,
-              error: {
-                code: "not_found",
-                retryable: false,
-                message: "No active workflow run found to cancel"
-              }
-            };
-          }
-
-          const targetWorkflow = Object.values(this.snapshot!.workflows).find(
-            (w) => w.runId === targetRunId
-          );
-
-          const cancelResult = buildCancellationRequest({
-            runId: targetRunId,
-            ...(cancelInput?.taskId ? { taskId: cancelInput.taskId } : {}),
-            requestedBy: "conversation",
-            requestedAt,
-            expectedVersion: targetWorkflow ? targetWorkflow.revision : 1,
-            reason: cancelInput?.reason ?? "User requested workflow cancellation",
-            ...(input.conversationDecision ? { cancellationId: this.generateTurnId(input, "canc"),
-              idempotencyKey: this.generateTurnId(input, "idemp-canc") } : {})
-          });
-
-          if (!cancelResult.ok) {
-            return cancelResult;
-          }
-
-          const cancellationRequest = cancelResult.value;
-
-          const cancelDelegationRaw = {
-            schemaVersion: 2 as const,
-            delegationId: this.generateTurnId(input, "del-cancel"),
-            messageId: this.generateTurnId(input, "msg-cancel"),
-            correlationId,
-            sessionId: this.config.sessionId,
-            runId: targetRunId,
-            requestedBy: "conversation" as const,
-            targetRole: "coordinator" as const,
-            title: `Hủy workflow run: ${targetRunId}`,
-            objective: cancellationRequest.reason,
-            specificationId: `spec-cancel-${targetRunId}`,
-            sddLevel: "lightweight" as const,
-            acceptanceCriteria: [
-              {
-                id: "ac-cancel-1",
-                description: cancellationRequest.reason,
-                category: "functional" as const,
-                verificationMethod: "manual_review" as const,
-                required: true,
-                status: "pending" as const,
-                evidenceArtifactIds: []
-              }
-            ],
-            inputArtifacts: [],
-            priority: "critical" as const,
-            requestedAt,
-            idempotencyKey: cancellationRequest.idempotencyKey,
-            metadata: {
-              action: "cancel",
-              targetRunId,
-              cancellationRequest: cancellationRequest as unknown as JsonValue,
-              requestedScope: [cancelInput?.taskId ?? targetRunId],
-              rawUserRequest: input.content,
-              interpretedIntent: cancellationRequest.reason
+          const batchKey = input.messageId ?? this.generateId("cancel-batch");
+          let batch = this.snapshot!.cancellationBatches?.[batchKey];
+          const saveBatch = async (): Promise<OperationResult<unknown>> => this.persistUpdatedSnapshot({ ...this.snapshot!,
+            cancellationBatches: { ...this.snapshot!.cancellationBatches, [batchKey]: batch! },
+            deliveryRecords: this.config.bridge.getAllDeliveryRecords() });
+          if (!batch) {
+            const targets = cancelInput?.runIds ?? [cancelInput?.runId ?? classification.targetRunId ?? this.snapshot!.session.activeRunId]
+              .filter((id): id is string => id !== undefined);
+            const items: CancellationBatch["items"] = [];
+            for (const targetRunId of targets) {
+              const targetWorkflow = Object.values(this.snapshot!.workflows).find(w => w.runId === targetRunId);
+              if (!targetWorkflow || targetWorkflow.sessionId !== this.config.sessionId) return { ok: false, error: { code: "not_found", retryable: false,
+                message: `No workflow run ${targetRunId} found in this Conversation session` } };
+              const itemInput = { ...input, messageId: `${batchKey}:${targetRunId}` };
+              const cancelResult = buildCancellationRequest({ runId: targetRunId,
+                ...(cancelInput?.taskId ? { taskId: cancelInput.taskId } : {}), requestedBy: "conversation", requestedAt,
+                expectedVersion: targetWorkflow.revision, reason: cancelInput?.reason ?? "User requested workflow cancellation",
+                cancellationId: this.generateTurnId(itemInput, "canc"), idempotencyKey: this.generateTurnId(itemInput, "idemp-canc") });
+              if (!cancelResult.ok) return cancelResult;
+              const cancellationRequest = cancelResult.value;
+              const parsed = DelegationRequestSchema.safeParse({ schemaVersion: 2,
+                delegationId: this.generateTurnId(itemInput, "del-cancel"), messageId: this.generateTurnId(itemInput, "msg-cancel"),
+                correlationId: targetWorkflow.correlationId, sessionId: this.config.sessionId, runId: targetRunId,
+                requestedBy: "conversation", targetRole: "coordinator", title: `Hủy workflow run: ${targetRunId}`,
+                objective: cancellationRequest.reason, specificationId: `spec-cancel-${targetRunId}`, sddLevel: "lightweight",
+                acceptanceCriteria: [{ id: "ac-cancel-1", description: cancellationRequest.reason, category: "functional",
+                  verificationMethod: "manual_review", required: true, status: "pending", evidenceArtifactIds: [] }],
+                inputArtifacts: [], priority: "critical", requestedAt, idempotencyKey: cancellationRequest.idempotencyKey,
+                metadata: { action: "cancel", targetRunId, cancellationRequest,
+                  requestedScope: [cancelInput?.taskId ?? targetRunId], rawUserRequest: input.content,
+                  interpretedIntent: cancellationRequest.reason, userMessageId: batchKey, cancellationBatchRunIds: targets } });
+              if (!parsed.success) return { ok: false, error: { code: "validation", retryable: false,
+                message: `Invalid cancel DelegationRequest: ${parsed.error.message}` } };
+              // Even cancelled runs are sent to Runtime for safe stop/reconciliation; a Conversation label is not proof.
+              items.push({ runId: targetRunId, status: "pending", request: cancellationRequest, delegation: parsed.data });
             }
-          };
-
-          const parsedCancelDel = DelegationRequestSchema.safeParse(cancelDelegationRaw);
-          if (!parsedCancelDel.success) {
-            return {
-              ok: false,
-              error: {
-                code: "validation",
-                retryable: false,
-                message: `Invalid cancel DelegationRequest: ${parsedCancelDel.error.message}`,
-                details: JSON.parse(JSON.stringify(parsedCancelDel.error.issues))
-              }
-            };
+            batch = { input: UserTurnInputSchema.parse(input), items };
+            const saved = await saveBatch();
+            if (!saved.ok) return saved;
           }
-          const cancelDelegation = parsedCancelDel.data;
-
-          const userMsg: ConversationMessage = {
-            schemaVersion: 2,
-            messageId: input.messageId ?? this.generateId("msg-user"),
-            sessionId: this.config.sessionId,
-            correlationId,
-            runId: targetRunId,
-            turnSequence: userTurnSequence,
-            sender: "user",
-            ...decisionReceipt,
-            recipient: "conversation",
-            intent: "user_request",
-            content: input.content,
-            artifactReferences: input.inputArtifacts ? [...input.inputArtifacts] : [],
-            createdAt: input.occurredAt ?? now
-          };
-
-          const agentReply: ConversationMessage = {
-            schemaVersion: 2,
-            messageId: this.generateId("msg-chat"),
-            sessionId: this.config.sessionId,
-            correlationId,
-            runId: targetRunId,
-            turnSequence: agentTurnSequence,
-            sender: "conversation",
-            recipient: "user",
-            intent: "progress_update",
-            content: `Yêu cầu hủy workflow run ${targetRunId} đã được gửi qua Herdr; đang chờ Runtime/Coordinator xác nhận kết quả hủy.${classification.followUpContents?.length ? " Yêu cầu tiếp theo được lưu vào hàng đợi để xử lý riêng: " + classification.followUpContents.join("; ") : ""}`,
-            ...(input.conversationDecision ? { metadata: { cancellationRequest: JSON.parse(JSON.stringify(cancellationRequest)) } } : {}),
-            artifactReferences: [],
-            createdAt: now
-          };
-
-          const msgValidation = this.validateConversationMessages(userMsg, agentReply);
-          if (!msgValidation.ok) return msgValidation;
-
-          const sendCancelResult = await this.config.bridge.handOffToCoordinator(
-            cancelDelegation,
-            options
-          );
-          if (!sendCancelResult.ok) {
-            return sendCancelResult;
+          for (let i = 0; i < batch.items.length; i++) {
+            const item = batch.items[i]!;
+            if (item.status === "attempting") {
+              // A crash can occur between the queue side effect and recording its receipt. Never assume not delivered.
+              batch = { ...batch, items: batch.items.map((entry, index) => index !== i ? entry : { ...entry, status: "blocked",
+                error: { code: "unknown_delivery", retryable: false, manualInterventionRequired: true,
+                  message: "Interrupted cancellation enqueue; reconcile delivery before retrying" } }) };
+              const saved = await saveBatch();
+              if (!saved.ok) return saved;
+              continue;
+            }
+            if (item.status !== "pending") continue;
+            batch = { ...batch, items: batch.items.map((entry, index) => index !== i ? entry : { ...entry, status: "attempting" }) };
+            const prepared = await saveBatch();
+            if (!prepared.ok) return prepared;
+            let sent: OperationResult<void>;
+            try { sent = await this.config.bridge.handOffToCoordinator(item.delegation, options); }
+            catch (error) { sent = { ok: false, error: { code: "unknown_delivery", retryable: false, manualInterventionRequired: true,
+              message: `Cancellation enqueue raised an error; reconcile required: ${String(error)}` } }; }
+            batch = { ...batch, items: batch.items.map((entry, index) => index !== i ? entry :
+              sent.ok ? { ...entry, status: "queued" } : { ...entry, status: "blocked", error: sent.error }) };
+            const saved = await saveBatch();
+            if (!saved.ok) return saved;
           }
-
-          const updatedWorkflows = { ...this.snapshot!.workflows };
-          if (targetWorkflow) {
-            updatedWorkflows[targetWorkflow.correlationId] = {
-              ...targetWorkflow,
-              sdlcStatus: "cancelled",
-              updatedAt: now
-            };
-          }
-
-          const updatedSession: ConversationSession = {
-            ...this.snapshot!.session,
-            turnCount: agentTurnSequence,
-            updatedAt: now
-          };
-
-          const updatedSnapshot: ConversationContextSnapshot = {
-            ...this.snapshot!,
-            session: updatedSession,
+          const single = batch.items.length === 1 ? batch.items[0] : undefined;
+          const summary = { items: batch.items.map(item => ({ runId: item.runId, status: item.status,
+            ...(item.error ? { error: item.error } : {}) })) };
+          const userMsg: ConversationMessage = { schemaVersion: 2,
+            messageId: input.messageId ?? this.generateId("msg-user"), sessionId: this.config.sessionId, correlationId,
+            ...(single ? { runId: single.runId } : {}), turnSequence: userTurnSequence, sender: "user", ...decisionReceipt,
+            recipient: "conversation", intent: "user_request", content: input.content,
+            artifactReferences: input.inputArtifacts ? [...input.inputArtifacts] : [], createdAt: input.occurredAt ?? now };
+          const queued = batch.items.filter(item => item.status === "queued").length;
+          const blocked = batch.items.filter(item => item.status === "blocked").length;
+          const agentReply: ConversationMessage = { schemaVersion: 2, messageId: this.generateId("msg-chat"),
+            sessionId: this.config.sessionId, correlationId, ...(single ? { runId: single.runId } : {}), turnSequence: agentTurnSequence,
+            sender: "conversation", recipient: "user", intent: "progress_update",
+            content: `Yêu cầu hủy: ${queued}/${batch.items.length} run đã vào hàng đợi Runtime; ${blocked} run bị chặn. ` +
+              "Đang chờ Runtime xác nhận xử lý và dừng/reconcile; queued không có nghĩa đã bắt đầu hoặc dừng hoàn toàn." +
+              batch.items.filter(item => item.error).map(item => `\n${item.runId}: ${item.error!.message}`).join(""),
+            metadata: { cancellationBatch: JSON.parse(JSON.stringify(summary)),
+              ...(single ? { cancellationRequest: JSON.parse(JSON.stringify(single.request)) } : {}) }, artifactReferences: [], createdAt: now };
+          const valid = this.validateConversationMessages(userMsg, agentReply);
+          if (!valid.ok) return valid;
+          const saved = await this.persistUpdatedSnapshot({ ...this.snapshot!,
+            session: { ...this.snapshot!.session, turnCount: agentTurnSequence, updatedAt: now },
             messages: [...this.snapshot!.messages, userMsg, agentReply],
-            workflows: updatedWorkflows,
             pendingInboundQueue: [...this.snapshot!.pendingInboundQueue, ...(classification.followUpContents ?? []).map(content => ({
               queueId: this.generateId("queue-followup"), kind: "user_turn" as const, enqueuedAt: now,
-              input: { sessionId: input.sessionId, content, provenance: input.provenance, inputArtifacts: input.inputArtifacts }
-            }))],
-            deliveryRecords: this.config.bridge.getAllDeliveryRecords()
-          };
-
-          const saveRes = await this.persistUpdatedSnapshot(updatedSnapshot);
-          if (!saveRes.ok) return saveRes;
-
-          return {
-            ok: true,
-            value: {
-              sessionId: this.config.sessionId,
-              correlationId,
-              runId: targetRunId,
-              recognizedIntent: "cancellation_request",
-              sessionStatus: this.snapshot!.session.status,
-              userMessage: userMsg,
-              agentReply,
-              cancellationRequest,
-              queuedBecauseBusy: false,
-              substantiveUpdate: true
-            }
-          };
+              input: { sessionId: input.sessionId, content, provenance: input.provenance, inputArtifacts: input.inputArtifacts } }))] });
+          if (!saved.ok) return saved;
+          return { ok: true, value: { sessionId: this.config.sessionId, correlationId, ...(single ? { runId: single.runId,
+            cancellationRequest: single.request } : {}), recognizedIntent: "cancellation_request", sessionStatus: this.snapshot!.session.status,
+            userMessage: userMsg, agentReply, queuedBecauseBusy: false, substantiveUpdate: true } };
         }
 
         default: {
@@ -1415,6 +1344,64 @@ export class ConversationGateway {
     } finally {
       this.isProcessingTurn = false;
     }
+  }
+
+  /** Refresh display state from Runtime authority; never infer completion evidence from a status label. */
+  async reconcileRuntimeRuns(rawEntries: readonly unknown[]): Promise<OperationResult<{ updated: string[]; rejected: string[]; busy?: boolean }>> {
+    if (!this.snapshot) {
+      const initialized = await this.initializeOrRecoverSession();
+      if (!initialized.ok) return initialized;
+    }
+    if (this.isProcessingTurn || this.isFlushingQueue) return { ok: true, value: { updated: [], rejected: [], busy: true } };
+    const updated: string[] = [], rejected: string[] = [];
+    const now = this.getNow(), workflows = { ...this.snapshot!.workflows }, runMap = { ...this.snapshot!.runIdToCorrelationId };
+    const pending = { ...this.snapshot!.pendingApprovals }, closed = { ...this.snapshot!.closedApprovals };
+    const terminal = new Set<string>();
+    for (const raw of rawEntries) {
+      // The private projection accepts Runtime fields but parses exchanged public values with their contracts.
+      const parsed = z.object({ runId: z.string().min(1), delegation: DelegationRequestSchema,
+        status: SdlcWorkStatusSchema, cancelled: z.boolean() }).passthrough().safeParse(raw);
+      if (!parsed.success) { rejected.push("Invalid Runtime run projection"); continue; }
+      const run = parsed.data, delegation = run.delegation;
+      if (delegation.sessionId !== this.config.sessionId) { rejected.push(`${run.runId}: another session`); continue; }
+      if (delegation.runId !== run.runId) { rejected.push(`${run.runId}: delegation run mismatch`); continue; }
+      const correlationId = delegation.correlationId;
+      const previous = workflows[correlationId];
+      const mapped = runMap[run.runId];
+      if ((mapped !== undefined && mapped !== correlationId) || (previous !== undefined && previous.runId !== run.runId)) {
+        rejected.push(`${run.runId}: conflicting workflow correlation`); continue;
+      }
+      const status = run.cancelled ? "cancelled" : run.status;
+      workflows[correlationId] = { correlationId, sessionId: this.config.sessionId, delegationId: delegation.delegationId,
+        specificationId: delegation.specificationId, runId: run.runId, title: delegation.title, objective: delegation.objective,
+        kind: previous?.kind ?? "feature", sddLevel: delegation.sddLevel, priority: delegation.priority,
+        acceptanceCriteria: delegation.acceptanceCriteria, revision: previous?.revision ?? 1, generation: previous?.generation ?? 0,
+        activeApprovalIds: previous?.activeApprovalIds ?? [], progressHistory: previous?.progressHistory ?? [],
+        ...previous, sdlcStatus: status, completedVerified: previous?.completedVerified === true && status === "completed",
+        createdAt: previous?.createdAt ?? delegation.requestedAt, updatedAt: now };
+      runMap[run.runId] = correlationId;
+      if (isTerminalRunStatus(status)) terminal.add(run.runId);
+      updated.push(run.runId);
+    }
+    for (const request of Object.values(pending)) {
+      if (!terminal.has(request.runId)) continue;
+      closed[request.approvalId] = { approvalId: request.approvalId, runId: request.runId, status: "expired",
+        reason: `Runtime xác nhận run ${request.runId} đã kết thúc; không thể tiếp tục bằng approval`, closedAt: now };
+      delete pending[request.approvalId];
+    }
+    for (const [id, workflow] of Object.entries(workflows)) {
+      workflows[id] = { ...workflow, activeApprovalIds: workflow.activeApprovalIds.filter(id => pending[id] !== undefined) };
+    }
+    const activeApprovalIds = this.snapshot!.session.activeApprovalIds.filter(id => pending[id] !== undefined);
+    const { activeRunId, ...sessionBase } = this.snapshot!.session;
+    const session = { ...sessionBase, activeApprovalIds,
+      ...(activeRunId !== undefined && !terminal.has(activeRunId) ? { activeRunId } : {}),
+      status: sessionBase.status === "awaiting_user_approval" && activeApprovalIds.length === 0 ? "reporting_progress" as const : sessionBase.status,
+      updatedAt: now };
+    const saved = await this.persistUpdatedSnapshot({ ...this.snapshot!, session, workflows, runIdToCorrelationId: runMap,
+      pendingApprovals: pending, closedApprovals: closed });
+    if (!saved.ok) return saved;
+    return { ok: true, value: { updated, rejected } };
   }
 
   /**
@@ -1445,6 +1432,8 @@ export class ConversationGateway {
       if (this.snapshot!.approvalDecisions[request.approvalId]) { reject("approval đã được quyết định"); continue; }
       if (this.snapshot!.closedApprovals?.[request.approvalId]) { reject("approval đã đóng vì run kết thúc hoặc được thay thế"); continue; }
       if (isUserDecisionRequest(request) && request.expiresAt !== undefined && Date.parse(now) >= Date.parse(request.expiresAt)) { reject("approval đã hết hạn"); continue; }
+      const knownWorkflow = Object.values(workflows).find(item => item.runId === request.runId);
+      if (knownWorkflow && isTerminalRunStatus(knownWorkflow.sdlcStatus)) { reject("run đã kết thúc"); continue; }
       const existing = pending[request.approvalId];
       if (existing) {
         if (!isDeepStrictEqual(existing, request)) { reject("approval đã đăng ký nhưng nội dung khác với Runtime"); continue; }
@@ -1533,6 +1522,11 @@ export class ConversationGateway {
         };
       }
       validatedApprovalRequest = aprResult.data;
+      const approvalWorkflow = Object.values(this.snapshot!.workflows).find(item => item.runId === validatedApprovalRequest!.runId);
+      if ((validatedApprovalRequest.sessionId !== undefined && validatedApprovalRequest.sessionId !== this.config.sessionId) ||
+          (message.run_id !== undefined && message.run_id !== validatedApprovalRequest.runId)) {
+        return { ok: false, error: { code: "validation", retryable: false, message: "Approval does not match this session/run" } };
+      }
       // A closed approval never comes back: a replayed request is acknowledged without being registered.
       if (this.snapshot!.closedApprovals?.[validatedApprovalRequest.approvalId] !== undefined) {
         return {
@@ -1547,6 +1541,9 @@ export class ConversationGateway {
             substantiveUpdate: false
           }
         };
+      }
+      if (approvalWorkflow && isTerminalRunStatus(approvalWorkflow.sdlcStatus)) {
+        return { ok: false, error: { code: "validation", retryable: false, message: "Cannot register an approval for a terminal run" } };
       }
     }
 
@@ -1693,7 +1690,7 @@ export class ConversationGateway {
           const isExplicitlyVerifiedCompleted =
             formatted.isCompleted && (p["verified"] === true || p["completedVerified"] === true);
           const rawSdlcStatus = (p["sdlcStatus"] as SdlcWorkStatus | undefined) ?? workflow.sdlcStatus;
-          const safeSdlcStatus: SdlcWorkStatus = isExplicitlyVerifiedCompleted
+          const safeSdlcStatus: SdlcWorkStatus = workflow.sdlcStatus === "cancelled" ? "cancelled" : isExplicitlyVerifiedCompleted
             ? "completed"
             : rawSdlcStatus === "completed"
               ? workflow.sdlcStatus === "completed"

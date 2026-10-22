@@ -264,3 +264,20 @@ in that same turn. Runtime admits the revision and supersedes old approvals thro
 its existing lifecycle, retaining run/correlation and history. No second human turn
 is required just to re-enter approval syntax for a clear scope correction. These are
 local ingress/revision tests; model obedience and live provider acceptance are separate.
+
+### Session cancellation recovery
+
+A single authenticated Chat decision can select `cancellationInput.runId`, a unique nonempty
+`cancellationInput.runIds` list, or `cancellationInput.scope: "session_existing"`. The private
+Conversation snapshot freezes the selected run IDs and existing v2 request envelopes before
+first enqueue, then records each enqueue attempt and outcome. Retry/restart keeps that set;
+a partial failure does not prevent the remaining items from being attempted. An interrupted
+attempt with no durable receipt is reported as `unknown_delivery` and needs reconciliation;
+it is never automatically resent.
+
+An enqueue acknowledgement only means `queued`, and never changes the workflow projection
+to `cancelled`. Even an already cancelled display entry goes through Runtime so unresolved
+stop/reconciliation work remains visible. Runtime run reconciliation refreshes session-owned
+projections and closes stale approvals on terminal runs. A terminal label does not establish
+verified completion or prove every process stopped. These guarantees have package-local
+regression coverage; they do not establish live provider/Herdr acceptance.
