@@ -744,3 +744,11 @@ này không thay thế một approval đang chờ và không tạo workflow mớ
 Runtime lưu intake đã được Conversation xác thực cùng outbox intent trước dispatch đầu tiên;
 `delegation.accepted` và ingress Herdr vẫn là các bước riêng. Vì vậy capability denial trước khi
 Coordinator nhận yêu cầu cũng giữ được cùng run và action để xử lý, thay vì chỉ có terminal lỗi.
+
+Conversation display recovery distinguishes notices surfaced to the model from
+notices displayed to the user. Substantive progress with a run and a complete
+headline remains eligible for display acknowledgement after restart. Claude and
+Codex Stop hooks (Codex requires its final assistant message) can issue at most two
+reminders per missed notice. Generic/truncated updates have no progress display
+acknowledgement; display receipts never authorize a workflow or approval. These
+guarantees are covered by local subprocess/host tests, not live-provider acceptance.

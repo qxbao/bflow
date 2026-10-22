@@ -73,6 +73,41 @@ describe("Chat decides intent; Gateway validates and executes", () => {
     }
   });
 
+  it("revises the existing Logs run after option feedback, preserving correlation and replay identity", async () => {
+    const { turn, gateway, config, transport } = await setup();
+    const first = await turn("Tích hợp realtime Logs", { intent: "workflow_request", requirementDraft: {
+      ...spike("Tích hợp realtime Logs").requirementDraft, kind: "feature", title: "Logs", sddLevel: "full",
+      acceptanceCriteriaDescriptions: ["Realtime Logs và kiểm tra reconnect"]
+    } });
+    if (!first.ok || !first.value.runId) throw new Error("setup failed");
+    const runId = first.value.runId, correlationId = first.value.correlationId;
+    expect((await gateway.handleCoordinatorRoleMessage({ schema_version: 2, message_id: "decision-logs", correlation_id: correlationId,
+      run_id: runId, sender: { role: "runtime" }, recipient: { role: "conversation" }, type: "approval.request",
+      payload: { schemaVersion: 2, approvalId: "apr-logs-design", runId, sessionId: "session-chat", status: "pending",
+        target: { type: "run" }, revision: 1, generation: 0, requestedBy: "coordinator", requestedAt: new Date().toISOString(),
+        reason: "Approve the design?", evidence: [], idempotencyKey: "logs-design", metadata: { kind: "user_decision",
+          question: "Approve the design?", options: ["Approve design", "Request changes to the design"] } }, artifact_references: []
+    })).ok).toBe(true);
+    const feedback = "2. Bỏ realtime, chỉ hiển thị các bước tổng quan trong Logs";
+    const answer = await gateway.handleUserTurn({ sessionId: "session-chat", messageId: "human-logs-feedback", content: feedback,
+      provenance: { origin: "user", authenticatedUser: true } });
+    expect(answer.ok && answer.value.approvalDecision).toMatchObject({ reason: feedback, metadata: { selectedOption: "Request changes to the design" } });
+    const decision = { intent: "workflow_request", targetRunId: runId, requirementDraft: {
+      ...spike("Chỉ hiển thị các bước tổng quan trong Logs; bỏ yêu cầu realtime").requirementDraft,
+      kind: "feature", title: "Logs overview", isRequirementChange: true,
+      acceptanceCriteriaDescriptions: ["Logs hiển thị các bước tổng quan theo thứ tự; không cần realtime"]
+    } };
+    const revision = await turn("Sửa lại approach và tích hợp lại cho tôi đi", decision, { messageId: "human-logs-revision" });
+    expect(revision.ok && revision.value).toMatchObject({ runId, correlationId,
+      delegationRequest: { runId, metadata: { revision: 2, isRequirementChange: true } } });
+    expect(Object.keys(gateway.getContextSnapshot().workflows)).toEqual([correlationId]);
+    expect(gateway.getContextSnapshot().pendingClarifications).toEqual({});
+    const recovered = new ConversationGateway(config);
+    expect((await recovered.handleUserTurn({ sessionId: "session-chat", messageId: "human-logs-revision",
+      content: "Sửa lại approach và tích hợp lại cho tôi đi", conversationDecision: decision } as never)).ok).toBe(true);
+    expect(transport.sentRoleMessages.filter(message => message.type === "delegation.request")).toHaveLength(2);
+  });
+
   it.each(["Xin chào", "Bạn có những MCP nào", "A, giữ cả 5 tiêu chí"])("does not dispatch when Chat chooses conversation: %s", async content => {
     const { turn, transport } = await setup();
     const result = await turn(content, { intent: "conversation_only", directReply: "Trả lời trực tiếp theo ngữ cảnh." });

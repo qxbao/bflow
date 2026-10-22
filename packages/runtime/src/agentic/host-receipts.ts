@@ -12,7 +12,7 @@ import { digest, json, record, strings, textField } from "./journal.js";
 import { redactString } from "../resilience/redaction.js";
 import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
 import { nativeEnvelopeIssues, nativeMessageFingerprint, NativeRejectionSchema } from "./native-delivery-status.js";
-import { ApprovalNoticeSchema, UserDecisionNoticeSchema, approvalNoticeFields, isUserFacingNotice, renderConversationNotice, userDecisionNoticeFields } from "./conversation-notice-render.js";
+import { ApprovalNoticeSchema, UserDecisionNoticeSchema, approvalNoticeFields, renderConversationNotice, userDecisionNoticeFields } from "./conversation-notice-render.js";
 
 type Kind = "native-rejection" | "approval-failure" | "runtime-nudge" | "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "decision-reblock" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled";
 export interface HumanHookProvenance {
@@ -560,7 +560,7 @@ export class HostReceiptJournal {
     }
   }
   /**
-   * User-facing notices (user decisions, blocks) that were surfaced but not yet shown to the user, oldest first.
+   * Decisions, blocks and substantive progress surfaced to the model but not yet shown to the user, oldest first.
    * `reblocks` counts how many Stop hooks already re-blocked for display.
    */
   async undisplayedUserFacingNotices(): Promise<(ConversationNotice & { surfacedAt: string; reblocks: number })[]> {
@@ -569,7 +569,7 @@ export class HostReceiptJournal {
       const surfaced = await this.read("notice-surfaced", this.epochKey(id, await this.noticeEpoch(id)));
       if (surfaced === undefined || await this.read("notice-displayed", id) !== undefined) continue;
       const notice = ConversationNoticeSchema.parse(await this.read("conversation-notice", id));
-      if (!isUserFacingNotice(renderConversationNotice(notice))) continue;
+      if (renderConversationNotice(notice).ackToken === undefined) continue;
       const surfacedAt = NoticeSurfacedSchema.parse(surfaced).surfacedAt ?? notice.receivedAt;
       values.push({ ...notice, surfacedAt, reblocks: await this.noticeReblockCount(id) });
     }
@@ -632,7 +632,7 @@ export class HostReceiptJournal {
       if (await this.read("notice-displayed", id) !== undefined) continue;
       const notice = await this.read("conversation-notice", id);
       if (notice === undefined || await this.read("notice-surfaced", this.epochKey(id, await this.noticeEpoch(id))) === undefined) continue;
-      if (!isUserFacingNotice(renderConversationNotice(ConversationNoticeSchema.parse(notice)))) continue;
+      if (renderConversationNotice(ConversationNoticeSchema.parse(notice)).ackToken === undefined) continue;
       await this.write("notice-displayed", id, { messageId: id, displayedAt: new Date().toISOString() });
       marked.push(id);
     }

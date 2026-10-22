@@ -56,6 +56,53 @@ async function fixture(replies: Record<string, unknown>, provider = "claude") {
 const assistantTurn = (text: string) => ({ type: "assistant", message: { content: [{ type: "text", text }] } });
 
 describe.skipIf(process.platform === "win32")("Conversation user decision display hooks", () => {
+  it("does not acknowledge another run's identical progress headline", async () => {
+    const progress = (messageId: string, runId: string) => ({ ...decisionNotice, messageId, runId, type: "delegation.accepted",
+      summary: JSON.stringify({ headline: "Coordinator accepted the objective" }), surfacedAt: "2026-10-20T03:17:00.000Z", reblocks: 0 });
+    const first = progress("accepted-1", "run-1"), second = progress("accepted-2", "run-2");
+    const f = await fixture({ conversation_notices: { notices: [], undisplayed: [first, second] } }, "codex");
+    const result = await f.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1",
+      last_assistant_message: "[accepted-1] Coordinator accepted the objective · run run-1" });
+    expect(result.code, result.stderr).toBe(0);
+    const displayed = f.calls.find(call => call.method === "conversation_notices_displayed");
+    expect(displayed?.params.messageIds).toEqual(["accepted-1"]);
+    expect(JSON.parse(result.stdout).reason).toContain("run-2");
+    expect(f.calls.at(-1)).toMatchObject({ method: "conversation_notices_reblocked", params: { messageIds: ["accepted-2"] } });
+  });
+
+  it.each([0, 1, 2])("recovers an ignored Codex notice with a bounded Stop reminder (attempt %s)", async reblocks => {
+    const f = await fixture({ conversation_notices: { notices: [], undisplayed: [
+      { ...decisionNotice, surfacedAt: "2026-10-20T03:17:00.000Z", reblocks }
+    ] } }, "codex");
+    const result = await f.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1",
+      last_assistant_message: "Thông báo chưa kèm nội dung cập nhật từ Runtime." });
+    expect(result.code, result.stderr).toBe(0);
+    if (reblocks < 2) {
+      expect(JSON.parse(result.stdout)).toMatchObject({ decision: "block" });
+      expect(JSON.parse(result.stdout).reason).toContain("Dùng schema v2 hay giữ v1?");
+      expect(f.calls.at(-1)).toMatchObject({ method: "conversation_notices_reblocked", params: { messageIds: [decisionNotice.messageId] } });
+    } else {
+      expect(result.stdout).toBe("");
+      expect(f.calls.map(call => call.method)).not.toContain("conversation_notices_reblocked");
+    }
+  });
+
+  it.each(["codex", "claude"])("recovers a missed substantive progress update for %s and stops after display", async provider => {
+    const progress = { ...decisionNotice, messageId: "progress-e2e-found", type: "conversation.progress",
+      summary: JSON.stringify({ headline: "Root test:e2e already exists; continuing with the existing runner" }),
+      surfacedAt: "2026-10-20T03:17:00.000Z", reblocks: 0 };
+    const f = await fixture({ conversation_notices: { notices: [], undisplayed: [progress] } }, provider);
+    const result = await f.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1",
+      last_assistant_message: "Chưa có nội dung cập nhật cụ thể nào từ Runtime." });
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout).reason).toContain("Root test:e2e already exists");
+    const shown = await f.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1",
+      last_assistant_message: "[progress-e2e-found] Root test:e2e already exists; continuing with the existing runner" });
+    expect(shown.code, shown.stderr).toBe(0);
+    expect(shown.stdout).toBe("");
+    expect(f.calls.at(-1)).toMatchObject({ method: "conversation_notices_displayed", params: { messageIds: [progress.messageId] } });
+  });
+
   it("blocks Stop with the question and numbered options first, then marks the notice surfaced", async () => {
     const f = await fixture({ conversation_notices: { notices: [decisionNotice], undisplayed: [] } });
     const result = await f.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1", stop_hook_active: false, transcript_path: await f.transcript([]) });

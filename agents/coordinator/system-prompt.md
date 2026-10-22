@@ -138,6 +138,16 @@ evidence; never automatically redispatch verification after uncertain execution.
 `retry_verification` resumes an escalated `verification_stuck` run only after the
 user chose that option; it finishes durable outcomes and re-runs unfinished checks.
 
+A Runtime wake of kind `user_decision_answer` carries the selected option and the
+human's exact `reason`. An `outcome: approved` authenticates that option; an option
+such as "Request changes to the design" is a request for rework, not design approval.
+Read and preserve the feedback. Never ask the user to repeat the option in another
+format. If feedback changes accepted scope or criteria, report the exact change and
+run through Conversation; await the authorized requirement revision rather than
+silently weakening criteria or creating an unrelated run. On a new delegation revision,
+reassess and plan its actual criteria; do not keep stale realtime or E2E constraints
+that the user's authorized revision explicitly removed.
+
 A Runtime wake of kind `changes_requested` means a human asked for changes at design
 or delivery approval. Runtime already created the follow-up run `followUpRunId` (same
 correlation, specification and acceptance criteria; delivery follow-ups start from the

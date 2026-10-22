@@ -253,3 +253,11 @@ trích xuất phê duyệt đã xác thực, không phải một quyền phủ q
 Các đảm bảo này có test cục bộ ở mức package/integration. Chúng không chứng minh live provider,
 Herdr transport hay nghiệm thu SDLC đầy đủ. Các host đang chạy cần rebuild và restart để nạp
 MCP tool và prompt mới.
+
+Numbered specialist replies can include feedback after explicit punctuation (for example
+`2. bỏ realtime` or `apr-...: 2 — bỏ realtime`). The trusted human hook maps the
+number to an offered option and retains the reply as the decision reason. Unknown
+requests, ambiguous targets and conflicting selectors confer no approval. Selecting
+"Request changes" acknowledges that choice; it does not approve the design. A later
+explicit scope correction uses the existing `isRequirementChange` / `targetRunId`
+path, keeping the run and correlation while incrementing the delegation revision.

@@ -160,13 +160,17 @@ function updateNotice(notice: NoticeLike): RenderedNotice {
   const type = notice.type ?? "notice", sender = notice.senderRole ?? "runtime";
   const truncated = notice.truncated === true;
   // A Runtime progress message says why it matters in blockageReason (or headline); show that instead of only the type.
-  const payload = type === "conversation.progress" ? parseSummary(notice) : undefined;
+  const payload = ["conversation.progress", "delegation.accepted"].includes(type) ? parseSummary(notice) : undefined;
   const text = payload && typeof payload === "object" && !Array.isArray(payload)
     ? [(payload as Record<string, unknown>).blockageReason, (payload as Record<string, unknown>).headline].find(value => typeof value === "string" && value.length > 0) as string | undefined
     : undefined;
-  const headline = `ℹ️ Cập nhật từ ${sender} (${type})${notice.runId ? ` · run ${notice.runId}` : ""}${text ? `: ${text}` : ""}`;
+  // Bind display to this exact notice and its content: repeated/stale headlines must not acknowledge a different update.
+  const ackToken = notice.runId && text ? `[${notice.messageId}] ${text}` : undefined;
+  const headline = `ℹ️ Cập nhật từ ${sender} (${type})${notice.runId ? ` · run ${notice.runId}` : ""}${text ? `: ${ackToken ?? text}` : ""}`;
   const note = truncated ? " — nội dung bị cắt ngắn, không hiển thị đầy đủ" : "";
+  // Substantive progress needs display recovery too. Its text is an acknowledgement token, never approval authority.
   return { messageId: notice.messageId, kind: "update", ...(notice.runId ? { runId: notice.runId } : {}), headline,
+    ...(ackToken ? { ackToken } : {}),
     display: `${headline}${note}` };
 }
 
