@@ -842,6 +842,17 @@ describe("P12 repository environment lifecycle", () => {
     await expect(unactivated.down(true, 3000)).rejects.toThrow("requires activation");
     expect((await unactivated.down(false, 3000, true)).status).toBe("down");
     expect(events.at(-1)).toBe("terminate-unactivated");
+    expect((await lifecycle.up()).status).toBe("up");
+    const unrecoveredRun = new EnvironmentLifecycle(dir, { runner, integration: {
+      manager: fixture.manager, runtime: mockRuntime(),
+      quiesce: async () => ({ ok: false, error: { code: "transport_unavailable", retryable: true, message: "Error: Error: Persisted Core run requires activation/recovery before safe shutdown" } }),
+      terminateIncompatibleHost: async () => { events.push("terminate-unrecovered-run"); }
+    } });
+    await expect(unrecoveredRun.down(true, 3000)).rejects.toThrow("requires activation/recovery");
+    expect((await unrecoveredRun.down(false, 3000, true)).status).toBe("down");
+    expect(events.at(-1)).toBe("terminate-unrecovered-run");
+    expect(runner.running.has(repository.sessionName)).toBe(false);
+    expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("down");
   });
   linuxIt("force down cannot bypass failed aggregate checkpoint persistence", async () => {
     await lifecycle.up();

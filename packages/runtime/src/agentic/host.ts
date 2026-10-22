@@ -1136,18 +1136,21 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         await activation?.catch(() => undefined);
         await preparation?.catch(() => undefined);
         if (!workspace) {
-          let cursor: string | undefined;
-          do {
-            const page = unwrap(await (await getQueryStore()).find({limit:100, ...(cursor ? {cursor} : {})}));
-            if (page.items.some(item => !["succeeded", "failed", "cancelled"].includes(item.snapshot.status))) throw new Error("Persisted Core run requires activation/recovery before safe shutdown");
-            cursor = page.nextCursor;
-          } while (cursor);
-          const journalModule = await import("./journal.js");
-          const journal = new journalModule.AgenticJournal(resolve(configuration.directory, "../../agentic/journal"), configuration.repositoryPath);
-          await journal.exclusive(async state => {
-            if (state.pendingCore.length || state.pendingVerifications.length || state.runs.some(run => !["completed", "cancelled", "failed"].includes(run.status)))
-              throw new Error("Persisted agentic work requires activation/reconciliation before safe shutdown");
-          });
+          // Nothing was quiesced yet: a refused offline barrier must leave `prepare`/activation available to recover the work.
+          try {
+            let cursor: string | undefined;
+            do {
+              const page = unwrap(await (await getQueryStore()).find({limit:100, ...(cursor ? {cursor} : {})}));
+              if (page.items.some(item => !["succeeded", "failed", "cancelled"].includes(item.snapshot.status))) throw new Error("Persisted Core run requires activation/recovery before safe shutdown");
+              cursor = page.nextCursor;
+            } while (cursor);
+            const journalModule = await import("./journal.js");
+            const journal = new journalModule.AgenticJournal(resolve(configuration.directory, "../../agentic/journal"), configuration.repositoryPath);
+            await journal.exclusive(async state => {
+              if (state.pendingCore.length || state.pendingVerifications.length || state.runs.some(run => !["completed", "cancelled", "failed"].includes(run.status)))
+                throw new Error("Persisted agentic work requires activation/reconciliation before safe shutdown");
+            });
+          } catch (error) { if (!workspace) quiesced = false; throw error; }
           await taskLogPane.close();
           await platformSession?.shutdown();
           quiesceCompleted = true; return null;

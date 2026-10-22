@@ -164,6 +164,8 @@ describe.skipIf(process.platform !== "linux")("default durable host lifecycle an
     } finally { opened.value.close(); }
     // An unresolved persisted Core run must never receive an invented quiesce receipt.
     expect((await next.quiesce()).ok).toBe(false);
+    // The refused offline barrier must not latch the host; `up` still has to prepare and recover that run.
+    expect(await next.prepare()).toEqual(first);
   });
   it("registers role-filtered MCP tools before any SessionManifest exists and rejects role lifecycle escalation", async () => {
     const f = await fixture(), launches = await f.controller.prepare();
