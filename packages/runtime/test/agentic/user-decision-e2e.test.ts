@@ -318,7 +318,8 @@ describe.skipIf(process.platform !== "linux")("P30 user decisions end to end", (
     await runtime.flushOutbound();
     const host = await f.chat(runtime);
     await host.receiveHerdr(await promptOf(runtime));
-    await reply(host, "1");
+    // Both approvals advertise numbered choices, so the reply names the user decision.
+    await reply(host, `${approvalId}: 1`);
     await runtime.receiveHerdr((await outbound(runtime)).find(entry => entry.message.type === "approval.decision")!.message);
     expect(await userDecisions(runtime, approvalId)).toMatchObject({ status: "answered" });
     const state = await runtime.inspect(RUN) as unknown as { status: string; approval: { approvalId: string; status: string }; decision?: unknown };

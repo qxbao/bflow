@@ -533,7 +533,7 @@ describe("P30 T8 conversation user-decision relay", () => {
       expect(result.value.approvalInput).toMatchObject({ approvalId: design.approvalId, decision: "approved" });
     });
 
-    it("keeps answering the user decision by option number or exact option text while a design approval is pending", () => {
+    it("keeps answering the user decision by exact option text or named number while a design approval is pending", () => {
       const question = userDecisionRequest();
       const design = designApproval();
       const context = {
@@ -542,13 +542,16 @@ describe("P30 T8 conversation user-decision relay", () => {
         pendingApprovals: { [question.approvalId]: question, [design.approvalId]: design }
       } as unknown as ConversationContextSnapshot;
 
-      for (const reply of ["1", "Postgres"]) {
+      for (const reply of [`${question.approvalId}: 1`, "Postgres"]) {
         const result = classifyUserIntent(turn(reply), context);
         expect(result.ok, reply).toBe(true);
         if (!result.ok) return;
         expect(result.value.approvalInput, reply).toMatchObject({ approvalId: question.approvalId });
-        expect(result.value.approvalInput?.selectedOption, reply).toBe(reply === "1" ? "SQLite" : "Postgres");
+        expect(result.value.approvalInput?.selectedOption, reply).toBe(reply === "Postgres" ? "Postgres" : "SQLite");
       }
+      // The design approval numbers its choices too, so a bare number names neither request.
+      const bare = classifyUserIntent(turn("1"), context);
+      expect(bare.ok && bare.value.intent).not.toBe("approval_response");
     });
 
     it("does not let an unmatched reply answer the user decision while a design approval is pending", () => {

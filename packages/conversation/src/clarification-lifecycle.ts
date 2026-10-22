@@ -37,3 +37,29 @@ export function expireStaleClarifications(snapshot: ConversationContextSnapshot,
     session: { ...snapshot.session, status, unresolvedQuestions, updatedAt: nowIso }
   };
 }
+
+/**
+ * Closes clarifications that were about one approval once that approval is decided: e.g. the user sent a bare
+ * approval id, Conversation asked which option, and a later "<id>: <answer>" decided it. Without this the question
+ * stays open and keeps capturing later short replies. Returns the same snapshot object when nothing matched.
+ */
+export function closeClarificationsForApproval(
+  snapshot: ConversationContextSnapshot,
+  approvalId: string,
+  nowIso: string
+): ConversationContextSnapshot {
+  const entries = Object.entries(snapshot.pendingClarifications);
+  const open = entries.filter(([, clarification]) => !clarification.originalRequestText.includes(approvalId) &&
+    !clarification.unresolvedQuestions.some(question => question.includes(approvalId)));
+  if (open.length === entries.length) return snapshot;
+
+  const unresolvedQuestions = open.flatMap(([, clarification]) => clarification.unresolvedQuestions);
+  const status = snapshot.session.status === "awaiting_user_clarification" && unresolvedQuestions.length === 0
+    ? "active"
+    : snapshot.session.status;
+  return {
+    ...snapshot,
+    pendingClarifications: Object.fromEntries(open),
+    session: { ...snapshot.session, status, unresolvedQuestions, updatedAt: nowIso }
+  };
+}
