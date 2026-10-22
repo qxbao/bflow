@@ -73,7 +73,7 @@ describe("Chat decides intent; Gateway validates and executes", () => {
     }
   });
 
-  it("revises the existing Logs run after option feedback, preserving correlation and replay identity", async () => {
+  it("accepts Chat's Logs revision while the old approval is still pending, preserving correlation and replay identity", async () => {
     const { turn, gateway, config, transport } = await setup();
     const first = await turn("Tích hợp realtime Logs", { intent: "workflow_request", requirementDraft: {
       ...spike("Tích hợp realtime Logs").requirementDraft, kind: "feature", title: "Logs", sddLevel: "full",
@@ -89,22 +89,21 @@ describe("Chat decides intent; Gateway validates and executes", () => {
           question: "Approve the design?", options: ["Approve design", "Request changes to the design"] } }, artifact_references: []
     })).ok).toBe(true);
     const feedback = "2. Bỏ realtime, chỉ hiển thị các bước tổng quan trong Logs";
-    const answer = await gateway.handleUserTurn({ sessionId: "session-chat", messageId: "human-logs-feedback", content: feedback,
-      provenance: { origin: "user", authenticatedUser: true } });
-    expect(answer.ok && answer.value.approvalDecision).toMatchObject({ reason: feedback, metadata: { selectedOption: "Request changes to the design" } });
+    expect(gateway.getContextSnapshot().pendingApprovals["apr-logs-design"]?.status).toBe("pending");
     const decision = { intent: "workflow_request", targetRunId: runId, requirementDraft: {
       ...spike("Chỉ hiển thị các bước tổng quan trong Logs; bỏ yêu cầu realtime").requirementDraft,
       kind: "feature", title: "Logs overview", isRequirementChange: true,
       acceptanceCriteriaDescriptions: ["Logs hiển thị các bước tổng quan theo thứ tự; không cần realtime"]
     } };
-    const revision = await turn("Sửa lại approach và tích hợp lại cho tôi đi", decision, { messageId: "human-logs-revision" });
+    const revision = await turn(feedback, decision, { messageId: "human-logs-revision" });
     expect(revision.ok && revision.value).toMatchObject({ runId, correlationId,
       delegationRequest: { runId, metadata: { revision: 2, isRequirementChange: true } } });
     expect(Object.keys(gateway.getContextSnapshot().workflows)).toEqual([correlationId]);
     expect(gateway.getContextSnapshot().pendingClarifications).toEqual({});
     const recovered = new ConversationGateway(config);
     expect((await recovered.handleUserTurn({ sessionId: "session-chat", messageId: "human-logs-revision",
-      content: "Sửa lại approach và tích hợp lại cho tôi đi", conversationDecision: decision } as never)).ok).toBe(true);
+      content: feedback, conversationDecision: decision } as never)).ok).toBe(true);
+    expect(transport.sentRoleMessages.some(message => message.type === "approval.decision")).toBe(false);
     expect(transport.sentRoleMessages.filter(message => message.type === "delegation.request")).toHaveLength(2);
   });
 

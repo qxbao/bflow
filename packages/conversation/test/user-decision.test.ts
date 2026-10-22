@@ -105,13 +105,15 @@ describe("trusted hook approval routing", () => {
     "apr-user-decision-abc123: 2 — bỏ realtime, chỉ cần các bước tổng quan",
     "chọn 2: giữ nguyên contracts; chỉ sửa phần hiển thị",
     "2) Giữ Postgres\nCó kiểm tra reconnect và thứ tự."
-  ])("authenticates a numbered choice with feedback without discarding its reason: %s", content => {
+  ])("leaves a numbered reply with prose to Chat instead of committing human approval: %s", content => {
     const result = classifyTrustedApprovalReply(turn(content), contextWith(userDecisionRequest()));
-    expect(result?.ok && result.value.approvalInput).toMatchObject({
-      approvalId: "apr-user-decision-abc123", decision: "approved", selectedOption: "Postgres",
-      reason: content.replace(/^apr-user-decision-abc123:\s*/, "")
-    });
+    expect(result).toBeUndefined();
   });
+  it.each(["2", "2.", "2)", "chọn 2", "apr-user-decision-abc123: 2", "Postgres"])(
+    "retains exact option governance independently of prose interpretation: %s", content => {
+      const result = classifyTrustedApprovalReply(turn(content), contextWith(userDecisionRequest()));
+      expect(result?.ok && result.value.approvalInput).toMatchObject({ approvalId: "apr-user-decision-abc123", selectedOption: "Postgres" });
+    });
   it.each(["2.5", "2 triển khai", "2 hoặc 1", "2/1", "9. bỏ realtime", "2 —", "2. chọn 1"])(
     "does not infer an authenticated option from an invalid or conflicting selector: %s", content => {
       expect(classifyTrustedApprovalReply(turn(content), contextWith(userDecisionRequest()))).toBeUndefined();
@@ -127,7 +129,7 @@ describe("trusted hook approval routing", () => {
     expect(classifyTrustedApprovalReply(turn("2. bỏ realtime"), context)).toBeUndefined();
     expect(classifyTrustedApprovalReply(turn("apr-unknown: 2 — bỏ realtime"), context)).toBeUndefined();
     const targeted = classifyTrustedApprovalReply(turn("apr-another: 2 — bỏ realtime"), context);
-    expect(targeted?.ok && targeted.value.approvalInput).toMatchObject({ approvalId: "apr-another", selectedOption: "Postgres" });
+    expect(targeted).toBeUndefined();
   });
   it("requires a named request for free-text specialist answers", () => {
     const context = contextWith(userDecisionRequest({ metadata: { kind: "user_decision", question: "Choose the storage backend" } }));

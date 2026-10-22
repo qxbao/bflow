@@ -750,7 +750,17 @@ export function classifyTrustedApprovalReply(
   const classified = classifyUserIntent(input, context);
   if (!classified.ok || classified.value.intent !== "approval_response") return undefined;
   const approval = classified.value.approvalInput;
-  if (approval?.selectedOption !== undefined) return classified;
+  if (approval?.selectedOption !== undefined) {
+    // A numeric prefix plus prose can change requirements, rather than answer this question.
+    // Leave its meaning to Chat; the hook may consume only a complete selector or an exact offered label.
+    if (!approval.approvalId) return undefined;
+    const request = context.pendingApprovals[approval.approvalId];
+    const answer = normalizeForMatching(approval.reason ?? "");
+    const exactNumber = /^(?:(?:chọn|lựa chọn|option|choose)\s*)?\d{1,2}\s*[.)]?$/iu.test(answer);
+    const exactLabel = request && (optionLabelsOf(request) ?? []).some(label =>
+      normalizeForMatching(label).replace(/[.!?]+$/u, "") === answer.replace(/[.!?]+$/u, ""));
+    return exactNumber || exactLabel ? classified : undefined;
+  }
   const content = normalizeForMatching(input.content);
   const namedId = extractExplicitId(sanitizeInputText(input.content), "apr-");
   const namedRequest = namedId ? context.pendingApprovals[namedId] : undefined;

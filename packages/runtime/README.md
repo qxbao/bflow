@@ -752,3 +752,10 @@ Codex Stop hooks (Codex requires its final assistant message) can issue at most 
 reminders per missed notice. Generic/truncated updates have no progress display
 acknowledgement; display receipts never authorize a workflow or approval. These
 guarantees are covered by local subprocess/host tests, not live-provider acceptance.
+
+A numbered choice followed by prose is not committed as human governance at intake.
+The original authenticated turn stays undecided for `conversation_decide`, allowing
+Chat to revise the same workflow while an older approval is pending. The revision
+uses normal Runtime admission/supersession; it does not fabricate an approval or
+invoke operational resume. Exact numeric/option replies still use the trusted human
+hook. Restart/replay coverage retains the same revision envelope and user-turn identity.
