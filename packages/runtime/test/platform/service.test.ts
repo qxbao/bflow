@@ -1030,7 +1030,9 @@ describe("DefaultPlatformReadinessService", () => {
     const [gatewayLaunch] = launches;
     expect(gatewayLaunch?.launch.argv.length).toBeGreaterThan(0);
     expect(gatewayLaunch?.launch.argv).toEqual(gatewayLaunch?.profile.argv);
-    const tokenValues = Object.values(gatewayLaunch?.launch.env ?? {});
+    const { DISABLE_AUTOUPDATER, ...tokenEnv } = gatewayLaunch?.launch.env ?? {};
+    expect(DISABLE_AUTOUPDATER).toBe("1");
+    const tokenValues = Object.values(tokenEnv);
     expect(tokenValues).toHaveLength(1);
     expect(tokenValues[0]).toBe(gatewayControl.tokens()[0]);
     expect(gatewayLaunch?.launch.launchId).toBe(gatewayLaunch?.profile.launchId);
@@ -1051,6 +1053,18 @@ describe("DefaultPlatformReadinessService", () => {
     const developer = await service.prepareDeveloper(identity, requirement({ provider: "codex" }));
     expect(developer.ok).toBe(true);
     if (developer.ok) expect(developer.value.launch.env).toMatchObject({ HOME: home, CODEX_HOME: codexHome });
+  });
+
+  it("disables Claude updates for permanent and dynamic role processes", async () => {
+    const { service } = buildService({ gateway: false });
+    const { taskId: _taskId, ...role } = requirement({ role: "reviewer", skillSelections: [], toolIds: [] });
+    const permanent = await service.prepareSession(identity, [role]);
+    expect(permanent.ok).toBe(true);
+    if (permanent.ok) expect(permanent.value.report.ready).toBe(true);
+    if (permanent.ok) expect(permanent.value.launches[0]?.launch.env["DISABLE_AUTOUPDATER"]).toBe("1");
+    const developer = await service.prepareDeveloper(identity, requirement());
+    expect(developer.ok).toBe(true);
+    if (developer.ok) expect(developer.value.launch.env["DISABLE_AUTOUPDATER"]).toBe("1");
   });
 
   it("passes the configured role model and effort through readiness and into launch argv", async () => {
@@ -1184,7 +1198,8 @@ describe("DefaultPlatformReadinessService", () => {
     expect(launched.ok).toBe(true);
     if (!launched.ok) return;
     expect(launched.value.taskId).toBe("t1");
-    expect(Object.keys(launched.value.launch.env)).toHaveLength(1);
+    expect(Object.keys(launched.value.launch.env)).toHaveLength(2);
+    expect(launched.value.launch.env["DISABLE_AUTOUPDATER"]).toBe("1");
     expect(await journalKinds(journal)).toEqual(["intent"]);
 
     const blocked = await service.prepareDeveloper(identity, requirement({

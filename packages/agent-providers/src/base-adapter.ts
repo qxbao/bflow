@@ -31,7 +31,7 @@ import {
   verifyLaunchAttestation
 } from "./attestation.js";
 import { createHealthCheck, executionProbeFailureDiagnostic } from "./diagnostics.js";
-import { validateProviderEnvironment } from "./environment.js";
+import { providerSessionEnvironment, validateProviderEnvironment } from "./environment.js";
 import { type LaunchMaterialFailure, resolveLaunchMaterial, type ResolvedLaunchMaterial } from "./launch-material.js";
 import { compileProviderPermissions, hostLaunchPermissionOptions } from "./permissions.js";
 import { createProviderProcessRunner } from "./runner.js";
@@ -139,6 +139,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
   protected getProviderCommandEnvironment(): Readonly<Record<string, string>> {
     return {
       ...(this.options.isolatorEnvironment ?? {}),
+      ...providerSessionEnvironment(this.descriptor.provider),
       BFLOW_PROVIDER: this.descriptor.provider
     };
   }

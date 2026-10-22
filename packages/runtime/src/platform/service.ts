@@ -13,7 +13,7 @@ import {
   type OperationOptions,
   type OperationResult
 } from "@bflow/contracts";
-import type { LiveReadinessObservation } from "@bflow/agent-providers";
+import { providerSessionEnvironment, type LiveReadinessObservation } from "@bflow/agent-providers";
 import { sha256Hex } from "./environment.js";
 import { fail, failWith, ok } from "./errors.js";
 import { IsolatorProfileResolver, type ResolvedIsolatorProfile } from "./isolator-profile.js";
@@ -651,7 +651,8 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       gateway: attempt.gateway,
       launch: {
         argv: profile.value.argv,
-        env: { ...(attempt.context.launchEnvironment ?? {}), ...attempt.gateway.tokenEnvironment },
+        env: { ...(attempt.context.launchEnvironment ?? {}), ...attempt.gateway.tokenEnvironment,
+          ...providerSessionEnvironment(requirement.provider) },
         launchId: profile.value.launchId,
         launchFingerprint: profile.value.launchFingerprint
       }

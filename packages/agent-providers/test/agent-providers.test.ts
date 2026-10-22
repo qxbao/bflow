@@ -700,6 +700,36 @@ describe("@bflow/agent-providers", () => {
   });
 
   describe("native-only startup authentication", () => {
+    it("still rejects a changed executable when the updater is disabled", async () => {
+      const binary = join(testBaseDir, "changed-claude");
+      await writeFile(binary, "#!/bin/sh\necho first\n", { mode: 0o700 });
+      const env = createTestEnvironment("claude");
+      const nativeSession = { source: "claude", kind: "id" as const, value: "native-digest-test" };
+      const adapter = new ClaudeProviderAdapter({ runner: createFakeProviderRunner(), executablePath: binary,
+        executionProbe: "disabled", trustedIssuerKeys: { [testIssuerId]: testPublicKeyPem },
+        liveObservation: { paneId: "pane-digest-test", transportState: "idle", interactiveReady: true, nativeSession } });
+      const prepared = await adapter.prepareLaunch(env);
+      expect(prepared.ok).toBe(true);
+      if (!prepared.ok) return;
+      const attestation = createSignedLaunchAttestation({ receiptId: "digest-test", issuerId: testIssuerId,
+        launchId: prepared.value.launchId, launchFingerprint: prepared.value.launchFingerprint,
+        sessionId: env.scope.sessionId, paneId: "pane-digest-test", nativeSession,
+        observedAt: new Date().toISOString(), privateKeyPem: testPrivateKeyPem });
+      await writeFile(binary, "#!/bin/sh\necho changed\n", { mode: 0o700 });
+      const result = await adapter.checkHealth({ schemaVersion: 3, environment: env, stage: "activated",
+        launchProfile: prepared.value, launchAttestation: attestation, requestedAt: new Date().toISOString() });
+      expect(result.ok && result.value.status).toBe("blocked");
+      expect(result.ok && result.value.checks.some(check => check.code === "native_binding_executable_mismatch")).toBe(true);
+    });
+    it("prevents Claude subprocesses from updating the binary during readiness", async () => {
+      const invocations: { args: readonly string[]; env?: Readonly<Record<string, string>> }[] = [];
+      const runner = createFakeProviderRunner({ customHandler: invocation => { invocations.push(invocation); return undefined; } });
+      const result = await new ClaudeProviderAdapter({ runner, executablePath: fakeBinaryPath, executionProbe: "disabled"
+      }).checkHealth({ schemaVersion: 3, environment: createTestEnvironment("claude"), stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(result.ok).toBe(true);
+      expect(invocations.some(call => call.args.join(" ") === "auth status --json")).toBe(true);
+      expect(invocations.every(call => call.env?.["DISABLE_AUTOUPDATER"] === "1")).toBe(true);
+    });
     it.each(["null", '{"authenticated":false}', "Error: credentials missing"])("rejects non-model Agy output: %s", async stdout => {
       const runner = createFakeProviderRunner({ customHandler: invocation => invocation.args.join(" ") === "models"
         ? { exitCode: 0, started: true, stdout, stderr: "" } : undefined });

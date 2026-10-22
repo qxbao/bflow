@@ -485,8 +485,8 @@ describe("P30 dynamic Developer launches end to end", () => {
     expect(start.args[start.args.indexOf("--kind") + 1]).toBe("claude");
     expect(start.args[start.args.indexOf("--pane") + 1]).toBe(paneId);
     expect(start.args.slice(start.args.indexOf("--") + 1)).toEqual(launch.argv);
-    // No Gateway services for this role, so the invocation carries no launch env.
-    expect(Object.keys(launch.env)).toHaveLength(0);
+    // With no Gateway grant, the launch carries only the session lifecycle policy.
+    expect(launch.env).toEqual({ DISABLE_AUTOUPDATER: "1" });
 
     expect(result.value.metadata).toEqual(expect.objectContaining({
       topologyRole: "developer",

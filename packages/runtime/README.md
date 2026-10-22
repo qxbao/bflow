@@ -598,6 +598,10 @@ Trong lúc khởi động, một SessionStart receipt cục bộ theo launch ho�
 
 ## P30 platform readiness
 
+Claude được launch với `DISABLE_AUTOUPDATER=1`, áp dụng cả permanent role và Developer
+động. Đây là policy môi trường riêng cho phiên để updater nền không đổi binary giữa
+preflight và activation; các kiểm tra executable/config digest và attestation vẫn bắt buộc.
+
 `DefaultPlatformReadinessService` (export từ `src/platform/index.ts`) ghép các thành phần
 platform đã triển khai cho một session generation: role environment, skill session record, Gateway
 registration, provider preflight/launch intent, và activation với launch attestation do host ký.

@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { providerSessionEnvironment } from "@bflow/agent-providers";
 
 export interface EnvironmentProcessRequest {
   readonly executable: string;
@@ -87,7 +88,7 @@ export const environmentProcessRunner: EnvironmentProcessRunner = {
 
 /** Inherited pane/socket context must never override this repository's session. */
 export function namedSessionEnvironment(sessionName: string, base = process.env): NodeJS.ProcessEnv {
-  const env = { ...base };
+  const env = { ...base, ...providerSessionEnvironment("claude") };
   for (const key of Object.keys(env)) {
     if (key.startsWith("HERDR_") && key !== "HERDR_CONFIG_PATH") delete env[key];
   }

@@ -5,6 +5,11 @@ Package này quản lý việc discovery CLI của agent bên ngoài, phát hi�
 
 ## Ranh giới kiến trúc
 
+Các subprocess readiness và launch Claude do Bflow quản lý nhận `DISABLE_AUTOUPDATER=1`
+trong môi trường riêng của phiên. Updater nền không được đổi executable giữa prepare và
+activation; kiểm tra digest vẫn từ chối binary bị đổi thật. Cấu hình global không bị sửa.
+Xem [cơ chế cập nhật của Claude](https://code.claude.com/docs/en/setup#disable-auto-updates).
+
 Theo [docs/provider-contracts.md](../../docs/provider-contracts.md) và [AGENTS.md](../../AGENTS.md):
 - **Leaf chỉ phụ thuộc Contracts**: Chỉ phụ thuộc `@bflow/contracts` và `zod`. Không bao giờ import `@bflow/pane-manager`, `@bflow/runtime`, `@bflow/core` hay `apps/cli`.
 - **Chỉ tạo dữ liệu launch**: Chỉ sinh launch profile đã validate và argument của lệnh start. Việc thực thi process và vòng đời terminal pane thuộc hoàn toàn về Herdr và Pane Manager.

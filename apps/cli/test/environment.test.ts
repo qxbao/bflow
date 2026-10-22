@@ -970,6 +970,15 @@ describe("P12 repository environment lifecycle", () => {
 });
 
 describe("environment command parsing and session context", () => {
+  it("keeps provider auto-updates disabled from the earliest lifecycle subprocess", async () => {
+    const base = { PATH: process.env.PATH, DISABLE_AUTOUPDATER: "0" };
+    const result = await environmentProcessRunner.run({ executable: process.execPath,
+      args: ["-e", "process.stdout.write(process.env.DISABLE_AUTOUPDATER || 'unset')"],
+      cwd: process.cwd(), env: namedSessionEnvironment("test-session", base) });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("1");
+    expect(base.DISABLE_AUTOUPDATER).toBe("0");
+  });
   it.each(["up", "down", "attach", "doctor", "recover"])("supports %s and its help", (command) => {
     expect(parseCliArgs([command, "--json"]).ok).toBe(true); expect(parseCliArgs([command, "--help"]).ok).toBe(true);
   });
@@ -978,6 +987,6 @@ describe("environment command parsing and session context", () => {
   });
   it("removes inherited socket, remote and caller pane context", () => {
     expect(namedSessionEnvironment("repo-session", { PATH: "/bin", HERDR_SOCKET: "/wrong", HERDR_PANE_ID: "other", HERDR_SESSION: "other", HERDR_ENV: "1", HERDR_CONFIG_PATH: "/explicit/config" }))
-      .toEqual({ PATH: "/bin", HERDR_CONFIG_PATH: "/explicit/config", HERDR_SESSION: "repo-session" });
+      .toEqual({ PATH: "/bin", DISABLE_AUTOUPDATER: "1", HERDR_CONFIG_PATH: "/explicit/config", HERDR_SESSION: "repo-session" });
   });
 });

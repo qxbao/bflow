@@ -5,6 +5,9 @@ Build từ thư mục gốc của repository bằng `pnpm build`, sau đó chạ
 Cần Node >=22.13 và pnpm được pin ở root cho storage runtime hiện có.
 Việc khóa vòng đời yêu cầu `flock` của Linux (util-linux) có trong PATH.
 
+Các subprocess trong vòng đời phiên nhận `DISABLE_AUTOUPDATER=1` ngay từ dependency/auth
+checks, để Claude không tự đổi binary khi `up` đang chuẩn bị và activate các role.
+
 `bflow up` kiểm tra native auth, cấu hình/quyền, MCP, startup receipt và activated health
 mà không gửi ping/pong tới model. `bflow doctor` mặc định cũng không chạy model.
 Dùng `bflow doctor --deep` khi muốn thử model thật: mỗi bộ provider/profile/model/effort

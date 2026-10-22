@@ -20,6 +20,11 @@ const DANGEROUS_ENV_KEYS = new Set([
   "BHOME"
 ]);
 
+/** Session-local lifecycle policy; provider self-updates must not race launch/activation digest checks. */
+export function providerSessionEnvironment(provider: AgentEnvironment["provider"]): Readonly<Record<string, string>> {
+  return provider === "claude" ? { DISABLE_AUTOUPDATER: "1" } : {};
+}
+
 const SECRET_KEY_PATTERN = /(?:TOKEN|SECRET|API_KEY|PASSWORD|CREDENTIAL|PRIVATE_KEY)/i;
 const SECRET_VALUE_PATTERNS = [
   /^sk-[A-Za-z0-9_-]+/,
@@ -262,5 +267,5 @@ export function buildProviderEnvironment(
     }
   }
 
-  return env;
+  return { ...env, ...providerSessionEnvironment(environment.provider) };
 }
