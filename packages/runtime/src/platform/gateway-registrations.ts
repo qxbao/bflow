@@ -302,9 +302,22 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
     targets: readonly LedgerEntry[], scope: TrustScope, options?: OperationOptions): Promise<LedgerEntries> {
     const now = this.now().toISOString();
     const next: Record<string, LedgerEntry> = { ...entries };
+    // An unconfirmed entry the Gateway no longer lists (e.g. after a Gateway restart) is already gone; the Gateway
+    // would refuse to revoke a registration it does not know, so it is retired locally instead.
+    let listed: ReadonlySet<string> | undefined;
+    if (targets.some(entry => entry.state === "intent" || entry.state === "unknown" || entry.state === "lost")) {
+      const result = await this.control.list(scope, options);
+      if (!result.ok) throw new GatewayPortError(result.error);
+      listed = new Set(result.value.map(registration => registration.registrationId));
+    }
     let failure: ContractError | undefined;
     for (const entry of targets) {
       if (entry.state === "revoked") continue;
+      if (entry.state !== "registered" && listed !== undefined && !listed.has(entry.registrationId)) {
+        next[entry.registrationId] = { ...entry, state: "revoked", updatedAt: now };
+        this.tokens.delete(entry.registrationId);
+        continue;
+      }
       const result = await this.control.revoke(entry.registrationId, scopedOperation(scope, entry.registrationId), options);
       if (result.ok || result.error.code === "not_found") {
         next[entry.registrationId] = { ...entry, state: "revoked", updatedAt: now };
