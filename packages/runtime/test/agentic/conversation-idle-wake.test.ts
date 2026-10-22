@@ -120,6 +120,8 @@ describe.skipIf(process.platform === "win32")("Idle Conversation wake-up (incide
     // 04:52:35 delegation.accepted arrives and the Stop hook surfaces it; Conversation goes idle.
     await receipts.appendConversationNotice(accepted);
     await receipts.markConversationNoticesSurfaced([accepted.message_id]);
+    // This fixture models a consumed AND displayed update; surfacing alone now retains display recovery.
+    await receipts.markConversationNoticesDisplayed([accepted.message_id]);
     expect(await notifier.tick(herdr.value)).toBe("idle");
 
     // 04:53:00 the user_decision approval.request is written to the inbox; the next pass (≤ 2 s) types the nudge.

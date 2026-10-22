@@ -100,6 +100,37 @@ describe("trusted hook approval routing", () => {
     expect(result?.ok).toBe(true);
     if (result?.ok) expect(result.value.approvalInput?.selectedOption).toBe("Postgres");
   });
+  it.each([
+    "2. Loại bỏ real time cũng được, tôi chỉ muốn các bước tổng quan trong pane Logs",
+    "apr-user-decision-abc123: 2 — bỏ realtime, chỉ cần các bước tổng quan",
+    "chọn 2: giữ nguyên contracts; chỉ sửa phần hiển thị",
+    "2) Giữ Postgres\nCó kiểm tra reconnect và thứ tự."
+  ])("leaves a numbered reply with prose to Chat instead of committing human approval: %s", content => {
+    const result = classifyTrustedApprovalReply(turn(content), contextWith(userDecisionRequest()));
+    expect(result).toBeUndefined();
+  });
+  it.each(["2", "2.", "2)", "chọn 2", "apr-user-decision-abc123: 2", "Postgres"])(
+    "retains exact option governance independently of prose interpretation: %s", content => {
+      const result = classifyTrustedApprovalReply(turn(content), contextWith(userDecisionRequest()));
+      expect(result?.ok && result.value.approvalInput).toMatchObject({ approvalId: "apr-user-decision-abc123", selectedOption: "Postgres" });
+    });
+  it.each(["2.5", "2 triển khai", "2 hoặc 1", "2/1", "9. bỏ realtime", "2 —", "2. chọn 1"])(
+    "does not infer an authenticated option from an invalid or conflicting selector: %s", content => {
+      expect(classifyTrustedApprovalReply(turn(content), contextWith(userDecisionRequest()))).toBeUndefined();
+    });
+  it.each(["1. chọn 1 và 2", "1. chọn cả 1 và 2", "1. chọn cả phương án 1 và 2", "1. select both option 1 and 2", "2. 1", "2. tôi không chọn phương án 2, chọn phương án 1", "2. Postgres\n1. SQLite", "1. và 2", "1. and 2", "1. & 2", "1. SQLite hoặc Postgres"])(
+    "does not authenticate feedback containing another choice or an option list: %s", content => {
+      expect(classifyTrustedApprovalReply(turn(content), contextWith(userDecisionRequest()))).toBeUndefined();
+    });
+  it("requires a known question target for feedback when several questions are pending", () => {
+    const context = contextWith(userDecisionRequest());
+    const other = userDecisionRequest({ approvalId: "apr-another", runId: "run-other" });
+    context.pendingApprovals[other.approvalId] = other;
+    expect(classifyTrustedApprovalReply(turn("2. bỏ realtime"), context)).toBeUndefined();
+    expect(classifyTrustedApprovalReply(turn("apr-unknown: 2 — bỏ realtime"), context)).toBeUndefined();
+    const targeted = classifyTrustedApprovalReply(turn("apr-another: 2 — bỏ realtime"), context);
+    expect(targeted).toBeUndefined();
+  });
   it("requires a named request for free-text specialist answers", () => {
     const context = contextWith(userDecisionRequest({ metadata: { kind: "user_decision", question: "Choose the storage backend" } }));
     expect(classifyTrustedApprovalReply(turn("Tạo spike: khảo sát quyền MCP của từng role"), context)).toBeUndefined();

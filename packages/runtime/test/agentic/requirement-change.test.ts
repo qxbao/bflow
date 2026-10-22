@@ -12,6 +12,9 @@ import { AdmissionRejectedError, AgenticWorkflowRuntime } from "../../src/agenti
 import { loadAgenticPolicies, type PanePolicy } from "../../src/agentic/ports.js";
 import { FakeAgentTransport } from "../helpers/fake-transport.js";
 import { draft, workflow } from "../../../specification/test/fixtures.js";
+import { createAgenticConversationHost } from "../../src/agentic/conversation.js";
+import { HostConversationIntake } from "../../src/agentic/host-conversation.js";
+import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn(); });
@@ -111,6 +114,81 @@ async function admit(f: Awaited<ReturnType<typeof fixture>>, message: ReturnType
   await f.runtime.queueHerdr(message);
   return f.runtime.receiveHerdr(message);
 }
+
+describe("raw scope correction through Conversation while an approval is pending", () => {
+  it("routes the original Logs correction to Chat, admits one revision and supersedes the old question without approval", async () => {
+    const f = await fixture();
+    const manifest = unwrap(await f.ports.panes.getManifest());
+    const binding = manifest.panes.find(pane => pane.role === "conversation")!;
+    const coordinator = manifest.panes.find(pane => pane.role === "coordinator")!;
+    let humanDecisions = 0;
+    let chat = await createAgenticConversationHost({ runtime: f.runtime, manifest, contextDirectory: join(f.root, "conversation"),
+      onHumanDecision: async () => { humanDecisions++; } });
+    const receipts = new HostReceiptJournal(join(f.root, "host-receipts"), f.repository, manifest.sessionId);
+    let intake = new HostConversationIntake(receipts, () => chat);
+    const original = { messageId: "human-logs-initial", conversationSessionId: "session-1", userId: "human-1",
+      content: "Pane Logs hiển thị realtime các bước workflow" };
+    await intake.receive(binding, original);
+    const initialDecision = { intent: "workflow_request", requirementDraft: { title: "Workflow Logs", objective: original.content,
+      kind: "feature", sddLevel: "lightweight", priority: "normal", scopeDefined: true, isLargeTask: false,
+      affectedPaths: [], acceptanceCriteriaDescriptions: ["Logs hiển thị realtime các bước từ Runtime, đúng thứ tự, không trùng"],
+      isRequirementChange: false } };
+    await intake.decide(binding, { decision: initialDecision });
+    const initial = (await f.state()).outbound.find((out: any) => out.message.type === "delegation.request").message;
+    const runId = initial.run_id, correlationId = initial.correlation_id;
+    await f.runtime.flushOutbound();
+    await f.runtime.receiveHerdr(initial);
+    const receipt = await f.runtime.requestUserDecision(coordinator, "coordinator", { runId, taskId: "logs-flow",
+      question: "Approve the realtime Logs design?", options: ["Approve design", "Request changes to the design"] }) as { approvalId: string };
+    await f.runtime.flushOutbound();
+    for (const message of f.conversationInbox) await chat.receiveRuntime(message);
+    const correction = { ...original, messageId: "human-logs-correction",
+      content: "2. Loại bỏ real time cũng được, tôi chỉ muốn pane logs in ra màn được các bước tổng quan trong màn logs thôi" };
+    const received = await intake.receive(binding, correction);
+    expect(received).toMatchObject({ messageId: correction.messageId, requiresConversationDecision: true,
+      context: { pendingApprovals: { [receipt.approvalId]: { runId, status: "pending" } } } });
+    expect(await receipts.conversationDecision(correction.messageId)).toBeUndefined();
+    expect(humanDecisions).toBe(0);
+    expect((await f.runtime.inspect(runId) as any).userDecisions[receipt.approvalId].status).toBe("pending");
+    const decision = { intent: "workflow_request", targetRunId: runId, requirementDraft: {
+      ...initialDecision.requirementDraft, objective: "Không cần realtime; chỉ in các bước tổng quan của flow trong Logs",
+      acceptanceCriteriaDescriptions: ["Hiển thị các bước tổng quan từ Runtime theo thứ tự, không trùng; không yêu cầu realtime"],
+      isRequirementChange: true } };
+    await expect(intake.decide(binding, { decision: { ...decision, targetRunId: "run-foreign" } })).rejects.toThrow("existing unfinished workflow");
+    await expect(intake.decide(binding, { decision: { intent: "approval_response", approvalInput: { decision: "approved" } } })).rejects.toThrow();
+    expect(await receipts.conversationDecision(correction.messageId)).toBeUndefined();
+    const changed = await intake.decide(binding, { decision });
+    expect(changed).toMatchObject({ ok: true, value: { runId, correlationId, userMessage: { content: correction.content },
+      delegationRequest: { metadata: { revision: 2, isRequirementChange: true } } } });
+    const revisions = (await f.state()).outbound.filter((out: any) => out.message.type === "delegation.request");
+    expect(revisions).toHaveLength(2);
+    const revised = revisions[1].message;
+    expect(revised).toMatchObject({ run_id: runId, correlation_id: correlationId, recipient: { role: "coordinator", pane_id: coordinator.paneId } });
+    await f.runtime.receiveHerdr(revised);
+    await f.runtime.flushOutbound();
+    for (const message of f.conversationInbox) await chat.receiveRuntime(message);
+    const current = await f.runtime.inspect(runId) as any;
+    expect(current).toMatchObject({ coreCreated: false, delegation: { metadata: { revision: 2 } },
+      userDecisions: { [receipt.approvalId]: { status: "cancelled" } } });
+    expect(current.delegationHistory).toHaveLength(1);
+    expect((await f.state()).outbound.some((out: any) => out.message.type === "approval.decision")).toBe(false);
+    expect(await chat.getContext()).toMatchObject({ pendingApprovals: {}, pendingClarifications: {} });
+    expect(humanDecisions).toBe(0);
+    expect(await receipts.humanDecisions()).toEqual([]);
+    // The existing Runtime log records the observed steps; it never advances business success.
+    const entries = await f.runtime.activityLog.read({ runId, lines: 100, maxBytes: 100_000 });
+    expect(entries).toEqual(expect.arrayContaining([expect.objectContaining({ role: "runtime", action: "run_admitted", runId }),
+      expect.objectContaining({ role: "runtime", action: "approval.request", runId })]));
+    const restarted = f.restart();
+    chat = await createAgenticConversationHost({ runtime: restarted, manifest, contextDirectory: join(f.root, "conversation") });
+    intake = new HostConversationIntake(receipts, () => chat);
+    expect(await intake.receive(binding, correction)).toMatchObject({ requiresConversationDecision: false, result: changed });
+    expect(await intake.decide(binding, { decision })).toEqual(changed);
+    await restarted.receiveHerdr(revised);
+    expect((await f.state()).outbound.filter((out: any) => out.message.type === "delegation.request")).toHaveLength(2);
+    expect((await restarted.inspect(runId) as any).delegationHistory).toHaveLength(1);
+  });
+});
 
 describe("requirement change: revisions are admitted in order and persisted", () => {
   it.each([false, true])("invalidates rejection proof and action identity on a new requirement revision (previous admission: %s)", async admitted => {

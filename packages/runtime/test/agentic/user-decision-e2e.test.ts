@@ -147,6 +147,27 @@ async function reply(host: AgenticConversationHost, content: string, messageId =
 const resumeOf = async (instance: AgenticWorkflowRuntime) => (await outbound(instance)).filter(entry => entry.message.type === "task.status");
 
 describe.skipIf(process.platform !== "linux")("P30 user decisions end to end", () => {
+  it("does not consume the Logs scope correction as a governance option, even on a repeated hook call", async () => {
+    const f = await fixture(), runtime = f.runtime();
+    const receipt = await runtime.requestUserDecision(f.coordinator, "coordinator", parseUserDecisionToolInput({
+      runId: RUN, taskId: "logs-flow", question: "Approve the Logs design?",
+      options: ["Approve design", "Request changes to the design"]
+    })) as { approvalId: string };
+    await runtime.flushOutbound();
+    const host = await f.chat(runtime);
+    await host.receiveHerdr(await promptOf(runtime));
+    const content = "2. Loại bỏ real time cũng được, tôi chỉ muốn pane logs in ra các bước tổng quan";
+    const input = { sessionId: SESSION, messageId: "user-feedback-once", content,
+      provenance: { origin: "user", authenticatedUser: true, userId: "human-1", paneId: "pane-conversation", channel: "herdr_attach" } };
+    expect(await host.handleTrustedApproval(input)).toBeUndefined();
+    expect(await host.handleTrustedApproval(input)).toBeUndefined();
+    const decisions = (await outbound(runtime)).filter(entry => entry.message.type === "approval.decision");
+    expect(decisions).toHaveLength(0);
+    const wakes = (await outbound(runtime)).filter(entry => entry.message.type === "task.status" && entry.message.recipient.role === "coordinator");
+    expect(wakes).toHaveLength(0);
+    expect(await userDecisions(runtime, receipt.approvalId)).toMatchObject({ status: "pending" });
+  });
+
   it("routes a specialist decision through Conversation and resumes the asker exactly once", async () => {
     const f = await fixture(); const runtime = f.runtime();
     const approvalId = await request(runtime, f.developer);

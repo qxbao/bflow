@@ -253,3 +253,14 @@ trích xuất phê duyệt đã xác thực, không phải một quyền phủ q
 Các đảm bảo này có test cục bộ ở mức package/integration. Chúng không chứng minh live provider,
 Herdr transport hay nghiệm thu SDLC đầy đủ. Các host đang chạy cần rebuild và restart để nạp
 MCP tool và prompt mới.
+
+The trusted hook commits a specialist choice only for a complete number (for example
+`2` or `apr-...: 2`) or an exact offered option label. A numbered prefix with prose,
+such as `2. bỏ realtime`, remains the original trusted user turn for Chat to interpret;
+it cannot automatically authorize an option. Explicitly targeted free-text questions
+without offered options retain their separate reply path. When the turn changes scope,
+Chat uses `workflow_request`, `isRequirementChange: true` and the existing `targetRunId`
+in that same turn. Runtime admits the revision and supersedes old approvals through
+its existing lifecycle, retaining run/correlation and history. No second human turn
+is required just to re-enter approval syntax for a clear scope correction. These are
+local ingress/revision tests; model obedience and live provider acceptance are separate.

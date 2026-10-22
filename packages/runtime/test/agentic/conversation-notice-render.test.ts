@@ -96,7 +96,7 @@ describe("Conversation notice rendering", () => {
   it("keeps other notices as short headlines", () => {
     const rendered = renderConversationNotice(notice("progress-1", "conversation.progress", { headline: "x" }));
     expect(rendered).toMatchObject({ kind: "update" });
-    expect(rendered.ackToken).toBeUndefined();
+    expect(rendered.ackToken).toBe("[progress-1] x");
   });
   it("tolerates partial notices from a host reply", () => {
     expect(renderConversationNotice({ messageId: "notice-1" }).display).toContain("Cập nhật từ runtime (notice)");
@@ -146,6 +146,20 @@ describe("transcript and reminder helpers", () => {
 });
 
 describe("display acknowledgement receipts", () => {
+  it("retains surfaced substantive progress until user display, including after reopening", async () => {
+    const root = await directory(), path = join(root, "receipts");
+    const receipts = new HostReceiptJournal(path, "/tmp/bflow-notice-render-repo", "session-1");
+    await receipts.appendConversationNotice({ schema_version: 2, message_id: "progress-runner-found", correlation_id: "corr-1", run_id: "run-42",
+      sender: { role: "coordinator" }, recipient: { role: "conversation" }, type: "conversation.progress",
+      payload: { headline: "Root E2E runner exists", sdlcStatus: "specifying" }, artifact_references: [], idempotency_key: "progress-runner-found" });
+    await receipts.markConversationNoticesSurfaced(["progress-runner-found"]);
+    const reopened = new HostReceiptJournal(path, "/tmp/bflow-notice-render-repo", "session-1");
+    expect(await reopened.unsurfacedConversationNotices()).toEqual([]);
+    expect(await reopened.undisplayedUserFacingNotices()).toEqual([expect.objectContaining({ messageId: "progress-runner-found", reblocks: 0 })]);
+    expect(await reopened.markConversationNoticesDisplayed(["progress-runner-found"])).toEqual(["progress-runner-found"]);
+    expect(await receipts.undisplayedUserFacingNotices()).toEqual([]);
+  });
+
   it("lists surfaced user decisions until they are displayed, and bounds re-blocks", async () => {
     const root = await directory();
     const receipts = new HostReceiptJournal(join(root, "receipts"), "/tmp/bflow-notice-render-repo", "session-1");
@@ -163,7 +177,7 @@ describe("display acknowledgement receipts", () => {
     expect(await receipts.undisplayedUserFacingNotices()).toEqual([]);
     await receipts.markConversationNoticesSurfaced(["decision-" + APPROVAL_ID, "progress-1"]);
     const undisplayed = await receipts.undisplayedUserFacingNotices();
-    expect(undisplayed.map(item => item.messageId)).toEqual(["decision-" + APPROVAL_ID]);
+    expect(undisplayed.map(item => item.messageId)).toEqual(["decision-" + APPROVAL_ID, "progress-1"]);
     expect(undisplayed[0]).toMatchObject({ reblocks: 0, type: "approval.request" });
     expect(typeof undisplayed[0]!.surfacedAt).toBe("string");
     // Surfacing again keeps the first time and creates no second receipt.
@@ -172,8 +186,8 @@ describe("display acknowledgement receipts", () => {
     expect(await receipts.recordNoticeReblock("decision-" + APPROVAL_ID)).toBe(2);
     expect(MAX_NOTICE_REBLOCKS).toBe(2);
     expect((await receipts.undisplayedUserFacingNotices())[0]!.reblocks).toBe(2);
-    // Unknown, unsurfaced or non-user-facing ids are ignored, never marked displayed.
-    expect(await receipts.markConversationNoticesDisplayed(["progress-1", "never-appended"])).toEqual([]);
+    // Progress has its own display receipt; unknown ids are ignored.
+    expect(await receipts.markConversationNoticesDisplayed(["progress-1", "never-appended"])).toEqual(["progress-1"]);
     expect(await receipts.markConversationNoticesDisplayed(["decision-" + APPROVAL_ID])).toEqual(["decision-" + APPROVAL_ID]);
     expect(await receipts.markConversationNoticesDisplayed(["decision-" + APPROVAL_ID])).toEqual([]);
     const reloaded = new HostReceiptJournal(join(root, "receipts"), "/tmp/bflow-notice-render-repo", "session-1");

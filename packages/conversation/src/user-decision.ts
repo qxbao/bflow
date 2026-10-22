@@ -175,9 +175,17 @@ export function resolveUserDecisionReply(
     return { kind: "answer", reason: trimmed };
   }
 
-  const numbered = /^(?:(?:chọn|lựa chọn|option|choose)\s*)?(\d{1,2})\s*[.)]?$/u.exec(normalized);
+  // An explicit separator distinguishes a choice with feedback from a decimal, list of choices or ordinary prose.
+  const numbered = /^(?:(?:chọn|lựa chọn|option|choose)\s*)?(\d{1,2})\s*[.)]?$/u.exec(normalized) ??
+    /^(?:(?:chọn|lựa chọn|option|choose)\s*)?(\d{1,2})(?:[.)]\s+|\s*[:—–-]\s+)(\S.*)$/u.exec(normalized);
   if (numbered) {
     const index = Number(numbered[1]);
+    const feedback = numbered[2];
+    // A second selection or a pasted numbered list is not unambiguous feedback. Never choose one side of it.
+    if (feedback && (/^\d/u.test(feedback) ||
+        /(?:^|\s)(?:chọn|lựa chọn|option|choose|select|phương án|hoặc|hay|or|và|and|&|\+|\/)(?:\s+(?:cả|both|all|phương án|option))*\s*#?\d/iu.test(feedback) ||
+        /(?:^|\s)(?:hoặc|hay|or)(?:\s|$)/iu.test(feedback) ||
+        /\n\s*\d{1,2}[.)]/u.test(trimmed))) return ambiguousReply(options);
     const selected = index >= 1 && index <= options.length ? options[index - 1] : undefined;
     return selected !== undefined ? { kind: "answer", selectedOption: selected, reason: trimmed } : ambiguousReply(options);
   }

@@ -744,3 +744,18 @@ này không thay thế một approval đang chờ và không tạo workflow mớ
 Runtime lưu intake đã được Conversation xác thực cùng outbox intent trước dispatch đầu tiên;
 `delegation.accepted` và ingress Herdr vẫn là các bước riêng. Vì vậy capability denial trước khi
 Coordinator nhận yêu cầu cũng giữ được cùng run và action để xử lý, thay vì chỉ có terminal lỗi.
+
+Conversation display recovery distinguishes notices surfaced to the model from
+notices displayed to the user. Substantive progress with a run and a complete
+headline remains eligible for display acknowledgement after restart. Claude and
+Codex Stop hooks (Codex requires its final assistant message) can issue at most two
+reminders per missed notice. Generic/truncated updates have no progress display
+acknowledgement; display receipts never authorize a workflow or approval. These
+guarantees are covered by local subprocess/host tests, not live-provider acceptance.
+
+A numbered choice followed by prose is not committed as human governance at intake.
+The original authenticated turn stays undecided for `conversation_decide`, allowing
+Chat to revise the same workflow while an older approval is pending. The revision
+uses normal Runtime admission/supersession; it does not fabricate an approval or
+invoke operational resume. Exact numeric/option replies still use the trusted human
+hook. Restart/replay coverage retains the same revision envelope and user-turn identity.
