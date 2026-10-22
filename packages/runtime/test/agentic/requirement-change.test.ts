@@ -113,6 +113,25 @@ async function admit(f: Awaited<ReturnType<typeof fixture>>, message: ReturnType
 }
 
 describe("requirement change: revisions are admitted in order and persisted", () => {
+  it.each([false, true])("invalidates rejection proof and action identity on a new requirement revision (previous admission: %s)", async admitted => {
+    const f = await fixture({ humanApproval: true });
+    await admit(f, f.handoff(f.request(1, "Rev1 criterion")));
+    const rejected = { code: "unsupported_verification" as const, reason: "Old revision runner binding", options: ["Correct old proposal"] };
+    await f.runtime.recordWorkflowRejected("run-1", rejected);
+    const oldAction = (await f.run()).lastWorkflowRejection.actionId;
+    if (admitted) {
+      await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+      expect((await f.run()).lastWorkflowRejection).toBeUndefined();
+    }
+    await admit(f, f.handoff(f.request(2, "Revised criterion")));
+    expect((await f.run()).lastWorkflowRejection).toBeUndefined();
+    await f.runtime.recordWorkflowRejected("run-1", rejected);
+    const current = await f.run();
+    expect(current.lastWorkflowRejection.actionId).not.toBe(oldAction);
+    f.restart();
+    expect((await f.run()).lastWorkflowRejection.actionId).toBe(current.lastWorkflowRejection.actionId);
+  });
+
   it("accepts rev1, then rev2 and rev3, keeps history, and sends later specialist work with the rev3 criteria", async () => {
     const f = await fixture();
     await admit(f, f.handoff(f.request(1, "Rev1 criterion")));

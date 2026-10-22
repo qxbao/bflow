@@ -5,8 +5,9 @@ import { redactString } from "../resilience/redaction.js";
  * Structured reasons a Coordinator's workflow proposal is refused before any state changes.
  * The options are informational text for the user. Nothing here is applied automatically.
  */
-export type WorkflowRejectionCode = "missing_behavioral_runner" | "unsupported_verification" | "policy_violation" |
-  "no_test_runner_detected" | "runner_setup_required" | "verification_sandbox_unavailable" | "missing_test_paths" | "missing_test_mapping" | "unknown_test_command" | "unsupported_method";
+export const WorkflowRejectionCodeSchema = z.enum(["missing_behavioral_runner", "unsupported_verification", "policy_violation",
+  "no_test_runner_detected", "runner_setup_required", "verification_sandbox_unavailable", "missing_test_paths", "missing_test_mapping", "unknown_test_command", "unsupported_method"]);
+export type WorkflowRejectionCode = z.infer<typeof WorkflowRejectionCodeSchema>;
 
 /**
  * Coordinator-fixable refusals: the structured error is the instruction for the Coordinator, so Conversation gets no notice.

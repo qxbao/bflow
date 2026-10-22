@@ -157,16 +157,23 @@ về việc giao nhận, không bao giờ là task thành công, và lần nhắ
   genuine user prompt, skipping tool-result entries.
 - **Rejected workflow proposals.** `propose_workflow` pre-checks (project policy, then verification
   support) return a structured error `{ code, reason, methods?, criteria?, options }` to the
-  Coordinator. The same reason reaches Conversation as a `workflow_rejected` notice, outside any
-  journal transaction. User-facing codes: `no_test_runner_detected` (unknown ecosystem found no
+  Coordinator. Runtime retains a validated private rejection record while allowing correction
+  in the same turn. On Coordinator STOP, the rejection becomes a durable manual blocker;
+  restart/watchdog do not retry the unchanged configuration. Explicit resumes retain the existing
+  limits and delivery/approval fences, with a distinct idempotent action per recurrence.
+  User-facing codes: `no_test_runner_detected` (unknown ecosystem found no
   supported runner; options: the Coordinator adds a setup task, or the run is cancelled), plus
   `unsupported_verification` and `policy_violation`; `missing_behavioral_runner` remains only for
   owner-configured runners. Coordinator-fixable codes are returned to the Coordinator as the tool error
   and are never sent to Conversation: `runner_setup_required` (a recognized ecosystem needs a reviewed runner/reporter setup task), `missing_test_paths` (no test file in `affectedPaths`),
-  `missing_test_mapping` (a criterion has no mapped test names), `unknown_test_command` (a target
+  `missing_test_mapping` (missing or ambiguous identities, owned test scope, or task execution budget), `unknown_test_command` (a target
   command is not a detected label, or the label is missing from `infrastructure.commands`) and
   `unsupported_method` (no runner for the criterion's method). The options are informational; nothing
   is applied automatically, and the specification and its criteria are never changed by Runtime.
+  Whole-spec runner binding checks individual command budgets; before admitting a DAG, Runtime
+  resolves each task's actual strategy and ownership, requires every automated criterion to bind,
+  and enforces the aggregate 540s task budget. Detection and binding do not prove sandbox readiness
+  or test success: independent execution and authenticated evidence remain required.
   Automatic detection is retried on each proposal while unsupported and refreshed after repository HEAD changes. Dynamic checks/gates use the same VerificationEngine when each plan is frozen, so no host restart is needed.
   An owner-configured runner (`.bflow/verification.json`, optional override) is pinned when the host is
   created (`docs/verification-runners.md`), so changing that file later requires quiescing the host.

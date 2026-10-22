@@ -117,6 +117,110 @@ async function fixture(runs: RunRecord[] = [run("run-1", "specifying")]) {
 }
 
 describe("bounded automatic resume", () => {
+  it("creates a fresh recovery wake when the resumed Coordinator STOPs without proposing again", async () => {
+    const f = await fixture();
+    const initial = coordinatorWake("rejection-initial");
+    await f.runtime.queueHerdr(initial); await f.runtime.flushOutbound();
+    await f.runtime.recordWorkflowRejected("run-1", { code: "unsupported_verification", reason: "Split the overbudget task", options: ["Split task"] });
+    await f.stopWithoutAction(initial);
+    const firstAction = (await f.record()).pendingAction!.actionId;
+    const first = await f.runtime.resumeBlockedRun("run-1", firstAction) as { messageId: string };
+    const wake = (await f.resumeWakes()).find(out => out.message.message_id === first.messageId)!.message;
+    await f.stopWithoutAction(wake);
+    const second = await f.record();
+    expect(second.pendingAction!.actionId).not.toBe(firstAction);
+    expect(second.pendingAction).toMatchObject({ recovery: "manual", manualResumeAttempts: 1 });
+    await f.runtime.coordinatorStopWithoutResponse(wake, f.coordinator());
+    expect((await f.record()).pendingAction).toEqual(second.pendingAction);
+    f.restart();
+    const resumed = await f.runtime.resumeBlockedRun("run-1", second.pendingAction!.actionId) as { messageId: string };
+    expect(resumed.messageId).not.toBe(first.messageId);
+    expect((await f.runtime.resumeBlockedRun("run-1", second.pendingAction!.actionId) as { messageId: string }).messageId).toBe(resumed.messageId);
+    expect(await f.resumeWakes()).toHaveLength(2);
+    expect((await f.record()).pendingAction?.manualResumeAttempts).toBe(2);
+  });
+
+  it("persists proposal rejection across real Coordinator STOP/restart, uses fresh notices per episode, and preserves resume limits", async () => {
+    const f = await fixture();
+    const rejection = { code: "unsupported_verification" as const, reason: "Task unit needs owned test files; correct its mapping before continuing", options: ["Correct owned test files"] };
+    let message = coordinatorWake("proposal-wake");
+    await f.runtime.queueHerdr(message);
+    for (let episode = 0; episode < 4; episode++) {
+      for (let pass = 0; pass < 3; pass++) await f.runtime.flushOutbound();
+      expect(["accepted", "released"]).toContain((await f.outbound()).find(out => out.message.message_id === message.message_id)?.status);
+      await f.runtime.recordWorkflowRejected("run-1", rejection);
+      const proof = (await f.record()).lastWorkflowRejection!;
+      await f.runtime.recordWorkflowRejected("run-1", rejection);
+      expect((await f.record()).lastWorkflowRejection).toEqual(proof);
+      const notices = (await f.outbound()).filter(out => (out.message.payload as any).kind === "workflow_rejected");
+      expect(notices).toHaveLength(episode + 1);
+      expect(notices.at(-1)!.message.payload).toMatchObject({ actionId: proof.actionId });
+      await f.stopWithoutAction(message);
+      f.restart(); f.advance(240 * SECOND);
+      const blocked = await f.record();
+      expect(blocked.pendingAction).toMatchObject({ recovery: "manual", previousStatus: "specifying" });
+      expect(blocked.pendingAction?.manualResumeAttempts ?? 0).toBe(episode);
+      expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 0 });
+      if (episode === 3) {
+        await expect(f.runtime.resumeBlockedRun("run-1", blocked.pendingAction!.actionId)).rejects.toThrow("Explicit resume budget is exhausted");
+        break;
+      }
+      const first = await f.runtime.resumeBlockedRun("run-1", blocked.pendingAction!.actionId) as { messageId: string };
+      const replay = await f.runtime.resumeBlockedRun("run-1", blocked.pendingAction!.actionId) as { messageId: string };
+      expect(replay.messageId).toBe(first.messageId);
+      expect((await f.resumeWakes()).filter(out => out.message.message_id === first.messageId)).toHaveLength(1);
+      message = (await f.resumeWakes()).find(out => out.message.message_id === first.messageId)!.message;
+    }
+  });
+
+  it.each([
+    ["code", "unrecognized"], ["episodeNumber", -1], ["actionId", "next-for-another-run"],
+    ["rejectedAt", "yesterday"], ["rejectionFingerprint", "bad"], ["previousStatus", "completed"], ["extra", true]
+  ])("rejects malformed durable proposal proof field %s at journal ingress", async (field, value) => {
+    const f = await fixture();
+    await f.runtime.recordWorkflowRejected("run-1", { code: "missing_test_mapping", reason: "Missing owned test files", options: [] });
+    await expect(f.journal.exclusive(async (state, save) => {
+      (state.runs[0]!.lastWorkflowRejection as unknown as Record<string, unknown>)[field as string] = value;
+      await save();
+    })).rejects.toThrow();
+    f.restart();
+    expect((await f.record()).lastWorkflowRejection?.code).toBe("missing_test_mapping");
+  });
+
+  it.each(["native", "sending", "unknown_delivery", "approval", "decision", "cancelled", "unrelated_blocker"] as const)(
+    "does not replace a %s fence with proposal recovery state", async fence => {
+      const f = await fixture();
+      if (["sending", "unknown_delivery"].includes(fence)) {
+        await f.runtime.queueHerdr(coordinatorWake("uncertain-proposal"));
+        await f.runtime.flushOutbound();
+      }
+      if (fence === "decision") await f.runtime.requestUserDecision(f.coordinator(), "coordinator", parseUserDecisionToolInput({
+        runId: "run-1", taskId: "planning", question: "Choose backend", options: ["SQLite", "Postgres"], expiresInMinutes: 60
+      }));
+      await f.journal.exclusive(async (state, save) => {
+        const current = state.runs[0]!;
+        if (fence === "native") current.nativeDeliveries = [{ operationId: "native-uncertain", message: coordinatorWake("native-proposal") }];
+        if (["sending", "unknown_delivery"].includes(fence)) state.outbound.find(out => out.message.message_id === "uncertain-proposal")!.status = fence as "sending" | "unknown_delivery";
+        if (fence === "approval") {
+          current.status = "awaiting_approval";
+          current.approval = ApprovalRequestSchema.parse({ schemaVersion: 2, approvalId: "pending-design", runId: "run-1", sessionId: "session-1",
+            status: "pending", target: { type: "run" }, revision: 1, generation: 0, requestedBy: "coordinator", requestedAt: T0,
+            reason: "Human design approval", evidence: [], idempotencyKey: "pending-design" });
+        }
+        if (fence === "cancelled") current.cancelled = true;
+        if (fence === "unrelated_blocker") {
+          current.status = "escalated";
+          current.pendingAction = { actionId: `next-${digest(["run-1", "existing-blocker"])}`, sourceMessageId: "existing-blocker",
+            kind: "resume_coordinator", owner: "coordinator", reason: "Existing capability blocker", createdAt: T0,
+            state: "pending", previousStatus: "specifying", recovery: "manual" };
+        }
+        await save();
+      });
+      const before = await f.runtime.inspect();
+      await f.runtime.recordWorkflowRejected("run-1", { code: "missing_test_mapping", reason: "No mapped test", options: ["Correct mapping"] });
+      expect(await f.runtime.inspect()).toEqual(before);
+    });
+
   it.each(["native", "sending", "unknown_delivery"] as const)("keeps verification retries blocked by %s uncertainty under both automatic and explicit retry", async kind => {
     const f = await fixture();
     await f.escalateVerification();
@@ -166,6 +270,25 @@ describe("bounded automatic resume", () => {
     // A repeated explicit resume of the same action is answered from its receipt, never a second wake.
     await f.runtime.resumeBlockedRun("run-1", blocked.pendingAction!.actionId);
     expect(await f.resumeWakes()).toHaveLength(1);
+  });
+
+  it("does not auto-resume static runner/proposal blockers, marks recovery as manual, and preserves the blocker for user action", async () => {
+    const f = await fixture();
+    await f.runtime.observeCoordinatorOutcome(coordinatorBlocked("blocked-runner", "runner_setup_required: Selected test identities cannot be bound"));
+    const blocked = await f.record();
+    expect(blocked).toMatchObject({
+      status: "escalated",
+      pendingAction: { recovery: "manual", state: "pending", previousStatus: "specifying" }
+    });
+    const notice = (await f.outbound()).find(out => out.message.message_id === `coordinator-blocked-${digest(["run-1", "blocked-runner"])}`)!;
+    expect(notice.message.payload).toMatchObject({ actionId: blocked.pendingAction!.actionId });
+    expect((notice.message.payload as any).automaticResume).toBeUndefined();
+
+    f.advance(120 * SECOND);
+    expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 0 });
+    const stillBlocked = await f.record();
+    expect(stillBlocked.status).toBe("escalated");
+    expect(stillBlocked.pendingAction?.state).toBe("pending");
   });
 
   it("B1: resumes no-next-action stops with growing backoff, stops after 3 attempts with one notice, and keeps the budget across restart", async () => {
@@ -235,7 +358,7 @@ describe("bounded automatic resume", () => {
     await expect(f.runtime.resumeBlockedRun("run-1", exhausted.pendingAction!.actionId)).rejects.toThrow(/Explicit resume budget is exhausted/);
     expect(await f.record()).toMatchObject({ status: "escalated", pendingAction: { state: "pending", recovery: "manual", resumeAttempts: 3, manualResumeAttempts: 3 } });
     expect(await f.resumeWakes()).toHaveLength(3 + 3 * 4);
-  });
+  }, 60_000);
 
   it("B8: re-runs the existing retry_verification automatically with backoff, bounded to 3 retries", async () => {
     const f = await fixture([run("run-1", "verifying")]);
