@@ -196,7 +196,9 @@ function approvalContent(notice: NoticeLike, fields: ApprovalNotice): RenderedNo
   const evidenceLine = `Bằng chứng: ${fields.evidenceCount ? `${fields.evidenceCount} artifact${evidence ? ` — ${evidence}` : ""}` : "không có"}`;
   const lines = [headline, `Đối tượng: ${fields.target}`, `Lý do: ${fields.reason}`, `Người yêu cầu: ${fields.requestedBy}`, evidenceLine,
     `Hạn: ${fields.expiresAt ?? "Không có hạn — đang chờ bạn trả lời"}`, ...options.map(option => `${option.number}. ${option.text}`),
-    `Trả lời: <số lựa chọn> hoặc "${fields.approvalId}: approve" / "${fields.approvalId}: reject <lý do>"`];
+    // The Conversation parser accepts exactly these: a bare number only while this is the sole pending approval.
+    `Trả lời: "${fields.approvalId}: 1" (duyệt) / "${fields.approvalId}: 2 <lý do>" (từ chối), hoặc "${fields.approvalId}: approve" / "${fields.approvalId}: reject <lý do>"; ` +
+      `chỉ khi đây là phê duyệt duy nhất đang chờ mới được gõ "1" hoặc "2 <lý do>" không kèm mã`];
   return { messageId: notice.messageId, kind: "approval", approvalId: fields.approvalId, ackToken: fields.approvalId,
     ...(fields.runId ? { runId: fields.runId } : {}), headline, reply: lines[lines.length - 1]!, options, ...(fields.expiresAt ? { expiresAt: fields.expiresAt } : {}),
     display: lines.join("\n") };

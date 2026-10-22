@@ -28,7 +28,7 @@ import {
 import { HerdrConversationBridge } from "./herdr-bridge.js";
 import { classifyUserIntent } from "./intent-classifier.js";
 import { resolveChatDecision } from "./chat-decision.js";
-import { expireStaleClarifications } from "./clarification-lifecycle.js";
+import { closeClarificationsForApproval, expireStaleClarifications } from "./clarification-lifecycle.js";
 import { closedApprovalNotice, isTerminalRunStatus, supersededApprovals } from "./approval-lifecycle.js";
 import {
   isUserDecisionRequest,
@@ -1189,7 +1189,7 @@ export class ConversationGateway {
             updatedAt: now
           };
 
-          const updatedSnapshot: ConversationContextSnapshot = {
+          const updatedSnapshot: ConversationContextSnapshot = closeClarificationsForApproval({
             ...this.snapshot!,
             session: updatedSession,
             messages: [...this.snapshot!.messages, userMsg, agentReply],
@@ -1197,7 +1197,7 @@ export class ConversationGateway {
             pendingApprovals: updatedPendingApprovals,
             approvalDecisions: updatedApprovalDecisions,
             deliveryRecords: this.config.bridge.getAllDeliveryRecords()
-          };
+          }, targetApproval.approvalId, now);
 
           const saveRes = await this.persistUpdatedSnapshot(updatedSnapshot);
           if (!saveRes.ok) return saveRes;

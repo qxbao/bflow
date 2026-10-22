@@ -125,10 +125,10 @@ export async function createAgenticConversationHost(options: {
     const workflows = Object.fromEntries(Object.entries(snapshot.workflows).map(([id, workflow]) => [id, {
       ...record(workflow), activeApprovalIds: (record(workflow).activeApprovalIds as string[]).filter(value => value !== decision.approvalId)
     }]));
-    const saved = await contextStore.save({ ...snapshot, pendingApprovals, workflows,
+    const saved = await contextStore.save(module.closeClarificationsForApproval({ ...snapshot, pendingApprovals, workflows,
       approvalDecisions: { ...snapshot.approvalDecisions, [decision.approvalId]: decision },
       session: { ...snapshot.session, activeApprovalIds,
-        status: activeApprovalIds.length ? "awaiting_user_approval" : "reporting_progress" } });
+        status: activeApprovalIds.length ? "awaiting_user_approval" : "reporting_progress" } }, decision.approvalId, new Date().toISOString()));
     if (!saved.ok) throw new Error(saved.error.message);
   }
   if (options.recoveredHumanDecisions?.length) {
@@ -153,6 +153,8 @@ export async function createAgenticConversationHost(options: {
       throw error;
     }
   };
+  /** Why the current user turn's approval-shaped reply was not recorded; replaced on every trusted turn. */
+  let turnWarnings: string[] = [];
   const withWarnings = (result: unknown) =>
     approvalWarnings.length && result && typeof result === "object" ? { ...(result as object), approvalWarnings } : result;
   return {
@@ -164,7 +166,7 @@ export async function createAgenticConversationHost(options: {
     async getContext() {
       const context = gateway.getContextSnapshot();
       return json({ session: context.session, pendingClarifications: context.pendingClarifications,
-        pendingApprovals: context.pendingApprovals, approvalWarnings, workflows: context.workflows,
+        pendingApprovals: context.pendingApprovals, approvalWarnings: [...turnWarnings, ...approvalWarnings], workflows: context.workflows,
         runIdToCorrelationId: context.runIdToCorrelationId, agentBusy: context.agentBusy,
         messages: context.messages.slice(-20).map((input: unknown) => {
           const { metadata: _metadata, ...message } = ConversationMessageSchema.parse(input); return message;
@@ -176,6 +178,7 @@ export async function createAgenticConversationHost(options: {
       if (!result.ok) throw new Error(result.error.message);
     },
     async handleTrustedApproval(input) {
+      turnWarnings = [];
       const context = gateway.getContextSnapshot();
       const parsed = module.UserTurnInputSchema.parse(input);
       // Resume the same hook turn from Gateway state; reapplying could misroute an already-decided approval.
@@ -195,7 +198,7 @@ export async function createAgenticConversationHost(options: {
       if (queued) return { ok: true, value: { sessionId: context.session.sessionId, recognizedIntent: "approval_response",
         sessionStatus: context.session.status, queuedBecauseBusy: true, substantiveUpdate: false } };
       // A lost approval.request must not strand the user's answer: ask Runtime what is pending before classifying.
-      const named = /(?<![\w-])apr-[A-Za-z0-9_-]+/.exec(parsed.content)?.[0];
+      const named: string | undefined = module.namedApprovalId(parsed.content, context);
       let current = context;
       if (named !== undefined || Object.keys(context.pendingApprovals).length === 0) {
         await reconcileApprovals().catch(() => undefined);
@@ -210,7 +213,12 @@ export async function createAgenticConversationHost(options: {
       }
       if (Object.keys(current.pendingApprovals).length === 0) return undefined;
       const classified = module.classifyTrustedApprovalReply(parsed, current);
-      if (!classified?.ok) return undefined;
+      if (!classified?.ok) {
+        // Not recorded: say why in this turn's context so the Conversation model never drops the reply silently.
+        const unrecorded: string | undefined = module.explainUnrecordedApprovalReply(parsed, current);
+        if (unrecorded !== undefined) turnWarnings = [unrecorded];
+        return undefined;
+      }
       return gateway.handleUserTurn(parsed);
     },
     async receiveHerdr(input) {

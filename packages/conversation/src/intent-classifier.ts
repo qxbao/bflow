@@ -30,6 +30,38 @@ function extractExplicitId(text: string, prefix: string): string | undefined {
   return match ? match[1] : undefined;
 }
 
+const APPROVAL_TOKEN_REGEX = /(?<![\w-])[A-Za-z][A-Za-z0-9]*-[A-Za-z0-9_-]+/g;
+/**
+ * A leading "<id>: <decision>" whose id looks generated (a hyphen and a digit), e.g. `design-1a2b…: approve`.
+ * Only a decision-shaped answer counts, so "run-123: trạng thái?" stays an ordinary question.
+ */
+const LEADING_APPROVAL_ID_REGEX =
+  /^\s*([A-Za-z][A-Za-z0-9]*-(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{3,})\s*[:：]\s*(?:\d+(?!\p{L})|approve|approved|lgtm|reject|rejected|decline|changes_requested|request changes|phê duyệt|đồng ý|duyệt|chấp thuận|từ chối|không duyệt|cần sửa)/iu;
+
+/**
+ * The approval a reply names. Ids the session knows (pending, decided or closed) match exactly whatever their
+ * prefix (`apr-…`, `design-…`). An unknown `apr-…` or leading `<id>:` is still returned, so it is refused instead of
+ * falling back to another pending approval.
+ */
+export function namedApprovalId(text: string, context: ConversationContextSnapshot): string | undefined {
+  const known = new Set([
+    ...Object.keys(context.pendingApprovals),
+    ...Object.keys(context.approvalDecisions ?? {}),
+    ...Object.keys(context.closedApprovals ?? {})
+  ]);
+  for (const match of text.matchAll(APPROVAL_TOKEN_REGEX)) if (known.has(match[0])) return match[0];
+  return extractExplicitId(text, "apr-") ?? LEADING_APPROVAL_ID_REGEX.exec(text)?.[1];
+}
+
+/** The reply with the named approval id and its separator removed. */
+function withoutApprovalId(text: string, approvalId: string | undefined): string {
+  const trimmed = text.trim();
+  return (approvalId === undefined ? trimmed : trimmed.replace(approvalId, "")).replace(/^[\s:：,-]+|[\s:,.!?-]+$/gu, "");
+}
+
+/** `1` approves; `2 <reason>` rejects. A design/task approval notice numbers its choices this way. */
+const NUMBERED_APPROVAL_CHOICE_REGEX = /^([12])(?:$|[\s:.)-]+([\s\S]*)$)/u;
+
 function extractFilePaths(text: string): readonly string[] {
   const pathRegex = /(?<![\w/])(?:(?:packages|src|apps|tests|test|scripts|lib|components|skills|agents|docs)\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|[a-zA-Z0-9_.-]+\.(?:ts|tsx|js|jsx|json|md|yaml|yml))\b/g;
   // A path in an exclusion, example or prohibited default is not affirmative scope.
@@ -170,6 +202,37 @@ function detectApproval(
     return { matched: false };
   }
 
+  const pendingIds = [...new Set([...pendingApprovalKeys, ...activeApprovalIds])];
+  const namedId = namedApprovalId(rawContent, context);
+  const numbered = NUMBERED_APPROVAL_CHOICE_REGEX.exec(withoutApprovalId(rawContent, namedId));
+  if (numbered) {
+    // A number answers a design/task approval only when it is named or is the only approval pending at all.
+    const allPending = new Set([...Object.keys(context.pendingApprovals), ...(context.session.activeApprovalIds ?? [])]);
+    const targetId = namedId ?? (allPending.size === 1 ? pendingIds[0] : undefined);
+    const target = targetId !== undefined ? context.pendingApprovals[targetId] : undefined;
+    if (target === undefined || isUserDecisionRequest(target)) return { matched: false };
+    const reason = numbered[2]?.trim() ?? "";
+    const targetRunId = target.runId;
+    const targetCorrelationId = context.runIdToCorrelationId[targetRunId];
+    const common = {
+      confidence: 0.96,
+      clarifyingQuestions: [] as string[],
+      targetRunId,
+      ...(targetCorrelationId !== undefined ? { targetCorrelationId } : {})
+    };
+    if (numbered[1] === "2" && reason.length === 0) {
+      // A rejection always carries the user's reason; a bare "2" is never turned into one.
+      return { matched: true, result: { ...common, intent: "conversation_only",
+        rationale: "Numbered rejection without a reason; asking for it without changing approval state.",
+        directReply: `Từ chối ${target.approvalId} cần kèm lý do: \`2 <lý do>\` hoặc \`${target.approvalId}: reject <lý do>\`.` } };
+    }
+    return { matched: true, result: { ...common, intent: "approval_response",
+      rationale: `User chose numbered option ${numbered[1]} of a design/task approval.`,
+      approvalInput: numbered[1] === "1"
+        ? { approvalId: target.approvalId, decision: "approved" }
+        : { approvalId: target.approvalId, decision: "rejected", reason } } };
+  }
+
   const approveRegex =
     /(?<!\p{L})(?:approve|approved|lgtm|đồng ý|duyệt|chấp thuận|chấp nhận|ok duyệt|đồng ý duyệt|xác nhận duyệt)(?!\p{L})/iu;
   const rejectRegex =
@@ -193,10 +256,7 @@ function detectApproval(
 
   // An id-less reply names an approval only when exactly one is pending; with several it stays
   // unnamed so the Gateway asks which one instead of deciding the first.
-  const pendingIds = [...new Set([...pendingApprovalKeys, ...activeApprovalIds])];
-  const explicitId =
-    extractExplicitId(rawContent, "apr-") ??
-    (pendingIds.length === 1 ? pendingIds[0] : undefined);
+  const explicitId = namedId ?? (pendingIds.length === 1 ? pendingIds[0] : undefined);
 
   let reason: string | undefined;
   if (decision !== "approved") {
@@ -250,7 +310,7 @@ function detectUserDecision(
   const pending = live.length > 0 ? live : userDecisions;
   const designApprovalPending = Object.values(context.pendingApprovals).some((request) => !isUserDecisionRequest(request));
 
-  const explicitId = extractExplicitId(rawContent, "apr-");
+  const explicitId = namedApprovalId(rawContent, context);
   if (explicitId !== undefined && !pending.some((request) => request.approvalId === explicitId)) {
     // The reply names a non-user approval (design/task); leave it to the approval path.
     return { matched: false };
@@ -263,6 +323,10 @@ function detectUserDecision(
     : rawContent;
   const matchesExactOption = pending.some((request) =>
     (optionLabelsOf(request) ?? []).some((option) => normalizeForMatching(option) === normalizeForMatching(answerCandidate)));
+  // A design/task approval numbers its choices too, so a bare number is ambiguous while one is pending.
+  if (designApprovalPending && explicitId === undefined && !matchesExactOption && /^\d+$/u.test(answerCandidate.trim())) {
+    return { matched: false };
+  }
   if (!matchesExactOption && isClearStatusQuestion(answerCandidate)) {
     return { matched: false };
   }
@@ -747,6 +811,8 @@ export function classifyTrustedApprovalReply(
   context: ConversationContextSnapshot
 ): OperationResult<IntentClassificationResult> | undefined {
   if (Object.keys(context.pendingApprovals).length === 0) return undefined;
+  // One governance reply per message: a turn naming several approvals is never split or partly applied.
+  if (approvalIdsByLine(input.content, context).size > 1) return undefined;
   const classified = classifyUserIntent(input, context);
   if (!classified.ok || classified.value.intent !== "approval_response") return undefined;
   const approval = classified.value.approvalInput;
@@ -762,7 +828,7 @@ export function classifyTrustedApprovalReply(
     return exactNumber || exactLabel ? classified : undefined;
   }
   const content = normalizeForMatching(input.content);
-  const namedId = extractExplicitId(sanitizeInputText(input.content), "apr-");
+  const namedId = namedApprovalId(sanitizeInputText(input.content), context);
   const namedRequest = namedId ? context.pendingApprovals[namedId] : undefined;
   // Never let an unrecognized id fall back to a different pending approval.
   if (namedId && !namedRequest) return undefined;
@@ -780,7 +846,55 @@ export function classifyTrustedApprovalReply(
   const targetedSpecialistAnswer = namesPendingRequest && namedRequest !== undefined && isUserDecisionRequest(namedRequest);
   const pendingDesigns = Object.values(context.pendingApprovals).filter(request => !isUserDecisionRequest(request));
   const unambiguousTarget = namedRequest !== undefined || pendingDesigns.length === 1 || Object.keys(context.pendingApprovals).length === 1;
-  return (completeDecision || targetedReason || targetedSpecialistAnswer) && unambiguousTarget ? classified : undefined;
+  // classifyUserIntent already limits a numbered choice to a named or sole design/task approval.
+  const numberedChoice = approval?.approvalId !== undefined && context.pendingApprovals[approval.approvalId] !== undefined &&
+    !isUserDecisionRequest(context.pendingApprovals[approval.approvalId]!) && NUMBERED_APPROVAL_CHOICE_REGEX.test(reply) &&
+    !/\n/u.test(reply);
+  return (completeDecision || targetedReason || targetedSpecialistAnswer || numberedChoice) && unambiguousTarget ? classified : undefined;
+}
+
+/** Pending approval ids named at the start of each line ("<id>: …"), or anywhere in a single-line reply. */
+function approvalIdsByLine(content: string, context: ConversationContextSnapshot): Set<string> {
+  const lines = sanitizeInputText(content).split(/\r?\n/u).map(line => line.trim()).filter(line => line.length > 0);
+  const ids = new Set<string>();
+  for (const line of lines) {
+    const id = namedApprovalId(line, context);
+    if (id !== undefined && context.pendingApprovals[id] !== undefined) ids.add(id);
+  }
+  return ids;
+}
+
+/**
+ * Why an approval-shaped user turn was NOT recorded, for a turn classifyTrustedApprovalReply did not accept.
+ * The warning reaches the Conversation model so the reply is never dropped silently; nothing is decided here.
+ */
+export function explainUnrecordedApprovalReply(
+  input: UserTurnInput,
+  context: ConversationContextSnapshot
+): string | undefined {
+  const pending = Object.keys(context.pendingApprovals);
+  if (pending.length === 0) return undefined;
+  const text = sanitizeInputText(input.content);
+  const lines = text.split(/\r?\n/u).map(line => line.trim()).filter(line => line.length > 0);
+  const named = approvalIdsByLine(text, context);
+  const syntax = "Gửi mỗi quyết định trong một tin nhắn riêng, một dòng: `<mã>: approve`, `<mã>: reject <lý do>` hoặc `<mã>: <số lựa chọn>`.";
+  if (lines.length > 1 && named.size > 0) {
+    return `Tin nhắn nhiều dòng có phản hồi cho ${[...named].join(", ")} nên CHƯA ghi nhận quyết định nào. ${syntax}`;
+  }
+  const namedId = namedApprovalId(text, context);
+  const reply = normalizeForMatching(withoutApprovalId(text, namedId));
+  const decisionShaped = NUMBERED_APPROVAL_CHOICE_REGEX.test(reply) || /^\d+$/u.test(reply) ||
+    /^(?:approve(?:d)?|lgtm|phê duyệt|đồng ý(?: duyệt)?|duyệt|chấp thuận|chấp nhận|reject(?:ed)?|từ chối|không duyệt)$/iu.test(reply);
+  if (!decisionShaped) return undefined;
+  if (namedId === undefined && pending.length > 1) {
+    return `Đang có ${pending.length} phê duyệt/câu hỏi chờ (${pending.join(", ")}); phản hồi không ghi mã nên CHƯA được ghi nhận. ${syntax}`;
+  }
+  const targetId = namedId ?? pending[0]!;
+  const target = context.pendingApprovals[targetId];
+  if (target !== undefined && !isUserDecisionRequest(target) && /^(?:2|reject(?:ed)?|từ chối|không duyệt)$/iu.test(reply)) {
+    return `Từ chối ${targetId} cần kèm lý do nên CHƯA được ghi nhận: \`${targetId}: reject <lý do>\` hoặc \`2 <lý do>\`.`;
+  }
+  return undefined;
 }
 
 /**
