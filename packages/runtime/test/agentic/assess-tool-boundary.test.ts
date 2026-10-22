@@ -1,19 +1,23 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, realpath, rm } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
-import { PaneBindingSchema } from "@bflow/contracts";
+import { PaneBindingSchema, SpecificationSchema } from "@bflow/contracts";
+import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 import { classifyChange } from "../../../specification/src/classification.js";
 import { draft } from "../../../specification/test/fixtures.js";
 import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
-import type { AgenticRuntimePorts } from "../../src/agentic/ports.js";
+import { loadAgenticPolicies, type AgenticRuntimePorts } from "../../src/agentic/ports.js";
 import { CoordinatorTools } from "../../src/agentic/tools.js";
+import recordedLogsFlow from "./fixtures/assess-logs-flow.json";
+import { assessmentFailureSummary } from "../../src/agentic/assessment-input.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "bflow-assess-boundary-")); roots.push(root);
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-assess-boundary-"))); roots.push(root);
   // assess is read-only: its only dependency is the real classification policy.
   const bindings = ["architect", "planner"].map(role => PaneBindingSchema.parse({ schemaVersion: 2, bindingId: `binding-${role}`,
     sessionId: "session-1", role, paneGroup: "coordination", agentId: `${role}-agent`, workspaceId: "workspace", tabId: "tab",
@@ -24,11 +28,78 @@ async function fixture() {
   } as unknown as AgenticRuntimePorts;
   const runtime = new AgenticWorkflowRuntime(ports, { journalDirectory: join(root, "journal"), repositoryPath: root });
   const assess = vi.spyOn(runtime, "assess");
-  return { tools: new CoordinatorTools(runtime), assess };
+  return { root, ports, runtime, tools: new CoordinatorTools(runtime), assess };
 }
 const principal = { role: "coordinator" as const };
 
 describe("assess tool Specification ingress", () => {
+  it("diagnoses the recorded contract-valid Logs specification before invoking Runtime", async () => {
+    const f = await fixture();
+    expect(SpecificationSchema.safeParse(recordedLogsFlow.specification).success).toBe(true);
+    const error = await f.tools.invoke("assess", recordedLogsFlow, principal).catch(error => error);
+    expect(error).toBeInstanceOf(ZodError);
+    expect(error.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: ["specification", "metadata", "sdd"], message: expect.stringContaining("planning_reference") })
+    ]));
+    expect(f.assess).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, {}, { sdd: null }, { sdd: {} }, { sdd: { assessment: [] } }])(
+    "validates P15 assessment presence for direct Runtime callers (%j)", async metadata => {
+      const f = await fixture();
+      const error = await f.runtime.assess({ ...recordedLogsFlow.specification, metadata }).catch(error => error);
+      expect(error).toBeInstanceOf(ZodError);
+      expect(error.issues[0].path[0]).toBe("metadata");
+      expect(error.message).toContain("planning_reference");
+    });
+
+  it("keeps P15 field errors under the tool specification path without inventing impact defaults", async () => {
+    const f = await fixture();
+    const specification = { ...recordedLogsFlow.specification, metadata: { sdd: { assessment: { kind: "feature" } } } };
+    const error = await f.tools.invoke("assess", { specification }, principal).catch(error => error);
+    expect(error).toBeInstanceOf(ZodError);
+    expect(error.issues.map((issue: { path: string[] }) => issue.path.join(".")))
+      .toContain("specification.metadata.sdd.assessment.behaviorChange");
+  });
+
+  it("logs a known input location and remediation without received values or arbitrary keys", async () => {
+    const f = await fixture();
+    const error = await f.tools.invoke("assess", recordedLogsFlow, principal).catch(error => error);
+    expect(assessmentFailureSummary(error)).toBe("specification.metadata.sdd: invalid input; read planning_reference");
+    const unsafe = new ZodError([{ code: "custom", path: ["specification", "metadata", "private-value"], message: "received secret-value" }]);
+    expect(assessmentFailureSummary(unsafe)).toBe("specification.metadata: invalid input; read planning_reference");
+    expect(assessmentFailureSummary(new Error("secret-value"))).toBe("P15 assess failed; inspect tool error");
+  });
+
+  it("reassesses the recorded requirement with explicit impact while preserving every delegated criterion", async () => {
+    const f = await fixture();
+    // Exercise Runtime's actual dist-loaded P15 adapter, not just the direct classification test dependency.
+    execFileSync("git", ["init", "-b", "main"], { cwd: f.root, stdio: "pipe" });
+    execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", "-c", "user.name=Test",
+      "-c", "user.email=test@example.test", "commit", "--allow-empty", "-m", "fixture"], { cwd: f.root, stdio: "pipe" });
+    const artifacts = await openFilesystemArtifactStore({ root: join(f.root, "artifacts"), storeId: "assess" });
+    if (!artifacts.ok) throw new Error(artifacts.error.message);
+    try {
+      f.ports.policies = await loadAgenticPolicies({ repositoryPath: f.root, artifactStore: artifacts.value, gates: [],
+        loadSpecification: async () => { throw new Error("assess must not load an accepted specification"); }, authorizeApprover: () => false });
+      const filesBefore = await readdir(f.root);
+      // The recorded first call spans three owners; keep that scope for a conservative assessment.
+      const specification = { ...recordedLogsFlow.specification, metadata: { sdd: { assessment: {
+        kind: "feature", behaviorChange: true, modules: ["runtime", "pane-manager", "cli"],
+        securityImpact: false, publicApiImpact: false, dataSchemaImpact: false, architectureImpact: false,
+        migrationRequired: false, risk: "medium", unresolvedQuestions: []
+      } } } };
+      const before = structuredClone(specification);
+      await expect(f.tools.invoke("assess", { specification }, principal)).resolves.toMatchObject({
+        complexity: "complex", level: "full", riskLevel: "high", humanApprovalRequired: true,
+        clarificationRequired: false, suggestedRoles: ["architect", "planner"]
+      });
+      expect(specification).toEqual(before);
+      // assess never proposes a workflow, writes a journal, accepts criteria, or dispatches work.
+      await expect(readdir(f.root)).resolves.toEqual(filesBefore);
+    } finally { artifacts.value.close(); }
+  });
+
   it("assesses a complete Specification with the actual classification policy", async () => {
     const f = await fixture(), spec = draft("api");
     await expect(f.tools.invoke("assess", { specification: spec }, principal)).resolves.toMatchObject({

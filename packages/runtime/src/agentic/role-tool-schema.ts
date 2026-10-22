@@ -35,6 +35,30 @@ function render(schema: z.ZodTypeAny): Record<string, unknown> {
 }
 
 export const specificationToolSchema = render(SpecificationSchema);
+// Discovery guidance for assess's package-local precondition. The authoritative P15
+// classifyChange validates every field at invocation; this is not a second policy validator.
+const impactFlags = ["behaviorChange", "securityImpact", "publicApiImpact", "dataSchemaImpact", "architectureImpact", "migrationRequired"];
+export const assessmentToolSchema = {
+  type: "object", additionalProperties: false,
+  properties: {
+    kind: { type: "string", enum: ["documentation", "formatting", "feature", "bugfix", "refactoring", "configuration"] },
+    ...Object.fromEntries(impactFlags.map(name => [name, { type: "boolean" }])),
+    modules: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } },
+    risk: { type: "string", enum: ["low", "medium", "high", "critical"] },
+    unresolvedQuestions: { type: "array", items: { type: "string", minLength: 1 } }
+  },
+  required: ["kind", ...impactFlags, "modules", "risk", "unresolvedQuestions"]
+};
+export const assessmentSpecificationToolSchema = {
+  ...specificationToolSchema,
+  required: [...specificationToolSchema.required as string[], "metadata"],
+  properties: {
+    ...specificationToolSchema.properties as Record<string, unknown>,
+    metadata: { type: "object", additionalProperties: {}, required: ["sdd"], properties: {
+      sdd: { type: "object", additionalProperties: {}, required: ["assessment"], properties: { assessment: assessmentToolSchema } }
+    } }
+  }
+};
 const roleMessageToolSchema = render(RoleMessageSchema);
 export const nativeRoleMessageToolSchema = {
   ...roleMessageToolSchema,
