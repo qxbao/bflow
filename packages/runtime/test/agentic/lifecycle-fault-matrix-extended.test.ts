@@ -66,7 +66,11 @@ describe.skipIf(process.platform !== "linux")("whole-run lifecycle fault matrix 
     const f = await lifecycleFixture(cleanups);
     await through(f, "implemented");
     const hold = f.hold("task");
-    void f.runtime.tick().catch(() => undefined); // this coroutine belongs to the "dead" process and never finishes
+    const ticking = f.runtime.tick();
+    // The simulated dead process still has a live coroutine and gate timeout in this test process.
+    // Drain it before the fixture closes its stores/removes artifacts, including on assertion failure.
+    void ticking.catch(() => undefined); // teardown awaits and surfaces any rejection
+    cleanups.push(async () => { hold.release(); await ticking; });
     await hold.reached;
     await f.restartProcess();
     expect(await drive(f, "implemented", 0)).toBe(0);
