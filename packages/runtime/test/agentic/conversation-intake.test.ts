@@ -302,14 +302,14 @@ describe("trusted raw turns and model decision receipts", () => {
 });
 
 describe("Chat decisions through the real Conversation facade and durable Runtime outbox", () => {
-  it("recovers a crash after outbox persistence and before Gateway snapshot save without changing envelope timestamps or redispatching", async () => {
+  it.each([false, true])("recovers a crash after outbox persistence and before Gateway snapshot save without changing envelope timestamps or redispatching (revision already applied: %s)", async appliedRevision => {
     const f = await fixture(), at = "2026-10-19T00:00:00.000Z";
     const coordinator = PaneBindingSchema.parse({ ...f.binding, role: "coordinator", bindingId: "coordinator-binding", agentId: "coordinator",
       paneId: "coordinator-pane", session: { source: "herdr:claude", kind: "id", value: "native-coordinator" } });
     const manifest = SessionManifestSchema.parse({ schemaVersion: 2, sessionId: "herdr-session", workspaceRoot: f.directory, projectName: "chat-test",
       herdrWorkspaceId: "workspace", herdrTabId: "tab", status: "up", conversationSessionId: "chat-session", activeRunIds: [],
       attachTarget: { role: "conversation", paneId: f.binding.paneId }, panes: [f.binding, coordinator], createdAt: at, updatedAt: at });
-    const createRuntime = () => new AgenticWorkflowRuntime({} as AgenticRuntimePorts,
+    const createRuntime = () => new AgenticWorkflowRuntime({ authenticateMessage: async () => true, panes: { getManifest: async () => ({ ok: true, value: manifest }) } } as unknown as AgenticRuntimePorts,
       { journalDirectory: join(f.directory, "runtime-journal"), repositoryPath: f.directory });
     let runtime = createRuntime();
     let chat = await createAgenticConversationHost({ runtime, manifest, contextDirectory: join(f.directory, "context") });
@@ -324,13 +324,25 @@ describe("Chat decisions through the real Conversation facade and durable Runtim
     const decision = { intent: "workflow_request", requirementDraft: { title: "Khảo sát quyền MCP", objective: "Liệt kê quyền MCP của từng role",
       kind: "spike", sddLevel: "lightweight", priority: "normal", scopeDefined: true, isLargeTask: false, affectedPaths: [],
       acceptanceCriteriaDescriptions: ["Bảng role/server/cấu hình/cơ chế chặn; chỉ đọc"], isRequirementChange: false } };
+    if (appliedRevision) {
+      // Commit revision 1, then lose Conversation's save for an applied requirement revision 2.
+      const first = await chat.handleUserTurn({ sessionId: "chat-session", messageId: "first-revision", content: "Initial read-only spike",
+        provenance: { origin: "user", authenticatedUser: true }, conversationDecision: decision }) as any;
+      const initial = first.value.delegationRequest;
+      await runtime.receiveHerdr((await runtime.inspect() as any).outbound.find((out: any) => out.message.message_id === initial.messageId).message);
+      Object.assign(decision.requirementDraft, { isRequirementChange: true, targetRunId: initial.runId, objective: "Refine existing read-only scope" });
+    }
     const queue = runtime.queueHerdr.bind(runtime);
-    runtime.queueHerdr = async message => { await queue(message); throw new Error("simulated crash after durable outbox write"); };
+    runtime.queueHerdr = async message => {
+      await queue(message);
+      if (appliedRevision) await runtime.receiveHerdr(message);
+      throw new Error("simulated crash after durable outbox write");
+    };
     await expect(intake.decide(f.binding, { messageId: input.messageId, decision })).rejects.toThrow("simulated crash");
     const before = await runtime.inspect() as unknown as { outbound: { message: { occurred_at: string } }[] };
-    expect(before.outbound).toHaveLength(1);
+    expect(before.outbound.filter((out: any) => out.message.type === "delegation.request")).toHaveLength(appliedRevision ? 2 : 1);
     const trusted = (await f.journal().conversationTurns())[0]!;
-    expect(before.outbound[0]!.message.occurred_at).toBe(trusted.occurredAt);
+    expect(before.outbound.filter((out: any) => out.message.type === "delegation.request").at(-1)!.message.occurred_at).toBe(trusted.occurredAt);
     runtime = createRuntime();
     chat = await createAgenticConversationHost({ runtime, manifest, contextDirectory: join(f.directory, "context") });
     intake = new HostConversationIntake(f.journal(), () => chat);
@@ -342,5 +354,60 @@ describe("Chat decisions through the real Conversation facade and durable Runtim
     expect(after.outbound).toEqual(before.outbound);
     expect(await intake.decide(f.binding, { messageId: input.messageId, decision })).toEqual(recovered);
     await expect(chat.parseDecision({ intent: "approval_response", approvalInput: { decision: "approved" } })).rejects.toThrow();
+  });
+});
+
+describe("session cancellation through one trusted Conversation decision", () => {
+  it("pins the session run set, keeps conflict/provenance guards, and replays after a host restart", async () => {
+    const f = await fixture(), at = "2026-10-19T00:00:00.000Z";
+    const coordinator = PaneBindingSchema.parse({ ...f.binding, role: "coordinator", bindingId: "coordinator-binding", agentId: "coordinator",
+      paneId: "coordinator-pane", session: { source: "herdr:claude", kind: "id", value: "native-coordinator" } });
+    const manifest = SessionManifestSchema.parse({ schemaVersion: 2, sessionId: "herdr-session", workspaceRoot: f.directory, projectName: "batch-test",
+      herdrWorkspaceId: "workspace", herdrTabId: "tab", status: "up", conversationSessionId: "chat-session", activeRunIds: [],
+      attachTarget: { role: "conversation", paneId: f.binding.paneId }, panes: [f.binding, coordinator], createdAt: at, updatedAt: at });
+    const ports = { panes: { getManifest: async () => ({ ok: true, value: manifest }) } } as unknown as AgenticRuntimePorts;
+    const openRuntime = () => new AgenticWorkflowRuntime(ports, { journalDirectory: join(f.directory, "runtime-journal"), repositoryPath: f.directory });
+    let runtime = openRuntime();
+    const openChat = () => createAgenticConversationHost({ runtime, manifest, contextDirectory: join(f.directory, "context") });
+    let chat = await openChat(), intake = new HostConversationIntake(f.journal(), () => chat);
+    const workflowDecision = (title: string) => ({ intent: "workflow_request", requirementDraft: { title, objective: `Inspect ${title}`,
+      kind: "spike", sddLevel: "lightweight", priority: "normal", scopeDefined: true, isLargeTask: false, affectedPaths: [],
+      acceptanceCriteriaDescriptions: ["Report observed state"], isRequirementChange: false } });
+    for (const id of ["first", "second"]) {
+      await intake.receive(f.binding, f.turn(id, `Inspect ${id}`));
+      await intake.decide(f.binding, { decision: workflowDecision(id) });
+    }
+    const before = await runtime.inspect() as any;
+    const targets = before.runs.map((run: any) => run.runId).sort();
+    expect(targets).toHaveLength(2);
+    await intake.receive(f.binding, f.turn("cancel-both", "Hủy hết các run cũ"));
+    const args = { decision: { intent: "cancellation_request", cancellationInput: { scope: "session_existing" } } };
+    const result = await intake.decide(f.binding, args);
+    expect(result).toMatchObject({ ok: true, value: { recognizedIntent: "cancellation_request" } });
+    const state = await runtime.inspect() as any;
+    const cancellations = state.outbound.filter((out: any) => out.message.payload.metadata?.action === "cancel");
+    expect(cancellations.map((out: any) => out.message.run_id).sort()).toEqual(targets);
+    expect(new Set(cancellations.map((out: any) => out.message.idempotency_key)).size).toBe(2);
+    expect(state.runs).toHaveLength(2); // An operational cancellation never creates a workflow.
+    expect(state.runs.every((run: any) => run.cancelled && run.status === "cancelled")).toBe(true);
+    const context = await chat.getContext() as any;
+    expect(context.runtimeStatus.runtimeRunIds.sort()).toEqual(targets);
+    expect(context.runtimeStatus.snapshotOnlyRunIds).toEqual([]);
+    expect(Object.values(context.workflows).every((run: any) => run.sdlcStatus === "cancelled")).toBe(true);
+    const receipt = await f.journal().conversationDecision("cancel-both");
+    expect(receipt?.decision).toEqual(args.decision);
+    expect((await f.journal().conversationTurns()).at(-1)).toMatchObject({ messageId: "cancel-both", content: "Hủy hết các run cũ", userId: "human" });
+    runtime = openRuntime(); chat = await openChat(); intake = new HostConversationIntake(f.journal(), () => chat);
+    expect(await intake.decide(f.binding, args)).toEqual(result);
+    expect((await runtime.inspect() as any).outbound).toEqual(state.outbound);
+    await expect(intake.decide(f.binding, { decision: { intent: "cancellation_request", cancellationInput: { runId: targets[0] } } }))
+      .rejects.toThrow("Conflicting Conversation decision");
+    // Later work is outside the frozen old batch, even after recovery.
+    await intake.receive(f.binding, f.turn("later", "Inspect later"));
+    await intake.decide(f.binding, { decision: workflowDecision("later") });
+    const latest = await runtime.inspect() as any;
+    expect(latest.runs).toHaveLength(3);
+    expect(latest.outbound.filter((out: any) => out.message.payload.metadata?.action === "cancel")).toHaveLength(2);
+    expect(await f.journal().humanDecisions()).toEqual([]);
   });
 });

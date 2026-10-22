@@ -786,7 +786,10 @@ export class ConversationGateway {
           const isRequirementChange = draft.isRequirementChange;
 
           const existingWorkflow = this.snapshot!.workflows[correlationId];
-          const revision = existingWorkflow ? existingWorkflow.revision + 1 : 1;
+          // Runtime may recover a durable intake before this turn's Conversation save. That projection
+          // already carries this exact delegation; replay must preserve its revision and envelope.
+          const sameDelegation = input.conversationDecision && existingWorkflow?.delegationId === this.generateTurnId(input, "del");
+          const revision = existingWorkflow ? existingWorkflow.revision + (sameDelegation ? 0 : 1) : 1;
 
           const delegationResult = buildDelegationRequest({
             sessionId: this.config.sessionId,
@@ -1376,10 +1379,15 @@ export class ConversationGateway {
       }
       runtimeCancellationTargets[run.runId] = RuntimeCancellationTargetSchema.parse(run);
       const status = run.cancelled ? "cancelled" : run.status;
-      workflows[correlationId] = { ...previous, correlationId, sessionId: this.config.sessionId, delegationId: delegation.delegationId,
-        specificationId: delegation.specificationId, runId: run.runId, title: delegation.title, objective: delegation.objective,
-        kind: previous?.kind ?? "feature", sddLevel: delegation.sddLevel, priority: delegation.priority,
-        acceptanceCriteria: delegation.acceptanceCriteria, revision: previous?.revision ?? 1, generation: previous?.generation ?? 0,
+      const runtimeRevision = z.number().int().nonnegative().catch(1).parse(delegation.metadata?.revision);
+      // A queued newer requirement can precede Runtime ingress. Preserve its identity as a pair;
+      // when Runtime is newer, adopt its revision together with the delegation id for exact-turn recovery.
+      const pendingNewer = previous?.runId === run.runId && previous.revision > runtimeRevision;
+      const requirement = pendingNewer ? previous : delegation;
+      workflows[correlationId] = { ...previous, correlationId, sessionId: this.config.sessionId, delegationId: requirement.delegationId,
+        specificationId: requirement.specificationId, runId: run.runId, title: requirement.title, objective: requirement.objective,
+        kind: previous?.kind ?? "feature", sddLevel: requirement.sddLevel, priority: requirement.priority,
+        acceptanceCriteria: requirement.acceptanceCriteria, revision: pendingNewer ? previous.revision : runtimeRevision, generation: previous?.generation ?? 0,
         activeApprovalIds: previous?.activeApprovalIds ?? [], progressHistory: previous?.progressHistory ?? [],
         sdlcStatus: status, completedVerified: previous?.runId === run.runId && previous.completedVerified === true && status === "completed",
         createdAt: previous?.createdAt ?? delegation.requestedAt, updatedAt: now };
@@ -1402,8 +1410,12 @@ export class ConversationGateway {
       ...(activeRunId !== undefined && !terminal.has(activeRunId) ? { activeRunId } : {}),
       status: sessionBase.status === "awaiting_user_approval" && activeApprovalIds.length === 0 ? "reporting_progress" as const : sessionBase.status,
       updatedAt: now };
-    const saved = await this.persistUpdatedSnapshot({ ...this.snapshot!, session, workflows, runIdToCorrelationId: runMap,
-      pendingApprovals: pending, closedApprovals: closed, runtimeCancellationTargets });
+    let reconciled: ConversationContextSnapshot = { ...this.snapshot!, session, workflows, runIdToCorrelationId: runMap,
+      pendingApprovals: pending, closedApprovals: closed, runtimeCancellationTargets };
+    for (const request of Object.values(this.snapshot!.pendingApprovals)) {
+      if (terminal.has(request.runId)) reconciled = closeClarificationsForApproval(reconciled, request.approvalId, now);
+    }
+    const saved = await this.persistUpdatedSnapshot(reconciled);
     if (!saved.ok) return saved;
     return { ok: true, value: { updated, rejected } };
   }

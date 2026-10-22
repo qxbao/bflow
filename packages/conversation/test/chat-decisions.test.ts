@@ -357,6 +357,8 @@ describe("Chat decides intent; Gateway validates and executes", () => {
       target: { type: "run" }, revision: 1, generation: 0, requestedBy: "coordinator", requestedAt: new Date().toISOString(),
       reason: "Continue?", evidence: [], idempotencyKey: "stale-decision", metadata: { kind: "user_decision", question: "Continue?", options: ["Yes", "No"] } };
     expect((await gateway.reconcilePendingApprovals([{ request, correlationId: first.value.correlationId }])).ok).toBe(true);
+    expect((await turn("apr-stale", { intent: "clarify", clarifyingQuestions: ["apr-stale: Yes or No?"] })).ok).toBe(true);
+    expect(Object.keys(gateway.getContextSnapshot().pendingClarifications)).toHaveLength(1);
     const missing = { ...second.value.delegationRequest, runId: "run-runtime-only", correlationId: "corr-runtime-only" };
     const foreign = { ...missing, runId: "run-foreign", correlationId: "corr-foreign", sessionId: "session-foreign" };
     const result = await gateway.reconcileRuntimeRuns([
@@ -369,6 +371,8 @@ describe("Chat decides intent; Gateway validates and executes", () => {
     if (result.ok) expect(result.value.rejected).toHaveLength(1);
     const snapshot = gateway.getContextSnapshot();
     expect(snapshot.pendingApprovals).toEqual({});
+    expect(snapshot.pendingClarifications).toEqual({});
+    expect(snapshot.session.unresolvedQuestions).toEqual([]);
     expect(snapshot.session.activeApprovalIds).toEqual([]);
     expect(snapshot.closedApprovals?.["apr-stale"]).toMatchObject({ status: "expired" });
     expect(snapshot.workflows[second.value.correlationId]?.completedVerified).toBe(false);
@@ -411,6 +415,26 @@ describe("Chat decides intent; Gateway validates and executes", () => {
     const summary = result.value.agentReply.metadata?.cancellationBatch as { items: { runId: string }[] };
     expect(new Set(summary.items.map(item => item.runId))).toEqual(new Set([parent.runId, child.runId]));
     expect(transport.sentRoleMessages).toHaveLength(3);
+  });
+
+  it("renders Runtime cancellation and snapshot-only history without claiming either is running or fully stopped", async () => {
+    const { turn, gateway } = await setup();
+    const first = await turn("A", spike("A"));
+    const historical = await turn("B", spike("B"));
+    if (!first.ok || !historical.ok) throw new Error("setup failed");
+    await gateway.reconcileRuntimeRuns([{ runId: first.value.runId, delegation: first.value.delegationRequest,
+      status: "cancelled", cancelled: true }]);
+    const status = await turn("Trạng thái", { intent: "status_query" });
+    if (!status.ok) throw new Error("status failed");
+    const content = status.value.agentReply.content;
+    const cancelledLine = content.split("\n").find(line => line.includes(`Run: \`${first.value.runId}\``));
+    const historicalLine = content.split("\n").find(line => line.includes(`Run: \`${historical.value.runId}\``));
+    expect(cancelledLine).toContain("[Đã hủy]");
+    expect(cancelledLine).not.toContain("[Đang chạy]");
+    expect(historicalLine).toContain("[Chỉ có trong Conversation]");
+    expect(historicalLine).not.toContain("[Đang chạy]");
+    expect(content).toContain("reconciliation");
+    expect(content).not.toContain("fully stopped");
   });
 
   it("refuses an unknown or foreign run before any batch item is sent", async () => {

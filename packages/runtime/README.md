@@ -764,3 +764,31 @@ Chat to revise the same workflow while an older approval is pending. The revisio
 uses normal Runtime admission/supersession; it does not fabricate an approval or
 invoke operational resume. Exact numeric/option replies still use the trusted human
 hook. Restart/replay coverage retains the same revision envelope and user-turn identity.
+
+## Session cancellation controls
+
+Một lượt người dùng được xác thực chỉ có một `conversation_decide`. Protocol Chat/host
+riêng nhận `cancellationInput.runId`, `runIds` hoặc `scope: "session_existing"`;
+Conversation đóng băng tập run trong session trước khi gửi từng cancellation có key riêng.
+`CancellationRequest` và `DelegationRequest` công khai không đổi. Retry vẫn gắn với
+message/provenance gốc và không mở workflow mới.
+
+Runtime lưu cancellation control vào outbox trước khi áp dụng, độc lập với việc Coordinator
+đang rảnh hoặc scheduler đang chờ verification. Tick/flush khôi phục control còn queued
+sau restart; binding pane cũ không thay đổi quyền hủy của cùng session. Trạng thái `delivered`
+của control này nghĩa là Runtime đã áp dụng cục bộ, không phải signed Herdr receipt hay
+Coordinator đã bắt đầu lượt model. Cancellation đang `sending`/`unknown_delivery` giữ
+quy trình reconciliation và không được gửi lại tự động.
+
+Run đã hủy không dispatch công việc còn queued và không nhận approval để tiếp tục.
+Conversation đối soát projection/pending approval với Runtime; entry chỉ có trong snapshot
+được báo riêng, không được dùng làm bằng chứng còn chạy hay đã dừng. `cancelled` nghĩa là
+ý định hủy có thẩm quyền đã được áp dụng; chỉ thông báo reconciliation cuối mới cho biết
+`fully stopped` hoặc blocker cần xử lý. Native delivery chưa rõ được giữ nguyên và báo blocker,
+không bị bỏ qua để tuyên bố đã dừng. Worktree vẫn được giữ để kiểm tra.
+
+Regression cục bộ: build rồi chạy `pnpm exec vitest run
+packages/runtime/test/agentic/cancel-reconcile.test.ts
+packages/runtime/test/agentic/conversation-intake.test.ts packages/conversation/test`.
+Các test dùng transport giả và storage/policy thật; không chứng minh các run trong session
+production đã được dừng hoặc provider/Herdr live đã chấp nhận bản sửa.

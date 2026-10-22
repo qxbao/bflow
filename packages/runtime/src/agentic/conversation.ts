@@ -3,6 +3,7 @@ import {
   type JsonValue, type OperationResult, type RoleMessage, type SessionManifest
 } from "@bflow/contracts";
 import { digest, json, record, textField } from "./journal.js";
+import { redactString } from "../resilience/redaction.js";
 import { validateUserDecisionAnswer } from "./decision-routing.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
 
@@ -53,6 +54,8 @@ export async function createAgenticConversationHost(options: {
       return { ok: true, value: undefined };
     }
     const run = record(await runtime.inspect(decision.runId));
+    if (run.cancelled === true || ["completed", "failed", "cancelled"].includes(String(run.status)))
+      throw new Error("Run is terminal; approval cannot continue it");
     const userDecision = (run.userDecisions as Record<string, { request: unknown; status?: string } | undefined> | undefined)?.[decision.approvalId];
     if (userDecision) {
       // Specialist user decisions have their own record; they never occupy the single design/task approval slot.
@@ -135,10 +138,34 @@ export async function createAgenticConversationHost(options: {
     const refreshed = await gateway.initializeOrRecoverSession();
     if (!refreshed.ok) throw new Error(refreshed.error.message);
   }
+  // Runtime journal is authoritative for status, including cancellation. This is local projection reconciliation,
+  // never a fabricated Herdr receipt or a human decision; the Gateway validates the exported nested contracts.
+  let runtimeRunIds: string[] = [];
+  let projectionWarnings: string[] = [];
+  const reconcileRuns = async () => {
+    const state = record(await runtime.inspect());
+    if (!Array.isArray(state.runs)) throw new Error("Runtime returned invalid run status snapshot");
+    const entries = state.runs.map(input => {
+      const run = record(input), delegation = DelegationRequestSchema.parse(run.delegation);
+      return { runId: run.runId, delegation, status: run.status, cancelled: run.cancelled };
+    }).filter(run => run.delegation.sessionId === manifest.conversationSessionId);
+    const result = await gateway.reconcileRuntimeRuns(entries);
+    if (!result.ok) throw new Error(result.error.message);
+    projectionWarnings = result.value.rejected.map((reason: string) => `Runtime projection could not be reconciled: ${reason}`);
+    runtimeRunIds = entries.map(run => run.delegation.runId!);
+  };
+  const runtimeStatus = () => {
+    const known = new Set(runtimeRunIds);
+    const snapshotOnlyRunIds = Object.values(gateway.getContextSnapshot().workflows)
+      .map(input => textField(record(input).runId)).filter(runId => !known.has(runId));
+    return { runtimeRunIds, snapshotOnlyRunIds,
+      ...(snapshotOnlyRunIds.length ? { warning: "Conversation entries without a matching Runtime run are historical projection only; they do not prove running or fully stopped work." } : {}) };
+  };
   /** Asks Runtime what is pending for this session and registers what Conversation lacks. Warnings stay until a later reconcile clears them. */
   let approvalWarnings: string[] = [];
   const reconcileApprovals = async () => {
     try {
+      await reconcileRuns();
       const pending = await runtime.pendingApprovals({ sessionId: manifest.conversationSessionId });
       const result = await gateway.reconcilePendingApprovals(pending);
       if (!result.ok) throw new Error(result.error.message);
@@ -156,7 +183,8 @@ export async function createAgenticConversationHost(options: {
   /** Why the current user turn's approval-shaped reply was not recorded; replaced on every trusted turn. */
   let turnWarnings: string[] = [];
   const withWarnings = (result: unknown) =>
-    approvalWarnings.length && result && typeof result === "object" ? { ...(result as object), approvalWarnings } : result;
+    result && typeof result === "object" ? { ...(result as object), runtimeStatus: runtimeStatus(),
+      ...([...approvalWarnings, ...projectionWarnings].length ? { approvalWarnings: [...approvalWarnings, ...projectionWarnings] } : {}) } : result;
   return {
     reconcileApprovals,
     async handleUserTurn(input) {
@@ -164,20 +192,23 @@ export async function createAgenticConversationHost(options: {
       return withWarnings(await gateway.handleUserTurn(input));
     },
     async getContext() {
+      await reconcileRuns().catch(error => { projectionWarnings = [`Runtime status unavailable: ${redactString(String(error))}`]; });
       const context = gateway.getContextSnapshot();
       return json({ session: context.session, pendingClarifications: context.pendingClarifications,
-        pendingApprovals: context.pendingApprovals, approvalWarnings: [...turnWarnings, ...approvalWarnings], workflows: context.workflows,
-        runIdToCorrelationId: context.runIdToCorrelationId, agentBusy: context.agentBusy,
+        pendingApprovals: context.pendingApprovals, approvalWarnings: [...turnWarnings, ...approvalWarnings, ...projectionWarnings], workflows: context.workflows,
+        runIdToCorrelationId: context.runIdToCorrelationId, agentBusy: context.agentBusy, runtimeStatus: runtimeStatus(),
         messages: context.messages.slice(-20).map((input: unknown) => {
           const { metadata: _metadata, ...message } = ConversationMessageSchema.parse(input); return message;
         }) });
     },
     async parseDecision(input) { return module.ChatDecisionSchema.parse(input); },
     async validateDecision(input) {
+      await reconcileRuns();
       const result = module.resolveChatDecision(module.ChatDecisionSchema.parse(input), gateway.getContextSnapshot());
       if (!result.ok) throw new Error(result.error.message);
     },
     async handleTrustedApproval(input) {
+      await reconcileRuns();
       turnWarnings = [];
       const context = gateway.getContextSnapshot();
       const parsed = module.UserTurnInputSchema.parse(input);

@@ -470,7 +470,11 @@ export function formatStatusSummaryForUser(
 
     lines.push(`📊 **BÁO CÁO TIẾN ĐỘ QUY TRÌNH [${wf.runId}]**`);
     lines.push(`- **Yêu cầu:** ${wf.title}`);
-    lines.push(`- **Giai đoạn SDLC:** ${wf.sdlcStatus}`);
+    const snapshotOnly = context.runtimeCancellationTargets !== undefined && !context.runtimeCancellationTargets[wf.runId];
+    lines.push(snapshotOnly
+      ? `- **Bản ghi Conversation:** ${wf.sdlcStatus}; chưa tìm thấy run Runtime tương ứng, chưa xác nhận đang chạy hay đã dừng.`
+      : `- **Giai đoạn SDLC:** ${wf.sdlcStatus}`);
+    if (!snapshotOnly && wf.sdlcStatus === "cancelled") lines.push("- Ý định hủy đã được ghi nhận; xem kết quả reconciliation để xác nhận trạng thái dừng.");
     lines.push(`- **Cấp độ SDD:** ${wf.sddLevel} | **Ưu tiên:** ${wf.priority}`);
 
     if (wf.lastProgress) {
@@ -516,8 +520,17 @@ export function formatStatusSummaryForUser(
   } else {
     lines.push(`\n**Các quy trình công việc (${workflows.length}):**`);
     for (const wf of workflows) {
-      const stateBadge = wf.completedVerified
-        ? "✅ [Hoàn thành]"
+      const snapshotOnly = context.runtimeCancellationTargets !== undefined && !context.runtimeCancellationTargets[wf.runId];
+      const stateBadge = snapshotOnly
+        ? "🗂️ [Chỉ có trong Conversation]"
+        : wf.sdlcStatus === "cancelled"
+        ? "⏹️ [Đã hủy]"
+        : wf.sdlcStatus === "failed"
+        ? "❌ [Thất bại]"
+        : wf.sdlcStatus === "escalated"
+        ? "🛑 [Cần xử lý]"
+        : wf.sdlcStatus === "completed"
+        ? (wf.completedVerified ? "✅ [Hoàn thành]" : "[Đã kết thúc; chưa xác minh]")
         : wf.blockedReason
         ? "🛑 [Bị chặn]"
         : wf.failureReason
@@ -527,6 +540,9 @@ export function formatStatusSummaryForUser(
       lines.push(
         `  ${stateBadge} **${wf.title}** (Run: \`${wf.runId}\` | Giai đoạn: \`${wf.sdlcStatus}\`)`
       );
+      if (!snapshotOnly && wf.sdlcStatus === "cancelled") {
+        lines.push("    ↳ Xem kết quả reconciliation để xác nhận trạng thái dừng.");
+      }
       if (wf.lastProgress?.headline) {
         lines.push(`    ↳ ${wf.lastProgress.headline}`);
       }
