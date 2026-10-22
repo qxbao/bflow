@@ -465,6 +465,11 @@ export interface ClosedApproval {
   readonly closedAt: string;
 }
 
+/** Session-owned Runtime targets, including multiple follow-up runs sharing a display correlation. */
+export const RuntimeCancellationTargetSchema = z.object({ runId: IdentifierSchema, delegation: DelegationRequestSchema,
+  status: SdlcWorkStatusSchema, cancelled: z.boolean() }).strict();
+export type RuntimeCancellationTarget = z.infer<typeof RuntimeCancellationTargetSchema>;
+
 /** Private durable Conversation plan. Existing public request schemas remain unchanged. */
 export const CancellationBatchSchema = z.object({
   input: UserTurnInputSchema,
@@ -481,6 +486,7 @@ export type CancellationBatch = z.infer<typeof CancellationBatchSchema>;
 export const ConversationContextSnapshotSchema = z
   .object({
     schemaVersion: z.literal(2),
+    runtimeCancellationTargets: z.record(IdentifierSchema, RuntimeCancellationTargetSchema).optional(),
     cancellationBatches: z.record(IdentifierSchema, CancellationBatchSchema).optional(),
     session: ConversationSessionSchema,
     messages: z.array(ConversationMessageSchema),
@@ -502,6 +508,7 @@ export const ConversationContextSnapshotSchema = z
   .strict();
 
 export interface ConversationContextSnapshot {
+  readonly runtimeCancellationTargets?: Readonly<Record<string, RuntimeCancellationTarget>> | undefined;
   readonly cancellationBatches?: Readonly<Record<string, CancellationBatch>> | undefined;
   readonly schemaVersion: 2;
   readonly session: ConversationSession;

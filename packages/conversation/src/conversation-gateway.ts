@@ -7,7 +7,6 @@ import {
   ContractErrorSchema,
   ConversationMessageSchema,
   DelegationRequestSchema,
-  SdlcWorkStatusSchema,
   type AgentTransportState,
   type ApprovalRequest,
   type ConversationMessage,
@@ -49,6 +48,7 @@ import {
 import { sanitizeReasonForUser, wrapUntrustedRepositoryContent } from "./safety.js";
 import {
   MAX_QUEUE_PROCESSING_ATTEMPTS,
+  RuntimeCancellationTargetSchema,
   UserTurnInputSchema,
   type ApprovalReconciliation,
   type CancellationBatch,
@@ -1243,7 +1243,10 @@ export class ConversationGateway {
               .filter((id): id is string => id !== undefined);
             const items: CancellationBatch["items"] = [];
             for (const targetRunId of targets) {
-              const targetWorkflow = Object.values(this.snapshot!.workflows).find(w => w.runId === targetRunId);
+              const runtimeTarget = this.snapshot!.runtimeCancellationTargets?.[targetRunId];
+              const targetWorkflow = Object.values(this.snapshot!.workflows).find(w => w.runId === targetRunId) ??
+                (runtimeTarget ? { sessionId: runtimeTarget.delegation.sessionId, correlationId: runtimeTarget.delegation.correlationId,
+                  revision: typeof runtimeTarget.delegation.metadata?.revision === "number" ? runtimeTarget.delegation.metadata.revision : 1 } : undefined);
               if (!targetWorkflow || targetWorkflow.sessionId !== this.config.sessionId) return { ok: false, error: { code: "not_found", retryable: false,
                 message: `No workflow run ${targetRunId} found in this Conversation session` } };
               const itemInput = { ...input, messageId: `${batchKey}:${targetRunId}` };
@@ -1357,10 +1360,10 @@ export class ConversationGateway {
     const now = this.getNow(), workflows = { ...this.snapshot!.workflows }, runMap = { ...this.snapshot!.runIdToCorrelationId };
     const pending = { ...this.snapshot!.pendingApprovals }, closed = { ...this.snapshot!.closedApprovals };
     const terminal = new Set<string>();
+    const runtimeCancellationTargets = { ...this.snapshot!.runtimeCancellationTargets };
     for (const raw of rawEntries) {
       // The private projection accepts Runtime fields but parses exchanged public values with their contracts.
-      const parsed = z.object({ runId: z.string().min(1), delegation: DelegationRequestSchema,
-        status: SdlcWorkStatusSchema, cancelled: z.boolean() }).passthrough().safeParse(raw);
+      const parsed = RuntimeCancellationTargetSchema.strip().safeParse(raw);
       if (!parsed.success) { rejected.push("Invalid Runtime run projection"); continue; }
       const run = parsed.data, delegation = run.delegation;
       if (delegation.sessionId !== this.config.sessionId) { rejected.push(`${run.runId}: another session`); continue; }
@@ -1368,16 +1371,17 @@ export class ConversationGateway {
       const correlationId = delegation.correlationId;
       const previous = workflows[correlationId];
       const mapped = runMap[run.runId];
-      if ((mapped !== undefined && mapped !== correlationId) || (previous !== undefined && previous.runId !== run.runId)) {
+      if (mapped !== undefined && mapped !== correlationId) {
         rejected.push(`${run.runId}: conflicting workflow correlation`); continue;
       }
+      runtimeCancellationTargets[run.runId] = RuntimeCancellationTargetSchema.parse(run);
       const status = run.cancelled ? "cancelled" : run.status;
-      workflows[correlationId] = { correlationId, sessionId: this.config.sessionId, delegationId: delegation.delegationId,
+      workflows[correlationId] = { ...previous, correlationId, sessionId: this.config.sessionId, delegationId: delegation.delegationId,
         specificationId: delegation.specificationId, runId: run.runId, title: delegation.title, objective: delegation.objective,
         kind: previous?.kind ?? "feature", sddLevel: delegation.sddLevel, priority: delegation.priority,
         acceptanceCriteria: delegation.acceptanceCriteria, revision: previous?.revision ?? 1, generation: previous?.generation ?? 0,
         activeApprovalIds: previous?.activeApprovalIds ?? [], progressHistory: previous?.progressHistory ?? [],
-        ...previous, sdlcStatus: status, completedVerified: previous?.completedVerified === true && status === "completed",
+        sdlcStatus: status, completedVerified: previous?.runId === run.runId && previous.completedVerified === true && status === "completed",
         createdAt: previous?.createdAt ?? delegation.requestedAt, updatedAt: now };
       runMap[run.runId] = correlationId;
       if (isTerminalRunStatus(status)) terminal.add(run.runId);
@@ -1399,7 +1403,7 @@ export class ConversationGateway {
       status: sessionBase.status === "awaiting_user_approval" && activeApprovalIds.length === 0 ? "reporting_progress" as const : sessionBase.status,
       updatedAt: now };
     const saved = await this.persistUpdatedSnapshot({ ...this.snapshot!, session, workflows, runIdToCorrelationId: runMap,
-      pendingApprovals: pending, closedApprovals: closed });
+      pendingApprovals: pending, closedApprovals: closed, runtimeCancellationTargets });
     if (!saved.ok) return saved;
     return { ok: true, value: { updated, rejected } };
   }

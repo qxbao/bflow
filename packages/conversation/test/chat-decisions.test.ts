@@ -393,6 +393,26 @@ describe("Chat decides intent; Gateway validates and executes", () => {
     ] });
   });
 
+  it("includes every Runtime follow-up run sharing one correlation in session cancellation", async () => {
+    const { turn, gateway, transport } = await setup();
+    const first = await turn("A", spike("A"));
+    if (!first.ok || !first.value.delegationRequest) throw new Error("setup failed");
+    const parent = first.value.delegationRequest;
+    const child = { ...parent, runId: `${parent.runId}-r2`, delegationId: "del-follow-up", messageId: "msg-follow-up" };
+    const reconciled = await gateway.reconcileRuntimeRuns([
+      { runId: parent.runId, delegation: parent, status: "escalated", cancelled: false, tasks: [] },
+      { runId: child.runId, delegation: child, status: "planning", cancelled: false, tasks: [] }
+    ]);
+    expect(reconciled.ok && reconciled.value.rejected).toEqual([]);
+    expect(gateway.getContextSnapshot().workflows[first.value.correlationId]?.runId).toBe(child.runId);
+    const result = await turn("Hủy hết các run cũ", { intent: "cancellation_request", cancellationInput: { scope: "session_existing" } });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const summary = result.value.agentReply.metadata?.cancellationBatch as { items: { runId: string }[] };
+    expect(new Set(summary.items.map(item => item.runId))).toEqual(new Set([parent.runId, child.runId]));
+    expect(transport.sentRoleMessages).toHaveLength(3);
+  });
+
   it("refuses an unknown or foreign run before any batch item is sent", async () => {
     const { turn, transport } = await setup();
     const first = await turn("Khảo sát MCP", spike("Khảo sát MCP"));
