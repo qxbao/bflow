@@ -84,6 +84,15 @@ có ví dụ envelope đã được xác thực; `assess` và `propose_workflow`
 Specification v2, kể cả criterion `status`/`evidenceArtifactIds`. Các Zod contract vẫn xác
 thực nghiêm ngặt và kiểm tra các ràng buộc giữa trường tại ingress.
 
+Riêng `assess` yêu cầu impact assessment tường minh tại `specification.metadata.sdd.assessment`.
+Một `Specification` hợp lệ theo shared contract vẫn có thể thiếu dữ liệu P15 này. Tool discovery
+công bố các trường assessment; tool boundary và direct Runtime caller đều từ chối object thiếu
+với schema path và hướng dẫn đọc `planning_reference(section="specification")`. Policy P15 được
+nạp qua adapter vẫn xác thực các impact flags; Runtime không tự điền hoặc suy đoán chúng.
+`assess` chỉ trả phân loại/gợi ý role, không sửa classification trong draft, duyệt spec, tạo DAG
+hay dispatch. Khi chuẩn bị proposal, Coordinator phải cập nhật draft theo kết quả policy và giữ
+nguyên các acceptance criteria đã được ủy quyền.
+
 Native intent thiếu ACK giữ trạng thái uncertain và chặn gửi lại cùng operation.
 `reconcile_delivery` chỉ đối soát Runtime outbox; chưa có API xác nhận `not_delivered`
 cho native intent. ACK/application đến muộn có thể giải quyết trạng thái uncertain;
@@ -507,6 +516,13 @@ custom native host process (không phải AI model), và chỉ dừng session te
 Runtime ghi một JSONL activity log tại `task-activity.jsonl` trong private Runtime state đã được resolve (thường là `.bflow/state/agentic/task-activity.jsonl`; khi workspace cần state riêng tư bên ngoài repo, dùng vị trí private được pin thay thế). Retention mặc định giữ tối đa 1000 entries và 512 KiB. Log giữ các milestone đã quan sát như admission, thay đổi trạng thái, assignment, verification, approval và kết quả agent đã xác thực. Đây là bản ghi chẩn đoán có giới hạn; nó không lưu prompt, argv, tool input/output hay private model reasoning. Terminal output và nhãn transport vẫn là dữ liệu không tin cậy; Herdr `done` không chứng minh task thành công.
 
 Trong một host đã activate, pane `task-log` hiển thị các dòng mới nhất trong tab Logs. Các role có thể gọi `read_task_log`; Conversation và Coordinator đọc theo session/run, còn specialist phải lọc theo run/task được giao. `log_task_step` ghi một dòng tiến độ ngắn gắn với assignment hiện tại. Các dòng tự báo cáo và log không phải approval, receipt hay verification evidence. Nội dung đã được redaction, chuẩn hóa một dòng, giới hạn kích thước/dung lượng; lỗi ghi log không làm thay đổi kết quả nghiệp vụ.
+
+Lỗi `assess` ghi diagnostic có schema path đã biết và hướng dẫn `planning_reference` thay vì chỉ tên `Error`;
+viewer giữ tối đa 120 ký tự outcome. Không ghi tool arguments. Các pha chưa chạy không có
+bằng chứng từ log: intake/planning/blockage không chứng minh implementation, verification
+hay review đã hoàn tất. Milestone riêng cho thay đổi `run.workflowCycle` hiện chưa được ghi
+(khác với task verification cycle); cần bổ sung và kiểm thử trước khi khẳng định log bao phủ
+đầy đủ vòng verification/rework cấp workflow.
 
 Viewer đọc đủ snapshot trong giới hạn lưu trữ, giữ các lần xuất hiện lặp và không phát lại lịch sử khi file được thay thế nguyên tử. Bản ghi mới có ID riêng; khóa lọc theo run/task gốc được giữ riêng với chuỗi hiển thị đã rút gọn hoặc redaction. Khi Herdr khởi động lại và dùng lại pane ID cho terminal khác, Runtime bỏ binding cũ và tạo pane log mới, giữ nguyên terminal thay thế. Việc đóng pane yêu cầu process-info khớp đúng pane và chỉ có tiến trình viewer dự kiến ở foreground.
 
