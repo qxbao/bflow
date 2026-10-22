@@ -79,7 +79,7 @@ Mỗi check trả về `status: "passed" | "failed" | "unknown"`. Trạng thái 
 | --- | --- | --- |
 | `binary` | preflight, activated | Xác minh sự hiện diện của executable, là regular file, quyền execute, và digest khớp `pinnedExecutableDigest`. |
 | `version` | preflight, activated | Kiểm tra phiên bản CLI và xác minh thỏa semver tối thiểu yêu cầu (ví dụ Claude >= 2.0.0, Codex >= 0.150.0). |
-| `authentication` | preflight, activated | Chạy auth status của provider (`claude auth status --json`, `codex login status`, `agy models`) và probe thực thi tối thiểu (`--print`, `exec`). Phân biệt credential hết hạn với thiếu credential. |
+| `authentication` | preflight, activated | Chạy auth status của provider (`claude auth status --json`, `codex login status`, `agy models`). Với `executionProbe: "disabled"`, không gọi model; linked Codex kiểm tra quyền đọc catalog bằng GET `/models`. Caller cũ mặc định vẫn có probe thực thi tối thiểu (`--print`, `exec`); Runtime startup chọn `disabled`. |
 | `environment` | preflight, activated | Xác minh đường dẫn thư mục canonical của `cwd` và `stateDirectory` (không symlink), quyền riêng tư `0o700`, và không có biến môi trường nguy hiểm (`LD_PRELOAD`) hay token bí mật. |
 | `mcp` | preflight, activated | Xác minh tương thích transport của client và đăng ký của mọi `requiredMcpServiceIds`. |
 | `launch_arguments` | preflight, activated | Xác minh các cờ CLI launch khớp với capability được provider hỗ trợ. |
@@ -155,8 +155,10 @@ For a trusted linked Codex LB, the host may also supply `codexBackendUrl`. Codex
 launch arguments select `codex-lb` at `<root>/backend-api/codex` with the Responses API, websocket
 support, the `x-openai-actor-authorization` header, and native OpenAI auth disabled. Native
 `codex login status` is skipped only for this linked mode; the real `codex exec ... ping` remains
-required and its failure blocks readiness. If a trusted `CODEX_LB_API_KEY` is present, the adapter
-passes it only in the in-memory execution-probe environment and puts only its variable name in
+required in execution-probe mode and its failure blocks that diagnostic. Runtime startup instead
+requires authenticated GET access to the backend's `/models` catalog; missing/invalid catalog access
+blocks startup without falling back to inference. If a trusted `CODEX_LB_API_KEY` is present, the adapter
+passes it only in the in-memory execution-probe environment or catalog Authorization header, and puts only its variable name in
 Codex configuration arguments. The Runtime remains responsible for supplying the selected
 environment and key to the launched pane.
 
@@ -290,9 +292,10 @@ Văn bản authentication ngẫu nhiên và output `tokens used` không xác l�
 một lỗi expiration tường minh; các lỗi authentication tường minh khác báo `auth_missing`. Chẩn đoán
 ưu tiên lỗi của provider hơn banner khởi động trước khi áp giới hạn hiển thị 240 ký tự,
 redact toàn bộ stream trước khi chọn dòng, và giữ chi tiết lỗi của runner khi output rỗng.
-Launch tương tác của Codex gồm một startup prompt được dành riêng gắn với `BFLOW_ENVIRONMENT_ID`, chỉ yêu cầu
-`pong` mà không gọi tool hay làm việc workflow. Runtime tiêu thụ đúng lượt khởi động đó; input
-người dùng thông thường như `ping` vẫn đi qua Conversation Gateway.
+Launch Codex chỉ thêm bootstrap prompt khi có host UserPromptSubmit hook để xử lý cục bộ.
+Runtime ghi nhận native session thật rồi chặn đúng prompt gắn với `BFLOW_ENVIRONMENT_ID` trước
+inference bằng exit 2; không yêu cầu model trả `pong`. Hook lỗi chặn prompt thay vì cho qua.
+Input người dùng thông thường như `ping` vẫn đi qua Conversation Gateway.
 
 Tra cứu PATH bỏ qua thư mục, entry dangling và file không có quyền execute, nên thư mục `codex/` của một plugin không thể che CLI thật. Nó giữ nguyên việc duyệt symlink/parent vật lý và coi thành phần PATH rỗng là thư mục hiện tại, khớp với cách spawn process. Ứng viên executable đầu tiên vẫn phải qua xác minh ownership và permission; một executable không an toàn không bị âm thầm thay bằng ứng viên sau. Đường dẫn executable tường minh vẫn nghiêm ngặt. Probe authentication và execution dùng executable canonical đã xác minh, kể cả khi execution probe đổi working directory.
 

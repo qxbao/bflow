@@ -186,6 +186,7 @@ export interface EnvironmentCommandArgs extends GlobalCliFlags {
   readonly timeoutMs?: number | undefined;
   readonly yes: boolean;
   readonly force?: boolean | undefined;
+  readonly deep?: boolean | undefined;
 }
 
 export interface RunCommandArgs extends GlobalCliFlags {

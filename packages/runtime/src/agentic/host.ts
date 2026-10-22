@@ -74,7 +74,7 @@ async function readRoleConfiguration(path: string): Promise<RoleConfiguration> {
 function shellQuote(value: string): string { return "'" + value.replaceAll("'", "'\\''") + "'"; }
 const NATIVE_HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "PreToolUse"] as const;
 /**
- * Launch-local hook runner. PreToolUse is fail-closed even when the Node entry cannot run its own handler (crash, missing
+ * Launch-local hook runner. Tool and prompt hooks fail closed even when Node cannot run its handler (crash, missing
  * module, signal): any status other than 0 (decision on stdout) or 2 (block) becomes exit 2 with a stderr reason, which
  * both Claude and Codex treat as a block. Codex ignores an exit-2 block without a non-empty stderr reason.
  */
@@ -82,11 +82,15 @@ export function hookRunnerScript(nodePath: string, executable: string, rolePath:
   const invoke = `${shellQuote(nodePath)} ${shellQuote(executable)} hook ${shellQuote(rolePath)} "$@"`;
   return [
     "#!/bin/sh",
-    'if [ "$1" = PreToolUse ]; then',
+    'if [ "$1" = PreToolUse ] || [ "$1" = UserPromptSubmit ]; then',
     `  ${invoke}`,
     "  status=$?",
     '  if [ "$status" -ne 0 ] && [ "$status" -ne 2 ]; then',
-    '    echo "Bflow PreToolUse guard exited with status $status; tool call denied" >&2',
+    '    if [ "$1" = PreToolUse ]; then',
+    '      echo "Bflow PreToolUse guard exited with status $status; tool call denied" >&2',
+    "    else",
+    '      echo "Bflow UserPromptSubmit guard exited with status $status; prompt denied" >&2',
+    "    fi",
     "    exit 2",
     "  fi",
     '  exit "$status"',
@@ -1851,7 +1855,33 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
     const markBoundary = async () => {
       if (configuration.role === "coordinator") await callHost(configuration.socketPath, configuration.token, "provider_prompt_boundary", { paneId, nativeSessionId: textField(hook.session_id) });
     };
-    if (configuration.provider === "codex" && environmentId && hook.prompt === codexStartupPrompt(environmentId)) { await markBoundary(); return; }
+    if (configuration.provider === "codex" && environmentId && (hook.prompt === codexStartupPrompt(environmentId) ||
+        hook.prompt === `[bflow startup ${environmentId}] Reply only pong. Do not use tools or start a workflow.`)) {
+      // Codex creates its native session on the first prompt. Register that genuine session locally,
+      // then reject this reserved prompt at UserPromptSubmit so no inference request is made.
+      // Finish before the provider's 30s hook timeout: providers can treat an externally timed-out
+      // hook as a nonblocking error. This local timeout always exits with a blocking stderr reason.
+      const bootstrapTimeout = setTimeout(() => {
+        process.stderr.write("Bflow local startup registration timed out; prompt denied.\n", () => process.exit(2));
+      }, 20_000);
+      try {
+        const session = textField(hook.session_id);
+        if (hook.agent_id || process.env.CURSOR_VERSION || hook.cursor_version) throw new Error("Bflow bootstrap must originate from the main provider");
+        const socketPath = process.env.HERDR_SOCKET_PATH;
+        if (socketPath) await reportHerdrNativeSession({ provider: configuration.provider, paneId, sessionId: session, socketPath,
+          ...(typeof hook.transcript_path === "string" ? { transcriptPath: hook.transcript_path } : {}) });
+        const plan = roleConfigPath === undefined ? undefined : await resolveProbePlan(dirname(roleConfigPath), configuration.role, process.env);
+        const reachability = plan === undefined ? undefined : await probeAllGateways(plan, process.env, (url, init) => fetch(url, init));
+        await callHost(configuration.socketPath, configuration.token, "provider_started", { paneId, nativeSessionId: session,
+          ...(plan === undefined || reachability === undefined ? {} : { launchId: plan.launchId, toolReachability: reachability }) });
+        await callHost(configuration.socketPath, configuration.token, "native_session", { paneId, sessionId: session });
+        await markBoundary();
+        process.stdout.write(JSON.stringify({ decision: "block", reason: "Bflow startup registered locally; no model request is needed." }) + "\n");
+        process.stderr.write("Bflow startup registered locally; waiting for work.\n");
+        process.exitCode = 2;
+        return;
+      } finally { clearTimeout(bootstrapTimeout); }
+    }
     let message: RoleMessage | undefined, prompt: string;
     try { prompt = normalizeProviderPrompt(textField(hook.prompt)); }
     catch (error) { await markBoundary(); throw error; }
@@ -1897,6 +1927,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     : readRoleConfiguration(path).then(configuration => mode === "mcp" ? runRoleMcp(configuration, path) :mode === "hook" ? runProviderHook(configuration, textField(process.argv[4]), path) : Promise.reject(new Error("Unknown host mode")));
   // A PreToolUse hook fails closed even before its handler runs (missing/corrupt role configuration, wrong mode).
   const toolGate = mode === "hook" && process.argv[4] === "PreToolUse";
+  const promptGate = mode === "hook" && process.argv[4] === "UserPromptSubmit";
   // Exit only after the refusal is flushed: pipe writes are asynchronous on some platforms.
   if (toolGate) process.once("uncaughtException", error => {
     denyPreToolUseOnFailure(error);
@@ -1904,6 +1935,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   });
   task.catch(error => {
     if (toolGate) { denyPreToolUseOnFailure(error); return; }
-    process.stderr.write(redactString(String(error)) + "\n"); process.exitCode = 1;
+    process.stderr.write(redactString(String(error)) + "\n"); process.exitCode = promptGate ? 2 : 1;
   });
 }

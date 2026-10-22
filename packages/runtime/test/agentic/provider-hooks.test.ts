@@ -22,6 +22,8 @@ async function fixture(role = "conversation", provider = "codex", replies: Recor
       const call = JSON.parse(input.split("\n")[0]!);
       calls.push(call);
       const reply = Array.isArray(replies[call.method]) ? (replies[call.method] as unknown[]).shift() : replies[call.method];
+      if (reply === "__no_reply__") return;
+      if (reply instanceof Error) { socket.end(JSON.stringify({ ok: false, error: { message: reply.message } }) + "\n"); return; }
       socket.end(JSON.stringify({ ok: true, value: reply ?? { accepted: true } }) + "\n");
     });
   });
@@ -31,7 +33,7 @@ async function fixture(role = "conversation", provider = "codex", replies: Recor
   await writeFile(path, JSON.stringify({ socketPath, token: "role-token", role, provider, sessionId: "session", herdrBinary: "unused" }), { mode: 0o600 });
   return { calls, invoke: async (event: string, input: string) => {
     const child = spawn(process.execPath, [fileURLToPath(new URL("../../dist/agentic/host.js", import.meta.url)), "hook", path, event], {
-      env: { ...process.env, HERDR_PANE_ID: "pane-1", HERDR_SOCKET_PATH: "", BFLOW_ENVIRONMENT_ID: "env-test", BFLOW_LAUNCH_ID: "" },
+      env: { ...process.env, HERDR_PANE_ID: "pane-1", HERDR_SOCKET_PATH: "", BFLOW_ENVIRONMENT_ID: "env-test", BFLOW_LAUNCH_ID: undefined },
       stdio: ["pipe", "pipe", "pipe"]
     });
     let stdout = "", stderr = "";
@@ -53,11 +55,16 @@ describe.skipIf(process.platform === "win32")("provider hook ingress", () => {
     expect((await f.invoke("UserPromptSubmit", JSON.stringify(prompt))).code).toBe(0);
     expect(f.calls.map(call => call.method)).toEqual(["user_prompt"]);
   });
-  it.each(["conversation", "coordinator"])("ignores only the reserved Codex startup turn for %s", async role => {
+  it.each(["conversation", "coordinator"].flatMap(role => [
+    [role, "[bflow startup env-test] Reply only pong. Do not use tools or start a workflow."],
+    [role, "[bflow startup env-test] Initialize the local Bflow session; do not send this prompt to the model."]
+  ]))("blocks the reserved Codex startup turn before inference after registering %s", async (role, prompt) => {
     const f = await fixture(role);
-    const prompt = "[bflow startup env-test] Reply only pong. Do not use tools or start a workflow.";
-    expect((await f.invoke("UserPromptSubmit", JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt }))).code).toBe(0);
-    expect(f.calls.map(call => call.method)).toEqual(role === "coordinator" ? ["provider_prompt_boundary"] : []);
+    const result = await f.invoke("UserPromptSubmit", JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt }));
+    expect(result.code).toBe(2);
+    expect(JSON.parse(result.stdout)).toMatchObject({ decision: "block" });
+    expect(f.calls.map(call => call.method)).toEqual(["provider_started", "native_session", ...(role === "coordinator" ? ["provider_prompt_boundary"] : [])]);
+    expect(f.calls[0]?.params).toEqual({ paneId: "pane-1", nativeSessionId: "native-1" });
   });
   it("selects the matching hook after unrelated plugin JSON", async () => {
     const f = await fixture();
@@ -65,6 +72,22 @@ describe.skipIf(process.platform === "win32")("provider hook ingress", () => {
     expect(result.code).toBe(0);
     expect(f.calls).toEqual([expect.objectContaining({ method: "user_prompt", params: { paneId: "pane-1", hook: { ...prompt, prompt: "hello" } } })]);
   });
+  it("blocks local bootstrap when the host rejects startup registration", async () => {
+    const f = await fixture("conversation", "codex", { provider_started: new Error("registration refused") });
+    const result = await f.invoke("UserPromptSubmit", JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "native-1",
+      prompt: "[bflow startup env-test] Initialize the local Bflow session; do not send this prompt to the model." }));
+    expect(result.code).toBe(2);
+    expect(result.stderr.trim()).not.toBe("");
+    expect(f.calls.map(call => call.method)).toEqual(["provider_started"]);
+  });
+  it("blocks a hung bootstrap before the provider's external hook timeout", async () => {
+    const f = await fixture("conversation", "codex", { provider_started: "__no_reply__" });
+    const result = await f.invoke("UserPromptSubmit", JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "native-1",
+      prompt: "[bflow startup env-test] Initialize the local Bflow session; do not send this prompt to the model." }));
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("local startup registration timed out; prompt denied");
+    expect(f.calls.map(call => call.method)).toEqual(["provider_started"]);
+  }, 25_000);
   it("refuses ambiguous hook objects instead of choosing a human prompt", async () => {
     const f = await fixture();
     const result = await f.invoke("UserPromptSubmit", JSON.stringify({ ...prompt, prompt: "approve" }) + "\n" + JSON.stringify({ ...prompt, prompt: "reject" }));
@@ -126,6 +149,9 @@ describe.skipIf(process.platform === "win32")("fail-closed PreToolUse hook entry
     const blocked = await run(runner, ["PreToolUse"], tool);
     expect(blocked.code).toBe(2);
     expect(blocked.stderr).toContain("Bflow PreToolUse guard exited with status 1; tool call denied");
+    const blockedPrompt = await run(runner, ["UserPromptSubmit"]);
+    expect(blockedPrompt.code).toBe(2);
+    expect(blockedPrompt.stderr).toContain("prompt denied");
     const other = await run(runner, ["Stop"]);
     expect(other.code).toBe(1);
     await writeFile(crashing, "process.stdout.write('{\"ok\":1}'); process.exit(2);\n");

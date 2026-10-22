@@ -91,6 +91,7 @@ export { CoordinatorTools, COORDINATOR_TOOLS, COORDINATOR_ROLE_PROFILE } from ".
 export { createAgenticConversationHost } from "./agentic/conversation.js";
 export type { AgenticConversationHost } from "./agentic/conversation.js";
 export { openAgenticWorkspace } from "./agentic/workspace.js";
+export { probeConfiguredProviderModels, type ProviderModelDiagnosticsInput } from "./agentic/provider-model-diagnostics.js";
 export type { OpenAgenticWorkspaceOptions, AgenticWorkspaceHandle } from "./agentic/workspace.js";
 
 export { createSignedBindingReceipt } from "./agentic/receipt-host.js";

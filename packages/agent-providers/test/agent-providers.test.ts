@@ -2,7 +2,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   type AgentEnvironment,
   AgentEnvironmentSchema,
@@ -570,7 +570,7 @@ describe("@bflow/agent-providers", () => {
         expect(profile.argv).toContain("never");
         expect(profile.argv).toContain("--model");
         expect(profile.argv).toContain("o3-mini");
-        expect(profile.argv.at(-1)).toBe(codexStartupPrompt(env.environmentId));
+        expect(profile.argv).not.toContain(codexStartupPrompt(env.environmentId));
       }
     });
 
@@ -696,6 +696,78 @@ describe("@bflow/agent-providers", () => {
       });
       expect(verification.valid).toBe(false);
       expect(verification.code).toBe("invalid_signature");
+    });
+  });
+
+  describe("native-only startup authentication", () => {
+    it.each(["null", '{"authenticated":false}', "Error: credentials missing"])("rejects non-model Agy output: %s", async stdout => {
+      const runner = createFakeProviderRunner({ customHandler: invocation => invocation.args.join(" ") === "models"
+        ? { exitCode: 0, started: true, stdout, stderr: "" } : undefined });
+      const result = await new AgyProviderAdapter({ runner, executablePath: fakeBinaryPath, executionProbe: "disabled"
+      }).checkHealth({ schemaVersion: 3, environment: createTestEnvironment("agy"), stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(result.ok && result.value.checks.find(check => check.check === "authentication")?.status).toBe("failed");
+    });
+    it("accepts authenticated linked catalog access even when no models are available", async () => {
+      const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response('{"models":[]}', { status: 200 }));
+      try {
+        const result = await new CodexProviderAdapter({ runner: createFakeProviderRunner(), executablePath: fakeBinaryPath,
+          codexHomeDirectory: testCodexHome, executionProbe: "disabled", codexBackendUrl: "http://127.0.0.1:8765/backend-api/codex"
+        }).checkHealth({ schemaVersion: 3, environment: createTestEnvironment("codex"), stage: "preflight", requestedAt: new Date().toISOString() });
+        expect(result.ok && result.value.checks.find(check => check.check === "authentication")?.status).toBe("passed");
+      } finally { fetcher.mockRestore(); }
+    });
+    it("rejects a zero-exit Codex status that says not logged in", async () => {
+      const runner = createFakeProviderRunner({ customHandler: invocation => invocation.args.join(" ") === "login status"
+        ? { exitCode: 0, started: true, stdout: "Not logged in", stderr: "" } : undefined });
+      const result = await new CodexProviderAdapter({ runner, executablePath: fakeBinaryPath, codexHomeDirectory: testCodexHome,
+        executionProbe: "disabled" }).checkHealth({ schemaVersion: 3, environment: createTestEnvironment("codex"),
+        stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(result.ok && result.value.checks.find(check => check.check === "authentication")?.status).toBe("failed");
+    });
+    it.each([200, 401, 404])("checks linked Codex authentication with GET models, never inference (HTTP %i)", async status => {
+      const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+        models: [{ slug: "test-model" }]
+      }), { status }));
+      const calls: string[][] = [];
+      try {
+        const runner = createFakeProviderRunner({ customHandler: invocation => { calls.push([...invocation.args]); return undefined; } });
+        const result = await new CodexProviderAdapter({ runner, executablePath: fakeBinaryPath,
+          codexHomeDirectory: testCodexHome, executionProbe: "disabled", codexBackendUrl: "http://127.0.0.1:8765/backend-api/codex"
+        }).checkHealth({ schemaVersion: 3, environment: createTestEnvironment("codex"), stage: "preflight", requestedAt: new Date().toISOString() });
+        expect(fetcher).toHaveBeenCalledWith("http://127.0.0.1:8765/backend-api/codex/models",
+          expect.objectContaining({ method: "GET", redirect: "error" }));
+        expect(result.ok && result.value.checks.find(check => check.check === "authentication")?.status).toBe(status === 200 ? "passed" : "failed");
+        expect(calls.some(args => args.includes("ping") || args.includes("exec") || args.includes("login"))).toBe(false);
+      } finally { fetcher.mockRestore(); }
+    });
+
+    it.each(["claude", "codex", "agy"] as const)("checks %s auth without executing a model", async provider => {
+      const calls: readonly string[][] = [];
+      const runner = createFakeProviderRunner({ customHandler: invocation => {
+        (calls as string[][]).push([...invocation.args]);
+        if (invocation.args.includes("ping")) return { exitCode: 1, started: true, stdout: "", stderr: "model unavailable" };
+        return undefined;
+      } });
+      const options = { runner, executablePath: fakeBinaryPath, codexHomeDirectory: testCodexHome,
+        executionProbe: "disabled" as const, allowTestFilesystemOwnership: true };
+      const adapter = provider === "codex" ? new CodexProviderAdapter(options) :
+        provider === "claude" ? new ClaudeProviderAdapter(options) : new AgyProviderAdapter(options);
+      const result = await adapter.checkHealth({ schemaVersion: 3, environment: createTestEnvironment(provider),
+        stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.checks.find(check => check.check === "authentication")).toMatchObject({ status: "passed", code: "auth_native_ok" });
+      expect(calls.some(args => args.includes("ping") || args.includes("--print") || args.includes("exec"))).toBe(false);
+    });
+
+    it.each(['{"loggedIn":false}', '{}', 'not json'])("rejects unproven Claude native authentication: %s", async stdout => {
+      const runner = createFakeProviderRunner({ customHandler: invocation => invocation.args.join(" ") === "auth status --json"
+        ? { exitCode: 0, started: true, stdout, stderr: "" } : undefined });
+      const result = await new ClaudeProviderAdapter({ runner, executablePath: fakeBinaryPath, executionProbe: "disabled",
+        allowTestFilesystemOwnership: true }).checkHealth({ schemaVersion: 3, environment: createTestEnvironment("claude"),
+        stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(result.ok && result.value.status).toBe("blocked");
+      expect(result.ok && result.value.checks.find(check => check.check === "authentication")?.status).toBe("failed");
     });
   });
 

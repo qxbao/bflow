@@ -165,7 +165,7 @@ export const CLI_COMMAND_REFERENCE: readonly CliCommandReferenceEntry[] = [
     purpose: "Diagnose environment health, configuration integrity, Herdr integration, and tool dependencies.",
     reusedEngines: ["EnvironmentDoctor", "ToolDependencyInspector", "PaneManager"],
     requiredFlags: [],
-    optionalFlags: ["-j, --json", "-h, --help"],
+    optionalFlags: ["--deep (execute configured models; may consume usage)", "-j, --json", "-h, --help"],
     exitCodes: COMMON_EXIT_CODES,
     idempotencyAndRetry: "Read-only diagnostics. Safe to run repeatedly.",
     permissionRequirements: "Read access to repository configuration and system tools.",

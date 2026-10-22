@@ -72,6 +72,8 @@ export interface EnvironmentCompositionInput {
   readonly env: NodeJS.ProcessEnv;
 }
 export interface EnvironmentDependencies {
+  /** Explicit opt-in model diagnostics; the default implementation uses the Runtime facade. */
+  readonly probeProviderModels?: () => Promise<readonly import("@bflow/runtime").RolePreflightSummary[]>;
   readonly signal?: AbortSignal;
   readonly runner?: EnvironmentProcessRunner;
   readonly integration?: EnvironmentIntegration;
@@ -1042,7 +1044,7 @@ export class EnvironmentLifecycle {
     }
     return { workspaceRoot: repository.root, sessionName: repository.sessionName, server, configuration: "valid", manifest, liveObservation, issues };
   }
-  async doctor(): Promise<EnvironmentDoctorReport> {
+  async doctor(deep = false): Promise<EnvironmentDoctorReport> {
     this.progress("Reading repository configuration for diagnostics...");
     const repository = await identifyRepository(this.cwd, this.runner);
     let config: EnvironmentConfig | null = null;
@@ -1053,6 +1055,7 @@ export class EnvironmentLifecycle {
       runner: this.runner,
       env: this.env,
       dependencies: this.dependencies,
+      deep,
       probeSession: (cfg) => this.probe(repository, cfg),
       integration: (cfg) => this.integration(repository, cfg),
       intent: () => this.intent(repository),

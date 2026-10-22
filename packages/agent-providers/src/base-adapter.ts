@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { z } from "zod";
 import { constants } from "node:fs";
 import { chmod, mkdir, open, readdir, readFile, stat, symlink } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -152,6 +153,30 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
 
   protected shouldCheckNativeAuthentication(): boolean {
     return true;
+  }
+
+  protected async nativeAuthenticationOutcome(executable: string, _options?: OperationOptions) {
+    return this.runner.run({
+      executable, args: this.getAuthCommand(), env: this.getProviderCommandEnvironment(),
+      ...this.commandEnvironmentOptions(), timeoutMs: 45_000
+    });
+  }
+
+  protected nativeAuthenticationConfirmed(stdout: string, stderr: string): boolean {
+    if (/\b(?:unauthori[sz]ed|unauthenticated|not logged in|auth(?:entication)? required)\b/i.test(stdout + "\n" + stderr)) return false;
+    if (this.descriptor.provider === "claude") {
+      try {
+        const parsed = z.object({ loggedIn: z.boolean().optional(), authenticated: z.boolean().optional(),
+          status: z.string().optional() }).passthrough().safeParse(JSON.parse(stdout));
+        return parsed.success && parsed.data.loggedIn !== false && parsed.data.authenticated !== false &&
+          (parsed.data.loggedIn === true || parsed.data.authenticated === true) &&
+          (parsed.data.status === undefined || ["active", "authenticated"].includes(parsed.data.status));
+      } catch { return false; }
+    }
+    if (this.descriptor.provider === "codex") return /^[ \t]*logged in\b/im.test(stdout + "\n" + stderr);
+    // Native Agy success is a tab-separated id/description list, not an arbitrary zero-exit response.
+    return stdout.split(/\r?\n/).some(line => /^[A-Za-z0-9][A-Za-z0-9._:/-]*\t+\S/.test(line)) &&
+      !/^\s*(?:error|fatal)\s*:/im.test(stderr);
   }
 
   private executableVerificationOptions() {
@@ -500,15 +525,9 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       checks.push(createHealthCheck("authentication", "failed", failure.code,
         `Provider execution probe was skipped because inherited state is blocked: ${failure.message}`, failure.remediation));
     } else try {
-      const authArgs = this.getAuthCommand();
-      const authOutcome = this.shouldCheckNativeAuthentication()
-        ? await this.runner.run({
-            executable,
-            args: authArgs,
-            env: this.getProviderCommandEnvironment(),
-            ...this.commandEnvironmentOptions(),
-            timeoutMs: 45_000
-          })
+      const nativeOnly = this.options.executionProbe === "disabled";
+      const authOutcome = this.shouldCheckNativeAuthentication() || nativeOnly
+        ? await this.nativeAuthenticationOutcome(executable, options)
         : { exitCode: 0, stdout: "", stderr: "", started: true };
 
       const combinedAuthOutput = `${authOutcome.stdout}\n${authOutcome.stderr}`;
@@ -516,7 +535,8 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
         combinedAuthOutput.toLowerCase().includes("expired") ||
         (authOutcome.stdout.includes('"status":"expired"') || authOutcome.stdout.includes('"status": "expired"'));
 
-      if (authOutcome.exitCode !== 0 || isExpired) {
+      if (authOutcome.exitCode !== 0 || !authOutcome.started || authOutcome.failure !== undefined || isExpired ||
+          (nativeOnly && !this.nativeAuthenticationConfirmed(authOutcome.stdout, authOutcome.stderr))) {
         const code = isExpired ? "auth_expired" : "auth_missing";
         checks.push(
           createHealthCheck(
@@ -527,6 +547,10 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
             `Authenticate '${this.descriptor.executableName}' using your provider login or credentials.`
           )
         );
+      } else if (nativeOnly) {
+        authPassed = true;
+        checks.push(createHealthCheck("authentication", "passed", "auth_native_ok",
+          "Native authentication verified without model execution; model availability and quota are checked by real work or bflow doctor --deep."));
       } else {
         // Run minimal non-interactive execution probe
         const probeArgs = this.getProbeCommand(environment);

@@ -77,7 +77,9 @@ export interface HostMcpServer {
 }
 
 export interface ProviderAdapterOptions {
-  /** Host-factory-owned, raw-runner-bound sharing/reuse of eligible model execution pings only. */
+  /** Legacy callers retain execution checks; startup explicitly selects native auth without inference. */
+  readonly executionProbe?: "required" | "disabled";
+  /** Caller-owned, raw-runner-bound sharing/reuse of eligible model execution pings only. */
   readonly executionProbeCoalescer?: import("./execution-probe-coalescer.js").ProviderExecutionProbeCoalescer;
   readonly executablePath?: string;
   readonly pinnedExecutableDigest?: string;

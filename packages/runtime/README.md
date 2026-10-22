@@ -625,11 +625,12 @@ Các đảm bảo được triển khai ở đây, với package-local test tron
   các receipt startup/native/tool chính xác và thực hiện role health. Kích hoạt cuối cùng vẫn lặp lại
   toàn bộ cổng role bắt buộc với health mới và một attestation đã ký mới được xác minh cho mỗi role;
   kết quả chuẩn bị không bao giờ thay thế nó hay khởi động workspace/scheduler.
-- Một host provider factory dùng chung chỉ Codex model execution ping giữa các snapshot tương đương,
-  giữ kết quả thành công tối đa 30 giây. Thay đổi binary/config/account/session/cwd/model/permission
-  và environment làm mất hiệu lực tính tương đương; authentication, role health, native binding, MCP,
-  skill và attestation vẫn mới. Công việc tiến triển có thể làm ấm quan sát hẹp này, trong khi
-  các check cục bộ lặp lại thêm overhead; các test cục bộ này không thiết lập được mức tăng tốc khởi động live.
+- Host provider factory tắt execution probe cho mọi provider trong preflight và activation:
+  readiness dùng native auth, binary/config/permission, MCP, skill và attestation mới, không gọi model.
+  Codex bootstrap được UserPromptSubmit ghi nhận native session rồi chặn bằng exit 2 trước inference;
+  hook lỗi cũng chặn prompt. CLI vẫn chờ đầy đủ startup/tool/native receipts và activated health.
+  Quota và khả năng chạy model chỉ được xác minh khi làm việc thật hoặc chủ động chạy
+  `bflow doctor --deep`; readiness này không phải bằng chứng inference thành công.
 - Các preparatory check dừng công việc đang xếp hàng khi thất bại và drain công việc đã bắt đầu. Một
   control acknowledgement riêng tư tách biệt drain công việc daemon và các journal native-session/startup
   tuần tự hóa sau khi client ngắt kết nối, trước CLI quiesce/shutdown/cleanup. Prepare drain generation trước

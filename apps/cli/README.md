@@ -5,6 +5,15 @@ Build từ thư mục gốc của repository bằng `pnpm build`, sau đó chạ
 Cần Node >=22.13 và pnpm được pin ở root cho storage runtime hiện có.
 Việc khóa vòng đời yêu cầu `flock` của Linux (util-linux) có trong PATH.
 
+`bflow up` kiểm tra native auth, cấu hình/quyền, MCP, startup receipt và activated health
+mà không gửi ping/pong tới model. `bflow doctor` mặc định cũng không chạy model.
+Dùng `bflow doctor --deep` khi muốn thử model thật: mỗi bộ provider/profile/model/effort
+của các role bắt buộc được thử một lần; lệnh có thể tiêu hao usage. Deep diagnostics
+không tạo pane/workflow và không thay thế các cổng readiness/verification của Runtime.
+Không chạy kiểm tra sâu đồng nghĩa lỗi quota hoặc model không khả dụng có thể chỉ xuất hiện
+ở tác vụ thật. Linked Codex cần endpoint catalog `GET /models` hoạt động để xác minh
+quyền truy cập backend mà không inference; không tự quay lại probe tính phí khi endpoint lỗi.
+
 
 ## Thiết lập lần đầu
 

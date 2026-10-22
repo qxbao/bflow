@@ -15,6 +15,11 @@ import type {
 } from "../src/index.js";
 
 describe("force environment shutdown arguments", () => {
+  it("accepts explicit model checks only on doctor --deep", () => {
+    const result = parseCliArgs(["doctor", "--deep", "--json"]);
+    expect(result.ok && result.value).toMatchObject({ command: "doctor", deep: true, json: true });
+    for (const command of ["up", "down", "attach", "recover"]) expect(parseCliArgs([command, "--deep"]).ok).toBe(false);
+  });
   it("accepts an explicit force shutdown without requiring a second confirmation flag", () => {
     const result = parseCliArgs(["down", "--force", "--json", "--timeout", "12000"]);
     expect(result.ok).toBe(true);

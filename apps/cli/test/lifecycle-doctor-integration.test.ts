@@ -670,6 +670,23 @@ describe("Task 2: Platform v3 Lifecycle & Doctor Integration", () => {
   });
 
   describe("EnvironmentLifecycle.doctor() Integration", () => {
+    it("executes model diagnostics only with --deep and reports model failures", async () => {
+      const probeProviderModels = vi.fn(async () => [{ role: "conversation" as const, provider: "claude" as const,
+        required: true, status: "blocked" as const, checks: [], message: "Model quota exhausted" }]);
+      const lifecycle = new EnvironmentLifecycle(dir, {
+        runner, probeProviderModels,
+        providerOverrides: { claude: { available: true, authenticated: true } }
+      });
+      const normal = await lifecycle.doctor();
+      expect(probeProviderModels).not.toHaveBeenCalled();
+      expect(normal.checks.some(check => check.checkId.startsWith("model-"))).toBe(false);
+      const deep = await lifecycle.doctor(true);
+      expect(probeProviderModels).toHaveBeenCalledTimes(1);
+      expect(deep.healthy).toBe(false);
+      expect(deep.checks).toContainEqual(expect.objectContaining({ checkId: "model-claude-conversation",
+        status: "failed", message: "Model quota exhausted" }));
+    });
+
     it("delegates to runDoctorDiagnostics and reflects healthy state", async () => {
       const fixture = createMockManager(repository);
 

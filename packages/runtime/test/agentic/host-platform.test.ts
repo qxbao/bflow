@@ -88,7 +88,7 @@ describe("Codex hook trust propagation", () => {
     })).toMatchObject({ descriptor: { provider: "codex" } });
   });
 
-  it("shares execution probes across adapters from one host factory while each role checks authentication", async () => {
+  it("checks authentication for each role without model execution during startup", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-host-coalescer-")));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
     const home = join(root, "home"), state = join(root, "state"), binary = join(root, "codex");
@@ -121,11 +121,11 @@ describe("Codex hook trust propagation", () => {
     const results = await Promise.all([health("conversation"), health("reviewer")]);
     expect(results.map(result => result.ok && result.value.status), JSON.stringify(results)).toEqual(["ready", "ready"]);
     expect(authentications).toBe(2);
-    expect(probes).toBe(1);
+    expect(probes).toBe(0);
     const final = await health("conversation");
     expect(final.ok && final.value.status).toBe("ready");
     expect(authentications).toBe(3);
-    expect(probes).toBe(1);
+    expect(probes).toBe(0);
   });
 
   it("keeps the operator HOME when only a Codex config home is selected", () => {

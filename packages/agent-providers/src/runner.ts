@@ -499,7 +499,7 @@ export function createFakeProviderRunner(config?: FakeRunnerConfig): ProviderCom
         }
         return {
           exitCode: 0,
-          stdout: "antigravity-2.0\ngemini-1.5-pro\ngemini-1.5-flash\n",
+          stdout: "antigravity-2.0\tAntigravity 2.0\ngemini-1.5-pro\tGemini 1.5 Pro\ngemini-1.5-flash\tGemini 1.5 Flash\n",
           stderr: "",
           started: true
         };

@@ -19,6 +19,9 @@ import { namedSessionEnvironment, type EnvironmentProcessRunner } from "./enviro
 import type { RepositoryIdentity } from "./repository.js";
 import type { EnvironmentDependencies, EnvironmentIntegration } from "./environment.js";
 import { lifecycleLockStatus } from "./lifecycle-lock.js";
+import { probeDoctorModels } from "./provider-model-diagnostics.js";
+import { RolePreflightSummarySchema } from "@bflow/runtime";
+import { scrubDiagnosticText } from "@bflow/agent-providers";
 
 export type DoctorCheckStatus = "pass" | "warning" | "fail" | "skipped";
 export type DoctorGroupName = "runtime" | "agent_providers" | "mcp" | "tools" | "skills";
@@ -46,6 +49,7 @@ export interface DoctorGroupedMetadata {
 }
 
 export interface DoctorDiagnosticsOptions {
+  readonly deep?: boolean;
   readonly repository: RepositoryIdentity;
   readonly config: EnvironmentConfig | null;
   readonly runner: EnvironmentProcessRunner;
@@ -751,6 +755,32 @@ export async function runDoctorDiagnostics(
       reason: authReason,
       remediation: authRemediation
     });
+  }
+
+  if (options.deep) {
+    progress("Checking configured models (explicit --deep; model usage may be charged)...");
+    try {
+      if (config === null) throw new Error("A valid repository configuration is required for model diagnostics.");
+      const results = dependencies?.probeProviderModels
+        ? await dependencies.probeProviderModels()
+        : await probeDoctorModels({ repository, config, env: options.env ?? process.env },
+          { timeoutMs: 75_000, ...(dependencies?.signal === undefined ? {} : { signal: dependencies.signal }) });
+      if (results.length === 0) throw new Error("No required provider models were selected for diagnostics.");
+      for (const value of results) {
+        const result = RolePreflightSummarySchema.parse(value);
+        const failed = result.checks.filter(check => check.status !== "passed");
+        agentProviderChecks.push({
+          checkId: `model-${result.provider}-${result.role}`, group: "agent_providers", component: result.provider,
+          status: result.status === "ready" ? "pass" : "fail", detected_version: null,
+          reason: scrubDiagnosticText([result.message, ...failed.map(check => check.message)].filter(Boolean).join(" ")),
+          remediation: result.status === "ready" ? "" : "Check provider authentication, selected model, quota and network access."
+        });
+      }
+    } catch (error) {
+      agentProviderChecks.push({ checkId: "provider-models", group: "agent_providers", component: "models",
+        status: "fail", detected_version: null, reason: scrubDiagnosticText(String(error)),
+        remediation: "Resolve repository/provider configuration and rerun bflow doctor --deep." });
+    }
   }
 
   // provider-permissions

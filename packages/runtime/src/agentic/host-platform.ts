@@ -7,7 +7,7 @@ import {
   AgentProviderIdSchema, AgentRoleSchema,
   type AgentProviderId, type AgentRole, type ContractError, type OperationOptions
 } from "@bflow/contracts";
-import { createManagedCodexHookEnvironment, createProviderExecutionProbeCoalescer, createProviderProcessRunner, type LiveReadinessObservation } from "@bflow/agent-providers";
+import { createManagedCodexHookEnvironment, type LiveReadinessObservation } from "@bflow/agent-providers";
 import { FileSkillStore, SkillManager } from "@bflow/skills";
 import type { SkillManifest } from "@bflow/contracts";
 import {
@@ -602,13 +602,13 @@ export function createHostProviderAdapterFactory(
   hookEnvironment: Readonly<Record<string, string | undefined>> = process.env
 ): ProviderAdapterFactory {
   const trustedCodexOptions = createHostProviderFactoryOptions(platform, hookEnvironment).perProvider.codex;
-  const runner = options.perProvider?.codex?.runner ?? options.runner ?? createProviderProcessRunner();
-  const executionProbeCoalescer = createProviderExecutionProbeCoalescer({ runner, successfulResultTtlMs: 30_000 });
   return createProviderAdapterFactory({
     ...options,
     perProvider: {
       ...options.perProvider,
-      codex: { ...options.perProvider?.codex, ...trustedCodexOptions, runner, executionProbeCoalescer }
+      claude: { ...options.perProvider?.claude, executionProbe: "disabled" },
+      agy: { ...options.perProvider?.agy, executionProbe: "disabled" },
+      codex: { ...options.perProvider?.codex, ...trustedCodexOptions, executionProbe: "disabled" }
     }
   });
 }

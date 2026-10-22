@@ -21,6 +21,8 @@ import type {
 import { codexHookPolicyPath, inspectCodexHooks } from "./codex-hook-trust.js";
 import { managedCodexPluginArgs } from "./codex-plugin-policy.js";
 import { codexProbeConfigDependencies } from "./codex-probe-config.js";
+import { checkCodexBackendAuthentication } from "./backend-authentication.js";
+import type { OperationOptions } from "@bflow/contracts";
 
 /** Observe metadata only: no credential bytes are read or retained. Symlinks/special files and
  * inaccessible/required-missing inputs are ineligible, so the adapter runs its own normal ping. */
@@ -74,9 +76,9 @@ function withForwardedMcpEnv(server: Record<string, unknown>): Record<string, un
   return { ...server, env_vars: [...new Set([...existing, ...CODEX_MCP_FORWARDED_ENV])] };
 }
 
-/** Reserved, environment-bound startup turn; ordinary user prompts must still reach Conversation. */
+/** Environment-bound local bootstrap. The host UserPromptSubmit hook must block it before inference. */
 export function codexStartupPrompt(environmentId: string): string {
-  return `[bflow startup ${environmentId}] Reply only pong. Do not use tools or start a workflow.`;
+  return `[bflow startup ${environmentId}] Initialize the local Bflow session; do not send this prompt to the model.`;
 }
 
 const MCP_NOT_ISOLATED_CODE = "codex_global_mcp_not_isolated";
@@ -235,6 +237,13 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
 
   protected override shouldCheckNativeAuthentication(): boolean {
     return this.options.codexBackendUrl === undefined;
+  }
+
+  protected override nativeAuthenticationOutcome(executable: string, options?: OperationOptions) {
+    if (this.options.codexBackendUrl === undefined) return super.nativeAuthenticationOutcome(executable, options);
+    const environment = this.getProviderExecutionEnvironment();
+    const apiKey = this.options.isolatorEnvironment !== undefined ? environment["CODEX_LB_API_KEY"] : process.env["CODEX_LB_API_KEY"];
+    return checkCodexBackendAuthentication(this.options.codexBackendUrl, apiKey, options);
   }
 
   protected override getProbeCommand(_environment: AgentEnvironment): readonly string[] {
@@ -577,7 +586,8 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
       argv.push("-c", `model_reasoning_effort=${JSON.stringify(this.options.effort)}`);
     }
 
-    argv.push(codexStartupPrompt(environment.environmentId));
+    // No bootstrap may reach a model when there is no host hook to consume it.
+    if (this.options.hostHooks?.UserPromptSubmit !== undefined) argv.push(codexStartupPrompt(environment.environmentId));
 
     return { argv };
   }
