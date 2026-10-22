@@ -61,7 +61,7 @@ class Panes {
   }
 }
 
-async function fixture(options: { design?: boolean } = {}) {
+async function fixture(options: { design?: boolean; designId?: string } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-user-decision-e2e-")));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const repository = join(root, "repo"); await mkdir(repository);
@@ -95,7 +95,7 @@ async function fixture(options: { design?: boolean } = {}) {
       // A design approval occupies the single run.approval slot while the Developer asks a user decision.
       state.runs[0]!.status = "awaiting_approval";
       state.runs[0]!.approvalKind = "design";
-      state.runs[0]!.approval = ApprovalRequestSchema.parse({ schemaVersion: 2, approvalId: "apr-design-1", runId: RUN, sessionId: SESSION,
+      state.runs[0]!.approval = ApprovalRequestSchema.parse({ schemaVersion: 2, approvalId: options.designId ?? "apr-design-1", runId: RUN, sessionId: SESSION,
         status: "pending", target: { type: "task", taskId: TASK }, revision: 1, generation: 0, requestedBy: "runtime",
         requestedAt, reason: "Approve the design", evidence: [], idempotencyKey: "design-approval-1", metadata: {} });
     }
@@ -385,6 +385,38 @@ describe.skipIf(process.platform !== "linux")("P30 user decisions end to end", (
     // Askers of a dead run are never resumed, but Conversation must drop the now-unanswerable prompt.
     expect((await outbound(runtime)).filter(entry => (entry.message.payload as { kind?: string }).kind === "user_decision_expired" &&
       entry.message.recipient.role === "conversation")).toHaveLength(1);
+  });
+
+  describe("trusted hook replies to design approvals and multi-line replies", () => {
+    const trusted = (host: AgenticConversationHost, messageId: string, content: string) => host.handleTrustedApproval({ sessionId: SESSION,
+      messageId, content, provenance: { origin: "user", authenticatedUser: true, userId: "human-1", paneId: "pane-conversation", channel: "herdr_attach" } }) as
+      Promise<{ ok: boolean; value?: { approvalDecision?: ApprovalDecision } } | undefined>;
+    const designId = "design-1404c0ffee5a7d9b2e3f4a5b";
+
+    it.each([`${designId}: approve`, "1"])("records %s for the only pending design-… approval", async content => {
+      const f = await fixture({ design: true, designId }); const runtime = f.runtime();
+      const host = await f.chat(runtime);
+      const result = await trusted(host, "design-reply", content);
+      expect(result?.ok).toBe(true);
+      expect(result?.value?.approvalDecision).toMatchObject({ approvalId: designId, decision: "approved" });
+      const decisions = (await outbound(runtime)).filter(entry => entry.message.type === "approval.decision");
+      expect(decisions.map(entry => (entry.message.payload as { approvalId: string }).approvalId)).toEqual([designId]);
+    });
+
+    it("records nothing for a two-line reply naming two decisions and warns in the turn context", async () => {
+      const f = await fixture(); const runtime = f.runtime();
+      const first = await request(runtime, f.developer);
+      const second = await request(runtime, f.developer, { question: "Which cache should we use?", options: ["Redis", "Memory"] });
+      const host = await f.chat(runtime);
+      await host.reconcileApprovals();
+      expect(await trusted(host, "multi-line", `${second}: 1\n${first}) hiển thị lại câu hỏi`)).toBeUndefined();
+      const context = await host.getContext() as { approvalWarnings: string[] };
+      expect(context.approvalWarnings[0]).toContain("CHƯA ghi nhận");
+      expect((await outbound(runtime)).some(entry => entry.message.type === "approval.decision")).toBe(false);
+      // The warning belongs to that turn only.
+      await trusted(host, "next-turn", "trạng thái thế nào?");
+      expect((await host.getContext() as { approvalWarnings: string[] }).approvalWarnings).toEqual([]);
+    });
   });
 
   describe("lost approval.request reconciliation", () => {
