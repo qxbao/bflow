@@ -26,6 +26,7 @@ export interface OpenAgenticWorkspaceOptions {
   deterministicGates: readonly QualityGate[];
   behavioralChecks?: AgenticRuntimePorts["behavioralChecks"];
   behavioralGates?: () => readonly QualityGate[];
+  validateTaskCommands?: AgenticRuntimePorts["validateTaskCommands"];
   authenticateMessage: AgenticRuntimePorts["authenticateMessage"];
   /** Called after Conversation applied a Runtime outbox message; the host records it as a durable notice for the model. */
   onConversationNotice?: (message: RoleMessage) => Promise<void>;
@@ -234,6 +235,7 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       ...(options.preflightRoleCapabilities ? { preflightRoleCapabilities: options.preflightRoleCapabilities } : {}),
       maxConcurrency: options.maxDeveloperCapacity ?? 2, taskChecks: options.taskChecks, workflowChecks: options.workflowChecks,
       ...(options.behavioralChecks ? { behavioralChecks: options.behavioralChecks } : {}),
+      ...(options.validateTaskCommands ? { validateTaskCommands: options.validateTaskCommands } : {}),
       authenticateMessage: async message => await authenticateNativeHerdrMessage(message) || await options.authenticateMessage(message),
       deliverToConversation: async message => {
         if (!conversation) throw new Error("Conversation host is not ready");

@@ -73,7 +73,11 @@ detects the repository's runner, exposed as `auto:unit` (unit_test) and
 - list the exact committed test files in `affectedPaths` (a `test/` or `tests/`
   directory, or a `.test`/`.spec` suffix); each Developer task owns the ones it writes;
 - set `criterionMappings` testNames to the exact names the runner reports (vitest:
-  describe titles plus the test title joined by one space; node --test: the test title).
+  describe titles plus the test title joined by one space; node --test: the test title);
+- keep each Developer task's aggregate execution, preparation and checkout budget within the
+  540s independent execution deadline. Root Vitest profiles with a build step cost 390s each;
+  split `auto:unit` and `auto:integration` criteria into dependency-ordered tasks in that case.
+  Each task must own test files that bind every criterion assigned to it.
 Never change a criterion's `verificationMethod`.
 
 ## Execution and evidence
@@ -143,9 +147,12 @@ never weaken criteria and never resume the superseded parent run.
 A `propose_workflow` rejection whose error is structured JSON with code
 `missing_test_paths`, `missing_test_mapping`, `unknown_test_command` or
 `unsupported_method` is an instruction to you: fix the specification or DAG exactly
-as its `reason` says and propose again, without asking the user. `unsupported_method`
+as its `reason` says and propose again, without asking the user. For `missing_test_mapping`,
+correct the named mapping, runner selection or owned file scope; if the reason is an execution
+deadline, split the implementation into dependency-ordered tasks per runner/verificationMethod. `unsupported_method`
 cannot be fixed by you (you must not change `verificationMethod`); report it to the
-user through Conversation instead.
+user through Conversation instead. If `runner_setup_required` occurs for an unsupported
+ecosystem, schedule a reviewed setup task for that runner.
 A rejection with code `no_test_runner_detected` has already been shown to the user
 with its options. You may add one setup task that installs and configures the test
 runner (vitest 2.x or node --test) before the main task and propose again; ask the

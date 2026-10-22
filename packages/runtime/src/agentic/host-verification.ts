@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   ArtifactReferenceSchema, ArtifactWriteOptionsSchema, QualityGateContextSchema, QualityGateDefinitionSchema,
   PaneBindingSchema, QualityGateResultSchema, SpecificationSchema, TestStrategySchema, VerificationResultSchema,
+  WorkflowDefinitionSchema,
   type ArtifactStore, type JsonValue, type PaneBinding, type QualityGate, type QualityGateResult, type Specification, type TestStrategy, type VerificationResult
 } from "@bflow/contracts";
 import { digest, json, record, strings, textField } from "./journal.js";
@@ -130,8 +131,9 @@ export class HostVerification {
    * Fail closed at proposal ingress. Owner mode keeps the explicit owner checks. Automatic mode fails with structured
    * rejections: `no_test_runner_detected` is reported to the user; the other codes are Coordinator-fixable and silent.
    */
-  assertSupported(input: unknown, strategyInput?: unknown) {
+  assertSupported(input: unknown, strategyInput?: unknown, definitionInput?: unknown) {
     const spec = SpecificationSchema.parse(input);
+    if (definitionInput !== undefined) WorkflowDefinitionSchema.parse(definitionInput);
     const active = spec.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived");
     const automated = active.filter(criterion => criterion.verificationMethod !== "manual_review");
     if (!automated.length) {
@@ -139,7 +141,10 @@ export class HostVerification {
       return;
     }
     if (active.some(criterion => criterion.verificationMethod === "manual_review")) throw new Error("Mixed manual and behavioral TDD criteria require separate tasks with complete independent evidence");
-    if (this.runners.automatic) return this.assertDetectedSupported(spec, automated, strategyInput);
+    if (this.runners.automatic) {
+      this.assertDetectedSupported(spec, automated, strategyInput);
+      return;
+    }
     for (const criterion of automated) if (!this.runners.owner.some(command => command.method === criterion.verificationMethod)) throw new Error(`No owner-configured behavioral runner for ${criterion.verificationMethod}`);
     if (strategyInput !== undefined) {
       const strategy = TestStrategySchema.parse(strategyInput);
@@ -149,6 +154,66 @@ export class HostVerification {
       }
       for (const command of strategy.targetCommands) if (!this.runners.owner.some(config => config.command === command)) throw new Error(`No owner-configured argv for ${command}`);
       if (strategy.coverageThresholdPercent !== undefined) throw new Error("Configured behavioral reporters do not measure aggregate coverage");
+    }
+  }
+  assertTaskSupported(taskSpec: Specification, strategy: TestStrategy, ownedPaths: readonly string[]) {
+    this.assertSupported(taskSpec, strategy);
+    const automated = taskSpec.acceptanceCriteria.filter(c => c.required !== false && c.status !== "waived" && c.verificationMethod !== "manual_review");
+    if (!automated.length) return;
+    const profiles = this.runners.automatic ? (this.runners.current?.status === "detected" ? this.runners.current.profiles : []) : [];
+    let commands: BoundBehavioralCommand[];
+    try {
+      commands = resolveTaskCommands({
+        owner: this.runners.automatic ? [] : this.runners.owner,
+        profiles,
+        strategy,
+        specification: taskSpec,
+        ownedPaths: [...ownedPaths]
+      });
+    } catch (error) {
+      if (error instanceof WorkflowProposalRejected) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("runner_identity_unselectable") || message.includes("missing_test_mapping")) {
+        throw new WorkflowProposalRejected({
+          code: "missing_test_mapping",
+          reason: `Selected test identities cannot be bound to the detected runner: ${message}`,
+          options: []
+        });
+      }
+      throw new WorkflowProposalRejected({
+        code: "unsupported_verification",
+        reason: `Selected test identities cannot be bound exactly to the detected runner: ${message}`,
+        options: []
+      });
+    }
+
+    for (const criterion of automated) {
+      const mapping = strategy.criterionMappings.find(m => m.criterionId === criterion.id);
+      if (!mapping || !mapping.testNames.length) {
+        throw new WorkflowProposalRejected({
+          code: "missing_test_mapping",
+          reason: `Criterion ${criterion.id} (${criterion.verificationMethod}) has no mapped test names in test strategy`,
+          options: []
+        });
+      }
+      const bound = commands.some(cmd => {
+        if (cmd.method !== criterion.verificationMethod) return false;
+        return mapping.testNames.every(name => cmd.testNames.includes(name));
+      });
+      if (!bound) {
+        throw new WorkflowProposalRejected({
+          code: "missing_test_mapping",
+          reason: `Criterion ${criterion.id} (${criterion.verificationMethod}) test identities cannot be bound to any runner command within task owned paths; check test files and owned paths`,
+          options: []
+        });
+      }
+    }
+    if (!commands.length) {
+      throw new WorkflowProposalRejected({
+        code: "missing_test_mapping",
+        reason: `Task has automated criteria (${automated.map(c => c.id).join(", ")}) but no behavioral runner command could be bound to its owned test files`,
+        options: []
+      });
     }
   }
   private assertDetectedSupported(spec: Specification, automated: Specification["acceptanceCriteria"], strategyInput: unknown) {
@@ -177,7 +242,13 @@ export class HostVerification {
       for (const command of strategy.targetCommands) if (!profiles.some(profile => profile.command === command)) reject("unknown_test_command", `targetCommands contains '${command}', which is not a detected runner label (${labels}). Use only detected labels, or remove the command, and propose again.`);
       if (strategy.coverageThresholdPercent !== undefined) throw new Error("Configured behavioral reporters do not measure aggregate coverage");
       try { resolveTaskCommands({ owner: [], profiles, strategy, specification: spec }); }
-      catch { reject("runner_setup_required", "Selected test identities cannot be bound exactly to the detected runner. Coordinator must split ambiguous tasks or create a reviewed runner setup task; preserve verificationMethod."); }
+      catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("runner_identity_unselectable")) {
+          reject("missing_test_mapping", `Selected test identities cannot be bound to the detected runner: ${message}`);
+        }
+        reject("unsupported_verification", `Selected test identities cannot be bound exactly to the detected runner: ${message}`);
+      }
     }
   }
   /** Gate for one owner command, bound to the owner configuration (unchanged behaviour). */

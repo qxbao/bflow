@@ -24,6 +24,7 @@ import { parseBehavioralCommands, type BehavioralCommand, type RunnerProfile } f
 import { TestRunnerSource } from "../../src/agentic/task-commands.js";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
 import { digest } from "../../src/agentic/journal.js";
+import { WorkflowProposalRejected } from "../../src/agentic/workflow-rejection.js";
 import { FakeAgentTransport } from "../helpers/fake-transport.js";
 import { draft, workflow } from "../../../specification/test/fixtures.js";
 
@@ -224,6 +225,73 @@ async function fixture(options: { dynamicGate?: boolean; parallel?: boolean; tdd
 }
 
 const phaseTestName = "ac-1: The requested outcome is independently verifiable";
+
+describe("workflow proposal admission regressions", () => {
+  async function proposalFixture() {
+    const profiles: RunnerProfile[] = ([ ["unit", "unit_test"], ["integration", "integration_test"] ] as const).map(([level, method]) => ({
+      id: `auto-${level}`, command: `auto:${level}`, method, levels: [level, "regression"], source: "detected",
+      executable: process.execPath, args: ["node_modules/vitest/vitest.mjs", "run", "--reporter=json"], reporter: "vitest_json",
+      timeoutMs: 180000, prepare: { args: ["node_modules/typescript/bin/tsc", "-b"], timeoutMs: 120000 },
+      checkoutDependencyRoots: [], dependencySource: process.cwd()
+    }));
+    const runners = new TestRunnerSource([], process.cwd(), async () => ({ status: "detected", profiles, notes: [] }));
+    await runners.refresh();
+    const f = await fixture({ intake: false, humanApproval: true, runners });
+    Object.assign(f.spec, draft("bugfix"));
+    f.spec.affectedPaths = ["src/log.ts", "test/unit.test.ts", "test/integration.test.ts"];
+    f.spec.acceptanceCriteria = ["unit_test", "integration_test", "unit_test"].map((method, index) => ({
+      ...f.spec.acceptanceCriteria[0]!, id: `ac-${index + 1}`, description: `Logging criterion ${index + 1}`,
+      verificationMethod: method as "unit_test" | "integration_test"
+    }));
+    f.spec.traceabilityTaskIds = ["unit", "integration"];
+    const details = f.spec.metadata!.sdd as any;
+    details.traceability = f.spec.acceptanceCriteria.map(c => ({ criterionId: c.id, taskIds: [c.verificationMethod === "unit_test" ? "unit" : "integration"] }));
+    f.spec.metadata!.conditionalTdd = {
+      policyVersion: 1, taskId: "unit", taskType: "domain_logic",
+      changeImpact: { surfaces: ["domain_logic"], behaviorChanged: true, deterministic: true, regressionReproducible: true,
+        securitySensitive: false, dataMigration: false, scope: "local" },
+      infrastructure: { readiness: "ready", commands: [
+        { method: "unit_test", command: "auto:unit", level: "unit" },
+        { method: "integration_test", command: "auto:integration", level: "integration" }
+      ] }, testability: { level: "automated", rationale: "Deterministic regression fixtures" },
+      riskClassification: "low", conventions: { tdd: "contextual", requiredMethods: [], suggestedLevels: [] }
+    };
+    const split = workflow(["unit", "integration"]);
+    split.tasks.forEach(task => {
+      task.acceptanceCriteria = task.id === "unit" ? ["ac-1", "ac-3"] : ["ac-2"];
+      (task as any).metadata = { ownedPaths: f.spec.affectedPaths };
+    });
+    const bundled = { ...split, tasks: [{ ...split.tasks[0]!, acceptanceCriteria: ["ac-1", "ac-2", "ac-3"] }] };
+    f.ports.validateTaskCommands = (specification, strategy, owned) => f.verification.assertTaskSupported(specification, strategy, owned);
+    await f.runtime.receiveHerdr(f.envelope("delegation.request", {
+      schemaVersion: 2, delegationId: "delegation-proposal", messageId: "intake-proposal", correlationId: "correlation-1",
+      sessionId: "session-1", runId: "run-1", requestedBy: "conversation", targetRole: "coordinator", title: f.spec.title,
+      objective: f.spec.summary, specificationId: f.spec.specId, sddLevel: f.spec.level,
+      acceptanceCriteria: f.spec.acceptanceCriteria, inputArtifacts: [], priority: "normal", requestedAt: new Date().toISOString(),
+      idempotencyKey: "intake-proposal"
+    }, { message_id: "intake-proposal", idempotency_key: "intake-proposal" }));
+    return { ...f, split, bundled };
+  }
+
+  it("rejects an overbudget task promptly, keeps the journal usable, and accepts a corrected split through the human gate", async () => {
+    const f = await proposalFixture();
+    await expect(f.runtime.proposeWorkflow("run-1", f.spec, f.bundled)).rejects.toBeInstanceOf(WorkflowProposalRejected);
+    const rejected = await f.inspect();
+    expect(rejected.definition).toBeUndefined();
+    expect(rejected.coreCreated).toBe(false);
+    expect(rejected.lastWorkflowRejection.code).toBe("missing_test_mapping");
+    expect(f.transport.sentRequests.filter(call => JSON.parse(call.instruction).type === "task.assignment")).toHaveLength(0);
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.split);
+    const corrected = await f.inspect();
+    expect(corrected.status).toBe("awaiting_approval");
+    expect(corrected.tasks).toHaveLength(2);
+    expect(corrected.lastWorkflowRejection).toBeUndefined();
+    expect(corrected.coreCreated).toBe(false);
+    expect(corrected.workflowSpec.specification.acceptanceCriteria).toEqual(f.spec.acceptanceCriteria);
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.split);
+    expect((await f.inspect()).approval.approvalId).toBe(corrected.approval.approvalId);
+  });
+});
 /** Runtime-detected profile without owner configuration; detection itself is stubbed, execution is real. */
 async function automaticRunners(): Promise<TestRunnerSource> {
   const profile: RunnerProfile = { id: "auto-integration", command: "auto:integration", executable: process.execPath,

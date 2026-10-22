@@ -35,7 +35,7 @@ import { unwrap } from "./outbox.js";
 import { HostVerification, HostBehavioralFailure, DEFAULT_HOST_CHECKS } from "./host-verification.js";
 import { HostReceiptJournal, MAX_NOTICE_REBLOCKS, deliveryFailureNotice, parseConversationResumeRequest, isCoordinatorTrigger, type CoordinatorTurnObservation, type HumanHookProvenance } from "./host-receipts.js";
 import { parseBehavioralCommands } from "./behavioral-runner.js";
-import { WorkflowProposalRejected, guardWorkflowProposal, reportsToUser } from "./workflow-rejection.js";
+import { WorkflowProposalRejected, guardWorkflowProposal } from "./workflow-rejection.js";
 import { disposeDetectedDependencies } from "./runner-detection.js";
 import { TestRunnerSource, describeTestRunners } from "./task-commands.js";
 import { evaluateWatchdog } from "./run-watchdog.js";
@@ -543,6 +543,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       nativeIngressSocket: nativeSocket, bindingReceiptKeys: { [issuerId]: publicKey }, roleLaunch: launch,
       roleCapabilities: capabilities, preflightRoleCapabilities, taskChecks: DEFAULT_HOST_CHECKS, workflowChecks: DEFAULT_HOST_CHECKS, deterministicGates: [verification.deterministicGate()],
       behavioralChecks: (specification, strategy, originalRevision) => verification.behavioralChecks(specification, strategy, originalRevision), behavioralGates: () => verification.behavioralGates(),
+      validateTaskCommands: (specification, strategy, ownedPaths) => verification.assertTaskSupported(specification, strategy, ownedPaths),
       authenticateMessage: authenticateNativeHerdrMessage,
       // Runtime outbox messages reach Conversation in-process; the model learns of them only through hook notices.
       onConversationNotice: async message => { await receipts.appendConversationNotice(message); },
@@ -850,12 +851,12 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           if (configuration.policy?.sdd.minimumLevel === "full" && spec.level !== "full") throw new Error("Project policy requires a full specification");
         } });
         guardWorkflowProposal({ phase: "verification", specification: spec, configuredMethods, check: () =>
-          verification.assertSupported(spec, host.runtime.ports.policies.strategy.resolve(spec)) });
+          verification.assertSupported(spec, host.runtime.ports.policies.strategy.resolve(spec), parameters.definition) });
       } catch (error) {
         // Outside any journal transaction: Conversation learns why, and the Coordinator receives the same structured reason as its tool error.
         // Coordinator-fixable refusals stay with the Coordinator (structured tool error only); user notices are for the rest.
-        if (error instanceof WorkflowProposalRejected && runId !== undefined && reportsToUser(error.rejection)) {
-          try { await host.runtime.reportWorkflowRejected(runId, error.rejection); }
+        if (error instanceof WorkflowProposalRejected && runId !== undefined) {
+          try { await host.runtime.recordWorkflowRejected(runId, error.rejection); }
           catch (reportError) { process.stderr.write(`Bflow could not report workflow rejection: ${redactString(String(reportError))}\n`); }
         }
         throw error;

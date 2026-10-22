@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { z } from "zod";
 import {
   AgentAssignmentSchema, AgentExecutionHandleSchema, AgentLeaseSchema, AgentRequestSchema, AgentRoleSchema,
   AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
@@ -15,6 +16,7 @@ import {
 } from "@bflow/contracts";
 import type { TaskWorktree, VerificationPlan } from "./ports.js";
 import { isUserDecisionRequest, type UserDecisionAnswer } from "./decision-routing.js";
+import { WorkflowRejectionCodeSchema } from "./workflow-rejection.js";
 
 export function json(value: unknown): JsonValue { return JsonValueSchema.parse(JSON.parse(JSON.stringify(value))); }
 export function digest(value: unknown): string {
@@ -87,7 +89,20 @@ export interface RunRecord {
   supersededBy?: string;
   /** Bounded automatic Developer resolver episode for the current P18 merge conflict; absent in journals written before it. */
   conflictResolution?: ConflictResolutionRecord;
+  /** Structured rejection proof of the last rejected workflow proposal; cleared when a valid proposal is admitted. */
+  lastWorkflowRejection?: ProposalRejectionRecord;
 }
+const rejectionText = z.string().min(1).max(2000);
+const ProposalRejectionSchema = z.object({
+  code: WorkflowRejectionCodeSchema, reason: rejectionText,
+  episodeNumber: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+  sourceMessageId: rejectionText, actionId: rejectionText, rejectedAt: IsoDateTimeSchema,
+  rejectionFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  previousStatus: SdlcWorkStatusSchema.refine(status => !["escalated", "completed", "failed", "cancelled"].includes(status)).optional(),
+  options: z.array(rejectionText).max(100).optional(), methods: z.array(rejectionText).max(100).optional(),
+  criteria: z.array(rejectionText).max(100).optional()
+}).strict();
+export type ProposalRejectionRecord = z.infer<typeof ProposalRejectionSchema>;
 /** One P18 conflict (identified by its deterministic request message) and the resolver attempts assigned for it. */
 export interface ConflictResolutionRecord {
   conflictId: string; integrationKey: string; taskKey: string; conflictPaths: string[];
@@ -186,6 +201,16 @@ function parseState(input: unknown, repository: string): JournalState {
     textField(run.runId); run.delegation = DelegationRequestSchema.parse(run.delegation);
     if (run.delegation.runId !== run.runId) throw new Error("Journal run/delegation mismatch");
     run.status = SdlcWorkStatusSchema.parse(run.status);
+    if (run.lastWorkflowRejection !== undefined) {
+      const proof = ProposalRejectionSchema.parse(run.lastWorkflowRejection);
+      const revisionValue = run.delegation.metadata?.revision;
+      const revision = typeof revisionValue === "number" && Number.isSafeInteger(revisionValue) ? revisionValue : 1;
+      const source = `rejection-r${revision}-ep${proof.episodeNumber}-${digest([run.runId, revision, proof.episodeNumber])}`;
+      if (proof.sourceMessageId !== source || proof.actionId !== `next-${digest([run.runId, source])}` ||
+          proof.rejectionFingerprint !== digest([proof.code, proof.reason, proof.options ?? [], proof.methods ?? [], proof.criteria ?? []]))
+        throw new Error("Invalid workflow proposal rejection identity");
+      run.lastWorkflowRejection = proof;
+    }
     if (typeof run.coreCreated !== "boolean" || typeof run.cancelled !== "boolean" || !Number.isInteger(run.maxIterations) || run.maxIterations < 1 || run.maxIterations > 10)
       throw new Error("Invalid run flags/limit");
     if (!Array.isArray(run.tasks)) throw new Error("Invalid task journal");

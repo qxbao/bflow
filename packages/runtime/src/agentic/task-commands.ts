@@ -89,7 +89,9 @@ export function resolveTaskCommands(input: TaskCommandInput): BoundBehavioralCom
   const namesByProfile = new Map<RunnerProfile, string[]>();
   for (const criterion of input.specification.acceptanceCriteria.filter(item => item.required !== false && item.status !== "waived")) {
     const mapping = input.strategy.criterionMappings.find(item => item.criterionId === criterion.id);
-    if (!mapping?.testNames.length || !selected.some(profile => profile.method === criterion.verificationMethod)) continue;
+    if (!mapping?.testNames.length || !selected.some(profile => profile.method === criterion.verificationMethod)) {
+      continue;
+    }
     const matches = selected.filter(profile => {
       if (profile.method !== criterion.verificationMethod) return false;
       const testPaths = automaticTestPaths(profile, input.specification);
@@ -107,7 +109,15 @@ export function resolveTaskCommands(input: TaskCommandInput): BoundBehavioralCom
     testNames, testPaths: automaticTestPaths(profile, input.specification, input.ownedPaths)
   }));
   const commands = [...owner, ...bound];
-  if (bound.length && commands.reduce((total, command) => total + command.timeoutMs + (command.prepare?.timeoutMs ?? command.adapter?.prepare?.timeoutMs ?? command.adapter?.bind(command, "/tmp/bflow-profile-validation").prepare?.timeoutMs ?? 0) + 90000, 0) > 540000)
+  if (!commands.length && input.ownedPaths === undefined && input.specification.acceptanceCriteria.some(item => item.required !== false && item.status !== "waived" && item.verificationMethod !== "manual_review")) {
+    throw new Error("runner_identity_unselectable: no behavioral runner command could be bound for required criteria; verify test files and criterion mappings");
+  }
+  const commandBudget = (command: BoundBehavioralCommand) =>
+    command.timeoutMs + (command.prepare?.timeoutMs ?? command.adapter?.prepare?.timeoutMs ?? command.adapter?.bind(command, "/tmp/bflow-profile-validation").prepare?.timeoutMs ?? 0) + 90000;
+  const budgetExceeded = input.ownedPaths !== undefined
+    ? commands.reduce((total, command) => total + commandBudget(command), 0) > 540000
+    : commands.some(command => commandBudget(command) > 540000);
+  if (bound.length && budgetExceeded)
     throw new Error("runner_identity_unselectable: split selected runners into tasks within the independent execution deadline");
   return commands;
 }

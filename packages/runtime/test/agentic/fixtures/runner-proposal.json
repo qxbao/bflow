@@ -1,0 +1,396 @@
+{
+  "provenance": {
+    "historicalCall": "exec-3d5eae67-7984-40f0-98bb-08b7c52f8a9d",
+    "redactions": [
+      "runId",
+      "sessionId",
+      "specId"
+    ],
+    "note": "Original criteria/descriptions/methods and proposal structure retained; no credentials in selected arguments."
+  },
+  "specification": {
+    "schemaVersion": 2,
+    "specId": "spec-proposal-fixture",
+    "runId": "run-proposal-fixture",
+    "sessionId": "session-proposal-fixture",
+    "level": "full",
+    "complexity": "standard",
+    "riskLevel": "medium",
+    "title": "Process lifecycle logging in Logs pane",
+    "summary": "Complete process lifecycle visibility in existing Runtime Logs pane.",
+    "problemStatement": "The existing bounded Runtime activity log and Logs viewer do not yet clearly identify all process lifecycle events.",
+    "scope": {
+      "inScope": [
+        "Runtime-managed process lifecycle diagnostics",
+        "Existing Logs pane/viewer"
+      ],
+      "outOfScope": [
+        "New logging backend",
+        "Public contracts",
+        "Raw provider output, prompts or secrets",
+        "Arbitrary system processes"
+      ]
+    },
+    "acceptanceCriteria": [
+      {
+        "id": "ac-1",
+        "description": "Logs displays process lifecycle entries with stable process identity and available run/task/attempt context.",
+        "category": "functional",
+        "verificationMethod": "unit_test",
+        "required": true,
+        "status": "pending",
+        "evidenceArtifactIds": []
+      },
+      {
+        "id": "ac-2",
+        "description": "Existing bounded TaskActivityLog keeps separate process events without cross-attribution and Logs displays them.",
+        "category": "functional",
+        "verificationMethod": "integration_test",
+        "required": true,
+        "status": "pending",
+        "evidenceArtifactIds": []
+      },
+      {
+        "id": "ac-3",
+        "description": "Tests verify rendered process lifecycle and distinct identities for relevant lifecycle cases.",
+        "category": "functional",
+        "verificationMethod": "unit_test",
+        "required": true,
+        "status": "pending",
+        "evidenceArtifactIds": []
+      }
+    ],
+    "affectedPaths": [
+      "packages/runtime/src/agentic/host.ts",
+      "packages/runtime/src/agentic/task-log-viewer.ts",
+      "packages/runtime/test/agentic/task-log-viewer.test.ts"
+    ],
+    "architectureNotes": "Use the existing TaskActivityLog and viewer, recording stable process identity from Runtime-owned lifecycle boundaries.",
+    "securityConsiderations": "Retain current private bounded redacting behavior; no prompts, secrets, environment or raw argv. Diagnostics do not prove task success.",
+    "rollbackPlan": "Revert host/viewer edits; existing activity log presentation remains.",
+    "testStrategy": {
+      "schemaVersion": 2,
+      "strategyId": "strategy-process-logs",
+      "specId": "spec-proposal-fixture",
+      "tddDecision": {
+        "schemaVersion": 2,
+        "decisionId": "tdd-process-logs",
+        "runId": "run-proposal-fixture",
+        "taskId": "runtime-process-logs",
+        "specId": "spec-proposal-fixture",
+        "mode": "required",
+        "rationale": "Stable process identity and rendered lifecycle events are deterministic behavior; tests are available and required test-first.",
+        "verifiableConditions": [
+          "ac-1 and ac-3 unit tests verify process identity rendering.",
+          "ac-2 integration test verifies process entries remain distinct."
+        ],
+        "changeClassification": "refactoring",
+        "requiresFailingTestFirst": true,
+        "decidedBy": "coordinator",
+        "decidedAt": "2026-10-22T03:45:00.000Z"
+      },
+      "requiredTestLevels": [
+        "unit",
+        "integration"
+      ],
+      "targetCommands": [
+        "auto:unit",
+        "auto:integration"
+      ],
+      "independentVerificationRequired": true,
+      "criterionMappings": [
+        {
+          "criterionId": "ac-1",
+          "testNames": [
+            "task log viewer > renders bounded sanitized human-readable entries and follows atomic replacement without replay"
+          ]
+        },
+        {
+          "criterionId": "ac-2",
+          "testNames": [
+            "task log viewer > shows every retained event in a large burst and does not replay it on atomic replacement"
+          ]
+        },
+        {
+          "criterionId": "ac-3",
+          "testNames": [
+            "task log viewer > keeps repeated identical legacy rows as distinct occurrences"
+          ]
+        }
+      ],
+      "createdAt": "2026-10-22T03:45:00.000Z",
+      "metadata": {
+        "conditionalTdd": {
+          "policyVersion": 1,
+          "assessment": {
+            "policyVersion": 1,
+            "taskId": "runtime-process-logs",
+            "taskType": "integration",
+            "changeImpact": {
+              "surfaces": [
+                "integration",
+                "refactoring"
+              ],
+              "behaviorChanged": true,
+              "deterministic": true,
+              "regressionReproducible": true,
+              "securitySensitive": false,
+              "dataMigration": false,
+              "scope": "local"
+            },
+            "infrastructure": {
+              "readiness": "ready",
+              "commands": [
+                {
+                  "method": "unit_test",
+                  "command": "auto:unit",
+                  "level": "unit"
+                },
+                {
+                  "method": "integration_test",
+                  "command": "auto:integration",
+                  "level": "integration"
+                }
+              ]
+            },
+            "testability": {
+              "level": "automated",
+              "rationale": "The existing Logs viewer tests deterministically exercise process-separated rows."
+            },
+            "riskClassification": "medium",
+            "conventions": {
+              "tdd": "contextual",
+              "requiredMethods": [],
+              "suggestedLevels": [
+                "unit",
+                "integration"
+              ]
+            }
+          },
+          "acceptanceCriteria": [
+            {
+              "id": "ac-1",
+              "description": "Logs displays process lifecycle entries with stable process identity and available run/task/attempt context.",
+              "category": "functional",
+              "verificationMethod": "unit_test",
+              "required": true,
+              "status": "pending",
+              "evidenceArtifactIds": []
+            },
+            {
+              "id": "ac-2",
+              "description": "Existing bounded TaskActivityLog keeps separate process events without cross-attribution and Logs displays them.",
+              "category": "functional",
+              "verificationMethod": "integration_test",
+              "required": true,
+              "status": "pending",
+              "evidenceArtifactIds": []
+            },
+            {
+              "id": "ac-3",
+              "description": "Tests verify rendered process lifecycle and distinct identities for relevant lifecycle cases.",
+              "category": "functional",
+              "verificationMethod": "unit_test",
+              "required": true,
+              "status": "pending",
+              "evidenceArtifactIds": []
+            }
+          ],
+          "affectedPaths": [
+            "packages/runtime/src/agentic/host.ts",
+            "packages/runtime/src/agentic/task-log-viewer.ts",
+            "packages/runtime/test/agentic/task-log-viewer.test.ts"
+          ],
+          "riskLevel": "medium",
+          "requiredVerificationMethods": [
+            "unit_test",
+            "integration_test"
+          ],
+          "suggestedTestLevels": [
+            "unit",
+            "integration"
+          ],
+          "evidenceRequirements": [
+            "Red: fail on unchanged behavior.",
+            "Green: pass same tests.",
+            "Refactor: rerun same tests.",
+            "Independent verification required."
+          ]
+        }
+      }
+    },
+    "tddDecision": {
+      "schemaVersion": 2,
+      "decisionId": "tdd-process-logs",
+      "runId": "run-proposal-fixture",
+      "taskId": "runtime-process-logs",
+      "specId": "spec-proposal-fixture",
+      "mode": "required",
+      "rationale": "Stable process identity and rendered lifecycle events are deterministic behavior; tests are available and required test-first.",
+      "verifiableConditions": [
+        "ac-1 and ac-3 unit tests verify process identity rendering.",
+        "ac-2 integration test verifies process entries remain distinct."
+      ],
+      "changeClassification": "refactoring",
+      "requiresFailingTestFirst": true,
+      "decidedBy": "coordinator",
+      "decidedAt": "2026-10-22T03:45:00.000Z"
+    },
+    "version": 1,
+    "traceabilityTaskIds": [
+      "runtime-process-logs"
+    ],
+    "status": "draft",
+    "createdBy": "coordinator",
+    "createdAt": "2026-10-22T03:45:00.000Z",
+    "updatedAt": "2026-10-22T03:45:00.000Z",
+    "metadata": {
+      "conditionalTdd": {
+        "policyVersion": 1,
+        "taskId": "runtime-process-logs",
+        "taskType": "integration",
+        "changeImpact": {
+          "surfaces": [
+            "integration",
+            "refactoring"
+          ],
+          "behaviorChanged": true,
+          "deterministic": true,
+          "regressionReproducible": true,
+          "securitySensitive": false,
+          "dataMigration": false,
+          "scope": "local"
+        },
+        "infrastructure": {
+          "readiness": "ready",
+          "commands": [
+            {
+              "method": "unit_test",
+              "command": "auto:unit",
+              "level": "unit"
+            },
+            {
+              "method": "integration_test",
+              "command": "auto:integration",
+              "level": "integration"
+            }
+          ]
+        },
+        "testability": {
+          "level": "automated",
+          "rationale": "The existing Logs viewer tests deterministically exercise process-separated rows."
+        },
+        "riskClassification": "medium",
+        "conventions": {
+          "tdd": "contextual",
+          "requiredMethods": [],
+          "suggestedLevels": [
+            "unit",
+            "integration"
+          ]
+        }
+      },
+      "sdd": {
+        "policyVersion": 1,
+        "assessment": {
+          "kind": "feature",
+          "behaviorChange": true,
+          "modules": [
+            "runtime-agentic-logging"
+          ],
+          "securityImpact": false,
+          "publicApiImpact": false,
+          "dataSchemaImpact": false,
+          "architectureImpact": false,
+          "migrationRequired": false,
+          "risk": "medium",
+          "unresolvedQuestions": []
+        },
+        "functionalRequirements": [
+          "Record process lifecycle with stable identity and available task context.",
+          "Render process identity in Logs.",
+          "Keep logging bounded, sanitized and best effort."
+        ],
+        "proposedTestStrategy": "Run exact mapped tests using detected auto runners.",
+        "technicalConstraints": [
+          "Existing journal/viewer only.",
+          "No public contract changes.",
+          "Logging errors cannot affect workflow state."
+        ],
+        "apiDataContracts": [],
+        "risksAndTradeoffs": [
+          "Diagnostic loss on storage error is acceptable; workflow proceeds."
+        ],
+        "traceability": [
+          {
+            "criterionId": "ac-1",
+            "taskIds": [
+              "runtime-process-logs"
+            ]
+          },
+          {
+            "criterionId": "ac-2",
+            "taskIds": [
+              "runtime-process-logs"
+            ]
+          },
+          {
+            "criterionId": "ac-3",
+            "taskIds": [
+              "runtime-process-logs"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "definition": {
+    "schemaVersion": "1",
+    "id": "flow-process-logs",
+    "name": "Process lifecycle logging",
+    "version": "1",
+    "tasks": [
+      {
+        "id": "runtime-process-logs",
+        "title": "Add Runtime process lifecycle logs",
+        "role": "developer",
+        "instruction": "Implement in ownedPaths. Follow red, green, refactor using same tests. No secrets/raw process args; logging best effort.",
+        "acceptanceCriteria": [
+          "ac-1",
+          "ac-2",
+          "ac-3"
+        ],
+        "retry": {
+          "maxAttempts": 1,
+          "strategy": "fixed",
+          "initialDelayMs": 0,
+          "maxDelayMs": 0,
+          "jitter": false
+        },
+        "timeout": {
+          "executionTimeoutMs": 600000,
+          "heartbeatTimeoutMs": 120000,
+          "onTimeout": "block"
+        },
+        "requiresApproval": false,
+        "qualityGates": [],
+        "metadata": {
+          "ownedPaths": [
+            "packages/runtime/src/agentic/host.ts",
+            "packages/runtime/src/agentic/task-log-viewer.ts",
+            "packages/runtime/test/agentic/task-log-viewer.test.ts"
+          ]
+        }
+      }
+    ],
+    "dependencies": [],
+    "qualityGates": [],
+    "maxConcurrency": 1,
+    "failurePolicy": "block",
+    "recovery": {
+      "checkpoint": "task-boundary",
+      "resumeStrategy": "checkpoint-then-replay",
+      "staleExecution": "reconcile"
+    }
+  }
+}

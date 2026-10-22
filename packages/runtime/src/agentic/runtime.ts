@@ -19,7 +19,7 @@ import { taskLogAssignmentContextFromSnapshot, taskLogBusinessTaskId, type TaskL
 import { join } from "node:path";
 import { CONVERSATION_DELIVERY_MAX_ATTEMPTS, DISPATCH_FAILURE_NOTICE_ATTEMPTS, HerdrOutbox, NOT_READY_FAILURE_MS, unwrap } from "./outbox.js";
 import { RoleCapabilityPreflightError, type AgenticRuntimePorts, type Integration, type VerificationPlan } from "./ports.js";
-import type { WorkflowRejection } from "./workflow-rejection.js";
+import { WorkflowProposalRejected, WorkflowRejectionCodeSchema, reportsToUser, type WorkflowRejection } from "./workflow-rejection.js";
 import type { RunFacts } from "./run-watchdog.js";
 import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
 import { nativeMessageFingerprint, NativeRejectionSchema } from "./native-delivery-status.js";
@@ -743,6 +743,7 @@ export class AgenticWorkflowRuntime {
     }
     run.delegationHistory = [...(run.delegationHistory ?? []), run.delegation];
     run.delegation = delegation;
+    delete run.lastWorkflowRejection;
     delete run.definition; delete run.workflowSpec; delete run.baseRevision; delete run.approval; delete run.approvalKind;
     run.tasks = []; run.status = "intake"; delete run.error;
   }
@@ -901,20 +902,47 @@ export class AgenticWorkflowRuntime {
   async watchdogSnapshot(sessionId: string): Promise<(RunFacts & { pendingDecisionRequests: { request: ApprovalRequest; correlationId: string }[] })[]> {
     return this.transaction(async state => state.runs.filter(run => run.delegation.sessionId === sessionId).map(run => this.runFacts(state, run)));
   }
-  /**
-   * Tells Conversation why Runtime refused a workflow proposal. The Coordinator gets the same structured reason from the tool error.
-   * Informational only: nothing is changed or approved. Idempotent per (run, code, reason).
-   */
-  async reportWorkflowRejected(runId: string, rejection: WorkflowRejection): Promise<void> {
+  /** Cache a typed refusal while the Coordinator can still correct its proposal in the same turn. */
+  private recordProposalRejection(state: JournalState, outbox: HerdrOutbox, run: RunRecord, input: WorkflowRejection): boolean {
+    if (run.cancelled || run.supersededBy || TERMINAL_RUN_STATUSES.includes(run.status) || run.definition || run.coreCreated ||
+        run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === run.runId &&
+          !isConversationDelivery(out) && ["sending", "unknown_delivery"].includes(out.status)) ||
+        Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
+        run.approval && (!run.decision || run.decision.approvalId !== run.approval.approvalId)) return false;
+    const rejection: WorkflowRejection = {
+      code: WorkflowRejectionCodeSchema.parse(input.code), reason: redactString(textField(input.reason)).slice(0, 2000),
+      options: strings(input.options).slice(0, 100).map(value => redactString(value).slice(0, 2000)),
+      ...(input.methods === undefined ? {} : { methods: strings(input.methods).slice(0, 100).map(value => redactString(value).slice(0, 2000)) }),
+      ...(input.criteria === undefined ? {} : { criteria: strings(input.criteria).slice(0, 100).map(value => redactString(value).slice(0, 2000)) })
+    };
+    const prior = run.lastWorkflowRejection;
+    if (run.status === "escalated" && run.pendingAction?.actionId !== prior?.actionId) return false;
+    const resumed = prior !== undefined && run.resumeReceipts?.some(receipt => receipt.actionId === prior.actionId);
+    const fingerprint = digest([rejection.code, rejection.reason, rejection.options, rejection.methods ?? [], rejection.criteria ?? []]);
+    if (prior && !resumed && prior.rejectionFingerprint === fingerprint) return false;
+    const episodeNumber = prior ? prior.episodeNumber + (resumed ? 1 : 0) : 1;
+    const sourceMessageId = `rejection-r${revisionOf(run.delegation)}-ep${episodeNumber}-${digest([run.runId, revisionOf(run.delegation), episodeNumber])}`;
+    const actionId = `next-${digest([run.runId, sourceMessageId])}`;
+    const previousStatus = run.status === "escalated" ? run.pendingAction?.previousStatus ?? prior?.previousStatus ?? "planning" : run.status;
+    run.lastWorkflowRejection = {
+      ...rejection, episodeNumber, sourceMessageId, actionId, rejectedAt: this.now(),
+      rejectionFingerprint: fingerprint, previousStatus
+    };
+    if (reportsToUser(rejection)) this.emit(state, outbox, run, "conversation.progress", {
+      kind: "workflow_rejected", runId: run.runId, ...rejection,
+      headline: `Workflow bị từ chối: ${rejection.reason}`, actionId
+    }, `workflow-rejected:${actionId}:${fingerprint}`, "conversation");
+    return true;
+  }
+  /** A rejected proposal is not an admitted workflow; STOP turns its proof into a durable manual blocker. */
+  async recordWorkflowRejected(runId: string, rejection: WorkflowRejection): Promise<void> {
     await this.transaction(async (state, save, _core, outbox) => {
       const run = state.runs.find(item => item.runId === runId);
-      if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) return;
-      this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_rejected", runId, code: rejection.code, reason: rejection.reason,
-        ...(rejection.methods === undefined ? {} : { methods: rejection.methods }), ...(rejection.criteria === undefined ? {} : { criteria: rejection.criteria }),
-        options: rejection.options, headline: `Workflow bị từ chối: ${rejection.reason}` },
-      `workflow-rejected:${digest([runId, rejection.code, rejection.reason])}`, "conversation");
-      await save();
+      if (run && this.recordProposalRejection(state, outbox, run, rejection)) await save();
     });
+  }
+  async reportWorkflowRejected(runId: string, rejection: WorkflowRejection): Promise<void> {
+    return this.recordWorkflowRejected(runId, rejection);
   }
   /** A user-decision notice stayed undisplayed through its resends. Idempotent per approval. */
   async reportWorkflowBlocked(runId: string, approvalId: string, resends: number): Promise<void> {
@@ -1298,15 +1326,18 @@ export class AgenticWorkflowRuntime {
         // its bounded attempt budget carries over from the action this blocker follows, so resume -> blocked cannot loop.
         const capabilityBlocker = /repository|read-only tool|native mutation|exec_command|resource enumeration/i.test(blockage) &&
           state.outbound.some(out => out.message.run_id === run.runId && out.status === "failed" && out.error?.includes(RoleCapabilityPreflightError.name));
+        const staticRunnerBlocker = run.lastWorkflowRejection !== undefined ||
+          /runner_setup_required|no_test_runner_detected|missing_test_mapping|unsupported_verification|policy_violation|cannot bind existing detected|runner mapping|test-runner binding/i.test(blockage);
+        const recoveryKind = capabilityBlocker ? "capability_repair" : staticRunnerBlocker ? "manual" : "auto_resume";
         // Any other Coordinator blocker resumes automatically with backoff on the same inherited budget; a blocker that needs a
         // human answer goes through request_user_decision instead, and a pending decision/approval never auto-resumes (see above).
         run.pendingAction = { actionId: `next-${digest([run.runId, parsed.message_id])}`, kind: "resume_coordinator", owner: "coordinator",
           reason: reason.slice(0, 2000), sourceMessageId: parsed.message_id, createdAt: this.now(),
-          state: "pending", previousStatus: run.status, ...inheritedAutoResume(run), recovery: capabilityBlocker ? "capability_repair" : "auto_resume" };
+          state: "pending", previousStatus: run.status, ...inheritedAutoResume(run), recovery: recoveryKind };
         run.status = "escalated";
         if (!options.notificationAlreadyRecorded) {
           const noticeId = `coordinator-blocked-${digest([run.runId, parsed.message_id])}`;
-          const automatic = !capabilityBlocker && (run.pendingAction.resumeAttempts ?? 0) < AUTO_RESUME_LIMIT;
+          const automatic = recoveryKind === "auto_resume" && (run.pendingAction.resumeAttempts ?? 0) < AUTO_RESUME_LIMIT;
           outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: noticeId, correlation_id: run.delegation.correlationId,
             causation_id: parsed.message_id, run_id: run.runId, sender: { role: "runtime" }, recipient: { role: "conversation" },
             type: "conversation.progress", payload: { kind: "workflow_blocked", runId: run.runId, sdlcStatus: run.status,
@@ -1592,27 +1623,38 @@ export class AgenticWorkflowRuntime {
   private recordCoordinatorNoNextAction(state: JournalState, outbox: HerdrOutbox, run: RunRecord, message: RoleMessage, _delivery: Outbound): void {
     if (run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) return;
     const prior = run.pendingAction;
-    const previousStatus = prior?.previousStatus ?? run.status;
-    const reason = prior?.reason ?? run.error ?? `Coordinator turn ended in ${run.status} without recording a durable next action.`;
-    const sourceMessageId = prior?.kind === "coordinator_continuation" && prior.state === "pending"
-      ? prior.sourceMessageId : message.message_id;
+    let rejection = run.lastWorkflowRejection;
+    if (rejection && run.resumeReceipts?.some(receipt => receipt.actionId === rejection!.actionId && receipt.messageId === message.message_id)) {
+      // A new delivered resumed turn stopped without correcting the proposal. Stop replay
+      // keeps the pending action; a new turn needs a new wake and the inherited budget.
+      const episodeNumber = rejection.episodeNumber + 1;
+      const sourceMessageId = `rejection-r${revisionOf(run.delegation)}-ep${episodeNumber}-${digest([run.runId, revisionOf(run.delegation), episodeNumber])}`;
+      rejection = { ...rejection, episodeNumber, sourceMessageId,
+        actionId: `next-${digest([run.runId, sourceMessageId])}`, rejectedAt: this.now() };
+      run.lastWorkflowRejection = rejection;
+    }
+    const previousStatus = rejection?.previousStatus ?? prior?.previousStatus ?? (run.status === "escalated" ? "planning" : run.status);
+    const reason = rejection ? rejection.reason : (prior?.reason ?? run.error ?? `Coordinator turn ended in ${run.status} without recording a durable next action.`);
+    const sourceMessageId = rejection ? rejection.sourceMessageId : (prior?.kind === "coordinator_continuation" && prior.state === "pending"
+      ? prior.sourceMessageId : message.message_id);
+    const actionId = rejection ? rejection.actionId : `next-${digest([run.runId, sourceMessageId])}`;
     run.error = reason;
     run.status = "escalated";
-    // Automatic, bounded: the budget and backoff anchor carry over from the action this stop follows (resume -> stop cannot loop).
-    run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
+    const recovery = rejection ? "manual" : "auto_resume";
+    run.pendingAction = { actionId, kind: "resume_coordinator", owner: "coordinator",
       reason: reason.slice(0, 2000), sourceMessageId, createdAt: prior?.createdAt ?? this.now(), state: "pending", previousStatus,
       resumeAttempts: prior?.resumeAttempts ?? 0, ...(prior?.lastResumedAt === undefined ? {} : { lastResumedAt: prior.lastResumedAt }),
-      ...inheritedManualResume(run), recovery: "auto_resume" };
+      ...inheritedManualResume(run), recovery };
     const messageId = `coordinator-no-next-action-${digest([run.runId, run.pendingAction.actionId])}`;
     if (state.outbound.some(out => out.message.message_id === messageId)) return;
-    const automatic = (run.pendingAction.resumeAttempts ?? 0) < AUTO_RESUME_LIMIT;
+    const automatic = recovery === "auto_resume" && (run.pendingAction.resumeAttempts ?? 0) < AUTO_RESUME_LIMIT;
     outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: messageId, correlation_id: run.delegation.correlationId,
       causation_id: message.message_id, run_id: message.run_id, sender: { role: "runtime" }, recipient: { role: "conversation" },
       type: "conversation.progress", payload: { kind: "coordinator_no_response", runId: run.runId, owner: "coordinator",
         actionId: run.pendingAction.actionId, reason, blockageReason: reason,
         headline: automatic ? "Coordinator stopped without a workflow next action; Runtime will resume it automatically" : "Coordinator stopped without a workflow next action",
         ...(automatic ? { automaticResume: automaticResumeNotice(run.pendingAction) } : {}),
-        options: ["Khắc phục blocker rồi yêu cầu Coordinator tiếp tục run", "Hủy run"] },
+        options: rejection?.options?.length ? rejection.options : ["Khắc phục blocker rồi yêu cầu Coordinator tiếp tục run", "Hủy run"] },
       artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }));
   }
   /** Coordinator chooses these calls adaptively. No fixed chain of Analyst -> Architect -> Planner. */
@@ -1768,9 +1810,20 @@ export class AgenticWorkflowRuntime {
           acceptanceCriteria: criteria, traceabilityTaskIds: [task.id], metadata: { ...draft.metadata,
             sdd: { ...sdd, traceability: criteria.map(c => ({ criterionId: c.id, taskIds: [task.id] })) },
             conditionalTdd: { ...record(task.metadata?.conditionalTdd ?? draft.metadata?.conditionalTdd), taskId: task.id } } });
+        if (this.ports.validateTaskCommands) {
+          try { this.ports.validateTaskCommands(taskSpec.specification, taskSpec.strategy, ownedPaths); }
+          catch (error) {
+            const rejected = error instanceof WorkflowProposalRejected ? error : new WorkflowProposalRejected({
+              code: "missing_test_mapping", reason: `Task ${task.id} command validation failed: ${redactString(String(error))}`, options: []
+            });
+            if (this.recordProposalRejection(state, outbox, run, rejected.rejection)) await save();
+            throw rejected;
+          }
+        }
         // P15 checks the precise per-task matrix against its graph projection.
         tasks.push({ taskId: task.id, spec: taskSpec, worktrees: [], outboundIds: [] });
       }
+      delete run.lastWorkflowRejection;
       run.definition = definition; run.workflowSpec = workflowSpec; run.tasks = tasks; run.maxIterations = maxIterations;
       // A follow-up run (human changes requested) starts from the parent's delivered head, preset at its creation.
       run.baseRevision ??= textField((await this.ports.policies.git.inspect()).head);
