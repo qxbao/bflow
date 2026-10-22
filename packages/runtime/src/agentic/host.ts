@@ -44,7 +44,8 @@ import { HostDevelopment } from "./host-development.js";
 import { redactString } from "../resilience/redaction.js";
 import { TaskActivityLog } from "./task-activity-log.js";
 import { TaskLogPane } from "./task-log-pane.js";
-import { nativeRoleMessageToolSchema, parseNativeRoleMessage, roleReplyGuidance, specificationToolSchema } from "./role-tool-schema.js";
+import { assessmentFailureSummary } from "./assessment-input.js";
+import { assessmentSpecificationToolSchema, nativeRoleMessageToolSchema, parseNativeRoleMessage, roleReplyGuidance, specificationToolSchema } from "./role-tool-schema.js";
 import { inspectNativeDelivery } from "./native-delivery-status.js";
 import { handleTaskLogTool, taskLogAssignmentContext } from "./task-log-tools.js";
 import { createHostPlatformSession, launchMaterial, type HostAgentObservation, type HostPlatformSession, type StartupProof } from "./host-platform.js";
@@ -974,7 +975,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           if (recordLifecycle) await activityLog.record({ kind: "tool", role, action: `${name}:completed`, ...context, durationMs: Date.now() - startedAt });
           return value;
         } catch (error) {
-          await activityLog.record({ kind: "error", role, action: `${name}:failed`, ...context, outcome: error instanceof Error ? error.name : "HostToolError", durationMs: Date.now() - startedAt });
+          await activityLog.record({ kind: "error", role, action: `${name}:failed`, ...context,
+            outcome: name === "assess" ? assessmentFailureSummary(error) : error instanceof Error ? error.name : "HostToolError", durationMs: Date.now() - startedAt });
           throw error;
         }
       }
@@ -1522,7 +1524,7 @@ export function availableTools(role: AgentRole) {
       options:{type:"array",items:{type:"string",minLength:1,maxLength:200},minItems:2,maxItems:6},
       context:{type:"string",maxLength:4000},expiresInMinutes:{type:"integer",minimum:1,maximum:1440}},required:["runId","taskId","question"]},
     inspect:{properties:{runId:string},required:[]}, report_progress:{properties:{runId:string,headline:string,questions:array},required:["runId","headline"]},
-    assess:{properties:{specification:specificationToolSchema},required:["specification"]},
+    assess:{properties:{specification:assessmentSpecificationToolSchema},required:["specification"]},
     request_specialist:{properties:{runId:string,role:string,objective:string,requiredCapabilities:array},required:["runId","role","objective","requiredCapabilities"]},
     propose_workflow:{properties:{runId:string,specification:specificationToolSchema,definition:object,maxIterations:{type:"integer",minimum:1,maximum:10}},required:["runId","specification","definition"]},
     reconcile_delivery:{properties:{messageId:string},required:["messageId"]}, authorize_implementation:{properties:{runId:string,taskId:string},required:["runId","taskId"]},

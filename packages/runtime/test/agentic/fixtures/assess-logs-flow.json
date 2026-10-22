@@ -1,0 +1,79 @@
+{
+  "specification": {
+    "schemaVersion": 2,
+    "specId": "spec-corr-84992d03b145c04e3f75f6e0ab9",
+    "runId": "run-5d4617de846b87f10b8819005949856193cb7382c1153d91d7776d9af0940ca8",
+    "sessionId": "conv-bf-18ae12a891b37ae326ec",
+    "level": "lightweight",
+    "title": "Mở rộng pane Logs để hiển thị tổng quan flow",
+    "summary": "Mở rộng nội dung log vào Logs pane đang tồn tại, phản ánh các pha và hoạt động của workflow mà không ảnh hưởng điều phối.",
+    "problemStatement": "Logs hiện cần thể hiện tiến trình xuyên suốt workflow và hoạt động liên quan thay vì đầu ra cục bộ của một pane.",
+    "scope": {
+      "inScope": [
+        "Kiểm tra luồng log hiện tại trong Runtime/Pane Manager/CLI",
+        "Bổ sung ghi nhận có cấu trúc vào pane Logs hiện có",
+        "Unit tests về tổng hợp và định tuyến log"
+      ],
+      "outOfScope": [
+        "Tạo pane hoặc destination mới",
+        "Thay đổi orchestration, trạng thái workflow, scheduling hoặc giao thức Herdr ngoài phạm vi log hiện có"
+      ]
+    },
+    "acceptanceCriteria": [
+      {
+        "id": "ac-1",
+        "description": "Dùng lại pane Logs hiện có của Herdr; không tạo pane/log destination mới.",
+        "category": "functional",
+        "verificationMethod": "unit_test",
+        "required": true,
+        "status": "pending",
+        "evidenceArtifactIds": []
+      },
+      {
+        "id": "ac-2",
+        "description": "Log thể hiện được tổng quan tiến trình flow và các chuyển pha/hoạt động liên quan, thay vì chỉ ghi đầu ra cục bộ của một pane.",
+        "category": "functional",
+        "verificationMethod": "unit_test",
+        "required": true,
+        "status": "pending",
+        "evidenceArtifactIds": []
+      },
+      {
+        "id": "ac-3",
+        "description": "Kiểm tra cấu trúc triển khai hiện tại trước khi sửa và tuân thủ kiến trúc đang có.",
+        "category": "functional",
+        "verificationMethod": "unit_test",
+        "required": true,
+        "status": "pending",
+        "evidenceArtifactIds": []
+      },
+      {
+        "id": "ac-4",
+        "description": "Không làm thay đổi hành vi điều phối workflow; có kiểm thử phù hợp cho thay đổi logging.",
+        "category": "functional",
+        "verificationMethod": "unit_test",
+        "required": true,
+        "status": "pending",
+        "evidenceArtifactIds": []
+      }
+    ],
+    "affectedPaths": [
+      "packages/runtime/src",
+      "packages/runtime/test",
+      "packages/pane-manager/src",
+      "packages/pane-manager/test",
+      "apps/cli"
+    ],
+    "createdBy": "coordinator",
+    "createdAt": "2026-10-22T15:22:41.479Z",
+    "updatedAt": "2026-10-22T15:22:41.479Z",
+    "version": 1,
+    "status": "draft",
+    "complexity": "standard",
+    "riskLevel": "low",
+    "traceabilityTaskIds": [
+      "logs-flow"
+    ],
+    "metadata": {}
+  }
+}

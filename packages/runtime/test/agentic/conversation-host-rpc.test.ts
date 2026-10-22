@@ -79,6 +79,10 @@ describe.skipIf(process.platform !== "linux")("Native role schemas and Conversat
     const { draft } = await import("../../../specification/test/fixtures.js");
     const v2 = draft("documentation");
     await expect(coordinatorCall("assess", { specification: v2 })).resolves.toMatchObject({ complexity: "trivial", clarificationRequired: false });
+    await expect(coordinatorCall("assess", { specification: { ...v2, metadata: {} } })).rejects.toThrow("metadata");
+    const assessActivity = (await readFile(join(root, ".bflow/state/agentic/task-activity.jsonl"), "utf8"))
+      .trim().split("\n").map(line => JSON.parse(line));
+    expect(assessActivity.find(entry => entry.action === "assess:failed")?.outcome).toContain("specification.metadata.sdd");
     await expect(coordinatorCall("assess", { specification: { schemaVersion: "1", id: "old-id", description: "old shape", sddLevel: "lightweight", acceptanceCriteria: v2.acceptanceCriteria.map(({ status: _status, evidenceArtifactIds: _ids, ...criterion }) => criterion) } })).rejects.toThrow();
     // A valid [] reaches native delivery. Losing its acknowledgement reserves the original operation;
     // a repeated call must not invoke the plugin again, even after reopening the receipt journal.

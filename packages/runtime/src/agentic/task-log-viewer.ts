@@ -16,7 +16,7 @@ function display(value: unknown): string {
   const at = typeof entry.at === 'string' ? Date.parse(entry.at) : NaN;
   const time = Number.isFinite(at) ? new Date(at).toISOString().slice(11, 19) : '--:--:--';
   const kind = clean(entry.kind, 48).toLowerCase();
-  const outcome = clean(entry.outcome, 48);
+  const outcome = clean(entry.outcome, 120);
   const severity = /error|denied|failed|blocked/.test(`${kind} ${outcome}`.toLowerCase()) ? '!' : /requested|warning|retry|unknown/.test(`${kind} ${outcome}`.toLowerCase()) ? '~' : '·';
   const context = [entry.role && clean(entry.role, 24), entry.runId && `run:${clean(entry.runId, 16)}`, entry.taskId && `task:${clean(entry.taskId, 16)}`, entry.attemptId && `try:${clean(entry.attemptId, 12)}`].filter(Boolean).join(' ');
   const action = clean(entry.action, 100) || clean(entry.kind, 48) || 'activity';

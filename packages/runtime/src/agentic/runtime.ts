@@ -24,6 +24,7 @@ import type { RunFacts } from "./run-watchdog.js";
 import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
 import { nativeMessageFingerprint, NativeRejectionSchema } from "./native-delivery-status.js";
 import { describeValidationError, INVALID_ROLE_MESSAGE_LIMIT, isMessageContentFailure } from "./role-message-feedback.js";
+import { AssessmentSpecificationSchema, assessmentErrorAt } from "./assessment-input.js";
 
 const VERIFICATION_GATE = "p19-independent-task-verification";
 const TERMINAL_RUN_STATUSES: readonly string[] = ["completed", "failed", "cancelled", "escalated"];
@@ -1811,9 +1812,11 @@ export class AgenticWorkflowRuntime {
     });
   }
   async assess(specificationInput: unknown): Promise<JsonValue> {
-    const spec = SpecificationSchema.parse(specificationInput);
+    const spec = AssessmentSpecificationSchema.parse(specificationInput);
     const assessment = record(spec.metadata?.sdd).assessment;
-    const classification = this.ports.policies.classifyChange(assessment, spec.affectedPaths);
+    let classification: ReturnType<AgenticRuntimePorts["policies"]["classifyChange"]>;
+    try { classification = this.ports.policies.classifyChange(assessment, spec.affectedPaths); }
+    catch (error) { return assessmentErrorAt(error, ["metadata", "sdd", "assessment"]); }
     const unresolved = strings(record(assessment).unresolvedQuestions);
     // Only roles with a pane bound in this session can receive request_specialist; the rest would be refused.
     const availableRoles = await this.boundSpecialistRoles(), bound = new Set(availableRoles.map(item => item.role));

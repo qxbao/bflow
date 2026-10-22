@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { RoleMessageSchema, SpecificationSchema } from "@bflow/contracts";
 import { availableTools } from "../../src/agentic/host.js";
 import { parseNativeRoleMessage, roleReplyExample, roleReplyGuidance } from "../../src/agentic/role-tool-schema.js";
+import { ChangeAssessmentSchema } from "../../../specification/src/classification.js";
 
 // These are the schemas actually returned by the provider MCP tools/list path.
 const input = (role: "architect" | "coordinator", name: string) =>
@@ -44,5 +45,20 @@ describe("native role tool schema guidance", () => {
       expect(schema.properties.scope.required).toEqual(["inScope", "outOfScope"]);
       expect(schema.properties.version).toMatchObject({ type: "integer", exclusiveMinimum: 0 });
     }
+  });
+
+  it("advertises assess's required P15 impact object while keeping proposal discovery compatible", () => {
+    const spec = input("coordinator", "assess").properties.specification;
+    expect(spec.required).toContain("metadata");
+    expect(spec.properties.metadata.required).toEqual(["sdd"]);
+    expect(spec.properties.metadata.properties.sdd.required).toEqual(["assessment"]);
+    const assessment = spec.properties.metadata.properties.sdd.properties.assessment;
+    // Detect drift against P15's exported schema without importing the leaf into production Runtime.
+    expect([...assessment.required].sort()).toEqual(Object.keys(ChangeAssessmentSchema.shape).sort());
+    expect(Object.keys(assessment.properties).sort()).toEqual(Object.keys(ChangeAssessmentSchema.shape).sort());
+    expect(assessment.properties.kind.enum).toEqual(ChangeAssessmentSchema.shape.kind.options);
+    expect(assessment.properties.risk.enum).toEqual(ChangeAssessmentSchema.shape.risk.options);
+    expect(assessment.additionalProperties).toBe(false);
+    expect(input("coordinator", "propose_workflow").properties.specification.required).not.toContain("metadata");
   });
 });
