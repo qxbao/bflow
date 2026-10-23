@@ -434,6 +434,32 @@ describe("specialist blockers and run-step isolation", () => {
     expect(blocked[0]!.message.payload).toMatchObject({ reason: "Specialist developer blocked: Missing API token", options: expect.any(Array) });
   });
 
+  it("does not turn a verifier's echo of a Runtime-measured phase failure into a stale run blocker", async () => {
+    const f = await fixture();
+    f.panes.bindings.push(PaneBindingSchema.parse({ ...f.panes.bindings.find(pane => pane.role === "architect")!,
+      bindingId: "binding-qa", role: "qa", agentId: "qa-agent", paneId: "pane-qa", session: { source: "test", kind: "id", value: "session-qa" } }));
+    (f.runtime.ports.roleCapabilities as Record<string, string[]>).qa = ["repository.read"];
+    await f.runtime.queueHerdr(message("phase-red", { type: "verification.requested", recipient: { role: "qa" },
+      payload: { kind: "conditional_evidence", phase: "red", taskId: "implement", implementationAttemptId: "attempt-1", sourceRevision: "a".repeat(40) } }));
+    await f.runtime.flushOutbound();
+    expect((await f.outboundOf("phase-red")).handle?.target.paneId).toBe("pane-qa");
+    // Runtime measured Red itself, released the verifier and already routed the repairable failure to Developer.
+    await f.journal.exclusive(async (state: JournalState, save) => {
+      const out = state.outbound.find(item => item.message.message_id === "phase-red")!;
+      out.status = "released"; out.error = "policy_phase_failed:Red requires an assertion failure";
+      out.phaseFailure = { summary: "Red requires an assertion failure", repairable: true, applied: true };
+      await save();
+    });
+    await f.runtime.receiveHerdr(RoleMessageSchema.parse({ schema_version: 2, message_id: "qa-echo", correlation_id: "correlation",
+      causation_id: "phase-red", run_id: "run-1", sender: { role: "qa", agent_id: "qa-agent", pane_id: "pane-qa" }, recipient: { role: "coordinator" },
+      type: "task.status", payload: { status: "blocked", summary: "Red phase verification failed: repair the tests" }, artifact_references: [],
+      occurred_at: T0, idempotency_key: "qa-echo" }));
+    const after = await f.runtime.inspect("run-1") as unknown as RunRecord;
+    expect(after.error).toBeUndefined();
+    expect(after.pendingAction).toBeUndefined();
+    expect(await f.notices("workflow_blocked")).toHaveLength(0);
+  });
+
   it("records one run's failing step on that run once, while other messages still flush", async () => {
     // A run without a definition cannot be created in Core: its scheduling step throws.
     const f = await fixture({ runs: [run("run-1", "implementing")] });
