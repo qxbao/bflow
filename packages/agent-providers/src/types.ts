@@ -69,7 +69,7 @@ export interface LiveReadinessObservation {
   readonly permissionDenied?: boolean;
 }
 
-export type HostHookEvent = "SessionStart" | "UserPromptSubmit" | "Stop" | "PreToolUse";
+export type HostHookEvent = "SessionStart" | "UserPromptSubmit" | "Stop" | "PreToolUse" | "PreInvocation";
 
 export interface HostMcpServer {
   readonly command: string;
@@ -100,6 +100,8 @@ export interface ProviderAdapterOptions {
   readonly nativeSessionHookCommand?: string;
   /** Trusted Bflow host stdio MCP servers; command must be absolute. Names must not collide with registrations. */
   readonly hostMcpServers?: Readonly<Record<string, HostMcpServer>>;
+  /** Trusted runtime-owned stdio-to-Gateway bridge executable used by Agy when direct HTTP auth interpolation is unavailable. */
+  readonly agyGatewayShimCommand?: HostMcpServer;
   /** Full shell command per native hook event. `SessionStart` here supersedes `nativeSessionHookCommand`. */
   readonly hostHooks?: Readonly<Partial<Record<HostHookEvent, string>>>;
   /** registrationId -> environment variable NAME holding the bearer token of a streamable_http registration. */

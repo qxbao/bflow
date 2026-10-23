@@ -1,3 +1,4 @@
+import { agyStdioHttpCliPath } from "@bflow/mcp-gateway";
 import { join } from "node:path";
 import type { AgentProviderId, AgentRole } from "@bflow/contracts";
 import {
@@ -67,7 +68,13 @@ export function createProviderAdapterFactory(options: ProviderAdapterFactoryOpti
       ...(context.hostHooks !== undefined ? { hostHooks: context.hostHooks } : {}),
       ...(context.mcpTokenEnvironmentNames !== undefined ? { mcpTokenEnvironmentNames: context.mcpTokenEnvironmentNames } : {}),
       ...(context.isolatorEnvironment !== undefined ? { isolatorEnvironment: { ...context.isolatorEnvironment } } : {}),
-      ...(context.codexBackendUrl !== undefined ? { codexBackendUrl: context.codexBackendUrl } : {})
+      ...(context.codexBackendUrl !== undefined ? { codexBackendUrl: context.codexBackendUrl } : {}),
+      ...(provider === "agy" ? {
+        agyGatewayShimCommand: {
+          command: process.execPath,
+          args: [agyStdioHttpCliPath]
+        }
+      } : {})
     };
     switch (provider) {
       case "claude":

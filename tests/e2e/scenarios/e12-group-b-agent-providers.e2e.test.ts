@@ -378,15 +378,21 @@ exit 0
         expect(activatedHealth.ok).toBe(true);
         if (activatedHealth.ok) {
           expect(activatedHealth.value.stage).toBe("activated");
-          if (provider === "agy") {
-            expect(activatedHealth.value.status).toBe("unsupported");
-            expect(activatedHealth.value.checks.find((c) => c.check === "native_binding")?.code).toBe(
-              "native_binding_unsupported"
-            );
-          } else {
-            expect(activatedHealth.value.status).toBe("ready");
-            expect(activatedHealth.value.checks.every((c) => c.status === "passed")).toBe(true);
-          }
+          expect(activatedHealth.value.status).toBe("ready");
+          expect(activatedHealth.value.checks.every((c) => c.status === "passed")).toBe(true);
+        }
+        const rejectedAttestation = await fullRegistry.checkHealth({
+          schemaVersion: CURRENT_PLATFORM_SCHEMA_VERSION,
+          environment: fullEnv,
+          stage: "activated",
+          launchProfile: profile,
+          launchAttestation: { ...attestation, signature: { ...attestation.signature, value: Buffer.alloc(64).toString("base64") } },
+          requestedAt: new Date(Date.now() + 50).toISOString()
+        });
+        expect(rejectedAttestation.ok).toBe(true);
+        if (rejectedAttestation.ok) {
+          expect(rejectedAttestation.value.status).toBe("blocked");
+          expect(rejectedAttestation.value.checks.find(c => c.check === "native_binding")?.status).toBe("failed");
         }
       }
     );

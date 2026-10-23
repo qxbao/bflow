@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { PassThrough } from "node:stream";
+import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -1831,6 +1832,7 @@ rl.on('line', (line) => {
     // ignore parse error on invalid line
   }
 });
+
 `;
       fs.writeFileSync(scriptPath, serverCode, { mode: 0o644 });
 
@@ -2270,6 +2272,78 @@ rl.on('line', (line) => {
       expect(res.ok).toBe(false);
     } finally {
       await cleanup();
+    }
+  });
+});
+
+describe("Agy stdio to authenticated Gateway HTTP bridge", () => {
+  it("initializes, lists and calls tools through the real Gateway without retrying an unknown call", async () => {
+    const calls: string[] = [];
+    const driverFactory = new ProgrammableDriverFactory(() => ({
+      onCallTool: async input => {
+        calls.push(input.tool);
+        if (input.tool === "compute") throw new Error("fixture upstream failure after dispatch");
+        return ok({ isError: false, content: [{ type: "text", text: "gateway-echo-result" }] });
+      }
+    }));
+    const gateway = new BflowSharedMCPGateway({ serviceManager: new DefaultMCPServiceManager({ driverFactory }) });
+    gateway.registry.registerService(makeServiceDefinition("svc-agy-bridge"));
+    const server = new StreamableHttpGatewayServer({ gateway, host: "127.0.0.1", port: 0 });
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "bflow-agy-bridge-test-"));
+    let child: ReturnType<typeof spawn> | undefined;
+    try {
+      const base = await server.start();
+      const registration = makeClientRegistration("agy-bridge", "svc-agy-bridge", {
+        provider: "agy", role: "developer", allowedTools: ["echo", "compute"],
+        scope: makeScope("session", { sessionId: "agy-bridge-session" }) as any
+      });
+      const registered = await gateway.register(registration);
+      expect(registered.ok).toBe(true);
+      const token = gateway.secretStore.getClientTokenByRegistration(registration.registrationId);
+      expect(token).toBeDefined();
+
+      const entry = path.join(path.dirname(path.dirname(new URL(import.meta.url).pathname)), "dist", "agy-stdio-http-cli.js");
+      child = spawn(process.execPath, [entry, `${base}/mcp`, registration.registrationId, "BFLOW_GATEWAY_TOKEN", JSON.stringify(["svc-agy-bridge"])], {
+        env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: root, BFLOW_GATEWAY_TOKEN: token! },
+        stdio: ["pipe", "pipe", "pipe"]
+      });
+      let buffer = "";
+      let stderr = "";
+      const pending = new Map<string | number, { resolve: (value: any) => void }>();
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", chunk => {
+        buffer += chunk;
+        for (;;) {
+          const end = buffer.indexOf("\n"); if (end < 0) break;
+          const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
+          let message: any; try { message = JSON.parse(line); } catch { continue; }
+          const waiter = pending.get(message.id); if (waiter) { pending.delete(message.id); waiter.resolve(message); }
+        }
+      });
+      child.stderr.setEncoding("utf8"); child.stderr.on("data", chunk => { stderr += chunk; });
+      const request = (id: number, method: string, params?: Record<string, unknown>) => new Promise<any>((resolve, reject) => {
+        const timer = setTimeout(() => { pending.delete(id); reject(new Error(`Agy bridge response timed out for ${method}`)); }, 5000);
+        pending.set(id, { resolve: value => { clearTimeout(timer); resolve(value); } });
+        child!.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, ...(params ? { params } : {}) })}\n`);
+      });
+
+      const initialized = await request(1, "initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "agy-probe", version: "1.4.5" } });
+      expect(initialized.result.protocolVersion).toBeDefined();
+      child.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n');
+      const listed = await request(2, "tools/list");
+      expect(listed.result.tools.map((tool: any) => tool.name)).toEqual(["echo", "compute"]);
+
+      const completed = await request(3, "tools/call", { name: "echo", arguments: { text: "fixture" } });
+      expect(completed.result).toMatchObject({ isError: false, content: [{ text: "gateway-echo-result" }] });
+      const unknown = await request(4, "tools/call", { name: "compute", arguments: { value: 1 } });
+      expect(unknown.result.isError).toBe(true);
+      expect(unknown.result.content[0].text).toContain("unknown");
+      expect(calls).toEqual(["echo", "compute"]);
+      expect(stderr).not.toContain(token!);
+    } finally {
+      child?.kill("SIGTERM");
+      await server.stop();
+      await fs.promises.rm(root, { recursive: true, force: true });
     }
   });
 });

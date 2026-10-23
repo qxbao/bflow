@@ -175,6 +175,7 @@ describe("profile-selected provider environments", () => {
       expect(result.ok).toBe(true);
       expect(calls.some((call) => call.args.includes("--version"))).toBe(true);
       expect(calls.some((call) => call.args.includes("--help"))).toBe(true);
+      // Every provider execution probe receives exactly the selected profile environment.
       expect(calls.some((call) => call.args.includes("ping"))).toBe(true);
       for (const call of calls) {
         expect(call.inheritEnvironment).toBe(false);
@@ -190,7 +191,8 @@ describe("profile-selected provider environments", () => {
         });
       }
       if (provider === "agy") {
-        expect(calls.find((call) => call.args.includes("ping"))?.env?.["HOME"]).toBe(selected.home);
+        expect(calls.find((call) => call.args.includes("models"))?.env?.["HOME"]).toBe(selected.home);
+        expect(calls.some((call) => call.args.includes("ping"))).toBe(true);
         expect(await readFile(join(selected.agyHome, "settings.json"), "utf8").catch(() => "")).toBe("");
         expect(await readFile(join(stateDirectory, "agy-home", ".gemini", "antigravity-cli", "settings.json"), "utf8").catch(() => "")).toBe("");
       }

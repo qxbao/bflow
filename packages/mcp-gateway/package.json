@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./agy-stdio-http-cli": {
+      "types": "./dist/agy-stdio-http-cli.d.ts",
+      "import": "./dist/agy-stdio-http-cli.js"
     }
   },
   "files": [

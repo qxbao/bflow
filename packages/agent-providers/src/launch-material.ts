@@ -2,7 +2,7 @@ import { isAbsolute } from "node:path";
 import { SafeArgumentSchema } from "@bflow/contracts";
 import type { HostHookEvent, ProviderAdapterOptions } from "./types.js";
 
-export const HOST_HOOK_EVENTS: readonly HostHookEvent[] = ["SessionStart", "UserPromptSubmit", "Stop", "PreToolUse"];
+export const HOST_HOOK_EVENTS: readonly HostHookEvent[] = ["SessionStart", "UserPromptSubmit", "Stop", "PreToolUse", "PreInvocation"];
 
 const HOST_SERVER_NAME_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
 const TOKEN_ENVIRONMENT_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
@@ -32,6 +32,7 @@ export interface LaunchMaterialInput {
   readonly options: ProviderAdapterOptions;
   readonly supportsNativeHooks: boolean;
   readonly supportsMcpConfigFile: boolean;
+  readonly supportedHostHookEvents?: readonly HostHookEvent[];
   readonly renderStreamableHttpServer: StreamableHttpServerRenderer;
 }
 
@@ -109,6 +110,9 @@ export function resolveLaunchMaterial(input: LaunchMaterialInput): ResolvedLaunc
   }
 
   const hooks: Partial<Record<HostHookEvent, readonly unknown[]>> = {};
+  const supportedEvents = new Set(input.supportedHostHookEvents ?? HOST_HOOK_EVENTS.filter(event => event !== "PreInvocation"));
+  const unsupportedRequested = HOST_HOOK_EVENTS.filter(event => options.hostHooks?.[event] !== undefined && !supportedEvents.has(event));
+  if (unsupportedRequested.length > 0) return unsupported("native_hooks_unsupported", `Provider does not support native hooks required for ${unsupportedRequested.join(", ")}`);
   const requestedHostHooks = HOST_HOOK_EVENTS.filter((event) => options.hostHooks?.[event] !== undefined);
   if (requestedHostHooks.length > 0 && !supportsNativeHooks) {
     return unsupported(

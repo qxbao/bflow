@@ -285,6 +285,7 @@ describe("DefaultPlatformReadinessService", () => {
         now,
         perProvider: {
           claude: { executablePath: binaryPath, allowTestFilesystemOwnership: true },
+          agy: { executablePath: binaryPath, allowTestFilesystemOwnership: true },
           codex: { executablePath: binaryPath, allowTestFilesystemOwnership: true,
             codexHomeDirectory: join(baseDir, "test-codex-home"),
             codexHookApprovalPath: join(identity.stateDirectory, "codex-hook-approvals.json") }
@@ -1106,6 +1107,30 @@ describe("DefaultPlatformReadinessService", () => {
     const developer = await service.prepareDeveloper(identity, requirement({ provider: "codex" }));
     expect(developer.ok).toBe(true);
     if (developer.ok) expect(developer.value.launch.env).toMatchObject({ HOME: home, CODEX_HOME: codexHome });
+  });
+
+  it("launches Agy with a session and role private HOME outside untrusted role environment variables", async () => {
+    const { service } = buildService({ gateway: false, providerFactory: contextProviderFactory(() => undefined) });
+    const result = await service.prepareSession(identity, [requirement({ provider: "agy" })]);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.report.ready, JSON.stringify(result.value.report.roles)).toBe(true);
+    const launch = result.value.launches[0]!;
+    const home = join(launch.environment.stateDirectory, "agy-home", launch.role);
+    expect(launch.launch.env).toMatchObject({ HOME: home, XDG_CONFIG_HOME: join(home, ".config") });
+    expect(launch.environment.environmentVariables).not.toHaveProperty("HOME");
+    expect(launch.environment.environmentVariables).not.toHaveProperty("XDG_CONFIG_HOME");
+  });
+
+  it("prepares native Agy specialist launch material through the real adapter", async () => {
+    const { service } = buildService({ gateway: false });
+    const result = await service.prepareSession(identity, [requirement({ provider: "agy" })]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.report.ready).toBe(true);
+    expect(result.value.launches).toHaveLength(1);
+    expect(result.value.report.roles[0]?.checks.some(check => check.code === "native_binding_unsupported")).toBe(false);
   });
 
   it("disables Claude updates for permanent and dynamic role processes", async () => {

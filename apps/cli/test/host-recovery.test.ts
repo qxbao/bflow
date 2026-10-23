@@ -80,7 +80,7 @@ describe.skipIf(process.platform === "win32")("persistent host recovery", () => 
     expect(fs.existsSync(join(input.repository.root, ".bflow/state/host"))).toBe(false);
   });
 
-  it("cleans up a preparation timeout with no pane receipt before any role dispatch", async () => {
+  it("preserves offline session ownership when provider preparation times out before starting Herdr", async () => {
     const input = await repository();
     const runner = new HerdrProcesses();
     const up = vi.fn();
@@ -97,12 +97,14 @@ describe.skipIf(process.platform === "win32")("persistent host recovery", () => 
     };
     const lifecycle = new EnvironmentLifecycle(input.repository.root, { runner, integration,
       providerOverrides: { codex: { available: true, authenticated: true }, claude: { available: true, authenticated: true } } });
-    await expect(lifecycle.up(500)).rejects.toThrow(/timed out.*Automatic cleanup completed successfully/s);
+    await expect(lifecycle.up(500)).rejects.toThrow(/timed out.*Automatic cleanup was not attempted because startup had not changed the session/s);
     expect(prepareRoles).toHaveBeenCalledOnce();
     expect(up).not.toHaveBeenCalled();
-    expect(quiesce).toHaveBeenCalledOnce();
+    expect(quiesce).not.toHaveBeenCalled();
+    expect(integration.manager.down).not.toHaveBeenCalled();
+    expect(integration.shutdownHost).not.toHaveBeenCalled();
     expect(runner.session(input.repository.sessionName).running).toBe(false);
-    expect(JSON.parse(await readFile(join(input.repository.root, ".bflow/state/operation.json"), "utf8")).phase).toBe("down");
+    await expect(readFile(join(input.repository.root, ".bflow/state/operation.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("preserves uncertain pane dispatch when no recoverable receipt exists", async () => {

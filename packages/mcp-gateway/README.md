@@ -23,6 +23,12 @@ MCP Gateway cung cấp một hub kết nối ghép kênh thông lượng cao cho
 
 ## Các thành phần cốt lõi
 
+`agy-stdio-http-cli` là client shim cho Agy: cấu hình chỉ chứa endpoint,
+registration, service IDs và tên biến môi trường token. Shim giữ session HTTP có
+xác thực, kiểm tra correlation response/call và không tự gửi lại mutation khi kết
+quả `unknown`. Shim không thay Herdr, không cấp quyền role và không chứng minh
+provider đã activated-ready.
+
 1. **`BflowSharedMCPGateway`** (`src/gateway.ts`):
    Bộ phân xử trung tâm triển khai `SharedMCPGateway`. Quản lý đăng ký client, bearer token, scope ủy quyền tool, semaphore concurrency, call ledger, exclusive resource lease với fencing token đơn điệu, và reconciliation lời gọi.
 2. **`StreamableHttpGatewayServer`** (`src/http-server.ts`):

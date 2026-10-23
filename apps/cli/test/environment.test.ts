@@ -247,7 +247,7 @@ describe("P12 repository environment lifecycle", () => {
     expect(runner.running.has(repository.sessionName)).toBe(false);
     expect(runner.running.has("other-repository")).toBe(true);
   });
-  linuxIt("uses supported Agy models for up and doctor while retaining the host readiness gate", async () => {
+  linuxIt("prepares Agy readiness before starting a new Herdr server", async () => {
     const path = join(dir, ".bflow/config.yml");
     const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
     config.environment.roles = config.environment.roles.map(role => ({ ...role, cli: "agy" }));
@@ -259,16 +259,57 @@ describe("P12 repository environment lifecycle", () => {
         : request.args.join(" ") === "--version" ? { exitCode: 0, stdout: "agy 1.4.2", stderr: "" }
         : { exitCode: 2, stdout: "", stderr: `Error: unexpected argument "${request.args[0]}".` }));
     const prepareRoles = vi.fn(async () => { throw new Error("host readiness sentinel"); });
+    const quiesce = vi.fn(async () => ({ ok: true, value: undefined }));
     const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, prepareRoles,
-      runtime: mockRuntime(), quiesce: async () => ({ ok: true, value: undefined }) } });
+      runtime: mockRuntime([activeRun]), quiesce } });
     await expect(composed.up()).rejects.toThrow("host readiness sentinel");
     expect(prepareRoles).toHaveBeenCalledOnce();
     expect(fixture.manager.up).not.toHaveBeenCalled();
+    expect(runner.requests.some(request => request.args[0] === "server")).toBe(false);
+    expect(fixture.manager.down).not.toHaveBeenCalled();
+    expect(quiesce).not.toHaveBeenCalled();
+    await expect(readFile(join(dir, ".bflow/state/operation.json"))).rejects.toThrow();
     const report = await composed.doctor();
     expect(report.checks.find(check => check.checkId === "auth-agy")?.status).toBe("passed");
     const requests = runner.requests.filter(request => request.executable === "agy");
     expect(requests.filter(request => request.args.join(" ") === "models")).toHaveLength(2);
     expect(requests.some(request => request.args[0] === "auth" || request.args[0] === "status")).toBe(false);
+  });
+  linuxIt("preserves a saved manifest and active run when offline provider preparation fails", async () => {
+    const saved = fixture.create(); saved.activeRunIds = [activeRun.runId];
+    await mkdir(join(dir, ".bflow/state"), { recursive: true, mode: 0o700 });
+    await writeFile(join(dir, ".bflow/state/session.json"), JSON.stringify(saved));
+    const before = await readFile(join(dir, ".bflow/state/session.json"), "utf8");
+    const prepareRoles = vi.fn(async () => { throw new Error("Agy native capability unavailable"); });
+    const quiesce = vi.fn(async () => ({ ok: true, value: undefined }));
+    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, prepareRoles,
+      runtime: mockRuntime([activeRun]), quiesce } });
+
+    await expect(composed.up()).rejects.toThrow("Agy native capability unavailable");
+
+    expect(runner.requests.some(request => request.args[0] === "server")).toBe(false);
+    expect(fixture.manager.up).not.toHaveBeenCalled();
+    expect(fixture.manager.down).not.toHaveBeenCalled();
+    expect(quiesce).not.toHaveBeenCalled();
+    expect(await readFile(join(dir, ".bflow/state/session.json"), "utf8")).toBe(before);
+    await expect(readFile(join(dir, ".bflow/state/operation.json"))).rejects.toThrow();
+  });
+  linuxIt("prepares provider roles before starting Herdr on a new session", async () => {
+    const order: string[] = [];
+    const prepareRoles = vi.fn(async () => { order.push("prepare"); });
+    const original = runner.run.bind(runner);
+    vi.spyOn(runner, "run").mockImplementation(async request => {
+      if (request.executable === "herdr" && request.args[0] === "server") order.push("server");
+      return original(request);
+    });
+    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, prepareRoles, runtime: mockRuntime() } });
+
+    const result = await composed.up();
+
+    expect(result.status).toBe("up");
+    expect(prepareRoles).toHaveBeenCalledOnce();
+    expect(fixture.manager.up).toHaveBeenCalledOnce();
+    expect(order).toEqual(["prepare", "server"]);
   });
   linuxIt.each([
     ["mixed model list and policy denial", 0, "gemini-3.8-flash-high\tGemini 3.8 Flash\n", "blocked by workspace policy", "agent provider 'agy' is blocked"],
@@ -338,7 +379,7 @@ describe("P12 repository environment lifecycle", () => {
     expect(json.error.message).toBe(failure.message);
     expect(original.message).toBe(message);
   });
-  linuxIt("automatically shuts down when the composed host readiness preflight blocks pane startup", async () => {
+  linuxIt("preserves the composed host without creating Herdr when readiness preflight blocks startup", async () => {
     const path = join(dir, ".bflow/config.yml");
     const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
     const input = { repository, config, env: process.env };
@@ -354,9 +395,11 @@ describe("P12 repository environment lifecycle", () => {
     };
     const composed = new EnvironmentLifecycle(dir, { runner, openIntegration: async () =>
       openPaneManagerEnvironment(input, runner, async () => host) });
-    await expect(composed.up()).rejects.toThrow(/Provider readiness is not satisfied.*missing provider authentication.*Automatic cleanup completed successfully/s);
+    await expect(composed.up()).rejects.toThrow(/Provider readiness is not satisfied.*missing provider authentication/s);
     expect(host.prepare).toHaveBeenCalledOnce();
-    expect(host.shutdown).toHaveBeenCalledOnce();
+    expect(host.shutdown).not.toHaveBeenCalled();
+    expect(host.quiesce).not.toHaveBeenCalled();
+    expect(runner.requests.some(request => request.args[0] === "server")).toBe(false);
     expect(fixture.manager.up).not.toHaveBeenCalled();
     expect(runner.running.has(repository.sessionName)).toBe(false);
   });

@@ -2,10 +2,14 @@ import type {
   AgentEnvironment,
   AgentProviderDescriptor
 } from "@bflow/contracts";
+import { SafeArgumentSchema } from "@bflow/contracts";
+import { isAbsolute } from "node:path";
 import { BaseProviderAdapter } from "./base-adapter.js";
+import type { ResolvedLaunchMaterial } from "./launch-material.js";
 import { compileProviderPermissions } from "./permissions.js";
 import type {
   DetectedProviderCapabilities,
+  HostHookEvent,
   ProviderAdapterOptions
 } from "./types.js";
 
@@ -33,7 +37,7 @@ export class AgyProviderAdapter extends BaseProviderAdapter {
     ],
     mcpTransports: ["stdio", "streamable_http"],
     supportsUnattended: false,
-    supportsNativeBinding: false
+    supportsNativeBinding: true
   };
 
   constructor(options?: ProviderAdapterOptions) {
@@ -53,8 +57,61 @@ export class AgyProviderAdapter extends BaseProviderAdapter {
     return probe;
   }
 
-  protected override supportsMcpConfigFile(capabilities: DetectedProviderCapabilities): boolean {
-    return capabilities.supportedFlags.has("--mcp-config");
+  protected override supportsMcpConfigFile(_capabilities: DetectedProviderCapabilities): boolean {
+    // Agy discovers mcp_config.json under the process HOME; it has no --mcp-config flag.
+    return true;
+  }
+
+  protected override renderStreamableHttpMcpServer(endpoint: string, tokenEnvironmentName: string): Record<string, unknown> | undefined {
+    const shim = this.options.agyGatewayShimCommand;
+    const registration = this.options.mcpRegistrations?.find(item =>
+      item.connection.transport === "streamable_http" && item.connection.endpoint === endpoint &&
+      this.options.mcpTokenEnvironmentNames?.[item.registrationId] === tokenEnvironmentName);
+    if (!shim || !registration || !isAbsolute(shim.command)) return undefined;
+    const args = [
+      ...shim.args,
+      endpoint,
+      registration.registrationId,
+      tokenEnvironmentName,
+      JSON.stringify(registration.serviceIds)
+    ];
+    if (args.some(argument => !SafeArgumentSchema.safeParse(argument).success)) return undefined;
+    const requiredTokens = new Set(Object.values(this.options.mcpTokenEnvironmentNames ?? {}));
+    const clearedEnvironment = Object.fromEntries(Object.keys(this.options.isolatorEnvironment ?? {})
+      .filter(name => /^[A-Z_][A-Z0-9_]*$/.test(name) && /TOKEN|SECRET|API_KEY|PASSWORD|CREDENTIAL|NODE_OPTIONS|LD_PRELOAD|PYTHONPATH/.test(name) && !requiredTokens.has(name))
+      .map(name => [name, ""]));
+    return { command: shim.command, args, ...(Object.keys(clearedEnvironment).length ? { env: clearedEnvironment } : {}) };
+  }
+
+  protected override resolveHostLaunchMaterial(capabilities: DetectedProviderCapabilities): ResolvedLaunchMaterial {
+    if (this.options.hostHooks?.UserPromptSubmit !== undefined) {
+      return {
+        mcpServers: {},
+        hooks: {},
+        failure: {
+          kind: "unsupported",
+          code: "native_hooks_unsupported",
+          message: "Agy does not provide a physical UserPromptSubmit event; Conversation Agy cannot establish trusted human input"
+        }
+      };
+    }
+    const resolved = super.resolveHostLaunchMaterial(capabilities);
+    if (resolved.failure) return resolved;
+    const hooks: Partial<Record<HostHookEvent, readonly unknown[]>> = {};
+    const flatHandlers = (event: HostHookEvent): unknown[] => (resolved.hooks[event] ?? []).flatMap(value => {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) return [];
+      const group = value as { hooks?: unknown };
+      return Array.isArray(group.hooks) ? group.hooks : [];
+    });
+    const sessionStart = flatHandlers("SessionStart");
+    if (sessionStart.length) hooks.SessionStart = sessionStart;
+    const stop = flatHandlers("Stop");
+    if (stop.length) hooks.Stop = stop;
+    const preInvocation = flatHandlers("PreInvocation");
+    if (preInvocation.length) hooks.PreInvocation = preInvocation;
+    const preToolUse = flatHandlers("PreToolUse");
+    if (preToolUse.length) hooks.PreToolUse = [{ matcher: ".*", hooks: preToolUse }];
+    return { ...resolved, hooks };
   }
 
   protected override async compileArgv(
@@ -83,6 +140,17 @@ export class AgyProviderAdapter extends BaseProviderAdapter {
     }
 
     const argv: string[] = [...permResult.flags];
+
+    if (Object.values(this.options.hostHooks ?? {}).some(command => typeof command === "string" && command.length > 0)) {
+      if (!capabilities.supportedFlags.has("--prompt-interactive")) {
+        return {
+          argv: [],
+          unsupportedCode: "invalid_flag",
+          unsupportedMessage: "Antigravity CLI does not support --prompt-interactive required to establish trusted Bflow startup hooks"
+        };
+      }
+      argv.push("--prompt-interactive", `[bflow startup ${environment.environmentId}] Reply only pong. Do not use tools or start a workflow.`);
+    }
 
     if (capabilities.supportedFlags.has("--mcp-config")) {
       argv.push("--mcp-config", configFiles.mcpConfigFile);

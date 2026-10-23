@@ -1,3 +1,4 @@
+import { resolveNativeAgyPrompt } from "./native-agy-prompt.js";
 import type {
   AgentSessionLocator,
   AgentTransportState,
@@ -1190,7 +1191,8 @@ export class RolePaneManager {
         // Launch profiles are not rewritten: any provider's profile must already reference the original role prompt.
         const original = await readBuiltinRolePrompt(spec.topologyRole);
         if (!original) return validationError(`Required original prompt is missing for ${spec.topologyRole}`);
-        const promptSource = await launchPromptSource(launch.argv, original.prompt);
+        const promptSource = await launchPromptSource(launch.argv, original.prompt) ?? (launch.provider === "agy" && launch.env.HOME
+          ? await resolveNativeAgyPrompt(launch.env.HOME, spec.topologyRole === "chat" ? "conversation" : "coordinator", original.prompt) : undefined);
         if (promptSource === undefined)
           return validationError(`Launch profile for ${spec.topologyRole} must reference the original Bflow role prompt; rebuild the launch profile.`);
         originalPromptSource = promptSource;

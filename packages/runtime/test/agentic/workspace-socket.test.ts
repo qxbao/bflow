@@ -6,7 +6,7 @@ import { expect, it } from "vitest";
 import { SessionManifestSchema } from "@bflow/contracts";
 import { openAgenticWorkspace } from "../../dist/agentic/workspace.js";
 
-it("composes the named Herdr socket for a dynamic Developer's env-bearing pane", async () => {
+it.each(["codex", "agy"])("composes platform Developer launch without rebuilding legacy files for %s Coordinator", async (coordinatorKind) => {
   const root = await realpath(await mkdtemp("/tmp/bflow-workspace-socket-"));
   const sessionId = "workspace-socket", socketPath = join(root, "herdr.sock");
   const requests: { method: string; params: Record<string, unknown> }[] = [];
@@ -41,11 +41,15 @@ else console.log(JSON.stringify({running:true,session:process.env.HERDR_SESSION,
     const manifest = SessionManifestSchema.parse({ schemaVersion: 2, sessionId, projectName: "fixture", workspaceRoot: root,
       herdrWorkspaceId: "w1", herdrTabId: "w1:t1", status: "up", conversationSessionId: "conversation", activeRunIds: [],
       panes: ["conversation", "coordinator"].map((role, index) => ({ schemaVersion: 2, bindingId: `binding-${role}`, sessionId,
-        role, agentId: role, paneId: `w1:p${index + 1}`, workspaceId: "w1", tabId: "w1:t1", provider: "herdr", agentKind: "codex",
+        role, agentId: role, paneId: `w1:p${index + 1}`, workspaceId: "w1", tabId: "w1:t1", provider: "herdr", agentKind: role === "coordinator" ? coordinatorKind : "codex",
         cwd: root, isolationMode: "dedicated_pane", readOnlyWorkspace: true, permanent: true, transportState: "idle", boundAt: at })),
       attachTarget: { role: "conversation", paneId: "w1:p1" }, createdAt: at, updatedAt: at });
     await writeFile(join(manifestDirectory, `${sessionId}.manifest.json`), JSON.stringify(manifest));
+    const mcpConfigFile = join(root, "legacy-mcp.json"), hooksSettingsFile = join(root, "legacy-hooks.json");
+    await writeFile(mcpConfigFile, JSON.stringify({ mcpServers: {} }));
+    await writeFile(hooksSettingsFile, JSON.stringify({ hooks: {} }));
     workspace = await openAgenticWorkspace({ repositoryPath: root, sessionId, herdrBinary: binary,
+      roleLaunch: { developer: { systemPrompt: "Legacy descriptor must not replace a prepared platform launch.", mcpConfigFile, hooksSettingsFile } },
       roleCapabilities: {}, taskChecks: [], workflowChecks: [], deterministicGates: [],
       authenticateMessage: async () => false, authenticateResult: async () => false, authenticateEvidence: async () => false,
       authenticateGateResult: async () => false, authorizeHuman: async () => false,

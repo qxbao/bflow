@@ -1,4 +1,5 @@
 import { lstat, mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import {
   AgentHealthCheckSchema,
   canonicalReceiptJson,
@@ -622,9 +623,20 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     const profileLaunchEnvironment = isolatorProfile === undefined
       ? undefined
       : { ...isolatorProfile.environment };
-    const launchEnvironment = isolatorProfile === undefined
-      ? codexLaunchEnvironment
-      : { ...(codexLaunchEnvironment ?? {}), ...profileLaunchEnvironment };
+    const launchEnvironmentValues: Record<string, string> = {
+      ...(codexLaunchEnvironment ?? {}),
+      ...(profileLaunchEnvironment ?? {})
+    };
+    if (requirement.provider === "agy") {
+      const privateHome = join(environment.value.stateDirectory, "agy-home", requirement.role);
+      launchEnvironmentValues["HOME"] = privateHome;
+      launchEnvironmentValues["XDG_CONFIG_HOME"] = join(privateHome, ".config");
+      launchEnvironmentValues["XDG_DATA_HOME"] = join(privateHome, ".local", "share");
+      launchEnvironmentValues["XDG_STATE_HOME"] = join(privateHome, ".local", "state");
+      launchEnvironmentValues["XDG_CACHE_HOME"] = join(privateHome, ".cache");
+      launchEnvironmentValues["PATH"] = `${join(privateHome, "bin")}:${process.env["PATH"] ?? "/usr/bin:/bin"}`;
+    }
+    const launchEnvironment = Object.keys(launchEnvironmentValues).length > 0 ? launchEnvironmentValues : undefined;
     const context: ProviderAdapterContext = {
       ...(rolePrompt !== undefined ? { rolePrompt } : {}),
       ...(requirement.model !== undefined ? { model: requirement.model } : {}),
