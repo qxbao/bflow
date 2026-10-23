@@ -1029,3 +1029,8 @@ Native timeout reporting rechecks the owned immutable intent and signed ACK befo
 again after recording uncertainty. An ACK that races a stale watchdog snapshot clears
 only its exact pending delivery; a missing ACK still blocks dispatch. This never resends
 the envelope, synthesizes an ACK, or substitutes transport evidence for a gate verdict.
+
+While an independent Herdr gate awaits its reply, a non-overlapping dispatch pass keeps
+its original queued request live if pane readiness or a delivery hold recovers. It uses
+the existing Outbox checks and backoff within the original gate deadline; it does not
+create a new invocation, retry an unknown delivery, or extend verification budgets.

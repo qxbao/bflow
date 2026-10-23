@@ -1048,6 +1048,31 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
       await ticking; expect((await f.inspect()).tasks[0].cycle.status).toBe("passed");
     } catch (error) { await ticking; throw error; }
   });
+  it("dispatches an already queued review when readiness returns while the verifier is awaiting its reply", async () => {
+    const f = await fixture({ remoteReview: true });
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    f.panes.busy.add("reviewer");
+    const definition = (f.ports as any).taskChecks.find((check: any) => check.id === "review");
+    const context = { runId: "run-1", taskId: "implement", attemptId: "ready-review", artifacts: [], input: { scope: "task" },
+      definition: { ...definition, timeout: { ...definition.timeout, executionTimeoutMs: 20_000 } } };
+    const control = new AbortController(), waiting = f.runtime.herdrQualityGate("review").evaluate(context as any, { signal: control.signal });
+    waiting.catch(() => undefined);
+    const requests = async () => ((await f.runtime.inspect()) as any).outbound.filter((out: any) => out.message.type === "verification.requested");
+    try {
+      await expect.poll(async () => (await requests())[0]?.status, { timeout: 10_000 }).toBe("queued");
+      await expect.poll(async () => typeof (await requests())[0]?.notReadySince, { timeout: 10_000 }).toBe("string");
+      f.panes.busy.delete("reviewer");
+      // No second scheduler tick or operator resume: the gate wait must keep the existing outbox live.
+      await expect.poll(async () => (await requests())[0]?.status, { timeout: 4_000 }).toBe("accepted");
+      expect(await requests()).toHaveLength(1);
+      const [request] = await requests();
+      await f.runtime.receiveHerdr(f.envelope("review.verdict", { gateId: "review", runId: "run-1", taskId: "implement", evaluationId: randomUUID(),
+        status: "passed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString() },
+        { sender: { role: "reviewer", agent_id: request.handle.target.agentId, pane_id: request.handle.target.paneId }, causation_id: request.message.message_id }));
+      await expect(waiting).resolves.toMatchObject({ ok: true, value: { status: "passed" } });
+    } finally { control.abort(); await waiting.catch(() => undefined); }
+  });
+
   it("re-requests a Reviewer check after a late verdict instead of reusing evidence that predates the retry", async () => {
     const f = await fixture({ remoteReview: true });
     await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();

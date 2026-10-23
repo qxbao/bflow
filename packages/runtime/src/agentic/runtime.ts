@@ -945,6 +945,8 @@ export class AgenticWorkflowRuntime {
       options?.signal?.addEventListener("abort", abort, { once: true });
       if (options?.signal?.aborted) abort();
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let dispatchTimer: ReturnType<typeof setInterval> | undefined;
+      let dispatching = false;
       try {
         await this.transaction(async (state, save, _core, outbox) => {
           const run = this.run(state, context.runId); this.live(run);
@@ -1009,11 +1011,22 @@ export class AgenticWorkflowRuntime {
           await save();
         });
         await this.flushOutbound();
+        // tick() awaits this gate. Keep its existing queued request dispatchable when a delivery hold or pane readiness
+        // recovers during the wait; Outbox retains all lease/fence, uncertainty, cancellation and backoff checks.
+        dispatchTimer = setInterval(() => {
+          if (dispatching || this.quiesced || options?.signal?.aborted) return;
+          dispatching = true;
+          void (async () => {
+            const queued = await this.journal.exclusive(async state => state.outbound.some(out => out.message.message_id === key && out.status === "queued"));
+            if (queued && !this.quiesced && !options?.signal?.aborted) await this.flushOutbound();
+          })().catch(rejectReply).finally(() => { dispatching = false; });
+        }, 1_000);
+        dispatchTimer.unref();
         const outcome = await Promise.race([reply, new Promise<never>((_resolve, reject) => {
           timer = setTimeout(() => reject(new Error("Herdr verification reply timeout; delivery remains reconcilable")), context.definition.timeout.executionTimeoutMs);
         })]);
         return { ok: true, value: outcome };
-      } finally { if (timer) clearTimeout(timer); options?.signal?.removeEventListener("abort", abort); this.gateWaiters.delete(key); }
+      } finally { if (timer) clearTimeout(timer); if (dispatchTimer) clearInterval(dispatchTimer); options?.signal?.removeEventListener("abort", abort); this.gateWaiters.delete(key); }
     } };
   }
   async inspect(runId?: string): Promise<JsonValue> {
