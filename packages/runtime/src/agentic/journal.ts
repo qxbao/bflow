@@ -171,7 +171,8 @@ export interface Outbound {
   /** Stop observations made for a cancelled execution; bounded so an unresponsive pane is reported instead of polled forever. */
   cancelObservations?: number;
   phaseFailureEvidence?: ArtifactReference;
-  phaseFailure?: { summary: string; repairable: boolean; applied: boolean };
+  /** `retryAuthorized`: an explicit resume allows re-measuring the same revision after a non-repairable (infrastructure) failure. */
+  phaseFailure?: { summary: string; repairable: boolean; applied: boolean; retryAuthorized?: boolean };
   /** A control notice borrows its task assignment's lease; it never owns capacity. */
   parentAssignmentId?: string;
   /** Private outbox position captured before this Coordinator turn is physically dispatched. */
@@ -312,6 +313,7 @@ function parseState(input: unknown, repository: string): JournalState {
     if (out.phaseFailure) {
       textField(out.phaseFailure.summary);
       if (typeof out.phaseFailure.repairable !== "boolean" || typeof out.phaseFailure.applied !== "boolean" ||
+          out.phaseFailure.retryAuthorized !== undefined && (out.phaseFailure.retryAuthorized !== true || out.phaseFailure.repairable) ||
           out.message.type !== "verification.requested" || record(out.message.payload).kind !== "conditional_evidence")
         throw new Error("Invalid private policy failure outcome");
     }

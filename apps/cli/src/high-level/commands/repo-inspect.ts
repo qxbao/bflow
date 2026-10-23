@@ -44,7 +44,7 @@ function parseWorktrees(text: string) {
       branch: fields.get("branch")?.replace(/^refs\/heads\//, "") ?? null,
       detached: fields.has("detached"),
       locked: fields.has("locked"),
-      bflowManaged: (fields.get("worktree") ?? "").includes("/bflow-git/trees/")
+      bflowManaged: ["/bflow-git/trees/", "/.bflow/state/worktrees/"].some(marker => (fields.get("worktree") ?? "").includes(marker))
     };
   });
 }

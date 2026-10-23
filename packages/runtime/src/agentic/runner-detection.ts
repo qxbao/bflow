@@ -103,6 +103,8 @@ export function parseTscBuildArgs(script: string): string[] | undefined {
   if (tokens[0] !== "tsc") return undefined;
   const rest = tokens.slice(1);
   if (rest.length === 0) return [];
+  // `tsc -p <tsconfig>` is the common single-project form (e.g. the portable example); it takes exactly one path.
+  if ((rest[0] === "-p" || rest[0] === "--project") && rest.length === 2) return isSafeRelativePath(rest[1]!) ? rest : undefined;
   if (rest[0] !== "-b" && rest[0] !== "--build") return undefined;
   if (rest.slice(1).some(path => !isSafeRelativePath(path))) return undefined;
   return rest;
