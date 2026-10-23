@@ -304,6 +304,22 @@ export class HerdrOutbox {
       this.markNotReady(out); return;
     }
     this.markReady(out);
+    const reviewSource = this.state.outbound.find(item => item.reviewReplacement?.replacementMessageId === out.message.message_id);
+    if (reviewSource) {
+      const original = reviewSource.handle?.target;
+      const blockers: string[] = [];
+      if (!run || run.cancelled || run.status !== "verifying") blockers.push("run_not_verifying");
+      if (run?.nativeDeliveries?.length || this.state.outbound.some(item => item.message.run_id === run?.runId &&
+          (item.status === "unknown_delivery" || item.status === "sending" && !isConversationDelivery(item)))) blockers.push("unreconciled_delivery");
+      if (run?.approval && run.decision?.approvalId !== run.approval.approvalId || Object.values(run?.userDecisions ?? {}).some(item => item.status === "pending")) blockers.push("pending_human_gate");
+      if (!original?.session || !pane.session || pane.role !== "reviewer" || !pane.readOnlyWorkspace || pane.paneId === original.paneId || digest(pane.session) === digest(original.session)) blockers.push("replacement_native_identity");
+      if (out.message.type !== "verification.requested" || digest(out.message.payload) !== reviewSource.reviewReplacement!.contextDigest) blockers.push("context_changed");
+      if (digest(out.capabilities) !== digest(reviewSource.capabilities)) blockers.push("capabilities_changed");
+      if (blockers.length) {
+        out.error = `Authorized workflow review replacement waits: ${blockers.join(", ")}`; await this.save(); return;
+      }
+      if (out.error?.startsWith("Authorized workflow review replacement waits")) delete out.error;
+    }
     // A continuation is separately leased, and can only wake the exact native session holding the unchanged review.
     if (record(out.message.payload).kind === "resume_verification_request") {
       const source = this.state.outbound.find(item => item.message.message_id === record(out.message.payload).sourceMessageId);

@@ -417,6 +417,21 @@ và endpoint không có thẩm quyền riêng tư được pin vẫn chặn reco
 Hành vi này không di dời cấu hình lưu trữ Runtime legacy tường minh và không
 tuyên bố nghiệm thu provider/Herdr trên mọi filesystem.
 
+Một workflow Reviewer đã nhận request chắc chắn nhưng chưa có verdict có thể được thay
+bằng đúng một invocation read-only mới sau lệnh vật lý `replace workflow review <message-id>`
+qua Conversation. Lệnh này cần quyền riêng của người dùng; resume/design/task/delivery approval
+không cấp quyền đó. Chỉ áp dụng trên workflow có các task đã kiểm chứng, writer đã release,
+Core task succeeded, TDD evidence đầy đủ và commit/spec tích hợp không đổi. Các gate và
+unknown delivery vẫn chặn; số lần thay bị giới hạn theo maxIterations, không reset counter.
+
+Quyết định lưu marker private journal **v4** trước khi ngừng waiter cục bộ. Binary cũ phải từ
+chối v4; marker không sửa request/handle/status gốc, không khẳng định provider đã dừng hoặc
+review cũ đã/chưa xảy ra và không tạo ACK/verdict. Mọi ingress/replay theo causation gốc và
+completion từ observation cũ đều bị fence. Invocation mới dùng đúng context/capability, có
+request ID liên kết riêng, chỉ dispatch tới native Reviewer read-only khác qua preflight/lease
+hiện hữu. Request mới chưa rõ delivery không được gửi lại qua restart. Đây là bảo đảm từ
+source và kiểm thử hồi quy cục bộ; không tự chứng minh một run live đã hoàn tất.
+
 Journal P19 riêng tư nằm dưới `<selected-state>/agentic/journal`. Nó
 dùng tuần tự hóa trong cùng process cộng với `flock` của Linux, fsync file, rename nguyên tử và
 fsync thư mục. Nó bị ràng buộc với repository và từ chối state hỏng/không được hỗ trợ.

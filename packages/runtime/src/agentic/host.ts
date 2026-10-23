@@ -341,6 +341,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     return json({ ok: true, value: await requireWorkspace().runtime.fenceNativeDiagnostic({ operationId,
       sessionId: turn.conversationSessionId, userMessageId: turn.messageId, userId: turn.userId }) });
   }, async (turn, operationId) => json({ ok: true, value: await requireWorkspace().runtime.retirePolicyPhase({ operationId,
+    sessionId: turn.conversationSessionId, userMessageId: turn.messageId, userId: turn.userId }) }),
+  async (turn, operationId) => json({ ok: true, value: await requireWorkspace().runtime.replaceWorkflowReview({ operationId,
     sessionId: turn.conversationSessionId, userMessageId: turn.messageId, userId: turn.userId }) }));
   const nativeSessions = new Map<string, {role: AgentRole; sessionId: string}>();
   try { for (const [pane, value] of Object.entries(record(JSON.parse(await readFile(join(configuration.directory, "native-sessions.json"), "utf8"))))) {
@@ -579,6 +581,15 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           digest(turn.binding.session) === digest(humanHookProvenance.binding.session) &&
           turn.binding.paneId === humanHookProvenance.binding.paneId && turn.binding.role === "conversation" &&
           digest(turn.content) === humanHookProvenance.promptDigest && turn.content.trim() === `retire policy phase ${authority.operationId}`;
+      },
+      authorizeReviewReplacement: async authority => {
+        if (!humanHookProvenance || humanHookProvenance.messageId !== authority.userMessageId ||
+            humanHookProvenance.userId !== authority.userId || humanHookProvenance.conversationSessionId !== authority.sessionId) return false;
+        const turn = (await receipts.conversationTurns()).find(item => item.messageId === authority.userMessageId);
+        return turn !== undefined && turn.userId === authority.userId && turn.conversationSessionId === authority.sessionId &&
+          digest(turn.binding.session) === digest(humanHookProvenance.binding.session) &&
+          turn.binding.paneId === humanHookProvenance.binding.paneId && turn.binding.role === "conversation" &&
+          digest(turn.content) === humanHookProvenance.promptDigest && turn.content.trim() === `replace workflow review ${authority.operationId}`;
       },
       authorizeNativeDiagnosticFence: async authority => {
         if (!humanHookProvenance || humanHookProvenance.messageId !== authority.userMessageId ||

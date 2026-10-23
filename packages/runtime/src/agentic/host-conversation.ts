@@ -3,7 +3,7 @@ import { JsonValueSchema, PaneBindingSchema, type JsonValue, type PaneBinding } 
 import { digest, json, record } from "./journal.js";
 import { redactString } from "../resilience/redaction.js";
 import { HostReceiptJournal, parseConversationResumeRequest, type TrustedConversationTurn } from "./host-receipts.js";
-import { parseNativeDiagnosticFenceCommand, parsePolicyPhaseRetirementCommand } from "./native-diagnostic-fence.js";
+import { parseNativeDiagnosticFenceCommand, parsePolicyPhaseRetirementCommand, parseWorkflowReviewReplacementCommand } from "./native-diagnostic-fence.js";
 
 interface ConversationIntakePort {
   getContext(): Promise<unknown>;
@@ -26,7 +26,8 @@ export class HostConversationIntake {
   private pending: Promise<unknown> = Promise.resolve();
   constructor(readonly receipts: HostReceiptJournal, private readonly conversation: () => ConversationIntakePort,
     private readonly fenceDiagnostic?: (turn: TrustedConversationTurn, operationId: string) => Promise<JsonValue>,
-    private readonly retirePolicyPhase?: (turn: TrustedConversationTurn, operationId: string) => Promise<JsonValue>) {}
+    private readonly retirePolicyPhase?: (turn: TrustedConversationTurn, operationId: string) => Promise<JsonValue>,
+    private readonly replaceWorkflowReview?: (turn: TrustedConversationTurn, operationId: string) => Promise<JsonValue>) {}
   private exclusive<T>(work: () => Promise<T>): Promise<T> {
     const result = this.pending.catch(() => undefined).then(work);
     this.pending = result;
@@ -40,7 +41,7 @@ export class HostConversationIntake {
   private async recoverableTurns(binding: PaneBinding): Promise<TrustedConversationTurn[]> {
     const turns: TrustedConversationTurn[] = [];
     for (const turn of await this.receipts.conversationTurns()) {
-      if (identity(turn.binding) !== identity(binding) || parseConversationResumeRequest(turn.content) || (parseNativeDiagnosticFenceCommand(turn.content) || parsePolicyPhaseRetirementCommand(turn.content)) ||
+      if (identity(turn.binding) !== identity(binding) || parseConversationResumeRequest(turn.content) || (parseNativeDiagnosticFenceCommand(turn.content) || parsePolicyPhaseRetirementCommand(turn.content) || parseWorkflowReviewReplacementCommand(turn.content)) ||
           await this.receipts.conversationDecision(turn.messageId) !== undefined ||
           await this.receipts.conversationApprovalFailure(turn.messageId) !== undefined) continue;
       if (await this.receipts.wasConversationTurnNudged(turn)) turns.push(turn);
@@ -67,14 +68,15 @@ export class HostConversationIntake {
       const saved = await this.receipts.conversationDecision(turn.messageId);
       if (saved?.result !== undefined) return this.reply(binding, { messageId: turn.messageId, requiresConversationDecision: false, result: saved.result });
       const phaseRetirement = parsePolicyPhaseRetirementCommand(trusted.content);
-      const operationId = parseNativeDiagnosticFenceCommand(trusted.content) ?? phaseRetirement;
+      const reviewReplacement = parseWorkflowReviewReplacementCommand(trusted.content);
+      const operationId = parseNativeDiagnosticFenceCommand(trusted.content) ?? phaseRetirement ?? reviewReplacement;
       if (operationId !== undefined) {
-        const intent = json({ intent: phaseRetirement ? "trusted_policy_phase_retirement" : "trusted_native_diagnostic_fence", operationId });
+        const intent = json({ intent: reviewReplacement ? "trusted_workflow_review_replacement" : phaseRetirement ? "trusted_policy_phase_retirement" : "trusted_native_diagnostic_fence", operationId });
         if (saved && digest(saved.decision) !== digest(intent)) throw new Error("Conflicting physical diagnostic fence command");
         await this.receipts.recordConversationIntent(turn.messageId, intent);
         let result: JsonValue;
         try {
-          const apply = phaseRetirement ? this.retirePolicyPhase : this.fenceDiagnostic;
+          const apply = reviewReplacement ? this.replaceWorkflowReview : phaseRetirement ? this.retirePolicyPhase : this.fenceDiagnostic;
           if (!apply) throw new Error("This host does not support this physical fence command");
           result = json(await apply(trusted, operationId));
         } catch (error) {
@@ -137,7 +139,7 @@ export class HostConversationIntake {
       if (await this.receipts.isConversationRuntimeNudge(binding)) return undefined;
       const turn = (await this.receipts.conversationTurns()).filter(value => identity(value.binding) === identity(binding)).at(-1);
       const latest = turn ? await this.receipts.conversationDecision(turn.messageId) : undefined;
-      if (turn && (parseNativeDiagnosticFenceCommand(turn.content) || parsePolicyPhaseRetirementCommand(turn.content))) return undefined;
+      if (turn && (parseNativeDiagnosticFenceCommand(turn.content) || parsePolicyPhaseRetirementCommand(turn.content) || parseWorkflowReviewReplacementCommand(turn.content))) return undefined;
       if (turn && latest?.result === undefined) {
         // An ordinary intent is not a committed correction/cancellation; retain its exact retry ahead of older work.
         if (await this.receipts.conversationApprovalFailure(turn.messageId) === undefined &&
@@ -159,7 +161,7 @@ export class HostConversationIntake {
       const turn = args.messageId === undefined ? turns.filter(value => identity(value.binding) === identity(binding)).at(-1)
         : turns.find(value => value.messageId === args.messageId);
       if (!turn) throw new Error(args.messageId === undefined ? "No trusted user turn has been recorded for this Conversation pane" : "Unknown trusted user turn");
-      if ((parseNativeDiagnosticFenceCommand(turn.content) || parsePolicyPhaseRetirementCommand(turn.content))) throw new Error("Diagnostic fencing requires the physical user hook; model decisions cannot authorize it");
+      if ((parseNativeDiagnosticFenceCommand(turn.content) || parsePolicyPhaseRetirementCommand(turn.content) || parseWorkflowReviewReplacementCommand(turn.content))) throw new Error("Diagnostic fencing requires the physical user hook; model decisions cannot authorize it");
       const messageId = turn.messageId;
       if (identity(turn.binding) !== identity(binding)) throw new Error("Conversation decision pane/native session changed");
       if (await this.receipts.conversationApprovalFailure(messageId) !== undefined && await this.receipts.conversationDecision(messageId) === undefined)

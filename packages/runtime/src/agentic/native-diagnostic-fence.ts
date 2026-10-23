@@ -28,3 +28,8 @@ export function parseNativeDiagnosticFenceCommand(content: string): string | und
 export function parsePolicyPhaseRetirementCommand(content: string): string | undefined {
   return /^retire policy phase ([A-Za-z0-9][A-Za-z0-9._:-]{0,199})$/u.exec(content.trim())?.[1];
 }
+
+/** Exact physical command only; prose/quotes never authorize another verifier invocation. */
+export function parseWorkflowReviewReplacementCommand(content: string): string | undefined {
+  return /^replace workflow review ([A-Za-z0-9][A-Za-z0-9._:-]{0,199})$/u.exec(content.trim())?.[1];
+}

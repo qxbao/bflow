@@ -79,6 +79,7 @@ export interface AgenticPolicies {
 }
 export interface AgenticRuntimePorts {
   /** Physical Conversation hook only; not an agent tool or an approval inferred by a model. */
+  authorizeReviewReplacement?: (authority: import("./native-diagnostic-fence.js").NativeDiagnosticFenceAuthority) => Promise<boolean>;
   authorizePolicyPhaseRetirement?: (authority: import("./native-diagnostic-fence.js").NativeDiagnosticFenceAuthority) => Promise<boolean>;
   hasPolicyPhaseReceipt?: (request: RoleMessage) => Promise<boolean>;
   authorizeNativeDiagnosticFence?(input: import("./native-diagnostic-fence.js").NativeDiagnosticFenceAuthority): Promise<boolean>;

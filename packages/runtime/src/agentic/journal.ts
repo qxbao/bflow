@@ -175,6 +175,9 @@ export interface Outbound {
   cancelObservations?: number;
   phaseRetirement?: { operationId: string; sessionId: string; userMessageId: string; userId: string;
     blockedReplyId: string; decidedAt: string; resumeAuthorizedBy?: string | undefined; disposition: "retired_without_measurement_claim" };
+  /** Physical permission to cease waiting on one workflow review. The original request/outcome stays intact. */
+  reviewReplacement?: { operationId: string; sessionId: string; userMessageId: string; userId: string; decidedAt: string;
+    contextDigest: string; replacementMessageId: string; disposition: "replaced_without_verdict_claim" };
   phaseFailureEvidence?: ArtifactReference;
   /** `retryAuthorized`: an explicit resume allows re-measuring the same revision after a non-repairable (infrastructure) failure. */
   phaseFailure?: { summary: string; repairable: boolean; applied: boolean; retryAuthorized?: boolean };
@@ -190,7 +193,7 @@ export interface Outbound {
   leaseRelease?: ReleaseAgentLeaseRequest;
 }
 export interface JournalState {
-  version: 1 | 2 | 3; repository: string; runs: RunRecord[]; outbound: Outbound[];
+  version: 1 | 2 | 3 | 4; repository: string; runs: RunRecord[]; outbound: Outbound[];
   /** "rejected" is terminal and carries Runtime's reason: the message was refused by admission and must never be retried. */
   inbox: { message: RoleMessage; status: "received" | "applied" | "rejected"; reason?: string }[];
   pendingCore: AppendEventsRequest[];
@@ -204,7 +207,7 @@ export function isConversationDelivery(out: Outbound): boolean {
 /** Private storage codec; exported schemas validate every persisted boundary value. */
 function parseState(input: unknown, repository: string): JournalState {
   const root = record(input);
-  if ((root.version !== 1 && root.version !== 2 && root.version !== 3) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
+  if ((root.version !== 1 && root.version !== 2 && root.version !== 3 && root.version !== 4) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
   for (const key of ["runs", "outbound", "inbox", "pendingCore", "pendingVerifications"]) if (!Array.isArray(root[key])) throw new Error(`Invalid journal ${key}`);
   const state = root as unknown as JournalState;
   for (const run of state.runs) {
@@ -333,10 +336,21 @@ function parseState(input: unknown, repository: string): JournalState {
     if (out.phaseRetirement) {
       const retirement = z.object({ operationId: z.string().min(1), sessionId: z.string().min(1), userMessageId: z.string().min(1), userId: z.string().min(1),
         blockedReplyId: z.string().min(1), decidedAt: IsoDateTimeSchema, resumeAuthorizedBy: z.string().min(1).optional(), disposition: z.literal("retired_without_measurement_claim") }).strict().parse(out.phaseRetirement);
-      if (state.version !== 3 || retirement.operationId !== out.message.message_id || out.phaseFailure ||
+      if (state.version < 3 || retirement.operationId !== out.message.message_id || out.phaseFailure ||
           out.message.type !== "verification.requested" || record(out.message.payload).kind !== "conditional_evidence" || !out.handle)
         throw new Error("Invalid retired policy phase");
       out.phaseRetirement = retirement;
+    }
+    if (out.reviewReplacement) {
+      const replacement = z.object({ operationId: z.string().min(1), sessionId: z.string().min(1), userMessageId: z.string().min(1), userId: z.string().min(1),
+        decidedAt: IsoDateTimeSchema, contextDigest: z.string().regex(/^[a-f0-9]{64}$/), replacementMessageId: z.string().min(1),
+        disposition: z.literal("replaced_without_verdict_claim") }).strict().parse(out.reviewReplacement);
+      const context = record(out.message.payload), configuration = record(record(context.definition).configuration);
+      if (state.version < 4 || replacement.operationId !== out.message.message_id || out.message.type !== "verification.requested" || !out.handle ||
+          out.status !== "released" || context.taskId !== "workflow-verification" || record(context.input).scope !== "workflow" || configuration.kind !== "review" || configuration.role !== "reviewer" ||
+          replacement.contextDigest !== digest(out.message.payload) || replacement.replacementMessageId !== `review-replacement-${digest([out.message.run_id, replacement.operationId, replacement.userMessageId, replacement.contextDigest])}` ||
+          !state.runs.some(run => run.runId === out.message.run_id && run.delegation.sessionId === replacement.sessionId)) throw new Error("Invalid workflow review replacement");
+      out.reviewReplacement = replacement;
     }
     if (out.phaseFailureEvidence) out.phaseFailureEvidence = ArtifactReferenceSchema.parse(out.phaseFailureEvidence);
     if (out.phaseFailure) {

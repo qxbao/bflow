@@ -409,9 +409,11 @@ export class HostVerification {
   async inspectReview(binding: PaneBinding, input: unknown) {
     if (!["reviewer", "qa", "tester"].includes(binding.role)) throw new Error("Independent verification role required");
     const args = record(input), state = record(await this.runtime().inspect());
-    const out = (state.outbound as Record<string, unknown>[]).find(item => item.handle && record(record(item.handle).target).paneId === binding.paneId &&
+    const out = (state.outbound as Record<string, unknown>[]).find(item => item.handle && record(record(item.handle).target).paneId === binding.paneId && record(record(item.handle).target).agentId === binding.agentId &&
+      digest(record(record(item.handle).target).session) === digest(binding.session) && ["accepted", "released"].includes(String(item.status)) &&
       record(item.message).message_id === args.messageId && record(item.message).type === "verification.requested");
     if (!out) throw new Error("No verification request assigned to this pane");
+    if (out.reviewReplacement) throw new Error("Replaced workflow review cannot create another observation");
     let context = QualityGateContextSchema.parse(record(out.message).payload);
     const details = record(context.input), config = record(context.definition.configuration);
     if (config.kind !== "review" || config.role !== binding.role) throw new Error("Review role mismatch");
@@ -442,6 +444,10 @@ export class HostVerification {
     const pending = stored ? { binding: stored.binding, context: stored.context, observation: this.parseCapture(stored.observation) } : this.reviews.get(id);
     if (!pending || digest(this.bindingIdentity(pending.binding)) !== digest(this.bindingIdentity(binding))) throw new Error("Review observation belongs to another pane or is missing");
     const context = QualityGateContextSchema.parse(pending.context), configuration = record(context.definition.configuration), details = record(context.input);
+    const state = record(await this.runtime().inspect());
+    if ((state.outbound as Record<string, unknown>[]).some(out => out.reviewReplacement && out.handle &&
+        record(record(out.handle).target).paneId === pending.binding.paneId && digest(record(record(out.handle).target).session) === digest(pending.binding.session) && digest(record(out.message).payload) === digest(context)))
+      throw new Error("Replaced workflow review cannot complete a stored observation");
     if (configuration.kind !== "review" || configuration.role !== binding.role) throw new Error("Review role mismatch");
     const criteria = this.judgments(args.criteria, configuration.criterionIds as string[]);
     const evaluationId = `host-review-${digest([id, this.bindingIdentity(binding), context])}`;

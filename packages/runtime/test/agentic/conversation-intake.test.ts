@@ -448,3 +448,19 @@ it("retires a policy phase only through its physical hook, keeps a separate idem
   expect(await intake().receive(f.binding, f.turn("quoted-retire", 'Explain "retire policy phase phase-old"'))).toMatchObject({ requiresConversationDecision: true });
   expect(calls).toBe(1);
 });
+
+it("requires an exact physical Conversation turn for a workflow review replacement, separate from all approvals", async () => {
+  const f = await fixture(); let calls = 0;
+  const intake = () => new HostConversationIntake(f.journal(), () => f.port, undefined, undefined, async (turn, operationId) => {
+    calls++; expect(operationId).toBe("gate-old-review"); expect(turn.content).toBe("replace workflow review gate-old-review");
+    return { ok: true, value: { disposition: "replaced_without_verdict_claim", originalOutcome: "unknown" } };
+  });
+  const result = await intake().receive(f.binding, f.turn("physical-review-replacement", "replace workflow review gate-old-review"));
+  expect(result).toMatchObject({ requiresConversationDecision: false, result: { ok: true } });
+  expect(await intake().receive(f.binding, f.turn("physical-review-replacement", "replace workflow review gate-old-review"))).toEqual(result);
+  expect(calls).toBe(1); expect(f.applied).toHaveLength(0); expect(await f.journal().humanDecisions()).toHaveLength(0);
+  await expect(intake().decide(f.binding, { messageId: "physical-review-replacement", decision: { intent: "conversation_only", directReply: "Approved" } })).rejects.toThrow(/physical/);
+  for (const [id, content] of [["quoted-replacement", 'Explain "replace workflow review gate-old-review"'], ["mixed-replacement", "replace workflow review gate-old-review and approve delivery"]])
+    expect(await intake().receive(f.binding, f.turn(id!, content!))).toMatchObject({ requiresConversationDecision: true });
+  expect(calls).toBe(1);
+});

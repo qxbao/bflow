@@ -393,7 +393,7 @@ export class AgenticWorkflowRuntime {
     // `received` is the durable inbox write-ahead before semantic application. The envelope was parsed and authenticated
     // before that write. Reapply all business validators, deferring blocked/terminal runs until an authorized resume.
     const received = await this.transaction(async state => state.inbox.filter(item => item.status === "received" &&
-        (isCancellationHandoff(item.message) || !state.runs.some(run => run.runId === item.message.run_id && (run.cancelled ||
+        (isCancellationHandoff(item.message) || state.outbound.some(out => out.reviewReplacement && out.message.message_id === item.message.causation_id) || !state.runs.some(run => run.runId === item.message.run_id && (run.cancelled ||
           TERMINAL_RUN_STATUSES.includes(run.status) && !this.acceptsPausedNativeReply(state, run, item.message) &&
           !(run.status === "escalated" && isConversationContext(item.message))))))
       .map(item => RoleMessageSchema.parse(item.message)));
@@ -948,7 +948,13 @@ export class AgenticWorkflowRuntime {
                 item.message.sender.role === prior.message.recipient.role && item.message.sender.agent_id === prior.handle.target.agentId &&
                 item.message.sender.pane_id === prior.handle.target.paneId));
           };
-          for (let attempt = 1; settled(key); attempt++) key = `gate-${digest([context, attempt])}`;
+          for (let attempt = 1, traversed = 0; ; ) {
+            if (++traversed > state.outbound.length + 1) throw new Error("Review invocation recovery chain is invalid");
+            const replaced = state.outbound.find(item => item.message.message_id === key)?.reviewReplacement;
+            if (replaced) { if (replaced.contextDigest !== digest(context)) throw new Error("Review replacement context changed"); key = replaced.replacementMessageId; continue; }
+            if (!settled(key)) break;
+            key = `gate-${digest([context, attempt++])}`;
+          }
           this.gateWaiters.set(key, { runId: context.runId, accept: finish, reject: rejectReply });
           const unanswered = state.outbound.find(out => out.message.message_id === key);
           if (unanswered) {
@@ -979,8 +985,14 @@ export class AgenticWorkflowRuntime {
             }
             return;
           }
+          const recoverySource = state.outbound.find(item => item.reviewReplacement?.replacementMessageId === key);
+          if (recoverySource) {
+            const current = unwrap(await this.ports.panes.getRoleBinding(role)), old = recoverySource.handle!.target;
+            if (!current?.session || current.paneId === old.paneId || digest(current.session) === digest(old.session))
+              throw new Error("Authorized review replacement requires a distinct verified native session");
+          }
           outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: key, correlation_id: run.delegation.correlationId,
-            run_id: run.runId, sender: { role: "coordinator" }, recipient: { role }, type: "verification.requested",
+            run_id: run.runId, ...(recoverySource ? { causation_id: recoverySource.message.message_id } : {}), sender: { role: "coordinator" }, recipient: { role }, type: "verification.requested",
             payload: context, artifact_references: context.artifacts, occurred_at: this.now(), idempotency_key: key }), role,
             `check-${digest([context.taskId, context.definition.id, context.attemptId])}`, context.attemptId!, role === "reviewer" ? ["review"] : role === "tester" ? ["testing"] : ["verification"]);
           await save();
@@ -1323,6 +1335,11 @@ export class AgenticWorkflowRuntime {
           if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) throw new Error(`Run is ${run.status}; informational context cannot reopen it`);
           this.wakeCoordinator(state, outbox, run, message);
           inbox.status = "applied"; await save(); return json({ accepted: true, informational: true });
+        }
+        const replacedReview = state.outbound.find(out => out.message.message_id === message.causation_id && out.reviewReplacement);
+        if (replacedReview) {
+          inbox.status = "rejected"; inbox.reason = "Result belongs to a replaced workflow review; original outcome remains unclaimed"; await save();
+          throw new AdmissionRejectedError(inbox.reason);
         }
         // Signature-verified reception is durable before semantic work. An exact bound execution outcome can
         // acknowledge delivery while a different business action pauses the run; validators apply only after resume.
@@ -3531,6 +3548,48 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         delivery: "unknown_delivery", resendAllowed: false, lateAdmissionDenied: true });
     });
   }
+  /** Human authorization for one fresh independent workflow Reviewer; no verdict, stop or delivery claim about the original. */
+  async replaceWorkflowReview(input: unknown): Promise<JsonValue> {
+    const authority = NativeDiagnosticFenceAuthoritySchema.parse(input);
+    if (!await this.ports.authorizeReviewReplacement?.(authority)) throw new Error("Review replacement requires authenticated physical human authority");
+    return this.transaction(async (state, save, core) => {
+      const original = state.outbound.find(item => item.message.message_id === authority.operationId);
+      if (!original?.handle || original.message.type !== "verification.requested") throw new Error("No exact delivered workflow review to replace");
+      const run = this.run(state, original.message.run_id!);
+      if (run.delegation.sessionId !== authority.sessionId) throw new Error("Cross-session workflow review replacement");
+      if (original.reviewReplacement) {
+        this.gateWaiters.get(original.message.message_id)?.reject(new Error("Workflow review replaced by physical human authority; no original verdict claimed"));
+        return json({ alreadyReplaced: true, ...original.reviewReplacement });
+      }
+      const context = QualityGateContextSchema.parse(original.message.payload), details = record(context.input), config = record(context.definition.configuration);
+      if (context.taskId !== FINAL_TASK || details.scope !== "workflow" || config.kind !== "review" || config.role !== "reviewer" || original.message.recipient.role !== "reviewer" ||
+          original.status !== "released" || !original.request || digest(original.request.context) !== digest(original.message) || original.leaseRelease || original.leaseRenewal || original.leaseReacquisition)
+        throw new Error("Only a released known-delivered workflow Reviewer request is replaceable");
+      const paused = run.status === "escalated" && run.error?.startsWith(VERIFICATION_RETRY_PREFIX) && !run.workflowVerificationPending &&
+        run.pendingAction?.kind === "resume_coordinator" && run.pendingAction.state === "pending" && run.pendingAction.previousStatus === "verifying";
+      const waiting = run.status === "verifying" && run.workflowVerificationPending && this.gateWaiters.has(original.message.message_id);
+      if (run.cancelled || (!paused && !waiting) || run.approval && run.decision?.approvalId !== run.approval.approvalId || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending"))
+        throw new Error("Workflow review replacement waits for its exact verification waiter/blocker and all human gates");
+      if (run.nativeDeliveries?.length || state.outbound.some(item => item.message.run_id === run.runId && ["sending", "unknown_delivery"].includes(item.status)) ||
+          state.pendingVerifications.some(item => record(item.job).runId === run.runId)) throw new Error("Uncertain delivery or pending verification must be reconciled first");
+      if (state.inbox.some(item => item.message.causation_id === original.message.message_id && item.message.type === "review.verdict" && item.status !== "rejected"))
+        throw new Error("A received review verdict must be reconciled before replacement");
+      if (!run.workflowChange || details.sourceRevision !== run.workflowChange.headCommitHash || !/^[a-f0-9]{40}$/.test(String(details.sourceRevision)) ||
+          !run.workflowSpec || details.specFingerprint !== digest(run.workflowSpec.specification) || run.tasks.some(task => !task.writerReleased || !task.result || task.cycle?.status !== "passed"))
+        throw new Error("Workflow review replacement must retain the exact verified integrated revision and specification");
+      for (const task of run.tasks) this.ports.policies.assertEvidenceComplete(task.spec.strategy);
+      const snapshot = await core.snapshot(run.runId);
+      if (!snapshot.tasks.length || snapshot.tasks.some(task => task.status !== "succeeded")) throw new Error("Implementation tasks are not independently completed");
+      if (state.outbound.filter(item => item.message.run_id === run.runId && item.reviewReplacement).length >= run.maxIterations)
+        throw new Error("Workflow review replacement bound exhausted");
+      const contextDigest = digest(context), replacementMessageId = `review-replacement-${digest([run.runId, authority.operationId, authority.userMessageId, contextDigest])}`;
+      original.reviewReplacement = { ...authority, decidedAt: this.now(), contextDigest, replacementMessageId, disposition: "replaced_without_verdict_claim" };
+      state.version = 4; await save(); // Durable late-result fence before any new invocation; old binaries must reject it.
+      // Cease this local wait only. This neither stops the provider nor supplies an old verdict; ordinary bounded verification records the environment block.
+      this.gateWaiters.get(original.message.message_id)?.reject(new Error("Workflow review replaced by physical human authority; no original verdict claimed"));
+      return json({ runId: run.runId, ...original.reviewReplacement, originalDelivery: "known_delivered", originalOutcome: "unknown", resendAllowed: false });
+    });
+  }
   /** Physical human retirement, never a statement that an old measurement did or did not execute. */
   async retirePolicyPhase(input: unknown): Promise<JsonValue> {
     const authority = NativeDiagnosticFenceAuthoritySchema.parse(input);
@@ -3570,7 +3629,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         record(item.message.payload).taskId === payload.taskId && record(item.message.payload).implementationAttemptId === payload.implementationAttemptId && record(item.message.payload).phase === payload.phase);
       if (retirements.length >= run.maxIterations) throw new Error("Policy phase retirement bound exhausted");
       request.phaseRetirement = { ...authority, blockedReplyId: blocked.message.message_id, decidedAt: this.now(), disposition: "retired_without_measurement_claim" };
-      state.version = 3;
+      if (state.version < 3) state.version = 3;
       await save(); // Durable late-result fence before capacity release or any continuation.
       await this.recoverPolicyPhaseRetirements(state, save, outbox);
       return json({ operationId: authority.operationId, disposition: request.phaseRetirement.disposition, lateAdmissionDenied: true,
