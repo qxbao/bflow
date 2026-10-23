@@ -77,16 +77,20 @@ export class GitIntegrationEngine {
 
   private taskPath(key: string): string { return join(this.worktreeRoot, `task-${key}`); }
   private integrationPath(key: string): string { return join(this.worktreeRoot, `integration-${key}`); }
+  /** New worktrees use `worktreeRoot`; records created before it was configured keep their original managed location. */
+  private managedPath(recorded: string, name: string): boolean {
+    return [this.worktreeRoot, join(this.stateDirectory, "trees")].some(root => recorded === join(root, name));
+  }
   private async transaction<T>(action: (state: State) => Promise<T>): Promise<T> {
     return withRepositoryLock(this.stateDirectory, async () => {
       // Common Git dir, rather than the caller's linked worktree, is the repository identity.
       const common = (await inspectRepository(this.repositoryPath)).commonDir;
       const state = await readState(this.stateDirectory, common);
       for (const [key, task] of Object.entries(state.tasks)) {
-        requireCondition(key === identity(task.request.runId, task.request.taskId, task.request.attemptId) && key === task.key && task.worktreePath === this.taskPath(key) && task.branchName === taskBranchName(task.request), "invalid_journal", "Task binding does not match journal identity");
+        requireCondition(key === identity(task.request.runId, task.request.taskId, task.request.attemptId) && key === task.key && this.managedPath(task.worktreePath, `task-${key}`) && task.branchName === taskBranchName(task.request), "invalid_journal", "Task binding does not match journal identity");
       }
       for (const [key, integration] of Object.entries(state.integrations)) {
-        requireCondition(key === identity(integration.request.runId, integration.request.integrationId) && key === integration.key && integration.worktreePath === this.integrationPath(key) &&
+        requireCondition(key === identity(integration.request.runId, integration.request.integrationId) && key === integration.key && this.managedPath(integration.worktreePath, `integration-${key}`) &&
           integration.branchName === this.integrationBranch(integration.request), "invalid_journal", "Integration binding does not match journal identity");
       }
       return action(state);
