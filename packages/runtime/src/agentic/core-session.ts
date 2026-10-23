@@ -1,10 +1,12 @@
 import {
   AppendEventsRequestSchema, DomainEventSchema, StoredRunSchema, WorkflowAdvanceResultSchema,
+  parseRecoveryCheckpointWithCompatibility, decodeWorkflowAggregateCheckpointState,
   WorkflowRunSnapshotSchema, type OperationResult, type WorkflowAdvanceResult, type WorkflowRunSnapshot
 } from "@bflow/contracts";
 import type { AgenticRuntimePorts } from "./ports.js";
 import { type JournalState, type RunRecord } from "./journal.js";
 import { unwrap } from "./outbox.js";
+import { eventTailCursor } from "../recovery.js";
 
 /** Core event batches are journaled before SQLite writes. Recovery replays authoritative events. */
 export class CoreSession {
@@ -62,13 +64,23 @@ export class CoreSession {
       }));
       const stored = unwrap(await this.ports.runStore.get(run.runId));
       if (!stored) throw new Error("Missing authoritative run store record");
+      const rawCheckpoint = unwrap(await this.ports.runStore.loadLatestCheckpoint(run.runId));
+      const checkpoint = rawCheckpoint === null ? undefined : unwrap(parseRecoveryCheckpointWithCompatibility(rawCheckpoint));
+      if (checkpoint) {
+        if (checkpoint.runId !== run.runId || checkpoint.version > stored.snapshot.version || checkpoint.eventSequence > stored.snapshot.lastEventSequence)
+          throw new Error("Checkpoint does not belong to the authoritative run history");
+        if (checkpoint.codec.name !== "bflow.workflow-aggregate+json" || ![1, 2].includes(checkpoint.codec.version))
+          throw new Error("Core recovery requires a complete aggregate checkpoint");
+        // The decoder preserves approvals, fencing, cancellation/retry and command outcomes; a query projection is never a substitute.
+        unwrap(decodeWorkflowAggregateCheckpointState(checkpoint));
+      }
       const events = [];
-      let cursor: string | undefined;
+      let cursor: string | undefined = checkpoint ? eventTailCursor(run.runId, checkpoint.eventSequence) : undefined;
       do {
         const page = unwrap(await this.ports.runStore.readEvents(run.runId, { limit: 100, ...(cursor ? { cursor } : {}) }));
         events.push(...page.items.map(event => DomainEventSchema.parse(event))); cursor = page.nextCursor;
       } while (cursor);
-      unwrap(await this.ports.engine.recover({ runId: run.runId, events, expectedVersion: stored.snapshot.version }));
+      unwrap(await this.ports.engine.recover({ runId: run.runId, ...(checkpoint ? { checkpoint } : {}), events, expectedVersion: stored.snapshot.version }));
     }
   }
   async hasEvent(runId: string, type: string, id: string): Promise<boolean> {

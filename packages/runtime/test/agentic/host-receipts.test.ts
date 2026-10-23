@@ -76,6 +76,12 @@ describe("private durable host authentication receipts", () => {
     await Promise.all([f.journal.recordGate(gate), f.journal.recordEvidence(evidence), f.journal.putObservation("review", "review-id", observation)]);
     expect(await f.reopen().authenticateGate(gate)).toBe(true);
     expect(await f.reopen().authenticateEvidence(evidence)).toBe(true);
+    const phaseRequest = RoleMessageSchema.parse({ schema_version: 2, message_id: "phase-request", correlation_id: "correlation", run_id: "run",
+      sender: { role: "coordinator" }, recipient: { role: "qa" }, type: "verification.requested", payload: { taskId: "task", phase: "red", sourceRevision: "a".repeat(40) }, artifact_references: [] });
+    expect(await f.reopen().hasPolicyPhaseEvidence(phaseRequest)).toBe(false);
+    await f.journal.recordEvidence({ ...evidence, verificationId: "phase-evidence", metadata: { conditionalTdd: { phase: "red", sourceRevision: "a".repeat(40) } } });
+    expect(await f.reopen().hasPolicyPhaseEvidence(phaseRequest)).toBe(true);
+    expect(await f.reopen().hasPolicyPhaseEvidence({ ...phaseRequest, payload: { taskId: "task", phase: "green", sourceRevision: "a".repeat(40) } })).toBe(false);
     expect(await f.reopen().getObservation("review", "review-id")).toEqual(observation);
     expect(await f.reopen().authenticateGate({ ...gate, status: "failed" })).toBe(false);
     expect(await f.reopen().authenticateEvidence({ ...evidence, metadata: { sourceRevision: "b".repeat(40) } })).toBe(false);

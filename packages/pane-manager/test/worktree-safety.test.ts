@@ -39,6 +39,7 @@ describe("production worktree safety inspection", () => {
     const result = await createGitWorktreeInspector().inspect(root);
     expect(result).toMatchObject({ ok: true, value: { isClean: false } });
     if (result.ok) expect(result.value.dirtyFiles).toEqual(expect.arrayContaining(["local-secret.txt", " name\nwith whitespace "]));
+    if (result.ok) expect((result.value as any).ignoredFiles).toEqual(["local-secret.txt"]);
   });
 
   it("ignores inherited repository and index overrides when inspecting a dirty checkout", async () => {

@@ -2523,7 +2523,10 @@ export class RolePaneManager {
       const worktreePath = binding.worktreePath ?? binding.cwd;
       const inspected = await this.#worktreeInspector.inspect(worktreePath, options);
       if (!inspected.ok) return inspected;
-      if (!inspected.value.isClean) {
+      const retainsWorktreeData = request.removeWorktree !== true;
+      const ignoredOnly = inspected.value.dirtyFiles.length > 0 && inspected.value.ignoredFiles !== undefined &&
+        inspected.value.dirtyFiles.every(path => inspected.value.ignoredFiles!.includes(path));
+      if (!inspected.value.isClean && !(retainsWorktreeData && ignoredOnly)) {
         return conflictError(
           `Cannot release, close, or remove developer worktree containing uncommitted changes: ${inspected.value.dirtyFiles.join(", ")}`
         );

@@ -23,6 +23,103 @@ trước khi lấy lease hoặc gọi transport nếu platform binding chưa có
 chấp nhận mà thiếu session từ bản cũ vẫn bất biến và không được tự gắn session hay gửi lại;
 trường hợp đó cần đối soát riêng, không phải bằng chứng tác vụ hoàn tất.
 
+Với Node TAP hoàn chỉnh và đúng danh tính test, exception trong thân test không phải
+assertion được lưu thành quan sát không được chấp nhận và gửi lại Developer để sửa test
+theo giới hạn rework hiện có. Nó không phải bằng chứng Red và không cấp quyền sửa mã sản phẩm.
+Output thiếu/sai danh tính, lỗi hook, timeout hoặc sandbox vẫn là lỗi hạ tầng cần đối soát.
+
+Sau một explicit resume cho phase bị lỗi hạ tầng, Runtime gửi notice retry về đúng Developer
+đang giữ execution; không yêu cầu Coordinator gọi công cụ chỉ dành cho Developer. Nếu host
+ngừng quá TTL lease, Runtime chỉ cấp lease tiếp nối qua Registry sau khi đối chiếu native session,
+worktree, capability và Core execution hiện tại. Fence phải tăng; assignment, request và handle
+gốc giữ nguyên. Intent cấp lease và lịch sử lease riêng được lưu để replay đúng idempotency key
+sau crash; tối đa ba lần tiếp nối cho một assignment. Human gate, cancellation, unknown delivery,
+session bị thay hoặc không có native binding đều chặn đường này. Không có SQL/public-contract migration;
+bản cũ không hỗ trợ tiếp nối phải đối soát thay vì gửi lại assignment.
+
+Continuation tường minh sau một auto-resume có message ID riêng: receipt tự động không được
+nuốt yêu cầu tiếp tục qua Conversation. Wake cũ và trạng thái delivery của nó giữ nguyên;
+retry tường minh cùng blocker trả về receipt riêng, tính một lượt manual và giữ trạng thái
+business đang chạy. Các fence diagnostic hiện hữu được đưa vào wake để đối soát; chúng
+không phải ACK, phê duyệt hoặc quyền bỏ qua bằng chứng TDD. Không thay public contracts.
+
+Quyết định tích hợp riêng cho lần live 2026-10-23: chủ dự án chọn giữ run và thêm fence cho
+diagnostic cũ thay vì hủy run. Chỉ lệnh người dùng vật lý qua Conversation
+`fence diagnostic <operation-id>` có thể hủy một `task.status: blocked` từ pane Coordinator
+đã nghỉ, gửi tới Conversation, còn unknown và chưa có inbox/ACK. Không có model tool thực hiện
+thao tác này. Intent gốc vẫn unknown, không được gửi lại; tombstone lưu người quyết định và
+message ID của lượt người dùng, đồng thời từ chối mọi bản đến muộn trước khi đổi business state.
+Assignment, result, approval và diagnostic từ pane hiện tại không được fence theo đường này.
+
+Owner/compatibility: lựa chọn của chủ dự án trong vòng live này cho phép thêm fence diagnostic.
+Chỉ Runtime host, Conversation intake và journal riêng của Runtime bị ảnh hưởng; callback
+host tùy chọn mặc định từ chối, nên composition cũ không được cấp quyền fence ngầm.
+Journal riêng của Runtime vẫn đọc v1; lần fence đầu tiên ghi v2 trong cùng
+lần lưu tombstone. Binary cũ từ chối v2. Không upcast v1 thành bằng chứng fence; v1 có fence
+bị từ chối. Shared `@bflow/contracts`, `RuntimeService`, Core event/checkpoint codecs và SQLite schema không đổi.
+Không downgrade một session đã fence về binary cũ; giữ journal và dùng Runtime có hỗ trợ v2.
+
+Retire một policy phase là quyết định riêng qua lệnh vật lý Conversation
+`retire policy phase <request-id>`, không được suy diễn từ fence diagnostic, resume hoặc duyệt thiết kế.
+Host chỉ chấp nhận request đã có blocker xác thực đúng verifier/correlation/causation, pane/native session verifier
+đã thay, lease hết hạn và không có receipt kết quả cần đối soát hoặc phép đo đang chạy trong host.
+Thiếu receipt không chứng minh phép đo chưa chạy: disposition là `retired_without_measurement_claim`.
+Giữ nguyên request, handle, blocker và grant lease cũ; Registry không hỗ trợ release lease hết hạn,
+nên không tạo receipt release giả. Tombstone được lưu trước khi loại request khỏi dispatch/renewal.
+Mọi verification.result cũ, kể cả inbox received replay, bị từ chối. Chỉ sau resume vật lý được host xác thực qua Conversation (lưu đúng user message ID), Runtime thông báo
+Developer hiện hữu yêu cầu đo cùng phase/revision bằng request ID mới; không gửi lại assignment.
+
+Quyết định compatibility riêng cho sửa lỗi live: chỉ Runtime host/intake/outbox/journal thay đổi;
+public contracts/Core codec/SQLite giữ nguyên. Journal đọc v1/v2 như trước, và ghi v3 khi retire phase.
+Binary v1/v2 từ chối v3; không downgrade session đã retire. Fence diagnostic sau đó không hạ version.
+Retirement được chặn bởi approval/user-decision/unknown delivery/cancellation và giới hạn riêng
+`maxIterations` theo run/task/implementation-attempt/phase qua các revision. Replay không tiêu thêm lượt;
+retirement không là measurement, Red hoặc repair failure, và không reset giới hạn verification/TDD.
+Cancellation không release giả grant đã hết hạn của retirement; vẫn dừng Developer/Core bình thường và báo riêng outcome lịch sử chưa được xác nhận.
+Quyền áp dụng từng retirement phải đến từ chủ dự án qua command vật lý chính xác; model không có tool cấp quyền.
+
+Control client giới hạn phản hồi thông thường ở 4 MiB; riêng RPC `checkpoint` nhận tối đa
+16 MiB để không mất acknowledgement của aggregate checkpoint đã lưu vượt 4 MiB.
+Checkpoint lớn hơn vẫn bị từ chối và phải đối soát id/checksum đã lưu trước khi retry;
+việc vượt giới hạn phản hồi không chứng minh thao tác ghi thất bại. Public checkpoint codec không đổi.
+
+Khi phép đo bị từ chối, phản hồi QA trả đúng request/phase/revision, summary, loại repair và
+ArtifactReference đã lưu nếu có, kể cả replay. `phaseRecorded: false` và `implementationAuthorized: false`
+phân biệt outcome bị từ chối với bằng chứng TDD được chấp nhận; lifecycle status riêng không đủ
+để kết luận thiếu output hoặc xin đo lại. Runtime vẫn giữ quyền điều phối repair/resume có giới hạn.
+
+`assignment_context` đặt `policyEvidence` gọn trước dossier đầy đủ: receipt TDD đã được
+Runtime chấp nhận tách khỏi outcome bị từ chối, giữ nguyên phase/revision/verification ID
+và ArtifactReference/checksum. Chỉ xuất các run đã thuộc assignment hiện tại của pane;
+không suy luận bằng chứng từ progress, transport state hay nội dung agent tự khai.
+
+Sau resume vật lý qua Conversation, Runtime gửi một task notice tiếp nối riêng cho
+Developer hiện hữu nếu cùng Core execution vẫn running, lease còn hiệu lực và required TDD
+đã có đúng Red được chấp nhận. Notice không cấp Red hay approval mới và không sửa test;
+retry cùng resume giữ nguyên ID. Các gate, cancellation, unknown delivery và giới hạn resume
+được kiểm tra trước đó như cũ; resume tự động hoặc Coordinator không tạo notice này.
+
+QA workflow sử dụng `inspect_review` để quan sát diff và chạy command do host đã cấu hình
+trên đúng commit tích hợp. Kết quả test và ArtifactReference/checksum được lưu cùng observation
+host bất biến, trả gọn qua `qaBehavioralObservation`; không dùng tool phase TDD cho gate này.
+`complete_review` vẫn yêu cầu judgment độc lập cho từng criterion và không thể pass nếu test
+thực tế thất bại. Observation diff-only cũ không được nâng thành bằng chứng test; phải inspect
+lại qua host. Test tiếp tục chạy trong sandbox verification hiện hữu, không nhận argv/revision
+hay output từ agent. Gate timeout/bounds/approval không đổi và không sinh thêm TDD receipt.
+Tổng ngân sách setup/prepare/test được giới hạn theo thời gian gate còn lại, có margin cho ACK; chỉ giảm timeout tối đa, không đổi command/argv. Batch không còn đủ ngân sách bị từ chối trước execution. Completed submission replay xác thực receipt trước khi đọc worktree; completion đầu tiên vẫn kiểm tra source, kể cả sau restart.
+
+Verification retry sau restart dựng plan bằng journal state được truyền tường minh trong
+transaction, không phụ thuộc state tạm chỉ tồn tại trong `tick`. Implementer IDs được giữ
+đúng từ execution gốc cho kiểm tra độc lập; commit tích hợp, task evidence và các giới hạn
+retry/approval không đổi. Cùng đường này phục vụ explicit resume và `retry_verification`.
+
+Gate retry tạo request ID mới sau một verdict đã áp dụng hoặc blocker `task.status: blocked`
+được xác thực đúng request/run/correlation/agent/pane. Request cũ và outcome giữ nguyên;
+không giả verdict hay ACK. Blocker có thể đến trước khi lease được release: lượt mới chỉ
+được queue, còn Registry và kiểm tra pane vẫn chặn dispatch tới khi capacity sẵn sàng.
+Sending/unknown delivery không được coi là một attempt đã đối soát; các giới hạn verification
+và phê duyệt hiện hữu không đổi.
+
 Các đầu vào host bắt buộc là tường minh: định danh repository/session, role capability,
 định nghĩa check của task/workflow, deterministic gate runner, ingress thông điệp/result/evidence
 Herdr có xác thực và phê duyệt của con người có xác thực. Không có
@@ -320,6 +417,26 @@ và endpoint không có thẩm quyền riêng tư được pin vẫn chặn reco
 Hành vi này không di dời cấu hình lưu trữ Runtime legacy tường minh và không
 tuyên bố nghiệm thu provider/Herdr trên mọi filesystem.
 
+Một workflow Reviewer đã nhận request chắc chắn nhưng chưa có verdict có thể được thay
+bằng đúng một invocation read-only mới sau lệnh vật lý `replace workflow review <message-id>`
+qua Conversation. Lệnh này cần quyền riêng của người dùng; resume/design/task/delivery approval
+không cấp quyền đó. Chỉ áp dụng trên workflow có các task đã kiểm chứng, writer đã release,
+Core task succeeded, TDD evidence đầy đủ và commit/spec tích hợp không đổi. Các gate và
+unknown delivery vẫn chặn; số lần thay bị giới hạn theo maxIterations, không reset counter.
+
+Quyết định lưu marker private journal **v4** trước khi ngừng waiter cục bộ. Binary cũ phải từ
+chối v4; marker không sửa request/handle/status gốc, không khẳng định provider đã dừng hoặc
+review cũ đã/chưa xảy ra và không tạo ACK/verdict. Mọi ingress/replay theo causation gốc và
+completion từ observation cũ đều bị fence. Invocation mới dùng đúng context/capability, có
+request ID liên kết riêng, chỉ dispatch tới native Reviewer read-only khác qua preflight/lease
+hiện hữu. Request mới chưa rõ delivery không được gửi lại qua restart. Đây là bảo đảm từ
+source và kiểm thử hồi quy cục bộ; không tự chứng minh một run live đã hoàn tất.
+Cùng lệnh vật lý hỗ trợ workflow QA đã nhận request nhưng lease hết hạn, kể cả khi
+Registry từ chối release. QA replacement ghi **v5** để binary v4 từ chối marker này.
+Request/handle/status/leaseRelease cũ giữ nguyên; outbox không giả release thành công,
+không renew/resend request đã fence. QA mới phải chạy test tại commit tích hợp qua host
+như cũ. Role, command và test evidence không được nới quyền bởi replacement.
+
 Journal P19 riêng tư nằm dưới `<selected-state>/agentic/journal`. Nó
 dùng tuần tự hóa trong cùng process cộng với `flock` của Linux, fsync file, rename nguyên tử và
 fsync thư mục. Nó bị ràng buộc với repository và từ chối state hỏng/không được hỗ trợ.
@@ -333,6 +450,19 @@ và receipt sai định dạng không bao giờ chứng minh không được gia
 `not_delivered` mới cho phép gửi lại đúng AgentRequest gốc. Một pane, fingerprint
 của request hay lease bị thay đổi không bị âm thầm thay thế. Các thông điệp mơ hồ giữ
 lease và không tự động gửi lại qua restart.
+
+CoreSession phục hồi từ aggregate checkpoint mới nhất đã qua bộ kiểm tra tương thích,
+kiểm tra run/version/sequence và decoder aggregate, sau đó chỉ đọc event tail bằng cursor
+được dùng trong recovery hiện hữu. Không có checkpoint thì đọc lịch sử đầy đủ. Checkpoint
+hỏng hoặc khác run không được bỏ qua để nhận projection; command outcomes, approval,
+fencing, retry và cancellation tiếp tục thuộc aggregate của Core. Cách này tránh replay toàn
+bộ lịch sử ở mỗi RPC khi lịch sử dài. Các bảo đảm này có kiểm thử cục bộ, không thay một
+verdict live hay phê duyệt của người dùng.
+
+Trong khi phép kiểm chứng độc lập do Runtime sở hữu còn đang chạy, báo cáo blocked của
+Coordinator được lưu như chẩn đoán; kết quả verification vẫn quyết định phase. Blocker đến
+muộn từ specialist đã có verdict xác thực không thay thế lineage/counter hiện có. Request
+user decision và cancellation vẫn dùng đường riêng và giữ nguyên authority/gate.
 
 Các Core event batch được journal trước khi SQLite append và được retry idempotent.
 Aggregate checkpoint được giữ lại; authoritative complete event replay khôi phục
@@ -783,6 +913,16 @@ thuộc session trước.
 Để yêu cầu tiếp tục run bị chặn trong Conversation, dùng `tiếp tục` hoặc `resume <run-id>`.
 Host kiểm tra input người dùng thật và session trước khi chuyển yêu cầu tới Runtime; thao tác
 này không thay thế một approval đang chờ và không tạo workflow mới.
+Khi một review read-only đã được giao chắc chắn nhưng chưa trả kết quả, explicit resume
+có provenance từ Conversation cho phép Runtime gửi một diagnostic riêng cho đúng native
+session cũ khi gate đang đợi. Request/handle gốc không đổi; diagnostic có lease riêng,
+giữ capability gốc, không cấp verdict và không được resend nếu delivery chưa rõ. Native
+session khác, gate đang chờ duyệt hoặc request chưa rõ delivery đều chặn continuation.
+Mỗi lượt người dùng giữ wake bất biến riêng; replay cùng lượt không tiêu thêm budget.
+Thông tin vận hành `task.status` đã xác thực từ Conversation được chuyển tới Coordinator
+ngay cả khi run đang escalated hoặc chờ duyệt; nội dung được giữ lồng trong wake của
+Runtime, không có quyền resume/approve. Replay receipt `received`, lỗi capability và Stop
+của lượt thông tin đều giữ nguyên blocker, bằng chứng và các cổng phê duyệt hiện có.
 
 Runtime lưu intake đã được Conversation xác thực cùng outbox intent trước dispatch đầu tiên;
 `delegation.accepted` và ingress Herdr vẫn là các bước riêng. Vì vậy capability denial trước khi
@@ -830,3 +970,8 @@ packages/runtime/test/agentic/cancel-reconcile.test.ts
 packages/runtime/test/agentic/conversation-intake.test.ts packages/conversation/test`.
 Các test dùng transport giả và storage/policy thật; không chứng minh các run trong session
 production đã được dừng hoặc provider/Herdr live đã chấp nhận bản sửa.
+
+Nếu `complete_review` nhận sai observation ID, host vẫn từ chối verdict. Thông báo lỗi
+chỉ gợi ý tối đa ba ID đã quan sát trong cùng native pane, cùng request và context được
+giao; request bị thay thế không nhận gợi ý. Agent phải tự chọn ID đúng và nộp nhận định
+độc lập. Gợi ý không tạo receipt hay tự thay tham số của agent.

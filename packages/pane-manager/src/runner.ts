@@ -280,7 +280,9 @@ export function createGitWorktreeInspector(gitBinary = "git"): WorktreeInspector
         };
       }
 
-      const dirtyFiles = statusOutcome.stdout.split("\0").filter(Boolean).map(line => line.slice(3));
+      const statusEntries = statusOutcome.stdout.split("\0").filter(Boolean);
+      const ignoredFiles = statusEntries.filter(line => line.startsWith("!! ")).map(line => line.slice(3));
+      const dirtyFiles = statusEntries.map(line => line.slice(3));
       const isClean = dirtyFiles.length === 0;
 
       const revParseOutcome = await inspectGit(["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -298,7 +300,7 @@ export function createGitWorktreeInspector(gitBinary = "git"): WorktreeInspector
         value: {
           exists: true,
           isClean,
-          dirtyFiles,
+          dirtyFiles, ignoredFiles,
           ...(currentBranch !== undefined && { currentBranch })
         }
       };

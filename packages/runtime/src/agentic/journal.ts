@@ -4,12 +4,12 @@ import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import {
-  AgentAssignmentSchema, AgentExecutionHandleSchema, AgentLeaseSchema, AgentRequestSchema, AgentRoleSchema,
+  AcquireAgentLeaseRequestSchema, AgentAssignmentSchema, AgentExecutionHandleSchema, AgentLeaseSchema, AgentRequestSchema, AgentRoleSchema,
   AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
   DelegationRequestSchema, GitChangeSetSchema, IsoDateTimeSchema, JsonValueSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema, ReleaseAgentLeaseRequestSchema,
   SdlcWorkStatusSchema, SpecificationSchema, TestStrategySchema, VerificationCycleSchema,
   VerificationResultSchema, WorkflowDefinitionSchema, type AgentAssignment, type AgentExecutionHandle, type AgentLease,
-  type AgentRequest, type AgentResult, type AppendEventsRequest, type ApprovalDecision,
+  type AcquireAgentLeaseRequest, type AgentRequest, type AgentResult, type AppendEventsRequest, type ApprovalDecision,
   type AgentRole, type ApprovalRequest, type DelegationRequest, type GitChangeSet, type JsonValue, type ArtifactReference,
   type RoleMessage, type SdlcWorkStatus, type Specification, type TestStrategy,
   type VerificationCycle, type WorkflowDefinition, type RenewAgentLeaseRequest, type ReleaseAgentLeaseRequest
@@ -17,6 +17,7 @@ import {
 import type { TaskWorktree, VerificationPlan } from "./ports.js";
 import { isUserDecisionRequest, type UserDecisionAnswer } from "./decision-routing.js";
 import { WorkflowRejectionCodeSchema } from "./workflow-rejection.js";
+import { NativeDiagnosticFenceSchema, type NativeDiagnosticFence } from "./native-diagnostic-fence.js";
 
 export function json(value: unknown): JsonValue { return JsonValueSchema.parse(JSON.parse(JSON.stringify(value))); }
 export function digest(value: unknown): string {
@@ -78,6 +79,8 @@ export interface RunRecord {
   resumeReceipts?: { actionId: string; messageId: string }[];
   /** Private native-host intents not yet acknowledged/applied. Independent of the current business blocker or human gate. */
   nativeDeliveries?: { operationId: string; message: RoleMessage }[];
+  /** Authenticated human cancellation of a stale diagnostic; its original delivery stays unknown and can never be replayed. */
+  nativeDiagnosticFences?: NativeDiagnosticFence[];
   /**
    * Invalid RoleMessages per (sender role, assignment/causation) key. Bounded; `messageIds` dedupes replays of one inbound
    * envelope. Absent in older journals (no invalid messages counted).
@@ -170,6 +173,11 @@ export interface Outbound {
   stopObservedAt?: string;
   /** Stop observations made for a cancelled execution; bounded so an unresponsive pane is reported instead of polled forever. */
   cancelObservations?: number;
+  phaseRetirement?: { operationId: string; sessionId: string; userMessageId: string; userId: string;
+    blockedReplyId: string; decidedAt: string; resumeAuthorizedBy?: string | undefined; disposition: "retired_without_measurement_claim" };
+  /** Physical permission to cease waiting on one workflow review. The original request/outcome stays intact. */
+  reviewReplacement?: { operationId: string; sessionId: string; userMessageId: string; userId: string; decidedAt: string;
+    contextDigest: string; replacementMessageId: string; disposition: "replaced_without_verdict_claim" };
   phaseFailureEvidence?: ArtifactReference;
   /** `retryAuthorized`: an explicit resume allows re-measuring the same revision after a non-repairable (infrastructure) failure. */
   phaseFailure?: { summary: string; repairable: boolean; applied: boolean; retryAuthorized?: boolean };
@@ -178,10 +186,14 @@ export interface Outbound {
   /** Private outbox position captured before this Coordinator turn is physically dispatched. */
   coordinatorResponseBaseline?: number;
   leaseRenewal?: RenewAgentLeaseRequest;
+  /** Prior Registry leases of this same immutable execution; never rewrites its original assignment/request/handle. */
+  leaseHistory?: AgentLease[];
+  /** Write-ahead Registry request for an explicitly authorized, continuity-checked lease continuation. */
+  leaseReacquisition?: AcquireAgentLeaseRequest;
   leaseRelease?: ReleaseAgentLeaseRequest;
 }
 export interface JournalState {
-  version: 1; repository: string; runs: RunRecord[]; outbound: Outbound[];
+  version: 1 | 2 | 3 | 4 | 5; repository: string; runs: RunRecord[]; outbound: Outbound[];
   /** "rejected" is terminal and carries Runtime's reason: the message was refused by admission and must never be retried. */
   inbox: { message: RoleMessage; status: "received" | "applied" | "rejected"; reason?: string }[];
   pendingCore: AppendEventsRequest[];
@@ -195,7 +207,7 @@ export function isConversationDelivery(out: Outbound): boolean {
 /** Private storage codec; exported schemas validate every persisted boundary value. */
 function parseState(input: unknown, repository: string): JournalState {
   const root = record(input);
-  if (root.version !== 1 || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
+  if ((root.version !== 1 && root.version !== 2 && root.version !== 3 && root.version !== 4 && root.version !== 5) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
   for (const key of ["runs", "outbound", "inbox", "pendingCore", "pendingVerifications"]) if (!Array.isArray(root[key])) throw new Error(`Invalid journal ${key}`);
   const state = root as unknown as JournalState;
   for (const run of state.runs) {
@@ -227,6 +239,18 @@ function parseState(input: unknown, repository: string): JournalState {
         if (entry.message.run_id !== run.runId || entry.message.correlation_id !== run.delegation.correlationId ||
             operations.has(entry.operationId) || messages.has(entry.message.message_id)) throw new Error("Invalid native delivery ownership");
         operations.add(entry.operationId); messages.add(entry.message.message_id);
+      }
+    }
+    if (run.nativeDiagnosticFences !== undefined) {
+      if (state.version < 2) throw new Error("Diagnostic fences require private journal v2; never reinterpret them as v1");
+      if (!Array.isArray(run.nativeDiagnosticFences)) throw new Error("Invalid diagnostic fences");
+      run.nativeDiagnosticFences = run.nativeDiagnosticFences.map(item => NativeDiagnosticFenceSchema.parse(item));
+      const ids = new Set<string>();
+      for (const fence of run.nativeDiagnosticFences) {
+        if (ids.has(fence.operationId) || fence.message.run_id !== run.runId || fence.message.correlation_id !== run.delegation.correlationId ||
+            fence.sessionId !== run.delegation.sessionId || run.nativeDeliveries?.some(item => item.operationId === fence.operationId || item.message.message_id === fence.message.message_id))
+          throw new Error("Diagnostic fence ownership or pending-delivery conflict");
+        ids.add(fence.operationId);
       }
     }
     if (run.delegationHistory !== undefined) run.delegationHistory = run.delegationHistory.map(item => DelegationRequestSchema.parse(item));
@@ -309,6 +333,26 @@ function parseState(input: unknown, repository: string): JournalState {
       if (!out.handle || out.message.type !== "delegation.request" || Date.parse(out.stopObservedAt) < Date.parse(out.handle.acceptedAt))
         throw new Error("Invalid specialist Stop observation");
     }
+    if (out.phaseRetirement) {
+      const retirement = z.object({ operationId: z.string().min(1), sessionId: z.string().min(1), userMessageId: z.string().min(1), userId: z.string().min(1),
+        blockedReplyId: z.string().min(1), decidedAt: IsoDateTimeSchema, resumeAuthorizedBy: z.string().min(1).optional(), disposition: z.literal("retired_without_measurement_claim") }).strict().parse(out.phaseRetirement);
+      if (state.version < 3 || retirement.operationId !== out.message.message_id || out.phaseFailure ||
+          out.message.type !== "verification.requested" || record(out.message.payload).kind !== "conditional_evidence" || !out.handle)
+        throw new Error("Invalid retired policy phase");
+      out.phaseRetirement = retirement;
+    }
+    if (out.reviewReplacement) {
+      const replacement = z.object({ operationId: z.string().min(1), sessionId: z.string().min(1), userMessageId: z.string().min(1), userId: z.string().min(1),
+        decidedAt: IsoDateTimeSchema, contextDigest: z.string().regex(/^[a-f0-9]{64}$/), replacementMessageId: z.string().min(1),
+        disposition: z.literal("replaced_without_verdict_claim") }).strict().parse(out.reviewReplacement);
+      const context = record(out.message.payload), configuration = record(record(context.definition).configuration);
+      if (state.version < 4 || replacement.operationId !== out.message.message_id || out.message.type !== "verification.requested" || !out.handle ||
+          (!["accepted", "released"].includes(out.status)) || context.taskId !== "workflow-verification" || record(context.input).scope !== "workflow" || configuration.kind !== "review" || !["reviewer", "qa"].includes(String(configuration.role)) || ((configuration.role === "qa" || out.status === "accepted") && state.version < 5) ||
+          out.status === "accepted" && (!out.lease || Date.parse(out.lease.expiresAt) > Date.parse(replacement.decidedAt)) ||
+          replacement.contextDigest !== digest(out.message.payload) || replacement.replacementMessageId !== `review-replacement-${digest([out.message.run_id, replacement.operationId, replacement.userMessageId, replacement.contextDigest])}` ||
+          !state.runs.some(run => run.runId === out.message.run_id && run.delegation.sessionId === replacement.sessionId)) throw new Error("Invalid workflow review replacement");
+      out.reviewReplacement = replacement;
+    }
     if (out.phaseFailureEvidence) out.phaseFailureEvidence = ArtifactReferenceSchema.parse(out.phaseFailureEvidence);
     if (out.phaseFailure) {
       textField(out.phaseFailure.summary);
@@ -316,6 +360,27 @@ function parseState(input: unknown, repository: string): JournalState {
           out.phaseFailure.retryAuthorized !== undefined && (out.phaseFailure.retryAuthorized !== true || out.phaseFailure.repairable) ||
           out.message.type !== "verification.requested" || record(out.message.payload).kind !== "conditional_evidence")
         throw new Error("Invalid private policy failure outcome");
+    }
+    if (out.leaseHistory) {
+      if (!Array.isArray(out.leaseHistory) || !out.leaseHistory.length || out.leaseHistory.length > 3 ||
+          out.parentAssignmentId || !out.lease || !out.assignment || !out.handle?.target.session || out.message.type !== "task.assignment")
+        throw new Error("Invalid task lease continuation history");
+      out.leaseHistory = out.leaseHistory.map(item => AgentLeaseSchema.parse(item));
+      const chain = [...out.leaseHistory, out.lease];
+      if (out.assignment.leaseId !== chain[0]!.leaseId || out.assignment.fencingToken !== chain[0]!.fencingToken ||
+          chain.some((item, index) => item.agentId !== out.lease!.agentId || item.runId !== out.lease!.runId ||
+            item.taskId !== out.lease!.taskId || item.attemptId !== out.lease!.attemptId || index > 0 &&
+            (item.fencingToken <= chain[index - 1]!.fencingToken || item.leaseId === chain[index - 1]!.leaseId)))
+        throw new Error("Task lease continuation changed ownership or fence order");
+    }
+    if (out.leaseReacquisition) {
+      out.leaseReacquisition = AcquireAgentLeaseRequestSchema.parse(out.leaseReacquisition);
+      const request = out.leaseReacquisition;
+      if (out.parentAssignmentId || out.message.type !== "task.assignment" || out.status !== "accepted" || !out.handle?.target.session ||
+          !out.lease || out.leaseRenewal || out.leaseRelease || request.leaseId === out.lease.leaseId ||
+          request.agentId !== out.lease.agentId || request.runId !== out.lease.runId || request.taskId !== out.lease.taskId ||
+          request.attemptId !== out.lease.attemptId || (out.leaseHistory?.length ?? 0) >= 3)
+        throw new Error("Invalid pending task lease continuation");
     }
     if (out.leaseRenewal) {
       out.leaseRenewal = RenewAgentLeaseRequestSchema.parse(out.leaseRenewal);
@@ -351,6 +416,14 @@ function parseState(input: unknown, repository: string): JournalState {
     item.message = RoleMessageSchema.parse(item.message);
     if (!["received", "applied", "rejected"].includes(item.status)) throw new Error("Invalid inbox status");
     if (item.reason !== undefined) textField(item.reason);
+  }
+  for (const out of state.outbound.filter(item => item.phaseRetirement)) {
+    const run = state.runs.find(item => item.runId === out.message.run_id), retirement = out.phaseRetirement!, target = out.handle!.target;
+    const reply = state.inbox.find(item => item.status === "applied" && item.message.message_id === retirement.blockedReplyId)?.message;
+    if (!run || retirement.sessionId !== run.delegation.sessionId || !reply || reply.type !== "task.status" ||
+        reply.causation_id !== out.message.message_id || reply.run_id !== run.runId || reply.correlation_id !== out.message.correlation_id ||
+        reply.sender.role !== out.message.recipient.role || reply.sender.agent_id !== target.agentId || reply.sender.pane_id !== target.paneId || record(reply.payload).status !== "blocked")
+      throw new Error("Retired policy phase ownership or blocker mismatch");
   }
   for (const pending of state.pendingVerifications) {
     const job = record(pending.job); const outcome = record(pending.outcome);

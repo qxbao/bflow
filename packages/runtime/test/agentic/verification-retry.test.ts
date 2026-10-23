@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { RoleMessageSchema } from "@bflow/contracts";
 import { lifecycleFixture, type LifecycleFixture } from "../helpers/lifecycle-fixture.js";
 
@@ -43,6 +43,24 @@ describe.skipIf(process.platform !== "linux")("blocked verification retry", () =
     await f.approve();
     expect((await f.run()).status).toBe("completed");
   }, 60_000);
+
+  it.each(["resume", "retry"])("recovers timed-out workflow verification after restart outside tick (%s)", async mode => {
+    const f = await lifecycleFixture(cleanups); await implemented(f);
+    await f.runtime.tick(); expect((await f.run()).tasks[0]!.cycle?.status).toBe("passed");
+    const hold = f.hold("workflow"); await f.runtime.tick(); await hold.reached; hold.release();
+    const blocked = await f.run();
+    expect(blocked).toMatchObject({ status: "escalated", workflowCycle: { status: "escalated" } });
+    const integrated = blocked.workflowChange!.headCommitHash;
+    const evidence = structuredClone(blocked.tasks[0]!.spec.strategy.metadata);
+    await f.restartProcess();
+    const planning = vi.spyOn(f.ports.policies, "createVerificationPlan");
+    if (mode === "resume") await expect(f.runtime.resumeBlockedRun("run-1", blocked.pendingAction!.actionId)).resolves.toMatchObject({ queued: true });
+    else await expect(f.runtime.retryVerification("run-1")).resolves.toMatchObject({ retried: true });
+    expect(planning).toHaveBeenCalledWith(expect.objectContaining({ scope: "workflow", implementerIds: expect.arrayContaining([expect.stringContaining("dev")]) }));
+    expect((await f.run()).workflowChange!.headCommitHash).toBe(integrated);
+    expect((await f.run()).tasks[0]!.spec.strategy.metadata).toEqual(evidence);
+    await f.runtime.tick(); expect((await f.run()).status).toBe("awaiting_approval");
+  }, 90000);
 
   it("retry_verification performs the same retry and is bounded across repeated blocked outcomes", async () => {
     const f = await lifecycleFixture(cleanups);

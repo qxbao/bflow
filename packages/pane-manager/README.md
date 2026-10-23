@@ -307,3 +307,11 @@ bấm xác nhận update, trust hay permission, và không bao giờ để lộ 
 trong lỗi. `pane read` vẫn là hành động tường minh của operator.
 
 `readBuiltinRolePrompt(role)` resolve các asset `agents/` đã cài cho từng topology role, thử các ứng viên theo thứ tự: `chat/system-prompt.md`, `coordinator/system-prompt.md`, `analyst/system-prompt.md` rồi `analyst/prompt.md`, `architect/system-prompt.md` rồi `architect/prompt.md`, `planner/system-prompt.md`, `developer/system-prompt.md`, `reviewer/system-prompt.md`, và `verifier/system-prompt.md` rồi `verifier/prompt.md` cho `qa-verifier`. Nó mở file no-follow/nonblocking, yêu cầu một regular file không rỗng tối đa 64 KiB và ném lỗi nếu không ứng viên nào nạp được. Package cũng export `NON_USER_FACING_AUTONOMOUS_POLICY` và `STRUCTURED_RESULT_REQUIRED_FIELDS` (cùng văn bản và danh sách trường mà registry và Runtime host dùng). Chính `startAgentInPane` chỉ inject file prompt gốc cho các pane `chat` và `coordinator`; các role khác nhận prompt từ cấu hình launch của Runtime host. Test: `pnpm exec vitest run packages/pane-manager/test/role-prompts.test.ts`.
+
+Developer release retains ignored dependencies and local data when Git reports that all dirty
+entries are ignored and `removeWorktree` is false. This includes closing the provider pane to
+revoke its launch credentials: pane closure preserves the worktree's files. The inspector still
+reports the checkout dirty; allocation and worktree removal keep the strict clean guard.
+Tracked and ordinary untracked edits still block release. The additive optional `ignoredFiles`
+inspection detail changes no `@bflow/contracts` schema; custom inspectors without it remain strict.
+No ignored data is deleted or excluded from diagnostics. Platform token revocation remains intact.

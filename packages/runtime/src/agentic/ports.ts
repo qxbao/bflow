@@ -78,6 +78,11 @@ export interface AgenticPolicies {
   assertEvidenceComplete(strategy: unknown): void;
 }
 export interface AgenticRuntimePorts {
+  /** Physical Conversation hook only; not an agent tool or an approval inferred by a model. */
+  authorizeReviewReplacement?: (authority: import("./native-diagnostic-fence.js").NativeDiagnosticFenceAuthority) => Promise<boolean>;
+  authorizePolicyPhaseRetirement?: (authority: import("./native-diagnostic-fence.js").NativeDiagnosticFenceAuthority) => Promise<boolean>;
+  hasPolicyPhaseReceipt?: (request: RoleMessage) => Promise<boolean>;
+  authorizeNativeDiagnosticFence?(input: import("./native-diagnostic-fence.js").NativeDiagnosticFenceAuthority): Promise<boolean>;
   engine: WorkflowEngine; runStore: RunStore; artifactStore: ArtifactStore;
   registry: import("@bflow/contracts").AgentRegistry; transport: AgentTransport;
   panes: PanePolicy; policies: AgenticPolicies;

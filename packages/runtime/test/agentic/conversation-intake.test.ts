@@ -411,3 +411,56 @@ describe("session cancellation through one trusted Conversation decision", () =>
     expect(await f.journal().humanDecisions()).toEqual([]);
   });
 });
+
+it("fences a diagnostic only from its recorded physical command and never turns it into approval or model intent", async () => {
+  const f = await fixture(); let calls = 0;
+  const intake = () => new HostConversationIntake(f.journal(), () => f.port, async (turn, operationId) => {
+    calls++;
+    expect((await f.journal().conversationTurns()).find(item => item.messageId === turn.messageId)?.content)
+      .toBe("fence diagnostic old-diagnostic");
+    expect(operationId).toBe("old-diagnostic");
+    return { ok: true, value: { disposition: "fenced_without_delivery_claim", delivery: "unknown_delivery", resendAllowed: false } };
+  });
+  const received = await intake().receive(f.binding, f.turn("user-fence", "fence diagnostic old-diagnostic"));
+  expect(received).toMatchObject({ requiresConversationDecision: false, result: { ok: true } });
+  expect(await intake().receive(f.binding, f.turn("user-fence", "fence diagnostic old-diagnostic"))).toEqual(received);
+  expect(calls).toBe(1); expect(f.applied).toHaveLength(0);
+  expect(await f.journal().humanDecisions()).toHaveLength(0);
+  await expect(intake().decide(f.binding, { messageId: "user-fence", decision: { intent: "conversation_only", directReply: "Changed" } }))
+    .rejects.toThrow(/physical|fenc/);
+  expect(await intake().receive(f.binding, f.turn("user-quote", 'Explain "fence diagnostic old-diagnostic"')))
+    .toMatchObject({ requiresConversationDecision: true });
+  expect(calls).toBe(1);
+});
+
+it("retires a policy phase only through its physical hook, keeps a separate idempotent result and grants no approval", async () => {
+  const f = await fixture(); let calls = 0;
+  const intake = () => new HostConversationIntake(f.journal(), () => f.port, undefined, async (turn, operationId) => {
+    calls++; expect(operationId).toBe("phase-old");
+    expect((await f.journal().conversationTurns()).find(item => item.messageId === turn.messageId)?.content).toBe("retire policy phase phase-old");
+    return { ok: true, value: { disposition: "retired_without_measurement_claim", resendAllowed: false } };
+  });
+  const result = await intake().receive(f.binding, f.turn("physical-retire", "retire policy phase phase-old"));
+  expect(result).toMatchObject({ requiresConversationDecision: false, result: { ok: true } });
+  expect(await intake().receive(f.binding, f.turn("physical-retire", "retire policy phase phase-old"))).toEqual(result);
+  expect(calls).toBe(1); expect(f.applied).toHaveLength(0); expect(await f.journal().humanDecisions()).toHaveLength(0);
+  await expect(intake().decide(f.binding, { messageId: "physical-retire", decision: { intent: "conversation_only", directReply: "Authorize" } })).rejects.toThrow(/physical/);
+  expect(await intake().receive(f.binding, f.turn("quoted-retire", 'Explain "retire policy phase phase-old"'))).toMatchObject({ requiresConversationDecision: true });
+  expect(calls).toBe(1);
+});
+
+it("requires an exact physical Conversation turn for a workflow review replacement, separate from all approvals", async () => {
+  const f = await fixture(); let calls = 0;
+  const intake = () => new HostConversationIntake(f.journal(), () => f.port, undefined, undefined, async (turn, operationId) => {
+    calls++; expect(operationId).toBe("gate-old-review"); expect(turn.content).toBe("replace workflow review gate-old-review");
+    return { ok: true, value: { disposition: "replaced_without_verdict_claim", originalOutcome: "unknown" } };
+  });
+  const result = await intake().receive(f.binding, f.turn("physical-review-replacement", "replace workflow review gate-old-review"));
+  expect(result).toMatchObject({ requiresConversationDecision: false, result: { ok: true } });
+  expect(await intake().receive(f.binding, f.turn("physical-review-replacement", "replace workflow review gate-old-review"))).toEqual(result);
+  expect(calls).toBe(1); expect(f.applied).toHaveLength(0); expect(await f.journal().humanDecisions()).toHaveLength(0);
+  await expect(intake().decide(f.binding, { messageId: "physical-review-replacement", decision: { intent: "conversation_only", directReply: "Approved" } })).rejects.toThrow(/physical/);
+  for (const [id, content] of [["quoted-replacement", 'Explain "replace workflow review gate-old-review"'], ["mixed-replacement", "replace workflow review gate-old-review and approve delivery"]])
+    expect(await intake().receive(f.binding, f.turn(id!, content!))).toMatchObject({ requiresConversationDecision: true });
+  expect(calls).toBe(1);
+});

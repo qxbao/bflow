@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, rm, realpath } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -16,6 +16,7 @@ import { evaluateWatchdog } from "../../src/agentic/run-watchdog.js";
 import { guardNativeShell } from "../../src/agentic/read-only-commands.js";
 import { digest, type JournalState, type Outbound, type RunRecord } from "../../src/agentic/journal.js";
 import { FakeAgentTransport } from "../helpers/fake-transport.js";
+import { HerdrOutbox } from "../../src/agentic/outbox.js";
 import { draft, workflow } from "../../../specification/test/fixtures.js";
 
 // A-Z acceptance for WORKFLOW-AZ-PLAN.md ("Nghiệm thu"): one delegation survives each recoverable fault once and reaches the
@@ -329,7 +330,106 @@ describe("A-Z acceptance: an implementing run stays recoverable", () => {
 });
 
 describe("A-Z acceptance: an infrastructure measurement failure is resumable", () => {
-  it("records a resume action and re-measures the same revision only after an explicit resume", async () => {
+  it.each([false, true])("retires a blocked verifier only with physical authority, preserving unknown measurement outcome and the original request (crash=%s)", async crash => {
+    const f = await fixture();
+    (f.ports.roleCapabilities.qa as string[]).push("testing");
+    const spec = structuredClone(f.spec);
+    spec.acceptanceCriteria[0]!.verificationMethod = "integration_test";
+    const intake = f.envelope("delegation.request", { ...(f.intake.payload as object), acceptanceCriteria: spec.acceptanceCriteria },
+      { message_id: "intake-1", idempotency_key: "intake-1" });
+    await f.runtime.queueHerdr(intake); await f.deliveredById("intake-1"); await f.runtime.receiveHerdr(intake);
+    await f.runtime.proposeWorkflow("run-1", spec, f.def, 1);
+    await f.runtime.tick();
+    const assignment = (await f.state()).outbound.find(out => out.message.type === "task.assignment")!;
+    const developer = f.panes.bindings.find(pane => pane.agentId === assignment.handle!.target.agentId)!;
+    developer.session = assignment.handle!.target.session;
+    const head = git(developer.worktreePath!, "rev-parse", "HEAD");
+    const phase = (await f.record()).tasks[0]!.spec.strategy.tddDecision.mode === "required" ? "red" : "verification";
+    const queued = await f.runtime.requestPhaseVerification(developer, "run-1", "implement", phase, head) as { messageId: string };
+    const request = await f.deliveredById(queued.messageId);
+    const qa = f.panes.bindings.find(pane => pane.paneId === request.handle!.target.paneId)!;
+    const blockedReply = f.envelope("task.status", { status: "blocked", summary: "Host reconciliation unavailable; no measurement performed" }, {
+      causation_id: queued.messageId, sender: { role: "qa", agent_id: qa.agentId, pane_id: qa.paneId }
+    });
+    await f.runtime.receiveHerdr(blockedReply);
+    const coordinator = f.binding("coordinator");
+    await f.runtime.observeCoordinatorOutcome(f.envelope("task.status", { status: "blocked", summary: "Await explicit continuation after host repair" }, {
+      recipient: { role: "conversation" }, causation_id: blockedReply.message_id, sender: { role: "coordinator", agent_id: coordinator.agentId, pane_id: coordinator.paneId }
+    }));
+    const blocked = await f.record();
+    if (crash) await (f.runtime as any).journal.exclusive(async (state: JournalState, save: () => Promise<void>) => {
+      await new HerdrOutbox(f.ports, state, save).release(state.outbound.find(out => out.message.message_id === queued.messageId)!);
+    });
+    qa.paneId = "replacement-qa"; qa.session = { source: "test", kind: "id", value: "replacement-qa-session" };
+    f.advance(301 * SECOND);
+    const authority = { operationId: queued.messageId, sessionId: "session-1", userMessageId: "physical-retirement", userId: "human-1" };
+    expect(typeof f.runtime.retirePolicyPhase).toBe("function");
+    await expect(f.runtime.retirePolicyPhase(authority)).rejects.toThrow(/physical human/);
+    f.ports.authorizePolicyPhaseRetirement = async () => true;
+    await expect(f.runtime.retirePolicyPhase({ ...authority, sessionId: "other" })).rejects.toThrow(/Cross-session/);
+    f.ports.hasPolicyPhaseReceipt = async () => true;
+    await expect(f.runtime.retirePolicyPhase(authority)).rejects.toThrow(/host evidence/);
+    f.ports.hasPolicyPhaseReceipt = async () => false;
+    const replacementPane = qa.paneId; qa.paneId = request.handle!.target.paneId;
+    await expect(f.runtime.retirePolicyPhase(authority)).rejects.toThrow(/retired verifier/);
+    qa.paneId = replacementPane;
+    const replacementSession = qa.session; qa.session = request.handle!.target.session;
+    await expect(f.runtime.retirePolicyPhase(authority)).rejects.toThrow(/retired verifier/);
+    qa.session = replacementSession;
+    if (crash) {
+      const internals = f.runtime as any, recover = internals.recoverPolicyPhaseRetirements;
+      internals.recoverPolicyPhaseRetirements = async () => { throw new Error("crash after retirement tombstone"); };
+      await expect(f.runtime.retirePolicyPhase(authority)).rejects.toThrow("crash after retirement tombstone");
+      internals.recoverPolicyPhaseRetirements = recover;
+      const fresh = new AgenticWorkflowRuntime(f.ports, { journalDirectory: join(f.root, "journal"), repositoryPath: f.repository });
+      await fresh.retirePolicyPhase(authority);
+    } else await f.runtime.retirePolicyPhase(authority);
+    const retired = (await f.state()).outbound.find(out => out.message.message_id === queued.messageId)!;
+    expect(retired.phaseRetirement).toMatchObject({ disposition: "retired_without_measurement_claim", blockedReplyId: blockedReply.message_id });
+    expect(retired.phaseFailure).toBeUndefined();
+    expect(JSON.parse(await readFile(join(f.root, "journal", "state.json"), "utf8")).version).toBe(3);
+    expect(retired.status).toBe("cancelled");
+    expect(retired.phaseFailureEvidence).toBeUndefined();
+    expect((await f.record()).tasks[0]!.spec.strategy.metadata?.tddEvidence ?? []).toHaveLength(0);
+    expect((await f.state()).outbound.filter(out => out.message.type === "task.assignment")).toHaveLength(1);
+    await expect(f.runtime.requestPhaseVerification(developer, "run-1", "implement", phase, head)).rejects.toThrow(/paused/);
+    const reopened = new AgenticWorkflowRuntime(f.ports, { journalDirectory: join(f.root, "journal"), repositoryPath: f.repository });
+    await expect(reopened.retirePolicyPhase(authority)).resolves.toMatchObject({ alreadyRetired: true });
+    await reopened.resumeBlockedRun("run-1", blocked.pendingAction!.actionId);
+    await expect(f.runtime.requestPhaseVerification(developer, "run-1", "implement", phase, head)).rejects.toThrow(/Conversation resume/);
+    expect((await f.state()).outbound.some(out => (out.message.payload as any).kind === "policy_phase_outcome" && out.message.causation_id === assignment.message.message_id)).toBe(false);
+    await reopened.resumeBlockedRun("run-1", blocked.pendingAction!.actionId, { conversationUserMessageId: "physical-resume" });
+    const retryNotice = (await f.state()).outbound.find(out => (out.message.payload as any).kind === "policy_phase_outcome" && (out.message.payload as any).status === "retry")!;
+    expect(retryNotice).toBeDefined();
+    f.advance(301 * SECOND);
+    await reopened.flushOutbound(); await reopened.flushOutbound();
+    expect((await f.state()).outbound.filter(out => out.message.message_id === retryNotice.message.message_id)).toHaveLength(1);
+    expect(["accepted", "released"]).toContain((await f.state()).outbound.find(out => out.message.message_id === retryNotice.message.message_id)!.status);
+    const late = f.envelope("verification.result", {}, { causation_id: queued.messageId, sender: { role: "qa", agent_id: request.handle!.target.agentId, pane_id: request.handle!.target.paneId } });
+    await expect(reopened.receiveHerdr(late)).rejects.toThrow(/Retired policy phase/);
+    await reopened.recoverMissingCoordinatorWakeups();
+    expect((await f.record()).tasks[0]!.spec.strategy.metadata?.tddEvidence ?? []).toHaveLength(0);
+    const next = await f.runtime.requestPhaseVerification(developer, "run-1", "implement", phase, head) as { messageId: string };
+    expect(next.messageId).not.toBe(queued.messageId);
+    expect((await f.state()).outbound.find(out => out.message.message_id === queued.messageId)!.message).toEqual(request.message);
+    if (crash) {
+      await expect(reopened.receiveHerdr(f.envelope("task.status", { action: "cancel", reason: "Cancel after retired verifier" }))).resolves.toMatchObject({ accepted: true });
+      expect((await f.record()).cancelled).toBe(true);
+      expect(f.transport.cancelledHandles.some(handle => handle.requestId === assignment.handle!.requestId)).toBe(true);
+      return;
+    }
+    const second = await f.deliveredById(next.messageId);
+    await f.runtime.receiveHerdr(f.envelope("task.status", { status: "blocked", summary: "Second verifier cannot continue" }, {
+      causation_id: next.messageId, sender: { role: "qa", agent_id: qa.agentId, pane_id: qa.paneId }
+    }));
+    qa.paneId = "third-qa-pane"; qa.session = { source: "test", kind: "id", value: "third-qa-session" };
+    f.advance(301 * SECOND);
+    await expect(reopened.retirePolicyPhase({ ...authority, operationId: next.messageId, userMessageId: "second-physical-retirement" })).rejects.toThrow(/bound exhausted/);
+    expect((await f.state()).outbound.filter(out => out.phaseRetirement)).toHaveLength(1);
+    expect((await f.state()).outbound.find(out => out.message.message_id === next.messageId)!.handle).toEqual(second.handle);
+  }, 60_000);
+
+  it.each([false, true])("records a resume action and re-measures the same revision only after an explicit resume (recovery crash=%s)", async recoveryCrash => {
     const f = await fixture();
     (f.ports.roleCapabilities.qa as string[]).push("testing");
     const spec = structuredClone(f.spec);
@@ -347,12 +447,42 @@ describe("A-Z acceptance: an infrastructure measurement failure is resumable", (
     const queued = await f.runtime.requestPhaseVerification(developer, "run-1", "implement", phase, head) as { messageId: string };
     const request = await f.deliveredById(queued.messageId);
     const qa = f.panes.bindings.find(pane => pane.paneId === request.handle!.target.paneId)!;
-    await f.runtime.recordPhaseFailure(qa, queued.messageId, "Behavioral runner infrastructure failure (prepare): exit 2", false);
+    const measurementFailure = await f.runtime.recordPhaseFailure(qa, queued.messageId, "Behavioral runner infrastructure failure (prepare): exit 2", false);
+    expect(measurementFailure).toMatchObject({ phaseRecorded: false, implementationAuthorized: false,
+      outcome: { requestId: queued.messageId, phase, sourceRevision: head, repairable: false, summary: expect.stringContaining("infrastructure failure") },
+      next: expect.stringContaining("Runtime") });
+    expect(await f.runtime.recordPhaseFailure(qa, queued.messageId, "Behavioral runner infrastructure failure (prepare): exit 2", false)).toMatchObject({
+      alreadyRecorded: true, phaseRecorded: false, implementationAuthorized: false, outcome: (measurementFailure as any).outcome });
     const blocked = await f.record();
     expect(blocked).toMatchObject({ status: "escalated", pendingAction: { kind: "resume_coordinator", state: "pending", recovery: "manual" } });
     await expect(f.runtime.requestPhaseVerification(developer, "run-1", "implement", phase, head)).rejects.toThrow(/paused awaiting resume/);
     await f.runtime.resumeBlockedRun("run-1", blocked.pendingAction!.actionId);
     expect((await f.record()).status).toBe(blocked.pendingAction!.previousStatus);
+    const retryNotice = (await f.state()).outbound.find(out => out.message.type === "task.status" &&
+      out.message.run_id === "run-1" && (out.message.payload as Record<string, unknown>).kind === "policy_phase_outcome" &&
+      (out.message.payload as Record<string, unknown>).status === "retry");
+    expect(retryNotice).toBeDefined();
+    expect(retryNotice?.parentAssignmentId).toBe(assignment.message.message_id);
+    expect(retryNotice?.message.recipient.pane_id).toBe(developer.paneId);
+    expect(retryNotice?.message.payload).toMatchObject({ phase, status: "retry" });
+    expect((await f.state()).outbound.filter(out => out.message.type === "task.assignment")).toHaveLength(1);
+    f.advance(301 * SECOND);
+    if (recoveryCrash) {
+      await expect((f.runtime as any).journal.exclusive(async (state: JournalState, save: () => Promise<void>) => {
+        const parent = state.outbound.find(out => out.message.message_id === assignment.message.message_id)!;
+        const notice = state.outbound.find(out => out.message.message_id === retryNotice!.message.message_id)!;
+        notice.status = "cancelled"; notice.error = "Task notice parent lease is expired or mismatched";
+        const outbox = new HerdrOutbox(f.ports, state, save);
+        await outbox.recoverTaskLease(parent, state.outbound.find(out => out.message.message_id === queued.messageId)!);
+        throw new Error("crash after replacement lease before notice requeue");
+      })).rejects.toThrow("crash after replacement lease");
+    }
+    await f.runtime.flushOutbound();
+    await f.runtime.flushOutbound();
+    const sameNotice = (await f.state()).outbound.filter(out => out.message.message_id === retryNotice!.message.message_id);
+    expect(sameNotice).toHaveLength(1);
+    expect(["accepted", "released"]).toContain(sameNotice[0]!.status);
+    expect((await f.state()).outbound.find(out => out.message.message_id === assignment.message.message_id)!.leaseHistory).toHaveLength(1);
     const again = await f.runtime.requestPhaseVerification(developer, "run-1", "implement", phase, head) as { messageId: string };
     expect(again.messageId).not.toBe(queued.messageId);
   }, 60_000);
@@ -482,4 +612,67 @@ describe("A-Z acceptance: human gates and uncertain deliveries are never resumed
     expect(sent()).toBe(sentBefore);
     expect((await uncertain()).status).toBe("unknown_delivery");
   });
+});
+
+describe("human fencing of a stale diagnostic without claiming delivery", () => {
+  async function fencedFixture() {
+    const f = await fixture(); await delegate(f);
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    f.binding("coordinator").session = { source: "herdr:codex", kind: "id", value: "current-coordinator" };
+    f.ports.authorizeNativeDiagnosticFence = async authority => authority.userId === "human-1" && authority.sessionId === "session-1";
+    const message = f.envelope("task.status", { status: "blocked", summary: "Retired Coordinator diagnostic" }, {
+      message_id: "old-native-diagnostic", idempotency_key: "old-native-diagnostic", recipient: { role: "conversation" },
+      sender: { role: "coordinator", agent_id: "coordinator", pane_id: "retired-coordinator" }
+    });
+    await f.runtime.recordNativeDeliveryIntent(message, "old-diagnostic");
+    const authority = { operationId: "old-diagnostic", sessionId: "session-1", userMessageId: "trusted-user-fence", userId: "human-1" };
+    return { ...f, message, authority };
+  }
+
+  it("preserves the unknown intent, rejects late arrival across restart, and grants no business success", async () => {
+    const f = await fencedFixture();
+    const before = await f.record();
+    const result = await f.runtime.fenceNativeDiagnostic(f.authority) as any;
+    expect(result).toMatchObject({ disposition: "fenced_without_delivery_claim", delivery: "unknown_delivery", resendAllowed: false });
+    let run = await f.record();
+    expect(run.nativeDeliveries).toHaveLength(0);
+    expect(run.nativeDiagnosticFences?.[0]?.message).toEqual(f.message);
+    expect(run.status).toBe(before.status);
+    expect(run.decision).toEqual(before.decision);
+    expect(run.tasks[0]!.spec.strategy).toEqual(before.tasks[0]!.spec.strategy);
+    await expect(f.runtime.observeCoordinatorOutcome(f.message)).rejects.toThrow(/fenced/);
+    expect((await f.record()).status).toBe(before.status);
+    const reopened = new AgenticWorkflowRuntime(f.ports, { journalDirectory: join(f.root, "journal"), repositoryPath: f.repository });
+    await reopened.initialize();
+    await reopened.recordNativeDeliveryIntent(f.message, f.authority.operationId);
+    run = await reopened.inspect("run-1") as unknown as RunRecord;
+    expect(run.nativeDeliveries).toHaveLength(0);
+    expect(run.nativeDiagnosticFences).toHaveLength(1);
+    await expect(reopened.observeCoordinatorOutcome(f.message)).rejects.toThrow(/fenced/);
+    const path = join(f.root, "journal/state.json");
+    const encoded = JSON.parse(await readFile(path, "utf8"));
+    expect(encoded.version).toBe(2);
+    encoded.version = 1;
+    await writeFile(path, JSON.stringify(encoded));
+    await expect(reopened.inspect("run-1")).rejects.toThrow("require private journal v2");
+  }, 60000);
+
+  it("refuses missing human authority, cross-session input, live-sender diagnostics and conclusive payloads", async () => {
+    const f = await fencedFixture();
+    f.ports.authorizeNativeDiagnosticFence = async () => false;
+    await expect(f.runtime.fenceNativeDiagnostic(f.authority)).rejects.toThrow(/human/);
+    f.ports.authorizeNativeDiagnosticFence = async () => true;
+    await expect(f.runtime.fenceNativeDiagnostic({ ...f.authority, sessionId: "another-session" })).rejects.toThrow(/session/);
+    for (const [id, patch] of [
+      ["live-source", { sender: { role: "coordinator", agent_id: "coordinator", pane_id: f.binding("coordinator").paneId } }],
+      ["completed", { payload: { status: "completed", summary: "Claimed completion" } }],
+      ["assignment", { type: "task.assignment", recipient: { role: "developer" } }],
+      ["approval", { type: "approval.decision" }]
+    ] as const) {
+      const message = RoleMessageSchema.parse({ ...f.message, ...patch, message_id: id, idempotency_key: id });
+      await f.runtime.recordNativeDeliveryIntent(message, id);
+      await expect(f.runtime.fenceNativeDiagnostic({ ...f.authority, operationId: id })).rejects.toThrow();
+    }
+    expect((await f.record()).nativeDiagnosticFences ?? []).toHaveLength(0);
+  }, 60000);
 });

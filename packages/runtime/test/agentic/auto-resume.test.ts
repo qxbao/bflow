@@ -117,6 +117,28 @@ async function fixture(runs: RunRecord[] = [run("run-1", "specifying")]) {
 }
 
 describe("bounded automatic resume", () => {
+  it("delivers an explicit resume separately when an automatic wake is already queued, retaining both identities across restart", async () => {
+    const actionId = `next-${digest(["run-1", "blocked-source"])}`;
+    const f = await fixture([run("run-1", "escalated", { pendingAction: {
+      actionId, kind: "resume_coordinator", owner: "coordinator", reason: "Waiting for repaired host",
+      sourceMessageId: "blocked-source", createdAt: T0, state: "pending", previousStatus: "implementing", recovery: "auto_resume"
+    } })]);
+    f.advance(31 * SECOND);
+    const automatic = await f.runtime.resumeBlockedRun("run-1", actionId, { automatic: true }) as { messageId: string };
+    f.restart();
+    const manual = await f.runtime.resumeBlockedRun("run-1", actionId) as { messageId: string };
+    expect(manual.messageId).not.toBe(automatic.messageId);
+    const wakes = await f.resumeWakes();
+    expect(wakes).toHaveLength(2);
+    expect(wakes.find(out => out.message.message_id === automatic.messageId)!.message.payload).toMatchObject({ automatic: true });
+    expect(wakes.find(out => out.message.message_id === manual.messageId)!.message.payload).toMatchObject({ automatic: false });
+    expect(await f.record()).toMatchObject({ status: "implementing", pendingAction: { manualResumeAttempts: 1, resumeAttempts: 0 } });
+    f.restart();
+    expect(await f.runtime.resumeBlockedRun("run-1", actionId)).toMatchObject({ messageId: manual.messageId });
+    expect(await f.resumeWakes()).toHaveLength(2);
+    expect((await f.record()).pendingAction?.manualResumeAttempts).toBe(1);
+  });
+
   it("creates a fresh recovery wake when the resumed Coordinator STOPs without proposing again", async () => {
     const f = await fixture();
     const initial = coordinatorWake("rejection-initial");
@@ -267,9 +289,11 @@ describe("bounded automatic resume", () => {
     expect(wakes).toHaveLength(1);
     expect(wakes[0]!.message).toMatchObject({ message_id: `resume-${digest(["run-1", blocked.pendingAction!.actionId])}`, recipient: { role: "coordinator" },
       payload: { kind: "resume_run", actionId: blocked.pendingAction!.actionId, automatic: true, attempt: 1, limit: 3 } });
-    // A repeated explicit resume of the same action is answered from its receipt, never a second wake.
-    await f.runtime.resumeBlockedRun("run-1", blocked.pendingAction!.actionId);
-    expect(await f.resumeWakes()).toHaveLength(1);
+    // An explicit request is distinct from an automatic wake; its own retry is idempotent.
+    const explicit = await f.runtime.resumeBlockedRun("run-1", blocked.pendingAction!.actionId);
+    expect(await f.resumeWakes()).toHaveLength(2);
+    expect(await f.runtime.resumeBlockedRun("run-1", blocked.pendingAction!.actionId)).toEqual(explicit);
+    expect(await f.resumeWakes()).toHaveLength(2);
   });
 
   it("does not auto-resume static runner/proposal blockers, marks recovery as manual, and preserves the blocker for user action", async () => {

@@ -18,12 +18,13 @@ async function fixture() {
   await writeFile(join(repository,"guide.md"),"after\n");git("add","guide.md");git("commit","-m","change"); const head=git("rev-parse","HEAD");
   const opened=await openFilesystemArtifactStore({root:join(root,"artifacts"),storeId:"host-test"});if(!opened.ok) throw new Error(opened.error.message);
   cleanups.push(async()=>{opened.value.close();await rm(root,{recursive:true,force:true});});
-  const binding=PaneBindingSchema.parse({schemaVersion:2,bindingId:"review-binding",sessionId:"session",role:"reviewer",agentId:"independent-reviewer",paneId:"pane",workspaceId:"workspace",tabId:"tab",provider:"claude",agentKind:"claude",cwd:repository,isolationMode:"dedicated_pane",readOnlyWorkspace:true,transportState:"idle",boundAt:new Date().toISOString()});
+  const binding=PaneBindingSchema.parse({schemaVersion:2,bindingId:"review-binding",sessionId:"session",role:"reviewer",agentId:"independent-reviewer",paneId:"pane",workspaceId:"workspace",tabId:"tab",provider:"claude",agentKind:"claude",cwd:repository,isolationMode:"dedicated_pane",readOnlyWorkspace:true,session:{source:"test",kind:"id",value:"native-review"},transportState:"idle",boundAt:new Date().toISOString()});
   const definition={...DEFAULT_HOST_CHECKS[0]!,configuration:{kind:"review",method:"manual_review",criterionIds:["ac-1"],testNames:["criterion"],role:"reviewer",levels:[]}};
   const context=QualityGateContextSchema.parse({runId:"run",taskId:"task",attemptId:"attempt",definition,artifacts:[],input:{sourceRevision:head,baseRevision:base,sourceWorktreePath:repository,specFingerprint:"a".repeat(64),scope:"task"}});
-  const runtime={inspect:async()=>({outbound:[{message:{message_id:"request",type:"verification.requested",payload:context},handle:{target:{paneId:binding.paneId}}}]})} as unknown as AgenticWorkflowRuntime;
+  const outbound:Record<string,any>[]=[{status:"accepted",message:{message_id:"request",type:"verification.requested",payload:context},handle:{target:{paneId:binding.paneId,agentId:binding.agentId,session:binding.session}}}];
+  const runtime={inspect:async()=>({outbound})} as unknown as AgenticWorkflowRuntime;
   const restore=()=>new HostVerification(()=>runtime,()=>opened.value,new HostReceiptJournal(join(root,"receipts"),repository,"session"));
-  return {repository,head,base,git,binding,context,restore,host:restore()};
+  return {repository,head,base,git,binding,context,outbound,restore,host:restore()};
 }
 describe("trusted host observations",()=>{
   it("captures the actual pinned diff before accepting an independent verdict and rejects altered receipts",async()=>{
@@ -49,4 +50,30 @@ describe("trusted host observations",()=>{
     expect(result.ok && result.value.status).toBe("failed");
     expect(result.ok && (result.value.metadata?.verification as {exitCode:number}).exitCode).not.toBe(0);
   });
+  it("pins the exact native Reviewer and fences stored observations after physical replacement",async()=>{
+    const f=await fixture();
+    await expect(f.host.inspectReview({...f.binding,agentId:"other-agent"},{messageId:"request"})).rejects.toThrow("No verification request");
+    await expect(f.host.inspectReview({...f.binding,session:{source:"test",kind:"id",value:"other-native"}},{messageId:"request"})).rejects.toThrow("No verification request");
+    const observed=await f.host.inspectReview(f.binding,{messageId:"request"}) as {reviewId:string};
+    f.outbound[0]!.reviewReplacement={disposition:"replaced_without_verdict_claim"};
+    await expect(f.host.inspectReview(f.binding,{messageId:"request"})).rejects.toThrow("Replaced workflow review");
+    await expect(f.restore().completeReview(f.binding,{reviewId:observed.reviewId,criteria:[{criterionId:"ac-1",passed:true,summary:"old observation"}],summary:"old observation"})).rejects.toThrow("Replaced workflow review");
+  });
+
+  it("guides a mistaken reviewId only to this native pane's observation for the exact assigned request",async()=>{
+    const f=await fixture(), observed=await f.host.inspectReview(f.binding,{messageId:"request"}) as {reviewId:string};
+    await expect(f.host.completeReview(f.binding,{messageId:"request",reviewId:"mistyped-observation",criteria:[],summary:"not a verdict"})).rejects.toThrow(observed.reviewId);
+    await expect(f.host.completeReview({...f.binding,agentId:"foreign-agent"},{messageId:"request",reviewId:"mistyped-observation",criteria:[],summary:"not a verdict"})).rejects.not.toThrow(observed.reviewId);
+    await expect(f.host.completeReview({...f.binding,session:{...f.binding.session!,value:"foreign-native"}},{messageId:"request",reviewId:"mistyped-observation",criteria:[],summary:"not a verdict"})).rejects.not.toThrow(observed.reviewId);
+    await expect(f.host.completeReview(f.binding,{messageId:"another-request",reviewId:"mistyped-observation",criteria:[],summary:"not a verdict"})).rejects.not.toThrow(observed.reviewId);
+    f.outbound.push({...f.outbound[0],message:{...f.outbound[0]!.message,message_id:"new-identical-context"}});
+    await expect(f.host.completeReview(f.binding,{messageId:"new-identical-context",reviewId:"mistyped-observation",criteria:[],summary:"not a verdict"})).rejects.not.toThrow(observed.reviewId);
+    await expect(f.restore().completeReview(f.binding,{messageId:"new-identical-context",reviewId:observed.reviewId,criteria:[],summary:"not a verdict"})).rejects.toThrow("another verification request");
+    f.outbound[0]!.reviewReplacement={disposition:"replaced_without_verdict_claim"};
+    await expect(f.host.completeReview(f.binding,{messageId:"request",reviewId:"mistyped-observation",criteria:[],summary:"not a verdict"})).rejects.not.toThrow(observed.reviewId);
+    delete f.outbound[0]!.reviewReplacement;
+    const completed=await f.host.completeReview(f.binding,{messageId:"request",reviewId:observed.reviewId,criteria:[{criterionId:"ac-1",passed:true,summary:"The exact committed change meets the criterion"}],summary:"Independent observed review"});
+    expect(completed.result.status).toBe("passed");
+  });
+
 });

@@ -1,3 +1,4 @@
+import { policyEvidenceView } from "./policy-evidence-view.js";
 import { execFile } from "node:child_process";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
@@ -352,7 +353,17 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   let verificationSandbox = await probeBehavioralSandbox(configuration.repositoryPath);
   const verification = new HostVerification(() => requireWorkspace().runtime, () => requireWorkspace().runtime.ports.artifactStore, receipts, testRunners);
   const development = new HostDevelopment(() => requireWorkspace().runtime, testRunners);
-  const conversationIntake = new HostConversationIntake(receipts, () => requireWorkspace().conversation);
+  const activePolicyMeasurements = new Set<string>();
+  const conversationIntake = new HostConversationIntake(receipts, () => requireWorkspace().conversation, async (turn, operationId) => {
+    const delivery = await receipts.nativeDelivery(operationId);
+    if (!delivery || delivery.status !== "unknown_delivery" || await receipts.nativeRejection(delivery.message.message_id))
+      throw new Error("Diagnostic operation is missing or already has authoritative delivery/refusal evidence");
+    return json({ ok: true, value: await requireWorkspace().runtime.fenceNativeDiagnostic({ operationId,
+      sessionId: turn.conversationSessionId, userMessageId: turn.messageId, userId: turn.userId }) });
+  }, async (turn, operationId) => json({ ok: true, value: await requireWorkspace().runtime.retirePolicyPhase({ operationId,
+    sessionId: turn.conversationSessionId, userMessageId: turn.messageId, userId: turn.userId }) }),
+  async (turn, operationId) => json({ ok: true, value: await requireWorkspace().runtime.replaceWorkflowReview({ operationId,
+    sessionId: turn.conversationSessionId, userMessageId: turn.messageId, userId: turn.userId }) }));
   const nativeSessions = new Map<string, {role: AgentRole; sessionId: string}>();
   try { for (const [pane, value] of Object.entries(record(JSON.parse(await readFile(join(configuration.directory, "native-sessions.json"), "utf8"))))) {
     const session = record(value); nativeSessions.set(pane, { role: AgentRoleSchema.parse(session.role), sessionId: textField(session.sessionId) });
@@ -581,6 +592,34 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       authenticateGateResult: async (result, message) => await authenticateNativeHerdrMessage(message) && verification.authenticateGate(result),
       projectApprovalRequired: () => configuration.policy?.sdd.approvalRequired === true,
       authorizeHuman: decision => receipts.authenticateHuman(decision),
+      hasPolicyPhaseReceipt: async request => activePolicyMeasurements.has(request.message_id) || receipts.hasPolicyPhaseEvidence(request),
+      authorizePolicyPhaseRetirement: async authority => {
+        if (!humanHookProvenance || humanHookProvenance.messageId !== authority.userMessageId ||
+            humanHookProvenance.userId !== authority.userId || humanHookProvenance.conversationSessionId !== authority.sessionId) return false;
+        const turn = (await receipts.conversationTurns()).find(item => item.messageId === authority.userMessageId);
+        return turn !== undefined && turn.userId === authority.userId && turn.conversationSessionId === authority.sessionId &&
+          digest(turn.binding.session) === digest(humanHookProvenance.binding.session) &&
+          turn.binding.paneId === humanHookProvenance.binding.paneId && turn.binding.role === "conversation" &&
+          digest(turn.content) === humanHookProvenance.promptDigest && turn.content.trim() === `retire policy phase ${authority.operationId}`;
+      },
+      authorizeReviewReplacement: async authority => {
+        if (!humanHookProvenance || humanHookProvenance.messageId !== authority.userMessageId ||
+            humanHookProvenance.userId !== authority.userId || humanHookProvenance.conversationSessionId !== authority.sessionId) return false;
+        const turn = (await receipts.conversationTurns()).find(item => item.messageId === authority.userMessageId);
+        return turn !== undefined && turn.userId === authority.userId && turn.conversationSessionId === authority.sessionId &&
+          digest(turn.binding.session) === digest(humanHookProvenance.binding.session) &&
+          turn.binding.paneId === humanHookProvenance.binding.paneId && turn.binding.role === "conversation" &&
+          digest(turn.content) === humanHookProvenance.promptDigest && turn.content.trim() === `replace workflow review ${authority.operationId}`;
+      },
+      authorizeNativeDiagnosticFence: async authority => {
+        if (!humanHookProvenance || humanHookProvenance.messageId !== authority.userMessageId ||
+            humanHookProvenance.userId !== authority.userId || humanHookProvenance.conversationSessionId !== authority.sessionId) return false;
+        const turn = (await receipts.conversationTurns()).find(item => item.messageId === authority.userMessageId);
+        return turn !== undefined && turn.userId === authority.userId && turn.conversationSessionId === authority.sessionId &&
+          digest(turn.binding.session) === digest(humanHookProvenance.binding.session) &&
+          turn.binding.paneId === humanHookProvenance.binding.paneId && turn.binding.role === "conversation" &&
+          digest(turn.content) === humanHookProvenance.promptDigest && turn.content.trim() === `fence diagnostic ${authority.operationId}`;
+      },
       recoveredHumanDecisions: await receipts.humanDecisions(),
       onNativeRejection: async message => {
         await receipts.recordNativeRejection(message);
@@ -675,7 +714,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     if (name === "inspect_native_delivery") {
       if (!["coordinator", "conversation"].includes(role)) throw new Error("Only Coordinator or Conversation inspects native delivery");
       const { operationId } = z.object({ operationId: z.string().min(1).max(200) }).strict().parse(parameters);
-      return json(await inspectNativeDelivery(receipts, operationId, await host.runtime.nativeDeliveryInbox()));
+      const delivery = await inspectNativeDelivery(receipts, operationId, await host.runtime.nativeDeliveryInbox());
+      const fence = await host.runtime.nativeDiagnosticFenceStatus(operationId);
+      return json({ ...delivery, ...(fence === null ? {} : { fence, blocking: false, resendAllowed: false }) });
     }
     const taskLogResult = await handleTaskLogTool({ role, binding, activityLog, inspect: () => host.runtime.inspect() }, name, parameters);
     if (taskLogResult !== undefined) return json(taskLogResult);
@@ -701,14 +742,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     if (name === "resume_run") {
       const runId = textField(parameters.runId);
       if (role === "conversation") {
-        await receipts.authorizeConversationResume(binding, parameters.messageId === undefined ? undefined : textField(parameters.messageId), runId);
+        const resumeTurn = await receipts.authorizedConversationResumeTurn(binding, parameters.messageId === undefined ? undefined : textField(parameters.messageId), runId);
         const run = record(await host.runtime.inspect(runId));
         if (DelegationRequestSchema.parse(run.delegation).sessionId !== manifest!.conversationSessionId)
           throw new Error("Resume request belongs to another Conversation session");
         if (run.pendingAction === undefined)
           throw new Error(`Run ${runId} (${String(run.status)}) has no recorded blocker to resume${run.error === undefined ? "" : `; last error: ${String(run.error)}`}`);
         const action = record(run.pendingAction);
-        return host.runtime.resumeBlockedRun(runId, textField(action.actionId));
+        return host.runtime.resumeBlockedRun(runId, textField(action.actionId), { conversationUserMessageId: resumeTurn.messageId });
       }
       if (role !== "coordinator") throw new Error("Only Coordinator or an authenticated Conversation resume request may resume a blocked run");
       return host.runtime.resumeBlockedRun(runId, textField(parameters.actionId));
@@ -776,9 +817,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         return record(record(out.handle).target).paneId === binding.paneId && ["accepted", "released"].includes(String(out.status));
       });
       const conflictResolution = role === "developer" ? await development.conflictResolutionContext(binding) : undefined;
-      return json({ ...(conflictResolution ? { kind: "conflict_resolution", conflictResolution } : {}),
-        assignments: outbound.map(out => ({ ...out, envelopeDigest: digest(out.message) })),
-        runs: (state.runs as Record<string, unknown>[]).filter(run => outbound.some(out => record(out.message).run_id === run.runId)) });
+      const assignedRuns = (state.runs as Record<string, unknown>[]).filter(run => outbound.some(out => record(out.message).run_id === run.runId));
+      return json({ policyEvidence: policyEvidenceView(assignedRuns, state.outbound as Record<string, unknown>[]),
+        policyEvidenceNote: "Stored Runtime phase receipts and rejected outcomes only. A failed result with accepted phase red is valid Red, never Green. Read the exact revision and artifact checksums; no lifecycle status or agent text is proof.",
+        ...(conflictResolution ? { kind: "conflict_resolution", conflictResolution } : {}),
+        assignments: outbound.map(out => ({ ...out, envelopeDigest: digest(out.message) })), runs: assignedRuns });
     }
     if (role === "developer" && ["submit_implementation", "request_verification", "authorize_implementation"].includes(name))
       await development.refuseForResolver(binding, name);
@@ -839,13 +882,16 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         digest(record(record(out.handle).target).session) === digest(binding.session) && record(out.message).type === "verification.requested" &&
         record(out.message).run_id === parameters.runId && record(record(out.message).payload).kind === "conditional_evidence" &&
         record(record(out.message).payload).taskId === parameters.taskId && record(record(out.message).payload).phase === parameters.phase &&
-        !String(out.error ?? "").startsWith("policy_phase_failed:")) : [];
+        !out.phaseRetirement && !String(out.error ?? "").startsWith("policy_phase_failed:")) : [];
       if (requests.length !== 1) throw new Error("No unique assigned policy-phase request for this verifier");
       const source = RoleMessageSchema.parse(requests[0]!.message);
       const applied = Array.isArray(state.inbox) ? state.inbox.map(record).find(item => item.status === "applied" &&
         record(item.message).causation_id === source.message_id && record(item.message).type === "verification.result") : undefined;
       if (applied) return json({ alreadyRecorded: true, verificationId: record(record(applied.message).payload).verificationId });
       if (requests[0]!.status !== "accepted") throw new Error("Policy verifier lease released without applied evidence; reconcile the original request");
+      if (activePolicyMeasurements.has(source.message_id)) throw new Error("Policy measurement is already in flight; reconcile it before retry");
+      activePolicyMeasurements.add(source.message_id);
+      try {
       let completed: Awaited<ReturnType<HostVerification["behavioralEvidence"]>>;
       try {
         completed = await verification.behavioralEvidence(binding, parameters);
@@ -855,7 +901,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         return host.runtime.recordPhaseFailure(binding, source.message_id, redactString(String(error)), error instanceof HostBehavioralFailure,
           error instanceof HostBehavioralFailure ? error.evidence : undefined);
       }
-      return nativeDeliver(envelope(source, "verification.result", completed.result, completed.result.evidenceArtifacts), `behavioral:${completed.result.verificationId}`);
+      return await nativeDeliver(envelope(source, "verification.result", completed.result, completed.result.evidenceArtifacts), `behavioral:${completed.result.verificationId}`);
+      } finally { activePolicyMeasurements.delete(source.message_id); }
     }
     if (name === "inspect_alternative_verification") return verification.inspectAlternative(binding, parameters);
     if (name === "complete_review") {
@@ -1531,7 +1578,7 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
     { name: "check_work", description: "Run owner-configured checks as Developer feedback. This never counts as independent acceptance evidence; runId,taskId" },
     { name: "request_verification", description: "Ask Runtime to dispatch an independent QA phase, then end your turn. Phase: red,green,refactor,verification; runId,taskId,phase" });
   if (["reviewer", "qa", "tester"].includes(role)) tools.push(
-    { name: "inspect_review", description: "Independently capture exact assigned diff before review; parameters: messageId" },
+    { name: "inspect_review", description: "Capture the exact assigned diff. For QA workflow gates also run the owner-configured tests at that integrated revision and return qaBehavioralObservation; use complete_review afterward, never record_behavioral_verification for this gate. Parameters: messageId" },
     { name: "complete_review", description: "Return a verdict after inspect_review; parameters: reviewId, messageId, summary, criteria:[{criterionId,passed,summary}]" });
   if (["qa", "tester"].includes(role)) tools.push({ name: "inspect_alternative_verification", description: "Capture exact committed diff and accepted dossier before evaluating criteria; parameters: runId,taskId" }, { name: "record_alternative_verification", description: "Capture actual committed documentation diff and independent manual acceptance evidence; parameters: observationId,runId,taskId,criteria:[{criterionId,passed,summary}]" });
   if (["qa", "tester"].includes(role)) tools.push({ name: "record_behavioral_verification", description: "Execute an assigned phase using the owner's argv, exact committed tests and real output; runId,taskId,phase. Never supply test output yourself." });
@@ -1707,7 +1754,7 @@ export async function runRoleMcp(configuration: RoleConfiguration, roleConfigPat
       if (request.method === "ping") { reply({}); continue; }
       if (request.method !== "tools/call") throw new Error("Unsupported MCP method");
       const params = record(request.params); if (!availableTools(configuration.role, configuration.provider).some(tool => tool.name === params.name)) throw new Error("Tool is unavailable for this role");
-      const measured = ["record_behavioral_verification", "check_work", "complete_review", "record_alternative_verification"].includes(String(params.name));
+      const measured = ["record_behavioral_verification", "check_work", "inspect_review", "complete_review", "record_alternative_verification"].includes(String(params.name));
       const paneId = process.env.HERDR_PANE_ID;
       if (paneId === undefined || paneId.length === 0) throw new Error("HERDR_PANE_ID is not set in the Bflow MCP server environment; the provider must forward it");
       const result = await callHost(configuration.socketPath, configuration.token, "role_call", { ...params, paneId,
