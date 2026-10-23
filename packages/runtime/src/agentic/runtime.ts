@@ -2246,7 +2246,14 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       });
       if (!allocation.ok) {
         run.error = `Developer allocation pending for ${task.taskId}: ${allocation.error.message}`;
-        if (allocation.error.code !== "conflict" || !allocation.error.retryable) run.status = "escalated";
+        if (allocation.error.code !== "conflict" || !allocation.error.retryable) {
+          run.status = "escalated";
+          // Resumable once the environment is fixed: resume restores implementing and the scheduler retries this allocation.
+          const sourceMessageId = `developer-allocation:${id}`;
+          run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
+            reason: run.error.slice(0, 2000), sourceMessageId, createdAt: this.now(), state: "pending", previousStatus: "implementing",
+            ...inheritedManualResume(run), recovery: "manual" };
+        }
         this.progress(state, outbox, run, run.error); await save(); continue;
       }
       const pane = PaneBindingSchema.parse(allocation.value);

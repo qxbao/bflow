@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, realpath } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, mkdir, realpath, writeFile } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
 import { z } from "zod";
 import {
   ArtifactReferenceSchema, ArtifactWriteOptionsSchema, GitChangeSetSchema, RoleMessageSchema,
@@ -55,19 +55,28 @@ export class GitIntegrationEngine {
     readonly repositoryPath: string,
     readonly stateDirectory: string,
     private readonly artifactStore: ArtifactStore,
-    private readonly provider: GitProvider | undefined
+    private readonly provider: GitProvider | undefined,
+    readonly worktreeRoot: string = join(stateDirectory, "trees")
   ) {}
 
-  static async open(options: { repositoryPath: string; artifactStore: ArtifactStore; provider?: GitProvider }): Promise<GitIntegrationEngine> {
+  /**
+   * `worktreeRoot` places managed worktrees outside the Git directory: agent CLIs such as Claude Code and Codex refuse
+   * writes anywhere under `.git`, so a Developer could never edit a worktree kept there. The default remains for callers
+   * that do not launch agents into worktrees.
+   */
+  static async open(options: { repositoryPath: string; artifactStore: ArtifactStore; provider?: GitProvider; worktreeRoot?: string }): Promise<GitIntegrationEngine> {
     z.string().min(1).parse(options.repositoryPath);
+    if (options.worktreeRoot !== undefined) requireCondition(isAbsolute(options.worktreeRoot), "invalid_input", "worktreeRoot must be an absolute path");
     const repository = await inspectRepository(options.repositoryPath);
-    const engine = new GitIntegrationEngine(repository.root, join(repository.commonDir, "bflow-git"), options.artifactStore, options.provider);
+    const stateDirectory = join(repository.commonDir, "bflow-git");
+    const engine = new GitIntegrationEngine(repository.root, stateDirectory, options.artifactStore, options.provider,
+      options.worktreeRoot ?? join(stateDirectory, "trees"));
     await engine.transaction(async () => undefined);
     return engine;
   }
 
-  private taskPath(key: string): string { return join(this.stateDirectory, "trees", `task-${key}`); }
-  private integrationPath(key: string): string { return join(this.stateDirectory, "trees", `integration-${key}`); }
+  private taskPath(key: string): string { return join(this.worktreeRoot, `task-${key}`); }
+  private integrationPath(key: string): string { return join(this.worktreeRoot, `integration-${key}`); }
   private async transaction<T>(action: (state: State) => Promise<T>): Promise<T> {
     return withRepositoryLock(this.stateDirectory, async () => {
       // Common Git dir, rather than the caller's linked worktree, is the repository identity.
@@ -124,7 +133,11 @@ export class GitIntegrationEngine {
       return;
     }
     requireCondition(!bindings.some(binding => binding.branch === record.branchName), "branch_in_use", "Branch already belongs to another worktree");
-    await mkdir(join(this.stateDirectory, "trees"), { recursive: true });
+    await mkdir(this.worktreeRoot, { recursive: true });
+    // A root inside the checkout must never make the main working tree dirty; the ignore file also covers itself.
+    await writeFile(join(this.worktreeRoot, ".gitignore"), "*\n", { flag: "wx" }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "EEXIST") throw error;
+    });
     if (await this.branchExists(record.branchName)) {
       requireCondition(await resolveCommit(this.repositoryPath, record.branchName) === record.baseCommitHash, "branch_collision", "Pending creation branch changed; manual reconciliation required");
       await git(this.repositoryPath, ["worktree", "add", record.worktreePath, record.branchName]);

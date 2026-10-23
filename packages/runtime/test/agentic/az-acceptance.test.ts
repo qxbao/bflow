@@ -297,6 +297,37 @@ async function delegate(f: Awaited<ReturnType<typeof fixture>>) {
 const exhaustedNotices = async (f: Awaited<ReturnType<typeof fixture>>) => (await f.state()).outbound.filter(out =>
   out.message.recipient.role === "conversation" && exhaustedNotice.test(String((out.message.payload as { headline?: string }).headline)));
 
+describe("A-Z acceptance: an implementing run stays recoverable", () => {
+  it("keeps the run scheduled when the Coordinator asks the user a question after Core exists", async () => {
+    const f = await fixture(); await delegate(f);
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    expect((await f.record()).status).toBe("implementing");
+    await f.runtime.reportProgress("run-1", "Dispatch is blocked by uncommitted files", ["Commit them or ignore them?"]);
+    expect((await f.record()).status).toBe("implementing");
+    expect((await f.state()).outbound.some(out => out.message.type === "conversation.clarification")).toBe(true);
+  }, 60_000);
+
+  it("records a resumable action when Developer allocation fails and retries it after an explicit resume", async () => {
+    const f = await fixture(); await delegate(f);
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    const allocate = f.panes.allocateDeveloper.bind(f.panes);
+    f.panes.allocateDeveloper = async () => ({ ok: false as const, error: { code: "validation" as const, retryable: false as const,
+      message: "A Herdr socket port is required to create panes with launch env" } }) as never;
+    await f.runtime.tick();
+    const blocked = await f.record();
+    expect(blocked).toMatchObject({ status: "escalated", pendingAction: { kind: "resume_coordinator", state: "pending", previousStatus: "implementing" } });
+    f.panes.allocateDeveloper = allocate;
+    await f.runtime.resumeBlockedRun("run-1", blocked.pendingAction!.actionId);
+    expect((await f.record()).status).toBe("implementing");
+    await f.runtime.tick();
+    expect((await f.state()).outbound.some(out => out.message.type === "task.assignment" && out.message.recipient.role === "developer")).toBe(true);
+    // Agent CLIs refuse writes under `.git`; the Developer worktree lives in ignored private state instead.
+    const worktreePath = (await f.record()).tasks[0]!.worktrees[0]!.worktreePath;
+    expect(worktreePath.startsWith(join(f.repository, ".bflow", "state", "worktrees") + "/")).toBe(true);
+    expect(worktreePath).not.toContain("/.git/");
+  }, 60_000);
+});
+
 describe("A-Z acceptance: the automatic budget is bounded", () => {
   it("stops after 3 automatic resumes of a recurring no-next-action stop with one Conversation notice; an explicit user resume still runs", async () => {
     const f = await fixture();

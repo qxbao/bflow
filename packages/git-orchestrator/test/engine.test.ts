@@ -81,6 +81,16 @@ describe.skipIf(process.platform !== "linux")("GitIntegrationEngine using real i
   }
   const prRequest = { remote: "origin", baseBranch: "main", title: "Implement task", body: "Verified integration" };
 
+  it("creates managed worktrees under an explicit worktreeRoot outside the Git directory", async () => {
+    const root = join(repository, ".bflow", "state", "worktrees");
+    const placed = await GitIntegrationEngine.open({ repositoryPath: repository, artifactStore: store, worktreeRoot: root });
+    const task = await placed.prepareTask(request("task-root"));
+    expect(task.worktreePath.startsWith(`${root}/`)).toBe(true);
+    expect(task.worktreePath).not.toContain("/.git/");
+    expect(await git(repository, "status", "--porcelain", "--untracked-files=all")).toBe("");
+    await expect(GitIntegrationEngine.open({ repositoryPath: repository, artifactStore: store, worktreeRoot: "relative" })).rejects.toThrow(/absolute/);
+  });
+
   it("discovers root, branch, HEAD and dirty state from a nested directory", async () => {
     const nested = await GitIntegrationEngine.open({ repositoryPath: join(repository, "src"), artifactStore: store });
     expect(await nested.inspect()).toMatchObject({ root: repository, branch: "main", head: base, dirty: false });
