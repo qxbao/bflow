@@ -58,13 +58,13 @@ describe.skipIf((await probeBehavioralSandbox()).status !== "ready")("independen
   it.each([true, false])("exposes real owner-run tests at the integrated QA revision and prevents a false pass (passing=%s)", async passing => {
     const f = await fixture();
     if (passing) { await writeFile(join(f.cwd, "source.cjs"), "module.exports=x=>x*2;\n"); f.commit("integrated implementation"); }
-    const revision = f.git("rev-parse", "HEAD"), binding = { ...f.binding, role: "qa" as const };
+    const revision = f.git("rev-parse", "HEAD"), binding = { ...f.binding, role: "qa" as const, session: { source: "test", kind: "id" as const, value: "workflow-qa-native" } };
     const context = QualityGateContextSchema.parse({ runId: "run-1", taskId: "workflow-verification", attemptId: "workflow-attempt",
       definition: { id: "host-qa", name: "QA", evaluator: "native-herdr-review", required: true, timeout: { executionTimeoutMs: 300000, onTimeout: "block" },
         configuration: { kind: "review", role: "qa", method: "manual_review", criterionIds: ["ac-1"], testNames: [testName], levels: [] } },
       artifacts: [], input: { scope: "workflow", sourceRevision: revision, baseRevision: f.base, sourceWorktreePath: f.cwd, specFingerprint: "a".repeat(64) } });
     const runtime = { inspect: async (runId?: string) => runId ? { baseRevision: f.base, workflowSpec: { specification: f.specification, strategy: f.strategy }, tasks: [] }
-      : { outbound: [{ message: { message_id: "workflow-qa", type: "verification.requested", payload: context }, handle: { target: { paneId: binding.paneId } } }] } } as unknown as AgenticWorkflowRuntime;
+      : { outbound: [{ status: "accepted", message: { message_id: "workflow-qa", type: "verification.requested", payload: context }, handle: { target: { paneId: binding.paneId, agentId: binding.agentId, session: binding.session } } }] } } as unknown as AgenticWorkflowRuntime;
     const reopen = () => new HostVerification(() => runtime, () => f.store, new HostReceiptJournal(join(f.cwd, "..", "workflow-qa-receipts"), f.cwd, "session-1"), [f.command]);
     const host = reopen();
     const observed = await host.inspectReview(binding, { messageId: "workflow-qa" }) as any;

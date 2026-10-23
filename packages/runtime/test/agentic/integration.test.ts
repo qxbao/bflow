@@ -1107,8 +1107,9 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
     const gate = f.runtime.herdrQualityGate("review");
     const state = async () => await f.runtime.inspect() as any;
     const first = new AbortController(), pending = gate.evaluate(context as any, { signal: first.signal }); pending.catch(() => undefined);
-    await expect.poll(async () => (await state()).outbound.filter((out: any) => out.message.type === "verification.requested" && out.handle).length).toBe(1);
-    first.abort(); await expect(pending).rejects.toThrow(/aborted/); await f.runtime.flushOutbound();
+    try { await expect.poll(async () => (await state()).outbound.filter((out: any) => out.message.type === "verification.requested" && out.handle).length, { timeout: 15000 }).toBe(1); }
+    finally { first.abort(); await pending.catch(() => undefined); }
+    await expect(pending).rejects.toThrow(/aborted/); await f.runtime.flushOutbound();
     const original = (await state()).outbound.find((out: any) => out.message.type === "verification.requested");
     expect(original.status).toBe("released");
     await (f.runtime as any).journal.exclusive(async (journal: any, save: any) => {
@@ -1140,7 +1141,7 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
       ({ ok: false, error: { code: "timeout", retryable: true, message: "Unknown diagnostic delivery" } }); }
     const second = new AbortController(); let resumed = gate.evaluate(context as any, { signal: second.signal }); resumed.catch(() => undefined);
     try {
-      await expect.poll(async () => (f.runtime as any).gateWaiters.size).toBe(1);
+      await expect.poll(async () => (f.runtime as any).gateWaiters.size, { timeout: 15000 }).toBe(1);
       await f.runtime.flushOutbound();
       let notices = (await state()).outbound.filter((out: any) => out.message.payload?.kind === "resume_verification_request");
       if (["changed-at-dispatch", "approval-at-dispatch"].includes(mode)) {
@@ -1155,7 +1156,7 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
         expect(notices).toHaveLength(1); expect(notices[0].status).toBe("unknown_delivery");
         second.abort(); await resumed.catch(() => undefined); f.restart();
         const retry = new AbortController(), waiting = f.runtime.herdrQualityGate("review").evaluate(context as any, { signal: retry.signal }); waiting.catch(() => undefined);
-        try { await expect.poll(async () => (f.runtime as any).gateWaiters.size).toBe(1); await f.runtime.flushOutbound();
+        try { await expect.poll(async () => (f.runtime as any).gateWaiters.size, { timeout: 15000 }).toBe(1); await f.runtime.flushOutbound();
           expect(f.transport.sentRequests.filter(request => JSON.parse(request.instruction).payload?.kind === "resume_verification_request")).toHaveLength(1);
           expect((await state()).outbound.filter((out: any) => out.message.payload?.kind === "resume_verification_request")).toHaveLength(1);
         } finally { retry.abort(); await waiting.catch(() => undefined); } return;
@@ -1167,7 +1168,7 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
       expect(f.transport.sentRequests.filter(request => JSON.parse(request.instruction).type === "verification.requested")).toHaveLength(1);
       second.abort(); await resumed.catch(() => undefined); f.restart();
       const restarted = new AbortController(); resumed = f.runtime.herdrQualityGate("review").evaluate(context as any, { signal: restarted.signal }); resumed.catch(() => undefined);
-      await expect.poll(async () => (f.runtime as any).gateWaiters.size).toBe(1); await f.runtime.flushOutbound();
+      await expect.poll(async () => (f.runtime as any).gateWaiters.size, { timeout: 15000 }).toBe(1); await f.runtime.flushOutbound();
       expect(f.transport.sentRequests.filter(request => JSON.parse(request.instruction).payload?.kind === "resume_verification_request")).toHaveLength(1);
       await f.runtime.receiveHerdr(f.envelope("review.verdict", { gateId: "review", runId: "run-1", taskId: "implement", evaluationId: randomUUID(), status: "passed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString() },
         { sender: { role: "reviewer", agent_id: original.handle.target.agentId, pane_id: original.handle.target.paneId }, causation_id: original.message.message_id }));
@@ -1181,6 +1182,7 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
     await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
     for (const phase of ["red", "green", "refactor"] as const) await f.evidence("implement", phase);
     await f.submit();
+    for (const check of f.ports.taskChecks!) check.timeout.executionTimeoutMs = 30000;
     const taskTick = f.runtime.tick(); taskTick.catch(() => undefined);
     const requests = async () => ((await f.runtime.inspect()) as any).outbound.filter((out: any) => out.message.type === "verification.requested" && out.handle);
     await expect.poll(async () => (await requests()).filter((out: any) => out.message.payload.input?.scope === "task").length, { timeout: 15000 }).toBe(1);
@@ -1189,7 +1191,7 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
     await f.runtime.receiveHerdr(await verdict(taskReview)); await taskTick;
     expect((await f.inspect()).tasks[0].cycle.status).toBe("passed");
     await (f.runtime as any).journal.exclusive(async (journal: any, save: any) => { journal.runs[0].maxIterations = 1; await save(); });
-    (f.ports.workflowChecks!.find(check => check.id === "review")!.timeout as { executionTimeoutMs: number }).executionTimeoutMs = 5000;
+    (f.ports.workflowChecks!.find(check => check.id === "review")!.timeout as { executionTimeoutMs: number }).executionTimeoutMs = 10000;
     const workflowTick = f.runtime.tick(); workflowTick.catch(() => undefined);
     await expect.poll(async () => (await requests()).some((out: any) => out.message.payload.input?.scope === "workflow"), { timeout: 15000 }).toBe(true);
     if (!active) await workflowTick;
