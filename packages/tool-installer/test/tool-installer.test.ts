@@ -98,7 +98,8 @@ describe("managed tool installer", () => {
     const executable = await f.installer.inspectExecutable(f.request);
     expect(executable.ok).toBe(true);
     if (executable.ok) expect(executable.value).toMatchObject({
-      status: "already_satisfied", toolId: "chrome-devtools-mcp", version: "1.2.3",
+      schemaVersion: 3, toolId: "chrome-devtools-mcp", version: "1.2.3",
+      artifactIntegrity: f.pin.integrity,
       executablePath: expect.stringContaining("/managed/chrome-devtools-mcp/node_modules/"),
       executableDigest: expect.stringMatching(/^[a-f0-9]{64}$/)
     });

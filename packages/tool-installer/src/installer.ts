@@ -11,9 +11,10 @@ import { OfficialProviderPluginAdapter } from "./provider-plugins.js";
 import { readRegular } from "./files.js";
 import {
   CURRENT_PLATFORM_SCHEMA_VERSION, SetupApplyRequestSchema, SetupReceiptSchema, SetupStepSchema,
-  ToolCapabilitySchema, ToolInstallRequestSchema,
+  ToolCapabilitySchema, ToolInstallRequestSchema, VerifiedToolExecutableIdentitySchema,
   type ContractError, type OperationOptions, type OperationResult, type SetupApplyRequest,
-  type SetupReceipt, type SetupStep, type ToolCapability, type ToolInstallRequest, type ToolInstaller
+  type SetupReceipt, type SetupStep, type ToolCapability, type ToolInstallRequest, type ToolInstaller,
+  type VerifiedToolExecutableIdentity
 } from "@bflow/contracts";
 
 const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -168,17 +169,6 @@ export const systemToolHost: ToolHost = {
 };
 
 export interface ToolInspection { status: SetupReceipt["status"]; diagnostics: string[]; ownedPaths: string[] }
-
-/** Read-only identity evidence for a currently verified Bflow-managed executable. */
-export interface ManagedExecutableInspection {
-  toolId: string;
-  status: SetupReceipt["status"];
-  version: string;
-  executablePath: string | null;
-  executableDigest: string | null;
-  desiredStateDigest: string;
-  diagnostics: string[];
-}
 
 export interface ManagedToolInstallerOptions {
   readonly managedRoot: string;
@@ -346,24 +336,18 @@ export class ManagedToolInstaller implements ToolInstaller {
    * Inspect the executable behind an exact approved pin. A PATH probe or version label alone
    * never produces identity evidence; the owned marker, pinned artifact, and functional probe
    * must all still pass at the moment this method runs.
-   * `status === "already_satisfied"` is the only ready status; then both canonical path and
-   * current executable digest are non-null. Other statuses carry diagnostics and null identity.
+   * Only a fully verified executable returns the strict exported identity contract. Other
+   * states use the OperationResult error branch, never a partial identity object.
    */
-  async inspectExecutable(raw: ToolInstallRequest, _options?: OperationOptions): Promise<OperationResult<ManagedExecutableInspection>> {
+  async inspectExecutable(raw: ToolInstallRequest, _options?: OperationOptions): Promise<OperationResult<VerifiedToolExecutableIdentity>> {
     const planned = await this.plan(raw);
     if (!planned.ok) return planned;
     const request = planned.value.toolInstall!;
     const pin = this.#pin(request);
     if (!pin) return fail("Tool pin missing", "not_found");
     const observation = await this.#observe(request.destination, pin, planned.value.desiredStateDigest);
-    const base: ManagedExecutableInspection = {
-      toolId: pin.toolId, status: observation.status, version: pin.version,
-      executablePath: null, executableDigest: null,
-      desiredStateDigest: planned.value.desiredStateDigest, diagnostics: [...observation.diagnostics]
-    };
-    if (observation.status !== "already_satisfied") return ok(base);
-    if (pin.recipe.kind === "provider_plugin") return ok({ ...base, status: "blocked",
-      diagnostics: [...base.diagnostics, "Provider plugins do not expose a Bflow-managed executable identity"] });
+    if (observation.status !== "already_satisfied") return fail(observation.diagnostics.join("; ") || "Managed executable is not verified");
+    if (pin.recipe.kind === "provider_plugin") return fail("Provider plugins do not expose a Bflow-managed executable identity");
     try {
       const destination = await realpath(request.destination);
       const executable = await realpath(join(destination, managedToolExecutable(pin)));
@@ -371,10 +355,11 @@ export class ManagedToolInstaller implements ToolInstaller {
       const info = await stat(executable);
       if (!info.isFile()) throw new Error("Managed executable is not a regular file");
       const executableDigest = await digestFile(executable);
-      return ok({ ...base, executablePath: executable, executableDigest });
+      return ok(VerifiedToolExecutableIdentitySchema.parse({ schemaVersion: CURRENT_PLATFORM_SCHEMA_VERSION,
+        toolId: pin.toolId, version: pin.version, artifactIntegrity: pin.integrity,
+        desiredStateDigest: planned.value.desiredStateDigest, executablePath: executable, executableDigest }));
     } catch (error) {
-      return ok({ ...base, status: "blocked", diagnostics: [...base.diagnostics,
-        `Managed executable identity could not be verified: ${error instanceof Error ? error.message : String(error)}`] });
+      return fail(`Managed executable identity could not be verified: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
