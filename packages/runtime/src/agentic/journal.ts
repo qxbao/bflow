@@ -193,7 +193,7 @@ export interface Outbound {
   leaseRelease?: ReleaseAgentLeaseRequest;
 }
 export interface JournalState {
-  version: 1 | 2 | 3 | 4; repository: string; runs: RunRecord[]; outbound: Outbound[];
+  version: 1 | 2 | 3 | 4 | 5; repository: string; runs: RunRecord[]; outbound: Outbound[];
   /** "rejected" is terminal and carries Runtime's reason: the message was refused by admission and must never be retried. */
   inbox: { message: RoleMessage; status: "received" | "applied" | "rejected"; reason?: string }[];
   pendingCore: AppendEventsRequest[];
@@ -207,7 +207,7 @@ export function isConversationDelivery(out: Outbound): boolean {
 /** Private storage codec; exported schemas validate every persisted boundary value. */
 function parseState(input: unknown, repository: string): JournalState {
   const root = record(input);
-  if ((root.version !== 1 && root.version !== 2 && root.version !== 3 && root.version !== 4) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
+  if ((root.version !== 1 && root.version !== 2 && root.version !== 3 && root.version !== 4 && root.version !== 5) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
   for (const key of ["runs", "outbound", "inbox", "pendingCore", "pendingVerifications"]) if (!Array.isArray(root[key])) throw new Error(`Invalid journal ${key}`);
   const state = root as unknown as JournalState;
   for (const run of state.runs) {
@@ -347,7 +347,8 @@ function parseState(input: unknown, repository: string): JournalState {
         disposition: z.literal("replaced_without_verdict_claim") }).strict().parse(out.reviewReplacement);
       const context = record(out.message.payload), configuration = record(record(context.definition).configuration);
       if (state.version < 4 || replacement.operationId !== out.message.message_id || out.message.type !== "verification.requested" || !out.handle ||
-          out.status !== "released" || context.taskId !== "workflow-verification" || record(context.input).scope !== "workflow" || configuration.kind !== "review" || configuration.role !== "reviewer" ||
+          (!["accepted", "released"].includes(out.status)) || context.taskId !== "workflow-verification" || record(context.input).scope !== "workflow" || configuration.kind !== "review" || !["reviewer", "qa"].includes(String(configuration.role)) || ((configuration.role === "qa" || out.status === "accepted") && state.version < 5) ||
+          out.status === "accepted" && (!out.lease || Date.parse(out.lease.expiresAt) > Date.parse(replacement.decidedAt)) ||
           replacement.contextDigest !== digest(out.message.payload) || replacement.replacementMessageId !== `review-replacement-${digest([out.message.run_id, replacement.operationId, replacement.userMessageId, replacement.contextDigest])}` ||
           !state.runs.some(run => run.runId === out.message.run_id && run.delegation.sessionId === replacement.sessionId)) throw new Error("Invalid workflow review replacement");
       out.reviewReplacement = replacement;

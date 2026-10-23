@@ -431,6 +431,11 @@ completion từ observation cũ đều bị fence. Invocation mới dùng đúng
 request ID liên kết riêng, chỉ dispatch tới native Reviewer read-only khác qua preflight/lease
 hiện hữu. Request mới chưa rõ delivery không được gửi lại qua restart. Đây là bảo đảm từ
 source và kiểm thử hồi quy cục bộ; không tự chứng minh một run live đã hoàn tất.
+Cùng lệnh vật lý hỗ trợ workflow QA đã nhận request nhưng lease hết hạn, kể cả khi
+Registry từ chối release. QA replacement ghi **v5** để binary v4 từ chối marker này.
+Request/handle/status/leaseRelease cũ giữ nguyên; outbox không giả release thành công,
+không renew/resend request đã fence. QA mới phải chạy test tại commit tích hợp qua host
+như cũ. Role, command và test evidence không được nới quyền bởi replacement.
 
 Journal P19 riêng tư nằm dưới `<selected-state>/agentic/journal`. Nó
 dùng tuần tự hóa trong cùng process cộng với `flock` của Linux, fsync file, rename nguyên tử và

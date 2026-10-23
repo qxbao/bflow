@@ -122,7 +122,7 @@ export const CANCEL_STOP_OBSERVATION_LIMIT = 5;
 const CANCEL_STOP_OBSERVATION_WAIT_MS = 500;
 /** A live execution that cancellation must stop: Developer or specialist work, never a Conversation or Coordinator message. */
 function isStoppableExecution(out: Outbound): boolean {
-  return ["task.assignment", "verification.requested", "delegation.request"].includes(out.message.type) &&
+  return !out.reviewReplacement && ["task.assignment", "verification.requested", "delegation.request"].includes(out.message.type) &&
     !["coordinator", "conversation"].includes(out.message.recipient.role);
 }
 const DELIVERY_FAILURE_OPTIONS = ["Check the recipient role pane in Herdr; delivery retries automatically once it is ready",
@@ -3271,7 +3271,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
    */
   private async requestStop(core: CoreSession, outbox: HerdrOutbox, save: () => Promise<void>, run: RunRecord, out: Outbound,
     reason: string): Promise<void> {
-    if (!out.handle || out.cancelRequested) return;
+    if (!out.handle || out.cancelRequested || out.reviewReplacement) return;
     try { await outbox.renew(out); } catch (error) { out.error = `Cancellation lease unresolved: ${String(error)}`; await save(); return; }
     out.cancelRequested = true; await save();
     const version = run.coreCreated ? (await core.snapshot(run.runId)).version : 0;
@@ -3330,6 +3330,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     const unresolved: string[] = (run.nativeDeliveries ?? []).map(item => `Native delivery ${item.operationId} is uncertain (${item.message.message_id}); no mutation was resent`);
     for (const retired of state.outbound.filter(item => item.message.run_id === run.runId && item.phaseRetirement))
       unresolved.push(`Retired verifier phase ${retired.message.message_id}: measurement/remote outcome remains unclaimed; late results are fenced`);
+    for (const replaced of state.outbound.filter(item => item.message.run_id === run.runId && item.reviewReplacement))
+      unresolved.push(`Replaced workflow review ${replaced.message.message_id}: original remote outcome remains unclaimed; no stop/release is asserted and late results are fenced`);
     for (const out of state.outbound.filter(item => item.message.run_id === run.runId && isCancellationHandoff(item.message) && item.status === "failed" && item.error?.startsWith("Cancellation processing failed:")))
       unresolved.push(out.error ?? `Cancellation control ${out.message.message_id} failed`);
     for (const item of state.inbox.filter(entry => entry.message.run_id === run.runId && entry.status === "received" && isCancellationHandoff(entry.message)))
@@ -3562,9 +3564,11 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         return json({ alreadyReplaced: true, ...original.reviewReplacement });
       }
       const context = QualityGateContextSchema.parse(original.message.payload), details = record(context.input), config = record(context.definition.configuration);
-      if (context.taskId !== FINAL_TASK || details.scope !== "workflow" || config.kind !== "review" || config.role !== "reviewer" || original.message.recipient.role !== "reviewer" ||
-          original.status !== "released" || !original.request || digest(original.request.context) !== digest(original.message) || original.leaseRelease || original.leaseRenewal || original.leaseReacquisition)
-        throw new Error("Only a released known-delivered workflow Reviewer request is replaceable");
+      if (context.taskId !== FINAL_TASK || details.scope !== "workflow" || config.kind !== "review" || !["reviewer", "qa"].includes(String(config.role)) || original.message.recipient.role !== config.role ||
+          !["accepted", "released"].includes(original.status) || !original.request || digest(original.request.context) !== digest(original.message) ||
+          original.leaseRenewal || original.leaseReacquisition || original.status === "accepted" && (!original.lease || Date.parse(original.lease.expiresAt) > Date.parse(this.now())) ||
+          original.status === "released" && original.leaseRelease)
+        throw new Error("Only a released or expired known-delivered workflow review request is replaceable");
       const paused = run.status === "escalated" && run.error?.startsWith(VERIFICATION_RETRY_PREFIX) && !run.workflowVerificationPending &&
         run.pendingAction?.kind === "resume_coordinator" && run.pendingAction.state === "pending" && run.pendingAction.previousStatus === "verifying";
       const waiting = run.status === "verifying" && run.workflowVerificationPending && this.gateWaiters.has(original.message.message_id);
@@ -3584,7 +3588,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         throw new Error("Workflow review replacement bound exhausted");
       const contextDigest = digest(context), replacementMessageId = `review-replacement-${digest([run.runId, authority.operationId, authority.userMessageId, contextDigest])}`;
       original.reviewReplacement = { ...authority, decidedAt: this.now(), contextDigest, replacementMessageId, disposition: "replaced_without_verdict_claim" };
-      state.version = 4; await save(); // Durable late-result fence before any new invocation; old binaries must reject it.
+      const markerVersion = config.role === "qa" || original.status === "accepted" ? 5 : 4;
+      if (state.version < markerVersion) state.version = markerVersion;
+      await save(); // Durable late-result fence before any new invocation; old binaries must reject it.
       // Cease this local wait only. This neither stops the provider nor supplies an old verdict; ordinary bounded verification records the environment block.
       this.gateWaiters.get(original.message.message_id)?.reject(new Error("Workflow review replaced by physical human authority; no original verdict claimed"));
       return json({ runId: run.runId, ...original.reviewReplacement, originalDelivery: "known_delivered", originalOutcome: "unknown", resendAllowed: false });

@@ -90,6 +90,7 @@ export class HerdrOutbox {
   }
   async renew(out: Outbound): Promise<void> {
     const owner = out.parentAssignmentId ? this.noticeParent(out) : out;
+    if (owner.reviewReplacement) throw new Error("Replaced workflow review cannot renew its original lease");
     if (owner.leaseReacquisition) await this.reconcileLeaseAcquisition(owner);
     if (owner.leaseRelease) throw new Error("Assignment lease release is pending");
     if (!owner.lease) throw new Error("Assignment has no current lease");
@@ -188,7 +189,7 @@ export class HerdrOutbox {
     await this.renew(owner);
   }
   async release(out: Outbound): Promise<void> {
-    if (out.phaseRetirement) return; // Historical expired grant, never claim a Registry release or remote stop.
+    if (out.phaseRetirement || out.reviewReplacement) return; // Historical expired grant, never claim a Registry release or remote stop.
     if (out.status === "released") return;
     if (out.leaseReacquisition) await this.reconcileLeaseAcquisition(out);
     if (out.lease && !out.parentAssignmentId) {
@@ -239,7 +240,7 @@ export class HerdrOutbox {
     if (out.error?.includes(" not ready since ")) delete out.error;
   }
   private async step(out: Outbound, onBound: (out: Outbound, handle: AgentExecutionHandle) => Promise<void>): Promise<void> {
-    if (out.phaseRetirement) return; // Physical tombstone: neither resend, renew nor manufacture an expired-lease release.
+    if (out.phaseRetirement || out.reviewReplacement) return; // Physical tombstone: neither resend, renew nor manufacture an expired-lease release.
     if (out.leaseRelease) { await this.release(out); return; }
     // A Conversation inbox write-ahead stays "sending": Runtime applies it after this locked pass.
     if (out.status === "sending" && !isConversationDelivery(out)) { out.status = "unknown_delivery"; await this.save(); }
@@ -312,7 +313,7 @@ export class HerdrOutbox {
       if (run?.nativeDeliveries?.length || this.state.outbound.some(item => item.message.run_id === run?.runId &&
           (item.status === "unknown_delivery" || item.status === "sending" && !isConversationDelivery(item)))) blockers.push("unreconciled_delivery");
       if (run?.approval && run.decision?.approvalId !== run.approval.approvalId || Object.values(run?.userDecisions ?? {}).some(item => item.status === "pending")) blockers.push("pending_human_gate");
-      if (!original?.session || !pane.session || pane.role !== "reviewer" || !pane.readOnlyWorkspace || pane.paneId === original.paneId || digest(pane.session) === digest(original.session)) blockers.push("replacement_native_identity");
+      if (!original?.session || !pane.session || pane.role !== reviewSource.message.recipient.role || !["reviewer", "qa"].includes(pane.role) || !pane.readOnlyWorkspace || pane.paneId === original.paneId || digest(pane.session) === digest(original.session)) blockers.push("replacement_native_identity");
       if (out.message.type !== "verification.requested" || digest(out.message.payload) !== reviewSource.reviewReplacement!.contextDigest) blockers.push("context_changed");
       if (digest(out.capabilities) !== digest(reviewSource.capabilities)) blockers.push("capabilities_changed");
       if (blockers.length) {
