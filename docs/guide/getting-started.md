@@ -21,6 +21,8 @@ git add .gitignore README.md package.json pnpm-lock.yaml tsconfig.json src test 
 git commit -m "chore: initialize calculator example"
 node "$BFLOW_HOME/apps/cli/dist/bin.js" init --name calculator
 node "$BFLOW_HOME/templates/node-typescript/apply.mjs" . bugfix
+git add .bflow/.gitignore .bflow/config.yml
+git commit -m "chore: add bflow config"
 node "$BFLOW_HOME/apps/cli/dist/bin.js" doctor --json
 node "$BFLOW_HOME/apps/cli/dist/bin.js" status --json
 ```
@@ -28,6 +30,7 @@ node "$BFLOW_HOME/apps/cli/dist/bin.js" status --json
 > [!NOTE]
 > - Hãy chọn một thư mục đích hoàn toàn mới chưa tồn tại trước đó.
 > - Git yêu cầu phải có thông tin danh tính người dùng (`user.name` và `user.email`) được cấu hình để thực hiện lệnh commit.
+> - Commit `.bflow/.gitignore` và `.bflow/config.yml` trước `bflow up`: Runtime chỉ cấp worktree cho Developer khi working tree sạch, nên hai tệp chưa commit này sẽ chặn bước triển khai.
 > - Lệnh `git archive` chỉ trích xuất các tệp mẫu đã được commit, hoàn toàn không sao chép các thư mục tạm như `node_modules/`, `dist/` hoặc `.bflow` cục bộ từ mã nguồn gốc.
 > - Lệnh `doctor` có thể trả về mã lỗi `exit 1` nếu môi trường của bạn chưa cài đặt Herdr, chưa có CLI của agent hoặc còn thiếu cấu hình; vui lòng kiểm tra kỹ chi tiết từng hạng mục kiểm tra trong kết quả trả về.
 

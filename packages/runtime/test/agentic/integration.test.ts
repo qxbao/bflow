@@ -550,6 +550,14 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
     expect((await f.runtime.inspect() as any).runs).toHaveLength(before.runs.length);
     expect(unwrap(await f.ports.runStore.get("run-1"))).toBeNull();
   });
+  it("keeps an implementing run scheduled when the Coordinator asks the user a question", async () => {
+    const f = await fixture();
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    expect((await f.inspect()).status).toBe("implementing");
+    await f.runtime.reportProgress("run-1", "Dispatch is blocked by uncommitted files", ["Commit them or ignore them?"]);
+    expect((await f.inspect()).status).toBe("implementing");
+    expect((await f.runtime.inspect() as any).outbound.some((out: any) => out.message.type === "conversation.clarification")).toBe(true);
+  });
   it("runs a small workflow without Architect through real policies/Git/storage and delivery approval", async () => {
     const f = await fixture();
     await f.runtime.proposeWorkflow("run-1", f.spec, f.def);

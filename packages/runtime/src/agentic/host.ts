@@ -681,6 +681,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         const run = record(await host.runtime.inspect(runId));
         if (DelegationRequestSchema.parse(run.delegation).sessionId !== manifest!.conversationSessionId)
           throw new Error("Resume request belongs to another Conversation session");
+        if (run.pendingAction === undefined)
+          throw new Error(`Run ${runId} (${String(run.status)}) has no recorded blocker to resume${run.error === undefined ? "" : `; last error: ${String(run.error)}`}`);
         const action = record(run.pendingAction);
         return host.runtime.resumeBlockedRun(runId, textField(action.actionId));
       }
@@ -1499,14 +1501,16 @@ export function availableTools(role: AgentRole) {
   const string = { type:"string", minLength:1 }, array = {type:"array",items:string}, object = {type:"object"};
   const strictObject = (properties: Record<string, unknown>, required: string[]) => ({ type: "object", properties, required, additionalProperties: false });
   const targets = { targetRunId: string, targetCorrelationId: string };
+  const verificationMethod = { type: "string", enum: ["unit_test", "integration_test", "e2e_test", "typecheck", "lint", "static_analysis", "manual_review"] };
   const draft = strictObject({ title: string, objective: string, kind: { type: "string", enum: ["feature", "bugfix", "refactor", "spike"] },
     sddLevel: { type: "string", enum: ["lightweight", "full"] }, priority: { type: "string", enum: ["low", "normal", "high", "critical"] },
     scopeDefined: { type: "boolean" }, isLargeTask: { type: "boolean" }, affectedPaths: array, acceptanceCriteriaDescriptions: array,
-    verificationMethods: { type: "array", items: { type: "string", enum: ["unit_test", "integration_test", "e2e_test", "typecheck", "lint", "static_analysis", "manual_review"] } },
+    verificationMethods: { type: "array", items: verificationMethod },
+    acceptanceCriteria: { type: "array", items: strictObject({ description: string, verificationMethod }, ["description", "verificationMethod"]) },
     isRequirementChange: { type: "boolean" }, codeChangesAuthorized: { type: "boolean" }, ...targets,
     investigationTasks: { type: "array", items: strictObject({ objective: string, affectedPaths: array,
       codeChangesAuthorized: { type: "boolean", const: false } }, ["objective", "affectedPaths", "codeChangesAuthorized"]) }
-  }, ["title", "objective", "kind", "sddLevel", "priority", "scopeDefined", "isLargeTask", "affectedPaths", "acceptanceCriteriaDescriptions", "isRequirementChange"]);
+  }, ["title", "objective", "kind", "sddLevel", "priority", "scopeDefined", "isLargeTask", "affectedPaths", "isRequirementChange"]);
   const chatDecision = { oneOf: [
     strictObject({ intent: { const: "conversation_only", type: "string" }, directReply: string }, ["intent", "directReply"]),
     strictObject({ intent: { const: "clarify", type: "string" }, clarifyingQuestions: { type: "array", items: string, minItems: 1, maxItems: 3 },
