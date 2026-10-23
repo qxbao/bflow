@@ -7,6 +7,7 @@ import type {
   MCPResourceRequest,
   MCPToolCall,
   MCPToolCallResult,
+  ResolvedToolGrant,
   OperationOptions,
   OperationResult,
   ScopedOperation
@@ -19,7 +20,8 @@ import {
   MCPToolCallSchema,
   MCPToolCallResultSchema,
   ScopedOperationSchema,
-  isTrustScopeWithin
+  isTrustScopeWithin,
+  ResolvedToolGrantSchema
 } from "@bflow/contracts";
 import type {
   ActiveClientSession,
@@ -41,7 +43,8 @@ import {
 import { GatewayMetricsCollector } from "./metrics.js";
 import { MCPServiceRegistry } from "./registry.js";
 import { DefaultMCPServiceManager, type DefaultMCPServiceManagerOptions } from "./service-manager.js";
-import { fallbackToolDefinition } from "./tool-definitions.js";
+import { fallbackToolDefinition, isSupportedJsonSchema, validateJsonSchema } from "./tool-definitions.js";
+import { DurableGatewayCallLedger } from "./durable-ledger.js";
 
 interface ResourceState {
   currentFence: number;
@@ -66,6 +69,12 @@ export interface BflowSharedMCPGatewayOptions {
   /** Trusted host decisions about known services; see `DefaultMCPServiceManagerOptions.policyOverrides`. */
   readonly policyOverrides?: DefaultMCPServiceManagerOptions["policyOverrides"];
   readonly now?: (() => Date) | undefined;
+  /** Private durable receipt path. Intent records prevent uncertain calls from being replayed after restart. */
+  readonly callLedgerPath?: string | undefined;
+  /** Host-side trusted lookup; never infer an authority grant from skill metadata or tool names. */
+  readonly toolGrantResolver?: ((registration: MCPClientRegistration, call: MCPToolCall) => ResolvedToolGrant | readonly ResolvedToolGrant[] | undefined) | undefined;
+  /** Require every Gateway call to have a matching host-resolved tool grant. */
+  readonly requireResolvedToolGrants?: boolean | ((registration: MCPClientRegistration) => boolean) | undefined;
 }
 
 export class BflowSharedMCPGateway {
@@ -74,6 +83,9 @@ export class BflowSharedMCPGateway {
   readonly metrics: GatewayMetricsCollector;
   readonly secretStore: GatewaySecretStore;
   readonly now: () => Date;
+  private readonly durableCallLedger?: DurableGatewayCallLedger;
+  private readonly toolGrantResolver?: BflowSharedMCPGatewayOptions["toolGrantResolver"];
+  private readonly requireResolvedToolGrants: boolean | ((registration: MCPClientRegistration) => boolean);
 
   private readonly registrations = new Map<string, MCPClientRegistration>();
   private readonly sessions = new Map<string, ActiveClientSession>();
@@ -97,6 +109,9 @@ export class BflowSharedMCPGateway {
         ...(options?.now !== undefined ? { now: options.now } : {})
       });
     this.now = options?.now ?? (() => new Date());
+    if (options?.callLedgerPath) this.durableCallLedger = new DurableGatewayCallLedger(options.callLedgerPath);
+    this.toolGrantResolver = options?.toolGrantResolver;
+    this.requireResolvedToolGrants = options?.requireResolvedToolGrants ?? false;
 
     this.serviceManager.onCrash((partitionKey, reason) => {
       this.handleBackendCrash(partitionKey, reason);
@@ -430,6 +445,69 @@ export class BflowSharedMCPGateway {
           retryable: false,
           message: `Service '${serviceId}' not found in registry`
         });
+      }
+    }
+
+    const strictToolRegistration = typeof this.requireResolvedToolGrants === "function"
+      ? this.requireResolvedToolGrants(client) : this.requireResolvedToolGrants;
+    if (strictToolRegistration) {
+      const grants = this.toolGrantResolver?.(client, {
+        schemaVersion: 3, callId: "registration-preflight", registrationId: client.registrationId,
+        serviceId: client.serviceIds[0]!, tool: client.allowedTools[0]!, input: {}, idempotencyKey: client.idempotencyKey
+      });
+      const grantValues = grants === undefined ? [] : Array.isArray(grants) ? grants : [grants];
+      const parsedGrants = grantValues.map(value => ResolvedToolGrantSchema.safeParse(value));
+      if (parsedGrants.some(parsed => !parsed.success)) {
+        return err({ code: "validation", retryable: false, message: "Resolved tool grants failed schema validation during registration" });
+      }
+      if (!parsedGrants.length) {
+        return err({ code: "validation", retryable: false, message: "A new Gateway registration requires at least one resolved tool grant" });
+      }
+      for (const serviceId of client.serviceIds) {
+        const entry = this.registry.getService(serviceId)!;
+        const grantsForService = parsedGrants.flatMap(parsed => parsed.success ? [parsed.data] : [])
+          .filter(grant => grant.serviceId === serviceId && grant.role === client.role &&
+            computePayloadFingerprint(grant.scope) === computePayloadFingerprint(client.scope));
+        if (!grantsForService.length) continue;
+        if (grantsForService.some(grant => grant.toolId !== entry.definition.tool.toolId || grant.kind !== entry.definition.tool.kind ||
+            grant.operations.some(operationName => !entry.definition.tool.operations.includes(operationName)))) {
+          return err({ code: "validation", retryable: false, message: `Resolved grant does not match service '${serviceId}' capability` });
+        }
+        const operation: ScopedOperation = { schemaVersion: 3, scope: client.scope, idempotencyKey: client.idempotencyKey };
+        const ensured = await this.serviceManager.ensure(entry.definition, operation, { timeoutMs: entry.definition.healthTimeoutMs });
+        if (!ensured.ok || ensured.value.status !== "ready") {
+          return err({ code: "transport_unavailable", retryable: true,
+            message: `Gateway service '${serviceId}' is unavailable during grant preflight` });
+        }
+        const partition = computePartitionKey(entry.definition, entry.policy, client.scope);
+        if (!partition.ok) return partition;
+        const state = this.serviceManager.getPartitionState(partition.value);
+        if (!state) return err({ code: "transport_unavailable", retryable: true, message: `Gateway service '${serviceId}' has no negotiated partition` });
+        const requestedOperations = [...new Set(grantsForService.flatMap(grant => grant.operations))];
+        for (const operationName of requestedOperations) {
+          if (!entry.definition.tool.operations.includes(operationName)) {
+            return err({ code: "validation", retryable: false, message: `Operation '${operationName}' is outside service '${serviceId}' configuration` });
+          }
+          const definition = state.toolDefinitions?.find(tool => tool.name === operationName);
+          if (!definition || state.defaultedInputSchemaTools?.includes(operationName) || !isSupportedJsonSchema(definition.inputSchema)) {
+            if (grantsForService.some(grant => grant.requiredness === "required" && grant.operations.includes(operationName))) {
+              state.status = "blocked";
+              state.diagnosticCode = "tool_schema_unavailable";
+            }
+            return err({ code: "validation", retryable: false,
+              message: `Operation '${operationName}' has no enforceable negotiated input schema` });
+          }
+        }
+        const schemaDigest = computePayloadFingerprint({
+          tools: [...(state.toolDefinitions ?? [])].sort((a, b) => a.name.localeCompare(b.name)),
+          defaultedInputSchemaTools: [...(state.defaultedInputSchemaTools ?? [])].sort()
+        });
+        if (this.durableCallLedger && !this.durableCallLedger.pinServiceSchema({ serviceId, revision: entry.definition.revision,
+          serviceConfigDigest: entry.configDigest, schemaDigest })) {
+          state.status = "blocked";
+          state.diagnosticCode = "tool_schema_drift";
+          return err({ code: "validation", retryable: false, message: `Gateway service '${serviceId}' schema drifted without a revision change` });
+        }
       }
     }
 
@@ -975,25 +1053,41 @@ export class BflowSharedMCPGateway {
       });
     }
 
-    const idCheck = this.checkIdempotency<MCPToolCallResult>(
-      request.idempotencyKey,
-      request
-    );
-    if (idCheck.cached) return idCheck.cached;
-    if (idCheck.conflict) {
-      return err({
-        code: "conflict",
-        retryable: true,
-        message: "Conflicting payload for idempotencyKey"
-      });
-    }
-
     const reg = this.registrations.get(request.registrationId);
     if (!reg) {
       return err({ code: "not_found", retryable: false, message: "Client registration not found" });
     }
     if (Date.parse(reg.expiresAt) <= this.now().getTime()) {
       return err({ code: "validation", retryable: false, message: "Client registration has expired" });
+    }
+
+    let grant: ResolvedToolGrant | undefined;
+    const rawGrants = this.toolGrantResolver?.(reg, request);
+    if (rawGrants !== undefined) {
+      const candidates = Array.isArray(rawGrants) ? rawGrants : [rawGrants];
+      const parsedGrants = candidates.map(candidate => ResolvedToolGrantSchema.safeParse(candidate));
+      if (parsedGrants.some(candidate => !candidate.success))
+        return err({ code: "validation", retryable: false, message: "Resolved tool grant failed schema validation" });
+      const service = this.registry.getService(request.serviceId)?.definition;
+      const matches = parsedGrants.map(candidate => candidate.success ? candidate.data : undefined).filter((candidate): candidate is ResolvedToolGrant =>
+        candidate !== undefined && candidate.role === reg.role && candidate.toolId === service?.tool.toolId &&
+        candidate.serviceId === request.serviceId && candidate.operations.includes(request.tool) &&
+        computePayloadFingerprint(candidate.scope) === computePayloadFingerprint(reg.scope));
+      if (matches.length > 1) return err({ code: "validation", retryable: false, message: "Multiple resolved grants authorize the same Gateway operation" });
+      grant = matches[0];
+      if (!grant) {
+        return err({ code: "validation", retryable: false, message: "Resolved tool grant does not authorize this role, service, operation, or scope" });
+      }
+      if (grant.memoryScope) {
+        const input = request.input !== null && typeof request.input === "object" && !Array.isArray(request.input)
+          ? request.input as Record<string, unknown> : {};
+        const memory = grant.memoryScope;
+        if (input.wing !== memory.wing) {
+          return err({ code: "validation", retryable: false, message: "Scoped memory access must name the granted read-only wing" });
+        }
+      }
+    } else if (typeof this.requireResolvedToolGrants === "function" ? this.requireResolvedToolGrants(reg) : this.requireResolvedToolGrants) {
+      return err({ code: "validation", retryable: false, message: "No host-resolved tool grant is available" });
     }
 
     if (!reg.serviceIds.includes(request.serviceId)) {
@@ -1036,6 +1130,27 @@ export class BflowSharedMCPGateway {
         message: `Service '${request.serviceId}' not found`
       });
     }
+
+    if (!entry.definition.tool.operations.includes(request.tool)) {
+      return err({ code: "validation", retryable: false, message: "Operation is not part of the configured service capability" });
+    }
+
+    // Authenticate current authority before revealing even a previously stored receipt.
+    const idCheck = this.checkIdempotency<MCPToolCallResult>(request.idempotencyKey, request);
+    if (idCheck.conflict) return err({ code: "conflict", retryable: true, message: "Conflicting payload for idempotencyKey" });
+    const existingCall = this.callLedger.get(request.callId);
+    if (existingCall) {
+      if (existingCall.call.registrationId !== reg.registrationId || existingCall.fingerprint !== computePayloadFingerprint(request))
+        return err({ code: "conflict", retryable: true, message: "callId is already bound to another Gateway principal or request" });
+      return ok(existingCall.result);
+    }
+    const durableEntry = this.durableCallLedger?.get(request.callId);
+    if (durableEntry) {
+      if (durableEntry.registrationId !== reg.registrationId || durableEntry.requestDigest !== computePayloadFingerprint(request))
+        return err({ code: "conflict", retryable: true, message: "callId is already bound to another Gateway principal or request" });
+      return ok(durableEntry.result);
+    }
+    if (idCheck.cached) return idCheck.cached;
 
     if (isInteractiveMethodForbidden(request.tool)) {
       this.recordAudit({
@@ -1095,6 +1210,9 @@ export class BflowSharedMCPGateway {
         activeLease.leaseId !== request.resourceLease.leaseId ||
         activeLease.registrationId !== request.registrationId ||
         activeLease.serviceId !== request.serviceId ||
+        activeLease.resourceKey !== request.resourceLease.resourceKey ||
+        activeLease.resourceKey !== resourceKey ||
+        activeLease.fencingToken !== request.resourceLease.fencingToken ||
         activeLease.fencingToken !== resState.currentFence ||
         Date.parse(activeLease.expiresAt) <= nowMs
       ) {
@@ -1152,6 +1270,27 @@ export class BflowSharedMCPGateway {
         retryable: true,
         message: "Driver is not available or alive"
       });
+    }
+
+    const currentPartition = this.serviceManager.getPartitionState(partitionKey);
+    const negotiatedDefinition = currentPartition?.toolDefinitions?.find((tool) => tool.name === request.tool);
+    const strictSchema = grant !== undefined;
+    const definition = negotiatedDefinition ?? (!strictSchema ? fallbackToolDefinition(request.tool) : undefined);
+    if (this.durableCallLedger && currentPartition) {
+      const schemaDigest = computePayloadFingerprint({
+        tools: [...(currentPartition.toolDefinitions ?? [])].sort((a, b) => a.name.localeCompare(b.name)),
+        defaultedInputSchemaTools: [...(currentPartition.defaultedInputSchemaTools ?? [])].sort()
+      });
+      if (!this.durableCallLedger.pinServiceSchema({ serviceId: request.serviceId, revision: entry.definition.revision,
+        serviceConfigDigest: entry.configDigest, schemaDigest })) {
+        currentPartition.status = "blocked";
+        currentPartition.diagnosticCode = "tool_schema_drift";
+        return err({ code: "validation", retryable: false, message: "Negotiated tool schema drifted without a service revision change" });
+      }
+    }
+    if (!definition || (strictSchema && currentPartition?.defaultedInputSchemaTools?.includes(request.tool)) ||
+        !validateJsonSchema(request.input, definition.inputSchema)) {
+      return err({ code: "validation", retryable: false, message: "Tool input does not match the currently discovered upstream schema" });
     }
 
     const maxConcurrency =
@@ -1218,6 +1357,7 @@ export class BflowSharedMCPGateway {
       dispatchedToUpstream: true,
       result: initialResult
     };
+    this.durableCallLedger?.recordIntent(request);
     this.callLedger.set(request.callId, ledgerEntry);
 
     this.metrics.recordCallStart(request.serviceId);
@@ -1305,6 +1445,7 @@ export class BflowSharedMCPGateway {
             observedAt: this.now().toISOString()
           });
           ledgerEntry.result = uncertainResult;
+          this.durableCallLedger?.recordResult(request.callId, uncertainResult);
           if (isExclusive && resState) {
             resState.quarantinedByCallId = request.callId;
           }
@@ -1338,6 +1479,7 @@ export class BflowSharedMCPGateway {
       });
 
       ledgerEntry.result = callResult;
+      this.durableCallLedger?.recordResult(request.callId, callResult);
       this.recordAudit({
         action: "tool.call",
         registrationId: reg.registrationId,
@@ -1381,6 +1523,7 @@ export class BflowSharedMCPGateway {
           observedAt: this.now().toISOString()
         });
         ledgerEntry.result = uncertainResult;
+        this.durableCallLedger?.recordResult(request.callId, uncertainResult);
         if (isExclusive && resState) {
           resState.quarantinedByCallId = request.callId;
         }
@@ -1445,6 +1588,18 @@ export class BflowSharedMCPGateway {
 
     const ledger = this.callLedger.get(request.callId);
     if (!ledger) {
+      const registration = this.registrations.get(request.registrationId);
+      if (!registration || Date.parse(registration.expiresAt) <= this.now().getTime() ||
+          !registration.serviceIds.includes(request.serviceId) || !registration.allowedTools.includes(request.tool)) {
+        return err({ code: "validation", retryable: false, message: "Call reconciliation requires a current authorized Gateway registration" });
+      }
+      const durable = this.durableCallLedger?.get(request.callId);
+      if (durable) {
+        if (durable.registrationId !== request.registrationId || durable.requestDigest !== computePayloadFingerprint(request)) {
+          return err({ code: "conflict", retryable: true, message: "Call ID is already bound to another Gateway principal or request" });
+        }
+        return ok(durable.result);
+      }
       return err({
         code: "not_found",
         retryable: false,
@@ -1475,6 +1630,7 @@ export class BflowSharedMCPGateway {
           output: rec.output ?? ledger.result.output,
           observedAt: this.now().toISOString()
         });
+        this.durableCallLedger?.recordResult(request.callId, ledger.result);
         this.clearQuarantine(request.serviceId, request.callId);
         this.recordAudit({
           action: "tool.reconcile",
@@ -1498,6 +1654,7 @@ export class BflowSharedMCPGateway {
           },
           observedAt: this.now().toISOString()
         });
+        this.durableCallLedger?.recordResult(request.callId, ledger.result);
         this.clearQuarantine(request.serviceId, request.callId);
         this.recordAudit({
           action: "tool.reconcile",

@@ -19,6 +19,7 @@ import type {
 import { CURRENT_PLATFORM_SCHEMA_VERSION } from "@bflow/contracts";
 import {
   BflowSharedMCPGateway,
+  type BflowSharedMCPGatewayOptions,
   DefaultMCPServiceManager,
   GatewayMetricsCollector,
   GatewaySecretStore,
@@ -43,7 +44,8 @@ import {
   type MCPUpstreamToolCallOutput,
   type RegisteredMCPServiceEntry,
   normalizeUpstreamToolList,
-  MCP_TOOL_DEFINITION_LIMITS
+  MCP_TOOL_DEFINITION_LIMITS,
+  validateJsonSchema
 } from "../src/index.js";
 
 // ============================================================================
@@ -2105,7 +2107,7 @@ rl.on('line', (line) => {
 });
 `;
 
-  function setupStdioWorker(tools: unknown) {
+  function setupStdioWorker(tools: unknown, gatewayOptions?: BflowSharedMCPGatewayOptions) {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-defs-test-"));
     const scriptPath = path.join(tmpDir, "worker.cjs");
     const payloadPath = path.join(tmpDir, "tools.json");
@@ -2138,7 +2140,7 @@ rl.on('line', (line) => {
       driverFactory: new SubprocessStdioDriverFactory({ secretStore, defaultTimeoutMs: 30_000 }),
       secretStore
     });
-    const gateway = new BflowSharedMCPGateway({ serviceManager, secretStore });
+    const gateway = new BflowSharedMCPGateway({ serviceManager, secretStore, ...gatewayOptions });
     gateway.registry.registerService(service);
     return {
       serviceId,
@@ -2181,6 +2183,22 @@ rl.on('line', (line) => {
     expect(res.value.defaultedInputSchemaTools).toEqual(["bare"]);
   });
 
+  it("blocks an explicit grant registration when its real stdio definition omits inputSchema", async () => {
+    const { serviceId, gateway, cleanup } = setupStdioWorker([{ name: "query" }], {
+      requireResolvedToolGrants: true,
+      toolGrantResolver: (registered, request) => ({ schemaVersion: 3, grantId: "grant-schema-required",
+        policyDigest: "a".repeat(64), toolId: request.serviceId, kind: "stdio_mcp", requiredness: "required",
+        role: registered.role, scope: registered.scope, triggers: ["explicit"], serviceId: request.serviceId, operations: ["query"] })
+    });
+    const registration = makeClientRegistration("reg-schema-required", serviceId, { role: "developer", allowedTools: ["query"] });
+    try {
+      const result = await gateway.register(registration);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.message).toContain("no enforceable negotiated input schema");
+      expect(gateway.secretStore.getClientTokenByRegistration(registration.registrationId)).toBeUndefined();
+    } finally { await cleanup(); }
+  });
+
   it("rejects malformed, duplicate, non-object-typed, oversized and over-count upstream lists", () => {
     const cases: unknown[] = [
       undefined,
@@ -2189,6 +2207,7 @@ rl.on('line', (line) => {
       { tools: [{ description: "no name" }] },
       { tools: [{ name: "a", inputSchema: "not-object" }] },
       { tools: [{ name: "a", inputSchema: { type: "array" } }] },
+      { tools: [{ name: "a", inputSchema: { type: "object", properties: { q: { type: "string", pattern: "^safe$" } } } }] },
       { tools: [{ name: "a" }, { name: "a" }] },
       { tools: [{ name: "a", description: "x".repeat(MCP_TOOL_DEFINITION_LIMITS.maxDefinitionBytes) }] },
       {
@@ -2199,6 +2218,8 @@ rl.on('line', (line) => {
       const res = normalizeUpstreamToolList(raw);
       expect(res.ok, String(JSON.stringify(raw)).slice(0, 80)).toBe(false);
     }
+    expect(validateJsonSchema("not-an-object", { required: ["wing"] })).toBe(false);
+    expect(validateJsonSchema({ wing: "ok", extra: true }, { type: "object", properties: { wing: { type: "string" } }, additionalProperties: false })).toBe(false);
   });
 
   it("advertises upstream definitions over HTTP tools/list with serviceId, honouring allowedTools", async () => {
@@ -2272,6 +2293,71 @@ rl.on('line', (line) => {
       expect(res.ok).toBe(false);
     } finally {
       await cleanup();
+    }
+  });
+
+  it("keeps a real stdio call unknown after restart without persisting its input or replaying it", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-ledger-live-"));
+    const scriptPath = path.join(tmpDir, "worker.cjs");
+    const counterPath = path.join(tmpDir, "side-effects.txt");
+    const ledgerPath = path.join(tmpDir, "gateway-calls.jsonl");
+    const worker = `const fs=require('fs');const rl=require('readline').createInterface({input:process.stdin,terminal:false});rl.on('line',line=>{const m=JSON.parse(line);if(m.method==='initialize')process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result:{protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'ledger-worker',version:'1'}}})+String.fromCharCode(10));else if(m.method==='tools/list')process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result:{tools:[{name:'mempalace_search',inputSchema:{type:'object',properties:{wing:{type:'string',enum:['approved-wing']},query:{type:'string',minLength:1}},required:['wing','query'],additionalProperties:false}}]}})+String.fromCharCode(10));else if(m.method==='tools/call'){fs.appendFileSync(${JSON.stringify(counterPath)},'x');setTimeout(()=>{},10000);}});`;
+    fs.writeFileSync(scriptPath, worker, { mode: 0o600 });
+    const serviceId = "mempalace-ledger-test";
+    const service = makeServiceDefinition(serviceId, {
+      scope: makeScope("repository", { repoId: "repo-a" }),
+      tool: { schemaVersion: 3, toolId: "mempalace", kind: "stdio_mcp", version: "3.11.0", operations: ["mempalace_search"],
+        resource: { sharing: "concurrent", maxConcurrency: 2 }, required: true },
+      connection: { kind: "stdio_mcp", executable: process.execPath, argv: [scriptPath], environmentBindings: {},
+        executableDigest: createHash("sha256").update(fs.readFileSync(process.execPath)).digest("hex"), ownership: "bflow", bridgeRequired: true }
+    });
+    const scope = makeScope("session", { repoId: "repo-a", sessionId: "sess-live-ledger" });
+    const client = makeClientRegistration("reg-live-ledger", serviceId, { scope, allowedTools: ["mempalace_search"] });
+    const grant = { schemaVersion: 3 as const, grantId: "grant-live-ledger", policyDigest: "a".repeat(64), toolId: "mempalace",
+      kind: "stdio_mcp" as const, requiredness: "required" as const, role: "developer" as const, scope,
+      triggers: ["prior_context" as const], serviceId, operations: ["mempalace_search"],
+      memoryScope: { wing: "approved-wing", repositoryId: "repo-a", access: "read_only" as const } };
+    const makeGateway = () => {
+      const gateway = new BflowSharedMCPGateway({ callLedgerPath: ledgerPath, requireResolvedToolGrants: true,
+        toolGrantResolver: () => [grant] });
+      gateway.registry.registerService(service);
+      return gateway;
+    };
+    const call: MCPToolCall = { schemaVersion: 3, callId: "call-live-ledger", registrationId: client.registrationId,
+      serviceId, tool: "mempalace_search", input: { wing: "approved-wing", query: "private query text" }, idempotencyKey: "idem-live-ledger" };
+    const firstGateway = makeGateway();
+    try {
+      expect((await firstGateway.register(client)).ok).toBe(true);
+      const wrongWing = await firstGateway.call({ ...call, callId: "call-wrong-wing", idempotencyKey: "idem-wrong-wing",
+        input: { wing: "another-wing", query: "private query text" } });
+      expect(wrongWing.ok).toBe(false);
+      const memoryWrite = await firstGateway.call({ ...call, callId: "call-memory-write", idempotencyKey: "idem-memory-write",
+        tool: "mempalace_write", input: { wing: "approved-wing", content: "must not be written" } });
+      expect(memoryWrite.ok).toBe(false);
+      const unscopedStatus = await firstGateway.call({ ...call, callId: "call-memory-status", idempotencyKey: "idem-memory-status",
+        tool: "mempalace_status", input: { wing: "approved-wing" } });
+      expect(unscopedStatus.ok).toBe(false);
+      const first = await firstGateway.call(call, { timeoutMs: 150 });
+      expect(first.ok && first.value.status).toBe("unknown");
+      expect(fs.readFileSync(counterPath, "utf8")).toBe("x");
+      const ledger = fs.readFileSync(ledgerPath, "utf8");
+      expect(ledger).not.toContain("private query text");
+    } finally {
+      await firstGateway.serviceManager.stop(serviceId, makeScopedOp(makeScope("machine"))).catch(() => undefined);
+    }
+
+    const secondGateway = makeGateway();
+    try {
+      expect((await secondGateway.register(client)).ok).toBe(true);
+      const recovered = await secondGateway.call(call);
+      expect(recovered.ok && recovered.value.status).toBe("unknown");
+      expect(fs.readFileSync(counterPath, "utf8")).toBe("x");
+      const conflicting = await secondGateway.call({ ...call, input: { q: "changed request" }, idempotencyKey: "idem-live-ledger-2" });
+      expect(conflicting.ok).toBe(false);
+      expect(fs.readFileSync(counterPath, "utf8")).toBe("x");
+    } finally {
+      await secondGateway.serviceManager.stop(serviceId, makeScopedOp(makeScope("machine"))).catch(() => undefined);
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 });

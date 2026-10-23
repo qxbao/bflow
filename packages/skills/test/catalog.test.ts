@@ -9,6 +9,7 @@ import {
   SkillFileStore,
   loadSkillCatalog,
   bindRoleSkills,
+  resolveRoleSkillSelections,
   RoleSkillBindingsSchema,
   readBundle,
   BASELINE_COMMANDS,
@@ -44,6 +45,30 @@ const shared = [
   "recover-execution",
 ];
 describe("canonical role catalog", () => {
+  it("selects tool skills only when the matching host grant exists", async () => {
+    const library = fileURLToPath(new URL("../../../skills", import.meta.url));
+    const catalog = await loadSkillCatalog(library, {
+      source: "builtin",
+      supportedCommands: BASELINE_COMMANDS,
+    });
+    const raw = JSON.parse((await readBundle(library))["roles/bindings.json"]!);
+    const parsed = RoleSkillBindingsSchema.parse(raw);
+    const common = {
+      bindings: parsed.bindings,
+      conditionalBindings: parsed.conditionalBindings,
+      role: "developer" as const,
+      catalog: catalog.map((entry) => entry.definition),
+    };
+
+    const withoutGrant = resolveRoleSkillSelections({ ...common, grantedToolIds: [] });
+    expect(withoutGrant.map((selection) => selection.skill.skillId)).not.toContain("use-mempalace");
+
+    const withGrant = resolveRoleSkillSelections({ ...common, grantedToolIds: ["mempalace"] });
+    expect(withGrant.map((selection) => selection.skill.skillId)).toContain("use-mempalace");
+    expect(() => resolveRoleSkillSelections({ ...common, conditionalBindings: { developer: [
+      { toolId: "mempalace", skillId: "missing-pin", required: false }
+    ] }, grantedToolIds: [] })).toThrow(/Missing or forbidden conditional skill pin/);
+  });
   it("ships all shared skills and resolves all ten roles identically across three providers", async () => {
     const library = fileURLToPath(new URL("../../../skills", import.meta.url));
     const loaded = await loadSkillCatalog(library, {

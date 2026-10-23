@@ -4,7 +4,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ManagedToolInstaller, createToolCapability, type ManagedToolPin, type ToolHost } from "../src/installer.js";
-import { FileToolCapabilityRegistry, ToolCapabilityRegistry, ensureGitNexusIndex,
+import { FileToolCapabilityRegistry, ToolCapabilityRegistry, ensureGitNexusIndex, canonicalToolId,
   planChromeSession, rtkProviderIntegration, runWithRtk, superpowersInstallRoute, verifyMcpStartup, verifyRtk,
   verifySuperpowersSkills, writeOwnedToolConfig } from "../src/integrations.js";
 import { OfficialProviderPluginAdapter } from "../src/provider-plugins.js";
@@ -95,6 +95,13 @@ describe("managed tool installer", () => {
     const first = await f.installer.apply(f.applyRequest);
     if (first.ok && first.value.status !== "applied") throw new Error(first.value.diagnostics.join("; "));
     expect(first.ok && first.value.status).toBe("applied");
+    const executable = await f.installer.inspectExecutable(f.request);
+    expect(executable.ok).toBe(true);
+    if (executable.ok) expect(executable.value).toMatchObject({
+      status: "already_satisfied", toolId: "chrome-devtools-mcp", version: "1.2.3",
+      executablePath: expect.stringContaining("/managed/chrome-devtools-mcp/node_modules/"),
+      executableDigest: expect.stringMatching(/^[a-f0-9]{64}$/)
+    });
     const second = await f.installer.apply(f.applyRequest);
     expect(second.ok && second.value.status).toBe("already_satisfied");
     expect(f.calls.filter(call => call.startsWith("npm "))).toHaveLength(1);
@@ -219,6 +226,15 @@ describe("tool integrations", () => {
     expect(await new FileToolCapabilityRegistry(file).list("repo-b")).toHaveLength(0);
     await registry.revoke("repo-a", "rtk");
     expect(await registry.list("repo-a")).toHaveLength(0);
+  });
+
+  it("publishes exact upstream operation names and keeps browser as an explicit alias", () => {
+    expect(createToolCapability("gitnexus", "1.6.12", "repo-a").operations).toEqual(["query", "context", "impact"]);
+    expect(createToolCapability("chrome-devtools-mcp", "1.11.0", "repo-a").operations)
+      .toEqual(["list_pages", "new_page", "navigate_page"]);
+    expect(createToolCapability("mempalace", "3.11.0", "repo-a").operations).toEqual(["mempalace_search"]);
+    expect(createToolCapability("rtk", "1.0.1", "repo-a").kind).toBe("cli_only");
+    expect(canonicalToolId("browser")).toBe("chrome-devtools-mcp");
   });
 
   it("serializes GitNexus writers and tracks repository fingerprint", async () => {

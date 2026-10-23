@@ -94,6 +94,25 @@ Với các tool tác động đến trình duyệt hoặc thiết bị/phần c�
 4. Nếu một lời gọi tool mutating bị timeout hoặc backend crash giữa lời gọi, kết quả lời gọi được gắn cờ `status: "unknown"` và exclusive resource bị quarantine (`diagnosticCode: "resource_quarantined"`).
 5. Resource vẫn bị khóa theo kiểu fail-closed cho đến khi được giải quyết qua `gateway.reconcileCall()`. **Các lời gọi tool mutating không bao giờ được tự động phát lại.**
 
+## Grant, input schema và journal phục hồi
+
+Control registration nội bộ có thể gắn `ResolvedToolGrant[]` đã được host xác thực mà không đổi
+`MCPClientRegistration`. Gateway kiểm lại role, session scope, tool catalog ID, service ID và
+operation trước khi đọc receipt hay gọi upstream. Registration có grant sẽ preflight đúng các
+input schema đã thương lượng; thiếu schema, schema mặc định hoặc keyword mà validator chưa hỗ trợ
+sẽ chặn registration. Ở runtime, operation còn phải nằm trong `service.tool.operations` và input
+được kiểm tra lại ngay trước dispatch. Resource lease phải khớp cả resource key và fencing token.
+
+Khi CLI cấp `callLedgerPath`, Gateway giữ journal riêng theo machine state. Journal version 2 chỉ
+lưu call/registration/service/operation IDs, digest request/output, schema pins, trạng thái và
+timestamp; query và output body không được ghi vào đây. `intent` được fsync trước side effect;
+lock writer kiểm tra lại state mới nhất để ngăn hai Gateway process claim cùng call ID. File và
+thư mục phải owner-only, regular, bounded và không phải symlink. Sau restart, kể cả receipt đã
+hoàn tất chỉ được trả dưới dạng `unknown` với mã `gateway_response_unavailable_after_restart`,
+vì body response không được giữ trong ledger. Call đang dở cũng giữ `unknown`; Gateway không tự
+gọi lại upstream. Schema digest được pin theo service revision, cùng revision nhưng khác schema
+sẽ block cho tới khi một revision mới được duyệt.
+
 ---
 
 ## Các lệnh chạy được

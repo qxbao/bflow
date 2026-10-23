@@ -34,6 +34,13 @@ CLI parser và Runtime wiring vẫn do P29/P30 sở hữu. `bflow setup`,
 trên baseline này. API của package và các điểm tích hợp đã sẵn sàng; việc nối lệnh cuối cùng
 và kích hoạt provider live vẫn là công việc tích hợp. Ở đây không có scheduler hay gate mới.
 
+`roles/bindings.json` có thể thêm `conditionalBindings` mà không làm hỏng file legacy chỉ có
+`schemaVersion` và `bindings`. `resolveRoleSkillSelections` luôn kiểm tra skill pin cùng role
+trong catalog đã tải; nó chỉ thêm skill có điều kiện khi host truyền tool grant cùng `toolId`.
+Skill và dependency chỉ là chỉ dẫn, không tạo capability hoặc operation. Một conditional pin
+thiếu/sai role sẽ lỗi kể cả khi tool chưa được cấp; tool bắt buộc nhưng grant chưa sẵn sàng cũng
+chặn resolve. Tool tùy chọn không có grant sẽ không xuất hiện trong manifest.
+
 ## Định dạng và xác minh
 
 Mỗi bundle chứa `SKILL.md` với YAML frontmatter `name`/`description` một dòng chuẩn,

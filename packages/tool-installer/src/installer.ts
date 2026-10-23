@@ -169,6 +169,17 @@ export const systemToolHost: ToolHost = {
 
 export interface ToolInspection { status: SetupReceipt["status"]; diagnostics: string[]; ownedPaths: string[] }
 
+/** Read-only identity evidence for a currently verified Bflow-managed executable. */
+export interface ManagedExecutableInspection {
+  toolId: string;
+  status: SetupReceipt["status"];
+  version: string;
+  executablePath: string | null;
+  executableDigest: string | null;
+  desiredStateDigest: string;
+  diagnostics: string[];
+}
+
 export interface ManagedToolInstallerOptions {
   readonly managedRoot: string;
   readonly desiredStateContext?: Readonly<Record<string, string>>;
@@ -329,6 +340,42 @@ export class ManagedToolInstaller implements ToolInstaller {
     const pin = this.#pin(request);
     if (!pin) return fail("Tool pin missing", "not_found");
     return ok(await this.#observe(request.destination, pin, planned.value.desiredStateDigest));
+  }
+
+  /**
+   * Inspect the executable behind an exact approved pin. A PATH probe or version label alone
+   * never produces identity evidence; the owned marker, pinned artifact, and functional probe
+   * must all still pass at the moment this method runs.
+   * `status === "already_satisfied"` is the only ready status; then both canonical path and
+   * current executable digest are non-null. Other statuses carry diagnostics and null identity.
+   */
+  async inspectExecutable(raw: ToolInstallRequest, _options?: OperationOptions): Promise<OperationResult<ManagedExecutableInspection>> {
+    const planned = await this.plan(raw);
+    if (!planned.ok) return planned;
+    const request = planned.value.toolInstall!;
+    const pin = this.#pin(request);
+    if (!pin) return fail("Tool pin missing", "not_found");
+    const observation = await this.#observe(request.destination, pin, planned.value.desiredStateDigest);
+    const base: ManagedExecutableInspection = {
+      toolId: pin.toolId, status: observation.status, version: pin.version,
+      executablePath: null, executableDigest: null,
+      desiredStateDigest: planned.value.desiredStateDigest, diagnostics: [...observation.diagnostics]
+    };
+    if (observation.status !== "already_satisfied") return ok(base);
+    if (pin.recipe.kind === "provider_plugin") return ok({ ...base, status: "blocked",
+      diagnostics: [...base.diagnostics, "Provider plugins do not expose a Bflow-managed executable identity"] });
+    try {
+      const destination = await realpath(request.destination);
+      const executable = await realpath(join(destination, managedToolExecutable(pin)));
+      if (!executable.startsWith(`${destination}${sep}`)) throw new Error("Executable escaped its managed installation");
+      const info = await stat(executable);
+      if (!info.isFile()) throw new Error("Managed executable is not a regular file");
+      const executableDigest = await digestFile(executable);
+      return ok({ ...base, executablePath: executable, executableDigest });
+    } catch (error) {
+      return ok({ ...base, status: "blocked", diagnostics: [...base.diagnostics,
+        `Managed executable identity could not be verified: ${error instanceof Error ? error.message : String(error)}`] });
+    }
   }
 
   async reconcile(raw: SetupApplyRequest, _options?: OperationOptions): Promise<OperationResult<SetupReceipt>> {
@@ -600,9 +647,9 @@ export class ManagedToolInstaller implements ToolInstaller {
 export function createToolCapability(toolId: "rtk" | "gitnexus" | "chrome-devtools-mcp" | "mempalace" | "context7" | "superpowers", version: string, repositoryId: string): ToolCapability {
   const definitions = {
     rtk: { kind: "cli_only", operations: ["optimize_output", "gain"], resource: { sharing: "concurrent", maxConcurrency: 64 } },
-    gitnexus: { kind: "stdio_mcp", operations: ["code_query", "code_context", "impact"], resource: { sharing: "exclusive", resourceKey: `gitnexus-${repositoryId}` } },
-    "chrome-devtools-mcp": { kind: "stdio_mcp", operations: ["browser_debug", "page_navigate"], resource: { sharing: "exclusive", resourceKey: `chrome-${repositoryId}` } },
-    mempalace: { kind: "stdio_mcp", operations: ["mempalace_status", "mempalace_search"], resource: { sharing: "concurrent", maxConcurrency: 16 } },
+    gitnexus: { kind: "stdio_mcp", operations: ["query", "context", "impact"], resource: { sharing: "exclusive", resourceKey: `gitnexus-${repositoryId}` } },
+    "chrome-devtools-mcp": { kind: "stdio_mcp", operations: ["list_pages", "new_page", "navigate_page"], resource: { sharing: "exclusive", resourceKey: `chrome-${repositoryId}` } },
+    mempalace: { kind: "stdio_mcp", operations: ["mempalace_search"], resource: { sharing: "concurrent", maxConcurrency: 16 } },
     context7: { kind: "native_remote_mcp", operations: ["resolve-library-id", "query-docs"], resource: { sharing: "concurrent", maxConcurrency: 16 } },
     superpowers: { kind: "cli_only", operations: ["skills_instruction"], resource: { sharing: "concurrent", maxConcurrency: 64 } }
   } as const;

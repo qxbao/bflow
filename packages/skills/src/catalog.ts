@@ -47,10 +47,71 @@ export const RoleSkillNamesSchema = z.record(
   AgentRoleSchema,
   z.array(z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)).min(1),
 );
+export const ConditionalRoleSkillBindingSchema = z.object({
+  toolId: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
+  skillId: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
+  required: z.boolean().default(false),
+}).strict();
+export const ConditionalRoleSkillBindingsSchema = z.record(
+  AgentRoleSchema,
+  z.array(ConditionalRoleSkillBindingSchema),
+);
 export const RoleSkillBindingsSchema = z
-  .object({ schemaVersion: z.literal(3), bindings: RoleSkillNamesSchema })
+  .object({
+    schemaVersion: z.literal(3),
+    bindings: RoleSkillNamesSchema,
+    conditionalBindings: ConditionalRoleSkillBindingsSchema.default({}),
+  })
   .strict();
 export type RoleSkillNames = z.infer<typeof RoleSkillNamesSchema>;
+export type ConditionalRoleSkillBinding = z.infer<typeof ConditionalRoleSkillBindingSchema>;
+
+export interface ResolveRoleSkillSelectionsRequest {
+  bindings: unknown;
+  conditionalBindings?: unknown;
+  role: AgentRole;
+  catalog: SkillDefinition[];
+  /** IDs from validated host grants; catalog metadata never supplies these. */
+  grantedToolIds: readonly string[];
+  requiredToolIds?: readonly string[];
+}
+
+/** Resolve workflow skills and add tool skills only when the host supplied a matching grant. */
+export function resolveRoleSkillSelections(
+  request: ResolveRoleSkillSelectionsRequest,
+): ResolveSkillsRequest["selections"] {
+  const conditional = ConditionalRoleSkillBindingsSchema.parse(request.conditionalBindings ?? {});
+  const definitions = z.array(SkillDefinitionSchema).parse(request.catalog);
+  const role = AgentRoleSchema.parse(request.role);
+  const roleBindings = conditional[role] ?? [];
+  const conditionalSkillIds = new Set(roleBindings.map((item) => item.skillId));
+  const base = bindRoleSkills(request.bindings, role, request.catalog)
+    .filter((item) => !conditionalSkillIds.has(item.skill.skillId));
+  const granted = new Set(request.grantedToolIds);
+  const required = new Set(request.requiredToolIds ?? []);
+  const extra: ResolveSkillsRequest["selections"] = [];
+  for (const binding of roleBindings) {
+    const definition = definitions.find((item) => item.skillId === binding.skillId);
+    if (!definition || !definition.allowedRoles.includes(role)) {
+      throw new Error(`Missing or forbidden conditional skill pin: ${binding.skillId}`);
+    }
+    if (!granted.has(binding.toolId)) {
+      if (binding.required || required.has(binding.toolId)) {
+        throw new Error(`Required tool grant unavailable for conditional skill: ${binding.toolId}`);
+      }
+      continue;
+    }
+    if (extra.some((item) => item.skill.skillId === binding.skillId) || base.some((item) => item.skill.skillId === binding.skillId)) {
+      throw new Error(`Duplicate conditional role skill binding: ${binding.skillId}`);
+    }
+    extra.push({
+      skill: { skillId: definition.skillId, version: definition.version, digest: definition.digest },
+      required: binding.required || required.has(binding.toolId),
+    });
+  }
+  return [...base, ...extra];
+}
+
 export function bindRoleSkills(
   input: unknown,
   role: AgentRole,
