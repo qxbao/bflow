@@ -113,6 +113,13 @@ transaction, không phụ thuộc state tạm chỉ tồn tại trong `tick`. Im
 đúng từ execution gốc cho kiểm tra độc lập; commit tích hợp, task evidence và các giới hạn
 retry/approval không đổi. Cùng đường này phục vụ explicit resume và `retry_verification`.
 
+Gate retry tạo request ID mới sau một verdict đã áp dụng hoặc blocker `task.status: blocked`
+được xác thực đúng request/run/correlation/agent/pane. Request cũ và outcome giữ nguyên;
+không giả verdict hay ACK. Blocker có thể đến trước khi lease được release: lượt mới chỉ
+được queue, còn Registry và kiểm tra pane vẫn chặn dispatch tới khi capacity sẵn sàng.
+Sending/unknown delivery không được coi là một attempt đã đối soát; các giới hạn verification
+và phê duyệt hiện hữu không đổi.
+
 Các đầu vào host bắt buộc là tường minh: định danh repository/session, role capability,
 định nghĩa check của task/workflow, deterministic gate runner, ingress thông điệp/result/evidence
 Herdr có xác thực và phê duyệt của con người có xác thực. Không có

@@ -1072,6 +1072,30 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
     await f.runtime.receiveHerdr(verdict(fresh));
     await expect(retried).resolves.toMatchObject({ ok: true, value: { gateId: "review", status: "passed" } });
   });
+  it.each([false, true])("creates a fresh gate request after an authenticated blocked reply (capacity released=%s)", async released => {
+    const f = await fixture({ remoteReview: true });
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    const definition = (f.ports as any).taskChecks.find((check: any) => check.id === "review");
+    const context = { runId: "run-1", taskId: "implement", attemptId: "blocked-gate-retry", artifacts: [], input: { scope: "task" }, definition: { ...definition, timeout: { ...definition.timeout, executionTimeoutMs: 20000 } } };
+    const gate = f.runtime.herdrQualityGate("review");
+    const requests = async () => ((await f.runtime.inspect()) as any).outbound.filter((out: any) => out.message.type === "verification.requested");
+    const first = new AbortController(), abandoned = gate.evaluate(context as any, { signal: first.signal }); abandoned.catch(() => undefined);
+    await expect.poll(async () => (await requests()).filter((out: any) => out.handle).length, { timeout: 10000 }).toBe(1);
+    first.abort(); await expect(abandoned).rejects.toThrow(/aborted/);
+    const [prior] = await requests();
+    await f.runtime.receiveHerdr(f.envelope("task.status", { status: "blocked", summary: "Host capability unavailable" }, { sender: { role: "reviewer", agent_id: prior.handle.target.agentId, pane_id: prior.handle.target.paneId }, causation_id: prior.message.message_id }));
+    if (released) await f.runtime.flushOutbound();
+    expect((await requests())[0].status).toBe(released ? "released" : "accepted");
+    const second = new AbortController(), retried = gate.evaluate(context as any, { signal: second.signal }); retried.catch(() => undefined);
+    try {
+      await expect.poll(async () => (await requests()).filter((out: any) => out.handle).length, { timeout: 10000 }).toBe(2);
+      const fresh = (await requests()).find((out: any) => out.message.message_id !== prior.message.message_id);
+      await f.runtime.receiveHerdr(f.envelope("review.verdict", { gateId: "review", runId: "run-1", taskId: "implement", evaluationId: randomUUID(), status: "passed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString() }, { sender: { role: "reviewer", agent_id: fresh.handle.target.agentId, pane_id: fresh.handle.target.paneId }, causation_id: fresh.message.message_id }));
+      await expect(retried).resolves.toMatchObject({ ok: true, value: { status: "passed" } });
+      expect((await requests())[0].message).toEqual(prior.message);
+    } finally { second.abort(); await retried.catch(() => undefined); }
+  }, 60000);
+
   it("reconciliation permits resend only after a proven not_delivered result", async () => {
     const f = await fixture(); f.panes.busy.add("conversation");
     f.transport.customSendHandler = () => ({ ok: false, error: { code: "timeout", retryable: true, message: "uncertain" } });

@@ -925,8 +925,16 @@ export class AgenticWorkflowRuntime {
           const run = this.run(state, context.runId); this.live(run);
           // An already-applied verdict predates this evaluation and fails the verifier's execution-window check, so a retry asks
           // again under the next deterministic key. A request still awaiting its reply (same key, no verdict) is waited on, not resent.
-          for (let attempt = 1; state.inbox.some(item => item.status === "applied" && item.message.causation_id === key && item.message.type === "review.verdict"); attempt++)
-            key = `gate-${digest([context, attempt])}`;
+          const settled = (messageId: string): boolean => {
+            const prior = state.outbound.find(item => item.message.message_id === messageId);
+            return state.inbox.some(item => item.status === "applied" && item.message.causation_id === messageId &&
+              (item.message.type === "review.verdict" || prior?.handle && ["accepted", "released"].includes(prior.status) &&
+                item.message.type === "task.status" && objectField(item.message.payload, "status") === "blocked" &&
+                item.message.run_id === context.runId && item.message.correlation_id === run.delegation.correlationId &&
+                item.message.sender.role === prior.message.recipient.role && item.message.sender.agent_id === prior.handle.target.agentId &&
+                item.message.sender.pane_id === prior.handle.target.paneId));
+          };
+          for (let attempt = 1; settled(key); attempt++) key = `gate-${digest([context, attempt])}`;
           this.gateWaiters.set(key, { runId: context.runId, accept: finish, reject: rejectReply });
           if (state.outbound.some(out => out.message.message_id === key)) return;
           outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: key, correlation_id: run.delegation.correlationId,
