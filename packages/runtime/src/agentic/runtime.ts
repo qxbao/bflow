@@ -1440,6 +1440,10 @@ export class AgenticWorkflowRuntime {
 
   /** A specialist blocker is visible to the user, not only to the Coordinator. Idempotent per message. */
   private reportSpecialistBlocked(state: JournalState, outbox: HerdrOutbox, run: RunRecord, message: RoleMessage, blockage: string): void {
+    if (state.inbox.some(item => item.status === "applied" && item.message.type === "review.verdict" &&
+        item.message.run_id === run.runId && item.message.causation_id === message.causation_id &&
+        item.message.sender.role === message.sender.role && item.message.sender.agent_id === message.sender.agent_id && item.message.sender.pane_id === message.sender.pane_id))
+      return; // A late delivery diagnostic cannot replace the authenticated gate outcome or its resume lineage.
     const reason = `Specialist ${message.sender.role} blocked: ${blockage}`.slice(0, 2000);
     if (!resumablyPaused(run)) {
       run.error = reason;
@@ -1496,6 +1500,11 @@ export class AgenticWorkflowRuntime {
       if (!existing) { state.inbox.push({ message: parsed, status: "received" }); await save(); }
       const blockage = specialistBlockage(parsed.payload);
       if (blockage !== undefined) {
+        if (run.workflowVerificationPending || run.tasks.some(task => task.verificationPending)) {
+          // The Runtime-owned verification result decides this phase. A model's delivery diagnostic cannot pause its live waiter or reset its lineage counters.
+          const inbox = state.inbox.find(item => item.message.message_id === parsed.message_id)!; inbox.status = "applied";
+          await save(); return;
+        }
         if (run.status === "awaiting_approval" || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
           const inbox = state.inbox.find(item => item.message.message_id === parsed.message_id)!; inbox.status = "applied"; await save(); return;
         }

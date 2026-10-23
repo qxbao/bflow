@@ -46,8 +46,8 @@ export interface HostVerificationReceipts {
   getGate(evaluationId: string): Promise<QualityGateResult | undefined>;
   authenticateGate(result: QualityGateResult): Promise<boolean>;
   authenticateEvidence(result: VerificationResult): Promise<boolean>;
-  putObservation(kind: "review" | "alternative", id: string, value: { binding: PaneBinding; observation: JsonValue; context?: unknown; runId?: string; taskId?: string }): Promise<unknown>;
-  getObservation(kind: "review" | "alternative", id: string): Promise<{ binding: PaneBinding; observation: JsonValue; context?: unknown; runId?: string; taskId?: string } | undefined>;
+  putObservation(kind: "review" | "alternative", id: string, value: { binding: PaneBinding; observation: JsonValue; context?: unknown; runId?: string; taskId?: string; sourceMessageId?: string }): Promise<unknown>;
+  getObservation(kind: "review" | "alternative", id: string): Promise<{ binding: PaneBinding; observation: JsonValue; context?: unknown; runId?: string; taskId?: string; sourceMessageId?: string } | undefined>;
 }
 /** A completed, valid measurement that requires a bounded Developer repair. */
 export class HostBehavioralFailure extends Error {
@@ -405,7 +405,7 @@ export class HostVerification {
     return values;
   }
   /** Capture objective revision/diff before the model evaluates it; the returned ID pins later judgment. */
-  private readonly reviews = new Map<string, { binding: PaneBinding; context: unknown; observation: Awaited<ReturnType<HostVerification["capture"]>> }>();
+  private readonly reviews = new Map<string, { binding: PaneBinding; sourceMessageId: string; context: unknown; observation: Awaited<ReturnType<HostVerification["capture"]>> }>();
   async inspectReview(binding: PaneBinding, input: unknown) {
     if (!["reviewer", "qa", "tester"].includes(binding.role)) throw new Error("Independent verification role required");
     const args = record(input), state = record(await this.runtime().inspect());
@@ -435,14 +435,35 @@ export class HostVerification {
         context = QualityGateContextSchema.parse({ ...context, input: { ...details, hostQaBehavioralObservation: qaBehavioralObservation } });
       }
     }
-    const reviewId = randomUUID(); await this.receipts?.putObservation("review", reviewId, { binding, context, observation: json(observation) });
-    this.reviews.set(reviewId, { binding, context, observation });
+    const reviewId = randomUUID(), sourceMessageId = textField(args.messageId);
+    await this.receipts?.putObservation("review", reviewId, { binding, sourceMessageId, context, observation: json(observation) });
+    this.reviews.set(reviewId, { binding, sourceMessageId, context, observation });
     return json({ reviewId, ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}), context, observation });
   }
   async completeReview(binding: PaneBinding, input: unknown) {
     const args = record(input), id = textField(args.reviewId), stored = await this.receipts?.getObservation("review", id);
-    const pending = stored ? { binding: stored.binding, context: stored.context, observation: this.parseCapture(stored.observation) } : this.reviews.get(id);
-    if (!pending || digest(this.bindingIdentity(pending.binding)) !== digest(this.bindingIdentity(binding))) throw new Error("Review observation belongs to another pane or is missing");
+    const pending = stored ? { binding: stored.binding, sourceMessageId: stored.sourceMessageId, context: stored.context, observation: this.parseCapture(stored.observation) } : this.reviews.get(id);
+    if (!pending || digest(this.bindingIdentity(pending.binding)) !== digest(this.bindingIdentity(binding))) {
+      // Guidance never selects an observation or submits a judgment on the caller's behalf.
+      const state = record(await this.runtime().inspect());
+      const assigned = (state.outbound as Record<string, unknown>[]).find(out => !out.reviewReplacement && out.handle &&
+        ["accepted", "released"].includes(String(out.status)) && record(out.message).type === "verification.requested" &&
+        record(out.message).message_id === args.messageId && record(record(out.handle).target).paneId === binding.paneId &&
+        record(record(out.handle).target).agentId === binding.agentId && digest(record(record(out.handle).target).session) === digest(binding.session));
+      const originalContext = (context: unknown) => {
+        const parsed = QualityGateContextSchema.parse(context), { hostQaBehavioralObservation: _measurement, ...input } = record(parsed.input);
+        return { ...parsed, input };
+      };
+      const candidates = assigned ? [...this.reviews].filter(([, review]) => review.sourceMessageId === args.messageId &&
+        digest(this.bindingIdentity(review.binding)) === digest(this.bindingIdentity(binding)) &&
+        digest(originalContext(review.context)) === digest(originalContext(record(assigned.message).payload)))
+        .slice(-3).map(([reviewId]) => reviewId) : [];
+      throw new Error("Review observation belongs to another pane or is missing" + (candidates.length
+        ? `; this pane's observation IDs for the exact assigned message: ${candidates.join(", ")}. Retry complete_review with the chosen reviewId and independent judgments.`
+        : "; use inspect_review for the assigned messageId before submitting independent judgments."));
+    }
+    if (args.messageId !== undefined && pending.sourceMessageId !== undefined && args.messageId !== pending.sourceMessageId)
+      throw new Error("Review observation belongs to another verification request");
     const context = QualityGateContextSchema.parse(pending.context), configuration = record(context.definition.configuration), details = record(context.input);
     const state = record(await this.runtime().inspect());
     if ((state.outbound as Record<string, unknown>[]).some(out => out.reviewReplacement && out.handle &&

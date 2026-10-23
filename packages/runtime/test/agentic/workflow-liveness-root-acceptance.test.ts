@@ -282,4 +282,35 @@ describe("root acceptance of durable next actions", () => {
     expect((await f.inspect()).outbound.find(out => out.message.causation_id === "conversation-context")?.status).toBe("unknown_delivery");
   });
 
+  it.each(["workflow"])("keeps the Runtime-owned %s verification active when Coordinator reports a late blocker", async scope => {
+    const current = preservedRun("verifying");
+    current.workflowVerificationPending = true;
+    const f = await fixture({ runs: [current] });
+    const notice = envelope("late-coordinator-blocker", "run-1", { role: "conversation" }, {
+      sender: { role: "coordinator", agent_id: "coordinator-agent", pane_id: "pane-coordinator" }, payload: { status: "blocked", summary: "Model says review delivery is uncertain" }
+    });
+    await f.runtime.observeCoordinatorOutcome(notice);
+    expect((await f.inspect()).runs[0]).toEqual(current);
+    expect((await f.inspect()).inbox.find(item => item.message.message_id === notice.message_id)?.status).toBe("applied");
+    await f.runtime.observeCoordinatorOutcome(notice); expect((await f.inspect()).runs[0]).toEqual(current);
+  });
+
+  it("does not replace a verification lineage with a late specialist blocker after its authenticated verdict", async () => {
+    const current = preservedRun("verifying"); current.workflowVerificationPending = true;
+    const f = await fixture({ runs: [current] }); (f.runtime as any).ports.authenticateGateResult = async () => true;
+    const request = envelope("review-request", "run-1", { role: "reviewer" }, { sender: { role: "coordinator" }, type: "verification.requested",
+      payload: { runId: "run-1", taskId: "workflow-verification", attemptId: "integrated-revision", artifacts: [], input: {},
+        definition: { id: "host-reviewer", name: "Reviewer", evaluator: "review", required: true, timeout: { executionTimeoutMs: 30000, onTimeout: "block" } } } });
+    await f.runtime.queueHerdr(request); await f.runtime.flushOutbound();
+    // initialize clears an orphan flag before this fixture's first delivery; the verdict below is still conclusive.
+    current.workflowVerificationPending = false;
+    const sender = { role: "reviewer", agent_id: "reviewer-agent", pane_id: "pane-reviewer" };
+    await f.runtime.receiveHerdr(envelope("review-verdict", "run-1", { role: "coordinator" }, { sender, type: "review.verdict", causation_id: request.message_id,
+      payload: { gateId: "host-reviewer", runId: "run-1", taskId: "workflow-verification", evaluationId: "review-observation", status: "passed", findings: [], producedArtifacts: [], evaluatedAt: T0 } }));
+    await f.runtime.receiveHerdr(envelope("late-specialist-blocker", "run-1", { role: "coordinator" }, { sender, causation_id: request.message_id,
+      payload: { status: "blocked", summary: "Provider did not observe its late ACK" } }));
+    expect((await f.inspect()).runs[0]).toEqual(current);
+    expect((await f.inspect()).inbox.find(item => item.message.message_id === "late-specialist-blocker")?.status).toBe("applied");
+  });
+
 });

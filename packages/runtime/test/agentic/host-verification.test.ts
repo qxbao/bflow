@@ -60,4 +60,20 @@ describe("trusted host observations",()=>{
     await expect(f.restore().completeReview(f.binding,{reviewId:observed.reviewId,criteria:[{criterionId:"ac-1",passed:true,summary:"old observation"}],summary:"old observation"})).rejects.toThrow("Replaced workflow review");
   });
 
+  it("guides a mistaken reviewId only to this native pane's observation for the exact assigned request",async()=>{
+    const f=await fixture(), observed=await f.host.inspectReview(f.binding,{messageId:"request"}) as {reviewId:string};
+    await expect(f.host.completeReview(f.binding,{messageId:"request",reviewId:"mistyped-observation",criteria:[],summary:"not a verdict"})).rejects.toThrow(observed.reviewId);
+    await expect(f.host.completeReview({...f.binding,agentId:"foreign-agent"},{messageId:"request",reviewId:"mistyped-observation",criteria:[],summary:"not a verdict"})).rejects.not.toThrow(observed.reviewId);
+    await expect(f.host.completeReview({...f.binding,session:{...f.binding.session!,value:"foreign-native"}},{messageId:"request",reviewId:"mistyped-observation",criteria:[],summary:"not a verdict"})).rejects.not.toThrow(observed.reviewId);
+    await expect(f.host.completeReview(f.binding,{messageId:"another-request",reviewId:"mistyped-observation",criteria:[],summary:"not a verdict"})).rejects.not.toThrow(observed.reviewId);
+    f.outbound.push({...f.outbound[0],message:{...f.outbound[0]!.message,message_id:"new-identical-context"}});
+    await expect(f.host.completeReview(f.binding,{messageId:"new-identical-context",reviewId:"mistyped-observation",criteria:[],summary:"not a verdict"})).rejects.not.toThrow(observed.reviewId);
+    await expect(f.restore().completeReview(f.binding,{messageId:"new-identical-context",reviewId:observed.reviewId,criteria:[],summary:"not a verdict"})).rejects.toThrow("another verification request");
+    f.outbound[0]!.reviewReplacement={disposition:"replaced_without_verdict_claim"};
+    await expect(f.host.completeReview(f.binding,{messageId:"request",reviewId:"mistyped-observation",criteria:[],summary:"not a verdict"})).rejects.not.toThrow(observed.reviewId);
+    delete f.outbound[0]!.reviewReplacement;
+    const completed=await f.host.completeReview(f.binding,{messageId:"request",reviewId:observed.reviewId,criteria:[{criterionId:"ac-1",passed:true,summary:"The exact committed change meets the criterion"}],summary:"Independent observed review"});
+    expect(completed.result.status).toBe("passed");
+  });
+
 });

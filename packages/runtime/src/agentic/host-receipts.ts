@@ -50,7 +50,7 @@ const ApprovalFailureReceiptSchema = z.object({ messageId: z.string().min(1), at
 const ConversationDecisionReceiptSchema = z.object({ messageId: z.string().min(1), decision: JsonValueSchema,
   result: JsonValueSchema.optional() }).strict();
 export interface HostObservation {
-  binding: PaneBinding; observation: JsonValue; context?: unknown; runId?: string; taskId?: string;
+  binding: PaneBinding; observation: JsonValue; context?: unknown; runId?: string; taskId?: string; sourceMessageId?: string;
 }
 export interface CoordinatorTurnObservation { binding: PaneBinding; message: RoleMessage; sequence: number; nativeResponseBaseline?: string[] }
 interface Envelope { version: 1; repository: string; sessionId: string; kind: Kind; id: string; payload: JsonValue; checksum: string }
@@ -166,7 +166,8 @@ export class HostReceiptJournal {
     const value = record(input), binding = PaneBindingSchema.parse(value.binding);
     if (binding.sessionId !== this.sessionId) throw new Error("Foreign observation binding");
     const observation = JsonValueSchema.parse(value.observation);
-    if (kind === "review") return json({ binding, observation, context: QualityGateContextSchema.parse(value.context) });
+    if (kind === "review") return json({ binding, observation, context: QualityGateContextSchema.parse(value.context),
+      ...(value.sourceMessageId === undefined ? {} : { sourceMessageId: textField(value.sourceMessageId) }) });
     return json({ binding, observation, runId: textField(value.runId), taskId: textField(value.taskId) });
   }
   private validate(raw: unknown, kind: Kind, id: string): Envelope {
@@ -687,6 +688,7 @@ export class HostReceiptJournal {
     const value = await this.read(kind, id); if (value === undefined) return undefined;
     const raw = record(value);
     return { binding: PaneBindingSchema.parse(raw.binding), observation: JsonValueSchema.parse(raw.observation),
+      ...(raw.sourceMessageId === undefined ? {} : { sourceMessageId: textField(raw.sourceMessageId) }),
       ...(raw.context ? { context: QualityGateContextSchema.parse(raw.context) } : {}),
       ...(raw.runId ? { runId: textField(raw.runId) } : {}), ...(raw.taskId ? { taskId: textField(raw.taskId) } : {}) };
   }

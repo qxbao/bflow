@@ -451,6 +451,19 @@ và receipt sai định dạng không bao giờ chứng minh không được gia
 của request hay lease bị thay đổi không bị âm thầm thay thế. Các thông điệp mơ hồ giữ
 lease và không tự động gửi lại qua restart.
 
+CoreSession phục hồi từ aggregate checkpoint mới nhất đã qua bộ kiểm tra tương thích,
+kiểm tra run/version/sequence và decoder aggregate, sau đó chỉ đọc event tail bằng cursor
+được dùng trong recovery hiện hữu. Không có checkpoint thì đọc lịch sử đầy đủ. Checkpoint
+hỏng hoặc khác run không được bỏ qua để nhận projection; command outcomes, approval,
+fencing, retry và cancellation tiếp tục thuộc aggregate của Core. Cách này tránh replay toàn
+bộ lịch sử ở mỗi RPC khi lịch sử dài. Các bảo đảm này có kiểm thử cục bộ, không thay một
+verdict live hay phê duyệt của người dùng.
+
+Trong khi phép kiểm chứng độc lập do Runtime sở hữu còn đang chạy, báo cáo blocked của
+Coordinator được lưu như chẩn đoán; kết quả verification vẫn quyết định phase. Blocker đến
+muộn từ specialist đã có verdict xác thực không thay thế lineage/counter hiện có. Request
+user decision và cancellation vẫn dùng đường riêng và giữ nguyên authority/gate.
+
 Các Core event batch được journal trước khi SQLite append và được retry idempotent.
 Aggregate checkpoint được giữ lại; authoritative complete event replay khôi phục
 trạng thái approval, retry, gate và cancellation. Projection RunStore được duy trì
@@ -957,3 +970,8 @@ packages/runtime/test/agentic/cancel-reconcile.test.ts
 packages/runtime/test/agentic/conversation-intake.test.ts packages/conversation/test`.
 Các test dùng transport giả và storage/policy thật; không chứng minh các run trong session
 production đã được dừng hoặc provider/Herdr live đã chấp nhận bản sửa.
+
+Nếu `complete_review` nhận sai observation ID, host vẫn từ chối verdict. Thông báo lỗi
+chỉ gợi ý tối đa ba ID đã quan sát trong cùng native pane, cùng request và context được
+giao; request bị thay thế không nhận gợi ý. Agent phải tự chọn ID đúng và nộp nhận định
+độc lập. Gợi ý không tạo receipt hay tự thay tham số của agent.
