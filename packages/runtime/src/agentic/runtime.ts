@@ -1811,9 +1811,12 @@ export class AgenticWorkflowRuntime {
       } else if (!["task.assignment", "delegation.request", "verification.requested", "task.status"].includes(message.type) ||
           message.sender.role !== "coordinator" && message.sender.role !== "runtime") throw new Error("Agy specialist needs an assigned Runtime delivery");
       const owner = out.parentAssignmentId ? state.outbound.find(item => item.message.message_id === out.parentAssignmentId) : out;
+      // Dispatch receipts remain immutable across a bounded, authorized continuation of this same Core execution.
+      // Journal validation pins history ownership and increasing fences; Registry renewal below proves the current grant.
+      const dispatchLease = owner?.lease && [owner.lease, ...owner.leaseHistory ?? []].find(lease =>
+        out.request?.metadata?.leaseId === lease.leaseId && out.request.metadata?.fencingToken === lease.fencingToken);
       if (!owner || !["sending", "unknown_delivery", "accepted"].includes(owner.status) || owner.cancelRequested || owner.leaseRelease || !owner.lease || !out.request ||
-          Date.parse(owner.lease.expiresAt) <= Date.parse(this.now()) ||
-          out.request.metadata?.leaseId !== owner.lease.leaseId || out.request.metadata?.fencingToken !== owner.lease.fencingToken ||
+          Date.parse(owner.lease.expiresAt) <= Date.parse(this.now()) || !dispatchLease ||
           owner.lease.agentId !== binding.agentId || owner.lease.runId !== run.runId || owner.lease.taskId !== owner.request?.taskId)
         throw new Error("Agy delivery has no current matching lease and fence");
       let continuation = false;

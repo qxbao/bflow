@@ -2054,6 +2054,58 @@ describe("current native Agy turn authority", () => {
       expectedVersion: snapshot.version, reason: "stale Core authority", requestedBy: "test", requestedAt: new Date().toISOString(), idempotencyKey: "cancel-core-native" }));
     await expect(f.runtime.authorizeAgyProviderTurn(message, binding, "submit_implementation")).rejects.toThrow();
   });
+  it("retains Agy authority for a delivered retry notice after an authorized higher-fence lease continuation", async () => {
+    const f = await fixture({ tdd: true });
+    let clockOffset = 0;
+    const clock = () => new Date(Date.now() + clockOffset);
+    f.ports.clock = clock;
+    f.ports.registry = new FileAgentRegistry({ stateFile: join(f.root, "registry.json"), clock });
+    f.ports.preflightRoleCapabilities = async () => undefined;
+    f.ports.roleCapabilities.qa = ["verification", "testing", "repository.read"];
+    const allocate = f.panes.allocateDeveloper.bind(f.panes);
+    f.panes.allocateDeveloper = async request => {
+      const result = await allocate(request);
+      if (result.ok) { result.value.provider = "herdr"; result.value.agentKind = "agy";
+        result.value.session = { source: "herdr:antigravity_cli", kind: "id", value: "native-agy-lease-continuation" }; }
+      return result;
+    };
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    const state = await f.runtime.inspect() as any;
+    const original = state.outbound.find((out: any) => out.message.type === "task.assignment");
+    const binding = f.panes.bindings.find(item => item.paneId === original.handle.target.paneId)!;
+    const revision = git(binding.worktreePath!, "rev-parse", "HEAD");
+    const queued = await f.runtime.requestPhaseVerification(binding, "run-1", "implement", "red", revision) as any;
+    await f.runtime.flushOutbound();
+    const qa = f.panes.bindings.find(item => item.role === "qa")!;
+    await f.runtime.recordPhaseFailure(qa, queued.messageId, "Independent runner unavailable", false);
+    const paused = await f.inspect();
+    await expect(f.runtime.authorizeAgyProviderTurn(original.request.context, binding, "request_verification")).rejects.toThrow(/paused|escalated/);
+    await f.runtime.resumeBlockedRun("run-1", paused.pendingAction.actionId, { conversationUserMessageId: "physical-lease-resume" });
+    await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
+    const resumed = await f.runtime.inspect() as any;
+    const notice = resumed.outbound.find((out: any) => out.parentAssignmentId === original.message.message_id && out.message.payload.status === "retry");
+    expect(notice.status).toBe("accepted");
+    await expect(f.runtime.authorizeAgyProviderTurn(notice.request.context, binding, "request_verification")).resolves.toBeUndefined();
+    // Provider throttling outlives the original lease; recovery retains this exact delivered notice.
+    clockOffset += 301_000;
+    await f.runtime.recoverMissingCoordinatorWakeups();
+    const recovered = await f.runtime.inspect() as any;
+    const parent = recovered.outbound.find((out: any) => out.message.message_id === original.message.message_id);
+    const retained = recovered.outbound.find((out: any) => out.message.message_id === notice.message.message_id);
+    expect(parent.leaseHistory).toHaveLength(1);
+    expect(parent.lease.fencingToken).toBeGreaterThan(notice.request.metadata.fencingToken);
+    expect(parent.request).toEqual(original.request); expect(parent.assignment).toEqual(original.assignment); expect(parent.handle).toEqual(original.handle);
+    expect(retained.request).toEqual(notice.request); expect(retained.handle).toEqual(notice.handle);
+    expect(recovered.outbound.filter((out: any) => out.parentAssignmentId === parent.message.message_id)).toHaveLength(1);
+    await expect(f.runtime.authorizeAgyProviderTurn(retained.request.context, binding, "request_verification")).resolves.toBeUndefined();
+    await expect(f.runtime.authorizeAgyProviderTurn(parent.request.context, binding, "assignment_context")).resolves.toBeUndefined();
+    // A valid historical dispatch never overrides revocation of the current Registry grant.
+    const current = (await f.runtime.inspect() as any).outbound.find((out: any) => out.message.message_id === parent.message.message_id);
+    unwrap(await f.ports.registry.releaseLease({ leaseId: current.lease.leaseId, fencingToken: current.lease.fencingToken,
+      expectedVersion: current.lease.version, releasedAt: clock().toISOString(), idempotencyKey: "revoke-continued-agy" }));
+    await expect(f.runtime.authorizeAgyProviderTurn(retained.request.context, binding, "request_verification")).rejects.toThrow();
+    await expect(f.runtime.authorizeAgyProviderTurn(parent.request.context, binding, "assignment_context")).rejects.toThrow();
+  });
   it("authorizes the exact current specialist delivery using current Registry authority", async () => {
     const { f, binding, message } = await assigned();
     await expect(f.runtime.authorizeAgyProviderTurn(message, binding)).resolves.toBeUndefined();
