@@ -2562,7 +2562,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     }
     await this.recoverPolicyPhaseRetirements(state, save, outbox);
   }
-  private verificationPlan(run: RunRecord, task?: TaskRecord): VerificationPlan {
+  private verificationPlan(state: JournalState, run: RunRecord, task?: TaskRecord): VerificationPlan {
     if (task?.verificationPlan) return task.verificationPlan;
     const dossier = task?.spec ?? run.workflowSpec!;
     const plan = this.ports.policies.createVerificationPlan({ runId: run.runId, taskId: task?.taskId ?? FINAL_TASK,
@@ -2583,12 +2583,11 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         return [{ ...check, configuration: json({ ...config, criterionIds: criteria.map(criterion => criterion.id),
           testNames: config.kind === "review" ? dossier.strategy.criterionMappings.filter(mapping => criteria.some(criterion => criterion.id === mapping.criterionId)).flatMap(mapping => mapping.testNames) : names }) }];
       }),
-      implementerIds: run.tasks.flatMap(item => item.outboundIds).map(id => this.activeState!.outbound.find(out => out.message.message_id === id)?.handle?.target.agentId).filter((id): id is string => !!id),
+      implementerIds: run.tasks.flatMap(item => item.outboundIds).map(id => state.outbound.find(out => out.message.message_id === id)?.handle?.target.agentId).filter((id): id is string => !!id),
       maxIterations: run.maxIterations });
     if (task) task.verificationPlan = plan;
     return plan;
   }
-  private activeState: JournalState | undefined;
   /** A bounded scheduler step; performs independent verification outside the journal lock. */
   async tick(): Promise<JsonValue> {
     await this.initialize();
@@ -2604,8 +2603,6 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     }
     const jobs = await this.transaction(async (state, save, core, outbox) => {
       const jobs: VerificationJob[] = [];
-      this.activeState = state;
-      try {
         for (const run of state.runs) {
           if (this.quiesced) break;
           if (run.nativeDeliveries?.length) continue;
@@ -2644,7 +2641,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
               const change = GitChangeSetSchema.parse(await this.ports.policies.git.collectTask(task.worktrees.at(-1)!.key));
               if (change.runId !== run.runId || change.taskId !== task.taskId || change.attemptId !== current.attemptId) throw new Error("Git task submission mismatch");
               task.changeSet = change;
-              const plan = this.verificationPlan(run, task);
+              const plan = this.verificationPlan(state, run, task);
               task.cycle ??= VerificationCycleSchema.parse(this.ports.policies.verification.start(plan, `cycle-${digest([run.runId, task.taskId])}`));
               task.verificationPending = true; run.status = "verifying";
               jobs.push({ runId: run.runId, taskId: task.taskId, plan, cycle: task.cycle, change,
@@ -2661,7 +2658,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
             if (snapshot.tasks.every(task => task.status === "succeeded") && run.tasks.every(task => task.cycle?.status === "passed")) {
               await this.integrate(state, save, outbox, run);
               if (run.status === "verifying" && run.workflowChange && !run.workflowVerificationPending) {
-                const plan = this.verificationPlan(run);
+                const plan = this.verificationPlan(state, run);
                 run.workflowCycle ??= VerificationCycleSchema.parse(this.ports.policies.verification.start(plan, `cycle-${digest([run.runId, FINAL_TASK])}`));
                 run.workflowVerificationPending = true;
                 jobs.push({ runId: run.runId, taskId: FINAL_TASK, plan, cycle: run.workflowCycle, change: run.workflowChange,
@@ -2679,7 +2676,6 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           this.surfaceOutboundFailures(state, outbox); this.surfaceCapabilityPreflightFailures(state, outbox);
         }
         await save(); return jobs;
-      } finally { this.activeState = undefined; }
     });
     await this.deliverConversationInbox();
     for (const job of jobs) {
@@ -2794,11 +2790,11 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     for (const task of run.tasks) {
       if (task.verificationPending && !retained.some(item => pendingTaskId(item) === task.taskId)) task.verificationPending = false;
       if (task.cycle && retryableVerificationCycle(task.cycle)) task.cycle = VerificationCycleSchema.parse(this.ports.policies.verification.start(
-        this.verificationPlan(run, task), `cycle-${digest([run.runId, task.taskId, task.cycle.cycleId])}`));
+        this.verificationPlan(state, run, task), `cycle-${digest([run.runId, task.taskId, task.cycle.cycleId])}`));
     }
     if (run.workflowVerificationPending && !retained.some(item => pendingTaskId(item) === FINAL_TASK)) run.workflowVerificationPending = false;
     if (run.workflowCycle && retryableVerificationCycle(run.workflowCycle)) run.workflowCycle = VerificationCycleSchema.parse(this.ports.policies.verification.start(
-      this.verificationPlan(run), `cycle-${digest([run.runId, FINAL_TASK, run.workflowCycle.cycleId])}`));
+      this.verificationPlan(state, run), `cycle-${digest([run.runId, FINAL_TASK, run.workflowCycle.cycleId])}`));
     run.status = "verifying"; delete run.error;
     return retained.length;
   }

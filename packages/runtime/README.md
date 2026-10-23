@@ -108,6 +108,11 @@ lại qua host. Test tiếp tục chạy trong sandbox verification hiện hữu
 hay output từ agent. Gate timeout/bounds/approval không đổi và không sinh thêm TDD receipt.
 Tổng ngân sách setup/prepare/test được giới hạn theo thời gian gate còn lại, có margin cho ACK; chỉ giảm timeout tối đa, không đổi command/argv. Batch không còn đủ ngân sách bị từ chối trước execution. Completed submission replay xác thực receipt trước khi đọc worktree; completion đầu tiên vẫn kiểm tra source, kể cả sau restart.
 
+Verification retry sau restart dựng plan bằng journal state được truyền tường minh trong
+transaction, không phụ thuộc state tạm chỉ tồn tại trong `tick`. Implementer IDs được giữ
+đúng từ execution gốc cho kiểm tra độc lập; commit tích hợp, task evidence và các giới hạn
+retry/approval không đổi. Cùng đường này phục vụ explicit resume và `retry_verification`.
+
 Các đầu vào host bắt buộc là tường minh: định danh repository/session, role capability,
 định nghĩa check của task/workflow, deterministic gate runner, ingress thông điệp/result/evidence
 Herdr có xác thực và phê duyệt của con người có xác thực. Không có
