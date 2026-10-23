@@ -69,6 +69,15 @@ describe("historical workflow proposal binding", () => {
     const host = await verification();
     expect(() => host.assertSupported(spec, strategy, { tasks: [] })).toThrow();
   });
+  it("refuses policy-required checks without runnable commands before requesting design approval", async () => {
+    const highRisk = SpecificationSchema.parse({ ...spec, riskLevel: "high" });
+    const resolved = new TestStrategyResolver().resolve(highRisk);
+    const host = await verification();
+    const error = refusal(() => host.assertSupported(highRisk, resolved, definition));
+    expect(error.code).toBe("unsupported_method");
+    expect(error.reason).toContain("static_analysis");
+    expect(error.reason).toContain("policy");
+  });
   it("rejects partial criterion coverage in a monorepo task after both profiles bind globally", async () => {
     const unit = { ...profiles()[0]!, timeoutMs: 1000, prepare: undefined };
     const integration: RunnerProfile = { ...profiles()[1]!, timeoutMs: 1000, prepare: undefined, adapter: {

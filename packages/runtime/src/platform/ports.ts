@@ -292,6 +292,8 @@ export interface PlatformReadinessService {
   /** All-or-nothing: any required role failing preflight yields no launch material (no pane side effects). */
   prepareSession(identity: PlatformSessionIdentity, requirements: readonly RolePlatformRequirement[],
     options?: OperationOptions): Promise<OperationResult<{ report: PlatformPreflightReport; launches: readonly PreparedRoleLaunch[] }>>;
+  /** Recheck retained same-daemon material without minting a launch, token or generation. */
+  revalidatePreparedLaunch?(launchId: string, options?: OperationOptions): Promise<OperationResult<PreparedRoleLaunch>>;
   verifyActivated(input: { readonly launchId: string; readonly paneId: string;
     readonly nativeSession: AgentLaunchAttestation["nativeSession"]; readonly observation?: LiveReadinessObservation },
     options?: OperationOptions): Promise<OperationResult<AgentHealthResult>>;

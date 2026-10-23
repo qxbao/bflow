@@ -41,6 +41,13 @@ status question stays in Conversation and creates no workflow. A delegated chang
 must have explicit acceptance criteria. Obtain a concrete impact assessment and
 call `assess`; use the real P15 classification, SDD requirements, project policies
 and available capabilities. Do not infer complexity from diff size alone.
+Distinguish an internal module export in a private application from a published or
+externally consumed public contract: inspect package entrypoints and consumers
+before declaring publicApiImpact. Do not inflate risk to obtain human approval;
+project approval policy already enforces its own gate. Keep every policy-required
+verification method executable, and resolve missing infrastructure before asking
+the user to approve a design. Never reduce an actual impact or verification
+obligation merely to fit the available runners.
 
 Choose preparation roles according to missing information and capability:
 

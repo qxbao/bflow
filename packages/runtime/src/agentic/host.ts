@@ -41,6 +41,7 @@ import { TestRunnerSource, describeTestRunners } from "./task-commands.js";
 import { evaluateWatchdog } from "./run-watchdog.js";
 import { HostConversationIntake } from "./host-conversation.js";
 import { HostDevelopment } from "./host-development.js";
+import { patchFilePaths } from "./patch-paths.js";
 import { redactString } from "../resilience/redaction.js";
 import { TaskActivityLog } from "./task-activity-log.js";
 import { TaskLogPane } from "./task-log-pane.js";
@@ -1094,7 +1095,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           await removeLegacyRoleProbes(configuration.directory, roles);
           toolExpectations.clear();
           if (!platformSession) return { roleLaunch: launch };
-          const prepared = await platformSession.prepare(options);
+          const prepared = (!workspace ? await platformSession.resumePreparation(options) : undefined) ?? await platformSession.prepare(options);
           for (const [role, expectation] of prepared.reachability) toolExpectations.set(role, expectation);
           const roleLaunch = Object.fromEntries(Object.entries(launch).map(([role, descriptor]) => {
             const ready = prepared.launches.get(role as AgentRole);
@@ -1934,7 +1935,15 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
     if (ids.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_surfaced", { paneId, nativeSessionId: textField(hook.session_id), messageIds: ids });
   }
   if (event === "PreToolUse") {
-    try { await callHost(configuration.socketPath, configuration.token, "tool_guard", { paneId, hook }); }
+    try {
+      // Codex has one patch tool rather than Claude's Edit/Write. Authorize
+      // every source/destination through the existing host scope/TDD guard
+      // before allowing the original native operation; never execute it here.
+      const hooks = configuration.role === "developer" && hook.tool_name === "apply_patch"
+        ? patchFilePaths(hook.tool_input).map(file_path => ({ ...hook, tool_name: "Write", tool_input: { file_path } }))
+        : [hook];
+      for (const guarded of hooks) await callHost(configuration.socketPath, configuration.token, "tool_guard", { paneId, hook: guarded });
+    }
     catch (error) {
       process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny",
         permissionDecisionReason: redactString(String(error)) } }) + "\n");

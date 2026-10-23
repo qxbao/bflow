@@ -200,7 +200,8 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
     projectName: manifest.projectName, workspaceRoot: repository, conversationSessionId: manifest.conversationSessionId,
     maxDeveloperCapacity: options.maxDeveloperCapacity ?? 2,
     defaultAgentKind: manifest.panes.find(p => p.role === "coordinator")!.agentKind,
-    roleConfigs }, runner, store: manifestStore });
+    roleConfigs }, runner, store: manifestStore,
+    socket: paneModule.createHerdrSocketPort({ runner, sessionId: options.sessionId }) });
   const panes: PanePolicy = options.developerLaunches ? withDeveloperLaunches(rolePanes, options.developerLaunches) : rolePanes;
   const directory = options.storageDirectory ?? resolve(resolvePrivateRuntimeStateDirectory(repository), "agentic");
   await mkdir(directory, { recursive: true, mode: 0o700 });

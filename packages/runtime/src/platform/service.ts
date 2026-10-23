@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { lstat, mkdir } from "node:fs/promises";
 import {
   AgentHealthCheckSchema,
   canonicalReceiptJson,
@@ -13,7 +13,7 @@ import {
   type OperationOptions,
   type OperationResult
 } from "@bflow/contracts";
-import { providerSessionEnvironment, type LiveReadinessObservation } from "@bflow/agent-providers";
+import { computeFileSha256, providerSessionEnvironment, resolveAndVerifyExecutable, type LiveReadinessObservation } from "@bflow/agent-providers";
 import { sha256Hex } from "./environment.js";
 import { fail, failWith, ok } from "./errors.js";
 import { IsolatorProfileResolver, type ResolvedIsolatorProfile } from "./isolator-profile.js";
@@ -290,6 +290,42 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       },
       launches: ready ? [...launched.values()] : []
     });
+  }
+
+  async revalidatePreparedLaunch(launchId: string, options?: OperationOptions): Promise<OperationResult<PreparedRoleLaunch>> {
+    if (options?.signal?.aborted) return fail("cancelled", "Prepared launch revalidation interrupted");
+    if (options?.deadline !== undefined && Date.parse(options.deadline) <= this.now().getTime())
+      return failWith({ code: "timeout", retryable: true, retrySafety: "observation_only", message: "Prepared launch revalidation deadline expired" });
+    const record = this.launches.get(launchId), material = record?.material;
+    if (!record || !material || ["failed", "released", "degraded"].includes(record.state))
+      return fail("conflict", "Prepared launch is missing, failed or released; stop and reconcile startup");
+    if (Date.parse(material.profile.expiresAt) <= this.now().getTime())
+      return fail("conflict", "Prepared launch profile expired; stop and reconcile startup");
+    try {
+      const executable = await resolveAndVerifyExecutable(material.profile.executable);
+      if (executable.canonicalPath !== material.profile.executable || executable.digest !== material.profile.executableDigest)
+        return fail("conflict", "Prepared launch executable changed");
+      for (const file of material.profile.configFiles) {
+        const info = await lstat(file.path);
+        if ((info.mode & 0o077) !== 0 || await computeFileSha256(file.path) !== file.digest)
+          return fail("conflict", "Prepared launch configuration changed or has unsafe permissions");
+      }
+    } catch (error) {
+      return fail("conflict", `Prepared launch files cannot be revalidated: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const profile = await this.revalidateProfile(material.requirement, material.isolatorProfile, options);
+    if (!profile.ok) return profile;
+    const skills = await this.deps.skills.load(material.identity, material.requirement.role, material.requirement.taskId);
+    if (!skills.ok) return skills;
+    if (!skills.value || canonicalReceiptJson(skills.value.manifest) !== canonicalReceiptJson(material.context.skillManifest))
+      return fail("conflict", "Prepared launch pinned skills changed or are missing");
+    const gateway = await this.verifyGateway(options);
+    if (!gateway.ok) return gateway;
+    if (!gateway.value.healthy || gateway.value.uncertain)
+      return fail("conflict", "Prepared launch Gateway registration is lost or uncertain");
+    const health = await this.deps.providers.preflight(material.environment, material.context, options);
+    if (!health.ok) return health;
+    return ok({ ...material.prepared, preflight: health.value });
   }
 
   async verifyActivated(

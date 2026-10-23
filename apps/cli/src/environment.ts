@@ -732,7 +732,16 @@ export class EnvironmentLifecycle {
         startupError = error;
       }
       let cleanupOutcome: string | undefined;
-      if (startupError !== undefined && cleanupEligible) {
+      const startupDetails = startupError instanceof EnvironmentError ? startupError.contractError.details : undefined;
+      // A provider dialog needs its exact live pane. Shutting it down makes the
+      // advertised inspect/resolve/retry recovery impossible on every launch.
+      const preserveStartupDialog = roleDispatchAttempted && startupError instanceof EnvironmentError &&
+        startupError.contractError.code === "conflict" && startupDetails !== null && typeof startupDetails === "object" &&
+        !Array.isArray(startupDetails) && startupDetails.sessionId === repository.sessionName &&
+        typeof startupDetails.paneId === "string" && typeof startupDetails.reason === "string";
+      if (preserveStartupDialog)
+        cleanupOutcome = "was not attempted because an interactive startup dialog requires a choice; session and panes were preserved";
+      if (startupError !== undefined && cleanupEligible && !preserveStartupDialog) {
         try {
           if (roleDispatchAttempted && startupError instanceof EnvironmentError && ["timeout", "cancelled", "unknown_delivery"].includes(startupError.contractError.code)) {
             const cleanupDeadline = new Deadline(config.environment.shutdownTimeoutMs);
@@ -754,7 +763,7 @@ export class EnvironmentLifecycle {
       }
       if (closeError !== undefined && startupError !== closeError)
         cleanupOutcome = `${cleanupOutcome ?? "cleanup outcome is unknown"}; startup integration close also failed (${String(closeError)})`;
-      if (closeError !== undefined && cleanupEligible && cleanupOutcome === undefined) {
+      if (closeError !== undefined && cleanupEligible && cleanupOutcome === undefined && !preserveStartupDialog) {
         try {
           await this.downLocked(repository, config, true);
           cleanupOutcome = "completed after the startup integration failed to close";

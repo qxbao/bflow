@@ -368,6 +368,59 @@ describe("DefaultPlatformReadinessService", () => {
     return (await journal.entries()).map(entry => entry.kind);
   }
 
+  it("rechecks a retained launch after health expiry without replacing its profile, tokens or intent", async () => {
+    let now = Date.now();
+    const { service, journal } = buildService({ now: () => new Date(now) });
+    const result = await service.prepareSession(identity, [requirement({ mcpServiceIds: ["svc-search"] })]);
+    if (!result.ok || !result.value.report.ready) throw new Error(JSON.stringify(result));
+    const original = result.value.launches[0]!;
+    const tokens = gatewayControl.tokens();
+    const kinds = await journalKinds(journal);
+    now += 600_000;
+    const resumed = await service.revalidatePreparedLaunch(original.launch.launchId);
+    expect(resumed.ok ? "ok" : resumed.error.message).toBe("ok");
+    if (!resumed.ok) return;
+    expect(resumed.value.launch).toEqual(original.launch);
+    expect(resumed.value.profile).toEqual(original.profile);
+    expect(Date.parse(resumed.value.preflight.checkedAt)).toBe(now);
+    expect(gatewayControl.tokens()).toEqual(tokens);
+    expect(await journalKinds(journal)).toEqual(kinds);
+  });
+
+  it.each(["expired", "missing-skills", "gateway-lost", "released", "binary-changed", "config-changed"] as const)("refuses %s retained startup material without replacing it", async condition => {
+    let now = Date.now();
+    const { service, journal } = buildService({ now: () => new Date(now) });
+    const result = await service.prepareSession(identity, [requirement({ mcpServiceIds: ["svc-search"] })]);
+    if (!result.ok || !result.value.report.ready) throw new Error(JSON.stringify(result));
+    const original = result.value.launches[0]!;
+    if (condition === "expired") now += 3_600_001;
+    if (condition === "missing-skills") await rm(join(identity.stateDirectory, "gen-1/skills/developer-t1.json"));
+    if (condition === "gateway-lost") gatewayControl.restart();
+    if (condition === "released") await service.releaseLaunch(original.launch.launchId);
+    if (condition === "binary-changed") await writeFile(binaryPath, "#!/bin/sh\necho changed\n");
+    if (condition === "config-changed") await writeFile(original.profile.configFiles[0]!.path, "changed launch settings");
+    const kinds = await journalKinds(journal);
+    expect((await service.revalidatePreparedLaunch(original.launch.launchId)).ok).toBe(false);
+    expect(await journalKinds(journal)).toEqual(kinds);
+  });
+
+  it("refuses a selected profile whose identity changes during a retained startup", async () => {
+    const stateRoot = join(baseDir, "isolator-state");
+    const selected = await createIsolatorProfile(stateRoot, "claude", "personal");
+    const restore = useIsolatorState(stateRoot);
+    try {
+      const { service, journal } = buildService();
+      const result = await service.prepareSession(identity, [requirement({ profileName: "personal" })]);
+      if (!result.ok || !result.value.report.ready) throw new Error(JSON.stringify(result));
+      const metadata = join(selected.profileRoot, "profile.env");
+      await rm(metadata);
+      await writeFile(metadata, "AI_ISOLATOR_TOOL=claude\nAI_ISOLATOR_PROFILE=personal\nAI_ISOLATOR_CREATED_AT=2026-10-21T00:00:00Z\n", { mode: 0o600 });
+      const resumed = await service.revalidatePreparedLaunch(result.value.launches[0]!.launch.launchId);
+      expect(resumed).toMatchObject({ ok: false, error: { message: expect.stringContaining("profile identity changed") } });
+      expect(await journalKinds(journal)).toEqual(["intent"]);
+    } finally { restore(); }
+  });
+
   it("bounds concurrent provider probes and waits for all verdicts before preparing launches", async () => {
     const runner = createFakeProviderRunner({ scenario: "healthy" });
     const run = runner.run.bind(runner);
