@@ -1732,7 +1732,9 @@ export class AgenticWorkflowRuntime {
   async reportProgress(runId: string, headline: string, questions: string[] = []): Promise<JsonValue> {
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId); this.live(run);
-      if (questions.length) run.status = "clarifying";
+      // Once Core exists the scheduler owns the run (dispatch retries, verification, integration); a question is still
+      // delivered, but "clarifying" would remove the run from scheduling with no recorded action to resume it.
+      if (questions.length && !run.coreCreated) run.status = "clarifying";
       if (run.pendingAction?.kind === "coordinator_continuation") delete run.pendingAction;
       this.emit(state, outbox, run, questions.length ? "conversation.clarification" : "conversation.progress",
         { headline: textField(headline), questions: strings(questions), sdlcStatus: run.status }, `coordinator-progress:${digest([headline, questions])}`);

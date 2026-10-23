@@ -1,4 +1,5 @@
 import type { OperationResult } from "@bflow/contracts";
+import { resolveDraftCriteria } from "./delegation-builder.js";
 import type { ChatDecision, ConversationContextSnapshot, IntentClassificationResult } from "./types.js";
 
 /** Validate state references and completeness, without interpreting natural-language intent. */
@@ -14,8 +15,10 @@ export function resolveChatDecision(
 
   if (decision.intent === "workflow_request") {
     const draft = decision.requirementDraft;
-    if (!draft.scopeDefined || draft.acceptanceCriteriaDescriptions.length === 0 ||
-        draft.acceptanceCriteriaDescriptions.some(description => !description.trim())) {
+    const criteria = resolveDraftCriteria(draft);
+    if (!criteria.ok) return invalid(criteria.error.message);
+    if (!draft.scopeDefined || criteria.value.length === 0 ||
+        criteria.value.some(criterion => !criterion.description.trim())) {
       return invalid("A workflow decision requires defined scope and non-empty acceptance criteria");
     }
     if ((targetCorrelationId && draft.targetCorrelationId && targetCorrelationId !== draft.targetCorrelationId) ||

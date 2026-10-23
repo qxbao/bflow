@@ -60,6 +60,33 @@ function formatZodError(error: { issues: readonly { path: readonly (string | num
   };
 }
 
+/**
+ * Pairs each acceptance criterion with the method the draft declared for it. The per-criterion
+ * `acceptanceCriteria` form is authoritative; legacy `verificationMethods` must give either one method
+ * for every criterion or exactly one per criterion, so a short list never leaves a criterion on an
+ * unrequested method. A criterion without a declared method is inferred only when no method was declared.
+ */
+export function resolveDraftCriteria(
+  draft: ExtractedRequirementDraft,
+  fallbackDescriptions: readonly string[] = []
+): OperationResult<readonly { readonly description: string; readonly verificationMethod?: VerificationMethod | undefined }[]> {
+  const invalid = (message: string) => ({ ok: false as const, error: { code: "validation" as const, retryable: false as const, message } });
+  const methods = draft.verificationMethods ?? [];
+  if (draft.acceptanceCriteria !== undefined) {
+    if (draft.acceptanceCriteriaDescriptions.length > 0 || methods.length > 0) {
+      return invalid("Use either acceptanceCriteria[] or acceptanceCriteriaDescriptions with verificationMethods, not both");
+    }
+    return { ok: true, value: draft.acceptanceCriteria };
+  }
+  const descriptions = draft.acceptanceCriteriaDescriptions.length > 0 ? draft.acceptanceCriteriaDescriptions : fallbackDescriptions;
+  if (methods.length > 1 && methods.length !== descriptions.length) {
+    return invalid(`verificationMethods has ${methods.length} entries for ${descriptions.length} acceptance criteria; ` +
+      "declare one method for all criteria, one per criterion, or use acceptanceCriteria[].verificationMethod");
+  }
+  return { ok: true, value: descriptions.map((description, idx) =>
+    ({ description, verificationMethod: methods.length === 1 ? methods[0] : methods[idx] })) };
+}
+
 function generateRandomSuffix(): string {
   return Math.random().toString(36).substring(2, 9);
 }
@@ -88,23 +115,24 @@ export function buildDelegationRequest(params: {
   }
 
   // 2. Build structured AcceptanceCriterion list
-  const rawCriteria =
-    params.draft.acceptanceCriteriaDescriptions.length > 0
-      ? params.draft.acceptanceCriteriaDescriptions
-      : [
-          `Triển khai yêu cầu: ${params.draft.title}`,
-          "Đảm bảo kiểm thử và typecheck vượt qua 100%"
-        ];
+  const resolvedCriteria = resolveDraftCriteria(params.draft, [
+    `Triển khai yêu cầu: ${params.draft.title}`,
+    "Đảm bảo kiểm thử và typecheck vượt qua 100%"
+  ]);
+  if (!resolvedCriteria.ok) {
+    return resolvedCriteria;
+  }
+  const rawCriteria = resolvedCriteria.value;
 
   const acceptanceCriteria: AcceptanceCriterion[] = [];
   for (let idx = 0; idx < rawCriteria.length; idx++) {
-    const desc = rawCriteria[idx] ?? `Tiêu chí nghiệm thu ${idx + 1}`;
+    const desc = rawCriteria[idx]?.description ?? `Tiêu chí nghiệm thu ${idx + 1}`;
     const description = desc.trim().length > 0 ? desc.trim() : `Tiêu chí nghiệm thu ${idx + 1}`;
     const criterionRaw = {
       id: `ac-${idx + 1}`,
       description,
       category: inferCriterionCategory(description),
-      verificationMethod: params.draft.verificationMethods?.[idx] ?? inferVerificationMethod(description, params.draft.kind),
+      verificationMethod: rawCriteria[idx]?.verificationMethod ?? inferVerificationMethod(description, params.draft.kind),
       required: true,
       status: "pending" as const,
       evidenceArtifactIds: []
