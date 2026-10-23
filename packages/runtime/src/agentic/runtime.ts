@@ -1472,14 +1472,19 @@ export class AgenticWorkflowRuntime {
       if (run.supersededBy) throw new AdmissionRejectedError(`Run ${runId} continued as follow-up run ${run.supersededBy}; resume or inspect ${run.supersededBy}`);
       if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) throw new Error(`Run is ${run.status}; it cannot be resumed`);
       const priorResume = run.resumeReceipts?.find(item => item.actionId === actionId);
+      // An automatic wake is not the user's explicit operational request. Keep its immutable delivery,
+      // but allow a separately identified manual continuation even while that wake is queued/accepted.
+      const priorWake = priorResume && state.outbound.find(item => item.message.message_id === priorResume.messageId);
+      const explicitAfterAutomatic = !options.automatic && priorWake !== undefined && record(priorWake.message.payload).automatic === true &&
+        action?.actionId === actionId && action.kind === "resume_coordinator";
       const retryUnsent = action?.actionId === actionId && action.state === "pending" &&
         [action.sourceMessageId, ...(action.relatedMessageIds ?? [])].every(id => state.outbound.some(out =>
           out.message.message_id === id && out.status === "failed" && out.error?.includes(RoleCapabilityPreflightError.name)));
       // A receipt answers a repeated call for the episode it settled; the same identity pending again (a recurrence) is a new episode.
       const recurred = run.status === "escalated" && action?.actionId === actionId && action.state === "pending";
-      if (priorResume && !retryUnsent && !recurred) return json({ queued: true, messageId: priorResume.messageId, actionId });
+      if (priorResume && !retryUnsent && !recurred && !explicitAfterAutomatic) return json({ queued: true, messageId: priorResume.messageId, actionId });
       // A still-unknown native delivery (legacy escalated record) resumes by waking the Coordinator to reconcile; it is never resent.
-      if (run.status !== "escalated" || !action || action.actionId !== actionId || !["resume_coordinator", "reconcile_delivery"].includes(action.kind)) {
+      if ((!explicitAfterAutomatic && run.status !== "escalated") || !action || action.actionId !== actionId || !["resume_coordinator", "reconcile_delivery"].includes(action.kind)) {
         const prior = state.outbound.find(item => item.message.message_id === `resume-${digest([runId, actionId])}`);
         if (prior) return json({ queued: true, messageId: prior.message.message_id, actionId });
         throw new Error("No matching recoverable blocker to resume");
@@ -1529,7 +1534,7 @@ export class AgenticWorkflowRuntime {
         if (requirements.some(capability => !this.ports.roleCapabilities[binding.role]?.includes(capability)))
           throw new RoleCapabilityPreflightError(`${binding.role} required capability is unavailable: ${requirements.join(", ")}`);
       }
-      const messageId = `resume-${digest([runId, action.actionId])}`;
+      const messageId = `resume-${digest(explicitAfterAutomatic ? [runId, action.actionId, "explicit"] : [runId, action.actionId])}`;
       if (failedCapabilityDispatches.length) {
         // Preflight failed before a lease or transport operation. Reuse that exact immutable unsent handoff once the target proof passes.
         for (const failedCapabilityDispatch of failedCapabilityDispatches) {
@@ -1542,10 +1547,11 @@ export class AgenticWorkflowRuntime {
           correlation_id: run.delegation.correlationId, causation_id: action.sourceMessageId, run_id: runId,
           sender: { role: "runtime" }, recipient: { role: "coordinator" }, type: "task.status",
           payload: { kind: "resume_run", actionId: action.actionId, reason: action.reason,
-            ...(options.automatic ? { automatic: true, attempt: (action.resumeAttempts ?? 0) + 1, limit: AUTO_RESUME_LIMIT } : {}),
+            ...(options.automatic ? { automatic: true, attempt: (action.resumeAttempts ?? 0) + 1, limit: AUTO_RESUME_LIMIT } : { automatic: false }),
+            diagnosticFences: (run.nativeDiagnosticFences ?? []).map(item => ({ operationId: item.operationId, disposition: item.disposition, delivery: "unknown_delivery", resendAllowed: false })),
             next: options.automatic
               ? "Runtime resumed this run automatically (bounded). Inspect the durable blocker, then record the next workflow action through Runtime; if only a human can decide, use request_user_decision instead of stopping."
-              : "Inspect the durable blocker, confirm the required capability is now available, then continue this same run through Runtime." },
+              : "This is an explicit operational resume request, distinct from earlier automatic wakes or hold instructions. Inspect the current durable blocker and diagnostic fences, confirm the required capability is now available, then continue this same run through Runtime. It grants no approval, TDD/verification-limit reset, delivery claim or implementation authority." },
           artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }), "coordinator");
       }
       const verificationRetry = run.error?.startsWith(VERIFICATION_RETRY_PREFIX) === true;
@@ -1560,7 +1566,7 @@ export class AgenticWorkflowRuntime {
         action.resumeAttempts = 0;
         if (action.kind === "resume_coordinator" && (action.recovery === undefined || action.recovery === "manual")) action.recovery = "auto_resume";
       }
-      run.status = action.previousStatus ?? "specifying";
+      run.status = action.previousStatus ?? (explicitAfterAutomatic ? run.status : "specifying");
       if (verificationRetry) this.prepareVerificationRetry(state, run); // same as retry_verification
       delete action.previousStatus;
       delete run.error;

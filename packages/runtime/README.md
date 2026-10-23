@@ -37,6 +37,12 @@ sau crash; tối đa ba lần tiếp nối cho một assignment. Human gate, can
 session bị thay hoặc không có native binding đều chặn đường này. Không có SQL/public-contract migration;
 bản cũ không hỗ trợ tiếp nối phải đối soát thay vì gửi lại assignment.
 
+Continuation tường minh sau một auto-resume có message ID riêng: receipt tự động không được
+nuốt yêu cầu tiếp tục qua Conversation. Wake cũ và trạng thái delivery của nó giữ nguyên;
+retry tường minh cùng blocker trả về receipt riêng, tính một lượt manual và giữ trạng thái
+business đang chạy. Các fence diagnostic hiện hữu được đưa vào wake để đối soát; chúng
+không phải ACK, phê duyệt hoặc quyền bỏ qua bằng chứng TDD. Không thay public contracts.
+
 Quyết định tích hợp riêng cho lần live 2026-10-23: chủ dự án chọn giữ run và thêm fence cho
 diagnostic cũ thay vì hủy run. Chỉ lệnh người dùng vật lý qua Conversation
 `fence diagnostic <operation-id>` có thể hủy một `task.status: blocked` từ pane Coordinator
