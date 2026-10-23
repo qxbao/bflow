@@ -1428,7 +1428,8 @@ export class AgenticWorkflowRuntime {
         } else if (message.type === "task.status" && message.sender.role === "developer" && this.resolverReport(state, outbox, run, message)) {
           // Handled: a resolver report ends its own attempt; Runtime assigns the next resolver or escalates on the next tick.
         } else {
-          const blockage = message.sender.role !== "coordinator" ? specialistBlockage(message.payload) : undefined;
+          const blockage = message.sender.role !== "coordinator" && !this.echoesMeasuredPhaseFailure(state, run, message)
+            ? specialistBlockage(message.payload) : undefined;
           if (blockage !== undefined) this.reportSpecialistBlocked(state, outbox, run, message, blockage);
           if (message.recipient.role === "coordinator") this.wakeCoordinator(state, outbox, run, message);
         }
@@ -1436,6 +1437,17 @@ export class AgenticWorkflowRuntime {
       inbox.status = "applied"; await save();
       return json({ accepted: true });
     });
+  }
+
+  /**
+   * The verifier's status reply to a phase request whose failure Runtime itself measured and already applied (repair notice or
+   * escalation). Runtime owns that outcome; the echo is not a new blocker and must not leave a stale error/next action behind.
+   */
+  private echoesMeasuredPhaseFailure(state: JournalState, run: RunRecord, message: RoleMessage): boolean {
+    return message.causation_id !== undefined && state.outbound.some(out => out.message.message_id === message.causation_id &&
+      out.message.run_id === run.runId && out.message.type === "verification.requested" && out.phaseFailure?.applied === true &&
+      out.message.recipient.role === message.sender.role && out.handle?.target.agentId === message.sender.agent_id &&
+      out.handle?.target.paneId === message.sender.pane_id);
   }
 
   /** A specialist blocker is visible to the user, not only to the Coordinator. Idempotent per message. */
