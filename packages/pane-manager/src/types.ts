@@ -282,6 +282,8 @@ export interface WorktreeCleanlinessResult {
   readonly exists: boolean;
   readonly isClean: boolean;
   readonly dirtyFiles: readonly string[];
+  /** Exact Git ignored entries, retained as dirty for allocation and any destructive release. */
+  readonly ignoredFiles?: readonly string[];
   readonly currentBranch?: string;
 }
 
