@@ -48,7 +48,7 @@ import { TaskActivityLog } from "./task-activity-log.js";
 import { TaskLogPane } from "./task-log-pane.js";
 import { assessmentFailureSummary } from "./assessment-input.js";
 import { assessmentSpecificationToolSchema, nativeRoleMessageToolSchema, parseNativeRoleMessage, roleReplyGuidance, specificationToolSchema } from "./role-tool-schema.js";
-import { inspectNativeDelivery } from "./native-delivery-status.js";
+import { inspectNativeDelivery, reportNativeDeliveryUncertainty } from "./native-delivery-status.js";
 import { readAgyNativeTurn, type AgyPendingNativeTool } from "./agy-native-transcript.js";
 import { handleTaskLogTool, taskLogAssignmentContext } from "./task-log-tools.js";
 import { createHostPlatformSession, launchMaterial, type HostAgentObservation, type HostPlatformSession, type StartupProof } from "./host-platform.js";
@@ -369,7 +369,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       // A refusal is a settled answer, not an unknown delivery: no uncertain report and no resend.
       if (isNonRetryableDeliveryError(error)) throw error;
       // Intent is recorded but no acknowledgement was observed: the delivery is unknown. Surface it; never resend here.
-      await workspace?.runtime.reportUncertainNativeDelivery(message, operationId, redactString(String(error))).catch(() => undefined);
+      if (workspace && await reportNativeDeliveryUncertainty(receipts, workspace.runtime, message, operationId, redactString(String(error))).catch(() => false))
+        return json({ delivered: true, messageId: message.message_id });
       throw error;
     }
   };
@@ -1577,7 +1578,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (reportedUncertain.has(operationId)) continue;
       // A refused delivery is settled by Runtime's refusal notice: it is not uncertain and is never resent.
       if (await host.runtime.inboundRejection(message.message_id) !== undefined) { reportedUncertain.add(operationId); continue; }
-      await host.runtime.reportUncertainNativeDelivery(message, operationId, "Native delivery acknowledgement was not observed; the message was not resent and needs reconciliation");
+      await reportNativeDeliveryUncertainty(receipts, host.runtime, message, operationId, "Native delivery acknowledgement was not observed; the message was not resent and needs reconciliation");
       reportedUncertain.add(operationId);
     }
     // Optional Runtime capability: a Conversation delivery that Runtime gave up on is shown to the user as a durable notice.

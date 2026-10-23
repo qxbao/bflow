@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { canonicalReceiptJson, DelegationRequestSchema, RoleMessageSchema } from "@bflow/contracts";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
 import { startHerdrReceiptIngress } from "../../src/agentic/herdr-ingress.js";
-import { inspectNativeDelivery } from "../../src/agentic/native-delivery-status.js";
+import { inspectNativeDelivery, reportNativeDeliveryUncertainty } from "../../src/agentic/native-delivery-status.js";
 import { AgenticJournal, digest } from "../../src/agentic/journal.js";
 import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import type { AgenticRuntimePorts } from "../../src/agentic/ports.js";
@@ -27,6 +27,47 @@ async function fixture() {
 }
 
 describe("native delivery reconciliation", () => {
+  it.each(["before", "during", "absent"] as const)("reconciles a Conversation diagnostic ACK %s the stale uncertainty report without resending", async timing => {
+    const f = await fixture(), journalDirectory = join(f.root, "journal"), now = new Date().toISOString();
+    const message = RoleMessageSchema.parse({ ...f.message, message_id: "coordinator-progress", idempotency_key: "progress-key",
+      sender: { role: "coordinator", agent_id: "coordinator", pane_id: "coordinator-pane" }, recipient: { role: "conversation" }, type: "task.status", payload: { status: "inconclusive" } });
+    const delegation = DelegationRequestSchema.parse({ schemaVersion: 2, delegationId: "delegation", messageId: "intake", correlationId: "correlation", sessionId: "session",
+      runId: "run", requestedBy: "conversation", targetRole: "coordinator", title: "Original work", objective: "Original scope", specificationId: "spec", sddLevel: "full",
+      acceptanceCriteria: draft().acceptanceCriteria, inputArtifacts: [], priority: "normal", requestedAt: now, idempotencyKey: "intake" });
+    const journal = new AgenticJournal(journalDirectory, f.root);
+    await journal.exclusive(async (state, save) => {
+      state.runs.push({ runId: "run", delegation, status: "verifying", tasks: [], coreCreated: false, cancelled: false, maxIterations: 3 }); await save();
+    });
+    const runtime = new AgenticWorkflowRuntime({} as AgenticRuntimePorts, { journalDirectory, repositoryPath: f.root });
+    await f.receipts.recordNativeIntent("operation", message);
+    await runtime.recordNativeDeliveryIntent(message, "operation");
+    if (timing === "before") { await f.receipts.recordNativeAcknowledgement(message); await runtime.reconcileNativeDelivery(message.message_id); }
+    const acknowledged = await reportNativeDeliveryUncertainty(f.receipts, {
+      reconcileNativeDelivery: id => runtime.reconcileNativeDelivery(id),
+      reportUncertainNativeDelivery: async (...args) => {
+        if (timing === "during") { await f.receipts.recordNativeAcknowledgement(message); await runtime.reconcileNativeDelivery(message.message_id); }
+        await runtime.reportUncertainNativeDelivery(...args);
+      }
+    }, message, "operation", "Stale timeout observation");
+    expect(acknowledged).toBe(timing !== "absent");
+    const state = await journal.exclusive(async state => structuredClone(state));
+    expect(state.runs[0]!.nativeDeliveries ?? []).toEqual(timing === "absent" ? [{ operationId: "operation", message }] : []);
+    expect(state.runs[0]!.status).toBe("verifying");
+    expect(state.inbox).toEqual([]);
+    expect(state.outbound.every(out => out.message.recipient.role === "conversation")).toBe(true);
+    expect((await f.receipts.nativeDelivery("operation"))?.status).toBe(timing === "absent" ? "unknown_delivery" : "acknowledged");
+  });
+
+  it("refuses a timeout report with a different immutable envelope before changing Runtime", async () => {
+    const f = await fixture(); await f.receipts.recordNativeIntent("operation", f.message);
+    await f.receipts.recordNativeAcknowledgement(f.message);
+    const runtime = { reportUncertainNativeDelivery: vi.fn(), reconcileNativeDelivery: vi.fn() };
+    await expect(reportNativeDeliveryUncertainty(f.receipts, runtime, { ...f.message, payload: { different: true } }, "operation", "timeout"))
+      .rejects.toThrow(/immutable intent/);
+    expect(runtime.reportUncertainNativeDelivery).not.toHaveBeenCalled();
+    expect(runtime.reconcileNativeDelivery).not.toHaveBeenCalled();
+  });
+
   it("does not create a missing private receipt directory during inspection", async () => {
     const f = await fixture();
     expect(await inspectNativeDelivery(f.receipts, "missing", [])).toMatchObject({ delivery: "not_found" });

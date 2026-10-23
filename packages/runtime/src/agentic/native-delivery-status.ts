@@ -4,6 +4,27 @@ import { digest, textField } from "./journal.js";
 import { parseNativeRoleMessage } from "./role-tool-schema.js";
 import type { HostReceiptJournal } from "./host-receipts.js";
 
+/** Recheck owned ACK evidence around a stale timeout report; never send the envelope again. */
+export async function reportNativeDeliveryUncertainty(
+  receipts: Pick<HostReceiptJournal, "nativeDelivery">,
+  runtime: { reportUncertainNativeDelivery(message: RoleMessage, operationId: string, reason: string): Promise<void>;
+    reconcileNativeDelivery(messageId: string): Promise<boolean> },
+  message: RoleMessage, operationId: string, reason: string
+): Promise<boolean> {
+  const acknowledged = async () => {
+    const delivery = await receipts.nativeDelivery(operationId);
+    if (!delivery || nativeMessageFingerprint(delivery.message) !== nativeMessageFingerprint(message))
+      throw new Error("Native uncertainty report does not match its immutable intent");
+    if (delivery.status !== "acknowledged") return false;
+    await runtime.reconcileNativeDelivery(message.message_id);
+    return true;
+  };
+  if (await acknowledged()) return true;
+  await runtime.reportUncertainNativeDelivery(message, operationId, reason);
+  // The ACK callback can settle Runtime after our first read but before the report recreates its pending intent.
+  return acknowledged();
+}
+
 export const NativeIssueSchema = z.object({ path: z.string(), code: z.string(), message: z.string() }).strict();
 /** Only the trusted native binding signature is replaced in flight. All other fields remain immutable. */
 export function nativeMessageFingerprint(message: RoleMessage): string {

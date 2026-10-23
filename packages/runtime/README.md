@@ -1024,3 +1024,8 @@ Khi diagnostic legacy làm mất bộ đếm resume thủ công đang cache, Run
 các intent `resume_run` khác nhau do Runtime đã phát cho đúng run/action và giữ giá trị
 lớn hơn giữa cận dưới đó với bộ đếm hiện có. Không suy diễn việc giao intent hay provider
 đã dừng; không sửa intent cũ, không tạo receipt và không cấp lại các lượt đã dùng.
+
+Native timeout reporting rechecks the owned immutable intent and signed ACK before and
+again after recording uncertainty. An ACK that races a stale watchdog snapshot clears
+only its exact pending delivery; a missing ACK still blocks dispatch. This never resends
+the envelope, synthesizes an ACK, or substitutes transport evidence for a gate verdict.
