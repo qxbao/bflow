@@ -990,9 +990,11 @@ export class RolePaneManager {
 
     // Step 4: Persist Manifest
     const coordinatorBinding = manifestPanes.find((p) => p.role === "coordinator");
+    // Developer panes are Runtime-owned task panes; a stale one (e.g. from a cancelled run) is reconciled by Runtime after
+    // activation and must not keep the permanent topology from coming up.
     const allHealthy = manifestPanes.every(
       (p) =>
-        (p.role === "developer" && p.metadata?.["allocationStatus"] === "released") ||
+        p.role === "developer" ||
         p.transportState === "idle" ||
         p.transportState === "done" ||
         p.transportState === "working" ||
@@ -2045,9 +2047,10 @@ export class RolePaneManager {
       parseAgentInfoResult(agentFocusOutcome, "agent_info");
 
       const coordinatorBinding = recoveredPanes.find((p) => p.role === "coordinator");
+      // Developer panes are Runtime-owned and reconciled after activation; they do not gate the restored topology.
       const allHealthy = recoveredPanes.every(
         (p) =>
-          (p.role === "developer" && p.metadata?.["allocationStatus"] === "released") ||
+          p.role === "developer" ||
           p.transportState === "idle" ||
           p.transportState === "done" ||
           p.transportState === "working" ||

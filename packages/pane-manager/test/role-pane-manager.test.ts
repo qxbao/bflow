@@ -1822,6 +1822,26 @@ describe("RolePaneManager Verification Suite", () => {
       expect(recoveredManifest.attachTarget.paneId).toBe(recoveredChat.paneId);
     });
 
+    it("brings the topology up despite a stale Developer binding left by a cancelled run", async () => {
+      const fileStore = new FileSessionManifestStore(tempDir);
+      const manager = createRolePaneManager({ config, runner, store: fileStore, worktreeInspector: inspector });
+      const initRes = await manager.initializeTopology();
+      expect(initRes.ok).toBe(true);
+      if (!initRes.ok) return;
+      const chat = initRes.value.panes.find((p) => p.role === "conversation")!;
+      const stale = { ...chat, bindingId: "binding-dev-stale", role: "developer" as const, agentId: "dev-stale", paneId: "w9:p9",
+        workspaceId: "w9", tabId: "w9:t1", permanent: false, worktreePath: join(tempDir, "gone"), readOnlyWorkspace: false,
+        transportState: "disconnected" as const };
+      const saved = await fileStore.save({ ...initRes.value, panes: [...initRes.value.panes, stale] });
+      expect(saved.ok).toBe(true);
+
+      const again = await createRolePaneManager({ config, runner, store: fileStore, worktreeInspector: inspector }).initializeTopology();
+      expect(again.ok).toBe(true);
+      if (!again.ok) return;
+      expect(again.value.status).toBe("up");
+      expect(again.value.panes.find((p) => p.bindingId === "binding-dev-stale")?.transportState).toBe("disconnected");
+    });
+
     it("updates pane ID on moveRolePane without keeping old pane ID", async () => {
       const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
       await manager.initializeTopology();
