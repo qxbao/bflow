@@ -975,3 +975,9 @@ Nếu `complete_review` nhận sai observation ID, host vẫn từ chối verdic
 chỉ gợi ý tối đa ba ID đã quan sát trong cùng native pane, cùng request và context được
 giao; request bị thay thế không nhận gợi ý. Agent phải tự chọn ID đúng và nộp nhận định
 độc lập. Gợi ý không tạo receipt hay tự thay tham số của agent.
+
+Core giữ cache phục hồi chỉ trong một instance Runtime: aggregate đã xác thực hoặc đã ghi
+thành công được tái dùng khi chính engine/RunStore, definition và toàn bộ snapshot trong
+bộ nhớ/lưu trữ vẫn khớp. Cache không tạo aggregate từ projection và không lưu qua restart.
+Phiên bản thay đổi, engine đổi, bộ nhớ lệch hoặc cache mới đều phải qua checkpoint/event
+recovery; không cho phép ghi đè aggregate trong bộ nhớ mới hơn bằng lịch sử cũ.

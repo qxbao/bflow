@@ -12,7 +12,7 @@ import { AgenticJournal, digest, isConversationDelivery, json, record, strings, 
   type ConflictResolverAttempt, type Outbound, type RunRecord, type SpecRecord, type TaskRecord, type UserDecisionRecord } from "./journal.js";
 import { buildDecisionRequestMessage, buildUserDecisionRequest, USER_DECISION_EXPIRED_KIND, validateUserDecisionAnswer, type UserDecisionToolInput } from "./decision-routing.js";
 import { captureIntegratedChange } from "./integration-change.js";
-import { CoreSession } from "./core-session.js";
+import { CoreSession, type CoreRestoreCache } from "./core-session.js";
 import { redactString } from "../resilience/redaction.js";
 import { TaskActivityLog } from "./task-activity-log.js";
 import { taskLogAssignmentContextFromSnapshot, taskLogBusinessTaskId, type TaskLogAssignment } from "./task-log-tools.js";
@@ -198,6 +198,7 @@ export class AgenticWorkflowRuntime {
     this.journal = new AgenticJournal(options.journalDirectory, options.repositoryPath);
     this.activityLog = TaskActivityLog.open(join(options.journalDirectory, "../task-activity.jsonl"));
   }
+  private readonly coreRestoreCache: CoreRestoreCache = new Map();
   private quiesced = false;
   /** Stop new scheduling before lifecycle checkpointing; retain in-flight receipts and worktrees. */
   async quiesce(): Promise<void> {
@@ -342,7 +343,7 @@ export class AgenticWorkflowRuntime {
         previous = structuredClone(state);
       };
       const saveAndLog = async () => { await save(); this.refreshTaskLogAssignmentSnapshot(state); await logChanges(); };
-      const core = new CoreSession(this.ports, state, saveAndLog);
+      const core = new CoreSession(this.ports, state, saveAndLog, this.coreRestoreCache);
       await core.restore();
       const outbox = new HerdrOutbox(this.ports, state, saveAndLog);
       await this.recoverPhaseFailures(state, saveAndLog, outbox);
