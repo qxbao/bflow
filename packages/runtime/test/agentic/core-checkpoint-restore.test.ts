@@ -57,4 +57,46 @@ describe.skipIf(process.platform !== "linux")("authoritative Core checkpoint res
     expect(unwrap(await engine.getSnapshot("run-1"))).toEqual(unwrap(await f.ports.engine.getSnapshot("run-1")));
   }, 90000);
 
+  it("reuses only this process's validated aggregate when both memory and authoritative storage are unchanged", async () => {
+    const { f, state } = await prepared(), engine = new DeterministicWorkflowEngine(), cache = new Map();
+    const latest = vi.spyOn(f.ports.runStore, "loadLatestCheckpoint"), recover = vi.spyOn(engine, "recover");
+    const ports = { ...f.ports, engine };
+    await new CoreSession(ports, state, async () => undefined, cache).restore();
+    const before = unwrap(await engine.getSnapshot("run-1"))!;
+    const expected = unwrap(await engine.createCheckpoint({ runId: "run-1", expectedVersion: before.version, checkpointId: "before-reuse", createdAt: new Date().toISOString() }));
+    await new CoreSession(ports, state, async () => undefined, cache).restore();
+    expect(latest).toHaveBeenCalledTimes(1); expect(recover).toHaveBeenCalledTimes(1);
+    const actual = unwrap(await engine.createCheckpoint({ runId: "run-1", expectedVersion: before.version, checkpointId: "after-reuse", createdAt: new Date().toISOString() }));
+    expect(actual.state).toEqual(expected.state);
+    // A fresh Runtime must validate persisted recovery material again, even with the same engine port.
+    await new CoreSession(ports, state, async () => undefined, new Map()).restore();
+    expect(latest).toHaveBeenCalledTimes(2);
+  }, 90000);
+
+  it("invalidates validated reuse when an unpersisted engine mutation diverges from authoritative storage", async () => {
+    const { f, state } = await prepared(), engine = new DeterministicWorkflowEngine(), cache = new Map(), ports = { ...f.ports, engine };
+    const latest = vi.spyOn(f.ports.runStore, "loadLatestCheckpoint");
+    await new CoreSession(ports, state, async () => undefined, cache).restore();
+    const before = unwrap(await engine.getSnapshot("run-1"))!;
+    unwrap(await engine.advance({ runId: "run-1", expectedVersion: before.version, occurredAt: new Date().toISOString(), idempotencyKey: "unpersisted-memory-only" }));
+    expect(unwrap(await engine.getSnapshot("run-1"))!.version).toBeGreaterThan(before.version);
+    await expect(new CoreSession(ports, state, async () => undefined, cache).restore()).rejects.toThrow("Recovery cannot replace a newer in-memory aggregate");
+    expect(latest).toHaveBeenCalledTimes(2);
+    const restarted = new DeterministicWorkflowEngine();
+    await new CoreSession({ ...ports, engine: restarted }, state, async () => undefined, cache).restore();
+    expect(latest).toHaveBeenCalledTimes(3); expect(unwrap(await restarted.getSnapshot("run-1"))).toEqual(before);
+  }, 90000);
+
+  it("revalidates recovery when authoritative storage advances beyond the remembered aggregate", async () => {
+    const { f, state } = await prepared(), engine = new DeterministicWorkflowEngine(), cache = new Map(), ports = { ...f.ports, engine };
+    const latest = vi.spyOn(f.ports.runStore, "loadLatestCheckpoint");
+    await new CoreSession(ports, state, async () => undefined, cache).restore();
+    const before = unwrap(await engine.getSnapshot("run-1"))!;
+    await f.runtime.tick();
+    const expected = unwrap(await f.ports.engine.getSnapshot("run-1"))!;
+    expect(expected.version).toBeGreaterThan(before.version);
+    await new CoreSession(ports, state, async () => undefined, cache).restore();
+    expect(latest).toHaveBeenCalledTimes(2); expect(unwrap(await engine.getSnapshot("run-1"))).toEqual(expected);
+  }, 90000);
+
 });

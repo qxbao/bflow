@@ -4,14 +4,22 @@ import {
   WorkflowRunSnapshotSchema, type OperationResult, type WorkflowAdvanceResult, type WorkflowRunSnapshot
 } from "@bflow/contracts";
 import type { AgenticRuntimePorts } from "./ports.js";
-import { type JournalState, type RunRecord } from "./journal.js";
+import { digest, type JournalState, type RunRecord } from "./journal.js";
 import { unwrap } from "./outbox.js";
 import { eventTailCursor } from "../recovery.js";
+
+/** Process-local proof of a previously restored or successfully persisted aggregate; never reconstructed from a query projection. */
+export type CoreRestoreCache = Map<string, { snapshot: WorkflowRunSnapshot; engine: AgenticRuntimePorts["engine"]; runStore: AgenticRuntimePorts["runStore"]; definitionDigest: string }>;
 
 /** Core event batches are journaled before SQLite writes. Recovery replays authoritative events. */
 export class CoreSession {
   constructor(private readonly ports: AgenticRuntimePorts, private readonly state: JournalState,
-    private readonly save: () => Promise<void>) {}
+    private readonly save: () => Promise<void>, private readonly restored: CoreRestoreCache = new Map()) {}
+  private remember(snapshot: WorkflowRunSnapshot): void {
+    const run = this.state.runs.find(item => item.runId === snapshot.runId);
+    if (run?.definition) this.restored.set(snapshot.runId, { snapshot: WorkflowRunSnapshotSchema.parse(snapshot),
+      engine: this.ports.engine, runStore: this.ports.runStore, definitionDigest: digest(run.definition) });
+  }
   async flush(): Promise<void> {
     while (this.state.pendingCore.length) {
       unwrap(await this.ports.runStore.appendEvents(AppendEventsRequestSchema.parse(this.state.pendingCore[0])));
@@ -36,6 +44,7 @@ export class CoreSession {
         idempotencyKey: `p19-events:${result.snapshot.runId}:${result.emittedEvents[0]!.eventId}` }));
       await this.save(); await this.flush();
     }
+    this.remember(result.snapshot);
   }
   async create(run: RunRecord): Promise<void> {
     if (!run.definition) throw new Error("Missing workflow definition");
@@ -58,12 +67,19 @@ export class CoreSession {
     for (const run of this.state.runs.filter(item => item.coreCreated)) {
       if (!run.definition) throw new Error("Missing persisted definition");
       // Register the actual persisted definition in a newly constructed deterministic engine.
-      if (!unwrap(await this.ports.engine.getSnapshot(run.runId))) unwrap(await this.ports.engine.createRun({
+      const memory = unwrap(await this.ports.engine.getSnapshot(run.runId));
+      if (!memory) unwrap(await this.ports.engine.createRun({
         runId: run.runId, definition: run.definition, createdAt: run.delegation.requestedAt,
         idempotencyKey: `p19-create:${run.runId}`
       }));
-      const stored = unwrap(await this.ports.runStore.get(run.runId));
-      if (!stored) throw new Error("Missing authoritative run store record");
+      const rawStored = unwrap(await this.ports.runStore.get(run.runId));
+      if (!rawStored) throw new Error("Missing authoritative run store record");
+      const stored = StoredRunSchema.parse(rawStored), cached = this.restored.get(run.runId);
+      if (memory && cached?.engine === this.ports.engine && cached.runStore === this.ports.runStore &&
+          cached.definitionDigest === digest(run.definition) && cached.definitionDigest === digest(stored.definition) && digest(WorkflowRunSnapshotSchema.parse(memory)) === digest(cached.snapshot) &&
+          digest(memory) === digest(stored.snapshot)) continue;
+      // Invalidate before recovery: a failed decode, failed append, changed port or divergent engine cannot retain reuse authority.
+      this.restored.delete(run.runId);
       const rawCheckpoint = unwrap(await this.ports.runStore.loadLatestCheckpoint(run.runId));
       const checkpoint = rawCheckpoint === null ? undefined : unwrap(parseRecoveryCheckpointWithCompatibility(rawCheckpoint));
       if (checkpoint) {
@@ -81,6 +97,7 @@ export class CoreSession {
         events.push(...page.items.map(event => DomainEventSchema.parse(event))); cursor = page.nextCursor;
       } while (cursor);
       unwrap(await this.ports.engine.recover({ runId: run.runId, ...(checkpoint ? { checkpoint } : {}), events, expectedVersion: stored.snapshot.version }));
+      this.remember(await this.snapshot(run.runId));
     }
   }
   async hasEvent(runId: string, type: string, id: string): Promise<boolean> {

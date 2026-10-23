@@ -282,9 +282,10 @@ describe("root acceptance of durable next actions", () => {
     expect((await f.inspect()).outbound.find(out => out.message.causation_id === "conversation-context")?.status).toBe("unknown_delivery");
   });
 
-  it.each(["workflow"])("keeps the Runtime-owned %s verification active when Coordinator reports a late blocker", async scope => {
+  it.each(["workflow", "queued-resume"])("keeps the Runtime-owned %s verification active when Coordinator reports a late blocker", async scope => {
     const current = preservedRun("verifying");
-    current.workflowVerificationPending = true;
+    current.workflowVerificationPending = scope === "workflow";
+    current.pendingAction!.state = "queued";
     const f = await fixture({ runs: [current] });
     const notice = envelope("late-coordinator-blocker", "run-1", { role: "conversation" }, {
       sender: { role: "coordinator", agent_id: "coordinator-agent", pane_id: "pane-coordinator" }, payload: { status: "blocked", summary: "Model says review delivery is uncertain" }
@@ -313,14 +314,15 @@ describe("root acceptance of durable next actions", () => {
     expect((await f.inspect()).inbox.find(item => item.message.message_id === "late-specialist-blocker")?.status).toBe("applied");
   });
 
-  it("keeps a pending Runtime verification and its spent resume budget when a specialist reports blocked before any verdict", async () => {
+  it.each(["active-verifier", "queued-resume"])("keeps the %s and its spent resume budget when a specialist reports blocked before any verdict", async mode => {
     const current = preservedRun("verifying"), f = await fixture({ runs: [current] });
     const request = envelope("active-review-request", "run-1", { role: "reviewer" }, { sender: { role: "coordinator" }, type: "verification.requested",
       payload: { runId: "run-1", taskId: "workflow-verification", attemptId: "integrated-revision", artifacts: [], input: {},
         definition: { id: "host-reviewer", name: "Reviewer", evaluator: "review", required: true, timeout: { executionTimeoutMs: 30000, onTimeout: "block" } } } });
     await f.runtime.queueHerdr(request); await f.runtime.flushOutbound();
     await (f.runtime as any).journal.exclusive(async (state: any, save: () => Promise<void>) => {
-      state.runs[0].workflowVerificationPending = true; await save();
+      state.runs[0].workflowVerificationPending = mode === "active-verifier";
+      state.runs[0].pendingAction.state = "queued"; await save();
     });
     const before = structuredClone((await f.inspect()).runs[0]);
     await f.runtime.receiveHerdr(envelope("specialist-blocked-before-verdict", "run-1", { role: "coordinator" }, {

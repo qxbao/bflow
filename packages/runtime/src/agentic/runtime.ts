@@ -12,7 +12,7 @@ import { AgenticJournal, digest, isConversationDelivery, json, record, strings, 
   type ConflictResolverAttempt, type Outbound, type RunRecord, type SpecRecord, type TaskRecord, type UserDecisionRecord } from "./journal.js";
 import { buildDecisionRequestMessage, buildUserDecisionRequest, USER_DECISION_EXPIRED_KIND, validateUserDecisionAnswer, type UserDecisionToolInput } from "./decision-routing.js";
 import { captureIntegratedChange } from "./integration-change.js";
-import { CoreSession } from "./core-session.js";
+import { CoreSession, type CoreRestoreCache } from "./core-session.js";
 import { redactString } from "../resilience/redaction.js";
 import { TaskActivityLog } from "./task-activity-log.js";
 import { taskLogAssignmentContextFromSnapshot, taskLogBusinessTaskId, type TaskLogAssignment } from "./task-log-tools.js";
@@ -208,6 +208,7 @@ export class AgenticWorkflowRuntime {
     this.journal = new AgenticJournal(options.journalDirectory, options.repositoryPath);
     this.activityLog = TaskActivityLog.open(join(options.journalDirectory, "../task-activity.jsonl"));
   }
+  private readonly coreRestoreCache: CoreRestoreCache = new Map();
   private quiesced = false;
   /** Stop new scheduling before lifecycle checkpointing; retain in-flight receipts and worktrees. */
   async quiesce(): Promise<void> {
@@ -352,7 +353,7 @@ export class AgenticWorkflowRuntime {
         previous = structuredClone(state);
       };
       const saveAndLog = async () => { await save(); this.refreshTaskLogAssignmentSnapshot(state); await logChanges(); };
-      const core = new CoreSession(this.ports, state, saveAndLog);
+      const core = new CoreSession(this.ports, state, saveAndLog, this.coreRestoreCache);
       await core.restore();
       const outbox = new HerdrOutbox(this.ports, state, saveAndLog);
       await this.recoverPhaseFailures(state, saveAndLog, outbox);
@@ -1451,7 +1452,8 @@ export class AgenticWorkflowRuntime {
   /** A specialist blocker is visible to the user, not only to the Coordinator. Idempotent per message. */
   private reportSpecialistBlocked(state: JournalState, outbox: HerdrOutbox, run: RunRecord, message: RoleMessage, blockage: string): void {
     // The authenticated report remains in the inbox; the active Runtime verifier owns its outcome and resume budget.
-    if (run.workflowVerificationPending || run.tasks.some(task => task.verificationPending)) return;
+    if (run.workflowVerificationPending || run.tasks.some(task => task.verificationPending) ||
+        run.pendingAction?.kind === "resume_coordinator" && run.pendingAction.state === "queued") return;
     if (state.inbox.some(item => item.status === "applied" && item.message.type === "review.verdict" &&
         item.message.run_id === run.runId && item.message.causation_id === message.causation_id &&
         item.message.sender.role === message.sender.role && item.message.sender.agent_id === message.sender.agent_id && item.message.sender.pane_id === message.sender.pane_id))
@@ -1512,7 +1514,8 @@ export class AgenticWorkflowRuntime {
       if (!existing) { state.inbox.push({ message: parsed, status: "received" }); await save(); }
       const blockage = specialistBlockage(parsed.payload);
       if (blockage !== undefined) {
-        if (run.workflowVerificationPending || run.tasks.some(task => task.verificationPending)) {
+        if (run.workflowVerificationPending || run.tasks.some(task => task.verificationPending) ||
+            run.pendingAction?.kind === "resume_coordinator" && run.pendingAction.state === "queued") {
           // The Runtime-owned verification result decides this phase. A model's delivery diagnostic cannot pause its live waiter or reset its lineage counters.
           const inbox = state.inbox.find(item => item.message.message_id === parsed.message_id)!; inbox.status = "applied";
           await save(); return;
@@ -2800,6 +2803,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         for (const run of state.runs) {
           if (this.quiesced) break;
           if (run.nativeDeliveries?.length) continue;
+          // Legacy delivery blockers can predate nativeDeliveries. Reconciliation and cancellation still run outside this work loop.
+          if (run.pendingAction?.state === "pending" && run.pendingAction.recovery === "reconcile_delivery") continue;
           if (run.cancelled || ["completed", "failed", "cancelled", "escalated", "awaiting_approval", "intake", "clarifying", "specifying", "planning"].includes(run.status)) continue;
           // One run's failure is recorded on that run; the other runs and the outbox flush below still proceed.
           try {
