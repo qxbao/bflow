@@ -2057,6 +2057,21 @@ describe("RolePaneManager Verification Suite", () => {
       }
     });
 
+    it("closes Developer worktree panes before the source workspace's role panes", async () => {
+      const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+      expect((await manager.initializeTopology()).ok).toBe(true);
+      inspector.setCleanliness("/repo/.worktrees/task-1", { exists: false, isClean: true, dirtyFiles: [] });
+      const developer = await manager.allocateDeveloper({ taskId: "task-1", worktreePath: "/repo/.worktrees/task-1", branchName: "feat/task-1" });
+      expect(developer.ok).toBe(true);
+      if (!developer.ok) return;
+      const before = runner.calls.length;
+      expect((await manager.shutdownTopology()).ok).toBe(true);
+      const closed = runner.calls.slice(before).filter((c) => c.args[0] === "pane" && c.args[1] === "close").map((c) => c.args[2]);
+      // Herdr refuses to close the source workspace's last pane while a linked worktree workspace is open.
+      expect(closed[0]).toBe(developer.value.paneId);
+      expect(closed.length).toBeGreaterThan(1);
+    });
+
     it.each(["error", "timeout"])("does not record shutdown success when pane close returns %s", async failure => {
       const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
       const initialized = await manager.initializeTopology();

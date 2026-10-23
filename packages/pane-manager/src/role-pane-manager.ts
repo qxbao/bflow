@@ -481,7 +481,10 @@ export class RolePaneManager {
           livePaneIds.add(pane.paneId);
         }
       }
-      for (const pane of manifest.panes) {
+      // Herdr refuses to close the source workspace's last pane while a linked worktree workspace is still open
+      // ("would close a worktree group"), so Developer worktree panes close first.
+      const closeOrder = [...manifest.panes.filter(pane => pane.role === "developer"), ...manifest.panes.filter(pane => pane.role !== "developer")];
+      for (const pane of closeOrder) {
         if (!livePaneIds.has(pane.paneId)) continue;
         const outcome = await this.#runHerdr(["pane", "close", pane.paneId], options);
         if (outcome.exitCode !== 0 || outcome.failure) {
