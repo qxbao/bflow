@@ -429,6 +429,7 @@ export function createFakeProviderRunner(config?: FakeRunnerConfig): ProviderCom
             "  --mode\n" +
             "  --add-dir\n" +
             "  --disable-slash-commands\n" +
+            "  --prompt-interactive\n" +
             "  --dangerously-skip-permissions\n" +
             "  --print\n" +
             "  --output-format\n" +

@@ -26,6 +26,12 @@ import { nativeMessageFingerprint, NativeRejectionSchema } from "./native-delive
 import { describeValidationError, INVALID_ROLE_MESSAGE_LIMIT, isMessageContentFailure } from "./role-message-feedback.js";
 import { AssessmentSpecificationSchema, assessmentErrorAt } from "./assessment-input.js";
 
+/** Existing receipt and diagnostic operations that may drain after scheduling is quiesced. */
+export const QUIESCED_RECEIPT_DRAIN_OPERATIONS: readonly string[] = Object.freeze([
+  "inspect_native_delivery", "host_status", "assignment_context", "repository_read", "read_pinned_instructions", "read_task_log", "log_task_step",
+  "inspect_review", "complete_review", "inspect_alternative_verification", "record_alternative_verification", "record_behavioral_verification", "submit_implementation"
+]);
+
 const VERIFICATION_GATE = "p19-independent-task-verification";
 const TERMINAL_RUN_STATUSES: readonly string[] = ["completed", "failed", "cancelled", "escalated"];
 /** Terminal specialist `task.status` values (every agents/<role>/system-prompt.md); each discharges the correlated handoff's result obligation. */
@@ -177,6 +183,10 @@ function isCancellationHandoff(message: RoleMessage): boolean {
 function supersededReason(run: RunRecord, approvalId: string): string | undefined {
   const item = run.supersededApprovals?.find(entry => entry.approvalId === approvalId);
   return item === undefined ? undefined : `Approval superseded by requirement revision ${item.supersededByRevision}`;
+}
+function assertNoPendingPaneDecision(run: RunRecord, binding: PaneBinding): void {
+  if (Object.values(run.userDecisions ?? {}).some(entry => entry.status === "pending" && entry.role === binding.role &&
+      entry.agentId === binding.agentId && entry.paneId === binding.paneId)) throw new Error("Pane is waiting for its pending human decision");
 }
 type Admission = { kind: "new" } | { kind: "duplicate" } | { kind: "revision"; revision: number } | { kind: "rejected"; reason: string };
 const REJECTED_REVISION_OPTIONS = ["Gửi revision mới hợp lệ", "Tạo run mới", "Hủy run"];
@@ -782,7 +792,7 @@ export class AgenticWorkflowRuntime {
     for (const entry of Object.values(run.userDecisions ?? {})) if (entry.status === "pending") {
       entry.status = "cancelled"; superseded.push({ approvalId: entry.request.approvalId, supersededByRevision: revision });
       // The asker is waiting for an answer that can no longer come; it is resumed with the outcome instead of waiting forever.
-      this.resumeUserDecisionAsker(outbox, run, entry, { kind: "user_decision_answer", approvalId: entry.request.approvalId, outcome: "cancelled",
+      this.resumeUserDecisionAsker(state, outbox, run, entry, { kind: "user_decision_answer", approvalId: entry.request.approvalId, outcome: "cancelled",
         reason: `Requirement revision ${revision} superseded this question` });
     }
     if (superseded.length) {
@@ -1654,6 +1664,75 @@ export class AgenticWorkflowRuntime {
     const message = RoleMessageSchema.parse(input), binding = PaneBindingSchema.parse(bindingInput);
     await this.transaction(async state => { this.providerDelivery(state, message, binding); });
   }
+  /** Current native Agy admission/tool authority; historical delivery matching alone grants no new action. */
+  async authorizeAgyProviderTurn(input: unknown, bindingInput: unknown, operationName?: string): Promise<void> {
+    const message = RoleMessageSchema.parse(input), binding = PaneBindingSchema.parse(bindingInput);
+    await this.transaction(async (state, _save, core, outbox) => {
+      if (this.quiesced && (operationName === undefined || !QUIESCED_RECEIPT_DRAIN_OPERATIONS.includes(operationName)))
+        throw new Error("Runtime is quiesced; only existing receipt-drain operations are permitted");
+      if (binding.role === "conversation" || binding.agentKind !== "agy" || !binding.session ||
+          !["agy", "herdr:antigravity_cli"].includes(binding.session.source)) throw new Error("No current native Agy specialist authority");
+      const out = this.providerDelivery(state, message, binding);
+      if (!["sending", "unknown_delivery", "accepted"].includes(out.status) || out.cancelRequested || out.leaseRelease)
+        throw new Error("Agy delivery is released, cancelled or no longer active");
+      const run = this.run(state, textField(message.run_id));
+      this.live(run);
+      assertNoPendingPaneDecision(run, binding);
+      if (binding.role === "coordinator") {
+        if (message.type === "delegation.request" && message.sender.role === "conversation") {
+          if (digest(DelegationRequestSchema.parse(message.payload)) !== digest(run.delegation)) throw new Error("Agy delegation revision is stale");
+        } else if (message.type !== "task.status" || message.sender.role !== "runtime") throw new Error("Agy Coordinator needs a current Runtime trigger");
+      } else if (!["task.assignment", "delegation.request", "verification.requested", "task.status"].includes(message.type) ||
+          message.sender.role !== "coordinator" && message.sender.role !== "runtime") throw new Error("Agy specialist needs an assigned Runtime delivery");
+      const owner = out.parentAssignmentId ? state.outbound.find(item => item.message.message_id === out.parentAssignmentId) : out;
+      if (!owner || !["sending", "unknown_delivery", "accepted"].includes(owner.status) || owner.cancelRequested || owner.leaseRelease || !owner.lease || !out.request ||
+          Date.parse(owner.lease.expiresAt) <= Date.parse(this.now()) ||
+          out.request.metadata?.leaseId !== owner.lease.leaseId || out.request.metadata?.fencingToken !== owner.lease.fencingToken ||
+          owner.lease.agentId !== binding.agentId || owner.lease.runId !== run.runId || owner.lease.taskId !== owner.request?.taskId)
+        throw new Error("Agy delivery has no current matching lease and fence");
+      let continuation = false;
+      if (message.type === "task.status") {
+        const payload = record(message.payload);
+        if (payload.kind === "user_decision_answer" && typeof payload.approvalId === "string") {
+          const entry = run.userDecisions?.[payload.approvalId];
+          if (entry && ["answered", "rejected", "expired", "cancelled"].includes(entry.status) && entry.role === binding.role &&
+              entry.agentId === binding.agentId && entry.paneId === binding.paneId && out.taskId === entry.taskId) {
+            const superseded = run.supersededApprovals?.find(item => item.approvalId === entry.request.approvalId);
+            const expected = entry.status === "cancelled" ? { kind: "user_decision_answer", approvalId: entry.request.approvalId, outcome: "cancelled",
+              reason: `Requirement revision ${superseded?.supersededByRevision} superseded this question` } :
+              { kind: "user_decision_answer", approvalId: entry.request.approvalId, outcome: entry.answer?.outcome ?? "expired",
+              ...(entry.answer?.selectedOption === undefined ? {} : { selectedOption: entry.answer.selectedOption }),
+              ...(entry.answer?.reason === undefined ? {} : { reason: entry.answer.reason }) };
+            continuation = (entry.status !== "cancelled" || superseded !== undefined) && digest(payload) === digest(expected) && message.causation_id === `decision-${entry.request.approvalId}` &&
+              message.message_id === `user-decision-answer-${digest([run.runId, entry.request.approvalId, entry.status])}`;
+          }
+        } else if (payload.kind === "role_message_rejected") {
+          continuation = payload.status === "rejected" && payload.runId === run.runId && message.causation_id === payload.rejectedMessageId &&
+            state.inbox.some(item => item.status === "rejected" && item.message.message_id === payload.rejectedMessageId &&
+              item.message.run_id === run.runId && item.message.type === payload.rejectedType && item.message.sender.role === binding.role &&
+              item.message.sender.agent_id === binding.agentId && item.message.sender.pane_id === binding.paneId);
+        }
+      }
+      if (binding.role !== "coordinator" && !out.parentAssignmentId &&
+          (message.type === "task.status" ? !continuation : out.status === "accepted" && !this.outboundOwesResult(state, run, out)))
+        throw new Error("Agy specialist delivery has already been answered or replaced");
+      if (owner.message.type === "task.assignment") {
+        if (isConflictResolverAssignment(owner.message)) {
+          const resolver = this.currentResolver(run, owner);
+          if (!resolver || resolver.attempt.status !== "assigned") throw new Error("Agy conflict resolver attempt is no longer current");
+        } else {
+          const task = run.tasks.find(item => item.taskId === owner.taskId);
+          const current = (await core.snapshot(run.runId)).tasks.find(item => item.taskId === owner.taskId);
+          if (!task || task.spec.specification.status !== "approved" || task.result || task.writerReleased ||
+              current?.status !== "running" || current.attemptId !== owner.attemptId ||
+              owner.status === "accepted" && (!owner.handle || digest(current.agentExecution) !== digest(owner.handle)) ||
+              current.agentExecution !== undefined && (!owner.handle || digest(current.agentExecution) !== digest(owner.handle))) throw new Error("Agy assignment attempt is no longer current");
+        }
+      }
+      // Registry, rather than the journal's future expiry, proves current fencing authority.
+      await outbox.renew(out);
+    });
+  }
   /** An authenticated Stop is operational evidence only. It never applies ingress, retries delivery or changes business state. */
   async coordinatorTurnStopped(input: unknown, bindingInput: unknown): Promise<void> {
     const message = RoleMessageSchema.parse(input), binding = PaneBindingSchema.parse(bindingInput);
@@ -2072,7 +2151,7 @@ export class AgenticWorkflowRuntime {
     const answer = validateUserDecisionAnswer(entry.request, decision, now);
     entry.status = answer.outcome === "rejected" ? "rejected" : "answered";
     entry.answer = answer;
-    this.resumeUserDecisionAsker(outbox, run, entry, { kind: "user_decision_answer", approvalId: entry.request.approvalId, outcome: answer.outcome,
+    this.resumeUserDecisionAsker(state, outbox, run, entry, { kind: "user_decision_answer", approvalId: entry.request.approvalId, outcome: answer.outcome,
       ...(answer.selectedOption !== undefined ? { selectedOption: answer.selectedOption } : {}),
       ...(answer.reason !== undefined ? { reason: answer.reason } : {}) });
     await save();
@@ -2086,7 +2165,7 @@ export class AgenticWorkflowRuntime {
   private expireUserDecision(state: JournalState, outbox: HerdrOutbox, run: RunRecord, entry: UserDecisionRecord): void {
     entry.status = "expired";
     this.notifyUserDecisionClosed(state, outbox, run, entry);
-    this.resumeUserDecisionAsker(outbox, run, entry, { kind: "user_decision_answer", approvalId: entry.request.approvalId, outcome: "expired" });
+    this.resumeUserDecisionAsker(state, outbox, run, entry, { kind: "user_decision_answer", approvalId: entry.request.approvalId, outcome: "expired" });
   }
   private expireUserDecisions(state: JournalState, outbox: HerdrOutbox): boolean {
     const now = Date.parse(this.now());
@@ -2104,13 +2183,18 @@ export class AgenticWorkflowRuntime {
     return changed;
   }
   /** Resumes the asking pane through the normal Herdr outbox (lease, pane health and recipient checks apply). */
-  private resumeUserDecisionAsker(outbox: HerdrOutbox, run: RunRecord, entry: UserDecisionRecord, payload: Record<string, unknown>): void {
+  private resumeUserDecisionAsker(state: JournalState, outbox: HerdrOutbox, run: RunRecord, entry: UserDecisionRecord, payload: Record<string, unknown>): void {
     const id = `user-decision-answer-${digest([run.runId, entry.request.approvalId, entry.status])}`;
-    outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: run.delegation.correlationId,
+    const message = RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: run.delegation.correlationId,
       // A Coordinator asker is resumed by Runtime itself: a role message cannot name the same role as sender and recipient.
       causation_id: `decision-${entry.request.approvalId}`, run_id: run.runId, sender: { role: entry.role === "coordinator" ? "runtime" : "coordinator" },
       recipient: { role: entry.role, agent_id: entry.agentId, pane_id: entry.paneId }, type: "task.status",
-      payload: json(payload), artifact_references: [], occurred_at: this.now(), idempotency_key: id }), entry.role, entry.taskId, `attempt-${id}`);
+      payload: json(payload), artifact_references: [], occurred_at: this.now(), idempotency_key: id });
+    const parent = entry.role === "developer" ? [...state.outbound].reverse().find(out => out.message.type === "task.assignment" &&
+      out.message.run_id === run.runId && out.taskId === entry.taskId && out.status === "accepted" &&
+      out.handle?.target.agentId === entry.agentId && out.handle.target.paneId === entry.paneId) : undefined;
+    if (parent) outbox.enqueueTaskNotice(message, parent);
+    else outbox.enqueue(message, entry.role, entry.taskId, `attempt-${id}`);
   }
   private async applyDecision(state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox,
     run: RunRecord, decision: ApprovalDecision): Promise<void> {
@@ -2325,6 +2409,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     return this.transaction(async (state, _save, core, outbox) => {
       if (this.quiesced || binding.role !== "developer") throw new Error("Developer writes are quiesced or unauthorized");
       const run = this.run(state, runId); this.live(run);
+      assertNoPendingPaneDecision(run, binding);
       const task = run.tasks.find(item => item.taskId === taskId), definition = run.definition?.tasks.find(item => item.id === taskId);
       const current = (await core.snapshot(runId)).tasks.find(item => item.taskId === taskId);
       const out = state.outbound.find(item => item.handle?.requestId === current?.agentExecution?.requestId);
@@ -2967,6 +3052,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   private async ownedResolver(state: JournalState, outbox: HerdrOutbox, binding: PaneBinding, runId: string, taskId: string) {
     if (this.quiesced || binding.role !== "developer") throw new Error("Developer writes are quiesced or unauthorized");
     const run = this.run(state, runId); this.live(run);
+    assertNoPendingPaneDecision(run, binding);
     const resolution = run.conflictResolution, attempt = resolution?.attempts.find(item => item.taskId === taskId && item.status === "assigned");
     const out = attempt && state.outbound.find(item => item.message.message_id === attempt.messageId);
     if (!resolution || !attempt || !out?.handle || out.status !== "accepted" || out.handle.target.agentId !== binding.agentId ||
@@ -3205,21 +3291,30 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     if ((await core.snapshot(run.runId)).tasks.some(item => item.status === "cancelling" && item.agentExecution === undefined)) await confirm(undefined);
   }
   /**
-   * Host-reported Stop of a specialist turn. A role that still owes an answer (an accepted assignment or delegation with no
+   * Host-reported Stop of a specialist turn. A role that still owes an answer (an accepted assignment, delegation, or verification request with no
    * applied message from it since) makes Conversation see `developer_no_response` / `specialist_no_response` and wakes the
    * Coordinator once per assignment. Herdr Stop is operational evidence only, never task success.
    */
-  async specialistTurnStopped(bindingInput: unknown, roleInput: unknown, observedAt = new Date().toISOString()): Promise<void> {
+  async specialistTurnStopped(bindingInput: unknown, roleInput: unknown, observedAt = new Date().toISOString(), sourceMessageId?: string): Promise<void> {
     const binding = PaneBindingSchema.parse(bindingInput), role = textField(roleInput);
     if (binding.role !== role || role === "conversation" || role === "coordinator") throw new Error("Specialist Stop requires a non-Conversation specialist binding");
     await this.transaction(async (state, save, _core, outbox) => {
+      const source = sourceMessageId === undefined ? undefined : state.outbound.find(item => item.message.message_id === textField(sourceMessageId));
+      if (sourceMessageId !== undefined && (!source || source.message.recipient.role !== role || !source.handle ||
+          source.handle.target.paneId !== binding.paneId || source.handle.target.agentId !== binding.agentId ||
+          digest(source.handle.target.session) !== digest(binding.session) || source.handle.target.workspaceId !== binding.workspaceId ||
+          source.handle.target.tabId !== binding.tabId || !["accepted", "released"].includes(source.status) ||
+          !Number.isFinite(Date.parse(observedAt)) || Date.parse(source.handle.acceptedAt) > Date.parse(observedAt))) return;
+      // Continuation notices are delivered on the existing assignment execution. Attribute their Stop to that parent assignment.
+      const expectedSourceMessageId = source?.parentAssignmentId ?? source?.message.message_id;
       let changed = false;
       for (const out of [...state.outbound]) {
+        if (expectedSourceMessageId !== undefined && out.message.message_id !== expectedSourceMessageId) continue;
         if (out.message.recipient.role !== role || out.handle?.target.paneId !== binding.paneId || out.handle.target.agentId !== binding.agentId ||
             digest(out.handle.target.session) !== digest(binding.session) || out.handle.target.workspaceId !== binding.workspaceId ||
             out.handle.target.tabId !== binding.tabId || Date.parse(out.handle.acceptedAt) > Date.parse(observedAt) ||
             !Number.isFinite(Date.parse(observedAt)) || !["accepted", "released"].includes(out.status)) continue;
-        if (!["task.assignment", "delegation.request"].includes(out.message.type) || !out.message.run_id) continue;
+        if (!["task.assignment", "delegation.request", "verification.requested"].includes(out.message.type) || !out.message.run_id) continue;
         const run = state.runs.find(item => item.runId === out.message.run_id);
         // Retain physical Stop independently of delivery reconciliation; host may settle this Stop receipt now.
         // A later retry still requires released capacity, no uncertain deliveries, and an unanswered assignment.

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, realpath, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { join, parse, resolve, sep } from "node:path";
 import {
   type AgentEnvironment,
   AgentEnvironmentSchema,
@@ -173,6 +173,10 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
   }
 
   protected async nativeAuthenticationOutcome(executable: string, _options?: OperationOptions, environment?: AgentEnvironment) {
+    // Agy initializes first-run state even for `models`. Adopt an existing
+    // completed receipt before that first command creates an incomplete one.
+    if (this.descriptor.provider === "agy" && environment !== undefined && this.options.isolatorEnvironment?.HOME === undefined)
+      await this.prepareAgyLaunchHome(environment);
     return this.runner.run({
       executable, args: this.getAuthCommand(), env: this.getProviderCommandEnvironment(environment),
       ...this.commandEnvironmentOptions(), timeoutMs: 45_000
@@ -233,6 +237,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       options: this.options,
       supportsNativeHooks: capabilities.supportsNativeHooks,
       supportsMcpConfigFile: this.supportsMcpConfigFile(capabilities),
+      ...(this.descriptor.provider === "agy" ? { supportedHostHookEvents: ["SessionStart", "Stop", "PreToolUse", "PreInvocation"] as const } : {}),
       renderStreamableHttpServer: (endpoint, tokenEnvironmentName) =>
         this.renderStreamableHttpMcpServer(endpoint, tokenEnvironmentName)
     });
@@ -569,14 +574,15 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
 
       if (authOutcome.exitCode !== 0 || !authOutcome.started || authOutcome.failure !== undefined || isExpired ||
           (nativeOnly && !this.nativeAuthenticationConfirmed(authOutcome.stdout, authOutcome.stderr))) {
-        const code = isExpired ? "auth_expired" : "auth_missing";
+        const timedOut = authOutcome.failure === "timeout";
+        const code = timedOut ? "timeout" : isExpired ? "auth_expired" : "auth_missing";
         checks.push(
           createHealthCheck(
             "authentication",
             "failed",
             code,
-            `Authentication check failed: ${combinedAuthOutput}`,
-            `Authenticate '${this.descriptor.executableName}' using your provider login or credentials.`
+            timedOut ? "Native authentication catalog check timed out; authentication could not be established." : `Authentication check failed: ${combinedAuthOutput}`,
+            timedOut ? "Verify provider connectivity and retry the native authentication check." : `Authenticate '${this.descriptor.executableName}' using your provider login or credentials.`
           )
         );
       } else if (nativeOnly) {
@@ -1162,6 +1168,16 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
           );
         }
 
+        // SessionStart and Herdr idle may precede Agy's onboarding UI. Re-read
+        // the mutable native state after startup; an adopted source receipt is
+        // not proof that this launch accepted it.
+        if (this.descriptor.provider === "agy" && !await this.hasCompletedAgyOnboarding(environment)) {
+          bindingOk = false;
+          hasFailed = true;
+          checks.push(createHealthCheck("native_binding", "failed", "agy_onboarding_incomplete",
+            "The private Agy launch has no valid completed native onboarding receipt; interactive readiness is unproven.",
+            "Complete native onboarding in the intended provider environment, then prepare a fresh launch. Bflow never accepts terms or data-use consent automatically."));
+        }
         // 1. Verify attestation signature
         if (bindingOk) {
           const attestationVerification = verifyLaunchAttestation(
@@ -1672,7 +1688,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       0o600
     );
     try {
-      await settingsFile.writeFile(JSON.stringify(settingsObj, null, 2), "utf8");
+      await settingsFile.writeFile(JSON.stringify(settingsObj, null, 2) + (agyHome ? "\n" : ""), "utf8");
     } finally {
       await settingsFile.close();
     }
@@ -1701,6 +1717,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       const nativeHookGroup: Record<string, unknown> = { SessionStart: sessionStartHandlers };
       if (material.hooks.PreToolUse !== undefined) nativeHookGroup["PreToolUse"] = material.hooks.PreToolUse;
       if (material.hooks.Stop !== undefined) nativeHookGroup["Stop"] = material.hooks.Stop;
+      if (material.hooks.PreInvocation !== undefined) nativeHookGroup["PreInvocation"] = material.hooks.PreInvocation;
       const hooksFile = await open(
         agyHooksPath,
         constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
@@ -1869,7 +1886,8 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     const targetCliDir = join(agyHome, ".gemini", "antigravity-cli");
     const xdgConfigDir = join(agyHome, ".config");
     const wrapperBinDir = join(agyHome, "bin");
-    for (const directory of [join(environment.stateDirectory, "agy-home"), agyHome, join(agyHome, ".gemini"), configDir, targetCliDir, xdgConfigDir, wrapperBinDir]) {
+    const cacheDir = join(targetCliDir, "cache");
+    for (const directory of [join(environment.stateDirectory, "agy-home"), agyHome, join(agyHome, ".gemini"), configDir, targetCliDir, cacheDir, xdgConfigDir, wrapperBinDir]) {
       try { await mkdir(directory, { mode: 0o700 }); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
       const info = await lstat(directory);
@@ -1878,6 +1896,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
         throw new Error("Unsafe Agy private configuration directory");
       await chmod(directory, 0o700);
     }
+    await this.adoptCompletedAgyOnboarding(agyHome);
     const trustedWorkspaces = Array.from(
       new Set([
         environment.cwd,
@@ -1886,20 +1905,107 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       ])
     );
 
-    const settingsFile = await open(
-      join(targetCliDir, "settings.json"),
-      constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
-      0o600
-    );
+    // A readiness probe must never erase the compiled permissions/config of an already prepared launch.
+    const settingsPath = join(targetCliDir, "settings.json");
     try {
-      await settingsFile.writeFile(
-        JSON.stringify({ trustedWorkspaces }, null, 2),
-        "utf8"
-      );
-    } finally {
-      await settingsFile.close();
+      const settingsFile = await open(settingsPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      try { await settingsFile.writeFile(JSON.stringify({ trustedWorkspaces }, null, 2), "utf8"); }
+      finally { await settingsFile.close(); }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const existing = await lstat(settingsPath);
+      if (!existing.isFile() || existing.isSymbolicLink() || (existing.mode & 0o077) !== 0 ||
+          typeof process.getuid === "function" && existing.uid !== process.getuid()) throw new Error("Unsafe existing Agy native settings");
     }
-    await chmod(join(targetCliDir, "settings.json"), 0o600);
     return agyHome;
+  }
+
+  private async hasCompletedAgyOnboarding(environment: AgentEnvironment): Promise<boolean> {
+    const home = join(environment.stateDirectory, "agy-home", environment.role);
+    const path = join(home, ".gemini", "antigravity-cli", "cache", "onboarding.json");
+    try {
+      let cursor = parse(path).root;
+      for (const component of path.slice(cursor.length).split(sep).filter(Boolean)) {
+        cursor = join(cursor, component);
+        const info = await lstat(cursor);
+        if (info.isSymbolicLink() || cursor !== path && !info.isDirectory()) return false;
+        if (cursor === home || cursor.startsWith(home + sep)) {
+          if (typeof process.getuid === "function" && info.uid !== process.getuid() || (info.mode & 0o022) !== 0) return false;
+        }
+      }
+      const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      try {
+        const info = await handle.stat();
+        if (!info.isFile() || info.size > 64 * 1024 || (info.mode & 0o022) !== 0 ||
+            typeof process.getuid === "function" && info.uid !== process.getuid()) return false;
+        const bytes = await handle.readFile();
+        if (bytes.length > 64 * 1024) return false;
+        const receipt: unknown = JSON.parse(bytes.toString("utf8"));
+        return typeof receipt === "object" && receipt !== null && !Array.isArray(receipt) &&
+          (receipt as Record<string, unknown>).onboardingComplete === true;
+      } finally { await handle.close(); }
+    } catch { return false; }
+  }
+
+  private async adoptCompletedAgyOnboarding(privateHome: string): Promise<void> {
+    const nativeHome = this.options.isolatorEnvironment?.HOME ?? process.env.HOME;
+    if (!nativeHome) return;
+    const resolvedNativeHome = resolve(nativeHome);
+    let homeCursor = parse(resolvedNativeHome).root;
+    for (const component of resolvedNativeHome.slice(homeCursor.length).split(sep).filter(Boolean)) {
+      homeCursor = join(homeCursor, component);
+      let nativeHomeInfo;
+      try { nativeHomeInfo = await lstat(homeCursor); } catch { return; }
+      if (nativeHomeInfo.isSymbolicLink() || !nativeHomeInfo.isDirectory()) return;
+      if (homeCursor === resolvedNativeHome && ((typeof process.getuid === "function" && nativeHomeInfo.uid !== process.getuid()) || (nativeHomeInfo.mode & 0o022) !== 0)) return;
+    }
+    const sourceHome = join(resolvedNativeHome, ".gemini", "antigravity-cli", "cache");
+    const source = join(sourceHome, "onboarding.json");
+    let cursor = nativeHome;
+    for (const component of [".gemini", "antigravity-cli", "cache", "onboarding.json"]) {
+      cursor = join(cursor, component);
+      let info;
+      try { info = await lstat(cursor); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw error;
+      }
+      const isFile = component === "onboarding.json";
+      if (info.isSymbolicLink()) return;
+      if (typeof process.getuid === "function" && info.uid !== process.getuid()) return;
+      if (isFile) {
+        if (!info.isFile() || (info.mode & 0o022) !== 0 || info.size > 64 * 1024) return;
+      } else {
+        if (!info.isDirectory() || (info.mode & 0o022) !== 0) return;
+      }
+    }
+    let sourceHandle;
+    try { sourceHandle = await open(source, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+    catch { return; }
+    let bytes: Buffer;
+    try {
+      const info = await sourceHandle.stat();
+      if (!info.isFile() || (typeof process.getuid === "function" && info.uid !== process.getuid()) || (info.mode & 0o022) !== 0 || info.size > 64 * 1024)
+        throw new Error("Agy onboarding receipt failed protected-file validation");
+      bytes = await sourceHandle.readFile();
+      if (bytes.length > 64 * 1024) throw new Error("Agy onboarding receipt exceeds the size limit");
+    } finally { await sourceHandle.close(); }
+    let receipt: unknown;
+    try { receipt = JSON.parse(bytes.toString("utf8")); }
+    catch { throw new Error("Agy onboarding receipt is malformed JSON"); }
+    if (typeof receipt !== "object" || receipt === null || Array.isArray(receipt) || (receipt as Record<string, unknown>).onboardingComplete !== true) return;
+
+    const destination = join(privateHome, ".gemini", "antigravity-cli", "cache", "onboarding.json");
+    try {
+      const existing = await lstat(destination);
+      if (existing.isSymbolicLink() || !existing.isFile() || (typeof process.getuid === "function" && existing.uid !== process.getuid()) || (existing.mode & 0o077) !== 0)
+        throw new Error("Unsafe existing private Agy onboarding receipt");
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const target = await open(destination, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    try { await target.writeFile(bytes); } finally { await target.close(); }
+    await chmod(destination, 0o600);
   }
 }

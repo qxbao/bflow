@@ -37,7 +37,7 @@ export class AgyProviderAdapter extends BaseProviderAdapter {
     ],
     mcpTransports: ["stdio", "streamable_http"],
     supportsUnattended: false,
-    supportsNativeBinding: false
+    supportsNativeBinding: true
   };
 
   constructor(options?: ProviderAdapterOptions) {
@@ -107,6 +107,8 @@ export class AgyProviderAdapter extends BaseProviderAdapter {
     if (sessionStart.length) hooks.SessionStart = sessionStart;
     const stop = flatHandlers("Stop");
     if (stop.length) hooks.Stop = stop;
+    const preInvocation = flatHandlers("PreInvocation");
+    if (preInvocation.length) hooks.PreInvocation = preInvocation;
     const preToolUse = flatHandlers("PreToolUse");
     if (preToolUse.length) hooks.PreToolUse = [{ matcher: ".*", hooks: preToolUse }];
     return { ...resolved, hooks };
@@ -138,6 +140,17 @@ export class AgyProviderAdapter extends BaseProviderAdapter {
     }
 
     const argv: string[] = [...permResult.flags];
+
+    if (Object.values(this.options.hostHooks ?? {}).some(command => typeof command === "string" && command.length > 0)) {
+      if (!capabilities.supportedFlags.has("--prompt-interactive")) {
+        return {
+          argv: [],
+          unsupportedCode: "invalid_flag",
+          unsupportedMessage: "Antigravity CLI does not support --prompt-interactive required to establish trusted Bflow startup hooks"
+        };
+      }
+      argv.push("--prompt-interactive", `[bflow startup ${environment.environmentId}] Reply only pong. Do not use tools or start a workflow.`);
+    }
 
     if (capabilities.supportedFlags.has("--mcp-config")) {
       argv.push("--mcp-config", configFiles.mcpConfigFile);

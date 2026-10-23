@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { RoleMessageSchema } from "@bflow/contracts";
 import { BFLOW_INBOX_NUDGE } from "../../dist/agentic/conversation-inbox.js";
+import { randomUUID } from "node:crypto";
 
 const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const action of cleanup.splice(0).reverse()) await action(); });
@@ -14,6 +15,35 @@ async function fixture(role = "conversation", provider = "codex", replies: Recor
   const root = await mkdtemp("/tmp/bf-hook-test-");
   cleanup.push(() => rm(root, { recursive: true, force: true }));
   const socketPath = join(root, "host.sock"), calls: { method: string; params: unknown }[] = [];
+  const herdrCalls: Record<string, unknown>[] = [];
+  const herdrSocketPath = join(root, "herdr.sock");
+  const herdrServer = provider === "agy" ? createServer(socket => {
+    let input = "";
+    socket.on("data", chunk => {
+      input += String(chunk);
+      if (!input.includes("\n")) return;
+      herdrCalls.push(JSON.parse(input.split("\n")[0]!) as Record<string, unknown>);
+      socket.end(JSON.stringify({ result: {} }) + "\n");
+    });
+  }) : undefined;
+  if (herdrServer) {
+    await new Promise<void>(accept => herdrServer.listen(herdrSocketPath, accept));
+    cleanup.push(() => new Promise<void>(accept => herdrServer.close(() => accept())));
+  }
+  const nativeSessionId = provider === "agy" ? randomUUID() : "native-1";
+  const agyHome = join(root, "agy-home");
+  const transcriptPath = join(agyHome, ".gemini", "antigravity-cli", "brain", nativeSessionId, ".system_generated", "logs", "transcript_full.jsonl");
+  if (provider === "agy") {
+    const directories = [agyHome, join(agyHome, ".gemini"), join(agyHome, ".gemini", "antigravity-cli"), join(agyHome, ".gemini", "antigravity-cli", "brain"),
+      join(agyHome, ".gemini", "antigravity-cli", "brain", nativeSessionId), join(agyHome, ".gemini", "antigravity-cli", "brain", nativeSessionId, ".system_generated"),
+      join(agyHome, ".gemini", "antigravity-cli", "brain", nativeSessionId, ".system_generated", "logs")];
+    for (const directory of directories) { await mkdir(directory, { recursive: true, mode: 0o700 }); await chmod(directory, 0o700); }
+    const prompt = JSON.stringify({ schema_version: 2, message_id: "agy-fixture", correlation_id: "agy-correlation", run_id: "run",
+      sender: { role: role === "coordinator" ? "conversation" : "coordinator" }, recipient: { role }, type: role === "coordinator" ? "delegation.request" : "task.assignment",
+      payload: {}, artifact_references: [], idempotency_key: "agy-fixture" });
+    await writeFile(transcriptPath, JSON.stringify({ step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE",
+      created_at: new Date().toISOString(), content: `<USER_REQUEST>\n${prompt}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nfixture\n</ADDITIONAL_METADATA>` }) + "\n", { mode: 0o644 });
+  }
   const server = createServer(socket => {
     let input = "";
     socket.on("data", chunk => {
@@ -31,10 +61,20 @@ async function fixture(role = "conversation", provider = "codex", replies: Recor
   cleanup.push(() => new Promise<void>(accept => server.close(() => accept())));
   const path = join(root, "role.json");
   await writeFile(path, JSON.stringify({ socketPath, token: "role-token", role, provider, sessionId: "session", herdrBinary: "unused" }), { mode: 0o600 });
-  return { calls, invoke: async (event: string, input: string) => {
+  return { calls, herdrCalls, nativeSessionId, transcriptPath, agyHome,
+    planTool: async (toolCall: Record<string, unknown>, stepIndex = 1) => writeFile(transcriptPath,
+      JSON.stringify({ step_index: stepIndex, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", tool_calls: [toolCall] }) + "\n", { flag: "a" }),
+    agyInput: (extra: Record<string, unknown> = {}) => JSON.stringify({ ...extra, conversationId: nativeSessionId, workspacePaths: ["/workspace"], transcriptPath }),
+    invoke: async (event: string, input: string, environment: Record<string, string> = {}) => {
+    if (provider === "agy") {
+      let extra: Record<string, unknown> = {};
+      try { extra = JSON.parse(input) as Record<string, unknown>; } catch { /* malformed hook input remains malformed */ }
+      if (Object.keys(extra).length > 0) input = JSON.stringify({ ...extra, conversationId: nativeSessionId, workspacePaths: ["/workspace"], transcriptPath });
+    }
     const child = spawn(process.execPath, [fileURLToPath(new URL("../../dist/agentic/host.js", import.meta.url)), "hook", path, event], {
       env: { ...process.env, HERDR_PANE_ID: "pane-1", HERDR_SOCKET_PATH: "", BFLOW_ENVIRONMENT_ID: "env-test",
-        ...(provider === "agy" ? { BFLOW_LAUNCH_ID: "launch-agy-1" } : { BFLOW_LAUNCH_ID: undefined }) },
+        ...(provider === "agy" ? { HOME: agyHome, HERDR_SOCKET_PATH: herdrSocketPath } : {}),
+        ...(provider === "agy" ? { BFLOW_LAUNCH_ID: "launch-agy-1" } : { BFLOW_LAUNCH_ID: undefined }), ...environment },
       stdio: ["pipe", "pipe", "pipe"]
     });
     let stdout = "", stderr = "";
@@ -92,58 +132,111 @@ describe.skipIf(process.platform === "win32")("provider hook ingress", () => {
 
   it("registers an Agy native conversationId as the current Herdr session", async () => {
     const f = await fixture("developer", "agy");
-    const result = await f.invoke("SessionStart", JSON.stringify({
-      conversationId: "agy-native-1", workspacePaths: ["/workspace"],
-      transcriptPath: "/tmp/private/transcript.jsonl", artifactDirectoryPath: "/tmp/private/artifacts", modelName: "test"
-    }));
+    const result = await f.invoke("SessionStart", f.agyInput({ artifactDirectoryPath: "/tmp/private/artifacts", modelName: "test" }));
     expect(result.code).toBe(0);
     expect(f.calls.map(call => call.method)).toEqual(["provider_started", "native_session"]);
-    expect(f.calls[0]?.params).toEqual({ paneId: "pane-1", nativeSessionId: "agy-native-1" });
+    expect(f.calls[0]?.params).toEqual({ paneId: "pane-1", nativeSessionId: f.nativeSessionId });
+    expect(f.herdrCalls).toEqual([expect.objectContaining({ method: "pane.report_agent_session", params: expect.objectContaining({
+      pane_id: "pane-1", source: "herdr:antigravity_cli", agent: "agy", agent_session_id: f.nativeSessionId, agent_session_path: f.transcriptPath
+    }) })]);
+  });
+
+  it("forwards native Agy PreInvocation metadata for independent host transcript admission", async () => {
+    const f = await fixture("developer", "agy");
+    const result = await f.invoke("PreInvocation", f.agyInput({ invocationNum: 0, initialNumSteps: 3 }));
+    expect(result.code).toBe(0);
+    expect(f.calls).toEqual([expect.objectContaining({ method: "agy_native_turn", params: expect.objectContaining({
+      paneId: "pane-1", nativeSessionId: f.nativeSessionId, launchId: "launch-agy-1", transcriptPath: f.transcriptPath,
+      anchor: expect.objectContaining({ transcriptPath: f.transcriptPath, stepIndex: 0, rowDigest: expect.stringMatching(/^[a-f0-9]{64}$/), prefixDigest: expect.stringMatching(/^[a-f0-9]{64}$/) })
+    }) })]);
+    expect(JSON.parse(result.stdout)).toEqual({});
+  });
+
+  it("does not admit an Agy turn when the host refuses its native transcript", async () => {
+    const f = await fixture("developer", "agy", { agy_native_turn: new Error("unpinned envelope") });
+    const result = await f.invoke("PreInvocation", f.agyInput({ invocationNum: 0, initialNumSteps: 3 }));
+    expect(JSON.parse(result.stdout)).toMatchObject({ injectSteps: expect.any(Array) });
+    expect(result.stderr).toContain("unresolved");
   });
 
   it("translates Agy call_mcp_tool into a current-session tool guard and native allow result", async () => {
     const f = await fixture("developer", "agy");
-    const result = await f.invoke("PreToolUse", JSON.stringify({
-      conversationId: "agy-native-1", workspacePaths: ["/workspace"], transcriptPath: "/tmp/private/transcript.jsonl",
-      artifactDirectoryPath: "/tmp/private/artifacts", modelName: "test", stepIdx: 1,
+    await f.planTool({ name: "call_mcp_tool", args: { ServerName: "bflow", ToolName: "assignment_context", Arguments: {} } });
+    const result = await f.invoke("PreToolUse", f.agyInput({ artifactDirectoryPath: "/tmp/private/artifacts", modelName: "test", stepIdx: 2,
       toolCall: { name: "call_mcp_tool", args: { ServerName: "bflow", ToolName: "assignment_context", Arguments: {} } }
     }));
     expect(result.code).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({ decision: "allow", reason: "Bflow tool guard permitted the call" });
     expect(f.calls).toEqual([expect.objectContaining({ method: "tool_guard", params: expect.objectContaining({
-      paneId: "pane-1", hook: expect.objectContaining({ hook_event_name: "PreToolUse", session_id: "agy-native-1", tool_name: "mcp__bflow__assignment_context" })
+      paneId: "pane-1", hook: expect.objectContaining({ hook_event_name: "PreToolUse", session_id: f.nativeSessionId, tool_name: "mcp__bflow__assignment_context",
+        native_anchor: expect.objectContaining({ transcriptPath: f.transcriptPath, stepIndex: 0 }), native_step_index: 2,
+        native_tool_call: { name: "call_mcp_tool", args: { ServerName: "bflow", ToolName: "assignment_context", Arguments: {} } } })
     }) })]);
   });
 
   it("denies unknown Agy tool names before they reach Runtime", async () => {
     const f = await fixture("developer", "agy");
-    const result = await f.invoke("PreToolUse", JSON.stringify({ conversationId: "agy-native-1", workspacePaths: ["/workspace"],
-      transcriptPath: "/tmp/private/transcript.jsonl", artifactDirectoryPath: "/tmp/private/artifacts", modelName: "test", stepIdx: 1,
+    const result = await f.invoke("PreToolUse", f.agyInput({ artifactDirectoryPath: "/tmp/private/artifacts", modelName: "test", stepIdx: 1,
       toolCall: { name: "run_command", args: { CommandLine: "touch /tmp/forbidden" } } }));
     expect(result.code).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({ decision: "deny" });
     expect(f.calls).toEqual([]);
   });
 
-  it("keeps user decision authority with Coordinator for Agy Bflow MCP calls", async () => {
+  it("routes an Agy Developer user-decision request through the existing authenticated Runtime guard", async () => {
     const f = await fixture("developer", "agy");
-    const result = await f.invoke("PreToolUse", JSON.stringify({ conversationId: "agy-native-1", workspacePaths: ["/workspace"],
-      transcriptPath: "/tmp/private/transcript.jsonl", artifactDirectoryPath: "/tmp/private/artifacts", modelName: "test", stepIdx: 1,
+    await f.planTool({ name: "call_mcp_tool", args: { ServerName: "bflow", ToolName: "request_user_decision", Arguments: { question: "Approve?" } } });
+    const result = await f.invoke("PreToolUse", f.agyInput({ artifactDirectoryPath: "/tmp/private/artifacts", modelName: "test", stepIdx: 2,
       toolCall: { name: "call_mcp_tool", args: { ServerName: "bflow", ToolName: "request_user_decision", Arguments: { question: "Approve?" } } } }));
     expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject({ decision: "deny" });
+    expect(JSON.parse(result.stdout)).toMatchObject({ decision: "allow" });
+    expect(f.calls.map(call => call.method)).toEqual(["tool_guard"]);
+  });
+
+  it.each(["bflow", "gateway-probe"])("denies an old raw Agy tool event after a newer input for %s", async serverName => {
+    const f = await fixture("developer", "agy");
+    const toolCall = { name: "call_mcp_tool", args: { ServerName: serverName, ToolName: "assignment_context", Arguments: {} } };
+    await f.planTool(toolCall);
+    const environment = { BFLOW_MCP_TOKEN_TEST: "test-only-token" };
+    if (serverName !== "bflow") {
+      const config = join(f.agyHome, ".gemini", "config");
+      await mkdir(config, { recursive: true, mode: 0o700 });
+      await writeFile(join(config, "mcp_config.json"), JSON.stringify({ mcpServers: { [serverName]: { command: process.execPath,
+        args: ["/test/agy-stdio-http-cli.js", "https://test.invalid/mcp", serverName, "BFLOW_MCP_TOKEN_TEST"] } } }), { mode: 0o600 });
+    }
+    const raw = f.agyInput({ stepIdx: 2, toolCall });
+    expect(JSON.parse((await f.invoke("PreToolUse", raw, environment)).stdout)).toMatchObject({ decision: "allow" });
+    const request = { schema_version: 2, message_id: "new-turn", correlation_id: "corr", sender: { role: "coordinator" }, recipient: { role: "developer" }, type: "task.assignment", payload: {}, artifact_references: [] };
+    await writeFile(f.transcriptPath, JSON.stringify({ step_index: 10, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE",
+      content: `<USER_REQUEST>\n${JSON.stringify(request)}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nfixture\n</ADDITIONAL_METADATA>` }) + "\n", { flag: "a" });
+    await f.planTool(toolCall, 11);
+    expect(JSON.parse((await f.invoke("PreToolUse", raw, environment)).stdout)).toMatchObject({ decision: "deny" });
+    expect(f.calls).toHaveLength(1);
+    expect(JSON.parse((await f.invoke("PreToolUse", f.agyInput({ stepIdx: 12, toolCall }), environment)).stdout)).toMatchObject({ decision: "allow" });
+    expect(f.calls).toHaveLength(2);
+  });
+
+  it("preserves unresolved Agy work when Stop has no trustworthy native turn epoch", async () => {
+    const f = await fixture("developer", "agy");
+    const result = await f.invoke("Stop", f.agyInput({ executionNum: 1, terminationReason: "NO_TOOL_CALL", fullyIdle: true, modelName: "test" }));
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ decision: "stop" });
+    expect(result.stderr).toMatch(/native.*epoch.*unproven/i);
     expect(f.calls).toEqual([]);
   });
 
-  it("binds Agy Stop to its native conversationId and reports the stop to Runtime", async () => {
-    const f = await fixture("developer", "agy");
-    const result = await f.invoke("Stop", JSON.stringify({ conversationId: "agy-native-1", executionNum: 1,
-      terminationReason: "NO_TOOL_CALL", fullyIdle: true, workspacePaths: ["/workspace"], modelName: "test" }));
-    expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ decision: "stop" });
-    expect(f.calls).toEqual([expect.objectContaining({ method: "provider_stopped", params: {
-      paneId: "pane-1", nativeSessionId: "agy-native-1", launchId: "launch-agy-1", executionNum: 1
-    } })]);
+  it("never relabels an old raw Agy Stop as a newer explicit transcript turn", async () => {
+    const f = await fixture("coordinator", "agy");
+    const oldStop = f.agyInput({ executionNum: 0, terminationReason: "NO_TOOL_CALL", fullyIdle: true });
+    await f.invoke("Stop", oldStop);
+    const next = JSON.stringify({ schema_version: 2, message_id: "turn-b", correlation_id: "corr", run_id: "run",
+      sender: { role: "conversation" }, recipient: { role: "coordinator" }, type: "delegation.request", payload: {}, artifact_references: [] });
+    await writeFile(f.transcriptPath, JSON.stringify({ step_index: 10, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE",
+      content: `<USER_REQUEST>\n${next}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nfixture\n</ADDITIONAL_METADATA>` }) + "\n", { flag: "a" });
+    const replay = await f.invoke("Stop", oldStop);
+    expect(replay.code).toBe(0);
+    expect(JSON.parse(replay.stdout)).toEqual({ decision: "stop" });
+    expect(f.calls).toEqual([]);
   });
   it("refuses ambiguous hook objects instead of choosing a human prompt", async () => {
     const f = await fixture();

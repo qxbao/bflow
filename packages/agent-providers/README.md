@@ -69,16 +69,24 @@ Agy sinh cấu hình native trong HOME riêng của role: MCP tại
 `.gemini/antigravity-cli/settings.json` và named hooks tại
 `.gemini/config/hooks.json`. Gateway HTTP dùng stdio shim đọc token từ biến môi
 trường, không dựa vào `--mcp-config` hoặc nội suy header của Agy.
-Khả năng chuẩn bị launch này chưa chứng nhận `bflow up`: preflight vẫn báo
-`native_binding_unsupported` cho tới khi binding Agy/Herdr được xác minh;
-Conversation báo `agy_human_ingress_unsupported` vì thiếu nguồn user input được
-chứng thực. Unattended vẫn unsupported. Không tự đổi provider hoặc bỏ gate.
+Adapter hỗ trợ xác minh signed native-session attestation của Agy/Herdr ở mức
+source và local tests. Activation còn đọc lại onboarding trong HOME của launch:
+receipt thiếu, không hợp lệ hoặc chưa hoàn tất báo `agy_onboarding_incomplete`.
+Receipt đã copy và Herdr `idle` không chứng minh provider đã sẵn sàng.
+Conversation vẫn unsupported vì thiếu trusted `UserPromptSubmit`; unattended vẫn
+unsupported. Đã có bằng chứng spike chỉ đọc chạy thật qua Codex Conversation,
+Agy Coordinator và Agy Architect: Runtime nhận phản hồi có correlation/causation
+khớp và Conversation hiển thị kết quả. Chưa có acceptance Developer Agy hoặc full SDLC.
+Runtime không settle Agy Stop khi chưa chứng minh được epoch của turn gốc.
+Một envelope mới được Runtime xác thực trên cùng launch/transcript có thể thay
+quyền tool của turn cũ; việc này không xác nhận kết quả, giải phóng lease hay
+hoàn tất công việc cũ. Không tự đổi provider hoặc bỏ gate.
 
 | Provider | Executable | Phiên bản cài đặt / mục tiêu | Capabilities | MCP Transports | Hỗ trợ Unattended | Native Attestation |
 | --- | --- | --- | --- | --- | --- | --- |
 | **Claude Code** (`claude`) | `claude` | 2.1.301 | Implementation, Review, Conversation | stdio, streamable_http | Có (với OS sandbox / bwrap) | Có |
 | **Codex CLI** (`codex`) | `codex` | 0.162.0 | Implementation, Review, Testing | stdio, streamable_http | Có (với OS sandbox / bwrap) | Có |
-| **Antigravity CLI** (`agy`) | `agy` | 1.4.0 | Implementation, Review | stdio, streamable_http qua shim | Không (chưa chứng nhận) | Không (chưa chứng nhận) |
+| **Antigravity CLI** (`agy`) | `agy` | 1.4.0 | Implementation, Review | stdio, streamable_http qua shim | Không (chưa chứng nhận) | Source/local tests; chưa có native workflow acceptance |
 
 ---
 
@@ -240,7 +248,7 @@ Dạng MCP và hooks được render:
 - Claude: `{"mcpServers":{"bflow":{"command":"<abs>","args":[...]},"gateway-dev":{"type":"http","url":"<endpoint>","headers":{"Authorization":"Bearer ${BFLOW_GATEWAY_TOKEN}"}}}}`. Claude expand `${VAR}` lúc launch.
 - Codex: cùng file đó được chuyển thành `-c mcp_servers={"bflow"={"command"=...,"args"=[...]},"gateway-dev"={"url"="<endpoint>","bearer_token_env_var"="BFLOW_GATEWAY_TOKEN"}}`.
 - Hooks (settings của Claude và `-c hooks=` của Codex): `{"<Event>":[{"hooks":[{"type":"command","command":"<cmd>","timeout":30}]}]}`.
-- Agy: native `.gemini/config/mcp_config.json` trong HOME riêng chứa host stdio server và stdio shim cho Gateway HTTP. Token chỉ được đọc từ môi trường lúc shim chạy; không dùng `--mcp-config` hay nội suy header `${VAR}`. Native `hooks.json` có `SessionStart`, `Stop` và `PreToolUse`; không có trusted `UserPromptSubmit`.
+- Agy: native `.gemini/config/mcp_config.json` trong HOME riêng chứa host stdio server và stdio shim cho Gateway HTTP. Token chỉ được đọc từ môi trường lúc shim chạy; không dùng `--mcp-config` hay nội suy header `${VAR}`. Native `hooks.json` có `SessionStart`, `PreInvocation`, `Stop` và `PreToolUse`; không có trusted `UserPromptSubmit`. Stop cho phép kết thúc physical turn nhưng không settle công việc Runtime vì native event chưa có epoch đáng tin cậy.
 
 Quy tắc fail-closed:
 
@@ -248,7 +256,7 @@ Quy tắc fail-closed:
 - Một registration hoặc host server trùng tên với cái khác → `validation`.
 - Agy được yêu cầu cung cấp `UserPromptSubmit` → `validation` từ `prepareLaunch`; `unsupported` từ `checkHealth`.
 - Agy registration `streamable_http` thiếu shim hợp lệ → `validation` từ `prepareLaunch`; `unsupported` từ `checkHealth`.
-- Agy vẫn bị chặn ở preflight khi native binding chưa được chứng nhận; tạo được native config không chứng minh role có thể chạy workflow.
+- Activation Agy thiếu completed onboarding trong HOME thực tế của launch → `agy_onboarding_incomplete`; tạo được native config hoặc native session không chứng minh role có thể chạy workflow.
 
 Process được launch phải nhận mỗi token trong biến môi trường có tên ghi trong config. Adapter không inject nó: `buildProviderEnvironment` chỉ dựng các biến Bflow cố định cộng `environmentVariables`, và các key `BFLOW_*` bị từ chối ở đó. Runtime integrator cung cấp giá trị token qua môi trường của pane.
 

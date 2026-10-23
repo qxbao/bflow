@@ -23,6 +23,27 @@ trước khi lấy lease hoặc gọi transport nếu platform binding chưa có
 chấp nhận mà thiếu session từ bản cũ vẫn bất biến và không được tự gắn session hay gửi lại;
 trường hợp đó cần đối soát riêng, không phải bằng chứng tác vụ hoàn tất.
 
+Agy specialist nhận envelope từ transcript native theo launch, pane/session và
+prefix đã ghim. Lời gọi MCP giữ anchor và đúng vị trí tool trong planner qua cả
+hook lẫn host; sự kiện cũ không được gắn sang turn mới. Raw Stop vẫn không chứng
+minh turn/task thành công. Turn mới được Runtime cho phép chỉ thay quyền thao tác
+của turn cũ, không discharge kết quả hoặc phê duyệt. Host đưa schema MCP trực tiếp
+vào prompt Agy vì native file/shell vẫn bị từ chối. Output lớn bị Agy lưu thành file
+có thể cần truy vấn lại bằng tool với giới hạn nhỏ; native đọc các file này chưa được cấp.
+
+Developer có `read_workspace_file` và `write_workspace_file` để thao tác UTF-8
+trong ownership của task dưới lease/fencing và TDD hiện tại. Ghi đè cần SHA-256 đã
+đọc; tạo file cần `expectedSha256: null`, parent đã tồn tại. Giới hạn 128 KiB và
+Linux descriptor-relative traversal từ chối symlink, hardlink, special file và
+workspace read-only. Không hỗ trợ tạo thư mục, ghi binary, crash-atomic replacement
+hoặc cô lập process cùng UID thù địch. Các test cục bộ không chứng minh Developer
+Agy thực hiện được toàn bộ SDLC trên provider thật.
+
+Spike chỉ đọc đã được kiểm chứng với Codex Conversation và Agy Coordinator/Architect:
+giao việc thực tế, đọc nguồn qua MCP, signed reply được Runtime áp dụng đúng
+correlation/causation và kết quả quay về Conversation. Launch cũ bị host đang chạy
+từ chối. Bằng chứng này không phải acceptance cho Developer Agy hoặc workflow SDLC đầy đủ.
+
 Các đầu vào host bắt buộc là tường minh: định danh repository/session, role capability,
 định nghĩa check của task/workflow, deterministic gate runner, ingress thông điệp/result/evidence
 Herdr có xác thực và phê duyệt của con người có xác thực. Không có

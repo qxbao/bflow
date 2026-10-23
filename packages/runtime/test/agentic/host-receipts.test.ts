@@ -3,13 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { connect } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApprovalDecisionSchema, PaneBindingSchema, QualityGateContextSchema, QualityGateResultSchema, RoleMessageSchema, VerificationResultSchema, canonicalReceiptJson } from "@bflow/contracts";
 import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 import { HostReceiptJournal, type HumanHookProvenance } from "../../src/agentic/host-receipts.js";
 import { digest, json } from "../../src/agentic/journal.js";
 import { startHerdrReceiptIngress, authenticateNativeHerdrMessage } from "../../src/agentic/herdr-ingress.js";
 import { createSignedBindingReceipt } from "../../src/agentic/receipt-host.js";
+import type { AgyNativeAnchor } from "../../src/agentic/agy-native-transcript.js";
 
 const cleanup: string[] = [];
 afterEach(async () => { for (const path of cleanup.splice(0)) await rm(path, { recursive: true, force: true }); });
@@ -29,6 +30,95 @@ async function fixture() {
   return { root, directory, journal, decision, provenance, at, binding, reopen: () => new HostReceiptJournal(directory, root, "herdr-session") };
 }
 describe("private durable host authentication receipts", () => {
+  it("supersedes only the expected prior native authority without fabricating Stop or losing unhandled ingress", async () => {
+    const f = await fixture();
+    const binding = PaneBindingSchema.parse({ ...f.binding, role: "architect", agentId: "architect", paneId: "agy-pane", agentKind: "agy", provider: "herdr",
+      session: { source: "herdr:antigravity_cli", kind: "id", value: "agy-native-session" } });
+    const message = RoleMessageSchema.parse({ schema_version: 2, message_id: "assignment-a", correlation_id: "corr", run_id: "run",
+      sender: { role: "coordinator" }, recipient: { role: "architect" }, type: "delegation.request", payload: {}, artifact_references: [], idempotency_key: "a" });
+    const anchor: AgyNativeAnchor = { transcriptPath: `${f.root}/native.jsonl`, device: "7", inode: "11", stepIndex: 0, rowDigest: "a".repeat(64), prefixDigest: "b".repeat(64) };
+    const first = await f.journal.recordAgyNativeTurn(binding, "launch", anchor, message);
+    const nextAnchor = { ...anchor, stepIndex: 10, rowDigest: "c".repeat(64), prefixDigest: "d".repeat(64) };
+    const nextMessage = { ...message, message_id: "assignment-b", idempotency_key: "b" };
+    await expect(f.journal.recordAgyNativeTurn(binding, "launch", nextAnchor, nextMessage, { supersedesTurnId: "0".repeat(64) })).rejects.toThrow();
+    const second = await f.journal.recordAgyNativeTurn(binding, "launch", nextAnchor, nextMessage, { supersedesTurnId: first.turnId });
+    await expect(f.journal.assertAgyNativeTurn(binding, "launch", anchor)).rejects.toThrow();
+    await expect(f.journal.recordAgyNativeTurn(binding, "launch", anchor, message)).rejects.toThrow(/superseded/i);
+    expect((await f.reopen().assertAgyNativeTurn(binding, "launch", nextAnchor)).turnId).toBe(second.turnId);
+    expect((await f.reopen().recoverAgyNativeTurns()).map(turn => turn.message.message_id)).toEqual(["assignment-a", "assignment-b"]);
+    expect((await f.reopen().latestAgyNativeTurn(binding, "launch"))?.stoppedAt).toBeUndefined();
+    expect((await readdir(f.directory)).filter(name => name.startsWith("specialist-stop-") || name.startsWith("agy-native-turn-stop-"))).toEqual([]);
+    const marker = (await readdir(f.directory)).find(name => name.startsWith("agy-native-turn-superseded-"));
+    expect(marker).toBeDefined();
+    await rm(join(f.directory, marker!)); // crash after durable successor, before redundant supersession bookkeeping
+    expect((await f.reopen().assertAgyNativeTurn(binding, "launch", nextAnchor)).turnId).toBe(second.turnId);
+    expect((await readdir(f.directory)).filter(name => name.startsWith("agy-native-turn-superseded-"))).toHaveLength(1);
+  });
+
+  it("admits and stops only exact monotonic Agy native transcript turns", async () => {
+    const f = await fixture();
+    const binding = PaneBindingSchema.parse({ ...f.binding, bindingId: "agy-binding", role: "developer", agentId: "agy-dev",
+      paneId: "agy-pane", provider: "herdr", agentKind: "agy", readOnlyWorkspace: false,
+      session: { source: "herdr:agy", kind: "id", value: "agy-native-session" } });
+    const message = RoleMessageSchema.parse({ schema_version: 2, message_id: "agy-assignment", correlation_id: "corr-1", run_id: "run-1",
+      sender: { role: "coordinator" }, recipient: { role: "developer", pane_id: binding.paneId, agent_id: binding.agentId },
+      type: "task.assignment", payload: { assignment: { assignmentId: "assignment-1" }, context: { task: "exact task" } },
+      artifact_references: [], occurred_at: f.at, idempotency_key: "assignment-key" });
+    const anchor: AgyNativeAnchor = { transcriptPath: `${f.root}/private/transcript.jsonl`, device: "7", inode: "11", stepIndex: 4,
+      rowDigest: "a".repeat(64), prefixDigest: "b".repeat(64) };
+    const record = (f.journal as any).recordAgyNativeTurn.bind(f.journal);
+    const assert = (f.journal as any).assertAgyNativeTurn.bind(f.journal);
+    const stop = (f.journal as any).stopAgyNativeTurn.bind(f.journal);
+    const first = await record(binding, "launch-1", anchor, message);
+    expect(first).toMatchObject({ turnId: expect.any(String), binding, launchId: "launch-1", anchor, message, duplicate: false });
+    expect(await record(binding, "launch-1", anchor, message)).toEqual({ ...first, duplicate: true });
+    expect(await assert(binding, "launch-1", anchor)).toMatchObject({ turnId: first.turnId, binding, launchId: "launch-1", anchor, message });
+    expect(await (f.reopen() as any).latestAgyNativeTurn(binding, "launch-1")).toMatchObject({ turnId: first.turnId, binding, launchId: "launch-1", anchor, message });
+    await expect(record(binding, "launch-1", { ...anchor, stepIndex: 5, rowDigest: "e".repeat(64), prefixDigest: "f".repeat(64) },
+      { ...message, message_id: "next-active", idempotency_key: "next-active" })).rejects.toThrow("previous Agy native turn has not stopped");
+    await expect(record(binding, "launch-1", anchor, { ...message, message_id: "different", idempotency_key: "different" })).rejects.toThrow();
+    await expect(record(binding, "launch-1", { ...anchor, inode: "12", stepIndex: 5 }, message)).rejects.toThrow();
+    await expect(record(binding, "launch-1", { ...anchor, stepIndex: 3 }, message)).rejects.toThrow();
+    await expect(assert(binding, "other-launch", anchor)).rejects.toThrow();
+    expect(await stop(binding, "launch-1", { ...anchor, stepIndex: 3 })).toBeUndefined();
+    const stopped = await stop(binding, "launch-1", anchor);
+    expect(stopped).toMatchObject({ turnId: first.turnId, binding, launchId: "launch-1", anchor, message, stoppedAt: expect.any(String) });
+    expect((await (f.reopen() as any).latestAgyNativeTurn(binding, "launch-1"))).toMatchObject({ turnId: first.turnId, stoppedAt: expect.any(String) });
+    await expect(assert(binding, "launch-1", anchor)).rejects.toThrow();
+    await expect(record(binding, "launch-1", anchor, message)).rejects.toThrow();
+    const nextAnchor = { ...anchor, stepIndex: 8, rowDigest: "c".repeat(64), prefixDigest: "d".repeat(64) };
+    await expect(record(binding, "launch-1", nextAnchor, message)).rejects.toThrow("Agy envelope message was already admitted at another native step");
+    expect(await record(binding, "launch-1", nextAnchor, { ...message, message_id: "next", idempotency_key: "next" })).toMatchObject({ duplicate: false });
+  });
+  it("recovers durable Agy prompt and Stop obligations across interrupted host writes", async () => {
+    const f = await fixture();
+    const binding = PaneBindingSchema.parse({ ...f.binding, role: "coordinator", agentId: "coordinator", paneId: "agy-pane", agentKind: "agy",
+      session: { source: "herdr:antigravity_cli", kind: "id", value: "native-agy" } });
+    const message = RoleMessageSchema.parse({ schema_version: 2, message_id: "agy-recover", correlation_id: "corr", run_id: "run",
+      sender: { role: "conversation" }, recipient: { role: "coordinator" }, type: "delegation.request", payload: {}, artifact_references: [], idempotency_key: "agy-recover" });
+    const anchor: AgyNativeAnchor = { transcriptPath: `${f.root}/transcript`, device: "7", inode: "11", stepIndex: 4,
+      rowDigest: "a".repeat(64), prefixDigest: "b".repeat(64) };
+    const fail = vi.spyOn(f.journal, "startCoordinatorTurn").mockRejectedValueOnce(new Error("interrupted after native receipt"));
+    await expect(f.journal.recordAgyNativeTurn(binding, "launch", anchor, message)).rejects.toThrow("interrupted");
+    fail.mockRestore();
+    const reopened = f.reopen();
+    const pending = await reopened.recoverAgyNativeTurns();
+    expect(pending).toMatchObject([{ message, binding, anchor }]);
+    const turn = pending[0]!;
+    await reopened.markAgyNativePromptHandled(turn.turnId);
+    expect(await f.reopen().recoverAgyNativeTurns()).toEqual([]);
+    const failStop = vi.spyOn(reopened, "stopCoordinatorTurn").mockRejectedValueOnce(new Error("interrupted after native stop"));
+    await expect(reopened.stopAgyNativeTurn(binding, "launch", anchor)).rejects.toThrow("interrupted");
+    failStop.mockRestore();
+    await f.reopen().recoverAgyNativeTurns();
+    expect((await f.reopen().pendingCoordinatorStops()).map(item => item.message.message_id)).toEqual([message.message_id]);
+  });
+  it("links specialist Stop records to their source message when supplied", async () => {
+    const f = await fixture();
+    const binding = { ...f.binding, role: "developer" as const };
+    const stopId = await (f.journal as any).recordSpecialistStop(binding, "source-message");
+    expect(await f.reopen().pendingSpecialistStops()).toMatchObject([{ stopId, sourceMessageId: "source-message" }]);
+  });
   it("restores the exact human decision and refuses altered identity, target, revision, feedback and status", async () => {
     const f = await fixture();
     expect(await f.journal.authenticateHuman(f.decision)).toBe(false);
@@ -185,6 +275,16 @@ describe("private durable host authentication receipts", () => {
 });
 
 describe("durable Coordinator turn observations", () => {
+  it("settles the exact old Coordinator turn when a newer native turn starts concurrently", async () => {
+    const f = await fixture();
+    const binding = { ...f.binding, role: "coordinator" as const, agentId: "coordinator", paneId: "coordinator-pane" };
+    const message = RoleMessageSchema.parse({ schema_version: 2, message_id: "old", correlation_id: "corr", run_id: "run",
+      sender: { role: "conversation" }, recipient: { role: "coordinator" }, type: "delegation.request", payload: {}, artifact_references: [], idempotency_key: "old" });
+    await f.journal.startCoordinatorTurn(binding, message);
+    await f.journal.startCoordinatorTurn(binding, { ...message, message_id: "new", idempotency_key: "new" });
+    await f.journal.stopCoordinatorTurn(binding, message.message_id);
+    expect((await f.reopen().pendingCoordinatorStops()).map(item => item.message.message_id)).toEqual(["old"]);
+  });
   it("recovers handled stops without mistaking their acknowledgements for stop observations", async () => {
     const f = await fixture();
     const binding = { ...f.binding, role: "coordinator" as const, agentId: "coordinator", paneId: "coordinator-pane" };

@@ -156,6 +156,11 @@ function prepared(role: AgentRole, provider: "claude" | "codex" | "agy", launchI
     launch: { argv: ["--kind-independent", `--provider=${provider}`], env: { BFLOW_MCP_TOKEN_CHAT: token }, launchId, launchFingerprint: "a".repeat(64) }
   } as unknown as PreparedRoleLaunch;
 }
+function preparedAgy(role: AgentRole, launchId: string, home: string, provider: "claude" | "codex" | "agy" = "agy"): PreparedRoleLaunch {
+  return { ...prepared(role, provider, launchId), profile: { configFiles: [
+    { path: join(home, ".gemini", "config", "mcp_config.json"), digest: "c".repeat(64) }
+  ] } as unknown as PreparedRoleLaunch["profile"] };
+}
 function failure(code: ContractError["code"], message: string, details?: Record<string, unknown>): OperationResult<never> {
   return { ok: false, error: { code, retryable: false, message, ...(details ? { details } : {}) } as ContractError };
 }
@@ -232,6 +237,64 @@ async function session(service: PlatformReadinessService, extra: Partial<{ gener
 }
 
 describe("P30 host platform composition", () => {
+  it("returns only the active Agy launch home bound to its exact role and launch id", async () => {
+    const permanentHome = "/private/agy/permanent";
+    const developerHome = "/private/agy/developer";
+    const service = fakeService({
+      prepareSession: async () => ({ ok: true, value: {
+        report: { ready: true, generation: 1, roles: [], checkedAt: at },
+        launches: [preparedAgy("conversation", "agy-conversation", permanentHome), preparedAgy("coordinator", "agy-coordinator", "/private/agy/coord")]
+      } }),
+      prepareDeveloper: async () => ({ ok: true, value: preparedAgy("developer", "agy-developer", developerHome) })
+    });
+    const { host } = await session(service);
+    await host.prepare();
+
+    expect(host.nativeAgyLaunch("conversation", "agy-conversation")).toEqual({ home: permanentHome, launchId: "agy-conversation" });
+    expect(host.nativeAgyLaunch("conversation", "stale-launch")).toBeUndefined();
+    expect(host.nativeAgyLaunch("coordinator", "agy-conversation")).toBeUndefined();
+    expect(host.nativeAgyLaunch("developer", "agy-developer")).toBeUndefined();
+
+    await host.allocateDeveloper("task-1", "/worktrees/task-1");
+    expect(host.nativeAgyLaunch("developer", "agy-developer")).toEqual({ home: developerHome, launchId: "agy-developer" });
+    expect(host.nativeAgyLaunch("conversation", "agy-developer")).toBeUndefined();
+    await host.releaseDeveloper("task-1");
+    expect(host.nativeAgyLaunch("developer", "agy-developer")).toBeUndefined();
+  });
+
+  it("does not expose non-Agy homes and clears Agy homes on shutdown", async () => {
+    const agyHome = "/private/agy/coordinator";
+    const service = fakeService({
+      prepareSession: async () => ({ ok: true, value: {
+        report: { ready: true, generation: 1, roles: [], checkedAt: at },
+        launches: [preparedAgy("conversation", "codex-conversation", "/private/codex/conversation", "codex"),
+          preparedAgy("coordinator", "agy-coordinator", agyHome)]
+      } })
+    });
+    const { host } = await session(service);
+    await host.prepare();
+    expect(host.nativeAgyLaunch("conversation", "codex-conversation")).toBeUndefined();
+    expect(host.nativeAgyLaunch("coordinator", "agy-coordinator")).toEqual({ home: agyHome, launchId: "agy-coordinator" });
+    await host.shutdown();
+    expect(host.nativeAgyLaunch("coordinator", "agy-coordinator")).toBeUndefined();
+  });
+
+  it("drops stale permanent launch bindings when the generation is prepared again", async () => {
+    let generation = 0;
+    const service = fakeService({ prepareSession: async () => {
+      generation++;
+      const launchId = `agy-conversation-${generation}`;
+      const home = `/private/agy/generation-${generation}`;
+      return { ok: true, value: { report: { ready: true, generation, roles: [], checkedAt: at }, launches: [preparedAgy("conversation", launchId, home)] } };
+    } });
+    const { host } = await session(service);
+    await host.prepare();
+    expect(host.nativeAgyLaunch("conversation", "agy-conversation-1")).toEqual({ home: "/private/agy/generation-1", launchId: "agy-conversation-1" });
+    await host.prepare();
+    expect(host.nativeAgyLaunch("conversation", "agy-conversation-1")).toBeUndefined();
+    expect(host.nativeAgyLaunch("conversation", "agy-conversation-2")).toEqual({ home: "/private/agy/generation-2", launchId: "agy-conversation-2" });
+  });
+
   it("resumes a pending generation with revalidated env-bearing launches and no new dispatch material", async () => {
     const rechecked: string[] = [];
     const service = fakeService({ revalidatePreparedLaunch: async launchId => {

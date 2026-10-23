@@ -1123,16 +1123,14 @@ describe("DefaultPlatformReadinessService", () => {
     expect(launch.environment.environmentVariables).not.toHaveProperty("XDG_CONFIG_HOME");
   });
 
-  it("blocks real Agy adapter preparation while native Herdr binding remains uncertified", async () => {
+  it("prepares native Agy specialist launch material through the real adapter", async () => {
     const { service } = buildService({ gateway: false });
     const result = await service.prepareSession(identity, [requirement({ provider: "agy" })]);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value.report.ready).toBe(false);
-    expect(result.value.launches).toEqual([]);
-    expect(result.value.report.roles[0]?.checks).toContainEqual(expect.objectContaining({
-      check: "native_binding", status: "failed", code: "native_binding_unsupported"
-    }));
+    expect(result.value.report.ready).toBe(true);
+    expect(result.value.launches).toHaveLength(1);
+    expect(result.value.report.roles[0]?.checks.some(check => check.code === "native_binding_unsupported")).toBe(false);
   });
 
   it("disables Claude updates for permanent and dynamic role processes", async () => {

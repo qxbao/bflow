@@ -1,6 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -592,11 +593,12 @@ describe("@bflow/agent-providers", () => {
       expect(calls.some(args => args.includes("o3-mini") && args.some(arg => arg.includes("model_reasoning_effort=\"high\"")))).toBe(true);
     });
 
-    it("Agy reports native binding unsupported at preflight and skips inference until Herdr identity is verified", async () => {
+    it("Agy specialist preflight supports native binding without requiring model inference", async () => {
       const runner = createFakeProviderRunner({ scenario: "healthy" });
       const run = vi.spyOn(runner, "run");
       const adapter = new AgyProviderAdapter({
         runner,
+        executionProbe: "disabled",
         executablePath: fakeBinaryPath,
         allowTestFilesystemOwnership: true
       });
@@ -611,8 +613,8 @@ describe("@bflow/agent-providers", () => {
 
       expect(healthResult.ok).toBe(true);
       if (healthResult.ok) {
-        expect(healthResult.value.status).toBe("unsupported");
-        expect(healthResult.value.checks.find(check => check.check === "native_binding")?.code).toBe("native_binding_unsupported");
+        expect(healthResult.value.status).toBe("ready");
+        expect(healthResult.value.checks.some(check => check.code === "native_binding_unsupported")).toBe(false);
         expect(healthResult.value.checks.some(check => check.check === "authentication" && check.status === "passed")).toBe(true);
       }
       expect(run.mock.calls.some(([invocation]) => invocation.args.includes("--print"))).toBe(false);
@@ -723,6 +725,14 @@ describe("@bflow/agent-providers", () => {
       expect(result.ok).toBe(true);
       expect(invocations.some(call => call.args.join(" ") === "auth status --json")).toBe(true);
       expect(invocations.every(call => call.env?.["DISABLE_AUTOUPDATER"] === "1")).toBe(true);
+    });
+    it("reports an Agy native catalog timeout as timeout rather than missing authentication", async () => {
+      const runner = createFakeProviderRunner({ customHandler: invocation => invocation.args.join(" ") === "models"
+        ? { exitCode: null, started: true, stdout: "", stderr: "", failure: "timeout" } : undefined });
+      const result = await new AgyProviderAdapter({ runner, executablePath: fakeBinaryPath, executionProbe: "disabled"
+      }).checkHealth({ schemaVersion: 3, environment: createTestEnvironment("agy"), stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(result.ok && result.value.checks.find(check => check.check === "authentication")).toMatchObject({
+        status: "failed", code: "timeout", message: expect.stringMatching(/timed out/i) });
     });
     it.each(["null", '{"authenticated":false}', "Error: credentials missing"])("rejects non-model Agy output: %s", async stdout => {
       const runner = createFakeProviderRunner({ customHandler: invocation => invocation.args.join(" ") === "models"
@@ -1247,12 +1257,14 @@ describe("@bflow/agent-providers", () => {
       }
     });
 
-    it("Agy uses native lowercase path and MCP permission rules and reports unsupported for unattended_isolated and activated", async () => {
+    it("Agy uses native lowercase path and MCP permission rules and requires signed native proof for activation and keeps unattended unsupported", async () => {
       const runner = createFakeProviderRunner({ scenario: "healthy" });
       const adapter = new AgyProviderAdapter({
         runner,
         executablePath: fakeBinaryPath,
-        allowTestFilesystemOwnership: true
+        allowTestFilesystemOwnership: true,
+        trustedIssuerKeys: { [testIssuerId]: testPublicKeyPem },
+        liveObservation: { paneId: "pane-agy-1", transportState: "idle", interactiveReady: true, nativeSession: { source: "herdr:antigravity_cli", kind: "id", value: "agy-sess-1" } }
       });
 
       const caps = await adapter.detectCapabilities();
@@ -1270,6 +1282,7 @@ describe("@bflow/agent-providers", () => {
 
         const settingsFileEntry = launchRes.value.configFiles.find((cf) => cf.path.endsWith("/.gemini/antigravity-cli/settings.json"));
         expect(settingsFileEntry).toBeDefined();
+        expect((await readFile(settingsFileEntry!.path, "utf8")).endsWith("\n")).toBe(true);
         const settingsJson = JSON.parse(await readFile(settingsFileEntry!.path, "utf8")) as {
           permissions?: { allow?: string[]; deny?: string[] };
           trustedWorkspaces?: string[];
@@ -1307,6 +1320,9 @@ describe("@bflow/agent-providers", () => {
       }
 
       const agyProfile = launchRes.value!;
+      const onboardingCache = join(testStateDir, "agy-home", wsEnv.role, ".gemini", "antigravity-cli", "cache");
+      await mkdir(onboardingCache, { recursive: true, mode: 0o700 });
+      await writeFile(join(onboardingCache, "onboarding.json"), '{"onboardingComplete":true}', { mode: 0o600 });
       const agyAttestation = createSignedLaunchAttestation({
         receiptId: "receipt-agy-1",
         issuerId: testIssuerId,
@@ -1315,7 +1331,7 @@ describe("@bflow/agent-providers", () => {
         sessionId: wsEnv.scope.sessionId,
         paneId: "pane-agy-1",
         nativeSession: {
-          source: "agy",
+          source: "herdr:antigravity_cli",
           kind: "id",
           value: "agy-sess-1"
         },
@@ -1333,11 +1349,51 @@ describe("@bflow/agent-providers", () => {
       });
       expect(activatedRes.ok).toBe(true);
       if (activatedRes.ok) {
-        expect(activatedRes.value.status).toBe("unsupported");
-        expect(activatedRes.value.checks.find((c) => c.check === "native_binding")?.code).toBe(
-          "native_binding_unsupported"
-        );
+        expect(activatedRes.value.status, JSON.stringify(activatedRes.value.checks)).toBe("ready");
+        expect(activatedRes.value.checks.find((c) => c.check === "native_binding")?.status).toBe("passed");
       }
+    });
+
+    it.each(["missing", "incomplete", "malformed", "symlink", "complete"])("checks actual private Agy onboarding before activated readiness: %s", async state => {
+      const environment = createTestEnvironment("agy", "workspace_auto", { stateDirectory: join(testStateDir, `onboarding-health-${state}`) });
+      await mkdir(environment.stateDirectory, { recursive: true, mode: 0o700 });
+      const nativeSession = { source: "herdr:antigravity_cli", kind: "id" as const, value: "native-onboarding-test" };
+      const adapter = new AgyProviderAdapter({ runner: createFakeProviderRunner({ scenario: "healthy" }), executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true, trustedIssuerKeys: { [testIssuerId]: testPublicKeyPem },
+        isolatorEnvironment: { HOME: environment.stateDirectory, PATH: process.env.PATH ?? "" },
+        liveObservation: { paneId: "onboarding-pane", transportState: "idle", interactiveReady: true, nativeSession } });
+      const launch = await adapter.prepareLaunch(environment);
+      expect(launch.ok).toBe(true); if (!launch.ok) return;
+      const cache = join(environment.stateDirectory, "agy-home", environment.role, ".gemini", "antigravity-cli", "cache");
+      await mkdir(cache, { recursive: true, mode: 0o700 });
+      const path = join(cache, "onboarding.json");
+      await rm(path, { force: true });
+      if (state === "symlink") {
+        const target = join(environment.stateDirectory, "foreign-onboarding.json");
+        await writeFile(target, '{"onboardingComplete":true}', { mode: 0o600 });
+        await symlink(target, path);
+      } else if (state !== "missing") await writeFile(path, state === "malformed" ? "{" : JSON.stringify({ onboardingComplete: state === "complete" }), { mode: 0o600 });
+      const attestation = createSignedLaunchAttestation({ receiptId: `receipt-onboarding-${state}`, issuerId: testIssuerId,
+        launchId: launch.value.launchId, launchFingerprint: launch.value.launchFingerprint, sessionId: environment.scope.sessionId,
+        paneId: "onboarding-pane", nativeSession, observedAt: new Date().toISOString(), privateKeyPem: testPrivateKeyPem });
+      const health = await adapter.checkHealth({ schemaVersion: 3, environment, stage: "activated", launchProfile: launch.value,
+        launchAttestation: attestation, requestedAt: new Date().toISOString() });
+      expect(health.ok).toBe(true); if (!health.ok) return;
+      if (state === "complete") expect(health.value.status, JSON.stringify(health.value.checks)).toBe("ready");
+      else {
+        expect(health.value.status).toBe("blocked");
+        expect(health.value.checks).toContainEqual(expect.objectContaining({ check: "native_binding", status: "failed", code: "agy_onboarding_incomplete" }));
+      }
+    });
+
+    it("Agy native SessionStart script emits parseable instructions before its first model turn", async () => {
+      const adapter = new AgyProviderAdapter({ runner: createFakeProviderRunner(), executablePath: fakeBinaryPath, allowTestFilesystemOwnership: true,
+        rolePrompt: "Native role marker: preserve the Coordinator policy" });
+      const profile = await adapter.prepareLaunch(createTestEnvironment("agy"));
+      expect(profile.ok).toBe(true); if (!profile.ok) return;
+      const script = profile.value.configFiles.find(file => file.path.endsWith("bflow-session-start.mjs"))!;
+      const stdout = execFileSync(process.execPath, [script.path], { input: JSON.stringify({ conversationId: "native-session", workspacePaths: [testCwd] }), encoding: "utf8" });
+      expect(JSON.parse(stdout).injectSteps[0].systemMessage.systemMessage).toContain("Native role marker: preserve the Coordinator policy");
     });
 
     it("Agy writes Bflow stdio MCP configuration into the private native HOME that its CLI discovers", async () => {
@@ -2122,13 +2178,19 @@ describe("@bflow/agent-providers", () => {
         executablePath: fakeBinaryPath,
         allowTestFilesystemOwnership: true,
         rolePrompt: marker,
-        hostHooks: { SessionStart: "/opt/bflow/host.js hook session-start", PreToolUse: "/opt/bflow/host.js hook pre-tool", Stop: "/opt/bflow/host.js hook stop" }
+        hostHooks: { SessionStart: "/opt/bflow/host.js hook session-start", PreInvocation: "/opt/bflow/host.js hook pre-invocation", PreToolUse: "/opt/bflow/host.js hook pre-tool", Stop: "/opt/bflow/host.js hook stop" }
       });
 
       const result = await adapter.prepareLaunch(env);
 
       expect(result.ok).toBe(true);
       if (!result.ok) return;
+      const startupPrompt = `[bflow startup ${env.environmentId}] Reply only pong. Do not use tools or start a workflow.`;
+      expect(result.value.argv).toContain("--prompt-interactive");
+      expect(result.value.argv).toContain(startupPrompt);
+      expect(result.value.argv).toContain("--sandbox");
+      expect(result.value.argv).toContain("accept-edits");
+      expect(result.value.argv).not.toContain("--dangerously-skip-permissions");
       const hooksFile = result.value.configFiles.find(file => file.path.endsWith("/.gemini/config/hooks.json"));
       expect(hooksFile).toBeDefined();
       const hooks = JSON.parse(await readFile(hooksFile!.path, "utf8")).bflow;
@@ -2138,12 +2200,104 @@ describe("@bflow/agent-providers", () => {
       ]);
       expect(hooks.PreToolUse).toEqual([{ matcher: ".*", hooks: [{ type: "command", command: "/opt/bflow/host.js hook pre-tool", timeout: 30 }] }]);
       expect(hooks.Stop).toEqual([{ type: "command", command: "/opt/bflow/host.js hook stop", timeout: 30 }]);
+      expect(hooks.PreInvocation).toEqual([{ type: "command", command: "/opt/bflow/host.js hook pre-invocation", timeout: 30 }]);
       const sessionHook = result.value.configFiles.find(file => file.path.endsWith("bflow-session-start.mjs"));
       expect(sessionHook).toBeDefined();
       const output = execFileSync(process.execPath, [sessionHook!.path], {
         input: JSON.stringify({ conversationId: "native-session-1", workspacePaths: [testCwd] }), encoding: "utf8"
       });
       expect(JSON.parse(output).injectSteps[0].systemMessage.systemMessage).toContain(marker);
+    });
+
+    it("refuses trusted Agy host hooks when the CLI lacks --prompt-interactive", async () => {
+      const env = createTestEnvironment("agy", "restricted", { role: "developer" });
+      const runner = createFakeProviderRunner({ scenario: "healthy", customHandler: invocation => {
+        if (invocation.args.join(" ") !== "--help") return undefined;
+        return { exitCode: 0, stdout: "Usage of agy:\n  --sandbox\n  --mode\n  --add-dir\n  --disable-slash-commands\n  --print\n  --model\n", stderr: "", started: true };
+      } });
+      const adapter = new AgyProviderAdapter({ runner, executablePath: fakeBinaryPath, allowTestFilesystemOwnership: true,
+        hostHooks: { SessionStart: "/opt/bflow/host.js hook session-start" } });
+
+      const result = await adapter.prepareLaunch(env);
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.message).toContain("--prompt-interactive");
+    });
+
+    it("adopts completed onboarding before the first private native authentication command", async () => {
+      const nativeHome = join(testBaseDir, "native-home-before-auth");
+      const sourceCache = join(nativeHome, ".gemini", "antigravity-cli", "cache");
+      await mkdir(sourceCache, { recursive: true, mode: 0o700 });
+      const receipt = '{"consumerOnboardingComplete":true,"enterpriseOnboardingComplete":false,"onboardingComplete":true}\n';
+      await writeFile(join(sourceCache, "onboarding.json"), receipt, { mode: 0o600 });
+      const environment = createTestEnvironment("agy", "workspace_auto", { stateDirectory: join(testStateDir, "before-auth") });
+      await mkdir(environment.stateDirectory, { recursive: true, mode: 0o700 });
+      let observedAtModels: string | undefined;
+      const runner = createFakeProviderRunner({ customHandler: invocation => {
+        if (invocation.args.join(" ") !== "models") return undefined;
+        const cache = join(invocation.env!.HOME!, ".gemini", "antigravity-cli", "cache");
+        mkdirSync(cache, { recursive: true, mode: 0o700 });
+        const path = join(cache, "onboarding.json");
+        // Native Agy creates first-run state when the HOME has not been adopted yet.
+        if (!existsSync(path)) writeFileSync(path, '{"onboardingComplete":false}', { mode: 0o600 });
+        observedAtModels = readFileSync(path, "utf8");
+        return undefined;
+      } });
+      const previousHome = process.env.HOME;
+      process.env.HOME = nativeHome;
+      try {
+        const adapter = new AgyProviderAdapter({ runner, executablePath: fakeBinaryPath, allowTestFilesystemOwnership: true, executionProbe: "disabled" });
+        const health = await adapter.checkHealth({ schemaVersion: 3, environment, stage: "preflight", requestedAt: new Date().toISOString() });
+        expect(health.ok).toBe(true);
+        expect(observedAtModels).toBe(receipt);
+        const launch = await adapter.prepareLaunch(environment);
+        expect(launch.ok).toBe(true);
+        expect(await readFile(join(environment.stateDirectory, "agy-home", environment.role, ".gemini", "antigravity-cli", "cache", "onboarding.json"), "utf8")).toBe(receipt);
+        expect(await readFile(join(sourceCache, "onboarding.json"), "utf8")).toBe(receipt);
+      } finally {
+        if (previousHome === undefined) delete process.env.HOME;
+        else process.env.HOME = previousHome;
+      }
+    });
+
+    it("copies only an existing completed onboarding receipt from the configured native HOME", async () => {
+      const nativeHome = join(testBaseDir, "native-home-completed");
+      const cache = join(nativeHome, ".gemini", "antigravity-cli", "cache");
+      await mkdir(cache, { recursive: true, mode: 0o700 });
+      const adopted = join(testStateDir, "agy-home", "developer", ".gemini", "antigravity-cli", "cache", "onboarding.json");
+      await rm(adopted, { force: true });
+      await chmod(nativeHome, 0o750);
+      await chmod(join(nativeHome, ".gemini"), 0o755);
+      await chmod(join(nativeHome, ".gemini", "antigravity-cli"), 0o755);
+      await chmod(cache, 0o755);
+      const receipt = '{"consumerOnboardingComplete":true,"enterpriseOnboardingComplete":false,"onboardingComplete":true}\n';
+      await writeFile(join(cache, "onboarding.json"), receipt, { mode: 0o600 });
+      const adapter = new AgyProviderAdapter({ runner: createFakeProviderRunner({ scenario: "healthy" }), executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true, isolatorEnvironment: { HOME: nativeHome, PATH: process.env.PATH ?? "" } });
+      const result = await adapter.prepareLaunch(createTestEnvironment("agy"));
+      expect(result.ok).toBe(true);
+      expect(await readFile(adopted, "utf8")).toBe(receipt);
+      expect(await readFile(join(cache, "onboarding.json"), "utf8")).toBe(receipt);
+    });
+
+    it("does not adopt incomplete onboarding or a symlinked onboarding receipt", async () => {
+      const nativeHome = join(testBaseDir, "native-home-incomplete");
+      const cache = join(nativeHome, ".gemini", "antigravity-cli", "cache");
+      const adopted = join(testStateDir, "agy-home", "developer", ".gemini", "antigravity-cli", "cache", "onboarding.json");
+      await rm(adopted, { force: true });
+      await mkdir(cache, { recursive: true, mode: 0o700 });
+      for (const directory of [nativeHome, join(nativeHome, ".gemini"), join(nativeHome, ".gemini", "antigravity-cli"), cache]) await chmod(directory, 0o700);
+      await writeFile(join(cache, "onboarding.json"), '{"onboardingComplete":false}', { mode: 0o600 });
+      const adapter = new AgyProviderAdapter({ runner: createFakeProviderRunner({ scenario: "healthy" }), executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true, isolatorEnvironment: { HOME: nativeHome, PATH: process.env.PATH ?? "" } });
+      expect((await adapter.prepareLaunch(createTestEnvironment("agy"))).ok).toBe(true);
+      await expect(readFile(adopted, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+      const target = join(testBaseDir, "onboarding-target.json");
+      await writeFile(target, '{"onboardingComplete":true}', { mode: 0o600 });
+      await rm(join(cache, "onboarding.json"));
+      await symlink(target, join(cache, "onboarding.json"));
+      expect((await adapter.prepareLaunch(createTestEnvironment("agy"))).ok).toBe(true);
+      await expect(readFile(adopted, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     });
 
     it("rejects Agy UserPromptSubmit hooks instead of relabeling model-loop events as user input", async () => {
@@ -2156,6 +2310,14 @@ describe("@bflow/agent-providers", () => {
       const result = await adapter.prepareLaunch(createTestEnvironment("agy"));
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.error.message).toContain("UserPromptSubmit");
+    });
+
+    it("rejects Agy-only PreInvocation hooks for providers without that native event", async () => {
+      const adapter = new ClaudeProviderAdapter({ runner: createFakeProviderRunner({ scenario: "healthy" }), executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true, hostHooks: { PreInvocation: "/opt/bflow/host.js hook pre-invocation" } });
+      const result = await adapter.prepareLaunch(createTestEnvironment("claude"));
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.message).toContain("PreInvocation");
     });
 
     it("keeps legacy nativeSessionHookCommand as a single SessionStart hook with timeout 10", async () => {
