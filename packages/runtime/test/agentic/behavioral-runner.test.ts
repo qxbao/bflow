@@ -13,7 +13,7 @@ import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 import { TestStrategyResolver, assertEvidenceComplete, assertReadyToImplement, recordEvidence } from "../../../test-strategy/src/index.js";
 import { assessment, spec } from "../../../test-strategy/test/fixtures.js";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
-import { HostVerification } from "../../src/agentic/host-verification.js";
+import { HostBehavioralFailure, HostVerification } from "../../src/agentic/host-verification.js";
 import { parseVitestJson } from "../../src/agentic/vitest-json.js";
 import { measureBehavior, parseBehavioralCommands } from "../../src/agentic/behavioral-runner.js";
 import type { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
@@ -51,10 +51,39 @@ async function fixture(taskType = "bugfix", reporter: "node_tap" | "vitest_json"
   const runtime = { inspect: async (runId?: string) => runId ? { baseRevision: base, tasks: [{ taskId: "task-1", spec: { specification, strategy } }] } : { outbound: [{ taskId: "task-1", message: assignment, handle: { target: { agentId: "developer", paneId: "developer-pane", worktreePath: cwd } } }] }, ports: { policies: { recordEvidence } } } as unknown as AgenticWorkflowRuntime;
   const receiptsPath = join(root, "host-receipts");
   const host = new HostVerification(() => runtime, () => opened.value, new HostReceiptJournal(receiptsPath, cwd, "session-1"), [command]);
-  return { cwd, git, commit, command, specification, redRevision, base, binding, host, restart(commands = [command]) { return new HostVerification(() => runtime, () => opened.value, new HostReceiptJournal(receiptsPath, cwd, "session-1"), commands); }, get strategy() { return strategy; }, accept(result: unknown) { strategy = recordEvidence(strategy, result); } };
+  return { cwd, git, commit, command, specification, redRevision, base, binding, host, store: opened.value, restart(commands = [command]) { return new HostVerification(() => runtime, () => opened.value, new HostReceiptJournal(receiptsPath, cwd, "session-1"), commands); }, get strategy() { return strategy; }, accept(result: unknown) { strategy = recordEvidence(strategy, result); } };
 }
 // Measurement launches require the production Bubblewrap namespace sandbox.
 describe.skipIf((await probeBehavioralSandbox()).status !== "ready")("independent behavioral command measurements", () => {
+  it("returns a bounded test repair for non-assertion Red failures without granting implementation authority", async () => {
+    const f = await fixture();
+    await writeFile(join(f.cwd, "test/behavior.test.cjs"), `const {test}=require('node:test'); const value=require('../source.cjs'); test(${JSON.stringify(testName)},()=>value.multiply(2,3));\n`);
+    f.commit("Red calls an absent export without an assertion");
+    let failure: unknown;
+    try { await f.host.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "red" }); }
+    catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(HostBehavioralFailure);
+    if (!(failure instanceof HostBehavioralFailure)) throw failure;
+    expect(failure.message).toContain("assertion");
+    expect(() => assertReadyToImplement(f.strategy)).toThrow(/Red/);
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of f.store.get(failure.evidence)) {
+      if (!chunk.ok) throw new Error(chunk.error.message);
+      chunks.push(chunk.value);
+    }
+    const observed = JSON.parse(Buffer.concat(chunks).toString());
+    expect(observed.accepted).toBe(false);
+    expect(observed.measurementFailure.outcome.stdout).toContain("TypeError");
+    expect(observed.measurementFailure.outcome.exitCode).toBe(1);
+    await writeFile(join(f.cwd, "test/behavior.test.cjs"), `const {test}=require('node:test'); const assert=require('node:assert/strict'); const value=require('../source.cjs'); test(${JSON.stringify(testName)},()=>assert.equal(typeof value.multiply,'function'));\n`);
+    const corrected = f.commit("Assert the missing target behavior before calling it");
+    const red = await f.host.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "red" });
+    expect(red.result.status).toBe("failed");
+    expect((red.result.metadata!.conditionalTdd as any).sourceRevision).toBe(corrected);
+    f.accept(red.result);
+    expect(() => assertReadyToImplement(f.strategy)).not.toThrow();
+  }, 30000);
+
   it("bounds aggregate command time and output within host transport capacity", async () => {
     const f = await fixture();
     expect(() => parseBehavioralCommands([{ ...f.command, timeoutMs: 300_001 }])).toThrow("execution bounds");

@@ -10,6 +10,7 @@ import { unwrap } from "./outbox.js";
 import { behavioralChecks, verificationGit, measureBehavior, parseBehavioralCommands, testFilePattern, type BehavioralCommand, type BoundBehavioralCommand } from "./behavioral-runner.js";
 import { TestRunnerSource, automaticChecks, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
 import { WorkflowProposalRejected, type WorkflowRejectionCode } from "./workflow-rejection.js";
+import { NodeTapTestCodeFailure } from "./node-tap.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
 const whitespaceCommand = "git diff --check";
 /** Default checks support documentation only. Behavioral checks require owner configuration. */
@@ -332,7 +333,16 @@ export class HostVerification {
     }
     if (phase !== expected) throw new Error(`Expected ${expected ?? "no further"} behavioral phase`);
     const measured = [];
-    for (const command of commands) measured.push(await measureBehavior(command, cwd, revision));
+    for (const command of commands) {
+      try { measured.push(await measureBehavior(command, cwd, revision)); }
+      catch (error) {
+        if (!(error instanceof NodeTapTestCodeFailure)) throw error;
+        const observation = await this.capture(cwd, textField(run.baseRevision), revision);
+        const evidence = await this.artifact(runId, taskId, { phase, observation, verifiedBy: binding.agentId, accepted: false,
+          measurementFailure: { protocol: "node_tap", summary: error.message, outcome: error.outcome } });
+        throw new HostBehavioralFailure(error.message, evidence);
+      }
+    }
     const observation = await this.capture(cwd, textField(run.baseRevision), revision);
     if (observation.exitCode !== 0) throw new Error("Committed diff integrity check failed");
     const red = prior[0], redDetails = red ? record(red.metadata?.conditionalTdd) : undefined;

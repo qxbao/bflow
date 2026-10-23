@@ -23,6 +23,11 @@ trước khi lấy lease hoặc gọi transport nếu platform binding chưa có
 chấp nhận mà thiếu session từ bản cũ vẫn bất biến và không được tự gắn session hay gửi lại;
 trường hợp đó cần đối soát riêng, không phải bằng chứng tác vụ hoàn tất.
 
+Với Node TAP hoàn chỉnh và đúng danh tính test, exception trong thân test không phải
+assertion được lưu thành quan sát không được chấp nhận và gửi lại Developer để sửa test
+theo giới hạn rework hiện có. Nó không phải bằng chứng Red và không cấp quyền sửa mã sản phẩm.
+Output thiếu/sai danh tính, lỗi hook, timeout hoặc sandbox vẫn là lỗi hạ tầng cần đối soát.
+
 Các đầu vào host bắt buộc là tường minh: định danh repository/session, role capability,
 định nghĩa check của task/workflow, deterministic gate runner, ingress thông điệp/result/evidence
 Herdr có xác thực và phê duyệt của con người có xác thực. Không có

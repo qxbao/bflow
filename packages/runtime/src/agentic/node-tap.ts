@@ -1,6 +1,13 @@
 import type { QualityCommandOutcome } from "@bflow/quality-gates";
 import { digest } from "./journal.js";
 
+/** Complete, identity-matched TAP whose test bodies failed without valid assertion evidence. */
+export class NodeTapTestCodeFailure extends Error {
+  constructor(readonly outcome: QualityCommandOutcome) {
+    super("Behavioral test code failed without an assertion regression; repair the tests before requesting Red evidence");
+  }
+}
+
 /** Supported measurement protocol: complete, flat Node test-runner TAP with assertion diagnostics. */
 export function parseNodeTap(outcome: QualityCommandOutcome, expectedNames: readonly string[], nameSelection = false) {
   if (outcome.spawnError || outcome.timedOut || outcome.aborted || outcome.outputTruncated || outcome.signal || outcome.exitCode === null) throw new Error("Behavioral runner infrastructure failure (spawn, deadline, signal or truncated output)");
@@ -17,6 +24,9 @@ export function parseNodeTap(outcome: QualityCommandOutcome, expectedNames: read
   const failures = results.filter(result => result[1] === "not ok");
   if (failures.length !== failed || results.filter(result => result[1] === "ok").length !== passed || (failed === 0 ? outcome.exitCode !== 0 : outcome.exitCode !== 1)) throw new Error("TAP result contradicts process exit code");
   const targetFailure = failed > 0 && failures.every(result => /^\s+failureType: 'testCodeFailure'$/m.test(result[4]!) && /^\s+code: 'ERR_ASSERTION'$/m.test(result[4]!));
-  if (failed && !targetFailure) throw new Error("Behavioral failure is infrastructure or unrelated, not an assertion regression");
+  if (failed && !targetFailure) {
+    if (failures.every(result => /^\s+failureType: 'testCodeFailure'$/m.test(result[4]!))) throw new NodeTapTestCodeFailure(outcome);
+    throw new Error("Behavioral failure is infrastructure or unrelated, not an assertion regression");
+  }
   return { testNames: names, testResults: results.map(result => ({ name: result[3]!, passed: result[1] === "ok" })), tests, passed, failed, targetFailure };
 }
