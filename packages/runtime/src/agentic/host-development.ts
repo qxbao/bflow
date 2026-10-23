@@ -45,9 +45,12 @@ export class HostDevelopment {
     if (binding.role !== "developer" || !binding.worktreePath) throw new Error("An assigned Developer worktree is required");
     const state = record(await this.runtime().inspect());
     if (!Array.isArray(state.outbound)) throw new Error("Invalid Runtime assignment state");
+    // Herdr reuses pane ids across restarts, so a cancelled run's unconfirmed assignment can name this pane too; the
+    // per-attempt Developer agent name tells them apart.
     const candidates = state.outbound.map(record).filter(out => out.status === "accepted" && out.handle &&
       RoleMessageSchema.parse(out.message).type === "task.assignment" &&
       AgentExecutionHandleSchema.parse(out.handle).target.paneId === binding.paneId &&
+      AgentExecutionHandleSchema.parse(out.handle).target.agentId === binding.agentId &&
       (args.runId === undefined || AgentExecutionHandleSchema.parse(out.handle).runId === args.runId) &&
       (args.taskId === undefined || AgentExecutionHandleSchema.parse(out.handle).taskId === args.taskId));
     if (candidates.length !== 1) throw new Error("No unique current task assignment for this Developer pane");

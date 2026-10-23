@@ -201,6 +201,7 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
     maxDeveloperCapacity: options.maxDeveloperCapacity ?? 2,
     defaultAgentKind: manifest.panes.find(p => p.role === "coordinator")!.agentKind,
     roleConfigs }, runner, store: manifestStore,
+    // Dynamic Developer launches carry Gateway env, which Herdr accepts only at pane creation over its socket.
     socket: paneModule.createHerdrSocketPort({ runner, sessionId: options.sessionId }) });
   const panes: PanePolicy = options.developerLaunches ? withDeveloperLaunches(rolePanes, options.developerLaunches) : rolePanes;
   const directory = options.storageDirectory ?? resolve(resolvePrivateRuntimeStateDirectory(repository), "agentic");

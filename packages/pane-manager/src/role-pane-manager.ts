@@ -481,7 +481,10 @@ export class RolePaneManager {
           livePaneIds.add(pane.paneId);
         }
       }
-      for (const pane of manifest.panes) {
+      // Herdr refuses to close the source workspace's last pane while a linked worktree workspace is still open
+      // ("would close a worktree group"), so Developer worktree panes close first.
+      const closeOrder = [...manifest.panes.filter(pane => pane.role === "developer"), ...manifest.panes.filter(pane => pane.role !== "developer")];
+      for (const pane of closeOrder) {
         if (!livePaneIds.has(pane.paneId)) continue;
         const outcome = await this.#runHerdr(["pane", "close", pane.paneId], options);
         if (outcome.exitCode !== 0 || outcome.failure) {
@@ -990,9 +993,11 @@ export class RolePaneManager {
 
     // Step 4: Persist Manifest
     const coordinatorBinding = manifestPanes.find((p) => p.role === "coordinator");
+    // Developer panes are Runtime-owned task panes; a stale one (e.g. from a cancelled run) is reconciled by Runtime after
+    // activation and must not keep the permanent topology from coming up.
     const allHealthy = manifestPanes.every(
       (p) =>
-        (p.role === "developer" && p.metadata?.["allocationStatus"] === "released") ||
+        p.role === "developer" ||
         p.transportState === "idle" ||
         p.transportState === "done" ||
         p.transportState === "working" ||
@@ -2045,9 +2050,10 @@ export class RolePaneManager {
       parseAgentInfoResult(agentFocusOutcome, "agent_info");
 
       const coordinatorBinding = recoveredPanes.find((p) => p.role === "coordinator");
+      // Developer panes are Runtime-owned and reconciled after activation; they do not gate the restored topology.
       const allHealthy = recoveredPanes.every(
         (p) =>
-          (p.role === "developer" && p.metadata?.["allocationStatus"] === "released") ||
+          p.role === "developer" ||
           p.transportState === "idle" ||
           p.transportState === "done" ||
           p.transportState === "working" ||

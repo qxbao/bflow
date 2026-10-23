@@ -240,7 +240,7 @@ export class AgenticWorkflowRuntime {
           // action (or retained an unrelated, already-resumed planning action).
           const allocationTask = run.coreCreated && run.status === "escalated" ? run.tasks.find(task =>
             run.error?.startsWith(`Developer allocation pending for ${task.taskId}: `)) : undefined;
-          if (allocationTask && (!run.pendingAction || run.pendingAction.reason !== run.error)) {
+          if (allocationTask && (!run.pendingAction || run.pendingAction.reason !== run.error!.slice(0, 2000))) {
             this.pauseDeveloperAllocation(run, allocationTask.taskId, run.error!); changed = true;
           }
           for (const task of run.tasks) {
@@ -1547,6 +1547,8 @@ export class AgenticWorkflowRuntime {
           artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }), "coordinator");
       }
       const verificationRetry = run.error?.startsWith(VERIFICATION_RETRY_PREFIX) === true;
+      const measurement = state.outbound.find(item => item.message.message_id === action.sourceMessageId && item.phaseFailure?.repairable === false);
+      if (measurement) measurement.phaseFailure!.retryAuthorized = true;
       action.state = "queued";
       action.lastResumedAt = this.now();
       if (options.automatic) action.resumeAttempts = (action.resumeAttempts ?? 0) + 1;
@@ -2365,11 +2367,13 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         if (record(previous.message.payload).sourceRevision !== sourceRevision) throw new Error("Prior phase measurement is unresolved on another revision; reconcile it before retrying");
         return json({ queued: true, messageId: previous.message.message_id, deliveryStatus: previous.status });
       }
-      if (state.outbound.some(item => item.message.run_id === runId && item.error?.startsWith("policy_phase_failed:") &&
+      const failedHere = state.outbound.filter(item => item.message.run_id === runId && item.error?.startsWith("policy_phase_failed:") &&
           record(item.message.payload).taskId === taskId && record(item.message.payload).phase === phase &&
-          record(item.message.payload).implementationAttemptId === current.attemptId && record(item.message.payload).sourceRevision === sourceRevision))
+          record(item.message.payload).implementationAttemptId === current.attemptId && record(item.message.payload).sourceRevision === sourceRevision);
+      if (failedHere.some(item => item.phaseFailure?.retryAuthorized !== true))
         throw new Error("This revision already failed the phase; commit a repair before requesting another measurement");
-      const id = `phase-${digest([runId, taskId, current.attemptId, phase, sourceRevision])}`;
+      // A resumed infrastructure failure re-measures the same revision under a new request identity.
+      const id = `phase-${digest(failedHere.length ? [runId, taskId, current.attemptId, phase, sourceRevision, failedHere.length] : [runId, taskId, current.attemptId, phase, sourceRevision])}`;
       outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: run.delegation.correlationId,
         causation_id: assignment.message.message_id, run_id: runId, sender: { role: "coordinator" }, recipient: { role: "qa" },
         type: "verification.requested", artifact_references: [], occurred_at: this.now(), idempotency_key: id,
@@ -2424,7 +2428,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     const prior = run.pendingAction?.sourceMessageId === sourceMessageId ? run.pendingAction : undefined;
     run.status = "escalated";
     run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
-      reason, sourceMessageId, createdAt: prior?.createdAt ?? this.now(), state: "pending", previousStatus: "implementing",
+      reason: reason.slice(0, 2000), sourceMessageId, createdAt: prior?.createdAt ?? this.now(), state: "pending", previousStatus: "implementing",
       ...inheritedAutoResume(run),
       recovery: "manual" };
   }
@@ -2441,7 +2445,13 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (run.cancelled || ["completed", "failed", "cancelled", "escalated"].includes(run.status)) {
         // Retain the receipt while preserving a newer terminal decision.
       } else if (!repairable || failures >= run.maxIterations) {
+        const previousStatus = run.status;
         run.status = "escalated"; run.error = !repairable ? `Policy measurement blocked: ${summary}` : `Policy phase repair limit exhausted: ${summary}`;
+        // An infrastructure failure (runner, sandbox, build) is not a code defect: once fixed, an explicit resume re-measures the
+        // same revision. An exhausted repair limit stays a human stop, so the bound is never widened.
+        if (!repairable) run.pendingAction = { actionId: `next-${digest([run.runId, request.message.message_id])}`, kind: "resume_coordinator",
+          owner: "coordinator", reason: run.error.slice(0, 2000), sourceMessageId: request.message.message_id, createdAt: this.now(), state: "pending",
+          previousStatus, ...inheritedManualResume(run), recovery: "manual" };
         this.progress(state, outbox, run, run.error);
       } else this.phaseNotice(state, outbox, run, task, textField(payload.phase), "failed", summary, request.message.message_id);
       request.phaseFailure!.applied = true;

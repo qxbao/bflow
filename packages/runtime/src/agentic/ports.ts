@@ -4,6 +4,7 @@ import type {
   QualityGateDefinition, QualityGateResult, RoleMessage, RunStore, SessionManifest, Specification, TestStrategy,
   VerificationCycle, VerificationResult, WorkflowDefinition, WorkflowEngine
 } from "@bflow/contracts";
+import { resolve } from "node:path";
 
 /** Package-local composition interfaces. Wire values always use frozen contracts. */
 export interface SpecificationPolicy {
@@ -149,7 +150,10 @@ export async function loadAgenticPolicies(options: AgenticCompositionOptions): P
         finally { activePlans.delete(plan.planId); engines.delete(plan.planId); }
       }
     },
-    git: await git.GitIntegrationEngine.open({ repositoryPath: options.repositoryPath, artifactStore: options.artifactStore }),
+    // Developer agents edit these worktrees, and agent CLIs refuse writes under `.git`. `.bflow/state/` is ignored by the
+    // init `.bflow/.gitignore`, and staying inside the checkout keeps the provider's folder trust for the repository.
+    git: await git.GitIntegrationEngine.open({ repositoryPath: options.repositoryPath, artifactStore: options.artifactStore,
+      worktreeRoot: resolve(options.repositoryPath, ".bflow", "state", "worktrees") }),
     classifyChange: spec.classifyChange, createVerificationPlan: verification.createVerificationPlan,
     recordEvidence: tdd.recordEvidence, assertReadyToImplement: tdd.assertReadyToImplement,
     assertEvidenceComplete: tdd.assertEvidenceComplete

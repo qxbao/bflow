@@ -420,6 +420,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
     let nativeSessionsChanged = false;
     for (const pane of panes) {
+      // Same scope as the receipts above: Runtime-owned Developer panes (possibly stale after a cancelled run) are checked
+      // per call by Runtime health/principal checks, never as permanent startup proof.
+      if (!pane.permanent || pane.role === "developer") continue;
       const actual = record(record(record(JSON.parse(await herdr(["agent", "get", pane.paneId]))).result).agent);
       const native = actual.agent_session ? record(actual.agent_session) : undefined;
       const expectedProvider = platformRoles.find(option => option.role === pane.role)?.provider ??

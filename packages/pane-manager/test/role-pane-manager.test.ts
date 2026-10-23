@@ -1822,6 +1822,26 @@ describe("RolePaneManager Verification Suite", () => {
       expect(recoveredManifest.attachTarget.paneId).toBe(recoveredChat.paneId);
     });
 
+    it("brings the topology up despite a stale Developer binding left by a cancelled run", async () => {
+      const fileStore = new FileSessionManifestStore(tempDir);
+      const manager = createRolePaneManager({ config, runner, store: fileStore, worktreeInspector: inspector });
+      const initRes = await manager.initializeTopology();
+      expect(initRes.ok).toBe(true);
+      if (!initRes.ok) return;
+      const chat = initRes.value.panes.find((p) => p.role === "conversation")!;
+      const stale = { ...chat, bindingId: "binding-dev-stale", role: "developer" as const, agentId: "dev-stale", paneId: "w9:p9",
+        workspaceId: "w9", tabId: "w9:t1", permanent: false, worktreePath: join(tempDir, "gone"), readOnlyWorkspace: false,
+        transportState: "disconnected" as const };
+      const saved = await fileStore.save({ ...initRes.value, panes: [...initRes.value.panes, stale] });
+      expect(saved.ok).toBe(true);
+
+      const again = await createRolePaneManager({ config, runner, store: fileStore, worktreeInspector: inspector }).initializeTopology();
+      expect(again.ok).toBe(true);
+      if (!again.ok) return;
+      expect(again.value.status).toBe("up");
+      expect(again.value.panes.find((p) => p.bindingId === "binding-dev-stale")?.transportState).toBe("disconnected");
+    });
+
     it("updates pane ID on moveRolePane without keeping old pane ID", async () => {
       const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
       await manager.initializeTopology();
@@ -2035,6 +2055,21 @@ describe("RolePaneManager Verification Suite", () => {
         expect(loaded.value.status).toBe("down");
         expect(loaded.value.panes.every((p) => p.transportState === "cancelled")).toBe(true);
       }
+    });
+
+    it("closes Developer worktree panes before the source workspace's role panes", async () => {
+      const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+      expect((await manager.initializeTopology()).ok).toBe(true);
+      inspector.setCleanliness("/repo/.worktrees/task-1", { exists: false, isClean: true, dirtyFiles: [] });
+      const developer = await manager.allocateDeveloper({ taskId: "task-1", worktreePath: "/repo/.worktrees/task-1", branchName: "feat/task-1" });
+      expect(developer.ok).toBe(true);
+      if (!developer.ok) return;
+      const before = runner.calls.length;
+      expect((await manager.shutdownTopology()).ok).toBe(true);
+      const closed = runner.calls.slice(before).filter((c) => c.args[0] === "pane" && c.args[1] === "close").map((c) => c.args[2]);
+      // Herdr refuses to close the source workspace's last pane while a linked worktree workspace is open.
+      expect(closed[0]).toBe(developer.value.paneId);
+      expect(closed.length).toBeGreaterThan(1);
     });
 
     it.each(["error", "timeout"])("does not record shutdown success when pane close returns %s", async failure => {

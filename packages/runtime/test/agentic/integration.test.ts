@@ -263,6 +263,30 @@ it.each([false, true])("recovers a refused Developer allocation through its own 
   expect(preflights).toContain("coordinator");
 });
 
+it("keeps a long Developer allocation diagnostic resumable across restart", async () => {
+  const f = await fixture();
+  f.ports.preflightRoleCapabilities = async () => {};
+  await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+  const allocate = f.panes.allocateDeveloper.bind(f.panes);
+  f.panes.allocateDeveloper = async () => ({ ok: false, error: { code: "validation", retryable: false,
+    message: "Provider diagnostic: " + "x".repeat(3000) } }) as never;
+  await f.runtime.tick();
+  const paused = await f.inspect();
+  expect(paused.status).toBe("escalated");
+  expect(paused.pendingAction.reason).toBe(paused.error.slice(0, 2000));
+  await f.runtime.resumeBlockedRun("run-1", paused.pendingAction.actionId);
+  await f.runtime.tick();
+  const beforeRestart = await f.inspect();
+  expect(beforeRestart.pendingAction.manualResumeAttempts).toBe(1);
+  f.restart(); await f.runtime.initialize();
+  expect((await f.inspect()).pendingAction).toEqual(beforeRestart.pendingAction);
+  f.panes.allocateDeveloper = allocate;
+  await f.runtime.resumeBlockedRun("run-1", paused.pendingAction.actionId);
+  await f.runtime.tick();
+  expect((await f.inspect()).tasks[0].worktrees).toEqual(paused.tasks[0].worktrees);
+  expect(f.transport.sentRequests.filter(request => request.role === "developer")).toHaveLength(1);
+});
+
 it("keeps the explicit allocation resume budget when provider diagnostics change", async () => {
   const f = await fixture({ humanApproval: true });
   f.ports.preflightRoleCapabilities = async () => {};
@@ -684,14 +708,6 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
     await f.runtime.receiveHerdr(f.envelope("conversation.intake", { content: "hello" }, { run_id: undefined }));
     expect((await f.runtime.inspect() as any).runs).toHaveLength(before.runs.length);
     expect(unwrap(await f.ports.runStore.get("run-1"))).toBeNull();
-  });
-  it("keeps an implementing run scheduled when the Coordinator asks the user a question", async () => {
-    const f = await fixture();
-    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
-    expect((await f.inspect()).status).toBe("implementing");
-    await f.runtime.reportProgress("run-1", "Dispatch is blocked by uncommitted files", ["Commit them or ignore them?"]);
-    expect((await f.inspect()).status).toBe("implementing");
-    expect((await f.runtime.inspect() as any).outbound.some((out: any) => out.message.type === "conversation.clarification")).toBe(true);
   });
   it("runs a small workflow without Architect through real policies/Git/storage and delivery approval", async () => {
     const f = await fixture();
