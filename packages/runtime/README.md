@@ -481,7 +481,7 @@ bộ lịch sử ở mỗi RPC khi lịch sử dài. Các bảo đảm này có 
 verdict live hay phê duyệt của người dùng.
 
 Trong khi phép kiểm chứng độc lập do Runtime sở hữu còn đang chạy, báo cáo blocked của
-Coordinator được lưu như chẩn đoán; kết quả verification vẫn quyết định phase. Blocker đến
+Coordinator hay specialist được lưu như chẩn đoán; kết quả verification vẫn quyết định phase. Blocker đến
 muộn từ specialist đã có verdict xác thực không thay thế lineage/counter hiện có. Request
 user decision và cancellation vẫn dùng đường riêng và giữ nguyên authority/gate.
 
