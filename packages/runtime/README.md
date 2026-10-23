@@ -99,6 +99,15 @@ Developer hiện hữu nếu cùng Core execution vẫn running, lease còn hi�
 retry cùng resume giữ nguyên ID. Các gate, cancellation, unknown delivery và giới hạn resume
 được kiểm tra trước đó như cũ; resume tự động hoặc Coordinator không tạo notice này.
 
+QA workflow sử dụng `inspect_review` để quan sát diff và chạy command do host đã cấu hình
+trên đúng commit tích hợp. Kết quả test và ArtifactReference/checksum được lưu cùng observation
+host bất biến, trả gọn qua `qaBehavioralObservation`; không dùng tool phase TDD cho gate này.
+`complete_review` vẫn yêu cầu judgment độc lập cho từng criterion và không thể pass nếu test
+thực tế thất bại. Observation diff-only cũ không được nâng thành bằng chứng test; phải inspect
+lại qua host. Test tiếp tục chạy trong sandbox verification hiện hữu, không nhận argv/revision
+hay output từ agent. Gate timeout/bounds/approval không đổi và không sinh thêm TDD receipt.
+Tổng ngân sách setup/prepare/test được giới hạn theo thời gian gate còn lại, có margin cho ACK; chỉ giảm timeout tối đa, không đổi command/argv. Batch không còn đủ ngân sách bị từ chối trước execution. Completed submission replay xác thực receipt trước khi đọc worktree; completion đầu tiên vẫn kiểm tra source, kể cả sau restart.
+
 Các đầu vào host bắt buộc là tường minh: định danh repository/session, role capability,
 định nghĩa check của task/workflow, deterministic gate runner, ingress thông điệp/result/evidence
 Herdr có xác thực và phê duyệt của con người có xác thực. Không có

@@ -12,6 +12,23 @@ import { TestRunnerSource, automaticChecks, resolveTaskCommands, type AutomaticR
 import { WorkflowProposalRejected, type WorkflowRejectionCode } from "./workflow-rejection.js";
 import { NodeTapTestCodeFailure } from "./node-tap.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
+export function boundQaReviewCommands(commands: readonly BoundBehavioralCommand[], budgetMs: number): BoundBehavioralCommand[] {
+  const available = budgetMs - commands.length * 90_000;
+  if (commands.length && available < commands.length * 2) throw new Error("QA workflow aggregate measurement budget exceeds the remaining gate deadline; split checks before retry");
+  const each = Math.floor(available / Math.max(1, commands.length));
+  return commands.map(command => {
+    const adapter = command.adapter;
+    const preparation = adapter?.bind(command, "/tmp/bflow-qa-budget").prepare ?? adapter?.prepare ?? command.prepare;
+    const prepareMs = preparation ? Math.min(preparation.timeoutMs, Math.floor(each / 2)) : 0;
+    return { ...command, timeoutMs: Math.min(command.timeoutMs, each - prepareMs),
+      ...(command.prepare ? { prepare: { ...command.prepare, timeoutMs: prepareMs } } : {}),
+      ...(adapter ? { adapter: { ...adapter,
+        ...(adapter.prepare ? { prepare: { ...adapter.prepare, timeoutMs: prepareMs } } : {}),
+        bind: (profile, root) => { const invocation = adapter.bind(profile, root); return { ...invocation,
+          ...(invocation.prepare ? { prepare: { ...invocation.prepare, timeoutMs: prepareMs } } : {}) }; }
+      } } : {}) };
+  });
+}
 const whitespaceCommand = "git diff --check";
 /** Default checks support documentation only. Behavioral checks require owner configuration. */
 export const DEFAULT_HOST_CHECKS = [
@@ -395,11 +412,30 @@ export class HostVerification {
     const out = (state.outbound as Record<string, unknown>[]).find(item => item.handle && record(record(item.handle).target).paneId === binding.paneId &&
       record(item.message).message_id === args.messageId && record(item.message).type === "verification.requested");
     if (!out) throw new Error("No verification request assigned to this pane");
-    const context = QualityGateContextSchema.parse(record(out.message).payload), details = record(context.input);
+    let context = QualityGateContextSchema.parse(record(out.message).payload);
+    const details = record(context.input), config = record(context.definition.configuration);
+    if (config.kind !== "review" || config.role !== binding.role) throw new Error("Review role mismatch");
     const observation = await this.capture(textField(details.sourceWorktreePath), textField(details.baseRevision), textField(details.sourceRevision));
+    let qaBehavioralObservation: JsonValue | undefined;
+    if (binding.role === "qa" && details.scope === "workflow") {
+      const dossier = await this.dossierFor(context.runId, context.taskId);
+      const age = out.message && typeof record(out.message).occurred_at === "string" ? Math.max(0, Date.now() - Date.parse(textField(record(out.message).occurred_at))) : 0;
+      const commands = boundQaReviewCommands(this.resolve(dossier), Math.min(540_000, context.definition.timeout.executionTimeoutMs - age - 30_000));
+      if (commands.length) {
+        const measurements = [];
+        for (const command of commands) measurements.push(await measureBehavior(command, observation.cwd, observation.revision));
+        const after = await this.capture(observation.cwd, observation.base, observation.revision);
+        if (digest(after) !== digest(observation)) throw new Error("QA source changed during independent measurement");
+        const artifact = await this.artifact(context.runId, context.taskId!, { scope: "workflow", sourceRevision: observation.revision, measurements, verifiedBy: binding.agentId });
+        qaBehavioralObservation = json({ sourceRevision: observation.revision, passed: measurements.every(item => item.failed === 0 && item.outcome.exitCode === 0),
+          evidenceArtifact: artifact, measurements: measurements.map(item => ({ command: item.command, method: item.method, testNames: item.testNames,
+            tests: item.tests, passed: item.passed, failed: item.failed, exitCode: item.outcome.exitCode })) });
+        context = QualityGateContextSchema.parse({ ...context, input: { ...details, hostQaBehavioralObservation: qaBehavioralObservation } });
+      }
+    }
     const reviewId = randomUUID(); await this.receipts?.putObservation("review", reviewId, { binding, context, observation: json(observation) });
     this.reviews.set(reviewId, { binding, context, observation });
-    return json({ reviewId, context, observation });
+    return json({ reviewId, ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}), context, observation });
   }
   async completeReview(binding: PaneBinding, input: unknown) {
     const args = record(input), id = textField(args.reviewId), stored = await this.receipts?.getObservation("review", id);
@@ -408,8 +444,6 @@ export class HostVerification {
     const context = QualityGateContextSchema.parse(pending.context), configuration = record(context.definition.configuration), details = record(context.input);
     if (configuration.kind !== "review" || configuration.role !== binding.role) throw new Error("Review role mismatch");
     const criteria = this.judgments(args.criteria, configuration.criterionIds as string[]);
-    const observed = await this.capture(pending.observation.cwd, pending.observation.base, pending.observation.revision);
-    if (digest(observed) !== digest(pending.observation)) throw new Error("Review source changed");
     const evaluationId = `host-review-${digest([id, this.bindingIdentity(binding), context])}`;
     const submission = digest({ criteria, summary: textField(args.summary) });
     const replay = this.receipts ? await this.receipts.getGate(evaluationId) : this.gateRecords.get(evaluationId);
@@ -417,10 +451,17 @@ export class HostVerification {
       if (replay.metadata?.hostReviewSubmission !== submission || !await this.authenticateGate(replay)) throw new Error("Conflicting completion for an immutable review observation");
       return { result: replay, artifact: ArtifactReferenceSchema.parse(replay.metadata?.evidence) };
     }
-    const evidence = await this.artifact(context.runId, context.taskId!, { observation: observed, criteria, reviewedBy: binding.agentId });
+    const observed = await this.capture(pending.observation.cwd, pending.observation.base, pending.observation.revision);
+    if (digest(observed) !== digest(pending.observation)) throw new Error("Review source changed");
+    const qaBehavioralObservation = details.hostQaBehavioralObservation;
+    if (binding.role === "qa" && details.scope === "workflow" && qaBehavioralObservation === undefined && this.resolve(await this.dossierFor(context.runId, context.taskId)).length)
+      throw new Error("Workflow QA needs a new inspect_review observation with owner-run measurements; no old diff-only observation is upgraded into test evidence");
+    const qaPassed = qaBehavioralObservation === undefined || record(qaBehavioralObservation).passed === true;
+    const evidence = await this.artifact(context.runId, context.taskId!, { observation: observed, criteria, reviewedBy: binding.agentId,
+      ...(qaBehavioralObservation === undefined ? {} : { qaBehavioralObservation }) });
     const result = QualityGateResultSchema.parse({ gateId: context.definition.id, runId: context.runId, taskId: context.taskId, evaluationId,
-      status: criteria.every(criterion => criterion.passed) && observed.exitCode === 0 ? "passed" : "failed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString(),
-      metadata: { verification: { schemaVersion: 2, checkId: context.definition.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
+      status: criteria.every(criterion => criterion.passed) && observed.exitCode === 0 && qaPassed ? "passed" : "failed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString(),
+      metadata: { ...(qaBehavioralObservation === undefined ? {} : { hostQaBehavioralObservation: qaBehavioralObservation }), verification: { schemaVersion: 2, checkId: context.definition.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
         sourceRevision: observed.revision, specFingerprint: details.specFingerprint, scope: details.scope, independentExecution: true, isolated: true, executorId: binding.agentId,
         role: binding.role, method: "manual_review", testNames: configuration.testNames, criteria, summary: textField(args.summary) }, evidence: json(evidence), hostReviewSubmission: submission } });
     await this.trustGate(result);

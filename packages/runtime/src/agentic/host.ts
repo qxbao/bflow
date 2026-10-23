@@ -1534,7 +1534,7 @@ export function availableTools(role: AgentRole) {
     { name: "check_work", description: "Run owner-configured checks as Developer feedback. This never counts as independent acceptance evidence; runId,taskId" },
     { name: "request_verification", description: "Ask Runtime to dispatch an independent QA phase, then end your turn. Phase: red,green,refactor,verification; runId,taskId,phase" });
   if (["reviewer", "qa", "tester"].includes(role)) tools.push(
-    { name: "inspect_review", description: "Independently capture exact assigned diff before review; parameters: messageId" },
+    { name: "inspect_review", description: "Capture the exact assigned diff. For QA workflow gates also run the owner-configured tests at that integrated revision and return qaBehavioralObservation; use complete_review afterward, never record_behavioral_verification for this gate. Parameters: messageId" },
     { name: "complete_review", description: "Return a verdict after inspect_review; parameters: reviewId, messageId, summary, criteria:[{criterionId,passed,summary}]" });
   if (["qa", "tester"].includes(role)) tools.push({ name: "inspect_alternative_verification", description: "Capture exact committed diff and accepted dossier before evaluating criteria; parameters: runId,taskId" }, { name: "record_alternative_verification", description: "Capture actual committed documentation diff and independent manual acceptance evidence; parameters: observationId,runId,taskId,criteria:[{criterionId,passed,summary}]" });
   if (["qa", "tester"].includes(role)) tools.push({ name: "record_behavioral_verification", description: "Execute an assigned phase using the owner's argv, exact committed tests and real output; runId,taskId,phase. Never supply test output yourself." });
@@ -1710,7 +1710,7 @@ export async function runRoleMcp(configuration: RoleConfiguration, roleConfigPat
       if (request.method === "ping") { reply({}); continue; }
       if (request.method !== "tools/call") throw new Error("Unsupported MCP method");
       const params = record(request.params); if (!availableTools(configuration.role).some(tool => tool.name === params.name)) throw new Error("Tool is unavailable for this role");
-      const measured = ["record_behavioral_verification", "check_work", "complete_review", "record_alternative_verification"].includes(String(params.name));
+      const measured = ["record_behavioral_verification", "check_work", "inspect_review", "complete_review", "record_alternative_verification"].includes(String(params.name));
       const paneId = process.env.HERDR_PANE_ID;
       if (paneId === undefined || paneId.length === 0) throw new Error("HERDR_PANE_ID is not set in the Bflow MCP server environment; the provider must forward it");
       const result = await callHost(configuration.socketPath, configuration.token, "role_call", { ...params, paneId }, measured ? 600_000 : 30_000);

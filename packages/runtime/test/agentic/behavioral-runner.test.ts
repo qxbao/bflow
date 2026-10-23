@@ -13,7 +13,7 @@ import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 import { TestStrategyResolver, assertEvidenceComplete, assertReadyToImplement, recordEvidence } from "../../../test-strategy/src/index.js";
 import { assessment, spec } from "../../../test-strategy/test/fixtures.js";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
-import { HostBehavioralFailure, HostVerification } from "../../src/agentic/host-verification.js";
+import { HostBehavioralFailure, HostVerification, boundQaReviewCommands } from "../../src/agentic/host-verification.js";
 import { parseVitestJson } from "../../src/agentic/vitest-json.js";
 import { measureBehavior, parseBehavioralCommands } from "../../src/agentic/behavioral-runner.js";
 import type { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
@@ -55,6 +55,41 @@ async function fixture(taskType = "bugfix", reporter: "node_tap" | "vitest_json"
 }
 // Measurement launches require the production Bubblewrap namespace sandbox.
 describe.skipIf((await probeBehavioralSandbox()).status !== "ready")("independent behavioral command measurements", () => {
+  it.each([true, false])("exposes real owner-run tests at the integrated QA revision and prevents a false pass (passing=%s)", async passing => {
+    const f = await fixture();
+    if (passing) { await writeFile(join(f.cwd, "source.cjs"), "module.exports=x=>x*2;\n"); f.commit("integrated implementation"); }
+    const revision = f.git("rev-parse", "HEAD"), binding = { ...f.binding, role: "qa" as const };
+    const context = QualityGateContextSchema.parse({ runId: "run-1", taskId: "workflow-verification", attemptId: "workflow-attempt",
+      definition: { id: "host-qa", name: "QA", evaluator: "native-herdr-review", required: true, timeout: { executionTimeoutMs: 300000, onTimeout: "block" },
+        configuration: { kind: "review", role: "qa", method: "manual_review", criterionIds: ["ac-1"], testNames: [testName], levels: [] } },
+      artifacts: [], input: { scope: "workflow", sourceRevision: revision, baseRevision: f.base, sourceWorktreePath: f.cwd, specFingerprint: "a".repeat(64) } });
+    const runtime = { inspect: async (runId?: string) => runId ? { baseRevision: f.base, workflowSpec: { specification: f.specification, strategy: f.strategy }, tasks: [] }
+      : { outbound: [{ message: { message_id: "workflow-qa", type: "verification.requested", payload: context }, handle: { target: { paneId: binding.paneId } } }] } } as unknown as AgenticWorkflowRuntime;
+    const reopen = () => new HostVerification(() => runtime, () => f.store, new HostReceiptJournal(join(f.cwd, "..", "workflow-qa-receipts"), f.cwd, "session-1"), [f.command]);
+    const host = reopen();
+    const observed = await host.inspectReview(binding, { messageId: "workflow-qa" }) as any;
+    expect(observed.qaBehavioralObservation).toMatchObject({ sourceRevision: revision, passed: passing, measurements: [{ exitCode: passing ? 0 : 1, tests: 1 }] });
+    const legacyReceipts = new HostReceiptJournal(join(f.cwd, "..", "workflow-qa-receipts"), f.cwd, "session-1");
+    await legacyReceipts.putObservation("review", "legacy-diff-only", { binding, context, observation: observed.observation });
+    await expect(reopen().completeReview(binding, { reviewId: "legacy-diff-only", criteria: [{ criterionId: "ac-1", passed: true, summary: "Code review" }], summary: "Legacy observation" })).rejects.toThrow(/new inspect_review/);
+    const complete = await reopen().completeReview(binding, { reviewId: observed.reviewId, criteria: [{ criterionId: "ac-1", passed: true, summary: "Code review" }], summary: "Reviewed integrated revision" });
+    expect(complete.result.status).toBe(passing ? "passed" : "failed");
+    expect(complete.result.metadata?.hostQaBehavioralObservation).toEqual(observed.qaBehavioralObservation);
+    await writeFile(join(f.cwd, "source.cjs"), "module.exports=x=>x*3;\n"); f.commit("worktree advanced after immutable completion");
+    expect((await reopen().completeReview(binding, { reviewId: observed.reviewId, criteria: [{ criterionId: "ac-1", passed: true, summary: "Code review" }], summary: "Reviewed integrated revision" })).result).toEqual(complete.result);
+    expect(f.strategy.metadata?.tddEvidence ?? []).toHaveLength(0);
+  });
+
+  it("bounds aggregate QA execution without changing owner argv and refuses a batch without setup budget", async () => {
+    const f = await fixture();
+    const original = { ...f.command, timeoutMs: 180000, prepare: { args: ["owner-build"], timeoutMs: 120000 } };
+    const [bounded] = boundQaReviewCommands([original], 270000);
+    expect(bounded!.timeoutMs + bounded!.prepare!.timeoutMs + 90000).toBeLessThanOrEqual(270000);
+    expect(bounded!.args).toEqual(original.args); expect(bounded!.prepare!.args).toEqual(original.prepare.args);
+    expect(original.timeoutMs).toBe(180000); expect(original.prepare.timeoutMs).toBe(120000);
+    expect(() => boundQaReviewCommands([original, original, original], 270000)).toThrow(/aggregate/);
+  });
+
   it("returns a bounded test repair for non-assertion Red failures without granting implementation authority", async () => {
     const f = await fixture();
     await writeFile(join(f.cwd, "test/behavior.test.cjs"), `const {test}=require('node:test'); const value=require('../source.cjs'); test(${JSON.stringify(testName)},()=>value.multiply(2,3));\n`);
