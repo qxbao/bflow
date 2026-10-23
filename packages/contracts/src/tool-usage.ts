@@ -31,6 +31,14 @@ export const ToolConsumptionSchema = z.discriminatedUnion("status", [
 ]);
 export type ToolConsumption = z.infer<typeof ToolConsumptionSchema>;
 
+function evidenceMatchesUsage(
+  reference: z.infer<typeof ArtifactReferenceSchema>,
+  runId: string | undefined,
+  taskId: string | undefined
+): boolean {
+  return runId !== undefined && reference.runId === runId && reference.taskId === taskId;
+}
+
 /** Secret-free usage evidence; this record never contains invocation input or output bodies. */
 export const ToolUsageRecordSchema = z.object({
   schemaVersion: PlatformSchemaVersionSchema,
@@ -38,7 +46,7 @@ export const ToolUsageRecordSchema = z.object({
   taskId: IdentifierSchema.optional(),
   role: AgentRoleSchema,
   sessionId: IdentifierSchema,
-  generation: z.number().int().nonnegative(),
+  generation: z.number().int().positive(),
   invocationId: IdentifierSchema,
   toolId: IdentifierSchema,
   serviceId: IdentifierSchema.optional(),
@@ -46,6 +54,7 @@ export const ToolUsageRecordSchema = z.object({
   status: ToolUsageStatusSchema,
   consumption: ToolConsumptionSchema.optional(),
   reasonCode: IdentifierSchema.optional(),
+  evidenceReferences: z.array(ArtifactReferenceSchema).optional(),
   observedAt: IsoDateTimeSchema
 }).strict().superRefine((record, context) => {
   if (record.taskId !== undefined && record.runId === undefined) {
@@ -60,7 +69,13 @@ export const ToolUsageRecordSchema = z.object({
   if (record.consumption?.status === "consumed" && (record.runId === undefined || record.taskId === undefined)) {
     context.addIssue({ code: "custom", path: ["consumption"], message: "consumed result requires run and task linkage" });
   }
-  if (record.consumption?.status === "consumed" && record.consumption.evidenceReferences.some(reference => reference.runId !== record.runId || reference.taskId !== record.taskId)) {
+  if (record.evidenceReferences?.some(reference => !evidenceMatchesUsage(reference, record.runId, record.taskId))) {
+    context.addIssue({ code: "custom", path: ["evidenceReferences"], message: "evidence ownership must match usage record" });
+  }
+  if (record.consumption?.status === "consumed" && record.consumption.evidenceReferences.some(reference => !evidenceMatchesUsage(reference, record.runId, record.taskId))) {
+    context.addIssue({ code: "custom", path: ["consumption", "evidenceReferences"], message: "consumption evidence ownership must match usage record" });
+  }
+  if (record.consumption?.status === "rejected" && record.consumption.evidenceReferences?.some(reference => !evidenceMatchesUsage(reference, record.runId, record.taskId))) {
     context.addIssue({ code: "custom", path: ["consumption", "evidenceReferences"], message: "consumption evidence ownership must match usage record" });
   }
 });

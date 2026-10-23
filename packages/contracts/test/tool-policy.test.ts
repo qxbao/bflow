@@ -40,6 +40,14 @@ describe("tool policy v3 contracts", () => {
     expect(schema.safeParse(policy).success).toBe(true);
     expect(schema.safeParse({ ...policy, schemaVersion: 2 }).success).toBe(false);
     expect(schema.safeParse({ ...policy, extraPermission: true }).success).toBe(false);
+    const splitByRole = [
+      { ...policy.requirements[0], roles: ["developer"], operations: ["search", "fetch"] },
+      { ...policy.requirements[0], roles: ["reviewer"], operations: ["search"] }
+    ];
+    expect(schema.safeParse({ ...policy, requirements: splitByRole }).success).toBe(true);
+    expect(schema.safeParse({ ...policy, requirements: [...splitByRole, { ...splitByRole[0], roles: ["developer"], operations: ["fetch"] }] }).success).toBe(false);
+    expect(schema.safeParse({ ...policy, requirements: [{ ...policy.requirements[0], kind: "cli_only", serviceId: "unexpected" }] }).success).toBe(false);
+    expect(schema.safeParse({ ...policy, requirements: [{ ...policy.requirements[0], memoryScope: { wing: "engineering", repositoryId: "other", access: "read_only" } }] }).success).toBe(false);
   });
 
   it("requires exact operation and service identity for resolved MCP grants", () => {
@@ -112,6 +120,14 @@ describe("tool policy v3 contracts", () => {
     expect(schema.safeParse(grant).success).toBe(true);
     expect(schema.safeParse({ ...grant, memoryScope: { ...grant.memoryScope, access: "read_write" } }).success).toBe(false);
     expect(schema.safeParse({ ...grant, memoryScope: { ...grant.memoryScope, repositoryId: "other" } }).success).toBe(false);
+    const cliGrant = {
+      schemaVersion: 3, grantId: "grant-cli", policyDigest: digest, toolId: "rtk", kind: "cli_only",
+      requiredness: "optional", role: "developer", scope: { ...repoScope, kind: "session", sessionId: "session-1" },
+      triggers: ["routine_command"], operations: ["run"],
+      cliIdentity: { executablePath: "/opt/tools/rtk", version: "1.2.3", digest },
+      memoryScope: { wing: "engineering", repositoryId: "repo-1", access: "read_only" }
+    };
+    expect(schema.safeParse(cliGrant).success).toBe(false);
   });
 
   it("accepts agent-supplied action data without allowing an agent to assert its identity", () => {
@@ -142,6 +158,7 @@ describe("tool policy v3 contracts", () => {
       operation: "search",
       status: "completed",
       consumption: { status: "consumed", source: "accepted_artifact", evidenceReferences: [{ ...artifactReference, taskId: "task-1" }] },
+      evidenceReferences: [{ ...artifactReference, taskId: "task-1" }],
       reasonCode: "result_linked",
       observedAt: now
     };
@@ -152,5 +169,11 @@ describe("tool policy v3 contracts", () => {
     expect(schema.safeParse({ ...record, status: "failed" }).success).toBe(false);
     expect(schema.safeParse({ ...record, taskId: undefined }).success).toBe(false);
     expect(schema.safeParse({ ...record, status: "completed", reasonCode: undefined }).success).toBe(true);
+    expect(schema.safeParse({ ...record, generation: 0 }).success).toBe(false);
+    expect(schema.safeParse({ ...record, runId: undefined, taskId: "task-1" }).success).toBe(false);
+    expect(schema.safeParse({ ...record, status: "unknown" }).success).toBe(false);
+    expect(schema.safeParse({ ...record, status: "denied", consumption: undefined, reasonCode: undefined }).success).toBe(false);
+    expect(schema.safeParse({ ...record, consumption: { status: "rejected", reasonCode: "irrelevant", evidenceReferences: [{ ...artifactReference, runId: "other-run" }] } }).success).toBe(false);
+    expect(schema.safeParse({ ...record, evidenceReferences: [{ ...artifactReference, runId: "other-run" }] }).success).toBe(false);
   });
 });
