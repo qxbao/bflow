@@ -981,3 +981,8 @@ thành công được tái dùng khi chính engine/RunStore, definition và toà
 bộ nhớ/lưu trữ vẫn khớp. Cache không tạo aggregate từ projection và không lưu qua restart.
 Phiên bản thay đổi, engine đổi, bộ nhớ lệch hoặc cache mới đều phải qua checkpoint/event
 recovery; không cho phép ghi đè aggregate trong bộ nhớ mới hơn bằng lịch sử cũ.
+
+Blocker chẩn đoán của specialist đến trong khoảng resume đã xếp hàng nhưng verifier chưa
+bắt đầu cũng không thay pending action hay số lượt đã dùng. Thông điệp xác thực vẫn được
+lưu trong inbox và chuyển tới Coordinator; chỉ kết quả kiểm chứng hoặc đường quyết định
+được cấp quyền mới có thể tiếp tục thay đổi trạng thái công việc.
