@@ -228,3 +228,16 @@ Rollback source bằng revert các scoped commits, không reset lịch sử/main
 Quiesce trước downgrade, giữ unknown calls; config backup byte-exact qua cơ chế migrate hiện có.
 Bàn giao gồm nguyên nhân, final design/decisions, commits, tested HEAD, ownership diff, config migration,
 test exit/pass/fail/skip, live evidence matrix per tool, skip/degraded reasons, limits, CI và Git status.
+
+### D-TOOLS-01 implementation clarification — executable ingress
+
+The approved identity verification path needs an exported ingress schema rather than a new
+package-local inspection response passed to CLI. Integration owner selects the additive
+`VerifiedToolExecutableIdentitySchema` (v3, toolId, version, approved artifactIntegrity,
+desiredStateDigest, canonical executablePath and executableDigest). Tool Installer returns
+this within existing OperationResult/ContractError; unverified installs return an error.
+CLI parses it before constructing a ResolvedToolGrant. This implements D-TOOLS-01's
+inventory-to-grant requirement, keeps all existing exports/shapes compatible and adds no
+SQL/checkpoint migration, authority, installer behavior or global configuration change.
+The project owner approved D-TOOLS-01 in conversation; root reviews this supporting schema
+before merging. Affected owners remain Contracts, Tool Installer and CLI.
