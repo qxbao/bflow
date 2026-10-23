@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import {
   AcquireAgentLeaseRequestSchema, AgentAssignmentSchema, AgentExecutionHandleSchema, AgentLeaseSchema, AgentRequestSchema, AgentRoleSchema,
@@ -446,6 +447,7 @@ function parseSpec(value: SpecRecord): void {
 /** Linux flock + fsync/rename. A crashed process releases its lock; stale PID files are never stolen. */
 export class AgenticJournal {
   readonly directory: string;
+  private validatedSnapshot?: { bytes: Buffer; value: JournalState };
   constructor(directory: string, readonly repository: string) { this.directory = resolve(directory); }
   private static readonly queues = new Map<string, Promise<unknown>>();
   async exclusive<T>(action: (state: JournalState, save: () => Promise<void>) => Promise<T>): Promise<T> {
@@ -465,22 +467,39 @@ export class AgenticJournal {
         child.once("error", e => { clearTimeout(timer); reject(e); });
         child.once("close", code => { clearTimeout(timer); code === 0 ? accept() : reject(new Error("Agentic runtime busy")); });
       });
-      let state: JournalState;
-      try { state = parseState(JSON.parse(await readFile(join(this.directory, "state.json"), "utf8")), this.repository); }
-      catch (e) {
+      let state: JournalState, baseline: JournalState | undefined, durableBytes: Buffer | undefined;
+      const statePath = join(this.directory, "state.json");
+      try {
+        const bytes = await readFile(statePath);
+        if (this.validatedSnapshot?.bytes.equals(bytes)) state = structuredClone(this.validatedSnapshot.value);
+        else {
+          state = parseState(JSON.parse(bytes.toString("utf8")), this.repository);
+          this.validatedSnapshot = { bytes: Buffer.from(bytes), value: structuredClone(state) };
+        }
+        baseline = this.validatedSnapshot.value; durableBytes = bytes;
+      } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+        delete this.validatedSnapshot;
         state = { version: 1, repository: this.repository, runs: [], outbound: [], inbox: [], pendingCore: [], pendingVerifications: [] };
       }
       return await action(state, async () => {
+        // Equality covers invalid values that JSON.stringify would omit. Re-read under flock before acknowledging unchanged durable bytes.
+        if (baseline && durableBytes && isDeepStrictEqual(state, baseline)) {
+          try { if ((await readFile(statePath)).equals(durableBytes)) return; }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+        }
         parseState(state, this.repository);
+        const serialized = JSON.stringify(state), normalized = parseState(JSON.parse(serialized), this.repository);
         const path = join(this.directory, `state-${randomUUID()}.tmp`);
         const file = await open(path, "wx", 0o600);
-        try { await file.writeFile(JSON.stringify(state)); await file.sync(); } finally { await file.close(); }
+        try { await file.writeFile(serialized); await file.sync(); } finally { await file.close(); }
         try {
-          await rename(path, join(this.directory, "state.json"));
+          await rename(path, statePath);
           const dir = await open(this.directory, "r");
           try { await dir.sync(); } finally { await dir.close(); }
         } finally { await rm(path, { force: true }); }
+        this.validatedSnapshot = { bytes: Buffer.from(serialized, "utf8"), value: normalized };
+        baseline = normalized; durableBytes = this.validatedSnapshot.bytes;
       });
     } finally { await lock.close(); }
   }

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   AgyProviderAdapter,
@@ -310,9 +310,14 @@ exit 0
         mkdirSync(codexHomeDir, { mode: 0o700 });
         chmodSync(codexHomeDir, 0o700);
 
+        const nativeHomeDir = join(root, "native-home");
+        mkdirSync(nativeHomeDir, { mode: 0o700 });
+        const onboardingPath = join(stateDir, "agy-home", "developer", ".gemini", "antigravity-cli", "cache", "onboarding.json");
+        if (provider === "agy") rmSync(onboardingPath, { force: true });
         const fullRegistry = createDefaultProviderRegistry({
           [provider]: {
             executablePath: binPath,
+            ...(provider === "agy" ? { isolatorEnvironment: { HOME: nativeHomeDir, PATH: process.env.PATH ?? "" } } : {}),
             runner,
             codexHomeDirectory: codexHomeDir,
             mcpRegistrations: [mcpReg],
@@ -367,6 +372,23 @@ exit 0
           privateKeyPem: privateKey
         });
 
+        if (provider === "agy") {
+          const awaitingOnboarding = await fullRegistry.checkHealth({
+            schemaVersion: CURRENT_PLATFORM_SCHEMA_VERSION, environment: fullEnv, stage: "activated",
+            launchProfile: profile, launchAttestation: attestation, requestedAt: new Date().toISOString()
+          });
+          expect(awaitingOnboarding.ok).toBe(true);
+          if (awaitingOnboarding.ok) {
+            expect(awaitingOnboarding.value.status).toBe("blocked");
+            expect(awaitingOnboarding.value.checks).toContainEqual(expect.objectContaining({
+              check: "native_binding", status: "failed", code: "agy_onboarding_incomplete"
+            }));
+          }
+          // Harness-only native state. The real adapter never completes onboarding or consents for the user.
+          mkdirSync(dirname(onboardingPath), { recursive: true, mode: 0o700 });
+          writeFileSync(onboardingPath, '{"onboardingComplete":true}\n', { mode: 0o600 });
+        }
+
         const activatedHealth = await fullRegistry.checkHealth({
           schemaVersion: CURRENT_PLATFORM_SCHEMA_VERSION,
           environment: fullEnv,
@@ -378,7 +400,7 @@ exit 0
         expect(activatedHealth.ok).toBe(true);
         if (activatedHealth.ok) {
           expect(activatedHealth.value.stage).toBe("activated");
-          expect(activatedHealth.value.status).toBe("ready");
+          expect(activatedHealth.value.status, JSON.stringify(activatedHealth.value.checks.filter(check => check.status !== "passed"))).toBe("ready");
           expect(activatedHealth.value.checks.every((c) => c.status === "passed")).toBe(true);
         }
         const rejectedAttestation = await fullRegistry.checkHealth({

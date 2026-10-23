@@ -1012,3 +1012,10 @@ Run có pending action chờ đối soát delivery, kể cả journal cũ chưa 
 không tự advance Core hay ghi checkpoint mới trong scheduler. Đường đối soát và cancellation
 vẫn hoạt động riêng; không có kết luận delivered/not-delivered, retry hay kết quả công việc
 nào được suy ra từ việc giữ yên run đó.
+
+Journal tái dùng snapshot đã kiểm tra chỉ khi nội dung file đọc dưới flock khớp chính xác
+bytes đã xác thực trong instance đó. Callback nhận bản sao độc lập; file đổi, hỏng hoặc
+khác version vẫn phải qua parser và không fallback về cache. Save không đổi state kiểm
+tra lại bytes còn tồn tại rồi giữ nguyên commit; mọi thay đổi vẫn qua schema và
+fsync/rename/fsync thư mục trước khi cập nhật cache. Cache không tạo receipt hay đổi
+quy tắc giao nhận, phê duyệt, fencing hoặc giới hạn retry.

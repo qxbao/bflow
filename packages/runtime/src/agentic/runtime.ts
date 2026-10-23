@@ -1453,7 +1453,7 @@ export class AgenticWorkflowRuntime {
   private reportSpecialistBlocked(state: JournalState, outbox: HerdrOutbox, run: RunRecord, message: RoleMessage, blockage: string): void {
     // The authenticated report remains in the inbox; the active Runtime verifier owns its outcome and resume budget.
     if (run.workflowVerificationPending || run.tasks.some(task => task.verificationPending) ||
-        run.pendingAction?.kind === "resume_coordinator" && run.pendingAction.state === "queued") return;
+        run.status === "verifying" && run.pendingAction?.kind === "resume_coordinator" && run.pendingAction.state === "queued") return;
     if (state.inbox.some(item => item.status === "applied" && item.message.type === "review.verdict" &&
         item.message.run_id === run.runId && item.message.causation_id === message.causation_id &&
         item.message.sender.role === message.sender.role && item.message.sender.agent_id === message.sender.agent_id && item.message.sender.pane_id === message.sender.pane_id))
@@ -1515,7 +1515,7 @@ export class AgenticWorkflowRuntime {
       const blockage = specialistBlockage(parsed.payload);
       if (blockage !== undefined) {
         if (run.workflowVerificationPending || run.tasks.some(task => task.verificationPending) ||
-            run.pendingAction?.kind === "resume_coordinator" && run.pendingAction.state === "queued") {
+            run.status === "verifying" && run.pendingAction?.kind === "resume_coordinator" && run.pendingAction.state === "queued") {
           // The Runtime-owned verification result decides this phase. A model's delivery diagnostic cannot pause its live waiter or reset its lineage counters.
           const inbox = state.inbox.find(item => item.message.message_id === parsed.message_id)!; inbox.status = "applied";
           await save(); return;
