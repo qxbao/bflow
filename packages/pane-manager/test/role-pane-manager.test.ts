@@ -1730,21 +1730,20 @@ describe("RolePaneManager Verification Suite", () => {
       }
     });
 
-    it("retains ignored dependencies on non-destructive release while refusing close, remove, and actual edits", async () => {
+    it("retains ignored dependencies on release and pane close while refusing worktree removal and actual edits", async () => {
       const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
       await manager.initializeTopology();
       const path = "/repo/.worktrees/ignored-dependencies";
       const allocation = await manager.allocateDeveloper({ taskId: "ignored-task", worktreePath: path });
       expect(allocation.ok).toBe(true);
       inspector.setCleanliness(path, { exists: true, isClean: false, dirtyFiles: ["node_modules/"], ignoredFiles: ["node_modules/"] } as any);
-      expect((await manager.releaseDeveloper({ taskId: "ignored-task", closePane: true })).ok).toBe(false);
       expect((await manager.releaseDeveloper({ taskId: "ignored-task", removeWorktree: true })).ok).toBe(false);
-      const closesByPolicy = createRolePaneManager({ config: { ...config, reuseIdleDeveloperPanes: false }, runner, store, worktreeInspector: inspector });
-      expect((await closesByPolicy.releaseDeveloper({ taskId: "ignored-task", closePane: false, removeWorktree: false })).ok).toBe(false);
       inspector.setCleanliness(path, { exists: true, isClean: false, dirtyFiles: ["node_modules/", "source.ts"], ignoredFiles: ["node_modules/"] } as any);
       expect((await manager.releaseDeveloper({ taskId: "ignored-task", closePane: false, removeWorktree: false })).ok).toBe(false);
       inspector.setCleanliness(path, { exists: true, isClean: false, dirtyFiles: ["node_modules/"], ignoredFiles: ["node_modules/"] } as any);
       expect(await manager.releaseDeveloper({ taskId: "ignored-task", closePane: false, removeWorktree: false })).toMatchObject({ ok: true, value: { paneClosed: false, worktreeRemoved: false, retainedForReuse: true } });
+      const closesByPolicy = createRolePaneManager({ config: { ...config, reuseIdleDeveloperPanes: false }, runner, store, worktreeInspector: inspector });
+      expect(await closesByPolicy.releaseDeveloper({ taskId: "ignored-task", closePane: false, removeWorktree: false })).toMatchObject({ ok: true, value: { paneClosed: true, worktreeRemoved: false, retainedForReuse: false } });
     });
 
     it("safely reuses idle released developer pane for new task without duplicate worktree create/open", async () => {
