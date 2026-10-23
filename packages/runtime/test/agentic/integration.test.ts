@@ -224,7 +224,166 @@ async function fixture(options: { dynamicGate?: boolean; parallel?: boolean; tdd
     restart: () => { runtime = new AgenticWorkflowRuntime({ ...ports, engine: new DeterministicWorkflowEngine({ bindingReceiptKeys }) }, runtimeOptions); return runtime; } };
 }
 
+it.each([false, true])("recovers a refused Developer allocation through its own action while retaining accepted work and approval (legacy: %s)", async legacy => {
+  const f = await fixture({ humanApproval: true });
+  const preflights: string[] = [];
+  f.ports.preflightRoleCapabilities = async binding => { preflights.push(binding.role); };
+  await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+  await f.approve();
+  const allocate = f.panes.allocateDeveloper.bind(f.panes);
+  f.panes.allocateDeveloper = async () => ({ ok: false, error: { code: "validation", retryable: false,
+    message: "A Herdr socket port is required to create panes with launch env" } }) as never;
+  await f.runtime.tick();
+  const paused = await f.inspect();
+  expect(paused).toMatchObject({ status: "escalated", pendingAction: { state: "pending", kind: "resume_coordinator",
+    previousStatus: "implementing", reason: paused.error } });
+  const tree = paused.tasks[0].worktrees[0].worktreePath;
+  const approval = paused.decision;
+  f.panes.allocateDeveloper = allocate;
+  if (legacy) {
+    const path = join(f.root, "journal/state.json"), state = JSON.parse(await readFile(path, "utf8"));
+    const oldActionId = `next-${digest(["run-1", "old-planning-blocker"])}`;
+    state.runs[0].pendingAction = { ...paused.pendingAction, actionId: oldActionId, sourceMessageId: "old-planning-blocker",
+      reason: "Unrelated resolved planning blocker", state: "queued" };
+    state.runs[0].resumeReceipts = [{ actionId: oldActionId, messageId: "old-requirement-revision" }];
+    await writeFile(path, JSON.stringify(state));
+  }
+  f.restart();
+  await f.runtime.initialize();
+  const recovered = await f.inspect();
+  expect(recovered.pendingAction).toMatchObject({ state: "pending", reason: paused.error, previousStatus: "implementing" });
+  await f.runtime.resumeBlockedRun("run-1", recovered.pendingAction.actionId);
+  await f.runtime.tick();
+  const resumed = await f.inspect();
+  expect(resumed.status).not.toBe("escalated");
+  expect(resumed.decision).toEqual(approval);
+  expect(resumed.tasks[0].worktrees).toHaveLength(1);
+  expect(resumed.tasks[0].worktrees[0].worktreePath).toBe(tree);
+  expect(f.transport.sentRequests.filter(request => request.role === "developer")).toHaveLength(1);
+  expect(preflights).toContain("coordinator");
+});
+
+it("keeps a long Developer allocation diagnostic resumable across restart", async () => {
+  const f = await fixture();
+  f.ports.preflightRoleCapabilities = async () => {};
+  await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+  const allocate = f.panes.allocateDeveloper.bind(f.panes);
+  f.panes.allocateDeveloper = async () => ({ ok: false, error: { code: "validation", retryable: false,
+    message: "Provider diagnostic: " + "x".repeat(3000) } }) as never;
+  await f.runtime.tick();
+  const paused = await f.inspect();
+  expect(paused.status).toBe("escalated");
+  expect(paused.pendingAction.reason).toBe(paused.error.slice(0, 2000));
+  await f.runtime.resumeBlockedRun("run-1", paused.pendingAction.actionId);
+  await f.runtime.tick();
+  const beforeRestart = await f.inspect();
+  expect(beforeRestart.pendingAction.manualResumeAttempts).toBe(1);
+  f.restart(); await f.runtime.initialize();
+  expect((await f.inspect()).pendingAction).toEqual(beforeRestart.pendingAction);
+  f.panes.allocateDeveloper = allocate;
+  await f.runtime.resumeBlockedRun("run-1", paused.pendingAction.actionId);
+  await f.runtime.tick();
+  expect((await f.inspect()).tasks[0].worktrees).toEqual(paused.tasks[0].worktrees);
+  expect(f.transport.sentRequests.filter(request => request.role === "developer")).toHaveLength(1);
+});
+
+it("keeps the explicit allocation resume budget when provider diagnostics change", async () => {
+  const f = await fixture({ humanApproval: true });
+  f.ports.preflightRoleCapabilities = async () => {};
+  await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.approve();
+  let episode = 0;
+  f.panes.allocateDeveloper = async () => ({ ok: false, error: { code: "validation", retryable: false,
+    message: `Launch launch-${episode++} cannot activate` } }) as never;
+  await f.runtime.tick();
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await f.runtime.resumeBlockedRun("run-1", (await f.inspect()).pendingAction.actionId);
+    await f.runtime.tick();
+    expect((await f.inspect()).pendingAction).toMatchObject({ state: "pending", manualResumeAttempts: attempt });
+  }
+  await expect(f.runtime.resumeBlockedRun("run-1", (await f.inspect()).pendingAction.actionId)).rejects.toThrow("Explicit resume budget is exhausted");
+  expect(f.transport.sentRequests.filter(request => request.role === "developer")).toHaveLength(0);
+});
+
+it.each([false, true, "paused"] as const)("keeps an executing run schedulable during a diagnostic specialist handoff (legacy: %s)", async legacy => {
+  const f = await fixture();
+  f.ports.preflightRoleCapabilities = async () => {};
+  await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+  await f.evidence("implement"); await f.submit();
+  expect((await f.inspect()).coreCreated).toBe(true);
+  await f.runtime.requestSpecialist("run-1", "architect", "Read-only diagnosis of a recovered execution blocker", ["repository.read"]);
+  if (!legacy) expect((await f.inspect()).status).toBe("implementing");
+  else {
+    const path = join(f.root, "journal/state.json"), state = JSON.parse(await readFile(path, "utf8"));
+    state.runs[0].status = legacy === "paused" ? "escalated" : "specifying";
+    if (legacy === "paused") state.runs[0].pendingAction = { actionId: `next-${digest(["run-1", "diagnostic-pause"])}`,
+      kind: "resume_coordinator", owner: "coordinator", reason: "Paused diagnostic", sourceMessageId: "diagnostic-pause",
+      createdAt: new Date().toISOString(), state: "pending", previousStatus: "specifying", recovery: "manual" };
+    await writeFile(path, JSON.stringify(state));
+    f.restart(); await f.runtime.initialize();
+    if (legacy === "paused") {
+      expect((await f.inspect()).status).toBe("escalated");
+      expect((await f.inspect()).pendingAction.previousStatus).toBe("implementing");
+      await f.runtime.resumeBlockedRun("run-1", (await f.inspect()).pendingAction.actionId);
+    } else expect((await f.inspect()).status).toBe("implementing");
+  }
+  await f.runtime.tick();
+  expect((await f.inspect()).tasks[0].cycle).toBeDefined();
+});
+
 const phaseTestName = "ac-1: The requested outcome is independently verifiable";
+
+it.each(["task", "delivery"] as const)("recovers an actionable %s approval after a legacy diagnostic phase regression", async kind => {
+  const f = await fixture();
+  f.def.tasks[0]!.requiresApproval = kind === "task";
+  await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+  await f.evidence("implement"); await f.submit(); await f.runtime.tick();
+  if (kind === "delivery") await f.runtime.tick();
+  const pending = await f.inspect();
+  expect(pending.status).toBe("awaiting_approval"); expect(pending.approvalKind).toBe(kind);
+  const path = join(f.root, "journal/state.json"), state = JSON.parse(await readFile(path, "utf8"));
+  state.runs[0].status = "specifying";
+  await writeFile(path, JSON.stringify(state));
+  f.restart(); await f.runtime.initialize();
+  const recovered = await f.inspect();
+  expect(recovered.status).toBe("awaiting_approval");
+  expect(recovered.approval).toEqual(pending.approval);
+  expect(recovered.decision).toEqual(pending.decision);
+  await f.runtime.tick();
+  expect((await f.inspect()).status).toBe("awaiting_approval");
+  await f.approve();
+  expect((await f.inspect()).decision.approvalId).toBe(pending.approval.approvalId);
+  expect((await f.inspect()).status).toBe(kind === "task" ? "implementing" : "completed");
+});
+
+it.each(["task", "delivery"] as const)("retains a manual pause before explicitly restoring a pending %s approval", async kind => {
+  const f = await fixture();
+  f.ports.preflightRoleCapabilities = async () => {};
+  f.def.tasks[0]!.requiresApproval = kind === "task";
+  await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+  await f.evidence("implement"); await f.submit(); await f.runtime.tick();
+  if (kind === "delivery") await f.runtime.tick();
+  const pending = await f.inspect();
+  expect(pending.status).toBe("awaiting_approval"); expect(pending.approvalKind).toBe(kind);
+  const path = join(f.root, "journal/state.json"), state = JSON.parse(await readFile(path, "utf8"));
+  state.runs[0].status = "escalated";
+  const actionId = `next-${digest(["run-1", "diagnostic-pause"])}`;
+  state.runs[0].pendingAction = { actionId, kind: "resume_coordinator", owner: "coordinator",
+    reason: "Paused legacy diagnosis", sourceMessageId: "diagnostic-pause", createdAt: new Date().toISOString(),
+    state: "pending", previousStatus: "specifying", recovery: "manual" };
+  await writeFile(path, JSON.stringify(state));
+  f.restart(); await f.runtime.initialize();
+  expect((await f.inspect()).status).toBe("escalated");
+  expect((await f.inspect()).pendingAction.previousStatus).toBe("awaiting_approval");
+  expect(await f.runtime.resumeRecoverableRuns()).toMatchObject({ resumed: 0 });
+  await expect(f.runtime.resumeBlockedRun("run-1", actionId, { automatic: true })).rejects.toThrow("pending approval");
+  await f.runtime.resumeBlockedRun("run-1", actionId);
+  expect((await f.inspect()).approval).toEqual(pending.approval);
+  expect((await f.inspect()).decision).toEqual(pending.decision);
+  await f.runtime.tick();
+  expect((await f.inspect()).status).toBe("awaiting_approval");
+  await f.approve();
+  expect((await f.inspect()).status).toBe(kind === "task" ? "implementing" : "completed");
+});
 
 describe("workflow proposal admission regressions", () => {
   async function proposalFixture() {

@@ -16,6 +16,13 @@ Các lệnh Herdr dùng `HERDR_SESSION` riêng cho từng repository, xóa các 
 định tuyến pane/socket được kế thừa theo cách giống P12. Preflight CLI/protocol chạy
 trước khi mở tài nguyên bền vững hay cấp phát Developer.
 
+Developer dùng platform launch phải có native session thực tế được lưu trong manifest và
+đã kết thúc lượt startup trước khi cấp phát thành công, kể cả khi không có Gateway registration.
+Runtime đối soát quan sát Herdr rồi trả binding hiện tại; outbox giữ assignment ở hàng đợi
+trước khi lấy lease hoặc gọi transport nếu platform binding chưa có session. Handle đã được
+chấp nhận mà thiếu session từ bản cũ vẫn bất biến và không được tự gắn session hay gửi lại;
+trường hợp đó cần đối soát riêng, không phải bằng chứng tác vụ hoàn tất.
+
 Các đầu vào host bắt buộc là tường minh: định danh repository/session, role capability,
 định nghĩa check của task/workflow, deterministic gate runner, ingress thông điệp/result/evidence
 Herdr có xác thực và phê duyệt của con người có xác thực. Không có
@@ -433,6 +440,13 @@ cho phép launch pane. Chuẩn bị độc lập không có option bị
 giới hạn mười phút; khởi động CLI cung cấp ngân sách cấu hình còn lại của nó.
 `openPersistedAgenticHost` mở lại một host cho shutdown/recovery bằng platform,
 policy và behavioral authority đã lưu; nó không yêu cầu thay đổi cấu hình.
+Khi thử lại một lần khởi động đang chờ trong cùng daemon, host kiểm tra lại profile,
+binary/config, skill đã pin, Gateway và preflight nhưng giữ nguyên generation, launch
+và token; cổng activated health cuối cùng vẫn bắt buộc. Không phục hồi cache launch
+qua daemon restart, và không tự đổi launch khi material đã hết hạn hoặc bị drift.
+Yêu cầu sửa đổi từ Conversation được gắn vào run ngay khi host tiếp nhận vào outbox,
+trước khi chuyển tới Coordinator. Việc này không tạo receipt Herdr nhận lại hay
+phê duyệt thiết kế; replay cùng revision giữ nguyên lịch sử và các cổng human.
 Các quan sát provider của permanent role chạy tối đa ba cái cùng lúc, sau khi chuẩn bị
 tuần tự environment/skills/Gateway. Mỗi provider subprocess nhận
 cancellation signal của thao tác và deadline còn lại; việc chuẩn bị launch
@@ -743,6 +757,12 @@ Recovery đọc inbox/receipts bền vững, phục hồi wake thiếu theo đú
 và tiếp tục verification bị gián đoạn bằng plan đã đóng băng. Nó không tạo binding proof hoặc
 resend delivery chưa rõ. Watchdog xét obligation của đúng run/pane; `unknown_delivery` là chờ
 reconciliation có hành động xử lý, không phải task thành công hoặc bằng chứng treo.
+
+Diagnostic specialist không đưa workflow đã tạo Core trở lại phase lập kế hoạch. Khi mở journal
+cũ có phase bị ghi lùi, Runtime khôi phục phase thực thi hoặc chờ phê duyệt task/delivery còn
+hiệu lực, giữ nguyên request và quyết định đã ghi; một action tạm dừng vẫn cần được xử lý riêng.
+Người dùng có thể explicit resume action đó về `awaiting_approval`, rồi trả lời approval;
+automatic resume vẫn bị chặn và việc resume không thay thế quyết định phê duyệt.
 
 Conversation nhận notice qua inbox; receipt chưa đồng nghĩa model đã thấy hoặc người dùng đã
 đọc. Host nhận diện layout idle đã quan sát của Claude/Codex, giữ draft không bị ghi đè và giới

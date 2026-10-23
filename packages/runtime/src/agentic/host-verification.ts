@@ -145,6 +145,7 @@ export class HostVerification {
       this.assertDetectedSupported(spec, automated, strategyInput);
       return;
     }
+    if (strategyInput !== undefined) this.assertPolicyMethods(TestStrategySchema.parse(strategyInput));
     for (const criterion of automated) if (!this.runners.owner.some(command => command.method === criterion.verificationMethod)) throw new Error(`No owner-configured behavioral runner for ${criterion.verificationMethod}`);
     if (strategyInput !== undefined) {
       const strategy = TestStrategySchema.parse(strategyInput);
@@ -216,6 +217,15 @@ export class HostVerification {
       });
     }
   }
+  private assertPolicyMethods(strategy: TestStrategy) {
+    const policy = strategy.metadata?.conditionalTdd;
+    if (policy === undefined) return;
+    const configured = this.configuredMethods();
+    const missing = strings(record(policy).requiredVerificationMethods).filter(method => method !== "manual_review" && !configured.includes(method));
+    if (missing.length) throw new WorkflowProposalRejected({ code: "unsupported_method",
+      reason: `Test strategy policy requires independent ${missing.join(", ")} checks with configured runners before design approval. Preserve the assessed policy and accepted criteria; provision the missing checks before proposing executable work.`,
+      methods: missing, options: [] });
+  }
   private assertDetectedSupported(spec: Specification, automated: Specification["acceptanceCriteria"], strategyInput: unknown) {
     const detection = this.runners.current;
     if (detection?.status !== "detected") {
@@ -229,6 +239,7 @@ export class HostVerification {
     const ids = automated.map(criterion => criterion.id).join(", ");
     if (!testPaths.length) reject("missing_test_paths", `Automated acceptance criteria (${ids}) need their committed test files listed in specification.affectedPaths. Add the exact test file paths (for example packages/x/test/feature.test.ts) to affectedPaths and propose again.`);
     const strategy = strategyInput === undefined ? undefined : TestStrategySchema.parse(strategyInput);
+    if (strategy) this.assertPolicyMethods(strategy);
     for (const criterion of automated) {
       const candidates = profiles.filter(item => item.method === criterion.verificationMethod);
       const profile = candidates.find(item => strategy?.targetCommands.includes(item.command)) ?? candidates[0];

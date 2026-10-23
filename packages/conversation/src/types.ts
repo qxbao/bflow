@@ -132,9 +132,12 @@ export const ExtractedRequirementDraftSchema = z
     scopeDefined: z.boolean(),
     isLargeTask: z.boolean(),
     affectedPaths: z.array(z.string()),
-    acceptanceCriteriaDescriptions: z.array(z.string()),
-    /** Optional explicit method per criterion, matched by index. Missing entries are inferred. */
+    /** Legacy form; omitted when `acceptanceCriteria` states each criterion with its method. */
+    acceptanceCriteriaDescriptions: z.array(z.string()).default([]),
+    /** Legacy methods: one per criterion (by index) or a single method for every criterion. */
     verificationMethods: z.array(VerificationMethodSchema).optional(),
+    /** Each criterion with its own explicit verification method. */
+    acceptanceCriteria: z.array(z.object({ description: z.string(), verificationMethod: VerificationMethodSchema }).strict()).optional(),
     isRequirementChange: z.boolean(),
     codeChangesAuthorized: z.boolean().optional(),
     targetRunId: IdentifierSchema.optional(),
@@ -155,6 +158,7 @@ export interface ExtractedRequirementDraft {
   readonly affectedPaths: readonly string[];
   readonly acceptanceCriteriaDescriptions: readonly string[];
   readonly verificationMethods?: readonly VerificationMethod[] | undefined;
+  readonly acceptanceCriteria?: readonly { readonly description: string; readonly verificationMethod: VerificationMethod }[] | undefined;
   readonly isRequirementChange: boolean;
   readonly codeChangesAuthorized?: boolean | undefined;
   readonly targetRunId?: string | undefined;

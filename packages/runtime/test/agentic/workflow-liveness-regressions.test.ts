@@ -631,12 +631,12 @@ describe("workflow liveness recovery boundaries", () => {
       run("run-cancelled", "specifying", { cancelled: true })] });
     await expect(f.runtime.queueHerdr(revised("run-1"))).resolves.toBeDefined();
     const current = await f.runtime.inspect("run-1") as unknown as RunRecord;
-    expect(current).toMatchObject({ status: "specifying", pendingAction: { actionId: action.actionId, state: "queued", resumeAttempts: 1 },
+    expect(current).toMatchObject({ status: "intake", delegation: { metadata: { revision: 2 }, objective: "Clarified objective" }, pendingAction: { actionId: action.actionId, state: "queued", resumeAttempts: 1 },
       resumeReceipts: [{ actionId: action.actionId, messageId: "intake-2-run-1" }] });
     expect(current.error).toBeUndefined();
     await f.runtime.flushOutbound();
     expect(f.transport.sentRequests.filter(request => request.role === "coordinator" && request.instruction.includes("intake-2-run-1"))).toHaveLength(1);
-    await f.runtime.receiveHerdr(revised("run-1")); // its ingress admits the revision against the restored live run
+    await f.runtime.receiveHerdr(revised("run-1")); // a real ingress replay preserves the already-admitted revision
     expect(await f.runtime.inspect("run-1")).toMatchObject({ status: "intake", delegation: { objective: "Clarified objective" } });
     await expect(f.runtime.queueHerdr(revised("run-terminal"))).rejects.toThrow(/escalated; requirement revisions are not accepted/);
     await expect(f.runtime.queueHerdr(revised("run-cancelled"))).rejects.toThrow(/cancelled/);

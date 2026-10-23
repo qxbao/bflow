@@ -94,6 +94,36 @@ describe("trusted approval replies observed in conv-bf-daac1a7e8152c8d655d6", ()
 });
 
 describe("approval reply targeting", () => {
+  it.each([
+    ["Duyệt thiết kế", DESIGN],
+    ["Duyệt tác vụ", "task-approval-1234abcd"],
+    ["Duyệt bàn giao", "delivery-1234abcd"]
+  ])("accepts the exact Vietnamese gate label %s only for its own approval", (label, id) => {
+    expect(decided(label, contextWith(designApproval(id))))
+      .toMatchObject({ approvalId: id, decision: "approved" });
+    expect(decided(`${id}: ${label}`, contextWith(designApproval(id))))
+      .toMatchObject({ approvalId: id, decision: "approved" });
+  });
+
+  it("never treats a Vietnamese gate label as authority for a different or ambiguous gate", () => {
+    for (const [label, id] of [["Duyệt thiết kế", "delivery-1234abcd"], ["Duyệt tác vụ", DESIGN], ["Duyệt bàn giao", DESIGN]]) {
+      expect(decided(label!, contextWith(designApproval(id!)))).toBeUndefined();
+      expect(decided(`${id}: ${label}`, contextWith(designApproval(id!)))).toBeUndefined();
+    }
+    for (const context of [contextWith(designApproval(), designApproval("design-2222beef")), contextWith(designApproval(), userDecision(APR_A))]) {
+      expect(decided("Duyệt thiết kế", context)).toBeUndefined();
+      expect(decided(`${DESIGN}: Duyệt thiết kế`, context)).toMatchObject({ approvalId: DESIGN, decision: "approved" });
+    }
+  });
+
+  it.each([
+    "Chưa duyệt thiết kế", "Không duyệt thiết kế", "Duyệt thiết kế nếu test đạt",
+    "Duyệt thiết kế và bàn giao", "Duyệt thiết kế; chưa duyệt tác vụ", 'Ví dụ: "Duyệt thiết kế"',
+    "Duyệt thiết kế\nDuyệt bàn giao"
+  ])("keeps prose and combined gate replies out of the trusted hook: %s", content => {
+    expect(decided(content, contextWith(designApproval()))).toBeUndefined();
+  });
+
   it("rejects a design approval by id with the reason", () => {
     expect(decided(`${DESIGN}: reject thiếu kiểm thử hồi quy`, contextWith(designApproval())))
       .toMatchObject({ approvalId: DESIGN, decision: "rejected", reason: expect.stringContaining("thiếu kiểm thử hồi quy") });

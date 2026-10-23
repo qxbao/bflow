@@ -212,12 +212,37 @@ export class AgenticWorkflowRuntime {
         runtimeId: `p19-${digest(this.journal.repository).slice(0, 16)}`, configuration: {}, recoveryMode: true, initializedAt: this.now()
       })));
       SessionManifestSchema.parse(unwrap(await this.ports.panes.getManifest()));
-      await this.transaction(async (state, save) => {
+      await this.transaction(async (state, save, core) => {
         // These flags describe coroutines owned by the previous process, not durable verification outcomes.
         // Keep a persisted outcome for finishVerification; otherwise the next tick resumes the frozen plan.
         let changed = false;
         for (const run of state.runs) {
           if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) continue;
+          // A diagnostic handoff in older hosts could regress an approved,
+          // already-created Core workflow into a preparation-only phase.
+          const preparationPhases = ["intake", "clarifying", "specifying", "planning"];
+          const resumePreparation = run.status === "escalated" && run.pendingAction?.kind === "resume_coordinator" &&
+            preparationPhases.includes(run.pendingAction.previousStatus ?? "");
+          if (run.coreCreated && run.definition && run.workflowSpec?.specification.status === "approved" &&
+              (preparationPhases.includes(run.status) || resumePreparation)) {
+            const snapshot = await core.snapshot(run.runId);
+            if (!["failed", "cancelled", "cancelling"].includes(snapshot.status)) {
+              const pendingApproval = ["task", "delivery"].includes(run.approvalKind ?? "") &&
+                run.approval?.status === "pending" && run.decision?.approvalId !== run.approval.approvalId;
+              const phase = pendingApproval ? "awaiting_approval" :
+                run.workflowVerificationPending || run.tasks.some(task => task.verificationPending) ? "verifying" : "implementing";
+              if (resumePreparation) run.pendingAction!.previousStatus = phase;
+              else run.status = phase;
+              changed = true;
+            }
+          }
+          // Older hosts escalated a refused allocation without its own resume
+          // action (or retained an unrelated, already-resumed planning action).
+          const allocationTask = run.coreCreated && run.status === "escalated" ? run.tasks.find(task =>
+            run.error?.startsWith(`Developer allocation pending for ${task.taskId}: `)) : undefined;
+          if (allocationTask && (!run.pendingAction || run.pendingAction.reason !== run.error!.slice(0, 2000))) {
+            this.pauseDeveloperAllocation(run, allocationTask.taskId, run.error!); changed = true;
+          }
           for (const task of run.tasks) {
             const outcome = state.pendingVerifications.some(item => pendingRunId(item) === run.runId && pendingTaskId(item) === task.taskId);
             if (task.verificationPending && !outcome) { task.verificationPending = false; changed = true; }
@@ -652,12 +677,23 @@ export class AgenticWorkflowRuntime {
     const result = await this.transaction(async (state, save, core, outbox) => {
       if (isConversationHandoff(message)) {
         const delegation = DelegationRequestSchema.parse(message.payload);
-        const admission = this.admitDelegation(state, delegation, this.inFlightDelegations(state, delegation.runId));
+        const pending = this.inFlightDelegations(state, delegation.runId);
+        const run = state.runs.find(run => run.runId === delegation.runId);
+        let admission = this.admitDelegation(state, delegation, pending);
+        // Older hosts could persist a queued revision without binding its content
+        // to the run. Reconcile only the latest exact replay through normal
+        // admission checks; never invent a signed inbound transport receipt.
+        if (admission.kind === "duplicate" && run && revisionOf(delegation) > revisionOf(run.delegation) &&
+            !pending.some(item => revisionOf(item) > revisionOf(delegation)))
+          admission = this.admitDelegation(state, delegation, []);
         // A duplicate carries already-admitted content, so a later turn re-sending it is still delivered; the outbox dedupes by message id.
         if (admission.kind === "rejected") { this.notifyRejection(state, outbox, message, admission.reason); await save(); throw new AdmissionRejectedError(admission.reason); }
         // The trusted Conversation already authorized this objective. Persist intake before capability/transport
         // checks, without inventing signed ingress or Coordinator acceptance. A first-dispatch failure must be resumable.
-        if (admission.kind === "revision") this.resumeForRevision(state.runs.find(run => run.runId === delegation.runId)!, message.message_id);
+        if (admission.kind === "revision") {
+          this.resumeForRevision(run!, message.message_id);
+          this.admitRevision(state, outbox, run!, delegation);
+        }
         if (admission.kind === "new" && !state.runs.some(run => run.runId === delegation.runId)) state.runs.push({
           runId: delegation.runId!, delegation, status: "intake", tasks: [], coreCreated: false, cancelled: false, maxIterations: 3
         });
@@ -1446,8 +1482,12 @@ export class AgenticWorkflowRuntime {
         if (prior) return json({ queued: true, messageId: prior.message.message_id, actionId });
         throw new Error("No matching recoverable blocker to resume");
       }
+      // Explicitly restoring a paused approval wait answers no human decision
+      // and cannot schedule work. Automatic resumes must still stop at the gate.
+      const restoreApprovalWait = !options.automatic && action.previousStatus === "awaiting_approval" &&
+        ["task", "delivery"].includes(run.approvalKind ?? "") && run.approval?.status === "pending";
       if (Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
-          run.approval !== undefined && (!run.decision || run.decision.approvalId !== run.approval.approvalId))
+          run.approval !== undefined && (!run.decision || run.decision.approvalId !== run.approval.approvalId) && !restoreApprovalWait)
         throw new Error("A pending approval or user decision must be resolved before resume");
       if (options.automatic && (action.resumeAttempts ?? 0) >= AUTO_RESUME_LIMIT) throw new Error("Bounded resume attempts are exhausted; cancel or request operator intervention");
       // An explicit user resume has its own bound and is still allowed once the automatic budget is spent.
@@ -1507,6 +1547,8 @@ export class AgenticWorkflowRuntime {
           artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }), "coordinator");
       }
       const verificationRetry = run.error?.startsWith(VERIFICATION_RETRY_PREFIX) === true;
+      const measurement = state.outbound.find(item => item.message.message_id === action.sourceMessageId && item.phaseFailure?.repairable === false);
+      if (measurement) measurement.phaseFailure!.retryAuthorized = true;
       action.state = "queued";
       action.lastResumedAt = this.now();
       if (options.automatic) action.resumeAttempts = (action.resumeAttempts ?? 0) + 1;
@@ -1732,7 +1774,9 @@ export class AgenticWorkflowRuntime {
   async reportProgress(runId: string, headline: string, questions: string[] = []): Promise<JsonValue> {
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId); this.live(run);
-      if (questions.length) run.status = "clarifying";
+      // Once Core exists the scheduler owns the run (dispatch retries, verification, integration); a question is still
+      // delivered, but "clarifying" would remove the run from scheduling with no recorded action to resume it.
+      if (questions.length && !run.coreCreated) run.status = "clarifying";
       if (run.pendingAction?.kind === "coordinator_continuation") delete run.pendingAction;
       this.emit(state, outbox, run, questions.length ? "conversation.clarification" : "conversation.progress",
         { headline: textField(headline), questions: strings(questions), sdlcStatus: run.status }, `coordinator-progress:${digest([headline, questions])}`);
@@ -1807,7 +1851,7 @@ export class AgenticWorkflowRuntime {
         return json({ blocked: true, messageId: out.message.message_id, reason: out.error });
       }
       if (run.pendingAction?.kind === "coordinator_continuation") delete run.pendingAction;
-      run.status = role === "planner" ? "planning" : "specifying";
+      if (!run.coreCreated) run.status = role === "planner" ? "planning" : "specifying";
       await save(); return json(fallbackFrom ? { ...out.message, fallback: { requestedRole: fallbackFrom, actingRole: role } } : out.message);
     });
   }
@@ -2244,7 +2288,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       });
       if (!allocation.ok) {
         run.error = `Developer allocation pending for ${task.taskId}: ${allocation.error.message}`;
-        if (allocation.error.code !== "conflict" || !allocation.error.retryable) run.status = "escalated";
+        if (allocation.error.code !== "conflict" || !allocation.error.retryable) this.pauseDeveloperAllocation(run, task.taskId, run.error);
         this.progress(state, outbox, run, run.error); await save(); continue;
       }
       const pane = PaneBindingSchema.parse(allocation.value);
@@ -2323,11 +2367,13 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         if (record(previous.message.payload).sourceRevision !== sourceRevision) throw new Error("Prior phase measurement is unresolved on another revision; reconcile it before retrying");
         return json({ queued: true, messageId: previous.message.message_id, deliveryStatus: previous.status });
       }
-      if (state.outbound.some(item => item.message.run_id === runId && item.error?.startsWith("policy_phase_failed:") &&
+      const failedHere = state.outbound.filter(item => item.message.run_id === runId && item.error?.startsWith("policy_phase_failed:") &&
           record(item.message.payload).taskId === taskId && record(item.message.payload).phase === phase &&
-          record(item.message.payload).implementationAttemptId === current.attemptId && record(item.message.payload).sourceRevision === sourceRevision))
+          record(item.message.payload).implementationAttemptId === current.attemptId && record(item.message.payload).sourceRevision === sourceRevision);
+      if (failedHere.some(item => item.phaseFailure?.retryAuthorized !== true))
         throw new Error("This revision already failed the phase; commit a repair before requesting another measurement");
-      const id = `phase-${digest([runId, taskId, current.attemptId, phase, sourceRevision])}`;
+      // A resumed infrastructure failure re-measures the same revision under a new request identity.
+      const id = `phase-${digest(failedHere.length ? [runId, taskId, current.attemptId, phase, sourceRevision, failedHere.length] : [runId, taskId, current.attemptId, phase, sourceRevision])}`;
       outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: run.delegation.correlationId,
         causation_id: assignment.message.message_id, run_id: runId, sender: { role: "coordinator" }, recipient: { role: "qa" },
         type: "verification.requested", artifact_references: [], occurred_at: this.now(), idempotency_key: id,
@@ -2377,6 +2423,15 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       return json({ status: run.status, maxIterations: run.maxIterations });
     });
   }
+  private pauseDeveloperAllocation(run: RunRecord, taskId: string, reason: string): void {
+    const sourceMessageId = `developer-allocation-${digest([run.runId, taskId, reason])}`;
+    const prior = run.pendingAction?.sourceMessageId === sourceMessageId ? run.pendingAction : undefined;
+    run.status = "escalated";
+    run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
+      reason: reason.slice(0, 2000), sourceMessageId, createdAt: prior?.createdAt ?? this.now(), state: "pending", previousStatus: "implementing",
+      ...inheritedAutoResume(run),
+      recovery: "manual" };
+  }
   private async recoverPhaseFailures(state: JournalState, save: () => Promise<void>, outbox: HerdrOutbox): Promise<void> {
     for (const request of state.outbound.filter(item => item.phaseFailure && !item.phaseFailure.applied)) {
       const { summary, repairable } = request.phaseFailure!;
@@ -2390,7 +2445,13 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (run.cancelled || ["completed", "failed", "cancelled", "escalated"].includes(run.status)) {
         // Retain the receipt while preserving a newer terminal decision.
       } else if (!repairable || failures >= run.maxIterations) {
+        const previousStatus = run.status;
         run.status = "escalated"; run.error = !repairable ? `Policy measurement blocked: ${summary}` : `Policy phase repair limit exhausted: ${summary}`;
+        // An infrastructure failure (runner, sandbox, build) is not a code defect: once fixed, an explicit resume re-measures the
+        // same revision. An exhausted repair limit stays a human stop, so the bound is never widened.
+        if (!repairable) run.pendingAction = { actionId: `next-${digest([run.runId, request.message.message_id])}`, kind: "resume_coordinator",
+          owner: "coordinator", reason: run.error.slice(0, 2000), sourceMessageId: request.message.message_id, createdAt: this.now(), state: "pending",
+          previousStatus, ...inheritedManualResume(run), recovery: "manual" };
         this.progress(state, outbox, run, run.error);
       } else this.phaseNotice(state, outbox, run, task, textField(payload.phase), "failed", summary, request.message.message_id);
       request.phaseFailure!.applied = true;

@@ -13,7 +13,7 @@ import type { AgenticRuntimePorts } from "../../src/agentic/ports.js";
 
 const cleanup: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const root of cleanup.splice(0)) await rm(root, { recursive: true, force: true }); });
-async function fixture() {
+async function fixture(options: { nativePending?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-task-notices-"))); cleanup.push(root);
   let at = new Date("2026-10-16T10:00:00.000Z"), ready = true;
   const registryFile = join(root, "registry.json"), registry = new FileAgentRegistry({ stateFile: registryFile, clock: () => at });
@@ -25,7 +25,8 @@ async function fixture() {
   let binding: PaneBinding = PaneBindingSchema.parse({ schemaVersion: 2, bindingId: "developer-binding", sessionId: "session-1", role: "developer",
     agentId: "developer", paneId: "pane-developer", workspaceId: "workspace", tabId: "tab", provider: "claude", agentKind: "claude", cwd: root,
     worktreePath: root, readOnlyWorkspace: false, isolationMode: "dedicated_pane", transportState: "idle", boundAt: at.toISOString(),
-    session: { source: "herdr:claude", kind: "id", value: "native-session" } });
+    ...(options.nativePending ? { metadata: { launchId: "launch-test", nativeSessionPending: true } }
+      : { session: { source: "herdr:claude", kind: "id", value: "native-session" } }) });
   const ports = { registry, engine, transport, clock: () => at, roleCapabilities: { developer: ["implementation"] }, panes: {
     getRoleBinding: async () => ({ ok: true as const, value: binding }), inspectRoleHealth: async () => ({ ok: true as const,
       value: { readyForPrompt: ready, occupantMatches: true, paneId: binding.paneId, agentId: binding.agentId } })
@@ -64,6 +65,23 @@ async function fixture() {
 }
 // AgenticJournal.exclusive uses Linux flock to serialize durable notices.
 describe.skipIf(process.platform !== "linux")("task notices borrowing active assignment authority", () => {
+  it("holds a platform assignment before Registry or transport until its native session is persisted", async () => {
+    const f = await fixture({ nativePending: true });
+    expect(f.transport.sentRequests).toHaveLength(0);
+    expect(f.onBound).not.toHaveBeenCalled();
+    await f.call(async (_outbox, state) => {
+      expect(f.parent(state)).toMatchObject({ status: "queued" });
+      expect(f.parent(state).lease).toBeUndefined();
+      expect(f.parent(state).request).toBeUndefined();
+    });
+    f.replace({ session: { source: "herdr:claude", kind: "id", value: "late-native-session" } });
+    await f.call(async (outbox, state) => {
+      await outbox.flush(f.onBound);
+      expect(f.parent(state).handle?.target.session?.value).toBe("late-native-session");
+    });
+    expect(f.transport.sentRequests).toHaveLength(1);
+  });
+
   it("sends through a one-slot Registry without another assignment, Core binding, or lease release", async () => {
     const f = await fixture();
     const acquire = vi.spyOn(f.registry, "acquireLease"), release = vi.spyOn(f.registry, "releaseLease");

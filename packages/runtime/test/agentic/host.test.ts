@@ -352,6 +352,13 @@ describe.skipIf(process.platform !== "linux")("P30 platform host", () => {
     await new Promise(resolve => setTimeout(resolve, 50));
     expect(await readFile(join(f.directory, "native-sessions.json"), "utf8")).toBe(journal);
     expect((await f.controller.platformStatus()).status.launches.every(launch => launch.state !== "activated")).toBe(true);
+    // A new CLI client retries the still-pending startup after close drained its
+    // checks. The daemon must reopen checks without revoking the exact launches.
+    const resumed = await f.controller.prepare();
+    expect(resumed.platform?.generation).toBe(prepared.platform?.generation);
+    expect(resumed.roleLaunch.conversation!.launch).toEqual(prepared.roleLaunch.conversation!.launch);
+    expect(resumed.roleLaunch.coordinator!.launch).toEqual(prepared.roleLaunch.coordinator!.launch);
+    expect((await f.controller.verifyRoleStartup!(manifest, "conversation")).ok).toBe(true);
   });
 
   it("blocks prepare without launch material when a required provider is not ready, and persists codex role providers", async () => {

@@ -36,8 +36,19 @@ const workflow = WorkflowDefinitionSchema.parse(JSON.parse(await readFile(resolv
 const original = await readFile(path, 'utf8');
 const current = parseConfigYaml(original);
 // Keep runtime/storage fields and all three checkout identity fields from init.
+// The fragment sets each role's `required` flag; the provider/model/profile chosen at
+// init (e.g. `--provider claude`) and roles the fragment omits are kept as initialized.
+const initRoles = current.environment?.roles ?? [];
+const fragmentRoles = fragment.environment.roles ?? [];
+const roles = [
+  ...fragmentRoles.map(role => {
+    const chosen = initRoles.find(item => item.role === role.role);
+    return chosen ? { ...role, ...chosen, required: role.required } : role;
+  }),
+  ...initRoles.filter(item => !fragmentRoles.some(role => role.role === item.role))
+];
 const next = { ...current, defaultWorkflow: workflow,
-  environment: { ...current.environment, ...fragment.environment } };
+  environment: { ...current.environment, ...fragment.environment, ...(fragmentRoles.length ? { roles } : {}) } };
 // Reuse the actual environment loader before touching the target. The scratch
 // checkout root is substituted only for its path identity check; all policies,
 // roles, workflow and storage values are validated exactly as they will be read.

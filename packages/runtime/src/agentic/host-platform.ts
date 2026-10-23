@@ -229,6 +229,7 @@ export interface HostPlatformSessionOptions {
 export class HostPlatformSession {
   private identity: PlatformSessionIdentity | undefined;
   private report: PlatformPreflightReport | undefined;
+  private preparedStartup: HostPlatformLaunchResult | undefined;
   private readonly launches = new Map<AgentRole, { launchId: string; provider: AgentProviderId }>();
   private readonly roleInstructions = new Map<AgentRole, { launchId: string; manifest: SkillManifest; instructionText: string; references: readonly { name: string; description: string; entrypoint: string; digest: string }[] }>();
   private readonly developerLaunches = new Map<string, string>();
@@ -245,6 +246,7 @@ export class HostPlatformSession {
    * Publishes the launch-keyed probe plan of every launch with Gateway registrations.
    */
   async prepare(options?: OperationOptions): Promise<HostPlatformLaunchResult> {
+    this.preparedStartup = undefined;
     await this.releasePermanentLaunches();
     const generation = await this.nextGeneration();
     const identity: PlatformSessionIdentity = {
@@ -285,11 +287,32 @@ export class HostPlatformSession {
       throw error;
     }
     await this.persistLaunches();
-    return {
+    const prepared: HostPlatformLaunchResult = {
       report: result.value.report,
       launches: new Map(result.value.launches.map(prepared => [prepared.role, prepared])),
       reachability
     };
+    if (prepared.report.ready) this.preparedStartup = prepared;
+    return prepared;
+  }
+
+  /** Resume only this daemon's successful pending preparation; never reconstruct secrets after restart. */
+  async resumePreparation(options?: OperationOptions): Promise<HostPlatformLaunchResult | undefined> {
+    if (!this.preparedStartup) return undefined;
+    if (!this.options.service.revalidatePreparedLaunch)
+      throw new Error("Prepared startup cannot be revalidated; stop and reconcile before retrying");
+    const launches = new Map<AgentRole, PreparedRoleLaunch>();
+    for (const [role, prepared] of this.preparedStartup.launches) {
+      const result = await this.options.service.revalidatePreparedLaunch(prepared.launch.launchId, options);
+      if (!result.ok) throw new Error(`Prepared startup could not be resumed: ${describeFailure(result.error)}. Run bflow down --yes before a fresh startup.`);
+      launches.set(role, result.value);
+    }
+    const report = { ...this.preparedStartup.report, checkedAt: new Date().toISOString(),
+      roles: this.preparedStartup.report.roles.map(role => ({ ...role,
+        ...(launches.has(role.role) ? { checks: launches.get(role.role)!.preflight.checks } : {}) })) };
+    this.report = report;
+    this.preparedStartup = { ...this.preparedStartup, report, launches };
+    return this.preparedStartup;
   }
 
   /** Exact pinned, provider-neutral skills for the current prepared launch; callers receive no storage paths or mutable bundle handles. */
@@ -444,6 +467,7 @@ export class HostPlatformSession {
 
   /** Revokes this session's Gateway registrations. Shared services are never stopped here. */
   async shutdown(): Promise<void> {
+    this.preparedStartup = undefined;
     const result = await this.options.service.shutdown();
     if (!result.ok) throw new Error(`Platform shutdown failed: ${describeFailure(result.error)}`);
     for (const launch of this.launches.values()) await this.removeLaunchArtifacts(launch.launchId);

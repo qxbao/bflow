@@ -258,7 +258,11 @@ interactively. A successful Agy check requires a returned model list, while netw
 policy and authentication failures remain distinct. The host still verifies actual
 execution readiness before launching roles; model access alone is not readiness.
 The CLI does not print provider account diagnostics or infer authentication from an idle pane. First-use provider trust prompts can still block
-startup and require operator action in that named session.
+startup and require operator action in that named session. An interactive startup
+conflict keeps the owned session, exact pane and launch receipt available: resolve
+the reported dialog, then rerun `bflow up` to reconcile the same agent. It does not
+report readiness or answer the dialog automatically. Use `bflow down --yes` to
+stop that pending startup explicitly.
 
 P13 nhận một argv runner chọn tường minh session có tên của repository này. Không có
 môi trường process toàn cục nào bị thay đổi. Tên CLI của role phải là các loại Herdr

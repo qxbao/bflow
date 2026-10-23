@@ -162,6 +162,11 @@ describe("detectTestRunners", () => {
     expect(parseTscBuildArgs("tsc -b /abs")).toBeUndefined();
     expect(parseTscBuildArgs("tsc -b $(id)")).toBeUndefined();
     expect(parseTscBuildArgs("tsc --noEmit")).toBeUndefined();
+    expect(parseTscBuildArgs("tsc -p tsconfig.json")).toEqual(["-p", "tsconfig.json"]);
+    expect(parseTscBuildArgs("tsc --project packages/app/tsconfig.json")).toEqual(["--project", "packages/app/tsconfig.json"]);
+    expect(parseTscBuildArgs("tsc -p ../escape.json")).toBeUndefined();
+    expect(parseTscBuildArgs("tsc -p a.json b.json")).toBeUndefined();
+    expect(parseTscBuildArgs("tsc -p tsconfig.json --noEmit")).toBeUndefined();
   });
 
   it("detects the real repository runner", async () => {

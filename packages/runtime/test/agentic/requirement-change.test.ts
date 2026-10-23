@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, rm, realpath } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -114,6 +114,46 @@ async function admit(f: Awaited<ReturnType<typeof fixture>>, message: ReturnType
   await f.runtime.queueHerdr(message);
   return f.runtime.receiveHerdr(message);
 }
+
+describe("trusted local revision admission", () => {
+  it("binds revised criteria before Coordinator delivery without a synthetic inbound echo and retains the human gate after restart", async () => {
+    const f = await fixture({ humanApproval: true });
+    await f.runtime.queueHerdr(f.handoff(f.request(1, "Original criterion")));
+    const revised = f.handoff(f.request(2, "Revised criterion"));
+    await f.runtime.queueHerdr(revised);
+    expect((await f.run()).delegation).toEqual(revised.payload);
+    expect((await f.run()).delegationHistory).toHaveLength(1);
+    f.restart();
+    await f.runtime.queueHerdr(revised);
+    expect((await f.run()).delegationHistory).toHaveLength(1);
+    expect((await f.state()).inbox.some((entry: any) => entry.message.message_id === revised.message_id)).toBe(false);
+    const draft = { ...f.spec, acceptanceCriteria: f.spec.acceptanceCriteria.map(criterion => ({ ...criterion, description: "Revised criterion" })) };
+    await f.runtime.proposeWorkflow("run-1", draft, f.def);
+    expect(await f.run()).toMatchObject({ status: "awaiting_approval", approvalKind: "design", approval: { status: "pending" } });
+    expect(f.transport.sentRequests.some(request => request.role === "developer")).toBe(false);
+  });
+
+  it("reconciles an exact replay from an older queued-but-unbound revision without duplicate history or signed receipt", async () => {
+    const f = await fixture();
+    const initial = f.handoff(f.request(1, "Original criterion"));
+    const revised = f.handoff(f.request(2, "Revised criterion"));
+    await f.runtime.queueHerdr(initial);
+    await f.runtime.queueHerdr(revised);
+    // Historical state captured from the live failure: the outbox knows rev2,
+    // while the run still binds rev1 and has no received transport echo.
+    const path = join(f.root, "journal/state.json");
+    const state = JSON.parse(await readFile(path, "utf8"));
+    state.runs[0].delegation = initial.payload;
+    delete state.runs[0].delegationHistory;
+    await writeFile(path, JSON.stringify(state));
+    f.restart();
+    await f.runtime.queueHerdr(revised);
+    await f.runtime.queueHerdr(revised);
+    expect((await f.run()).delegation).toEqual(revised.payload);
+    expect((await f.run()).delegationHistory).toEqual([initial.payload]);
+    expect((await f.state()).inbox).toEqual([]);
+  });
+});
 
 describe("raw scope correction through Conversation while an approval is pending", () => {
   it("routes the original Logs correction to Chat, admits one revision and supersedes the old question without approval", async () => {

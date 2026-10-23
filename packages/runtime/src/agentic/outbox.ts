@@ -201,6 +201,9 @@ export class HerdrOutbox {
     const bindingValue = unwrap(await this.ports.panes.getRoleBinding(out.selector));
     if (!bindingValue) { out.error = "Recipient pane unavailable"; return; }
     const pane = PaneBindingSchema.parse(bindingValue);
+    // A platform launch's empty Gateway grant is not native readiness. Do not create an
+    // immutable submission target until its real provider session has been persisted.
+    if (pane.metadata?.launchId !== undefined && !pane.session) { this.markNotReady(out); return; }
     const health = unwrap(await this.ports.panes.inspectRoleHealth(out.selector));
     if (!health.readyForPrompt || !health.occupantMatches || health.paneId !== pane.paneId || health.agentId !== pane.agentId) {
       this.markNotReady(out); return;

@@ -1,15 +1,24 @@
 import { describe, expect, it } from "vitest";
 import { withDeveloperLaunches, type DeveloperLaunchPort } from "../../src/agentic/workspace.js";
+import { PaneBindingSchema, type PaneBinding } from "@bflow/contracts";
 import type { PanePolicy } from "../../src/agentic/ports.js";
 
 /** Base pane policy whose panes are always ready; the wrapper alone decides degradation. */
 function basePanes(): PanePolicy {
   const paneOf = (role: string) => role === "coordinator" ? "pane-coord" : role === "dev-1" ? "pane-dev-1" : "pane-dev-2";
+  const bindings = new Map<string, PaneBinding>();
   return {
     getManifest: async () => ({ ok: true, value: null }),
-    getRoleBinding: async () => ({ ok: true, value: null }),
-    inspectRoleHealth: async role => ({ ok: true, value: { readyForPrompt: true, occupantMatches: true, paneId: paneOf(role), agentId: role } }),
-    allocateDeveloper: async request => ({ ok: true, value: { paneId: request.taskId === "task-1" ? "pane-dev-1" : "pane-dev-2" } as never }),
+    getRoleBinding: async selector => ({ ok: true, value: bindings.get(selector) ?? null }),
+    inspectRoleHealth: async role => ({ ok: true, value: { readyForPrompt: true, occupantMatches: true, paneId: role.startsWith("pane-") ? role : paneOf(role), agentId: role.startsWith("pane-") ? role.slice(5) : role } }),
+    allocateDeveloper: async request => {
+      const pane = PaneBindingSchema.parse({ schemaVersion: 2, bindingId: `binding-${request.agentName}`, sessionId: "session-1",
+        role: "developer", agentId: request.agentName, paneId: paneOf(request.agentName), workspaceId: "workspace", tabId: "tab",
+        provider: "herdr", agentKind: "codex", cwd: request.worktreePath, worktreePath: request.worktreePath,
+        readOnlyWorkspace: false, isolationMode: "dedicated_pane", transportState: "idle", boundAt: "2026-10-23T00:00:00.000Z",
+        session: { source: "herdr:codex", kind: "id", value: `native-${request.agentName}` }, metadata: { launchId: `launch-${request.taskId}` } });
+      bindings.set(pane.paneId, pane); return { ok: true, value: pane };
+    },
     releaseDeveloper: async () => ({ ok: true, value: undefined })
   };
 }

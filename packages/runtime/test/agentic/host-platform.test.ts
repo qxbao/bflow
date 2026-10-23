@@ -232,6 +232,31 @@ async function session(service: PlatformReadinessService, extra: Partial<{ gener
 }
 
 describe("P30 host platform composition", () => {
+  it("resumes a pending generation with revalidated env-bearing launches and no new dispatch material", async () => {
+    const rechecked: string[] = [];
+    const service = fakeService({ revalidatePreparedLaunch: async launchId => {
+      rechecked.push(launchId);
+      return { ok: true, value: prepared(launchId === "launch-conv" ? "conversation" : "coordinator", "codex", launchId) };
+    } });
+    const { host, options } = await session(service);
+    const original = await host.prepare();
+    const resumed = await host.resumePreparation();
+    expect([...resumed!.launches.values()].map(value => value.launch)).toEqual([...original.launches.values()].map(value => value.launch));
+    expect(rechecked.sort()).toEqual(["launch-conv", "launch-coord"]);
+    expect(service.calls).toEqual(["prepareSession"]);
+    expect(JSON.parse(await readFile(options.generationFile, "utf8")).generation).toBe(1);
+    expect(await new HostPlatformSession(options).resumePreparation()).toBeUndefined();
+  });
+
+  it("refuses a retained generation when revalidation fails instead of silently rotating it", async () => {
+    const service = fakeService({ revalidatePreparedLaunch: async () => failure("conflict", "profile changed") });
+    const { host } = await session(service);
+    await host.prepare();
+    await expect(host.resumePreparation()).rejects.toThrow("profile changed");
+    expect(host.launchIdOf("conversation")).toBe("launch-conv");
+    expect(service.calls).toEqual(["prepareSession"]);
+  });
+
   it("checks a completed role early but requires fresh health and attestation at the full manifest barrier", async () => {
     const fixture = await activationSession();
     const pane = fixture.panes[0]!;

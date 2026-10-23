@@ -41,6 +41,7 @@ import { TestRunnerSource, describeTestRunners } from "./task-commands.js";
 import { evaluateWatchdog } from "./run-watchdog.js";
 import { HostConversationIntake } from "./host-conversation.js";
 import { HostDevelopment } from "./host-development.js";
+import { patchFilePaths } from "./patch-paths.js";
 import { redactString } from "../resilience/redaction.js";
 import { TaskActivityLog } from "./task-activity-log.js";
 import { TaskLogPane } from "./task-log-pane.js";
@@ -439,6 +440,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
     let nativeSessionsChanged = false;
     for (const pane of panes) {
+      // Same scope as the receipts above: Runtime-owned Developer panes (possibly stale after a cancelled run) are checked
+      // per call by Runtime health/principal checks, never as permanent startup proof.
+      if (!pane.permanent || pane.role === "developer") continue;
       const actual = record(record(record(JSON.parse(await herdr(["agent", "get", pane.paneId]))).result).agent);
       const native = actual.agent_session ? record(actual.agent_session) : undefined;
       const expectedProvider = platformRoles.find(option => option.role === pane.role)?.provider ??
@@ -701,6 +705,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         const run = record(await host.runtime.inspect(runId));
         if (DelegationRequestSchema.parse(run.delegation).sessionId !== manifest!.conversationSessionId)
           throw new Error("Resume request belongs to another Conversation session");
+        if (run.pendingAction === undefined)
+          throw new Error(`Run ${runId} (${String(run.status)}) has no recorded blocker to resume${run.error === undefined ? "" : `; last error: ${String(run.error)}`}`);
         const action = record(run.pendingAction);
         return host.runtime.resumeBlockedRun(runId, textField(action.actionId));
       }
@@ -1125,7 +1131,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           await removeLegacyRoleProbes(configuration.directory, roles);
           toolExpectations.clear();
           if (!platformSession) return { roleLaunch: launch };
-          const prepared = await platformSession.prepare(options);
+          const prepared = (!workspace ? await platformSession.resumePreparation(options) : undefined) ?? await platformSession.prepare(options);
           for (const [role, expectation] of prepared.reachability) toolExpectations.set(role, expectation);
           const roleLaunch = Object.fromEntries(Object.entries(launch).map(([role, descriptor]) => {
             const ready = prepared.launches.get(role as AgentRole);
@@ -1532,14 +1538,16 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
   const string = { type:"string", minLength:1 }, array = {type:"array",items:string}, object = {type:"object"};
   const strictObject = (properties: Record<string, unknown>, required: string[]) => ({ type: "object", properties, required, additionalProperties: false });
   const targets = { targetRunId: string, targetCorrelationId: string };
+  const verificationMethod = { type: "string", enum: ["unit_test", "integration_test", "e2e_test", "typecheck", "lint", "static_analysis", "manual_review"] };
   const draft = strictObject({ title: string, objective: string, kind: { type: "string", enum: ["feature", "bugfix", "refactor", "spike"] },
     sddLevel: { type: "string", enum: ["lightweight", "full"] }, priority: { type: "string", enum: ["low", "normal", "high", "critical"] },
     scopeDefined: { type: "boolean" }, isLargeTask: { type: "boolean" }, affectedPaths: array, acceptanceCriteriaDescriptions: array,
-    verificationMethods: { type: "array", items: { type: "string", enum: ["unit_test", "integration_test", "e2e_test", "typecheck", "lint", "static_analysis", "manual_review"] } },
+    verificationMethods: { type: "array", items: verificationMethod },
+    acceptanceCriteria: { type: "array", items: strictObject({ description: string, verificationMethod }, ["description", "verificationMethod"]) },
     isRequirementChange: { type: "boolean" }, codeChangesAuthorized: { type: "boolean" }, ...targets,
     investigationTasks: { type: "array", items: strictObject({ objective: string, affectedPaths: array,
       codeChangesAuthorized: { type: "boolean", const: false } }, ["objective", "affectedPaths", "codeChangesAuthorized"]) }
-  }, ["title", "objective", "kind", "sddLevel", "priority", "scopeDefined", "isLargeTask", "affectedPaths", "acceptanceCriteriaDescriptions", "isRequirementChange"]);
+  }, ["title", "objective", "kind", "sddLevel", "priority", "scopeDefined", "isLargeTask", "affectedPaths", "isRequirementChange"]);
   const chatDecision = { oneOf: [
     strictObject({ intent: { const: "conversation_only", type: "string" }, directReply: string }, ["intent", "directReply"]),
     strictObject({ intent: { const: "clarify", type: "string" }, clarifyingQuestions: { type: "array", items: string, minItems: 1, maxItems: 3 },
@@ -2044,7 +2052,15 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
       }
       return;
     }
-    try { await callHost(configuration.socketPath, configuration.token, "tool_guard", { paneId, hook }); }
+    try {
+      // Codex has one patch tool rather than Claude's Edit/Write. Authorize
+      // every source/destination through the existing host scope/TDD guard
+      // before allowing the original native operation; never execute it here.
+      const hooks = configuration.role === "developer" && hook.tool_name === "apply_patch"
+        ? patchFilePaths(hook.tool_input).map(file_path => ({ ...hook, tool_name: "Write", tool_input: { file_path } }))
+        : [hook];
+      for (const guarded of hooks) await callHost(configuration.socketPath, configuration.token, "tool_guard", { paneId, hook: guarded });
+    }
     catch (error) {
       process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny",
         permissionDecisionReason: redactString(String(error)) } }) + "\n");
