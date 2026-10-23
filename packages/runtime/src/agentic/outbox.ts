@@ -269,6 +269,16 @@ export class HerdrOutbox {
     if (isConversationDelivery(out)) {
       out.status = "sending"; await this.save(); return;
     }
+    const policyRun = this.state.runs.find(item => item.runId === out.message.run_id);
+    if (out.parentAssignmentId && record(out.message.payload).kind === "policy_phase_outcome" && policyRun &&
+        (policyRun.status !== "implementing" || policyRun.cancelled || policyRun.nativeDeliveries?.length ||
+          policyRun.approval !== undefined && policyRun.decision?.approvalId !== policyRun.approval.approvalId ||
+          Object.values(policyRun.userDecisions ?? {}).some(item => item.status === "pending") ||
+          this.state.outbound.some(item => item !== out && item.message.run_id === policyRun.runId && ["sending", "unknown_delivery"].includes(item.status)))) {
+      out.error = "Policy continuation waits for active implementing state and all human/delivery gates";
+      await this.save(); return;
+    }
+    if (out.error === "Policy continuation waits for active implementing state and all human/delivery gates") delete out.error;
     if (out.parentAssignmentId) {
       try { this.noticeParent(out); } catch (error) { out.status = "cancelled"; out.error = String(error); await this.save(); return; }
     }

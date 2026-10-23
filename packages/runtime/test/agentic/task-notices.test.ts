@@ -376,3 +376,20 @@ describe.skipIf(process.platform !== "linux")("durable lease release recovery", 
     }
   });
 });
+
+it("holds a queued policy continuation when a human gate or pause appears before dispatch", async () => {
+  const f = await fixture();
+  await f.call(async (outbox, state, save) => {
+    outbox.enqueueTaskNotice(RoleMessageSchema.parse({ ...f.message("policy-continuation"), payload: { kind: "policy_phase_outcome", phase: "red", status: "passed" } }), f.parent(state));
+    state.runs[0]!.approval = ApprovalRequestSchema.parse({ ...state.runs[0]!.tasks[0]!.spec.request, approvalId: "new-human-gate" });
+    await save(); await outbox.flush(f.onBound);
+    expect(state.outbound.find(out => out.message.message_id === "policy-continuation")!.status).toBe("queued");
+    expect(f.transport.sentRequests).toHaveLength(1);
+    delete state.runs[0]!.approval; state.runs[0]!.status = "escalated";
+    await save(); await outbox.flush(f.onBound);
+    expect(f.transport.sentRequests).toHaveLength(1);
+    state.runs[0]!.status = "implementing";
+    await save(); await outbox.flush(f.onBound);
+    expect(f.transport.sentRequests).toHaveLength(2);
+  });
+});

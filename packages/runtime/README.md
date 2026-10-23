@@ -93,6 +93,12 @@ Runtime chấp nhận tách khỏi outcome bị từ chối, giữ nguyên phase
 và ArtifactReference/checksum. Chỉ xuất các run đã thuộc assignment hiện tại của pane;
 không suy luận bằng chứng từ progress, transport state hay nội dung agent tự khai.
 
+Sau resume vật lý qua Conversation, Runtime gửi một task notice tiếp nối riêng cho
+Developer hiện hữu nếu cùng Core execution vẫn running, lease còn hiệu lực và required TDD
+đã có đúng Red được chấp nhận. Notice không cấp Red hay approval mới và không sửa test;
+retry cùng resume giữ nguyên ID. Các gate, cancellation, unknown delivery và giới hạn resume
+được kiểm tra trước đó như cũ; resume tự động hoặc Coordinator không tạo notice này.
+
 Các đầu vào host bắt buộc là tường minh: định danh repository/session, role capability,
 định nghĩa check của task/workflow, deterministic gate runner, ingress thông điệp/result/evidence
 Herdr có xác thực và phê duyệt của con người có xác thực. Không có

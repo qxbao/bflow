@@ -1718,3 +1718,30 @@ describe("Conflict resolver Developer tools", () => {
     expect(await development.conflictResolutionContext(coreDeveloper)).toBeUndefined();
   });
 });
+
+it("resumes the existing Developer after accepted Red was paused by a stale blocker, without reassigning or replacing evidence", async () => {
+  const f = await fixture({ tdd: true });
+  f.ports.preflightRoleCapabilities = async () => undefined;
+  (f.ports.roleCapabilities.coordinator as string[]).push("repository.read");
+  await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+  await f.evidence("implement", "red");
+  const before = await f.runtime.inspect() as any;
+  const parent = before.outbound.find((out: any) => out.message.type === "task.assignment");
+  const coordinator = f.panes.bindings.find(pane => pane.role === "coordinator")!;
+  await f.runtime.observeCoordinatorOutcome(f.envelope("task.status", { status: "blocked", summary: "Stale verification blocker" }, {
+    recipient: { role: "conversation" }, sender: { role: "coordinator", agent_id: coordinator.agentId, pane_id: coordinator.paneId }
+  }));
+  const paused = await f.runtime.inspect("run-1") as any;
+  await f.runtime.resumeBlockedRun("run-1", paused.pendingAction.actionId);
+  expect((await f.runtime.inspect() as any).outbound.some((out: any) => out.message.payload.kind === "policy_phase_outcome" && out.message.payload.summary.includes("resumed"))).toBe(false);
+  // Recover a continuation that an earlier successful resume receipt did not send.
+  const currentPause = paused;
+  await f.runtime.resumeBlockedRun("run-1", currentPause.pendingAction.actionId, { conversationUserMessageId: "physical-resume" });
+  const after = await f.runtime.inspect() as any;
+  const notice = after.outbound.find((out: any) => out.message.payload.kind === "policy_phase_outcome" && out.message.payload.summary.includes("resumed"));
+  expect(notice).toMatchObject({ parentAssignmentId: parent.message.message_id, message: { recipient: { agent_id: parent.handle.target.agentId, pane_id: parent.handle.target.paneId }, payload: { phase: "red", status: "passed" } } });
+  expect(after.outbound.filter((out: any) => out.message.type === "task.assignment")).toHaveLength(1);
+  expect(after.runs[0].tasks[0].spec.strategy.metadata.tddEvidence).toEqual(before.runs[0].tasks[0].spec.strategy.metadata.tddEvidence);
+  await f.runtime.resumeBlockedRun("run-1", currentPause.pendingAction.actionId, { conversationUserMessageId: "physical-resume" });
+  expect((await f.runtime.inspect() as any).outbound.filter((out: any) => out.message.message_id === notice.message.message_id)).toHaveLength(1);
+}, 60_000);

@@ -1464,6 +1464,29 @@ export class AgenticWorkflowRuntime {
   }
 
   /** Resume only a recorded recoverable Coordinator blocker. The stable action identity prevents duplicate wakeups on retry/restart. */
+  private async resumeAcceptedRedDeveloper(state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox, run: RunRecord, messageId: string): Promise<void> {
+    if (run.status !== "implementing" || run.cancelled || run.nativeDeliveries?.length ||
+        run.approval !== undefined && run.decision?.approvalId !== run.approval.approvalId || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
+        state.outbound.some(item => item.message.run_id === run.runId && ["sending", "unknown_delivery"].includes(item.status))) return;
+        const snapshot = await core.snapshot(run.runId);
+        for (const task of run.tasks) {
+          const evidence = task.spec.strategy.metadata?.tddEvidence;
+          if (task.writerReleased || task.result || !Array.isArray(evidence) || evidence.length !== 1 || task.spec.strategy.tddDecision.mode !== "required") continue;
+          const red = VerificationResultSchema.parse(evidence[0]);
+          if (record(red.metadata?.conditionalTdd).phase !== "red") continue;
+          const current = snapshot.tasks.find(item => item.taskId === task.taskId);
+          const parent = state.outbound.find(item => item.message.type === "task.assignment" && item.message.run_id === run.runId &&
+            item.taskId === task.taskId && item.status === "accepted" && item.handle?.requestId === current?.agentExecution?.requestId);
+          if (current?.status !== "running" || !parent?.lease || Date.parse(parent.lease.expiresAt) <= Date.parse(this.now())) continue;
+          this.ports.policies.assertReadyToImplement(task.spec.strategy);
+          const outcomeId = `resume:${messageId}:${red.verificationId}`;
+          if (state.outbound.some(item => item.message.message_id === `phase-notice-${digest([run.runId, task.taskId, "red", outcomeId])}`)) continue;
+          this.phaseNotice(state, outbox, run, task, "red", "passed",
+            `Runtime resumed this same assignment after a verified Red receipt (${red.verificationId}). Inspect workspace status and continue the accepted TDD sequence; do not modify frozen tests. No new approval or measurement is granted.`,
+            outcomeId);
+        }
+    await save();
+  }
   async resumeBlockedRun(runIdInput: string, actionIdInput: string, options: { automatic?: boolean; conversationUserMessageId?: string } = {}): Promise<JsonValue> {
     const runId = textField(runIdInput), actionId = textField(actionIdInput);
     return this.transaction(async (state, save, _core, outbox) => {
@@ -1485,7 +1508,10 @@ export class AgenticWorkflowRuntime {
           out.message.message_id === id && out.status === "failed" && out.error?.includes(RoleCapabilityPreflightError.name)));
       // A receipt answers a repeated call for the episode it settled; the same identity pending again (a recurrence) is a new episode.
       const recurred = run.status === "escalated" && action?.actionId === actionId && action.state === "pending";
-      if (priorResume && !retryUnsent && !recurred && !explicitAfterAutomatic) return json({ queued: true, messageId: priorResume.messageId, actionId });
+      if (priorResume && !retryUnsent && !recurred && !explicitAfterAutomatic) {
+        if (!options.automatic && options.conversationUserMessageId) await this.resumeAcceptedRedDeveloper(state, save, _core, outbox, run, priorResume.messageId);
+        return json({ queued: true, messageId: priorResume.messageId, actionId });
+      }
       // A still-unknown native delivery (legacy escalated record) resumes by waking the Coordinator to reconcile; it is never resent.
       if ((!explicitAfterAutomatic && run.status !== "escalated") || !action || action.actionId !== actionId || !["resume_coordinator", "reconcile_delivery"].includes(action.kind)) {
         const prior = state.outbound.find(item => item.message.message_id === `resume-${digest([runId, actionId])}`);
@@ -1578,6 +1604,7 @@ export class AgenticWorkflowRuntime {
       else run.resumeReceipts.push({ actionId, messageId });
       if (run.resumeReceipts.length > 50) run.resumeReceipts.shift();
       for (const retired of retiredToResume) retired.phaseRetirement!.resumeAuthorizedBy = textField(options.conversationUserMessageId);
+      if (!options.automatic && options.conversationUserMessageId) await this.resumeAcceptedRedDeveloper(state, save, _core, outbox, run, messageId);
       await this.recoverPhaseFailures(state, save, outbox);
       await save();
       return json({ queued: true, messageId, actionId: action.actionId });
