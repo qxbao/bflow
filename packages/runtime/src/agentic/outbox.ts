@@ -304,6 +304,22 @@ export class HerdrOutbox {
       this.markNotReady(out); return;
     }
     this.markReady(out);
+    // A continuation is separately leased, and can only wake the exact native session holding the unchanged review.
+    if (record(out.message.payload).kind === "resume_verification_request") {
+      const source = this.state.outbound.find(item => item.message.message_id === record(out.message.payload).sourceMessageId);
+      const target = source?.handle?.target;
+      const replied = this.state.inbox.some(item => item.status === "applied" && item.message.causation_id === source?.message.message_id &&
+        ["review.verdict", "task.status"].includes(item.message.type) && (item.message.type !== "task.status" || record(item.message.payload).status === "blocked"));
+      if (!run || run.cancelled || run.status !== "verifying" || source?.status !== "released" || source.message.type !== "verification.requested" ||
+          source.message.run_id !== run.runId || record(record(source.message.payload).definition).configuration === undefined ||
+          record(record(record(source.message.payload).definition).configuration).kind !== "review" || !target || !pane.session ||
+          target.agentId !== pane.agentId || target.paneId !== pane.paneId || target.workspaceId !== pane.workspaceId || target.tabId !== pane.tabId || digest(target.session) !== digest(pane.session) ||
+          run.nativeDeliveries?.length || replied || run.approval && run.decision?.approvalId !== run.approval.approvalId ||
+          Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
+          this.state.outbound.some(item => item.message.run_id === run.runId && ["sending", "unknown_delivery"].includes(item.status))) {
+        out.status = "cancelled"; out.error = "Review continuation no longer matches an active known-delivered request"; await this.save(); return;
+      }
+    }
     // Fail closed before Registry lease acquisition, dispatch intent, or transport side effects.
     await this.ports.preflightRoleCapabilities?.(pane, out.capabilities);
     if (out.parentAssignmentId) {

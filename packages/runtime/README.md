@@ -880,6 +880,12 @@ thuộc session trước.
 Để yêu cầu tiếp tục run bị chặn trong Conversation, dùng `tiếp tục` hoặc `resume <run-id>`.
 Host kiểm tra input người dùng thật và session trước khi chuyển yêu cầu tới Runtime; thao tác
 này không thay thế một approval đang chờ và không tạo workflow mới.
+Khi một review read-only đã được giao chắc chắn nhưng chưa trả kết quả, explicit resume
+có provenance từ Conversation cho phép Runtime gửi một diagnostic riêng cho đúng native
+session cũ khi gate đang đợi. Request/handle gốc không đổi; diagnostic có lease riêng,
+giữ capability gốc, không cấp verdict và không được resend nếu delivery chưa rõ. Native
+session khác, gate đang chờ duyệt hoặc request chưa rõ delivery đều chặn continuation.
+Mỗi lượt người dùng giữ wake bất biến riêng; replay cùng lượt không tiêu thêm budget.
 
 Runtime lưu intake đã được Conversation xác thực cùng outbox intent trước dispatch đầu tiên;
 `delegation.accepted` và ingress Herdr vẫn là các bước riêng. Vì vậy capability denial trước khi

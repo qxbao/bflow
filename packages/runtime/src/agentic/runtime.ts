@@ -936,7 +936,35 @@ export class AgenticWorkflowRuntime {
           };
           for (let attempt = 1; settled(key); attempt++) key = `gate-${digest([context, attempt])}`;
           this.gateWaiters.set(key, { runId: context.runId, accept: finish, reject: rejectReply });
-          if (state.outbound.some(out => out.message.message_id === key)) return;
+          const unanswered = state.outbound.find(out => out.message.message_id === key);
+          if (unanswered) {
+            // Resume a known-delivered read-only request in its SAME native session. The original request/handle and
+            // unknown business outcome remain untouched; this separately leased diagnostic grants no gate verdict.
+            const receipt = run.resumeReceipts?.find(item => item.actionId === run.pendingAction?.actionId);
+            const wake = receipt && state.outbound.find(item => item.message.message_id === receipt.messageId);
+            const userTurn = wake && record(wake.message.payload).conversationUserMessageId;
+            if (unanswered.status === "released" && unanswered.handle && configuration.kind === "review" &&
+                run.pendingAction?.state === "queued" && typeof userTurn === "string" && record(wake!.message.payload).automatic === false &&
+                !run.nativeDeliveries?.length && !state.outbound.some(item => item.message.run_id === run.runId && ["sending", "unknown_delivery"].includes(item.status)) &&
+                (!run.approval || run.decision?.approvalId === run.approval.approvalId) &&
+                !Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
+              const binding = unwrap(await this.ports.panes.getRoleBinding(role));
+              const target = unanswered.handle.target;
+              if (binding && binding.session && binding.paneId === target.paneId && binding.agentId === target.agentId &&
+                  binding.workspaceId === target.workspaceId && binding.tabId === target.tabId && digest(binding.session) === digest(target.session)) {
+                const noticeId = `review-resume-${digest([key, userTurn])}`;
+                if (!state.outbound.some(item => item.message.message_id === noticeId)) {
+                  outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: noticeId, correlation_id: run.delegation.correlationId,
+                    causation_id: key, run_id: run.runId, sender: { role: "runtime" }, recipient: { role, agent_id: target.agentId, pane_id: target.paneId }, type: "task.status",
+                    payload: { kind: "resume_verification_request", sourceMessageId: key, conversationUserMessageId: userTurn,
+                      next: `Continue your existing read-only verification request ${key}. Call inspect_review with that original messageId, then complete_review. Preserve its exact revision/specification. This diagnostic is not a new assignment, approval or success claim. Report a correlated blocked task.status if unable to continue.` },
+                    artifact_references: [], occurred_at: this.now(), idempotency_key: noticeId }), role, undefined, undefined, unanswered.capabilities);
+                  await save();
+                }
+              }
+            }
+            return;
+          }
           outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: key, correlation_id: run.delegation.correlationId,
             run_id: run.runId, sender: { role: "coordinator" }, recipient: { role }, type: "verification.requested",
             payload: context, artifact_references: context.artifacts, occurred_at: this.now(), idempotency_key: key }), role,
@@ -1509,14 +1537,18 @@ export class AgenticWorkflowRuntime {
       const priorWake = priorResume && state.outbound.find(item => item.message.message_id === priorResume.messageId);
       const retiredToResume = !options.automatic && options.conversationUserMessageId ? state.outbound.filter(item =>
         item.message.run_id === runId && item.phaseRetirement && !item.phaseRetirement.resumeAuthorizedBy) : [];
+      const physicalAfterModel = !options.automatic && options.conversationUserMessageId !== undefined && priorWake !== undefined &&
+        record(priorWake.message.payload).conversationUserMessageId === undefined;
       const explicitAfterAutomatic = !options.automatic && action?.actionId === actionId && action.kind === "resume_coordinator" &&
-        (priorWake !== undefined && record(priorWake.message.payload).automatic === true || retiredToResume.length > 0);
+        (priorWake !== undefined && record(priorWake.message.payload).automatic === true || physicalAfterModel || retiredToResume.length > 0);
       const retryUnsent = action?.actionId === actionId && action.state === "pending" &&
         [action.sourceMessageId, ...(action.relatedMessageIds ?? [])].every(id => state.outbound.some(out =>
           out.message.message_id === id && out.status === "failed" && out.error?.includes(RoleCapabilityPreflightError.name)));
       // A receipt answers a repeated call for the episode it settled; the same identity pending again (a recurrence) is a new episode.
       const recurred = run.status === "escalated" && action?.actionId === actionId && action.state === "pending";
-      if (priorResume && !retryUnsent && !recurred && !explicitAfterAutomatic) {
+      const repeatedPhysicalTurn = options.conversationUserMessageId !== undefined && priorWake !== undefined &&
+        record(priorWake.message.payload).conversationUserMessageId === options.conversationUserMessageId;
+      if (priorResume && (repeatedPhysicalTurn || !retryUnsent && !recurred && !explicitAfterAutomatic)) {
         if (!options.automatic && options.conversationUserMessageId) await this.resumeAcceptedRedDeveloper(state, save, _core, outbox, run, priorResume.messageId);
         return json({ queued: true, messageId: priorResume.messageId, actionId });
       }
@@ -1571,7 +1603,7 @@ export class AgenticWorkflowRuntime {
         if (requirements.some(capability => !this.ports.roleCapabilities[binding.role]?.includes(capability)))
           throw new RoleCapabilityPreflightError(`${binding.role} required capability is unavailable: ${requirements.join(", ")}`);
       }
-      const messageId = `resume-${digest(retiredToResume.length ? [runId, action.actionId, "retired", retiredToResume.map(item => item.message.message_id)] : explicitAfterAutomatic ? [runId, action.actionId, "explicit"] : [runId, action.actionId])}`;
+      const messageId = `resume-${digest(retiredToResume.length ? [runId, action.actionId, "retired", retiredToResume.map(item => item.message.message_id)] : options.conversationUserMessageId ? [runId, action.actionId, "physical", options.conversationUserMessageId] : explicitAfterAutomatic ? [runId, action.actionId, "explicit"] : [runId, action.actionId])}`;
       if (failedCapabilityDispatches.length) {
         // Preflight failed before a lease or transport operation. Reuse that exact immutable unsent handoff once the target proof passes.
         for (const failedCapabilityDispatch of failedCapabilityDispatches) {
@@ -1584,7 +1616,8 @@ export class AgenticWorkflowRuntime {
           correlation_id: run.delegation.correlationId, causation_id: action.sourceMessageId, run_id: runId,
           sender: { role: "runtime" }, recipient: { role: "coordinator" }, type: "task.status",
           payload: { kind: "resume_run", actionId: action.actionId, reason: action.reason,
-            ...(options.automatic ? { automatic: true, attempt: (action.resumeAttempts ?? 0) + 1, limit: AUTO_RESUME_LIMIT } : { automatic: false }),
+            ...(options.automatic ? { automatic: true, attempt: (action.resumeAttempts ?? 0) + 1, limit: AUTO_RESUME_LIMIT } : { automatic: false,
+              ...(options.conversationUserMessageId ? { conversationUserMessageId: textField(options.conversationUserMessageId) } : {}) }),
             diagnosticFences: (run.nativeDiagnosticFences ?? []).map(item => ({ operationId: item.operationId, disposition: item.disposition, delivery: "unknown_delivery", resendAllowed: false })),
             next: options.automatic
               ? "Runtime resumed this run automatically (bounded). Inspect the durable blocker, then record the next workflow action through Runtime; if only a human can decide, use request_user_decision instead of stopping."

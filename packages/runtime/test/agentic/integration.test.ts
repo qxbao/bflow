@@ -1096,6 +1096,84 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
     } finally { second.abort(); await retried.catch(() => undefined); }
   }, 60000);
 
+  it.each(["physical", "model", "automatic", "unknown", "changed-native", "unknown-notice", "changed-at-dispatch", "approval-at-dispatch", "model-then-physical", "recurrent-physical", "missing-capability"])("continues the same unanswered review only after a physical resume (%s)", async mode => {
+    const f = await fixture({ remoteReview: true });
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    f.ports.preflightRoleCapabilities = async () => undefined;
+    const definition = (f.ports as any).taskChecks.find((check: any) => check.id === "review");
+    const context = { runId: "run-1", taskId: "implement", attemptId: "review-continuation", artifacts: [], input: { scope: "task" },
+      definition: { ...definition, timeout: { ...definition.timeout, executionTimeoutMs: 20000 } } };
+    const gate = f.runtime.herdrQualityGate("review");
+    const state = async () => await f.runtime.inspect() as any;
+    const first = new AbortController(), pending = gate.evaluate(context as any, { signal: first.signal }); pending.catch(() => undefined);
+    await expect.poll(async () => (await state()).outbound.filter((out: any) => out.message.type === "verification.requested" && out.handle).length).toBe(1);
+    first.abort(); await expect(pending).rejects.toThrow(/aborted/); await f.runtime.flushOutbound();
+    const original = (await state()).outbound.find((out: any) => out.message.type === "verification.requested");
+    expect(original.status).toBe("released");
+    await (f.runtime as any).journal.exclusive(async (journal: any, save: any) => {
+      const run = journal.runs[0]; run.status = "escalated";
+      run.pendingAction = { actionId: `next-${digest(["run-1", original.message.message_id])}`, kind: "resume_coordinator", owner: "coordinator", reason: "Provider quota recovered", sourceMessageId: original.message.message_id,
+        createdAt: new Date().toISOString(), state: "pending", previousStatus: "verifying", recovery: "capability_repair" };
+      await save();
+    });
+    const actionId = `next-${digest(["run-1", original.message.message_id])}`;
+    if (mode === "model-then-physical") await f.runtime.resumeBlockedRun("run-1", actionId);
+    if (mode === "recurrent-physical") {
+      await f.runtime.resumeBlockedRun("run-1", actionId, { conversationUserMessageId: "earlier-physical-turn" });
+      await (f.runtime as any).journal.exclusive(async (journal: any, save: any) => {
+        journal.runs[0].status = "escalated"; Object.assign(journal.runs[0].pendingAction, { state: "pending", previousStatus: "verifying" }); await save();
+      });
+      const beforeReplay = (await state()).runs[0].pendingAction.manualResumeAttempts;
+      await f.runtime.resumeBlockedRun("run-1", actionId, { conversationUserMessageId: "earlier-physical-turn" });
+      expect((await state()).runs[0].pendingAction.manualResumeAttempts).toBe(beforeReplay);
+      expect((await state()).runs[0].status).toBe("escalated");
+    }
+    await f.runtime.resumeBlockedRun("run-1", actionId, mode === "automatic" ? { automatic: true } : mode === "model" ? {} : { conversationUserMessageId: "physical-review-resume" });
+    if (mode === "unknown") await (f.runtime as any).journal.exclusive(async (journal: any, save: any) => {
+      journal.outbound.find((out: any) => out.message.message_id === original.message.message_id).status = "unknown_delivery"; await save();
+    });
+    if (mode === "changed-native") f.panes.bindings.find(binding => binding.role === "reviewer")!.session = { source: "test", kind: "id", value: "replacement" };
+    if (mode === "missing-capability") f.ports.roleCapabilities.reviewer = ["repository.read"];
+    if (["changed-at-dispatch", "approval-at-dispatch"].includes(mode)) f.panes.busy.add("reviewer");
+    if (mode === "unknown-notice") { await f.runtime.flushOutbound(); await f.runtime.flushOutbound(); f.transport.customSendHandler = () =>
+      ({ ok: false, error: { code: "timeout", retryable: true, message: "Unknown diagnostic delivery" } }); }
+    const second = new AbortController(); let resumed = gate.evaluate(context as any, { signal: second.signal }); resumed.catch(() => undefined);
+    try {
+      await expect.poll(async () => (f.runtime as any).gateWaiters.size).toBe(1);
+      await f.runtime.flushOutbound();
+      let notices = (await state()).outbound.filter((out: any) => out.message.payload?.kind === "resume_verification_request");
+      if (["changed-at-dispatch", "approval-at-dispatch"].includes(mode)) {
+        expect(notices).toHaveLength(1); expect(notices[0].status).toBe("queued");
+        if (mode === "changed-at-dispatch") f.panes.bindings.find(binding => binding.role === "reviewer")!.session = { source: "test", kind: "id", value: "replacement-after-queue" };
+        else await (f.runtime as any).journal.exclusive(async (journal: any, save: any) => { journal.runs[0].status = "awaiting_approval"; await save(); });
+        f.panes.busy.delete("reviewer"); await f.runtime.flushOutbound();
+        notices = (await state()).outbound.filter((out: any) => out.message.payload?.kind === "resume_verification_request");
+        expect(notices[0].status).toBe("cancelled"); expect(notices[0].handle).toBeUndefined(); return;
+      }
+      if (mode === "unknown-notice") {
+        expect(notices).toHaveLength(1); expect(notices[0].status).toBe("unknown_delivery");
+        second.abort(); await resumed.catch(() => undefined); f.restart();
+        const retry = new AbortController(), waiting = f.runtime.herdrQualityGate("review").evaluate(context as any, { signal: retry.signal }); waiting.catch(() => undefined);
+        try { await expect.poll(async () => (f.runtime as any).gateWaiters.size).toBe(1); await f.runtime.flushOutbound();
+          expect(f.transport.sentRequests.filter(request => JSON.parse(request.instruction).payload?.kind === "resume_verification_request")).toHaveLength(1);
+          expect((await state()).outbound.filter((out: any) => out.message.payload?.kind === "resume_verification_request")).toHaveLength(1);
+        } finally { retry.abort(); await waiting.catch(() => undefined); } return;
+      }
+      if (!["physical", "model-then-physical", "recurrent-physical"].includes(mode)) { expect(notices.filter((out: any) => out.handle)).toHaveLength(0); return; }
+      expect(notices).toHaveLength(1); expect(notices[0].capabilities).toEqual(original.capabilities);
+      expect(notices[0]).toMatchObject({ status: expect.stringMatching(/^(accepted|released)$/), message: { type: "task.status", payload: { sourceMessageId: original.message.message_id } } });
+      expect((await state()).outbound.find((out: any) => out.message.message_id === original.message.message_id)).toEqual(original);
+      expect(f.transport.sentRequests.filter(request => JSON.parse(request.instruction).type === "verification.requested")).toHaveLength(1);
+      second.abort(); await resumed.catch(() => undefined); f.restart();
+      const restarted = new AbortController(); resumed = f.runtime.herdrQualityGate("review").evaluate(context as any, { signal: restarted.signal }); resumed.catch(() => undefined);
+      await expect.poll(async () => (f.runtime as any).gateWaiters.size).toBe(1); await f.runtime.flushOutbound();
+      expect(f.transport.sentRequests.filter(request => JSON.parse(request.instruction).payload?.kind === "resume_verification_request")).toHaveLength(1);
+      await f.runtime.receiveHerdr(f.envelope("review.verdict", { gateId: "review", runId: "run-1", taskId: "implement", evaluationId: randomUUID(), status: "passed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString() },
+        { sender: { role: "reviewer", agent_id: original.handle.target.agentId, pane_id: original.handle.target.paneId }, causation_id: original.message.message_id }));
+      await expect(resumed).resolves.toMatchObject({ ok: true, value: { status: "passed" } });
+    } finally { second.abort(); await resumed.catch(() => undefined); }
+  }, 60000);
+
   it("reconciliation permits resend only after a proven not_delivered result", async () => {
     const f = await fixture(); f.panes.busy.add("conversation");
     f.transport.customSendHandler = () => ({ ok: false, error: { code: "timeout", retryable: true, message: "uncertain" } });
