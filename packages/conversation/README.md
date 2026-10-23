@@ -133,6 +133,11 @@ Phản hồi phê duyệt không khớp (`apr-...` không tồn tại, đã quy�
 
 ---
 
+Hook phê duyệt cũng nhận nguyên văn `Duyệt thiết kế`, `Duyệt tác vụ` và `Duyệt bàn giao`
+cho đúng loại cổng tương ứng. Khi nhiều yêu cầu đang chờ, phải kèm mã phê duyệt
+(`design-…: Duyệt thiết kế`). Nhãn sai loại cổng, câu có điều kiện hoặc câu gộp nhiều
+quyết định không được tự ghi nhận; duyệt thiết kế không cấp quyền duyệt tác vụ hay bàn giao.
+
 ## 7. Context Persistence & Crash Recovery
 
 Gói cung cấp 2 cài đặt của `ConversationContextStore`:

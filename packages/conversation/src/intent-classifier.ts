@@ -838,6 +838,17 @@ export function classifyTrustedApprovalReply(
   const reply = (namesPendingRequest ? content.slice(normalizedId!.length) :
     endsWithPendingRequest ? content.slice(0, -normalizedId!.length) : content).replace(/^[\s:,-]+|[\s:,.!?-]+$/gu, "");
 
+  // Exact Vietnamese gate labels carry authority for that gate only. Runtime-generated ids
+  // distinguish design, task and delivery approvals even though each can target a whole run.
+  const gateLabel = /^duyệt (thiết kế|tác vụ|bàn giao)$/u.exec(reply)?.[1];
+  if (gateLabel !== undefined) {
+    const prefix = gateLabel === "thiết kế" ? "design-" : gateLabel === "tác vụ" ? "task-approval-" : "delivery-";
+    const target = approval?.approvalId ? context.pendingApprovals[approval.approvalId] : undefined;
+    return target !== undefined && !isUserDecisionRequest(target) && target.approvalId.startsWith(prefix) &&
+      (namedRequest !== undefined || Object.keys(context.pendingApprovals).length === 1)
+      ? classified : undefined;
+  }
+
   // A keyword prefix is not approval evidence: “đồng ý rằng ...” and “cần sửa lỗi ...”
   // may be ordinary discussion or a new request. Bare replies must be complete commands.
   const completeDecision = /^(?:(?:tôi|i)\s+)?(?:approve(?:d)?|lgtm|phê duyệt|đồng ý(?: duyệt)?|duyệt|chấp thuận|chấp nhận|ok duyệt|xác nhận duyệt|reject(?:ed)?|decline|từ chối|không đồng ý|không duyệt|bác bỏ|request changes|changes requested|changes_requested|cần sửa|yêu cầu chỉnh sửa|chỉnh sửa lại|cần thay đổi)$/iu.test(reply);
