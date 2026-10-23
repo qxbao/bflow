@@ -65,7 +65,7 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
     return activeHost ??= (async () => {
       const runtime = await loadRuntime();
       const behavioralCommands = await readOwnerBehavioralCommands(runtime);
-      const context = await loadHostPlatformContext();
+      const context = await loadHostPlatformContext(input);
       const context7Ready = input.config.environment.context7?.enabled === true
         ? (await readGatewayReadiness(context.stateDirectory, "context7")).status === "ready" : undefined;
       const platform = await buildHostPlatformOptions(input, { context, context7Ready,

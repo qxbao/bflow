@@ -385,6 +385,15 @@ describe("Task 2: Platform v3 Lifecycle & Doctor Integration", () => {
       const skillsCheck = report.checks.find((c) => c.checkId === "skills-shared-installed");
       expect(skillsCheck?.status).toBe("failed");
       expect(skillsCheck?.message).toContain("missing: custom-skill");
+      const toolPolicyChecks = (report.metadata as any).groups.tools.filter((check: any) => check.checkId.startsWith("tool-policy-rtk-repository-"));
+      expect(toolPolicyChecks.map((check: any) => check.checkId)).toEqual([
+        "tool-policy-rtk-repository-installed",
+        "tool-policy-rtk-repository-allowed",
+        "tool-policy-rtk-repository-granted",
+        "tool-policy-rtk-repository-ready"
+      ]);
+      expect(toolPolicyChecks.find((check: any) => check.checkId.endsWith("-allowed"))?.status).toBe("warning");
+      expect(toolPolicyChecks.find((check: any) => check.checkId.endsWith("-granted"))?.status).toBe("skipped");
     });
   });
 

@@ -6,7 +6,7 @@ import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { z } from "zod";
 import { MCPClientRegistrationSchema, MCPServiceDefinitionSchema, MCPServiceObservationSchema, ScopedOperationSchema,
-  type MCPServiceDefinition, type MCPServiceObservation } from "@bflow/contracts";
+  type MCPServiceDefinition, type MCPServiceObservation, type ResolvedToolGrant } from "@bflow/contracts";
 import { GATEWAY_CONTROL_LOCATOR_FILE, startGatewayControl, type GatewayControl } from "./gateway-control.js";
 import { readStoredContext7Key, writeStoredContext7Key } from "./context7-secret.js";
 import { MachineConfigSchema, McpConfigComponent, ServicesComponent, SetupStateStore, EnvironmentManifestComponent,
@@ -66,7 +66,7 @@ export function setupGatewayDiagnostics(input: Pick<SetupGatewayInput, "reposito
 const requiredOperations = {
   gitnexus: ["query", "context", "impact"],
   "chrome-devtools-mcp": ["list_pages", "new_page", "navigate_page"],
-  mempalace: ["mempalace_status", "mempalace_search"]
+  mempalace: ["mempalace_search"]
 };
 const ApprovalSchema = z.object({ policyVersion: z.literal(2), repositorySelected: z.boolean(), browserExecutable: z.string().nullable(),
   remoteServices: z.array(z.object({ toolId: z.literal("context7"), authenticated: z.boolean(),
@@ -469,7 +469,11 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
   await validateLaunches(configured);
   const module = await leaf("mcp-gateway");
   const tools = await leaf("tool-installer");
-  const gateway = new module.BflowSharedMCPGateway({ policyOverrides: (service: MCPServiceDefinition) => tools.trustedGatewayPolicy(service) });
+  const runtimeGrants = new Map<string, readonly ResolvedToolGrant[]>();
+  const gateway = new module.BflowSharedMCPGateway({ policyOverrides: (service: MCPServiceDefinition) => tools.trustedGatewayPolicy(service),
+    callLedgerPath: join(configured.paths.state, "gateway-tool-calls.json"),
+    requireResolvedToolGrants: (registration: { registrationId: string }) => runtimeGrants.has(registration.registrationId),
+    toolGrantResolver: (registration: { registrationId: string }) => runtimeGrants.get(registration.registrationId) ?? [] });
   // The Context7 key reaches the Gateway only through its in-memory secret store, from a private file or the environment.
   if (configured.approval?.remoteServices.some(item => item.authenticated)) {
     const stored = await readStoredContext7Key(configured.paths);
@@ -519,7 +523,7 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
     const { scope } = configured.operation;
     if (scope.kind !== "session") throw new Error("Gateway control requires a session-scoped Gateway operation");
     control = await startGatewayControl({ gateway, stateRoot: configured.paths.state, machineId: scope.machineId,
-      configDigest: configured.definitionDigest, endpoint, workspaceRoot: scope.workspaceRoot, services: configured.services });
+      configDigest: configured.definitionDigest, endpoint, workspaceRoot: scope.workspaceRoot, services: configured.services, grantMap: runtimeGrants });
     if (readyServices.length) {
       const registrationId = `setup-probe-${randomUUID()}`;
       const registration = MCPClientRegistrationSchema.parse({ schemaVersion: 3, registrationId, provider: "codex", role: "reviewer",

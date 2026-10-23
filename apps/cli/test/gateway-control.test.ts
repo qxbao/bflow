@@ -3,8 +3,8 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { afterEach, beforeEach, expect, it } from "vitest";
-import { MCPClientRegistrationSchema, MCPServiceDefinitionSchema } from "@bflow/contracts";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { MCPClientRegistrationSchema, MCPServiceDefinitionSchema, ResolvedToolGrantSchema } from "@bflow/contracts";
 import { startGatewayControl } from "../src/gateway-control.js";
 
 let root: string;
@@ -13,10 +13,12 @@ let gateway: any;
 let data: any;
 let operation: any;
 let service: any;
+let grantMap: Map<string, any>;
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "bflow-control-test-"));
   const module = await import(new URL("../../../packages/mcp-gateway/dist/index.js", import.meta.url).href);
   gateway = new module.BflowSharedMCPGateway();
+  grantMap = new Map();
   data = new module.StreamableHttpGatewayServer({ gateway });
   const source = `let input='';process.stdin.on('data',chunk=>{input+=chunk;while(input.includes('\\n')){let n=input.indexOf('\\n');let m=JSON.parse(input.slice(0,n));input=input.slice(n+1);if(m.id===undefined)continue;const result=m.method==='initialize'?{protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'control-fixture',version:'1'}}:m.method==='tools/list'?{tools:[{name:'query',inputSchema:{type:'object'}},{name:'context',inputSchema:{type:'object'}},{name:'impact',inputSchema:{type:'object'}}]}:{content:[{type:'text',text:JSON.stringify(m.params)}]};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n')}});`;
   const script = join(root, "worker.cjs"); await writeFile(script, source, { mode: 0o600 });
@@ -30,7 +32,7 @@ beforeEach(async () => {
     authentication: { mode: "none" }, healthTimeoutMs: 1000, idleTimeoutMs: 1000, restartLimit: 0 });
   const ensured = await gateway.serviceManager.ensure(service, operation); expect(ensured.ok).toBe(true);
   control = await startGatewayControl({ gateway, stateRoot: join(root, "state"), machineId: "machine", configDigest: "a".repeat(64),
-    endpoint: `${await data.start()}/mcp`, workspaceRoot: root, services: [service] });
+    endpoint: `${await data.start()}/mcp`, workspaceRoot: root, services: [service], grantMap });
 });
 afterEach(async () => {
   await control?.stop(); await data?.stop();
@@ -84,6 +86,45 @@ it("enrolls a scoped role through control and calls real stdio through authentic
   expect((await rpc("release", { lease: lease.value, operation })).ok).toBe(true);
   expect((await rpc("revoke", { registrationId: "reviewer-pane-1", operation })).ok).toBe(true);
   expect(gateway.authenticateToken(registered.value.token).ok).toBe(false);
+});
+
+it("validates Runtime grants at registration and invokes only an exact granted operation through control", async () => {
+  const grant = ResolvedToolGrantSchema.parse({ schemaVersion: 3, grantId: "gitnexus-reviewer-grant", policyDigest: "b".repeat(64),
+    toolId: "gitnexus", kind: "stdio_mcp", requiredness: "required", role: "reviewer", scope: operation.scope,
+    serviceId: service.serviceId, operations: ["query"], triggers: ["code_relationships"] });
+  const wrongPrincipal = { ...grant, grantId: "gitnexus-qa-grant", role: "qa" };
+  expect((await rpc("register", { client: client(), toolGrants: [wrongPrincipal] })).ok).toBe(false);
+  const originalRegister = gateway.register.bind(gateway);
+  let grantAvailableDuringRegistration = false;
+  vi.spyOn(gateway, "register").mockImplementation(async (registeredClient: any) => {
+    grantAvailableDuringRegistration = grantMap.has(registeredClient.registrationId);
+    return originalRegister(registeredClient);
+  });
+  const registered = await rpc("register", { client: client({ allowedTools: ["query", "context"] }), toolGrants: [grant] });
+  expect(registered.ok).toBe(true);
+  expect(grantAvailableDuringRegistration).toBe(true);
+  expect(grantMap.get("reviewer-pane-1")).toEqual([grant]);
+  const lease = await rpc("acquire", { ...operation, registrationId: "reviewer-pane-1", serviceId: service.serviceId,
+    resourceKey: "gitnexus-fixture", ttlMs: 10_000 });
+  expect(lease.ok).toBe(true);
+  const call = { schemaVersion: 3, callId: "granted-call", registrationId: "reviewer-pane-1", serviceId: service.serviceId,
+    tool: "query", input: { query: "find" }, resourceLease: lease.value, idempotencyKey: "granted-call" };
+  const result = await rpc("invoke_tool", { call });
+  expect(result.ok).toBe(true);
+  expect(result.value.status).toBe("completed");
+  expect((await rpc("reconcile_tool_call", { call })).value.status).toBe("completed");
+  expect((await rpc("invoke_tool", { call: { ...call, callId: "wrong-op", tool: "context", idempotencyKey: "wrong-op" } })).ok).toBe(false);
+});
+
+it("treats an explicit empty Runtime grant set as deny-all and removes grants on revoke", async () => {
+  const registered = await rpc("register", { client: client(), toolGrants: [] });
+  expect(registered.ok).toBe(true);
+  expect(grantMap.has("reviewer-pane-1")).toBe(true);
+  const call = { schemaVersion: 3, callId: "denied-call", registrationId: "reviewer-pane-1", serviceId: service.serviceId,
+    tool: "query", input: {}, idempotencyKey: "denied-call" };
+  expect((await rpc("invoke_tool", { call })).ok).toBe(false);
+  expect((await rpc("revoke", { registrationId: "reviewer-pane-1", operation })).ok).toBe(true);
+  expect(grantMap.has("reviewer-pane-1")).toBe(false);
 });
 
 it("denies foreign repositories, widened roles, endpoint replacement, expired clients and unconfigured services", async () => {

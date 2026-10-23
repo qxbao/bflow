@@ -1165,6 +1165,58 @@ export async function runDoctorDiagnostics(
     });
   }
 
+  if (config?.environment?.toolPolicy) {
+    progress("Resolving repository tool policy against machine inventory...");
+    try {
+      const { loadHostPlatformContext, resolveRepositoryToolPolicy, resolveToolGrants } = await import("./platform-options.js");
+      const input = { repository, config, env: options.env ?? process.env };
+      const context = await loadHostPlatformContext(input);
+      const policy = resolveRepositoryToolPolicy(input, context.machineId);
+      resolveToolGrants(policy, context, input, undefined, undefined, observed => {
+        const missingReason = observed.reason ?? "No matching machine evidence was observed.";
+        const add = (stage: "installed" | "allowed" | "granted" | "ready", pass: boolean, reason: string, remediation: string) => {
+          toolChecks.push({ checkId: `tool-policy-${observed.toolId}-${observed.role}-${stage}`, group: "tools",
+            component: `${observed.toolId}:${observed.role}:${stage}`,
+            status: pass ? "pass" : observed.requiredness === "required" ? "fail" : "warning",
+            detected_version: observed.version ?? null, reason, remediation: pass ? "" : remediation });
+        };
+        add("installed", observed.installed, observed.installed ? `Machine inventory verifies '${observed.toolId}' (${observed.version ?? "version unavailable"}).` :
+          `Machine inventory does not verify '${observed.toolId}': ${missingReason}`, "Review the pinned tool and its setup receipt with 'bflow tool status'.");
+        add("allowed", observed.allowed, `Repository policy explicitly allows '${observed.toolId}' for role '${observed.role}'.`,
+          "Add an explicit role and operation requirement to environment.toolPolicy.");
+        add("granted", observed.granted, observed.granted ? `Runtime grant for '${observed.toolId}' is resolved for role '${observed.role}'.` :
+          `No Runtime grant is resolved for '${observed.toolId}' and role '${observed.role}': ${missingReason}`,
+          "Resolve the policy, machine inventory and Gateway operation allowlist, then retry 'bflow up'.");
+        add("ready", observed.ready, observed.ready ? `'${observed.toolId}' is ready for role '${observed.role}'.` :
+          `'${observed.toolId}' is not ready for role '${observed.role}': ${missingReason}`,
+          "Run 'bflow doctor' or 'bflow mcp status' to inspect the approved service readiness.");
+      }, false);
+    } catch (error) {
+      toolChecks.push({ checkId: "tool-policy-resolution", group: "tools", component: "repository-policy",
+        status: "fail", detected_version: null,
+        reason: `Repository tool policy could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+        remediation: "Correct the strict environment.toolPolicy schema, digest and repository scope before startup." });
+    }
+  } else {
+    for (const toolId of ["rtk", "gitnexus", "chrome-devtools-mcp", "mempalace"] as const) {
+      const visible = toolChecks.find(check => check.checkId === `tool-${toolId}`);
+      const foundOnPath = visible?.status === "pass";
+      const addPolicyState = (stage: "installed" | "allowed" | "granted" | "ready", status: DoctorCheckStatus, reason: string, remediation: string) =>
+        toolChecks.push({ checkId: `tool-policy-${toolId}-repository-${stage}`, group: "tools",
+          component: `${toolId}:repository:${stage}`, status, detected_version: visible?.detected_version ?? null, reason, remediation });
+      addPolicyState("installed", foundOnPath ? "warning" : "skipped",
+        foundOnPath ? `'${toolId}' is visible on PATH, but this probe does not verify its approved managed executable identity.` :
+          `No installation of '${toolId}' was observed by the CLI probe.`,
+        "Use 'bflow tool status' and the approved machine setup receipt to inspect installation identity.");
+      addPolicyState("allowed", "warning", `Repository tool policy does not allow '${toolId}'.`,
+        "Add an explicit role and operation requirement under environment.toolPolicy to allow this tool.");
+      addPolicyState("granted", "skipped", `No Runtime grant exists for '${toolId}' because the repository has no tool policy.`,
+        "Resolve an explicit repository policy before starting roles that need this tool.");
+      addPolicyState("ready", "skipped", `'${toolId}' is not ready for this repository because it has no resolved tool grant.`,
+        "Resolve the repository grant and verify the machine tool or Gateway service before use.");
+    }
+  }
+
   // ==========================================
   progress("Checking approved skills...");
   // Group 5: skills

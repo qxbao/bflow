@@ -1,6 +1,7 @@
 import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import { MCPServiceObservationSchema, type MCPServiceObservation } from "@bflow/contracts";
 
 /** The Gateway daemon rewrites this file every ten seconds while it is healthy (see setup-gateway.ts). */
 export const GATEWAY_READY_FILE = "setup-gateway-ready.json";
@@ -29,6 +30,7 @@ export interface ServiceReadiness {
   readonly observedAt?: string;
   readonly ageMs?: number;
   readonly endpoint?: string;
+  readonly observation?: MCPServiceObservation;
 }
 
 function alive(pid: number): boolean {
@@ -50,7 +52,9 @@ export async function readGatewayReadiness(stateDirectory: string, serviceId: st
   const ageMs = now() - Date.parse(receipt.observedAt);
   const running = ageMs <= MAX_AGE_MS && ageMs >= -1000 && alive(receipt.pid);
   const entry = receipt.observations.find(item => item.serviceId === serviceId);
+  const parsedObservation = entry ? MCPServiceObservationSchema.safeParse(entry) : undefined;
   const base = { discoveredTools: entry?.discoveredTools ?? [], observedAt: receipt.observedAt, ageMs, endpoint: receipt.endpoint,
+    ...(parsedObservation?.success ? { observation: parsedObservation.data } : {}),
     ...(entry?.diagnosticCode ? { diagnosticCode: entry.diagnosticCode } : {}) };
   if (!running) return { gateway: "stale", status: "unknown", ...base };
   if (!entry) return { gateway: "running", status: "missing", ...base };
