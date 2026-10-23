@@ -1626,8 +1626,14 @@ export class AgenticWorkflowRuntime {
           run.approval !== undefined && (!run.decision || run.decision.approvalId !== run.approval.approvalId) && !restoreApprovalWait)
         throw new Error("A pending approval or user decision must be resolved before resume");
       if (options.automatic && (action.resumeAttempts ?? 0) >= AUTO_RESUME_LIMIT) throw new Error("Bounded resume attempts are exhausted; cancel or request operator intervention");
+      // Legacy diagnostics could lose the cached count. Runtime-issued immutable intents retain a proven lower bound for this exact action.
+      const issuedManualResumes = new Set(state.outbound.filter(out => out.message.run_id === runId && out.message.sender.role === "runtime" &&
+        out.message.type === "task.status" && objectField(out.message.payload, "kind") === "resume_run" &&
+        objectField(out.message.payload, "automatic") === false && objectField(out.message.payload, "actionId") === actionId)
+        .map(out => out.message.message_id)).size;
+      const manualResumeAttempts = Math.max(action.manualResumeAttempts ?? 0, issuedManualResumes);
       // An explicit user resume has its own bound and is still allowed once the automatic budget is spent.
-      if (!options.automatic && (action.manualResumeAttempts ?? 0) >= MANUAL_RESUME_LIMIT)
+      if (!options.automatic && manualResumeAttempts >= MANUAL_RESUME_LIMIT)
         throw new Error(`Explicit resume budget is exhausted (${MANUAL_RESUME_LIMIT} user resumes of this blocker); cancel the run or request operator intervention`);
       // Re-checked under the journal lock: the classification/backoff may have changed since the automatic pass selected it.
       if (options.automatic && (action.state !== "pending" || !["auto_resume", "capability_repair"].includes(action.recovery ?? "manual") ||
@@ -1692,7 +1698,7 @@ export class AgenticWorkflowRuntime {
       if (options.automatic) action.resumeAttempts = (action.resumeAttempts ?? 0) + 1;
       else {
         // The user's resume grants a fresh automatic budget, with backoff counted from now, so the run can recover itself again.
-        action.manualResumeAttempts = (action.manualResumeAttempts ?? 0) + 1;
+        action.manualResumeAttempts = manualResumeAttempts + 1;
         action.resumeAttempts = 0;
         if (action.kind === "resume_coordinator" && (action.recovery === undefined || action.recovery === "manual")) action.recovery = "auto_resume";
       }

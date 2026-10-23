@@ -1019,3 +1019,8 @@ khác version vẫn phải qua parser và không fallback về cache. Save khôn
 tra lại bytes còn tồn tại rồi giữ nguyên commit; mọi thay đổi vẫn qua schema và
 fsync/rename/fsync thư mục trước khi cập nhật cache. Cache không tạo receipt hay đổi
 quy tắc giao nhận, phê duyệt, fencing hoặc giới hạn retry.
+
+Khi diagnostic legacy làm mất bộ đếm resume thủ công đang cache, Runtime lấy cận dưới từ
+các intent `resume_run` khác nhau do Runtime đã phát cho đúng run/action và giữ giá trị
+lớn hơn giữa cận dưới đó với bộ đếm hiện có. Không suy diễn việc giao intent hay provider
+đã dừng; không sửa intent cũ, không tạo receipt và không cấp lại các lượt đã dùng.

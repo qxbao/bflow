@@ -332,4 +332,23 @@ describe("root acceptance of durable next actions", () => {
     expect((await f.inspect()).inbox.find(item => item.message.message_id === "specialist-blocked-before-verdict")?.status).toBe("applied");
   });
 
+  it("retains the spent manual-resume budget from immutable Runtime intents when legacy diagnostics lost the cached count", async () => {
+    const current = preservedRun("escalated"); delete current.pendingAction!.manualResumeAttempts;
+    const f = await fixture({ runs: [current] }), actionId = current.pendingAction!.actionId;
+    for (const id of ["manual-issued-1", "manual-issued-2"]) await f.runtime.queueHerdr(envelope(id, "run-1", { role: "coordinator" }, {
+      sender: { role: "runtime" }, payload: { kind: "resume_run", actionId, automatic: false, conversationUserMessageId: id }
+    }));
+    const issued = structuredClone((await f.inspect()).outbound);
+    await f.runtime.resumeBlockedRun("run-1", actionId, { conversationUserMessageId: "manual-third" });
+    expect((await f.inspect()).runs[0]?.pendingAction).toMatchObject({ manualResumeAttempts: 3, state: "queued" });
+    expect((await f.inspect()).outbound.slice(0, issued.length)).toEqual(issued);
+    await f.journal.exclusive(async (state, save) => {
+      const run = state.runs[0]!; run.status = "escalated"; run.pendingAction!.state = "pending";
+      run.pendingAction!.previousStatus = "verifying"; await save();
+    });
+    const before = structuredClone(await f.inspect());
+    await expect(f.runtime.resumeBlockedRun("run-1", actionId, { conversationUserMessageId: "manual-fourth" })).rejects.toThrow(/Explicit resume budget is exhausted/);
+    expect(await f.inspect()).toEqual(before);
+  });
+
 });
