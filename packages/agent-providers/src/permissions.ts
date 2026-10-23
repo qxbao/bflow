@@ -316,6 +316,14 @@ function compileAgyPermissions(
   capabilities: DetectedProviderCapabilities,
   options: PermissionCompilerOptions
 ): CompiledPermissionResult {
+  if (role === "conversation") return {
+    supported: false,
+    code: "agy_human_ingress_unsupported",
+    message: "Agy does not expose a trusted physical UserPromptSubmit event required by the Conversation role",
+    remediation: "Use Claude or Codex for Conversation until Agy provides an authenticated physical user-input hook.",
+    flags: [],
+    detectsDangerouslySkipPermissions: capabilities.supportsDangerouslySkipPermissions
+  };
   const requiredFlags = ["--sandbox", "--mode", "--disable-slash-commands"];
 
   const extraRoots = new Set<string>();
@@ -357,36 +365,27 @@ function compileAgyPermissions(
   }
 
   const allowList: string[] = [];
-  for (const root of profile.readableRoots) {
-    allowList.push(`Read(${root}/**)`);
-  }
-  if (mode === "accept-edits") {
-    for (const root of profile.writableRoots) {
-      allowList.push(`Edit(${root}/**)`);
-      allowList.push(`Write(${root}/**)`);
-    }
-  }
   for (const serverName of options.mcpServerNames ?? []) {
-    allowList.push(`mcp__${serverName}__*`);
+    allowList.push(`mcp(${serverName}/*)`);
   }
 
-  const denyList: string[] = [];
+  // Agy native file and command tools stay denied. Bflow's role-scoped MCP API owns repository access,
+  // verification and writes, so a project hook or permission prompt cannot widen the provider surface.
+  const denyList: string[] = ["read_file(/)", "write_file(/)", "command(regex:.*)"];
   for (const pattern of PROTECTED_PATHS) {
-    denyList.push(`Read(${pattern})`);
-    denyList.push(`Edit(${pattern})`);
+    const target = pattern.endsWith("/**") ? pattern.slice(0, -2) : pattern;
+    denyList.push(`read_file(${target})`);
+    denyList.push(`write_file(${target})`);
   }
   for (const deniedRoot of profile.deniedRoots) {
-    denyList.push(`Read(${deniedRoot}/**)`);
-    denyList.push(`Edit(${deniedRoot}/**)`);
-  }
-  if (role !== "conversation") {
-    denyList.push("AskUserQuestion");
+    denyList.push(`read_file(${deniedRoot}/)`);
+    denyList.push(`write_file(${deniedRoot}/)`);
   }
 
   return {
     supported: true,
     code: "permissions_ok",
-    message: "Agy permission flags and permissions.allow policy compiled successfully",
+    message: "Agy native permission rules and sandbox flags compiled successfully",
     flags,
     detectsDangerouslySkipPermissions: capabilities.supportsDangerouslySkipPermissions,
     settingsPermissionsAllow: allowList,

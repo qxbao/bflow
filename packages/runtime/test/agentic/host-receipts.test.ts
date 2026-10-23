@@ -88,6 +88,39 @@ describe("private durable host authentication receipts", () => {
     expect(await f.reopen().reserveDecisionReblock("user-1")).toBeUndefined();
     expect(await f.reopen().reserveDecisionReblock("user-2")).toBe(1);
   });
+  it("durably binds one exact Agy assignment to its launch and native session before a Stop can settle it", async () => {
+    const f = await fixture();
+    const binding = PaneBindingSchema.parse({ ...f.binding, bindingId: "agy-binding", role: "developer", agentId: "agy-dev",
+      paneId: "agy-pane", provider: "agy", agentKind: "agy", readOnlyWorkspace: false,
+      session: { source: "herdr:agy", kind: "id", value: "agy-native-session" } });
+    const message = RoleMessageSchema.parse({ schema_version: 2, message_id: "agy-assignment", correlation_id: "corr-1", run_id: "run-1",
+      sender: { role: "coordinator" }, recipient: { role: "developer", pane_id: binding.paneId, agent_id: binding.agentId },
+      type: "task.assignment", payload: { assignment: { assignmentId: "assignment-1" }, context: { task: "exact task" } },
+      artifact_references: [], occurred_at: f.at, idempotency_key: "assignment-key" });
+    const envelopeDigest = digest(message);
+    const recordAdmission = (f.journal as any).recordAgyAdmission.bind(f.journal);
+    const recordStop = (f.journal as any).recordAgyStop.bind(f.journal);
+
+    const concurrent = await Promise.all([
+      recordAdmission(binding, "launch-agy-dev-1", message, envelopeDigest),
+      recordAdmission(binding, "launch-agy-dev-1", message, envelopeDigest)
+    ]);
+    const first = concurrent.find(value => value.duplicate === false)!;
+    expect(first).toBeDefined();
+    const duplicate = await recordAdmission(binding, "launch-agy-dev-1", message, envelopeDigest);
+    expect(duplicate).toEqual({ ...first, duplicate: true });
+    await expect(recordAdmission(binding, "launch-agy-dev-1", message, "0".repeat(64))).rejects.toThrow();
+    await expect(recordStop(binding, "launch-agy-dev-1", "foreign-session", 1)).rejects.toThrow();
+
+    // Agy resets executionNum to zero each physical turn: session/counter alone is ambiguous.
+    expect(await recordStop(binding, "launch-agy-dev-1", "agy-native-session", 0)).toBeUndefined();
+    const stopped = await recordStop(binding, "launch-agy-dev-1", "agy-native-session", 0, first.admissionId);
+    expect(stopped).toMatchObject({ admissionId: first.admissionId, message });
+    expect(await (f.reopen() as any).activeAgyAdmission(binding, "launch-agy-dev-1")).toBeUndefined();
+    await expect(recordAdmission(binding, "launch-agy-dev-1", message, envelopeDigest)).rejects.toThrow("already stopped");
+    expect(await recordStop(binding, "launch-agy-dev-1", "agy-native-session", 2)).toBeUndefined();
+    await expect(recordAdmission(f.binding, "launch-agy-dev-1", message, envelopeDigest)).rejects.toThrow();
+  });
   it("serializes competing immutable writes and refuses symlinked receipt files", async () => {
     const f = await fixture();
     const results = await Promise.allSettled([f.journal.recordHuman(f.decision, f.provenance),

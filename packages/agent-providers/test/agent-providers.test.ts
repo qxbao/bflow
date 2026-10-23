@@ -1,4 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
@@ -591,8 +592,9 @@ describe("@bflow/agent-providers", () => {
       expect(calls.some(args => args.includes("o3-mini") && args.some(arg => arg.includes("model_reasoning_effort=\"high\"")))).toBe(true);
     });
 
-    it("Agy passes preflight and produces deterministic prepareLaunch profile in plan mode", async () => {
+    it("Agy reports native binding unsupported at preflight and skips inference until Herdr identity is verified", async () => {
       const runner = createFakeProviderRunner({ scenario: "healthy" });
+      const run = vi.spyOn(runner, "run");
       const adapter = new AgyProviderAdapter({
         runner,
         executablePath: fakeBinaryPath,
@@ -609,19 +611,11 @@ describe("@bflow/agent-providers", () => {
 
       expect(healthResult.ok).toBe(true);
       if (healthResult.ok) {
-        expect(healthResult.value.status).toBe("ready");
-        expect(healthResult.value.checks).toHaveLength(8);
+        expect(healthResult.value.status).toBe("unsupported");
+        expect(healthResult.value.checks.find(check => check.check === "native_binding")?.code).toBe("native_binding_unsupported");
+        expect(healthResult.value.checks.some(check => check.check === "authentication" && check.status === "passed")).toBe(true);
       }
-
-      const launchResult = await adapter.prepareLaunch(env);
-      expect(launchResult.ok).toBe(true);
-      if (launchResult.ok) {
-        const profile = launchResult.value;
-        expect(profile.argv).toContain("--sandbox");
-        expect(profile.argv).toContain("--mode");
-        expect(profile.argv).toContain("plan");
-        expect(profile.argv).toContain("--disable-slash-commands");
-      }
+      expect(run.mock.calls.some(([invocation]) => invocation.args.includes("--print"))).toBe(false);
     });
 
     it("Rejects checkHealth and prepareLaunch when AbortSignal is cancelled", async () => {
@@ -1253,7 +1247,7 @@ describe("@bflow/agent-providers", () => {
       }
     });
 
-    it("Agy detects --dangerously-skip-permissions by version, writes permissions.allow/workspaceTrust, omits unverified --mcp-config, and reports unsupported for unattended_isolated and activated", async () => {
+    it("Agy uses native lowercase path and MCP permission rules and reports unsupported for unattended_isolated and activated", async () => {
       const runner = createFakeProviderRunner({ scenario: "healthy" });
       const adapter = new AgyProviderAdapter({
         runner,
@@ -1274,17 +1268,26 @@ describe("@bflow/agent-providers", () => {
         expect(launchRes.value.argv).not.toContain("--dangerously-skip-permissions");
         expect(launchRes.value.argv).not.toContain("--mcp-config");
 
-        const settingsFileEntry = launchRes.value.configFiles.find((cf) => cf.path.endsWith(".settings.json"));
+        const settingsFileEntry = launchRes.value.configFiles.find((cf) => cf.path.endsWith("/.gemini/antigravity-cli/settings.json"));
         expect(settingsFileEntry).toBeDefined();
         const settingsJson = JSON.parse(await readFile(settingsFileEntry!.path, "utf8")) as {
           permissions?: { allow?: string[]; deny?: string[] };
-          workspaceTrust?: { enabled?: boolean; trustedFolders?: string[] };
+          trustedWorkspaces?: string[];
+          workspaceTrust?: unknown;
+          systemPromptFile?: unknown;
+          mcpConfigFile?: unknown;
         };
-        expect(settingsJson.permissions?.allow).toContain(`Read(${testCwd}/**)`);
-        expect(settingsJson.permissions?.allow).toContain(`Edit(${testCwd}/**)`);
-        expect(settingsJson.permissions?.deny).toContain("AskUserQuestion");
-        expect(settingsJson.workspaceTrust?.enabled).toBe(true);
-        expect(settingsJson.workspaceTrust?.trustedFolders).toContain(testCwd);
+        expect(settingsJson.permissions?.allow).not.toContain(`read_file(${testCwd}/)`);
+        expect(settingsJson.permissions?.allow).not.toContain(`write_file(${testCwd}/)`);
+        expect(settingsJson.permissions?.deny).toContain("read_file(/)");
+        expect(settingsJson.permissions?.deny).toContain("write_file(/)");
+        expect(settingsJson.permissions?.deny).toContain("command(regex:.*)");
+        expect(settingsJson.permissions?.deny).toContain("write_file(./.git/)");
+        expect(settingsJson.permissions?.deny).not.toContain("AskUserQuestion");
+        expect(settingsJson.trustedWorkspaces).toContain(testCwd);
+        expect(settingsJson.workspaceTrust).toBeUndefined();
+        expect(settingsJson.systemPromptFile).toBeUndefined();
+        expect(settingsJson.mcpConfigFile).toBeUndefined();
       }
 
       const env = createTestEnvironment("agy", "unattended_isolated");
@@ -1335,6 +1338,64 @@ describe("@bflow/agent-providers", () => {
           "native_binding_unsupported"
         );
       }
+    });
+
+    it("Agy writes Bflow stdio MCP configuration into the private native HOME that its CLI discovers", async () => {
+      const adapter = new AgyProviderAdapter({
+        runner: createFakeProviderRunner({ scenario: "healthy" }),
+        executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true,
+        hostMcpServers: {
+          bflow: { command: "/opt/bflow/node", args: ["/opt/bflow/host.js", "mcp", "/private/role.json"] }
+        }
+      });
+
+      const result = await adapter.prepareLaunch(createTestEnvironment("agy", "workspace_auto"));
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const nativeConfigPath = join(testStateDir, "agy-home", "developer", ".gemini", "config", "mcp_config.json");
+      const config = result.value.configFiles.find(file => file.path === nativeConfigPath);
+      expect(config).toBeDefined();
+      expect(JSON.parse(await readFile(nativeConfigPath, "utf8"))).toMatchObject({
+        mcpServers: {
+          bflow: {
+            command: "/opt/bflow/node",
+            args: ["/opt/bflow/host.js", "mcp", "/private/role.json"],
+            env: expect.any(Object)
+          }
+        }
+      });
+      const nativeMcpConfig = JSON.parse(await readFile(nativeConfigPath, "utf8"));
+      expect(nativeMcpConfig.mcpServers.bflow.env).not.toHaveProperty("BFLOW_GATEWAY_TOKEN");
+      expect(result.value.environment.environmentVariables).not.toHaveProperty("HOME");
+    });
+
+    it("Agy authentication checks use the role-private HOME instead of the user's global configuration", async () => {
+      const runner = createFakeProviderRunner({ scenario: "healthy" });
+      const run = vi.spyOn(runner, "run");
+      const adapter = new AgyProviderAdapter({ runner, executablePath: fakeBinaryPath, allowTestFilesystemOwnership: true });
+      const environment = createTestEnvironment("agy");
+
+      await adapter.checkHealth({ schemaVersion: 3, environment, stage: "preflight", requestedAt: new Date().toISOString() });
+
+      const auth = run.mock.calls.find(([invocation]) => invocation.args[0] === "models")?.[0];
+      expect(auth?.env?.HOME).toBe(join(testStateDir, "agy-home", "developer"));
+      expect(auth?.env?.XDG_CONFIG_HOME).toBe(join(testStateDir, "agy-home", "developer", ".config"));
+    });
+
+    it("blocks Agy Conversation before provider execution because it has no trusted UserPromptSubmit source", async () => {
+      const runner = createFakeProviderRunner({ scenario: "healthy" });
+      const run = vi.spyOn(runner, "run");
+      const adapter = new AgyProviderAdapter({ runner, executablePath: fakeBinaryPath, allowTestFilesystemOwnership: true });
+      const environment = createTestEnvironment("agy", "restricted", { role: "conversation" });
+      const health = await adapter.checkHealth({ schemaVersion: 3, environment, stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(health.ok).toBe(true);
+      if (health.ok) {
+        expect(health.value.status).toBe("unsupported");
+        expect(health.value.checks.find(check => check.check === "permissions")?.code).toBe("agy_human_ingress_unsupported");
+      }
+      expect(run.mock.calls.some(([invocation]) => invocation.args.includes("--print"))).toBe(false);
     });
 
     it("Claude and Codex verify OS sandbox binary for unattended_isolated mode", async () => {
@@ -1940,7 +2001,7 @@ describe("@bflow/agent-providers", () => {
       if (!res.ok) expect(res.error.message).toMatch(/collides with a Bflow host MCP server/);
     });
 
-    it("Agy fails closed for streamable_http registrations and for host MCP servers without --mcp-config", async () => {
+    it("Agy requires the Runtime Gateway shim for HTTP registrations and discovers host MCP from its native HOME", async () => {
       const env = createTestEnvironment("agy");
       const httpAdapter = new AgyProviderAdapter({
         runner: createFakeProviderRunner({ scenario: "healthy" }),
@@ -1960,8 +2021,72 @@ describe("@bflow/agent-providers", () => {
         hostMcpServers: hostServers
       });
       const hostRes = await hostAdapter.prepareLaunch(env);
-      expect(hostRes.ok).toBe(false);
-      if (!hostRes.ok) expect(hostRes.error.message).toMatch(/--mcp-config/);
+      expect(hostRes.ok).toBe(true);
+      if (hostRes.ok) expect(hostRes.value.configFiles.some(file => file.path.endsWith("/.gemini/config/mcp_config.json"))).toBe(true);
+    });
+
+    it("Agy renders an authenticated Gateway registration as a native stdio shim without persisting the token", async () => {
+      const env = createTestEnvironment("agy");
+      const adapter = new AgyProviderAdapter({
+        runner: createFakeProviderRunner({ scenario: "healthy" }),
+        executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true,
+        isolatorEnvironment: { BFLOW_UNRELATED_SECRET: "must-not-persist" },
+        agyGatewayShimCommand: { command: "/opt/bflow/node", args: ["/opt/bflow/agy-stdio-http.js"] },
+        mcpRegistrations: [gatewayRegistration(env, "agy")],
+        mcpTokenEnvironmentNames: tokenEnvironmentNames
+      });
+
+      const result = await adapter.prepareLaunch(env);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const mcpPath = join(testStateDir, "agy-home", "developer", ".gemini", "config", "mcp_config.json");
+      const config = JSON.parse(await readFile(mcpPath, "utf8"));
+      expect(config.mcpServers["gateway-dev"]).toEqual({
+        command: "/opt/bflow/node",
+        args: ["/opt/bflow/agy-stdio-http.js", "http://127.0.0.1:4317/mcp", "gateway-dev", "BFLOW_GATEWAY_TOKEN", '["bflow-gateway"]'],
+        env: expect.objectContaining({ BFLOW_UNRELATED_SECRET: "" })
+      });
+      expect(config.mcpServers["gateway-dev"].env).not.toHaveProperty("BFLOW_GATEWAY_TOKEN");
+      const launchText = await readLaunchText(result.value);
+      expect(launchText).toContain("mcp(gateway-dev/*)");
+      expect(launchText).not.toContain("secret://mcp/gateway-token");
+      expect(launchText).not.toContain("Bearer ");
+    });
+
+    it("Agy's Herdr executable wrapper forwards only trusted pane/launch/token variables to its child", async () => {
+      const env = createTestEnvironment("agy");
+      const observedPath = join(testBaseDir, "agy-wrapper-child-env.json");
+      const providerExecutable = join(testBaseDir, "agy-wrapper-probe.mjs");
+      await writeFile(providerExecutable, `#!${process.execPath}\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(observedPath)}, JSON.stringify({\n` +
+        `  home: process.env.HOME, xdg: process.env.XDG_CONFIG_HOME,\n` +
+        `  pane: !!process.env.HERDR_PANE_ID, launch: !!process.env.BFLOW_LAUNCH_ID, gatewayToken: !!process.env.BFLOW_GATEWAY_TOKEN,\n` +
+        `  unrelated: !!process.env.BFLOW_UNRELATED_SECRET, nodeOptions: !!process.env.NODE_OPTIONS\n}));\n`, { mode: 0o700 });
+      await chmod(providerExecutable, 0o700);
+      const adapter = new AgyProviderAdapter({
+        runner: createFakeProviderRunner({ scenario: "healthy" }),
+        executablePath: providerExecutable,
+        allowTestFilesystemOwnership: true,
+        agyGatewayShimCommand: { command: "/opt/bflow/node", args: ["/opt/bflow/agy-stdio-http.js"] },
+        mcpRegistrations: [gatewayRegistration(env, "agy")],
+        mcpTokenEnvironmentNames: tokenEnvironmentNames
+      });
+      const launch = await adapter.prepareLaunch(env);
+      expect(launch.ok).toBe(true);
+      if (!launch.ok) return;
+      const wrapper = launch.value.configFiles.find(file => file.path.endsWith("/bin/agy"));
+      expect(wrapper).toBeDefined();
+      execFileSync(wrapper!.path, launch.value.argv, { env: { ...process.env, PATH: "/usr/bin:/bin", HOME: "/tmp/untrusted-home",
+        HERDR_PANE_ID: "pane-1", BFLOW_LAUNCH_ID: "launch-1", BFLOW_GATEWAY_TOKEN: "dummy-token",
+        BFLOW_UNRELATED_SECRET: "must-not-forward", NODE_OPTIONS: "--require=/tmp/untrusted.js" } });
+      const observed = JSON.parse(await readFile(observedPath, "utf8"));
+      expect(observed).toEqual({
+        home: join(testStateDir, "agy-home", "developer"),
+        xdg: join(testStateDir, "agy-home", "developer", ".config"),
+        pane: true, launch: true, gatewayToken: true, unrelated: false, nodeOptions: false
+      });
+      expect(await computeFileSha256(wrapper!.path)).toBe(wrapper!.digest);
     });
 
     it("reports unsupported when hooks are required by a provider without native hooks", async () => {
@@ -1970,11 +2095,11 @@ describe("@bflow/agent-providers", () => {
         runner: createFakeProviderRunner({ scenario: "healthy" }),
         executablePath: fakeBinaryPath,
         allowTestFilesystemOwnership: true,
-        hostHooks: { SessionStart: hostHooks.SessionStart }
+        hostHooks: { UserPromptSubmit: hostHooks.UserPromptSubmit }
       });
       const res = await adapter.prepareLaunch(env);
       expect(res.ok).toBe(false);
-      if (!res.ok) expect(res.error.message).toMatch(/does not support native hooks/);
+      if (!res.ok) expect(res.error.message).toMatch(/UserPromptSubmit/);
 
       const health = await adapter.checkHealth({
         schemaVersion: 3,
@@ -1987,6 +2112,50 @@ describe("@bflow/agent-providers", () => {
         expect(health.value.status).toBe("unsupported");
         expect(health.value.checks.find((c) => c.check === "launch_arguments")?.code).toBe("native_hooks_unsupported");
       }
+    });
+
+    it("writes Agy-native named hooks and injects the pinned role prompt at SessionStart", async () => {
+      const env = createTestEnvironment("agy", "workspace_auto", { role: "developer" });
+      const marker = "Bflow role prompt marker for native Agy";
+      const adapter = new AgyProviderAdapter({
+        runner: createFakeProviderRunner({ scenario: "healthy" }),
+        executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true,
+        rolePrompt: marker,
+        hostHooks: { SessionStart: "/opt/bflow/host.js hook session-start", PreToolUse: "/opt/bflow/host.js hook pre-tool", Stop: "/opt/bflow/host.js hook stop" }
+      });
+
+      const result = await adapter.prepareLaunch(env);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const hooksFile = result.value.configFiles.find(file => file.path.endsWith("/.gemini/config/hooks.json"));
+      expect(hooksFile).toBeDefined();
+      const hooks = JSON.parse(await readFile(hooksFile!.path, "utf8")).bflow;
+      expect(hooks.SessionStart).toEqual([
+        { type: "command", command: "/opt/bflow/host.js hook session-start", timeout: 30 },
+        expect.objectContaining({ type: "command", timeout: 30 })
+      ]);
+      expect(hooks.PreToolUse).toEqual([{ matcher: ".*", hooks: [{ type: "command", command: "/opt/bflow/host.js hook pre-tool", timeout: 30 }] }]);
+      expect(hooks.Stop).toEqual([{ type: "command", command: "/opt/bflow/host.js hook stop", timeout: 30 }]);
+      const sessionHook = result.value.configFiles.find(file => file.path.endsWith("bflow-session-start.mjs"));
+      expect(sessionHook).toBeDefined();
+      const output = execFileSync(process.execPath, [sessionHook!.path], {
+        input: JSON.stringify({ conversationId: "native-session-1", workspacePaths: [testCwd] }), encoding: "utf8"
+      });
+      expect(JSON.parse(output).injectSteps[0].systemMessage.systemMessage).toContain(marker);
+    });
+
+    it("rejects Agy UserPromptSubmit hooks instead of relabeling model-loop events as user input", async () => {
+      const adapter = new AgyProviderAdapter({
+        runner: createFakeProviderRunner({ scenario: "healthy" }),
+        executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true,
+        hostHooks: { UserPromptSubmit: "/opt/bflow/host.js hook user-prompt" }
+      });
+      const result = await adapter.prepareLaunch(createTestEnvironment("agy"));
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.message).toContain("UserPromptSubmit");
     });
 
     it("keeps legacy nativeSessionHookCommand as a single SessionStart hook with timeout 10", async () => {

@@ -79,8 +79,25 @@ const NATIVE_HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "PreTool
  * module, signal): any status other than 0 (decision on stdout) or 2 (block) becomes exit 2 with a stderr reason, which
  * both Claude and Codex treat as a block. Codex ignores an exit-2 block without a non-empty stderr reason.
  */
-export function hookRunnerScript(nodePath: string, executable: string, rolePath: string): string {
+export function hookRunnerScript(nodePath: string, executable: string, rolePath: string, provider?: AgentProviderId): string {
   const invoke = `${shellQuote(nodePath)} ${shellQuote(executable)} hook ${shellQuote(rolePath)} "$@"`;
+  if (provider === "agy") return [
+    "#!/bin/sh",
+    'if [ "$1" = PreToolUse ]; then',
+    `  ${invoke}`,
+    '  status=$?',
+    '  if [ "$status" -ne 0 ]; then echo \'{"decision":"deny","reason":"Bflow Agy tool guard failed"}\'; fi',
+    "  exit 0",
+    "fi",
+    'if [ "$1" = Stop ]; then',
+    `  ${invoke}`,
+    '  status=$?',
+    '  if [ "$status" -ne 0 ]; then echo \'{"decision":"stop"}\'; fi',
+    "  exit 0",
+    "fi",
+    `exec ${invoke}`,
+    ""
+  ].join("\n");
   return [
     "#!/bin/sh",
     'if [ "$1" = PreToolUse ] || [ "$1" = UserPromptSubmit ]; then',
@@ -172,6 +189,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const publicKey = await readFile(publicPath, "utf8");
   const promptAssets = await import(new URL("../../../pane-manager/dist/index.js", import.meta.url).href);
   const platformRoles = configuration.platform?.roles ?? [];
+  const providerForRole = (role: AgentRole): AgentProviderId => platformRoles.find(option => option.role === role)?.provider ?? "claude";
   const hookRunners = new Map<string, string>();
   // Bind short paths to the full host directory (repository + complete session ID).
   // Keep them stable over host recovery, without sharing scripts across hosts.
@@ -189,13 +207,13 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   }
   for (const role of roles) {
     const path = join(configuration.directory, role + ".json");
+    const provider: AgentProviderId = platformRoles.find(option => option.role === role)?.provider ?? "claude";
     const hookRunnerPath = useShortHook
       ? join(shortHookDir, `${role}.sh`)
       : join(configuration.directory, `${role}.hook.sh`);
-    const hookScriptContent = hookRunnerScript(process.execPath, executable, path);
+    const hookScriptContent = hookRunnerScript(process.execPath, executable, path, provider);
     await privateFile(hookRunnerPath, hookScriptContent, 0o700);
     hookRunners.set(role, hookRunnerPath);
-    const provider: AgentProviderId = platformRoles.find(option => option.role === role)?.provider ?? "claude";
     let roleConfig: RoleConfiguration;
     try { roleConfig = await readRoleConfiguration(path); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -248,7 +266,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     hostLaunch: role => {
       const rolePath = join(configuration.directory, role + ".json");
       const runner = hookRunners.get(role);
-      const hookEntries = Object.fromEntries(NATIVE_HOOK_EVENTS.map(event => [event, hookCommandFor(rolePath, event, runner)]));
+      const provider = platformRoles.find(option => option.role === role)?.provider ?? "claude";
+      const hookEvents = provider === "agy" ? NATIVE_HOOK_EVENTS.filter(event => event !== "UserPromptSubmit") : NATIVE_HOOK_EVENTS;
+      const hookEntries = Object.fromEntries(hookEvents.map(event => [event, hookCommandFor(rolePath, event, runner)]));
       return { mcpServers: { bflow: { command: process.execPath, args: [executable, "mcp", rolePath] } }, hooks: hookEntries };
     },
     nativeSessionHookCommand: role => hookCommandFor(join(configuration.directory, role + ".json"), "SessionStart", hookRunners.get(role))
@@ -607,7 +627,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     if (!required.includes("repository.read")) return;
     const role = binding.role;
     if (!capabilities[role as keyof typeof capabilities]?.includes("repository.read") ||
-        !availableTools(role).some(tool => tool.name === "repository_read"))
+        !availableTools(role, providerForRole(role)).some(tool => tool.name === "repository_read"))
       throw new RoleCapabilityPreflightError(`${role} host does not expose repository_read`);
     try {
       const current = await principal(role, binding.paneId);
@@ -621,7 +641,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           !bflowServer.args.includes(fileURLToPath(import.meta.url))) throw new Error("current launch does not bind the authenticated Bflow MCP server");
       const toolsReceipt = record(JSON.parse(await readFile(providerToolsListPath(role, binding.paneId), "utf8")));
       if (toolsReceipt.role !== role || toolsReceipt.paneId !== binding.paneId || toolsReceipt.agentId !== binding.agentId ||
-          toolsReceipt.sessionDigest !== digest(binding.session) || digest(toolsReceipt.toolNames) !== digest(availableTools(role).map(tool => tool.name).sort()) ||
+          toolsReceipt.sessionDigest !== digest(binding.session) || digest(toolsReceipt.toolNames) !== digest(availableTools(role, providerForRole(role)).map(tool => tool.name).sort()) ||
           toolsReceipt.launchId !== platformSession?.launchIdOf(role)) throw new Error("current role session has no matching authenticated Bflow tools/list proof");
       if (platformSession) {
         const pinned = await platformSession.readPinnedInstructions(role);
@@ -636,7 +656,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         ...(required.includes("verification") || required.includes("testing") ? ["record_behavioral_verification"] : []),
         ...(required.includes("review") ? ["inspect_review", "complete_review"] : [])
       ];
-      const toolNames = new Set(availableTools(role).map(tool => tool.name));
+      const toolNames = new Set(availableTools(role, providerForRole(role)).map(tool => tool.name));
       const missingTool = requiredTools.find(name => !toolNames.has(name));
       if (missingTool) throw new Error(`required verification capability ${missingTool} is unavailable`);
     } catch (error) {
@@ -751,7 +771,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       });
       const conflictResolution = role === "developer" ? await development.conflictResolutionContext(binding) : undefined;
       return json({ ...(conflictResolution ? { kind: "conflict_resolution", conflictResolution } : {}),
-        assignments: outbound, runs: (state.runs as Record<string, unknown>[]).filter(run => outbound.some(out => record(out.message).run_id === run.runId)) });
+        assignments: outbound.map(out => ({ ...out, envelopeDigest: digest(out.message) })),
+        runs: (state.runs as Record<string, unknown>[]).filter(run => outbound.some(out => record(out.message).run_id === run.runId)) });
     }
     if (role === "developer" && ["submit_implementation", "request_verification", "authorize_implementation"].includes(name))
       await development.refuseForResolver(binding, name);
@@ -903,7 +924,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (observed && (!observed.nativeSession || !platformRoles.some(option => option.role === role &&
             (observed.nativeSession!.source === option.provider || observed.nativeSession!.source === `herdr:${option.provider}`))))
           throw new Error("Provider tools/list has no compatible observed Herdr native session");
-        const names = availableTools(role).map(tool => tool.name).sort();
+        const names = availableTools(role, providerForRole(role)).map(tool => tool.name).sort();
         if (digest([...input.toolNames].sort()) !== digest(names)) throw new Error("Provider tools/list does not match the authenticated Bflow role surface");
         const expectedLaunchId = platformSession?.launchIdOf(role);
         if (expectedLaunchId !== input.launchId) throw new Error("Provider tools/list belongs to another prepared launch");
@@ -913,6 +934,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           sessionDigest: binding?.session ? digest(binding.session) : digest(observed?.nativeSession),
           ...(input.launchId === undefined ? {} : { launchId: input.launchId }), toolNames: names, observedAt: new Date().toISOString() }));
         return { recorded: true };
+      }
+      if (method === "agy_gateway_session") {
+        const input = z.object({ paneId: z.string().min(1), nativeSessionId: z.string().min(1), launchId: z.string().min(1) }).strict().parse(params);
+        if (providerForRole(role) !== "agy" || role === "conversation") throw new Error("Agy Gateway session is unavailable for this role");
+        const binding = await principal(role, input.paneId);
+        if (!binding.session || binding.session.value !== input.nativeSessionId || input.launchId !== platformSession?.launchIdOf(role))
+          throw new Error("Agy Gateway native session or launch mismatch");
+        return { permitted: true };
       }
       if (method === "tool_guard") {
         const input = record(params), hook = record(input.hook), binding = await principal(role, textField(input.paneId));
@@ -1014,6 +1043,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (!workspace) return { recorded: false };
         const input = record(params), binding = await principal(role, textField(input.paneId));
         if (!binding.session || binding.session.value !== textField(input.nativeSessionId)) throw new Error("Provider Stop native session mismatch");
+        if (providerForRole(role) === "agy") {
+          // No certified native turn epoch: a physical Stop must not settle an arbitrary active assignment.
+          return { recorded: false, reason: "agy_turn_identity_unsupported" };
+        }
         // Every non-Conversation role's Stop is durable: an unanswered assignment must not vanish with its turn.
         if (role === "coordinator") { if (await receipts.stopCoordinatorTurn(binding)) stopGeneration++; }
         else { await receipts.recordSpecialistStop(binding); stopGeneration++; }
@@ -1467,7 +1500,7 @@ export function prepareRoleToolMessage(binding: Pick<PaneBinding, "role" | "agen
   if (message.type === "approval.request") throw new Error("Only Runtime creates approval requests; Coordinator uses request_user_decision for a human decision");
   return message;
 }
-export function availableTools(role: AgentRole) {
+export function availableTools(role: AgentRole, _provider: AgentProviderId = "claude") {
   const tools = [{ name: "host_status", description: "Read the durable host scheduler status" },
     { name: "assignment_context", description: "Read assignments addressed to this authenticated pane and the accepted specification" },
     { name: "read_task_log", description: "Read bounded, redacted Runtime activity diagnostics. Specialists must pass runId and taskId from their authenticated assignment. Conversation/Coordinator may read session diagnostics. Never evidence of approval or task success." },
@@ -1655,7 +1688,7 @@ export async function runRoleMcp(configuration: RoleConfiguration, roleConfigPat
       if (request.method === "initialize") { reply({ protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "bflow", version: "0.1.0" } }); continue; }
       if (request.method === "tools/list") {
         const paneId = process.env.HERDR_PANE_ID;
-        const tools = availableTools(configuration.role);
+        const tools = availableTools(configuration.role, configuration.provider);
         // The provider always gets its tools; the preflight proof is recorded after the reply and retried until the native session is reported.
         reply({ tools });
         if (paneId) toolsListRecording = recordProviderToolsList(() => callHost(configuration.socketPath, configuration.token, "provider_tools_list", {
@@ -1665,14 +1698,38 @@ export async function runRoleMcp(configuration: RoleConfiguration, roleConfigPat
       }
       if (request.method === "ping") { reply({}); continue; }
       if (request.method !== "tools/call") throw new Error("Unsupported MCP method");
-      const params = record(request.params); if (!availableTools(configuration.role).some(tool => tool.name === params.name)) throw new Error("Tool is unavailable for this role");
+      const params = record(request.params); if (!availableTools(configuration.role, configuration.provider).some(tool => tool.name === params.name)) throw new Error("Tool is unavailable for this role");
       const measured = ["record_behavioral_verification", "check_work", "complete_review", "record_alternative_verification"].includes(String(params.name));
       const paneId = process.env.HERDR_PANE_ID;
       if (paneId === undefined || paneId.length === 0) throw new Error("HERDR_PANE_ID is not set in the Bflow MCP server environment; the provider must forward it");
-      const result = await callHost(configuration.socketPath, configuration.token, "role_call", { ...params, paneId }, measured ? 600_000 : 30_000);
+      const result = await callHost(configuration.socketPath, configuration.token, "role_call", { ...params, paneId,
+        ...(process.env[BFLOW_LAUNCH_ID_ENV] ? { launchId: process.env[BFLOW_LAUNCH_ID_ENV] } : {}) }, measured ? 600_000 : 30_000);
       reply({ content: [{ type: "text", text: JSON.stringify(result) }] });
     } catch (error) { reply({ isError: true, content: [{ type: "text", text: String(error) }] }); }
   }
+}
+
+function parseAgyHookJson(raw: string, event: string): Record<string, unknown> {
+  const common = z.object({
+    conversationId: z.string().min(1),
+    workspacePaths: z.array(z.string().min(1)).min(1),
+    transcriptPath: z.string().optional(),
+    artifactDirectoryPath: z.string().optional(),
+    modelName: z.string().optional()
+  }).passthrough();
+  let schema: z.ZodType<Record<string, unknown>>;
+  if (event === "SessionStart") schema = common;
+  else if (event === "PreToolUse") schema = common.extend({
+    stepIdx: z.number().int().nonnegative(),
+    toolCall: z.object({ name: z.string().min(1), args: z.record(z.unknown()) }).strict()
+  });
+  else if (event === "Stop") schema = common.extend({
+    executionNum: z.number().int().nonnegative(),
+    terminationReason: z.string().min(1),
+    fullyIdle: z.boolean().optional()
+  });
+  else throw new Error("Agy does not provide a trusted user-submission hook");
+  return schema.parse(JSON.parse(raw));
 }
 
 function parseHookJson(raw: string, event: string): Record<string, unknown> {
@@ -1718,6 +1775,24 @@ function parseHookJson(raw: string, event: string): Record<string, unknown> {
   return selected;
 }
 
+async function isRegisteredAgyGatewayServer(serverName: string): Promise<boolean> {
+  const home = process.env.HOME;
+  if (!home) return false;
+  try {
+    const path = join(home, ".gemini", "config", "mcp_config.json"), stat = await lstat(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.()) return false;
+    const parsed = z.object({ mcpServers: z.record(z.unknown()) }).strict().safeParse(JSON.parse(await readFile(path, "utf8")));
+    if (!parsed.success) return false;
+    const entry = parsed.data.mcpServers[serverName];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    const server = entry as Record<string, unknown>, args = Array.isArray(server.args) ? server.args : [];
+    const script = args[0], registrationId = args[2], tokenEnvironmentName = args[3];
+    if (typeof script !== "string" || !script.endsWith("agy-stdio-http-cli.js") || registrationId !== serverName ||
+        typeof tokenEnvironmentName !== "string" || !/^BFLOW_MCP_TOKEN_[A-Z0-9_]+$/.test(tokenEnvironmentName)) return false;
+    return typeof process.env[tokenEnvironmentName] === "string" && process.env[tokenEnvironmentName]!.length > 0;
+  } catch { return false; }
+}
+
 /** Only one whole provider-generated paste wrapper is accepted; surrounding prose never becomes a role envelope. */
 function normalizeProviderPrompt(prompt: string): string {
   try { JSON.parse(prompt); return prompt; } catch { /* Whole JSON may itself contain literal paste tags. */ }
@@ -1736,6 +1811,15 @@ function normalizeProviderPrompt(prompt: string): string {
 export async function runProviderHook(configuration: RoleConfiguration, event: string, roleConfigPath?: string): Promise<void> {
   try { await handleProviderHook(configuration, event, roleConfigPath); }
   catch (error) {
+    if (configuration.provider === "agy" && event === "PreToolUse") {
+      process.stdout.write(JSON.stringify({ decision: "deny", reason: redactString(String(error)) }) + "\n");
+      return;
+    }
+    if (configuration.provider === "agy" && event === "Stop") {
+      process.stderr.write("Bflow could not verify the Agy turn boundary; Runtime work remains unresolved.\n");
+      process.stdout.write(JSON.stringify({ decision: "stop" }) + "\n");
+      return;
+    }
     if (event !== "PreToolUse") throw error;
     // A malformed hook must deny explicitly; providers treat a plain hook
     // process failure as nonblocking and would otherwise execute an unguarded tool.
@@ -1775,11 +1859,11 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
   const chunks: Buffer[] = []; let size = 0;
   for await (const chunk of process.stdin) { size += Buffer.byteLength(chunk); if (size > 1024 * 1024) throw new Error("Oversized provider hook"); chunks.push(Buffer.from(chunk)); }
   const rawInput = Buffer.concat(chunks).toString("utf8");
-  const hook = parseHookJson(rawInput, event);
+  const hook = configuration.provider === "agy" ? parseAgyHookJson(rawInput, event) : parseHookJson(rawInput, event);
   const paneId = textField(process.env.HERDR_PANE_ID);
   if (event === "SessionStart" || event === "Stop") {
-    const session = textField(hook.session_id);
-    if (event !== hook.hook_event_name) throw new Error("Provider hook event mismatch");
+    const session = textField(configuration.provider === "agy" ? hook.conversationId : hook.session_id);
+    if (configuration.provider !== "agy" && event !== hook.hook_event_name) throw new Error("Provider hook event mismatch");
     if (hook.agent_id || process.env.CURSOR_VERSION || hook.cursor_version) return;
     const socketPath = process.env.HERDR_SOCKET_PATH;
     if (socketPath) {
@@ -1789,7 +1873,8 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
           paneId,
           sessionId: session,
           socketPath,
-          ...(typeof hook.transcript_path === "string" ? { transcriptPath: hook.transcript_path } : {}),
+          ...(typeof (configuration.provider === "agy" ? hook.transcriptPath : hook.transcript_path) === "string" ?
+            { transcriptPath: configuration.provider === "agy" ? hook.transcriptPath as string : hook.transcript_path as string } : {}),
           ...(typeof hook.source === "string" ? { source: hook.source } : {})
         });
       } catch (error) {
@@ -1804,7 +1889,8 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
     if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "provider_started", { paneId, nativeSessionId: session,
       ...(plan === undefined || reachability === undefined ? {} : { launchId: plan.launchId, toolReachability: reachability }) });
     if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "native_session", {paneId, sessionId:session});
-    if (event === "Stop" && configuration.role !== "conversation") await callHost(configuration.socketPath, configuration.token, "provider_stopped", { paneId, nativeSessionId: session });
+    if (event === "Stop" && configuration.role !== "conversation") await callHost(configuration.socketPath, configuration.token, "provider_stopped", { paneId, nativeSessionId: session,
+      ...(configuration.provider === "agy" ? { launchId: textField(process.env[BFLOW_LAUNCH_ID_ENV]), executionNum: hook.executionNum } : {}) });
     if (event === "Stop" && configuration.role === "conversation") {
       // Every ordinary user turn must reach conversation_decide. A turn that ends without it handed nothing to Runtime, so the Stop
       // is refused with the exact instruction; the host reserves at most MAX_DECISION_REBLOCKS refusals per turn (Claude and Codex
@@ -1852,6 +1938,9 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
         if (reblock.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_reblocked", { paneId, nativeSessionId: session, messageIds: reblock.map(item => item.messageId) });
         if (ids.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_surfaced", { paneId, nativeSessionId: session, messageIds: ids });
       }
+    }
+    if (configuration.provider === "agy" && event === "Stop") {
+      process.stdout.write(JSON.stringify({ decision: "stop" }) + "\n");
     }
   }
   if (event === "UserPromptSubmit" && configuration.role === "conversation" && textField(hook.prompt).trim() === BFLOW_INBOX_NUDGE) {
@@ -1930,6 +2019,31 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
     if (ids.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_surfaced", { paneId, nativeSessionId: textField(hook.session_id), messageIds: ids });
   }
   if (event === "PreToolUse") {
+    if (configuration.provider === "agy") {
+      const toolCall = record(hook.toolCall), args = record(toolCall.args), name = textField(toolCall.name);
+      try {
+        if (name !== "call_mcp_tool") throw new Error(`Agy native tool '${name}' is not allowed by Bflow`);
+        const serverName = textField(args.ServerName), toolName = textField(args.ToolName), input = args.Arguments ?? {};
+        if (!/^[a-z][a-z0-9_-]{0,63}$/.test(serverName) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(toolName) ||
+            typeof input !== "object" || input === null || Array.isArray(input)) throw new Error("Agy MCP tool call is malformed");
+        if (serverName === "bflow") {
+          if (toolName === USER_DECISION_TOOL && configuration.role !== "coordinator")
+            throw new Error("Only Coordinator may request a user decision through Bflow Conversation");
+          const nativeHook = { hook_event_name: "PreToolUse", session_id: textField(hook.conversationId),
+            tool_name: `mcp__bflow__${toolName}`, tool_input: input };
+          await callHost(configuration.socketPath, configuration.token, "tool_guard", { paneId, hook: nativeHook });
+        } else {
+          if (!(await isRegisteredAgyGatewayServer(serverName))) throw new Error("Agy MCP server is not registered to this Runtime launch");
+          await callHost(configuration.socketPath, configuration.token, "agy_gateway_session", {
+            paneId, nativeSessionId: textField(hook.conversationId), launchId: textField(process.env[BFLOW_LAUNCH_ID_ENV])
+          });
+        }
+        process.stdout.write(JSON.stringify({ decision: "allow", reason: "Bflow tool guard permitted the call" }) + "\n");
+      } catch (error) {
+        process.stdout.write(JSON.stringify({ decision: "deny", reason: redactString(String(error)) }) + "\n");
+      }
+      return;
+    }
     try { await callHost(configuration.socketPath, configuration.token, "tool_guard", { paneId, hook }); }
     catch (error) {
       process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny",

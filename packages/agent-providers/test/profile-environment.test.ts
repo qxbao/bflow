@@ -175,7 +175,9 @@ describe("profile-selected provider environments", () => {
       expect(result.ok).toBe(true);
       expect(calls.some((call) => call.args.includes("--version"))).toBe(true);
       expect(calls.some((call) => call.args.includes("--help"))).toBe(true);
-      expect(calls.some((call) => call.args.includes("ping"))).toBe(true);
+      // Agy's native Herdr binding is not yet certified, so preflight deliberately stops
+      // after native authentication and does not execute a model turn.
+      expect(calls.some((call) => call.args.includes("ping"))).toBe(provider !== "agy");
       for (const call of calls) {
         expect(call.inheritEnvironment).toBe(false);
         expect(call.env).toMatchObject({
@@ -190,7 +192,8 @@ describe("profile-selected provider environments", () => {
         });
       }
       if (provider === "agy") {
-        expect(calls.find((call) => call.args.includes("ping"))?.env?.["HOME"]).toBe(selected.home);
+        expect(calls.find((call) => call.args.includes("models"))?.env?.["HOME"]).toBe(selected.home);
+        expect(calls.some((call) => call.args.includes("ping"))).toBe(false);
         expect(await readFile(join(selected.agyHome, "settings.json"), "utf8").catch(() => "")).toBe("");
         expect(await readFile(join(stateDirectory, "agy-home", ".gemini", "antigravity-cli", "settings.json"), "utf8").catch(() => "")).toBe("");
       }

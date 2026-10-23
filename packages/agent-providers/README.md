@@ -64,11 +64,21 @@ flowchart TD
 
 ## Các Provider được hỗ trợ
 
+Agy sinh cấu hình native trong HOME riêng của role: MCP tại
+`.gemini/config/mcp_config.json`, permissions tại
+`.gemini/antigravity-cli/settings.json` và named hooks tại
+`.gemini/config/hooks.json`. Gateway HTTP dùng stdio shim đọc token từ biến môi
+trường, không dựa vào `--mcp-config` hoặc nội suy header của Agy.
+Khả năng chuẩn bị launch này chưa chứng nhận `bflow up`: preflight vẫn báo
+`native_binding_unsupported` cho tới khi binding Agy/Herdr được xác minh;
+Conversation báo `agy_human_ingress_unsupported` vì thiếu nguồn user input được
+chứng thực. Unattended vẫn unsupported. Không tự đổi provider hoặc bỏ gate.
+
 | Provider | Executable | Phiên bản cài đặt / mục tiêu | Capabilities | MCP Transports | Hỗ trợ Unattended | Native Attestation |
 | --- | --- | --- | --- | --- | --- | --- |
 | **Claude Code** (`claude`) | `claude` | 2.1.301 | Implementation, Review, Conversation | stdio, streamable_http | Có (với OS sandbox / bwrap) | Có |
 | **Codex CLI** (`codex`) | `codex` | 0.162.0 | Implementation, Review, Testing | stdio, streamable_http | Có (với OS sandbox / bwrap) | Có |
-| **Antigravity CLI** (`agy`) | `agy` | 1.4.0 | Implementation, Review | stdio, streamable_http | Không (chưa chứng nhận) | Không (chưa chứng nhận) |
+| **Antigravity CLI** (`agy`) | `agy` | 1.4.0 | Implementation, Review | stdio, streamable_http qua shim | Không (chưa chứng nhận) | Không (chưa chứng nhận) |
 
 ---
 
@@ -152,9 +162,11 @@ legacy inherited-environment behavior.
 
 Codex hook and MCP inspection uses the selected environment's `CODEX_HOME` or
 `$HOME/.codex`. The configured machine-owned `codexHookApprovalPath` remains outside that provider
-home. Agy uses the selected `HOME` directly; it does not copy authentication material from the
-outer process home or replace the selected home with a generated session home. The adapter does
-not write profile credentials or tokens into launch files.
+home. Agy capability/authentication probes use the selected profile `HOME` when one is supplied.
+Prepared Agy launches instead use `<stateDirectory>/agy-home/<role>` for native configuration;
+the launcher sets `HOME` and the XDG directories to that private home. The adapter does not copy
+profile credentials or tokens into launch files. This configuration does not establish native
+binding or prove that the launched private home is authenticated; readiness remains gated.
 
 For a trusted linked Codex LB, the host may also supply `codexBackendUrl`. Codex readiness and
 launch arguments select `codex-lb` at `<root>/backend-api/codex` with the Responses API, websocket
@@ -221,19 +233,22 @@ không thể mâu thuẫn nhau. Mọi file được ghi đều được bao ph�
 | `mcpTokenEnvironmentNames` | registrationId → **tên** biến môi trường (`^[A-Z_][A-Z0-9_]*$`) giữ bearer token. Giá trị token không bao giờ được chấp nhận hay ghi. |
 | `hostHooks` | Lệnh shell đầy đủ cho `SessionStart`, `UserPromptSubmit`, `Stop`, `PreToolUse`. Thay thế `nativeSessionHookCommand` cho `SessionStart`. |
 | `nativeSessionHookCommand` | Hook `SessionStart` đơn cũ (timeout 10 s), không đổi khi dùng một mình. |
+| `agyGatewayShimCommand` | Lệnh tuyệt đối và args của stdio→Gateway HTTP shim do host tin cậy cung cấp; Runtime mặc định dùng shim của Bflow. |
 
-Dạng được render (`<role>.mcp-config.json`):
+Dạng MCP và hooks được render:
 
 - Claude: `{"mcpServers":{"bflow":{"command":"<abs>","args":[...]},"gateway-dev":{"type":"http","url":"<endpoint>","headers":{"Authorization":"Bearer ${BFLOW_GATEWAY_TOKEN}"}}}}`. Claude expand `${VAR}` lúc launch.
 - Codex: cùng file đó được chuyển thành `-c mcp_servers={"bflow"={"command"=...,"args"=[...]},"gateway-dev"={"url"="<endpoint>","bearer_token_env_var"="BFLOW_GATEWAY_TOKEN"}}`.
 - Hooks (settings của Claude và `-c hooks=` của Codex): `{"<Event>":[{"hooks":[{"type":"command","command":"<cmd>","timeout":30}]}]}`.
+- Agy: native `.gemini/config/mcp_config.json` trong HOME riêng chứa host stdio server và stdio shim cho Gateway HTTP. Token chỉ được đọc từ môi trường lúc shim chạy; không dùng `--mcp-config` hay nội suy header `${VAR}`. Native `hooks.json` có `SessionStart`, `Stop` và `PreToolUse`; không có trusted `UserPromptSubmit`.
 
 Quy tắc fail-closed:
 
 - Một registration `streamable_http` không có ánh xạ biến môi trường token hợp lệ → `validation`.
 - Một registration hoặc host server trùng tên với cái khác → `validation`.
-- Hooks được yêu cầu cho provider không có native hooks (Agy) → `validation` từ `prepareLaunch`; `unsupported` từ `checkHealth`.
-- Agy không có dạng header/env-reference đã được xác minh, nên các registration `streamable_http` thất bại. Host MCP server thất bại trừ khi CLI quảng bá `--mcp-config`.
+- Agy được yêu cầu cung cấp `UserPromptSubmit` → `validation` từ `prepareLaunch`; `unsupported` từ `checkHealth`.
+- Agy registration `streamable_http` thiếu shim hợp lệ → `validation` từ `prepareLaunch`; `unsupported` từ `checkHealth`.
+- Agy vẫn bị chặn ở preflight khi native binding chưa được chứng nhận; tạo được native config không chứng minh role có thể chạy workflow.
 
 Process được launch phải nhận mỗi token trong biến môi trường có tên ghi trong config. Adapter không inject nó: `buildProviderEnvironment` chỉ dựng các biến Bflow cố định cộng `environmentVariables`, và các key `BFLOW_*` bị từ chối ở đó. Runtime integrator cung cấp giá trị token qua môi trường của pane.
 

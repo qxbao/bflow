@@ -239,8 +239,8 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
     return this.options.codexBackendUrl === undefined;
   }
 
-  protected override nativeAuthenticationOutcome(executable: string, options?: OperationOptions) {
-    if (this.options.codexBackendUrl === undefined) return super.nativeAuthenticationOutcome(executable, options);
+  protected override nativeAuthenticationOutcome(executable: string, options?: OperationOptions, _environment?: AgentEnvironment) {
+    if (this.options.codexBackendUrl === undefined) return super.nativeAuthenticationOutcome(executable, options, _environment);
     const environment = this.getProviderExecutionEnvironment();
     const apiKey = this.options.isolatorEnvironment !== undefined ? environment["CODEX_LB_API_KEY"] : process.env["CODEX_LB_API_KEY"];
     return checkCodexBackendAuthentication(this.options.codexBackendUrl, apiKey, options);

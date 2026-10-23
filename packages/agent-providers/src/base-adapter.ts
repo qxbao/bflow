@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { constants } from "node:fs";
-import { chmod, mkdir, open, readdir, readFile, stat, symlink } from "node:fs/promises";
-import { homedir } from "node:os";
+import { chmod, lstat, mkdir, open, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   type AgentEnvironment,
@@ -66,6 +65,16 @@ const DEFAULT_ROLE_PROMPTS: Record<string, string> = {
   planner:
     "You are the Bflow Planner Agent. You create milestone plans and track task breakdown."
 };
+const AGY_SECRET_ENV_NAME_PATTERN = /(?:TOKEN|SECRET|API_KEY|PASSWORD|CREDENTIAL|PRIVATE_KEY)/i;
+const AGY_RUNTIME_ENVIRONMENT_NAMES = [
+  "TERM", "COLORTERM", "NO_COLOR", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ",
+  "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "GNOME_KEYRING_CONTROL", "GPG_TTY",
+  "HERDR_PANE_ID", "HERDR_SOCKET_PATH", "HERDR_SESSION", "BFLOW_LAUNCH_ID", "BFLOW_ENVIRONMENT_ID"
+] as const;
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
 
 export function parseSemver(raw: string): { major: number; minor: number; patch: number } | null {
   const match = raw.match(/(\d+)\.(\d+)\.(\d+)/);
@@ -136,10 +145,17 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     return this.options.executablePath ?? this.descriptor.executableName;
   }
 
-  protected getProviderCommandEnvironment(): Readonly<Record<string, string>> {
+  protected getProviderCommandEnvironment(environment?: AgentEnvironment): Readonly<Record<string, string>> {
+    const agyHome = this.descriptor.provider === "agy" && environment !== undefined
+      ? this.options.isolatorEnvironment?.["HOME"] ?? join(environment.stateDirectory, "agy-home", environment.role)
+      : undefined;
+    const agyXdgConfig = this.descriptor.provider === "agy" && environment !== undefined
+      ? this.options.isolatorEnvironment?.["XDG_CONFIG_HOME"] ?? join(agyHome!, ".config")
+      : undefined;
     return {
       ...(this.options.isolatorEnvironment ?? {}),
       ...providerSessionEnvironment(this.descriptor.provider),
+      ...(agyHome !== undefined ? { HOME: agyHome, XDG_CONFIG_HOME: agyXdgConfig! } : {}),
       BFLOW_PROVIDER: this.descriptor.provider
     };
   }
@@ -156,9 +172,9 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     return true;
   }
 
-  protected async nativeAuthenticationOutcome(executable: string, _options?: OperationOptions) {
+  protected async nativeAuthenticationOutcome(executable: string, _options?: OperationOptions, environment?: AgentEnvironment) {
     return this.runner.run({
-      executable, args: this.getAuthCommand(), env: this.getProviderCommandEnvironment(),
+      executable, args: this.getAuthCommand(), env: this.getProviderCommandEnvironment(environment),
       ...this.commandEnvironmentOptions(), timeoutMs: 45_000
     });
   }
@@ -283,7 +299,8 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     const supportsSandboxFlag = supportedFlags.has("--sandbox");
     const supportsApprovalPolicyFlag = supportedFlags.has("--ask-for-approval");
     const supportsAddDirFlag = supportedFlags.has("--add-dir");
-    const supportsNativeHooks = providerId !== "agy";
+    // Agy 1.4.5 has verified SessionStart, PreToolUse and Stop hooks, but lacks physical UserPromptSubmit.
+    const supportsNativeHooks = true;
     const supportsUnattendedMode = providerId !== "agy";
 
     return {
@@ -520,15 +537,29 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     // C. Check: authentication & execution probe. Never invoke the provider while
     // inherited global hooks/MCP state is not approved or isolated.
     let authPassed = false;
-    if (inherited.hookFailure !== undefined || inherited.mcpFailure !== undefined) {
+    const agyConversationUnsupported = this.descriptor.provider === "agy" && environment.role === "conversation";
+    const agyBindingUnsupported = this.descriptor.provider === "agy" && request.stage === "preflight" &&
+      !this.descriptor.supportsNativeBinding && !agyConversationUnsupported;
+    if (agyBindingUnsupported) {
+      hasUnsupported = true;
+      checks.push(createHealthCheck("native_binding", "failed", "native_binding_unsupported",
+        "Agy native session binding has not passed the isolated Herdr identity acceptance probe.",
+        "Use Claude or Codex for active roles until Agy's native conversationId is verified against the current Herdr pane."));
+    }
+    if (agyConversationUnsupported) {
+      hasUnsupported = true;
+      authPassed = true;
+      checks.push(createHealthCheck("authentication", "unknown", "auth_skipped_unsupported_role",
+        "Provider authentication was not probed because Agy cannot receive trusted physical Conversation input."));
+    } else if (inherited.hookFailure !== undefined || inherited.mcpFailure !== undefined) {
       hasFailed = true;
       const failure = inherited.hookFailure ?? inherited.mcpFailure!;
       checks.push(createHealthCheck("authentication", "failed", failure.code,
         `Provider execution probe was skipped because inherited state is blocked: ${failure.message}`, failure.remediation));
     } else try {
-      const nativeOnly = this.options.executionProbe === "disabled";
+      const nativeOnly = this.options.executionProbe === "disabled" || agyBindingUnsupported;
       const authOutcome = this.shouldCheckNativeAuthentication() || nativeOnly
-        ? await this.nativeAuthenticationOutcome(executable, options)
+        ? await this.nativeAuthenticationOutcome(executable, options, environment)
         : { exitCode: 0, stdout: "", stderr: "", started: true };
 
       const combinedAuthOutput = `${authOutcome.stdout}\n${authOutcome.stderr}`;
@@ -877,7 +908,8 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     if (!permResult.supported) {
       if (
         permResult.code === "unattended_isolation_unsupported" ||
-        permResult.code === "agy_unattended_unsupported"
+        permResult.code === "agy_unattended_unsupported" ||
+        permResult.code === "agy_human_ingress_unsupported"
       ) {
         hasUnsupported = true;
       } else {
@@ -1546,9 +1578,18 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       ? `${rolePrompt}\n\n# Active Skills\n${this.options.renderedSkillsContent}`
       : rolePrompt;
 
+    const agyHome = this.descriptor.provider === "agy"
+      ? await this.prepareAgyLaunchHome(environment)
+      : undefined;
     const promptPath = join(environment.stateDirectory, `${environment.role}.system-prompt.txt`);
-    const mcpConfigPath = join(environment.stateDirectory, `${environment.role}.mcp-config.json`);
-    const settingsPath = join(environment.stateDirectory, `${environment.role}.settings.json`);
+    const mcpConfigPath = agyHome
+      ? join(agyHome, ".gemini", "config", "mcp_config.json")
+      : join(environment.stateDirectory, `${environment.role}.mcp-config.json`);
+    const settingsPath = agyHome
+      ? join(agyHome, ".gemini", "antigravity-cli", "settings.json")
+      : join(environment.stateDirectory, `${environment.role}.settings.json`);
+    const agyHooksPath = agyHome ? join(agyHome, ".gemini", "config", "hooks.json") : undefined;
+    const agySessionHookPath = agyHome ? join(agyHome, ".gemini", "config", "bflow-session-start.mjs") : undefined;
 
     // Write system prompt file
     const promptFile = await open(
@@ -1561,9 +1602,32 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     } finally {
       await promptFile.close();
     }
+    if (agyHome) await chmod(promptPath, 0o600);
 
     // Write MCP config file (host servers, stdio and streamable_http registrations; env names only, never token values)
     const mcpServersMap: Record<string, unknown> = { ...material.mcpServers };
+    if (agyHome) {
+      for (const [serverName, rawServer] of Object.entries(mcpServersMap)) {
+        if (typeof rawServer !== "object" || rawServer === null || Array.isArray(rawServer)) continue;
+        const server = rawServer as Record<string, unknown>;
+        const registration = this.options.mcpRegistrations?.find(item => item.registrationId === serverName);
+        const tokenName = registration === undefined ? undefined : this.options.mcpTokenEnvironmentNames?.[registration.registrationId];
+        const allowed = new Set([
+          "HOME", "XDG_CONFIG_HOME", "PATH", "TMPDIR", "TEMP", "TMP", ...AGY_RUNTIME_ENVIRONMENT_NAMES, "BFLOW_PROVIDER",
+          ...(tokenName === undefined ? [] : [tokenName])
+        ]);
+        const inheritedNames = new Set([
+          ...Object.keys(process.env),
+          ...Object.keys(this.options.isolatorEnvironment ?? {}),
+          ...Object.keys(environment.environmentVariables),
+          ...Object.values(this.options.mcpTokenEnvironmentNames ?? {})
+        ]);
+        const childEnvironment = Object.fromEntries(Array.from(inheritedNames)
+          .filter(name => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !allowed.has(name))
+          .map(name => [name, ""]));
+        mcpServersMap[serverName] = { ...server, env: { ...(typeof server.env === "object" && server.env !== null ? server.env as Record<string, unknown> : {}), ...childEnvironment } };
+      }
+    }
     const mcpFile = await open(
       mcpConfigPath,
       constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
@@ -1574,11 +1638,12 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     } finally {
       await mcpFile.close();
     }
+    if (agyHome) await chmod(mcpConfigPath, 0o600);
 
     // Write settings file (with native session hooks and provider-specific permissions/trust)
     const settingsObj: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(inherited.settingsMetadata ?? {})) settingsObj[key] = value;
-    if (Object.keys(material.hooks).length > 0) {
+    if (Object.keys(material.hooks).length > 0 && this.descriptor.provider !== "agy") {
       settingsObj["hooks"] = material.hooks;
     }
     if (this.descriptor.provider === "agy") {
@@ -1593,14 +1658,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
         allow: permResult.settingsPermissionsAllow ?? [],
         deny: permResult.settingsPermissionsDeny ?? []
       };
-      settingsObj["workspaceTrust"] = {
-        enabled: true,
-        trustedFolders
-      };
       settingsObj["trustedWorkspaces"] = trustedFolders;
-      settingsObj["systemPromptFile"] = promptPath;
-      settingsObj["mcpConfigFile"] = mcpConfigPath;
-      await this.prepareAgySessionHome(environment);
     } else if (this.descriptor.provider === "claude") {
       settingsObj["permissions"] = {
         allow: permResult.allowedTools ?? [],
@@ -1618,6 +1676,48 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     } finally {
       await settingsFile.close();
     }
+    if (agyHome) await chmod(settingsPath, 0o600);
+
+    if (agyHooksPath && agySessionHookPath) {
+      const promptScript = [
+        'import { readFileSync } from "node:fs";',
+        'let raw = ""; for await (const chunk of process.stdin) raw += chunk;',
+        'let event; try { event = JSON.parse(raw); } catch { process.exit(2); }',
+        'if (!event || typeof event.conversationId !== "string" || !Array.isArray(event.workspacePaths)) process.exit(2);',
+        `const systemMessage = readFileSync(${JSON.stringify(promptPath)}, "utf8");`,
+        'process.stdout.write(JSON.stringify({ injectSteps: [{ systemMessage: { systemMessage } }] }) + "\\n");',
+        ""
+      ].join("\n");
+      const hookScriptFile = await open(
+        agySessionHookPath,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+        0o600
+      );
+      try { await hookScriptFile.writeFile(promptScript, "utf8"); } finally { await hookScriptFile.close(); }
+      await chmod(agySessionHookPath, 0o600);
+
+      const sessionStartHandlers = [...(material.hooks.SessionStart ?? [])];
+      sessionStartHandlers.push({ type: "command", command: `${shellQuote(process.execPath)} ${shellQuote(agySessionHookPath)}`, timeout: 30 });
+      const nativeHookGroup: Record<string, unknown> = { SessionStart: sessionStartHandlers };
+      if (material.hooks.PreToolUse !== undefined) nativeHookGroup["PreToolUse"] = material.hooks.PreToolUse;
+      if (material.hooks.Stop !== undefined) nativeHookGroup["Stop"] = material.hooks.Stop;
+      const hooksFile = await open(
+        agyHooksPath,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+        0o600
+      );
+      try { await hooksFile.writeFile(JSON.stringify({ bflow: nativeHookGroup }, null, 2), "utf8"); } finally { await hooksFile.close(); }
+      await chmod(agyHooksPath, 0o600);
+    }
+
+    const agyWrapperPath = agyHome ? join(agyHome, "bin", "agy") : undefined;
+    if (agyWrapperPath && this.descriptor.provider === "agy") {
+      const shell = await this.buildAgyEnvironmentWrapper({ environment, home: agyHome!, executable: canonicalExecutable });
+      const wrapper = await open(agyWrapperPath,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o700);
+      try { await wrapper.writeFile(shell, "utf8"); } finally { await wrapper.close(); }
+      await chmod(agyWrapperPath, 0o700);
+    }
 
     // Compute digests of written files
     const promptDigest = await computeFileSha256(promptPath);
@@ -1629,6 +1729,11 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       { path: mcpConfigPath, digest: mcpDigest },
       { path: settingsPath, digest: settingsDigest }
     ];
+    if (agyHooksPath && agySessionHookPath) {
+      configFiles.push({ path: agyHooksPath, digest: await computeFileSha256(agyHooksPath) });
+      configFiles.push({ path: agySessionHookPath, digest: await computeFileSha256(agySessionHookPath) });
+    }
+    if (agyWrapperPath) configFiles.push({ path: agyWrapperPath, digest: await computeFileSha256(agyWrapperPath) });
 
     // Compile provider argv
     const compiled = await this.compileArgv(
@@ -1713,52 +1818,68 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
   }
 
   private async prepareAgySessionHome(environment: AgentEnvironment): Promise<string | undefined> {
-    if (this.options.isolatorEnvironment !== undefined) {
-      return this.options.isolatorEnvironment["HOME"];
-    }
+    if (this.options.isolatorEnvironment?.["HOME"] !== undefined) return this.options.isolatorEnvironment["HOME"];
+    return this.prepareAgyLaunchHome(environment);
+  }
 
+  private async buildAgyEnvironmentWrapper(input: {
+    readonly environment: AgentEnvironment;
+    readonly home: string;
+    readonly executable: string;
+  }): Promise<string> {
+    // Herdr inherits the pane environment. Rebuild Agy's environment from an explicit allowlist so
+    // arbitrary secrets and Node runtime overrides cannot leak into Agy or its MCP children.
+    const names = new Set<string>([
+      "PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMPDIR", "TEMP", "TMP", "TERM", "COLORTERM", "NO_COLOR",
+      "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR",
+      "GNOME_KEYRING_CONTROL", "GPG_TTY", "HERDR_ENV", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID", "HERDR_SOCKET_PATH", "HERDR_SESSION",
+      "BFLOW_LAUNCH_ID", "BFLOW_ENVIRONMENT_ID", "BFLOW_PROVIDER"
+    ]);
+    for (const name of Object.keys(input.environment.environmentVariables)) {
+      if (!AGY_SECRET_ENV_NAME_PATTERN.test(name)) names.add(name);
+    }
+    for (const name of Object.keys(input.environment.secretBindings)) names.add(name);
+    for (const name of Object.values(this.options.mcpTokenEnvironmentNames ?? {})) names.add(name);
+    const validNames = [...names].filter(name => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)).sort();
+    const assignments = validNames.map(name => {
+      if (name === "HOME") return `HOME=${shellQuote(input.home)}`;
+      if (name === "XDG_CONFIG_HOME") return `XDG_CONFIG_HOME=${shellQuote(join(input.home, ".config"))}`;
+      if (name === "XDG_DATA_HOME") return `XDG_DATA_HOME=${shellQuote(join(input.home, ".local", "share"))}`;
+      if (name === "XDG_STATE_HOME") return `XDG_STATE_HOME=${shellQuote(join(input.home, ".local", "state"))}`;
+      if (name === "XDG_CACHE_HOME") return `XDG_CACHE_HOME=${shellQuote(join(input.home, ".cache"))}`;
+      return `${name}="\${${name}-}"`;
+    }).join(" \\\n  ");
+    return [
+      "#!/bin/sh",
+      "set -eu",
+      `exec /usr/bin/env -i ${assignments} ${shellQuote(input.executable)} "$@"`,
+      ""
+    ].join("\n");
+  }
+
+  private async prepareAgyLaunchHome(environment: AgentEnvironment): Promise<string | undefined> {
     try {
       const stateStat = await stat(environment.stateDirectory);
       if (!stateStat.isDirectory()) return undefined;
     } catch {
       return undefined;
     }
-    const agyHome = join(environment.stateDirectory, "agy-home");
+    const agyHome = join(environment.stateDirectory, "agy-home", environment.role);
+    const configDir = join(agyHome, ".gemini", "config");
     const targetCliDir = join(agyHome, ".gemini", "antigravity-cli");
-    await mkdir(targetCliDir, { recursive: true, mode: 0o700 });
-    await chmod(agyHome, 0o700);
-    await chmod(join(agyHome, ".gemini"), 0o700);
-    await chmod(targetCliDir, 0o700);
-
-    const realHome = process.env["HOME"] || homedir();
-    const sourceCliDir = join(realHome, ".gemini", "antigravity-cli");
-    let baseSettings: Record<string, unknown> = {};
-    try {
-      const entries = await readdir(sourceCliDir);
-      for (const entry of entries) {
-        if (entry === "settings.json" || entry === "log" || entry === "cli.log") continue;
-        try {
-          await symlink(join(sourceCliDir, entry), join(targetCliDir, entry));
-        } catch {
-          // ignore EEXIST or race
-        }
-      }
-      await mkdir(join(targetCliDir, "log"), { recursive: true, mode: 0o700 });
-      const rawSettings = await readFile(join(sourceCliDir, "settings.json"), "utf8");
-      const parsed = JSON.parse(rawSettings);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        baseSettings = parsed as Record<string, unknown>;
-      }
-    } catch {
-      // No existing agy user settings directory
+    const xdgConfigDir = join(agyHome, ".config");
+    const wrapperBinDir = join(agyHome, "bin");
+    for (const directory of [join(environment.stateDirectory, "agy-home"), agyHome, join(agyHome, ".gemini"), configDir, targetCliDir, xdgConfigDir, wrapperBinDir]) {
+      try { await mkdir(directory, { mode: 0o700 }); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+      const info = await lstat(directory);
+      if (!info.isDirectory() || info.isSymbolicLink() || await realpath(directory) !== directory ||
+          typeof process.getuid === "function" && info.uid !== process.getuid())
+        throw new Error("Unsafe Agy private configuration directory");
+      await chmod(directory, 0o700);
     }
-
-    const existingTrusted = Array.isArray(baseSettings["trustedWorkspaces"])
-      ? (baseSettings["trustedWorkspaces"] as unknown[]).filter((x): x is string => typeof x === "string")
-      : [];
     const trustedWorkspaces = Array.from(
       new Set([
-        ...existingTrusted,
         environment.cwd,
         ...environment.permissionProfile.readableRoots,
         ...environment.permissionProfile.writableRoots
@@ -1772,12 +1893,13 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     );
     try {
       await settingsFile.writeFile(
-        JSON.stringify({ ...baseSettings, trustedWorkspaces }, null, 2),
+        JSON.stringify({ trustedWorkspaces }, null, 2),
         "utf8"
       );
     } finally {
       await settingsFile.close();
     }
+    await chmod(join(targetCliDir, "settings.json"), 0o600);
     return agyHome;
   }
 }

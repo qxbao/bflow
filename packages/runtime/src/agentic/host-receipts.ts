@@ -14,7 +14,7 @@ import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
 import { nativeEnvelopeIssues, nativeMessageFingerprint, NativeRejectionSchema } from "./native-delivery-status.js";
 import { ApprovalNoticeSchema, UserDecisionNoticeSchema, approvalNoticeFields, renderConversationNotice, userDecisionNoticeFields } from "./conversation-notice-render.js";
 
-type Kind = "native-rejection" | "approval-failure" | "runtime-nudge" | "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "decision-reblock" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled";
+type Kind = "native-rejection" | "approval-failure" | "runtime-nudge" | "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "decision-reblock" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled" | "agy-admission" | "agy-admission-stop";
 export interface HumanHookProvenance {
   origin: "UserPromptSubmit"; binding: PaneBinding; nativeSessionId: string;
   conversationSessionId: string; userId: string; messageId: string; promptDigest: string;
@@ -53,6 +53,15 @@ export interface HostObservation {
   binding: PaneBinding; observation: JsonValue; context?: unknown; runId?: string; taskId?: string;
 }
 export interface CoordinatorTurnObservation { binding: PaneBinding; message: RoleMessage; sequence: number; nativeResponseBaseline?: string[] }
+const AgyAdmissionSchema = z.object({ binding: PaneBindingSchema, launchId: z.string().min(1), message: RoleMessageSchema,
+  envelopeDigest: z.string().regex(/^[a-f0-9]{64}$/), admittedAt: z.string().datetime() }).strict().superRefine((value, ctx) => {
+  if (value.binding.role === "conversation" || value.binding.provider !== "agy" || !value.binding.session ||
+      value.message.recipient.role !== value.binding.role || digest(value.message) !== value.envelopeDigest)
+    ctx.addIssue({ code: "custom", message: "Agy admission is not bound to its native specialist envelope" });
+});
+const AgyAdmissionStopSchema = z.object({ admissionId: z.string().regex(/^[a-f0-9]{64}$/), binding: PaneBindingSchema,
+  launchId: z.string().min(1), nativeSessionId: z.string().min(1), executionNum: z.number().int().nonnegative(), observedAt: z.string().datetime() }).strict();
+export type AgyAdmission = z.infer<typeof AgyAdmissionSchema> & { readonly admissionId: string };
 interface Envelope { version: 1; repository: string; sessionId: string; kind: Kind; id: string; payload: JsonValue; checksum: string }
 
 /** A message that starts a Coordinator model turn the host must watch for a response: a user delegation or a Runtime wake-up. */
@@ -84,7 +93,18 @@ export function deliveryFailureNotice(message: RoleMessage, reason: string, head
  * Immutable records are linked only after file fsync; the directory is fsynced before ACK.
  * This trusts private local filesystem ownership, not hostile same-user mutation.
  */
+const agyJournalWrites = new Map<string, Promise<unknown>>();
+
 export class HostReceiptJournal {
+
+  private serializeAgy<T>(operation: () => Promise<T>): Promise<T> {
+    const key = `${this.directory}:${this.sessionId}`;
+    const previous = agyJournalWrites.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(operation);
+    agyJournalWrites.set(key, next);
+    void next.finally(() => { if (agyJournalWrites.get(key) === next) agyJournalWrites.delete(key); }).catch(() => undefined);
+    return next;
+  }
   readonly directory: string;
   readonly repository: string;
   constructor(directory: string, repository: string, readonly sessionId: string) {
@@ -130,6 +150,12 @@ export class HostReceiptJournal {
       if (typeof raw.stopId !== "string" || !raw.stopId) throw new Error("Invalid specialist stop acknowledgement");
       return json({ stopId: raw.stopId });
     }
+    if (kind === "agy-admission") {
+      const value = AgyAdmissionSchema.parse(input);
+      return json({ binding: value.binding, launchId: value.launchId, message: value.message,
+        envelopeDigest: value.envelopeDigest, admittedAt: value.admittedAt });
+    }
+    if (kind === "agy-admission-stop") return json(AgyAdmissionStopSchema.parse(input));
     if (kind.startsWith("coordinator-")) {
       const raw = record(input), binding = PaneBindingSchema.parse(raw.binding), message = RoleMessageSchema.parse(raw.message);
       if (binding.sessionId !== this.sessionId || binding.role !== "coordinator" || !binding.session ||
@@ -181,6 +207,9 @@ export class HostReceiptJournal {
         kind === "runtime-nudge" && digest([record(payload).bindingDigest, record(payload).sequence]) !== id ||
         kind.startsWith("conversation-") && record(payload).messageId !== id ||
         kind === "human" && ApprovalDecisionSchema.parse(record(payload).decision).approvalId !== id ||
+        kind === "agy-admission" && digest([record(payload).binding, record(payload).launchId, RoleMessageSchema.parse(record(payload).message).message_id,
+          record(payload).envelopeDigest]) !== id ||
+        kind === "agy-admission-stop" && record(payload).admissionId !== id ||
         kind === "gate" && QualityGateResultSchema.parse(payload).evaluationId !== id ||
         kind === "evidence" && VerificationResultSchema.parse(payload).verificationId !== id ||
         (kind === "notice-surfaced" || kind === "notice-displayed" || kind === "notice-resurfaced") && record(payload).messageId !== id.split("#")[0] ||
@@ -326,6 +355,49 @@ export class HostReceiptJournal {
   }
   async completeSpecialistStop(stopId: string): Promise<void> {
     await this.write("specialist-settled", stopId, { stopId });
+  }
+  async recordAgyAdmission(bindingInput: PaneBinding, launchId: string, messageInput: RoleMessage, envelopeDigest: string): Promise<{ admissionId: string; duplicate: boolean }> {
+    return this.serializeAgy(async () => {
+    const value = AgyAdmissionSchema.parse({ binding: bindingInput, launchId, message: messageInput, envelopeDigest, admittedAt: new Date().toISOString() });
+    const admissionId = digest([value.binding, value.launchId, value.message.message_id, value.envelopeDigest]);
+    const previous = await this.read("agy-admission", admissionId);
+    if (previous !== undefined) {
+      if (await this.read("agy-admission-stop", admissionId) !== undefined) throw new Error("Agy assignment turn has already stopped");
+      return { admissionId, duplicate: true };
+    }
+    const active = await this.activeAgyAdmission(value.binding, value.launchId);
+    if (active !== undefined) throw new Error("A different Agy assignment is still active for this launch and native session");
+    await this.write("agy-admission", admissionId, value);
+    return { admissionId, duplicate: false };
+    });
+  }
+  async activeAgyAdmission(bindingInput: PaneBinding, launchId: string): Promise<AgyAdmission | undefined> {
+    const binding = PaneBindingSchema.parse(bindingInput);
+    if (binding.role === "conversation" || binding.provider !== "agy" || !binding.session) throw new Error("Agy admission requires an authenticated specialist pane");
+    const matching: AgyAdmission[] = [];
+    for (const id of await this.receiptIds("agy-admission")) {
+      const raw = record(await this.read("agy-admission", id));
+      const receipt = AgyAdmissionSchema.parse(raw);
+      if (this.bindingIdentity(receipt.binding) !== this.bindingIdentity(binding) || receipt.launchId !== launchId) continue;
+      if (await this.read("agy-admission-stop", id) !== undefined) continue;
+      matching.push({ ...receipt, admissionId: id });
+    }
+    if (matching.length > 1) throw new Error("Ambiguous active Agy assignment receipt");
+    return matching[0];
+  }
+  async recordAgyStop(bindingInput: PaneBinding, launchId: string, nativeSessionId: string, executionNum: number, expectedAdmissionId?: string): Promise<AgyAdmission | undefined> {
+    return this.serializeAgy(async () => {
+    const binding = PaneBindingSchema.parse(bindingInput);
+    if (!binding.session || binding.session.value !== textField(nativeSessionId)) throw new Error("Agy Stop native session mismatch");
+    // Agy resets executionNum for each turn. Session/counter alone cannot identify which assignment ended.
+    if (expectedAdmissionId === undefined) return undefined;
+    const admission = await this.activeAgyAdmission(binding, launchId);
+    if (!admission) return undefined;
+    if (admission.admissionId !== expectedAdmissionId) throw new Error("Agy Stop belongs to another admitted assignment");
+    await this.write("agy-admission-stop", admission.admissionId, { admissionId: admission.admissionId, binding,
+      launchId, nativeSessionId, executionNum, observedAt: new Date().toISOString() });
+    return admission;
+    });
   }
   /** Native deliveries whose acknowledgement was not observed. Each one is never resent; it needs reconciliation. */
   async unacknowledgedNativeDeliveries(): Promise<{ operationId: string; message: RoleMessage }[]> {

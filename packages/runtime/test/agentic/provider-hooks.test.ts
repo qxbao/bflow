@@ -33,7 +33,8 @@ async function fixture(role = "conversation", provider = "codex", replies: Recor
   await writeFile(path, JSON.stringify({ socketPath, token: "role-token", role, provider, sessionId: "session", herdrBinary: "unused" }), { mode: 0o600 });
   return { calls, invoke: async (event: string, input: string) => {
     const child = spawn(process.execPath, [fileURLToPath(new URL("../../dist/agentic/host.js", import.meta.url)), "hook", path, event], {
-      env: { ...process.env, HERDR_PANE_ID: "pane-1", HERDR_SOCKET_PATH: "", BFLOW_ENVIRONMENT_ID: "env-test", BFLOW_LAUNCH_ID: undefined },
+      env: { ...process.env, HERDR_PANE_ID: "pane-1", HERDR_SOCKET_PATH: "", BFLOW_ENVIRONMENT_ID: "env-test",
+        ...(provider === "agy" ? { BFLOW_LAUNCH_ID: "launch-agy-1" } : { BFLOW_LAUNCH_ID: undefined }) },
       stdio: ["pipe", "pipe", "pipe"]
     });
     let stdout = "", stderr = "";
@@ -88,6 +89,62 @@ describe.skipIf(process.platform === "win32")("provider hook ingress", () => {
     expect(result.stderr).toContain("local startup registration timed out; prompt denied");
     expect(f.calls.map(call => call.method)).toEqual(["provider_started"]);
   }, 25_000);
+
+  it("registers an Agy native conversationId as the current Herdr session", async () => {
+    const f = await fixture("developer", "agy");
+    const result = await f.invoke("SessionStart", JSON.stringify({
+      conversationId: "agy-native-1", workspacePaths: ["/workspace"],
+      transcriptPath: "/tmp/private/transcript.jsonl", artifactDirectoryPath: "/tmp/private/artifacts", modelName: "test"
+    }));
+    expect(result.code).toBe(0);
+    expect(f.calls.map(call => call.method)).toEqual(["provider_started", "native_session"]);
+    expect(f.calls[0]?.params).toEqual({ paneId: "pane-1", nativeSessionId: "agy-native-1" });
+  });
+
+  it("translates Agy call_mcp_tool into a current-session tool guard and native allow result", async () => {
+    const f = await fixture("developer", "agy");
+    const result = await f.invoke("PreToolUse", JSON.stringify({
+      conversationId: "agy-native-1", workspacePaths: ["/workspace"], transcriptPath: "/tmp/private/transcript.jsonl",
+      artifactDirectoryPath: "/tmp/private/artifacts", modelName: "test", stepIdx: 1,
+      toolCall: { name: "call_mcp_tool", args: { ServerName: "bflow", ToolName: "assignment_context", Arguments: {} } }
+    }));
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ decision: "allow", reason: "Bflow tool guard permitted the call" });
+    expect(f.calls).toEqual([expect.objectContaining({ method: "tool_guard", params: expect.objectContaining({
+      paneId: "pane-1", hook: expect.objectContaining({ hook_event_name: "PreToolUse", session_id: "agy-native-1", tool_name: "mcp__bflow__assignment_context" })
+    }) })]);
+  });
+
+  it("denies unknown Agy tool names before they reach Runtime", async () => {
+    const f = await fixture("developer", "agy");
+    const result = await f.invoke("PreToolUse", JSON.stringify({ conversationId: "agy-native-1", workspacePaths: ["/workspace"],
+      transcriptPath: "/tmp/private/transcript.jsonl", artifactDirectoryPath: "/tmp/private/artifacts", modelName: "test", stepIdx: 1,
+      toolCall: { name: "run_command", args: { CommandLine: "touch /tmp/forbidden" } } }));
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ decision: "deny" });
+    expect(f.calls).toEqual([]);
+  });
+
+  it("keeps user decision authority with Coordinator for Agy Bflow MCP calls", async () => {
+    const f = await fixture("developer", "agy");
+    const result = await f.invoke("PreToolUse", JSON.stringify({ conversationId: "agy-native-1", workspacePaths: ["/workspace"],
+      transcriptPath: "/tmp/private/transcript.jsonl", artifactDirectoryPath: "/tmp/private/artifacts", modelName: "test", stepIdx: 1,
+      toolCall: { name: "call_mcp_tool", args: { ServerName: "bflow", ToolName: "request_user_decision", Arguments: { question: "Approve?" } } } }));
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ decision: "deny" });
+    expect(f.calls).toEqual([]);
+  });
+
+  it("binds Agy Stop to its native conversationId and reports the stop to Runtime", async () => {
+    const f = await fixture("developer", "agy");
+    const result = await f.invoke("Stop", JSON.stringify({ conversationId: "agy-native-1", executionNum: 1,
+      terminationReason: "NO_TOOL_CALL", fullyIdle: true, workspacePaths: ["/workspace"], modelName: "test" }));
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ decision: "stop" });
+    expect(f.calls).toEqual([expect.objectContaining({ method: "provider_stopped", params: {
+      paneId: "pane-1", nativeSessionId: "agy-native-1", launchId: "launch-agy-1", executionNum: 1
+    } })]);
+  });
   it("refuses ambiguous hook objects instead of choosing a human prompt", async () => {
     const f = await fixture();
     const result = await f.invoke("UserPromptSubmit", JSON.stringify({ ...prompt, prompt: "approve" }) + "\n" + JSON.stringify({ ...prompt, prompt: "reject" }));

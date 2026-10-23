@@ -1,5 +1,12 @@
 # Vòng đời môi trường của Bflow CLI (P12)
 
+Khi session đang offline, `up` chuẩn bị và kiểm tra provider trước khi tạo Herdr
+server mới. Nếu preflight từ chối, CLI giữ manifest/run cũ và trả lỗi provider;
+không gọi shutdown barrier trên công việc chưa được activate. Các trường hợp
+startup cũ chưa rõ delivery và session đang chạy vẫn phải reconciliation theo
+receipt hiện có. Cấu hình native Agy đã có trong source, nhưng readiness vẫn bị
+chặn khi native binding hoặc human-input provenance chưa được chứng nhận.
+
 Build từ thư mục gốc của repository bằng `pnpm build`, sau đó chạy
 `node apps/cli/dist/bin.js <command>` (hoặc executable `bflow` đã cài).
 Cần Node >=22.13 và pnpm được pin ở root cho storage runtime hiện có.

@@ -584,10 +584,20 @@ export class EnvironmentLifecycle {
         let manifestRaw = unwrap(await deadline.call((opts) => integration.manager.getManifest(repository.sessionName, opts)));
         let manifest = manifestRaw === null ? null : this.validateManifest(manifestRaw, repository);
         if (running && previous?.phase === "manager_pending" && (manifest !== null || saved !== null)) cleanupEligible = true;
+        const needsRoleStartup = !running || manifest === null || manifest.status === "down" || manifest.status === "degraded" ||
+          manifest.metadata?.["panePresentationVersion"] !== 1 || previous?.phase === "manager_pending";
+        let roleStartupPrepared = false;
         if (!running) {
           if (previous?.phase === "server_starting") {
             if (!previous.serverPid) fail("Startup was interrupted before its server acknowledgement. Run bflow recover --yes after stopping any old Bflow command, then bflow up. State is preserved.");
             if (this.processAlive(previous.serverPid)) fail(`Startup process ${previous.serverPid} is still alive; wait and rerun bflow up. Use bflow status/doctor to inspect it; no duplicate server was started.`);
+          }
+          if (previous?.phase === "manager_pending" && manifest === null)
+            fail("Earlier role startup has no recoverable pane receipt; refusing duplicate agents. Run bflow down --yes to reconcile and stop the partial startup, then bflow up. Preserve .bflow.");
+          if (needsRoleStartup && integration.prepareRoles) {
+            this.progress("Preparing provider environments and readiness...");
+            await deadline.call(opts => integration.prepareRoles!(opts));
+            roleStartupPrepared = true;
           }
           cleanupEligible = true;
           await this.writeIntent(repository, "server_starting");
@@ -608,12 +618,13 @@ export class EnvironmentLifecycle {
         }
 
         // Step 9: start_required_agents
-        if (!running || manifest === null || manifest.status === "down" || manifest.status === "degraded" || manifest.metadata?.["panePresentationVersion"] !== 1 || previous?.phase === "manager_pending") {
+        if (needsRoleStartup) {
           if (previous?.phase === "manager_pending" && manifest === null)
             fail("Earlier role startup has no recoverable pane receipt; refusing duplicate agents. Run bflow down --yes to reconcile and stop the partial startup, then bflow up. Preserve .bflow.");
-          if (integration.prepareRoles) {
+          if (integration.prepareRoles && !roleStartupPrepared) {
             this.progress("Preparing provider environments and readiness...");
             await deadline.call(opts => integration.prepareRoles!(opts));
+            roleStartupPrepared = true;
           }
           await this.writeIntent(repository, "manager_pending");
           cleanupEligible = true;
@@ -623,6 +634,7 @@ export class EnvironmentLifecycle {
         } else {
           this.progress("Reconciling agent roles...");
         }
+        if (manifest === null) fail("Role startup completed without a recoverable session manifest");
 
         // Step 10: confirm_roles_ready
         let reportedWaiting = false;
