@@ -2697,6 +2697,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         for (const run of state.runs) {
           if (this.quiesced) break;
           if (run.nativeDeliveries?.length) continue;
+          // Legacy delivery blockers can predate nativeDeliveries. Reconciliation and cancellation still run outside this work loop.
+          if (run.pendingAction?.state === "pending" && run.pendingAction.recovery === "reconcile_delivery") continue;
           if (run.cancelled || ["completed", "failed", "cancelled", "escalated", "awaiting_approval", "intake", "clarifying", "specifying", "planning"].includes(run.status)) continue;
           // One run's failure is recorded on that run; the other runs and the outbox flush below still proceed.
           try {

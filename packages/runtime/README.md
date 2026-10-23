@@ -986,3 +986,8 @@ Blocker chẩn đoán của specialist đến trong khoảng resume đã xếp h
 bắt đầu cũng không thay pending action hay số lượt đã dùng. Thông điệp xác thực vẫn được
 lưu trong inbox và chuyển tới Coordinator; chỉ kết quả kiểm chứng hoặc đường quyết định
 được cấp quyền mới có thể tiếp tục thay đổi trạng thái công việc.
+
+Run có pending action chờ đối soát delivery, kể cả journal cũ chưa có nativeDeliveries,
+không tự advance Core hay ghi checkpoint mới trong scheduler. Đường đối soát và cancellation
+vẫn hoạt động riêng; không có kết luận delivered/not-delivered, retry hay kết quả công việc
+nào được suy ra từ việc giữ yên run đó.
