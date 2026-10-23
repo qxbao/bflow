@@ -886,6 +886,10 @@ session cũ khi gate đang đợi. Request/handle gốc không đổi; diagnosti
 giữ capability gốc, không cấp verdict và không được resend nếu delivery chưa rõ. Native
 session khác, gate đang chờ duyệt hoặc request chưa rõ delivery đều chặn continuation.
 Mỗi lượt người dùng giữ wake bất biến riêng; replay cùng lượt không tiêu thêm budget.
+Thông tin vận hành `task.status` đã xác thực từ Conversation được chuyển tới Coordinator
+ngay cả khi run đang escalated hoặc chờ duyệt; nội dung được giữ lồng trong wake của
+Runtime, không có quyền resume/approve. Replay receipt `received`, lỗi capability và Stop
+của lượt thông tin đều giữ nguyên blocker, bằng chứng và các cổng phê duyệt hiện có.
 
 Runtime lưu intake đã được Conversation xác thực cùng outbox intent trước dispatch đầu tiên;
 `delegation.accepted` và ingress Herdr vẫn là các bước riêng. Vì vậy capability denial trước khi

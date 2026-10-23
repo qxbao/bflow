@@ -222,4 +222,64 @@ describe("root acceptance of durable next actions", () => {
     expect((await f.inspect()).inbox).toHaveLength(0);
   });
 
+  const operationalContext = () => envelope("conversation-context", "run-1", { role: "coordinator" }, {
+    sender: { role: "conversation", agent_id: "conversation-agent", pane_id: "pane-conversation" },
+    payload: { status: "blocked", summary: "Reviewer quota recovered; reconcile the same request", actionId: "untrusted-action", conversationUserMessageId: "untrusted-turn" }
+  });
+  const preservedRun = (status: RunRecord["status"]) => run("run-1", status, {
+    error: "Original verification blocker",
+    pendingAction: { actionId: `next-${digest(["run-1", "original-blocker"])}`, kind: "resume_coordinator", owner: "coordinator", reason: "Original verification blocker",
+      sourceMessageId: "original-blocker", createdAt: T0, state: "pending", previousStatus: "verifying", resumeAttempts: 2, manualResumeAttempts: 1, recovery: "manual" },
+    ...(status === "awaiting_approval" ? { approvalKind: "design" as const, approval: ApprovalRequestSchema.parse({ schemaVersion: 2, approvalId: "design-pending", runId: "run-1", sessionId: "session-1", status: "pending", target: { type: "run" }, revision: 1, generation: 0, requestedBy: "coordinator", requestedAt: T0, reason: "Pending design", evidence: [], idempotencyKey: "design-pending" }) } : {})
+  });
+  it.each(["escalated", "awaiting_approval", "planning"] as const)("forwards authenticated Conversation context without changing %s state, including received replay", async status => {
+    for (const recovered of [false, true]) {
+      const original = preservedRun(status), f = await fixture({ runs: [original] }), message = operationalContext();
+      if (recovered) {
+        await f.journal.exclusive(async (state, save) => { state.inbox.push({ message, status: "received" }); await save(); });
+        await f.makeRuntime().recoverMissingCoordinatorWakeups();
+      } else await f.runtime.receiveHerdr(message);
+      let state = await f.inspect(); expect(state.runs[0]).toEqual(original);
+      expect(state.inbox.find(item => item.message.message_id === message.message_id)?.status).toBe("applied");
+      const wakes = state.outbound.filter(out => out.message.causation_id === message.message_id);
+      expect(wakes).toHaveLength(1); expect(wakes[0]!.message).toMatchObject({ sender: { role: "runtime" }, type: "task.status", payload: { kind: "conversation_context_ready", result: message.payload } });
+      await f.runtime.receiveHerdr(message); await f.makeRuntime().recoverMissingCoordinatorWakeups();
+      state = await f.inspect(); expect(state.runs[0]).toEqual(original); expect(state.outbound.filter(out => out.message.causation_id === message.message_id)).toHaveLength(1);
+    }
+  });
+  it("keeps the original blocker when informational context dispatch exhausts capability preflight", async () => {
+    const original = preservedRun("escalated"), f = await fixture({ runs: [original], preflight: async () => { throw new RoleCapabilityPreflightError("Reader unavailable"); } });
+    await f.runtime.receiveHerdr(operationalContext()); await f.flushPreflight();
+    expect((await f.inspect()).runs[0]).toEqual(original); expect(f.transport.sentRequests).toHaveLength(0);
+    expect((await f.inspect()).outbound.some(out => out.message.recipient.role === "conversation" && (out.message.payload as { kind?: string }).kind === "delivery_failure")).toBe(true);
+  });
+  it("does not escalate a planning run when the informational Coordinator turn stops without business work", async () => {
+    const original = run("run-1", "planning"), f = await fixture({ runs: [original] });
+    await f.runtime.receiveHerdr(operationalContext()); await f.runtime.flushOutbound();
+    const wake = (await f.inspect()).outbound.find(out => out.message.causation_id === "conversation-context")!;
+    await f.runtime.coordinatorStopWithoutResponse(wake.message, f.panes.bindings.find(pane => pane.role === "coordinator")!);
+    expect((await f.inspect()).runs[0]).toEqual(original);
+  });
+  it.each(["cancelled-flag", "cancelled", "completed", "failed"])("refuses informational context for %s runs", async status => {
+    const current = run("run-1", status === "cancelled-flag" ? "planning" : status as RunRecord["status"], { cancelled: status === "cancelled-flag" });
+    const f = await fixture({ runs: [current] }); await expect(f.runtime.receiveHerdr(operationalContext())).rejects.toThrow();
+    expect((await f.inspect()).runs[0]).toEqual(current); expect((await f.inspect()).outbound.filter(out => out.message.causation_id === "conversation-context")).toHaveLength(0);
+  });
+
+  it("rejects unauthenticated Conversation context before journaling or forwarding it", async () => {
+    const f = await fixture({ runs: [preservedRun("escalated")] });
+    (f.runtime as any).ports.authenticateMessage = async () => false;
+    await expect(f.runtime.receiveHerdr(operationalContext())).rejects.toThrow(/Unauthenticated/);
+    expect((await f.inspect()).inbox).toHaveLength(0); expect((await f.inspect()).outbound).toHaveLength(0);
+  });
+  it("retains uncertainty without resending informational context or replacing the original blocker", async () => {
+    const original = preservedRun("escalated"), f = await fixture({ runs: [original] });
+    await f.runtime.receiveHerdr(operationalContext());
+    f.transport.customSendHandler = request => ({ ok: true, value: { status: "unknown_delivery", requestId: request.requestId, attemptId: request.attemptId,
+      runId: request.runId, taskId: request.taskId, observedAt: T0, reason: "Diagnostic ACK unknown" } as never });
+    await f.runtime.flushOutbound(); await f.makeRuntime().flushOutbound();
+    expect((await f.inspect()).runs[0]).toEqual(original); expect(f.transport.sentRequests).toHaveLength(1);
+    expect((await f.inspect()).outbound.find(out => out.message.causation_id === "conversation-context")?.status).toBe("unknown_delivery");
+  });
+
 });

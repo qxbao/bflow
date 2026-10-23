@@ -104,6 +104,13 @@ function resumablyPaused(run: RunRecord): boolean {
 const FINAL_TASK = "workflow-verification";
 /** Prefix of run errors that a Coordinator retry_verification can resume. */
 const VERIFICATION_RETRY_PREFIX = "Verification delivery/storage requires reconciliation:";
+/** Informational Conversation traffic never carries resume, approval or task-result authority. */
+function isConversationContext(message: RoleMessage): boolean {
+  return message.sender.role === "conversation" && message.recipient.role === "coordinator" && message.type === "task.status" && record(message.payload).action !== "cancel";
+}
+function isConversationContextWake(message: RoleMessage): boolean {
+  return message.sender.role === "runtime" && message.recipient.role === "coordinator" && message.type === "task.status" && record(message.payload).kind === "conversation_context_ready";
+}
 const VERIFICATION_ATTEMPT_LIMIT = 3;
 const RUN_STEP_FAILURE_PREFIX = "Run step failed:";
 /**
@@ -377,7 +384,7 @@ export class AgenticWorkflowRuntime {
     if (state.outbound.some(out => out.message.message_id === messageId)) return;
     outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: messageId, correlation_id: run.delegation.correlationId,
       causation_id: message.message_id, run_id: run.runId, sender: { role: "runtime" }, recipient: { role: "coordinator" }, type: "task.status",
-      payload: { kind: "specialist_result_ready", fromRole: message.sender.role, messageType: message.type, sourceMessageId: message.message_id,
+      payload: { kind: isConversationContext(message) ? "conversation_context_ready" : "specialist_result_ready", fromRole: message.sender.role, messageType: message.type, sourceMessageId: message.message_id,
         sdlcStatus: run.status, result: message.payload, next: "Call inspect to read the durable inbox, then continue the workflow or report a blocker." },
       artifact_references: message.artifact_references, occurred_at: this.now(), idempotency_key: messageId }), "coordinator");
   }
@@ -387,7 +394,8 @@ export class AgenticWorkflowRuntime {
     // before that write. Reapply all business validators, deferring blocked/terminal runs until an authorized resume.
     const received = await this.transaction(async state => state.inbox.filter(item => item.status === "received" &&
         (isCancellationHandoff(item.message) || !state.runs.some(run => run.runId === item.message.run_id && (run.cancelled ||
-          TERMINAL_RUN_STATUSES.includes(run.status) && !this.acceptsPausedNativeReply(state, run, item.message)))))
+          TERMINAL_RUN_STATUSES.includes(run.status) && !this.acceptsPausedNativeReply(state, run, item.message) &&
+          !(run.status === "escalated" && isConversationContext(item.message))))))
       .map(item => RoleMessageSchema.parse(item.message)));
     let replayed = 0;
     for (const message of received) {
@@ -612,7 +620,7 @@ export class AgenticWorkflowRuntime {
       const run = state.runs.find(item => item.runId === out.message.run_id);
       if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) continue;
       const before = state.outbound.length;
-      if (uncertain && !run.pendingAction) {
+      if (uncertain && !run.pendingAction && !isConversationContextWake(out.message)) {
         const reason = `Delivery to ${out.message.recipient.role} is unknown: ${redactString(out.error)}. Reconcile before any resend.`.slice(0, 2000);
         run.error = reason;
         run.pendingAction = { actionId: `next-${digest([run.runId, out.message.message_id])}`, kind: "resume_coordinator", owner: "coordinator",
@@ -627,7 +635,13 @@ export class AgenticWorkflowRuntime {
   }
   /** A failed capability proof is terminal for this immutable unsent message and creates one resumable blocker. */
   private surfaceCapabilityPreflightFailures(state: JournalState, outbox: HerdrOutbox): void {
-    const failures = state.outbound.filter(item => item.status === "failed" && item.error?.includes(RoleCapabilityPreflightError.name));
+    const allFailures = state.outbound.filter(item => item.status === "failed" && item.error?.includes(RoleCapabilityPreflightError.name));
+    for (const failure of allFailures.filter(item => isConversationContextWake(item.message))) {
+      const run = state.runs.find(item => item.runId === failure.message.run_id);
+      if (run && !run.cancelled && !["completed", "failed", "cancelled"].includes(run.status))
+        this.surfaceFailure(state, outbox, run, failure.message.message_id, "undeliverable", "Informational Conversation context", redactString(failure.error ?? "Capability unavailable"));
+    }
+    const failures = allFailures.filter(item => !isConversationContextWake(item.message));
     const byRun = new Map<string, Outbound[]>();
     for (const out of failures) if (out.message.run_id) byRun.set(out.message.run_id, [...(byRun.get(out.message.run_id) ?? []), out]);
     for (const runFailures of byRun.values()) {
@@ -1305,6 +1319,11 @@ export class AgenticWorkflowRuntime {
       } else {
         const run = this.run(state, message.run_id!);
         if (message.correlation_id !== run.delegation.correlationId) throw new Error("Wrong run correlation");
+        if (isConversationContext(message)) {
+          if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) throw new Error(`Run is ${run.status}; informational context cannot reopen it`);
+          this.wakeCoordinator(state, outbox, run, message);
+          inbox.status = "applied"; await save(); return json({ accepted: true, informational: true });
+        }
         // Signature-verified reception is durable before semantic work. An exact bound execution outcome can
         // acknowledge delivery while a different business action pauses the run; validators apply only after resume.
         if (this.defersPausedNativeOutcome(state, run, message)) {
@@ -3404,6 +3423,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     await this.transaction(async (state, save, _core, outbox) => {
       const delivery = this.providerDelivery(state, message, binding);
       if (binding.role !== "coordinator" || message.recipient.role !== "coordinator") throw new Error("Coordinator Stop requires a Coordinator delivery");
+      if (isConversationContextWake(message)) return; // An informational turn owes no business next action.
       const run = state.runs.find(item => item.runId === message.run_id);
       if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || this.hasSemanticNextAction(state, run)) return;
       if (reason) run.error = redactString(reason).slice(0, 2000);
