@@ -78,6 +78,11 @@ retirement không là measurement, Red hoặc repair failure, và không reset g
 Cancellation không release giả grant đã hết hạn của retirement; vẫn dừng Developer/Core bình thường và báo riêng outcome lịch sử chưa được xác nhận.
 Quyền áp dụng từng retirement phải đến từ chủ dự án qua command vật lý chính xác; model không có tool cấp quyền.
 
+Control client giới hạn phản hồi thông thường ở 4 MiB; riêng RPC `checkpoint` nhận tối đa
+16 MiB để không mất acknowledgement của aggregate checkpoint đã lưu vượt 4 MiB.
+Checkpoint lớn hơn vẫn bị từ chối và phải đối soát id/checksum đã lưu trước khi retry;
+việc vượt giới hạn phản hồi không chứng minh thao tác ghi thất bại. Public checkpoint codec không đổi.
+
 Các đầu vào host bắt buộc là tường minh: định danh repository/session, role capability,
 định nghĩa check của task/workflow, deterministic gate runner, ingress thông điệp/result/evidence
 Herdr có xác thực và phê duyệt của con người có xác thực. Không có
