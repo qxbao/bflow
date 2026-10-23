@@ -332,13 +332,15 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   let verificationSandbox = await probeBehavioralSandbox(configuration.repositoryPath);
   const verification = new HostVerification(() => requireWorkspace().runtime, () => requireWorkspace().runtime.ports.artifactStore, receipts, testRunners);
   const development = new HostDevelopment(() => requireWorkspace().runtime, testRunners);
+  const activePolicyMeasurements = new Set<string>();
   const conversationIntake = new HostConversationIntake(receipts, () => requireWorkspace().conversation, async (turn, operationId) => {
     const delivery = await receipts.nativeDelivery(operationId);
     if (!delivery || delivery.status !== "unknown_delivery" || await receipts.nativeRejection(delivery.message.message_id))
       throw new Error("Diagnostic operation is missing or already has authoritative delivery/refusal evidence");
     return json({ ok: true, value: await requireWorkspace().runtime.fenceNativeDiagnostic({ operationId,
       sessionId: turn.conversationSessionId, userMessageId: turn.messageId, userId: turn.userId }) });
-  });
+  }, async (turn, operationId) => json({ ok: true, value: await requireWorkspace().runtime.retirePolicyPhase({ operationId,
+    sessionId: turn.conversationSessionId, userMessageId: turn.messageId, userId: turn.userId }) }));
   const nativeSessions = new Map<string, {role: AgentRole; sessionId: string}>();
   try { for (const [pane, value] of Object.entries(record(JSON.parse(await readFile(join(configuration.directory, "native-sessions.json"), "utf8"))))) {
     const session = record(value); nativeSessions.set(pane, { role: AgentRoleSchema.parse(session.role), sessionId: textField(session.sessionId) });
@@ -567,6 +569,16 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       authenticateGateResult: async (result, message) => await authenticateNativeHerdrMessage(message) && verification.authenticateGate(result),
       projectApprovalRequired: () => configuration.policy?.sdd.approvalRequired === true,
       authorizeHuman: decision => receipts.authenticateHuman(decision),
+      hasPolicyPhaseReceipt: async request => activePolicyMeasurements.has(request.message_id) || receipts.hasPolicyPhaseEvidence(request),
+      authorizePolicyPhaseRetirement: async authority => {
+        if (!humanHookProvenance || humanHookProvenance.messageId !== authority.userMessageId ||
+            humanHookProvenance.userId !== authority.userId || humanHookProvenance.conversationSessionId !== authority.sessionId) return false;
+        const turn = (await receipts.conversationTurns()).find(item => item.messageId === authority.userMessageId);
+        return turn !== undefined && turn.userId === authority.userId && turn.conversationSessionId === authority.sessionId &&
+          digest(turn.binding.session) === digest(humanHookProvenance.binding.session) &&
+          turn.binding.paneId === humanHookProvenance.binding.paneId && turn.binding.role === "conversation" &&
+          digest(turn.content) === humanHookProvenance.promptDigest && turn.content.trim() === `retire policy phase ${authority.operationId}`;
+      },
       authorizeNativeDiagnosticFence: async authority => {
         if (!humanHookProvenance || humanHookProvenance.messageId !== authority.userMessageId ||
             humanHookProvenance.userId !== authority.userId || humanHookProvenance.conversationSessionId !== authority.sessionId) return false;
@@ -698,14 +710,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     if (name === "resume_run") {
       const runId = textField(parameters.runId);
       if (role === "conversation") {
-        await receipts.authorizeConversationResume(binding, parameters.messageId === undefined ? undefined : textField(parameters.messageId), runId);
+        const resumeTurn = await receipts.authorizedConversationResumeTurn(binding, parameters.messageId === undefined ? undefined : textField(parameters.messageId), runId);
         const run = record(await host.runtime.inspect(runId));
         if (DelegationRequestSchema.parse(run.delegation).sessionId !== manifest!.conversationSessionId)
           throw new Error("Resume request belongs to another Conversation session");
         if (run.pendingAction === undefined)
           throw new Error(`Run ${runId} (${String(run.status)}) has no recorded blocker to resume${run.error === undefined ? "" : `; last error: ${String(run.error)}`}`);
         const action = record(run.pendingAction);
-        return host.runtime.resumeBlockedRun(runId, textField(action.actionId));
+        return host.runtime.resumeBlockedRun(runId, textField(action.actionId), { conversationUserMessageId: resumeTurn.messageId });
       }
       if (role !== "coordinator") throw new Error("Only Coordinator or an authenticated Conversation resume request may resume a blocked run");
       return host.runtime.resumeBlockedRun(runId, textField(parameters.actionId));
@@ -835,13 +847,16 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         digest(record(record(out.handle).target).session) === digest(binding.session) && record(out.message).type === "verification.requested" &&
         record(out.message).run_id === parameters.runId && record(record(out.message).payload).kind === "conditional_evidence" &&
         record(record(out.message).payload).taskId === parameters.taskId && record(record(out.message).payload).phase === parameters.phase &&
-        !String(out.error ?? "").startsWith("policy_phase_failed:")) : [];
+        !out.phaseRetirement && !String(out.error ?? "").startsWith("policy_phase_failed:")) : [];
       if (requests.length !== 1) throw new Error("No unique assigned policy-phase request for this verifier");
       const source = RoleMessageSchema.parse(requests[0]!.message);
       const applied = Array.isArray(state.inbox) ? state.inbox.map(record).find(item => item.status === "applied" &&
         record(item.message).causation_id === source.message_id && record(item.message).type === "verification.result") : undefined;
       if (applied) return json({ alreadyRecorded: true, verificationId: record(record(applied.message).payload).verificationId });
       if (requests[0]!.status !== "accepted") throw new Error("Policy verifier lease released without applied evidence; reconcile the original request");
+      if (activePolicyMeasurements.has(source.message_id)) throw new Error("Policy measurement is already in flight; reconcile it before retry");
+      activePolicyMeasurements.add(source.message_id);
+      try {
       let completed: Awaited<ReturnType<HostVerification["behavioralEvidence"]>>;
       try {
         completed = await verification.behavioralEvidence(binding, parameters);
@@ -851,7 +866,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         return host.runtime.recordPhaseFailure(binding, source.message_id, redactString(String(error)), error instanceof HostBehavioralFailure,
           error instanceof HostBehavioralFailure ? error.evidence : undefined);
       }
-      return nativeDeliver(envelope(source, "verification.result", completed.result, completed.result.evidenceArtifacts), `behavioral:${completed.result.verificationId}`);
+      return await nativeDeliver(envelope(source, "verification.result", completed.result, completed.result.evidenceArtifacts), `behavioral:${completed.result.verificationId}`);
+      } finally { activePolicyMeasurements.delete(source.message_id); }
     }
     if (name === "inspect_alternative_verification") return verification.inspectAlternative(binding, parameters);
     if (name === "complete_review") {

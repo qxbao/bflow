@@ -15,6 +15,8 @@ import type { ReachabilityVerdict } from "./tool-reachability.js";
 
 export interface OpenAgenticWorkspaceOptions {
   authorizeNativeDiagnosticFence?: AgenticRuntimePorts["authorizeNativeDiagnosticFence"];
+  authorizePolicyPhaseRetirement?: AgenticRuntimePorts["authorizePolicyPhaseRetirement"];
+  hasPolicyPhaseReceipt?: AgenticRuntimePorts["hasPolicyPhaseReceipt"];
   repositoryPath: string; sessionId: string; herdrBinary?: string;
   bindingReceiptKeys?: Readonly<Record<string, string>>;
   nativeIngressSocket?: string;
@@ -269,6 +271,8 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       authorizeHuman: async decision => { const authorized = await options.authorizeHuman(decision);
         if (authorized) approvedBundles.set(decision.approvalId, decision); return authorized; },
       ...(options.authorizeNativeDiagnosticFence ? { authorizeNativeDiagnosticFence: options.authorizeNativeDiagnosticFence } : {}),
+      ...(options.authorizePolicyPhaseRetirement ? { authorizePolicyPhaseRetirement: options.authorizePolicyPhaseRetirement } : {}),
+      ...(options.hasPolicyPhaseReceipt ? { hasPolicyPhaseReceipt: options.hasPolicyPhaseReceipt } : {}),
       ...(options.projectApprovalRequired ? { projectApprovalRequired: options.projectApprovalRequired } : {})
     }, { journalDirectory: resolve(directory, "journal"), repositoryPath: repository });
     await runtime.initialize();

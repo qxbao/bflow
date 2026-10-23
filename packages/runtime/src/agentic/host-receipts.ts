@@ -460,6 +460,9 @@ export class HostReceiptJournal {
   }
   /** An operational resume is a real user request, not an approval or a model-supplied provenance flag. */
   async authorizeConversationResume(binding: PaneBinding, messageId: string | undefined, runId: string): Promise<void> {
+    await this.authorizedConversationResumeTurn(binding, messageId, runId);
+  }
+  async authorizedConversationResumeTurn(binding: PaneBinding, messageId: string | undefined, runId: string): Promise<TrustedConversationTurn> {
     await this.assertConversationUserTurn(binding);
     const turn = (await this.conversationTurns()).at(-1);
     if (binding.role !== "conversation" || !turn || messageId !== undefined && turn.messageId !== messageId ||
@@ -468,6 +471,7 @@ export class HostReceiptJournal {
     const request = parseConversationResumeRequest(turn.content);
     if (!request || request.runId !== undefined && request.runId !== runId)
       throw new Error("An explicit resume request is required: reply 'tiếp tục' or 'resume <run-id>' in Conversation");
+    return turn;
   }
   /** Reserve the next bounded Stop refusal for an undecided user turn; false once the budget is spent (it survives restart). */
   async reserveDecisionReblock(messageId: string): Promise<number | undefined> {
@@ -641,6 +645,16 @@ export class HostReceiptJournal {
   async recordGate(result: QualityGateResult): Promise<void> { const parsed = QualityGateResultSchema.parse(result); await this.write("gate", parsed.evaluationId, parsed); }
   async authenticateGate(input: QualityGateResult): Promise<boolean> { const result = QualityGateResultSchema.parse(input); return digest(await this.read("gate", result.evaluationId)) === digest(result); }
   async recordEvidence(result: VerificationResult): Promise<void> { const parsed = VerificationResultSchema.parse(result); await this.write("evidence", parsed.verificationId, parsed); }
+  async hasPolicyPhaseEvidence(request: RoleMessage): Promise<boolean> {
+    const payload = record(request.payload);
+    for (const id of await this.receiptIds("evidence")) {
+      const result = VerificationResultSchema.parse(await this.read("evidence", id));
+      const phase = result.metadata?.conditionalTdd;
+      if (result.runId === request.run_id && result.taskId === payload.taskId && phase &&
+          record(phase).phase === payload.phase && record(phase).sourceRevision === payload.sourceRevision) return true;
+    }
+    return false;
+  }
   async getEvidence(id: string): Promise<VerificationResult | undefined> { const value = await this.read("evidence", id); return value === undefined ? undefined : VerificationResultSchema.parse(value); }
   async getGate(id: string): Promise<QualityGateResult | undefined> { const value = await this.read("gate", id); return value === undefined ? undefined : QualityGateResultSchema.parse(value); }
   async recordNativeIntent(operationId: string, message: RoleMessage): Promise<boolean> { return this.write("native-intent", operationId, message); }

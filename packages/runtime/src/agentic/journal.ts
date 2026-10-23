@@ -173,6 +173,8 @@ export interface Outbound {
   stopObservedAt?: string;
   /** Stop observations made for a cancelled execution; bounded so an unresponsive pane is reported instead of polled forever. */
   cancelObservations?: number;
+  phaseRetirement?: { operationId: string; sessionId: string; userMessageId: string; userId: string;
+    blockedReplyId: string; decidedAt: string; resumeAuthorizedBy?: string | undefined; disposition: "retired_without_measurement_claim" };
   phaseFailureEvidence?: ArtifactReference;
   /** `retryAuthorized`: an explicit resume allows re-measuring the same revision after a non-repairable (infrastructure) failure. */
   phaseFailure?: { summary: string; repairable: boolean; applied: boolean; retryAuthorized?: boolean };
@@ -188,7 +190,7 @@ export interface Outbound {
   leaseRelease?: ReleaseAgentLeaseRequest;
 }
 export interface JournalState {
-  version: 1 | 2; repository: string; runs: RunRecord[]; outbound: Outbound[];
+  version: 1 | 2 | 3; repository: string; runs: RunRecord[]; outbound: Outbound[];
   /** "rejected" is terminal and carries Runtime's reason: the message was refused by admission and must never be retried. */
   inbox: { message: RoleMessage; status: "received" | "applied" | "rejected"; reason?: string }[];
   pendingCore: AppendEventsRequest[];
@@ -202,7 +204,7 @@ export function isConversationDelivery(out: Outbound): boolean {
 /** Private storage codec; exported schemas validate every persisted boundary value. */
 function parseState(input: unknown, repository: string): JournalState {
   const root = record(input);
-  if ((root.version !== 1 && root.version !== 2) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
+  if ((root.version !== 1 && root.version !== 2 && root.version !== 3) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
   for (const key of ["runs", "outbound", "inbox", "pendingCore", "pendingVerifications"]) if (!Array.isArray(root[key])) throw new Error(`Invalid journal ${key}`);
   const state = root as unknown as JournalState;
   for (const run of state.runs) {
@@ -237,7 +239,7 @@ function parseState(input: unknown, repository: string): JournalState {
       }
     }
     if (run.nativeDiagnosticFences !== undefined) {
-      if (state.version !== 2) throw new Error("Diagnostic fences require private journal v2; never reinterpret them as v1");
+      if (state.version < 2) throw new Error("Diagnostic fences require private journal v2; never reinterpret them as v1");
       if (!Array.isArray(run.nativeDiagnosticFences)) throw new Error("Invalid diagnostic fences");
       run.nativeDiagnosticFences = run.nativeDiagnosticFences.map(item => NativeDiagnosticFenceSchema.parse(item));
       const ids = new Set<string>();
@@ -328,6 +330,14 @@ function parseState(input: unknown, repository: string): JournalState {
       if (!out.handle || out.message.type !== "delegation.request" || Date.parse(out.stopObservedAt) < Date.parse(out.handle.acceptedAt))
         throw new Error("Invalid specialist Stop observation");
     }
+    if (out.phaseRetirement) {
+      const retirement = z.object({ operationId: z.string().min(1), sessionId: z.string().min(1), userMessageId: z.string().min(1), userId: z.string().min(1),
+        blockedReplyId: z.string().min(1), decidedAt: IsoDateTimeSchema, resumeAuthorizedBy: z.string().min(1).optional(), disposition: z.literal("retired_without_measurement_claim") }).strict().parse(out.phaseRetirement);
+      if (state.version !== 3 || retirement.operationId !== out.message.message_id || out.phaseFailure ||
+          out.message.type !== "verification.requested" || record(out.message.payload).kind !== "conditional_evidence" || !out.handle)
+        throw new Error("Invalid retired policy phase");
+      out.phaseRetirement = retirement;
+    }
     if (out.phaseFailureEvidence) out.phaseFailureEvidence = ArtifactReferenceSchema.parse(out.phaseFailureEvidence);
     if (out.phaseFailure) {
       textField(out.phaseFailure.summary);
@@ -391,6 +401,14 @@ function parseState(input: unknown, repository: string): JournalState {
     item.message = RoleMessageSchema.parse(item.message);
     if (!["received", "applied", "rejected"].includes(item.status)) throw new Error("Invalid inbox status");
     if (item.reason !== undefined) textField(item.reason);
+  }
+  for (const out of state.outbound.filter(item => item.phaseRetirement)) {
+    const run = state.runs.find(item => item.runId === out.message.run_id), retirement = out.phaseRetirement!, target = out.handle!.target;
+    const reply = state.inbox.find(item => item.status === "applied" && item.message.message_id === retirement.blockedReplyId)?.message;
+    if (!run || retirement.sessionId !== run.delegation.sessionId || !reply || reply.type !== "task.status" ||
+        reply.causation_id !== out.message.message_id || reply.run_id !== run.runId || reply.correlation_id !== out.message.correlation_id ||
+        reply.sender.role !== out.message.recipient.role || reply.sender.agent_id !== target.agentId || reply.sender.pane_id !== target.paneId || record(reply.payload).status !== "blocked")
+      throw new Error("Retired policy phase ownership or blocker mismatch");
   }
   for (const pending of state.pendingVerifications) {
     const job = record(pending.job); const outcome = record(pending.outcome);

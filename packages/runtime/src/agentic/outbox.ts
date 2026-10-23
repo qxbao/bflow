@@ -137,8 +137,7 @@ export class HerdrOutbox {
         !run || run.cancelled || run.status !== "implementing" || authorization.message.run_id !== run.runId ||
         authorization.message.type !== "verification.requested" || payload.kind !== "conditional_evidence" ||
         payload.taskId !== owner.taskId || payload.implementationAttemptId !== owner.attemptId ||
-        authorization.phaseFailure?.repairable !== false || !authorization.phaseFailure.applied ||
-        authorization.phaseFailure.retryAuthorized !== true || run.nativeDeliveries?.length ||
+        !(authorization.phaseRetirement?.resumeAuthorizedBy || authorization.phaseFailure?.repairable === false && authorization.phaseFailure.applied && authorization.phaseFailure.retryAuthorized === true) || run.nativeDeliveries?.length ||
         run.approval !== undefined && run.decision?.approvalId !== run.approval.approvalId ||
         Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
         this.state.outbound.some(item => item.message.run_id === run.runId && ["sending", "unknown_delivery"].includes(item.status)))
@@ -189,6 +188,7 @@ export class HerdrOutbox {
     await this.renew(owner);
   }
   async release(out: Outbound): Promise<void> {
+    if (out.phaseRetirement) return; // Historical expired grant, never claim a Registry release or remote stop.
     if (out.status === "released") return;
     if (out.leaseReacquisition) await this.reconcileLeaseAcquisition(out);
     if (out.lease && !out.parentAssignmentId) {
@@ -239,6 +239,7 @@ export class HerdrOutbox {
     if (out.error?.includes(" not ready since ")) delete out.error;
   }
   private async step(out: Outbound, onBound: (out: Outbound, handle: AgentExecutionHandle) => Promise<void>): Promise<void> {
+    if (out.phaseRetirement) return; // Physical tombstone: neither resend, renew nor manufacture an expired-lease release.
     if (out.leaseRelease) { await this.release(out); return; }
     // A Conversation inbox write-ahead stays "sending": Runtime applies it after this locked pass.
     if (out.status === "sending" && !isConversationDelivery(out)) { out.status = "unknown_delivery"; await this.save(); }

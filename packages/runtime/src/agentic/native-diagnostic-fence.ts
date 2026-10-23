@@ -24,3 +24,7 @@ export type NativeDiagnosticFence = z.infer<typeof NativeDiagnosticFenceSchema>;
 export function parseNativeDiagnosticFenceCommand(content: string): string | undefined {
   return /^fence diagnostic ([A-Za-z0-9][A-Za-z0-9._:-]{0,199})$/u.exec(content.trim())?.[1];
 }
+
+export function parsePolicyPhaseRetirementCommand(content: string): string | undefined {
+  return /^retire policy phase ([A-Za-z0-9][A-Za-z0-9._:-]{0,199})$/u.exec(content.trim())?.[1];
+}

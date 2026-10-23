@@ -59,6 +59,25 @@ lần lưu tombstone. Binary cũ từ chối v2. Không upcast v1 thành bằng 
 bị từ chối. Shared `@bflow/contracts`, `RuntimeService`, Core event/checkpoint codecs và SQLite schema không đổi.
 Không downgrade một session đã fence về binary cũ; giữ journal và dùng Runtime có hỗ trợ v2.
 
+Retire một policy phase là quyết định riêng qua lệnh vật lý Conversation
+`retire policy phase <request-id>`, không được suy diễn từ fence diagnostic, resume hoặc duyệt thiết kế.
+Host chỉ chấp nhận request đã có blocker xác thực đúng verifier/correlation/causation, pane/native session verifier
+đã thay, lease hết hạn và không có receipt kết quả cần đối soát hoặc phép đo đang chạy trong host.
+Thiếu receipt không chứng minh phép đo chưa chạy: disposition là `retired_without_measurement_claim`.
+Giữ nguyên request, handle, blocker và grant lease cũ; Registry không hỗ trợ release lease hết hạn,
+nên không tạo receipt release giả. Tombstone được lưu trước khi loại request khỏi dispatch/renewal.
+Mọi verification.result cũ, kể cả inbox received replay, bị từ chối. Chỉ sau resume vật lý được host xác thực qua Conversation (lưu đúng user message ID), Runtime thông báo
+Developer hiện hữu yêu cầu đo cùng phase/revision bằng request ID mới; không gửi lại assignment.
+
+Quyết định compatibility riêng cho sửa lỗi live: chỉ Runtime host/intake/outbox/journal thay đổi;
+public contracts/Core codec/SQLite giữ nguyên. Journal đọc v1/v2 như trước, và ghi v3 khi retire phase.
+Binary v1/v2 từ chối v3; không downgrade session đã retire. Fence diagnostic sau đó không hạ version.
+Retirement được chặn bởi approval/user-decision/unknown delivery/cancellation và giới hạn riêng
+`maxIterations` theo run/task/implementation-attempt/phase qua các revision. Replay không tiêu thêm lượt;
+retirement không là measurement, Red hoặc repair failure, và không reset giới hạn verification/TDD.
+Cancellation không release giả grant đã hết hạn của retirement; vẫn dừng Developer/Core bình thường và báo riêng outcome lịch sử chưa được xác nhận.
+Quyền áp dụng từng retirement phải đến từ chủ dự án qua command vật lý chính xác; model không có tool cấp quyền.
+
 Các đầu vào host bắt buộc là tường minh: định danh repository/session, role capability,
 định nghĩa check của task/workflow, deterministic gate runner, ingress thông điệp/result/evidence
 Herdr có xác thực và phê duyệt của con người có xác thực. Không có

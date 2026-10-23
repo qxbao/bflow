@@ -432,3 +432,19 @@ it("fences a diagnostic only from its recorded physical command and never turns 
     .toMatchObject({ requiresConversationDecision: true });
   expect(calls).toBe(1);
 });
+
+it("retires a policy phase only through its physical hook, keeps a separate idempotent result and grants no approval", async () => {
+  const f = await fixture(); let calls = 0;
+  const intake = () => new HostConversationIntake(f.journal(), () => f.port, undefined, async (turn, operationId) => {
+    calls++; expect(operationId).toBe("phase-old");
+    expect((await f.journal().conversationTurns()).find(item => item.messageId === turn.messageId)?.content).toBe("retire policy phase phase-old");
+    return { ok: true, value: { disposition: "retired_without_measurement_claim", resendAllowed: false } };
+  });
+  const result = await intake().receive(f.binding, f.turn("physical-retire", "retire policy phase phase-old"));
+  expect(result).toMatchObject({ requiresConversationDecision: false, result: { ok: true } });
+  expect(await intake().receive(f.binding, f.turn("physical-retire", "retire policy phase phase-old"))).toEqual(result);
+  expect(calls).toBe(1); expect(f.applied).toHaveLength(0); expect(await f.journal().humanDecisions()).toHaveLength(0);
+  await expect(intake().decide(f.binding, { messageId: "physical-retire", decision: { intent: "conversation_only", directReply: "Authorize" } })).rejects.toThrow(/physical/);
+  expect(await intake().receive(f.binding, f.turn("quoted-retire", 'Explain "retire policy phase phase-old"'))).toMatchObject({ requiresConversationDecision: true });
+  expect(calls).toBe(1);
+});
