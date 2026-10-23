@@ -313,4 +313,21 @@ describe("root acceptance of durable next actions", () => {
     expect((await f.inspect()).inbox.find(item => item.message.message_id === "late-specialist-blocker")?.status).toBe("applied");
   });
 
+  it("keeps a pending Runtime verification and its spent resume budget when a specialist reports blocked before any verdict", async () => {
+    const current = preservedRun("verifying"), f = await fixture({ runs: [current] });
+    const request = envelope("active-review-request", "run-1", { role: "reviewer" }, { sender: { role: "coordinator" }, type: "verification.requested",
+      payload: { runId: "run-1", taskId: "workflow-verification", attemptId: "integrated-revision", artifacts: [], input: {},
+        definition: { id: "host-reviewer", name: "Reviewer", evaluator: "review", required: true, timeout: { executionTimeoutMs: 30000, onTimeout: "block" } } } });
+    await f.runtime.queueHerdr(request); await f.runtime.flushOutbound();
+    await (f.runtime as any).journal.exclusive(async (state: any, save: () => Promise<void>) => {
+      state.runs[0].workflowVerificationPending = true; await save();
+    });
+    const before = structuredClone((await f.inspect()).runs[0]);
+    await f.runtime.receiveHerdr(envelope("specialist-blocked-before-verdict", "run-1", { role: "coordinator" }, {
+      sender: { role: "reviewer", agent_id: "reviewer-agent", pane_id: "pane-reviewer" }, causation_id: request.message_id,
+      payload: { status: "blocked", summary: "Review observation ID needs correction" } }));
+    expect((await f.inspect()).runs[0]).toEqual(before);
+    expect((await f.inspect()).inbox.find(item => item.message.message_id === "specialist-blocked-before-verdict")?.status).toBe("applied");
+  });
+
 });
