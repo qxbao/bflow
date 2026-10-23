@@ -1837,6 +1837,24 @@ export class AgenticWorkflowRuntime {
             state.inbox.some(item => item.status === "rejected" && item.message.message_id === payload.rejectedMessageId &&
               item.message.run_id === run.runId && item.message.type === payload.rejectedType && item.message.sender.role === binding.role &&
               item.message.sender.agent_id === binding.agentId && item.message.sender.pane_id === binding.paneId);
+        } else if (payload.kind === "resume_verification_request") {
+          const source = state.outbound.find(item => item.message.message_id === payload.sourceMessageId);
+          const receipt = run.resumeReceipts?.find(item => item.actionId === run.pendingAction?.actionId);
+          const wake = receipt && state.outbound.find(item => item.message.message_id === receipt.messageId);
+          const target = source?.handle?.target;
+          continuation = ["reviewer", "qa", "tester"].includes(binding.role) && run.status === "verifying" &&
+            run.pendingAction?.state === "queued" && typeof payload.conversationUserMessageId === "string" &&
+            record(wake?.message.payload).automatic === false && record(wake?.message.payload).conversationUserMessageId === payload.conversationUserMessageId &&
+            source?.status === "released" && source.message.type === "verification.requested" && source.message.run_id === run.runId &&
+            record(record(record(source.message.payload).definition).configuration).kind === "review" && !source.reviewReplacement &&
+            target !== undefined && target.agentId === binding.agentId && target.paneId === binding.paneId &&
+            target.workspaceId === binding.workspaceId && target.tabId === binding.tabId && digest(target.session) === digest(binding.session) &&
+            message.sender.role === "runtime" && message.causation_id === source.message.message_id &&
+            message.message_id === `review-resume-${digest([source.message.message_id, payload.conversationUserMessageId])}` &&
+            !run.nativeDeliveries?.length && (!run.approval || run.decision?.approvalId === run.approval.approvalId) &&
+            !Object.values(run.userDecisions ?? {}).some(entry => entry.status === "pending") &&
+            !state.outbound.some(item => item.message.run_id === run.runId && ["sending", "unknown_delivery"].includes(item.status) && item !== out) &&
+            this.outboundOwesResult(state, run, source);
         }
       }
       if (binding.role !== "coordinator" && !out.parentAssignmentId &&

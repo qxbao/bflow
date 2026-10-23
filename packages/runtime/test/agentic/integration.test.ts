@@ -1097,8 +1097,13 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
     } finally { second.abort(); await retried.catch(() => undefined); }
   }, 60000);
 
-  it.each(["physical", "model", "automatic", "unknown", "changed-native", "unknown-notice", "changed-at-dispatch", "approval-at-dispatch", "model-then-physical", "recurrent-physical", "missing-capability"])("continues the same unanswered review only after a physical resume (%s)", async mode => {
+  it.each(["physical", "agy-physical", "model", "automatic", "unknown", "changed-native", "unknown-notice", "changed-at-dispatch", "approval-at-dispatch", "model-then-physical", "recurrent-physical", "missing-capability"])("continues the same unanswered review only after a physical resume (%s)", async mode => {
     const f = await fixture({ remoteReview: true });
+    if (mode === "agy-physical") {
+      const binding = f.panes.bindings.find(item => item.role === "reviewer")!;
+      binding.provider = "herdr"; binding.agentKind = "agy";
+      binding.session = { source: "herdr:antigravity_cli", kind: "id", value: "native-agy-review-resume" };
+    }
     await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
     f.ports.preflightRoleCapabilities = async () => undefined;
     const definition = (f.ports as any).taskChecks.find((check: any) => check.id === "review");
@@ -1139,6 +1144,14 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
     if (["changed-at-dispatch", "approval-at-dispatch"].includes(mode)) f.panes.busy.add("reviewer");
     if (mode === "unknown-notice") { await f.runtime.flushOutbound(); await f.runtime.flushOutbound(); f.transport.customSendHandler = () =>
       ({ ok: false, error: { code: "timeout", retryable: true, message: "Unknown diagnostic delivery" } }); }
+    if (mode === "agy-physical") {
+      const send = f.transport.send.bind(f.transport);
+      f.transport.send = async request => {
+        const result = await send(request);
+        if (JSON.parse(request.instruction).payload?.kind === "resume_verification_request") f.panes.busy.add("reviewer");
+        return result;
+      };
+    }
     const second = new AbortController(); let resumed = gate.evaluate(context as any, { signal: second.signal }); resumed.catch(() => undefined);
     try {
       await expect.poll(async () => (f.runtime as any).gateWaiters.size, { timeout: 15000 }).toBe(1);
@@ -1161,11 +1174,28 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
           expect((await state()).outbound.filter((out: any) => out.message.payload?.kind === "resume_verification_request")).toHaveLength(1);
         } finally { retry.abort(); await waiting.catch(() => undefined); } return;
       }
-      if (!["physical", "model-then-physical", "recurrent-physical"].includes(mode)) { expect(notices.filter((out: any) => out.handle)).toHaveLength(0); return; }
+      if (!["physical", "agy-physical", "model-then-physical", "recurrent-physical"].includes(mode)) { expect(notices.filter((out: any) => out.handle)).toHaveLength(0); return; }
       expect(notices).toHaveLength(1); expect(notices[0].capabilities).toEqual(original.capabilities);
       expect(notices[0]).toMatchObject({ status: expect.stringMatching(/^(accepted|released)$/), message: { type: "task.status", payload: { sourceMessageId: original.message.message_id } } });
       expect((await state()).outbound.find((out: any) => out.message.message_id === original.message.message_id)).toEqual(original);
       expect(f.transport.sentRequests.filter(request => JSON.parse(request.instruction).type === "verification.requested")).toHaveLength(1);
+      if (mode === "agy-physical") {
+        const binding = f.panes.bindings.find(item => item.role === "reviewer")!;
+        await expect(f.runtime.authorizeAgyProviderTurn(notices[0].request.context, binding)).resolves.toBeUndefined();
+        await expect(f.runtime.authorizeAgyProviderTurn({ ...notices[0].request.context,
+          payload: { ...notices[0].message.payload, conversationUserMessageId: "fabricated-turn" } }, binding)).rejects.toThrow();
+        await (f.runtime as any).journal.exclusive(async (journal: any, save: any) => {
+          const run = journal.runs[0], receipt = run.resumeReceipts.find((item: any) => item.actionId === run.pendingAction.actionId);
+          journal.outbound.find((item: any) => item.message.message_id === receipt.messageId).message.payload.automatic = true;
+          await save();
+        });
+        await expect(f.runtime.authorizeAgyProviderTurn(notices[0].request.context, binding)).rejects.toThrow();
+        await (f.runtime as any).journal.exclusive(async (journal: any, save: any) => {
+          const run = journal.runs[0], receipt = run.resumeReceipts.find((item: any) => item.actionId === run.pendingAction.actionId);
+          journal.outbound.find((item: any) => item.message.message_id === receipt.messageId).message.payload.automatic = false;
+          await save();
+        });
+      }
       second.abort(); await resumed.catch(() => undefined); f.restart();
       const restarted = new AbortController(); resumed = f.runtime.herdrQualityGate("review").evaluate(context as any, { signal: restarted.signal }); resumed.catch(() => undefined);
       await expect.poll(async () => (f.runtime as any).gateWaiters.size, { timeout: 15000 }).toBe(1); await f.runtime.flushOutbound();
@@ -1173,6 +1203,8 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
       await f.runtime.receiveHerdr(f.envelope("review.verdict", { gateId: "review", runId: "run-1", taskId: "implement", evaluationId: randomUUID(), status: "passed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString() },
         { sender: { role: "reviewer", agent_id: original.handle.target.agentId, pane_id: original.handle.target.paneId }, causation_id: original.message.message_id }));
       await expect(resumed).resolves.toMatchObject({ ok: true, value: { status: "passed" } });
+      if (mode === "agy-physical") await expect(f.runtime.authorizeAgyProviderTurn(notices[0].request.context,
+        f.panes.bindings.find(item => item.role === "reviewer")!)).rejects.toThrow();
     } finally { second.abort(); await resumed.catch(() => undefined); }
   }, 60000);
 
