@@ -82,6 +82,125 @@ describe.skipIf(process.platform !== "linux")("task notices borrowing active ass
     expect(f.transport.sentRequests).toHaveLength(1);
   });
 
+  async function authorizeLeaseRecovery(f: Awaited<ReturnType<typeof fixture>>) {
+    await f.call(async (outbox, state, save) => {
+      const parent = f.parent(state);
+      const failed = outbox.enqueue(RoleMessageSchema.parse({ ...f.message("failed-phase"), type: "verification.requested",
+        recipient: { role: "qa" }, payload: { kind: "conditional_evidence",
+          phase: state.runs[0]!.tasks[0]!.spec.strategy.tddDecision.mode === "required" ? "red" : "verification", taskId: parent.taskId,
+          implementationAttemptId: parent.attemptId, sourceRevision: "a".repeat(40) } }), "qa");
+      failed.status = "released";
+      failed.phaseFailure = { summary: "Runner repaired", repairable: false, applied: true, retryAuthorized: true };
+      await save();
+    });
+  }
+
+  it("recovers an expired lease through Registry with a higher fence while preserving the original dispatch and handle", async () => {
+    const f = await fixture(); await authorizeLeaseRecovery(f);
+    const before = await f.call(async (_outbox, state) => structuredClone(f.parent(state)));
+    f.clock(301000);
+    await f.call(async (outbox, state) => {
+      await outbox.recoverTaskLease(f.parent(state), state.outbound.find(out => out.message.message_id === "failed-phase")!);
+      const parent = f.parent(state);
+      expect(parent.lease!.fencingToken).toBeGreaterThan(before.lease!.fencingToken);
+      expect(parent.handle).toEqual(before.handle);
+      expect(parent.request).toEqual(before.request);
+      expect(parent.assignment).toEqual(before.assignment);
+      expect(parent.leaseHistory).toEqual([before.lease]);
+    });
+    expect(f.transport.sentRequests).toHaveLength(1);
+    await f.notice("after-recovery");
+    await f.call(async (outbox, state) => { await outbox.flush(f.onBound); expect(state.outbound.find(out => out.parentAssignmentId)?.status).toBe("accepted"); });
+    expect(f.transport.sentRequests).toHaveLength(2);
+    expect(f.transport.sentRequests.filter(request => JSON.parse(request.instruction).type === "task.assignment")).toHaveLength(1);
+  });
+
+  it("replays the exact Registry continuation after a crash without changing the original execution", async () => {
+    const f = await fixture(); await authorizeLeaseRecovery(f); f.clock(301000);
+    const before = await f.call(async (_outbox, state) => structuredClone(f.parent(state)));
+    await f.open().exclusive(async (state, save) => {
+      let writes = 0;
+      const outbox = new HerdrOutbox(f.ports, state, async () => { if (++writes === 2) throw new Error("crash after Registry grant"); await save(); });
+      await expect(outbox.recoverTaskLease(f.parent(state), state.outbound.find(out => out.message.message_id === "failed-phase")!))
+        .rejects.toThrow("crash after Registry grant");
+    });
+    await f.call(async (outbox, state) => {
+      expect(f.parent(state).leaseReacquisition).toBeDefined();
+      await outbox.recoverTaskLease(f.parent(state), state.outbound.find(out => out.message.message_id === "failed-phase")!);
+      expect(f.parent(state).leaseHistory).toHaveLength(1);
+      expect(f.parent(state).lease!.fencingToken).toBe(before.lease!.fencingToken + 1);
+      expect(f.parent(state).handle).toEqual(before.handle);
+      expect(f.parent(state).request).toEqual(before.request);
+    });
+    expect(f.transport.sentRequests).toHaveLength(1);
+  });
+
+  it("settles a pending Registry grant so cancellation can renew and release without continuing work", async () => {
+    const f = await fixture(); await authorizeLeaseRecovery(f); f.clock(301000);
+    await f.open().exclusive(async (state, save) => {
+      let writes = 0;
+      const outbox = new HerdrOutbox(f.ports, state, async () => { if (++writes === 2) throw new Error("crash after grant"); await save(); });
+      await expect(outbox.recoverTaskLease(f.parent(state), state.outbound.find(out => out.message.message_id === "failed-phase")!)).rejects.toThrow("crash after grant");
+    });
+    await f.call(async (outbox, state, save) => {
+      state.runs[0]!.cancelled = true; state.runs[0]!.status = "cancelled"; await save();
+      await expect(outbox.renew(f.parent(state))).resolves.toBeUndefined();
+      expect(f.parent(state).leaseReacquisition).toBeUndefined();
+      await outbox.release(f.parent(state));
+      expect(f.parent(state).status).toBe("released");
+    });
+    expect(f.transport.sentRequests).toHaveLength(1);
+  });
+
+  it("bounds lease continuations and never reuses the prior fence", async () => {
+    const f = await fixture(); await authorizeLeaseRecovery(f);
+    for (let index = 0; index < 3; index++) {
+      f.clock(301000);
+      await f.call(async (outbox, state) => {
+        const previous = f.parent(state).lease!.fencingToken;
+        await outbox.recoverTaskLease(f.parent(state), state.outbound.find(out => out.message.message_id === "failed-phase")!);
+        expect(f.parent(state).lease!.fencingToken).toBeGreaterThan(previous);
+      });
+    }
+    f.clock(301000);
+    const acquire = vi.spyOn(f.registry, "acquireLease");
+    await f.call(async (outbox, state) => {
+      await expect(outbox.recoverTaskLease(f.parent(state), state.outbound.find(out => out.message.message_id === "failed-phase")!))
+        .rejects.toThrow("continuation limit exhausted");
+      expect(f.parent(state).leaseHistory).toHaveLength(3);
+    });
+    expect(acquire).not.toHaveBeenCalled(); expect(f.transport.sentRequests).toHaveLength(1);
+  });
+
+  it("keeps pending human gates, cancellation and unknown delivery ahead of an expired lease continuation", async () => {
+    const f = await fixture(); await authorizeLeaseRecovery(f); f.clock(301000);
+    const acquire = vi.spyOn(f.registry, "acquireLease");
+    await f.call(async (outbox, state) => {
+      const parent = f.parent(state), failed = state.outbound.find(out => out.message.message_id === "failed-phase")!, run = state.runs[0]!;
+      run.approval = ApprovalRequestSchema.parse({ ...run.tasks[0]!.spec.request, approvalId: "pending-human-gate" });
+      await expect(outbox.recoverTaskLease(parent, failed)).rejects.toThrow("resume authority");
+      delete run.approval; run.cancelled = true;
+      await expect(outbox.recoverTaskLease(parent, failed)).rejects.toThrow("resume authority");
+      run.cancelled = false; parent.status = "unknown_delivery";
+      await expect(outbox.recoverTaskLease(parent, failed)).rejects.toThrow("resume authority");
+      parent.status = "accepted";
+    });
+    expect(acquire).not.toHaveBeenCalled();
+  });
+
+  it("refuses expired-lease recovery without the same native occupant or explicit resume authority", async () => {
+    const f = await fixture(); await authorizeLeaseRecovery(f); f.clock(301000);
+    const acquire = vi.spyOn(f.registry, "acquireLease");
+    f.replace({ session: { source: "herdr:claude", kind: "id", value: "replaced" } });
+    await f.call(async (outbox, state) => {
+      const failed = state.outbound.find(out => out.message.message_id === "failed-phase")!;
+      await expect(outbox.recoverTaskLease(f.parent(state), failed)).rejects.toThrow(/native|recipient/);
+      failed.phaseFailure!.retryAuthorized = undefined;
+      await expect(outbox.recoverTaskLease(f.parent(state), failed)).rejects.toThrow(/resume/);
+    });
+    expect(acquire).not.toHaveBeenCalled();
+  });
+
   it("sends through a one-slot Registry without another assignment, Core binding, or lease release", async () => {
     const f = await fixture();
     const acquire = vi.spyOn(f.registry, "acquireLease"), release = vi.spyOn(f.registry, "releaseLease");

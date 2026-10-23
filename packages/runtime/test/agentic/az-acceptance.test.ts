@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, rm, realpath } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -16,6 +16,7 @@ import { evaluateWatchdog } from "../../src/agentic/run-watchdog.js";
 import { guardNativeShell } from "../../src/agentic/read-only-commands.js";
 import { digest, type JournalState, type Outbound, type RunRecord } from "../../src/agentic/journal.js";
 import { FakeAgentTransport } from "../helpers/fake-transport.js";
+import { HerdrOutbox } from "../../src/agentic/outbox.js";
 import { draft, workflow } from "../../../specification/test/fixtures.js";
 
 // A-Z acceptance for WORKFLOW-AZ-PLAN.md ("Nghiệm thu"): one delegation survives each recoverable fault once and reaches the
@@ -329,7 +330,7 @@ describe("A-Z acceptance: an implementing run stays recoverable", () => {
 });
 
 describe("A-Z acceptance: an infrastructure measurement failure is resumable", () => {
-  it("records a resume action and re-measures the same revision only after an explicit resume", async () => {
+  it.each([false, true])("records a resume action and re-measures the same revision only after an explicit resume (recovery crash=%s)", async recoveryCrash => {
     const f = await fixture();
     (f.ports.roleCapabilities.qa as string[]).push("testing");
     const spec = structuredClone(f.spec);
@@ -353,6 +354,31 @@ describe("A-Z acceptance: an infrastructure measurement failure is resumable", (
     await expect(f.runtime.requestPhaseVerification(developer, "run-1", "implement", phase, head)).rejects.toThrow(/paused awaiting resume/);
     await f.runtime.resumeBlockedRun("run-1", blocked.pendingAction!.actionId);
     expect((await f.record()).status).toBe(blocked.pendingAction!.previousStatus);
+    const retryNotice = (await f.state()).outbound.find(out => out.message.type === "task.status" &&
+      out.message.run_id === "run-1" && (out.message.payload as Record<string, unknown>).kind === "policy_phase_outcome" &&
+      (out.message.payload as Record<string, unknown>).status === "retry");
+    expect(retryNotice).toBeDefined();
+    expect(retryNotice?.parentAssignmentId).toBe(assignment.message.message_id);
+    expect(retryNotice?.message.recipient.pane_id).toBe(developer.paneId);
+    expect(retryNotice?.message.payload).toMatchObject({ phase, status: "retry" });
+    expect((await f.state()).outbound.filter(out => out.message.type === "task.assignment")).toHaveLength(1);
+    f.advance(301 * SECOND);
+    if (recoveryCrash) {
+      await expect((f.runtime as any).journal.exclusive(async (state: JournalState, save: () => Promise<void>) => {
+        const parent = state.outbound.find(out => out.message.message_id === assignment.message.message_id)!;
+        const notice = state.outbound.find(out => out.message.message_id === retryNotice!.message.message_id)!;
+        notice.status = "cancelled"; notice.error = "Task notice parent lease is expired or mismatched";
+        const outbox = new HerdrOutbox(f.ports, state, save);
+        await outbox.recoverTaskLease(parent, state.outbound.find(out => out.message.message_id === queued.messageId)!);
+        throw new Error("crash after replacement lease before notice requeue");
+      })).rejects.toThrow("crash after replacement lease");
+    }
+    await f.runtime.flushOutbound();
+    await f.runtime.flushOutbound();
+    const sameNotice = (await f.state()).outbound.filter(out => out.message.message_id === retryNotice!.message.message_id);
+    expect(sameNotice).toHaveLength(1);
+    expect(["accepted", "released"]).toContain(sameNotice[0]!.status);
+    expect((await f.state()).outbound.find(out => out.message.message_id === assignment.message.message_id)!.leaseHistory).toHaveLength(1);
     const again = await f.runtime.requestPhaseVerification(developer, "run-1", "implement", phase, head) as { messageId: string };
     expect(again.messageId).not.toBe(queued.messageId);
   }, 60_000);
@@ -482,4 +508,67 @@ describe("A-Z acceptance: human gates and uncertain deliveries are never resumed
     expect(sent()).toBe(sentBefore);
     expect((await uncertain()).status).toBe("unknown_delivery");
   });
+});
+
+describe("human fencing of a stale diagnostic without claiming delivery", () => {
+  async function fencedFixture() {
+    const f = await fixture(); await delegate(f);
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    f.binding("coordinator").session = { source: "herdr:codex", kind: "id", value: "current-coordinator" };
+    f.ports.authorizeNativeDiagnosticFence = async authority => authority.userId === "human-1" && authority.sessionId === "session-1";
+    const message = f.envelope("task.status", { status: "blocked", summary: "Retired Coordinator diagnostic" }, {
+      message_id: "old-native-diagnostic", idempotency_key: "old-native-diagnostic", recipient: { role: "conversation" },
+      sender: { role: "coordinator", agent_id: "coordinator", pane_id: "retired-coordinator" }
+    });
+    await f.runtime.recordNativeDeliveryIntent(message, "old-diagnostic");
+    const authority = { operationId: "old-diagnostic", sessionId: "session-1", userMessageId: "trusted-user-fence", userId: "human-1" };
+    return { ...f, message, authority };
+  }
+
+  it("preserves the unknown intent, rejects late arrival across restart, and grants no business success", async () => {
+    const f = await fencedFixture();
+    const before = await f.record();
+    const result = await f.runtime.fenceNativeDiagnostic(f.authority) as any;
+    expect(result).toMatchObject({ disposition: "fenced_without_delivery_claim", delivery: "unknown_delivery", resendAllowed: false });
+    let run = await f.record();
+    expect(run.nativeDeliveries).toHaveLength(0);
+    expect(run.nativeDiagnosticFences?.[0]?.message).toEqual(f.message);
+    expect(run.status).toBe(before.status);
+    expect(run.decision).toEqual(before.decision);
+    expect(run.tasks[0]!.spec.strategy).toEqual(before.tasks[0]!.spec.strategy);
+    await expect(f.runtime.observeCoordinatorOutcome(f.message)).rejects.toThrow(/fenced/);
+    expect((await f.record()).status).toBe(before.status);
+    const reopened = new AgenticWorkflowRuntime(f.ports, { journalDirectory: join(f.root, "journal"), repositoryPath: f.repository });
+    await reopened.initialize();
+    await reopened.recordNativeDeliveryIntent(f.message, f.authority.operationId);
+    run = await reopened.inspect("run-1") as unknown as RunRecord;
+    expect(run.nativeDeliveries).toHaveLength(0);
+    expect(run.nativeDiagnosticFences).toHaveLength(1);
+    await expect(reopened.observeCoordinatorOutcome(f.message)).rejects.toThrow(/fenced/);
+    const path = join(f.root, "journal/state.json");
+    const encoded = JSON.parse(await readFile(path, "utf8"));
+    expect(encoded.version).toBe(2);
+    encoded.version = 1;
+    await writeFile(path, JSON.stringify(encoded));
+    await expect(reopened.inspect("run-1")).rejects.toThrow("require private journal v2");
+  }, 60000);
+
+  it("refuses missing human authority, cross-session input, live-sender diagnostics and conclusive payloads", async () => {
+    const f = await fencedFixture();
+    f.ports.authorizeNativeDiagnosticFence = async () => false;
+    await expect(f.runtime.fenceNativeDiagnostic(f.authority)).rejects.toThrow(/human/);
+    f.ports.authorizeNativeDiagnosticFence = async () => true;
+    await expect(f.runtime.fenceNativeDiagnostic({ ...f.authority, sessionId: "another-session" })).rejects.toThrow(/session/);
+    for (const [id, patch] of [
+      ["live-source", { sender: { role: "coordinator", agent_id: "coordinator", pane_id: f.binding("coordinator").paneId } }],
+      ["completed", { payload: { status: "completed", summary: "Claimed completion" } }],
+      ["assignment", { type: "task.assignment", recipient: { role: "developer" } }],
+      ["approval", { type: "approval.decision" }]
+    ] as const) {
+      const message = RoleMessageSchema.parse({ ...f.message, ...patch, message_id: id, idempotency_key: id });
+      await f.runtime.recordNativeDeliveryIntent(message, id);
+      await expect(f.runtime.fenceNativeDiagnostic({ ...f.authority, operationId: id })).rejects.toThrow();
+    }
+    expect((await f.record()).nativeDiagnosticFences ?? []).toHaveLength(0);
+  }, 60000);
 });

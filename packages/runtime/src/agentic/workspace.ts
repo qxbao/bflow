@@ -14,6 +14,7 @@ import { unwrap } from "./outbox.js";
 import type { ReachabilityVerdict } from "./tool-reachability.js";
 
 export interface OpenAgenticWorkspaceOptions {
+  authorizeNativeDiagnosticFence?: AgenticRuntimePorts["authorizeNativeDiagnosticFence"];
   repositoryPath: string; sessionId: string; herdrBinary?: string;
   bindingReceiptKeys?: Readonly<Record<string, string>>;
   nativeIngressSocket?: string;
@@ -267,6 +268,7 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       authenticateEvidence: options.authenticateEvidence, authenticateGateResult: options.authenticateGateResult,
       authorizeHuman: async decision => { const authorized = await options.authorizeHuman(decision);
         if (authorized) approvedBundles.set(decision.approvalId, decision); return authorized; },
+      ...(options.authorizeNativeDiagnosticFence ? { authorizeNativeDiagnosticFence: options.authorizeNativeDiagnosticFence } : {}),
       ...(options.projectApprovalRequired ? { projectApprovalRequired: options.projectApprovalRequired } : {})
     }, { journalDirectory: resolve(directory, "journal"), repositoryPath: repository });
     await runtime.initialize();

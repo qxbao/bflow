@@ -411,3 +411,24 @@ describe("session cancellation through one trusted Conversation decision", () =>
     expect(await f.journal().humanDecisions()).toEqual([]);
   });
 });
+
+it("fences a diagnostic only from its recorded physical command and never turns it into approval or model intent", async () => {
+  const f = await fixture(); let calls = 0;
+  const intake = () => new HostConversationIntake(f.journal(), () => f.port, async (turn, operationId) => {
+    calls++;
+    expect((await f.journal().conversationTurns()).find(item => item.messageId === turn.messageId)?.content)
+      .toBe("fence diagnostic old-diagnostic");
+    expect(operationId).toBe("old-diagnostic");
+    return { ok: true, value: { disposition: "fenced_without_delivery_claim", delivery: "unknown_delivery", resendAllowed: false } };
+  });
+  const received = await intake().receive(f.binding, f.turn("user-fence", "fence diagnostic old-diagnostic"));
+  expect(received).toMatchObject({ requiresConversationDecision: false, result: { ok: true } });
+  expect(await intake().receive(f.binding, f.turn("user-fence", "fence diagnostic old-diagnostic"))).toEqual(received);
+  expect(calls).toBe(1); expect(f.applied).toHaveLength(0);
+  expect(await f.journal().humanDecisions()).toHaveLength(0);
+  await expect(intake().decide(f.binding, { messageId: "user-fence", decision: { intent: "conversation_only", directReply: "Changed" } }))
+    .rejects.toThrow(/physical|fenc/);
+  expect(await intake().receive(f.binding, f.turn("user-quote", 'Explain "fence diagnostic old-diagnostic"')))
+    .toMatchObject({ requiresConversationDecision: true });
+  expect(calls).toBe(1);
+});

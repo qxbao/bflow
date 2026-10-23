@@ -28,6 +28,31 @@ assertion được lưu thành quan sát không được chấp nhận và gửi
 theo giới hạn rework hiện có. Nó không phải bằng chứng Red và không cấp quyền sửa mã sản phẩm.
 Output thiếu/sai danh tính, lỗi hook, timeout hoặc sandbox vẫn là lỗi hạ tầng cần đối soát.
 
+Sau một explicit resume cho phase bị lỗi hạ tầng, Runtime gửi notice retry về đúng Developer
+đang giữ execution; không yêu cầu Coordinator gọi công cụ chỉ dành cho Developer. Nếu host
+ngừng quá TTL lease, Runtime chỉ cấp lease tiếp nối qua Registry sau khi đối chiếu native session,
+worktree, capability và Core execution hiện tại. Fence phải tăng; assignment, request và handle
+gốc giữ nguyên. Intent cấp lease và lịch sử lease riêng được lưu để replay đúng idempotency key
+sau crash; tối đa ba lần tiếp nối cho một assignment. Human gate, cancellation, unknown delivery,
+session bị thay hoặc không có native binding đều chặn đường này. Không có SQL/public-contract migration;
+bản cũ không hỗ trợ tiếp nối phải đối soát thay vì gửi lại assignment.
+
+Quyết định tích hợp riêng cho lần live 2026-10-23: chủ dự án chọn giữ run và thêm fence cho
+diagnostic cũ thay vì hủy run. Chỉ lệnh người dùng vật lý qua Conversation
+`fence diagnostic <operation-id>` có thể hủy một `task.status: blocked` từ pane Coordinator
+đã nghỉ, gửi tới Conversation, còn unknown và chưa có inbox/ACK. Không có model tool thực hiện
+thao tác này. Intent gốc vẫn unknown, không được gửi lại; tombstone lưu người quyết định và
+message ID của lượt người dùng, đồng thời từ chối mọi bản đến muộn trước khi đổi business state.
+Assignment, result, approval và diagnostic từ pane hiện tại không được fence theo đường này.
+
+Owner/compatibility: lựa chọn của chủ dự án trong vòng live này cho phép thêm fence diagnostic.
+Chỉ Runtime host, Conversation intake và journal riêng của Runtime bị ảnh hưởng; callback
+host tùy chọn mặc định từ chối, nên composition cũ không được cấp quyền fence ngầm.
+Journal riêng của Runtime vẫn đọc v1; lần fence đầu tiên ghi v2 trong cùng
+lần lưu tombstone. Binary cũ từ chối v2. Không upcast v1 thành bằng chứng fence; v1 có fence
+bị từ chối. Shared `@bflow/contracts`, `RuntimeService`, Core event/checkpoint codecs và SQLite schema không đổi.
+Không downgrade một session đã fence về binary cũ; giữ journal và dùng Runtime có hỗ trợ v2.
+
 Các đầu vào host bắt buộc là tường minh: định danh repository/session, role capability,
 định nghĩa check của task/workflow, deterministic gate runner, ingress thông điệp/result/evidence
 Herdr có xác thực và phê duyệt của con người có xác thực. Không có

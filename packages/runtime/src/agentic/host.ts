@@ -332,7 +332,13 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   let verificationSandbox = await probeBehavioralSandbox(configuration.repositoryPath);
   const verification = new HostVerification(() => requireWorkspace().runtime, () => requireWorkspace().runtime.ports.artifactStore, receipts, testRunners);
   const development = new HostDevelopment(() => requireWorkspace().runtime, testRunners);
-  const conversationIntake = new HostConversationIntake(receipts, () => requireWorkspace().conversation);
+  const conversationIntake = new HostConversationIntake(receipts, () => requireWorkspace().conversation, async (turn, operationId) => {
+    const delivery = await receipts.nativeDelivery(operationId);
+    if (!delivery || delivery.status !== "unknown_delivery" || await receipts.nativeRejection(delivery.message.message_id))
+      throw new Error("Diagnostic operation is missing or already has authoritative delivery/refusal evidence");
+    return json({ ok: true, value: await requireWorkspace().runtime.fenceNativeDiagnostic({ operationId,
+      sessionId: turn.conversationSessionId, userMessageId: turn.messageId, userId: turn.userId }) });
+  });
   const nativeSessions = new Map<string, {role: AgentRole; sessionId: string}>();
   try { for (const [pane, value] of Object.entries(record(JSON.parse(await readFile(join(configuration.directory, "native-sessions.json"), "utf8"))))) {
     const session = record(value); nativeSessions.set(pane, { role: AgentRoleSchema.parse(session.role), sessionId: textField(session.sessionId) });
@@ -561,6 +567,15 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       authenticateGateResult: async (result, message) => await authenticateNativeHerdrMessage(message) && verification.authenticateGate(result),
       projectApprovalRequired: () => configuration.policy?.sdd.approvalRequired === true,
       authorizeHuman: decision => receipts.authenticateHuman(decision),
+      authorizeNativeDiagnosticFence: async authority => {
+        if (!humanHookProvenance || humanHookProvenance.messageId !== authority.userMessageId ||
+            humanHookProvenance.userId !== authority.userId || humanHookProvenance.conversationSessionId !== authority.sessionId) return false;
+        const turn = (await receipts.conversationTurns()).find(item => item.messageId === authority.userMessageId);
+        return turn !== undefined && turn.userId === authority.userId && turn.conversationSessionId === authority.sessionId &&
+          digest(turn.binding.session) === digest(humanHookProvenance.binding.session) &&
+          turn.binding.paneId === humanHookProvenance.binding.paneId && turn.binding.role === "conversation" &&
+          digest(turn.content) === humanHookProvenance.promptDigest && turn.content.trim() === `fence diagnostic ${authority.operationId}`;
+      },
       recoveredHumanDecisions: await receipts.humanDecisions(),
       onNativeRejection: async message => {
         await receipts.recordNativeRejection(message);
@@ -655,7 +670,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     if (name === "inspect_native_delivery") {
       if (!["coordinator", "conversation"].includes(role)) throw new Error("Only Coordinator or Conversation inspects native delivery");
       const { operationId } = z.object({ operationId: z.string().min(1).max(200) }).strict().parse(parameters);
-      return json(await inspectNativeDelivery(receipts, operationId, await host.runtime.nativeDeliveryInbox()));
+      const delivery = await inspectNativeDelivery(receipts, operationId, await host.runtime.nativeDeliveryInbox());
+      const fence = await host.runtime.nativeDiagnosticFenceStatus(operationId);
+      return json({ ...delivery, ...(fence === null ? {} : { fence, blocking: false, resendAllowed: false }) });
     }
     const taskLogResult = await handleTaskLogTool({ role, binding, activityLog, inspect: () => host.runtime.inspect() }, name, parameters);
     if (taskLogResult !== undefined) return json(taskLogResult);

@@ -25,6 +25,7 @@ import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
 import { nativeMessageFingerprint, NativeRejectionSchema } from "./native-delivery-status.js";
 import { describeValidationError, INVALID_ROLE_MESSAGE_LIMIT, isMessageContentFailure } from "./role-message-feedback.js";
 import { AssessmentSpecificationSchema, assessmentErrorAt } from "./assessment-input.js";
+import { NativeDiagnosticFenceAuthoritySchema, NativeDiagnosticFenceSchema } from "./native-diagnostic-fence.js";
 
 const VERIFICATION_GATE = "p19-independent-task-verification";
 const TERMINAL_RUN_STATUSES: readonly string[] = ["completed", "failed", "cancelled", "escalated"];
@@ -1413,6 +1414,7 @@ export class AgenticWorkflowRuntime {
     // Only a matching live run has semantics to journal; any other status update is still delivered to Conversation unchanged.
     if (!parsed.run_id) return;
     return this.transaction(async (state, save, _core, outbox) => {
+      await this.refuseFencedDiagnostic(state, save, parsed);
       const run = state.runs.find(item => item.runId === parsed.run_id);
       if (!run || parsed.correlation_id !== run.delegation.correlationId || run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) return;
       const existing = state.inbox.find(item => item.message.message_id === parsed.message_id || (parsed.idempotency_key !== undefined && item.message.idempotency_key === parsed.idempotency_key));
@@ -1566,6 +1568,7 @@ export class AgenticWorkflowRuntime {
       if (priorResume) priorResume.messageId = messageId;
       else run.resumeReceipts.push({ actionId, messageId });
       if (run.resumeReceipts.length > 50) run.resumeReceipts.shift();
+      await this.recoverPhaseFailures(state, save, outbox);
       await save();
       return json({ queued: true, messageId, actionId: action.actionId });
     });
@@ -2457,6 +2460,51 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       request.phaseFailure!.applied = true;
       await save();
     }
+    // Older resumes authorized the retry but woke only Coordinator, which cannot invoke
+    // Developer-only phase tools. Recover the missing handoff from that durable authority.
+    if (this.quiesced) return;
+    for (const request of state.outbound.filter(item => item.phaseFailure?.applied &&
+      item.phaseFailure.repairable === false && item.phaseFailure.retryAuthorized === true)) {
+      const run = this.run(state, request.message.run_id!), payload = record(request.message.payload);
+      if (run.cancelled || run.status !== "implementing" || run.nativeDeliveries?.length ||
+          run.approval !== undefined && run.decision?.approvalId !== run.approval.approvalId ||
+          state.outbound.some(item => item.message.run_id === run.runId && ["sending", "unknown_delivery"].includes(item.status)) ||
+          Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) continue;
+      const task = run.tasks.find(item => item.taskId === payload.taskId);
+      if (!task || task.writerReleased) continue;
+      const rawReceipts = task.spec.strategy.metadata?.tddEvidence ?? [];
+      if (!Array.isArray(rawReceipts)) throw new Error("Corrupt policy measurement history");
+      const receipts = rawReceipts.map(item => VerificationResultSchema.parse(item));
+      const phase = textField(payload.phase);
+      const expected = task.spec.strategy.tddDecision.mode === "required" ? ["red", "green", "refactor"][receipts.length] : receipts.length === 0 ? "verification" : undefined;
+      if (phase !== expected) continue;
+      const parent = state.outbound.find(item => item.message.run_id === run.runId && item.message.type === "task.assignment" &&
+        item.taskId === task.taskId && item.status === "accepted" && item.handle?.attemptId === payload.implementationAttemptId);
+      if (!parent?.handle) continue;
+      const id = `phase-notice-${digest([run.runId, task.taskId, phase, request.message.message_id])}`;
+      const notice = state.outbound.find(item => item.message.message_id === id);
+      if (notice && (notice.status === "sending" || notice.status === "unknown_delivery")) continue;
+      const reviveUnsent = notice?.status === "cancelled" && !notice.request && !notice.handle && notice.error?.includes("parent lease is expired");
+      if (notice && !reviveUnsent && !parent.leaseReacquisition && parent.lease && Date.parse(parent.lease.expiresAt) > Date.parse(this.now())) continue;
+      if (state.outbound.some(item => item.message.run_id === run.runId &&
+          item.message.type === "verification.requested" && record(item.message.payload).taskId === task.taskId &&
+          record(item.message.payload).phase === phase && !item.phaseFailure && item.status !== "cancelled")) continue;
+      try { await outbox.recoverTaskLease(parent, request); }
+      catch (error) {
+        parent.error = `Task lease continuation blocked: ${String(error)}`;
+        await save(); continue;
+      }
+      if (notice) {
+        if (reviveUnsent) {
+          notice.status = "queued"; delete notice.error; await save();
+        }
+        continue; // Keep the original control message and any submission handle; never re-send an uncertain notice.
+      }
+      this.phaseNotice(state, outbox, run, task, phase, "retry",
+        `Explicit resume authorized a new independent measurement of ${phase} at ${textField(payload.sourceRevision)}. ` +
+        "Call request_verification for this phase again; this notice grants no Red evidence or implementation authority.", request.message.message_id);
+      await save();
+    }
   }
   private verificationPlan(run: RunRecord, task?: TaskRecord): VerificationPlan {
     if (task?.verificationPlan) return task.verificationPlan;
@@ -3301,12 +3349,13 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     const matches = (other: RoleMessage) => other.message_id === message.message_id ||
       message.idempotency_key !== undefined && other.idempotency_key === message.idempotency_key;
     const known = [...state.inbox.map(item => item.message),
-      ...state.runs.flatMap(run => (run.nativeDeliveries ?? []).map(entry => entry.message))];
+      ...state.runs.flatMap(run => [...(run.nativeDeliveries ?? []), ...(run.nativeDiagnosticFences ?? [])].map(entry => entry.message))];
     if (known.some(other => matches(other) && nativeMessageFingerprint(other) !== nativeMessageFingerprint(message)))
       throw new Error("Conflicting native delivery message");
   }
   private retainNativeIntent(state: JournalState, message: RoleMessage, operationId: string): RunRecord | undefined {
     this.assertNativeMessageConsistent(state, message);
+    if (this.fencedDiagnostic(state, message)) return undefined;
     const run = state.runs.find(item => item.runId === message.run_id);
     if (!run || message.correlation_id !== run.delegation.correlationId || this.refused(state, message.message_id)) return undefined;
     const pending = run.nativeDeliveries ?? (run.nativeDeliveries = []);
@@ -3315,6 +3364,61 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     if (!prior && !this.durablySettledNative(state, message))
       pending.push({ operationId: textField(operationId), message });
     return run;
+  }
+  private fencedDiagnostic(state: JournalState, message: RoleMessage) {
+    return state.runs.flatMap(run => run.nativeDiagnosticFences ?? []).find(fence => fence.message.message_id === message.message_id ||
+      message.idempotency_key !== undefined && fence.message.idempotency_key === message.idempotency_key);
+  }
+  private async refuseFencedDiagnostic(state: JournalState, save: () => Promise<void>, message: RoleMessage): Promise<void> {
+    this.assertNativeMessageConsistent(state, message);
+    if (!this.fencedDiagnostic(state, message)) return;
+    const reason = "Native diagnostic was fenced by an authenticated human without a delivery claim; late admission is forbidden";
+    const existing = state.inbox.find(item => item.message.message_id === message.message_id);
+    if (!existing) { state.inbox.push({ message, status: "rejected", reason }); await save(); }
+    throw new AdmissionRejectedError(reason);
+  }
+  /** Trusted physical Conversation command only. Cancels a stale diagnostic, never settles its transport as delivered/not-delivered. */
+  async fenceNativeDiagnostic(input: unknown): Promise<JsonValue> {
+    const authority = NativeDiagnosticFenceAuthoritySchema.parse(input);
+    if (!await this.ports.authorizeNativeDiagnosticFence?.(authority)) throw new Error("Diagnostic fence requires authenticated physical human authority");
+    return this.transaction(async (state, save) => {
+      const priorRuns = state.runs.filter(run => run.nativeDiagnosticFences?.some(item => item.operationId === authority.operationId));
+      if (priorRuns.length > 1) throw new Error("Ambiguous diagnostic fence operation");
+      const priorRun = priorRuns[0];
+      if (priorRun) {
+        if (priorRun.delegation.sessionId !== authority.sessionId) throw new Error("Cross-session diagnostic fence");
+        return json({ runId: priorRun.runId, operationId: authority.operationId, alreadyFenced: true,
+          disposition: "fenced_without_delivery_claim", delivery: "unknown_delivery", resendAllowed: false });
+      }
+      const candidates = state.runs.filter(item => item.nativeDeliveries?.some(entry => entry.operationId === authority.operationId));
+      if (candidates.length !== 1) throw new Error("No unique unresolved native operation with this ID");
+      const run = candidates[0]!;
+      if (run.delegation.sessionId !== authority.sessionId) throw new Error("Cross-session diagnostic fence");
+      if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status) ||
+          run.approval !== undefined && run.decision?.approvalId !== run.approval.approvalId ||
+          Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) throw new Error("A pending human gate must be resolved before diagnostic fencing");
+      const intent = run.nativeDeliveries!.find(entry => entry.operationId === authority.operationId)!;
+      const fence = NativeDiagnosticFenceSchema.parse({ ...authority, message: intent.message, decidedAt: this.now(), disposition: "fenced_without_delivery_claim" });
+      if (state.inbox.some(item => item.message.message_id === fence.message.message_id ||
+          fence.message.idempotency_key !== undefined && item.message.idempotency_key === fence.message.idempotency_key))
+        throw new Error("Admitted native messages require receipt reconciliation, not fencing");
+      const currentValue = unwrap(await this.ports.panes.getRoleBinding("coordinator"));
+      if (!currentValue) throw new Error("Current Coordinator session is unavailable");
+      const current = PaneBindingSchema.parse(currentValue), health = unwrap(await this.ports.panes.inspectRoleHealth("coordinator"));
+      if (!current.session || current.role !== "coordinator" || current.agentId !== fence.message.sender.agent_id ||
+          current.paneId === fence.message.sender.pane_id || !health.occupantMatches || health.paneId !== current.paneId || health.agentId !== current.agentId)
+        throw new Error("Only a diagnostic from a retired Coordinator pane can be fenced");
+      run.nativeDiagnosticFences = [...run.nativeDiagnosticFences ?? [], fence];
+      state.version = 2; // Old binaries must reject the journal rather than ignore a durable late-arrival fence.
+      run.nativeDeliveries = run.nativeDeliveries!.filter(item => item !== intent);
+      await save();
+      return json({ runId: run.runId, operationId: authority.operationId, disposition: fence.disposition,
+        delivery: "unknown_delivery", resendAllowed: false, lateAdmissionDenied: true });
+    });
+  }
+  async nativeDiagnosticFenceStatus(operationId: string): Promise<JsonValue> {
+    return this.journal.exclusive(async state => json(state.runs.flatMap(run => run.nativeDiagnosticFences ?? [])
+      .find(item => item.operationId === textField(operationId)) ?? null));
   }
   /** Trusted host write-ahead before native invocation. No transport or business success is inferred. */
   async recordNativeDeliveryIntent(input: unknown, operationId: string): Promise<void> {

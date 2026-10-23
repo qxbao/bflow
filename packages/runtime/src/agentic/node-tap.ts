@@ -3,8 +3,9 @@ import { digest } from "./journal.js";
 
 /** Complete, identity-matched TAP whose test bodies failed without valid assertion evidence. */
 export class NodeTapTestCodeFailure extends Error {
-  constructor(readonly outcome: QualityCommandOutcome) {
-    super("Behavioral test code failed without an assertion regression; repair the tests before requesting Red evidence");
+  constructor(readonly outcome: QualityCommandOutcome, readonly failedTestNames: readonly string[]) {
+    super(`Behavioral test code failed without an assertion regression in ${JSON.stringify(failedTestNames.slice(0, 8)).slice(0, 1000)}. ` +
+      "Repair the existing mapped tests to assert missing target behavior before calling absent code; preserve their names. Do not implement before valid Red evidence.");
   }
 }
 
@@ -25,7 +26,8 @@ export function parseNodeTap(outcome: QualityCommandOutcome, expectedNames: read
   if (failures.length !== failed || results.filter(result => result[1] === "ok").length !== passed || (failed === 0 ? outcome.exitCode !== 0 : outcome.exitCode !== 1)) throw new Error("TAP result contradicts process exit code");
   const targetFailure = failed > 0 && failures.every(result => /^\s+failureType: 'testCodeFailure'$/m.test(result[4]!) && /^\s+code: 'ERR_ASSERTION'$/m.test(result[4]!));
   if (failed && !targetFailure) {
-    if (failures.every(result => /^\s+failureType: 'testCodeFailure'$/m.test(result[4]!))) throw new NodeTapTestCodeFailure(outcome);
+    if (failures.every(result => /^\s+failureType: 'testCodeFailure'$/m.test(result[4]!)))
+      throw new NodeTapTestCodeFailure(outcome, failures.filter(result => !/^\s+code: 'ERR_ASSERTION'$/m.test(result[4]!)).map(result => result[3]!));
     throw new Error("Behavioral failure is infrastructure or unrelated, not an assertion regression");
   }
   return { testNames: names, testResults: results.map(result => ({ name: result[3]!, passed: result[1] === "ok" })), tests, passed, failed, targetFailure };

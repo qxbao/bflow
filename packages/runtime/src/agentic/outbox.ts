@@ -1,10 +1,10 @@
 import {
-  AgentAssignmentSchema, AgentConfigurationSchema, AgentLeaseSchema, AgentReconciliationResultSchema,
-  AgentRequestSchema, AgentSubmissionReceiptSchema, PaneBindingSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema, ReleaseAgentLeaseRequestSchema, WorkflowRunSnapshotSchema,
+  AcquireAgentLeaseRequestSchema, AgentAssignmentSchema, AgentConfigurationSchema, AgentLeaseSchema, AgentReconciliationResultSchema,
+  AgentRequestSchema, AgentSubmissionReceiptSchema, PaneBindingSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema, ReleaseAgentLeaseRequestSchema, VerificationResultSchema, WorkflowRunSnapshotSchema,
   type AgentExecutionHandle, type OperationResult, type RoleMessage, type PaneBinding
 } from "@bflow/contracts";
 import { RoleCapabilityPreflightError, type AgenticRuntimePorts } from "./ports.js";
-import { digest, isConversationDelivery, json, type JournalState, type Outbound } from "./journal.js";
+import { digest, isConversationDelivery, json, record, type JournalState, type Outbound } from "./journal.js";
 
 /** A recipient observed not ready for this long is reported to Conversation; delivery keeps retrying. */
 export const NOT_READY_FAILURE_MS = 5 * 60_000;
@@ -47,7 +47,8 @@ export class HerdrOutbox {
       throw new Error("Task notice requires an active parent assignment");
     if (parent.lease.agentId !== parent.handle.target.agentId || parent.lease.runId !== parent.message.run_id ||
         parent.lease.taskId !== parent.taskId || parent.lease.attemptId !== parent.attemptId ||
-        parent.assignment.leaseId !== parent.lease.leaseId || parent.assignment.fencingToken !== parent.lease.fencingToken ||
+        parent.assignment.leaseId !== (parent.leaseHistory?.[0] ?? parent.lease).leaseId ||
+        parent.assignment.fencingToken !== (parent.leaseHistory?.[0] ?? parent.lease).fencingToken ||
         Date.parse(parent.lease.expiresAt) <= Date.parse(this.now())) throw new Error("Task notice parent lease is expired or mismatched");
     const run = this.state.runs.find(item => item.runId === parent.message.run_id);
     const task = run?.tasks.find(item => item.taskId === parent.taskId);
@@ -89,12 +90,13 @@ export class HerdrOutbox {
   }
   async renew(out: Outbound): Promise<void> {
     const owner = out.parentAssignmentId ? this.noticeParent(out) : out;
+    if (owner.leaseReacquisition) await this.reconcileLeaseAcquisition(owner);
     if (owner.leaseRelease) throw new Error("Assignment lease release is pending");
     if (!owner.lease) throw new Error("Assignment has no current lease");
     const recovering = owner.leaseRenewal !== undefined;
     owner.leaseRenewal ??= RenewAgentLeaseRequestSchema.parse({ leaseId: owner.lease.leaseId,
       fencingToken: owner.lease.fencingToken, expectedVersion: owner.lease.version, ttlMs: 300_000,
-      requestedAt: this.now(), idempotencyKey: `renew:${owner.message.message_id}:${owner.lease.version}` });
+      requestedAt: this.now(), idempotencyKey: `renew:${owner.message.message_id}:${owner.lease.leaseId}:${owner.lease.version}` });
     await this.save(); // Retain exact renewal arguments if Registry commits before journal persistence.
     const lease = AgentLeaseSchema.parse(unwrap(await this.ports.registry.renewLease(owner.leaseRenewal)));
     if (Date.parse(lease.expiresAt) <= Date.parse(this.now())) throw new Error("Expired assignment lease");
@@ -105,8 +107,90 @@ export class HerdrOutbox {
     // authority with a fresh version before it can authorize another side effect.
     if (recovering) await this.renew(owner);
   }
+  private async reconcileLeaseAcquisition(owner: Outbound): Promise<void> {
+    if (!owner.leaseReacquisition) return;
+    if (!this.state.outbound.includes(owner) || owner.parentAssignmentId || owner.message.type !== "task.assignment" ||
+        owner.status !== "accepted" || !owner.lease || !owner.handle?.target.session || (owner.leaseHistory?.length ?? 0) >= 3)
+      throw new Error("Invalid pending task lease continuation");
+    owner.leaseReacquisition = AcquireAgentLeaseRequestSchema.parse(owner.leaseReacquisition);
+    const request = owner.leaseReacquisition;
+    if (request.agentId !== owner.lease.agentId || request.runId !== owner.lease.runId || request.taskId !== owner.lease.taskId ||
+        request.attemptId !== owner.lease.attemptId || request.leaseId === owner.lease.leaseId)
+      throw new Error("Pending task lease continuation ownership mismatch");
+    const acquired = AgentLeaseSchema.parse(unwrap(await this.ports.registry.acquireLease(owner.leaseReacquisition)));
+    if (acquired.leaseId !== owner.leaseReacquisition.leaseId || acquired.agentId !== owner.lease.agentId ||
+        acquired.runId !== owner.lease.runId || acquired.taskId !== owner.taskId || acquired.attemptId !== owner.attemptId ||
+        acquired.fencingToken <= owner.lease.fencingToken) throw new Error("Registry task lease continuation ownership/fence mismatch");
+    owner.leaseHistory = [...owner.leaseHistory ?? [], owner.lease];
+    owner.lease = acquired; delete owner.leaseReacquisition;
+    for (const child of this.state.outbound) if (child.parentAssignmentId === owner.message.message_id) child.lease = acquired;
+    await this.save();
+  }
+  /** A durable explicit phase resume may continue the exact live execution under a new Registry fence, at most three times. */
+  async recoverTaskLease(owner: Outbound, authorization: Outbound): Promise<void> {
+    const run = this.state.runs.find(item => item.runId === owner.message.run_id);
+    const task = run?.tasks.find(item => item.taskId === owner.taskId);
+    const payload = record(authorization.message.payload);
+    if (!this.state.outbound.includes(owner) || !this.state.outbound.includes(authorization) || owner.parentAssignmentId ||
+        owner.message.type !== "task.assignment" || owner.status !== "accepted" || !owner.lease || !owner.assignment ||
+        !owner.handle?.target.session || owner.cancelRequested || owner.leaseRelease || !task || task.writerReleased || task.result ||
+        !run || run.cancelled || run.status !== "implementing" || authorization.message.run_id !== run.runId ||
+        authorization.message.type !== "verification.requested" || payload.kind !== "conditional_evidence" ||
+        payload.taskId !== owner.taskId || payload.implementationAttemptId !== owner.attemptId ||
+        authorization.phaseFailure?.repairable !== false || !authorization.phaseFailure.applied ||
+        authorization.phaseFailure.retryAuthorized !== true || run.nativeDeliveries?.length ||
+        run.approval !== undefined && run.decision?.approvalId !== run.approval.approvalId ||
+        Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
+        this.state.outbound.some(item => item.message.run_id === run.runId && ["sending", "unknown_delivery"].includes(item.status)))
+      throw new Error("Task lease continuation requires explicit resume authority for a current execution");
+    const rawReceipts = task.spec.strategy.metadata?.tddEvidence ?? [];
+    if (!Array.isArray(rawReceipts)) throw new Error("Corrupt policy measurement history");
+    const receipts = rawReceipts.map(item => VerificationResultSchema.parse(item));
+    const expected = task.spec.strategy.tddDecision.mode === "required" ? ["red", "green", "refactor"][receipts.length] : receipts.length === 0 ? "verification" : undefined;
+    if (payload.phase !== expected) throw new Error("Task lease resume authority belongs to an earlier policy phase");
+    const raw = unwrap(await this.ports.panes.getRoleBinding(owner.selector));
+    if (!raw) throw new Error("Task lease recipient disappeared");
+    const pane = PaneBindingSchema.parse(raw), health = unwrap(await this.ports.panes.inspectRoleHealth(owner.selector));
+    if (digest(this.target(pane)) !== digest(owner.handle.target) || pane.cwd !== owner.request?.workingDirectory ||
+        !health.occupantMatches || !health.readyForPrompt || health.paneId !== pane.paneId || health.agentId !== pane.agentId)
+      throw new Error("Task lease recipient/native session or worktree changed");
+    const snapshot = WorkflowRunSnapshotSchema.parse(unwrap(await this.ports.engine.getSnapshot(run.runId)));
+    const current = snapshot.tasks.find(item => item.taskId === owner.taskId);
+    if (!current || current.status !== "running" || current.attemptId !== owner.attemptId ||
+        digest(current.agentExecution) !== digest(owner.handle) || ["succeeded", "failed", "cancelled", "cancelling"].includes(snapshot.status))
+      throw new Error("Task lease continuation does not own the current Core execution");
+    await this.ports.preflightRoleCapabilities?.(pane, owner.capabilities);
+    if (owner.leaseRenewal) {
+      const reconciled = await this.ports.registry.renewLease(owner.leaseRenewal);
+      if (!reconciled.ok && !(reconciled.error.code === "conflict" && reconciled.error.message === "Lease expired or released"))
+        unwrap(reconciled);
+      if (reconciled.ok) {
+        const lease = AgentLeaseSchema.parse(reconciled.value);
+        if (lease.leaseId !== owner.lease.leaseId || lease.fencingToken !== owner.lease.fencingToken ||
+            lease.agentId !== owner.lease.agentId || lease.runId !== owner.lease.runId || lease.taskId !== owner.lease.taskId ||
+            lease.attemptId !== owner.lease.attemptId) throw new Error("Registry renewal ownership mismatch during task continuation");
+        owner.lease = lease;
+      }
+      delete owner.leaseRenewal;
+      for (const child of this.state.outbound) if (child.parentAssignmentId === owner.message.message_id) child.lease = owner.lease;
+      await this.save();
+    }
+    if (!owner.leaseReacquisition && Date.parse(owner.lease.expiresAt) > Date.parse(this.now())) { await this.renew(owner); return; }
+    if ((owner.leaseHistory?.length ?? 0) >= 3) throw new Error("Task lease continuation limit exhausted");
+    owner.leaseReacquisition ??= AcquireAgentLeaseRequestSchema.parse({
+      leaseId: `lease-${digest([owner.message.message_id, owner.lease.leaseId, owner.lease.fencingToken])}`,
+      agentId: owner.lease.agentId, runId: run.runId, taskId: owner.taskId, attemptId: owner.attemptId,
+      ttlMs: 300_000, requestedAt: this.now(), idempotencyKey: `continue:${owner.message.message_id}:${owner.lease.leaseId}`
+    });
+    await this.save();
+    await this.reconcileLeaseAcquisition(owner);
+    const acquired = owner.lease;
+    if (Date.parse(acquired.expiresAt) <= Date.parse(this.now())) throw new Error("Recovered task lease continuation expired; reconcile before use");
+    await this.renew(owner);
+  }
   async release(out: Outbound): Promise<void> {
     if (out.status === "released") return;
+    if (out.leaseReacquisition) await this.reconcileLeaseAcquisition(out);
     if (out.lease && !out.parentAssignmentId) {
       if (out.leaseRenewal) await this.renew(out);
       out.leaseRelease ??= ReleaseAgentLeaseRequestSchema.parse({
