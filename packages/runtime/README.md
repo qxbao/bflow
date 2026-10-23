@@ -88,6 +88,11 @@ ArtifactReference đã lưu nếu có, kể cả replay. `phaseRecorded: false` 
 phân biệt outcome bị từ chối với bằng chứng TDD được chấp nhận; lifecycle status riêng không đủ
 để kết luận thiếu output hoặc xin đo lại. Runtime vẫn giữ quyền điều phối repair/resume có giới hạn.
 
+`assignment_context` đặt `policyEvidence` gọn trước dossier đầy đủ: receipt TDD đã được
+Runtime chấp nhận tách khỏi outcome bị từ chối, giữ nguyên phase/revision/verification ID
+và ArtifactReference/checksum. Chỉ xuất các run đã thuộc assignment hiện tại của pane;
+không suy luận bằng chứng từ progress, transport state hay nội dung agent tự khai.
+
 Các đầu vào host bắt buộc là tường minh: định danh repository/session, role capability,
 định nghĩa check của task/workflow, deterministic gate runner, ingress thông điệp/result/evidence
 Herdr có xác thực và phê duyệt của con người có xác thực. Không có

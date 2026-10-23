@@ -1,3 +1,4 @@
+import { policyEvidenceView } from "./policy-evidence-view.js";
 import { execFile } from "node:child_process";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
@@ -785,8 +786,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         return record(record(out.handle).target).paneId === binding.paneId && ["accepted", "released"].includes(String(out.status));
       });
       const conflictResolution = role === "developer" ? await development.conflictResolutionContext(binding) : undefined;
-      return json({ ...(conflictResolution ? { kind: "conflict_resolution", conflictResolution } : {}),
-        assignments: outbound, runs: (state.runs as Record<string, unknown>[]).filter(run => outbound.some(out => record(out.message).run_id === run.runId)) });
+      const assignedRuns = (state.runs as Record<string, unknown>[]).filter(run => outbound.some(out => record(out.message).run_id === run.runId));
+      return json({ policyEvidence: policyEvidenceView(assignedRuns, state.outbound as Record<string, unknown>[]),
+        policyEvidenceNote: "Stored Runtime phase receipts and rejected outcomes only. A failed result with accepted phase red is valid Red, never Green. Read the exact revision and artifact checksums; no lifecycle status or agent text is proof.",
+        ...(conflictResolution ? { kind: "conflict_resolution", conflictResolution } : {}), assignments: outbound, runs: assignedRuns });
     }
     if (role === "developer" && ["submit_implementation", "request_verification", "authorize_implementation"].includes(name))
       await development.refuseForResolver(binding, name);
