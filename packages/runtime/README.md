@@ -83,6 +83,11 @@ Control client giới hạn phản hồi thông thường ở 4 MiB; riêng RPC 
 Checkpoint lớn hơn vẫn bị từ chối và phải đối soát id/checksum đã lưu trước khi retry;
 việc vượt giới hạn phản hồi không chứng minh thao tác ghi thất bại. Public checkpoint codec không đổi.
 
+Khi phép đo bị từ chối, phản hồi QA trả đúng request/phase/revision, summary, loại repair và
+ArtifactReference đã lưu nếu có, kể cả replay. `phaseRecorded: false` và `implementationAuthorized: false`
+phân biệt outcome bị từ chối với bằng chứng TDD được chấp nhận; lifecycle status riêng không đủ
+để kết luận thiếu output hoặc xin đo lại. Runtime vẫn giữ quyền điều phối repair/resume có giới hạn.
+
 Các đầu vào host bắt buộc là tường minh: định danh repository/session, role capability,
 định nghĩa check của task/workflow, deterministic gate runner, ingress thông điệp/result/evidence
 Herdr có xác thực và phê duyệt của con người có xác thực. Không có

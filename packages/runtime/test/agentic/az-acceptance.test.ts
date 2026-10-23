@@ -447,7 +447,12 @@ describe("A-Z acceptance: an infrastructure measurement failure is resumable", (
     const queued = await f.runtime.requestPhaseVerification(developer, "run-1", "implement", phase, head) as { messageId: string };
     const request = await f.deliveredById(queued.messageId);
     const qa = f.panes.bindings.find(pane => pane.paneId === request.handle!.target.paneId)!;
-    await f.runtime.recordPhaseFailure(qa, queued.messageId, "Behavioral runner infrastructure failure (prepare): exit 2", false);
+    const measurementFailure = await f.runtime.recordPhaseFailure(qa, queued.messageId, "Behavioral runner infrastructure failure (prepare): exit 2", false);
+    expect(measurementFailure).toMatchObject({ phaseRecorded: false, implementationAuthorized: false,
+      outcome: { requestId: queued.messageId, phase, sourceRevision: head, repairable: false, summary: expect.stringContaining("infrastructure failure") },
+      next: expect.stringContaining("Runtime") });
+    expect(await f.runtime.recordPhaseFailure(qa, queued.messageId, "Behavioral runner infrastructure failure (prepare): exit 2", false)).toMatchObject({
+      alreadyRecorded: true, phaseRecorded: false, implementationAuthorized: false, outcome: (measurementFailure as any).outcome });
     const blocked = await f.record();
     expect(blocked).toMatchObject({ status: "escalated", pendingAction: { kind: "resume_coordinator", state: "pending", recovery: "manual" } });
     await expect(f.runtime.requestPhaseVerification(developer, "run-1", "implement", phase, head)).rejects.toThrow(/paused awaiting resume/);

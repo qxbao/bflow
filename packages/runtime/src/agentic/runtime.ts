@@ -2416,6 +2416,17 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       payload: json({ kind: "policy_phase_outcome", runId: run.runId, taskId: task.taskId, phase, status, summary, outcomeId }),
       artifact_references: [], occurred_at: this.now(), idempotency_key: id }), parent);
   }
+  private phaseFailureReply(run: RunRecord, request: Outbound, replay = false): JsonValue {
+    const payload = record(request.message.payload), failure = request.phaseFailure!;
+    return json({ status: run.status, maxIterations: run.maxIterations, ...(replay ? { alreadyRecorded: true } : {}),
+      phaseRecorded: false, implementationAuthorized: false,
+      outcome: { requestId: request.message.message_id, taskId: payload.taskId, phase: payload.phase,
+        sourceRevision: payload.sourceRevision, summary: failure.summary, repairable: failure.repairable,
+        evidenceArtifacts: request.phaseFailureEvidence ? [request.phaseFailureEvidence] : [] },
+      next: failure.repairable
+        ? "Runtime stored the rejected phase outcome and controls bounded Developer repair. This is not missing execution output, valid Red or implementation authorization. Do not report a new missing-evidence blocker; reconcile this exact request if needed."
+        : "Runtime stored an infrastructure blocker, not accepted policy evidence. Reconcile this exact outcome before an explicit resume; never resend uncertain work." });
+  }
   /** Actual host measurements can fail without becoming successful P16 evidence.
    * Preserve the request outcome, bound repairs, and resume only its owning task. */
   async recordPhaseFailure(bindingInput: PaneBinding, requestId: string, summary: string, repairable: boolean, evidence?: ArtifactReference): Promise<JsonValue> {
@@ -2430,7 +2441,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (request.phaseFailure) {
         if (request.phaseFailure.summary !== summary || request.phaseFailure.repairable !== repairable || digest(request.phaseFailureEvidence) !== digest(evidence))
           throw new Error("Conflicting immutable policy failure outcome");
-        return json({ alreadyRecorded: true, status: run.status });
+        return this.phaseFailureReply(run, request, true);
       }
       this.live(run);
       if (request.status !== "accepted") throw new Error("Verifier released without a saved phase failure; reconcile its original request");
@@ -2440,7 +2451,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       request.error = `policy_phase_failed:${summary}`;
       await save(); // preserve the measured outcome before releasing its lease
       await this.recoverPhaseFailures(state, save, outbox);
-      return json({ status: run.status, maxIterations: run.maxIterations });
+      return this.phaseFailureReply(run, request);
     });
   }
   private pauseDeveloperAllocation(run: RunRecord, taskId: string, reason: string): void {
