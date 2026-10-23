@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { IdentifierSchema } from "./common.js";
-import { PlatformSchemaVersionSchema, Sha256DigestSchema, TrustScopeSchema } from "./platform.js";
+import { NonEmptyArgumentSchema, PlatformSchemaVersionSchema, Sha256DigestSchema, TrustScopeSchema } from "./platform.js";
 import { AgentRoleSchema } from "./session.js";
 
 export const ToolTriggerSchema = z.enum([
@@ -95,6 +95,18 @@ const CliExecutableIdentitySchema = z.object({
   version: IdentifierSchema,
   digest: Sha256DigestSchema
 }).strict();
+
+/** Verified installer output at CLI ingress. A catalog pin alone cannot create this evidence. */
+export const VerifiedToolExecutableIdentitySchema = z.object({
+  schemaVersion: PlatformSchemaVersionSchema,
+  toolId: IdentifierSchema,
+  version: NonEmptyArgumentSchema,
+  artifactIntegrity: Sha256DigestSchema,
+  desiredStateDigest: Sha256DigestSchema,
+  executablePath: CliExecutableIdentitySchema.shape.executablePath,
+  executableDigest: Sha256DigestSchema
+}).strict();
+export type VerifiedToolExecutableIdentity = z.infer<typeof VerifiedToolExecutableIdentitySchema>;
 
 /** Host-resolved per-session grant. Identity and scope are checked again at invocation ingress. */
 export const ResolvedToolGrantSchema = z.object({
