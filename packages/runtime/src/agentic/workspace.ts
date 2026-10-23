@@ -151,7 +151,8 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
             binding.worktreePath !== entry.allocated.worktreePath || binding.metadata?.launchId !== entry.launchId))
           return failClosed(entry, "has a different persisted launch binding", callOptions);
         const health = binding?.session ? await base.inspectRoleHealth(binding.paneId, callOptions) : undefined;
-        const nativeSourceMatches = binding?.session?.source === binding?.agentKind || binding?.session?.source === `herdr:${binding?.agentKind}`;
+        const nativeSourceMatches = binding?.session?.source === binding?.agentKind || binding?.session?.source ===
+          (binding?.agentKind === "agy" ? "herdr:antigravity_cli" : `herdr:${binding?.agentKind}`);
         if (binding?.session && nativeSourceMatches && health?.ok && health.value.readyForPrompt && health.value.occupantMatches &&
             health.value.paneId === binding.paneId && health.value.agentId === binding.agentId) {
           pending.delete(entry.taskId);
@@ -209,7 +210,7 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
   // Verify the available Herdr version/protocol before opening persistent resources or allocating agents.
   unwrap(await transport.initialize({ runtimeId: `p19-${options.sessionId}`, configuration: {}, recoveryMode: true, initializedAt: new Date().toISOString() }));
   const roleConfigs: Record<string, unknown> = {};
-  for (const [role, launch] of Object.entries(options.roleLaunch ?? {})) {
+  for (const [role, launch] of Object.entries(options.developerLaunches ? {} : options.roleLaunch ?? {})) {
     const topology = paneModule.getRoleTopologySpec(role);
     if (!topology || topology.contractRole !== role) continue;
     const args = await paneModule.buildProviderRoleLaunchFromFiles({ ...launch, agentKind: manifest.panes.find(p => p.role === "coordinator")!.agentKind, role });

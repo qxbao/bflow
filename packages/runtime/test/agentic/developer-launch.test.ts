@@ -164,7 +164,7 @@ class FakeHerdr {
       name: agent.name, agent: agent.kind, pane_id: agent.paneId, terminal_id: `term-${agent.paneId}`,
       workspace_id: agent.workspaceId, tab_id: agent.tabId, focused: false, agent_status: "idle", revision: 1,
       interactive_ready: true, launch_pending: false,
-      ...(this.nativeSessionReady ? { agent_session: { source: `herdr:${agent.kind}`, kind: "id", value: `native-${agent.name}` } } : {})
+      ...(this.nativeSessionReady ? { agent_session: { source: agent.kind === "agy" ? "herdr:antigravity_cli" : `herdr:${agent.kind}`, kind: "id", value: `native-${agent.name}` } } : {})
     };
   }
 
@@ -320,7 +320,7 @@ describe("P30 dynamic Developer launches end to end", () => {
   }
 
   /** Builds the real host composition: readiness service, HostPlatformSession, RolePaneManager and the launch wrapper. */
-  async function buildHost(options: { runner?: ProviderCommandRunner; gateway?: boolean; maxCapacity?: number; mcpServiceIds?: string[];
+  async function buildHost(options: { provider?: "claude" | "agy"; runner?: ProviderCommandRunner; gateway?: boolean; maxCapacity?: number; mcpServiceIds?: string[];
     /** When true (default) the started provider reports every registration reachable, as its SessionStart hook would. */
     reportReachability?: boolean; startupTimeoutMs?: number; delayedNativeSession?: boolean } = {}) {
     // The runtime prepares the task worktree before allocating its Developer; preflight requires it to exist.
@@ -333,7 +333,7 @@ describe("P30 dynamic Developer launches end to end", () => {
     const providers = new ProviderReadiness({
       factory: createProviderAdapterFactory({
         runner: options.runner ?? createFakeProviderRunner({ scenario: "healthy" }),
-        perProvider: { claude: { executablePath: binaryPath, allowTestFilesystemOwnership: true } }
+        perProvider: { [options.provider ?? "claude"]: { executablePath: binaryPath, allowTestFilesystemOwnership: true } }
       }),
       journal
     });
@@ -352,7 +352,7 @@ describe("P30 dynamic Developer launches end to end", () => {
       machineId: "machine-1",
       repositoryId: "repo-1",
       roles: [{
-        role: "developer", provider: "claude", required: true, permissionMode: "workspace_auto",
+        role: "developer", provider: options.provider ?? "claude", required: true, permissionMode: "workspace_auto",
         capabilityIds: [], mcpServiceIds: options.mcpServiceIds ?? [], toolIds: ["search"],
         skillSelections: [{ skill: skillPin, required: true }]
       }],
@@ -471,6 +471,16 @@ describe("P30 dynamic Developer launches end to end", () => {
     }
     return found;
   }
+
+  it("admits an Agy Developer only after its exact native Herdr source is ready", async () => {
+    const host = await buildHost({ provider: "agy", delayedNativeSession: true });
+    expect(await host.panes.allocateDeveloper(allocation("run-1-t1")))
+      .toMatchObject({ ok: false, error: { code: "conflict", retryable: true } });
+    host.herdr.nativeSessionReady = true;
+    const admitted = await host.panes.allocateDeveloper(allocation("run-1-t1"));
+    expect(admitted).toMatchObject({ ok: true, value: { agentKind: "agy", session: { source: "herdr:antigravity_cli" } } });
+    expect(host.herdr.startCalls()).toHaveLength(1);
+  });
 
   it("persists a delayed native session before admitting a Developer with no Gateway registrations", async () => {
     const host = await buildHost({ delayedNativeSession: true });

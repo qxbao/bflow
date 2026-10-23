@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { mkdir, open, readFile, rename } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import {
   AgentProviderIdSchema, AgentRoleSchema,
@@ -231,6 +231,8 @@ export class HostPlatformSession {
   private report: PlatformPreflightReport | undefined;
   private preparedStartup: HostPlatformLaunchResult | undefined;
   private readonly launches = new Map<AgentRole, { launchId: string; provider: AgentProviderId }>();
+  /** Native Agy homes are keyed by launch id and exposed only while the matching launch is active. */
+  private readonly nativeAgyHomes = new Map<string, { role: AgentRole; provider: AgentProviderId; home: string }>();
   private readonly roleInstructions = new Map<AgentRole, { launchId: string; manifest: SkillManifest; instructionText: string; references: readonly { name: string; description: string; entrypoint: string; digest: string }[] }>();
   private readonly developerLaunches = new Map<string, string>();
   /** Active Developer launches by launch id: the reachability the launch must prove, or null without Gateway registrations. */
@@ -270,6 +272,7 @@ export class HostPlatformSession {
     try {
       for (const prepared of result.value.launches) {
         this.launches.set(prepared.role, { launchId: prepared.launch.launchId, provider: prepared.provider });
+        this.rememberNativeAgyHome(prepared);
         if (prepared.skills?.manifest && prepared.skills?.rendered) this.roleInstructions.set(prepared.role, { launchId: prepared.launch.launchId,
           manifest: prepared.skills.manifest, instructionText: prepared.skills.rendered.instructionText,
           references: prepared.skills.rendered.references.map(reference => ({ ...reference })) });
@@ -281,6 +284,7 @@ export class HostPlatformSession {
       for (const prepared of result.value.launches) {
         await this.options.service.releaseLaunch(prepared.launch.launchId).catch(() => undefined);
         await this.removeLaunchArtifacts(prepared.launch.launchId).catch(() => undefined);
+        this.nativeAgyHomes.delete(prepared.launch.launchId);
       }
       this.launches.clear();
       await this.persistLaunches();
@@ -402,6 +406,16 @@ export class HostPlatformSession {
     return this.launches.get(role)?.launchId;
   }
 
+  /** Native transcript access is bound to a live Agy launch and its exact prepared config home. */
+  nativeAgyLaunch(role: AgentRole, launchId: string): { home: string; launchId: string } | undefined {
+    const binding = this.nativeAgyHomes.get(launchId);
+    if (!binding || binding.role !== role || binding.provider !== "agy") return undefined;
+    const active = role === "developer"
+      ? [...this.developerLaunches.values()].includes(launchId)
+      : this.launches.get(role)?.launchId === launchId && this.launches.get(role)?.provider === "agy";
+    return active ? { home: binding.home, launchId } : undefined;
+  }
+
   /**
    * Dynamic Developer launch for one task worktree. Blocked launches throw; no pane is created on failure.
    * Publishes the launch's own probe plan (keyed by launch id, so concurrent Developers never share a file).
@@ -426,6 +440,7 @@ export class HostPlatformSession {
     }
     this.developerLaunches.set(taskId, launchId);
     this.developerGates.set(launchId, expectation ?? null);
+    this.rememberNativeAgyHome(result.value);
     return launchMaterial(result.value);
   }
 
@@ -463,6 +478,7 @@ export class HostPlatformSession {
     await this.removeLaunchArtifacts(launchId);
     this.developerLaunches.delete(taskId);
     this.developerGates.delete(launchId);
+    this.nativeAgyHomes.delete(launchId);
   }
 
   /** Revokes this session's Gateway registrations. Shared services are never stopped here. */
@@ -475,6 +491,7 @@ export class HostPlatformSession {
     this.launches.clear();
     this.developerLaunches.clear();
     this.developerGates.clear();
+    this.nativeAgyHomes.clear();
     await this.persistLaunches();
   }
 
@@ -554,6 +571,7 @@ export class HostPlatformSession {
       const released = await this.options.service.releaseLaunch(launch.launchId);
       if (!released.ok) throw new Error(`Previous platform launch could not be released: ${describeFailure(released.error)}`);
       await this.removeLaunchArtifacts(launch.launchId);
+      this.nativeAgyHomes.delete(launch.launchId);
     }
     this.launches.clear();
   }
@@ -562,6 +580,18 @@ export class HostPlatformSession {
   private async removeLaunchArtifacts(launchId: string): Promise<void> {
     await removeLaunchProbe(this.options.probeDirectory, launchId);
     await removeLaunchReachability(this.options.reachabilityDirectory, launchId);
+  }
+
+  private rememberNativeAgyHome(prepared: PreparedRoleLaunch): void {
+    if (prepared.provider !== "agy") return;
+    const expectedSuffix = join(".gemini", "config", "mcp_config.json");
+    const matches = prepared.profile.configFiles.filter(file => file.path.endsWith(`/${expectedSuffix}`));
+    if (matches.length !== 1) return;
+    const configPath = matches[0]!.path;
+    if (!configPath.startsWith("/") || resolve(configPath) !== configPath) return;
+    const home = dirname(dirname(dirname(configPath)));
+    if (home === "/" || join(home, expectedSuffix) !== configPath) return;
+    this.nativeAgyHomes.set(prepared.launch.launchId, { role: prepared.role, provider: prepared.provider, home });
   }
 
   private async nextGeneration(): Promise<number> {

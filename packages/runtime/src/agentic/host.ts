@@ -24,7 +24,7 @@ import { readHostConfiguration, type HostConfiguration, type RoleLaunchDescripto
 import { digest, json, record, textField } from "./journal.js";
 import { COORDINATOR_TOOLS } from "./tools.js";
 import { USER_DECISION_TOOL, buildDecisionRequestMessage, guardDirectUserInteraction, parseUserDecisionToolInput } from "./decision-routing.js";
-import { AdmissionRejectedError, isNonRetryableDeliveryError } from "./runtime.js";
+import { AdmissionRejectedError, isNonRetryableDeliveryError, QUIESCED_RECEIPT_DRAIN_OPERATIONS } from "./runtime.js";
 import { guardNativeShell, NATIVE_READ_GUIDANCE, NATIVE_SHELL_TOOLS } from "./read-only-commands.js";
 import { describeValidationError } from "./role-message-feedback.js";
 import { repositoryRead, RepositoryReadInputSchema } from "./repository-read.js";
@@ -34,7 +34,7 @@ import { CONVERSATION_CONTEXT_BUDGET, boundConversationContext } from "./convers
 import { openAgenticWorkspace, type AgenticWorkspaceHandle } from "./workspace.js";
 import { unwrap } from "./outbox.js";
 import { HostVerification, HostBehavioralFailure, DEFAULT_HOST_CHECKS } from "./host-verification.js";
-import { HostReceiptJournal, MAX_NOTICE_REBLOCKS, deliveryFailureNotice, parseConversationResumeRequest, isCoordinatorTrigger, type CoordinatorTurnObservation, type HumanHookProvenance } from "./host-receipts.js";
+import { AgyNativeAnchorSchema, HostReceiptJournal, MAX_NOTICE_REBLOCKS, deliveryFailureNotice, parseConversationResumeRequest, isCoordinatorTrigger, type AgyNativeTurn, type CoordinatorTurnObservation, type HumanHookProvenance } from "./host-receipts.js";
 import { parseBehavioralCommands } from "./behavioral-runner.js";
 import { WorkflowProposalRejected, guardWorkflowProposal } from "./workflow-rejection.js";
 import { disposeDetectedDependencies } from "./runner-detection.js";
@@ -49,6 +49,7 @@ import { TaskLogPane } from "./task-log-pane.js";
 import { assessmentFailureSummary } from "./assessment-input.js";
 import { assessmentSpecificationToolSchema, nativeRoleMessageToolSchema, parseNativeRoleMessage, roleReplyGuidance, specificationToolSchema } from "./role-tool-schema.js";
 import { inspectNativeDelivery } from "./native-delivery-status.js";
+import { readAgyNativeTurn, type AgyPendingNativeTool } from "./agy-native-transcript.js";
 import { handleTaskLogTool, taskLogAssignmentContext } from "./task-log-tools.js";
 import { createHostPlatformSession, launchMaterial, type HostAgentObservation, type HostPlatformSession, type StartupProof } from "./host-platform.js";
 import {
@@ -76,6 +77,9 @@ async function readRoleConfiguration(path: string): Promise<RoleConfiguration> {
 }
 function shellQuote(value: string): string { return "'" + value.replaceAll("'", "'\\''") + "'"; }
 const NATIVE_HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "PreToolUse"] as const;
+const AgyNativeToolCallSchema = z.object({ name: z.string().min(1), args: z.record(JsonValueSchema) }).strict();
+const AgyMcpOperationSchema = z.object({ nativeSessionId: z.string().min(1), anchor: AgyNativeAnchorSchema,
+  nativeStepIndex: z.number().int().nonnegative(), nativeToolCall: AgyNativeToolCallSchema }).strict();
 /**
  * Launch-local hook runner. Tool and prompt hooks fail closed even when Node cannot run its handler (crash, missing
  * module, signal): any status other than 0 (decision on stdout) or 2 (block) becomes exit 2 with a stderr reason, which
@@ -253,11 +257,13 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       systemPrompt += "Inspect the durable inbox, assess the spec and propose a schema-valid workflow. Use repository_read for bounded source/Git metadata, and read_pinned_instructions with a selected skillId to inspect exact approved SKILL.md content. " + NATIVE_READ_GUIDANCE + " If repository.read is missing, report the exact blocker. Use resume_run only after the host restores and preflights that capability. A Runtime wake of kind changes_requested means the human asked for changes at design/delivery approval: re-plan its followUpRunId with the feedback through propose_workflow (spec runId = followUpRunId, same specificationId and acceptance criteria); the superseded parent run is never resumed. Runtime controls dispatch and quality/approval gates. Never edit source or approve human-required gates.";
     } else if (role === "developer") systemPrompt += "Read assignment_context and workspace_status for the exact accepted specification, owned paths and worktree. " + NATIVE_READ_GUIDANCE + " In your task worktree the native shell also runs build/test commands only: npm|pnpm|yarn test, run test|build|typecheck, exec vitest|tsc; npx vitest|tsc|jest|mocha; node --test; tsc; go test; cargo test; pytest; python -m pytest. Never install packages, use the network or write Git state natively: use commit_changes with expectedHead for scoped commits and check_work for untrusted feedback. Required TDD: first edit/commit only configured testPaths, request_verification(red), then END YOUR TURN. Runtime sends a phase outcome to resume you. After independent Red, tests are frozen: authorize_implementation, edit source, commit, check_work, then request_verification(green) and yield. On Green receipt, refactor source if appropriate without editing Red tests, commit, request_verification(refactor) and yield. For non-required automated work, request_verification(verification) after a clean commit and yield. Submit implementation only when all required automated phase receipts exist. Manual docs evidence is requested after submission. Never modify accepted criteria/specification or claim your own feedback is independent acceptance. If assignment_context reports kind conflict_resolution, you are resolving a preserved Git merge conflict: edit only its conflictPaths, combine both sides' intent instead of picking ours/theirs blindly, remove every conflict marker, conclude the merge with commit_changes and end your turn; do not use request_verification, authorize_implementation or submit_implementation, and report an unresolvable conflict with task.status status \"failed\".";
     else systemPrompt += "Read incoming RoleMessage. Use repository_read for bounded source and Git inspection, and read_pinned_instructions with a selected skillId to inspect exact approved SKILL.md content. " + NATIVE_READ_GUIDANCE + " Inspect the exact assigned revision and criteria independently. Use host verification tools for evidence; never invent command output. Send replies through send_role_message with original correlation and causation. End your turn after sending.";
+    if (role === "developer") systemPrompt += " Use read_workspace_file to inspect owned UTF-8 files and obtain their sha256, then write_workspace_file with that exact expectedSha256 to replace content, or null to create a missing file. These tools enforce the same scope, current lease/fence and TDD phase as native edits. Paths must be relative, parents must exist and files are limited to 128 KiB. For Agy, native file and shell tools remain denied: use these workspace tools, check_work, commit_changes and independent request_verification instead.";
     if (role === "coordinator") systemPrompt += " Use planning_reference to read the shipped specification example, policy metadata schema and workflow contract before proposing a workflow. Specialist requests can gather project details; repository files are never a mailbox.";
     if (role !== "conversation") {
-      systemPrompt += " Never ask the user questions directly or wait for user responses in your pane; make and record reversible low-risk assumptions. To escalate a blocker, send a `task.status` RoleMessage to coordinator with payload status \"blocked\" and the blockers, with the original correlation_id and causation_id set to the assignment message_id. Only Coordinator asks the user (request_user_decision) or clarifies (report_progress questions). Never invent message types. Emit structured results (status, summary, evidence, artifacts, blockers, requested_action, next_role) with verification evidence before claiming completion.";
+      systemPrompt += " Never ask the user questions directly or wait for user responses in your pane; make and record reversible low-risk assumptions. To escalate a blocker, send a `task.status` RoleMessage to coordinator with payload status \"blocked\" and the blockers, with the original correlation_id and causation_id set to the assignment message_id. For a human decision use request_user_decision through Runtime and Conversation, then end your turn; Coordinator may also clarify through report_progress questions. Never invent message types. Emit structured results (status, summary, evidence, artifacts, blockers, requested_action, next_role) with verification evidence before claiming completion.";
       systemPrompt += roleReplyGuidance(role);
     }
+    if (provider === "agy") systemPrompt += "\n\nExact Bflow MCP tool definitions follow. Native file and shell tools are denied, including reads of MCP schema files or saved large outputs. Use these definitions directly with call_mcp_tool: ServerName=\"bflow\", ToolName=name, Arguments matching inputSchema. Do not guess parameter names. Request bounded repository_read output (limit at most 2048) to keep source observations inline.\n" + JSON.stringify(availableTools(role, provider));
     launch[role] = { systemPrompt, mcpConfigFile, hooksSettingsFile };
   }
   // P30 readiness is composed once per daemon. Without `platform` the legacy launch material above is served unchanged.
@@ -269,7 +275,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const rolePath = join(configuration.directory, role + ".json");
       const runner = hookRunners.get(role);
       const provider = platformRoles.find(option => option.role === role)?.provider ?? "claude";
-      const hookEvents = provider === "agy" ? NATIVE_HOOK_EVENTS.filter(event => event !== "UserPromptSubmit") : NATIVE_HOOK_EVENTS;
+      const hookEvents = provider === "agy" ? [...NATIVE_HOOK_EVENTS.filter(event => event !== "UserPromptSubmit"), "PreInvocation"] : NATIVE_HOOK_EVENTS;
       const hookEntries = Object.fromEntries(hookEvents.map(event => [event, hookCommandFor(rolePath, event, runner)]));
       return { mcpServers: { bflow: { command: process.execPath, args: [executable, "mcp", rolePath] } }, hooks: hookEntries };
     },
@@ -294,6 +300,27 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         !binding.session || !native || native.source !== binding.session.source || native.kind !== binding.session.kind || native.value !== binding.session.value)
       throw new Error("MCP pane occupant/native session changed");
     return binding;
+  };
+  const readAgyTurn = async (binding: PaneBinding, requestedLaunchId?: string, transcriptPath?: string, pendingTool?: AgyPendingNativeTool,
+    expectedMcpTool?: { name: string; arguments: Record<string, unknown> }) => {
+    const launchId = textField(binding.metadata?.launchId ?? platformSession?.launchIdOf(binding.role));
+    if (requestedLaunchId !== undefined && requestedLaunchId !== launchId) throw new Error("Agy native turn belongs to a stale launch");
+    const launch = platformSession?.nativeAgyLaunch(binding.role, launchId);
+    if (!launch || !binding.session || binding.agentKind !== "agy" && binding.provider !== "agy" || binding.role === "conversation") throw new Error("No prepared native Agy specialist launch");
+    const path = join(launch.home, ".gemini", "antigravity-cli", "brain", binding.session.value, ".system_generated", "logs", "transcript_full.jsonl");
+    const previous = await receipts.latestAgyNativeTurn(binding, launchId);
+    return { launchId, previous, ...(await readAgyNativeTurn({ home: launch.home, nativeSessionId: binding.session.value,
+      transcriptPath: transcriptPath ?? path, ...(previous ? { priorAnchor: previous.anchor } : {}), ...(pendingTool ? { pendingTool } : {}),
+      ...(expectedMcpTool ? { expectedMcpTool } : {}) })) };
+  };
+  const assertAgyTurn = async (binding: PaneBinding, expectedAnchor?: unknown, pendingTool?: AgyPendingNativeTool, operationName?: string) => {
+    const current = await readAgyTurn(binding, undefined, undefined, pendingTool);
+    if (expectedAnchor !== undefined && digest(expectedAnchor) !== digest(current.anchor)) throw new Error("Agy native hook belongs to another transcript turn");
+    const admitted = await receipts.assertAgyNativeTurn(binding, current.launchId, current.anchor);
+    const message = RoleMessageSchema.parse(JSON.parse(normalizeProviderPrompt(current.prompt.trim())));
+    if (digest(message) !== digest(admitted.message)) throw new Error("Agy native turn envelope changed");
+    await requireWorkspace().runtime.authorizeAgyProviderTurn(message, binding, operationName);
+    return admitted;
   };
   const nativeDeliver = async (message: RoleMessage, operationId = message.message_id) => {
     // Enforce native ingress requirements before reserving an intent or invoking the async plugin.
@@ -459,7 +486,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const expectedProvider = platformRoles.find(option => option.role === pane.role)?.provider ??
         AgentProviderIdSchema.parse(pane.agentKind ?? pane.provider);
       const validSource = (source: unknown) =>
-        source === `herdr:${expectedProvider}` || source === expectedProvider;
+        source === (expectedProvider === "agy" ? "herdr:antigravity_cli" : `herdr:${expectedProvider}`) || source === expectedProvider;
       if (startupPaths.get(pane.role) === "mcp_bootstrap") {
         // No SessionStart hook registered this pane: Herdr's observed native session is the proof, registered here.
         if (!native) throw new Error(`[bflow:native-startup-pending] ${pane.role} pane ${pane.paneId} has bootstrap reachability but Herdr reports no native session yet.`);
@@ -648,6 +675,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     });
     // Stops of an earlier host session are not re-judged here: the new Coordinator has had no turn yet, so a missing next action
     // from a previous session is not "no response". Unsettled Stops of this session are reconciled by the normal Stop loop.
+    for (const turn of await receipts.recoverAgyNativeTurns()) queueAgyNativePrompt(turn);
     await workspace.runtime.resumeRecoverableRuns();
     manifest = accepted;
     await taskLogPane.ensure(accepted.herdrWorkspaceId);
@@ -709,8 +737,16 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const roleCall = async (role: AgentRole, input: unknown) => {
     const args = record(input); const name = textField(args.name); const parameters = record(JsonValueSchema.parse(args.arguments ?? {}));
     const binding = await principal(role, textField(args.paneId));
+    if (providerForRole(role) === "agy") {
+      const operation = AgyMcpOperationSchema.parse(args.nativeAgyOperation);
+      if (operation.nativeSessionId !== binding.session?.value || operation.nativeToolCall.name !== "call_mcp_tool" ||
+          operation.nativeToolCall.args.ServerName !== "bflow" || operation.nativeToolCall.args.ToolName !== name ||
+          digest(operation.nativeToolCall.args.Arguments ?? {}) !== digest(parameters)) throw new Error("Agy MCP operation identity mismatch");
+      await readAgyTurn(binding, textField(args.launchId));
+      await assertAgyTurn(binding, operation.anchor, { stepIndex: operation.nativeStepIndex, toolCall: operation.nativeToolCall }, name);
+    }
     const host = requireWorkspace();
-    if (quiesced && !["inspect_native_delivery", "host_status", "assignment_context", "repository_read", "read_pinned_instructions", "read_task_log", "log_task_step", "inspect_review", "complete_review", "inspect_alternative_verification", "record_alternative_verification", "record_behavioral_verification", "submit_implementation"].includes(name)) throw new Error("Host is quiesced; new work is disabled while existing receipts can drain");
+    if (quiesced && !QUIESCED_RECEIPT_DRAIN_OPERATIONS.includes(name)) throw new Error("Host is quiesced; new work is disabled while existing receipts can drain");
     if (name === "inspect_native_delivery") {
       if (!["coordinator", "conversation"].includes(role)) throw new Error("Only Coordinator or Conversation inspects native delivery");
       const { operationId } = z.object({ operationId: z.string().min(1).max(200) }).strict().parse(parameters);
@@ -868,6 +904,12 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
     if (name === "inspect_review") return verification.inspectReview(binding, parameters);
     if (name === "workspace_status") return development.status(binding, parameters);
+    if (name === "read_workspace_file") return development.readWorkspaceFile(binding, parameters);
+    if (name === "write_workspace_file") {
+      if (platformSession && !platformRoles.some(option => option.role === "developer" && option.permissionMode !== "restricted"))
+        throw new Error("The Developer permission profile does not permit workspace writes");
+      return development.writeWorkspaceFile(binding, parameters);
+    }
     if (name === "commit_changes") return development.commit(binding, parameters);
     if (name === "check_work") return development.check(binding, parameters);
     if (name === "request_verification") {
@@ -956,7 +998,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     try { await workspace?.runtime.reportInboundFailure(message, reason); return message.run_id !== undefined; }
     catch (error) { process.stderr.write(`Bflow could not report inbound failure: ${redactString(String(error))}\n`); return false; }
   };
-  const physicalPrompts: {role: AgentRole; paneId: string; nativeSessionId: string; message: RoleMessage; attempts: number; retryAt: number}[] = [];
+  const physicalPrompts: {role: AgentRole; paneId: string; nativeSessionId: string; message: RoleMessage; attempts: number; retryAt: number; agyTurnId?: string}[] = [];
+  const queueAgyNativePrompt = (turn: AgyNativeTurn) => {
+    if (!physicalPrompts.some(item => item.agyTurnId === turn.turnId)) physicalPrompts.push({ role: turn.binding.role,
+      paneId: turn.binding.paneId, nativeSessionId: turn.binding.session!.value, message: turn.message, attempts: 0, retryAt: 0, agyTurnId: turn.turnId });
+  };
   let stopGeneration = 1, reconciledStopGeneration = 0; // First pump recovers durable stops after restart.
   /** Bounded retry for transient inbound and Stop reconciliation failures; after this many, the item is dropped with a durable notice. */
   const MAX_INBOUND_ATTEMPTS = 5;
@@ -975,7 +1021,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         const observed = binding ? undefined : await observeAgent(input.paneId);
         if (binding && (!binding.session || observed === undefined && currentManifest === undefined)) throw new Error("Provider tools/list cannot be bound to a current role session");
         if (observed && (!observed.nativeSession || !platformRoles.some(option => option.role === role &&
-            (observed.nativeSession!.source === option.provider || observed.nativeSession!.source === `herdr:${option.provider}`))))
+            (observed.nativeSession!.source === option.provider || observed.nativeSession!.source === (option.provider === "agy" ? "herdr:antigravity_cli" : `herdr:${option.provider}`)))))
           throw new Error("Provider tools/list has no compatible observed Herdr native session");
         const names = availableTools(role, providerForRole(role)).map(tool => tool.name).sort();
         if (digest([...input.toolNames].sort()) !== digest(names)) throw new Error("Provider tools/list does not match the authenticated Bflow role surface");
@@ -989,17 +1035,44 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         return { recorded: true };
       }
       if (method === "agy_gateway_session") {
-        const input = z.object({ paneId: z.string().min(1), nativeSessionId: z.string().min(1), launchId: z.string().min(1) }).strict().parse(params);
+        const input = z.object({ paneId: z.string().min(1), nativeSessionId: z.string().min(1), launchId: z.string().min(1), anchor: AgyNativeAnchorSchema,
+          nativeStepIndex: z.number().int().nonnegative(), nativeToolCall: AgyNativeToolCallSchema }).strict().parse(params);
         if (providerForRole(role) !== "agy" || role === "conversation") throw new Error("Agy Gateway session is unavailable for this role");
         const binding = await principal(role, input.paneId);
-        if (!binding.session || binding.session.value !== input.nativeSessionId || input.launchId !== platformSession?.launchIdOf(role))
+        if (!binding.session || binding.session.value !== input.nativeSessionId)
           throw new Error("Agy Gateway native session or launch mismatch");
+        await readAgyTurn(binding, input.launchId);
+        if (input.nativeToolCall.name !== "call_mcp_tool" || input.nativeToolCall.args.ServerName === "bflow") throw new Error("Agy Gateway call identity mismatch");
+        await assertAgyTurn(binding, input.anchor, { stepIndex: input.nativeStepIndex, toolCall: input.nativeToolCall });
         return { permitted: true };
+      }
+      if (method === "agy_native_turn") {
+        const input = z.object({ paneId: z.string().min(1), nativeSessionId: z.string().min(1), launchId: z.string().min(1), transcriptPath: z.string().min(1), anchor: AgyNativeAnchorSchema }).strict().parse(params);
+        if (providerForRole(role) !== "agy" || role === "conversation") throw new Error("Agy native admission requires a specialist");
+        // The private startup prompt establishes SessionStart before activation; no assignment is admitted here.
+        if (!workspace) return { recorded: false, reason: "startup" };
+        const binding = await principal(role, input.paneId);
+        if (binding.session?.value !== input.nativeSessionId) throw new Error("Agy admission native session mismatch");
+        const current = await readAgyTurn(binding, input.launchId, input.transcriptPath);
+        if (digest(input.anchor) !== digest(current.anchor)) throw new Error("Agy admission hook belongs to another transcript turn");
+        const message = RoleMessageSchema.parse(JSON.parse(normalizeProviderPrompt(current.prompt.trim())));
+        await requireWorkspace().runtime.authorizeAgyProviderTurn(message, binding);
+        const turn = await receipts.recordAgyNativeTurn(binding, current.launchId, current.anchor, message,
+          current.previous ? { supersedesTurnId: current.previous.turnId } : undefined);
+        queueAgyNativePrompt(turn);
+        return { recorded: true };
       }
       if (method === "tool_guard") {
         const input = record(params), hook = record(input.hook), binding = await principal(role, textField(input.paneId));
         if (hook.hook_event_name !== "PreToolUse" || !binding.session || hook.session_id !== binding.session.value)
           throw new Error("Tool guard native session mismatch");
+        if (providerForRole(role) === "agy") {
+          const nativeCall = AgyNativeToolCallSchema.parse(hook.native_tool_call), nativeStep = z.number().int().nonnegative().parse(hook.native_step_index);
+          if (nativeCall.name !== "call_mcp_tool" || nativeCall.args.ServerName !== "bflow" ||
+              hook.tool_name !== `mcp__bflow__${textField(nativeCall.args.ToolName)}` || digest(nativeCall.args.Arguments ?? {}) !== digest(hook.tool_input))
+            throw new Error("Agy host tool call identity mismatch");
+          await assertAgyTurn(binding, AgyNativeAnchorSchema.parse(hook.native_anchor), { stepIndex: nativeStep, toolCall: nativeCall }, textField(nativeCall.args.ToolName));
+        }
         const tool = textField(hook.tool_name);
         if (role === "conversation" && ["mcp__bflow__conversation_decide", "mcp__bflow__resume_run"].includes(tool))
           await receipts.assertConversationUserTurn(binding);
@@ -1042,6 +1115,17 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (payload.paneId === undefined) throw new Error("provider_bootstrap requires the provider pane id");
         await writeStartupReceipt(role, payload.paneId, { reachability: { launchId: payload.launchId, toolReachability: payload.toolReachability, source: "mcp_bootstrap" } });
         return { recorded: true };
+      }
+      if (method === "agy_mcp_operation") {
+        const input = z.object({ paneId: z.string().min(1), launchId: z.string().min(1), name: z.string().min(1), arguments: z.record(JsonValueSchema) }).strict().parse(params);
+        if (providerForRole(role) !== "agy" || role === "conversation" || !availableTools(role, "agy").some(tool => tool.name === input.name))
+          throw new Error("No native Agy MCP operation for this role");
+        const binding = await principal(role, input.paneId);
+        const current = await readAgyTurn(binding, input.launchId, undefined, undefined, { name: input.name, arguments: input.arguments });
+        if (!current.pendingTool) throw new Error("Agy MCP call has no pending native operation");
+        await assertAgyTurn(binding, current.anchor, current.pendingTool, input.name);
+        return AgyMcpOperationSchema.parse({ nativeSessionId: binding.session!.value, anchor: current.anchor,
+          nativeStepIndex: current.pendingTool.stepIndex, nativeToolCall: current.pendingTool.toolCall });
       }
       if (method === "role_call") {
         const input = record(params), name = textField(input.name);
@@ -1097,8 +1181,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         const input = record(params), binding = await principal(role, textField(input.paneId));
         if (!binding.session || binding.session.value !== textField(input.nativeSessionId)) throw new Error("Provider Stop native session mismatch");
         if (providerForRole(role) === "agy") {
-          // No certified native turn epoch: a physical Stop must not settle an arbitrary active assignment.
-          return { recorded: false, reason: "agy_turn_identity_unsupported" };
+          // Agy executionNum resets between turns. The latest transcript anchor
+          // cannot prove which invocation produced a delayed/replayed Stop.
+          return { recorded: false, reason: "native_stop_epoch_unproven" };
         }
         // Every non-Conversation role's Stop is durable: an unanswered assignment must not vanish with its turn.
         if (role === "coordinator") { if (await receipts.stopCoordinatorTurn(binding)) stopGeneration++; }
@@ -1348,15 +1433,20 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (head.retryAt > Date.now()) break;
         try {
           await applyInboundPrompt(head);
+          if (head.agyTurnId) await receipts.markAgyNativePromptHandled(head.agyTurnId);
           physicalPrompts.shift();
         } catch (error) {
           const reason = redactString(String(error));
           inboundError = reason; process.stderr.write(`Bflow inbound: ${reason}\n`);
           // Runtime refused it and its notice is the report: retrying or dropping it again would only add a second one.
-          if (isNonRetryableDeliveryError(error)) { physicalPrompts.shift(); continue; }
+          if (isNonRetryableDeliveryError(error)) {
+            if (head.agyTurnId) await receipts.markAgyNativePromptHandled(head.agyTurnId);
+            physicalPrompts.shift(); continue;
+          }
           head.attempts++;
           if (head.attempts < MAX_INBOUND_ATTEMPTS) { head.retryAt = Date.now() + 250 * 2 ** head.attempts; break; }
           // Dropped only after bounded retries, and never silently: Runtime's run notice, or a direct receipt when that fails.
+          if (head.agyTurnId) await receipts.markAgyNativePromptHandled(head.agyTurnId);
           physicalPrompts.shift();
           const dropped = `${reason} (dropped after ${head.attempts} attempts)`;
           if (!await reportInboundFailure(head.message, dropped)) {
@@ -1383,7 +1473,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       for (const stopped of await receipts.pendingSpecialistStops()) {
         const key = digest(["specialist", stopped.stopId]);
         try {
-          await requireWorkspace().runtime.specialistTurnStopped(stopped.binding, stopped.binding.role, stopped.observedAt);
+          await requireWorkspace().runtime.specialistTurnStopped(stopped.binding, stopped.binding.role, stopped.observedAt, stopped.sourceMessageId);
           await receipts.completeSpecialistStop(stopped.stopId); stopAttempts.delete(key);
         } catch (error) {
           retryNeeded = true; inboundError = redactString(String(error)); process.stderr.write(`Bflow stop: ${inboundError}\n`);
@@ -1574,6 +1664,8 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
   if (role === "developer") tools.push({ name: "authorize_implementation", description: "Verify accepted spec and Red evidence; parameters: runId, taskId" }, { name: "submit_implementation", description: "Submit committed implementation under your exact native assignment binding; parameters: runId, taskId" });
   if (role === "developer") tools.push(
     { name: "workspace_status", description: "Inspect your assigned task worktree, current Git HEAD and recorded TDD phases; runId,taskId" },
+    { name: "read_workspace_file", description: "Read one UTF-8 file inside your assigned task worktree and obtain its SHA-256. Bounded to 128 KiB, no symlinks or special files; runId,taskId,path" },
+    { name: "write_workspace_file", description: "Write one UTF-8 file inside accepted ownership and the current TDD phase. Pass expectedSha256 from read_workspace_file to replace, or null to create a new file. Existing parent directory required; 128 KiB limit; runId,taskId,path,content,expectedSha256" },
     { name: "commit_changes", description: "Commit only approved owned files on your task branch with expectedHead and message. No shell, push or merge; runId,taskId,expectedHead,message" },
     { name: "check_work", description: "Run owner-configured checks as Developer feedback. This never counts as independent acceptance evidence; runId,taskId" },
     { name: "request_verification", description: "Ask Runtime to dispatch an independent QA phase, then end your turn. Phase: red,green,refactor,verification; runId,taskId,phase" });
@@ -1634,6 +1726,8 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
     inspect_alternative_verification:{properties:{runId:string,taskId:string},required:["runId","taskId"]},
     record_alternative_verification:{properties:{observationId:string,runId:string,taskId:string,criteria:{type:"array",items:{type:"object",properties:{criterionId:string,passed:{type:"boolean"},summary:string},required:["criterionId","passed","summary"],additionalProperties:false}}},required:["observationId","runId","taskId","criteria"]},
     workspace_status:{properties:{runId:string,taskId:string},required:["runId","taskId"]},
+    read_workspace_file:{properties:{runId:string,taskId:string,path:string},required:["runId","taskId","path"]},
+    write_workspace_file:{properties:{runId:string,taskId:string,path:string,content:{type:"string",maxLength:131072},expectedSha256:{anyOf:[{type:"string",pattern:"^[a-f0-9]{64}$"},{type:"null"}]}},required:["runId","taskId","path","content","expectedSha256"]},
     commit_changes:{properties:{runId:string,taskId:string,expectedHead:string,message:string},required:["runId","taskId","expectedHead","message"]},
     check_work:{properties:{runId:string,taskId:string},required:["runId","taskId"]},
     request_verification:{properties:{runId:string,taskId:string,phase:{type:"string",enum:["red","green","refactor","verification"]}},required:["runId","taskId","phase"]},
@@ -1654,7 +1748,7 @@ async function reportHerdrNativeSession(params: {
     method: "pane.report_agent_session",
     params: {
       pane_id: params.paneId,
-      source: `herdr:${params.provider}`,
+      source: params.provider === "agy" ? "herdr:antigravity_cli" : `herdr:${params.provider}`,
       agent: params.provider,
       seq: Date.now() * 1000,
       agent_session_id: params.sessionId,
@@ -1757,7 +1851,11 @@ export async function runRoleMcp(configuration: RoleConfiguration, roleConfigPat
       const measured = ["record_behavioral_verification", "check_work", "inspect_review", "complete_review", "record_alternative_verification"].includes(String(params.name));
       const paneId = process.env.HERDR_PANE_ID;
       if (paneId === undefined || paneId.length === 0) throw new Error("HERDR_PANE_ID is not set in the Bflow MCP server environment; the provider must forward it");
+      const nativeAgyOperation = configuration.provider === "agy" ? AgyMcpOperationSchema.parse(await callHost(configuration.socketPath,
+        configuration.token, "agy_mcp_operation", { paneId, launchId: textField(process.env[BFLOW_LAUNCH_ID_ENV]),
+          name: textField(params.name), arguments: record(params.arguments ?? {}) })) : undefined;
       const result = await callHost(configuration.socketPath, configuration.token, "role_call", { ...params, paneId,
+        ...(nativeAgyOperation ? { nativeAgyOperation } : {}),
         ...(process.env[BFLOW_LAUNCH_ID_ENV] ? { launchId: process.env[BFLOW_LAUNCH_ID_ENV] } : {}) }, measured ? 600_000 : 30_000);
       reply({ content: [{ type: "text", text: JSON.stringify(result) }] });
     } catch (error) { reply({ isError: true, content: [{ type: "text", text: String(error) }] }); }
@@ -1774,6 +1872,9 @@ function parseAgyHookJson(raw: string, event: string): Record<string, unknown> {
   }).passthrough();
   let schema: z.ZodType<Record<string, unknown>>;
   if (event === "SessionStart") schema = common;
+  else if (event === "PreInvocation") schema = common.extend({
+    transcriptPath: z.string().min(1), invocationNum: z.number().int().nonnegative(), initialNumSteps: z.number().int().nonnegative()
+  });
   else if (event === "PreToolUse") schema = common.extend({
     stepIdx: z.number().int().nonnegative(),
     toolCall: z.object({ name: z.string().min(1), args: z.record(z.unknown()) }).strict()
@@ -1866,6 +1967,12 @@ function normalizeProviderPrompt(prompt: string): string {
 export async function runProviderHook(configuration: RoleConfiguration, event: string, roleConfigPath?: string): Promise<void> {
   try { await handleProviderHook(configuration, event, roleConfigPath); }
   catch (error) {
+    if (configuration.provider === "agy" && event === "PreInvocation") {
+      process.stderr.write("Bflow Agy native turn admission failed; Runtime work remains unresolved.\n");
+      process.stdout.write(JSON.stringify({ injectSteps: [{ systemMessage: { systemMessage:
+        "Bflow could not authenticate this native turn. Do not use tools or claim task completion. Stop and leave Runtime work unresolved." } }] }) + "\n");
+      return;
+    }
     if (configuration.provider === "agy" && event === "PreToolUse") {
       process.stdout.write(JSON.stringify({ decision: "deny", reason: redactString(String(error)) }) + "\n");
       return;
@@ -1915,7 +2022,30 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
   for await (const chunk of process.stdin) { size += Buffer.byteLength(chunk); if (size > 1024 * 1024) throw new Error("Oversized provider hook"); chunks.push(Buffer.from(chunk)); }
   const rawInput = Buffer.concat(chunks).toString("utf8");
   const hook = configuration.provider === "agy" ? parseAgyHookJson(rawInput, event) : parseHookJson(rawInput, event);
+  if (configuration.provider === "agy" && event === "Stop") {
+    // Permit the physical turn to end without inventing Runtime settlement or
+    // an unbounded continuation. Keep its admission and business work pending.
+    process.stderr.write("Bflow native Stop epoch is unproven for Agy; the active assignment remains unresolved.\n");
+    process.stdout.write(JSON.stringify({ decision: "stop" }) + "\n");
+    return;
+  }
   const paneId = textField(process.env.HERDR_PANE_ID);
+  const agyNative = configuration.provider === "agy" && ["PreInvocation", "PreToolUse"].includes(event)
+    ? await readAgyNativeTurn({ home: textField(process.env.HOME), nativeSessionId: textField(hook.conversationId), transcriptPath: textField(hook.transcriptPath),
+      ...(event === "PreToolUse" ? { pendingTool: { stepIndex: z.number().int().nonnegative().parse(hook.stepIdx), toolCall: AgyNativeToolCallSchema.parse(hook.toolCall) } } : {}) }) : undefined;
+  if (configuration.provider === "agy" && event === "PreInvocation") {
+    if (process.env.BFLOW_ENVIRONMENT_ID && agyNative!.prompt.trim() ===
+        `[bflow startup ${process.env.BFLOW_ENVIRONMENT_ID}] Reply only pong. Do not use tools or start a workflow.`) {
+      process.stdout.write("{}\n");
+      return;
+    }
+    await callHost(configuration.socketPath, configuration.token, "agy_native_turn", {
+      paneId, nativeSessionId: textField(hook.conversationId), launchId: textField(process.env[BFLOW_LAUNCH_ID_ENV]), transcriptPath: textField(hook.transcriptPath),
+      anchor: agyNative!.anchor
+    });
+    process.stdout.write("{}\n");
+    return;
+  }
   if (event === "SessionStart" || event === "Stop") {
     const session = textField(configuration.provider === "agy" ? hook.conversationId : hook.session_id);
     if (configuration.provider !== "agy" && event !== hook.hook_event_name) throw new Error("Provider hook event mismatch");
@@ -1944,8 +2074,7 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
     if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "provider_started", { paneId, nativeSessionId: session,
       ...(plan === undefined || reachability === undefined ? {} : { launchId: plan.launchId, toolReachability: reachability }) });
     if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "native_session", {paneId, sessionId:session});
-    if (event === "Stop" && configuration.role !== "conversation") await callHost(configuration.socketPath, configuration.token, "provider_stopped", { paneId, nativeSessionId: session,
-      ...(configuration.provider === "agy" ? { launchId: textField(process.env[BFLOW_LAUNCH_ID_ENV]), executionNum: hook.executionNum } : {}) });
+    if (event === "Stop" && configuration.role !== "conversation") await callHost(configuration.socketPath, configuration.token, "provider_stopped", { paneId, nativeSessionId: session });
     if (event === "Stop" && configuration.role === "conversation") {
       // Every ordinary user turn must reach conversation_decide. A turn that ends without it handed nothing to Runtime, so the Stop
       // is refused with the exact instruction; the host reserves at most MAX_DECISION_REBLOCKS refusals per turn (Claude and Codex
@@ -2082,15 +2211,15 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
         if (!/^[a-z][a-z0-9_-]{0,63}$/.test(serverName) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(toolName) ||
             typeof input !== "object" || input === null || Array.isArray(input)) throw new Error("Agy MCP tool call is malformed");
         if (serverName === "bflow") {
-          if (toolName === USER_DECISION_TOOL && configuration.role !== "coordinator")
-            throw new Error("Only Coordinator may request a user decision through Bflow Conversation");
           const nativeHook = { hook_event_name: "PreToolUse", session_id: textField(hook.conversationId),
-            tool_name: `mcp__bflow__${toolName}`, tool_input: input };
+            tool_name: `mcp__bflow__${toolName}`, tool_input: input, native_anchor: agyNative!.anchor,
+            native_step_index: hook.stepIdx, native_tool_call: toolCall };
           await callHost(configuration.socketPath, configuration.token, "tool_guard", { paneId, hook: nativeHook });
         } else {
           if (!(await isRegisteredAgyGatewayServer(serverName))) throw new Error("Agy MCP server is not registered to this Runtime launch");
           await callHost(configuration.socketPath, configuration.token, "agy_gateway_session", {
-            paneId, nativeSessionId: textField(hook.conversationId), launchId: textField(process.env[BFLOW_LAUNCH_ID_ENV])
+            paneId, nativeSessionId: textField(hook.conversationId), launchId: textField(process.env[BFLOW_LAUNCH_ID_ENV]), anchor: agyNative!.anchor,
+            nativeStepIndex: hook.stepIdx, nativeToolCall: toolCall
           });
         }
         process.stdout.write(JSON.stringify({ decision: "allow", reason: "Bflow tool guard permitted the call" }) + "\n");

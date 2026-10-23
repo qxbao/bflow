@@ -146,7 +146,7 @@ export function verifyLaunchAttestation(
   }
 
   if (expected?.provider !== undefined) {
-    const validSources = [expected.provider, `herdr:${expected.provider}`];
+    const validSources = [expected.provider, expected.provider === "agy" ? "herdr:antigravity_cli" : `herdr:${expected.provider}`];
     if (!validSources.includes(attestation.nativeSession.source)) {
       return {
         valid: false,

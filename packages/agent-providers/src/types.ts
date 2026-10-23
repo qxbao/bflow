@@ -69,7 +69,7 @@ export interface LiveReadinessObservation {
   readonly permissionDenied?: boolean;
 }
 
-export type HostHookEvent = "SessionStart" | "UserPromptSubmit" | "Stop" | "PreToolUse";
+export type HostHookEvent = "SessionStart" | "UserPromptSubmit" | "Stop" | "PreToolUse" | "PreInvocation";
 
 export interface HostMcpServer {
   readonly command: string;

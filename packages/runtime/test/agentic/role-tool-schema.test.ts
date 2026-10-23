@@ -9,6 +9,21 @@ const input = (role: "architect" | "coordinator", name: string) =>
   availableTools(role).find(tool => tool.name === name)!.inputSchema as any;
 
 describe("native role tool schema guidance", () => {
+  it("gives only Developers bounded workspace file tools with explicit replacement preconditions", () => {
+    for (const provider of ["agy", "claude", "codex"] as const) {
+      const tools = availableTools("developer", provider);
+      const read = tools.find(tool => tool.name === "read_workspace_file");
+      const write = tools.find(tool => tool.name === "write_workspace_file");
+      expect(read).toBeDefined();
+      expect(write).toBeDefined();
+      expect(read!.inputSchema).toMatchObject({ required: ["runId", "taskId", "path"], additionalProperties: false });
+      expect(write!.inputSchema).toMatchObject({ required: ["runId", "taskId", "path", "content", "expectedSha256"], additionalProperties: false,
+        properties: { content: { type: "string", maxLength: 131072 }, expectedSha256: { anyOf: [{ type: "string", pattern: "^[a-f0-9]{64}$" }, { type: "null" }] } } });
+      for (const role of ["conversation", "coordinator", "architect", "reviewer", "qa"] as const)
+        expect(availableTools(role, provider).some(tool => ["read_workspace_file", "write_workspace_file"].includes(tool.name))).toBe(false);
+    }
+  });
+
   it("creates a contract-valid Architect reply example without inventing stored references", () => {
     const example = roleReplyExample("architect");
     expect(RoleMessageSchema.parse(example)).toEqual(example);
