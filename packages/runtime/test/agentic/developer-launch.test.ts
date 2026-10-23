@@ -116,6 +116,7 @@ interface FakeAgent { name: string; kind: string; paneId: string; workspaceId: s
  * get/split/rename/close/process-info, agent list/get/start. Records every invocation with its env.
  */
 class FakeHerdr {
+  nativeSessionReady = true;
   /** `launchEnv` (agent start only) is the env of the pane the provider runs in — what a real provider process sees. */
   readonly calls: { args: string[]; env: Readonly<Record<string, string>> | undefined; launchEnv?: Readonly<Record<string, string>> | undefined }[] = [];
   readonly socketCalls: { method: string; params: Record<string, unknown> }[] = [];
@@ -162,7 +163,8 @@ class FakeHerdr {
     return {
       name: agent.name, agent: agent.kind, pane_id: agent.paneId, terminal_id: `term-${agent.paneId}`,
       workspace_id: agent.workspaceId, tab_id: agent.tabId, focused: false, agent_status: "idle", revision: 1,
-      interactive_ready: true, launch_pending: false
+      interactive_ready: true, launch_pending: false,
+      ...(this.nativeSessionReady ? { agent_session: { source: `herdr:${agent.kind}`, kind: "id", value: `native-${agent.name}` } } : {})
     };
   }
 
@@ -320,7 +322,7 @@ describe("P30 dynamic Developer launches end to end", () => {
   /** Builds the real host composition: readiness service, HostPlatformSession, RolePaneManager and the launch wrapper. */
   async function buildHost(options: { runner?: ProviderCommandRunner; gateway?: boolean; maxCapacity?: number; mcpServiceIds?: string[];
     /** When true (default) the started provider reports every registration reachable, as its SessionStart hook would. */
-    reportReachability?: boolean; startupTimeoutMs?: number } = {}) {
+    reportReachability?: boolean; startupTimeoutMs?: number; delayedNativeSession?: boolean } = {}) {
     // The runtime prepares the task worktree before allocating its Developer; preflight requires it to exist.
     for (const taskId of ["run-1-t1", "run-1-t2", "run-1-legacy"]) await mkdir(worktree(taskId), { recursive: true, mode: 0o700 });
     const hostDirectory = join(baseDir, "host");
@@ -367,6 +369,7 @@ describe("P30 dynamic Developer launches end to end", () => {
     await session.prepare();
 
     const herdr = new FakeHerdr();
+    herdr.nativeSessionReady = options.delayedNativeSession !== true;
     // The provider process of each started Developer proves its registrations from its own environment (H1 hook).
     herdr.onStart = async (paneId, env) => {
       const launchId = env?.[BFLOW_LAUNCH_ID_ENV];
@@ -407,7 +410,13 @@ describe("P30 dynamic Developer launches end to end", () => {
       allocate: request => session.allocateDeveloper(request.taskId, request.worktreePath),
       release: taskId => session.releaseDeveloper(taskId),
       reachability: (launchId, paneId) => session.developerReachability(launchId, paneId)
-    }, { startupTimeoutMs: options.startupTimeoutMs ?? 30_000, now: clock.now });
+    }, { startupTimeoutMs: options.startupTimeoutMs ?? 30_000, now: clock.now,
+      refreshBinding: async (paneId, callOptions) => {
+        const observed = await rolePanes.inspectTopologyHealth(callOptions);
+        if (!observed.ok) return observed;
+        return rolePanes.getRoleBinding(paneId, callOptions);
+      }
+    });
     return { service, session, journal, herdr, store, rolePanes, panes, clock, probeDirectory, reachabilityDirectory };
   }
 
@@ -462,6 +471,21 @@ describe("P30 dynamic Developer launches end to end", () => {
     }
     return found;
   }
+
+  it("persists a delayed native session before admitting a Developer with no Gateway registrations", async () => {
+    const host = await buildHost({ delayedNativeSession: true });
+    expect(await host.panes.allocateDeveloper(allocation("run-1-t1")))
+      .toMatchObject({ ok: false, error: { code: "conflict", retryable: true } });
+    expect(host.herdr.startCalls()).toHaveLength(1);
+    host.herdr.nativeSessionReady = true;
+    const resumed = await host.panes.allocateDeveloper(allocation("run-1-t1"));
+    expect(resumed.ok).toBe(true);
+    if (!resumed.ok) return;
+    expect(resumed.value.session?.value).toBe("native-dev-run-1-t1");
+    expect((await host.rolePanes.getRoleBinding(resumed.value.paneId)))
+      .toEqual({ ok: true, value: resumed.value });
+    expect(host.herdr.startCalls()).toHaveLength(1);
+  });
 
   it("allocates a Developer pane for the task worktree with the prepared launch and journals the intent", async () => {
     const host = await buildHost();

@@ -16,6 +16,13 @@ Các lệnh Herdr dùng `HERDR_SESSION` riêng cho từng repository, xóa các 
 định tuyến pane/socket được kế thừa theo cách giống P12. Preflight CLI/protocol chạy
 trước khi mở tài nguyên bền vững hay cấp phát Developer.
 
+Developer dùng platform launch phải có native session thực tế được lưu trong manifest và
+đã kết thúc lượt startup trước khi cấp phát thành công, kể cả khi không có Gateway registration.
+Runtime đối soát quan sát Herdr rồi trả binding hiện tại; outbox giữ assignment ở hàng đợi
+trước khi lấy lease hoặc gọi transport nếu platform binding chưa có session. Handle đã được
+chấp nhận mà thiếu session từ bản cũ vẫn bất biến và không được tự gắn session hay gửi lại;
+trường hợp đó cần đối soát riêng, không phải bằng chứng tác vụ hoàn tất.
+
 Các đầu vào host bắt buộc là tường minh: định danh repository/session, role capability,
 định nghĩa check của task/workflow, deterministic gate runner, ingress thông điệp/result/evidence
 Herdr có xác thực và phê duyệt của con người có xác thực. Không có

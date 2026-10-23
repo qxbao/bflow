@@ -2,7 +2,7 @@ import { resolvePrivateRuntimeStateDirectory } from "../private-state.js";
 import { mkdir, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
-  ApprovalDecisionSchema, RoleMessageSchema, SessionManifestSchema, type ApprovalDecision, type OperationOptions, type OperationResult, type QualityGate, type RoleMessage
+  ApprovalDecisionSchema, PaneBindingSchema, RoleMessageSchema, SessionManifestSchema, type ApprovalDecision, type OperationOptions, type OperationResult, type QualityGate, type RoleMessage
 } from "@bflow/contracts";
 import { AgenticWorkflowRuntime } from "./runtime.js";
 import { loadAgenticPolicies, type AgenticRuntimePorts, type PanePolicy } from "./ports.js";
@@ -72,6 +72,8 @@ export const DEVELOPER_STARTUP_TIMEOUT_MS = 30_000;
 export interface DeveloperLaunchOptions {
   readonly startupTimeoutMs?: number;
   readonly now?: () => number;
+  /** Reconcile Herdr's late native-session observation before returning the persisted binding. */
+  readonly refreshBinding?: (paneId: string, options?: OperationOptions) => ReturnType<PanePolicy["getRoleBinding"]>;
 }
 type AllocatedPane = Extract<Awaited<ReturnType<PanePolicy["allocateDeveloper"]>>, { ok: true }>["value"];
 interface PendingDeveloper { readonly taskId: string; readonly launchId: string; readonly allocated: AllocatedPane; readonly since: number }
@@ -137,14 +139,27 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
       try { verdict = await launches.reachability(entry.launchId, entry.allocated.paneId); }
       catch (error) { return failClosed(entry, `has no readable reachability record: ${String(error)}`, callOptions); }
       if (verdict.state === "ready") {
-        pending.delete(entry.taskId);
-        ready.set(entry.taskId, { paneId: entry.allocated.paneId, launchId: entry.launchId });
-        return { ok: true, value: entry.allocated };
+        const latest = await (launchOptions.refreshBinding ?? base.getRoleBinding.bind(base))(entry.allocated.paneId, callOptions);
+        if (!latest.ok) return latest;
+        const binding = latest.value === null ? null : PaneBindingSchema.parse(latest.value);
+        if (binding && (binding.bindingId !== entry.allocated.bindingId || binding.agentId !== entry.allocated.agentId ||
+            binding.paneId !== entry.allocated.paneId || binding.terminalId !== entry.allocated.terminalId ||
+            binding.worktreePath !== entry.allocated.worktreePath || binding.metadata?.launchId !== entry.launchId))
+          return failClosed(entry, "has a different persisted launch binding", callOptions);
+        const health = binding?.session ? await base.inspectRoleHealth(binding.paneId, callOptions) : undefined;
+        const nativeSourceMatches = binding?.session?.source === binding?.agentKind || binding?.session?.source === `herdr:${binding?.agentKind}`;
+        if (binding?.session && nativeSourceMatches && health?.ok && health.value.readyForPrompt && health.value.occupantMatches &&
+            health.value.paneId === binding.paneId && health.value.agentId === binding.agentId) {
+          pending.delete(entry.taskId);
+          ready.set(entry.taskId, { paneId: binding.paneId, launchId: entry.launchId });
+          return { ok: true, value: binding };
+        }
+        verdict = { state: "pending", reason: "native-session binding or the completed startup turn is not ready" };
       }
       if (verdict.state === "pending") {
         if (now() - entry.since < timeoutMs) {
           return { ok: false, error: { code: "conflict", retryable: true,
-            message: `Developer ${entry.taskId} has not proven Gateway tool reachability from its provider process yet: ${verdict.reason}`,
+            message: `Developer ${entry.taskId} has not proven Gateway tool reachability/native-session readiness from its provider process yet: ${verdict.reason}`,
             details: { stage: "developer_startup" } } };
         }
         return failClosed(entry, `did not prove Gateway tool reachability within ${timeoutMs} ms (${verdict.reason})`, callOptions);
@@ -196,14 +211,20 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
     const args = await paneModule.buildProviderRoleLaunchFromFiles({ ...launch, agentKind: manifest.panes.find(p => p.role === "coordinator")!.agentKind, role });
     roleConfigs[topology.topologyRole] = { args };
   }
-  const rolePanes: PanePolicy = new paneModule.RolePaneManager({ config: { sessionId: options.sessionId,
+  const rolePanes = new paneModule.RolePaneManager({ config: { sessionId: options.sessionId,
     projectName: manifest.projectName, workspaceRoot: repository, conversationSessionId: manifest.conversationSessionId,
     maxDeveloperCapacity: options.maxDeveloperCapacity ?? 2,
     defaultAgentKind: manifest.panes.find(p => p.role === "coordinator")!.agentKind,
     roleConfigs }, runner, store: manifestStore,
     // Dynamic Developer launches carry Gateway env, which Herdr accepts only at pane creation over its socket.
     socket: paneModule.createHerdrSocketPort({ runner, sessionId: options.sessionId }) });
-  const panes: PanePolicy = options.developerLaunches ? withDeveloperLaunches(rolePanes, options.developerLaunches) : rolePanes;
+  const panes: PanePolicy = options.developerLaunches ? withDeveloperLaunches(rolePanes, options.developerLaunches, {
+    refreshBinding: async (paneId, callOptions) => {
+      const observed = await rolePanes.inspectTopologyHealth(callOptions);
+      if (!observed.ok) return observed;
+      return rolePanes.getRoleBinding(paneId, callOptions);
+    }
+  }) : rolePanes;
   const directory = options.storageDirectory ?? resolve(resolvePrivateRuntimeStateDirectory(repository), "agentic");
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const runStore = unwrap<any>(persistenceModule.openSqliteRunStore({ filename: resolve(directory, "runs.db") }));
