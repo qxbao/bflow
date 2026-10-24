@@ -451,7 +451,8 @@ export function resolveToolGrants(policy: RepositoryToolPolicy | undefined, cont
         warn?.(`Optional tool '${requirement.toolId}' for role '${role}' is degraded: ${reason}`);
         continue;
       }
-      if (matches[0]!.tool.resource.sharing === "exclusive") {
+      if (matches[0]!.tool.resource.sharing === "exclusive" &&
+          (canonicalToolId === "chrome-devtools-mcp" || requirement.triggers.includes("browser_inspection"))) {
         reason = "exclusive MCP resources are not yet supported by the Runtime tool-action lease path";
         report();
         if (requirement.requiredness === "required" && strictRequired)

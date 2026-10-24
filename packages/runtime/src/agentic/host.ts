@@ -937,8 +937,17 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           throw new Error("No matching unknown tool action exists for reconciliation");
       } else await toolUsage.begin(base);
       const gatewayTaskId = assignment?.taskId && role === "developer" ? `${assignment.runId}-${assignment.taskId}` : undefined;
+      const normalizedInput = grant.toolId === "gitnexus" && request.operation === "query" &&
+        typeof request.input === "object" && request.input !== null && !Array.isArray(request.input) &&
+        typeof (request.input as Record<string, unknown>).query === "string" &&
+        (request.input as Record<string, unknown>).search_query === undefined
+        ? (() => {
+            const { query, ...rest } = request.input as Record<string, unknown>;
+            return JsonValueSchema.parse({ ...rest, search_query: String(query) });
+          })()
+        : request.input;
       const result = await platformSession.invokeTool(role, gatewayTaskId, grant.toolId, serviceId, request.operation,
-        trigger, request.input, invocationId, reconcile);
+        trigger, normalizedInput, invocationId, reconcile);
       if (!result.ok) {
         const uncertain = result.error.code === "timeout" || result.error.code === "unknown_delivery" || result.error.code === "cancelled" ||
           ("retrySafety" in result.error && result.error.retrySafety === "observation_only");

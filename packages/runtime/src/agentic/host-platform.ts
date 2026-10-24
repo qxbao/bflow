@@ -551,7 +551,7 @@ export class HostPlatformSession {
     const identity = this.identity, policy = this.options.platform.toolPolicy, grants = this.options.platform.toolGrants;
     if (!identity || !policy || !grants) return { ok: false, error: { code: "validation", retryable: false, message: "Tool actions require an active explicit repository policy and resolved grants" } };
     const requirement = policy.requirements.find(item => item.toolId === toolId && item.roles.includes(role) && item.kind !== "cli_only" &&
-      item.serviceId === serviceId && item.operations.includes(operation) && item.triggers.includes(trigger));
+      (item.serviceId === undefined || item.serviceId === serviceId) && item.operations.includes(operation) && item.triggers.includes(trigger));
     const grant = grants.find(item => item.role === role && item.toolId === toolId && item.kind !== "cli_only" &&
       item.policyDigest === policy.digest && item.serviceId === serviceId && item.operations.includes(operation) &&
       item.scope.kind === "session" && item.scope.machineId === identity.machineId && item.scope.sessionId === identity.sessionId && item.scope.repositoryId === identity.repositoryId &&

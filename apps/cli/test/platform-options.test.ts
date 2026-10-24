@@ -284,6 +284,32 @@ describe("buildHostPlatformOptions", () => {
       .rejects.toThrow(/Required tool 'browser'.*exclusive MCP resources are not yet supported/i);
   });
 
+  it("grants exclusive gitnexus resources through the Runtime lease path when ready", async () => {
+    const service = MCPServiceDefinitionSchema.parse({ schemaVersion: 3, serviceId: "gitnexus-repo", revision: 1,
+      scope: { kind: "machine", machineId: context.machineId },
+      tool: { schemaVersion: 3, toolId: "gitnexus", kind: "stdio_mcp", version: "1.6.12",
+        operations: ["query", "context", "impact"], required: true,
+        resource: { sharing: "exclusive", resourceKey: "gitnexus-repo" } },
+      connection: { kind: "stdio_mcp", executable: "/machine/gitnexus", argv: ["mcp"], environmentBindings: {},
+        executableDigest: "b".repeat(64), ownership: "bflow", bridgeRequired: true },
+      authentication: { mode: "none" }, healthTimeoutMs: 10_000, idleTimeoutMs: 60_000, restartLimit: 0 });
+    const input = configure(environment => {
+      delete environment.context7;
+      const body = { schemaVersion: 3 as const, repositoryId: base.repository.id,
+        scope: { kind: "repository" as const, machineId: context.machineId, repositoryId: base.repository.id, workspaceRoot: base.repository.root },
+        requirements: [{ toolId: "gitnexus", kind: "stdio_mcp" as const, operations: ["query", "context", "impact"],
+          requiredness: "optional" as const, roles: ["developer" as const], triggers: ["code_relationships" as const] }] };
+      environment.toolPolicy = RepositoryToolPolicySchema.parse({ ...body, digest: digest(body) });
+    });
+    const statuses: Parameters<NonNullable<import("../src/platform-options.js").HostPlatformDeps["onToolStatus"]>>[0][] = [];
+    const options = await buildHostPlatformOptions(input, { context: { ...context, mcpServices: [service],
+      serviceReadiness: new Map([[service.serviceId, { status: "ready", discoveredTools: service.tool.operations }]]) }, fileExists: absent,
+      onToolStatus: status => statuses.push(status) });
+    expect(options.toolGrants?.find(grant => grant.role === "developer" && grant.toolId === "gitnexus"))
+      .toMatchObject({ serviceId: "gitnexus-repo", operations: ["query", "context", "impact"], triggers: ["code_relationships"] });
+    expect(statuses.find(status => status.toolId === "gitnexus")).toMatchObject({ granted: true, ready: true });
+  });
+
   it("reports installed, allowed, granted and ready as separate policy observations", async () => {
     const input = configure(environment => {
       delete environment.context7;

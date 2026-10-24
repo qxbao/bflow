@@ -110,6 +110,9 @@ export interface GatewayControlPort {
   /** Registrations visible to exactly this session scope; used to reconcile uncertain registers. */
   list(scope: TrustScope, options?: OperationOptions): Promise<OperationResult<readonly MCPClientRegistration[]>>;
   inspectServices(operation: ScopedOperation, options?: OperationOptions): Promise<OperationResult<readonly MCPServiceObservation[]>>;
+  acquireResource?(request: import("@bflow/contracts").MCPResourceRequest, options?: OperationOptions): Promise<OperationResult<import("@bflow/contracts").MCPResourceLease>>;
+  renewResource?(request: import("@bflow/contracts").MCPResourceRenewRequest, options?: OperationOptions): Promise<OperationResult<import("@bflow/contracts").MCPResourceLease>>;
+  releaseResource?(lease: import("@bflow/contracts").MCPResourceLease, operation: ScopedOperation, options?: OperationOptions): Promise<OperationResult<void>>;
   invokeTool(call: import("@bflow/contracts").MCPToolCall, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>>;
   reconcileToolCall(call: import("@bflow/contracts").MCPToolCall, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>>;
 }
