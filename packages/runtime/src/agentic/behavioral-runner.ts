@@ -166,7 +166,7 @@ export interface BehavioralMeasurement {
   testBlobs: Record<string, string>; testNames: string[]; testResults: { name: string; passed: boolean }[]; tests: number; passed: number; failed: number; targetFailure: boolean;
   outcome: QualityCommandOutcome;
   /** Optional context-only summary. Parser/gates always consume `outcome` raw bytes. */
-  rtk?: { status: "compressed" | "degraded"; executablePath: string; version: string; digest: string; filter: string;
+  rtk?: { status: "compressed" | "passthrough" | "degraded"; executablePath: string; version: string; digest: string; filter: string;
     invocationId?: string;
     args: string[]; compressedOutput?: string; reasonCode?: string };
 }
@@ -266,10 +266,11 @@ async function prepareRtk(command: BoundBehavioralCommand, checkout: string, req
   if (help.exitCode !== 0 || !/stdin/i.test(help.stdout) || !help.stdout.includes("--filter"))
     throw new RtkRequiredToolUnavailable("rtk_stdin_filter_unsupported", "Pinned RTK does not expose a supported stdin filter");
   const sample = "RTK probe line\nRTK probe line\n";
-  const probe = await runSandboxedInput(sandbox, ["pipe", "--filter", request.filter], cwd, env, sample);
-  if (probe.exitCode !== 0 || probe.timedOut || probe.truncated || !probe.stdout.trim() || probe.stdout === sample)
+  const args = request.filter === "auto" ? ["pipe"] : ["pipe", "--filter", request.filter];
+  const probe = await runSandboxedInput(sandbox, args, cwd, env, sample);
+  if (probe.exitCode !== 0 || probe.timedOut || probe.truncated || !probe.stdout.trim())
     throw new RtkRequiredToolUnavailable("rtk_filter_unavailable", "Pinned RTK filter failed its bounded stdin probe");
-  return { sandbox, cwd, env, args: ["pipe", "--filter", request.filter] };
+  return { sandbox, cwd, env, args };
 }
 /** Bounded diagnostic tail for a failed prepare step. */
 function outputTail(outcome: QualityCommandOutcome): string {
@@ -379,7 +380,7 @@ export async function measureBehavior(command: BoundBehavioralCommand, cwd: stri
         }
         catch { resultRecorded = false; }
         rtkResult = compressed && resultRecorded
-          ? { status: "compressed", executablePath: options.rtk.executablePath, version: options.rtk.version, digest: options.rtk.digest,
+          ? { status: Buffer.byteLength(formatted.stdout) < Buffer.byteLength(raw) ? "compressed" : "passthrough", executablePath: options.rtk.executablePath, version: options.rtk.version, digest: options.rtk.digest,
               filter: options.rtk.filter, args: [...rtkContext.args], ...(options.rtk.invocationId ? { invocationId: options.rtk.invocationId } : {}), compressedOutput: formatted.stdout }
           : { status: "degraded", executablePath: options.rtk.executablePath, version: options.rtk.version, digest: options.rtk.digest,
               filter: options.rtk.filter, args: [...rtkContext.args], ...(options.rtk.invocationId ? { invocationId: options.rtk.invocationId } : {}),

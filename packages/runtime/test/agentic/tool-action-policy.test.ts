@@ -9,6 +9,17 @@ const grant: ResolvedToolGrant = { schemaVersion: 3, grantId: "memory-grant", po
   memoryScope: { wing: "engineering", repositoryId: "repo-1", access: "read_only" } };
 
 describe("Runtime memory tool action policy", () => {
+  it("validates real MemPalace MCP result fields and labels the repository binding as policy-derived", () => {
+    const note = { drawer_id: "drawer-1", text: "Historical note", wing: "engineering", room: "decisions",
+      source_path: "/approved/notes/design.md", filed_at: "2026-10-24T10:06:19.726007" };
+    const envelope = (entry: typeof note) => ({ content: [{ type: "text", text: JSON.stringify({ results: [entry] }) }] });
+    const result = validateMemoryActionOutput(grant, "mempalace_search", envelope(note));
+    expect(result).toHaveLength(1);
+    expect(result?.[0]?.provenance).toMatchObject({ sourceId: "drawer-1", sourceReference: note.source_path,
+      timestamp: note.filed_at, repositoryId: "repo-1", repositoryBinding: "approved_wing_policy" });
+    expect(validateMemoryActionOutput(grant, "mempalace_search", envelope({ ...note, wing: "other" }))).toBeNull();
+    expect(validateMemoryActionOutput(grant, "mempalace_search", envelope({ ...note, source_path: "" }))).toBeNull();
+  });
   it("requires exact granted wing and repository context before a memory search", () => {
     expect(() => validateMemoryActionInput(grant, "mempalace_search", { wing: "engineering", query: "design" })).not.toThrow();
     expect(() => validateMemoryActionInput(grant, "mempalace_search", { wing: "global", query: "design" })).toThrow(/wing/);

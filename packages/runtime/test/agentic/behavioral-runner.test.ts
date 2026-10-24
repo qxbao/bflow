@@ -198,6 +198,22 @@ describe.skipIf((await probeBehavioralSandbox()).status !== "ready")("independen
     await writeFile(join(f.cwd, "uncommitted.txt"), "dirty\n");
     await expect(measureBehavior(f.command, f.cwd, f.redRevision)).rejects.toThrow("clean worktree");
   });
+  it("keeps runner profile IDs separate from RTK auto mode and labels unchanged output", async () => {
+    const f = await fixture();
+    const executablePath = join(dirname(f.cwd), "rtk-auto-fixture");
+    await writeFile(executablePath, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf 'rtk 1.0.1\\n'; exit 0; fi
+if [ "$1" = "pipe" ] && [ "$2" = "--help" ]; then printf 'Read stdin --filter <FILTER>\\n'; exit 0; fi
+if [ "$1" = "pipe" ] && [ "$#" = "1" ]; then cat; exit 0; fi
+exit 1
+`, { mode: 0o700 });
+    const digest = createHash("sha256").update(await (await import("node:fs/promises")).readFile(executablePath)).digest("hex");
+    const measurement = await measureBehavior(f.command, f.cwd, f.redRevision, { rtk: {
+      executablePath, version: "1.0.1", digest, filter: "auto", required: true } });
+    expect(measurement).toMatchObject({ failed: 1, outcome: { exitCode: 1 }, rtk: { status: "passthrough", args: ["pipe"] } });
+    expect(measurement.rtk?.compressedOutput).toBe(measurement.outcome.stdout +
+      (measurement.outcome.stderr ? `\n[stderr]\n${measurement.outcome.stderr}` : ""));
+  });
   it("compresses captured output through the pinned RTK filter while TAP still parses the original raw result", async () => {
     const f = await fixture();
     const rtkPath = join(dirname(f.cwd), "rtk-fixture");

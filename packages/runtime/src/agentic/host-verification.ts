@@ -369,8 +369,8 @@ export class HostVerification {
           measurementFailure: { protocol: error instanceof NodeTapTestCodeFailure ? "node_tap" : "rtk_required", summary: error.message,
             outcome: originalOutcome, ...(error instanceof NodeTapTestCodeFailure && error.rtk ? { rtk: error.rtk } : {}),
             ...(error instanceof RtkRequiredToolUnavailable ? { rawOutput: error.rawOutput ?? "", reasonCode: error.reasonCode } : {}) } });
-        if (error instanceof NodeTapTestCodeFailure && error.rtk?.status === "compressed" && error.rtk.invocationId) await this.rtk?.consume(error.rtk.invocationId, evidence);
-        throw new HostBehavioralFailure(error.message, evidence, error instanceof NodeTapTestCodeFailure && error.rtk?.status === "compressed" && error.rtk.compressedOutput
+        if (error instanceof NodeTapTestCodeFailure && (error.rtk?.status === "compressed" || error.rtk?.status === "passthrough") && error.rtk.invocationId) await this.rtk?.consume(error.rtk.invocationId, evidence);
+        throw new HostBehavioralFailure(error.message, evidence, error instanceof NodeTapTestCodeFailure && (error.rtk?.status === "compressed" || error.rtk?.status === "passthrough") && error.rtk.compressedOutput
           ? [json({ commandId: command.id, exitCode: error.outcome.exitCode, compressedOutput: error.rtk.compressedOutput })] : []);
       }
     }
@@ -385,9 +385,9 @@ export class HostVerification {
     }
     if (phase === "red" ? !measured.some(item => item.targetFailure) : measured.some(item => item.failed)) {
       const evidence = await this.artifact(runId, taskId, { phase, observation, measurements: measured, verifiedBy: binding.agentId, accepted: false });
-      for (const item of measured) if (item.rtk?.status === "compressed" && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, evidence);
+      for (const item of measured) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, evidence);
       throw new HostBehavioralFailure(phase === "red" ? "Red requires an independently observed assertion failure" : "Behavioral acceptance failed; request repairs",
-        evidence, measured.flatMap(item => item.rtk?.status === "compressed" && item.rtk.compressedOutput
+        evidence, measured.flatMap(item => (item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.compressedOutput
           ? [json({ commandId: item.commandId, exitCode: item.outcome.exitCode, compressedOutput: item.rtk.compressedOutput })] : []));
     }
     if (phase === "red") {
@@ -395,7 +395,7 @@ export class HostVerification {
       if (measured.some(item => item.testResults.some(test => !test.passed && !targetNames.has(test.name)))) throw new Error("Red failure belongs to an unrelated test rather than an accepted target criterion");
     }
     const artifact = await this.artifact(runId, taskId, { phase, observation, measurements: measured, verifiedBy: binding.agentId });
-    for (const item of measured) if (item.rtk?.status === "compressed" && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, artifact);
+    for (const item of measured) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, artifact);
     const observations = measured.flatMap(item => criteria.filter(criterion => criterion.verificationMethod === item.method &&
       strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id)?.testNames.every(name => item.testNames.includes(name)))
       .map(criterion => ({ method: item.method, criterionId: criterion.id, evidenceArtifactId: artifact.artifactId, command: item.command, exitCode: item.outcome.exitCode!, summary: `${item.passed}/${item.tests} observed tests passed` })));
@@ -413,7 +413,7 @@ export class HostVerification {
     // Apply the same P16 validator before minting a host receipt; the Runtime will apply it again at ingress.
     this.runtime().ports.policies.recordEvidence(strategy, result);
     await this.trustEvidence(result);
-    return { result, assignment: assignment.message, rtkOutputs: measured.flatMap(item => item.rtk?.status === "compressed" && item.rtk.compressedOutput
+    return { result, assignment: assignment.message, rtkOutputs: measured.flatMap(item => (item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.compressedOutput
       ? [json({ commandId: item.commandId, exitCode: item.outcome.exitCode, compressedOutput: item.rtk.compressedOutput })] : []) };
   }
   private judgments(input: unknown, ids: string[]) {
@@ -453,7 +453,7 @@ export class HostVerification {
         const after = await this.capture(observation.cwd, observation.base, observation.revision);
         if (digest(after) !== digest(observation)) throw new Error("QA source changed during independent measurement");
         const artifact = await this.artifact(context.runId, context.taskId!, { scope: "workflow", sourceRevision: observation.revision, measurements, verifiedBy: binding.agentId });
-        for (const item of measurements) if (item.rtk?.status === "compressed" && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, artifact);
+        for (const item of measurements) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, artifact);
         qaBehavioralObservation = json({ sourceRevision: observation.revision, passed: measurements.every(item => item.failed === 0 && item.outcome.exitCode === 0),
           evidenceArtifact: artifact, measurements: measurements.map(item => ({ command: item.command, method: item.method, testNames: item.testNames,
             tests: item.tests, passed: item.passed, failed: item.failed, exitCode: item.outcome.exitCode,

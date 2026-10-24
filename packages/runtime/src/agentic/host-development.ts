@@ -269,7 +269,7 @@ export class HostDevelopment {
       content: (async function* () { yield bytes; })() });
     if (!stored.ok) throw new Error(`check_work feedback artifact could not be stored (${stored.error.code})`);
     const evidence = ArtifactReferenceSchema.parse(stored.value);
-    for (const item of measurements) if (item.rtk?.status === "compressed" && item.rtk.invocationId)
+    for (const item of measurements) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId)
       await this.rtk?.consume(item.rtk.invocationId, evidence);
     return json({ independentAcceptanceEvidence: false, sourceRevision: selected.head, evidence, measurements });
   }
