@@ -180,3 +180,19 @@ bao phủ mọi trường hợp tiêu cực được yêu cầu, tương đươn
 cấu hình được bảo toàn và ngữ nghĩa restart/update bất biến. Chúng là các test source
 và rendering cục bộ; không tuyên bố có live model session, nghiệm thu native skill-discovery hay thành công SDLC
 đầy đủ.
+
+## Hướng dẫn NFR có thể kiểm chứng
+
+Các bundle `requirements-analysis`, `specification-driven-development` và `test-planning`
+phiên bản `1.0.1` bổ sung cách làm rõ NFR theo outcome/rủi ro, oracle, nguồn ngưỡng,
+điều kiện đo và evidence. Specifier nạp brief và bốn ví dụ criterion từ reference
+cục bộ của skill; Tester/QA đưa oracle và điều kiện đã chấp nhận vào ma trận check
+hiện có. Ví dụ được parse bằng `AcceptanceCriterionSchema` và `SpecificationSchema`
+thật; catalog test kiểm tra reference được phân phối trong bundle pin của Specifier
+trên cả ba provider. Đây là bằng chứng local về instruction/schema/distribution,
+không phải xác nhận provider đã làm theo hay dự án đã đạt NFR.
+
+Giá trị proposed/unknown vẫn pending; thiếu tool và thiếu evidence là các khoảng
+trống riêng. Không thêm schema, metadata protocol, gate hoặc thay đổi TddDecision.
+Digest bao phủ toàn bundle được tính lại khi load catalog; setup phải cài version/pin
+mới theo approval hiện có, không ghi đè generation đang chạy.

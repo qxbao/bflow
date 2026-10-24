@@ -1,5 +1,5 @@
 import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -126,6 +126,22 @@ describe("canonical role catalog", () => {
         prior = ids;
         expect(ids).toEqual(expect.arrayContaining(bindings.bindings[role]!));
         expect(rendered.references).toHaveLength(selections.length);
+        // The actual role/provider reference must publish the reviewed NFR resource,
+        // not only advertise a skill name in its manifest.
+        if (role === "specifier") {
+          for (const [name, resource] of [
+            ["requirements-analysis", "nfr-clarification.md"],
+            ["specification-driven-development", "nfr-examples.md"],
+          ] as const) {
+            const reference = rendered.references.find((entry) => entry.name === name)!;
+            const published = await readBundle(dirname(reference.entrypoint));
+            const canonical = loaded.find((entry) => entry.definition.skillId === name)!;
+            expect(canonical.definition.version).toBe("1.0.1");
+            expect(published[resource]).toBeDefined();
+            expect(published[resource]).toBe(canonical.files[resource]);
+            expect(reference.digest).toBe(canonical.definition.digest);
+          }
+        }
         expect(rendered.instructionText).not.toContain("## Procedure");
         expect(rendered.instructionText).toContain("Bflow Conditional TDD");
         if (role !== "conversation")

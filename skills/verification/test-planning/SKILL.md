@@ -33,7 +33,8 @@ Skills are instruction-only and model-neutral. They do not grant tools, permissi
 
 1. Select checks that directly observe each criterion, including relevant failure/recovery cases. Follow the resolved strategy; tester advice cannot override conditional TDD.
 2. Separate deterministic checks, reviewer analysis, browser evidence and live provider probes. Identify exact commands/authorized tool operations, data and resource leases required.
-3. Submit the plan for the existing verification cycle with bounded scope and independence. Missing mandatory evidence blocks the affected criterion instead of being replaced with a fake runner.
+3. For an affected NFR, carry the accepted oracle, target source, workload, data scale, concurrency, environment, window and aggregation from the specification into the existing criterion-to-check matrix. Reuse the test-design reference selected by the manifest when available; do not duplicate its test selection method or change TddDecision. Report proposed/unknown targets, missing tools and missing evidence separately. A script or numeric target is not a result; an executed measurement still requires independent checking against the accepted criterion.
+4. Submit the plan for the existing verification cycle with bounded scope and independence. Missing mandatory evidence blocks the affected criterion instead of being replaced with a fake runner.
 
 ## Bflow commands
 

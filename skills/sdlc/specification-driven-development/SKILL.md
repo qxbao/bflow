@@ -33,7 +33,8 @@ Skills are instruction-only and model-neutral. They do not grant tools, permissi
 
 1. Classify change complexity and risk using existing policy. Lightweight means concise evidence, not permission to omit an accepted specification.
 2. Describe behavior, non-goals, constraints and objective criteria; add design detail proportional to risk. Trace each planned task to criterion identifiers.
-3. Submit the proposal through the existing specification/versioning flow. Implementation waits for the required accepted revision and design approvals; impact-analysis changes invalidate stale plans and evidence.
+3. For affected NFRs, use [the NFR criterion examples](nfr-examples.md). Preserve the requirements-analysis measurement brief in description/supporting prose using existing contract fields; proposed/unknown values remain pending. A measurable draft, available runner and executed measurement each differ from independent confirmation.
+4. Submit the proposal through the existing specification/versioning flow. Implementation waits for the required accepted revision and design approvals; impact-analysis changes invalidate stale plans and evidence.
 
 ## Bflow commands
 
