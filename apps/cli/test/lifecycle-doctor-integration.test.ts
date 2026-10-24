@@ -175,6 +175,49 @@ describe("Task 2: Platform v3 Lifecycle & Doctor Integration", () => {
   });
 
   describe("runDoctorDiagnostics", () => {
+    it.each([
+      { selectedProfile: false, outcome: "success" },
+      { selectedProfile: false, outcome: "failure" },
+      { selectedProfile: false, outcome: "throw" },
+      { selectedProfile: true, outcome: "success" },
+      { selectedProfile: true, outcome: "failure" },
+      { selectedProfile: true, outcome: "throw" }
+    ])("omits Codex account diagnostics: %j", async ({ selectedProfile, outcome }) => {
+      const cfg: EnvironmentConfig = JSON.parse(makeConfig(repository));
+      cfg.environment.roles = cfg.environment.roles.map(role => ({ ...role, cli: "codex" }));
+      const stateRoot = join(dir, "isolator-state");
+      if (selectedProfile) {
+        cfg.environment.defaults = { codex: { "profile-name": "personal" } };
+        const profileRoot = join(stateRoot, "profiles", "codex--personal");
+        await mkdir(profileRoot, { recursive: true, mode: 0o700 });
+        for (const name of ["home", "config", "cache", "data", "state", "tmp"]) {
+          await mkdir(join(profileRoot, name), { mode: 0o700 });
+        }
+        await writeFile(join(profileRoot, "profile.env"), "AI_ISOLATOR_TOOL=codex\nAI_ISOLATOR_PROFILE=personal\n", { mode: 0o600 });
+      }
+      const authRequest = vi.fn(async (request: EnvironmentProcessRequest) => {
+        if (request.executable !== "codex" || request.args.join(" ") !== "login status") return runner.run(request);
+        if (outcome === "throw") throw new Error("secret-account-exception");
+        return { exitCode: outcome === "success" ? 0 : 1,
+          stdout: "secret-account-stdout", stderr: "secret-account-stderr" };
+      });
+      const report = await runDoctorDiagnostics({ repository, config: cfg, runner: { run: authRequest },
+        env: { ...process.env, CODEX_HOME: undefined, AI_ISOLATOR_HOME: stateRoot },
+        dependencies: {}, probeSession: async () => false, intent: async () => null,
+        statePath: n => resolve(dir, ".bflow/state", n) });
+
+      const loginRequests = authRequest.mock.calls.map(([request]) => request).filter(request =>
+        request.executable === "codex" && request.args.join(" ") === "login status");
+      expect(loginRequests).toHaveLength(1);
+      expect(Boolean(loginRequests[0]!.env?.CODEX_HOME)).toBe(selectedProfile);
+      expect(report.checks.find(check => check.checkId === "auth-codex")).toMatchObject({
+        status: outcome === "success" ? "passed" : "failed",
+        ...(outcome === "success" ? {} : { remediation: expect.stringMatching(/login|authentication/) })
+      });
+      // Includes the grouped metadata as well as the public checks.
+      expect(JSON.stringify(report)).not.toContain("secret-account-");
+    });
+
     it("checks an explicitly selected linked Codex profile instead of the ambient login", async () => {
       runner.authenticated = false;
       const cfg: EnvironmentConfig = JSON.parse(makeConfig(repository));
