@@ -515,7 +515,10 @@ export class EnvironmentLifecycle {
       if (skillsOverride?.versionIncompatible) {
         fail("Skill catalog version is incompatible with Platform v3. Remediation: Update skill bundles to schemaVersion 3 and run 'bflow skills sync'.", { component: "skills" });
       }
-      if (config.environment.skills?.required || config.environment.skills?.requiredSkills?.length || config.environment.skills?.catalogDir || rolesToRun.some((r) => r.skills?.length)) {
+      if (!skillsOverride?.catalogDir && (config.environment.skills?.required || config.environment.skills?.requiredSkills?.length || rolesToRun.some(r => r.skills?.length))) {
+        const { validateBundledStartupSkills } = await import("./skill-catalog.js");
+        await validateBundledStartupSkills({ ...config.environment, roles: rolesToRun });
+      } else if (skillsOverride?.catalogDir || config.environment.skills?.catalogDir) {
         const catalogDir = resolve(repository.root, skillsOverride?.catalogDir ?? config.environment.skills?.catalogDir ?? ".bflow/skills");
         if (!existsSync(catalogDir)) {
           fail("Required skills are missing: catalog directory does not exist. Remediation: Run 'bflow skills sync' or 'bflow setup --apply' to install missing skills.", { component: "skills" });

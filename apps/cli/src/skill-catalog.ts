@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
 import type { AgentRole, SkillDefinition, SkillPin, ResolvedToolGrant } from "@bflow/contracts";
 import { SUPPORTED_CLI_COMMANDS } from "./command-reference.js";
+import type { EnvironmentConfig } from "./environment-config.js";
 
 /** P28 loader and pin binder from the built `@bflow/skills` package; loaded dynamically like the other workspace packages. */
 interface SkillsModule {
@@ -43,7 +44,32 @@ export async function loadMachineSkillCatalog(): Promise<MachineSkillCatalog> {
     approvedBuiltinSkillDigests: definitions.map(definition => definition.digest),
     resolvePins: (role, skillIds) => skillIds.length === 0 ? []
       : skills.bindRoleSkills(Object.fromEntries([[role, [...skillIds]]]), role, definitions),
-    resolveRolePins: (role, grants) => skills.resolveRoleSkillSelections({ bindings: roleBindings, conditionalBindings,
+    resolveRolePins: (role, grants) => skills.resolveRoleSkillSelections({ bindings: roleBindings.bindings, conditionalBindings,
       role, catalog: definitions, grantedToolIds: grants.map(grant => grant.toolId) })
   };
+}
+
+/** Validate bundled instruction selection here; Runtime prepare verifies the stored exact manifests before launch. */
+export async function validateBundledStartupSkills(environment: EnvironmentConfig["environment"], storeRoot?: string): Promise<void> {
+  if (environment.skills?.catalogDir || environment.skills?.bindingsPath)
+    throw new Error("Custom skill catalogDir/bindingsPath require an approved resolver; use the bundled catalog and bindings.");
+  const catalog = await loadMachineSkillCatalog();
+  let installed: SkillDefinition[] | undefined;
+  if (storeRoot) {
+    const module = await import(new URL("../../../packages/skills/dist/index.js", import.meta.url).href);
+    installed = await new module.SkillManager({ store: new module.SkillFileStore(storeRoot),
+      supportedCommands: SUPPORTED_CLI_COMMANDS, approvedBuiltinDigests: catalog.approvedBuiltinSkillDigests }).list();
+  }
+  for (const role of environment.roles) {
+    const defaults = catalog.resolveRolePins(role.role, []).map(item => item.skill.skillId);
+    const required = (environment.skills?.requiredSkills ?? []).filter(id =>
+      !catalog.definitions.some(definition => definition.skillId === id) ||
+      catalog.definitions.some(definition => definition.skillId === id && definition.allowedRoles.includes(role.role)));
+    const ids = [...new Set([...(role.skills ?? defaults), ...required])];
+    const pins = catalog.resolvePins(role.role, ids);
+    if (installed && pins.some(pin => !installed.some(definition => definition.digest === pin.skill.digest)))
+      throw new Error(`Role '${role.role}' is missing an exact pinned skill bundle in the machine skill store; run approved skills setup.`);
+    if (environment.skills?.required && !pins.some(item => item.skill.skillId === "using-bflow"))
+      throw new Error(`Role '${role.role}' requires its approved workflow skills; preserve using-bflow.`);
+  }
 }

@@ -398,6 +398,17 @@ describe("Task 2: Platform v3 Lifecycle & Doctor Integration", () => {
   });
 
   linuxDescribe("EnvironmentLifecycle.up() 12-step Sequence Validation", () => {
+    it("validates required bundled workflow skills without requiring a legacy repository catalog", async () => {
+      await writeFile(join(dir, ".bflow/config.yaml"), makeConfig(repository, { skills: { required: true } }));
+      const fixture = createMockManager(repository);
+      let composed = false;
+      const lifecycle = new EnvironmentLifecycle(dir, { runner,
+        providerOverrides: { claude: { available: true, authenticated: true } },
+        openIntegration: async () => { composed = true; return { manager: fixture.manager }; } });
+      const manifest = await lifecycle.up();
+      expect(manifest.status).toBe("up");
+      expect(composed).toBe(true);
+    });
     it("fails when required provider is missing and has no fallback", async () => {
       const lifecycle = new EnvironmentLifecycle(dir, {
         runner,

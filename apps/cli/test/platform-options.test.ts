@@ -40,6 +40,24 @@ function configure(edit: (environment: EnvironmentCompositionInput["config"]["en
 const absent = () => false;
 
 describe("buildHostPlatformOptions", () => {
+  it("resolves an explicitly scoped memory grant from a ready service before validating retrieved provenance", () => {
+    const scope = { kind: "repository" as const, machineId: context.machineId, repositoryId: base.repository.id, workspaceRoot: base.repository.root };
+    const policy = RepositoryToolPolicySchema.parse({ schemaVersion: 3, repositoryId: base.repository.id, scope,
+      digest: "a".repeat(64), requirements: [{ toolId: "mempalace", kind: "native_remote_mcp", serviceId: "memory",
+        operations: ["mempalace_search"], requiredness: "required", roles: ["developer"], triggers: ["prior_context"],
+        memoryScope: { wing: "approved-wing", repositoryId: base.repository.id, access: "read_only" } }] });
+    const service = MCPServiceDefinitionSchema.parse({ schemaVersion: 3, serviceId: "memory", revision: 1,
+      scope: { kind: "machine", machineId: context.machineId },
+      tool: { schemaVersion: 3, toolId: "mempalace", kind: "native_remote_mcp", version: "3.11.0",
+        operations: ["mempalace_search"], required: true, resource: { sharing: "concurrent", maxConcurrency: 1 } },
+      connection: { kind: "native_remote_mcp", endpoint: "https://memory.example.test/mcp", ownership: "external" },
+      authentication: { mode: "none" }, healthTimeoutMs: 1000, idleTimeoutMs: 60000, restartLimit: 0 });
+    const grants = resolveToolGrants(policy, { ...context, mcpServices: [service], serviceReadiness:
+      new Map([["memory", { status: "ready", discoveredTools: ["mempalace_search"] }]]) }, base);
+    expect(grants).toHaveLength(1);
+    expect(grants[0]).toMatchObject({ toolId: "mempalace", operations: ["mempalace_search"],
+      memoryScope: { wing: "approved-wing", repositoryId: base.repository.id, access: "read_only" } });
+  });
   it("rejects configured custom skill catalog and binding paths with remediation", () => {
     const input = configure(environment => { environment.skills = { catalogDir: "./custom", bindingsPath: "./bindings.json" }; });
     expect(() => resolveRepositoryToolPolicy(input, context.machineId)).toThrow(/catalogDir\/bindingsPath are not supported.*Remove these overrides/i);

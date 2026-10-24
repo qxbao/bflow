@@ -1242,7 +1242,20 @@ export async function runDoctorDiagnostics(
       Boolean(skillsConfig?.requiredSkills && skillsConfig.requiredSkills.length > 0) ||
       configuredRoles.some((r) => r.skills && r.skills.length > 0);
 
-    if (isSkillsRequired || hasRequestedSkills) {
+    if ((isSkillsRequired || hasRequestedSkills) && !skillsOverride?.catalogDir && !skillsConfig?.catalogDir) {
+      try {
+        const { loadHostPlatformContext } = await import("./platform-options.js");
+        const { validateBundledStartupSkills } = await import("./skill-catalog.js");
+        const context = await loadHostPlatformContext({ repository, config: config!, env: options.env ?? process.env });
+        await validateBundledStartupSkills(config!.environment, resolve(context.dataDirectory, "skills-store"));
+        sharedInstalledReason = "Required bundled workflow skills match the verified machine skill store; Runtime validates session manifests before launch.";
+      } catch (error) {
+        sharedInstalledStatus = "fail";
+        sharedInstalledReason = error instanceof Error ? error.message : String(error);
+        sharedInstalledRemediation = "Review and apply the pinned skills setup plan.";
+        sharedInstalledRepair = "bflow skills sync";
+      }
+    } else if (isSkillsRequired || hasRequestedSkills) {
       const catalogDir = resolve(
         repository.root,
         skillsOverride?.catalogDir ?? skillsConfig?.catalogDir ?? ".bflow/skills"

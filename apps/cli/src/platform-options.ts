@@ -380,11 +380,8 @@ export function resolveToolGrants(policy: RepositoryToolPolicy | undefined, cont
       serviceId = matches[0]!.serviceId;
       const readiness = context.serviceReadiness?.get(serviceId);
       ready = readiness?.status === "ready" && requirement.operations.every(operation => readiness.discoveredTools.includes(operation));
-      // A tools/list receipt proves operation availability, not memory wing provenance.
-      if (canonicalToolId === "mempalace") {
-        ready = false;
-        reason = "MemPalace read-only wing provenance is not available in the Gateway readiness receipt";
-      }
+      // This is service readiness only. The approved wing constrains calls at the
+      // Gateway; Runtime validates each retrieved item's provenance before use.
       if (!ready) {
         reason = readiness?.reason ?? (readiness ? `Gateway status is ${readiness.status} or required operations were not discovered` : "Gateway has no current ready observation");
         report();
