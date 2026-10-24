@@ -241,3 +241,11 @@ inventory-to-grant requirement, keeps all existing exports/shapes compatible and
 SQL/checkpoint migration, authority, installer behavior or global configuration change.
 The project owner approved D-TOOLS-01 in conversation; root reviews this supporting schema
 before merging. Affected owners remain Contracts, Tool Installer and CLI.
+
+### Integration review rulings (root, 2026-10-24)
+
+- `VerifiedToolExecutableIdentitySchema` is now exported in integration commit `47b48c4`, already cherry-picked into CLI (`44867a7`) and Platform (`cb93c67`). Platform should return `OperationResult<VerifiedToolExecutableIdentity>` from inspectExecutable; CLI validates with existing `OperationResultSchema(VerifiedToolExecutableIdentitySchema)`. No additional contract authorization is pending for this identity shape.
+- Runtime invocation IDs for the same business run/task/attempt/action must survive generation changes. Original authority generation remains recorded. Unknown/completed prior invocations cannot be dispatched again after restart; add a production host recovery regression.
+- Coordinator no-holder investigation must not hide an associated live run's pending approval/decision/unknown delivery by dropping run linkage. True pre-run investigation remains allowed by session policy.
+- Configured catalogDir/bindingsPath must be honored through approved P28 resolution or explicitly rejected with remediation; they cannot be silently ignored. Binding metadata is parsed before decisions.
+- Full open review notes: `/tmp/bflow-tools-review-findings.md`. Implementers close applicable findings with regression evidence; root alone owns these shared specification edits.

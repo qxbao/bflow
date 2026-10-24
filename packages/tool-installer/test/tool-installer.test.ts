@@ -9,6 +9,8 @@ import { FileToolCapabilityRegistry, ToolCapabilityRegistry, ensureGitNexusIndex
   verifySuperpowersSkills, writeOwnedToolConfig } from "../src/integrations.js";
 import { OfficialProviderPluginAdapter } from "../src/provider-plugins.js";
 
+import { VerifiedToolExecutableIdentitySchema } from "@bflow/contracts";
+
 const hash = (bytes: string) => createHash("sha256").update(bytes).digest("hex");
 const roots: string[] = [];
 afterEach(async () => { for (const path of roots.splice(0)) await rm(path, { recursive: true, force: true }); });
@@ -48,6 +50,21 @@ async function fixture() {
 }
 
 describe("managed tool installer", () => {
+  it("exchanges executable evidence through the exported ingress schema only after pin verification", async () => {
+    const f = await fixture();
+    expect((await f.installer.inspectExecutable(f.request)).ok).toBe(false);
+    const installed = await f.installer.apply(f.applyRequest);
+    expect(installed.ok && installed.value.status).toBe("applied");
+    const observed = await f.installer.inspectExecutable(f.request);
+    expect(observed.ok).toBe(true);
+    if (observed.ok) {
+      expect(VerifiedToolExecutableIdentitySchema.safeParse(observed.value).success).toBe(true);
+      expect(observed.value).toMatchObject({ artifactIntegrity: f.pin.integrity,
+        desiredStateDigest: f.applyRequest.step.desiredStateDigest });
+    }
+    await writeFile(join(f.destination, "artifact.tgz"), "tampered");
+    expect((await f.installer.inspectExecutable(f.request)).ok).toBe(false);
+  });
   it("plans approved native plugins, verifies activation and leaves uncertain mutations unresolved", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-native-"))); roots.push(root);
     const pin: ManagedToolPin = { toolId: "superpowers", installerId: "bflow-tools", version: "6.4.2",
