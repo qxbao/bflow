@@ -575,7 +575,7 @@ async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json", maxIt
   return { ...f, command, developer, qa, development, original, testPath, sourcePath, testSource, currentHead, edit, commit, addTests, request, measure, tickWithReviews };
 }
 
-// AgenticJournal persists changes under Linux flock; these integration cases exercise that boundary.
+// AgenticJournal persists changes under POSIX flock; these integration cases exercise that boundary.
 describe.skipIf((await probeBehavioralSandbox()).status !== "ready")("connected independent policy phases", () => {
   it("freezes Red test files bound by an automatic runner profile exactly like owner test files", async () => {
     const f = await connectedPhaseFixture("node_tap", 3, true);
@@ -710,7 +710,7 @@ describe("Runtime task activity log integration", () => {
   });
 });
 
-describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () => {
+describe.skipIf(process.platform === "win32")("P19 integrated Agentic SDLC", () => {
   it("loads a runner added after composition and ignores unselected language profiles when freezing a task plan", async () => {
     const f = await fixture({ tdd: true, dynamicGate: true });
     f.ports.behavioralChecks = () => [{ ...f.ports.taskChecks.find(check => check.id === "regression")!, id: "unselected-polyglot",
@@ -1813,8 +1813,8 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
 
 });
 
-// This recovery path acquires AgenticJournal.exclusive, which uses Linux flock.
-it.skipIf(process.platform !== "linux")("recovers the exact failed phase after a crash following lease release without duplicating repair notices", async () => {
+// This recovery path acquires AgenticJournal.exclusive, which uses POSIX flock.
+it.skipIf(process.platform === "win32")("recovers the exact failed phase after a crash following lease release without duplicating repair notices", async () => {
   const f = await fixture({ tdd: true });
   f.ports.roleCapabilities.qa = ["verification", "testing", "repository.read"];
   await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();

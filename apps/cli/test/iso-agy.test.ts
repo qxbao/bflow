@@ -1,4 +1,5 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { testPython } from "../../../tests/helpers/python-runtime.js";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -8,7 +9,7 @@ const engine = resolve(import.meta.dirname, "../isolation/bin/ai-isolator");
 const sandboxes: string[] = [];
 
 function sandbox() {
-  const root = mkdtempSync(resolve(tmpdir(), "bflow-iso-agy-"));
+  const root = realpathSync(mkdtempSync(resolve(tmpdir(), "bflow-iso-agy-")));
   sandboxes.push(root);
   const bin = resolve(root, "bin");
   mkdirSync(bin);
@@ -19,7 +20,7 @@ if (($#)); then printf '%s\\0' "$@" > "$FAKE_AGY_LOG.argv"; fi
 printf 'call\\n' >> "$FAKE_AGY_LOG.calls"
 printf 'HOME=%s\\nPWD=%s\\nXDG_CONFIG_HOME=%s\\nXDG_CACHE_HOME=%s\\nXDG_DATA_HOME=%s\\nXDG_STATE_HOME=%s\\nTMPDIR=%s\\n' "$HOME" "$PWD" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$TMPDIR" > "$FAKE_AGY_LOG.env"
 for key in AGY_CONFIG_DIR AGY_HOME AGY_API_KEY AGY_AUTH_TOKEN GEMINI_API_KEY GOOGLE_API_KEY GOOGLE_APPLICATION_CREDENTIALS ANTIGRAVITY_API_KEY ANTIGRAVITY_AUTH_TOKEN; do
-  if [[ -v $key ]]; then printf '%s=present\\n' "$key" >> "$FAKE_AGY_LOG.env"; else printf '%s=unset\\n' "$key" >> "$FAKE_AGY_LOG.env"; fi
+  if printenv "$key" >/dev/null; then printf '%s=present\\n' "$key" >> "$FAKE_AGY_LOG.env"; else printf '%s=unset\\n' "$key" >> "$FAKE_AGY_LOG.env"; fi
 done
 printf 'fake agy stdout\\n'
 printf 'fake agy stderr\\n' >&2
@@ -51,7 +52,8 @@ exit "\${FAKE_AGY_EXIT:-0}"
       GOOGLE_APPLICATION_CREDENTIALS: "/real/credentials.json",
       ANTIGRAVITY_API_KEY: "account-antigravity-key",
       ANTIGRAVITY_AUTH_TOKEN: "account-antigravity-token",
-      PATH: `${bin}:/usr/bin:/bin`,
+      AI_ISOLATOR_PY: testPython,
+        PATH: `${bin}:/usr/bin:/bin`,
     },
   };
 }

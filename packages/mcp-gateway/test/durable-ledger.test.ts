@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile, symlink, chmod } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile, symlink, chmod, realpath } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,7 +19,7 @@ describe("durable Gateway call ledger", () => {
   });
 
   it("restarts an intent as unknown so the caller cannot replay the side effect", async () => {
-    const root = await mkdtemp(join(tmpdir(), "gateway-ledger-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "gateway-ledger-")));
     roots.push(root);
     const path = join(root, "calls.jsonl");
     const call = {
@@ -42,7 +42,7 @@ describe("durable Gateway call ledger", () => {
   });
 
   it("stores only result digests and reports response unavailable after restart", async () => {
-    const root = await mkdtemp(join(tmpdir(), "gateway-ledger-output-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "gateway-ledger-output-")));
     roots.push(root);
     const path = join(root, "calls.jsonl");
     const ledger = new DurableGatewayCallLedger(path);
@@ -60,7 +60,7 @@ describe("durable Gateway call ledger", () => {
   });
 
   it("pins a service schema by revision and blocks same-revision drift", async () => {
-    const root = await mkdtemp(join(tmpdir(), "gateway-ledger-schema-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "gateway-ledger-schema-")));
     roots.push(root);
     const path = join(root, "calls.jsonl");
     const ledger = new DurableGatewayCallLedger(path);
@@ -73,7 +73,7 @@ describe("durable Gateway call ledger", () => {
   });
 
   it("refuses a symlink ledger", async () => {
-    const root = await mkdtemp(join(tmpdir(), "gateway-ledger-link-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "gateway-ledger-link-")));
     roots.push(root);
     const target = join(root, "target.jsonl");
     const path = join(root, "calls.jsonl");
@@ -83,7 +83,7 @@ describe("durable Gateway call ledger", () => {
   });
 
   it("atomically claims one intent across independent processes", async () => {
-    const root = await mkdtemp(join(tmpdir(), "gateway-ledger-two-instances-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "gateway-ledger-two-instances-")));
     roots.push(root);
     const path = join(root, "calls.jsonl");
     const call = { schemaVersion: 3 as const, callId: "shared-call", registrationId: "reg-1", serviceId: "svc-1",
@@ -101,7 +101,7 @@ describe("durable Gateway call ledger", () => {
   });
 
   it.each(["", "{"])("recovers a legacy lock left %s by a crashed owner", async (contents) => {
-    const root = await mkdtemp(join(tmpdir(), "gateway-ledger-crash-lock-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "gateway-ledger-crash-lock-")));
     roots.push(root);
     await chmod(root, 0o700);
     const path = join(root, "calls.jsonl");
@@ -111,7 +111,7 @@ describe("durable Gateway call ledger", () => {
   });
 
   it("releases an OS flock lock after its owner process crashes", async () => {
-    const root = await mkdtemp(join(tmpdir(), "gateway-ledger-live-lock-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "gateway-ledger-live-lock-")));
     roots.push(root);
     await chmod(root, 0o700);
     const path = join(root, "calls.jsonl");

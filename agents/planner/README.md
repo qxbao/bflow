@@ -12,3 +12,5 @@ The Planner Agent is a non-user-facing planning specialist in Bflow Agentic SDLC
 ## Communication
 - Sole ingress and egress via Herdr `RoleMessage` with `coordinator` and `runtime`.
 - Non-user-facing: never prompts or messages the user directly.
+
+The role consumes bounded task context supplied by Runtime, preserving repository/worktree/revision provenance and `observed` / `inferred` / `unknown` distinctions. Its prompt requires source citations, explicit coverage limits and source fallback for missing or stale GitNexus. Survey evidence never grants authority to change approved requirements, approvals, leases or an executing plan. These are instruction constraints; live-provider compliance is not established by prompt validation.

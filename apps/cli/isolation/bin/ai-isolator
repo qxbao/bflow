@@ -16,7 +16,13 @@ esac
 ISOLATOR_PY=""
 ISOLATOR_SKILLS_PY=""
 BFLOW_SOURCE_ISOLATED=0
-for candidate in "${AI_ISOLATOR_PY:-}" "$(command -v python3 2>/dev/null || true)" "$(command -v python 2>/dev/null || true)"; do
+isolator_python_candidates=("${AI_ISOLATOR_PY:-}" "$(command -v python3 2>/dev/null || true)" "$(command -v python 2>/dev/null || true)")
+# macOS can put Apple's older Python before a compatible Homebrew interpreter.
+# Inspect every executable on the caller's PATH without adding global locations or splitting paths at spaces.
+while IFS= read -r candidate; do
+  isolator_python_candidates[${#isolator_python_candidates[@]}]="$candidate"
+done < <(type -a -p python3 python 2>/dev/null || true)
+for candidate in "${isolator_python_candidates[@]}"; do
   [[ -n "$candidate" && -x "$candidate" ]] || continue
   if "$candidate" -c 'import sys' >/dev/null 2>&1; then
     [[ -n "$ISOLATOR_SKILLS_PY" ]] || ISOLATOR_SKILLS_PY="$candidate"

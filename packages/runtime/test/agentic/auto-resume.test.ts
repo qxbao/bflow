@@ -8,6 +8,7 @@ import { ApprovalRequestSchema, DelegationRequestSchema, PaneBindingSchema, Role
 import { AgenticJournal, digest, type JournalState, type Outbound, type RunRecord } from "../../src/agentic/journal.js";
 import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import { parseUserDecisionToolInput } from "../../src/agentic/decision-routing.js";
+import { renderConversationNotice } from "../../src/agentic/conversation-notice-render.js";
 import type { AgenticRuntimePorts, PanePolicy } from "../../src/agentic/ports.js";
 import { FakeAgentTransport } from "../helpers/fake-transport.js";
 import { draft } from "../../../specification/test/fixtures.js";
@@ -117,6 +118,62 @@ async function fixture(runs: RunRecord[] = [run("run-1", "specifying")]) {
 }
 
 describe("bounded automatic resume", () => {
+  it.each([
+    "No SDD conflict remains between lightweight and full; blocked only by a transient timeout.",
+    "The SDD conflict between lightweight and full was resolved; blocked only by a transient timeout."
+  ])("does not turn a resolved SDD diagnostic into a new human requirement gate: %s", async reason => {
+    const f = await fixture();
+    await f.runtime.observeCoordinatorOutcome(coordinatorBlocked("blocked-resolved", reason));
+    expect((await f.record()).pendingAction?.recovery).toBe("auto_resume");
+    f.advance(31 * SECOND);
+    expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 1 });
+  });
+
+  it.each([true, false])("explains the SDD conflict on the first notice and waits for a revision across restart (structured action: %s)", async structured => {
+    const f = await fixture();
+    const message = coordinatorBlocked("blocked-sdd", "Accepted lightweight SDD conflicts with P15: this new feature requires full SDD.");
+    message.payload = { status: "blocked", summary: "Accepted lightweight SDD conflicts with P15: this new feature requires full SDD.",
+      blockers: ["Need authorized revision of SDD level; resume is not approval to override accepted requirements."],
+      ...(structured ? { requested_action: "authorized_requirement_revision", next_role: "conversation" } : {}) };
+    await f.runtime.observeCoordinatorOutcome(message);
+    const blocked = await f.record();
+    expect(blocked).toMatchObject({ status: "escalated", pendingAction: { recovery: "manual", state: "pending" } });
+    const notification = (await f.outbound()).find(out => out.message.causation_id === message.message_id)!;
+    expect(notification.message.payload).not.toHaveProperty("automaticResume");
+    const rendered = renderConversationNotice({ messageId: notification.message.message_id, runId: "run-1",
+      type: notification.message.type, summary: JSON.stringify(notification.message.payload) });
+    expect(rendered.display).toContain("lightweight");
+    expect(rendered.display).toContain("full SDD");
+    expect(rendered.display).toContain("đổi yêu cầu run run-1 sang full SDD");
+    expect(rendered.display).toContain("giữ nguyên phạm vi");
+    expect(rendered.display).toContain("không sửa yêu cầu");
+    expect(rendered.display).not.toContain("Khắc phục capability");
+    expect(rendered.reply).not.toContain('"tiếp tục run-1" sau khi khắc phục');
+    f.restart(); f.advance(10 * 60 * SECOND);
+    expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 0 });
+    expect(await f.resumeWakes()).toEqual([]);
+    expect((await f.record()).delegation).toEqual(blocked.delegation);
+    expect((await f.record()).decision).toBeUndefined();
+  });
+
+  it("preserves the specific non-SDD revision blocker without inventing a full SDD requirement", async () => {
+    const f = await fixture();
+    const message = coordinatorBlocked("blocked-scope", "Two accepted scope constraints conflict; choose which requirement to retain.");
+    message.payload = { status: "blocked", summary: "Two accepted scope constraints conflict; choose which requirement to retain.",
+      blockers: ["Offline-only conflicts with mandatory live API calls"], requested_action: "authorized_requirement_revision", next_role: "conversation" };
+    await f.runtime.observeCoordinatorOutcome(message);
+    expect((await f.record()).pendingAction?.recovery).toBe("manual");
+    const notification = (await f.outbound()).find(out => out.message.causation_id === message.message_id)!;
+    const rendered = renderConversationNotice({ messageId: notification.message.message_id, runId: "run-1",
+      type: notification.message.type, summary: JSON.stringify(notification.message.payload) });
+    expect(rendered.display).toContain("Offline-only conflicts with mandatory live API calls");
+    expect(rendered.display).toContain("yêu cầu");
+    expect(rendered.display).not.toContain("full SDD");
+    expect(rendered.display).not.toContain("Khắc phục capability");
+    f.advance(10 * 60 * SECOND);
+    expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 0 });
+  });
+
   it("delivers an explicit resume separately when an automatic wake is already queued, retaining both identities across restart", async () => {
     const actionId = `next-${digest(["run-1", "blocked-source"])}`;
     const f = await fixture([run("run-1", "escalated", { pendingAction: {

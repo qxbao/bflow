@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { requirementRevisionGuidance } from "./requirement-revision-guidance.js";
 
 /**
  * Pure rendering of durable Conversation notices into the Vietnamese text the user must see.
@@ -41,6 +42,8 @@ export interface NoticeLike {
   userDecision?: unknown;
   /** Structured fields of a non-decision approval, when stored. */
   approval?: unknown;
+  /** Bounded blocker fields remain readable when the diagnostic summary is truncated. */
+  blocked?: unknown;
 }
 
 export type RenderedNoticeKind = "user_decision" | "approval" | "blocked" | "update";
@@ -58,6 +61,8 @@ export interface RenderedNotice {
   ackToken?: string;
   /** For updates and blocks: content that, shown together with the run id, also proves display after reformatting. */
   ackText?: string;
+  /** A requirement-revision notice is not displayed until the user sees its next action too. */
+  requiredActionText?: string;
   headline: string;
   reply?: string;
   display: string;
@@ -79,12 +84,26 @@ const APPROVAL_PAYLOAD = z.object({
 /** Kinds that name a run which cannot progress without the user. Runtime-authored failures carry `blockageReason` instead of `reason`. */
 const BLOCKED_KINDS = ["workflow_blocked", "run_stalled", "workflow_rejected", "delivery_failure", "delegation_rejected", "coordinator_no_response",
   "developer_no_response", "specialist_no_response", "verification_stuck"] as const;
+/** Runtime's automatic-resume schedule; display only, never authority to resume. */
+const AutomaticResumeSchema = z.object({ attempt: z.number().int().min(0), limit: z.number().int().min(0), notBefore: z.string().max(64) }).strict();
 const BLOCKED_PAYLOAD = z.object({
   kind: z.enum(BLOCKED_KINDS),
   reason: z.string().min(1),
   options: z.array(z.string()).optional(),
   runId: z.string().min(1).optional()
 }).passthrough();
+
+/** Private receipt projection, additive for old notices; carries no decision/approval authority. */
+export const BlockedNoticeSchema = z.object({
+  kind: z.enum(BLOCKED_KINDS),
+  reason: z.string().min(1).max(2000),
+  runId: z.string().min(1).optional(),
+  options: z.array(z.string().max(500)).max(10).optional(),
+  requested_action: z.literal("authorized_requirement_revision").optional(),
+  requiredSddLevel: z.literal("full").optional(),
+  blockers: z.array(z.string().max(200)).max(2).optional(),
+  automaticResume: AutomaticResumeSchema.optional()
+}).strict();
 
 const BLOCKED_LABEL: Record<(typeof BLOCKED_KINDS)[number], string> = {
   workflow_blocked: "workflow bị chặn",
@@ -219,15 +238,22 @@ function approvalNotice(notice: NoticeLike, payload: z.infer<typeof APPROVAL_PAY
 
 function blockedNotice(notice: NoticeLike, payload: z.infer<typeof BLOCKED_PAYLOAD>): RenderedNotice {
   const runId = payload.runId ?? notice.runId;
-  const options = (payload.options ?? []).map((text, index) => ({ number: index + 1, text }));
+  const revision = requirementRevisionGuidance(payload, runId);
+  const automatic = revision ? undefined : AutomaticResumeSchema.safeParse((payload as { automaticResume?: unknown }).automaticResume).data;
+  const options = (revision?.options ?? payload.options ?? []).map((text, index) => ({ number: index + 1, text }));
   const headline = `⚠️ [${notice.messageId}] ${capitalise(BLOCKED_LABEL[payload.kind])}${runId ? ` (run ${runId})` : ""}: ${payload.reason}`;
-  // Options describe possible actions; they are not selectable replies. Only the exact resume/cancel phrases are accepted.
-  const reply = runId ? `Trả lời "tiếp tục ${runId}" sau khi khắc phục, hoặc "hủy ${runId}" để hủy run.` : "Hãy cho Conversation biết cách xử lý";
+  // Options describe possible actions; they are not numbered decisions. Revisions go through Conversation's intent handling.
+  const reply = revision ? (revision.suggestedReply ? `Trả lời: "${revision.suggestedReply}".` :
+    `Trả lời bằng nội dung yêu cầu cần sửa cho ${runId ? `run ${runId}` : "run hiện tại"}.`) +
+    (runId ? ` Hoặc "hủy ${runId}" để hủy run.` : "") :
+    automatic && runId ? `Runtime sẽ tự tiếp tục run ${runId} (lần ${automatic.attempt}/${automatic.limit}); bạn chưa cần trả lời. Trả lời "hủy ${runId}" để hủy run.` :
+    runId ? `Trả lời "tiếp tục ${runId}" sau khi khắc phục, hoặc "hủy ${runId}" để hủy run.` : "Hãy cho Conversation biết cách xử lý";
   // The reason's prose before any structured detail: agents often reformat the JSON detail but keep this sentence.
   const lead = payload.reason.split(/[\n[{]/u)[0]!.trim();
   return { messageId: notice.messageId, kind: "blocked", ...(runId ? { runId } : {}), ackToken: notice.messageId,
+    ...(revision ? { requiredActionText: revision.suggestedReply ?? "nội dung yêu cầu cần sửa" } : {}),
     ...(lead.length >= 20 ? { ackText: lead } : {}), headline, reply,
-    options, display: [headline, ...options.map(option => `- ${option.text}`), reply].join("\n") };
+    options, display: [headline, ...(revision?.nextSteps ?? []), ...options.map(option => `- ${option.text}`), reply].join("\n") };
 }
 
 /** Blocked payload with its reason: Runtime-authored failures use blockageReason (or headline) instead of reason. */
@@ -240,12 +266,30 @@ function blockedPayload(raw: unknown): z.infer<typeof BLOCKED_PAYLOAD> | undefin
   return parsed.success ? parsed.data : undefined;
 }
 
+/** Keep actionable blocker content independently of the general diagnostic summary cap. */
+export function blockedNoticeFields(payload: unknown): z.infer<typeof BlockedNoticeSchema> | undefined {
+  const value = blockedPayload(payload);
+  if (!value) return undefined;
+  const revision = requirementRevisionGuidance(value, value.runId);
+  const automatic = AutomaticResumeSchema.safeParse((value as { automaticResume?: unknown }).automaticResume);
+  const parsed = BlockedNoticeSchema.safeParse({
+    kind: value.kind, reason: value.reason.slice(0, 2000),
+    ...(value.runId ? { runId: value.runId } : {}), ...(automatic.success ? { automaticResume: automatic.data } : {}),
+    ...(value.options ? { options: value.options.slice(0, 10).map(option => option.slice(0, 500)) } : {}),
+    ...(revision ? { requested_action: revision.requested_action, blockers: revision.blockers,
+      ...(revision.requiredSddLevel ? { requiredSddLevel: revision.requiredSddLevel } : {}) } : {})
+  });
+  return parsed.success ? parsed.data : undefined;
+}
+
 /** Renders one notice. Anything unparseable or truncated degrades to a generic update that says so. */
 export function renderConversationNotice(notice: NoticeLike): RenderedNotice {
   const structured = notice.userDecision === undefined ? undefined : UserDecisionNoticeSchema.safeParse(notice.userDecision);
   if (structured?.success) return decisionNotice(notice, structured.data);
   const approvalFields = notice.approval === undefined ? undefined : ApprovalNoticeSchema.safeParse(notice.approval);
   if (approvalFields?.success) return approvalContent(notice, approvalFields.data);
+  const blockedFields = notice.blocked === undefined ? undefined : BlockedNoticeSchema.safeParse(notice.blocked);
+  if (blockedFields?.success) return blockedNotice(notice, blockedFields.data);
   if (notice.type === "approval.request") {
     const approval = APPROVAL_PAYLOAD.safeParse(parseSummary(notice));
     const rendered = approval.success ? approvalNotice(notice, approval.data) : undefined;
@@ -259,11 +303,12 @@ export function renderConversationNotice(notice: NoticeLike): RenderedNotice {
 /** Notification text: the whole display when it fits, otherwise headline, clipped question and the reply line. */
 export function notificationBody(notice: RenderedNotice, max = 400): string {
   if (notice.display.length <= max) return notice.display;
-  const reply = notice.reply ?? "";
-  const head = notice.headline;
-  const room = max - head.length - reply.length - 4;
+  // Reserve the action before clipping the diagnostic headline; otherwise a long reason consumes the whole notification.
+  const reply = (notice.reply ?? "").slice(0, max);
+  const head = notice.headline.slice(0, Math.max(0, max - reply.length - (reply ? 1 : 0)));
+  const room = max - head.length - reply.length - 2;
   const question = (notice.question ?? "").slice(0, Math.max(0, room));
-  return [head, ...(question ? [question] : []), ...(reply ? [reply] : [])].join("\n").slice(0, max);
+  return [head, question, reply].filter(Boolean).join("\n").slice(0, max);
 }
 
 /** The MUST SHOW block placed first in hook output. Empty when there is nothing to show. */
@@ -286,6 +331,7 @@ function plain(text: string): string {
  */
 export function noticeDisplayed(notice: RenderedNotice, shown: string): boolean {
   if (notice.ackToken === undefined) return false;
+  if (notice.requiredActionText !== undefined && !plain(shown).toLowerCase().includes(plain(notice.requiredActionText).toLowerCase())) return false;
   if (shown.includes(notice.ackToken)) return true;
   if (notice.kind !== "update" && notice.kind !== "blocked") return false;
   if (shown.includes(notice.messageId)) return true;

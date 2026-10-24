@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { chmod, link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -12,14 +12,16 @@ const at = "2031-01-01T00:00:00.000Z", digest = (value: string) => createHash("s
 describe("guarded host workspace files", () => {
   let root: string, binding: PaneBinding, development: HostDevelopment, evidence: unknown[], denial: string | undefined;
   let resolver: boolean, guardActive: boolean, beforeGuardRelease: (() => Promise<void>) | undefined;
+  let forbidden: string[];
   beforeEach(async () => {
-    root = await mkdtemp(join(tmpdir(), "bflow-workspace-files-"));
+    root = await realpath(await mkdtemp(join(tmpdir(), "bflow-workspace-files-")));
     await mkdir(join(root, "src")); await mkdir(join(root, "test"));
     await writeFile(join(root, "src/math.ts"), "original");
     binding = { schemaVersion: 2, bindingId: "binding", sessionId: "session", role: "developer", paneGroup: "developer_worktree",
       agentId: "dev", workspaceId: "w2", tabId: "w2:t1", paneId: "w2:p2", provider: "herdr", agentKind: "agy", cwd: root, worktreePath: root,
       isolationMode: "dedicated_pane", readOnlyWorkspace: false, permanent: false, transportState: "idle", boundAt: at };
     evidence = []; denial = undefined; resolver = false; guardActive = false; beforeGuardRelease = undefined;
+    forbidden = ["src/private"];
     const strategy = { tddDecision: { mode: "required" }, targetCommands: ["test"], criterionMappings: [], metadata: { tddEvidence: evidence } };
     const use = async (callback: (...args: any[]) => Promise<unknown>, ...args: any[]) => {
       if (denial) throw new Error(denial);
@@ -35,7 +37,7 @@ describe("guarded host workspace files", () => {
         correlation: { token: "request", provenance: "orchestrator", verified: false }, acceptedAt: at } }] }),
       withDeveloperWorkspace: async (_binding: unknown, run: string, task: string, callback: (...args: any[]) => Promise<unknown>) => {
         expect([run, task]).toEqual(["run", "task"]);
-        return use(callback, { spec: { strategy, specification: { acceptanceCriteria: [] } } }, { metadata: { ownedPaths: ["src", "test"], forbiddenPaths: ["src/private"] } });
+        return use(callback, { spec: { strategy, specification: { acceptanceCriteria: [] } } }, { metadata: { ownedPaths: ["src", "test"], forbiddenPaths: forbidden } });
       },
       withConflictResolverWorkspace: async (_binding: unknown, _run: string, _task: string, callback: (...args: any[]) => Promise<unknown>) => use(callback, { conflictPaths: ["src/math.ts"] }),
       ports: { policies: { assertReadyToImplement: () => {
@@ -44,7 +46,7 @@ describe("guarded host workspace files", () => {
       } } }
     };
     development = new HostDevelopment(() => runtime as never, [{ id: "unit", command: "test", executable: process.execPath, args: ["--test"],
-      method: "unit_test", levels: ["unit"], testNames: ["math"], testPaths: ["test/math.test.ts"], timeoutMs: 1000 }]);
+      method: "unit_test", levels: ["unit"], testNames: ["math"], testPaths: ["test/math.test.ts", "test/input.ts"], timeoutMs: 1000 }]);
   });
   afterEach(async () => { await rm(root, { recursive: true, force: true }); });
 
@@ -63,6 +65,63 @@ describe("guarded host workspace files", () => {
     evidence.push({});
     await expect(development.readWorkspaceFile(binding, { path })).rejects.toThrow();
     await expect(development.writeWorkspaceFile(binding, { path, content: "bad", expectedSha256: null })).rejects.toThrow();
+  });
+  it("refuses case aliases of repository controls on every platform", async () => {
+    evidence.push({});
+    for (const path of ["src/.GIT/config", "src/.Bflow/state"]) {
+      await mkdir(join(root, path.split("/").slice(0, -1).join("/")), { recursive: true });
+      await writeFile(join(root, path), "control");
+      await expect(development.readWorkspaceFile(binding, { path })).rejects.toThrow(/Unsafe/);
+      await expect(development.writeWorkspaceFile(binding, { path, content: "bad", expectedSha256: digest("control") })).rejects.toThrow(/Unsafe/);
+    }
+  });
+  it.runIf(process.platform === "darwin")("refuses case aliases of forbidden paths on case-insensitive macOS volumes", async () => {
+    evidence.push({}); await mkdir(join(root, "src/private")); await writeFile(join(root, "src/private/secret"), "secret");
+    await expect(development.readWorkspaceFile(binding, { path: "src/PRIVATE/secret" })).rejects.toThrow(/ownership/);
+    await expect(development.writeWorkspaceFile(binding, { path: "src/PRIVATE/secret", content: "bad", expectedSha256: digest("secret") })).rejects.toThrow(/ownership/);
+  });
+  it.runIf(process.platform === "darwin").each([
+    { denied: "src/secret", existing: "src/secret", alias: "src/ſecret" },
+    { denied: "src/straße", existing: "src/straße", alias: "src/STRASSE" },
+    { denied: "src/strasse", existing: "src/straße", alias: "src/STRAẞE" }
+  ])("refuses Unicode case-fold aliases before reading, replacing or creating $alias", async ({ denied, existing, alias }) => {
+    evidence.push({}); forbidden.push(denied);
+    await expect(development.writeWorkspaceFile(binding, { path: alias, content: "unauthorized", expectedSha256: null })).rejects.toThrow(/ownership/);
+    await writeFile(join(root, existing), "private");
+    expect(await readFile(join(root, alias), "utf8")).toBe("private"); // actual APFS alias, no mocked platform
+    await expect(development.readWorkspaceFile(binding, { path: alias })).rejects.toThrow(/ownership/);
+    await expect(development.writeWorkspaceFile(binding, { path: alias, content: "unauthorized", expectedSha256: digest("private") })).rejects.toThrow(/ownership/);
+    expect(await readFile(join(root, existing), "utf8")).toBe("private");
+  });
+  it.runIf(process.platform === "darwin")("refuses a ligature alias of nested .bflow and preserves accent-distinct allowed files", async () => {
+    evidence.push({}); forbidden.push("src/resume");
+    await writeFile(join(root, "src/.bflow"), "control");
+    expect(await readFile(join(root, "src/.bﬂow"), "utf8")).toBe("control");
+    await expect(development.readWorkspaceFile(binding, { path: "src/.bﬂow" })).rejects.toThrow(/Unsafe/);
+    await expect(development.writeWorkspaceFile(binding, { path: "src/.bﬂow", content: "bad", expectedSha256: digest("control") })).rejects.toThrow(/Unsafe/);
+    await writeFile(join(root, "src/résumé"), "allowed");
+    expect(await development.readWorkspaceFile(binding, { path: "src/résumé" })).toMatchObject({ content: "allowed" });
+  });
+  it.runIf(process.platform === "darwin").each(["workspace", "native"])("freezes the same test inode through case aliases after Red for %s edits", async kind => {
+    await writeFile(join(root, "test/math.test.ts"), "frozen"); evidence.push({ independent: "red" });
+    expect(await readFile(join(root, "test/MATH.TEST.TS"), "utf8")).toBe("frozen");
+    const edit = kind === "workspace"
+      ? development.writeWorkspaceFile(binding, { path: "test/MATH.TEST.TS", content: "weakened", expectedSha256: digest("frozen") })
+      : development.authorizeFileEdit(binding, { tool_name: "Write", tool_input: { file_path: join(root, "test/MATH.TEST.TS") } });
+    await expect(edit).rejects.toThrow(/frozen/);
+    expect(await readFile(join(root, "test/math.test.ts"), "utf8")).toBe("frozen");
+  });
+  it.runIf(process.platform === "darwin")("recognizes the configured test through its case alias before Red", async () => {
+    await writeFile(join(root, "test/math.test.ts"), "test draft");
+    await development.writeWorkspaceFile(binding, { path: "test/MATH.TEST.TS", content: "regression", expectedSha256: digest("test draft") });
+    expect(await readFile(join(root, "test/math.test.ts"), "utf8")).toBe("regression");
+  });
+  it.runIf(process.platform === "darwin")("does not grant test-first edit permission for casing-key collisions that are distinct filesystem entries", async () => {
+    await writeFile(join(root, "test/input.ts"), "configured test"); await writeFile(join(root, "test/ınput.ts"), "implementation");
+    expect(await readFile(join(root, "test/input.ts"), "utf8")).toBe("configured test");
+    await expect(development.writeWorkspaceFile(binding, { path: "test/ınput.ts", content: "unauthorized implementation", expectedSha256: digest("implementation") })).rejects.toThrow(/Red/);
+    await expect(development.authorizeFileEdit(binding, { tool_name: "Write", tool_input: { file_path: join(root, "test/ınput.ts") } })).rejects.toThrow(/Red/);
+    expect(await readFile(join(root, "test/ınput.ts"), "utf8")).toBe("implementation");
   });
   it("refuses stale digests, blind writes, missing parents and unknown arguments without overwriting", async () => {
     evidence.push({});
@@ -84,6 +143,11 @@ describe("guarded host workspace files", () => {
     await expect(development.writeWorkspaceFile(binding, { path: "src/math.ts", content: "bad", expectedSha256: digest("original") })).rejects.toThrow(/read.only/i);
     expect(await readFile(join(root, "src/math.ts"), "utf8")).toBe("original");
   });
+  it.each([false, true])("refuses native edit authorization for a read-only Developer binding (resolver=%s)", async resolving => {
+    resolver = resolving; evidence.push({}); binding = { ...binding, readOnlyWorkspace: true };
+    await expect(development.authorizeFileEdit(binding, { tool_name: "Write", tool_input: { file_path: join(root, "src/math.ts") } })).rejects.toThrow(/read.only/i);
+    expect(await readFile(join(root, "src/math.ts"), "utf8")).toBe("original");
+  });
   it("rejects symlink directories, symlink files, hardlinks and FIFOs without following them", async () => {
     evidence.push({});
     await symlink(join(root, "test"), join(root, "src/linked-dir"));
@@ -102,6 +166,9 @@ describe("guarded host workspace files", () => {
     await writeFile(join(root, "src/big"), "x".repeat(131073));
     await writeFile(join(root, "src/binary"), Buffer.from([0xff]));
     for (const path of ["src/big", "src/binary"]) await expect(development.readWorkspaceFile(binding, { path })).rejects.toThrow();
+    await expect(development.writeWorkspaceFile(binding, { path: "src/binary", content: "replacement",
+      expectedSha256: createHash("sha256").update(Buffer.from([0xff])).digest("hex") })).rejects.toThrow();
+    expect(await readFile(join(root, "src/binary"))).toEqual(Buffer.from([0xff]));
     for (const content of ["x".repeat(131073), "\ud800"]) await expect(development.writeWorkspaceFile(binding, { path: "src/math.ts", content, expectedSha256: digest("original") })).rejects.toThrow();
     expect(await readFile(join(root, "src/math.ts"), "utf8")).toBe("original");
   });

@@ -1,6 +1,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { z } from "zod";
 import type {
   AcceptanceCriterion,
   AgentRole,
@@ -15,7 +18,7 @@ import {
 } from "@bflow/contracts";
 import type { StructuredLogger } from "../resilience/structured-logger.js";
 import type { ObservabilityTracker } from "../observability/metrics.js";
-import { redactString } from "../resilience/redaction.js";
+import { redactString, isSensitiveKey } from "../resilience/redaction.js";
 
 // --- Types & Interfaces ---
 
@@ -168,6 +171,8 @@ export interface SpecificationVersionRecord {
 }
 
 export interface PrepareRoleContextRequest {
+  /** Host launch already supplies canonical instructions; avoid duplicating them in survey attachments. */
+  readonly includeRoleInstructions?: boolean | undefined;
   readonly role: AgentRole;
   readonly taskId?: string | undefined;
   readonly runId?: string | undefined;
@@ -181,7 +186,16 @@ export interface PrepareRoleContextRequest {
   readonly maxTotalBytes?: number | undefined;
 }
 
+export interface SurveyRepositoryIdentity {
+  readonly repositoryRoot: string;
+  readonly worktreeRoot: string;
+  readonly sourceRevision: string;
+  readonly workingTreeState: "clean" | "dirty" | "unknown";
+}
+
 export interface RoleTaskContextBundle {
+  readonly repositoryIdentity?: SurveyRepositoryIdentity | undefined;
+  readonly baselineFiles?: readonly string[] | undefined;
   readonly role: AgentRole;
   readonly taskId?: string | undefined;
   readonly runId?: string | undefined;
@@ -221,7 +235,10 @@ const DEFAULT_IGNORED_DIRS = new Set([
   ".agents",
   ".skillforge",
   "graphify-out",
-  ".agy-staff"
+  ".gitnexus",
+  ".agy-staff",
+  ".worktrees",
+  "worktrees"
 ]);
 
 const ROLE_TO_AGENT_DIR: Readonly<Record<string, string>> = {
@@ -249,7 +266,18 @@ const STOP_WORDS = new Set([
  * from leaking into agent prompt contexts. Delegates to centralized redactString.
  */
 export function scrubSecrets(text: string): string {
-  return redactString(text);
+  // Preserve source line anchors when replacing multiline private-key material.
+  const lineStable = text.replace(/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
+    match => `[REDACTED]${"\n".repeat((match.match(/\n/g) ?? []).length)}`);
+  return redactString(lineStable).replace(
+    /(["']?)([A-Za-z_][A-Za-z0-9_-]*)\1(\s*:\s*)(["'][^"'\r\n]*["']|[^\s,;{}\r\n]+)/g,
+    (match: string, quote: string, key: string, separator: string, value: string) => {
+      if (/^(?:authorization|proxy-authorization)$/i.test(key) && /^(?:Bearer|Basic)$/i.test(value)) return match;
+      if (!isSensitiveKey(key)) return match;
+      const valueQuote = value.startsWith('"') || value.startsWith("'") ? value[0] : "";
+      return `${quote}${key}${quote}${separator}${valueQuote}[REDACTED]${valueQuote}`;
+    }
+  );
 }
 
 /**
@@ -486,9 +514,64 @@ function categorizeFile(relPath: string): RepositoryFileCategory {
   return "other";
 }
 
+/** Sensitive files are excluded before reading, including aliases resolved at read time. */
+function isSensitivePath(relativePath: string): boolean {
+  return relativePath.split(/[\\/]/).some(part =>
+    /^(?:\.env(?:\..*)?|\.npmrc|\.netrc|\.pypirc|\.ssh|\.aws|\.azure|\.gnupg|id_(?:rsa|dsa|ed25519|ecdsa)(?:\.pub)?|credentials(?:\..*)?|secrets?(?:\..*)?)$/i.test(part) ||
+    /\.(?:pem|key|p12|pfx|keystore|secret|token|credentials)$/i.test(part));
+}
+
+const executeFile = promisify(execFile);
+
+async function identifyRepository(repositoryRoot: string): Promise<SurveyRepositoryIdentity> {
+  const realRoot = await fs.promises.realpath(repositoryRoot);
+  // Inherited Git routing/configuration must never redirect the survey to another worktree.
+  const env: NodeJS.ProcessEnv = {
+    PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, SYSTEMROOT: process.env.SYSTEMROOT,
+    GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+    GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat", PAGER: "cat", GIT_NO_REPLACE_OBJECTS: "1"
+  };
+  const git = async (args: string[]): Promise<string> => {
+    const { stdout } = await executeFile("git", ["-C", realRoot, "-c", "safe.directory=", "-c", `safe.directory=${realRoot}`,
+      "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-c", "core.hooksPath=/dev/null",
+      "-c", "core.pager=cat", "-c", "diff.external=", ...args], {
+      env, encoding: "utf8", timeout: 3000, maxBuffer: 1024 * 1024
+    });
+    return stdout.trim();
+  };
+  try {
+    const worktreeRoot = await fs.promises.realpath(await git(["rev-parse", "--show-toplevel"]));
+    if (worktreeRoot !== realRoot) throw new Error("Survey root is not the Git worktree root");
+    const sourceRevision = await git(["rev-parse", "--verify", "HEAD"]);
+    // Like repository_read, never compare working files through repository-controlled
+    // clean/process filters. Keep the independently observed HEAD, but leave dirtiness unknown.
+    const configKeys = await git(["config", "--includes", "--name-only", "--list"]);
+    if (configKeys.split(/\r?\n/).some(key => /^filter\..+\.(?:clean|smudge|process)$/i.test(key))) {
+      return { repositoryRoot: realRoot, worktreeRoot, sourceRevision, workingTreeState: "unknown" };
+    }
+    return { repositoryRoot: realRoot, worktreeRoot, sourceRevision,
+      workingTreeState: (await git(["status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=all"])).length > 0 ? "dirty" : "clean" };
+  } catch {
+    return { repositoryRoot: realRoot, worktreeRoot: realRoot, sourceRevision: "unknown", workingTreeState: "unknown" };
+  }
+}
+
 /** Read repository content through a confined regular-file descriptor. */
 async function readRepositoryFile(repositoryRoot: string, fullPath: string): Promise<Buffer> {
   const rootReal = await fs.promises.realpath(repositoryRoot);
+  const lexicalRelative = path.relative(rootReal, path.resolve(fullPath));
+  if (isSensitivePath(lexicalRelative)) throw new Error("Sensitive repository file excluded");
+  // Reject symlink components and nested repositories/worktrees even when inside the root.
+  let current = rootReal;
+  const components = lexicalRelative.split(path.sep);
+  for (let i = 0; i < components.length; i++) {
+    current = path.join(current, components[i] ?? "");
+    const stat = await fs.promises.lstat(current);
+    if (stat.isSymbolicLink()) throw new Error("Symlink repository content excluded");
+    if (i < components.length - 1 && fs.existsSync(path.join(current, ".git"))) {
+      throw new Error("Nested repository content excluded");
+    }
+  }
   const realPath = await fs.promises.realpath(fullPath);
   const relative = path.relative(rootReal, realPath);
   if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
@@ -699,11 +782,12 @@ export class ArchitecturalDecisionStore {
 
   private async listPersistedDecisions(): Promise<ArchitecturalDecisionRecord[]> {
     try {
-      const content = await fs.promises.readFile(this.stateFile, "utf8");
-      const parsed = JSON.parse(content) as ArchitecturalDecisionRecord[];
-      if (Array.isArray(parsed)) {
-        return parsed;
-      }
+      const content = (await readRepositoryFile(this.repositoryRoot, this.stateFile)).toString("utf8");
+      return z.array(z.object({
+        decisionId: z.string(), title: z.string(), status: z.enum(["proposed", "accepted", "superseded", "deprecated"]),
+        summary: z.string(), rationale: z.string().optional(), consequences: z.string().optional(),
+        affectedPaths: z.array(z.string()), sourcePath: z.string().optional(), recordedAt: z.string(), sha256: z.string()
+      }).strict()).parse(JSON.parse(content));
     } catch {
       // Return empty if file does not exist
     }
@@ -846,11 +930,14 @@ export class SpecArtifactVersionManager {
 
   private async loadSpecVersions(): Promise<SpecificationVersionRecord[]> {
     try {
-      const content = await fs.promises.readFile(this.specVersionsFile, "utf8");
-      const parsed = JSON.parse(content) as SpecificationVersionRecord[];
-      if (Array.isArray(parsed)) {
-        return parsed;
-      }
+      const content = (await readRepositoryFile(this.repositoryRoot, this.specVersionsFile)).toString("utf8");
+      return z.array(z.object({
+        specId: z.string(), version: z.number().int().positive(), specFingerprint: z.string(),
+        status: z.enum(["draft", "review_pending", "approved", "superseded", "rejected"]), artifactRef: ArtifactReferenceSchema.optional(),
+        recordedAt: z.string(), previousVersion: z.number().int().positive().optional(), spec: SpecificationSchema
+      }).strict()).parse(JSON.parse(content)).filter(record => record.specId === record.spec.specId &&
+        record.version === (record.spec.version ?? 1) && record.status === record.spec.status &&
+        record.specFingerprint === crypto.createHash("sha256").update(canonicalJson(record.spec), "utf8").digest("hex"));
     } catch {
       // Empty
     }
@@ -859,11 +946,8 @@ export class SpecArtifactVersionManager {
 
   private async loadArtifactsMap(): Promise<Record<string, ArtifactReference[]>> {
     try {
-      const content = await fs.promises.readFile(this.artifactsFile, "utf8");
-      const parsed = JSON.parse(content) as Record<string, ArtifactReference[]>;
-      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-        return parsed;
-      }
+      const content = (await readRepositoryFile(this.repositoryRoot, this.artifactsFile)).toString("utf8");
+      return z.record(z.array(ArtifactReferenceSchema)).parse(JSON.parse(content));
     } catch {
       // Empty
     }
@@ -907,7 +991,7 @@ export class ProjectContextService {
     let gitignorePatterns: GitignorePattern[] = [];
     const gitignorePath = path.join(this.repositoryRoot, ".gitignore");
     try {
-      const gitignoreContent = await fs.promises.readFile(gitignorePath, "utf8");
+      const gitignoreContent = (await readRepositoryFile(this.repositoryRoot, gitignorePath)).toString("utf8");
       gitignorePatterns = parseGitignore(gitignoreContent);
     } catch {
       // No .gitignore present
@@ -935,8 +1019,11 @@ export class ProjectContextService {
         const fullPath = path.join(currentDir, dirent.name);
         const relPath = path.relative(this.repositoryRoot, fullPath).replace(/\\/g, "/");
 
+        if (isSensitivePath(relPath)) continue;
+        if (dirent.isDirectory() && fs.existsSync(path.join(fullPath, ".git"))) continue;
+
         // Hardcoded excluded directories
-        if (dirent.isDirectory() && DEFAULT_IGNORED_DIRS.has(dirent.name)) {
+        if (DEFAULT_IGNORED_DIRS.has(dirent.name)) {
           continue;
         }
 
@@ -951,15 +1038,7 @@ export class ProjectContextService {
         try {
           const lstat = await fs.promises.lstat(fullPath);
           if (lstat.isSymbolicLink()) {
-            const realPath = await fs.promises.realpath(fullPath);
-            const relReal = path.relative(this.repositoryRoot, realPath);
-            if (relReal.startsWith("..") || path.isAbsolute(relReal)) {
-              // Escaping symlink - reject!
-              continue;
-            }
-            const stat = await fs.promises.stat(realPath);
-            isDir = stat.isDirectory();
-            isFile = stat.isFile();
+            continue;
           } else if (lstat.isFIFO() || lstat.isSocket() || lstat.isBlockDevice() || lstat.isCharacterDevice()) {
             // Reject special files
             continue;
@@ -985,6 +1064,7 @@ export class ProjectContextService {
           } catch {
             continue;
           }
+          if (buffer.includes(0)) continue;
           const sizeBytes = buffer.byteLength;
           const sha256 = crypto.createHash("sha256").update(buffer).digest("hex");
           const category = categorizeFile(relPath);
@@ -1285,8 +1365,15 @@ export class ProjectContextService {
     const maxTotalBytes = query.maxTotalBytes ?? 64_000;
     const maxBytesPerFile = query.maxBytesPerFile ?? 16_000;
 
-    const normOwned = query.ownedPaths.map((p) => p.replace(/\\/g, "/"));
-    const normAffected = query.affectedPaths.map((p) => p.replace(/\\/g, "/"));
+    const normalizeScope = (value: string): string => {
+      const normalized = value.replace(/\\/g, "/").replace(/\/\*\*$/, "").replace(/\/$/, "");
+      if (path.isAbsolute(normalized) || normalized.split("/").includes("..") || isSensitivePath(normalized)) {
+        throw new Error("Unsafe survey scope");
+      }
+      return normalized;
+    };
+    const normOwned = query.ownedPaths.map(normalizeScope);
+    const normAffected = query.affectedPaths.map(normalizeScope);
 
     // Prepare token search terms for Tier 6
     const queryTokens = new Set<string>();
@@ -1317,7 +1404,7 @@ export class ProjectContextService {
       const p = file.relativePath;
       let matchedTier1 = false;
       for (const owned of normOwned) {
-        if (p === owned || p.startsWith(`${owned}/`)) {
+        if (owned === "." || p === owned || p.startsWith(`${owned}/`)) {
           scoredMap.set(p, { score: 100, scoreTier: "Tier 1: Owned" });
           matchedTier1 = true;
           break;
@@ -1326,7 +1413,7 @@ export class ProjectContextService {
       if (matchedTier1) continue;
 
       for (const aff of normAffected) {
-        if (p === aff || p.startsWith(`${aff}/`)) {
+        if (aff === "." || p === aff || p.startsWith(`${aff}/`)) {
           scoredMap.set(p, { score: 80, scoreTier: "Tier 2: Affected" });
           break;
         }
@@ -1342,12 +1429,26 @@ export class ProjectContextService {
       fileLookup.set(file.relativePath, file);
     }
 
+    const workspaceTargets = (specifier: string): string[] => {
+      const pkg = analysis.packages.find(candidate => specifier === candidate.name || specifier.startsWith(`${candidate.name}/`));
+      if (pkg === undefined) return [];
+      const subpath = specifier.slice(pkg.name.length).replace(/^\//, "");
+      const entries = subpath.length > 0 ? [subpath] : [...pkg.entrypoints, "src/index.ts", "index.ts"];
+      return entries.flatMap(entry => {
+        const base = path.posix.join(pkg.relativePath, entry.replace(/^\.\//, "").replace(/^dist\//, "src/"));
+        return [base, base.replace(/\.js$/, ".ts"), base.replace(/\.d\.ts$/, ".ts"), `${base}.ts`, `${base}/index.ts`];
+      }).filter(candidate => fileLookup.has(candidate));
+    };
+
     for (const seedPath of tier1And2Paths) {
       const seedFile = fileLookup.get(seedPath);
       if (seedFile === undefined) continue;
 
       // Forward imports: files that seed imports
       for (const imp of seedFile.imports) {
+        for (const target of workspaceTargets(imp)) {
+          if (!scoredMap.has(target)) scoredMap.set(target, { score: 60, scoreTier: "Tier 3: Neighbor (workspace import)" });
+        }
         if (imp.startsWith(".")) {
           const resolvedBase = path.normalize(path.join(path.dirname(seedPath), imp)).replace(/\\/g, "/");
           const candidates = [
@@ -1370,6 +1471,10 @@ export class ProjectContextService {
       for (const candidateFile of analysis.files) {
         if (scoredMap.has(candidateFile.relativePath)) continue;
         for (const imp of candidateFile.imports) {
+          if (workspaceTargets(imp).includes(seedPath)) {
+            scoredMap.set(candidateFile.relativePath, { score: 60, scoreTier: "Tier 3: Neighbor (workspace consumer)" });
+            break;
+          }
           if (imp.startsWith(".")) {
             const resolvedBase = path.normalize(path.join(path.dirname(candidateFile.relativePath), imp)).replace(/\\/g, "/");
             const candidates = [
@@ -1398,7 +1503,10 @@ export class ProjectContextService {
       for (const file of analysis.files) {
         if (scoredMap.has(file.relativePath)) continue;
         const fileBasename = path.basename(file.relativePath);
-        if (file.category === "test" && fileBasename.includes(stem)) {
+        const seedPackage = analysis.packages.filter(pkg => pkg.relativePath !== "." && seedPath.startsWith(`${pkg.relativePath}/`))
+          .sort((a, b) => b.relativePath.length - a.relativePath.length)[0];
+        const samePackage = seedPackage === undefined || file.relativePath.startsWith(`${seedPackage.relativePath}/`);
+        if (samePackage && file.category === "test" && fileBasename.includes(stem)) {
           scoredMap.set(file.relativePath, { score: 50, scoreTier: "Tier 4: Test" });
         }
       }
@@ -1427,7 +1535,7 @@ export class ProjectContextService {
     }
 
     // Step 5: Tier 6 (Path or exported tokens match query tokens)
-    if (queryTokens.size > 0) {
+    if (queryTokens.size > 0 && tier1And2Paths.size === 0 && normOwned.length === 0 && normAffected.length === 0) {
       for (const file of analysis.files) {
         if (scoredMap.has(file.relativePath)) continue;
         const basename = path.basename(file.relativePath).toLowerCase();
@@ -1472,10 +1580,11 @@ export class ProjectContextService {
       try {
         buffer = await readRepositoryFile(this.repositoryRoot, fullPath);
       } catch {
+        excludedMatchingFiles.push(candidate.entry.relativePath);
         continue;
       }
 
-      const content = buffer.toString("utf8");
+      const content = scrubSecrets(buffer.toString("utf8"));
       const sizeBytes = buffer.byteLength;
       const sha256 = crypto.createHash("sha256").update(buffer).digest("hex");
       let truncated = false;
@@ -1526,7 +1635,9 @@ export class ProjectContextService {
   public async prepareRoleTaskContext(request: PrepareRoleContextRequest): Promise<RoleTaskContextBundle> {
     const totalBudget = request.maxTotalBytes ?? 64_000;
     if (!Number.isSafeInteger(totalBudget) || totalBudget < 1) throw new Error("Context byte budget must be a positive safe integer");
-    const roleInstructions = await this.getAgentRoleInstructions(request.role);
+    const repositoryIdentity = await identifyRepository(this.repositoryRoot);
+    const analysis = await this.analyzeRepositoryStructure({ forceReanalysis: true });
+    const roleInstructions = request.includeRoleInstructions === false ? undefined : await this.getAgentRoleInstructions(request.role);
 
     // Look up specification
     let spec: Specification | null = null;
@@ -1575,7 +1686,18 @@ export class ProjectContextService {
     }
 
     // Build formatted prompt context with secret scrubbing
-    const promptSections: string[] = [];
+    const promptSections: string[] = [
+      `## Repository Survey Evidence\n` +
+      `Repository: ${repositoryIdentity.repositoryRoot}\nWorktree: ${repositoryIdentity.worktreeRoot}\n` +
+      `Source revision: ${repositoryIdentity.sourceRevision}; working tree: ${repositoryIdentity.workingTreeState}\n` +
+      `Snapshot: working-tree file fingerprints (not necessarily committed HEAD content).\n` +
+      `Observed: numbered source excerpts below, with source paths and SHA-256 fingerprints, are evidence of existing implementation only.\n` +
+      `Inferred: scope-selected files are candidate edit locations; static imports, workspace entrypoint mapping and test filename matches suggest dependencies/tests, not verified runtime behavior or full downstream coverage.\n` +
+      `Unknown: business intent, approved requirements not supplied in the specification, dynamic dependencies and behavior not demonstrated by source/tests. Do not infer approved requirements from code.\n` +
+      `GitNexus: unverified availability/index revision; using allowed source fallback. A registered GitNexus tool may supplement this survey only after its repository/revision match is proven and material claims checked against source. Missing/stale index alone does not block this fallback.\n` +
+      `Limits: bounded selection and one-hop static relationships; unselected files, dynamic dispatch and unexecuted tests are not surveyed. Symlinks, nested worktrees, generated/ignored and sensitive paths are excluded.\n` +
+      `Keep survey observations separate from acceptance criteria, approval, leases and task status. Human decisions go through Runtime → Conversation; read-only authority is unchanged.`
+    ];
 
     // Role instructions
     if (roleInstructions !== undefined) {
@@ -1623,24 +1745,42 @@ export class ProjectContextService {
       promptSections.push(`## Artifact References\n${scrubSecrets(artList)}`);
     }
 
-    // Relevant Files (scrubbed)
-    if (fileResult.includedFiles.length > 0) {
-      const fileBlocks = fileResult.includedFiles
-        .map((f) => `### File: ${f.relativePath} (${f.scoreTier})\n\`\`\`\n${scrubSecrets(f.content)}\n\`\`\``)
-        .join("\n\n");
-      promptSections.push(`## Relevant Repository Files\n${fileBlocks}`);
+    // Governance is mandatory; source excerpts use the remaining complete-prompt budget.
+    const selectedFiles = [...fileResult.includedFiles];
+    const omittedFiles = [...fileResult.excludedMatchingFiles];
+    const formatFile = (file: SelectedFileContent): string => {
+      const numbered = scrubSecrets(file.content).split(/\r?\n/).map((line, i) => `${i + 1}: ${line}`).join("\n");
+      return `### File: ${file.relativePath}:1 (${file.scoreTier})\n` +
+        `Observed source; SHA-256: ${file.sha256}; ${file.truncated ? "partial excerpt; remaining lines not surveyed" : "complete excerpt"}.\n` +
+        `\`\`\`\n${numbered}\n\`\`\``;
+    };
+    const formatPrompt = (): string => scrubSecrets([
+      ...promptSections,
+      `## Survey Coverage\nIncluded: ${selectedFiles.length}; omitted matching files: ${omittedFiles.length}; ` +
+        `truncated files: ${selectedFiles.filter(file => file.truncated).length}. ` +
+        `Omitted for budget or inaccessible/unsafe source: ${omittedFiles.slice(0, 8).join(", ") || "none"}` +
+        (omittedFiles.length > 8 ? ` (+${omittedFiles.length - 8} more)` : "") + ".",
+      ...(selectedFiles.length > 0 ? [`## Existing Behavior, Candidate Edits, Dependencies and Tests\n` + selectedFiles.map(formatFile).join("\n\n")] : ["Unknown: no source excerpt available within scope/budget; insufficient evidence to conclude existing behavior."])
+    ].join("\n\n"));
+    let formattedPromptContext = formatPrompt();
+    while (Buffer.byteLength(formattedPromptContext, "utf8") > totalBudget && selectedFiles.length > 0) {
+      const removed = selectedFiles.pop();
+      if (removed !== undefined) omittedFiles.push(removed.relativePath);
+      formattedPromptContext = formatPrompt();
     }
-
-    const formattedPromptContext = scrubSecrets(promptSections.join("\n\n"));
-    // Do not silently truncate governance, criteria or role instructions to fit.
     if (Buffer.byteLength(formattedPromptContext, "utf8") > totalBudget) {
       throw new Error(`Complete role context exceeds ${totalBudget} byte budget; narrow the task or increase its explicit budget`);
     }
 
     // Build file fingerprints
     const fileFingerprints: Record<string, string> = {};
-    for (const f of fileResult.includedFiles) {
+    for (const f of selectedFiles) {
       fileFingerprints[f.relativePath] = f.sha256;
+    }
+
+    for (const instructionPath of roleInstructions?.sourceFiles ?? []) {
+      const entry = analysis.files.find(file => file.relativePath === instructionPath);
+      if (entry !== undefined) fileFingerprints[instructionPath] = entry.sha256;
     }
 
     // Deterministic context hash
@@ -1650,6 +1790,7 @@ export class ProjectContextService {
         JSON.stringify({
           role: request.role,
           taskId: request.taskId,
+          repositoryIdentity,
           files: fileFingerprints,
           specVersion: spec?.version,
           specFingerprint,
@@ -1672,6 +1813,8 @@ export class ProjectContextService {
 
     const bundle: RoleTaskContextBundle = {
       role: request.role,
+      repositoryIdentity,
+      baselineFiles: analysis.files.map(file => file.relativePath),
       ...(request.taskId !== undefined ? { taskId: request.taskId } : {}),
       ...(request.runId !== undefined ? { runId: request.runId } : {}),
       ...(request.specId !== undefined ? { specId: request.specId } : {}),
@@ -1680,8 +1823,8 @@ export class ProjectContextService {
       ...(spec?.version !== undefined ? { specVersion: spec.version } : {}),
       ...(specFingerprint !== undefined ? { specFingerprint } : {}),
       totalBytes: Buffer.byteLength(formattedPromptContext, "utf8"),
-      includedFiles: fileResult.includedFiles.map((f) => f.relativePath),
-      excludedFileCount: fileResult.excludedMatchingFiles.length,
+      includedFiles: selectedFiles.map((f) => f.relativePath),
+      excludedFileCount: omittedFiles.length,
       preparedAt: new Date().toISOString(),
       formattedPromptContext,
       adrSummaries,
@@ -1733,6 +1876,16 @@ export class ProjectContextService {
     const deletedFiles: string[] = [];
     const addedOwnedFiles: string[] = [];
     let specVersionDrifted = false;
+    if (bundle.repositoryIdentity !== undefined) {
+      const currentIdentity = await identifyRepository(this.repositoryRoot);
+      if (currentIdentity.repositoryRoot !== bundle.repositoryIdentity.repositoryRoot ||
+          currentIdentity.worktreeRoot !== bundle.repositoryIdentity.worktreeRoot) {
+        reasons.push("Survey repository/worktree identity changed; refresh context for this assignment.");
+      }
+      if (currentIdentity.sourceRevision !== bundle.repositoryIdentity.sourceRevision) {
+        reasons.push("Survey source revision changed; refresh context before relying on its evidence.");
+      }
+    }
 
     // 1. Check all included files for modification, deletion, or symlink escaping
     for (const [relPath, recordedHash] of Object.entries(bundle.fileFingerprints)) {
@@ -1752,7 +1905,7 @@ export class ProjectContextService {
 
     // 2. Check current repository structure for newly added files
     const currentAnalysis = await this.analyzeRepositoryStructure({ forceReanalysis: true });
-    const knownFiles = new Set(Object.keys(bundle.fileFingerprints));
+    const knownFiles = new Set(bundle.baselineFiles ?? Object.keys(bundle.fileFingerprints));
 
     // Check if new files appeared
     for (const currentFile of currentAnalysis.files) {

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { writeDarwinRtkFixture } from "./rtk-fixture.js";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -207,6 +208,7 @@ if [ "$1" = "pipe" ] && [ "$2" = "--help" ]; then printf 'Read stdin --filter <F
 if [ "$1" = "pipe" ] && [ "$#" = "1" ]; then cat; exit 0; fi
 exit 1
 `, { mode: 0o700 });
+    await writeDarwinRtkFixture(executablePath, "passthrough");
     const digest = createHash("sha256").update(await (await import("node:fs/promises")).readFile(executablePath)).digest("hex");
     const measurement = await measureBehavior(f.command, f.cwd, f.redRevision, { rtk: {
       executablePath, version: "1.0.1", digest, filter: "auto", required: true } });
@@ -227,6 +229,7 @@ fi
 exit 2
 `);
     await (await import("node:fs/promises")).chmod(rtkPath, 0o700);
+    await writeDarwinRtkFixture(rtkPath, "count");
     const rawDigest = createHash("sha256").update(await (await import("node:fs/promises")).readFile(rtkPath)).digest("hex");
 
     const measured = await measureBehavior(f.command, f.cwd, f.redRevision, { rtk: {
@@ -259,6 +262,7 @@ fi
 exit 2
 `);
     await (await import("node:fs/promises")).chmod(rtkPath, 0o700);
+    await writeDarwinRtkFixture(rtkPath, "fail-test-output");
     const statuses: string[] = [];
     try {
       await measureBehavior(f.command, f.cwd, f.redRevision, { rtk: {
@@ -298,6 +302,7 @@ fi
 exit 2
 `);
     await (await import("node:fs/promises")).chmod(rtkPath, 0o700);
+    await writeDarwinRtkFixture(rtkPath, "count");
     const rtkDigest = createHash("sha256").update(await (await import("node:fs/promises")).readFile(rtkPath)).digest("hex");
     const ledger = new FileToolUsageLedger(join(dirname(f.cwd), "tool-usage.json"));
     const integration = { resolve: async () => ({ executablePath: rtkPath, version: "1.0.1", digest: rtkDigest, filter: "node-unit", required: true,

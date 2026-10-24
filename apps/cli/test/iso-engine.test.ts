@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, mkdirSync, wr
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { testPython } from "../../../tests/helpers/python-runtime.js";
 
 const enginePath = resolve(import.meta.dirname, "../isolation/bin/ai-isolator");
 
@@ -156,6 +157,21 @@ describe("bundled isolation engine", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+  it("finds a compatible python3 later in PATH when the first is Apple's older system interpreter", () => {
+    const home = mkdtempSync(resolve(tmpdir(), "bflow-iso-python-path-"));
+    try {
+      const oldBin = resolve(home, "old"), goodBin = resolve(home, "good");
+      mkdirSync(oldBin); mkdirSync(goodBin);
+      writeFileSync(resolve(oldBin, "python3"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+      symlinkSync(testPython, resolve(goodBin, "python3"));
+      writeFileSync(resolve(oldBin, "codex"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      const result = spawnSync("/bin/bash", [enginePath, "codex", "--name", "test", "--no-lb", "--no-login"], {
+        cwd: home, env: { ...process.env, HOME: home, AI_ISOLATOR_HOME: resolve(home, "state"), AI_ISOLATOR_PY: "",
+          PATH: `${oldBin}:${goodBin}:/usr/bin:/bin` }, encoding: "utf8"
+      });
+      expect(result.status, result.stderr).toBe(0);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
 
   it("warns once when shared Codex MCP config exists but no Python supports tomllib", () => {
     const home = mkdtempSync(resolve(tmpdir(), "bflow-iso-python-missing-"));
@@ -170,7 +186,14 @@ describe("bundled isolation engine", () => {
       }
       writeFileSync(resolve(bin, "codex"), "#!/usr/bin/env bash\nexit 0\n");
       chmodSync(resolve(bin, "codex"), 0o755);
-      const env = { ...process.env, HOME: home, AI_ISOLATOR_HOME: resolve(home, "state"), PATH: `${bin}:/usr/bin:/bin` };
+      // Every Python on PATH is now probed. Supply real shell utilities without accidentally
+      // exposing a second compatible system Python behind this test's deliberately old interpreters.
+      const utilities = resolve(home, "utilities"); mkdirSync(utilities);
+      for (const name of ["bash", "uname", "dirname", "mkdir", "chmod", "find", "grep", "sed", "awk", "tr", "head", "sort", "basename", "cat", "date", "rm", "readlink", "cut"]) {
+        const actual = [resolve("/usr/bin", name), resolve("/bin", name)].find(existsSync);
+        if (actual) symlinkSync(actual, resolve(utilities, name));
+      }
+      const env = { ...process.env, HOME: home, AI_ISOLATOR_HOME: resolve(home, "state"), AI_ISOLATOR_PY: "", PATH: `${bin}:${utilities}` };
       const result = spawnSync("bash", [enginePath, "codex", "--name", "test", "--no-lb", "--no-login"], {
         cwd: home,
         env,
@@ -190,7 +213,7 @@ describe("bundled isolation engine", () => {
       mkdirSync(bin);
       writeFileSync(resolve(bin, "claude"), "#!/usr/bin/env bash\nexit 0\n");
       chmodSync(resolve(bin, "claude"), 0o755);
-      const env = { ...process.env, HOME: home, AI_ISOLATOR_HOME: resolve(home, "state"), PATH: `${bin}:/usr/bin:/bin` };
+      const env = { ...process.env, AI_ISOLATOR_PY: testPython, HOME: home, AI_ISOLATOR_HOME: resolve(home, "state"), PATH: `${bin}:/usr/bin:/bin` };
       const create = spawnSync("bash", [enginePath, "claude", "--name", "remove-me", "--no-login"], { cwd: home, env, encoding: "utf8" });
       const remove = spawnSync("bash", [enginePath, "remove", "claude", "--name", "remove-me"], { cwd: home, env, encoding: "utf8" });
       const removeAgain = spawnSync("bash", [enginePath, "remove", "claude", "--name", "remove-me"], { cwd: home, env, encoding: "utf8" });
@@ -215,7 +238,7 @@ exit 0
 `);
       chmodSync(resolve(bin, "claude"), 0o755);
       const env = {
-        ...process.env,
+        ...process.env, AI_ISOLATOR_PY: testPython,
         HOME: home,
         AI_ISOLATOR_HOME: resolve(home, "state"),
         CLAUDE_CONFIG_DIR: "/real/account/config",
@@ -249,7 +272,7 @@ exit 0
       writeFileSync(resolve(bin, "codex"), "#!/usr/bin/env bash\nexit 0\n");
       chmodSync(resolve(bin, "codex"), 0o755);
       const env = {
-        ...process.env,
+        ...process.env, AI_ISOLATOR_PY: testPython,
         HOME: home,
         BFLOW_HOME: bflow,
         AI_ISOLATOR_HOME: "",
@@ -301,7 +324,7 @@ exit 0
       chmodSync(resolve(bin, "codex"), 0o755);
       const sharedState = resolve(realHome, ".local/share/ai-isolator");
       const env = {
-        ...process.env,
+        ...process.env, AI_ISOLATOR_PY: testPython,
         HOME: activeHome,
         AI_ISOLATOR_REAL_HOME: realHome,
         AI_ISOLATOR_HOME: "",
@@ -351,7 +374,7 @@ exit 0
       chmodSync(resolve(bin, "claude"), 0o755);
       const state = resolve(root, "state");
       const env = {
-        ...process.env,
+        ...process.env, AI_ISOLATOR_PY: testPython,
         HOME: activeHome,
         AI_ISOLATOR: "1",
         AI_ISOLATOR_REAL_HOME: realHome,
@@ -399,7 +422,7 @@ exit 0
       writeFileSync(resolve(bin, "codex"), "#!/usr/bin/env bash\nexit 0\n");
       chmodSync(resolve(bin, "codex"), 0o755);
       const state = resolve(home, "state");
-      const env = { ...process.env, HOME: home, AI_ISOLATOR_HOME: state, CODEX_HOME: "", BFLOW_HOME: "", PATH: `${bin}:/usr/bin:/bin` };
+      const env = { ...process.env, AI_ISOLATOR_PY: testPython, HOME: home, AI_ISOLATOR_HOME: state, CODEX_HOME: "", BFLOW_HOME: "", PATH: `${bin}:/usr/bin:/bin` };
       const create = spawnSync("bash", [enginePath, "codex", "--name", "hooks", "--no-lb", "--no-login"], {
         cwd: home, env, encoding: "utf8",
       });

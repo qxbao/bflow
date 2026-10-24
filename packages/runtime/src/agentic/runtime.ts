@@ -26,6 +26,7 @@ import { nativeMessageFingerprint, NativeRejectionSchema } from "./native-delive
 import { describeValidationError, INVALID_ROLE_MESSAGE_LIMIT, isMessageContentFailure } from "./role-message-feedback.js";
 import { AssessmentSpecificationSchema, assessmentErrorAt } from "./assessment-input.js";
 import { NativeDiagnosticFenceAuthoritySchema, NativeDiagnosticFenceSchema } from "./native-diagnostic-fence.js";
+import { requirementRevisionGuidance } from "./requirement-revision-guidance.js";
 import {
   buildReworkAssignmentContext, ReworkAssignmentContextSchema, settleReworkVerificationOutcome,
   toAssignedQualityFindings, validateAndStoreReworkResolution, verifyStoredReworkDossier,
@@ -1619,9 +1620,10 @@ export class AgenticWorkflowRuntime {
           state.outbound.some(out => out.message.run_id === run.runId && out.status === "failed" && out.error?.includes(RoleCapabilityPreflightError.name));
         const staticRunnerBlocker = run.lastWorkflowRejection !== undefined ||
           /runner_setup_required|no_test_runner_detected|missing_test_mapping|unsupported_verification|policy_violation|cannot bind existing detected|runner mapping|test-runner binding/i.test(blockage);
-        const recoveryKind = capabilityBlocker ? "capability_repair" : staticRunnerBlocker ? "manual" : "auto_resume";
-        // Any other Coordinator blocker resumes automatically with backoff on the same inherited budget; a blocker that needs a
-        // human answer goes through request_user_decision instead, and a pending decision/approval never auto-resumes (see above).
+        const revisionGuidance = requirementRevisionGuidance(parsed.payload, run.runId);
+        const recoveryKind = revisionGuidance ? "manual" : capabilityBlocker ? "capability_repair" : staticRunnerBlocker ? "manual" : "auto_resume";
+        // A requirement revision needs human input, even when a legacy Coordinator reports task.status instead of opening
+        // request_user_decision. Other transient blockers retain bounded backoff; no notice supplies approval authority.
         run.pendingAction = { actionId: `next-${digest([run.runId, parsed.message_id])}`, kind: "resume_coordinator", owner: "coordinator",
           reason: reason.slice(0, 2000), sourceMessageId: parsed.message_id, createdAt: this.now(),
           state: "pending", previousStatus: run.status, ...inheritedAutoResume(run), recovery: recoveryKind };
@@ -1633,9 +1635,13 @@ export class AgenticWorkflowRuntime {
             causation_id: parsed.message_id, run_id: run.runId, sender: { role: "runtime" }, recipient: { role: "conversation" },
             type: "conversation.progress", payload: { kind: "workflow_blocked", runId: run.runId, sdlcStatus: run.status,
               headline: automatic ? "Workflow bị chặn; Runtime sẽ tự tiếp tục Coordinator sau thời gian chờ" : "Workflow đang chờ khắc phục blocker",
-              reason, blockageReason: reason, fromRole: "coordinator", actionId: run.pendingAction.actionId,
+              reason, blockageReason: revisionGuidance ? reason.slice(0, 500) : reason, fromRole: "coordinator", actionId: run.pendingAction.actionId,
               ...(automatic ? { automaticResume: automaticResumeNotice(run.pendingAction) } : {}),
-              options: ["Khắc phục capability rồi yêu cầu tiếp tục run", "Hủy run"] },
+              // Store only the bounded inputs. The renderer derives the explanation/reply without duplicating it in the 4 KiB summary.
+              ...(revisionGuidance ? { requested_action: revisionGuidance.requested_action, blockers: revisionGuidance.blockers,
+                ...(revisionGuidance.requiredSddLevel ? { requiredSddLevel: revisionGuidance.requiredSddLevel } : {}),
+                options: revisionGuidance.options } : { options: [capabilityBlocker ? "Khắc phục capability rồi yêu cầu tiếp tục run" :
+                automatic ? "Runtime sẽ tự thử tiếp tục; bạn chưa cần thao tác" : "Khắc phục nguyên nhân được báo rồi yêu cầu tiếp tục run", "Hủy run"] }) },
             artifact_references: [], occurred_at: this.now(), idempotency_key: noticeId }), "conversation");
         }
       }

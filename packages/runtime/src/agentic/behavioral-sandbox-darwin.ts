@@ -32,7 +32,9 @@ const BASE_PROFILE = `(version 1)
 `;
 
 /**
- * Executes `/usr/bin/true` under the exact base profile used for measurements. Readiness must prove the real policy:
+ * Executes `/usr/bin/true` and the host's actual Node runtime under the exact base profile used for measurements.
+ * A successful system binary alone cannot prove that Node's loader/dependencies are permitted.
+ * Readiness must prove the real policy:
  * a hand-written minimal profile aborts dyld on current macOS (it also needs "/" and /dev/null), which made a working
  * sandbox look unavailable.
  */
@@ -40,6 +42,10 @@ export async function probeSeatbeltProfile(): Promise<void> {
   const scratch = await realpath(tmpdir());
   const params: [string, string][] = [["EXECUTABLE", "/usr/bin/true"], ["CHECKOUT", scratch], ["SCRATCH", scratch]];
   await run(SANDBOX_EXEC, ["-p", BASE_PROFILE, ...params.flatMap(([key, value]) => ["-D", `${key}=${value}`]), "--", "/usr/bin/true"],
+    { env: { PATH: "/usr/bin:/bin", LANG: "C" }, timeout: 10_000, maxBuffer: 16384 });
+  const node = await realpath(process.execPath);
+  params[0] = ["EXECUTABLE", node];
+  await run(SANDBOX_EXEC, ["-p", BASE_PROFILE, ...params.flatMap(([key, value]) => ["-D", `${key}=${value}`]), "--", node, "--version"],
     { env: { PATH: "/usr/bin:/bin", LANG: "C" }, timeout: 10_000, maxBuffer: 16384 });
 }
 

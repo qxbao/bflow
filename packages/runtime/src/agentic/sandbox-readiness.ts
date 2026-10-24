@@ -14,7 +14,7 @@ export async function probeBehavioralSandbox(repositoryRoot = process.cwd()): Pr
       // Probe actual deny-default execution of the real measurement profile, not only an installed deprecated launcher.
       await (await import("./behavioral-sandbox-darwin.js")).probeSeatbeltProfile();
       return { status: "ready", executable, platform: "darwin" };
-    } catch { return { status: "unsupported", code: "verification_sandbox_unavailable", reason: "No usable Seatbelt sandbox; isolated verification is unavailable on this host" }; }
+    } catch { return { status: "unsupported", code: "verification_sandbox_unavailable", reason: "Seatbelt cannot execute the required system/Node probe under the verification policy. Verify /usr/bin/sandbox-exec and use a standalone Node distribution whose runtime dependencies fit that policy" }; }
   }
   if (process.platform !== "linux") return { status: "unsupported", code: "verification_sandbox_unavailable", reason: `Behavioral sandbox is not verified on ${process.platform}` };
   for (const directory of (process.env.PATH ?? "/usr/bin:/bin").split(delimiter)) {

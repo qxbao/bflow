@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { HostReceiptJournal, MAX_NOTICE_REBLOCKS, parseConversationResumeRequest } from "../../src/agentic/host-receipts.js";
 import { isProviderInputEmpty, reminderDelayMs, reminderDue, afterReminder } from "../../src/agentic/conversation-inbox.js";
-import { lastAssistantText, mustShowSection, noticeDisplayed, notificationBody, renderConversationNotice } from "../../src/agentic/conversation-notice-render.js";
+import { blockedNoticeFields, lastAssistantText, mustShowSection, noticeDisplayed, notificationBody, renderConversationNotice } from "../../src/agentic/conversation-notice-render.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const action of cleanups.splice(0).reverse()) await action(); });
@@ -55,6 +55,60 @@ describe("isProviderInputEmpty on the current Claude layout", () => {
 });
 
 describe("Conversation notice rendering", () => {
+  it.each([
+    "SDD mismatch: policy requires lightweight SDD, not full SDD.",
+    "Xung đột SDD: giữ lightweight, không cần full SDD.",
+    "SDD mismatch: lightweight is allowed; no full SDD is required.",
+    "SDD conflict: lightweight chosen; this does not mean full SDD is required.",
+    "Xung đột SDD: giữ lightweight, không phải full SDD là bắt buộc."
+  ])("does not recommend full when the blocker says otherwise: %s", reason => {
+    const rendered = renderConversationNotice(notice("blocked-negative", "conversation.progress", {
+      kind: "workflow_blocked", reason, requested_action: "authorized_requirement_revision"
+    }));
+    expect(rendered.reply).not.toContain("sang full SDD");
+    expect(rendered.display).not.toContain("Đổi sang full SDD");
+  });
+
+  it("recognises an affirmative full requirement expressed after the SDD level", () => {
+    const rendered = renderConversationNotice(notice("blocked-postfix", "conversation.progress", {
+      kind: "workflow_blocked", reason: "SDD conflict: lightweight accepted; full SDD is required."
+    }));
+    expect(rendered.reply).toContain("sang full SDD");
+  });
+
+  it("requires the revision action to be shown, not just an id or the blocker headline", () => {
+    const rendered = renderConversationNotice(notice("blocked-ack", "conversation.progress", {
+      kind: "workflow_blocked", reason: "SDD conflict: accepted lightweight but policy requires full SDD."
+    }));
+    expect(noticeDisplayed(rendered, "Đã nhận blocked-ack")).toBe(false);
+    expect(noticeDisplayed(rendered, rendered.headline)).toBe(false);
+    expect(noticeDisplayed(rendered, rendered.display)).toBe(true);
+    expect(noticeDisplayed(rendered, rendered.display.replace("đổi yêu cầu", "**đổi yêu cầu**"))).toBe(true);
+  });
+
+  it("keeps the run-specific action in a bounded notification even when the cause is long", () => {
+    const rendered = renderConversationNotice(notice("blocked-notification", "conversation.progress", {
+      kind: "workflow_blocked", reason: "SDD conflict: lightweight accepted; policy requires full SDD. " + "detail ".repeat(150)
+    }));
+    const body = notificationBody(rendered);
+    expect(body.length).toBeLessThanOrEqual(400);
+    expect(body).toContain("đổi yêu cầu run run-42 sang full SDD");
+    expect(body).toContain("giữ nguyên phạm vi và tiêu chí nghiệm thu");
+  });
+
+  it("gives legacy SDD-conflict notices a concrete revision reply instead of the ineffective resume loop", () => {
+    const rendered = renderConversationNotice(notice("blocked-sdd", "conversation.progress", {
+      kind: "workflow_blocked", reason: "Coordinator blocked: accepted lightweight SDD conflicts with P15 requiring full SDD.",
+      options: ["Khắc phục capability rồi yêu cầu tiếp tục run", "Hủy run"]
+    }));
+    expect(rendered.display).toContain("đổi yêu cầu run run-42 sang full SDD");
+    expect(rendered.display).toContain("giữ nguyên phạm vi");
+    expect(rendered.display).toContain("không sửa yêu cầu");
+    expect(rendered.display).not.toContain("Khắc phục capability");
+    expect(rendered.display).toContain("hủy run-42");
+    expect(noticeDisplayed(rendered, rendered.display)).toBe(true);
+  });
+
   it("renders a user decision with options, expiry and the reply syntax", () => {
     const rendered = renderConversationNotice(notice("decision-" + APPROVAL_ID, "approval.request", decisionPayload));
     expect(rendered).toMatchObject({ kind: "user_decision", approvalId: APPROVAL_ID, ackToken: APPROVAL_ID, question: "Dùng schema v2 hay giữ v1?", requestedByRole: "coordinator" });
@@ -168,6 +222,37 @@ describe("transcript and reminder helpers", () => {
 });
 
 describe("display acknowledgement receipts", () => {
+  it("retains the full-SDD action when classification text lies past the bounded reason", async () => {
+    const root = await directory(), path = join(root, "receipts");
+    const receipts = new HostReceiptJournal(path, "/tmp/bflow-notice-render-repo", "session-1");
+    await receipts.appendConversationNotice({ schema_version: 2, message_id: "blocked-tail", correlation_id: "corr-1", run_id: "run-42",
+      sender: { role: "runtime" }, recipient: { role: "conversation" }, type: "conversation.progress",
+      payload: { kind: "workflow_blocked", reason: "detail ".repeat(800) + "SDD conflict: accepted lightweight; policy requires full SDD.",
+        requested_action: "authorized_requirement_revision" }, artifact_references: [], idempotency_key: "blocked-tail" });
+    const stored = (await new HostReceiptJournal(path, "/tmp/bflow-notice-render-repo", "session-1").unsurfacedConversationNotices())[0]!;
+    expect(stored.truncated).toBe(true);
+    expect(renderConversationNotice(stored).reply).toContain("đổi yêu cầu run run-42 sang full SDD");
+  });
+
+  it("keeps the cause and revision action visible after an oversized summary is stored and reopened", async () => {
+    const root = await directory(), path = join(root, "receipts");
+    const receipts = new HostReceiptJournal(path, "/tmp/bflow-notice-render-repo", "session-1");
+    await receipts.appendConversationNotice({ schema_version: 2, message_id: "blocked-long-sdd", correlation_id: "corr-1", run_id: "run-42",
+      sender: { role: "runtime" }, recipient: { role: "conversation" }, type: "conversation.progress",
+      payload: { kind: "workflow_blocked", reason: "Accepted lightweight SDD conflicts with P15 requiring full SDD.",
+        requested_action: "authorized_requirement_revision", blockers: ["Need authorized requirement revision"],
+        diagnostics: "long detail ".repeat(1000) }, artifact_references: [], idempotency_key: "blocked-long-sdd" });
+    const reopened = new HostReceiptJournal(path, "/tmp/bflow-notice-render-repo", "session-1");
+    const stored = (await reopened.unsurfacedConversationNotices())[0]!;
+    expect(stored.truncated).toBe(true);
+    const rendered = renderConversationNotice(stored);
+    expect(rendered.kind).toBe("blocked");
+    expect(rendered.display).toContain("đổi yêu cầu run run-42 sang full SDD");
+    expect(rendered.display).toContain("không sửa yêu cầu");
+    await reopened.markConversationNoticesSurfaced([stored.messageId]);
+    expect((await reopened.undisplayedUserFacingNotices()).map(item => item.messageId)).toContain(stored.messageId);
+  });
+
   it("retains surfaced substantive progress until user display, including after reopening", async () => {
     const root = await directory(), path = join(root, "receipts");
     const receipts = new HostReceiptJournal(path, "/tmp/bflow-notice-render-repo", "session-1");
@@ -253,5 +338,37 @@ describe("structured decision fields and assistant text", () => {
       { type: "assistant", message: { content: [{ type: "text", text: "after" }] } }
     ];
     expect(lastAssistantText(entries.map(entry => JSON.stringify(entry)).join("\n"))).toBe("after");
+  });
+});
+
+describe("blocked notice automatic resume and blockageReason", () => {
+  const automaticResume = { attempt: 2, limit: 5, notBefore: "2026-10-20T03:20:00.000Z" };
+  it("renders an auto-resume reply without asking for a manual resume", () => {
+    const rendered = renderConversationNotice(notice("blocked-auto", "conversation.progress", {
+      kind: "workflow_blocked", runId: "run-42", reason: "Coordinator pane unavailable", blockageReason: "Coordinator pane unavailable", automaticResume }));
+    expect(rendered.reply).toContain("Runtime sẽ tự tiếp tục run run-42 (lần 2/5)");
+    expect(rendered.reply).toContain('"hủy run-42"');
+    expect(rendered.reply).not.toContain("sau khi khắc phục");
+    expect(rendered.reply).not.toContain('"tiếp tục');
+  });
+  it("ignores a malformed automaticResume and keeps the manual reply", () => {
+    const rendered = renderConversationNotice(notice("blocked-bad", "conversation.progress", {
+      kind: "workflow_blocked", runId: "run-42", reason: "Coordinator pane unavailable", automaticResume: { attempt: "x" } }));
+    expect(rendered.reply).toContain('"tiếp tục run-42"');
+  });
+  it("round-trips automaticResume through blockedNoticeFields and still parses old receipts", () => {
+    const fields = blockedNoticeFields({ kind: "workflow_blocked", runId: "run-42", reason: "Pane unavailable", automaticResume });
+    expect(fields?.automaticResume).toEqual(automaticResume);
+    const rendered = renderConversationNotice(notice("blocked-fields", "conversation.progress", { kind: "workflow_blocked" }, { summary: "{", blocked: fields }));
+    expect(rendered.reply).toContain("Runtime sẽ tự tiếp tục run run-42");
+    const old = blockedNoticeFields({ kind: "workflow_blocked", runId: "run-42", reason: "Pane unavailable" });
+    expect(old).toBeDefined();
+    expect(old).not.toHaveProperty("automaticResume");
+    expect(renderConversationNotice(notice("blocked-old", "conversation.progress", { kind: "workflow_blocked" }, { summary: "{", blocked: old })).reply).toContain('"tiếp tục run-42"');
+  });
+  it("classifies a requirement-revision blocker as blocked via blockageReason", () => {
+    const fields = blockedNoticeFields({ kind: "workflow_blocked", runId: "run-42", reason: "SDD conflict: full SDD required.", blockageReason: "SDD conflict: full SDD required.",
+      requested_action: "authorized_requirement_revision" });
+    expect(fields?.requested_action).toBe("authorized_requirement_revision");
   });
 });

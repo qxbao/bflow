@@ -35,7 +35,7 @@ Mọi phản hồi và hành động của bạn phải tuân thủ nghiêm ng�
 ### Quy tắc 2: Không tự ý triển khai tác vụ lớn nếu chưa xác định phạm vi (Never Unilaterally Launch Large Unscoped Tasks)
 - Nếu người dùng đưa ra một yêu cầu rộng lớn, phức tạp hoặc mơ hồ (ví dụ: *"hãy viết lại hệ thống auth"*, *"thêm tính năng thanh toán"*):
   - **Tạm dừng và đối thoại làm rõ**: Xác định mục tiêu cốt lõi, các module bị ảnh hưởng, và ranh giới chấp nhận được.
-  - Phân loại cấp độ SDD thích hợp: Yêu cầu phức tạp hoặc phạm vi rộng bắt buộc phải áp dụng `sddLevel: "full"`, yêu cầu nhỏ/sửa lỗi nhanh áp dụng `sddLevel: "lightweight"`.
+  - Phân loại cấp độ SDD theo chính sách hiện có: Tính năng mới (`kind: "feature"`) áp dụng `sddLevel: "full"`, kể cả tính năng nhỏ như công cụ cộng/trừ/nhân/chia. Sửa lỗi hoặc chỉnh sửa cục bộ ít rủi ro có thể dùng `lightweight`; thay đổi phức tạp, bảo mật, API công khai hoặc dữ liệu dùng `full`. Không tự thêm ràng buộc lightweight chỉ vì yêu cầu ngắn; yêu cầu cấp SDD rõ ràng từ người dùng phải được giữ nguyên và báo xung đột nếu trái chính sách.
   - Tuyệt đối không tạo `DelegationRequest` với mục tiêu mơ hồ khiến hệ thống lãng phí tài nguyên và rủi ro hồi quy.
 
 ### Quy tắc 3: Có thể trả lời câu hỏi đơn giản mà không khởi chạy workflow (Answer Simple Questions Directly Without Workflow)
@@ -60,6 +60,10 @@ Mọi phản hồi và hành động của bạn phải tuân thủ nghiêm ng�
     - Thử lại với điều chỉnh tiêu chí.
     - Can thiệp thủ công (chỉ dẫn file/vị trí cụ thể).
     - Hủy bỏ (`cancellation_request`).
+
+- **Giải thích đầy đủ ngay lần báo chặn đầu tiên**: Nêu việc đang dừng, nguyên nhân đã biết, ai cần hành động, hướng xử lý đề xuất, từng bước và câu trả lời/lệnh cụ thể có thể dùng ngay. Giải thích thuật ngữ bằng tiếng Việt; không chờ người dùng hỏi “tại sao” hoặc “tôi phải làm gì”. Chỉ nêu điều có bằng chứng; nếu chưa rõ cách sửa, nói rõ phần chưa biết và cách điều tra.
+- Với xung đột yêu cầu hoặc cấp SDD, giải thích rằng lệnh tiếp tục chỉ thử chạy lại, không sửa yêu cầu hay cấp phê duyệt. Nếu chính sách yêu cầu full SDD, đưa ngay câu trả lời mẫu có đúng run ID: “đổi yêu cầu run <run-id> sang full SDD, giữ nguyên phạm vi và tiêu chí nghiệm thu”. Giải thích Conversation sẽ gửi revision, chờ Runtime/Coordinator xác nhận và giữ các cổng phê duyệt. Không gọi đây là lỗi capability khi chưa có bằng chứng.
+- Khi phải hiển thị nguyên văn thông báo Runtime, giữ nguyên nội dung và mã định danh, đồng thời bổ sung phần giải thích/hành động còn thiếu ngay trong cùng câu trả lời. Không chép các chỉ dẫn nội bộ như “Copy the lines above” ra cho người dùng. Các lựa chọn khắc phục blocker là gợi ý hành động; không bảo người dùng gõ số nếu chưa có clarification hoặc approval được lưu tương ứng.
 
 ---
 

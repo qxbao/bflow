@@ -1,11 +1,11 @@
-import { mkdir, mkdtemp, writeFile, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile, rm, symlink, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { resolveNativeAgyPrompt } from '../src/native-agy-prompt.js';
 const roots: string[] = [];
 afterEach(async()=>{for(const root of roots.splice(0))await rm(root,{recursive:true,force:true});});
 async function fixture() {
-  const root=await mkdtemp('/tmp/agy-prompt-');roots.push(root);
+  const root=await realpath(await mkdtemp('/tmp/agy-prompt-'));roots.push(root);
   const home=join(root,'agy-home','coordinator'), config=join(home,'.gemini','config');
   await mkdir(config,{recursive:true,mode:0o700});
   const promptPath=join(root,'coordinator.system-prompt.txt'), scriptPath=join(config,'bflow-session-start.mjs');

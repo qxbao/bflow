@@ -31,7 +31,7 @@ Review này không khẳng định các trách nhiệm đó đã hoàn tất.
 Bản sửa source: `4942b08`. Bản triển khai và các bản sửa được giữ qua merge commit
 `b35f063`. Đăng ký workspace là commit `9a71765f9e79fdc26ea3c5a8a576f5d89e18cac5`,
 chính là integration HEAD chính xác được kiểm thử bên dưới. Báo cáo review này là một
-commit chỉ-tài-liệu tiếp theo. `HANDOFF.md` gốc vẫn là evidence lịch sử.
+commit chỉ-tài-liệu tiếp theo.
 
 Việc xác thực chạy từ `/tmp/bflow-p16-integration` trên Linux với Node `v24.16.0`
 và pnpm `12.5.1`:
