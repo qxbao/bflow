@@ -797,6 +797,10 @@ Các đảm bảo được triển khai ở đây, với package-local test tron
 - `prepareSession` là all-or-nothing. Bất kỳ role bắt buộc nào chưa sẵn sàng (hoặc launch intent của nó
   không thể journal) tạo ra `ready: false` và không có launch material; các Gateway registration thực hiện trong lần gọi đó bị
   thu hồi theo từng role. Các role tùy chọn thất bại được báo cáo là `blocked` và bị bỏ qua.
+- Với grant tường minh, registration Gateway dùng đúng session scope của role để tạo hoặc xác minh partition
+  tương ứng, rồi Runtime kiểm tra readiness và operation discovery trong cùng scope trước khi tiếp tục.
+  Health của partition setup khác không chứng minh role partition đã sẵn sàng; registration không đạt hậu kiểm
+  bị thu hồi theo intent cụ thể, còn cleanup chưa xác nhận thì chặn launch và giữ reconciliation fail-closed.
 - Một role cần Gateway service mà không có Gateway control port được cấu hình là `blocked`.
 - Launch material (bearer token `launch.env`) chỉ được giữ trong bộ nhớ. Report, status snapshot và lỗi
   không bao giờ chứa giá trị token. Các launch đã nhả hoặc shut down bỏ material của chúng.

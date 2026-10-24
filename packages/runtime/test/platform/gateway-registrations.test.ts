@@ -196,6 +196,44 @@ describe("GatewayRegistrationManager", () => {
     expect(control.registeredGrants).toEqual([[grant]]);
   });
 
+  it("registers an explicit grant before inspecting readiness for that requested scope", async () => {
+    const grant: ResolvedToolGrant = { schemaVersion: 3, grantId: "grant-scoped-search", policyDigest: CONFIG_DIGEST,
+      toolId: "search-tool", kind: "stdio_mcp", requiredness: "required", role: "developer",
+      scope: { kind: "session", machineId: identity.machineId, repositoryId: identity.repositoryId,
+        workspaceRoot: identity.workspaceRoot, sessionId: identity.sessionId },
+      triggers: ["code_relationships"], serviceId: "svc-search", operations: ["search"] };
+    control.services = [observation("svc-search", { status: "stopped", diagnosticCode: "not_started", discoveredTools: [] })];
+    control.onRegister = () => { control.services = [observation("svc-search")]; };
+
+    const result = await manager().ensureForRole(identity, request({ toolGrants: [grant] }));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(control.registerCalls).toBe(1);
+    expect(control.inspectCalls).toBe(1);
+    expect(result.value.observations).toMatchObject([{ serviceId: "svc-search", status: "ready" }]);
+    expect(result.value.registrations[0]?.scope).toMatchObject({ repositoryId: identity.repositoryId, sessionId: identity.sessionId });
+  });
+
+  it("rechecks current readiness before returning a cached explicit-grant token", async () => {
+    const grant: ResolvedToolGrant = { schemaVersion: 3, grantId: "grant-cached-search", policyDigest: CONFIG_DIGEST,
+      toolId: "search-tool", kind: "stdio_mcp", requiredness: "required", role: "developer",
+      scope: { kind: "session", machineId: identity.machineId, repositoryId: identity.repositoryId,
+        workspaceRoot: identity.workspaceRoot, sessionId: identity.sessionId },
+      triggers: ["code_relationships"], serviceId: "svc-search", operations: ["search"] };
+    const gateway = manager();
+    const first = await gateway.ensureForRole(identity, request({ toolGrants: [grant] }));
+    expect(first.ok).toBe(true);
+    control.services = [observation("svc-search", { status: "stopped", diagnosticCode: "not_started", discoveredTools: [] })];
+
+    const second = await gateway.ensureForRole(identity, request({ toolGrants: [grant] }));
+
+    expect(second.ok).toBe(false);
+    expect(control.registerCalls).toBe(1);
+    expect(control.revokeCalls).toHaveLength(1);
+    expect(control.registrations.size).toBe(0);
+  });
+
   it("returns the bearer token under a sanitized environment name and keeps it out of the ledger", async () => {
     const result = await manager().ensureForRole(identity, request());
     expect(result.ok).toBe(true);

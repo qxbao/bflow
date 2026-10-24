@@ -714,7 +714,9 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
           if (!granted.ok) {
             const uncertain = granted.error.code === "timeout" || granted.error.code === "unknown_delivery" || granted.error.code === "cancelled" ||
               ("retrySafety" in granted.error && granted.error.retrySafety === "observation_only");
-            if (!uncertain && serviceGrants.every(grant => grant.requiredness === "optional")) {
+            const cleanupUnconfirmed = isRecord(granted.error.details) &&
+              granted.error.details["diagnosticCode"] === "gateway_readiness_cleanup_failed";
+            if (!uncertain && !cleanupUnconfirmed && serviceGrants.every(grant => grant.requiredness === "optional")) {
               toolChecks.push(toolCheck("unknown", "optional_gateway_service_unavailable", `Optional Gateway service ${serviceId} is unavailable: ${granted.error.message}`));
               continue;
             }

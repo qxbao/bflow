@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
@@ -8,10 +8,13 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   AgentEnvironment, AgentHealthRequest, AgentHealthResult, AgentLaunchProfile, AgentProviderAdapter, AgentProviderDescriptor,
-  ContractError, MCPClientRegistration, MCPServiceObservation, OperationOptions, OperationResult, ResolvedToolGrant, ScopedOperation, TrustScope
+  ContractError, MCPClientRegistration, MCPServiceObservation, MCPToolCall, OperationOptions, OperationResult, ResolvedToolGrant,
+  ScopedOperation, TrustScope
 } from "@bflow/contracts";
-import { RepositoryToolPolicySchema } from "@bflow/contracts";
+import { MCPServiceDefinitionSchema, RepositoryToolPolicySchema } from "@bflow/contracts";
 import { createFakeProviderRunner, type ProviderCommandInvocation, type ProviderCommandRunner } from "@bflow/agent-providers";
+import { BflowSharedMCPGateway, DefaultMCPServiceManager, GatewaySecretStore, StreamableHttpGatewayServer,
+  SubprocessStdioDriverFactory } from "@bflow/mcp-gateway";
 import { SkillFileStore, SkillManager, bundleDigest, type BundleFiles } from "@bflow/skills";
 import { failWith, ok } from "../../src/platform/errors.js";
 import { Ed25519LaunchAttestationSigner } from "../../src/platform/attestation-signer.js";
@@ -24,7 +27,7 @@ import { DefaultPlatformReadinessService } from "../../src/platform/service.js";
 import { createProviderAdapterFactory, createSkillResolver } from "../../src/platform/defaults.js";
 import type {
   GatewayControlPort, GatewayRegistrationGrant, PlatformSessionIdentity, ProviderAdapterContext, ProviderAdapterFactory,
-  RolePlatformRequirement
+  GatewayRegistrationPort, RolePlatformRequirement
 } from "../../src/platform/ports.js";
 
 const LIVE_READY = {
@@ -40,10 +43,12 @@ const ENDPOINT = "http://127.0.0.1:7777/mcp";
 /** In-memory Gateway with stateful registrations; fails the next register when asked. */
 class FakeGatewayControl implements GatewayControlPort {
   readonly registrations = new Map<string, { registration: MCPClientRegistration; bearerToken: string }>();
+  readonly revokeCalls: string[] = [];
   services: MCPServiceObservation[] = [];
   failNextRegister: ContractError | undefined;
   registerCalls = 0;
   inspectCalls = 0;
+  onRegister: (() => void) | undefined;
 
   async register(registration: MCPClientRegistration, _options?: OperationOptions):
     Promise<OperationResult<GatewayRegistrationGrant>> {
@@ -55,11 +60,13 @@ class FakeGatewayControl implements GatewayControlPort {
     }
     const bearerToken = randomBytes(24).toString("hex");
     this.registrations.set(registration.registrationId, { registration, bearerToken });
+    this.onRegister?.();
     return ok({ registration, bearerToken });
   }
 
   async revoke(registrationId: string, _operation: ScopedOperation, _options?: OperationOptions):
     Promise<OperationResult<void>> {
+    this.revokeCalls.push(registrationId);
     if (!this.registrations.has(registrationId)) {
       return failWith({ code: "not_found", retryable: false, message: "registration not found" });
     }
@@ -88,7 +95,7 @@ class FakeGatewayControl implements GatewayControlPort {
   }
 }
 
-function observation(serviceId: string): MCPServiceObservation {
+function observation(serviceId: string, overrides: Partial<MCPServiceObservation> = {}): MCPServiceObservation {
   return {
     schemaVersion: 3,
     serviceId,
@@ -100,7 +107,8 @@ function observation(serviceId: string): MCPServiceObservation {
     ownership: "bflow",
     activeClientCount: 0,
     observedAt: "2026-10-18T00:00:00.000Z",
-    diagnosticCode: "ok"
+    diagnosticCode: "ok",
+    ...overrides
   };
 }
 
@@ -278,6 +286,7 @@ describe("DefaultPlatformReadinessService", () => {
   function buildService(options: {
     runner?: ProviderCommandRunner;
     gateway?: boolean;
+    gatewayPort?: GatewayRegistrationPort;
     now?: () => Date;
     codexLaunchEnvironment?: Readonly<Record<string, string>>;
     providerFactory?: ProviderAdapterFactory;
@@ -299,9 +308,9 @@ describe("DefaultPlatformReadinessService", () => {
       journal,
       now
     });
-    const gateway = options.gateway === false
+    const gateway = options.gatewayPort ?? (options.gateway === false
       ? undefined
-      : new GatewayRegistrationManager({ control: gatewayControl, endpoint: ENDPOINT, now });
+      : new GatewayRegistrationManager({ control: gatewayControl, endpoint: ENDPOINT, now }));
     const service = new DefaultPlatformReadinessService({
       environments: new RoleEnvironmentResolver(),
       skills: new SkillSessionStore({ resolver: createSkillResolver(skillManager) }),
@@ -315,6 +324,219 @@ describe("DefaultPlatformReadinessService", () => {
     });
     return { service, journal };
   }
+
+  async function createActualScopedGatewayFixture(mode: "valid" | "missing-input-schema" | "unavailable-actual") {
+    const serviceId = "scoped-stdio-search";
+    const counterPath = join(baseDir, `scope-calls-${mode}.txt`);
+    const workerPath = join(baseDir, `scope-worker-${mode}.cjs`);
+    const startCounterPath = join(baseDir, `scope-starts-${mode}.txt`);
+    const workerSource = `
+const fs = require("node:fs");
+const readline = require("node:readline");
+const mode = process.argv[2];
+const counterPath = process.argv[3];
+const startCounterPath = process.argv[4];
+fs.appendFileSync(startCounterPath, "x");
+const startNumber = fs.readFileSync(startCounterPath, "utf8").length;
+const inputSchema = { type: "object", properties: { query: { type: "string" } }, required: ["query"], additionalProperties: false };
+const tools = [{ name: "search", ...(mode === "missing-input-schema" ? {} : { inputSchema }) }];
+const rl = readline.createInterface({ input: process.stdin, terminal: false });
+rl.on("line", line => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    const reply = mode === "unavailable-actual" && startNumber > 1
+      ? { jsonrpc: "2.0", id: message.id, error: { code: -32000, message: "actual partition unavailable" } }
+      : { jsonrpc: "2.0", id: message.id,
+        result: { protocolVersion: "2025-11-25", capabilities: { tools: {} }, serverInfo: { name: "scope-worker", version: "1" } } };
+    process.stdout.write(JSON.stringify(reply) + "\\n");
+  } else if (message.method === "tools/list") {
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { tools } }) + "\\n");
+  } else if (message.method === "tools/call") {
+    fs.appendFileSync(counterPath, "x");
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id,
+      result: { content: [{ type: "text", text: "actual-scope-result" }] } }) + "\\n");
+  }
+});
+`;
+    await writeFile(workerPath, workerSource, { mode: 0o700 });
+    await writeFile(counterPath, "", { mode: 0o600 });
+    const serviceDefinition = MCPServiceDefinitionSchema.parse({
+      schemaVersion: 3, serviceId, revision: 1,
+      scope: { kind: "machine", machineId: identity.machineId },
+      tool: { schemaVersion: 3, toolId: "scope-search-tool", kind: "stdio_mcp", version: "1.0.0",
+        operations: ["search"], resource: { sharing: "concurrent", maxConcurrency: 2 }, required: true },
+      connection: { kind: "stdio_mcp", executable: process.execPath,
+        argv: [workerPath, mode, counterPath, startCounterPath],
+        environmentBindings: {}, executableDigest: createHash("sha256").update(await readFile(process.execPath)).digest("hex"),
+        ownership: "bflow", bridgeRequired: true },
+      authentication: { mode: "none" }, healthTimeoutMs: 10_000, idleTimeoutMs: 60_000, restartLimit: 0
+    });
+    const secretStore = new GatewaySecretStore();
+    const serviceManager = new DefaultMCPServiceManager({
+      secretStore,
+      driverFactory: new SubprocessStdioDriverFactory({ secretStore, defaultTimeoutMs: 10_000 })
+    });
+    const grantsByRegistration = new Map<string, readonly ResolvedToolGrant[]>();
+    const gateway = new BflowSharedMCPGateway({
+      serviceManager,
+      secretStore,
+      requireResolvedToolGrants: true,
+      toolGrantResolver: registration => grantsByRegistration.get(registration.registrationId)
+    });
+    const registered = gateway.registry.registerService(serviceDefinition);
+    if (!registered.ok) throw new Error(registered.error.message);
+
+    const actualScope = { kind: "session" as const, machineId: identity.machineId, repositoryId: identity.repositoryId,
+      workspaceRoot: identity.workspaceRoot, sessionId: identity.sessionId };
+    const setupScope = { ...actualScope, repositoryId: "setup-repository", sessionId: "setup-gateway" };
+    const operation = (scope: TrustScope, idempotencyKey: string) => ({ schemaVersion: 3 as const, scope, idempotencyKey });
+    const actualOperation = operation(actualScope, "inspect-actual-scope");
+    const setupOperation = operation(setupScope, "warm-setup-scope");
+    const warmed = await serviceManager.ensure(serviceDefinition, setupOperation);
+    if (!warmed.ok || warmed.value.status !== "ready") throw new Error(`Setup partition failed to warm: ${JSON.stringify(warmed)}`);
+
+    const dataServer = new StreamableHttpGatewayServer({ gateway, host: "127.0.0.1", port: 0 });
+    let controlServer: { locator: { token: string }; stop(): Promise<void> } | undefined;
+    let runtimeControl: { list(scope: TrustScope): Promise<OperationResult<readonly MCPClientRegistration[]>>;
+      inspectServices(operation: ScopedOperation): Promise<OperationResult<readonly MCPServiceObservation[]>>;
+      invokeTool(call: MCPToolCall): Promise<OperationResult<import("@bflow/contracts").MCPToolCallResult>> } | undefined;
+    let registrationManager: GatewayRegistrationManager | undefined;
+    try {
+      const endpoint = await dataServer.start();
+      const { startGatewayControl } = await import(new URL("../../../../apps/cli/dist/gateway-control.js", import.meta.url).href);
+      const stateRoot = join(baseDir, `scope-control-${mode}`);
+      controlServer = await startGatewayControl({ gateway, stateRoot, machineId: identity.machineId,
+        configDigest: "a".repeat(64), endpoint, workspaceRoot: identity.workspaceRoot,
+        services: [serviceDefinition], grantMap: grantsByRegistration });
+      const { GatewayControlClient } = await import(new URL("../../dist/platform/gateway-control-client.js", import.meta.url).href);
+      const opened = await GatewayControlClient.fromLocator(join(stateRoot, "gateway-control.json"));
+      if (!opened.ok) throw new Error(`Runtime could not open the real CLI Gateway control endpoint: ${opened.error.message}`);
+      runtimeControl = opened.value;
+      registrationManager = new GatewayRegistrationManager({ control: runtimeControl, endpoint });
+    } catch (error) {
+      await controlServer?.stop();
+      await dataServer.stop();
+      await serviceManager.stop(serviceId, setupOperation);
+      await serviceManager.stop(serviceId, actualOperation);
+      throw error;
+    }
+
+    return {
+      serviceId, serviceDefinition, counterPath, actualScope, setupScope, actualOperation, setupOperation,
+      gatewayControlToken: controlServer!.locator.token,
+      gateway, serviceManager, runtimeControl: runtimeControl!, registrationManager: registrationManager!,
+      grantsByRegistration,
+      async cleanup() {
+        await registrationManager!.revokeSession(identity).catch(() => undefined);
+        await controlServer!.stop();
+        await dataServer.stop();
+        await serviceManager.stop(serviceId, setupOperation);
+        await serviceManager.stop(serviceId, actualOperation);
+      }
+    };
+  }
+
+  function scopeSearchPolicyAndGrant(serviceId: string, scope: TrustScope) {
+    const policy = RepositoryToolPolicySchema.parse({ schemaVersion: 3, repositoryId: identity.repositoryId,
+      scope: { kind: "repository", machineId: identity.machineId, repositoryId: identity.repositoryId, workspaceRoot: identity.workspaceRoot },
+      digest: "e".repeat(64), requirements: [{ toolId: "scope-search-tool", kind: "stdio_mcp", serviceId,
+        operations: ["search"], requiredness: "required", roles: ["developer"], triggers: ["code_relationships"] }] });
+    const grant: ResolvedToolGrant = { schemaVersion: 3, grantId: "grant-scoped-search", policyDigest: policy.digest,
+      toolId: "scope-search-tool", kind: "stdio_mcp", requiredness: "required", role: "developer", scope,
+      triggers: ["code_relationships"], serviceId, operations: ["search"] };
+    return { policy, grant };
+  }
+
+  async function expectBlockedActualGatewayFixture(mode: "missing-input-schema" | "unavailable-actual"): Promise<void> {
+    const fixture = await createActualScopedGatewayFixture(mode);
+    try {
+      const setupBefore = await fixture.runtimeControl.inspectServices(fixture.setupOperation);
+      const actualBefore = await fixture.runtimeControl.inspectServices(fixture.actualOperation);
+      expect(setupBefore.ok && setupBefore.value[0]?.status).toBe("ready");
+      expect(actualBefore.ok && actualBefore.value[0]?.status).not.toBe("ready");
+      const { policy, grant } = scopeSearchPolicyAndGrant(fixture.serviceId, fixture.actualScope);
+      const providerContexts: ProviderAdapterContext[] = [];
+      const { service } = buildService({ gatewayPort: fixture.registrationManager,
+        providerFactory: contextProviderFactory((_provider, context) => providerContexts.push(context)) });
+
+      const result = await service.prepareSession(identity, [requirement({ toolPolicy: policy, toolGrants: [grant],
+        mcpServiceIds: [fixture.serviceId], mcpOperations: ["search"], toolIds: ["scope-search-tool"] })]);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.report.ready).toBe(false);
+      expect(result.value.report.roles[0]?.status).toBe("blocked");
+      expect(result.value.launches).toEqual([]);
+      expect(providerContexts).toEqual([]);
+      expect(JSON.stringify(result)).not.toContain(fixture.gatewayControlToken);
+      expect(await readFile(fixture.counterPath, "utf8")).toBe("");
+      expect(fixture.grantsByRegistration.size).toBe(0);
+      const registrations = await fixture.runtimeControl.list(fixture.actualScope);
+      expect(registrations.ok && registrations.value).toEqual([]);
+      const setupAfter = await fixture.runtimeControl.inspectServices(fixture.setupOperation);
+      expect(setupAfter.ok && setupAfter.value[0]?.status).toBe("ready");
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+
+  it("registers into the actual role partition after warming only the synthetic setup partition", async () => {
+    const fixture = await createActualScopedGatewayFixture("valid");
+    try {
+      const setupBefore = await fixture.runtimeControl.inspectServices(fixture.setupOperation);
+      const actualBefore = await fixture.runtimeControl.inspectServices(fixture.actualOperation);
+      expect(setupBefore.ok && setupBefore.value[0]?.status).toBe("ready");
+      expect(actualBefore.ok && actualBefore.value[0]?.status).toBe("stopped");
+      expect(actualBefore.ok && actualBefore.value[0]?.diagnosticCode).toBe("not_started");
+      const setupInstanceBefore = setupBefore.ok ? setupBefore.value[0]?.instanceId : undefined;
+      const { policy, grant } = scopeSearchPolicyAndGrant(fixture.serviceId, fixture.actualScope);
+      const providerContexts: ProviderAdapterContext[] = [];
+      const { service } = buildService({ gatewayPort: fixture.registrationManager,
+        providerFactory: contextProviderFactory((_provider, context) => providerContexts.push(context)) });
+
+      const prepared = await service.prepareSession(identity, [requirement({ toolPolicy: policy, toolGrants: [grant],
+        mcpServiceIds: [fixture.serviceId], mcpOperations: ["search"], toolIds: ["scope-search-tool"] })]);
+
+      expect(prepared.ok && prepared.value.report.ready).toBe(true);
+      if (!prepared.ok) return;
+      expect(prepared.value.launches).toHaveLength(1);
+      expect(providerContexts.length).toBeGreaterThan(0);
+      const privateTokens = Object.values(prepared.value.launches[0]!.gateway.tokenEnvironment);
+      for (const context of providerContexts) {
+        expect(context.mcpRegistrations).toEqual([]);
+        expect(context.mcpObservations).toEqual([]);
+        expect(context.mcpTokenEnvironmentNames).toBeUndefined();
+        for (const token of privateTokens) expect(JSON.stringify(context)).not.toContain(token);
+      }
+      expect(Object.keys(prepared.value.launches[0]!.launch.env).some(name => name.startsWith("BFLOW_MCP_TOKEN_"))).toBe(false);
+
+      const setupAfter = await fixture.runtimeControl.inspectServices(fixture.setupOperation);
+      const actualAfter = await fixture.runtimeControl.inspectServices(fixture.actualOperation);
+      expect(setupAfter.ok && setupAfter.value[0]?.status).toBe("ready");
+      expect(actualAfter.ok && actualAfter.value[0]?.status).toBe("ready");
+      expect(setupAfter.ok && setupAfter.value[0]?.instanceId).toBe(setupInstanceBefore);
+      expect(actualAfter.ok && actualAfter.value[0]?.instanceId).not.toBe(setupInstanceBefore);
+
+      const registration = prepared.value.launches[0]?.gateway.registrations[0];
+      expect(registration).toBeDefined();
+      if (!registration) return;
+      const called = await fixture.runtimeControl.invokeTool({ schemaVersion: 3, callId: "actual-scope-search-call",
+        registrationId: registration.registrationId, serviceId: fixture.serviceId, tool: "search",
+        input: { query: "partition-check" }, idempotencyKey: "actual-scope-search-call" });
+      expect(called.ok && called.value.status).toBe("completed");
+      expect(await readFile(fixture.counterPath, "utf8")).toBe("x");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("blocks malformed required stdio schemas without exposing provider launch material", async () => {
+    await expectBlockedActualGatewayFixture("missing-input-schema");
+  });
+
+  it("blocks an unavailable actual repository partition without exposing provider launch material", async () => {
+    await expectBlockedActualGatewayFixture("unavailable-actual");
+  });
 
   function useIsolatorState(stateRoot: string): () => void {
     const previous = {
@@ -572,7 +794,41 @@ describe("DefaultPlatformReadinessService", () => {
     if (!result.ok) return;
     expect(result.value.report.roles[0]?.checks).toContainEqual(expect.objectContaining({ status: "unknown", code: "optional_gateway_service_unavailable" }));
     expect(result.value.launches[0]?.gateway.registrations).toEqual([]);
-    expect(gatewayControl.registerCalls).toBe(0);
+    expect(gatewayControl.registerCalls).toBe(1);
+    expect(gatewayControl.revokeCalls).toHaveLength(1);
+    expect(gatewayControl.registrations.size).toBe(0);
+  });
+
+  it("revokes a registered grant when same-scope post-registration readiness is lost", async () => {
+    const toolPolicy = { schemaVersion: 3 as const, repositoryId: identity.repositoryId,
+      scope: { kind: "repository" as const, machineId: identity.machineId, repositoryId: identity.repositoryId, workspaceRoot: identity.workspaceRoot },
+      digest: "3".repeat(64), requirements: [{ toolId: "code-search", kind: "native_remote_mcp" as const, serviceId: "svc-search",
+        operations: ["search"], requiredness: "required" as const, roles: ["developer" as const], triggers: ["code_relationships" as const] }] };
+    const grant: ResolvedToolGrant = { schemaVersion: 3, grantId: "grant-post-register-search", policyDigest: toolPolicy.digest,
+      toolId: "code-search", kind: "native_remote_mcp", requiredness: "required", role: "developer",
+      scope: { kind: "session", machineId: identity.machineId, repositoryId: identity.repositoryId,
+        workspaceRoot: identity.workspaceRoot, sessionId: identity.sessionId },
+      triggers: ["code_relationships"], serviceId: "svc-search", operations: ["search"] };
+    const providerContexts: ProviderAdapterContext[] = [];
+    let registerCallbackCount = 0;
+    gatewayControl.onRegister = () => {
+      registerCallbackCount += 1;
+      gatewayControl.services = [observation("svc-search", { status: "stopped", diagnosticCode: "not_started", discoveredTools: [] })];
+    };
+    const { service } = buildService({ providerFactory: contextProviderFactory((_provider, context) => providerContexts.push(context)) });
+
+    const result = await service.prepareSession(identity, [requirement({ toolPolicy, toolGrants: [grant],
+      mcpServiceIds: ["svc-search"], mcpOperations: ["search"] })]);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(registerCallbackCount).toBe(1);
+    expect(result.value.report.ready).toBe(false);
+    expect(result.value.launches).toEqual([]);
+    expect(providerContexts).toEqual([]);
+    expect(gatewayControl.registerCalls).toBe(1);
+    expect(gatewayControl.revokeCalls).toHaveLength(1);
+    expect(gatewayControl.registrations.size).toBe(0);
   });
 
   it.each(["expired", "missing-skills", "gateway-lost", "released", "binary-changed", "config-changed"] as const)("refuses %s retained startup material without replacing it", async condition => {

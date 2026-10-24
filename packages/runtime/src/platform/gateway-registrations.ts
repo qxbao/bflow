@@ -105,7 +105,9 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
       const now = this.now();
       const registration = this.buildRegistration(identity, scope, request, now);
       const operation = scopedOperation(scope, registration.registrationId);
-      const observations = await this.assertServicesReady(request, operation, options);
+      const observations = request.toolGrants === undefined
+        ? await this.assertServicesReady(request, operation, options)
+        : undefined;
 
       const path = ledgerPath(identity);
       let entries = (await readLedger(path)).entries;
@@ -113,7 +115,9 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
       const cached = this.tokens.get(registration.registrationId);
       if (existing?.state === "registered" && existing.registration && cached !== undefined &&
           Date.parse(existing.registration.expiresAt) > now.getTime()) {
-        return accessFor(existing.registration, cached, observations);
+        return accessFor(existing.registration, cached,
+          observations ?? await this.assertServicesReadyForRegistration(identity, path, entries, existing,
+            request, operation, scope, options));
       }
 
       if (existing) entries = await this.reconcile(identity, path, entries, existing, scope, options);
@@ -140,9 +144,12 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
 
       const registered: LedgerEntry = { ...makeEntry(registration, request.taskId, "registered", now),
         registration: verified.registration };
-      await writeLedger(identity, path, { ...entries, [registered.registrationId]: registered });
+      const registeredEntries = { ...entries, [registered.registrationId]: registered };
+      await writeLedger(identity, path, registeredEntries);
       this.tokens.set(registered.registrationId, verified.bearerToken);
-      return accessFor(verified.registration, verified.bearerToken, observations);
+      return accessFor(verified.registration, verified.bearerToken,
+        observations ?? await this.assertServicesReadyForRegistration(identity, path, registeredEntries, registered,
+          request, operation, scope, options));
     }));
   }
 
@@ -308,6 +315,24 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
       reject("validation", "Requested Gateway services or tools are not ready", { missingServices, missingTools });
     }
     return requested.flatMap(serviceId => byService.get(serviceId) ?? []);
+  }
+
+  private async assertServicesReadyForRegistration(identity: PlatformSessionIdentity, path: string,
+    entries: LedgerEntries, entry: LedgerEntry, request: GatewayRoleRequest, operation: ScopedOperation,
+    scope: TrustScope, options?: OperationOptions): Promise<readonly MCPServiceObservation[]> {
+    try {
+      return await this.assertServicesReady(request, operation, options);
+    } catch (readinessError) {
+      try {
+        await this.revokeEntries(identity, path, entries, [entry], scope, options);
+      } catch (cleanupError) {
+        const cleanupCode = cleanupError instanceof GatewayPortError ? cleanupError.failure.code : "corruption";
+        throw new GatewayPortError({ code: "conflict", retryable: true,
+          message: "Gateway registration readiness failed and cleanup could not be confirmed",
+          details: { diagnosticCode: "gateway_readiness_cleanup_failed", cleanupCode } });
+      }
+      throw readinessError;
+    }
   }
 
   /**
