@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -2298,6 +2298,66 @@ describe("@bflow/agent-providers", () => {
       await symlink(target, join(cache, "onboarding.json"));
       expect((await adapter.prepareLaunch(createTestEnvironment("agy"))).ok).toBe(true);
       await expect(readFile(adopted, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
+    it("links verified native Library/Keychains into the role-private Agy HOME before authentication and launch", async () => {
+      const nativeHome = join(testBaseDir, "native-home-keychains");
+      const sourceKeychains = join(nativeHome, "Library", "Keychains");
+      await mkdir(sourceKeychains, { recursive: true, mode: 0o700 });
+      for (const directory of [nativeHome, join(nativeHome, "Library"), sourceKeychains]) await chmod(directory, 0o700);
+      await writeFile(join(sourceKeychains, "login.keychain-db"), "keychain-stub", { mode: 0o600 });
+      const environment = createTestEnvironment("agy", "workspace_auto", { stateDirectory: join(testStateDir, "keychains-auth") });
+      await mkdir(environment.stateDirectory, { recursive: true, mode: 0o700 });
+      let keychainVisibleAtModels = false;
+      const runner = createFakeProviderRunner({ customHandler: invocation => {
+        if (invocation.args.join(" ") !== "models") return undefined;
+        keychainVisibleAtModels = existsSync(join(invocation.env!.HOME!, "Library", "Keychains", "login.keychain-db"));
+        return undefined;
+      } });
+      const previousHome = process.env.HOME;
+      process.env.HOME = nativeHome;
+      try {
+        const adapter = new AgyProviderAdapter({ runner, executablePath: fakeBinaryPath, allowTestFilesystemOwnership: true, executionProbe: "disabled" });
+        const health = await adapter.checkHealth({ schemaVersion: 3, environment, stage: "preflight", requestedAt: new Date().toISOString() });
+        expect(health.ok).toBe(true);
+        expect(keychainVisibleAtModels).toBe(true);
+        const privateKeychains = join(environment.stateDirectory, "agy-home", environment.role, "Library", "Keychains");
+        expect((await lstat(privateKeychains)).isSymbolicLink()).toBe(true);
+        expect(await readlink(privateKeychains)).toBe(sourceKeychains);
+      } finally {
+        if (previousHome === undefined) delete process.env.HOME;
+        else process.env.HOME = previousHome;
+      }
+
+      const unsafeHome = join(testBaseDir, "native-home-unsafe-keychains");
+      const targetKeychains = join(testBaseDir, "foreign-keychains");
+      await mkdir(join(unsafeHome, "Library"), { recursive: true, mode: 0o700 });
+      await mkdir(targetKeychains, { recursive: true, mode: 0o700 });
+      for (const directory of [unsafeHome, join(unsafeHome, "Library"), targetKeychains]) await chmod(directory, 0o700);
+      await symlink(targetKeychains, join(unsafeHome, "Library", "Keychains"));
+      const unsafeEnv = createTestEnvironment("agy", "workspace_auto", { stateDirectory: join(testStateDir, "keychains-unsafe") });
+      await mkdir(unsafeEnv.stateDirectory, { recursive: true, mode: 0o700 });
+      const unsafeAdapter = new AgyProviderAdapter({ runner: createFakeProviderRunner({ scenario: "healthy" }), executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true, isolatorEnvironment: { HOME: unsafeHome, PATH: process.env.PATH ?? "" } });
+      expect((await unsafeAdapter.prepareLaunch(unsafeEnv)).ok).toBe(true);
+      await expect(lstat(join(unsafeEnv.stateDirectory, "agy-home", unsafeEnv.role, "Library", "Keychains"))).rejects.toMatchObject({ code: "ENOENT" });
+
+      const profileHome = join(testBaseDir, "isolator-profile-home-keychains");
+      await mkdir(profileHome, { recursive: true, mode: 0o700 });
+      await chmod(profileHome, 0o700);
+      const profileEnv = createTestEnvironment("agy", "workspace_auto", { stateDirectory: join(testStateDir, "keychains-isolator-profile") });
+      await mkdir(profileEnv.stateDirectory, { recursive: true, mode: 0o700 });
+      const profileAdapter = new AgyProviderAdapter({
+        runner: createFakeProviderRunner({ scenario: "healthy" }),
+        executablePath: fakeBinaryPath,
+        allowTestFilesystemOwnership: true,
+        executionProbe: "disabled",
+        isolatorEnvironment: { HOME: profileHome, AI_ISOLATOR_REAL_HOME: nativeHome, PATH: process.env.PATH ?? "" }
+      });
+      expect((await profileAdapter.checkHealth({ schemaVersion: 3, environment: profileEnv, stage: "preflight", requestedAt: new Date().toISOString() })).ok).toBe(true);
+      expect(await readlink(join(profileHome, "Library", "Keychains"))).toBe(sourceKeychains);
+      expect((await profileAdapter.prepareLaunch(profileEnv)).ok).toBe(true);
+      expect(await readlink(join(profileEnv.stateDirectory, "agy-home", profileEnv.role, "Library", "Keychains"))).toBe(sourceKeychains);
     });
 
     it("rejects Agy UserPromptSubmit hooks instead of relabeling model-loop events as user input", async () => {
