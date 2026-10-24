@@ -13,18 +13,21 @@ const Details = z.object({
   blockers: z.array(z.string()).optional().catch(undefined)
 });
 
-/** Narrow fallback for old notices that recorded the SDD conflict only in prose. */
+// A clause is about the SDD level only when it names the spec/SDD itself, so "Git merge conflict" or "full rebuild" never match.
+const SDD_SUBJECT = /\b(?:sdd|spec(?:ification)?s?)\b|đặc tả/iu;
+
+/** Narrow fallback for old notices that recorded the SDD conflict only in prose; the conflict clause itself must name SDD and a level. */
 function sddConflict(text: string): boolean {
-  return /\bsdd\b/i.test(text) && /\blightweight\b/i.test(text) && /\bfull\b/i.test(text) &&
-    text.split(/[.;\n]/u).some(clause => /conflict|mismatch|contradict|violat|xung đột|mâu thuẫn/i.test(clause) &&
-      !/(?:\b(?:no|without)\s+(?:sdd[- ]*)?(?:conflict|mismatch)|(?:conflict|mismatch)[^\n]{0,160}\b(?:resolved|cleared|fixed)\b|không(?: còn| có)*\s+(?:xung đột|mâu thuẫn)|(?:xung đột|mâu thuẫn)[^\n]{0,160}đã(?: được)? giải quyết)/iu.test(clause));
+  return text.split(/[.;\n]/u).some(clause => SDD_SUBJECT.test(clause) && /\b(?:lightweight|full)\b/i.test(clause) &&
+    /conflict|mismatch|contradict|violat|xung đột|mâu thuẫn/i.test(clause) &&
+    !/(?:\b(?:no|without)\s+(?:sdd[- ]*)?(?:conflict|mismatch)|(?:conflict|mismatch)[^\n]{0,160}\b(?:resolved|cleared|fixed)\b|không(?: còn| có)*\s+(?:xung đột|mâu thuẫn)|(?:xung đột|mâu thuẫn)[^\n]{0,160}đã(?: được)? giải quyết)/iu.test(clause));
 }
 
-/** Match affirmative requirements in either word order, never the noun "requirement" or "requires lightweight, not full". */
+/** Match affirmative requirements in either word order, never the noun "requirement" or "requires lightweight, not full"; only in an SDD/spec clause. */
 function requiresFull(text: string): boolean {
   const beforeFull = /\b(?:require[sd]?|requiring|need(?:s|ed)?|must use)\s+(?:(?:use|using|a|the|level)\s+){0,2}[`'"]?full\b|(?:bắt buộc|cần|phải)\s+(?:(?:phải|dùng|sử dụng|áp dụng|mức)\s+){0,2}[`'"]?full\b/giu;
   const afterFull = /\bfull(?:\s+sdd)?\s+(?:(?:is|remains)\s+(?:required|mandatory)|(?:là\s+)?bắt buộc)/giu;
-  return text.split(/[.;\n]/u).some(clause => [...clause.matchAll(beforeFull), ...clause.matchAll(afterFull)].some(match =>
+  return text.split(/[.;\n]/u).filter(clause => SDD_SUBJECT.test(clause)).some(clause => [...clause.matchAll(beforeFull), ...clause.matchAll(afterFull)].some(match =>
     !/(?:\b(?:not|no|never|neither|doesn't|don't)|không|chưa|chẳng)(?:\s+\p{L}+){0,3}\s+$/iu.test(clause.slice(0, match.index))));
 }
 

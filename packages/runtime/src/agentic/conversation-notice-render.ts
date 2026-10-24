@@ -84,6 +84,8 @@ const APPROVAL_PAYLOAD = z.object({
 /** Kinds that name a run which cannot progress without the user. Runtime-authored failures carry `blockageReason` instead of `reason`. */
 const BLOCKED_KINDS = ["workflow_blocked", "run_stalled", "workflow_rejected", "delivery_failure", "delegation_rejected", "coordinator_no_response",
   "developer_no_response", "specialist_no_response", "verification_stuck"] as const;
+/** Runtime's automatic-resume schedule; display only, never authority to resume. */
+const AutomaticResumeSchema = z.object({ attempt: z.number().int().min(0), limit: z.number().int().min(0), notBefore: z.string().max(64) }).strict();
 const BLOCKED_PAYLOAD = z.object({
   kind: z.enum(BLOCKED_KINDS),
   reason: z.string().min(1),
@@ -99,7 +101,8 @@ export const BlockedNoticeSchema = z.object({
   options: z.array(z.string().max(500)).max(10).optional(),
   requested_action: z.literal("authorized_requirement_revision").optional(),
   requiredSddLevel: z.literal("full").optional(),
-  blockers: z.array(z.string().max(200)).max(2).optional()
+  blockers: z.array(z.string().max(200)).max(2).optional(),
+  automaticResume: AutomaticResumeSchema.optional()
 }).strict();
 
 const BLOCKED_LABEL: Record<(typeof BLOCKED_KINDS)[number], string> = {
@@ -236,12 +239,14 @@ function approvalNotice(notice: NoticeLike, payload: z.infer<typeof APPROVAL_PAY
 function blockedNotice(notice: NoticeLike, payload: z.infer<typeof BLOCKED_PAYLOAD>): RenderedNotice {
   const runId = payload.runId ?? notice.runId;
   const revision = requirementRevisionGuidance(payload, runId);
+  const automatic = revision ? undefined : AutomaticResumeSchema.safeParse((payload as { automaticResume?: unknown }).automaticResume).data;
   const options = (revision?.options ?? payload.options ?? []).map((text, index) => ({ number: index + 1, text }));
   const headline = `⚠️ [${notice.messageId}] ${capitalise(BLOCKED_LABEL[payload.kind])}${runId ? ` (run ${runId})` : ""}: ${payload.reason}`;
   // Options describe possible actions; they are not numbered decisions. Revisions go through Conversation's intent handling.
   const reply = revision ? (revision.suggestedReply ? `Trả lời: "${revision.suggestedReply}".` :
     `Trả lời bằng nội dung yêu cầu cần sửa cho ${runId ? `run ${runId}` : "run hiện tại"}.`) +
     (runId ? ` Hoặc "hủy ${runId}" để hủy run.` : "") :
+    automatic && runId ? `Runtime sẽ tự tiếp tục run ${runId} (lần ${automatic.attempt}/${automatic.limit}); bạn chưa cần trả lời. Trả lời "hủy ${runId}" để hủy run.` :
     runId ? `Trả lời "tiếp tục ${runId}" sau khi khắc phục, hoặc "hủy ${runId}" để hủy run.` : "Hãy cho Conversation biết cách xử lý";
   // The reason's prose before any structured detail: agents often reformat the JSON detail but keep this sentence.
   const lead = payload.reason.split(/[\n[{]/u)[0]!.trim();
@@ -266,9 +271,10 @@ export function blockedNoticeFields(payload: unknown): z.infer<typeof BlockedNot
   const value = blockedPayload(payload);
   if (!value) return undefined;
   const revision = requirementRevisionGuidance(value, value.runId);
+  const automatic = AutomaticResumeSchema.safeParse((value as { automaticResume?: unknown }).automaticResume);
   const parsed = BlockedNoticeSchema.safeParse({
     kind: value.kind, reason: value.reason.slice(0, 2000),
-    ...(value.runId ? { runId: value.runId } : {}),
+    ...(value.runId ? { runId: value.runId } : {}), ...(automatic.success ? { automaticResume: automatic.data } : {}),
     ...(value.options ? { options: value.options.slice(0, 10).map(option => option.slice(0, 500)) } : {}),
     ...(revision ? { requested_action: revision.requested_action, blockers: revision.blockers,
       ...(revision.requiredSddLevel ? { requiredSddLevel: revision.requiredSddLevel } : {}) } : {})

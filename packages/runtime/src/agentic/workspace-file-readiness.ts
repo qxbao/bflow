@@ -5,9 +5,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { darwinWorkspaceFile } from "./workspace-file-darwin.js";
 
+let probe: Promise<void> | undefined;
 /** Probe real descriptor access and bounded create/read/digest replacement before provider launch.
  * Only a fresh owned fixture is touched, never the user's worktree or current run. */
-export async function assertWorkspaceFileCapability(): Promise<void> {
+export function assertWorkspaceFileCapability(): Promise<void> {
+  // Memoize per process: concurrent callers share one in-flight probe and success is kept; a failure is dropped so repairs (free TMPDIR, Command Line Tools) are picked up on the next call.
+  if (!probe) {
+    const current = probe = probeWorkspaceFileCapability().catch((error: unknown) => { if (probe === current) probe = undefined; throw error; });
+  }
+  return probe;
+}
+
+async function probeWorkspaceFileCapability(): Promise<void> {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "bflow-workspace-probe-")));
   try {
     if (process.platform === "darwin") {

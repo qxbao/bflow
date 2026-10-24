@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { HostReceiptJournal, MAX_NOTICE_REBLOCKS, parseConversationResumeRequest } from "../../src/agentic/host-receipts.js";
 import { isProviderInputEmpty, reminderDelayMs, reminderDue, afterReminder } from "../../src/agentic/conversation-inbox.js";
-import { lastAssistantText, mustShowSection, noticeDisplayed, notificationBody, renderConversationNotice } from "../../src/agentic/conversation-notice-render.js";
+import { blockedNoticeFields, lastAssistantText, mustShowSection, noticeDisplayed, notificationBody, renderConversationNotice } from "../../src/agentic/conversation-notice-render.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const action of cleanups.splice(0).reverse()) await action(); });
@@ -338,5 +338,37 @@ describe("structured decision fields and assistant text", () => {
       { type: "assistant", message: { content: [{ type: "text", text: "after" }] } }
     ];
     expect(lastAssistantText(entries.map(entry => JSON.stringify(entry)).join("\n"))).toBe("after");
+  });
+});
+
+describe("blocked notice automatic resume and blockageReason", () => {
+  const automaticResume = { attempt: 2, limit: 5, notBefore: "2026-10-20T03:20:00.000Z" };
+  it("renders an auto-resume reply without asking for a manual resume", () => {
+    const rendered = renderConversationNotice(notice("blocked-auto", "conversation.progress", {
+      kind: "workflow_blocked", runId: "run-42", reason: "Coordinator pane unavailable", blockageReason: "Coordinator pane unavailable", automaticResume }));
+    expect(rendered.reply).toContain("Runtime sẽ tự tiếp tục run run-42 (lần 2/5)");
+    expect(rendered.reply).toContain('"hủy run-42"');
+    expect(rendered.reply).not.toContain("sau khi khắc phục");
+    expect(rendered.reply).not.toContain('"tiếp tục');
+  });
+  it("ignores a malformed automaticResume and keeps the manual reply", () => {
+    const rendered = renderConversationNotice(notice("blocked-bad", "conversation.progress", {
+      kind: "workflow_blocked", runId: "run-42", reason: "Coordinator pane unavailable", automaticResume: { attempt: "x" } }));
+    expect(rendered.reply).toContain('"tiếp tục run-42"');
+  });
+  it("round-trips automaticResume through blockedNoticeFields and still parses old receipts", () => {
+    const fields = blockedNoticeFields({ kind: "workflow_blocked", runId: "run-42", reason: "Pane unavailable", automaticResume });
+    expect(fields?.automaticResume).toEqual(automaticResume);
+    const rendered = renderConversationNotice(notice("blocked-fields", "conversation.progress", { kind: "workflow_blocked" }, { summary: "{", blocked: fields }));
+    expect(rendered.reply).toContain("Runtime sẽ tự tiếp tục run run-42");
+    const old = blockedNoticeFields({ kind: "workflow_blocked", runId: "run-42", reason: "Pane unavailable" });
+    expect(old).toBeDefined();
+    expect(old).not.toHaveProperty("automaticResume");
+    expect(renderConversationNotice(notice("blocked-old", "conversation.progress", { kind: "workflow_blocked" }, { summary: "{", blocked: old })).reply).toContain('"tiếp tục run-42"');
+  });
+  it("classifies a requirement-revision blocker as blocked via blockageReason", () => {
+    const fields = blockedNoticeFields({ kind: "workflow_blocked", runId: "run-42", reason: "SDD conflict: full SDD required.", blockageReason: "SDD conflict: full SDD required.",
+      requested_action: "authorized_requirement_revision" });
+    expect(fields?.requested_action).toBe("authorized_requirement_revision");
   });
 });

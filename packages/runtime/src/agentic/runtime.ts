@@ -1585,7 +1585,7 @@ export class AgenticWorkflowRuntime {
             causation_id: parsed.message_id, run_id: run.runId, sender: { role: "runtime" }, recipient: { role: "conversation" },
             type: "conversation.progress", payload: { kind: "workflow_blocked", runId: run.runId, sdlcStatus: run.status,
               headline: automatic ? "Workflow bị chặn; Runtime sẽ tự tiếp tục Coordinator sau thời gian chờ" : "Workflow đang chờ khắc phục blocker",
-              reason, ...(revisionGuidance ? {} : { blockageReason: reason }), fromRole: "coordinator", actionId: run.pendingAction.actionId,
+              reason, blockageReason: revisionGuidance ? reason.slice(0, 500) : reason, fromRole: "coordinator", actionId: run.pendingAction.actionId,
               ...(automatic ? { automaticResume: automaticResumeNotice(run.pendingAction) } : {}),
               // Store only the bounded inputs. The renderer derives the explanation/reply without duplicating it in the 4 KiB summary.
               ...(revisionGuidance ? { requested_action: revisionGuidance.requested_action, blockers: revisionGuidance.blockers,
