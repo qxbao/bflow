@@ -742,7 +742,14 @@ function createCoalescedAgyRunner(baseRunner: ProviderCommandRunner): ProviderCo
         return baseRunner.run(invocation);
       }
       const rawHome = invocation.env?.["HOME"] ?? "";
-      const homeScope = basename(dirname(rawHome)) === "agy-home" ? dirname(rawHome) : rawHome;
+      const agyHomeParent = dirname(rawHome);
+      const roleCategoryDir = dirname(dirname(agyHomeParent));
+      const homeScope =
+        basename(agyHomeParent) === "agy-home"
+          ? (basename(roleCategoryDir) === "roles" || basename(roleCategoryDir) === "developers"
+              ? dirname(roleCategoryDir)
+              : agyHomeParent)
+          : rawHome;
       const cacheKey = JSON.stringify([
         invocation.executable,
         invocation.args,
@@ -760,8 +767,8 @@ function createCoalescedAgyRunner(baseRunner: ProviderCommandRunner): ProviderCo
       }
       const task = (async () => {
         let effectiveInvocation = invocation;
-        if (arg0 === "models" && basename(dirname(rawHome)) === "agy-home") {
-          const probeHome = join(dirname(rawHome), ".auth-probe");
+        if (arg0 === "models" && basename(agyHomeParent) === "agy-home") {
+          const probeHome = join(homeScope, ".auth-probe");
           const probeCacheDir = join(probeHome, ".gemini", "antigravity-cli", "cache");
           const probeConfigDir = join(probeHome, ".config");
           try {

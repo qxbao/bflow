@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { GatewayControlClient, resolvePrivateRuntimeStateDirectory } from "@bflow/runtime";
-import type { MCPClientRegistration } from "@bflow/contracts";
+import type { MCPClientRegistration, ResolvedToolGrant } from "@bflow/contracts";
 import type { DocsTool, DocsToolCaller, ToolCallOutcome } from "@bflow/docs-retrieval";
 import { GATEWAY_CONTROL_LOCATOR_FILE } from "./gateway-control.js";
 import { readGatewayReadiness } from "./gateway-readiness.js";
@@ -116,7 +116,20 @@ export async function enrollOperatorAccess(options: OperatorAccessOptions): Prom
     connection: { transport: "streamable_http" as const, endpoint: readiness.endpoint, token: `secret://bflow/docs-cli/${registrationId}` },
     configDigest: "0".repeat(64), expiresAt: new Date(now.getTime() + 10 * 60_000).toISOString(), idempotencyKey: `${registrationId}:${randomUUID()}`
   };
-  const granted = await client.value.register(registration as MCPClientRegistration);
+  const grant: ResolvedToolGrant = {
+    schemaVersion: 3,
+    grantId: `grant-${registrationId}`,
+    policyDigest: "0".repeat(64),
+    toolId: "context7",
+    kind: "native_remote_mcp",
+    requiredness: "optional",
+    role: options.role as ResolvedToolGrant["role"],
+    scope,
+    serviceId: CONTEXT7_SERVICE,
+    operations: [...CONTEXT7_TOOL_NAMES],
+    triggers: ["external_documentation"]
+  };
+  const granted = await client.value.register(registration as MCPClientRegistration, undefined, [grant]);
   if (!granted.ok) return { mode: "none", kind: "not_granted", reason: granted.error.message };
   const operation = { schemaVersion: 3 as const, scope, idempotencyKey: `${registrationId}:revoke` };
   return { mode: "operator", target: { endpoint: readiness.endpoint, token: granted.value.bearerToken, registrationId },

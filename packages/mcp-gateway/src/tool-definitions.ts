@@ -15,8 +15,8 @@ export const MCP_TOOL_DEFINITION_LIMITS = Object.freeze({
   maxNameLength: 256
 });
 
-const SUPPORTED_SCHEMA_KEYWORDS = new Set(["type", "properties", "required", "additionalProperties", "items", "enum", "const",
-  "minimum", "maximum", "minLength", "maxLength", "minItems", "maxItems", "minProperties", "maxProperties",
+const SUPPORTED_SCHEMA_KEYWORDS = new Set(["$schema", "type", "properties", "required", "additionalProperties", "items", "enum", "const",
+  "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minLength", "maxLength", "minItems", "maxItems", "minProperties", "maxProperties",
   "description", "title", "default", "examples", "deprecated"]);
 const SUPPORTED_JSON_TYPES = new Set(["object", "array", "string", "number", "integer", "boolean", "null"]);
 
@@ -26,17 +26,21 @@ export function isSupportedJsonSchema(schema: unknown): schema is MCPUpstreamJso
     if (depth > 32 || rule === null || typeof rule !== "object" || Array.isArray(rule)) return false;
     const s = rule as Record<string, unknown>;
     if (Object.keys(s).some(key => !SUPPORTED_SCHEMA_KEYWORDS.has(key))) return false;
+    if (s.$schema !== undefined && (typeof s.$schema !== "string" || s.$schema.trim().length === 0)) return false;
     if (s.type !== undefined && !(typeof s.type === "string" ? SUPPORTED_JSON_TYPES.has(s.type) :
       Array.isArray(s.type) && s.type.length > 0 && new Set(s.type).size === s.type.length &&
       s.type.every(type => typeof type === "string" && SUPPORTED_JSON_TYPES.has(type)))) return false;
     if (s.required !== undefined && (!Array.isArray(s.required) || s.required.some(name => typeof name !== "string") ||
         new Set(s.required).size !== s.required.length)) return false;
     if (s.enum !== undefined && (!Array.isArray(s.enum) || s.enum.length === 0)) return false;
-    for (const key of ["minimum", "maximum", "minLength", "maxLength", "minItems", "maxItems", "minProperties", "maxProperties"]) {
+    for (const key of ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minLength", "maxLength", "minItems", "maxItems", "minProperties", "maxProperties"]) {
       const value = s[key];
-      if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || (key.startsWith("min") && value < 0))) return false;
+      if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || (key !== "minimum" && key.startsWith("min") && value < 0))) return false;
     }
     if (s.minimum !== undefined && s.maximum !== undefined && (s.minimum as number) > (s.maximum as number)) return false;
+    if (s.exclusiveMinimum !== undefined && s.exclusiveMaximum !== undefined && (s.exclusiveMinimum as number) >= (s.exclusiveMaximum as number)) return false;
+    if (s.minimum !== undefined && s.exclusiveMaximum !== undefined && (s.minimum as number) >= (s.exclusiveMaximum as number)) return false;
+    if (s.exclusiveMinimum !== undefined && s.maximum !== undefined && (s.exclusiveMinimum as number) >= (s.maximum as number)) return false;
     if (s.minLength !== undefined && s.maxLength !== undefined && (s.minLength as number) > (s.maxLength as number)) return false;
     if (s.minItems !== undefined && s.maxItems !== undefined && (s.minItems as number) > (s.maxItems as number)) return false;
     if (s.minProperties !== undefined && s.maxProperties !== undefined && (s.minProperties as number) > (s.maxProperties as number)) return false;
@@ -77,6 +81,8 @@ export function validateJsonSchema(value: unknown, schema: MCPUpstreamJsonObject
     if (typeof candidate === "number") {
       if (typeof s.minimum === "number" && candidate < s.minimum) return false;
       if (typeof s.maximum === "number" && candidate > s.maximum) return false;
+      if (typeof s.exclusiveMinimum === "number" && candidate <= s.exclusiveMinimum) return false;
+      if (typeof s.exclusiveMaximum === "number" && candidate >= s.exclusiveMaximum) return false;
     }
     if (Array.isArray(candidate)) {
       if (typeof s.minItems === "number" && candidate.length < s.minItems) return false;
