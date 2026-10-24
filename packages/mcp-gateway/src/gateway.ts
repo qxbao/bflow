@@ -7,6 +7,7 @@ import type {
   MCPResourceRequest,
   MCPToolCall,
   MCPToolCallResult,
+  JsonValue,
   ResolvedToolGrant,
   OperationOptions,
   OperationResult,
@@ -1509,7 +1510,7 @@ export class BflowSharedMCPGateway {
         schemaVersion: 3,
         callId: request.callId,
         status: outcomeStatus,
-        output: upstreamRes.value.content,
+        output: preserveStructuredToolOutput(upstreamRes.value.content, upstreamRes.value.structuredContent),
         observedAt: this.now().toISOString()
       });
 
@@ -1679,7 +1680,7 @@ export class BflowSharedMCPGateway {
           schemaVersion: 3,
           callId: request.callId,
           status: rec.status,
-          output: rec.output ?? ledger.result.output,
+          output: preserveStructuredToolOutput(rec.output ?? ledger.result.output, rec.structuredContent),
           observedAt: this.now().toISOString()
         });
         this.durableCallLedger?.recordResult(request.callId, ledger.result);
@@ -1723,4 +1724,8 @@ export class BflowSharedMCPGateway {
 
     return ok(ledger.result);
   }
+}
+
+function preserveStructuredToolOutput(content: JsonValue, structuredContent: JsonValue | undefined): JsonValue {
+  return structuredContent === undefined ? content : { content, structuredContent };
 }

@@ -113,6 +113,13 @@ vì body response không được giữ trong ledger. Call đang dở cũng gi�
 gọi lại upstream. Schema digest được pin theo service revision, cùng revision nhưng khác schema
 sẽ block cho tới khi một revision mới được duyệt.
 
+Nếu upstream cung cấp `structuredContent`, response của Gateway giữ cả `content` và
+`structuredContent` trong `MCPToolCallResult.output` với dạng
+`{ content, structuredContent }`, kể cả khi `content` là mảng rỗng. Kết quả reconciliation
+cũng giữ cả hai giá trị. Nếu upstream không cung cấp `structuredContent`, output tiếp tục giữ
+nguyên dạng content cũ. `outputSchema` được kiểm tra trên `structuredContent` thực trước khi
+result được báo completed; body không được ghi vào journal hoặc audit log.
+
 ---
 
 ## Các lệnh chạy được

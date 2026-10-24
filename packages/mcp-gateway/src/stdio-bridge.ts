@@ -226,12 +226,13 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
       const timedOut = this.timedOutUpstreamRequests.get(upstreamId);
       if (timedOut) {
         this.timedOutUpstreamRequests.delete(upstreamId);
-        const resultObj = msg.result as { isError?: boolean; content?: JsonValue } | undefined;
+        const resultObj = msg.result as { isError?: boolean; content?: JsonValue; structuredContent?: JsonValue } | undefined;
         const isError = Boolean(msg.error) || Boolean(resultObj?.isError);
         const output = (msg.error ?? resultObj?.content ?? (msg.result ?? null)) as JsonValue;
         const outcome: MCPUpstreamReconcileResult = {
           status: isError ? "failed" : "completed",
-          output
+          output,
+          ...(resultObj?.structuredContent !== undefined ? { structuredContent: resultObj.structuredContent } : {})
         };
         this.reconcileLedger.set(timedOut.clientRequestId, outcome);
         if (timedOut.callId) {

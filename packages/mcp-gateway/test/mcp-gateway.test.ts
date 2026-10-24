@@ -2122,6 +2122,8 @@ const fs = require('fs');
 const readline = require('readline');
 const payload = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const callResult = process.argv[3] ? JSON.parse(fs.readFileSync(process.argv[3], 'utf8')) : { content: [{ type: 'text', text: 'ok' }] };
+const callDelayMs = Number(process.argv[4] || 0);
+const invocationCounterPath = process.argv[5];
 const rl = readline.createInterface({ input: process.stdin, terminal: false });
 rl.on('line', (line) => {
   if (!line.trim()) return;
@@ -2131,26 +2133,31 @@ rl.on('line', (line) => {
   } else if (msg.method === 'tools/list') {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { tools: payload } }) + '\\n');
   } else if (msg.method === 'tools/call') {
-    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: callResult }) + '\\n');
+    if (invocationCounterPath) fs.appendFileSync(invocationCounterPath, 'x');
+    const reply = () => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: callResult }) + '\\n');
+    if (callDelayMs > 0) setTimeout(reply, callDelayMs);
+    else reply();
   }
 });
 `;
 
-  function setupStdioWorker(tools: unknown, gatewayOptions?: BflowSharedMCPGatewayOptions, callResult?: unknown) {
+  function setupStdioWorker(tools: unknown, gatewayOptions?: BflowSharedMCPGatewayOptions, callResult?: unknown, callDelayMs = 0) {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-defs-test-"));
     const scriptPath = path.join(tmpDir, "worker.cjs");
     const payloadPath = path.join(tmpDir, "tools.json");
     const callResultPath = path.join(tmpDir, "call-result.json");
+    const invocationCounterPath = path.join(tmpDir, "invocations.txt");
     fs.writeFileSync(scriptPath, toolDefinitionWorker, { mode: 0o644 });
     fs.writeFileSync(payloadPath, JSON.stringify(tools), { mode: 0o644 });
     if (callResult !== undefined) fs.writeFileSync(callResultPath, JSON.stringify(callResult), { mode: 0o600 });
+    fs.writeFileSync(invocationCounterPath, "", { mode: 0o600 });
     const serviceId = `svc-defs-${randomUUID().slice(0, 8)}`;
     const service = makeServiceDefinition(serviceId, {
       healthTimeoutMs: 30_000,
       connection: {
         kind: "stdio_mcp",
         executable: process.execPath,
-        argv: [scriptPath, payloadPath, ...(callResult === undefined ? [] : [callResultPath])],
+        argv: [scriptPath, payloadPath, callResult === undefined ? "" : callResultPath, String(callDelayMs), invocationCounterPath],
         environmentBindings: {},
         executableDigest: "0".repeat(64),
         ownership: "bflow",
@@ -2176,6 +2183,7 @@ rl.on('line', (line) => {
     return {
       serviceId,
       gateway,
+      invocationCount: () => fs.readFileSync(invocationCounterPath, "utf8").length,
       cleanup: async () => {
         await serviceManager.stop(serviceId, makeScopedOp(makeScope("machine"))).catch(() => undefined);
         fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -2346,7 +2354,7 @@ rl.on('line', (line) => {
         serviceId, tool: "query", input: { q: "hello" }, idempotencyKey: "schema-output-call" });
       expect(result.ok).toBe(true);
       if (result.ok) expect(result.value).toMatchObject({ status: "unknown", output: { diagnosticCode: "upstream_output_schema_invalid" } });
-      expect(JSON.stringify(result)).not.toContain("42");
+      if (result.ok) expect(JSON.stringify(result.value.output)).not.toContain("42");
     } finally {
       await cleanup();
     }
@@ -2365,6 +2373,80 @@ rl.on('line', (line) => {
         serviceId, tool: "query", input: { q: "hello" }, idempotencyKey: "schema-output-valid-call" });
       expect(result.ok).toBe(true);
       if (result.ok) expect(result.value.status).toBe("completed");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("returns structuredContent alongside empty content and keeps legacy content-only output unchanged", async () => {
+    const outputSchema = { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false };
+    const structured = setupStdioWorker([{
+      name: "query", inputSchema: { type: "object" }, outputSchema
+    }], undefined, { content: [], structuredContent: { value: 42 } });
+    try {
+      const client = makeClientRegistration("schema-output-structured-client", structured.serviceId,
+        { allowedTools: ["query"] });
+      expect((await structured.gateway.register(client)).ok).toBe(true);
+      const result = await structured.gateway.call({ schemaVersion: 3, callId: "schema-output-structured-call",
+        registrationId: client.registrationId, serviceId: structured.serviceId, tool: "query", input: {},
+        idempotencyKey: "schema-output-structured-call" });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value.status).toBe("completed");
+        expect(result.value.output).toEqual({ content: [], structuredContent: { value: 42 } });
+      }
+      expect(structured.invocationCount()).toBe(1);
+    } finally {
+      await structured.cleanup();
+    }
+
+    const legacyContent = [{ type: "text", text: "legacy response" }];
+    const legacy = setupStdioWorker([{ name: "query", inputSchema: { type: "object" } }],
+      undefined, { content: legacyContent });
+    try {
+      const client = makeClientRegistration("schema-output-legacy-client", legacy.serviceId, { allowedTools: ["query"] });
+      expect((await legacy.gateway.register(client)).ok).toBe(true);
+      const result = await legacy.gateway.call({ schemaVersion: 3, callId: "schema-output-legacy-call",
+        registrationId: client.registrationId, serviceId: legacy.serviceId, tool: "query", input: {},
+        idempotencyKey: "schema-output-legacy-call" });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value.status).toBe("completed");
+        expect(result.value.output).toEqual(legacyContent);
+      }
+      expect(legacy.invocationCount()).toBe(1);
+    } finally {
+      await legacy.cleanup();
+    }
+  });
+
+  it("preserves structuredContent from one real stdio invocation during reconciliation", async () => {
+    const structuredOutput = { value: 42 };
+    const { serviceId, gateway, invocationCount, cleanup } = setupStdioWorker([{
+      name: "query", inputSchema: { type: "object" },
+      outputSchema: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false }
+    }], undefined, { content: [], structuredContent: structuredOutput }, 100);
+    try {
+      const client = makeClientRegistration("schema-output-reconcile-client", serviceId, { allowedTools: ["query"] });
+      expect((await gateway.register(client)).ok).toBe(true);
+      expect((await gateway.serviceManager.ensure(gateway.registry.getService(serviceId)!.definition,
+        makeScopedOp(client.scope))).ok).toBe(true);
+      const call = { schemaVersion: 3 as const, callId: "schema-output-reconcile-call", registrationId: client.registrationId,
+        serviceId, tool: "query", input: {}, idempotencyKey: "schema-output-reconcile-call" };
+      const initial = await gateway.call(call, { timeoutMs: 25 });
+      expect(initial).toMatchObject({ ok: true, value: { status: "unknown" } });
+      await new Promise(resolve => setTimeout(resolve, 150));
+
+      const reconciled = await gateway.reconcileCall(call);
+
+      expect(reconciled.ok).toBe(true);
+      if (reconciled.ok) {
+        expect(reconciled.value.status).toBe("completed");
+        expect(reconciled.value.output).toEqual({ content: [], structuredContent: structuredOutput });
+      }
+      expect(invocationCount()).toBe(1);
     } finally {
       await cleanup();
     }
