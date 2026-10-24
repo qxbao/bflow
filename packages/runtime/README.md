@@ -1087,3 +1087,19 @@ While an independent Herdr gate awaits its reply, a non-overlapping dispatch pas
 its original queued request live if pane readiness or a delivery hold recovers. It uses
 the existing Outbox checks and backoff within the original gate deadline; it does not
 create a new invocation, retry an unknown delivery, or extend verification budgets.
+
+## Context khảo sát có dẫn chứng
+
+Host `assignment_context` cung cấp khảo sát có giới hạn cho assignment phân tích hiện hành
+của Coordinator/specifier/architect/planner. Runtime tái sử dụng `ProjectContextService`
+để chọn source, dependency tĩnh lân cận, test và tài liệu liên quan; context ghi worktree,
+HEAD, fingerprint, dòng nguồn, mức `observed`/`inferred`/`unknown` và phần bị cắt.
+Đây là dữ liệu chẩn đoán, không phải yêu cầu nghiệp vụ đã được duyệt hoặc bằng chứng task
+thành công. Thiếu bằng chứng về business intent phải giữ `unknown`.
+
+GitNexus chỉ bổ sung khảo sát qua tool action đã cấp quyền khi role xác minh được repository
+và revision index phù hợp, rồi đối chiếu source. Index thiếu/stale/unverified cho phép fallback
+đọc source trong phạm vi được cấp; dependency động và phần chưa đọc vẫn chưa được chứng minh.
+Drift được báo khi context trước thay đổi; không tự sửa spec, replan, chuyển task status,
+hoặc thay approval/lease. Kiểm thử cục bộ không chứng minh live-provider acceptance hay mức
+giảm token/lỗi. Xem `EVIDENCE-CONTEXT-HANDOFF.md` cho caller và validation cụ thể.

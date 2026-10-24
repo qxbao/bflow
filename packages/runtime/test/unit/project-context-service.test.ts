@@ -41,6 +41,151 @@ describe("ProjectContextService and Context Management", () => {
     return fullPath;
   }
 
+  describe("Evidence-backed scoped survey", () => {
+    const request = { role: "specifier" as const, taskId: "survey-task", title: "Adjust checkout", description: "Inspect existing checkout behavior",
+      ownedPaths: ["packages/shop/src/checkout.ts"], affectedPaths: [] };
+
+    it("never executes repository clean filters to determine survey working-tree state", async () => {
+      const git = (...args: string[]) => {
+        const result = spawnSync("git", ["-C", tmpRepoRoot, ...args], { encoding: "utf8" });
+        expect(result.status, result.stderr).toBe(0);
+        return result.stdout.trim();
+      };
+      git("init"); git("config", "user.email", "fixture@example.invalid"); git("config", "user.name", "Fixture");
+      await writeFile("packages/shop/src/checkout.ts", "export const checkout = true;");
+      await writeFile(".gitattributes", "*.ts filter=survey-canary\n");
+      git("add", "."); git("commit", "-m", "fixture baseline");
+      const revision = git("rev-parse", "HEAD");
+      git("config", "filter.survey-canary.clean", "touch SURVEY_FILTER_EXECUTED; cat");
+      await writeFile("packages/shop/src/checkout.ts", "export const checkout = false; // changed after commit\n");
+      const bundle = await service.prepareRoleTaskContext(request);
+      await expect(fs.stat(path.join(tmpRepoRoot, "SURVEY_FILTER_EXECUTED"))).rejects.toThrow();
+      expect(bundle.repositoryIdentity?.sourceRevision).toBe(revision);
+      expect(bundle.repositoryIdentity?.workingTreeState).toBe("unknown");
+      expect(bundle.formattedPromptContext).toContain("checkout = false");
+    });
+
+    it("cites existing source and one-hop cross-package consumers/dependencies without claiming approved intent", async () => {
+      await writeFile("packages/shop/package.json", JSON.stringify({ name: "@test/shop", main: "dist/index.js" }));
+      await writeFile("packages/shop/src/index.ts", "export { checkout } from './checkout.js';");
+      await writeFile("packages/shop/src/checkout.ts", "import { price } from '@test/pricing';\nexport function checkout() { return price(); }");
+      await writeFile("packages/pricing/package.json", JSON.stringify({ name: "@test/pricing", main: "dist/index.js" }));
+      await writeFile("packages/pricing/src/index.ts", "export function price() { return 42; }");
+      await writeFile("packages/shop/test/checkout.test.ts", "// checkout regression test");
+      await writeFile("packages/unrelated/src/checkout.ts", "SYNTHETIC_UNRELATED_CANARY");
+      const bundle = await service.prepareRoleTaskContext(request);
+      expect(bundle.includedFiles).toContain("packages/pricing/src/index.ts");
+      expect(bundle.includedFiles).toContain("packages/shop/test/checkout.test.ts");
+      expect(bundle.formattedPromptContext).toContain("packages/shop/src/checkout.ts:1");
+      expect(bundle.formattedPromptContext).toContain("2: export function checkout()");
+      expect(bundle.formattedPromptContext).toContain("Observed:");
+      expect(bundle.formattedPromptContext).toContain("Inferred:");
+      expect(bundle.formattedPromptContext).toContain("Unknown: business intent");
+      expect(bundle.formattedPromptContext).not.toContain("SYNTHETIC_UNRELATED_CANARY");
+      expect(bundle.formattedPromptContext).toContain("Runtime → Conversation");
+    });
+
+    it("records missing/unverified index fallback and ignores untrusted stale graph claims", async () => {
+      await writeFile("packages/shop/src/checkout.ts", "export const observed = true;");
+      await writeFile(".gitnexus/index.json", JSON.stringify({ revision: "old", claim: "SYNTHETIC_STALE_GRAPH_CANARY" }));
+      const bundle = await service.prepareRoleTaskContext(request);
+      expect(bundle.formattedPromptContext).toContain("unverified availability/index revision");
+      expect(bundle.formattedPromptContext).toContain("Missing/stale index alone does not block");
+      expect(bundle.formattedPromptContext).not.toContain("SYNTHETIC_STALE_GRAPH_CANARY");
+    });
+
+    it("keeps total context bounded and explicitly reports omitted source instead of silently truncating policy", async () => {
+      await writeFile("packages/shop/src/checkout.ts", "export const checkout = 'large';\n".repeat(500));
+      const bundle = await service.prepareRoleTaskContext({ ...request, maxTotalBytes: 3500 });
+      expect(bundle.totalBytes).toBeLessThanOrEqual(3500);
+      expect(bundle.excludedFileCount).toBe(1);
+      expect(bundle.formattedPromptContext).toContain("omitted matching files: 1");
+      expect(bundle.formattedPromptContext).toContain("insufficient evidence to conclude");
+      expect(bundle.formattedPromptContext).toContain("Keep survey observations separate");
+    });
+
+    it("records insufficient evidence for unknown paths and rejects escaped scope", async () => {
+      const bundle = await service.prepareRoleTaskContext(request);
+      expect(bundle.includedFiles).toEqual([]);
+      expect(bundle.formattedPromptContext).toContain("insufficient evidence to conclude");
+      await expect(service.prepareRoleTaskContext({ ...request, ownedPaths: ["../outside"] })).rejects.toThrow("Unsafe survey scope");
+    });
+
+    it("excludes sensitive paths, nested worktrees and symlink aliases and redacts before excerpt truncation", async () => {
+      await writeFile("packages/shop/src/checkout.ts", "export const checkout = true;\npassword: 'SYNTHETIC_PASSWORD_CANARY'\n" +
+        "-----BEGIN PRIVATE KEY-----\nSYNTHETIC_KEY_CANARY\n-----END PRIVATE KEY-----\nexport const anchored = true;");
+      await writeFile("packages/shop/src/.env", "SYNTHETIC_ENV_CANARY");
+      await writeFile("packages/shop/src/cert.pem", "SYNTHETIC_CERT_CANARY");
+      await writeFile("packages/shop/src/session.token", "SYNTHETIC_TOKEN_CANARY");
+      await writeFile("packages/shop/src/.ssh/config", "SYNTHETIC_SSH_CANARY");
+      await writeFile("packages/shop/src/nested/.git", "gitdir: /other/worktree");
+      await writeFile("packages/shop/src/nested/private.ts", "SYNTHETIC_NESTED_WORKTREE_CANARY");
+      await fs.symlink(path.join(tmpRepoRoot, "packages/shop/src/.env"), path.join(tmpRepoRoot, "packages/shop/src/alias.ts"));
+      const bundle = await service.prepareRoleTaskContext({ ...request, ownedPaths: ["packages/shop/src"] });
+      expect(bundle.formattedPromptContext).not.toMatch(/SYNTHETIC_(?:PASSWORD|KEY|ENV|CERT|TOKEN|SSH|NESTED_WORKTREE)_CANARY/);
+      expect(bundle.formattedPromptContext).toContain("6: export const anchored = true;");
+      expect(bundle.includedFiles).toEqual(["packages/shop/src/checkout.ts"]);
+    });
+
+    it("distinguishes actual worktree roots/revisions and detects revision-only drift", async () => {
+      const git = (...args: string[]) => {
+        const result = spawnSync("git", ["-C", tmpRepoRoot, ...args], { encoding: "utf8" });
+        expect(result.status, result.stderr).toBe(0);
+        return result.stdout.trim();
+      };
+      git("init"); git("config", "user.email", "fixture@example.invalid"); git("config", "user.name", "Fixture");
+      await writeFile("packages/shop/src/checkout.ts", "export const checkout = true;");
+      git("add", "."); git("commit", "-m", "fixture baseline");
+      const revision = git("rev-parse", "HEAD");
+      const original = await service.prepareRoleTaskContext(request);
+      const linkedRoot = path.join(tmpRepoRoot, "linked");
+      git("worktree", "add", "--detach", linkedRoot, "HEAD");
+      const linked = await new ProjectContextService(linkedRoot).prepareRoleTaskContext(request);
+      expect(original.repositoryIdentity?.sourceRevision).toBe(revision);
+      expect(linked.repositoryIdentity?.sourceRevision).toBe(revision);
+      expect(original.contextHash).not.toBe(linked.contextHash);
+      const wrongWorktree = await service.detectContextDrift(linked);
+      expect(wrongWorktree.reasons.some(reason => reason.includes("worktree identity changed"))).toBe(true);
+      git("commit", "--allow-empty", "-m", "revision only");
+      const drift = await service.detectContextDrift(original);
+      expect(drift.reasons.some(reason => reason.includes("source revision changed"))).toBe(true);
+      expect(drift.modifiedFiles).toEqual([]);
+    });
+
+    it("never follows context-state symlinks into another worktree", async () => {
+      const external = await fs.mkdtemp(path.join(os.tmpdir(), "bflow-context-external-"));
+      try {
+        await fs.mkdir(path.join(tmpRepoRoot, ".bflow/state"), { recursive: true });
+        await fs.writeFile(path.join(external, "decisions.json"), JSON.stringify([{
+          decisionId: "foreign", title: "Adjust checkout", status: "accepted", summary: "SYNTHETIC_FOREIGN_DECISION_CANARY",
+          affectedPaths: request.ownedPaths, recordedAt: new Date().toISOString(), sha256: "x"
+        }]));
+        await fs.writeFile(path.join(external, "artifacts.json"), JSON.stringify({ "survey-task": [{ bad: "SYNTHETIC_FOREIGN_ARTIFACT_CANARY" }] }));
+        await fs.symlink(external, path.join(tmpRepoRoot, ".bflow/state/context"));
+        const bundle = await service.prepareRoleTaskContext(request);
+        expect(bundle.formattedPromptContext).not.toContain("SYNTHETIC_FOREIGN");
+        expect(bundle.artifactReferences).toEqual([]);
+        expect(bundle.adrSummaries).toEqual([]);
+      } finally { await fs.rm(external, { recursive: true, force: true }); }
+    });
+
+    it("allows assignment attachments to avoid repeating launch instructions", async () => {
+      await writeFile("agents/analyst/system-prompt.md", "Canonical launch instruction ".repeat(2000));
+      await writeFile("packages/shop/src/checkout.ts", "export const checkout = true;");
+      const bundle = await service.prepareRoleTaskContext({ ...request, includeRoleInstructions: false, maxTotalBytes: 3500 });
+      expect(bundle.formattedPromptContext).not.toContain("Canonical launch instruction");
+      expect(bundle.formattedPromptContext).toContain("export const checkout = true");
+    });
+
+    it("does not report budget-excluded preexisting files as newly added drift", async () => {
+      await writeFile("packages/shop/src/checkout.ts", "export const checkout = true;");
+      await writeFile("packages/shop/src/helper.ts", "export const helper = true;");
+      const bundle = await service.prepareRoleTaskContext({ ...request, ownedPaths: ["packages/shop/src"], maxFiles: 1 });
+      expect(bundle.excludedFileCount).toBe(1);
+      expect((await service.detectContextDrift(bundle)).drifted).toBe(false);
+    });
+  });
+
   describe("1. Repository Structure Analysis", () => {
     it("discovers workspace packages, entrypoints, and dependencies", async () => {
       // Root package.json
@@ -1027,7 +1172,7 @@ MIIEowIBAAKCAQEA0...
 
         const report = await service.detectContextDrift(bundle);
         expect(report.drifted).toBe(true);
-        expect(report.reasons.some((r) => r.includes("escapes repository root"))).toBe(true);
+        expect(report.reasons.some((r) => r.includes("Symlink repository content excluded"))).toBe(true);
       } finally {
         await fs.rm(externalDir, { recursive: true, force: true });
       }

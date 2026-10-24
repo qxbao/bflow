@@ -63,3 +63,5 @@ Handoffs use the structured result sections of the prompt (`status`, `summary`, 
 - `system-prompt.md`: Complete system prompt loaded by the agent runner.
 - `role-profile.json`: Contract-validated role profile conforming to `AgentRoleProfileSchema`.
 - `@bflow/specification`: Supporting library providing schemas, engine, renderers, and classification logic (`packages/specification`).
+
+The role consumes bounded task context supplied by Runtime, preserving repository/worktree/revision provenance and `observed` / `inferred` / `unknown` distinctions. Its prompt requires source citations, explicit coverage limits and source fallback for missing or stale GitNexus. Survey evidence never grants authority to change approved requirements, approvals, leases or an executing plan. These are instruction constraints; live-provider compliance is not established by prompt validation.
