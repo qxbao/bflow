@@ -66,6 +66,7 @@ export function createProviderProcessRunner(defaultOptions?: {
         let stderrBytes = 0;
         let finished = false;
         let timer: NodeJS.Timeout | null = null;
+        let exitDrainTimer: NodeJS.Timeout | null = null;
         let abortHandler: (() => void) | null = null;
 
         let child: ChildProcess;
@@ -96,6 +97,10 @@ export function createProviderProcessRunner(defaultOptions?: {
           if (timer) {
             clearTimeout(timer);
             timer = null;
+          }
+          if (exitDrainTimer) {
+            clearTimeout(exitDrainTimer);
+            exitDrainTimer = null;
           }
           if (abortHandler && invocation.signal) {
             invocation.signal.removeEventListener("abort", abortHandler);
@@ -196,6 +201,19 @@ export function createProviderProcessRunner(defaultOptions?: {
             return;
           }
           stderr += chunk.toString("utf8");
+        });
+
+        child.once("exit", (code) => {
+          exitDrainTimer = setTimeout(() => {
+            child.stdout?.destroy();
+            child.stderr?.destroy();
+            finish({
+              exitCode: code,
+              stdout,
+              stderr,
+              started: true
+            });
+          }, 150);
         });
 
         child.on("close", (code) => {

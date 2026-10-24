@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { resolveAndVerifyExecutable } from "../src/attestation.js";
+import { createProviderProcessRunner } from "../src/runner.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
@@ -71,5 +72,20 @@ describe("executable PATH resolution", () => {
       cwd: root, env: { PATH: searchPath }, encoding: "utf8"
     }).trim();
     expect(selected).toBe(local);
+  });
+
+  it("resolves promptly when a command exits while a background grandchild holds stdout open", async () => {
+    const runner = createProviderProcessRunner({ defaultTimeoutMs: 5_000 });
+    const outcome = await runner.run({
+      executable: process.execPath,
+      args: [
+        "-e",
+        "import('node:child_process').then(({ spawn }) => { spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { stdio: 'inherit' }).unref(); process.stdout.write('models-ready\\n'); process.exit(0); });"
+      ],
+      timeoutMs: 3_000
+    });
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.stdout).toBe("models-ready\n");
+    expect(outcome.failure).toBeUndefined();
   });
 });

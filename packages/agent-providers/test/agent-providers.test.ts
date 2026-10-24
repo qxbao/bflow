@@ -1438,20 +1438,20 @@ describe("@bflow/agent-providers", () => {
       const auth = run.mock.calls.find(([invocation]) => invocation.args[0] === "models")?.[0];
       expect(auth?.env?.HOME).toBe(join(testStateDir, "agy-home", "developer"));
       expect(auth?.env?.XDG_CONFIG_HOME).toBe(join(testStateDir, "agy-home", "developer", ".config"));
+      expect(await readFile(join(testStateDir, "agy-home", "developer", ".zshenv"), "utf8")).toContain("skip_global_compinit=1");
+      expect(await readFile(join(testStateDir, "agy-home", "developer", ".zshrc"), "utf8")).toContain("Bflow isolated Agy shell home");
     });
 
-    it("blocks Agy Conversation before provider execution because it has no trusted UserPromptSubmit source", async () => {
+    it("allows Agy Conversation preflight with restricted permissions and native PreInvocation hook support", async () => {
       const runner = createFakeProviderRunner({ scenario: "healthy" });
-      const run = vi.spyOn(runner, "run");
       const adapter = new AgyProviderAdapter({ runner, executablePath: fakeBinaryPath, allowTestFilesystemOwnership: true });
       const environment = createTestEnvironment("agy", "restricted", { role: "conversation" });
       const health = await adapter.checkHealth({ schemaVersion: 3, environment, stage: "preflight", requestedAt: new Date().toISOString() });
       expect(health.ok).toBe(true);
       if (health.ok) {
-        expect(health.value.status).toBe("unsupported");
-        expect(health.value.checks.find(check => check.check === "permissions")?.code).toBe("agy_human_ingress_unsupported");
+        expect(health.value.status).toBe("ready");
+        expect(health.value.checks.find(check => check.check === "permissions")?.code).toBe("permissions_ok");
       }
-      expect(run.mock.calls.some(([invocation]) => invocation.args.includes("--print"))).toBe(false);
     });
 
     it("Claude and Codex verify OS sandbox binary for unattended_isolated mode", async () => {
@@ -2267,7 +2267,7 @@ describe("@bflow/agent-providers", () => {
       const adopted = join(testStateDir, "agy-home", "developer", ".gemini", "antigravity-cli", "cache", "onboarding.json");
       await rm(adopted, { force: true });
       await chmod(nativeHome, 0o750);
-      await chmod(join(nativeHome, ".gemini"), 0o755);
+      await chmod(join(nativeHome, ".gemini"), 0o775);
       await chmod(join(nativeHome, ".gemini", "antigravity-cli"), 0o755);
       await chmod(cache, 0o755);
       const receipt = '{"consumerOnboardingComplete":true,"enterpriseOnboardingComplete":false,"onboardingComplete":true}\n';

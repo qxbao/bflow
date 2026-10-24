@@ -475,4 +475,88 @@ describe("bounded automatic resume", () => {
     f.panes.busy.delete("coordinator");
     expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 1 });
   });
+
+  it("enqueues distinct resume_run wakes across recurring reportRunStalled episodes that share one actionId", async () => {
+    const f = await fixture([run("run-1", "intake")]);
+    const backoffs = [30, 60, 120];
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await f.runtime.reportRunStalled("run-1", `episode-${attempt}`);
+      const stalled = await f.record();
+      expect(stalled).toMatchObject({ status: "escalated", pendingAction: { recovery: "auto_resume", resumeAttempts: attempt, state: "pending" } });
+      f.advance(backoffs[attempt]! * SECOND);
+      expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 1 });
+      const wakes = await f.resumeWakes();
+      expect(wakes).toHaveLength(attempt + 1);
+      expect(wakes.at(-1)!.status).toBe("queued");
+      for (let pass = 0; pass < 3 && (await f.resumeWakes()).at(-1)!.status === "queued"; pass++) {
+        await f.runtime.flushOutbound();
+      }
+      expect(["accepted", "released"]).toContain((await f.resumeWakes()).at(-1)!.status);
+      const runtime = f.runtime as unknown as { transaction: (action: (state: JournalState, save: () => Promise<void>, core: unknown, outbox: { release: (out: Outbound) => Promise<void> }) => Promise<void>) => Promise<void> };
+      await runtime.transaction(async (state, save, _core, outbox) => {
+        const lastWake = state.outbound.filter(out => (out.message.payload as { kind?: string }).kind === "resume_run").at(-1)!;
+        await outbox.release(lastWake);
+        await save();
+      });
+    }
+  });
+
+  it("authorizes Agy Coordinator approval.decision turns and recovers delivered approval.decision outbox items missing from inbox", async () => {
+    const approval = ApprovalRequestSchema.parse({
+      schemaVersion: 2, approvalId: "approval-1", runId: "run-1", sessionId: "session-1",
+      status: "pending", target: { type: "run" }, revision: 1, generation: 1, requestedBy: "coordinator", requestedAt: T0,
+      reason: "Approve spec", evidence: [], idempotencyKey: "approval-1"
+    });
+    const f = await fixture([run("run-1", "awaiting_approval", { approval, approvalKind: "design" })]);
+    const coordinatorBinding = PaneBindingSchema.parse({
+      ...f.coordinator(),
+      provider: "agy",
+      agentKind: "agy",
+      session: { source: "herdr:antigravity_cli", kind: "id", value: "session-coordinator" }
+    });
+    f.panes.bindings = f.panes.bindings.map(binding => binding.role === "coordinator" ? coordinatorBinding : binding);
+
+    const decisionMessage = RoleMessageSchema.parse({
+      schema_version: 2,
+      message_id: "approval-msg-1",
+      correlation_id: "correlation",
+      causation_id: "approval-1",
+      run_id: "run-1",
+      sender: { role: "conversation" },
+      recipient: { role: "coordinator" },
+      type: "approval.decision",
+      payload: {
+        schemaVersion: 2,
+        approvalId: "approval-1",
+        runId: "run-1",
+        sessionId: "session-1",
+        target: approval.target,
+        revision: 1,
+        generation: 1,
+        decision: "rejected",
+        decidedBy: "user",
+        decidedAt: T0,
+        reason: "Need another approach",
+        feedbackArtifacts: [],
+        idempotencyKey: "decision-1"
+      },
+      artifact_references: [],
+      occurred_at: T0,
+      idempotency_key: "approval-msg-1"
+    });
+    await f.runtime.queueHerdr(decisionMessage);
+    await f.runtime.flushOutbound();
+    const out = (await f.outbound()).find(item => item.message.message_id === "approval-msg-1")!;
+    expect(out.status).toBe("accepted");
+
+    await expect(f.runtime.authorizeAgyProviderTurn(out.message, coordinatorBinding)).resolves.toBeUndefined();
+
+    // Simulate a previous turn where PreInvocation aborted before inbox write and Stop released the lease.
+    await f.journal.exclusive(async (state, save) => {
+      state.outbound.find(item => item.message.message_id === "approval-msg-1")!.status = "released";
+      await save();
+    });
+    expect(await f.runtime.recoverMissingCoordinatorWakeups()).toEqual({ recovered: 1 });
+    expect(await f.record()).toMatchObject({ status: "failed", decision: { approvalId: "approval-1", decision: "rejected" } });
+  });
 });

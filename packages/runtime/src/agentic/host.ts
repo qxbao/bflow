@@ -314,16 +314,23 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const launchId = textField(binding.metadata?.launchId ?? platformSession?.launchIdOf(binding.role));
     if (requestedLaunchId !== undefined && requestedLaunchId !== launchId) throw new Error("Agy native turn belongs to a stale launch");
     const launch = platformSession?.nativeAgyLaunch(binding.role, launchId);
-    if (!launch || !binding.session || binding.agentKind !== "agy" && binding.provider !== "agy" || binding.role === "conversation") throw new Error("No prepared native Agy specialist launch");
+    if (!launch || !binding.session || binding.agentKind !== "agy" && binding.provider !== "agy") throw new Error("No prepared native Agy launch");
     const path = join(launch.home, ".gemini", "antigravity-cli", "brain", binding.session.value, ".system_generated", "logs", "transcript_full.jsonl");
-    const previous = await receipts.latestAgyNativeTurn(binding, launchId);
+    const previous = binding.role === "conversation" ? undefined : await receipts.latestAgyNativeTurn(binding, launchId);
+    const priorAnchor = binding.role === "conversation"
+      ? await receipts.latestConversationAgyAnchor(binding, launchId)
+      : previous?.anchor;
     return { launchId, previous, ...(await readAgyNativeTurn({ home: launch.home, nativeSessionId: binding.session.value,
-      transcriptPath: transcriptPath ?? path, ...(previous ? { priorAnchor: previous.anchor } : {}), ...(pendingTool ? { pendingTool } : {}),
+      transcriptPath: transcriptPath ?? path, ...(priorAnchor ? { priorAnchor } : {}), ...(pendingTool ? { pendingTool } : {}),
       ...(expectedMcpTool ? { expectedMcpTool } : {}) })) };
   };
   const assertAgyTurn = async (binding: PaneBinding, expectedAnchor?: unknown, pendingTool?: AgyPendingNativeTool, operationName?: string) => {
     const current = await readAgyTurn(binding, undefined, undefined, pendingTool);
     if (expectedAnchor !== undefined && digest(expectedAnchor) !== digest(current.anchor)) throw new Error("Agy native hook belongs to another transcript turn");
+    if (binding.role === "conversation") {
+      await receipts.assertConversationAgyTurn(binding, current.launchId, current.anchor, current.prompt);
+      return undefined;
+    }
     const admitted = await receipts.assertAgyNativeTurn(binding, current.launchId, current.anchor);
     const message = RoleMessageSchema.parse(JSON.parse(normalizeProviderPrompt(current.prompt.trim())));
     if (digest(message) !== digest(admitted.message)) throw new Error("Agy native turn envelope changed");
@@ -1312,8 +1319,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           const input = z.object({ paneId: z.string().min(1), toolNames: z.array(z.string().min(1)).max(100), launchId: z.string().min(1).optional() }).strict().parse(params);
         const currentManifest = manifest ?? attemptedManifest;
         // Before activation a manifest binding may not carry the native session yet; then Herdr's observed session is the proof.
-        const binding = workspace ? await principal(role, input.paneId)
-          : currentManifest?.panes.find(pane => pane.role === role && pane.paneId === input.paneId && pane.session);
+        let binding = workspace ? undefined : currentManifest?.panes.find(pane => pane.role === role && pane.paneId === input.paneId && pane.session);
+        if (workspace) {
+          try {
+            binding = await principal(role, input.paneId);
+          } catch (error) {
+            if (role !== "developer" || !platformSession?.hasActiveDeveloperLaunch(input.launchId)) throw error;
+          }
+        }
         const observed = binding ? undefined : await observeAgent(input.paneId);
         if (binding && (!binding.session || observed === undefined && currentManifest === undefined)) throw new Error("Provider tools/list cannot be bound to a current role session");
         if (observed && (!observed.nativeSession || !platformRoles.some(option => option.role === role &&
@@ -1322,7 +1335,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         const names = availableTools(role, providerForRole(role)).map(tool => tool.name).sort();
         if (digest([...input.toolNames].sort()) !== digest(names)) throw new Error("Provider tools/list does not match the authenticated Bflow role surface");
         const expectedLaunchId = platformSession?.launchIdOf(role);
-        if (expectedLaunchId !== input.launchId) throw new Error("Provider tools/list belongs to another prepared launch");
+        const validLaunchId = role === "developer" && platformSession !== undefined && expectedLaunchId === undefined
+          ? platformSession.hasActiveDeveloperLaunch(input.launchId)
+          : expectedLaunchId === input.launchId;
+        if (!validLaunchId) throw new Error("Provider tools/list belongs to another prepared launch");
         const path = providerToolsListPath(role, input.paneId);
         await mkdir(dirname(path), { recursive: true, mode: 0o700 });
         await privateFile(path, JSON.stringify({ role, paneId: input.paneId, agentId: binding?.agentId ?? observed?.name,
@@ -1333,7 +1349,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (method === "agy_gateway_session") {
         const input = z.object({ paneId: z.string().min(1), nativeSessionId: z.string().min(1), launchId: z.string().min(1), anchor: AgyNativeAnchorSchema,
           nativeStepIndex: z.number().int().nonnegative(), nativeToolCall: AgyNativeToolCallSchema }).strict().parse(params);
-        if (providerForRole(role) !== "agy" || role === "conversation") throw new Error("Agy Gateway session is unavailable for this role");
+        if (providerForRole(role) !== "agy") throw new Error("Agy Gateway session is unavailable for this role");
         const binding = await principal(role, input.paneId);
         if (!binding.session || binding.session.value !== input.nativeSessionId)
           throw new Error("Agy Gateway native session or launch mismatch");
@@ -1352,6 +1368,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         const current = await readAgyTurn(binding, input.launchId, input.transcriptPath);
         if (digest(input.anchor) !== digest(current.anchor)) throw new Error("Agy admission hook belongs to another transcript turn");
         const message = RoleMessageSchema.parse(JSON.parse(normalizeProviderPrompt(current.prompt.trim())));
+        if (current.previous && digest(current.previous.anchor) === digest(current.anchor) &&
+            digest(current.previous.message) === digest(message) && current.previous.stoppedAt === undefined) {
+          queueAgyNativePrompt(current.previous);
+          return { recorded: true, duplicate: true };
+        }
         await requireWorkspace().runtime.authorizeAgyProviderTurn(message, binding);
         const turn = await receipts.recordAgyNativeTurn(binding, current.launchId, current.anchor, message,
           current.previous ? { supersedesTurnId: current.previous.turnId } : undefined);
@@ -1414,7 +1435,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       }
       if (method === "agy_mcp_operation") {
         const input = z.object({ paneId: z.string().min(1), launchId: z.string().min(1), name: z.string().min(1), arguments: z.record(JsonValueSchema) }).strict().parse(params);
-        if (providerForRole(role) !== "agy" || role === "conversation" || !availableTools(role, "agy").some(tool => tool.name === input.name))
+        if (providerForRole(role) !== "agy" || !availableTools(role, "agy").some(tool => tool.name === input.name))
           throw new Error("No native Agy MCP operation for this role");
         const binding = await principal(role, input.paneId);
         const current = await readAgyTurn(binding, input.launchId, undefined, undefined, { name: input.name, arguments: input.arguments });
@@ -1493,7 +1514,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (!workspace) return ["conversation_notices", "conversation_runtime_nudge"].includes(method) ? { notices: [], undisplayed: [] } : method === "conversation_pending_decision" ? {} : { recorded: false };
         const binding = await principal(role, textField(input.paneId));
         if (!binding.session || binding.session.value !== textField(input.nativeSessionId)) throw new Error("Conversation notice native session mismatch");
-        if (method === "conversation_runtime_nudge") await conversationIntake.runtimeNudge(binding);
+        if (method === "conversation_runtime_nudge") {
+          if (providerForRole(role) === "agy") {
+            const current = await readAgyTurn(binding, textField(input.launchId), textField(input.transcriptPath));
+            if (digest(AgyNativeAnchorSchema.parse(input.anchor)) !== digest(current.anchor) || current.prompt.trim() !== BFLOW_INBOX_NUDGE)
+              throw new Error("Agy Conversation nudge does not match the native transcript turn");
+          }
+          await conversationIntake.runtimeNudge(binding);
+        }
         if (["conversation_notices", "conversation_runtime_nudge"].includes(method)) return { notices: await receipts.unsurfacedConversationNotices(), undisplayed: await receipts.undisplayedUserFacingNotices() };
         if (method === "conversation_pending_decision") {
           // One bounded refusal is reserved per call, so a provider that ignores the Stop block cannot loop.
@@ -1518,21 +1546,39 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (method === "user_prompt") {
         if (role !== "conversation" || quiesced) throw new Error("Only active Conversation accepts user input");
         const input = record(params); const binding = await principal(role, textField(input.paneId));
-        const hook = record(input.hook); if (hook.hook_event_name !== "UserPromptSubmit") throw new Error("Physical user input hook required");
+        const hook = record(input.hook);
+        const isAgy = providerForRole(role) === "agy";
+        if (isAgy ? hook.hook_event_name !== "PreInvocation" : hook.hook_event_name !== "UserPromptSubmit")
+          throw new Error("Physical user input hook required");
         const prompt = textField(hook.prompt), nativeSessionId = textField(hook.session_id);
         if (!binding.session || binding.session.value !== nativeSessionId) throw new Error("Physical user input native session mismatch");
+        const agyCurrent = isAgy ? await readAgyTurn(binding, textField(input.launchId), textField(input.transcriptPath)) : undefined;
+        if (agyCurrent) {
+          if (digest(AgyNativeAnchorSchema.parse(input.anchor)) !== digest(agyCurrent.anchor) || agyCurrent.prompt !== prompt)
+            throw new Error("Agy user input hook does not match the native transcript turn");
+        }
         try { const candidate = JSON.parse(normalizeProviderPrompt(prompt)); if (candidate && typeof candidate === "object" && ("schema_version" in candidate || "sender" in candidate || "type" in candidate)) throw new Error("Role envelopes cannot become authenticated human input"); }
         catch (error) { if (!(error instanceof SyntaxError)) throw error; }
         const work = userQueue.catch(() => undefined).then(async () => {
           const current = await principal(role, textField(input.paneId));
-          if (digest({ ...current, transportState: undefined }) !== digest({ ...binding, transportState: undefined }))
+          if (digest({ ...current, transportState: undefined, lastHeartbeatAt: undefined }) !== digest({ ...binding, transportState: undefined, lastHeartbeatAt: undefined }))
             throw new Error("Physical user input pane changed while queued");
-          const messageId = `user-${digest([hook.session_id, hook.prompt, hook.transcript_path, randomUUID()])}`;
+          const messageId = agyCurrent
+            ? `user-${digest([nativeSessionId, agyCurrent.launchId, agyCurrent.anchor])}`
+            : `user-${digest([hook.session_id, hook.prompt, hook.transcript_path, randomUUID()])}`;
+          if (agyCurrent && (await receipts.conversationTurns()).some(turn => turn.messageId === messageId)) {
+            return json({ alreadyAdmitted: true, messageId });
+          }
           const userId = `local-user-${process.getuid?.() ?? "local"}`;
-          humanHookProvenance = { origin: "UserPromptSubmit", binding, nativeSessionId, userId, messageId,
-            conversationSessionId: manifest!.conversationSessionId, promptDigest: digest(prompt) };
+          humanHookProvenance = {
+            origin: agyCurrent ? "PreInvocation" : "UserPromptSubmit",
+            binding, nativeSessionId, userId, messageId,
+            conversationSessionId: manifest!.conversationSessionId, promptDigest: digest(prompt),
+            ...(agyCurrent ? { agyLaunchId: agyCurrent.launchId, agyAnchor: agyCurrent.anchor } : {})
+          };
           try { const received = record(await conversationIntake.receive(binding, { conversationSessionId: manifest!.conversationSessionId,
-            messageId, content: prompt, userId }));
+            messageId, content: prompt, userId,
+            ...(agyCurrent ? { agyLaunchId: agyCurrent.launchId, agyAnchor: agyCurrent.anchor } : {}) }));
             return json({ ...received, notices: await receipts.unsurfacedConversationNotices(), undisplayed: await receipts.undisplayedUserFacingNotices() }); }
           finally { humanHookProvenance = undefined; }
         }); userQueue = work; return work;
@@ -1695,7 +1741,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     let binding: PaneBinding | undefined;
     try {
       binding = await principal("coordinator", stopped.binding.paneId);
-      if (digest({ ...binding, transportState: undefined }) !== digest({ ...stopped.binding, transportState: undefined }))
+      if (digest({ ...binding, transportState: undefined, lastHeartbeatAt: undefined }) !== digest({ ...stopped.binding, transportState: undefined, lastHeartbeatAt: undefined }))
         unrecoverable = "Coordinator pane or native session changed before its turn was reconciled";
     } catch (error) {
       const text = redactString(String(error));
@@ -2327,7 +2373,7 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
   for await (const chunk of process.stdin) { size += Buffer.byteLength(chunk); if (size > 1024 * 1024) throw new Error("Oversized provider hook"); chunks.push(Buffer.from(chunk)); }
   const rawInput = Buffer.concat(chunks).toString("utf8");
   const hook = configuration.provider === "agy" ? parseAgyHookJson(rawInput, event) : parseHookJson(rawInput, event);
-  if (configuration.provider === "agy" && event === "Stop") {
+  if (configuration.provider === "agy" && event === "Stop" && configuration.role !== "conversation") {
     // Permit the physical turn to end without inventing Runtime settlement or
     // an unbounded continuation. Keep its admission and business work pending.
     process.stderr.write("Bflow native Stop epoch is unproven for Agy; the active assignment remains unresolved.\n");
@@ -2342,6 +2388,53 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
     if (process.env.BFLOW_ENVIRONMENT_ID && agyNative!.prompt.trim() ===
         `[bflow startup ${process.env.BFLOW_ENVIRONMENT_ID}] Reply only pong. Do not use tools or start a workflow.`) {
       process.stdout.write("{}\n");
+      return;
+    }
+    if (configuration.role === "conversation") {
+      const nativeSessionId = textField(hook.conversationId), launchId = textField(process.env[BFLOW_LAUNCH_ID_ENV]);
+      const transcriptPath = textField(hook.transcriptPath);
+      if (agyNative!.prompt.trim() === BFLOW_INBOX_NUDGE) {
+        if (hook.invocationNum !== 0) {
+          process.stdout.write("{}\n");
+          return;
+        }
+        const reply = await callHost(configuration.socketPath, configuration.token, "conversation_runtime_nudge", {
+          paneId, nativeSessionId, launchId, transcriptPath, anchor: agyNative!.anchor
+        });
+        const ids = noticeIds(reply), pending = undisplayedNotices(reply).map(item => item.notice);
+        const notices = [...(record(reply).notices as unknown[] ?? []), ...pending];
+        const additionalContext = "Trusted Bflow inbox nudge, not a user message and not an approval. requiresConversationDecision=false. " +
+          "Do not call conversation_decide or resume_run, and do not reuse an earlier user messageId. Report the supplied notices directly; do not ask the user to repeat. " +
+          mustShowSection(notices as Parameters<typeof mustShowSection>[0]) +
+          (notices.length ? "Runtime updates: " + JSON.stringify(notices) : "No new Runtime updates.");
+        process.stdout.write(JSON.stringify({ injectSteps: [{ systemMessage: { systemMessage: additionalContext } }] }) + "\n");
+        if (ids.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_surfaced", { paneId, nativeSessionId, messageIds: ids });
+        return;
+      }
+      const result = await callHost(configuration.socketPath, configuration.token, "user_prompt", {
+        paneId, launchId, transcriptPath, anchor: agyNative!.anchor,
+        hook: { hook_event_name: "PreInvocation", session_id: nativeSessionId, prompt: agyNative!.prompt, transcript_path: transcriptPath }
+      });
+      if (record(result).alreadyAdmitted === true) {
+        process.stdout.write("{}\n");
+        return;
+      }
+      const turnId = record(result).messageId;
+      const requiresDecision = record(result).requiresConversationDecision === true;
+      const header = typeof turnId === "string" ? `Trusted Bflow user turn: messageId=${turnId}; requiresConversationDecision=${requiresDecision}. ` +
+        (requiresDecision ? (parseConversationResumeRequest(normalizeProviderPrompt(agyNative!.prompt)) ?
+          "For this explicit resume request, call resume_run with the existing runId, then record conversation_only using conversation_decide; do not create a new workflow or change acceptance criteria. " :
+          "Call conversation_decide first (messageId optional; if given, use exactly this one). ") :
+          "Do not call conversation_decide for this turn; explain the trusted result or approval failure and display the notices. ") : "";
+      const shownFirst = mustShowSection([...(record(result).notices as unknown[] ?? []), ...undisplayedNotices(result).map(item => item.notice)] as Parameters<typeof mustShowSection>[0]);
+      const recoveryGuidance = Array.isArray(record(result).recoverableUserTurns) && (record(result).recoverableUserTurns as unknown[]).length ?
+        "Unfinished trusted user turns suspended by an earlier Runtime nudge are listed as recoverableUserTurns. Consider the current user's corrections or cancellation first. " +
+        "After deciding this current turn, explicitly provide each original messageId to conversation_decide with the appropriate decision; never silently execute, approve, or resume from an older turn. " : "";
+      const prefix = header + recoveryGuidance + shownFirst + "Trusted Bflow user turn and Conversation context: ";
+      const additionalContext = prefix + JSON.stringify(boundConversationContext(result, CONVERSATION_CONTEXT_BUDGET - Buffer.byteLength(prefix)));
+      process.stdout.write(JSON.stringify({ injectSteps: [{ systemMessage: { systemMessage: additionalContext } }] }) + "\n");
+      const ids = noticeIds(result);
+      if (ids.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_surfaced", { paneId, nativeSessionId, messageIds: ids });
       return;
     }
     await callHost(configuration.socketPath, configuration.token, "agy_native_turn", {
@@ -2380,14 +2473,15 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
       ...(plan === undefined || reachability === undefined ? {} : { launchId: plan.launchId, toolReachability: reachability }) });
     if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "native_session", {paneId, sessionId:session});
     if (event === "Stop" && configuration.role !== "conversation") await callHost(configuration.socketPath, configuration.token, "provider_stopped", { paneId, nativeSessionId: session });
+    const stopBlockDecision = configuration.provider === "agy" ? "continue" : "block";
     if (event === "Stop" && configuration.role === "conversation") {
       // Every ordinary user turn must reach conversation_decide. A turn that ends without it handed nothing to Runtime, so the Stop
       // is refused with the exact instruction; the host reserves at most MAX_DECISION_REBLOCKS refusals per turn (Claude and Codex
-      // both accept `decision: "block"` with a reason on Stop).
+      // both accept `decision: "block"` with a reason on Stop; Agy accepts `decision: "continue"` with a reason).
       const pending = record(await callHost(configuration.socketPath, configuration.token, "conversation_pending_decision", { paneId, nativeSessionId: session }));
       const approvalFailure = record(pending.approvalFailure ?? {});
       if (typeof approvalFailure.messageId === "string") {
-        process.stdout.write(JSON.stringify({ decision: "block", reason: `Bflow trusted approval failed (messageId=${approvalFailure.messageId}): ` +
+        process.stdout.write(JSON.stringify({ decision: stopBlockDecision, reason: `Bflow trusted approval failed (messageId=${approvalFailure.messageId}): ` +
           `${approvalFailure.note} Runtime error: ${approvalFailure.error}. Report this trusted failure to the user. ` +
           "Do not call conversation_decide or resume_run for this approval, and do not approve or retry automatically." }) + "\n");
         return;
@@ -2401,7 +2495,7 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
           "has no recorded decision, so nothing reached the Coordinator. Call conversation_decide now; messageId may be omitted, " +
           "the host binds your latest trusted user turn. Use workflow_request to start work, clarify for missing details, conversation_only " +
           "for a direct answer, status_query or cancellation_request. ";
-        process.stdout.write(JSON.stringify({ decision: "block", reason: `Bflow: the user's message ${JSON.stringify(String(pending.content ?? "").slice(0, 500))} ` +
+        process.stdout.write(JSON.stringify({ decision: stopBlockDecision, reason: `Bflow: the user's message ${JSON.stringify(String(pending.content ?? "").slice(0, 500))} ` +
           `(messageId=${pending.messageId}) ` + instruction + "Do not tell the user the hook lacks a messageId." }) + "\n");
         return;
       }
@@ -2412,20 +2506,22 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
       const ids = noticeIds(reply), undisplayed = undisplayedNotices(reply);
       // Display acknowledgement: a surfaced user decision or block counts as shown only when the final Conversation turn names it.
       // Codex supplies the final text as last_assistant_message; its rollout format is not a Claude transcript.
-      const shown = typeof hook.last_assistant_message === "string" ? hook.last_assistant_message : await transcriptAssistantText(hook.transcript_path);
+      const shown = typeof hook.last_assistant_message === "string" ? hook.last_assistant_message
+        : await transcriptAssistantText(configuration.provider === "agy" ? hook.transcriptPath : hook.transcript_path);
       const displayed = undisplayed.filter(item => noticeDisplayed(item.rendered, shown));
       if (displayed.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_displayed", { paneId, nativeSessionId: session, messageIds: displayed.map(item => item.messageId) });
-      // Codex reports the final assistant text on Stop; both supported hooks accept the same bounded display refusal.
-      if (configuration.provider !== "claude" && !(configuration.provider === "codex" && typeof hook.last_assistant_message === "string")) return;
+      // Codex reports the final assistant text on Stop; supported hooks accept the same bounded display refusal.
+      if (configuration.provider !== "claude" && configuration.provider !== "agy" && !(configuration.provider === "codex" && typeof hook.last_assistant_message === "string")) return;
       const reblock = undisplayed.filter(item => !displayed.includes(item) && item.reblocks < MAX_NOTICE_REBLOCKS);
       const fresh = z.object({ notices: z.array(z.object({ messageId: z.string().min(1) }).passthrough()).optional() }).passthrough()
         .parse(reply).notices?.filter(item => !displayed.some(shown => shown.messageId === item.messageId)) ?? [];
       if (fresh.length || reblock.length) {
         const notices = [...new Map([...fresh, ...reblock.map(item => ({ ...item.notice, messageId: item.messageId }))].map(item => [item.messageId, item])).values()];
-        process.stdout.write(JSON.stringify({ decision: "block", reason: mustShowSection(notices as Parameters<typeof mustShowSection>[0]) +
+        process.stdout.write(JSON.stringify({ decision: stopBlockDecision, reason: mustShowSection(notices as Parameters<typeof mustShowSection>[0]) +
           "Bflow Runtime updates (report them to the user, do not ask the user to repeat): " + JSON.stringify(notices) }) + "\n");
         if (reblock.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_reblocked", { paneId, nativeSessionId: session, messageIds: reblock.map(item => item.messageId) });
         if (ids.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_surfaced", { paneId, nativeSessionId: session, messageIds: ids });
+        return;
       }
     }
     if (configuration.provider === "agy" && event === "Stop") {

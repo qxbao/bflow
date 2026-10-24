@@ -46,11 +46,13 @@ export const environmentProcessRunner: EnvironmentProcessRunner = {
         let stdout = "";
         let stderr = "";
         let timer: ReturnType<typeof setTimeout> | undefined;
+        let exitDrainTimer: ReturnType<typeof setTimeout> | undefined;
         let settled = false;
         const finish = (error?: Error, exitCode: number | null = null) => {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
+          clearTimeout(exitDrainTimer);
           request.signal?.removeEventListener("abort", abort);
           if (error) reject(error);
           else resolve({ exitCode, stdout, stderr, ...(child.pid === undefined ? {} : { pid: child.pid }) });
@@ -75,6 +77,16 @@ export const environmentProcessRunner: EnvironmentProcessRunner = {
         child.stdout?.on("data", (chunk: Buffer) => receive(chunk, "stdout"));
         child.stderr?.on("data", (chunk: Buffer) => receive(chunk, "stderr"));
         child.once("error", (error) => finish(error));
+        if (!background && !interactive) {
+          child.once("exit", (code) => {
+            exitDrainTimer = setTimeout(() => {
+              terminate();
+              child.stdout?.destroy();
+              child.stderr?.destroy();
+              finish(undefined, code);
+            }, 150);
+          });
+        }
         child.once("close", (code) => finish(undefined, code));
         if (background) child.once("spawn", () => { child.unref(); finish(undefined, 0); });
         else if (!interactive) timer = setTimeout(() => {

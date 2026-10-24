@@ -1,6 +1,6 @@
 import { AGY_LOGIN_REMEDIATION, probeAgyAccess } from "./agy-access.js";
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { existsSync, readdirSync } from "node:fs";
 import { delimiter, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -12,6 +12,7 @@ import {
   type SessionLifecycleManager, type SessionManifest, type PaneBinding
 } from "@bflow/contracts";
 import { findExecutable } from "@bflow/machine-setup";
+import { resolvePrivateRuntimeStateDirectory } from "@bflow/runtime";
 import { readEnvironmentConfig, type EnvironmentConfig, type EnvironmentRoleConfig } from "./environment-config.js";
 import { environmentProcessRunner, namedSessionEnvironment, type EnvironmentProcessRunner } from "./environment-process.js";
 import { identifyRepository, type RepositoryIdentity } from "./repository.js";
@@ -872,17 +873,32 @@ export class EnvironmentLifecycle {
       const acquire = () => suppliedIntegration ? Promise.resolve(suppliedIntegration) : deadline.call(() => this.integration(repository, config));
       let saved = await this.savedManifest(repository);
       if (!saved) {
-        // A blocked first role may leave only P13's durable startup receipt.
+        // A blocked first role may leave only P13's durable startup receipt, or a failed preflight may leave an offline host daemon.
         // Recover ownership from that validated receipt, never from session name alone.
         const prior = await this.intent(repository);
-        if (!prior || !["server_starting", "manager_pending", "down"].includes(prior.phase)) fail("No repository manifest. Run bflow status or bflow doctor; no session was stopped.");
+        const hostConfigPath = resolve(resolvePrivateRuntimeStateDirectory(repository.root), "host", repository.sessionName, "host.json");
+        const hasHostReceipt = await lstat(hostConfigPath).then(stat => stat.isFile(), () => false);
+        if ((!prior || !["server_starting", "manager_pending", "down"].includes(prior.phase)) && !hasHostReceipt)
+          fail("No repository manifest. Run bflow status or bflow doctor; no session was stopped.");
         if (!await this.probe(repository, config, deadline)) {
-          if (prior.serverPid && this.processAlive(prior.serverPid)) fail(`Startup process ${prior.serverPid} is still alive. Wait before retrying down; state was preserved.`);
+          if (prior?.serverPid && this.processAlive(prior.serverPid)) fail(`Startup process ${prior.serverPid} is still alive. Wait before retrying down; state was preserved.`);
+          if (hasHostReceipt) {
+            const offline = await acquire();
+            if (offline?.shutdownHost) try {
+              if (!offline.runtime || !offline.quiesce) fail("Cannot drain the retained host safely; state was preserved.");
+              unwrap(await deadline.call(opts => offline.quiesce!(opts)));
+              const page = unwrap(await deadline.call(opts => offline.runtime!.findRuns({ status: ["queued", "running", "waiting", "blocked", "cancelling"], limit: 1 }, opts)));
+              if (page.items.length || page.nextCursor) fail("Active workflows require their recoverable manifest and checkpoints; no session was stopped.");
+              await deadline.call(() => offline.shutdownHost!());
+            } finally { if (offline !== suppliedIntegration) await deadline.call(() => offline.close?.() ?? Promise.resolve()); }
+          }
           await this.writeIntent(repository, "down");
           this.cleanupMcpSession(repository);
           return { workspaceRoot: repository.root, sessionName: repository.sessionName, server: "stopped" as const,
             configuration: "valid" as const, manifest: null, liveObservation: true, issues: [] };
         }
+        if (!prior || !["server_starting", "manager_pending", "down"].includes(prior.phase))
+          fail("No repository manifest. Run bflow status or bflow doctor; no session was stopped.");
         const recovery = await acquire();
         if (!recovery) fail("No role manager can reconcile the partial startup; no session was stopped.");
         try {

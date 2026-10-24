@@ -13,16 +13,21 @@ import { redactString } from "../resilience/redaction.js";
 import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
 import { nativeEnvelopeIssues, nativeMessageFingerprint, NativeRejectionSchema } from "./native-delivery-status.js";
 import { ApprovalNoticeSchema, UserDecisionNoticeSchema, approvalNoticeFields, renderConversationNotice, userDecisionNoticeFields } from "./conversation-notice-render.js";
+import { BFLOW_INBOX_NUDGE } from "./conversation-inbox.js";
 import type { AgyNativeAnchor } from "./agy-native-transcript.js";
 
 type Kind = "native-rejection" | "approval-failure" | "runtime-nudge" | "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "decision-reblock" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled" | "agy-admission" | "agy-admission-stop" | "agy-native-turn" | "agy-native-turn-stop" | "agy-native-prompt-handled" | "agy-native-turn-superseded";
+export const AgyNativeAnchorSchema = z.object({ transcriptPath: z.string().min(1), device: z.string().min(1), inode: z.string().min(1),
+  stepIndex: z.number().int().nonnegative(), rowDigest: z.string().regex(/^[a-f0-9]{64}$/), prefixDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 export interface HumanHookProvenance {
-  origin: "UserPromptSubmit"; binding: PaneBinding; nativeSessionId: string;
+  origin: "UserPromptSubmit" | "PreInvocation"; binding: PaneBinding; nativeSessionId: string;
   conversationSessionId: string; userId: string; messageId: string; promptDigest: string;
+  agyLaunchId?: string; agyAnchor?: AgyNativeAnchor;
 }
 export const TrustedConversationTurnSchema = z.object({
   binding: PaneBindingSchema, messageId: z.string().min(1), conversationSessionId: z.string().min(1),
-  content: z.string().min(1), occurredAt: z.string().datetime(), userId: z.string().min(1), sequence: z.number().int().positive()
+  content: z.string().min(1), occurredAt: z.string().datetime(), userId: z.string().min(1), sequence: z.number().int().positive(),
+  agyLaunchId: z.string().min(1).optional(), agyAnchor: AgyNativeAnchorSchema.optional()
 }).strict();
 export type TrustedConversationTurn = z.infer<typeof TrustedConversationTurnSchema>;
 /** Durable, sanitised inbox entry for a RoleMessage applied by Conversation; a notice is delivery evidence, never task success. */
@@ -62,8 +67,6 @@ const AgyAdmissionSchema = z.object({ binding: PaneBindingSchema, launchId: z.st
 });
 const AgyAdmissionStopSchema = z.object({ admissionId: z.string().regex(/^[a-f0-9]{64}$/), binding: PaneBindingSchema,
   launchId: z.string().min(1), nativeSessionId: z.string().min(1), executionNum: z.number().int().nonnegative(), observedAt: z.string().datetime() }).strict();
-export const AgyNativeAnchorSchema = z.object({ transcriptPath: z.string().min(1), device: z.string().min(1), inode: z.string().min(1),
-  stepIndex: z.number().int().nonnegative(), rowDigest: z.string().regex(/^[a-f0-9]{64}$/), prefixDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 const AgyNativeTurnSchema = z.object({ binding: PaneBindingSchema, launchId: z.string().min(1), anchor: AgyNativeAnchorSchema,
   message: RoleMessageSchema, admittedAt: z.string().datetime() }).strict().superRefine((value, ctx) => {
   if (value.binding.role === "conversation" || value.binding.agentKind !== "agy" && value.binding.provider !== "agy" || !value.binding.session ||
@@ -202,10 +205,16 @@ export class HostReceiptJournal {
     if (kind === "human") {
       const value = record(input), decision = ApprovalDecisionSchema.parse(value.decision), raw = record(value.provenance);
       const binding = PaneBindingSchema.parse(raw.binding);
-      const provenance: HumanHookProvenance = { origin: "UserPromptSubmit", binding,
+      const origin = raw.origin === "PreInvocation" ? "PreInvocation" : "UserPromptSubmit";
+      const agyLaunchId = raw.agyLaunchId === undefined ? undefined : textField(raw.agyLaunchId);
+      const agyAnchor = raw.agyAnchor === undefined ? undefined : AgyNativeAnchorSchema.parse(raw.agyAnchor);
+      const provenance: HumanHookProvenance = { origin, binding,
         nativeSessionId: textField(raw.nativeSessionId), conversationSessionId: textField(raw.conversationSessionId),
-        userId: textField(raw.userId), messageId: textField(raw.messageId), promptDigest: textField(raw.promptDigest) };
-      if (raw.origin !== "UserPromptSubmit" || binding.role !== "conversation" || binding.sessionId !== this.sessionId ||
+        userId: textField(raw.userId), messageId: textField(raw.messageId), promptDigest: textField(raw.promptDigest),
+        ...(agyLaunchId === undefined ? {} : { agyLaunchId }), ...(agyAnchor === undefined ? {} : { agyAnchor }) };
+      if ((raw.origin !== "UserPromptSubmit" && raw.origin !== "PreInvocation") ||
+          (raw.origin === "PreInvocation" && (binding.provider !== "agy" && binding.agentKind !== "agy" || !agyLaunchId || !agyAnchor)) ||
+          binding.role !== "conversation" || binding.sessionId !== this.sessionId ||
           !binding.session || binding.session.value !== provenance.nativeSessionId || decision.sessionId !== provenance.conversationSessionId ||
           decision.decidedBy !== provenance.userId || !/^[a-f0-9]{64}$/.test(provenance.promptDigest))
         throw new Error("Human receipt has mismatched trusted hook provenance");
@@ -233,9 +242,9 @@ export class HostReceiptJournal {
         kind === "agy-admission" && digest([record(payload).binding, record(payload).launchId, RoleMessageSchema.parse(record(payload).message).message_id,
           record(payload).envelopeDigest]) !== id ||
         kind === "agy-admission-stop" && record(payload).admissionId !== id ||
-        kind === "agy-native-turn" && digest([this.bindingIdentity(PaneBindingSchema.parse(record(payload).binding)), record(payload).launchId, record(payload).anchor]) !== id ||
+        kind === "agy-native-turn" && !this.isExpectedAgyTurnReceiptId(PaneBindingSchema.parse(record(payload).binding), record(payload).launchId, record(payload).anchor, id) ||
         kind === "agy-native-turn-stop" && (record(payload).turnId !== id ||
-          digest([this.bindingIdentity(PaneBindingSchema.parse(record(payload).binding)), record(payload).launchId, record(payload).anchor]) !== id) ||
+          !this.isExpectedAgyTurnReceiptId(PaneBindingSchema.parse(record(payload).binding), record(payload).launchId, record(payload).anchor, id)) ||
         kind === "gate" && QualityGateResultSchema.parse(payload).evaluationId !== id ||
         kind === "evidence" && VerificationResultSchema.parse(payload).verificationId !== id ||
         (kind === "notice-surfaced" || kind === "notice-displayed" || kind === "notice-resurfaced") && record(payload).messageId !== id.split("#")[0] ||
@@ -283,7 +292,12 @@ export class HostReceiptJournal {
   private turnId(binding: PaneBinding, message: RoleMessage): string {
     return digest([binding.paneId, binding.session, message.message_id]);
   }
-  private bindingIdentity(binding: PaneBinding): string { return digest({ ...binding, transportState: undefined }); }
+  private bindingIdentity(binding: PaneBinding): string { return digest({ ...binding, transportState: undefined, lastHeartbeatAt: undefined }); }
+  private legacyBindingIdentity(binding: PaneBinding): string { return digest({ ...binding, transportState: undefined }); }
+  private isExpectedAgyTurnReceiptId(binding: PaneBinding, launchId: unknown, anchor: unknown, id: string): boolean {
+    return digest([this.bindingIdentity(binding), launchId, anchor]) === id ||
+      digest([this.legacyBindingIdentity(binding), launchId, anchor]) === id;
+  }
   private async receiptIds(kind: Kind): Promise<string[]> {
     await this.prepare(); const ids: string[] = [];
     // Kinds can share a prefix, e.g. coordinator-stop and coordinator-stop-handled.
@@ -440,15 +454,28 @@ export class HostReceiptJournal {
   async latestAgyNativeTurn(bindingInput: PaneBinding, launchIdInput: string): Promise<AgyNativeTurn | undefined> {
     const binding = PaneBindingSchema.parse(bindingInput), launchId = textField(launchIdInput);
     if (binding.role === "conversation" || binding.agentKind !== "agy" && binding.provider !== "agy" || !binding.session) throw new Error("Agy native turn requires a specialist pane");
-    const matches: AgyNativeTurn[] = [];
+    const rawMatches: AgyNativeTurn[] = [];
     for (const id of await this.receiptIds("agy-native-turn")) {
       const raw = AgyNativeTurnSchema.parse(await this.read("agy-native-turn", id));
       if (this.bindingIdentity(raw.binding) === this.bindingIdentity(binding) && raw.launchId === launchId) {
         const turn = await this.readAgyNativeTurn(id);
-        if (turn) matches.push(turn);
+        if (turn) rawMatches.push(turn);
       }
     }
-    matches.sort((left, right) => left.anchor.stepIndex - right.anchor.stepIndex);
+    rawMatches.sort((left, right) => left.anchor.stepIndex - right.anchor.stepIndex || left.admittedAt.localeCompare(right.admittedAt));
+    const matches: AgyNativeTurn[] = [];
+    for (const candidate of rawMatches) {
+      const previous = matches.at(-1);
+      if (previous && previous.anchor.stepIndex === candidate.anchor.stepIndex &&
+          digest(previous.anchor) === digest(candidate.anchor) && digest(previous.message) === digest(candidate.message)) {
+        const canonicalId = this.agyNativeTurnId(binding, launchId, candidate.anchor);
+        const preferred = candidate.turnId === canonicalId ? candidate : previous.turnId === canonicalId ? previous : candidate;
+        const stoppedAt = previous.stoppedAt ?? candidate.stoppedAt;
+        matches[matches.length - 1] = { ...preferred, ...(stoppedAt === undefined ? {} : { stoppedAt }) };
+        continue;
+      }
+      matches.push(candidate);
+    }
     for (let index = 1; index < matches.length; index += 1) {
       const prior = matches[index - 1]!, current = matches[index]!;
       if (current.anchor.stepIndex <= prior.anchor.stepIndex || current.anchor.transcriptPath !== prior.anchor.transcriptPath ||
@@ -477,10 +504,18 @@ export class HostReceiptJournal {
         return { ...previous, duplicate: true };
       }
       for (const id of await this.receiptIds("agy-native-turn")) {
-        const earlier = AgyNativeTurnSchema.parse(await this.read("agy-native-turn", id));
+        const earlier = (await this.readAgyNativeTurn(id))!;
         if (this.bindingIdentity(earlier.binding) === this.bindingIdentity(binding) && earlier.launchId === launchId &&
-            earlier.message.message_id === value.message.message_id)
+            earlier.message.message_id === value.message.message_id) {
+          if (digest(earlier.anchor) === digest(anchor) && digest(earlier.message) === digest(value.message)) {
+            if (earlier.stoppedAt !== undefined) throw new Error("Agy native turn has already stopped");
+            const latestMatch = await this.latestAgyNativeTurn(binding, launchId);
+            if (!latestMatch || digest(latestMatch.anchor) !== digest(anchor)) throw new Error("Agy native turn has been superseded");
+            if (binding.role === "coordinator" && isCoordinatorTrigger(earlier.message)) await this.startCoordinatorTurn(binding, earlier.message);
+            return { ...earlier, duplicate: true };
+          }
           throw new Error("Agy envelope message was already admitted at another native step");
+        }
       }
       const latest = await this.latestAgyNativeTurn(binding, launchId);
       if (latest && (anchor.transcriptPath !== latest.anchor.transcriptPath || anchor.device !== latest.anchor.device || anchor.inode !== latest.anchor.inode))
@@ -522,11 +557,22 @@ export class HostReceiptJournal {
   async recoverAgyNativeTurns(): Promise<AgyNativeTurn[]> {
     return this.serializeAgy(async () => {
       const pending: AgyNativeTurn[] = [];
+      const handledAnchors = new Set<string>();
+      const allTurns: AgyNativeTurn[] = [];
       for (const id of await this.receiptIds("agy-native-turn")) {
         const turn = (await this.readAgyNativeTurn(id))!;
+        allTurns.push(turn);
+        if (await this.read("agy-native-prompt-handled", id) !== undefined) {
+          handledAnchors.add(this.agyNativeTurnId(turn.binding, turn.launchId, turn.anchor));
+        }
+      }
+      for (const turn of allTurns) {
         if (turn.binding.role === "coordinator" && isCoordinatorTrigger(turn.message)) await this.startCoordinatorTurn(turn.binding, turn.message);
         await this.settleAgyNativeStop(turn);
-        if (await this.read("agy-native-prompt-handled", id) === undefined) pending.push(turn);
+        const anchorKey = this.agyNativeTurnId(turn.binding, turn.launchId, turn.anchor);
+        if (!handledAnchors.has(anchorKey) && !pending.some(item => this.agyNativeTurnId(item.binding, item.launchId, item.anchor) === anchorKey)) {
+          pending.push(turn);
+        }
       }
       return pending.sort((a, b) => a.admittedAt.localeCompare(b.admittedAt) || a.anchor.stepIndex - b.anchor.stepIndex);
     });
@@ -643,6 +689,26 @@ export class HostReceiptJournal {
     const turn = TrustedConversationTurnSchema.parse(input);
     if (turn.binding.sessionId !== this.sessionId) throw new Error("Foreign Conversation turn");
     return await this.read("runtime-nudge", digest([this.conversationBindingIdentity(turn.binding), turn.sequence])) !== undefined;
+  }
+  async latestConversationAgyAnchor(bindingInput: PaneBinding, launchIdInput: string): Promise<AgyNativeAnchor | undefined> {
+    const binding = PaneBindingSchema.parse(bindingInput), launchId = textField(launchIdInput);
+    const identity = this.conversationBindingIdentity(binding);
+    const turns = (await this.conversationTurns()).filter(turn =>
+      this.conversationBindingIdentity(turn.binding) === identity && turn.agyLaunchId === launchId && turn.agyAnchor !== undefined);
+    return turns.at(-1)?.agyAnchor;
+  }
+  async assertConversationAgyTurn(bindingInput: PaneBinding, launchIdInput: string, anchorInput: AgyNativeAnchor, prompt: string): Promise<void> {
+    const binding = PaneBindingSchema.parse(bindingInput), launchId = textField(launchIdInput), anchor = AgyNativeAnchorSchema.parse(anchorInput);
+    if (binding.role !== "conversation" || (binding.agentKind !== "agy" && binding.provider !== "agy") || !binding.session)
+      throw new Error("Agy Conversation turn requires an authenticated Agy Conversation pane");
+    if (prompt.trim() === BFLOW_INBOX_NUDGE) {
+      if (!await this.isConversationRuntimeNudge(binding)) throw new Error("Agy Conversation nudge turn is not admitted");
+      return;
+    }
+    const identity = this.conversationBindingIdentity(binding);
+    const latest = (await this.conversationTurns()).filter(turn => this.conversationBindingIdentity(turn.binding) === identity).at(-1);
+    if (!latest || latest.agyLaunchId !== launchId || !latest.agyAnchor || digest(latest.agyAnchor) !== digest(anchor) || latest.content !== prompt)
+      throw new Error("No active Agy Conversation user turn matches the exact transcript anchor");
   }
   private async approvalFailures(messageId: string) {
     const failures: z.infer<typeof ApprovalFailureReceiptSchema>[] = [];

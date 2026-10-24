@@ -422,6 +422,28 @@ export class AgenticWorkflowRuntime {
         await this.reportInboundFailure(message, String(error));
       }
     }
+    const deliveredApprovals = await this.transaction(async state => {
+      const result = await this.ports.panes?.getManifest?.();
+      const sender = result?.ok ? SessionManifestSchema.parse(result.value).panes.find(pane => pane.role === "conversation") : undefined;
+      return state.outbound.filter(out => out.message.sender.role === "conversation" && out.message.recipient.role === "coordinator" &&
+        out.message.type === "approval.decision" && out.handle !== undefined && ["accepted", "released"].includes(out.status) &&
+        !state.inbox.some(item => item.message.message_id === out.message.message_id ||
+          (out.message.idempotency_key !== undefined && item.message.idempotency_key === out.message.idempotency_key)) &&
+        state.runs.some(run => run.runId === out.message.run_id && !run.cancelled && !TERMINAL_RUN_STATUSES.includes(run.status)))
+        .map(out => RoleMessageSchema.parse(sender && (!out.message.sender.pane_id || !out.message.sender.agent_id)
+          ? { ...out.message, sender: { ...out.message.sender, pane_id: out.message.sender.pane_id ?? sender.paneId, agent_id: out.message.sender.agent_id ?? sender.agentId } }
+          : out.message));
+    });
+    for (const message of deliveredApprovals) {
+      try {
+        if (!await this.ports.authorizeHuman(ApprovalDecisionSchema.parse(message.payload))) continue;
+        await withRecoveredHerdrReceipt(message, () => this.applyAuthenticatedHerdrMessage(message, false));
+        replayed++;
+      }
+      catch (error) {
+        await this.reportInboundFailure(message, String(error));
+      }
+    }
     return this.transaction(async (state, save, _core, outbox) => {
       let recovered = 0;
       for (const item of state.inbox.filter(entry => entry.status === "applied" && entry.message.recipient.role === "coordinator" &&
@@ -1682,7 +1704,17 @@ export class AgenticWorkflowRuntime {
         if (requirements.some(capability => !this.ports.roleCapabilities[binding.role]?.includes(capability)))
           throw new RoleCapabilityPreflightError(`${binding.role} required capability is unavailable: ${requirements.join(", ")}`);
       }
-      const messageId = `resume-${digest(retiredToResume.length ? [runId, action.actionId, "retired", retiredToResume.map(item => item.message.message_id)] : options.conversationUserMessageId ? [runId, action.actionId, "physical", options.conversationUserMessageId] : explicitAfterAutomatic ? [runId, action.actionId, "explicit"] : [runId, action.actionId])}`;
+      const baseResumeKey = retiredToResume.length
+        ? [runId, action.actionId, "retired", retiredToResume.map(item => item.message.message_id)]
+        : options.conversationUserMessageId
+          ? [runId, action.actionId, "physical", options.conversationUserMessageId]
+          : explicitAfterAutomatic
+            ? [runId, action.actionId, "explicit"]
+            : [runId, action.actionId];
+      let messageId = `resume-${digest(baseResumeKey)}`;
+      if ((recurred || explicitAfterAutomatic) && state.outbound.some(item => item.message.message_id === messageId)) {
+        messageId = `resume-${digest([...baseResumeKey, action.manualResumeAttempts ?? 0, (action.resumeAttempts ?? 0) + (options.automatic ? 1 : 0)])}`;
+      }
       if (failedCapabilityDispatches.length) {
         // Preflight failed before a lease or transport operation. Reuse that exact immutable unsent handoff once the target proof passes.
         for (const failedCapabilityDispatch of failedCapabilityDispatches) {
@@ -1826,12 +1858,24 @@ export class AgenticWorkflowRuntime {
       if (!["sending", "unknown_delivery", "accepted"].includes(out.status) || out.cancelRequested || out.leaseRelease)
         throw new Error("Agy delivery is released, cancelled or no longer active");
       const run = this.run(state, textField(message.run_id));
-      this.live(run);
+      const settledApproval = binding.role === "coordinator" && message.type === "approval.decision" && message.sender.role === "conversation" &&
+        run.decision !== undefined && run.decision.approvalId === objectField(message.payload, "approvalId");
+      const settledCancel = binding.role === "coordinator" && isCancellationHandoff(message) && run.cancelled;
+      if (!settledApproval && !settledCancel) this.live(run);
       assertNoPendingPaneDecision(run, binding);
       if (binding.role === "coordinator") {
         if (message.type === "delegation.request" && message.sender.role === "conversation") {
-          if (digest(DelegationRequestSchema.parse(message.payload)) !== digest(run.delegation)) throw new Error("Agy delegation revision is stale");
-        } else if (message.type !== "task.status" || message.sender.role !== "runtime") throw new Error("Agy Coordinator needs a current Runtime trigger");
+          if (!isCancellationHandoff(message) && digest(DelegationRequestSchema.parse(message.payload)) !== digest(run.delegation))
+            throw new Error("Agy delegation revision is stale");
+        } else if (message.type === "approval.decision" && message.sender.role === "conversation") {
+          const decision = ApprovalDecisionSchema.parse(message.payload);
+          if (!await this.ports.authorizeHuman(decision)) throw new Error("Human approval is not authenticated");
+          const reason = supersededReason(run, decision.approvalId);
+          if (reason !== undefined) throw new AdmissionRejectedError(reason);
+        } else if (!((["task.status", "verification.requested"].includes(message.type) && message.sender.role === "runtime") ||
+            (message.type === "task.status" && isConversationContext(message)))) {
+          throw new Error("Agy Coordinator needs a current Runtime trigger");
+        }
       } else if (!["task.assignment", "delegation.request", "verification.requested", "task.status"].includes(message.type) ||
           message.sender.role !== "coordinator" && message.sender.role !== "runtime") throw new Error("Agy specialist needs an assigned Runtime delivery");
       const owner = out.parentAssignmentId ? state.outbound.find(item => item.message.message_id === out.parentAssignmentId) : out;

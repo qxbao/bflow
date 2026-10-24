@@ -312,18 +312,10 @@ function compileCodexPermissions(
 
 function compileAgyPermissions(
   profile: PermissionProfile,
-  role: AgentRole,
+  _role: AgentRole,
   capabilities: DetectedProviderCapabilities,
   options: PermissionCompilerOptions
 ): CompiledPermissionResult {
-  if (role === "conversation") return {
-    supported: false,
-    code: "agy_human_ingress_unsupported",
-    message: "Agy does not expose a trusted physical UserPromptSubmit event required by the Conversation role",
-    remediation: "Use Claude or Codex for Conversation until Agy provides an authenticated physical user-input hook.",
-    flags: [],
-    detectsDangerouslySkipPermissions: capabilities.supportsDangerouslySkipPermissions
-  };
   const requiredFlags = ["--sandbox", "--mode", "--disable-slash-commands"];
 
   const extraRoots = new Set<string>();

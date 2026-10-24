@@ -2,7 +2,7 @@ import { z } from "zod";
 import { JsonValueSchema, PaneBindingSchema, type JsonValue, type PaneBinding } from "@bflow/contracts";
 import { digest, json, record } from "./journal.js";
 import { redactString } from "../resilience/redaction.js";
-import { HostReceiptJournal, parseConversationResumeRequest, type TrustedConversationTurn } from "./host-receipts.js";
+import { HostReceiptJournal, AgyNativeAnchorSchema, parseConversationResumeRequest, type TrustedConversationTurn } from "./host-receipts.js";
 import { parseNativeDiagnosticFenceCommand, parsePolicyPhaseRetirementCommand, parseWorkflowReviewReplacementCommand } from "./native-diagnostic-fence.js";
 
 interface ConversationIntakePort {
@@ -15,7 +15,8 @@ interface ConversationIntakePort {
 /** messageId is optional: the host binds the decision to this pane's latest authenticated user turn, so a model never has to copy it. */
 const DecisionCallSchema = z.object({ messageId: z.string().min(1).optional(), decision: JsonValueSchema }).strict();
 const ReceivedTurnSchema = z.object({ messageId: z.string().min(1), conversationSessionId: z.string().min(1),
-  content: z.string().min(1), userId: z.string().min(1) }).strict();
+  content: z.string().min(1), userId: z.string().min(1),
+  agyLaunchId: z.string().min(1).optional(), agyAnchor: AgyNativeAnchorSchema.optional() }).strict();
 const TRUSTED_APPROVAL = json({ intent: "trusted_approval" });
 function identity(binding: PaneBinding): string {
   return digest({ ...binding, transportState: undefined, lastHeartbeatAt: undefined });

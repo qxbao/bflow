@@ -1,3 +1,6 @@
+import { copyFile, lstat, mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { z } from "zod";
 import type { EnvironmentProcessRequest, EnvironmentProcessRunner } from "./environment-process.js";
 import { humanLine } from "./presentation.js";
@@ -16,14 +19,47 @@ interface AgyAccessResult {
   readonly remediation: string;
 }
 
+async function createIsolatedAgyProbeHome(baseEnv: NodeJS.ProcessEnv): Promise<string | undefined> {
+  if (baseEnv["AI_ISOLATOR_PROFILE"] !== undefined) return undefined;
+  const nativeHome = baseEnv["HOME"] ?? process.env["HOME"];
+  const probeHome = await mkdtemp(join(tmpdir(), "bflow-agy-access-"));
+  const cacheDir = join(probeHome, ".gemini", "antigravity-cli", "cache");
+  await mkdir(cacheDir, { recursive: true, mode: 0o700 });
+  if (nativeHome) {
+    const sourceOnboarding = join(nativeHome, ".gemini", "antigravity-cli", "cache", "onboarding.json");
+    try {
+      const info = await lstat(sourceOnboarding);
+      if (info.isFile() && !info.isSymbolicLink()) {
+        await copyFile(sourceOnboarding, join(cacheDir, "onboarding.json"));
+      }
+    } catch { /* Onboarding adoption is best-effort for probe isolation. */ }
+    const sourceKeychains = join(nativeHome, "Library", "Keychains");
+    try {
+      const info = await lstat(sourceKeychains);
+      if (info.isDirectory() && !info.isSymbolicLink()) {
+        await mkdir(join(probeHome, "Library"), { recursive: true, mode: 0o700 });
+        await symlink(sourceKeychains, join(probeHome, "Library", "Keychains"), "dir");
+      }
+    } catch { /* Keychains symlink is macOS-specific. */ }
+  }
+  return probeHome;
+}
+
 /** Agy has no auth/status subcommand. Its read-only model listing checks access; Runtime still probes actual execution. */
 export async function probeAgyAccess(runner: EnvironmentProcessRunner,
   request: Omit<EnvironmentProcessRequest, "executable" | "args" | "mode">): Promise<AgyAccessResult> {
+  const baseEnv = request.env ?? process.env;
+  let isolatedHome: string | undefined;
   let result;
-  try { result = await runner.run({ ...request, executable: "agy", args: ["models"] }); }
-  catch (error) {
+  try {
+    isolatedHome = await createIsolatedAgyProbeHome(baseEnv).catch(() => undefined);
+    const env = isolatedHome !== undefined ? { ...baseEnv, HOME: isolatedHome } : request.env;
+    result = await runner.run({ ...request, ...(env !== undefined ? { env } : {}), executable: "agy", args: ["models"] });
+  } catch (error) {
     return { status: "unavailable", message: `Agy access check failed: ${humanLine(error instanceof Error ? error.message : String(error), 160)}`,
       remediation: AGY_ACCESS_REMEDIATION };
+  } finally {
+    if (isolatedHome !== undefined) await rm(isolatedHome, { recursive: true, force: true }).catch(() => undefined);
   }
   let failure: z.infer<typeof FailureSchema> | undefined;
   try {

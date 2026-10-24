@@ -2328,5 +2328,90 @@ describe("RolePaneManager Verification Suite", () => {
         expect(devPanes.some((p) => p.paneId === oldPaneId)).toBe(false);
       }
     });
+
+    it("automatically replaces and restarts a host-launched permanent Agy pane that idles without a native session hook", async () => {
+      const { readBuiltinRolePrompt } = await import("../src/role-prompts.js");
+      const { mkdir, writeFile } = await import("node:fs/promises");
+      const directory = await mkdtemp(join(tmpdir(), "bflow-agy-recovery-"));
+      try {
+        const chat = await readBuiltinRolePrompt("chat"), coordinator = await readBuiltinRolePrompt("coordinator");
+        if (!chat || !coordinator) throw new Error("original role prompts are missing");
+        const chatHome = join(directory, "agy-home", "conversation");
+        const coordHome = join(directory, "agy-home", "coordinator");
+        await mkdir(join(chatHome, ".gemini", "config"), { recursive: true, mode: 0o700 });
+        await mkdir(join(coordHome, ".gemini", "config"), { recursive: true, mode: 0o700 });
+        const chatPrompt = join(directory, "conversation.system-prompt.txt");
+        const coordPrompt = join(directory, "coordinator.system-prompt.txt");
+        await writeFile(chatPrompt, chat.prompt, { mode: 0o600 });
+        await writeFile(coordPrompt, coordinator.prompt, { mode: 0o600 });
+        const scriptFor = (promptPath: string) => [
+          'import { readFileSync } from "node:fs";',
+          `const systemMessage = readFileSync(${JSON.stringify(promptPath)}, "utf8");`,
+          'process.stdout.write(JSON.stringify({ injectSteps: [{ systemMessage: { systemMessage } }] }) + "\\n");'
+        ].join("\n");
+        const chatHook = join(chatHome, ".gemini", "config", "bflow-session-start.mjs");
+        const coordHook = join(coordHome, ".gemini", "config", "bflow-session-start.mjs");
+        await writeFile(chatHook, scriptFor(chatPrompt), { mode: 0o600 });
+        await writeFile(coordHook, scriptFor(coordPrompt), { mode: 0o600 });
+        await writeFile(join(chatHome, ".gemini", "config", "hooks.json"), JSON.stringify({ bflow: { SessionStart: [{ type: "command", command: `'/trusted/node' '${chatHook}'`, timeout: 30 }] } }), { mode: 0o600 });
+        await writeFile(join(coordHome, ".gemini", "config", "hooks.json"), JSON.stringify({ bflow: { SessionStart: [{ type: "command", command: `'/trusted/node' '${coordHook}'`, timeout: 30 }] } }), { mode: 0o600 });
+
+        let nowMs = Date.parse("2026-10-24T08:00:00.000Z");
+        const fakeRunner = new FakeHerdrCommandRunner();
+        const fakeStore = new InMemorySessionManifestStore();
+        const fakeSocket = {
+          request: async (method: string, params: Record<string, unknown>) => {
+            const args = method === "workspace.create"
+              ? ["workspace", "create", "--cwd", String(params["cwd"]), "--label", String(params["label"]), "--no-focus"]
+              : method === "tab.create"
+                ? ["tab", "create", "--workspace", String(params["workspace_id"]), "--cwd", String(params["cwd"]), "--label", String(params["label"]), "--no-focus"]
+                : ["pane", "split", String(params["target_pane_id"]), "--direction", String(params["direction"] ?? "right"), "--cwd", String(params["cwd"] ?? "/workspace"), "--no-focus"];
+            const outcome = await fakeRunner.run({ args });
+            const parsed = JSON.parse(outcome.stdout);
+            return { ok: true as const, value: parsed.result };
+          }
+        };
+        const agyManager = createRolePaneManager({
+          config: {
+            ...config,
+            permanentRoles: ["chat", "coordinator"],
+            roleConfigs: {
+              chat: {
+                agentKind: "agy",
+                launch: { provider: "agy", argv: ["--model", "gemini-3.8-flash-medium"], env: { HOME: chatHome }, launchId: "launch-chat", launchFingerprint: "fp-chat" }
+              },
+              coordinator: {
+                agentKind: "agy",
+                launch: { provider: "agy", argv: ["--model", "gemini-4-argon-high"], env: { HOME: coordHome }, launchId: "launch-coord", launchFingerprint: "fp-coord" }
+              }
+            }
+          },
+          runner: fakeRunner,
+          store: fakeStore,
+          socket: fakeSocket,
+          worktreeInspector: inspector,
+          clock: () => new Date(nowMs)
+        });
+        const init = await agyManager.initializeTopology();
+        expect(init.ok).toBe(true);
+        if (!init.ok) return;
+        const originalChatPane = init.value.panes.find(p => p.role === "conversation")!;
+        expect(originalChatPane.metadata?.["nativeSessionPending"]).toBe(true);
+
+        nowMs += 10_000;
+        const health = await agyManager.inspectTopologyHealth();
+        expect(health.ok).toBe(true);
+        const manifestAfter = await agyManager.getManifest();
+        expect(manifestAfter.ok).toBe(true);
+        if (manifestAfter.ok && manifestAfter.value) {
+          const restartedChat = manifestAfter.value.panes.find(p => p.role === "conversation")!;
+          expect(restartedChat.paneId).not.toBe(originalChatPane.paneId);
+          expect(restartedChat.metadata?.["nativeSessionRetries"]).toBe(1);
+          expect(manifestAfter.value.attachTarget.paneId).toBe(restartedChat.paneId);
+        }
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    });
   });
 });

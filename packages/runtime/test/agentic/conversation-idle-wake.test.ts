@@ -46,6 +46,29 @@ describe("Claude ghost suggestion versus typed draft", () => {
     expect(isProviderInputEmpty("claude", stripGhostSuggestion("\x1b[2mno prompt here\x1b[0m"))).toBe(false);
   });
 
+  it("recognises Agy 1.4.5 > prompt with 38;5;8 placeholder text as empty and rejects a typed draft", () => {
+    const agyRule = "\x1b[0m\x1b[38;5;8m" + "─".repeat(119) + "\x1b[0m";
+    const agyStatus = "\x1b[0m\x1b[38;5;8m? for shortcuts                                                                \x1b[0m\x1b[38;5;2maccept-edits\x1b[0m\x1b[2m · Gemini 3.8 Flash · medium\x1b[0m";
+    const agyIdle = [
+      "  pong",
+      "",
+      agyRule,
+      "\x1b[0m\x1b[38;5;12m>\x1b[0m \x1b[0m\x1b[38;5;8mAccept-edits mode: file edits auto-approved (shift+tab to cycle)\x1b[0m",
+      agyRule,
+      agyStatus
+    ].join("\n");
+    const agyDraft = [
+      "  pong",
+      "",
+      agyRule,
+      "\x1b[0m\x1b[38;5;12m>\x1b[0m \x1b[0mđang gõ dở",
+      agyRule,
+      agyStatus
+    ].join("\n");
+    expect(isProviderInputEmpty("agy", stripGhostSuggestion(agyIdle))).toBe(true);
+    expect(isProviderInputEmpty("agy", stripGhostSuggestion(agyDraft))).toBe(false);
+  });
+
   it("checks within five seconds by default and retries unsurfaced nudges with backoff", () => {
     expect(inboxCheckIntervalMs(undefined)).toBe(2_000);
     expect(inboxCheckIntervalMs("1000")).toBe(1_000);

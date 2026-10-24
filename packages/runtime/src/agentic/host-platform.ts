@@ -1,13 +1,16 @@
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
-import { mkdir, open, readFile, rename } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { chmod, copyFile, mkdir, open, readFile, readlink, rename, rm, symlink } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import {
   AgentProviderIdSchema, AgentRoleSchema,
   type AgentProviderId, type AgentRole, type ContractError, type OperationOptions
 } from "@bflow/contracts";
-import { createManagedCodexHookEnvironment, type LiveReadinessObservation } from "@bflow/agent-providers";
+import {
+  createManagedCodexHookEnvironment, createProviderProcessRunner,
+  type LiveReadinessObservation, type ProviderCommandOutcome, type ProviderCommandRunner
+} from "@bflow/agent-providers";
 import { FileSkillStore, SkillManager } from "@bflow/skills";
 import type { SkillManifest } from "@bflow/contracts";
 import {
@@ -418,6 +421,10 @@ export class HostPlatformSession {
     return this.launches.get(role)?.launchId;
   }
 
+  hasActiveDeveloperLaunch(launchId: string | undefined): boolean {
+    return typeof launchId === "string" && [...this.developerLaunches.values()].includes(launchId);
+  }
+
   /** Native transcript access is bound to a live Agy launch and its exact prepared config home. */
   nativeAgyLaunch(role: AgentRole, launchId: string): { home: string; launchId: string } | undefined {
     const binding = this.nativeAgyHomes.get(launchId);
@@ -705,6 +712,82 @@ export function createHostProviderFactoryOptions(platform: AgenticHostPlatformOp
   };
 }
 
+function createCoalescedAgyRunner(baseRunner: ProviderCommandRunner): ProviderCommandRunner {
+  const inFlight = new Map<string, Promise<ProviderCommandOutcome>>();
+  const cached = new Map<string, { readonly expiresAt: number; readonly outcome: ProviderCommandOutcome }>();
+  return {
+    async run(invocation) {
+      const arg0 = invocation.args[0];
+      const isReadOnlyProbe =
+        invocation.args.length === 1 && (arg0 === "--version" || arg0 === "--help" || arg0 === "models");
+      if (!isReadOnlyProbe) {
+        return baseRunner.run(invocation);
+      }
+      const rawHome = invocation.env?.["HOME"] ?? "";
+      const homeScope = basename(dirname(rawHome)) === "agy-home" ? dirname(rawHome) : rawHome;
+      const cacheKey = JSON.stringify([
+        invocation.executable,
+        invocation.args,
+        homeScope,
+        invocation.env?.["AI_ISOLATOR_REAL_HOME"] ?? ""
+      ]);
+      const now = Date.now();
+      const hit = cached.get(cacheKey);
+      if (hit !== undefined && hit.expiresAt > now) {
+        return hit.outcome;
+      }
+      const existing = inFlight.get(cacheKey);
+      if (existing !== undefined) {
+        return existing;
+      }
+      const task = (async () => {
+        let effectiveInvocation = invocation;
+        if (arg0 === "models" && basename(dirname(rawHome)) === "agy-home") {
+          const probeHome = join(dirname(rawHome), ".auth-probe");
+          const probeCacheDir = join(probeHome, ".gemini", "antigravity-cli", "cache");
+          const probeConfigDir = join(probeHome, ".config");
+          try {
+            await mkdir(probeCacheDir, { recursive: true, mode: 0o700 });
+            await mkdir(probeConfigDir, { recursive: true, mode: 0o700 });
+            const sourceOnboarding = join(rawHome, ".gemini", "antigravity-cli", "cache", "onboarding.json");
+            const targetOnboarding = join(probeCacheDir, "onboarding.json");
+            await copyFile(sourceOnboarding, targetOnboarding).catch(() => {});
+            await chmod(targetOnboarding, 0o600).catch(() => {});
+            const sourceKeychains = join(rawHome, "Library", "Keychains");
+            const linkTarget = await readlink(sourceKeychains).catch(() => undefined);
+            if (linkTarget !== undefined) {
+              const probeLibrary = join(probeHome, "Library");
+              await mkdir(probeLibrary, { recursive: true, mode: 0o700 });
+              const probeKeychains = join(probeLibrary, "Keychains");
+              await rm(probeKeychains, { force: true }).catch(() => {});
+              await symlink(linkTarget, probeKeychains, "dir").catch(() => {});
+            }
+            effectiveInvocation = {
+              ...invocation,
+              env: {
+                ...invocation.env,
+                HOME: probeHome,
+                XDG_CONFIG_HOME: probeConfigDir
+              }
+            };
+          } catch {
+            effectiveInvocation = invocation;
+          }
+        }
+        const outcome = await baseRunner.run(effectiveInvocation);
+        if (outcome.exitCode === 0 && outcome.started && outcome.failure === undefined) {
+          cached.set(cacheKey, { expiresAt: Date.now() + 120_000, outcome });
+        }
+        return outcome;
+      })().finally(() => {
+        inFlight.delete(cacheKey);
+      });
+      inFlight.set(cacheKey, task);
+      return task;
+    }
+  };
+}
+
 /** Applies trusted platform paths last so role and repository data cannot redirect Codex hook approvals. */
 export function createHostProviderAdapterFactory(
   platform: AgenticHostPlatformOptions,
@@ -712,12 +795,15 @@ export function createHostProviderAdapterFactory(
   hookEnvironment: Readonly<Record<string, string | undefined>> = process.env
 ): ProviderAdapterFactory {
   const trustedCodexOptions = createHostProviderFactoryOptions(platform, hookEnvironment).perProvider.codex;
+  const agyRunner = createCoalescedAgyRunner(
+    options.perProvider?.agy?.runner ?? options.runner ?? createProviderProcessRunner()
+  );
   return createProviderAdapterFactory({
     ...options,
     perProvider: {
       ...options.perProvider,
       claude: { ...options.perProvider?.claude, executionProbe: "disabled" },
-      agy: { ...options.perProvider?.agy, executionProbe: "disabled" },
+      agy: { ...options.perProvider?.agy, runner: agyRunner, executionProbe: "disabled" },
       codex: { ...options.perProvider?.codex, ...trustedCodexOptions, executionProbe: "disabled" }
     }
   });

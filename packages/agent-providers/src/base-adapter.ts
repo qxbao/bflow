@@ -547,21 +547,15 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     // C. Check: authentication & execution probe. Never invoke the provider while
     // inherited global hooks/MCP state is not approved or isolated.
     let authPassed = false;
-    const agyConversationUnsupported = this.descriptor.provider === "agy" && environment.role === "conversation";
     const agyBindingUnsupported = this.descriptor.provider === "agy" && request.stage === "preflight" &&
-      !this.descriptor.supportsNativeBinding && !agyConversationUnsupported;
+      !this.descriptor.supportsNativeBinding;
     if (agyBindingUnsupported) {
       hasUnsupported = true;
       checks.push(createHealthCheck("native_binding", "failed", "native_binding_unsupported",
         "Agy native session binding has not passed the isolated Herdr identity acceptance probe.",
         "Use Claude or Codex for active roles until Agy's native conversationId is verified against the current Herdr pane."));
     }
-    if (agyConversationUnsupported) {
-      hasUnsupported = true;
-      authPassed = true;
-      checks.push(createHealthCheck("authentication", "unknown", "auth_skipped_unsupported_role",
-        "Provider authentication was not probed because Agy cannot receive trusted physical Conversation input."));
-    } else if (inherited.hookFailure !== undefined || inherited.mcpFailure !== undefined) {
+    if (inherited.hookFailure !== undefined || inherited.mcpFailure !== undefined) {
       hasFailed = true;
       const failure = inherited.hookFailure ?? inherited.mcpFailure!;
       checks.push(createHealthCheck("authentication", "failed", failure.code,
@@ -1923,6 +1917,21 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       if (!existing.isFile() || existing.isSymbolicLink() || (existing.mode & 0o077) !== 0 ||
           typeof process.getuid === "function" && existing.uid !== process.getuid()) throw new Error("Unsafe existing Agy native settings");
     }
+
+    // Prevent interactive zsh in Herdr panes from blocking on zsh-newuser-install or global compinit when HOME is isolated.
+    for (const [rcName, rcContent] of [[".zshenv", "skip_global_compinit=1\n"], [".zshrc", "# Bflow isolated Agy shell home\n"]] as const) {
+      const rcPath = join(agyHome, rcName);
+      try {
+        const rcFile = await open(rcPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+        try { await rcFile.writeFile(rcContent, "utf8"); }
+        finally { await rcFile.close(); }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const existing = await lstat(rcPath);
+        if (!existing.isFile() || existing.isSymbolicLink() || (existing.mode & 0o077) !== 0 ||
+            typeof process.getuid === "function" && existing.uid !== process.getuid()) throw new Error(`Unsafe existing Agy shell file ${rcName}`);
+      }
+    }
     return agyHome;
   }
 
@@ -1958,12 +1967,16 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     if (!nativeHome) return;
     const resolvedNativeHome = resolve(nativeHome);
     let homeCursor = parse(resolvedNativeHome).root;
+    let protectedNativeHome = false;
     for (const component of resolvedNativeHome.slice(homeCursor.length).split(sep).filter(Boolean)) {
       homeCursor = join(homeCursor, component);
       let nativeHomeInfo;
       try { nativeHomeInfo = await lstat(homeCursor); } catch { return; }
       if (nativeHomeInfo.isSymbolicLink() || !nativeHomeInfo.isDirectory()) return;
-      if (homeCursor === resolvedNativeHome && ((typeof process.getuid === "function" && nativeHomeInfo.uid !== process.getuid()) || (nativeHomeInfo.mode & 0o022) !== 0)) return;
+      if (homeCursor === resolvedNativeHome) {
+        if ((typeof process.getuid === "function" && nativeHomeInfo.uid !== process.getuid()) || (nativeHomeInfo.mode & 0o022) !== 0) return;
+        protectedNativeHome = (nativeHomeInfo.mode & 0o007) === 0;
+      }
     }
     const sourceHome = join(resolvedNativeHome, ".gemini", "antigravity-cli", "cache");
     const source = join(sourceHome, "onboarding.json");
@@ -1982,7 +1995,11 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       if (isFile) {
         if (!info.isFile() || (info.mode & 0o022) !== 0 || info.size > 64 * 1024) return;
       } else {
-        if (!info.isDirectory() || (info.mode & 0o022) !== 0) return;
+        const allowPrivateGroupDir =
+          protectedNativeHome &&
+          (info.mode & 0o002) === 0 &&
+          (typeof process.getgid !== "function" || (info.gid === process.getgid() && info.uid === info.gid));
+        if (!info.isDirectory() || ((info.mode & 0o022) !== 0 && !allowPrivateGroupDir)) return;
       }
     }
     let sourceHandle;

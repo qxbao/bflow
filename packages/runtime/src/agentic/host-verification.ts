@@ -92,7 +92,7 @@ export class HostVerification {
   async authenticateEvidence(result: VerificationResult): Promise<boolean> { return this.receipts ? this.receipts.authenticateEvidence(result) : this.evidenceReceipts.get(result.verificationId) === digest(result); }
   private async trustGate(result: QualityGateResult) { await this.receipts?.recordGate(result); this.gateReceipts.set(result.evaluationId, digest(result)); this.gateRecords.set(result.evaluationId, result); }
   private async trustEvidence(result: VerificationResult) { await this.receipts?.recordEvidence(result); this.evidenceReceipts.set(result.verificationId, digest(result)); this.evidenceRecords.set(result.verificationId, result); }
-  private bindingIdentity(binding: PaneBinding) { const { transportState: _transportState, ...identity } = binding; return identity; }
+  private bindingIdentity(binding: PaneBinding) { const { transportState: _transportState, lastHeartbeatAt: _lastHeartbeatAt, ...identity } = binding; return identity; }
   private async git(cwd: string, args: string[]): Promise<string> {
     return verificationGit(cwd, args);
   }

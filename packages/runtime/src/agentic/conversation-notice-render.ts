@@ -319,7 +319,14 @@ export function lastAssistantText(jsonl: string): string {
     let entry: unknown;
     try { entry = JSON.parse(line); } catch { continue; }
     if (typeof entry !== "object" || entry === null) continue;
+    const source = (entry as { source?: unknown }).source;
     const type = (entry as { type?: unknown }).type;
+    if (source === "USER_EXPLICIT" && type === "USER_INPUT") break;
+    if (source === "MODEL" && type === "PLANNER_RESPONSE") {
+      const agyContent = (entry as { content?: unknown }).content;
+      if (typeof agyContent === "string" && agyContent.length > 0) reversed.push(agyContent);
+      continue;
+    }
     const content = ((entry as { message?: { content?: unknown } }).message)?.content;
     if (type === "user") { if (isGenuineUserPrompt(content)) break; continue; }
     if (type !== "assistant") continue;

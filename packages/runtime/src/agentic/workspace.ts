@@ -224,6 +224,7 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
     // Dynamic Developer launches carry Gateway env, which Herdr accepts only at pane creation over its socket.
     socket: paneModule.createHerdrSocketPort({ runner, sessionId: options.sessionId }) });
   const panes: PanePolicy = options.developerLaunches ? withDeveloperLaunches(rolePanes, options.developerLaunches, {
+    startupTimeoutMs: 120_000,
     refreshBinding: async (paneId, callOptions) => {
       const observed = await rolePanes.inspectTopologyHealth(callOptions);
       if (!observed.ok) return observed;

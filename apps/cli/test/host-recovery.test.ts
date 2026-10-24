@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ensureAgenticHost, resolvePrivateRuntimeStateDirectory, type AgenticHostPlatformOptions } from "@bflow/runtime";
@@ -125,6 +125,27 @@ describe.skipIf(process.platform === "win32")("persistent host recovery", () => 
     expect(runner.session(input.repository.sessionName).running).toBe(true);
     expect(JSON.parse(await readFile(join(input.repository.root, ".bflow/state/operation.json"), "utf8")).phase).toBe("manager_pending");
   });
+
+  it("stops a retained offline host via bflow down when preflight failed before creating a manifest", async () => {
+    const input = await repository();
+    const root = input.repository.root;
+    const binary = join(root, "herdr.mjs");
+    await writeFile(binary, '#!/usr/bin/env node\nconsole.log(JSON.stringify({running:false}));\n', { mode: 0o700 });
+    const existing = await ensureAgenticHost({ repositoryPath: root, sessionId: input.repository.sessionName, herdrBinary: binary });
+    cleanup.push(() => existing.shutdown().catch(() => undefined));
+    const quiesce = vi.fn(async () => ({ ok: true as const, value: undefined }));
+    const shutdownHost = vi.fn(async () => { await existing.shutdown(); });
+    const integration = {
+      manager: { init: vi.fn(), up: vi.fn(), down: vi.fn(), attach: vi.fn(), doctorSession: vi.fn(),
+        getManifest: vi.fn(async () => ({ ok: true as const, value: null })) },
+      runtime: { findRuns: vi.fn(async () => ({ ok: true as const, value: { items: [] } })), getRun: vi.fn() },
+      quiesce, shutdownHost, close: vi.fn(async () => {})
+    };
+    const lifecycle = new EnvironmentLifecycle(root, { runner: new HerdrProcesses(), integration });
+    await expect(lifecycle.down()).resolves.toMatchObject({ server: "stopped", manifest: null });
+    expect(quiesce).toHaveBeenCalledOnce();
+    expect(shutdownHost).toHaveBeenCalledOnce();
+  });
 });
 
 describe("terminateHostOwner", () => {
@@ -141,5 +162,51 @@ describe("terminateHostOwner", () => {
     const dir = await realpath(await mkdtemp("/tmp/bflow-owner-"));
     cleanup.push(() => rm(dir, { recursive: true, force: true }));
     await expect(terminateHostOwner(dir)).resolves.toBeUndefined();
+  });
+});
+
+describe("environmentProcessRunner and probeAgyAccess isolation", () => {
+  it("completes capture execution when a exited command leaves a grandchild holding stdout", async () => {
+    const { environmentProcessRunner } = await import("../src/environment-process.js");
+    const dir = await realpath(await mkdtemp("/tmp/bflow-runner-"));
+    cleanup.push(() => rm(dir, { recursive: true, force: true }));
+    const res = await environmentProcessRunner.run({
+      executable: process.execPath,
+      args: [
+        "-e",
+        "import('node:child_process').then(({ spawn }) => { spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { stdio: 'inherit' }).unref(); process.stdout.write('ok\\n'); process.exit(0); });"
+      ],
+      cwd: dir,
+      timeoutMs: 3_000
+    });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toBe("ok\n");
+  });
+
+  it("isolates HOME and adopts onboarding.json when probing agy models access", async () => {
+    const { probeAgyAccess } = await import("../src/agy-access.js");
+    const nativeHome = await realpath(await mkdtemp("/tmp/bflow-agy-home-"));
+    cleanup.push(() => rm(nativeHome, { recursive: true, force: true }));
+    const cacheDir = join(nativeHome, ".gemini", "antigravity-cli", "cache");
+    await mkdir(cacheDir, { recursive: true, mode: 0o700 });
+    await writeFile(join(cacheDir, "onboarding.json"), '{"onboardingComplete":true}\n', { mode: 0o600 });
+    let observedHome: string | undefined;
+    let observedOnboarding: string | undefined;
+    const res = await probeAgyAccess(
+      {
+        async run(req) {
+          observedHome = req.env?.["HOME"];
+          if (observedHome) {
+            observedOnboarding = await readFile(join(observedHome, ".gemini", "antigravity-cli", "cache", "onboarding.json"), "utf8");
+          }
+          return { exitCode: 0, stdout: "gemini-3.8-flash-medium\tGemini 3.8 Flash\n", stderr: "" };
+        }
+      },
+      { cwd: nativeHome, env: { ...process.env, HOME: nativeHome }, timeoutMs: 5_000 }
+    );
+    expect(res.status).toBe("available");
+    expect(observedHome).toBeDefined();
+    expect(observedHome).not.toBe(nativeHome);
+    expect(observedOnboarding).toBe('{"onboardingComplete":true}\n');
   });
 });

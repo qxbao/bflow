@@ -914,7 +914,10 @@ export class RolePaneManager {
     };
     let nextStartup = 0;
     const failures = new Map<number, ContractError>();
-    await Promise.all(Array.from({ length: Math.min(MAX_PERMANENT_STARTUP_CONCURRENCY, startups.length) }, async () => {
+    const hasHostAgyStartup = startups.some(({ role, pending }) =>
+      pending.agentKind === "agy" && Boolean(this.#config.roleConfigs?.[role]?.launch?.env?.["HOME"]));
+    const startupConcurrency = hasHostAgyStartup ? 2 : MAX_PERMANENT_STARTUP_CONCURRENCY;
+    await Promise.all(Array.from({ length: Math.min(startupConcurrency, startups.length) }, async () => {
       while (failures.size === 0 && nextStartup < startups.length) {
         const index = nextStartup++;
         if (options?.signal?.aborted) {
@@ -939,7 +942,34 @@ export class RolePaneManager {
             cwd: this.#config.workspaceRoot, agentName: pending.agentId, agentKind: pending.agentKind!, permanent: true
           }, options);
           if (!started.ok) { failures.set(index, started.error); break; }
-          const saved = await publish(started.value);
+          let currentBinding = started.value;
+          const roleLaunch = this.#config.roleConfigs?.[role]?.launch;
+          if (currentBinding.agentKind === "agy" && Boolean(roleLaunch?.env?.["HOME"]) && !currentBinding.session) {
+            const settleDeadline = Math.min(
+              this.#clock().getTime() + 8_000,
+              options?.deadline !== undefined ? Date.parse(options.deadline) - 5_000 : Infinity
+            );
+            while (!options?.signal?.aborted && this.#clock().getTime() < settleDeadline) {
+              await new Promise(resolve => setTimeout(resolve, 400));
+              const agentGet = await this.#runHerdr(["agent", "get", currentBinding.paneId], options);
+              if (agentGet.exitCode !== 0 || agentGet.failure) break;
+              let info: HerdrAgentInfo;
+              try { info = parseAgentInfoResult(agentGet, "agent_info"); } catch { break; }
+              if (info.session) {
+                currentBinding = {
+                  ...currentBinding,
+                  session: info.session,
+                  transportState: info.agentStatus as AgentTransportState,
+                  metadata: { ...currentBinding.metadata, nativeSessionPending: false }
+                };
+                break;
+              }
+              if (info.agentStatus !== "working") {
+                break;
+              }
+            }
+          }
+          const saved = await publish(currentBinding);
           if (!saved.ok) { failures.set(index, saved.error); break; }
         } catch (error) {
           const failed = toProtocolError(error, `Failed to start permanent role '${role}'`);
@@ -1667,6 +1697,60 @@ export class RolePaneManager {
           });
         }
 
+        const roleLaunch = this.#config.roleConfigs?.[report.topologyRole]?.launch;
+        const retries = typeof binding.metadata?.["nativeSessionRetries"] === "number" ? binding.metadata["nativeSessionRetries"] : 0;
+        const ageMs = this.#clock().getTime() - Date.parse(binding.boundAt);
+        if (
+          binding.permanent === true &&
+          binding.agentKind === "agy" &&
+          roleLaunch?.provider === "agy" &&
+          Boolean(roleLaunch.env["HOME"]) &&
+          this.#socket !== undefined &&
+          binding.metadata?.["nativeSessionPending"] === true &&
+          !binding.session &&
+          !report.observedAgent?.session &&
+          report.occupantMatches &&
+          (report.transportState === "idle" || report.transportState === "done") &&
+          ageMs >= 8_000 &&
+          retries < 2
+        ) {
+          const split = await this.#splitPane(
+            binding.paneId,
+            "right",
+            binding.cwd,
+            roleLaunch,
+            `Failed to split replacement pane for '${report.topologyRole}'`,
+            options
+          );
+          if (split.ok) {
+            await this.#closePane(binding.paneId, options);
+            const restarted = await this.startAgentInPane({
+              role: report.topologyRole,
+              paneId: split.value.paneId,
+              workspaceId: binding.workspaceId,
+              tabId: binding.tabId,
+              cwd: binding.cwd,
+              agentName: binding.agentId,
+              agentKind: binding.agentKind,
+              permanent: true,
+              metadata: {
+                ...binding.metadata,
+                nativeSessionRetries: retries + 1
+              }
+            }, options);
+            if (restarted.ok) {
+              updatedPanes.push(restarted.value);
+              await balanceOwnedTab(
+                args => this.#runHerdr(args, options),
+                manifest.herdrWorkspaceId,
+                binding.tabId,
+                updatedPanes.filter(p => p.permanent && p.tabId === binding.tabId).map(p => p.paneId)
+              );
+              continue;
+            }
+          }
+        }
+
         updatedPanes.push({
           ...binding,
           ...(!binding.session && report.occupantMatches && report.observedAgent?.session &&
@@ -1687,11 +1771,21 @@ export class RolePaneManager {
       );
       const healthy = anomalies.length === 0;
       const newStatus: SessionManifestStatus = healthy && hasConversation && hasCoordinator ? "up" : "degraded";
+      const updatedConversation = updatedPanes.find((p) => p.role === "conversation" && p.permanent);
 
       const updatedManifest: SessionManifest = {
         ...manifest,
         status: newStatus,
         panes: updatedPanes,
+        ...(updatedConversation
+          ? {
+              attachTarget: {
+                paneId: updatedConversation.paneId,
+                role: "conversation",
+                ...(updatedConversation.terminalId !== undefined ? { terminalId: updatedConversation.terminalId } : {})
+              }
+            }
+          : {}),
         updatedAt: this.#clock().toISOString()
       };
 

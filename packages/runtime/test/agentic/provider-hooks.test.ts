@@ -424,4 +424,48 @@ describe.skipIf(process.platform === "win32")("Conversation inbox hooks", () => 
     expect(JSON.parse(result.stdout).hookSpecificOutput.additionalContext).toContain("notice-1");
     expect(f.calls.map(call => call.method)).toEqual(["user_prompt", "conversation_notices_surfaced"]);
   });
+  it("admits an Agy Conversation user turn via PreInvocation once per transcript anchor", async () => {
+    const f = await fixture("conversation", "agy", {
+      user_prompt: [{ messageId: "user-agy-1", requiresConversationDecision: true, notices: [notice] }, { alreadyAdmitted: true, messageId: "user-agy-1" }]
+    });
+    await writeFile(f.transcriptPath, JSON.stringify({ step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE",
+      created_at: new Date().toISOString(), content: "<USER_REQUEST>\nadd multiply\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nfixture\n</ADDITIONAL_METADATA>" }) + "\n", { mode: 0o644 });
+    const first = await f.invoke("PreInvocation", f.agyInput({ invocationNum: 0, initialNumSteps: 1 }));
+    expect(first.code).toBe(0);
+    const firstInjected = JSON.parse(first.stdout).injectSteps?.[0]?.systemMessage?.systemMessage as string;
+    expect(firstInjected).toMatch(/^Trusted Bflow user turn: messageId=user-agy-1; requiresConversationDecision=true\./);
+    expect(firstInjected).toContain("notice-1");
+    expect(f.calls.map(call => call.method)).toEqual(["user_prompt", "conversation_notices_surfaced"]);
+    const second = await f.invoke("PreInvocation", f.agyInput({ invocationNum: 1, initialNumSteps: 1 }));
+    expect(second.code).toBe(0);
+    expect(JSON.parse(second.stdout)).toEqual({});
+    expect(f.calls.map(call => call.method)).toEqual(["user_prompt", "conversation_notices_surfaced", "user_prompt"]);
+  });
+  it("handles Agy Conversation inbox nudges via PreInvocation only on invocationNum 0", async () => {
+    const f = await fixture("conversation", "agy", { conversation_runtime_nudge: { notices: [notice] } });
+    await writeFile(f.transcriptPath, JSON.stringify({ step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE",
+      created_at: new Date().toISOString(), content: `<USER_REQUEST>\n${BFLOW_INBOX_NUDGE}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nfixture\n</ADDITIONAL_METADATA>` }) + "\n", { mode: 0o644 });
+    const first = await f.invoke("PreInvocation", f.agyInput({ invocationNum: 0, initialNumSteps: 1 }));
+    expect(first.code).toBe(0);
+    const injected = JSON.parse(first.stdout).injectSteps?.[0]?.systemMessage?.systemMessage as string;
+    expect(injected).toContain("not a user message and not an approval");
+    expect(injected).toContain("notice-1");
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_runtime_nudge", "conversation_notices_surfaced"]);
+    const second = await f.invoke("PreInvocation", f.agyInput({ invocationNum: 1, initialNumSteps: 1 }));
+    expect(second.code).toBe(0);
+    expect(JSON.parse(second.stdout)).toEqual({});
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_runtime_nudge", "conversation_notices_surfaced"]);
+  });
+  it("continues Agy Conversation Stop for unsurfaced notices and stops when idle", async () => {
+    const f = await fixture("conversation", "agy", {
+      conversation_notices: [{ notices: [notice] }, { notices: [] }]
+    });
+    const first = await f.invoke("Stop", f.agyInput({ executionNum: 0, terminationReason: "NO_TOOL_CALL", fullyIdle: true }));
+    expect(first.code).toBe(0);
+    expect(JSON.parse(first.stdout)).toMatchObject({ decision: "continue", reason: expect.stringContaining("Bflow Runtime updates") });
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision", "conversation_notices", "conversation_notices_surfaced"]);
+    const second = await f.invoke("Stop", f.agyInput({ executionNum: 1, terminationReason: "NO_TOOL_CALL", fullyIdle: true }));
+    expect(second.code).toBe(0);
+    expect(JSON.parse(second.stdout)).toEqual({ decision: "stop" });
+  });
 });

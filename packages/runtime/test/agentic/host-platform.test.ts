@@ -220,6 +220,48 @@ describe("Codex hook trust propagation", () => {
     expect(probes).toBe(0);
   });
 
+  it("coalesces Agy capability and models probes across roles in a shared auth-probe home", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-host-agy-coalescer-")));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const home = join(root, "home"), state = join(root, "state"), binary = join(root, "agy");
+    await mkdir(join(home, ".gemini", "antigravity-cli", "cache"), { recursive: true, mode: 0o700 });
+    await mkdir(state, { mode: 0o700 });
+    await writeFile(binary, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    await writeFile(join(home, ".gemini", "antigravity-cli", "cache", "onboarding.json"), '{"onboardingComplete":true}\n', { mode: 0o600 });
+    let modelsCalls = 0, versionCalls = 0, helpCalls = 0;
+    const modelHomes: string[] = [];
+    const fake = createFakeProviderRunner();
+    const runner: ProviderCommandRunner = { run: async invocation => {
+      if (invocation.args[0] === "--version") versionCalls++;
+      if (invocation.args[0] === "--help") helpCalls++;
+      if (invocation.args[0] === "models") {
+        modelsCalls++;
+        if (invocation.env?.["HOME"]) modelHomes.push(invocation.env["HOME"]);
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      return fake.run(invocation);
+    } };
+    const factory = createHostProviderAdapterFactory(platform, { runner, perProvider: { agy: { executablePath: binary } } }, { HOME: home, PATH: process.env.PATH });
+    const checkRole = (role: "conversation" | "coordinator" | "planner") => {
+      const scope = { kind: "session" as const, machineId: "machine", repositoryId: "repo", workspaceRoot: root, sessionId: "session" };
+      const environment = AgentEnvironmentSchema.parse({ schemaVersion: 3, environmentId: `env-${role}`, provider: "agy", role, scope,
+        cwd: root, stateDirectory: state, configFingerprint: "a".repeat(64),
+        permissionProfile: { schemaVersion: 3, profileId: "permission", mode: "workspace_auto", scope, filesystem: "workspace_write",
+          readableRoots: [root], writableRoots: [root], deniedRoots: [], isolation: "provider_policy", network: { mode: "deny", allowedHosts: [] },
+          allowedTools: [], deniedAction: "request_via_conversation", allowGlobalPermissionBypass: false },
+        environmentVariables: {}, secretBindings: {}, requiredCapabilityIds: [], requiredMcpServiceIds: [], skillManifestDigest: "0".repeat(64) });
+      return factory("agy", { mcpRegistrations: [], mcpObservations: [], skillManifest: SkillManifestSchema.parse({ schemaVersion: 3, manifestId: `skills-${role}`,
+        environmentId: environment.environmentId, scope, role, provider: "agy", digest: environment.skillManifestDigest, skills: [], bindings: [] }), renderedSkillsContent: "", trustedIssuerKeys: {},
+        model: "gemini-3.8-flash-medium", isolatorEnvironment: { AI_ISOLATOR_REAL_HOME: home } }).checkHealth({ schemaVersion: 3, environment, stage: "preflight", requestedAt: new Date().toISOString() });
+    };
+    const outcomes = await Promise.all([checkRole("conversation"), checkRole("coordinator"), checkRole("planner")]);
+    expect(outcomes.map(item => item.ok && item.value.status), JSON.stringify(outcomes)).toEqual(["ready", "ready", "ready"]);
+    expect(modelsCalls).toBe(1);
+    expect(versionCalls).toBe(1);
+    expect(helpCalls).toBe(1);
+    expect(modelHomes).toEqual([join(state, "agy-home", ".auth-probe")]);
+  });
+
   it("keeps the operator HOME when only a Codex config home is selected", () => {
     const configured = { ...platform, codexHomeDirectory: "/machine/codex" };
     const options = createHostProviderFactoryOptions(configured, { HOME: "/operator/home" });

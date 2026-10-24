@@ -2,8 +2,8 @@
 export const BFLOW_INBOX_NUDGE = "[bflow] Có cập nhật mới từ Runtime";
 
 const RULE = /^\s*[─━]{8,}\s*$/u;
-/** Empty prompt: `❯` followed only by spaces or no-break spaces. Any other text, including a ghost suggestion, is not empty. */
-const EMPTY_CURRENT_PROMPT = /^\s*❯[\s ]*$/u;
+/** Empty prompt: `❯` or `>` followed only by spaces or no-break spaces. Any other text, including a ghost suggestion, is not empty. */
+const EMPTY_CURRENT_PROMPT = /^\s*[❯>][\s ]*$/u;
 
 /**
  * True only when the provider's visible input box is verifiably empty. Supports observed Claude and Codex layouts;
@@ -20,7 +20,7 @@ export function isProviderInputEmpty(provider: string, visibleText: string): boo
     return footer.length === 2 && /\s·\s+(?:\/|~\/|[A-Za-z]:\\)/u.test(footer[0]!) &&
       /^\s*\?\s+for shortcuts\b/u.test(footer[1]!);
   }
-  if (provider !== "claude") return false;
+  if (provider !== "claude" && provider !== "agy") return false;
   return isCurrentLayoutEmpty(lines) || isBoxedLayoutEmpty(lines);
 }
 
@@ -31,7 +31,8 @@ export function isProviderInputEmpty(provider: string, visibleText: string): boo
  */
 export function stripGhostSuggestion(ansiText: string): string {
   return ansiText.split(/\r?\n/).map(line => {
-    const prompt = line.includes("❯") || line.includes("›");
+    const plain = line.replace(/\x1b\[[0-9;:]*[@-~]/g, "");
+    const prompt = line.includes("❯") || line.includes("›") || /^\s*>(?:[\s ]|$)/u.test(plain);
     let out = "", faint = false;
     for (let index = 0; index < line.length;) {
       const csi = /^\x1b\[([0-9;:]*)([@-~])/.exec(line.slice(index));
@@ -47,13 +48,22 @@ export function stripGhostSuggestion(ansiText: string): string {
   }).join("\n");
 }
 
-/** Faint state after one SGR sequence; skips extended-colour arguments so `38;2;…` never reads as faint. */
+/** Faint state after one SGR sequence; skips extended-colour arguments so `38;2;…` never reads as faint, while `38;5;8` (Agy placeholder grey) is treated as ghost text on prompt lines. */
 function sgrFaint(parameters: string, faint: boolean): boolean {
   const codes = parameters === "" ? [0] : parameters.split(/[;:]/).map(code => Number(code || 0));
   for (let index = 0; index < codes.length; index++) {
     const code = codes[index]!;
-    if (code === 38 || code === 48 || code === 58) { index += codes[index + 1] === 5 ? 2 : codes[index + 1] === 2 ? 4 : 1; continue; }
-    if (code === 0 || code === 22) faint = false;
+    if (code === 38) {
+      if (codes[index + 1] === 5) {
+        faint = codes[index + 2] === 8;
+        index += 2;
+        continue;
+      }
+      index += codes[index + 1] === 2 ? 4 : 1;
+      continue;
+    }
+    if (code === 48 || code === 58) { index += codes[index + 1] === 5 ? 2 : codes[index + 1] === 2 ? 4 : 1; continue; }
+    if (code === 0 || code === 22 || code === 39) faint = false;
     else if (code === 2) faint = true;
   }
   return faint;
@@ -77,14 +87,14 @@ export function inboxCheckIntervalMs(value: string | undefined): number {
 }
 
 function isCurrentLayoutEmpty(lines: string[]): boolean {
-  const prompt = lines.map((line, index) => ({ line, index })).filter(item => /^\s*❯/u.test(item.line)).pop();
+  const prompt = lines.map((line, index) => ({ line, index })).filter(item => /^\s*[❯>]/u.test(item.line)).pop();
   if (!prompt) return false;
   const { line, index } = prompt;
   if (!EMPTY_CURRENT_PROMPT.test(line)) return false;
   // Exactly one prompt line, between a rule above and a rule below; at most one status line may follow the lower rule.
   if (index < 1 || !RULE.test(lines[index - 1]!) || !RULE.test(lines[index + 1] ?? "")) return false;
   const tail = lines.slice(index + 2);
-  return tail.length <= 1 && tail.every(item => !RULE.test(item) && !/❯/u.test(item));
+  return tail.length <= 1 && tail.every(item => !RULE.test(item) && !/[❯>]/u.test(item));
 }
 
 function isBoxedLayoutEmpty(lines: string[]): boolean {

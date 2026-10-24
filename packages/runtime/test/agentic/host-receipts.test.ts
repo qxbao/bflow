@@ -90,6 +90,23 @@ describe("private durable host authentication receipts", () => {
     await expect(record(binding, "launch-1", nextAnchor, message)).rejects.toThrow("Agy envelope message was already admitted at another native step");
     expect(await record(binding, "launch-1", nextAnchor, { ...message, message_id: "next", idempotency_key: "next" })).toMatchObject({ duplicate: false });
   });
+  it("preserves Agy native turn and Coordinator turn identity when manifest heartbeat or transportState updates", async () => {
+    const f = await fixture();
+    const binding = PaneBindingSchema.parse({ ...f.binding, bindingId: "agy-coord", role: "coordinator", agentId: "coordinator",
+      paneId: "coord-pane", provider: "agy", agentKind: "agy", readOnlyWorkspace: true,
+      lastHeartbeatAt: "2026-10-24T08:33:26.457Z",
+      session: { source: "herdr:agy", kind: "id", value: "agy-coord-session" } });
+    const message = RoleMessageSchema.parse({ schema_version: 2, message_id: "coord-delegation", correlation_id: "corr-hb", run_id: "run-hb",
+      sender: { role: "conversation" }, recipient: { role: "coordinator" }, type: "delegation.request", payload: {},
+      artifact_references: [], occurred_at: f.at, idempotency_key: "coord-delegation" });
+    const anchor: AgyNativeAnchor = { transcriptPath: `${f.root}/coord.jsonl`, device: "7", inode: "11", stepIndex: 11,
+      rowDigest: "a".repeat(64), prefixDigest: "b".repeat(64) };
+    const admitted = await f.journal.recordAgyNativeTurn(binding, "launch-hb", anchor, message);
+    const updatedBinding = { ...binding, lastHeartbeatAt: "2026-10-24T08:39:58.024Z", transportState: "working" as const };
+    expect((await f.reopen().assertAgyNativeTurn(updatedBinding, "launch-hb", anchor)).turnId).toBe(admitted.turnId);
+    expect((await f.reopen().latestAgyNativeTurn(updatedBinding, "launch-hb"))?.turnId).toBe(admitted.turnId);
+    expect(await f.reopen().recordAgyNativeTurn(updatedBinding, "launch-hb", anchor, message)).toMatchObject({ turnId: admitted.turnId, duplicate: true });
+  });
   it("recovers durable Agy prompt and Stop obligations across interrupted host writes", async () => {
     const f = await fixture();
     const binding = PaneBindingSchema.parse({ ...f.binding, role: "coordinator", agentId: "coordinator", paneId: "agy-pane", agentKind: "agy",
