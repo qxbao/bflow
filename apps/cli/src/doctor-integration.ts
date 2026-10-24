@@ -22,6 +22,8 @@ import { lifecycleLockStatus } from "./lifecycle-lock.js";
 import { probeDoctorModels } from "./provider-model-diagnostics.js";
 import { RolePreflightSummarySchema } from "@bflow/runtime";
 import { scrubDiagnosticText } from "@bflow/agent-providers";
+import { resolveIsolatorStateRoot } from "./platform-options.js";
+import { homedir } from "node:os";
 
 export type DoctorCheckStatus = "pass" | "warning" | "fail" | "skipped";
 export type DoctorGroupName = "runtime" | "agent_providers" | "mcp" | "tools" | "skills";
@@ -84,6 +86,26 @@ export async function loadMcpGatewayModule(): Promise<any> {
   } catch {
     return null;
   }
+}
+
+/** Check the selected Codex profile that Runtime will use. Linked backends use their
+ * authenticated model catalog endpoint, which verifies access without inference. */
+async function probeSelectedCodexProfile(profileName: string, environment: NodeJS.ProcessEnv,
+  cwd: string, runner: EnvironmentProcessRunner): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const runtimeProfiles = await import(new URL("../../../packages/runtime/dist/platform/isolator-profile.js", import.meta.url).href);
+  const stateRoot = resolveIsolatorStateRoot(environment, environment.HOME ?? homedir());
+  const result = await new runtimeProfiles.IsolatorProfileResolver({ stateRoot, environment }).resolve("codex", profileName, { timeoutMs: 8000 });
+  if (!result.ok) return { exitCode: 1, stdout: "", stderr: result.error.message };
+  const profile = result.value;
+  if (profile.identity.codexBackendMode === "linked" && profile.backendUrl) {
+    const backendAuth = await import(new URL("../../../packages/agent-providers/dist/backend-authentication.js", import.meta.url).href);
+    const checked = await backendAuth.checkCodexBackendAuthentication(profile.backendUrl, profile.environment.CODEX_LB_API_KEY,
+      { timeoutMs: 8000 });
+    return { exitCode: checked.exitCode ?? 1, stdout: checked.stdout, stderr: checked.stderr };
+  }
+  const checked = await runner.run({ executable: "codex", args: ["login", "status"], cwd,
+    env: { ...namedSessionEnvironment("doctor", environment), ...profile.environment }, timeoutMs: 5000 });
+  return { exitCode: checked.exitCode ?? 1, stdout: checked.stdout, stderr: checked.stderr };
 }
 
 function cleanDetailedCheck(check: DoctorDetailedCheck): DoctorDetailedCheck {
@@ -683,24 +705,34 @@ export async function runDoctorDiagnostics(
     } else {
       if (provider === "codex") {
         try {
-          const authRes = await runner.run({
-            executable: "codex",
-            args: ["login", "status"],
-            cwd: repository.root,
-            env,
-            timeoutMs: 5000
-          });
+          const requiredCodexRoles = configuredRoles.filter(role => role.cli === "codex" && (role.required ?? true));
+          const defaultProfileName = config?.environment.defaults?.codex?.["profile-name"];
+          const selectedProfileNames = [...new Set(requiredCodexRoles
+            .map(role => role["profile-name"] ?? defaultProfileName).filter((name): name is string => name !== undefined))];
+          const profileResults = await Promise.all(selectedProfileNames.map(name =>
+            probeSelectedCodexProfile(name, options.env ?? process.env, repository.root, runner)));
+          const needsAmbientLogin = requiredCodexRoles.length === 0 || requiredCodexRoles.some(role =>
+            role["profile-name"] === undefined && defaultProfileName === undefined);
+          if (needsAmbientLogin) {
+            const ambient = await runner.run({ executable: "codex", args: ["login", "status"], cwd: repository.root, env, timeoutMs: 5000 });
+            profileResults.push({ exitCode: ambient.exitCode ?? 1, stdout: ambient.stdout, stderr: ambient.stderr });
+          }
+          const authRes = { exitCode: profileResults.every(result => result.exitCode === 0) ? 0 : 1,
+            stdout: profileResults.filter(result => result.exitCode === 0).map(result => result.stdout).join(" "),
+            stderr: profileResults.filter(result => result.exitCode !== 0).map(result => result.stderr).join(" ") };
           if (authRes.exitCode === 0) {
             authStatus = "pass";
-            authReason = "Provider 'codex' reports authenticated; transport idle alone is not authentication evidence";
+            authReason = authRes.stdout.trim() || "Provider 'codex' reports authenticated; transport idle alone is not authentication evidence";
           } else {
             authStatus = "fail";
-            authReason = "Provider 'codex' is not authenticated. Run codex login in this profile before bflow up.";
-            authRemediation = "Run 'codex login' and verify with 'bflow doctor'.";
+            authReason = authRes.stderr.trim() || "Provider 'codex' is not authenticated. Run codex login in the selected profile before bflow up.";
+            authRemediation = selectedProfileNames.length
+              ? "Repair authentication or linked backend access in the selected Codex profile, then rerun 'bflow doctor'."
+              : "Run 'codex login' and verify with 'bflow doctor'.";
           }
         } catch {
           authStatus = "fail";
-          authReason = "Provider 'codex' is not authenticated. Run codex login in this profile before bflow up.";
+          authReason = "Selected Codex profile is not ready or authenticated. Check its profile and linked backend before bflow up.";
           authRemediation = "Run 'codex login' and verify with 'bflow doctor'.";
         }
       } else if (provider === "claude") {
@@ -1165,6 +1197,58 @@ export async function runDoctorDiagnostics(
     });
   }
 
+  if (config?.environment?.toolPolicy) {
+    progress("Resolving repository tool policy against machine inventory...");
+    try {
+      const { loadHostPlatformContext, resolveRepositoryToolPolicy, resolveToolGrants } = await import("./platform-options.js");
+      const input = { repository, config, env: options.env ?? process.env };
+      const context = await loadHostPlatformContext(input);
+      const policy = resolveRepositoryToolPolicy(input, context.machineId);
+      resolveToolGrants(policy, context, input, undefined, undefined, observed => {
+        const missingReason = observed.reason ?? "No matching machine evidence was observed.";
+        const add = (stage: "installed" | "allowed" | "granted" | "ready", pass: boolean | null, reason: string, remediation: string) => {
+          toolChecks.push({ checkId: `tool-policy-${observed.toolId}-${observed.role}-${stage}`, group: "tools",
+            component: `${observed.toolId}:${observed.role}:${stage}`,
+            status: pass ? "pass" : pass === null ? "warning" : observed.requiredness === "required" ? "fail" : "warning",
+            detected_version: observed.version ?? null, reason, remediation: pass ? "" : remediation });
+        };
+        add("installed", observed.installed, observed.installed === null ? `Service configuration for '${observed.toolId}' is known; local installation evidence is separate and remains unverified.` : observed.installed ? `Machine inventory verifies '${observed.toolId}' (${observed.version ?? "version unavailable"}).` :
+          `Machine inventory does not verify '${observed.toolId}': ${missingReason}`, "Review the pinned tool and its setup receipt with 'bflow tool status'.");
+        add("allowed", observed.allowed, `Repository policy explicitly allows '${observed.toolId}' for role '${observed.role}'.`,
+          "Add an explicit role and operation requirement to environment.toolPolicy.");
+        add("granted", observed.granted, observed.granted ? `Runtime grant for '${observed.toolId}' is resolved for role '${observed.role}'.` :
+          `No Runtime grant is resolved for '${observed.toolId}' and role '${observed.role}': ${missingReason}`,
+          "Resolve the policy, machine inventory and Gateway operation allowlist, then retry 'bflow up'.");
+        add("ready", observed.ready, observed.ready ? `'${observed.toolId}' is ready for role '${observed.role}'.` :
+          `'${observed.toolId}' is not ready for role '${observed.role}': ${missingReason}`,
+          "Run 'bflow doctor' or 'bflow mcp status' to inspect the approved service readiness.");
+      }, false);
+    } catch (error) {
+      toolChecks.push({ checkId: "tool-policy-resolution", group: "tools", component: "repository-policy",
+        status: "fail", detected_version: null,
+        reason: `Repository tool policy could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+        remediation: "Correct the strict environment.toolPolicy schema, digest and repository scope before startup." });
+    }
+  } else {
+    for (const toolId of ["rtk", "gitnexus", "chrome-devtools-mcp", "mempalace"] as const) {
+      const visible = toolChecks.find(check => check.checkId === `tool-${toolId}`);
+      const foundOnPath = visible?.status === "pass";
+      const addPolicyState = (stage: "installed" | "allowed" | "granted" | "ready", status: DoctorCheckStatus, reason: string, remediation: string) =>
+        toolChecks.push({ checkId: `tool-policy-${toolId}-repository-${stage}`, group: "tools",
+          component: `${toolId}:repository:${stage}`, status, detected_version: visible?.detected_version ?? null, reason, remediation });
+      addPolicyState("installed", foundOnPath ? "warning" : "skipped",
+        foundOnPath ? `'${toolId}' is visible on PATH, but this probe does not verify its approved managed executable identity.` :
+          `No installation of '${toolId}' was observed by the CLI probe.`,
+        "Use 'bflow tool status' and the approved machine setup receipt to inspect installation identity.");
+      addPolicyState("allowed", "warning", `Repository tool policy does not allow '${toolId}'.`,
+        "Add an explicit role and operation requirement under environment.toolPolicy to allow this tool.");
+      addPolicyState("granted", "skipped", `No Runtime grant exists for '${toolId}' because the repository has no tool policy.`,
+        "Resolve an explicit repository policy before starting roles that need this tool.");
+      addPolicyState("ready", "skipped", `'${toolId}' is not ready for this repository because it has no resolved tool grant.`,
+        "Resolve the repository grant and verify the machine tool or Gateway service before use.");
+    }
+  }
+
   // ==========================================
   progress("Checking approved skills...");
   // Group 5: skills
@@ -1190,7 +1274,20 @@ export async function runDoctorDiagnostics(
       Boolean(skillsConfig?.requiredSkills && skillsConfig.requiredSkills.length > 0) ||
       configuredRoles.some((r) => r.skills && r.skills.length > 0);
 
-    if (isSkillsRequired || hasRequestedSkills) {
+    if ((isSkillsRequired || hasRequestedSkills) && !skillsOverride?.catalogDir && !skillsConfig?.catalogDir) {
+      try {
+        const { loadHostPlatformContext } = await import("./platform-options.js");
+        const { validateBundledStartupSkills } = await import("./skill-catalog.js");
+        const context = await loadHostPlatformContext({ repository, config: config!, env: options.env ?? process.env });
+        await validateBundledStartupSkills(config!.environment, resolve(context.dataDirectory, "skills-store"));
+        sharedInstalledReason = "Required bundled workflow skills match the verified machine skill store; Runtime validates session manifests before launch.";
+      } catch (error) {
+        sharedInstalledStatus = "fail";
+        sharedInstalledReason = error instanceof Error ? error.message : String(error);
+        sharedInstalledRemediation = "Review and apply the pinned skills setup plan.";
+        sharedInstalledRepair = "bflow skills sync";
+      }
+    } else if (isSkillsRequired || hasRequestedSkills) {
       const catalogDir = resolve(
         repository.root,
         skillsOverride?.catalogDir ?? skillsConfig?.catalogDir ?? ".bflow/skills"

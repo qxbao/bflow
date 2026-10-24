@@ -3,13 +3,14 @@ import { realpathSync, statSync } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { isAbsolute, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { IdentifierSchema, MCPClientRegistrationSchema, MCPEndpointSchema, MCPResourceLeaseSchema,
   MCPResourceRenewRequestSchema, MCPResourceRequestSchema, MCPServiceDefinitionSchema, MCPServiceObservationSchema,
-  MCPToolCallResultSchema, MCPToolCallSchema, PlatformSchemaVersionSchema, ScopedOperationSchema, Sha256DigestSchema, TrustScopeSchema,
+  MCPToolCallResultSchema, MCPToolCallSchema, PlatformSchemaVersionSchema, ResolvedToolGrantSchema, ScopedOperationSchema, Sha256DigestSchema, TrustScopeSchema,
   type ContractError, type MCPClientRegistration, type MCPResourceLease, type MCPResourceRenewRequest,
   type MCPResourceRequest, type MCPServiceDefinition, type MCPServiceObservation, type MCPToolCall,
-  type MCPToolCallResult, type OperationOptions, type OperationResult, type ScopedOperation, type TrustScope } from "@bflow/contracts";
+  type MCPToolCallResult, type OperationOptions, type OperationResult, type ResolvedToolGrant, type ScopedOperation, type TrustScope } from "@bflow/contracts";
 
 /** Private rendezvous file for role Runtimes. Holds the control token: written 0600, never logged. */
 export const GATEWAY_CONTROL_LOCATOR_FILE = "gateway-control.json";
@@ -34,6 +35,7 @@ export interface GatewayControlGateway {
   acquireResource(request: MCPResourceRequest, options?: OperationOptions): Promise<OperationResult<MCPResourceLease>>;
   renewResource(request: MCPResourceRenewRequest, options?: OperationOptions): Promise<OperationResult<MCPResourceLease>>;
   releaseResource(lease: MCPResourceLease, operation: ScopedOperation, options?: OperationOptions): Promise<OperationResult<void>>;
+  call(request: MCPToolCall, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>>;
   reconcileCall(request: MCPToolCall, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>>;
   readonly secretStore: { getClientTokenByRegistration(registrationId: string): string | undefined };
   readonly serviceManager: {
@@ -54,6 +56,8 @@ export interface GatewayControlOptions {
   /** Trusted host grants for services approved for sharing across repositories; empty by default. */
   readonly machineSharedServiceIds?: readonly string[];
   readonly services: readonly MCPServiceDefinition[];
+  /** Authenticated Runtime grants keyed by ephemeral Gateway registration. */
+  readonly grantMap?: Map<string, readonly ResolvedToolGrant[]>;
 }
 
 export interface GatewayControl {
@@ -61,7 +65,7 @@ export interface GatewayControl {
   stop(): Promise<void>;
 }
 
-const METHODS = ["catalog", "register", "list", "acquire", "renew", "release", "reconcile", "revoke"] as const;
+const METHODS = ["catalog", "register", "list", "acquire", "renew", "release", "invoke_tool", "reconcile_tool_call", "reconcile", "revoke"] as const;
 type Method = (typeof METHODS)[number];
 
 const RequestSchema = z.object({
@@ -119,7 +123,7 @@ export async function startGatewayControl(options: GatewayControlOptions): Promi
   const locatorPath = join(options.stateRoot, GATEWAY_CONTROL_LOCATOR_FILE);
   const service = new GatewayControlService({ gateway: options.gateway, machineId: options.machineId,
     ...(options.workspaceRoot === undefined ? {} : { workspaceRoot: options.workspaceRoot }), endpoint, services, machineSharedServiceIds,
-    token: locator.token, generation: locator.generation });
+    ...(options.grantMap ? { grantMap: options.grantMap } : {}), token: locator.token, generation: locator.generation });
 
   const sockets = new Set<Socket>();
   const server = createServer(socket => serveConnection(socket, service, sockets));
@@ -180,6 +184,7 @@ interface ServiceSettings {
   readonly endpoint: string;
   readonly services: ReadonlyMap<string, MCPServiceDefinition>;
   readonly machineSharedServiceIds: ReadonlySet<string>;
+  readonly grantMap?: Map<string, readonly ResolvedToolGrant[]>;
   readonly token: string;
   readonly generation: string;
 }
@@ -192,6 +197,7 @@ class GatewayControlService {
 
   clear(): void {
     this.known.clear();
+    this.settings.grantMap?.clear();
   }
 
   async handleLine(text: string): Promise<ControlReply> {
@@ -227,6 +233,8 @@ class GatewayControlService {
       case "acquire": return this.acquire(params);
       case "renew": return this.renew(params);
       case "release": return this.release(params);
+      case "invoke_tool": return this.invokeTool(params);
+      case "reconcile_tool_call": return this.reconcileToolCall(params);
       case "reconcile": return this.reconcile(params);
       case "revoke": return this.revoke(params);
     }
@@ -250,9 +258,10 @@ class GatewayControlService {
   }
 
   private async register(params: unknown): Promise<ControlReply> {
-    const parsed = parseParams(z.object({ client: MCPClientRegistrationSchema }).strict(), params, "register");
+    const parsed = parseParams(z.object({ client: MCPClientRegistrationSchema, toolGrants: z.array(ResolvedToolGrantSchema).optional() }).strict(), params, "register");
     if ("reply" in parsed) return parsed.reply;
     const client = parsed.data.client;
+    const toolGrants = parsed.data.toolGrants;
     const denied = this.checkScope(client.scope);
     if (denied) return denied;
     if (client.role === "conversation") return failure("validation", "The conversation role never receives Gateway tool access");
@@ -266,20 +275,46 @@ class GatewayControlService {
     if (client.allowedTools.some(tool => !granted.has(tool))) {
       return failure("validation", "Requested tools are not offered by the configured services");
     }
+    if (toolGrants !== undefined) {
+      if (!this.settings.grantMap) return failure("validation", "Gateway control does not support resolved Runtime tool grants");
+      for (const grant of toolGrants) {
+        if (grant.role !== client.role || grant.kind === "cli_only" || !grant.serviceId || !client.serviceIds.includes(grant.serviceId) ||
+            grant.scope.kind !== "session" || !sameScope(grant.scope, client.scope) ||
+            grant.operations.some(operation => !client.allowedTools.includes(operation)))
+          return failure("validation", "Resolved tool grant does not match the registered role, session, service and operations");
+        const service = this.settings.services.get(grant.serviceId);
+        if (!service || service.tool.toolId !== grant.toolId || service.tool.kind !== grant.kind ||
+            grant.operations.some(operation => !service.tool.operations.includes(operation)))
+          return failure("validation", "Resolved tool grant does not match the configured service definition");
+      }
+    }
     if (client.connection.transport !== "streamable_http" || client.connection.endpoint !== this.settings.endpoint) {
       return failure("validation", "Registration must target the Gateway control endpoint");
     }
     if (Date.parse(client.expiresAt) <= Date.now()) return failure("validation", "Registration is already expired");
     const existing = this.known.get(client.registrationId);
-    if (existing && (existing.role !== client.role || existing.provider !== client.provider || !sameScope(existing.scope, client.scope))) {
-      return failure("validation", "registrationId already belongs to a different principal");
+    if (existing && !isDeepStrictEqual(existing, client)) {
+      return failure("conflict", "registrationId is already bound to a different client");
+    }
+    if (existing && this.settings.grantMap &&
+        (this.settings.grantMap.has(client.registrationId) !== (toolGrants !== undefined) ||
+          toolGrants !== undefined && !isDeepStrictEqual(this.settings.grantMap.get(client.registrationId), toolGrants))) {
+      return failure("conflict", "registrationId is already bound to a different Runtime grant set");
     }
 
+    if (toolGrants !== undefined) this.settings.grantMap?.set(client.registrationId, toolGrants);
+    else this.settings.grantMap?.delete(client.registrationId);
+    this.known.set(client.registrationId, client);
     const registered = await this.settings.gateway.register(client);
-    if (!registered.ok) return this.forward(registered.error);
+    if (!registered.ok) {
+      if (!existing) {
+        this.known.delete(client.registrationId);
+        this.settings.grantMap?.delete(client.registrationId);
+      }
+      return this.forward(registered.error);
+    }
     const token = this.settings.gateway.secretStore.getClientTokenByRegistration(client.registrationId);
     if (token === undefined) return failure("conflict", "Gateway did not issue a client token; retry with a new registration attempt");
-    this.known.set(client.registrationId, client);
     return { ok: true, value: { registration: client, token } };
   }
 
@@ -327,11 +362,45 @@ class GatewayControlService {
   private async reconcile(params: unknown): Promise<ControlReply> {
     const parsed = parseParams(z.object({ call: MCPToolCallSchema }).strict(), params, "reconcile");
     if ("reply" in parsed) return parsed.reply;
-    const known = this.known.get(parsed.data.call.registrationId);
-    if (!known || !known.serviceIds.includes(parsed.data.call.serviceId)) {
-      return failure("validation", "Tool call does not belong to a registered client");
-    }
+    const owned = this.ownedCall(parsed.data.call);
+    if ("reply" in owned) return owned.reply;
     return this.delegate(await this.settings.gateway.reconcileCall(parsed.data.call), MCPToolCallResultSchema);
+  }
+
+  private async invokeTool(params: unknown): Promise<ControlReply> {
+    const parsed = parseParams(z.object({ call: MCPToolCallSchema }).strict(), params, "invoke_tool");
+    if ("reply" in parsed) return parsed.reply;
+    const owned = this.ownedCall(parsed.data.call);
+    if ("reply" in owned) return owned.reply;
+    return this.delegate(await this.settings.gateway.call(parsed.data.call), MCPToolCallResultSchema);
+  }
+
+  private async reconcileToolCall(params: unknown): Promise<ControlReply> {
+    const parsed = parseParams(z.object({ call: MCPToolCallSchema }).strict(), params, "reconcile_tool_call");
+    if ("reply" in parsed) return parsed.reply;
+    const owned = this.ownedCall(parsed.data.call);
+    if ("reply" in owned) return owned.reply;
+    return this.delegate(await this.settings.gateway.reconcileCall(parsed.data.call), MCPToolCallResultSchema);
+  }
+
+  private ownedCall(call: MCPToolCall): { readonly registration: MCPClientRegistration } | { readonly reply: ControlReply } {
+    const registration = this.known.get(call.registrationId);
+    if (!registration || !registration.serviceIds.includes(call.serviceId) || !registration.allowedTools.includes(call.tool))
+      return { reply: failure("validation", "Tool call does not belong to an authorized service, operation and registration") };
+    const denied = this.checkScope(registration.scope);
+    if (denied) return { reply: denied };
+    const service = this.settings.services.get(call.serviceId);
+    if (!service || !service.tool.operations.includes(call.tool))
+      return { reply: failure("validation", "Tool operation is not in the configured service definition") };
+    if (call.resourceLease && (call.resourceLease.registrationId !== registration.registrationId || call.resourceLease.serviceId !== call.serviceId))
+      return { reply: failure("validation", "Resource lease belongs to a different registration") };
+    const registrationGrants = this.settings.grantMap?.get(call.registrationId);
+    if (registrationGrants !== undefined && !registrationGrants.some(grant => grant.serviceId === call.serviceId && grant.operations.includes(call.tool)))
+      return { reply: failure("validation", "Tool call is outside the resolved Runtime grant") };
+    if (service.tool.toolId === "mempalace" && !registrationGrants?.some(grant => grant.serviceId === call.serviceId &&
+        grant.toolId === "mempalace" && grant.memoryScope))
+      return { reply: failure("validation", "MemPalace calls require an explicit repository read-only memory grant") };
+    return { registration };
   }
 
   private async revoke(params: unknown): Promise<ControlReply> {
@@ -342,7 +411,10 @@ class GatewayControlService {
     const owned = this.ownedBy(parsed.data.registrationId, parsed.data.operation.scope);
     if ("reply" in owned) return owned.reply;
     const revoked = await this.settings.gateway.revoke(parsed.data.registrationId, parsed.data.operation);
-    if (revoked.ok || revoked.error.code === "not_found") this.known.delete(parsed.data.registrationId);
+    if (revoked.ok || revoked.error.code === "not_found") {
+      this.known.delete(parsed.data.registrationId);
+      this.settings.grantMap?.delete(parsed.data.registrationId);
+    }
     return revoked.ok ? { ok: true, value: null } : this.forward(revoked.error);
   }
 

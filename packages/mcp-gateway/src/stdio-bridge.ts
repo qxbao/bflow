@@ -226,12 +226,13 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
       const timedOut = this.timedOutUpstreamRequests.get(upstreamId);
       if (timedOut) {
         this.timedOutUpstreamRequests.delete(upstreamId);
-        const resultObj = msg.result as { isError?: boolean; content?: JsonValue } | undefined;
+        const resultObj = msg.result as { isError?: boolean; content?: JsonValue; structuredContent?: JsonValue } | undefined;
         const isError = Boolean(msg.error) || Boolean(resultObj?.isError);
         const output = (msg.error ?? resultObj?.content ?? (msg.result ?? null)) as JsonValue;
         const outcome: MCPUpstreamReconcileResult = {
           status: isError ? "failed" : "completed",
-          output
+          output,
+          ...(resultObj?.structuredContent !== undefined ? { structuredContent: resultObj.structuredContent } : {})
         };
         this.reconcileLedger.set(timedOut.clientRequestId, outcome);
         if (timedOut.callId) {
@@ -661,6 +662,7 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
       | {
           isError?: boolean;
           content?: JsonValue;
+          structuredContent?: JsonValue;
         }
       | undefined;
 
@@ -672,18 +674,21 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
 
     this.reconcileLedger.set(input.requestId, {
       status: isError ? "failed" : "completed",
-      output: content
+      output: content,
+      ...(resultObj?.structuredContent !== undefined ? { structuredContent: resultObj.structuredContent } : {})
     });
     if (input.callId) {
       this.reconcileLedger.set(input.callId, {
         status: isError ? "failed" : "completed",
-        output: content
+        output: content,
+        ...(resultObj?.structuredContent !== undefined ? { structuredContent: resultObj.structuredContent } : {})
       });
     }
 
     return ok({
       isError,
-      content
+      content,
+      ...(resultObj?.structuredContent !== undefined ? { structuredContent: resultObj.structuredContent } : {})
     });
   }
 

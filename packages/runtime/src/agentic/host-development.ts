@@ -5,11 +5,11 @@ import { lstat, open, readFile, realpath, type FileHandle } from "node:fs/promis
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
-import { AgentExecutionHandleSchema, PaneBindingSchema, RoleMessageSchema, type PaneBinding } from "@bflow/contracts";
-import { measureBehavior, parseBehavioralCommands, type BehavioralCommand } from "./behavioral-runner.js";
+import { AgentExecutionHandleSchema, ArtifactReferenceSchema, ArtifactWriteOptionsSchema, PaneBindingSchema, RoleMessageSchema, type PaneBinding } from "@bflow/contracts";
+import { measureBehavior, parseBehavioralCommands, type BehavioralCommand, type RtkOutputIntegration } from "./behavioral-runner.js";
 import { TestRunnerSource, resolveTaskCommands } from "./task-commands.js";
 import { isConflictResolverAssignment, type AgenticWorkflowRuntime } from "./runtime.js";
-import { json, record, strings, textField } from "./journal.js";
+import { digest, json, record, strings, textField } from "./journal.js";
 import type { JsonValue, Specification, TestStrategy } from "@bflow/contracts";
 
 const execute = promisify(execFile);
@@ -35,7 +35,8 @@ const utf8 = (bytes: Uint8Array) => new TextDecoder("utf-8", { fatal: true, igno
  * and TDD phase. Git commits are structured host operations, never shell input. */
 export class HostDevelopment {
   private readonly runners: TestRunnerSource;
-  constructor(private readonly runtime: () => AgenticWorkflowRuntime, runners: TestRunnerSource | readonly BehavioralCommand[]) {
+  constructor(private readonly runtime: () => AgenticWorkflowRuntime, runners: TestRunnerSource | readonly BehavioralCommand[],
+    private readonly rtk?: RtkOutputIntegration) {
     this.runners = runners instanceof TestRunnerSource ? runners : new TestRunnerSource(parseBehavioralCommands(runners));
   }
   /** The same resolver as Verification: owner commands and automatic profiles, bound to this task's identities and ownership. */
@@ -63,7 +64,7 @@ export class HostDevelopment {
       (args.taskId === undefined || AgentExecutionHandleSchema.parse(out.handle).taskId === args.taskId));
     if (candidates.length !== 1) throw new Error("No unique current task assignment for this Developer pane");
     const handle = AgentExecutionHandleSchema.parse(candidates[0]!.handle);
-    return { binding, runId: handle.runId, taskId: handle.taskId, args, cwd: binding.worktreePath,
+    return { binding, runId: handle.runId, taskId: handle.taskId, attemptId: handle.attemptId, args, cwd: binding.worktreePath,
       resolver: isConflictResolverAssignment(RoleMessageSchema.parse(candidates[0]!.message)) };
   }
   private async relativePath(cwd: string, input: string): Promise<string> {
@@ -254,8 +255,23 @@ export class HostDevelopment {
     }));
     if (!selected.commands.length) throw new Error("No automated checks for this task: configure an owner command or make the accepted criteria and test files resolvable");
     const measurements = [];
-    for (const command of selected.commands) measurements.push(await measureBehavior(command.checkoutDependencyRoots === undefined ? command : { ...command, originalRevision: selected.originalRevision }, context.cwd, selected.head));
-    return json({ independentAcceptanceEvidence: false, sourceRevision: selected.head, measurements });
+    for (const command of selected.commands) {
+      const rtk = await this.rtk?.resolve({ role: "developer", runId: context.runId, taskId: context.taskId,
+        attemptId: context.attemptId, commandId: command.id, revision: selected.head });
+      measurements.push(await measureBehavior(command.checkoutDependencyRoots === undefined ? command : { ...command, originalRevision: selected.originalRevision },
+        context.cwd, selected.head, rtk ? { rtk } : {}));
+    }
+    const bytes = Buffer.from(JSON.stringify({ sourceRevision: selected.head, measurements }));
+    const artifactId = `check-work-${digest([context.runId, context.taskId, selected.head, measurements]).slice(0, 36)}`;
+    const stored = await this.runtime().ports.artifactStore.put({ options: ArtifactWriteOptionsSchema.parse({ artifactId,
+      runId: context.runId, taskId: context.taskId, kind: "log", mediaType: "application/json",
+      expectedIntegrity: { checksum: { algorithm: "sha256", value: sha256(bytes) }, sizeBytes: bytes.length }, idempotencyKey: artifactId }),
+      content: (async function* () { yield bytes; })() });
+    if (!stored.ok) throw new Error(`check_work feedback artifact could not be stored (${stored.error.code})`);
+    const evidence = ArtifactReferenceSchema.parse(stored.value);
+    for (const item of measurements) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId)
+      await this.rtk?.consume(item.rtk.invocationId, evidence);
+    return json({ independentAcceptanceEvidence: false, sourceRevision: selected.head, evidence, measurements });
   }
   /**
    * Concludes the preserved P18 merge with the resolver's edits. Only the conflicted files may differ from what the merge staged,

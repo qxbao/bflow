@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, readlink, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
-import { ToolCapabilitySchema, type ToolCapability } from "@bflow/contracts";
+import { MCPServiceDefinitionSchema, MCPServiceObservationSchema, ToolCapabilitySchema, type ToolCapability } from "@bflow/contracts";
 import { z } from "zod";
 import { spawn } from "node:child_process";
 import { constants as osConstants, hostname } from "node:os";
@@ -9,6 +9,46 @@ import { createToolCapability, systemToolHost, type ProcessResult, type ToolHost
 import { privateDirectory, readRegular } from "./files.js";
 
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
+
+/** Explicit catalog alias; aliases never imply a capability or permission. */
+export const TOOL_ID_ALIASES = Object.freeze({ browser: "chrome-devtools-mcp" } as const);
+export function canonicalToolId(toolId: string): string {
+  return Object.hasOwn(TOOL_ID_ALIASES, toolId) ? TOOL_ID_ALIASES[toolId as keyof typeof TOOL_ID_ALIASES] : toolId;
+}
+
+export type VerifiedServiceCapabilityProjection =
+  | { status: "ready"; toolId: string; serviceId: string; revision: number; version: string;
+      operations: string[]; capability: ToolCapability; observedAt: string }
+  | { status: "blocked"; reasonCode: string; diagnostic: string };
+
+/** Project a configured MCP capability only from a fresh matching Gateway observation. */
+export function projectVerifiedServiceCapability(input: {
+  service: unknown;
+  observation: unknown;
+  now?: Date;
+  maxObservationAgeMs?: number;
+}): VerifiedServiceCapabilityProjection {
+  const service = MCPServiceDefinitionSchema.parse(input.service);
+  const observation = MCPServiceObservationSchema.parse(input.observation);
+  const blocked = (reasonCode: string, diagnostic: string): VerifiedServiceCapabilityProjection => ({ status: "blocked", reasonCode, diagnostic });
+  if (observation.serviceId !== service.serviceId || observation.revision !== service.revision ||
+      observation.ownership !== service.connection.ownership) {
+    return blocked("service_observation_mismatch", "Gateway observation does not match the configured service identity, revision, or owner");
+  }
+  if (observation.status !== "ready") return blocked("service_not_ready", `Gateway service status is ${observation.status}`);
+  const ageMs = (input.now ?? new Date()).getTime() - Date.parse(observation.observedAt);
+  if (ageMs < -1000 || ageMs > (input.maxObservationAgeMs ?? 60_000))
+    return blocked("service_observation_stale", "Gateway service observation is stale or from the future");
+  const operations = service.tool.operations;
+  if (!operations.length || new Set(operations).size !== operations.length ||
+      operations.some(operation => !observation.discoveredTools.includes(operation))) {
+    return blocked("service_operation_drift", "Gateway discovery does not contain the exact configured operation set");
+  }
+  const capability = ToolCapabilitySchema.parse({ ...service.tool, toolId: canonicalToolId(service.tool.toolId), operations: [...operations] });
+  return { status: "ready", toolId: capability.toolId, serviceId: service.serviceId, revision: service.revision,
+    version: capability.version, operations: [...operations], capability, observedAt: observation.observedAt };
+}
+
 const gitNexusFreshnessSchema = z.object({
   schemaVersion: z.literal(1),
   repository: z.string().min(1),

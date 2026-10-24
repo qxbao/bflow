@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { copyIsolatedNodeDependencies } from "../helpers/isolated-node-dependencies.js";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { probeBehavioralSandbox } from "../../src/agentic/sandbox-readiness.js";
@@ -14,6 +14,8 @@ import { TestStrategyResolver, assertEvidenceComplete, assertReadyToImplement, r
 import { assessment, spec } from "../../../test-strategy/test/fixtures.js";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
 import { HostBehavioralFailure, HostVerification, boundQaReviewCommands } from "../../src/agentic/host-verification.js";
+import { HostDevelopment } from "../../src/agentic/host-development.js";
+import { FileToolUsageLedger } from "../../src/platform/tool-usage-ledger.js";
 import { parseVitestJson } from "../../src/agentic/vitest-json.js";
 import { measureBehavior, parseBehavioralCommands } from "../../src/agentic/behavioral-runner.js";
 import type { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
@@ -195,6 +197,125 @@ describe.skipIf((await probeBehavioralSandbox()).status !== "ready")("independen
     await expect(measureBehavior({ ...f.command, args: ["-e", "process.exit(0)"] }, f.cwd, f.redRevision)).rejects.toThrow("complete Node TAP");
     await writeFile(join(f.cwd, "uncommitted.txt"), "dirty\n");
     await expect(measureBehavior(f.command, f.cwd, f.redRevision)).rejects.toThrow("clean worktree");
+  });
+  it("keeps runner profile IDs separate from RTK auto mode and labels unchanged output", async () => {
+    const f = await fixture();
+    const executablePath = join(dirname(f.cwd), "rtk-auto-fixture");
+    await writeFile(executablePath, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf 'rtk 1.0.1\\n'; exit 0; fi
+if [ "$1" = "pipe" ] && [ "$2" = "--help" ]; then printf 'Read stdin --filter <FILTER>\\n'; exit 0; fi
+if [ "$1" = "pipe" ] && [ "$#" = "1" ]; then cat; exit 0; fi
+exit 1
+`, { mode: 0o700 });
+    const digest = createHash("sha256").update(await (await import("node:fs/promises")).readFile(executablePath)).digest("hex");
+    const measurement = await measureBehavior(f.command, f.cwd, f.redRevision, { rtk: {
+      executablePath, version: "1.0.1", digest, filter: "auto", required: true } });
+    expect(measurement).toMatchObject({ failed: 1, outcome: { exitCode: 1 }, rtk: { status: "passthrough", args: ["pipe"] } });
+    expect(measurement.rtk?.compressedOutput).toBe(measurement.outcome.stdout +
+      (measurement.outcome.stderr ? `\n[stderr]\n${measurement.outcome.stderr}` : ""));
+  });
+  it("compresses captured output through the pinned RTK filter while TAP still parses the original raw result", async () => {
+    const f = await fixture();
+    const rtkPath = join(dirname(f.cwd), "rtk-fixture");
+    await writeFile(rtkPath, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf 'rtk 1.0.1\n'; exit 0; fi
+if [ "$1" = "pipe" ] && [ "$2" = "--help" ]; then printf 'Read stdin --filter <FILTER>\n'; exit 0; fi
+if [ "$1" = "pipe" ] && [ "$2" = "--filter" ] && [ "$3" = "node-unit" ]; then
+  count=0; while IFS= read -r line; do count=$((count+1)); done
+  printf 'filtered:%s lines\\n' "$count"; exit 0
+fi
+exit 2
+`);
+    await (await import("node:fs/promises")).chmod(rtkPath, 0o700);
+    const rawDigest = createHash("sha256").update(await (await import("node:fs/promises")).readFile(rtkPath)).digest("hex");
+
+    const measured = await measureBehavior(f.command, f.cwd, f.redRevision, { rtk: {
+      executablePath: rtkPath, version: "1.0.1", digest: rawDigest, filter: "node-unit", required: true
+    } });
+
+    expect(measured.outcome.exitCode).toBe(1);
+    expect(measured.failed).toBe(1);
+    expect(measured.rtk).toMatchObject({ status: "compressed", filter: "node-unit", compressedOutput: expect.stringContaining("filtered:") });
+  });
+  it("blocks a required RTK prerequisite before the runner and degrades an optional missing filter to raw output", async () => {
+    const f = await fixture();
+    const unavailable = { executablePath: join(f.cwd, "missing-rtk"), version: "1.0.1", digest: "a".repeat(64), filter: "node-unit" };
+    await expect(measureBehavior(f.command, f.cwd, f.redRevision, { rtk: { ...unavailable, required: true } }))
+      .rejects.toThrow(/RTK executable/);
+    const optional = await measureBehavior(f.command, f.cwd, f.redRevision, { rtk: { ...unavailable, required: false } });
+    expect(optional).toMatchObject({ failed: 1, outcome: { exitCode: 1 }, rtk: { status: "degraded", reasonCode: "rtk_binary_unavailable" } });
+  });
+  it("blocks required RTK formatting failure after one command while retaining the original raw result", async () => {
+    const f = await fixture();
+    const rtkPath = join(dirname(f.cwd), "rtk-required-filter-failure");
+    await writeFile(rtkPath, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf 'rtk 1.0.1\\n'; exit 0; fi
+if [ "$1" = "pipe" ] && [ "$2" = "--help" ]; then printf 'Read stdin --filter <FILTER>\\n'; exit 0; fi
+if [ "$1" = "pipe" ] && [ "$2" = "--filter" ]; then
+  input=$(cat)
+  case "$input" in *'not ok'*) exit 2;; esac
+  printf 'filtered probe\\n'; exit 0
+fi
+exit 2
+`);
+    await (await import("node:fs/promises")).chmod(rtkPath, 0o700);
+    const statuses: string[] = [];
+    try {
+      await measureBehavior(f.command, f.cwd, f.redRevision, { rtk: {
+        executablePath: rtkPath, version: "1.0.1", digest: createHash("sha256").update(await (await import("node:fs/promises")).readFile(rtkPath)).digest("hex"),
+        filter: "node-unit", required: true, onResult: async result => { statuses.push(result.status); }
+      } });
+      throw new Error("Required RTK formatting unexpectedly succeeded");
+    } catch (error) {
+      expect(error).toMatchObject({ name: "RtkRequiredToolUnavailable", reasonCode: "rtk_filter_failed",
+        originalOutcome: { exitCode: 1 }, rawOutput: expect.stringContaining("not ok") });
+    }
+    expect(statuses).toEqual(["failed"]);
+  });
+  it("uses the RTK path through Developer check_work and links consumption to raw feedback evidence", async () => {
+    const f = await fixture();
+    const developerBinding = PaneBindingSchema.parse({ ...f.binding, bindingId: "developer-binding", role: "developer", agentId: "dev-1",
+      paneId: "developer-pane", worktreePath: f.cwd, readOnlyWorkspace: false });
+    const state = { outbound: [{ status: "accepted", taskId: "task-1", attemptId: "attempt-1",
+      message: { schema_version: 2, message_id: "assignment", correlation_id: "correlation", run_id: "run-1", sender: { role: "coordinator" },
+        recipient: { role: "developer", agent_id: "dev-1", pane_id: "developer-pane" }, type: "task.assignment", payload: {},
+        artifact_references: [], occurred_at: new Date().toISOString(), idempotency_key: "assignment" },
+      handle: { executionId: "execution-1", requestId: "request-1", attemptId: "attempt-1", runId: "run-1", taskId: "task-1",
+        idempotencyKey: "assignment-1", target: { transport: "herdr", agentId: "dev-1", workspaceId: "workspace", tabId: "tab",
+          paneId: "developer-pane", worktreePath: f.cwd }, correlation: { token: "request-1", provenance: "orchestrator", verified: false }, acceptedAt: new Date().toISOString() } }] };
+    const task = { spec: { specification: f.specification, strategy: f.strategy }, worktrees: [{ baseCommitHash: f.base }] };
+    const runtime = { inspect: async () => state, withDeveloperWorkspace: async (_binding: unknown, _runId: string, _taskId: string,
+      use: (...args: any[]) => Promise<unknown>) => use(task, { metadata: { ownedPaths: ["source.cjs", "test/behavior.test.cjs"] } }),
+      ports: { artifactStore: f.store, policies: { assertReadyToImplement: () => undefined } } } as unknown as AgenticWorkflowRuntime;
+    const rtkPath = join(dirname(f.cwd), "rtk-check-work-fixture");
+    await writeFile(rtkPath, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf 'rtk 1.0.1\\n'; exit 0; fi
+if [ "$1" = "pipe" ] && [ "$2" = "--help" ]; then printf 'Read stdin --filter <FILTER>\\n'; exit 0; fi
+if [ "$1" = "pipe" ] && [ "$2" = "--filter" ] && [ "$3" = "node-unit" ]; then
+  count=0; while IFS= read -r line; do count=$((count+1)); done
+  printf 'filtered:%s lines\\n' "$count"; exit 0
+fi
+exit 2
+`);
+    await (await import("node:fs/promises")).chmod(rtkPath, 0o700);
+    const rtkDigest = createHash("sha256").update(await (await import("node:fs/promises")).readFile(rtkPath)).digest("hex");
+    const ledger = new FileToolUsageLedger(join(dirname(f.cwd), "tool-usage.json"));
+    const integration = { resolve: async () => ({ executablePath: rtkPath, version: "1.0.1", digest: rtkDigest, filter: "node-unit", required: true,
+      invocationId: "tool-rtk-check", onIntent: async () => ledger.begin({ schemaVersion: 3, runId: "run-1", taskId: "task-1", role: "developer",
+        sessionId: "session-1", generation: 1, invocationId: "tool-rtk-check", toolId: "rtk", operation: "pipe", status: "started", observedAt: new Date().toISOString() }),
+      onResult: async result => ledger.put({ schemaVersion: 3, runId: "run-1", taskId: "task-1", role: "developer", sessionId: "session-1", generation: 1,
+        invocationId: "tool-rtk-check", toolId: "rtk", operation: "pipe", status: result.status, ...(result.reasonCode ? { reasonCode: result.reasonCode } : {}), observedAt: new Date().toISOString() }) }),
+      consume: async (invocationId: string, evidence: any) => {
+        const previous = (await ledger.list()).find(item => item.invocationId === invocationId)!;
+        await ledger.consume({ ...previous, evidenceReferences: [evidence], consumption: { status: "consumed", source: "host_context", evidenceReferences: [evidence] } });
+      } };
+    const development = new HostDevelopment(() => runtime, [f.command], integration);
+
+    const feedback = await development.check(developerBinding, { runId: "run-1", taskId: "task-1" }) as any;
+
+    expect(feedback.measurements[0]).toMatchObject({ failed: 1, outcome: { exitCode: 1 }, rtk: { status: "compressed", compressedOutput: expect.stringContaining("filtered:") } });
+    expect(feedback.independentAcceptanceEvidence).toBe(false);
+    expect((await ledger.list())[0]).toMatchObject({ status: "completed", consumption: { status: "consumed", source: "host_context" } });
   });
   it.each([["refactoring", "node_tap"], ["documentation", "node_tap"], ["refactoring", "vitest_json"], ["documentation", "vitest_json"]] as const)("requires real passing verification for %s with %s", async (taskType, reporter) => {
     const f = await fixture(taskType, reporter); expect(f.strategy.tddDecision.mode).not.toBe("required");

@@ -3,9 +3,9 @@ import { lstat, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { MCPServiceDefinition, ScopedOperation, MCPToolCallResult, MCPResourceLease } from "@bflow/contracts";
+import type { MCPServiceDefinition, MCPServiceObservation, ScopedOperation, MCPToolCallResult, MCPResourceLease } from "@bflow/contracts";
 import type { ToolHost } from "../src/installer.js";
-import { FileToolCapabilityRegistry } from "../src/integrations.js";
+import { FileToolCapabilityRegistry, projectVerifiedServiceCapability } from "../src/integrations.js";
 import { planRtkConfiguration, applyRtkConfiguration } from "../src/rtk-config.js";
 import {
   createGitNexusService,
@@ -177,6 +177,27 @@ describe("rtk configuration planner and applicator", () => {
 });
 
 describe("mcp services integration", () => {
+  it("projects only the exact ready service operations from a matching Gateway observation", () => {
+    const service: MCPServiceDefinition = {
+      schemaVersion: 3, serviceId: "gitnexus-r1", revision: 2,
+      scope: { kind: "repository", machineId: "m1", repositoryId: "r1", workspaceRoot: "/repo" },
+      tool: { schemaVersion: 3, toolId: "gitnexus", kind: "stdio_mcp", version: "1.6.12",
+        operations: ["query", "context", "impact"], required: true,
+        resource: { sharing: "exclusive", resourceKey: "gitnexus-r1" } },
+      connection: { kind: "stdio_mcp", executable: "/opt/bflow/gitnexus", argv: ["mcp"], environmentBindings: {},
+        executableDigest: hash("exe"), ownership: "bflow", bridgeRequired: true },
+      authentication: { mode: "none" }, healthTimeoutMs: 15000, idleTimeoutMs: 60000, restartLimit: 2
+    };
+    const observation: MCPServiceObservation = { schemaVersion: 3, serviceId: service.serviceId, revision: service.revision,
+      instanceId: "gitnexus-instance", status: "ready", protocolVersion: "2025-11-25",
+      discoveredTools: ["query", "context", "impact", "unapproved_extra"], ownership: "bflow", activeClientCount: 0,
+      observedAt: new Date().toISOString(), diagnosticCode: "ready" };
+    expect(projectVerifiedServiceCapability({ service, observation })).toMatchObject({ status: "ready", toolId: "gitnexus",
+      serviceId: service.serviceId, operations: ["query", "context", "impact"] });
+    expect(projectVerifiedServiceCapability({ service, observation: { ...observation, revision: 1 } }).status).toBe("blocked");
+    expect(projectVerifiedServiceCapability({ service, observation: { ...observation, discoveredTools: ["query", "context"] } }).status).toBe("blocked");
+  });
+
   it("creates valid GitNexus service definition with isolation and exclusive lease key", async () => {
     const root = await mkdtemp(join(tmpdir(), "bflow-nexus-svc-"));
     roots.push(root);

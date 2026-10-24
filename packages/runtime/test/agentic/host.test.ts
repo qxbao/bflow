@@ -36,6 +36,7 @@ describe.skipIf(process.platform !== "linux")("default durable host lifecycle an
     expect(availableTools("coordinator", "agy").some(tool => tool.name === "agy_admit_assignment")).toBe(false);
     expect(availableTools("conversation", "agy").some(tool => tool.name === "agy_admit_assignment")).toBe(false);
     expect(availableTools("developer", "claude").some(tool => tool.name === "agy_admit_assignment")).toBe(false);
+    expect(availableTools("coordinator").map(tool => tool.name)).toContain("acknowledge_tool_action");
   });
   it("accepts a startup Coordinator Stop before Runtime activation without creating a work result", async () => {
     const f = await fixture(), launches = await f.controller.prepare();

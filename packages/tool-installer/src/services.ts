@@ -111,6 +111,10 @@ export function createContext7RemoteService(input: {
  * an uncertain write.
  */
 export function trustedGatewayPolicy(service: MCPServiceDefinition): { readOnlyTools: string[] } | undefined {
+  if (service.tool.toolId === "mempalace" && service.connection.kind === "stdio_mcp" &&
+      service.connection.executable === process.execPath && service.connection.argv.length === 4 &&
+      service.connection.argv[0] === resolveLocalOrDist("./service-launcher.js"))
+    return { readOnlyTools: ["mempalace_search"] };
   return service.connection.kind === "native_remote_mcp" && service.connection.endpoint === CONTEXT7_MCP_ENDPOINT && service.tool.toolId === "context7"
     ? { readOnlyTools: [...CONTEXT7_TOOLS] } : undefined;
 }

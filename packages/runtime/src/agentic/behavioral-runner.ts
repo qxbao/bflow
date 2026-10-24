@@ -1,13 +1,14 @@
-import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { mkdir, mkdtemp, lstat, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { QualityGateDefinitionSchema, type QualityGateDefinition } from "@bflow/contracts";
+import { QualityGateDefinitionSchema, type ArtifactReference, type AgentRole, type QualityGateDefinition } from "@bflow/contracts";
 import type { QualityCommandOutcome } from "@bflow/quality-gates";
 import { record, textField } from "./journal.js";
-import { parseNodeTap } from "./node-tap.js";
+import { NodeTapTestCodeFailure, parseNodeTap } from "./node-tap.js";
 import { parseVitestJson } from "./vitest-json.js";
 import { assertCheckoutDependencyRoot, sandboxBehavior } from "./behavioral-sandbox.js";
 import type { AdapterRunner } from "./runner-adapter.js";
@@ -164,6 +165,112 @@ export interface BehavioralMeasurement {
   sourceRevision: string; command: string; commandId: string; method: BehavioralCommand["method"];
   testBlobs: Record<string, string>; testNames: string[]; testResults: { name: string; passed: boolean }[]; tests: number; passed: number; failed: number; targetFailure: boolean;
   outcome: QualityCommandOutcome;
+  /** Optional context-only summary. Parser/gates always consume `outcome` raw bytes. */
+  rtk?: { status: "compressed" | "passthrough" | "degraded"; executablePath: string; version: string; digest: string; filter: string;
+    invocationId?: string;
+    args: string[]; compressedOutput?: string; reasonCode?: string };
+}
+export interface RtkOutputRequest {
+  readonly executablePath: string;
+  readonly version: string;
+  readonly digest: string;
+  /** Exact approved runner profile ID, passed as RTK's filter name without shell parsing. */
+  readonly filter: string;
+  readonly required: boolean;
+  readonly invocationId?: string;
+  readonly onIntent?: () => Promise<void>;
+  readonly onUnavailable?: (reasonCode: string) => Promise<void>;
+  readonly onResult?: (result: { readonly status: "completed" | "failed"; readonly reasonCode?: string }) => Promise<void>;
+}
+export interface RtkOutputIntegration {
+  readonly resolve: (input: { role: AgentRole; runId: string; taskId?: string; attemptId?: string; commandId: string; revision: string }) => Promise<RtkOutputRequest | undefined>;
+  readonly consume: (invocationId: string, evidence: ArtifactReference) => Promise<void>;
+}
+export class RtkRequiredToolUnavailable extends Error {
+  constructor(readonly reasonCode: string, message: string, readonly originalOutcome?: QualityCommandOutcome, readonly rawOutput?: string) {
+    super(message); this.name = "RtkRequiredToolUnavailable";
+  }
+}
+type SandboxedProcessResult = { readonly exitCode: number | null; readonly signal: NodeJS.Signals | null;
+  readonly stdout: string; readonly stderr: string; readonly timedOut: boolean; readonly truncated: boolean };
+const RTK_FORMAT_TIMEOUT_MS = 5_000;
+const RTK_FORMAT_MAX_BYTES = 262_144;
+
+async function runSandboxedInput(sandbox: { executable: string; args: string[] }, childArgs: readonly string[], cwd: string,
+  env: Readonly<Record<string, string>>, input: string): Promise<SandboxedProcessResult> {
+  const separator = sandbox.args.lastIndexOf("--");
+  if (separator < 0 || typeof sandbox.args[separator + 1] !== "string") throw new Error("RTK sandbox command is malformed");
+  const args = [...sandbox.args.slice(0, separator + 1), sandbox.args[separator + 1]!, ...childArgs];
+  return new Promise(resolve => {
+    let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), truncated = false, timedOut = false, settled = false;
+    const child = spawn(sandbox.executable, args, { cwd, env: { ...env }, shell: false, detached: process.platform !== "win32",
+      stdio: ["pipe", "pipe", "pipe"] });
+    const timer = setTimeout(() => { timedOut = true; terminate(); }, RTK_FORMAT_TIMEOUT_MS);
+    const terminate = () => {
+      if (process.platform !== "win32" && child.pid) {
+        try { process.kill(-child.pid, "SIGKILL"); return; } catch { /* fall through */ }
+      }
+      child.kill("SIGKILL");
+    };
+    const take = (prior: Buffer, chunk: Buffer) => {
+      const size = prior.length + chunk.length;
+      if (size > RTK_FORMAT_MAX_BYTES) { truncated = true; terminate(); }
+      return Buffer.concat([prior, chunk.subarray(0, Math.max(0, RTK_FORMAT_MAX_BYTES - prior.length))]);
+    };
+    child.stdout.on("data", (chunk: Buffer) => { stdout = take(stdout, chunk); });
+    child.stderr.on("data", (chunk: Buffer) => { stderr = take(stderr, chunk); });
+    child.once("error", error => {
+      if (settled) return; settled = true; clearTimeout(timer);
+      resolve({ exitCode: null, signal: null, stdout: "", stderr: error.name, timedOut: false, truncated: false });
+    });
+    child.once("close", (code, signal) => {
+      if (settled) return; settled = true; clearTimeout(timer);
+      resolve({ exitCode: code, signal, stdout: stdout.toString("utf8"), stderr: stderr.toString("utf8"), timedOut, truncated });
+    });
+    child.stdin.once("error", () => { /* closed stdin is reflected by the child's exit status */ });
+    child.stdin.end(input);
+  });
+}
+
+async function prepareRtk(command: BoundBehavioralCommand, checkout: string, request: RtkOutputRequest): Promise<{
+  readonly sandbox: { executable: string; args: string[] }; readonly cwd: string; readonly env: Record<string, string>; readonly args: string[];
+}> {
+  if (!isAbsolute(request.executablePath) || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(request.version) ||
+      !/^[a-f0-9]{64}$/.test(request.digest) || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(request.filter))
+    throw new RtkRequiredToolUnavailable("rtk_identity_invalid", "RTK identity or profile filter is invalid");
+  const info = await lstat(request.executablePath).catch(() => undefined);
+  if (!info) throw new RtkRequiredToolUnavailable("rtk_binary_unavailable", "Pinned RTK executable is absent");
+  if (info.isSymbolicLink() || !info.isFile() || info.nlink !== 1 || await realpath(request.executablePath) !== request.executablePath)
+    throw new RtkRequiredToolUnavailable("rtk_binary_unavailable", "Pinned RTK executable is not a canonical regular file");
+  const bytes = await readFile(request.executablePath);
+  if (createHash("sha256").update(bytes).digest("hex") !== request.digest)
+    throw new RtkRequiredToolUnavailable("rtk_binary_drift", "Pinned RTK executable digest changed");
+  const cwd = join(checkout, ".bflow-rtk-scratch");
+  await mkdir(cwd, { recursive: true, mode: 0o700 });
+  const sandboxExecutable = join(cwd, "rtk");
+  await writeFile(sandboxExecutable, bytes, { flag: "wx", mode: 0o700 });
+  if (createHash("sha256").update(await readFile(sandboxExecutable)).digest("hex") !== request.digest)
+    throw new RtkRequiredToolUnavailable("rtk_binary_copy_drift", "Pinned RTK scratch copy failed its digest check");
+  const config = join(cwd, "config"), data = join(cwd, "data"), cache = join(cwd, "cache");
+  await Promise.all([config, data, cache].map(path => mkdir(path, { recursive: true, mode: 0o700 })));
+  const env = { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", HOME: cwd,
+    TMPDIR: cwd, XDG_CONFIG_HOME: config, XDG_DATA_HOME: data, XDG_CACHE_HOME: cache };
+  const formatter: BoundBehavioralCommand = { id: `rtk-${command.id}`, command: "rtk pipe", executable: sandboxExecutable,
+    args: [], method: command.method, levels: command.levels, testNames: command.testNames, testPaths: command.testPaths,
+    timeoutMs: RTK_FORMAT_TIMEOUT_MS, checkoutDependencyRoots: [], dependencySource: cwd };
+  const sandbox = await sandboxBehavior(formatter, cwd, []);
+  const version = await runSandboxedInput(sandbox, ["--version"], cwd, env, "");
+  if (version.exitCode !== 0 || !version.stdout.includes(request.version))
+    throw new RtkRequiredToolUnavailable("rtk_version_mismatch", `Pinned RTK version probe failed (exit=${String(version.exitCode)}, signal=${String(version.signal)}, timedOut=${version.timedOut})`);
+  const help = await runSandboxedInput(sandbox, ["pipe", "--help"], cwd, env, "");
+  if (help.exitCode !== 0 || !/stdin/i.test(help.stdout) || !help.stdout.includes("--filter"))
+    throw new RtkRequiredToolUnavailable("rtk_stdin_filter_unsupported", "Pinned RTK does not expose a supported stdin filter");
+  const sample = "RTK probe line\nRTK probe line\n";
+  const args = request.filter === "auto" ? ["pipe"] : ["pipe", "--filter", request.filter];
+  const probe = await runSandboxedInput(sandbox, args, cwd, env, sample);
+  if (probe.exitCode !== 0 || probe.timedOut || probe.truncated || !probe.stdout.trim())
+    throw new RtkRequiredToolUnavailable("rtk_filter_unavailable", "Pinned RTK filter failed its bounded stdin probe");
+  return { sandbox, cwd, env, args };
 }
 /** Bounded diagnostic tail for a failed prepare step. */
 function outputTail(outcome: QualityCommandOutcome): string {
@@ -171,7 +278,8 @@ function outputTail(outcome: QualityCommandOutcome): string {
   return [stderr ? `stderr: ${stderr}` : "", stdout ? `stdout: ${stdout}` : ""].filter(Boolean).map(part => ` ${part}`).join("");
 }
 /** Runs only committed bytes in a new detached worktree; it has no host credentials or inherited Node/Git overrides. */
-export async function measureBehavior(command: BoundBehavioralCommand, cwd: string, revision: string): Promise<BehavioralMeasurement> {
+export async function measureBehavior(command: BoundBehavioralCommand, cwd: string, revision: string,
+  options: { readonly rtk?: RtkOutputRequest } = {}): Promise<BehavioralMeasurement> {
   await assertPinnedRevision(cwd, revision);
   await assertRunnerProvenance(command, cwd, revision);
   const testBlobs: Record<string, string> = {};
@@ -184,9 +292,31 @@ export async function measureBehavior(command: BoundBehavioralCommand, cwd: stri
   Object.assign(testBlobs, command.definitionBlobs ?? {});
   // Canonical path: Vitest reports resolved file names (macOS /var is a symlink to /private/var) and they are matched against the checkout.
   const temporary = await realpath(await mkdtemp(join(tmpdir(), "bflow-behavioral-"))), checkout = join(temporary, "checkout");
-  let added = false;
+  let added = false, rtkIntentOpen = false, rtkSettled = false;
   try {
     await verificationGit(cwd, ["worktree", "add", "--detach", checkout, revision]); added = true;
+    let rtkContext: Awaited<ReturnType<typeof prepareRtk>> | undefined;
+    let rtkResult: BehavioralMeasurement["rtk"];
+    if (options.rtk) {
+      const rtkWorkspace = join(temporary, "rtk-workspace");
+      await mkdir(rtkWorkspace, { mode: 0o700 });
+      try { rtkContext = await prepareRtk(command, rtkWorkspace, options.rtk); }
+      catch (error) {
+        const reasonCode = error instanceof RtkRequiredToolUnavailable ? error.reasonCode : "rtk_probe_failed";
+        await options.rtk.onUnavailable?.(reasonCode);
+        if (options.rtk.required) {
+          if (error instanceof RtkRequiredToolUnavailable) throw error;
+          throw new RtkRequiredToolUnavailable("rtk_probe_failed", "Pinned RTK could not be safely probed before the command");
+        }
+        rtkResult = { status: "degraded", executablePath: options.rtk.executablePath, version: options.rtk.version,
+          digest: options.rtk.digest, filter: options.rtk.filter,
+          args: ["pipe", "--filter", options.rtk.filter], ...(options.rtk.invocationId ? { invocationId: options.rtk.invocationId } : {}), reasonCode };
+      }
+    }
+    if (rtkContext && options.rtk?.onIntent) {
+      try { await options.rtk.onIntent(); rtkIntentOpen = true; }
+      catch { throw new RtkRequiredToolUnavailable("rtk_usage_intent_failed", "RTK invocation intent could not be stored before running the command"); }
+    }
     const reportDirectory = join(temporary, "reports");
     if (command.adapter) {
       await mkdir(reportDirectory, { mode: 0o700 });
@@ -238,17 +368,62 @@ export async function measureBehavior(command: BoundBehavioralCommand, cwd: stri
     if (!result.ok) throw new Error(`Behavioral command invocation failed: ${result.error.message}`);
     const outcome = result.value as QualityCommandOutcome;
     if (SANDBOX_ERROR.test(outcome.stderr)) throw new Error(`Behavioral sandbox failed: ${outcome.stderr.trim()}`);
+    if (options.rtk && rtkContext) {
+      const raw = outcome.stdout + (outcome.stderr ? `\n[stderr]\n${outcome.stderr}` : "");
+      try {
+        const formatted = await runSandboxedInput(rtkContext.sandbox, rtkContext.args, rtkContext.cwd, rtkContext.env, raw);
+        const compressed = formatted.exitCode === 0 && formatted.signal === null && !formatted.timedOut && !formatted.truncated && !!formatted.stdout.trim();
+        const reasonCode = formatted.timedOut ? "rtk_timeout" : formatted.truncated ? "rtk_output_truncated" : "rtk_filter_failed";
+        let resultRecorded = true;
+        try {
+          if (options.rtk.onResult) { rtkSettled = true; await options.rtk.onResult(compressed ? { status: "completed" } : { status: "failed", reasonCode }); }
+        }
+        catch { resultRecorded = false; }
+        rtkResult = compressed && resultRecorded
+          ? { status: Buffer.byteLength(formatted.stdout) < Buffer.byteLength(raw) ? "compressed" : "passthrough", executablePath: options.rtk.executablePath, version: options.rtk.version, digest: options.rtk.digest,
+              filter: options.rtk.filter, args: [...rtkContext.args], ...(options.rtk.invocationId ? { invocationId: options.rtk.invocationId } : {}), compressedOutput: formatted.stdout }
+          : { status: "degraded", executablePath: options.rtk.executablePath, version: options.rtk.version, digest: options.rtk.digest,
+              filter: options.rtk.filter, args: [...rtkContext.args], ...(options.rtk.invocationId ? { invocationId: options.rtk.invocationId } : {}),
+              reasonCode: resultRecorded ? reasonCode : "rtk_usage_result_failed" };
+        if (options.rtk.required && (!compressed || !resultRecorded))
+          throw new RtkRequiredToolUnavailable(resultRecorded ? reasonCode : "rtk_usage_result_failed",
+            "Required RTK formatting failed after the original command; raw command evidence was retained", outcome, raw);
+      } catch {
+        if (options.rtk.required) {
+          const raw = outcome.stdout + (outcome.stderr ? `\n[stderr]\n${outcome.stderr}` : "");
+          throw new RtkRequiredToolUnavailable("rtk_filter_failed",
+            "Required RTK formatting failed after the original command; raw command evidence was retained", outcome, raw);
+        }
+        if (options.rtk.onResult) {
+          rtkSettled = true;
+          await options.rtk.onResult({ status: "failed", reasonCode: "rtk_filter_failed" }).catch(() => undefined);
+        }
+        rtkResult = { status: "degraded", executablePath: options.rtk.executablePath, version: options.rtk.version, digest: options.rtk.digest,
+          filter: options.rtk.filter, args: [...rtkContext.args], ...(options.rtk.invocationId ? { invocationId: options.rtk.invocationId } : {}), reasonCode: "rtk_filter_failed" };
+      }
+    }
     // Tracked files must match the revision and no non-ignored untracked file may exist. Prepared checkouts may also hold
     // git-ignored outputs (build output, dependency mountpoints), so only owner commands keep the strict ignored-file check.
     await assertPinnedRevision(checkout, revision);
     const relaxed = command.prepare !== undefined || command.checkoutDependencyRoots !== undefined;
     if (!relaxed && await verificationGit(checkout, ["status", "--porcelain=v1", "--ignored=matching", "--untracked-files=all", "-z"])) throw new Error("Behavioral execution generated files outside the committed revision");
     await assertPinnedRevision(cwd, revision);
-    const parsed = command.adapter ? parseRunnerResult(command.adapter.format, outcome, command.testNames,
-      invocation?.reportPaths ? await collectRunnerReports(invocation.reportPaths, checkout, reportDirectory) : undefined, command.adapter.failureExitCodes)
-      : command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames, command.checkoutDependencyRoots !== undefined) : parseNodeTap(outcome, command.testNames, command.checkoutDependencyRoots !== undefined);
-    return { sourceRevision: revision, command: command.command, commandId: command.id, method: command.method, testBlobs, ...parsed, outcome };
+    let parsed: ReturnType<typeof parseNodeTap> | ReturnType<typeof parseVitestJson>;
+    try {
+      parsed = command.adapter ? parseRunnerResult(command.adapter.format, outcome, command.testNames,
+        invocation?.reportPaths ? await collectRunnerReports(invocation.reportPaths, checkout, reportDirectory) : undefined, command.adapter.failureExitCodes)
+        : command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames, command.checkoutDependencyRoots !== undefined) : parseNodeTap(outcome, command.testNames, command.checkoutDependencyRoots !== undefined);
+    } catch (error) {
+      if (error instanceof NodeTapTestCodeFailure && rtkResult) throw new NodeTapTestCodeFailure(error.outcome, error.failedTestNames, rtkResult);
+      throw error;
+    }
+    return { sourceRevision: revision, command: command.command, commandId: command.id, method: command.method, testBlobs, ...parsed, outcome,
+      ...(rtkResult ? { rtk: rtkResult } : {}) };
   } finally {
+    if (rtkIntentOpen && !rtkSettled && options.rtk?.onResult) {
+      rtkSettled = true;
+      await options.rtk.onResult({ status: "failed", reasonCode: "runner_aborted_before_rtk_result" }).catch(() => undefined);
+    }
     if (added) await verificationGit(cwd, ["worktree", "remove", "--force", checkout]);
     await rm(temporary, { recursive: true, force: true });
   }

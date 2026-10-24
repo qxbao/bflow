@@ -804,6 +804,10 @@ Các đảm bảo được triển khai ở đây, với package-local test tron
 - `prepareSession` là all-or-nothing. Bất kỳ role bắt buộc nào chưa sẵn sàng (hoặc launch intent của nó
   không thể journal) tạo ra `ready: false` và không có launch material; các Gateway registration thực hiện trong lần gọi đó bị
   thu hồi theo từng role. Các role tùy chọn thất bại được báo cáo là `blocked` và bị bỏ qua.
+- Với grant tường minh, registration Gateway dùng đúng session scope của role để tạo hoặc xác minh partition
+  tương ứng, rồi Runtime kiểm tra readiness và operation discovery trong cùng scope trước khi tiếp tục.
+  Health của partition setup khác không chứng minh role partition đã sẵn sàng; registration không đạt hậu kiểm
+  bị thu hồi theo intent cụ thể, còn cleanup chưa xác nhận thì chặn launch và giữ reconciliation fail-closed.
 - Một role cần Gateway service mà không có Gateway control port được cấu hình là `blocked`.
 - Launch material (bearer token `launch.env`) chỉ được giữ trong bộ nhớ. Report, status snapshot và lỗi
   không bao giờ chứa giá trị token. Các launch đã nhả hoặc shut down bỏ material của chúng.
@@ -872,6 +876,48 @@ từng launch và pane.
 - Một host daemon được restart sẽ cho nghỉ hưu các launch của daemon trước: nó thu hồi các registration của session, journal
   `released` cho các intent đang mở và xóa các plan/record của chúng; kích hoạt khi đó cần một `bflow up` mới.
 - `platform_status` báo cáo khả năng tiếp cận theo từng launch, lần Gateway check cuối và mọi restart recovery, không có token.
+
+### Tool actions, usage ledger và RTK
+
+`assignment_context` trả về `toolActions` riêng cho role đang được xác thực. Mỗi mục nêu tool ID,
+operation, trigger, mức bắt buộc, scope memory nếu có, và tình trạng `available`, `degraded` hoặc
+`blocked`. Đây là mô tả quyền đã được host resolve; nó không chứa Gateway token, bearer header hay
+identity đường dẫn executable. Role chỉ gọi `invoke_tool_action` khi trigger phù hợp với việc đang làm;
+tool tùy chọn không cần được gọi chỉ để tạo bằng chứng.
+
+Runtime ghi disposition `skipped` cho tool có grant nhưng không được dùng khi role kết thúc turn/task
+được giao, và `degraded`/`blocked` cho grant tùy chọn/bắt buộc không khả dụng. Các entry liên kết với
+run, task và role; `read_tool_usage` giữ lại entry từ generation trước để unknown delivery còn nhìn thấy
+sau restart. Việc reconcile dùng invocation ID ổn định và giữ generation gốc trong ledger. `completed`
+chỉ nói Gateway trả kết quả; khi provider transport không xác nhận đã nhận/kết hợp kết quả, consumption
+được ghi là `not_used` với lý do `provider_delivery_unconfirmed`, không được suy diễn thành consumed.
+Role có thể gọi `acknowledge_tool_action` trong đúng assignment hiện tại với invocation ID và nguyên
+`ArtifactReference` trả về để xác nhận Runtime đã giao đúng result evidence vào task context. Runtime
+xác thực lại pane/role, assignment, grant, invocation và checksum đã lưu; thao tác không gọi upstream,
+không chấp nhận invocation unknown, và ACK lặp lại là idempotent. ACK chỉ chứng minh delivery vào
+context, không chứng minh agent đã hiểu hoặc dùng nội dung, không thay thế accepted artifact/verified
+action evidence và không chứng minh task thành công. Các entry này là chẩn đoán hoạt động, không chứng
+minh task thành công.
+
+Kiểm tra provenance của memory nhận cả MCP result envelope đầy đủ và content array mà Gateway stdio
+driver trả về. Vẫn yêu cầu đúng một text block có giới hạn chứa kết quả parse được, wing được cấp và
+trường nguồn/thời gian gốc (hoặc provenance tường minh tương đương); memory sai dạng, ngoài scope
+hoặc không quy nguồn được giữ lại và không đưa vào context.
+
+RTK là CLI-only và chỉ chạy qua host runner trên output đã capture. Lệnh gốc chạy một lần; Node TAP,
+Vitest và kiểm tra RGR tiếp tục đọc status/output thô. RTK `auto` có thể giữ nguyên bytes, và Runtime
+không tuyên bố giảm token nếu output không thay đổi. Probe identity/filter diễn ra trước lệnh; RTK tùy
+chọn lỗi được ghi `degraded`, còn RTK bắt buộc lỗi trước lệnh chặn runner. Nếu format RTK bắt buộc lỗi
+sau lệnh, Runtime lưu status/output thô và trả blocker, không chạy lại lệnh.
+Host cấu hình cũ không có `toolPolicy` tiếp tục chạy runner gốc mà không tự yêu cầu RTK hoặc platform
+generation. Một lần `check_work` mới sau invocation RTK đã kết thúc có invocation ID riêng; invocation
+đang `started`/`unknown` vẫn chặn lần chạy tiếp theo cho tới khi được đối soát.
+
+Giới hạn: Runtime chưa có lifecycle acquire/renew/release cho Gateway resource lease. Các action có
+trigger `browser_inspection` vì vậy được báo `degraded` hoặc `blocked` với
+`exclusive_resource_lease_unsupported`; chúng không được quảng bá là usable khi Gateway có thể từ chối
+vì thiếu lease. Tool MCP và RTK local ở trên chưa chứng minh live provider delivery hoặc full SDLC
+acceptance.
 
 Giới hạn: kế thừa environment của hook, mở rộng header `${VAR}` của Claude và `bearer_token_env_var` của Codex
 chỉ được xác minh bằng các hook spawn cục bộ và config đã render, không phải provider hay Herdr live.

@@ -4,10 +4,11 @@ import { join } from "node:path";
 import {
   AgentProviderIdSchema, AgentRoleSchema, IsoDateTimeSchema, MCPClientRegistrationSchema, MCPEndpointSchema,
   MCPServiceObservationSchema, Sha256DigestSchema, TrustScopeSchema
+  , MCPToolCallSchema, MCPToolCallResultSchema
 } from "@bflow/contracts";
 import type {
   AgentProviderId, AgentRole, ContractError, JsonValue, MCPClientRegistration,
-  MCPServiceObservation, OperationOptions, OperationResult, ScopedOperation, TrustScope
+  MCPServiceObservation, MCPToolCall, MCPToolCallResult, OperationOptions, OperationResult, ScopedOperation, TrustScope
 } from "@bflow/contracts";
 import { fail, failWith, ok } from "./errors.js";
 import type {
@@ -104,7 +105,9 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
       const now = this.now();
       const registration = this.buildRegistration(identity, scope, request, now);
       const operation = scopedOperation(scope, registration.registrationId);
-      const observations = await this.assertServicesReady(request, operation, options);
+      const observations = request.toolGrants === undefined
+        ? await this.assertServicesReady(request, operation, options)
+        : undefined;
 
       const path = ledgerPath(identity);
       let entries = (await readLedger(path)).entries;
@@ -112,7 +115,9 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
       const cached = this.tokens.get(registration.registrationId);
       if (existing?.state === "registered" && existing.registration && cached !== undefined &&
           Date.parse(existing.registration.expiresAt) > now.getTime()) {
-        return accessFor(existing.registration, cached, observations);
+        return accessFor(existing.registration, cached,
+          observations ?? await this.assertServicesReadyForRegistration(identity, path, entries, existing,
+            request, operation, scope, options));
       }
 
       if (existing) entries = await this.reconcile(identity, path, entries, existing, scope, options);
@@ -121,7 +126,7 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
       entries = { ...entries, [intent.registrationId]: intent };
       await writeLedger(identity, path, entries);
 
-      const sent = await this.control.register(registration, options);
+      const sent = await this.control.register(registration, options, request.toolGrants);
       if (!sent.ok) {
         if (isUncertain(sent.error.code)) {
           await writeLedger(identity, path, { ...entries, [intent.registrationId]: { ...intent, state: "unknown" } });
@@ -139,9 +144,12 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
 
       const registered: LedgerEntry = { ...makeEntry(registration, request.taskId, "registered", now),
         registration: verified.registration };
-      await writeLedger(identity, path, { ...entries, [registered.registrationId]: registered });
+      const registeredEntries = { ...entries, [registered.registrationId]: registered };
+      await writeLedger(identity, path, registeredEntries);
       this.tokens.set(registered.registrationId, verified.bearerToken);
-      return accessFor(verified.registration, verified.bearerToken, observations);
+      return accessFor(verified.registration, verified.bearerToken,
+        observations ?? await this.assertServicesReadyForRegistration(identity, path, registeredEntries, registered,
+          request, operation, scope, options));
     }));
   }
 
@@ -217,6 +225,38 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
     }));
   }
 
+  async invokeTool(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
+    operation: string, input: JsonValue, callId: string, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>> {
+    return this.callRegisteredTool(identity, role, taskId, serviceId, operation, input, callId, false, options);
+  }
+
+  async reconcileToolCall(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
+    operation: string, input: JsonValue, callId: string, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>> {
+    return this.callRegisteredTool(identity, role, taskId, serviceId, operation, input, callId, true, options);
+  }
+
+  private async callRegisteredTool(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
+    operation: string, input: JsonValue, callId: string, reconcile: boolean, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>> {
+    return this.serialize(() => this.guard(async () => {
+      const path = ledgerPath(identity), entries = (await readLedger(path)).entries;
+      const entry = Object.values(entries).find(item => item.state === "registered" && item.role === role && item.taskId === taskId &&
+        item.serviceIds.includes(serviceId) && item.allowedTools.includes(operation) && item.registration !== undefined &&
+        item.registration.scope.sessionId === identity.sessionId && item.registration.scope.repositoryId === identity.repositoryId &&
+        item.registration.scope.workspaceRoot === identity.workspaceRoot && item.registration.expiresAt > this.now().toISOString());
+      if (!entry?.registration) throw new GatewayPortError({ code: "not_found", retryable: false,
+        message: "No current Gateway registration grants this role, task, service and operation" });
+      const call: MCPToolCall = { schemaVersion: 3, callId, registrationId: entry.registrationId, serviceId,
+        tool: operation, input, idempotencyKey: callId };
+      const parsed = MCPToolCallSchema.safeParse(call);
+      if (!parsed.success) reject("validation", "Invalid Gateway tool call");
+      const result = reconcile ? await this.control.reconcileToolCall(parsed.data, options) : await this.control.invokeTool(parsed.data, options);
+      if (!result.ok) throw new GatewayPortError(result.error);
+      const checked = MCPToolCallResultSchema.safeParse(result.value);
+      if (!checked.success || checked.data.callId !== callId) reject("corruption", "Gateway tool result is malformed or mismatched");
+      return ok(checked.data);
+    }));
+  }
+
   private buildRegistration(identity: PlatformSessionIdentity, scope: TrustScope, request: GatewayRoleRequest,
     now: Date): MCPClientRegistration {
     const serviceIds = [...request.serviceIds].sort();
@@ -275,6 +315,24 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
       reject("validation", "Requested Gateway services or tools are not ready", { missingServices, missingTools });
     }
     return requested.flatMap(serviceId => byService.get(serviceId) ?? []);
+  }
+
+  private async assertServicesReadyForRegistration(identity: PlatformSessionIdentity, path: string,
+    entries: LedgerEntries, entry: LedgerEntry, request: GatewayRoleRequest, operation: ScopedOperation,
+    scope: TrustScope, options?: OperationOptions): Promise<readonly MCPServiceObservation[]> {
+    try {
+      return await this.assertServicesReady(request, operation, options);
+    } catch (readinessError) {
+      try {
+        await this.revokeEntries(identity, path, entries, [entry], scope, options);
+      } catch (cleanupError) {
+        const cleanupCode = cleanupError instanceof GatewayPortError ? cleanupError.failure.code : "corruption";
+        throw new GatewayPortError({ code: "conflict", retryable: true,
+          message: "Gateway registration readiness failed and cleanup could not be confirmed",
+          details: { diagnosticCode: "gateway_readiness_cleanup_failed", cleanupCode } });
+      }
+      throw readinessError;
+    }
   }
 
   /**

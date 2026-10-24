@@ -6,6 +6,7 @@ export * from "./stdio-bridge.js";
 export * from "./http-upstream.js";
 export * from "./service-manager.js";
 export * from "./gateway.js";
+export * from "./durable-ledger.js";
 export * from "./http-server.js";
 export * from "./agy-stdio-http-bridge.js";
 export * from "./tool-definitions.js";

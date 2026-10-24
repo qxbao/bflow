@@ -442,6 +442,56 @@ observation; chỉ một file MCP đã cấu hình không thiết lập health c
 | `bflow skills sync` | Đồng bộ các skill đã duyệt từ catalog sang storage của agent provider. | `SkillManager`, `SkillStore` | `--list`, `--provider <claude\|codex\|agy>` |
 | `bflow agent check` | Xác thực provider readiness và activated health theo contract. | `AgentProviderRegistry` | `--provider <claude\|codex\|agy>`, `--stage <preflight\|activated>` |
 
+### Repository tool policy
+
+`bflow up` resolves tool access from the repository's optional `environment.toolPolicy`,
+the machine's approved setup inventory and a fresh Gateway observation. A tool pin or
+installed executable alone never creates repository access. With no policy, provider roles
+still receive their approved workflow skills, while tool-backed skills are skipped with a
+reason. Explicit `role.skills: []` removes only that role's defaults; repository
+`environment.skills.requiredSkills` remain required.
+
+The policy distinguishes the catalog `toolId`, an MCP `serviceId`, and exact upstream
+`operations`. Its repository scope must match the current machine, repository and canonical
+workspace root. `digest` is the SHA-256 of canonical JSON for the policy object with the
+`digest` field omitted. Recompute it whenever any requirement changes.
+
+```yaml
+environment:
+  toolPolicy:
+    schemaVersion: 3
+    repositoryId: <repository-id>
+    scope:
+      kind: repository
+      machineId: <machine-id>
+      repositoryId: <repository-id>
+      workspaceRoot: <canonical-workspace-path>
+    digest: <canonical-policy-sha256>
+    requirements:
+      - toolId: context7
+        kind: native_remote_mcp
+        serviceId: context7
+        operations: [resolve-library-id, query-docs]
+        requiredness: optional
+        roles: [specifier, architect, planner, developer, reviewer, qa]
+        triggers: [external_documentation]
+```
+
+MCP operation names must match the reviewed machine service definition and its current
+Gateway negotiation. CLI-only grants require the exact managed executable receipt, version
+and digest. Optional unavailable tools are skipped with a degraded reason; required
+unavailable tools stop startup before panes launch. A skill dependency never adds a grant.
+Legacy `environment.context7` remains supported and resolves to the same explicit Context7
+service and operation set. Legacy `requiredTools` and `requiredMcpServices` fail with a
+migration message because they do not identify a role and exact operation allowlist.
+
+The private Gateway control registers per-role, per-service Runtime grants separately from
+the public MCP registration schema. Calls use the exact upstream operation through the
+authenticated control endpoint. Memory calls require a repository-scoped read-only grant;
+the Gateway validates the requested wing against that grant. `bflow doctor` shows
+installation, repository allowance, resolved Runtime grant and readiness as separate checks.
+None of those checks claims that a tool has been invoked or its result consumed.
+
 ```bash
 pnpm --filter @bflow/cli build
 pnpm exec vitest run apps/cli/test/high-level

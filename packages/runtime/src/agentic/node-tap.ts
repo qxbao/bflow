@@ -3,7 +3,8 @@ import { digest } from "./journal.js";
 
 /** Complete, identity-matched TAP whose test bodies failed without valid assertion evidence. */
 export class NodeTapTestCodeFailure extends Error {
-  constructor(readonly outcome: QualityCommandOutcome, readonly failedTestNames: readonly string[]) {
+  constructor(readonly outcome: QualityCommandOutcome, readonly failedTestNames: readonly string[],
+    readonly rtk?: import("./behavioral-runner.js").BehavioralMeasurement["rtk"]) {
     super(`Behavioral test code failed without an assertion regression in ${JSON.stringify(failedTestNames.slice(0, 8)).slice(0, 1000)}. ` +
       "Repair the existing mapped tests to assert missing target behavior before calling absent code; preserve their names. Do not implement before valid Red evidence.");
   }
