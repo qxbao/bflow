@@ -1,6 +1,6 @@
 ---
 name: test-planning
-description: "Use to plan independent criterion-driven checks and test data for an assigned verification cycle."
+description: "Use when planning independent criterion-driven and risk-based checks, boundary test data or coverage matrices for an assigned verification cycle."
 ---
 
 ## Supported roles
@@ -11,30 +11,31 @@ Skills are instruction-only and model-neutral. They do not grant tools, permissi
 
 ## Prerequisites
 
-- Accepted specification and TestStrategy.
+- Accepted specification and resolved `TestStrategy` / `TddDecision`.
 - Independent tester/QA assignment and candidate environment.
 
 ## Trigger conditions
 
-- Verification needs a check plan.
-- A changed criterion or candidate invalidates prior coverage.
+- Verification needs a criterion-driven check plan.
+- A changed criterion, candidate diff or risk surface invalidates prior coverage.
 
 ## Required inputs
 
-- Criterion IDs, candidate revision and TddDecision.
+- Criterion IDs, candidate revision, affected paths and `TddDecision` (`required`, `recommended`, `not_applicable`).
 - Allowed tools/data, environments and verification budget.
 
 ## Expected outputs
 
-- A criterion-to-check/evidence matrix.
-- Required fixtures, environment prerequisites and explicit gaps.
+- A traceability matrix linking `criterion → risk & viewpoint (or N/A reason) → check/test identity & method → environment/prerequisite → expected evidence`.
+- Explicit separation of what `unit_test` proves, what requires `integration_test` / `e2e_test` / `manual_review`, and any declared prerequisite gaps.
 
 ## Procedure
 
-1. Select checks that directly observe each criterion, including relevant failure/recovery cases. Follow the resolved strategy; tester advice cannot override conditional TDD.
-2. Separate deterministic checks, reviewer analysis, browser evidence and live provider probes. Identify exact commands/authorized tool operations, data and resource leases required.
-3. For an affected NFR, carry the accepted oracle, target source, workload, data scale, concurrency, environment, window and aggregation from the specification into the existing criterion-to-check matrix. Reuse the test-design reference selected by the manifest when available; do not duplicate its test selection method or change TddDecision. Report proposed/unknown targets, missing tools and missing evidence separately. A script or numeric target is not a result; an executed measurement still requires independent checking against the accepted criterion.
-4. Submit the plan for the existing verification cycle with bounded scope and independence. Missing mandatory evidence blocks the affected criterion instead of being replaced with a fake runner.
+1. Obey the approved `Specification`, `TestStrategy` and `TddDecision`. Do not impose TDD on every change (`recommended` and `not_applicable` follow their resolved verification path), do not add mandatory tests outside policy, and do not modify acceptance criteria.
+2. Map each criterion through `criterion → risk → check/test identity → environment/prerequisite → expected evidence`. Load [the conditional risk viewpoints reference](references/risk-viewpoints.md) on demand and apply only viewpoints triggered by the criterion and changed surfaces; record `N/A — <reason>` for inapplicable viewpoints instead of inflating every task with a full checklist.
+3. State what `unit_test` proves (isolated logic, parser rules, state transitions) versus what remains unproven without `integration_test` or `e2e_test` (real entrypoint wiring, cross-component contracts, durable storage, built `dist/` execution). Never require browser or live provider checks unless a criterion needs them and the role holds the grant/lease; if a criterion requires unavailable browser/live access, report a `blocked` prerequisite gap instead of substituting static HTML parsing or a fake runner.
+4. For an affected NFR, carry the accepted oracle, target source, workload, data scale, concurrency, environment, window and aggregation from the specification into the existing criterion-to-check matrix. Reuse the conditional risk viewpoints reference above; do not duplicate its test selection method or change TddDecision. Report proposed/unknown targets, missing tools and missing evidence separately. A script or numeric target is not a result; an executed measurement still requires independent checking against the accepted criterion.
+5. Submit the plan for the existing verification cycle with bounded scope and independence. Missing mandatory evidence blocks the affected criterion instead of being replaced with a fake runner.
 
 ## Bflow commands
 
@@ -44,19 +45,19 @@ This baseline has no dedicated skill or verification command. Use the existing a
 
 ## Verification requirements
 
-- Every accepted criterion has a meaningful check or declared prerequisite gap.
-- The plan binds results to exact revision, environment and evidence level.
+- Every accepted criterion maps to falsifiable checks or an explicit prerequisite gap; placing an `AC-*` tag in a test name or comment alone never proves coverage.
+- Each planned check binds to the exact candidate revision, configured method command, environment prerequisites and evidence level.
 
 ## Error handling
 
-If required test access is missing, report the prerequisite and continue independent permitted planning. Do not invent an unsupported test command.
+If required test access, browser lease or live provider environment is missing, report the exact prerequisite gap (`blocked` or `inconclusive`) and continue independent permitted planning. Do not invent an unsupported test command or fake runner.
 
 ## Escalation rules
 
-New environments, data permissions or unavailable required live proof route through Runtime/Conversation.
+New environments, data permissions, policy re-resolution or unavailable required live proof route through Runtime/Conversation.
 
 Every non-Conversation role routes missing requirements, permission requests and human decisions through Runtime → Herdr → Conversation. Keep native direct questions/elicitation disabled. Conversation is the sole user interface and cannot mutate source or dispatch specialists. Silence and unattended mode are not approval.
 
 ## Concrete examples
 
-See [the worked example](worked-example.md) for inputs, authorized steps, expected evidence and a failure branch. The example is illustrative; it does not create approval or a live run.
+Load [the conditional risk viewpoints reference](references/risk-viewpoints.md) for viewpoint selection rules and [the worked example](worked-example.md) for analyzed scenarios, authorized steps, expected evidence and a failure branch. The examples are illustrative; they do not create approval or a live run.

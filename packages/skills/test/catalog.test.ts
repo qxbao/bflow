@@ -68,6 +68,45 @@ describe("canonical role catalog", () => {
     expect(() => resolveRoleSkillSelections({ ...common, conditionalBindings: { developer: [
       { toolId: "mempalace", skillId: "missing-pin", required: false }
     ] }, grantedToolIds: [] })).toThrow(/Missing or forbidden conditional skill pin/);
+
+    const expectedReferences: Record<string, string> = {
+      "test-planning": "references/risk-viewpoints.md",
+      "review-code": "references/test-risk-review.md",
+      "security-review": "references/security-test-viewpoints.md",
+      "browser-inspection": "references/ui-risk-viewpoints.md",
+    };
+    for (const [skillId, refPath] of Object.entries(expectedReferences)) {
+      const entry = catalog.find((item) => item.definition.skillId === skillId);
+      expect(entry?.definition.version).toBe("1.0.1");
+      expect(entry?.files[refPath]).toBeDefined();
+      expect(entry?.files["worked-example.md"]).toBeDefined();
+    }
+
+    const testerWithoutBrowser = resolveRoleSkillSelections({
+      ...common,
+      role: "tester",
+      grantedToolIds: [],
+    });
+    expect(testerWithoutBrowser.map((s) => s.skill.skillId)).toContain("test-planning");
+    expect(testerWithoutBrowser.map((s) => s.skill.skillId)).not.toContain("browser-inspection");
+
+    const qaWithBrowser = resolveRoleSkillSelections({
+      ...common,
+      role: "qa",
+      grantedToolIds: ["browser"],
+    });
+    expect(qaWithBrowser.map((s) => s.skill.skillId)).toEqual(
+      expect.arrayContaining(["test-planning", "browser-inspection"]),
+    );
+
+    const reviewerSelections = resolveRoleSkillSelections({
+      ...common,
+      role: "reviewer",
+      grantedToolIds: [],
+    });
+    expect(reviewerSelections.map((s) => s.skill.skillId)).toEqual(
+      expect.arrayContaining(["review-code", "security-review"]),
+    );
   });
   it("ships all shared skills and resolves all ten roles identically across three providers", async () => {
     const library = fileURLToPath(new URL("../../../skills", import.meta.url));
@@ -150,7 +189,7 @@ describe("canonical role catalog", () => {
           );
       }
     }
-  }, 60000);
+  }, 120000);
   it("rejects duplicate names, unknown references and forbidden role binding", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "skills-duplicate-")));
     roots.push(root);

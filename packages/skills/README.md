@@ -102,8 +102,8 @@ ngầm. Các thư mục staging tạm và bundle không dùng có thể còn l�
 entry skill đã publish. Publish nguyên tử không phải là transaction nhiều file hay chịu được mất điện,
 và đây không phải cô lập chống same-UID thù địch, network-filesystem hay đa host. Full provider sandboxing vẫn là công việc của P25/P30.
 
-Bundle canonical `use-mempalace` có phiên bản `1.0.1`: cách diễn đạt về điều kiện tiên quyết do setup sở hữu
-đã thay đổi sau khi `1.0.0` được publish. Setup nối thêm pin chính xác mới bên cạnh các byte
+Các bundle canonical `use-mempalace`, `test-planning`, `review-code`, `security-review` và `browser-inspection` có phiên bản `1.0.1`: nội dung hướng dẫn và các file `references/*.md` tải theo nhu cầu
+đã được cập nhật sau khi `1.0.0` được publish. Setup nối thêm pin chính xác mới bên cạnh các byte
 `1.0.0` đã cài, bảo toàn các session manifest hiện có. Không xóa catalog cũ
 hay ghi đè phiên bản cũ để hòa giải một bundle phân phối đã thay đổi.
 

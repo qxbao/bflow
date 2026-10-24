@@ -100,7 +100,9 @@ No skill starts duplicate workers, mutates global provider settings or installs 
 
 ## Worked examples
 
-Every skill has a `worked-example.md` bound into its content inventory. A typical flow
+Every skill has a `worked-example.md` bound into its content inventory, and verification/browser
+skills (`test-planning`, `review-code`, `security-review`, `browser-inspection` at `1.0.1`)
+package on-demand `references/*.md` guides for conditional risk-based test design and review. A typical flow
 loads understand-task for Conversation, specification-driven-development for Specifier,
 task-decomposition for Coordinator/Planner, implement-task and conditional-tdd for Developer,
 then run-verification and independent review-code/test-planning for Reviewer/QA. Failure
