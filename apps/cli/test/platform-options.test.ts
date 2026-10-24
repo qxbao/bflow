@@ -9,7 +9,7 @@ import { digest } from "@bflow/machine-setup";
 import { EnvironmentConfigEnvironmentSchema } from "../src/environment-config.js";
 import { identifyRepository, readEnvironmentConfig, runCli, type EnvironmentCompositionInput } from "../src/index.js";
 import { parseConfigYaml, renderEnvironmentConfigYaml } from "../src/config-format.js";
-import { buildHostPlatformOptions, formatPlatformNotReady, resolveCodexTrustPaths, resolveIsolatorStateRoot, resolveToolGrants, type HostPlatformContext } from "../src/platform-options.js";
+import { buildHostPlatformOptions, formatPlatformNotReady, resolveCodexTrustPaths, resolveIsolatorStateRoot, resolveRepositoryToolPolicy, resolveToolGrants, type HostPlatformContext } from "../src/platform-options.js";
 import { loadMachineSkillCatalog } from "../src/skill-catalog.js";
 import { GATEWAY_CONTROL_LOCATOR_FILE } from "../src/gateway-control.js";
 
@@ -40,6 +40,10 @@ function configure(edit: (environment: EnvironmentCompositionInput["config"]["en
 const absent = () => false;
 
 describe("buildHostPlatformOptions", () => {
+  it("rejects configured custom skill catalog and binding paths with remediation", () => {
+    const input = configure(environment => { environment.skills = { catalogDir: "./custom", bindingsPath: "./bindings.json" }; });
+    expect(() => resolveRepositoryToolPolicy(input, context.machineId)).toThrow(/catalogDir\/bindingsPath are not supported.*Remove these overrides/i);
+  });
   it("derives the isolator root only from trusted machine environment", () => {
     expect(resolveIsolatorStateRoot({ AI_ISOLATOR_HOME: "/machine/isolator" }, "/home/native")).toBe("/machine/isolator");
     expect(resolveIsolatorStateRoot({ AI_ISOLATOR_REAL_HOME: "/home/real" }, "/home/isolated-profile"))
@@ -238,12 +242,15 @@ describe("buildHostPlatformOptions", () => {
           requiredness: "optional" as const, roles: ["tester" as const], triggers: ["browser_inspection" as const] }] };
       environment.toolPolicy = RepositoryToolPolicySchema.parse({ ...body, digest: digest(body) });
     });
+    const statuses: Parameters<NonNullable<import("../src/platform-options.js").HostPlatformDeps["onToolStatus"]>>[0][] = [];
     const options = await buildHostPlatformOptions(input, { context: { ...context, mcpServices: [service],
-      serviceReadiness: new Map([[service.serviceId, { status: "ready", discoveredTools: service.tool.operations }]]) }, fileExists: absent });
+      serviceReadiness: new Map([[service.serviceId, { status: "ready", discoveredTools: service.tool.operations }]]) }, fileExists: absent,
+      onToolStatus: status => statuses.push(status) });
     const tester = options.roles.find(role => role.role === "tester")!;
     expect(tester.toolIds).toEqual(["chrome-devtools-mcp"]);
     expect(tester.skillSelections.map(selection => selection.skill.skillId)).toContain("browser-inspection");
     expect(options.toolGrants?.find(grant => grant.role === "tester")?.toolId).toBe("chrome-devtools-mcp");
+    expect(statuses.find(status => status.toolId === "browser")?.installed).toBe(false);
   });
 
   it("reports installed, allowed, granted and ready as separate policy observations", async () => {

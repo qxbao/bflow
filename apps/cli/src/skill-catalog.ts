@@ -5,6 +5,7 @@ import { SUPPORTED_CLI_COMMANDS } from "./command-reference.js";
 
 /** P28 loader and pin binder from the built `@bflow/skills` package; loaded dynamically like the other workspace packages. */
 interface SkillsModule {
+  RoleSkillBindingsSchema: { parse(input: unknown): { schemaVersion: 3; bindings: Record<string, string[]>; conditionalBindings: Record<string, { skillId: string; toolId: string; required: boolean }[]> } };
   loadSkillCatalog(root: string, options: { source: "builtin"; supportedCommands: readonly string[] }):
     Promise<{ directory: string; definition: SkillDefinition }[]>;
   bindRoleSkills(input: unknown, role: AgentRole, catalog: SkillDefinition[]): { skill: SkillPin; required: boolean }[];
@@ -15,7 +16,7 @@ export interface MachineSkillCatalog {
   /** Approved builtin bundles, as `skills sync` pins them. */
   readonly entries: readonly { root: string; source: "builtin"; expectedDigest: string }[];
   readonly definitions: readonly SkillDefinition[];
-  readonly roleBindings: unknown;
+  readonly roleBindings: { schemaVersion: 3; bindings: Record<string, string[]>; conditionalBindings: Record<string, { skillId: string; toolId: string; required: boolean }[]> };
   readonly conditionalBindings: unknown;
   readonly canonicalToolId: (toolId: string) => string;
   readonly approvedBuiltinSkillDigests: readonly string[];
@@ -31,8 +32,8 @@ export async function loadMachineSkillCatalog(): Promise<MachineSkillCatalog> {
   const toolInstaller = await import(new URL("../../../packages/tool-installer/dist/index.js", import.meta.url).href);
   const items = await skills.loadSkillCatalog(catalogRoot, { source: "builtin", supportedCommands: SUPPORTED_CLI_COMMANDS });
   const definitions = items.map(item => item.definition);
-  const roleBindings = JSON.parse(await readFile(fileURLToPath(new URL("../../../skills/roles/bindings.json", import.meta.url)), "utf8")) as unknown;
-  const conditionalBindings = (roleBindings as { conditionalBindings?: unknown }).conditionalBindings ?? {};
+  const roleBindings = skills.RoleSkillBindingsSchema.parse(JSON.parse(await readFile(fileURLToPath(new URL("../../../skills/roles/bindings.json", import.meta.url)), "utf8")));
+  const conditionalBindings = roleBindings.conditionalBindings;
   return {
     entries: items.map(item => ({ root: item.directory, source: "builtin", expectedDigest: item.definition.digest })),
     definitions,

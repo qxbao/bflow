@@ -231,18 +231,17 @@ function roleOption(role: EnvironmentRoleConfig, input: EnvironmentCompositionIn
     const definitions = skills.definitions.filter(definition => definition.skillId === skillId);
     return definitions.length === 0 || definitions.some(definition => definition.allowedRoles.includes(role.role));
   });
-  const defaultBindings = skills.roleBindings as { bindings?: Record<string, string[]>;
-    conditionalBindings?: Record<string, { skillId: string; toolId: string; requiredness?: "required" | "optional" }[]> };
-  const conditional = defaultBindings.conditionalBindings?.[role.role] ?? [];
+  const defaultBindings = skills.roleBindings;
+  const conditional = defaultBindings.conditionalBindings[role.role] ?? [];
   const conditionalSkillIds = new Set(conditional.map(binding => binding.skillId));
-  const inheritedSkillIds = role.skills ?? defaultBindings.bindings?.[role.role] ?? [];
+  const inheritedSkillIds = role.skills ?? defaultBindings.bindings[role.role] ?? [];
   const grantsByTool = new Map(grants.map(grant => [skills.canonicalToolId(grant.toolId), grant]));
   const grantForBinding = (binding: { readonly toolId: string }) => grantsByTool.get(skills.canonicalToolId(binding.toolId));
   const applicableConditional = role.skills === undefined ? conditional : conditional.filter(binding => role.skills!.includes(binding.skillId));
-  const missingRequiredBindings = applicableConditional.filter(binding => (binding.requiredness ?? "optional") === "required" && !grantForBinding(binding));
+  const missingRequiredBindings = applicableConditional.filter(binding => binding.required && !grantForBinding(binding));
   if (missingRequiredBindings.length)
     throw new Error(`Role '${role.role}' requires a tool-backed skill grant for: ${missingRequiredBindings.map(binding => binding.toolId).join(", ")}`);
-  for (const binding of applicableConditional.filter(item => (item.requiredness ?? "optional") === "optional" && !grantForBinding(item)))
+  for (const binding of applicableConditional.filter(item => !item.required && !grantForBinding(item)))
     warn?.(`Optional skill '${binding.skillId}' for role '${role.role}' is skipped because tool '${binding.toolId}' has no approved grant`);
   const skillIds = [...new Set([
     ...inheritedSkillIds.filter(skillId => !conditionalSkillIds.has(skillId)),
@@ -264,7 +263,7 @@ function roleOption(role: EnvironmentRoleConfig, input: EnvironmentCompositionIn
     const conditionalBinding = conditional.find(binding => binding.skillId === selection.skill.skillId);
     const grant = conditionalBinding ? grantForBinding(conditionalBinding) : undefined;
     return { ...selection, required: conditionalBinding
-      ? conditionalBinding.requiredness === "required" || grant?.requiredness === "required"
+      ? conditionalBinding.required || grant?.requiredness === "required"
       : (definitionsById.get(selection.skill.skillId)?.requiredToolIds.length ?? 0) === 0 };
   });
   const requiredSkillIds = new Set(environmentSkills);
@@ -288,6 +287,9 @@ function roleOption(role: EnvironmentRoleConfig, input: EnvironmentCompositionIn
 }
 
 export function resolveRepositoryToolPolicy(input: EnvironmentCompositionInput, machineId: string): RepositoryToolPolicy | undefined {
+  const skillConfig = input.config.environment.skills;
+  if (skillConfig?.catalogDir || skillConfig?.bindingsPath)
+    throw new Error("Custom environment.skills.catalogDir/bindingsPath are not supported by platform startup. Remove these overrides or use the approved bundled skills catalog and bindings.");
   const explicit = input.config.environment.toolPolicy;
   if (explicit) {
     const parsed = RepositoryToolPolicySchema.parse(explicit);
@@ -322,6 +324,11 @@ export function resolveToolGrants(policy: RepositoryToolPolicy | undefined, cont
   onStatus?: (status: ToolPolicyResolutionStatus) => void, strictRequired = true): ResolvedToolGrant[] {
   if (!policy) return [];
   const grants: ResolvedToolGrant[] = [];
+  for (const requirement of policy.requirements.filter(item => context.skills.canonicalToolId(item.toolId) === "mempalace")) {
+    if (!requirement.memoryScope || requirement.memoryScope.access !== "read_only" || !requirement.memoryScope.wing.trim() ||
+        requirement.memoryScope.repositoryId !== input.repository.id || requirement.operations.some(operation => operation !== "mempalace_search"))
+      throw new Error("MemPalace requires an explicit repository-bound read-only wing and the mempalace_search operation; configure memoryScope or remove the requirement.");
+  }
   const machineServices = (context.mcpServices ?? []).map(service => MCPServiceDefinitionSchema.parse(service));
   for (const requirement of policy.requirements) for (const role of requirement.roles) {
     if (role === "conversation") throw new Error("Conversation role cannot receive a tool grant");
@@ -366,11 +373,18 @@ export function resolveToolGrants(policy: RepositoryToolPolicy | undefined, cont
         warn?.(`Optional tool '${requirement.toolId}' for role '${role}' is degraded: ${reason}`);
         continue;
       }
-      installed = true;
+      // A service definition proves configuration, not exact executable installation.
+      // Until CLI has verified the managed install identity, report installation as unverified.
+      installed = false;
       version = matches[0]!.tool.version;
       serviceId = matches[0]!.serviceId;
       const readiness = context.serviceReadiness?.get(serviceId);
       ready = readiness?.status === "ready" && requirement.operations.every(operation => readiness.discoveredTools.includes(operation));
+      // A tools/list receipt proves operation availability, not memory wing provenance.
+      if (canonicalToolId === "mempalace") {
+        ready = false;
+        reason = "MemPalace read-only wing provenance is not available in the Gateway readiness receipt";
+      }
       if (!ready) {
         reason = readiness?.reason ?? (readiness ? `Gateway status is ${readiness.status} or required operations were not discovered` : "Gateway has no current ready observation");
         report();
