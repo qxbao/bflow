@@ -35,6 +35,12 @@ Tool IDs identify catalog tools; capability IDs describe verified capabilities;
 service IDs identify configured Gateway connections; operation names are the
 actual negotiated upstream names. These are not interchangeable.
 
+Integration compatibility ruling: content-only MCP responses retain their existing
+Gateway output shape. A response that also supplies `structuredContent` preserves
+both fields in the existing JSON-valued result. Output schema validation must not
+discard the structured data that it validated. This needs no contract or storage
+migration; it adds no field to legacy content-only responses.
+
 ## CLI output and repository memory
 
 The RTK runner executes the original command once and captures its raw output and
