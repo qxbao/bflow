@@ -2320,8 +2320,8 @@ rl.on('line', (line) => {
     let activeGrant = grant;
     const makeGateway = () => {
       const gateway = new BflowSharedMCPGateway({ callLedgerPath: ledgerPath, requireResolvedToolGrants: true,
-        toolGrantResolver: () => [activeGrant] });
-      gateway.registry.registerService(service);
+        policyOverrides: () => ({ readOnlyTools: ["mempalace_search"] }), toolGrantResolver: () => [activeGrant] });
+      gateway.registry.registerService(service, { readOnlyTools: ["mempalace_search"] });
       return gateway;
     };
     const call: MCPToolCall = { schemaVersion: 3, callId: "call-live-ledger", registrationId: client.registrationId,
@@ -2340,8 +2340,14 @@ rl.on('line', (line) => {
       const unscopedStatus = await firstGateway.call({ ...call, callId: "call-memory-status", idempotencyKey: "idem-memory-status",
         tool: "mempalace_status", input: { wing: "approved-wing" } });
       expect(unscopedStatus.ok).toBe(false);
+      const unscopedSearch = await firstGateway.call({ ...call, callId: "call-unscoped-search", idempotencyKey: "idem-unscoped-search" }, { timeoutMs: 100 });
+      expect(unscopedSearch.ok).toBe(false);
+      expect(fs.existsSync(counterPath)).toBe(false);
+      activeGrant = memoryGrant;
       const first = await firstGateway.call(call, { timeoutMs: 150 });
-      expect(first.ok && first.value.status).toBe("unknown");
+      // The read-only transport reports its timeout; the durable intent still
+      // prevents replay and must recover as unknown after restart.
+      expect(first.ok).toBe(false);
       expect(fs.readFileSync(counterPath, "utf8")).toBe("x");
       const ledger = fs.readFileSync(ledgerPath, "utf8");
       expect(ledger).not.toContain("private query text");

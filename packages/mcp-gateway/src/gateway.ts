@@ -1100,6 +1100,9 @@ export class BflowSharedMCPGateway {
       return err({ code: "validation", retryable: false, message: "No host-resolved tool grant is available" });
     }
 
+    if (this.registry.getService(request.serviceId)?.definition.tool.toolId === "mempalace" && !grant?.memoryScope) {
+      return err({ code: "validation", retryable: false, message: "Memory invocation requires an explicit repository-bound read-only scope" });
+    }
     if (!reg.serviceIds.includes(request.serviceId)) {
       this.recordAudit({
         action: "security.violation",
