@@ -114,4 +114,52 @@ describe("Runtime tool action ledger", () => {
     await ledger.notUsed({ ...completed, consumption: { status: "not_used", reasonCode: "provider_delivery_unconfirmed" } });
     expect((await ledger.list())[0]?.consumption).toEqual({ status: "not_used", reasonCode: "provider_delivery_unconfirmed" });
   });
+
+  it("acknowledges exact stored result evidence idempotently after delivery was unconfirmed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bflow-tool-ledger-delivery-ack-"));
+    roots.push(root);
+    const ledger = new FileToolUsageLedger(join(root, "usage.json"));
+    const started = { schemaVersion: 3 as const, runId: "run-a", taskId: "task-a", role: "coordinator" as const,
+      sessionId: "session-a", generation: 2, invocationId: "action-ack", toolId: "memory", serviceId: "memory-service",
+      operation: "search", status: "started" as const, observedAt: new Date().toISOString() };
+    await ledger.begin(started);
+    const evidence = { trust: "stored" as const, artifactId: "memory-output", runId: "run-a", taskId: "task-a",
+      kind: "agent-output" as const, uri: "artifact://store-a/memory-output", mediaType: "application/json",
+      checksum: { algorithm: "sha256" as const, value: "a".repeat(64) }, createdAt: new Date().toISOString() };
+    const completed = { ...started, status: "completed" as const, evidenceReferences: [evidence] };
+    await ledger.put(completed);
+    await ledger.notUsed({ ...completed, consumption: { status: "not_used", reasonCode: "provider_delivery_unconfirmed" } });
+
+    const acknowledged = { ...completed, consumption: { status: "consumed" as const, source: "host_context" as const,
+      evidenceReferences: [evidence] } };
+    await ledger.acknowledgeDelivery(acknowledged);
+    await ledger.acknowledgeDelivery(acknowledged);
+    await ledger.acknowledgeDelivery({ ...acknowledged, observedAt: new Date(Date.now() + 1000).toISOString() });
+
+    expect((await ledger.list())[0]?.consumption).toEqual(acknowledged.consumption);
+    await expect(ledger.acknowledgeDelivery({ ...acknowledged, role: "developer" })).rejects.toThrow();
+    await expect(ledger.acknowledgeDelivery({ ...acknowledged, taskId: "other-task" })).rejects.toThrow();
+    await expect(ledger.acknowledgeDelivery({ ...acknowledged, generation: 3 })).rejects.toThrow(/matching completed/);
+    const wrongEvidence = { ...evidence, checksum: { ...evidence.checksum, value: "b".repeat(64) } };
+    await expect(ledger.acknowledgeDelivery({ ...acknowledged, evidenceReferences: [wrongEvidence],
+      consumption: { ...acknowledged.consumption, evidenceReferences: [wrongEvidence] } })).rejects.toThrow(/evidence/);
+  });
+
+  it("does not acknowledge an unknown invocation even when the caller supplies a completed result", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bflow-tool-ledger-unknown-ack-"));
+    roots.push(root);
+    const path = join(root, "usage.json"), ledger = new FileToolUsageLedger(path);
+    const started = { schemaVersion: 3 as const, runId: "run-a", taskId: "task-a", role: "coordinator" as const,
+      sessionId: "session-a", generation: 2, invocationId: "action-unknown-ack", toolId: "memory", serviceId: "memory-service",
+      operation: "search", status: "started" as const, observedAt: new Date().toISOString() };
+    await ledger.begin(started);
+    await ledger.recoverInterrupted();
+    const evidence = { trust: "stored" as const, artifactId: "memory-output", runId: "run-a", taskId: "task-a",
+      kind: "agent-output" as const, uri: "artifact://store-a/memory-output", mediaType: "application/json",
+      checksum: { algorithm: "sha256" as const, value: "a".repeat(64) }, createdAt: new Date().toISOString() };
+    await expect(ledger.acknowledgeDelivery({ ...started, status: "completed",
+      evidenceReferences: [evidence], consumption: { status: "consumed", source: "host_context", evidenceReferences: [evidence] } }))
+      .rejects.toThrow(/completed invocation/);
+    expect((await ledger.list())[0]).toMatchObject({ status: "unknown", reasonCode: "unknown_delivery" });
+  });
 });

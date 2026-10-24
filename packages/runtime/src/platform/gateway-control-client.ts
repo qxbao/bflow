@@ -56,11 +56,11 @@ export class GatewayControlClient implements GatewayControlPort {
     }
   }
 
-  async register(registration: MCPClientRegistration, options?: OperationOptions, grants: readonly ResolvedToolGrant[] = []):
+  async register(registration: MCPClientRegistration, options?: OperationOptions, grants?: readonly ResolvedToolGrant[]):
     Promise<OperationResult<GatewayRegistrationGrant>> {
     const sent = MCPClientRegistrationSchema.safeParse(registration);
     if (!sent.success) return fail("validation", "Invalid Gateway client registration");
-    const parsedGrants = grants.map(grant => ResolvedToolGrantSchema.safeParse(grant));
+    const parsedGrants = (grants ?? []).map(grant => ResolvedToolGrantSchema.safeParse(grant));
     if (parsedGrants.some(grant => !grant.success) || parsedGrants.some(grant => {
       if (!grant.success) return true;
       const value = grant.data;
@@ -70,7 +70,8 @@ export class GatewayControlClient implements GatewayControlPort {
         sent.data.serviceIds.length !== 1 || value.serviceId !== sent.data.serviceIds[0] ||
         value.operations.some(operation => !sent.data.allowedTools.includes(operation));
     })) return fail("validation", "Resolved Gateway grants do not match the exact registration scope, service and operations");
-    const reply = await this.call("register", { client: sent.data, toolGrants: parsedGrants.map(grant => grant.success ? grant.data : undefined) }, options);
+    const reply = await this.call("register", { client: sent.data,
+      ...(grants === undefined ? {} : { toolGrants: parsedGrants.map(grant => grant.success ? grant.data : undefined) }) }, options);
     if (!reply.ok) return reply;
     const value = reply.value;
     if (!isRecord(value) || !hasExactKeys(value, ["registration", "token"]) || typeof value.token !== "string" ||

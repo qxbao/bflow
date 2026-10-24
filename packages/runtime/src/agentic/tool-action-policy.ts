@@ -10,6 +10,26 @@ export function toolActionInvocationId(sessionId: string, role: AgentRole, actio
     actionId, toolId, operation]).slice(0, 48)}`;
 }
 
+/** Explicit completed repeats get a fresh identity; unresolved delivery always blocks advancement. */
+export function nextToolActionInvocationId(baseId: string, existing: readonly ToolUsageRecord[]): string {
+  let ordinal = 0;
+  while (true) {
+    const candidate = ordinal === 0 ? baseId : `${baseId}-r${ordinal}`;
+    const record = existing.find(item => item.invocationId === candidate);
+    if (!record) return candidate;
+    if (record.status === "started" || record.status === "unknown")
+      throw new Error("Tool action delivery is unresolved; reconcile before another invocation");
+    ordinal++;
+  }
+}
+
+export function rtkRequirement(policy: RepositoryToolPolicy | undefined, role: AgentRole, commandId: string) {
+  const matches = policy?.requirements.filter(item => item.toolId === "rtk" && item.kind === "cli_only" &&
+    item.roles.includes(role) && item.triggers.includes("routine_command") && item.operations.includes("pipe") &&
+    item.cliCommandProfiles?.includes(commandId)) ?? [];
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 /** Scoped usage view intentionally spans generations so an unknown receipt remains visible after host restart. */
 export function visibleToolUsage(records: readonly ToolUsageRecord[], sessionId: string, role: AgentRole,
   assignment?: { readonly runId: string; readonly taskId: string }): ToolUsageRecord[] {
@@ -90,6 +110,7 @@ export function validateMemoryActionInput(grant: ResolvedToolGrant, operation: s
 export function validateMemoryActionOutput(grant: ResolvedToolGrant, operation: string, output: JsonValue): readonly Record<string, unknown>[] | null | undefined {
   const scope = grant.memoryScope;
   if (!scope || operation !== "mempalace_search") return undefined;
+  if (Array.isArray(output)) output = { content: output } as JsonValue;
   if (!isRecord(output)) return null;
   if (output.isError === true) return null;
   if (Array.isArray(output.content)) {

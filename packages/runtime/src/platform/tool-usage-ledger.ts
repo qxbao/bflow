@@ -111,6 +111,35 @@ export class FileToolUsageLedger {
     });
   }
 
+  /** Authenticated role ACK that the exact stored result reached its current task context. */
+  async acknowledgeDelivery(record: ToolUsageRecord): Promise<void> {
+    const checked = ToolUsageRecordSchema.parse(record);
+    const consumption = checked.consumption;
+    if (checked.status !== "completed" || consumption?.status !== "consumed" ||
+        consumption.source !== "host_context" || !checked.evidenceReferences?.length ||
+        !isDeepStrictEqual(consumption.evidenceReferences, checked.evidenceReferences))
+      throw new TypeError("Delivery acknowledgement requires completed usage and its exact stored result evidence");
+    await this.exclusive(async () => {
+      const state = await this.read();
+      const index = state.records.findIndex(item => item.invocationId === checked.invocationId);
+      if (index < 0) throw new Error("Tool invocation has no durable result");
+      const previous = state.records[index]!;
+      if (previous.status !== "completed" || previous.generation !== checked.generation || !sameImmutableIdentity(previous, checked))
+        throw new Error("Only the matching completed invocation can be acknowledged");
+      if (!isDeepStrictEqual(previous.evidenceReferences, checked.evidenceReferences))
+        throw new Error("Delivery acknowledgement cannot replace or extend result evidence");
+      if (previous.consumption?.status === "consumed" && previous.consumption.source === "host_context" &&
+          isDeepStrictEqual(previous.consumption.evidenceReferences, consumption.evidenceReferences)) return;
+      if (isDeepStrictEqual(previous, checked)) return;
+      const priorDisposition = previous.consumption;
+      if (priorDisposition !== undefined &&
+          (priorDisposition.status !== "not_used" || priorDisposition.reasonCode !== "provider_delivery_unconfirmed"))
+        throw new Error("Only unconfirmed provider delivery can be acknowledged");
+      const records = [...state.records]; records[index] = checked;
+      await this.write({ schemaVersion: VERSION, records });
+    });
+  }
+
   /** Records that forwarding/use was not acknowledged; it must never be promoted to consumed on inference. */
   async notUsed(record: ToolUsageRecord): Promise<void> {
     const checked = ToolUsageRecordSchema.parse(record);

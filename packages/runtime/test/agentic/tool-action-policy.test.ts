@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { RepositoryToolPolicySchema, ResolvedToolGrantSchema, ToolUsageRecordSchema, type ResolvedToolGrant } from "@bflow/contracts";
 import { toolActionInvocationId, uninvokedToolDispositions, validateMemoryActionInput, validateMemoryActionOutput,
-  visibleToolUsage } from "../../src/agentic/tool-action-policy.js";
+  visibleToolUsage, nextToolActionInvocationId, rtkRequirement } from "../../src/agentic/tool-action-policy.js";
 
 const grant: ResolvedToolGrant = { schemaVersion: 3, grantId: "memory-grant", policyDigest: "a".repeat(64), toolId: "mempalace",
   kind: "native_remote_mcp", requiredness: "optional", role: "coordinator",
@@ -20,6 +20,16 @@ describe("Runtime memory tool action policy", () => {
       timestamp: note.filed_at, repositoryId: "repo-1", repositoryBinding: "approved_wing_policy" });
     expect(validateMemoryActionOutput(grant, "mempalace_search", envelope({ ...note, wing: "other" }))).toBeNull();
     expect(validateMemoryActionOutput(grant, "mempalace_search", envelope({ ...note, source_path: "" }))).toBeNull();
+  });
+  it("accepts the Gateway stdio driver's raw MCP content array", () => {
+    const note = { drawer_id: "drawer-fixture", text: "Sanitized historical note", wing: "engineering", room: "decisions",
+      source_path: "/approved/notes/fixture.md", filed_at: "2026-10-24T10:06:19.726007" };
+    const gatewayOutput = [{ type: "text", text: JSON.stringify({ results: [note] }) }];
+
+    expect(validateMemoryActionOutput(grant, "mempalace_search", gatewayOutput as never)).toMatchObject([{
+      text: note.text, provenance: { wing: note.wing, sourceId: note.drawer_id, sourceReference: note.source_path,
+        repositoryId: "repo-1", repositoryBinding: "approved_wing_policy" }
+    }]);
   });
   it("requires exact granted wing and repository context before a memory search", () => {
     expect(() => validateMemoryActionInput(grant, "mempalace_search", { wing: "engineering", query: "design" })).not.toThrow();
@@ -64,5 +74,19 @@ describe("Runtime memory tool action policy", () => {
       status: "unknown", reasonCode: "unknown_delivery", observedAt: new Date().toISOString() });
     expect(visibleToolUsage([record], "session-1", "coordinator", { runId: "run-1", taskId: "task-1" })).toEqual([record]);
     expect(visibleToolUsage([record], "session-1", "coordinator", { runId: "run-2", taskId: "task-1" })).toEqual([]);
+  });
+
+  it("gives an explicit repeat a distinct identity but never advances past unresolved delivery", () => {
+    const completed = ToolUsageRecordSchema.parse({ schemaVersion: 3, runId: "run-1", taskId: "task-1", role: "developer",
+      sessionId: "session-1", generation: 1, invocationId: "rtk-base", toolId: "rtk", operation: "pipe",
+      status: "completed", observedAt: new Date().toISOString() });
+    expect(nextToolActionInvocationId("rtk-base", [completed])).toBe("rtk-base-r1");
+    expect(nextToolActionInvocationId("rtk-base", [{ ...completed, generation: 7 }])).toBe("rtk-base-r1");
+    expect(() => nextToolActionInvocationId("rtk-base", [{ ...completed, status: "unknown" }])).toThrow(/unresolved/);
+    expect(() => nextToolActionInvocationId("rtk-base", [{ ...completed, status: "started" }])).toThrow(/unresolved/);
+  });
+
+  it("does not infer RTK authority or a generation requirement without repository policy", () => {
+    expect(rtkRequirement(undefined, "developer", "unit-test")).toBeUndefined();
   });
 });

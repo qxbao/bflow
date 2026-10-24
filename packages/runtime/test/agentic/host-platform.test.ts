@@ -18,7 +18,7 @@ import {
   HostPlatformSession, skillSupportedCommands, HostPlatformStatusSchema, launchMaterial, liveObservation, requirementFor,
   createHostProviderFactoryOptions, createHostProviderAdapterFactory
 } from "../../src/agentic/host-platform.js";
-import { describeToolActions } from "../../src/agentic/tool-action-policy.js";
+import { describeToolActions, validateMemoryActionOutput } from "../../src/agentic/tool-action-policy.js";
 
 const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const action of cleanup.splice(0).reverse()) await action(); });
@@ -80,7 +80,10 @@ describe("profile selection ingress", () => {
       verifyGateway: async () => ({ ok: true, value: { checkedAt: at, healthy: true, lost: [], uncertain: false } }),
       invokeTool: async (...args: unknown[]) => {
         calls.push(args);
-        return { ok: true, value: { schemaVersion: 3, callId: "call-memory", status: "completed", output: { results: [] }, observedAt: at } };
+        const note = { drawer_id: "drawer-stub", text: "Sanitized result", wing: "engineering", room: "decisions",
+          source_path: "/approved/notes/fixture.md", filed_at: at };
+        return { ok: true, value: { schemaVersion: 3, callId: "call-memory", status: "completed",
+          output: [{ type: "text", text: JSON.stringify({ results: [note] }) }], observedAt: at } };
       }
     });
     const { options } = await session(service);
@@ -105,6 +108,9 @@ describe("profile selection ingress", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject([expect.anything(), "coordinator", undefined, "memory-service", "mempalace_search",
       { wing: "engineering", query: "prior design decisions" }, "call-memory", { timeoutMs: 5_000 }]);
+    expect(validateMemoryActionOutput(grant, "mempalace_search", result.value.output as never)?.[0]?.provenance)
+      .toMatchObject({ wing: "engineering", repositoryId: options.platform.repositoryId, sourceId: "drawer-stub",
+        repositoryBinding: "approved_wing_policy" });
   });
   it("registers exact MCP operations while preserving catalog tool IDs", () => {
     const grant = ResolvedToolGrantSchema.parse({ schemaVersion: 3, grantId: "grant-context7", policyDigest: "a".repeat(64), toolId: "context7",
