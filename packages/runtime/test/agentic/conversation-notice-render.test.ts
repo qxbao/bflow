@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { HostReceiptJournal, MAX_NOTICE_REBLOCKS, parseConversationResumeRequest } from "../../src/agentic/host-receipts.js";
+import { TaskActivityLog } from "../../src/agentic/task-activity-log.js";
 import { isProviderInputEmpty, reminderDelayMs, reminderDue, afterReminder } from "../../src/agentic/conversation-inbox.js";
 import { blockedNoticeFields, lastAssistantText, mustShowSection, noticeDisplayed, notificationBody, renderConversationNotice } from "../../src/agentic/conversation-notice-render.js";
 
@@ -457,5 +458,106 @@ describe("blocked notice automatic resume and blockageReason", () => {
     const fields = blockedNoticeFields({ kind: "workflow_blocked", runId: "run-42", reason: "SDD conflict: full SDD required.", blockageReason: "SDD conflict: full SDD required.",
       requested_action: "authorized_requirement_revision" });
     expect(fields?.requested_action).toBe("authorized_requirement_revision");
+  });
+});
+
+describe("technical detail logging and on-demand lookup", () => {
+  it("records redacted notice technical details to TaskActivityLog on appendConversationNotice and survives log errors", async () => {
+    const root = await directory();
+    const activity = TaskActivityLog.open(join(root, "task-activity.jsonl"));
+    const receipts = new HostReceiptJournal(join(root, "receipts"), "/tmp/bflow-notice-render-repo", "session-1", activity);
+    await receipts.appendConversationNotice({
+      schema_version: 2,
+      message_id: "apr-msg-log-1",
+      correlation_id: "corr-log-1",
+      run_id: "run-42",
+      sender: { role: "coordinator" },
+      recipient: { role: "conversation" },
+      type: "approval.request",
+      payload: {
+        approvalId: "design-abc123",
+        runId: "run-42",
+        title: "Thêm trang đăng nhập",
+        target: { type: "run", runId: "run-42" },
+        reason: "Duyệt bản thiết kế xác thực người dùng — Authorization: Bearer secret-jwt-token",
+        requestedBy: "coordinator",
+        expiresAt: "2026-10-20T04:00:00.000Z",
+        evidence: [
+          { kind: "specification", uri: "artifact://store/spec-1" },
+          { kind: "patch", uri: "artifact://store/patch-1" }
+        ]
+      },
+      artifact_references: [{
+        artifactId: "log-1",
+        runId: "run-42",
+        trust: "stored",
+        uri: "artifact://store/log-1",
+        kind: "log",
+        mediaType: "text/plain",
+        createdAt: "2026-10-20T03:16:00.000Z",
+        sizeBytes: 12,
+        checksum: { algorithm: "sha256", value: "a".repeat(64) }
+      }],
+      idempotency_key: "apr-msg-log-1"
+    });
+    const entries = await activity.read({ runId: "run-42" });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      kind: "notice",
+      role: "coordinator",
+      runId: "run-42",
+      shortId: "#1",
+      runLabel: "Việc #1: Thêm trang đăng nhập",
+      messageType: "approval.request",
+      reason: "Duyệt bản thiết kế xác thực người dùng — Authorization: Bearer [REDACTED]",
+      artifacts: ["artifact://store/log-1", "artifact://store/spec-1", "artifact://store/patch-1"]
+    });
+
+    const failingLog = {
+      record: async () => { throw new Error("Simulated disk full in activity log"); }
+    };
+    const resilientReceipts = new HostReceiptJournal(join(root, "receipts"), "/tmp/bflow-notice-render-repo", "session-1", failingLog);
+    await expect(resilientReceipts.appendConversationNotice({
+      schema_version: 2,
+      message_id: "blocked-log-fail",
+      correlation_id: "corr-log-2",
+      run_id: "run-42",
+      sender: { role: "runtime" },
+      recipient: { role: "conversation" },
+      type: "conversation.progress",
+      payload: { kind: "workflow_blocked", reason: "Developer không phản hồi: {\"code\":\"timeout\"}" },
+      artifact_references: [],
+      idempotency_key: "blocked-log-fail"
+    })).resolves.toBe(true);
+    expect((await resilientReceipts.unsurfacedConversationNotices()).map(item => item.messageId)).toContain("blocked-log-fail");
+
+    const detailByShortId = await resilientReceipts.readConversationNoticeDetail("#1");
+    expect(detailByShortId).toMatchObject({
+      shortId: "#1",
+      runLabel: "Việc #1: Thêm trang đăng nhập",
+      messageId: "apr-msg-log-1",
+      type: "approval.request",
+      senderRole: "coordinator",
+      runId: "run-42",
+      correlationId: "corr-log-1",
+      approvalId: "design-abc123",
+      reason: "Duyệt bản thiết kế xác thực người dùng — Authorization: Bearer [REDACTED]",
+      artifacts: ["artifact://store/log-1", "artifact://store/spec-1", "artifact://store/patch-1"]
+    });
+    expect(detailByShortId.summary).not.toContain("secret-jwt-token");
+
+    const detailByWorkTag = await resilientReceipts.readConversationNoticeDetail("Việc #1");
+    expect(detailByWorkTag).toMatchObject({
+      shortId: "#2",
+      runLabel: "Việc #1: Thêm trang đăng nhập",
+      messageId: "blocked-log-fail",
+      type: "conversation.progress",
+      senderRole: "runtime",
+      runId: "run-42",
+      reason: 'Developer không phản hồi: {"code":"timeout"}'
+    });
+
+    await expect(resilientReceipts.readConversationNoticeDetail("#99")).rejects.toThrow(/Unknown|not found/i);
+    await expect(resilientReceipts.readConversationNoticeDetail("Việc #99")).rejects.toThrow(/Unknown|not found/i);
   });
 });

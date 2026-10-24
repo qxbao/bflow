@@ -80,4 +80,40 @@ describe('task log viewer', () => {
       expect(output.match(/04:05:07/g)).toHaveLength(1);
     } finally { child.kill('SIGTERM'); await exited; }
   });
+
+  it('formats notice technical details on one readable line with #n, Việc #k, role, runId, messageType, reason and artifacts', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'bflow-viewer-notice-')); dirs.push(directory);
+    const log = join(directory, 'activity.jsonl');
+    const viewer = join(process.cwd(), 'packages/runtime/dist/agentic/task-log-viewer.js');
+    const noticeEntry = {
+      at: '2026-10-20T04:05:08.000Z',
+      kind: 'notice',
+      role: 'runtime',
+      action: 'conversation.progress:workflow_blocked',
+      messageType: 'conversation.progress',
+      runId: 'run-42',
+      shortId: '#3',
+      runLabel: 'Việc #1: Thêm trang đăng nhập',
+      reason: 'Developer không phản hồi: {"code":"timeout","attempt":3}',
+      artifacts: ['artifact://store/spec-1', 'artifact://store/patch-1']
+    };
+    await writeFile(log, `${JSON.stringify(noticeEntry)}\n`);
+    const child = spawn(process.execPath, [viewer, log], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+    let output = '';
+    child.stdout.setEncoding('utf8'); child.stdout.on('data', (chunk) => { output += chunk; });
+    try {
+      await expect.poll(() => output, { timeout: 3000, interval: 30 }).toContain('04:05:08');
+      const lines = output.trim().split('\n').filter(Boolean);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('#3');
+      expect(lines[0]).toContain('Việc #1');
+      expect(lines[0]).toContain('runtime');
+      expect(lines[0]).toContain('run:run-42');
+      expect(lines[0]).toContain('conversation.progress');
+      expect(lines[0]).toContain('Developer không phản hồi: {"code":"timeout","attempt":3}');
+      expect(lines[0]).toContain('artifact://store/spec-1');
+      expect(lines[0]).toContain('artifact://store/patch-1');
+    } finally { child.kill('SIGTERM'); await exited; }
+  });
 });
