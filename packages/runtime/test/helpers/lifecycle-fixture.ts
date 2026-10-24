@@ -146,9 +146,30 @@ export async function lifecycleFixture(cleanups: (() => Promise<void>)[]) {
     const outbound = [...(await state()).outbound].reverse().find(out => out.taskId === taskId && out.message.type === "task.assignment" && out.message.run_id === runId)!;
     const handle = outbound.handle!, path = handle.target.worktreePath!;
     await writeFile(join(path, "guide.md"), content); git(path, "add", "guide.md"); git(path, "commit", "-m", "implement");
+    const reworkContext = outbound.message.payload?.reworkContext as { reworkGeneration: number; findings: { findingId: string; code: string; message: string }[] } | undefined;
+    const headRevision = git(path, "rev-parse", "HEAD");
+    const findingResolutions = reworkContext?.findings.map(finding => ({
+      findingId: finding.findingId,
+      disposition: "addressed",
+      rootCause: `Root cause for ${finding.code}: ${finding.message}`,
+      sourceLocations: [{ path: "guide.md", startLine: 1, endLine: 1 }],
+      repairSummary: `Updated guide.md to resolve ${finding.code} (${finding.findingId})`,
+      discriminatingCheck: {
+        kind: "quality_gate",
+        target: finding.code,
+        beforeOutcome: `Failed with ${finding.code}: ${finding.message}`,
+        afterOutcome: `Resolved ${finding.code} in guide.md at ${headRevision}`
+      },
+      evidence: {
+        sourceRevision: headRevision,
+        reworkGeneration: reworkContext.reworkGeneration,
+        summary: `Verified guide.md at revision ${headRevision} for generation ${reworkContext.reworkGeneration}`
+      }
+    }));
     const result = AgentResultSchema.parse({ requestId: handle.requestId, attemptId: handle.attemptId, runId, taskId, executionId: handle.executionId,
       status: "succeeded", verification: { status: "verified", evidence: "Authenticated test-host result", correlation:
         unwrap(await ports.engine.getSnapshot(runId))!.tasks.find(task => task.taskId === taskId)!.bindingVerification?.receipt.correlation ?? handle.correlation },
+      ...(findingResolutions ? { output: { findingResolutions } } : {}),
       artifactProposals: [], retryable: false, startedAt: handle.acceptedAt, completedAt: new Date().toISOString() });
     await runtime.receiveHerdr(envelope("implementation.submitted", result, { causation_id: outbound.message.message_id, run_id: runId,
       correlation_id: outbound.message.correlation_id, sender: { role: "developer", agent_id: handle.target.agentId, pane_id: handle.target.paneId } }));

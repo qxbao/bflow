@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
-  ArtifactReferenceSchema, ArtifactWriteOptionsSchema, QualityGateContextSchema, QualityGateDefinitionSchema,
+  ArtifactReferenceSchema, ArtifactWriteOptionsSchema, QualityFindingSchema, QualityGateContextSchema, QualityGateDefinitionSchema,
   PaneBindingSchema, QualityGateResultSchema, SpecificationSchema, TestStrategySchema, VerificationResultSchema,
   WorkflowDefinitionSchema,
   type ArtifactStore, type JsonValue, type PaneBinding, type QualityGate, type QualityGateResult, type Specification, type TestStrategy, type VerificationResult
 } from "@bflow/contracts";
 import { digest, json, record, strings, textField } from "./journal.js";
+import { ReworkFindingVerdictSchema, ReworkResolutionDossierSchema, type ReworkResolutionDossier } from "./rework-causality.js";
 import { unwrap } from "./outbox.js";
 import { behavioralChecks, verificationGit, measureBehavior, parseBehavioralCommands, testFilePattern, type BehavioralCommand,
   type BoundBehavioralCommand, type RtkOutputIntegration } from "./behavioral-runner.js";
@@ -423,6 +424,13 @@ export class HostVerification {
     if (new Set(values.map(value => value.criterionId)).size !== values.length || digest(values.map(value => value.criterionId).sort()) !== digest([...ids].sort())) throw new Error("Review must cover exactly the assigned criteria");
     return values;
   }
+  private reworkDossierFor(state: Record<string, unknown>, runId: string, taskId?: string, attemptId?: string): ReworkResolutionDossier | undefined {
+    if (!taskId || !attemptId || !Array.isArray(state.runs)) return undefined;
+    const run = state.runs.map(record).find(item => item.runId === runId);
+    const task = Array.isArray(run?.tasks) ? run!.tasks.map(record).find(item => item.taskId === taskId) : undefined;
+    if (!Array.isArray(task?.reworkResolutions)) return undefined;
+    return task!.reworkResolutions.map(item => ReworkResolutionDossierSchema.parse(item)).find(item => item.attemptId === attemptId);
+  }
   /** Capture objective revision/diff before the model evaluates it; the returned ID pins later judgment. */
   private readonly reviews = new Map<string, { binding: PaneBinding; sourceMessageId: string; context: unknown; observation: Awaited<ReturnType<HostVerification["capture"]>> }>();
   async inspectReview(binding: PaneBinding, input: unknown) {
@@ -461,10 +469,11 @@ export class HostVerification {
         context = QualityGateContextSchema.parse({ ...context, input: { ...details, hostQaBehavioralObservation: qaBehavioralObservation } });
       }
     }
+    const reworkResolution = this.reworkDossierFor(state, context.runId, context.taskId, context.attemptId);
     const reviewId = randomUUID(), sourceMessageId = textField(args.messageId);
     await this.receipts?.putObservation("review", reviewId, { binding, sourceMessageId, context, observation: json(observation) });
     this.reviews.set(reviewId, { binding, sourceMessageId, context, observation });
-    return json({ reviewId, ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}), context, observation });
+    return json({ reviewId, ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}), ...(reworkResolution ? { reworkResolution } : {}), context, observation });
   }
   async completeReview(binding: PaneBinding, input: unknown) {
     const args = record(input), id = textField(args.reviewId), stored = await this.receipts?.getObservation("review", id);
@@ -497,8 +506,90 @@ export class HostVerification {
       throw new Error("Replaced workflow review cannot complete a stored observation");
     if (configuration.kind !== "review" || configuration.role !== binding.role) throw new Error("Review role mismatch");
     const criteria = this.judgments(args.criteria, configuration.criterionIds as string[]);
+    const reworkResolution = this.reworkDossierFor(state, context.runId, context.taskId, context.attemptId);
+    const findingVerdicts = args.findingVerdicts === undefined ? [] : (() => {
+      if (!Array.isArray(args.findingVerdicts)) throw new Error("findingVerdicts must be an array");
+      const parsed = args.findingVerdicts.map(item => ReworkFindingVerdictSchema.parse(item));
+      if (new Set(parsed.map(item => item.findingId)).size !== parsed.length) throw new Error("Duplicate findingId in findingVerdicts");
+      if (reworkResolution) {
+        const validIds = new Set(reworkResolution.reworkContext.findings.map(item => item.findingId));
+        for (const item of parsed) {
+          if (!validIds.has(item.findingId)) {
+            throw new Error(`Review findingVerdict references unknown findingId '${item.findingId}' not in reworkGeneration ${reworkResolution.reworkGeneration}`);
+          }
+        }
+      } else if (parsed.length > 0) {
+        throw new Error("findingVerdicts cannot be submitted for an initial non-rework review");
+      }
+      return parsed;
+    })();
+    const explicitFindings = args.findings === undefined ? [] : (() => {
+      if (!Array.isArray(args.findings)) throw new Error("findings must be an array");
+      return args.findings.map(value => {
+        const item = record(value);
+        const locObj = item.location !== null && typeof item.location === "object" && !Array.isArray(item.location)
+          ? (item.location as Record<string, unknown>) : undefined;
+        const filePath = typeof item.filePath === "string" && item.filePath.trim()
+          ? item.filePath.trim()
+          : typeof locObj?.path === "string" && locObj.path.trim()
+            ? locObj.path.trim()
+            : undefined;
+        const line = typeof item.line === "number"
+          ? item.line
+          : typeof locObj?.line === "number"
+            ? locObj.line
+            : undefined;
+        const location = typeof item.location === "string" && item.location.trim()
+          ? item.location.trim()
+          : filePath !== undefined
+            ? (line !== undefined ? `${filePath}:${line}` : filePath)
+            : undefined;
+        return QualityFindingSchema.parse({
+          code: textField(item.code),
+          severity: item.severity === undefined ? "error" : textField(item.severity),
+          message: textField(item.message),
+          ...(location !== undefined ? { location } : {}),
+          ...(typeof item.artifactId === "string" && item.artifactId.trim() ? { artifactId: item.artifactId.trim() } : {}),
+          details: json({
+            ...(item.details !== null && typeof item.details === "object" && !Array.isArray(item.details) ? item.details : {}),
+            ...(filePath !== undefined ? { filePath } : {}),
+            ...(line !== undefined ? { line } : {}),
+            ...(typeof item.criterionId === "string" && item.criterionId.trim() ? { criterionId: item.criterionId.trim() } : {}),
+            ...(typeof item.priorFindingId === "string" && item.priorFindingId.trim() ? { priorFindingId: item.priorFindingId.trim() } : {})
+          })
+        });
+      });
+    })();
+    const verdictFindings = findingVerdicts.filter(item => item.verdict === "rejected").map(item => {
+      const orig = reworkResolution!.reworkContext.findings.find(f => f.findingId === item.findingId)!;
+      const res = reworkResolution!.findingResolutions.find(r => r.findingId === item.findingId);
+      const filePath = item.filePath ?? orig.filePath;
+      const line = item.line ?? orig.line;
+      const location = filePath !== undefined ? (line !== undefined ? `${filePath}:${line}` : filePath) : orig.location;
+      return QualityFindingSchema.parse({
+        code: orig.code,
+        severity: "error",
+        message: item.summary,
+        ...(location !== undefined ? { location } : {}),
+        details: json({
+          priorFindingId: orig.findingId,
+          reworkVerdict: "rejected",
+          rejectedDisposition: res?.disposition ?? null,
+          ...(filePath !== undefined ? { filePath } : {}),
+          ...(line !== undefined ? { line } : {}),
+          ...(orig.criterionId ? { criterionId: orig.criterionId } : {}),
+          ...(orig.checkId ? { checkId: orig.checkId } : {})
+        })
+      });
+    });
+    const allFindings = [...verdictFindings, ...explicitFindings];
     const evaluationId = `host-review-${digest([id, this.bindingIdentity(binding), context])}`;
-    const submission = digest({ criteria, summary: textField(args.summary) });
+    const submission = digest({
+      criteria,
+      summary: textField(args.summary),
+      ...(findingVerdicts.length ? { findingVerdicts } : {}),
+      ...(explicitFindings.length ? { findings: explicitFindings } : {})
+    });
     const replay = this.receipts ? await this.receipts.getGate(evaluationId) : this.gateRecords.get(evaluationId);
     if (replay) {
       if (replay.metadata?.hostReviewSubmission !== submission || !await this.authenticateGate(replay)) throw new Error("Conflicting completion for an immutable review observation");
@@ -510,13 +601,27 @@ export class HostVerification {
     if (binding.role === "qa" && details.scope === "workflow" && qaBehavioralObservation === undefined && this.resolve(await this.dossierFor(context.runId, context.taskId)).length)
       throw new Error("Workflow QA needs a new inspect_review observation with owner-run measurements; no old diff-only observation is upgraded into test evidence");
     const qaPassed = qaBehavioralObservation === undefined || record(qaBehavioralObservation).passed === true;
-    const evidence = await this.artifact(context.runId, context.taskId!, { observation: observed, criteria, reviewedBy: binding.agentId,
-      ...(qaBehavioralObservation === undefined ? {} : { qaBehavioralObservation }) });
+    const reworkRejected = findingVerdicts.some(item => item.verdict === "rejected") || allFindings.some(item => item.severity === "error");
+    const evidence = await this.artifact(context.runId, context.taskId!, {
+      observation: observed,
+      criteria,
+      reviewedBy: binding.agentId,
+      ...(qaBehavioralObservation === undefined ? {} : { qaBehavioralObservation }),
+      ...(findingVerdicts.length ? { findingVerdicts } : {}),
+      ...(allFindings.length ? { findings: allFindings } : {})
+    });
     const result = QualityGateResultSchema.parse({ gateId: context.definition.id, runId: context.runId, taskId: context.taskId, evaluationId,
-      status: criteria.every(criterion => criterion.passed) && observed.exitCode === 0 && qaPassed ? "passed" : "failed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString(),
-      metadata: { ...(qaBehavioralObservation === undefined ? {} : { hostQaBehavioralObservation: qaBehavioralObservation }), verification: { schemaVersion: 2, checkId: context.definition.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
-        sourceRevision: observed.revision, specFingerprint: details.specFingerprint, scope: details.scope, independentExecution: true, isolated: true, executorId: binding.agentId,
-        role: binding.role, method: "manual_review", testNames: configuration.testNames, criteria, summary: textField(args.summary) }, evidence: json(evidence), hostReviewSubmission: submission } });
+      status: criteria.every(criterion => criterion.passed) && observed.exitCode === 0 && qaPassed && !reworkRejected ? "passed" : "failed",
+      findings: allFindings, producedArtifacts: [], evaluatedAt: new Date().toISOString(),
+      metadata: {
+        ...(qaBehavioralObservation === undefined ? {} : { hostQaBehavioralObservation: qaBehavioralObservation }),
+        ...(findingVerdicts.length ? { findingVerdicts: json(findingVerdicts) } : {}),
+        verification: { schemaVersion: 2, checkId: context.definition.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
+          sourceRevision: observed.revision, specFingerprint: details.specFingerprint, scope: details.scope, independentExecution: true, isolated: true, executorId: binding.agentId,
+          role: binding.role, method: "manual_review", testNames: configuration.testNames, criteria, summary: textField(args.summary) },
+        evidence: json(evidence),
+        hostReviewSubmission: submission
+      } });
     await this.trustGate(result);
     return { result, artifact: evidence };
   }
