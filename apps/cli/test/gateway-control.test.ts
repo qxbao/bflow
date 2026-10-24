@@ -1,5 +1,6 @@
 import { createConnection } from "node:net";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -13,6 +14,8 @@ let gateway: any;
 let data: any;
 let operation: any;
 let service: any;
+let sharedService: any;
+let upstream: Server | undefined;
 let grantMap: Map<string, any>;
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "bflow-control-test-"));
@@ -37,6 +40,13 @@ beforeEach(async () => {
 afterEach(async () => {
   await control?.stop(); await data?.stop();
   if (service) await gateway.serviceManager.stop(service.serviceId, operation);
+  if (sharedService) await gateway.serviceManager.stop(sharedService.serviceId, operation);
+  sharedService = undefined;
+  if (upstream) {
+    upstream.closeAllConnections();
+    await new Promise<void>((resolve, reject) => upstream!.close(error => error ? reject(error) : resolve()));
+    upstream = undefined;
+  }
   await rm(root, { recursive: true, force: true });
 });
 function rpc(method: string, params: unknown, overrides: Record<string, unknown> = {}) {
@@ -148,4 +158,107 @@ it("rejects principal replacement, cross-session leases and old control credenti
     endpoint: old.endpoint, workspaceRoot: root, services: [service] });
   expect(control.locator.generation).not.toBe(old.generation); expect(control.locator.token).not.toBe(old.token);
   expect((await rpc("catalog", { operation }, { generation: old.generation, token: old.token })).ok).toBe(false);
+});
+
+
+async function enableSharedService() {
+  upstream = createServer((request, response) => {
+    let body = "";
+    request.on("data", chunk => { body += chunk; });
+    request.on("end", () => {
+      const message = JSON.parse(body);
+      if (message.id === undefined) { response.writeHead(202); response.end(); return; }
+      const result = message.method === "initialize"
+        ? { protocolVersion: "2025-11-25", capabilities: { tools: {} }, serverInfo: { name: "shared-docs", version: "1" } }
+        : message.method === "tools/list" ? { tools: [{ name: "query-docs", inputSchema: { type: "object" } }] }
+        : { content: [{ type: "text", text: "shared documentation" }] };
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
+    });
+  });
+  await new Promise<void>(resolve => upstream!.listen(0, "127.0.0.1", resolve));
+  const address = upstream.address();
+  if (!address || typeof address === "string") throw new Error("Missing shared service address");
+  sharedService = MCPServiceDefinitionSchema.parse({ ...service, serviceId: "shared-docs",
+    tool: { ...service.tool, toolId: "context7", kind: "native_remote_mcp", operations: ["query-docs"],
+      resource: { sharing: "concurrent", maxConcurrency: 16 } },
+    connection: { kind: "native_remote_mcp", endpoint: `http://127.0.0.1:${address.port}/mcp`, ownership: "external" } });
+  expect((await gateway.serviceManager.ensure(sharedService, operation)).ok).toBe(true);
+  await control!.stop();
+  control = await startGatewayControl({ gateway, stateRoot: join(root, "state"), machineId: "machine", configDigest: "a".repeat(64),
+    endpoint: `${await data.start()}/mcp`, workspaceRoot: root, services: [service, sharedService], machineSharedServiceIds: [sharedService.serviceId] });
+  const foreignRoot = join(root, "other-worktree");
+  await mkdir(foreignRoot);
+  const foreignOperation = { ...operation, scope: { ...operation.scope, repositoryId: "other-repository", workspaceRoot: foreignRoot } };
+  const foreignClient = client({ registrationId: "foreign-reviewer", idempotencyKey: "foreign-register", scope: foreignOperation.scope,
+    serviceIds: [sharedService.serviceId], allowedTools: ["query-docs"] });
+  return { foreignRoot, foreignOperation, foreignClient };
+}
+
+it("shares only host-approved machine services across worktrees while preserving repository tool isolation", async () => {
+  const { foreignOperation, foreignClient } = await enableSharedService();
+  const catalog = await rpc("catalog", { operation: foreignOperation });
+  expect(catalog.ok).toBe(true);
+  expect(catalog.value.observations.map((item: any) => item.serviceId)).toEqual([sharedService.serviceId]);
+  expect((await rpc("catalog", { operation })).value.observations).toHaveLength(2);
+  const registered = await rpc("register", { client: foreignClient });
+  expect(registered.ok).toBe(true);
+  const response = await fetch(control!.locator.endpoint, { method: "POST",
+    headers: { Authorization: `Bearer ${registered.value.token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: "docs-call", method: "tools/call",
+      params: { name: "query-docs", serviceId: sharedService.serviceId, arguments: {}, callId: "docs-call", idempotencyKey: "docs-call" } }) });
+  const result = await response.json() as any;
+  expect(response.ok).toBe(true);
+  expect(result.error).toBeUndefined();
+  expect(result.result.status).toBe("completed");
+  expect(result.result.output).toEqual([{ type: "text", text: "shared documentation" }]);
+  expect((await rpc("register", { client: client({ scope: foreignOperation.scope }) })).ok).toBe(false);
+  expect((await rpc("register", { client: { ...foreignClient, serviceIds: [sharedService.serviceId, service.serviceId] } })).ok).toBe(false);
+  expect((await rpc("register", { client: { ...foreignClient, allowedTools: ["query"] } })).ok).toBe(false);
+});
+
+it("keeps shared-service registrations, replacement and revocation scoped to each repository and session", async () => {
+  const { foreignOperation, foreignClient } = await enableSharedService();
+  const local = await rpc("register", { client: client() });
+  const foreign = await rpc("register", { client: foreignClient });
+  expect(local.ok).toBe(true); expect(foreign.ok).toBe(true);
+  expect((await rpc("list", { scope: operation.scope })).value.registrations.map((item: any) => item.registrationId)).toEqual(["reviewer-pane-1"]);
+  expect((await rpc("list", { scope: foreignOperation.scope })).value.registrations.map((item: any) => item.registrationId)).toEqual(["foreign-reviewer"]);
+  const anotherSession = { ...foreignOperation, scope: { ...foreignOperation.scope, sessionId: "other-session" } };
+  expect((await rpc("list", { scope: anotherSession.scope })).value.registrations).toEqual([]);
+  expect((await rpc("register", { client: { ...foreignClient, registrationId: "reviewer-pane-1" } })).ok).toBe(false);
+  expect((await rpc("acquire", { ...foreignOperation, registrationId: "reviewer-pane-1", serviceId: service.serviceId,
+    resourceKey: "gitnexus-fixture", ttlMs: 1000 })).ok).toBe(false);
+  expect((await rpc("acquire", { ...foreignOperation, registrationId: "foreign-reviewer", serviceId: service.serviceId,
+    resourceKey: "gitnexus-fixture", ttlMs: 1000 })).ok).toBe(false);
+  expect((await rpc("revoke", { registrationId: "foreign-reviewer", operation })).ok).toBe(false);
+  expect((await rpc("revoke", { registrationId: "foreign-reviewer", operation: anotherSession })).ok).toBe(false);
+  expect((await rpc("revoke", { registrationId: "foreign-reviewer", operation: foreignOperation })).ok).toBe(true);
+  expect(gateway.authenticateToken(foreign.value.token).ok).toBe(false);
+  expect(gateway.authenticateToken(local.value.token).ok).toBe(true);
+});
+
+it("rejects noncanonical and foreign-machine workspaces even when a service is shared", async () => {
+  const { foreignRoot, foreignOperation, foreignClient } = await enableSharedService();
+  const alias = join(root, "worktree-alias");
+  await symlink(foreignRoot, alias);
+  for (const scope of [
+    { ...foreignOperation.scope, workspaceRoot: alias },
+    { ...foreignOperation.scope, workspaceRoot: join(root, "missing") },
+    { ...foreignOperation.scope, machineId: "other-machine" }
+  ]) {
+    expect((await rpc("catalog", { operation: { ...foreignOperation, scope } })).ok).toBe(false);
+    expect((await rpc("register", { client: { ...foreignClient, scope } })).ok).toBe(false);
+  }
+});
+
+it("rejects unknown and repository-scoped services in the host machine-sharing grant", async () => {
+  await control!.stop();
+  const options = { gateway, stateRoot: join(root, "state"), machineId: "machine", configDigest: "a".repeat(64),
+    endpoint: control!.locator.endpoint, workspaceRoot: root, services: [service] };
+  await expect(startGatewayControl({ ...options, machineSharedServiceIds: ["missing"] })).rejects.toThrow(/machine|configured|service/i);
+  const repositoryService = { ...service, scope: { kind: "repository", machineId: "machine", repositoryId: "repo", workspaceRoot: root } };
+  await expect(startGatewayControl({ ...options, services: [repositoryService], machineSharedServiceIds: [service.serviceId] })).rejects.toThrow(/machine/i);
+  const otherMachineService = { ...service, scope: { kind: "machine", machineId: "other-machine" } };
+  await expect(startGatewayControl({ ...options, services: [otherMachineService], machineSharedServiceIds: [service.serviceId] })).rejects.toThrow(/machine/i);
 });

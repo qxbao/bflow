@@ -51,8 +51,10 @@ export interface GatewayControlOptions {
   readonly configDigest: string;
   /** Loopback Gateway MCP URL that role clients must be registered against. */
   readonly endpoint: string;
-  /** Session workspace this control accepts. When omitted, requests must name a canonical existing directory. */
+  /** Workspace for repository-bound services. When omitted, requests must name a canonical existing directory. */
   readonly workspaceRoot?: string;
+  /** Trusted host grants for services approved for sharing across repositories; empty by default. */
+  readonly machineSharedServiceIds?: readonly string[];
   readonly services: readonly MCPServiceDefinition[];
   /** Authenticated Runtime grants keyed by ephemeral Gateway registration. */
   readonly grantMap?: Map<string, readonly ResolvedToolGrant[]>;
@@ -98,6 +100,14 @@ export async function startGatewayControl(options: GatewayControlOptions): Promi
     services.set(parsed.serviceId, parsed);
   }
 
+  const machineSharedServiceIds = new Set(options.machineSharedServiceIds ?? []);
+  for (const serviceId of machineSharedServiceIds) {
+    const service = services.get(serviceId);
+    if (!service || service.scope.kind !== "machine" || service.scope.machineId !== options.machineId) {
+      throw new TypeError("Machine-shared services must be configured with this machine's scope");
+    }
+  }
+
   await ensurePrivateDirectory(options.stateRoot, uid);
   let socketDirectory = options.stateRoot;
   if (Buffer.byteLength(join(options.stateRoot, SOCKET_FILE)) >= MAX_SOCKET_PATH_BYTES) {
@@ -112,7 +122,7 @@ export async function startGatewayControl(options: GatewayControlOptions): Promi
     generation: randomBytes(16).toString("hex"), endpoint });
   const locatorPath = join(options.stateRoot, GATEWAY_CONTROL_LOCATOR_FILE);
   const service = new GatewayControlService({ gateway: options.gateway, machineId: options.machineId,
-    ...(options.workspaceRoot === undefined ? {} : { workspaceRoot: options.workspaceRoot }), endpoint, services,
+    ...(options.workspaceRoot === undefined ? {} : { workspaceRoot: options.workspaceRoot }), endpoint, services, machineSharedServiceIds,
     ...(options.grantMap ? { grantMap: options.grantMap } : {}), token: locator.token, generation: locator.generation });
 
   const sockets = new Set<Socket>();
@@ -173,6 +183,7 @@ interface ServiceSettings {
   readonly workspaceRoot?: string;
   readonly endpoint: string;
   readonly services: ReadonlyMap<string, MCPServiceDefinition>;
+  readonly machineSharedServiceIds: ReadonlySet<string>;
   readonly grantMap?: Map<string, readonly ResolvedToolGrant[]>;
   readonly token: string;
   readonly generation: string;
@@ -236,6 +247,7 @@ class GatewayControlService {
     if (denied) return denied;
     const observations: MCPServiceObservation[] = [];
     for (const serviceId of this.settings.services.keys()) {
+      if (!this.serviceAllowed(serviceId, parsed.data.operation.scope)) continue;
       const inspected = await this.settings.gateway.serviceManager.inspect(serviceId, parsed.data.operation);
       if (!inspected.ok) return this.forward(inspected.error);
       const observation = MCPServiceObservationSchema.safeParse(inspected.value);
@@ -257,6 +269,7 @@ class GatewayControlService {
     for (const serviceId of client.serviceIds) {
       const service = this.settings.services.get(serviceId);
       if (!service) return failure("validation", "Requested service is not configured for this Gateway");
+      if (!this.serviceAllowed(serviceId, client.scope)) return failure("validation", "Requested service is bound to a different workspace");
       for (const tool of service.tool.operations) granted.add(tool);
     }
     if (client.allowedTools.some(tool => !granted.has(tool))) {
@@ -405,19 +418,23 @@ class GatewayControlService {
     return revoked.ok ? { ok: true, value: null } : this.forward(revoked.error);
   }
 
-  /** Only session scope from this control's machine and workspace is ever accepted. */
+  /** Foreign workspaces may use only the machine services explicitly granted by the trusted host. */
   private checkScope(scope: TrustScope): ControlReply | undefined {
     if (scope.kind !== "session") return failure("validation", "Gateway control requires session scope");
     if (scope.machineId !== this.settings.machineId) return failure("validation", "Operation belongs to a different machine");
     const bound = this.settings.workspaceRoot;
-    if (bound !== undefined) {
-      if (scope.workspaceRoot !== bound) {
-        return failure("validation", `The machine Gateway is bound to workspace '${bound}' but this operation targets '${scope.workspaceRoot}'. Run 'bflow setup --dir ${scope.workspaceRoot}' to rebind the Gateway to this repository, then retry.`);
-      }
-      return undefined;
+    if (bound !== undefined && scope.workspaceRoot !== bound && this.settings.machineSharedServiceIds.size === 0) {
+      return failure("validation", `The machine Gateway is bound to workspace '${bound}' but this operation targets '${scope.workspaceRoot}'. Run 'bflow setup --dir ${scope.workspaceRoot}' to rebind the Gateway to this repository, then retry.`);
     }
+    if (scope.workspaceRoot === bound) return undefined;
     if (!isCanonicalDirectory(scope.workspaceRoot)) return failure("validation", "Operation belongs to a non-canonical workspace");
     return undefined;
+  }
+
+  private serviceAllowed(serviceId: string, scope: TrustScope): boolean {
+    return this.settings.workspaceRoot === undefined ||
+      (scope.kind !== "machine" && scope.workspaceRoot === this.settings.workspaceRoot) ||
+      this.settings.machineSharedServiceIds.has(serviceId);
   }
 
   private ownedBy(registrationId: string, scope: TrustScope):

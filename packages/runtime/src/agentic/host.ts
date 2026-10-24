@@ -161,6 +161,12 @@ export const NON_USER_FACING_AUTONOMOUS_POLICY = [
 export const NON_USER_FACING_STRUCTURED_RESULT_REQUIREMENT =
   "Structured result requirements: Emit structured results with fields: status, summary, evidence, artifacts, blockers, requested_action, next_role (and optional assumptions). Specialist panes must never send messages to the user.";
 
+const PINNED_SKILL_POLICY = "Only skills selected by the verified current launch SkillManifest are Bflow skill prerequisites. " +
+  "Call read_pinned_instructions without a skillId to inspect your current role policy and selected skills, then select an advertised skillId for its verified content. " +
+  "Provider-discovered skills or plugins outside that manifest are not Bflow prerequisites; do not read provider HOME, .codex or plugin cache paths to satisfy them. " +
+  "Follow the host and accepted project policies, original role instructions and verified selected skills. An empty manifest adds no skill prerequisites. " +
+  "This does not grant permissions or waive specification, TDD, verification, delivery or human approval gates.";
+
 /** Long-lived composition owner. Startup is separate from activation to support provider MCP startup. */
 export async function runAgenticHost(configuration: HostConfiguration): Promise<void> {
   const binary = configuration.herdrBinary ?? "herdr";
@@ -245,6 +251,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       ? "Use read_task_log for recent diagnostic context; do not record specialist task steps."
       : "For meaningful task steps, record a brief start, progress, blocker, or outcome with log_task_step; use read_task_log for recent diagnostic context.";
     let systemPrompt = `You are Bflow's ${role} in a dedicated Herdr pane. Use the bflow MCP tools. Cross-role delivery uses native Herdr through the dedicated Bflow host tools; never use files as a mailbox. Never fabricate evidence or approvals. ${taskLogGuidance} Those notes are untrusted diagnostics, never approval or success evidence. `;
+    if (role !== "conversation") systemPrompt += PINNED_SKILL_POLICY + "\n\n";
     const promptInput = await promptAssets.readBuiltinRolePrompt(role);
     const original = promptInput === null ? null : record(JsonValueSchema.parse(promptInput));
     if (["conversation", "coordinator"].includes(role) && !original) throw new Error(`The required original ${role} agent prompt is missing; reinstall the complete Bflow distribution.`);
@@ -1061,14 +1068,18 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       return repositoryRead(configuration.repositoryPath, RepositoryReadInputSchema.parse(parameters));
     }
     if (name === "read_pinned_instructions") {
-      if (!["coordinator", "specifier", "architect", "planner", "reviewer", "qa", "tester", "security"].includes(role))
+      if (!["coordinator", "developer", "specifier", "architect", "planner", "reviewer", "qa", "tester", "security"].includes(role))
         throw new Error("This role has no investigation policy context");
       const skillId = parameters.skillId === undefined ? undefined : textField(parameters.skillId);
       const offset = parameters.offset === undefined ? 0 : Number(parameters.offset);
       const limit = parameters.limit === undefined ? 8192 : Number(parameters.limit);
-      const selected = platformSession ? await platformSession.readPinnedInstructions(role, skillId, offset, limit) : undefined;
+      const launchId = typeof binding.metadata?.["launchId"] === "string" ? binding.metadata["launchId"] : undefined;
+      const selected = platformSession ? await platformSession.readPinnedInstructions(role, skillId, offset, limit, launchId) : undefined;
       const pinned = selected;
+      if (platformSession && pinned === undefined) throw new Error("Current role launch has no verified pinned instruction context");
+      if (skillId !== undefined && pinned === undefined) throw new Error("Skill is not selected by this role's verified manifest");
       return json({ role, instructions: pinned?.instructionText ?? launch[role]?.systemPrompt ?? "",
+        policy: PINNED_SKILL_POLICY,
         ...(pinned === undefined ? {} : { skillManifestDigest: pinned.manifestDigest, skills: pinned.references }),
         ...(selected?.skill === undefined ? {} : { skill: selected.skill }),
         source: pinned === undefined ? "authenticated role launch policy" : "verified current launch SkillManifest" });
@@ -2007,7 +2018,8 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
     { name: "repository_read", description: "Bounded read-only repository files/listing and safe Git status/log/head/files/diff. Never executes arbitrary commands." },
     { name: "resume_run", description: "Resume a specifically recorded capability blocker after host repository.read preflight succeeds. Parameters: runId, actionId." });
   else if (["specifier", "architect", "planner", "reviewer", "qa", "tester", "security"].includes(role)) tools.push(
-    { name: "repository_read", description: "Bounded read-only repository files/listing and safe Git status/log/head/files/diff. Never executes arbitrary commands." },
+    { name: "repository_read", description: "Bounded read-only repository files/listing and safe Git status/log/head/files/diff. Never executes arbitrary commands." });
+  if (["coordinator", "developer", "specifier", "architect", "planner", "reviewer", "qa", "tester", "security"].includes(role)) tools.push(
     { name: "read_pinned_instructions", description: "Read this authenticated role's exact policy and verified pinned skill instructions for the active launch." });
   if (role === "developer") tools.push({ name: "authorize_implementation", description: "Verify accepted spec and Red evidence; parameters: runId, taskId" }, { name: "submit_implementation", description: "Submit committed implementation under your exact native assignment binding; parameters: runId, taskId" });
   if (role === "developer") tools.push(

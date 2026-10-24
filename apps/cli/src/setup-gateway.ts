@@ -523,7 +523,17 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
     const { scope } = configured.operation;
     if (scope.kind !== "session") throw new Error("Gateway control requires a session-scoped Gateway operation");
     control = await startGatewayControl({ gateway, stateRoot: configured.paths.state, machineId: scope.machineId,
-      configDigest: configured.definitionDigest, endpoint, workspaceRoot: scope.workspaceRoot, services: configured.services, grantMap: runtimeGrants });
+      configDigest: configured.definitionDigest, endpoint, workspaceRoot: scope.workspaceRoot, services: configured.services, grantMap: runtimeGrants,
+      // Only the exact approved stateless hosted service crosses workspace boundaries. Local indexes,
+      // browser profiles and memory backends keep the workspace selected by setup.
+      machineSharedServiceIds: configured.services.filter(service =>
+        configured.generatedIds.includes(service.serviceId) && service.scope.kind === "machine" &&
+        service.scope.machineId === scope.machineId && service.tool.toolId === "context7" &&
+        service.serviceId === tools.CONTEXT7_SERVICE_ID && service.connection.kind === "native_remote_mcp" &&
+        service.connection.endpoint === tools.CONTEXT7_MCP_ENDPOINT && service.connection.ownership === "external" &&
+        service.tool.resource.sharing === "concurrent" &&
+        service.tool.operations.every(operation => tools.CONTEXT7_TOOLS.includes(operation)) &&
+        service.tool.operations.length === tools.CONTEXT7_TOOLS.length).map(service => service.serviceId) });
     if (readyServices.length) {
       const registrationId = `setup-probe-${randomUUID()}`;
       const registration = MCPClientRegistrationSchema.parse({ schemaVersion: 3, registrationId, provider: "codex", role: "reviewer",

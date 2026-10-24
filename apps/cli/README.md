@@ -57,6 +57,14 @@ riêng. Các workflow role kết nối tới Gateway chạy nền qua bộ đị
 `gateway-control.json` trong thư mục state của Gateway. `bflow up` truyền bộ định vị đó
 cho host khi nó tồn tại; setup không thiết lập các kết nối role này.
 
+Context7 hosted do setup tạo dùng chung giữa các repository/worktree trên cùng máy:
+chuyển worktree rồi chạy `down`/`up` không cần rebind Gateway. Control endpoint chỉ
+chia sẻ đúng dịch vụ Context7 đã được setup duyệt, vẫn kiểm tra machine, workspace
+canonical, token và quyền từng role/session. GitNexus, Chrome và các backend cục bộ
+vẫn giới hạn trong workspace đã setup; một repo khác cần setup riêng để sử dụng chúng.
+Gateway đang chạy từ bản CLI cũ cần khởi động lại service do Bflow sở hữu sau khi build
+bản sửa; `up` không tự sửa cấu hình machine hoặc khởi động lại Gateway dùng chung.
+
 Chạy lại setup có thể thêm hoặc cập nhật cấu hình Gateway trong khi GitNexus reader của nó
 đang hoạt động, khi `status --json` xác nhận index hiện hành. Việc rebuild một index cũ
 vẫn yêu cầu quyền truy cập storage độc quyền; setup giữ nguyên lock reader hoặc writer đang bận.

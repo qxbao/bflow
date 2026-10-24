@@ -11,7 +11,7 @@ import { callHost } from "../../src/agentic/host-protocol.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
-async function hostFixture() {
+async function hostFixture(includeDeveloper = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-chat-rpc-")));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   execFileSync("git", ["init", "-b", "main"], { cwd: root, stdio: "pipe" });
@@ -27,7 +27,7 @@ async function hostFixture() {
     'if(rest[0]==="--version") console.log("herdr test-fixture");',
     'else if(rest[0]==="api") console.log("protocol: 22\\nschema_version: 1");',
     'else if(rest[0]==="plugin" && rest[1]==="config-dir") console.log(join(root,"plugin"));',
-    'else if(rest[0]==="agent" && rest[1]==="get") { const conversation=rest[2]==="pane-chat"; console.log(JSON.stringify({result:{agent:{name:conversation?"chat":"coordinator",pane_id:rest[2],workspace_id:"workspace",tab_id:"tab",agent_status:"working",agent_session:{source:"herdr:claude",kind:"id",value:conversation?"native-chat":"native-coordinator"}}}})); }',
+    'else if(rest[0]==="agent" && rest[1]==="get") { const conversation=rest[2]==="pane-chat", developer=rest[2]==="pane-developer"; console.log(JSON.stringify({result:{agent:{name:conversation?"chat":developer?"developer":"coordinator",pane_id:rest[2],workspace_id:"workspace",tab_id:"tab",agent_status:"working",agent_session:{source:"herdr:claude",kind:"id",value:conversation?"native-chat":developer?"native-developer":"native-coordinator"}}}})); }',
     'else if(rest[0]==="pane" && rest[1]==="read") console.log("coordinator waiting for architect reply token=sk-ant-abcdefghijklmnopqrstuvwxyz0123456789");',
     'else if(rest[0]==="pane") process.exitCode=1;',
     'else console.log(JSON.stringify({running:false,socket:join(root,"herdr.sock")}));'
@@ -42,23 +42,38 @@ async function hostFixture() {
   const manifest = SessionManifestSchema.parse({ schemaVersion: 2, sessionId, workspaceRoot: root, projectName: "chat-rpc",
     herdrWorkspaceId: "workspace", herdrTabId: "tab", status: "up", conversationSessionId: "chat-session", activeRunIds: [],
     attachTarget: { role: "conversation", paneId: "pane-chat" }, createdAt: at, updatedAt: at,
-    panes: ["conversation", "coordinator"].map(role => ({ schemaVersion: 2, bindingId: `binding-${role}`, sessionId, role,
-      agentId: role === "conversation" ? "chat" : "coordinator", paneId: role === "conversation" ? "pane-chat" : "pane-coordinator",
+    panes: ["conversation", "coordinator", ...(includeDeveloper ? ["developer"] : [])].map(role => ({ schemaVersion: 2, bindingId: `binding-${role}`, sessionId, role,
+      agentId: role === "conversation" ? "chat" : role, paneId: role === "conversation" ? "pane-chat" : `pane-${role}`,
       workspaceId: "workspace", tabId: "tab", provider: "claude", agentKind: "claude", cwd: root, permanent: true, readOnlyWorkspace: true,
       isolationMode: "dedicated_pane", transportState: "idle", boundAt: at,
-      session: { source: "herdr:claude", kind: "id", value: role === "conversation" ? "native-chat" : "native-coordinator" } })) });
+      session: { source: "herdr:claude", kind: "id", value: role === "conversation" ? "native-chat" : `native-${role}` } })) });
   const manifestDirectory = join(root, ".bflow/state/panes"); await mkdir(manifestDirectory, { recursive: true });
   await writeFile(join(manifestDirectory, `${sessionId}.manifest.json`), JSON.stringify(manifest));
-  for (const [role, config] of [["conversation", chat], ["coordinator", coordinator]] as const) {
+  const developer = includeDeveloper ? JSON.parse(await readFile(join(hostDirectory, "developer.json"), "utf8")) : undefined;
+  for (const [role, config] of [["conversation", chat], ["coordinator", coordinator], ...(developer ? [["developer", developer]] : [])] as const) {
     const binding = manifest.panes.find(pane => pane.role === role)!;
     await callHost(config.socketPath, config.token, "provider_started", { paneId: binding.paneId, nativeSessionId: binding.session!.value });
     await callHost(config.socketPath, config.token, "native_session", { paneId: binding.paneId, sessionId: binding.session!.value });
   }
   expect(await controller.activate(manifest)).toEqual({ ok: true, value: undefined });
-  return { root, sessionId, hostDirectory, launches, chat, coordinator, at };
+  return { root, sessionId, hostDirectory, launches, chat, coordinator, developer, at };
 }
 
 describe.skipIf(process.platform !== "linux")("Native role schemas and Conversation through the real host RPC", () => {
+  it("serves Developer policy through authenticated MCP while refusing another role's pane", async () => {
+    const f = await hostFixture(true), developer = f.developer!;
+    const read = (paneId: string) => callHost(developer.socketPath, developer.token, "role_call", {
+      paneId, name: "read_pinned_instructions", arguments: {} });
+    const result = await read("pane-developer") as { role: string; instructions: string; source: string };
+    expect(result).toMatchObject({ role: "developer", source: "authenticated role launch policy" });
+    expect(result.instructions).toContain("read_pinned_instructions");
+    expect(result.instructions).toContain("Only skills selected by the verified current launch SkillManifest");
+    await expect(callHost(developer.socketPath, developer.token, "role_call", {
+      paneId: "pane-developer", name: "read_pinned_instructions", arguments: { skillId: "using-superpowers" }
+    })).rejects.toThrow("not selected");
+    await expect(read("pane-coordinator")).rejects.toThrow();
+  });
+
   it("rejects malformed native envelopes before intent, accepts v2 assessment, and never repeats uncertain delivery", async () => {
     const { root, sessionId, hostDirectory, launches, coordinator } = await hostFixture();
     expect(launches.roleLaunch.architect!.systemPrompt).toContain('"artifact_references":[]');

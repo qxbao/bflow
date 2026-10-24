@@ -9,6 +9,21 @@ const input = (role: "architect" | "coordinator", name: string) =>
   availableTools(role).find(tool => tool.name === name)!.inputSchema as any;
 
 describe("native role tool schema guidance", () => {
+  it("exposes pinned role instructions to Coordinator and Developer without granting repository or provider-home access", () => {
+    for (const provider of ["agy", "claude", "codex"] as const) {
+      for (const role of ["coordinator", "developer"] as const) {
+        const tools = availableTools(role, provider);
+        const read = tools.find(tool => tool.name === "read_pinned_instructions");
+        expect(read, `${provider}/${role} must be able to inspect its pinned instructions`).toBeDefined();
+        expect(read!.inputSchema).toMatchObject({ additionalProperties: false, required: [],
+          properties: { skillId: { type: "string", minLength: 1 } } });
+        expect(read!.inputSchema.properties).not.toHaveProperty("path");
+      }
+      expect(availableTools("developer", provider).some(tool => tool.name === "repository_read")).toBe(false);
+      expect(availableTools("conversation", provider).some(tool => tool.name === "read_pinned_instructions")).toBe(false);
+    }
+  });
+
   it("gives only Developers bounded workspace file tools with explicit replacement preconditions", () => {
     for (const provider of ["agy", "claude", "codex"] as const) {
       const tools = availableTools("developer", provider);
