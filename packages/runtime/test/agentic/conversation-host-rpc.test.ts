@@ -59,7 +59,7 @@ async function hostFixture(includeDeveloper = false) {
   return { root, sessionId, hostDirectory, launches, chat, coordinator, developer, at };
 }
 
-describe.skipIf(process.platform !== "linux")("Native role schemas and Conversation through the real host RPC", () => {
+describe.skipIf(process.platform === "win32")("Native role schemas and Conversation through the real host RPC", () => {
   it("serves Developer policy through authenticated MCP while refusing another role's pane", async () => {
     const f = await hostFixture(true), developer = f.developer!;
     const read = (paneId: string) => callHost(developer.socketPath, developer.token, "role_call", {

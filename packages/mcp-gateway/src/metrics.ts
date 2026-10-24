@@ -1,16 +1,24 @@
 import * as fs from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { GatewayMetricsSnapshot, ServiceMetricsSnapshot, UpstreamHttpEvent } from "./types.js";
 import { UPSTREAM_HTTP_EVENTS } from "./types.js";
 
 /**
- * Reads Resident Set Size (RSS) in bytes for a Linux process using /proc/<pid>/status or /proc/<pid>/statm.
- * Returns 0 if process does not exist or /proc is not available.
+ * Legacy exported name retained for compatibility. Linux uses procfs; macOS uses bounded system ps.
+ * Returns 0 when a measurement is unavailable, never a fabricated RSS estimate.
  */
 export async function readLinuxProcessRssBytes(pid: number): Promise<number> {
-  if (pid <= 0 || !Number.isInteger(pid)) {
+  if (pid <= 0 || !Number.isSafeInteger(pid)) {
     return 0;
   }
   try {
+    if (process.platform === "darwin") {
+      const { stdout } = await promisify(execFile)("/bin/ps", ["-o", "rss=", "-p", String(pid)],
+        { timeout: 1000, maxBuffer: 1024, env: { PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C" } });
+      const kib = /^\s*\d+\s*$/.test(stdout) ? Number(stdout.trim()) : NaN;
+      return Number.isSafeInteger(kib * 1024) ? kib * 1024 : 0;
+    }
     const status = await fs.promises.readFile(`/proc/${pid}/status`, "utf8");
     const match = status.match(/VmRSS:\s+(\d+)\s+kB/i);
     if (match && match[1]) {

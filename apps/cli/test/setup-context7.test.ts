@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, describe } from "vitest";
 import { defaultMachineConfig, detectPlatform, defaultHostEnvironment, SetupStateStore, digest,
@@ -13,7 +13,7 @@ let runtime: Awaited<ReturnType<typeof startSetupGatewayRuntime>> | undefined;
 let restore: (() => void) | undefined;
 // A short root keeps the control socket inside the state directory. Beyond 100 bytes the Gateway falls back to one
 // shared /tmp socket, which concurrent test files (and macOS's long temporary paths) would otherwise contend for.
-beforeEach(async () => { root = await mkdtemp(join("/tmp", "bflow-c7-")); });
+beforeEach(async () => { root = await realpath(await mkdtemp(join("/tmp", "bflow-c7-"))); });
 afterEach(async () => { await runtime?.stop(); runtime = undefined; restore?.(); restore = undefined; await rm(root, { recursive: true, force: true }); });
 
 /** Stands in for the hosted endpoint: only requests to mcp.context7.com are answered; everything else reaches the real fetch. */

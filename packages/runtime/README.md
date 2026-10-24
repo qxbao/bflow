@@ -138,10 +138,30 @@ có thể cần truy vấn lại bằng tool với giới hạn nhỏ; native đ
 Developer có `read_workspace_file` và `write_workspace_file` để thao tác UTF-8
 trong ownership của task dưới lease/fencing và TDD hiện tại. Ghi đè cần SHA-256 đã
 đọc; tạo file cần `expectedSha256: null`, parent đã tồn tại. Giới hạn 128 KiB và
-Linux descriptor-relative traversal từ chối symlink, hardlink, special file và
+descriptor-relative traversal trên Linux và macOS từ chối symlink, hardlink, special file và
 workspace read-only. Không hỗ trợ tạo thư mục, ghi binary, crash-atomic replacement
 hoặc cô lập process cùng UID thù địch. Các test cục bộ không chứng minh Developer
 Agy thực hiện được toàn bộ SDLC trên provider thật.
+
+Review bổ sung cho macOS: `forbiddenPaths` và control paths dùng so sánh Unicode case mappings
+bao gồm ſ/s, ß/ss và ligature ﬂ/fl, không chỉ lowercase. File test đã có phải được nhận diện
+bằng cùng device/inode (bigint) trước khi cấp quyền sửa qua alias; phép so sánh deny bảo thủ
+không tự cấp quyền TDD. Native edit cũng từ chối binding read-only. Cache helper bị xóa được
+biên dịch lại trước thao tác; mọi lỗi chuẩn bị được loại khỏi cache sau khi trả lỗi, với tối đa
+một lần sửa cache thiếu trong một request. Không replay một thao tác đã gọi helper. Xem
+[review sau bàn giao](../../docs/acceptance/2026-10-24-macos-portability-review.md).
+
+Trên macOS, Runtime biên dịch helper C đi kèm bằng `/usr/bin/clang` của Apple Command
+Line Tools trong thư mục tạm riêng mode 0700; không tải dependency, không dùng shell
+hay thay đổi provider settings. Source nằm trong `workspace-file-darwin-source.ts`,
+được mang theo bản build TypeScript, không phụ thuộc ABI addon Node. Helper dùng
+`openat`/`O_NOFOLLOW` cho từng component, `F_GETPATH` để phát hiện directory bị dời,
+và descriptor riêng cho leaf; SHA-256 dùng CommonCrypto của macOS. Binary được giữ
+riêng cho process và dọn khi process thoát bình thường; thư mục còn sau crash không
+được tái sử dụng. `prepare` thử tạo/đọc/thay file thực trước launch; Developer dispatch
+thử lại capability trước khi giao việc. Thiếu compiler chặn startup với hướng dẫn
+`xcode-select --install`. Không suy diễn rằng `workspace_status` thành công là bằng
+chứng thao tác file đã hoạt động. Xem [báo cáo macOS](../../docs/acceptance/2026-10-24-macos-portability.md).
 
 Spike chỉ đọc đã được kiểm chứng với Codex Conversation và Agy Coordinator/Architect:
 giao việc thực tế, đọc nguồn qua MCP, signed reply được Runtime áp dụng đúng
@@ -466,7 +486,7 @@ không renew/resend request đã fence. QA mới phải chạy test tại commit
 như cũ. Role, command và test evidence không được nới quyền bởi replacement.
 
 Journal P19 riêng tư nằm dưới `<selected-state>/agentic/journal`. Nó
-dùng tuần tự hóa trong cùng process cộng với `flock` của Linux, fsync file, rename nguyên tử và
+dùng tuần tự hóa trong cùng process cộng với `flock` trên Linux/macOS, fsync file, rename nguyên tử và
 fsync thư mục. Nó bị ràng buộc với repository và từ chối state hỏng/không được hỗ trợ.
 Nó không phải kênh giao tiếp ArtifactStore. Mọi việc giao agent thực tế đều dùng
 Herdr; journal lưu trạng thái scheduling/outbox/inbox và receipt.
@@ -752,8 +772,10 @@ script, runner configuration, imported Gradle/MSBuild definitions and helper blo
 revision; selected test files freeze after independent Red. Structured leaf results,
 assertion/error discrimination and independent Quality Gates remain mandatory.
 
-Linux Bubblewrap is discovered on PATH and actually probed. `up` exposes structured
-sandbox unavailability; measurement never falls back to host execution. External
+Linux Bubblewrap is discovered on PATH and actually probed. macOS uses deny-default
+Seatbelt and probes both a system binary and the actual Node runtime. When configured
+or detected checks require verification, `prepare` refuses an unavailable sandbox before
+launching roles; measurement never falls back to host execution. External
 toolchains/caches mount narrowly and read-only, without whole homes or credentials.
 Only public integrity-pinned npm lock v2/v3 warming is implemented, in a separate
 no-script network sandbox with capability-probed slirp4netns egress, disabled host loopback/DNS proxy and an owned writable cache; measurement
@@ -922,7 +944,11 @@ acceptance.
 Giới hạn: kế thừa environment của hook, mở rộng header `${VAR}` của Claude và `bearer_token_env_var` của Codex
 chỉ được xác minh bằng các hook spawn cục bộ và config đã render, không phải provider hay Herdr live.
 
-Legacy JS and owner commands also have a deny-default macOS Seatbelt backend (see the runner architecture document). Native polyglot adapter mounts/reports and dependency warming remain Linux-only; macOS was not measured on this integration host.
+Legacy JS and owner commands also have a deny-default macOS Seatbelt backend (see the runner architecture document).
+Real macOS measurements, adversarial sandbox checks and local Runtime tests are recorded in
+[the macOS report](../../docs/acceptance/2026-10-24-macos-portability.md). Native polyglot adapter
+mounts/reports and automatic dependency warming remain Linux-only; install Node dependencies
+in the disposable repository before starting verification on macOS.
 
 The polyglot measurement fixtures require both an installed toolchain and the pinned
 fixture dependencies in its selected offline cache. Tests inventory Maven/Gradle/NuGet

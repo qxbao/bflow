@@ -57,7 +57,9 @@ Intentional changes from the source:
   by a small in-script Python selector and Git Bash UTF-8 setup. No unrelated
   runtime module is bundled. Bash, Python 3.11+ (for `tomllib`), and curl or wget
   for Codex LB health probes are required for the corresponding features. The
-  selector checks for `tomllib`, then tries the next available Python executable.
+  selector checks for `tomllib`, then tries every Python executable found on the caller's
+  existing PATH. This includes compatible interpreters behind Apple's older system Python;
+  paths containing spaces remain single arguments. It adds no global search locations.
   Python 3.11+ is required for profile initialization and startup because native
   capability synchronization is part of profile readiness. If no supported
   Python is available, synchronization fails visibly and the profile is not

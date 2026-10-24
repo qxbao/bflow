@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -2332,7 +2332,7 @@ describe("RolePaneManager Verification Suite", () => {
     it("automatically replaces and restarts a host-launched permanent Agy pane that idles without a native session hook", async () => {
       const { readBuiltinRolePrompt } = await import("../src/role-prompts.js");
       const { mkdir, writeFile } = await import("node:fs/promises");
-      const directory = await mkdtemp(join(tmpdir(), "bflow-agy-recovery-"));
+      const directory = await realpath(await mkdtemp(join(tmpdir(), "bflow-agy-recovery-")));
       try {
         const chat = await readBuiltinRolePrompt("chat"), coordinator = await readBuiltinRolePrompt("coordinator");
         if (!chat || !coordinator) throw new Error("original role prompts are missing");

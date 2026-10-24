@@ -93,6 +93,11 @@ Triển khai `MCPServiceManager` để giám sát các backend tool driver:
 - **Cửa sổ Idle Sweep Grace (`idleTimeoutMs`)**: Giữ backend ở trạng thái ấm trong các khoảng nghỉ ngắn giữa task, kết nối lại ngay cho agent quay lại, và dừng backend khi idle timeout hết hạn (`stopped_idle`).
 - **Hạn ngạch tiến trình và bộ nhớ**: Thực thi số tiến trình tối đa (`maxProcessCount`) và giới hạn tổng RSS bộ nhớ (`maxTotalMemoryBytes`), tự động loại bỏ các backend idle chưa được cấp phát khi hệ thống chịu áp lực.
 
+  macOS đo RSS của PID bằng `/bin/ps` có timeout thay cho đọc `/proc` hoặc dùng
+  ước lượng browser 50 MiB. Phép đo thất bại không được ghi thành sample thành công;
+  sampler giữ observation trước đó. Đây là số đo PID, chưa phải tổng RAM của cây
+  Chrome renderer. Test portability dùng Node child riêng, không phải Chrome live acceptance.
+
 ### 3. Dedicated Browser Runtime (`DedicatedBrowserRuntime`)
 Điều phối các session Chrome/Chromium headless cô lập cho agent:
 - **Cây Profile chuẩn OS**: Sinh các thư mục dữ liệu người dùng mang tính xác định, an toàn với filesystem, nằm ngoài repository và tách biệt khỏi profile Chrome cá nhân.

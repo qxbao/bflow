@@ -11,6 +11,7 @@ import { TestRunnerSource, resolveTaskCommands } from "./task-commands.js";
 import { isConflictResolverAssignment, type AgenticWorkflowRuntime } from "./runtime.js";
 import { digest, json, record, strings, textField } from "./journal.js";
 import type { JsonValue, Specification, TestStrategy } from "@bflow/contracts";
+import { darwinWorkspaceFile } from "./workspace-file-darwin.js";
 
 const execute = promisify(execFile);
 /** Rules every conflict resolver receives in assignment_context and workspace_status. */
@@ -23,6 +24,11 @@ export const CONFLICT_RESOLVER_RULES: readonly string[] = [
   "If you cannot resolve it, send task.status with status \"failed\" and the reason to coordinator (causation_id = assignment message_id)."
 ];
 const covers = (prefix: string, path: string) => prefix === path || path.startsWith(prefix + "/");
+// APFS aliases include full Unicode case mappings (ſ/s, ß/ss, ﬂ/fl), not only lowercase.
+// A second round also converges ẞ -> ß -> ss; preserve accents through canonical decomposition.
+const darwinPathKey = (path: string) => path.normalize("NFD").toUpperCase().toLowerCase().normalize("NFD")
+  .toUpperCase().toLowerCase().normalize("NFD");
+const workspacePathKey = (path: string) => process.platform === "darwin" ? darwinPathKey(path) : path;
 const safe = (path: string) => !isAbsolute(path) && !path.includes("\\") && !path.includes("\0") &&
   path.split("/").every(segment => segment !== "" && segment !== "." && segment !== "..");
 const FILE_BYTES = 128 * 1024;
@@ -79,8 +85,32 @@ export class HostDevelopment {
     return local.split(sep).join("/");
   }
   private scope(path: string, owned: string[], forbidden: string[]) {
-    if (!safe(path) || !owned.some(prefix => covers(prefix, path)) || [...forbidden, ".git", ".bflow"].some(prefix => covers(prefix, path)))
+    const comparison = workspacePathKey;
+    if (!safe(path) || !owned.some(prefix => covers(prefix, path)) || [...forbidden, ".git", ".bflow"].some(prefix => covers(comparison(prefix), comparison(path))))
       throw new Error(`Path '${path}' is outside the accepted task ownership`);
+  }
+  /** Deny comparisons may be conservative; permission to edit a test before Red must be exact.
+   * Non-literal aliases count only when both existing names identify the same single-link regular file.
+   * This avoids granting implementation writes for distinct names on case-sensitive volumes or e.g. i/ı. */
+  private async isTestPath(cwd: string, path: string, tests: string[]): Promise<boolean> {
+    if (tests.includes(path)) return true;
+    if (process.platform !== "darwin") return false;
+    const aliases = tests.filter(test => workspacePathKey(test) === workspacePathKey(path));
+    if (!aliases.length) return false;
+    try {
+      const current = await lstat(resolve(cwd, path), { bigint: true });
+      if (!current.isFile() || current.nlink !== 1n) throw new Error("Developer test aliases require a regular file with no hardlinks");
+      for (const candidate of aliases) {
+        try {
+          const test = await lstat(resolve(cwd, candidate), { bigint: true });
+          if (test.isFile() && test.nlink === 1n && test.dev === current.dev && test.ino === current.ino) return true;
+        } catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error; }
+      }
+      return false;
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return false;
+      throw error;
+    }
   }
   /** The current resolver assignment of this pane, or undefined when the pane holds an ordinary Core task (or none). */
   private async resolverIdentity(binding: PaneBinding) {
@@ -110,6 +140,7 @@ export class HostDevelopment {
   }
   async authorizeFileEdit(binding: PaneBinding, input: unknown): Promise<void> {
     const context = await this.identity(binding, {}), hook = record(input), toolInput = record(hook.tool_input);
+    if (context.binding.readOnlyWorkspace) throw new Error("Developer workspace is read-only");
     if (!["Edit", "Write"].includes(String(hook.tool_name))) throw new Error("Only scoped file-edit tools are supported");
     const path = await this.relativePath(context.cwd, textField(toolInput.file_path));
     if (context.resolver) {
@@ -123,7 +154,7 @@ export class HostDevelopment {
       this.scope(path, strings(record(definition.metadata).ownedPaths), strings(record(definition.metadata).forbiddenPaths ?? []));
       const strategy = task.spec.strategy;
       const tests = this.commandsFor(task, strings(record(definition.metadata).ownedPaths)).flatMap(command => [...command.testPaths, ...Object.keys(command.definitionBlobs ?? {})]);
-      const isTest = tests.some(test => test === path);
+      const isTest = await this.isTestPath(context.cwd, path, tests);
       const evidence = strategy.metadata?.tddEvidence;
       if (strategy.tddDecision.mode === "required" && Array.isArray(evidence) && evidence.length && isTest)
         throw new Error("Red test files are frozen after independent Red measurement");
@@ -136,7 +167,7 @@ export class HostDevelopment {
     const context = await this.identity(binding, input), path = input.path;
     if (writing && context.binding.readOnlyWorkspace) throw new Error("Developer workspace is read-only");
     // Reject lexical escapes before normalization, including nested repository control directories.
-    if (!safe(path) || path.split("/").length > 64 || path.split("/").some(part => [".git", ".bflow"].includes(part)))
+    if (!safe(path) || path.split("/").length > 64 || path.split("/").some(part => [".git", ".bflow"].includes(process.platform === "darwin" ? darwinPathKey(part) : part.toLowerCase())))
       throw new Error("Unsafe Developer workspace file path");
     if (context.resolver) return this.runtime().withConflictResolverWorkspace(context.binding, context.runId, context.taskId, async resolution => {
       if (!resolution.conflictPaths.includes(path)) throw new Error(`Path '${path}' is not one of the conflicted files`);
@@ -148,7 +179,7 @@ export class HostDevelopment {
       if (writing) {
         const strategy = task.spec.strategy;
         const tests = this.commandsFor(task, owned).flatMap(command => [...command.testPaths, ...Object.keys(command.definitionBlobs ?? {})]);
-        const isTest = tests.includes(path), evidence = strategy.metadata?.tddEvidence;
+        const isTest = await this.isTestPath(context.cwd, path, tests), evidence = strategy.metadata?.tddEvidence;
         if (strategy.tddDecision.mode === "required" && isTest && Array.isArray(evidence) && evidence.length)
           throw new Error("Red test files are frozen after independent Red measurement");
         if (!(strategy.tddDecision.mode === "required" && isTest)) this.runtime().ports.policies.assertReadyToImplement(strategy);
@@ -197,7 +228,13 @@ export class HostDevelopment {
   /** Bounded UTF-8 source access is allowed before Red; missing leaf files return exists:false. */
   async readWorkspaceFile(binding: PaneBinding, input: unknown): Promise<JsonValue> {
     const args = workspaceReadSchema.parse(input);
-    return this.withWorkspaceFile(binding, args, false, (cwd, path) => this.withFileParent(cwd, path, async file => {
+    return this.withWorkspaceFile(binding, args, false, async (cwd, path) => {
+      if (process.platform === "darwin") {
+        const bytes = await darwinWorkspaceFile(cwd, path);
+        return bytes === undefined ? json({ path, exists: false, content: null, sha256: null, bytes: 0 })
+          : json({ path, exists: true, content: utf8(bytes), sha256: sha256(bytes), bytes: bytes.length });
+      }
+      return this.withFileParent(cwd, path, async file => {
       try { await this.assertRegularPath(file); }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return json({ path, exists: false, content: null, sha256: null, bytes: 0 });
@@ -206,14 +243,20 @@ export class HostDevelopment {
       const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       try { const value = await this.boundedFile(handle); return json({ path, exists: true, content: value.content, sha256: value.sha256, bytes: value.bytes.length }); }
       finally { await handle.close(); }
-    }));
+      });
+    });
   }
   /** Digest-checked replacement or exclusive creation, never a shell command, patch evaluator or permission grant.
    * In-place replacement preserves mode and pins the original inode. It is not crash-atomic, nor hostile same-UID isolation. */
   async writeWorkspaceFile(binding: PaneBinding, input: unknown): Promise<JsonValue> {
     const args = workspaceWriteSchema.parse(input), bytes = Buffer.from(args.content, "utf8");
     if (bytes.length > FILE_BYTES || utf8(bytes) !== args.content) throw new Error("Developer content must be valid UTF-8 within 128 KiB");
-    return this.withWorkspaceFile(binding, args, true, (cwd, path) => this.withFileParent(cwd, path, async file => {
+    return this.withWorkspaceFile(binding, args, true, async (cwd, path) => {
+      if (process.platform === "darwin") {
+        await darwinWorkspaceFile(cwd, path, { bytes, expectedSha256: args.expectedSha256 });
+        return json({ path, written: true, created: args.expectedSha256 === null, bytes: bytes.length, sha256: sha256(bytes) });
+      }
+      return this.withFileParent(cwd, path, async file => {
       const creating = args.expectedSha256 === null;
       if (!creating) await this.assertRegularPath(file);
       const handle = await open(file, constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK |
@@ -233,7 +276,8 @@ export class HostDevelopment {
         await handle.sync();
         return json({ path, written: true, created: creating, bytes: bytes.length, sha256: sha256(bytes) });
       } finally { await handle.close(); }
-    }));
+      });
+    });
   }
   async status(binding: PaneBinding, input: unknown) {
     const context = await this.identity(binding, input);
@@ -327,9 +371,10 @@ export class HostDevelopment {
       const tests = this.commandsFor(task, owned).flatMap(command => [...command.testPaths, ...Object.keys(command.definitionBlobs ?? {})]);
       if (task.spec.strategy.tddDecision.mode === "required") {
         const evidence = task.spec.strategy.metadata?.tddEvidence;
-        if (Array.isArray(evidence) && evidence.length && paths.some(path => tests.includes(path)))
+        const testPaths = await Promise.all(paths.map(path => this.isTestPath(context.cwd, path, tests)));
+        if (Array.isArray(evidence) && evidence.length && testPaths.some(Boolean))
           throw new Error("Red test files are frozen after independent Red measurement");
-        if (!paths.every(path => tests.includes(path))) this.runtime().ports.policies.assertReadyToImplement(task.spec.strategy);
+        if (!testPaths.every(Boolean)) this.runtime().ports.policies.assertReadyToImplement(task.spec.strategy);
       } else this.runtime().ports.policies.assertReadyToImplement(task.spec.strategy);
       await this.git(context.cwd, ["add", "--all", "--", ...paths]);
       await this.git(context.cwd, ["commit", "-m", message]);

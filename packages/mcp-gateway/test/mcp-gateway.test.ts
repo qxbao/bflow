@@ -2453,7 +2453,7 @@ rl.on('line', (line) => {
   });
 
   it("keeps a real stdio call unknown after restart without persisting its input or replaying it", async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-ledger-live-"));
+    const tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-ledger-live-")));
     const scriptPath = path.join(tmpDir, "worker.cjs");
     const counterPath = path.join(tmpDir, "side-effects.txt");
     const ledgerPath = path.join(tmpDir, "gateway-calls.jsonl");

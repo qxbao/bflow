@@ -1,5 +1,5 @@
 import { createConnection } from "node:net";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile, realpath } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,7 +18,7 @@ let sharedService: any;
 let upstream: Server | undefined;
 let grantMap: Map<string, any>;
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "bflow-control-test-"));
+  root = await realpath(await mkdtemp(join(tmpdir(), "bflow-control-test-")));
   const module = await import(new URL("../../../packages/mcp-gateway/dist/index.js", import.meta.url).href);
   gateway = new module.BflowSharedMCPGateway();
   grantMap = new Map();

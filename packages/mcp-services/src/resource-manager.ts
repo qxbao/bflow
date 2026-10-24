@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { readDarwinProcessRssBytes } from "./process-memory.js";
 import {
   CURRENT_PLATFORM_SCHEMA_VERSION,
   type MCPServiceDefinition,
@@ -801,6 +802,9 @@ export class BackendResourceManager implements MCPServiceManager {
         } catch {
           // ignore error
         }
+      } else if (partition.pid && process.platform === "darwin") {
+        try { rss = await readDarwinProcessRssBytes(partition.pid); }
+        catch { /* A failed measurement is not a new successful sample. Retain the prior observation. */ }
       } else if (partition.pid && process.platform === "linux") {
         try {
           const content = await fs.promises.readFile(`/proc/${partition.pid}/status`, "utf8");

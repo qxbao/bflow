@@ -10,6 +10,13 @@ it("probes deny-default Seatbelt execution before reporting Darwin ready", async
   mocks.exec.mockImplementation((_binary, _args, _options, callback) => callback(null, "", ""));
   expect(await probeBehavioralSandbox()).toEqual({ status: "ready", executable: "/usr/bin/sandbox-exec", platform: "darwin" });
   expect(mocks.exec).toHaveBeenCalledWith("/usr/bin/sandbox-exec", expect.arrayContaining([expect.stringContaining("(deny default)"), "/usr/bin/true"]), expect.objectContaining({ timeout: 10000 }), expect.any(Function));
+  expect(mocks.exec).toHaveBeenCalledWith("/usr/bin/sandbox-exec", expect.arrayContaining([process.execPath, "--version"]), expect.objectContaining({ timeout: 10000 }), expect.any(Function));
+});
+it("refuses readiness when true runs but the actual Node runtime cannot execute under Seatbelt", async () => {
+  Object.defineProperty(process, "platform", { value: "darwin" });
+  mocks.exec.mockImplementation((_binary, args, _options, callback) => args.includes("--version")
+    ? callback(new Error("dyld: required library denied")) : callback(null, "", ""));
+  expect(await probeBehavioralSandbox()).toMatchObject({ status: "unsupported", code: "verification_sandbox_unavailable" });
 });
 it("fails closed when an installed Seatbelt launcher cannot enforce the probe", async () => {
   Object.defineProperty(process, "platform", { value: "darwin" });

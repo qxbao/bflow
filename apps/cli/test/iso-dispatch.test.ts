@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { main } from "../src/bin.js";
 import { runCli } from "../src/commands.js";
 import { runIsolator } from "../src/iso.js";
+import { testPython } from "../../../tests/helpers/python-runtime.js";
 
 let previousExitCode: number | undefined;
 beforeEach(() => { previousExitCode = process.exitCode; });
@@ -95,8 +96,11 @@ describe("bflow iso dispatch", () => {
       const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
       try {
         const command = `${quote(process.execPath)} ${quote(harness)} ${quote(engine)}`;
-        const result = spawnSync("/usr/bin/script", ["-qec", command, "/dev/null"], { encoding: "utf8", timeout: 15000 });
-        expect(result.status).toBe(0);
+        // BSD script requires its own stdin to be a terminal. Python's PTY supplies a real controlling
+        // terminal without assuming util-linux script's incompatible -qec flags or an interactive test runner.
+        const result = spawnSync(testPython, ["-c", "import os,pty,sys; status=pty.spawn(sys.argv[1:]); sys.exit(os.waitstatus_to_exitcode(status))",
+          "/bin/sh", "-c", command], { encoding: "utf8", timeout: 15000 });
+        expect(result.status, result.stdout + result.stderr).toBe(0);
         expect(result.stdout).toContain("controlling-tty");
       } finally {
         rmSync(dir, { recursive: true, force: true });

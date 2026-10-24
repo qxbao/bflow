@@ -35,6 +35,11 @@ provider đã activated-ready.
    Server HTTP/1.1 Node.js trên loopback phục vụ `POST /mcp`, `GET /mcp` (SSE keepalive), `DELETE /mcp`, `/health` và `/metrics`. Thực thi validate Host/Origin, xác thực bearer token và ngăn cách session.
 3. **`StdioToHttpBridge`** (`src/stdio-bridge.ts`):
    Bridge các lời gọi gateway tới các subprocess stdio MCP worker upstream qua JSON-RPC 2.0 phân tách bằng newline. Chuyển đổi và ánh xạ lại JSON-RPC ID thành `gw_<gen>_<seq>_<session>`, thực thi giới hạn kích thước frame (`maxFrameBytes`), backpressure ghi (`maxPendingWrites`), và chặn các prompt elicitation trái phép.
+
+   Worker RSS dùng procfs trên Linux và `/bin/ps -o rss= -p <pid>` trên macOS, với
+   argv cố định, environment tối thiểu và timeout. Tên export cũ `readLinuxProcessRssBytes`
+   được giữ tương thích; thiếu phép đo trả 0 theo API hiện tại, không chứng minh memory
+   limit đã được thực thi. Không suy diễn số đo của một PID thành toàn bộ process tree.
 4. **`DefaultMCPServiceManager`** (`src/service-manager.ts`):
    Quản lý vòng đời partition (`ensure`, `inspect`, `release`, `start`, `stop`, `restart`, `status`, `health`), bộ đếm generation, phục hồi crash, và `restartLimit` có giới hạn. Không bao giờ chấm dứt các external worker đã tiếp nhận khi release hoặc stop.
 5. **`MCPServiceRegistry`** (`src/registry.ts`):

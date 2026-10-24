@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile, mkdir, access } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile, mkdir, access, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,7 +37,7 @@ async function sandbox() {
   const candidateTmp = tmpdir();
   const realIsolatorRoot = process.env.HOME ? join(process.env.HOME, ".local", "share", "ai-isolator") : "";
   const isolatedTmp = realIsolatorRoot !== "" && candidateTmp.startsWith(realIsolatorRoot);
-  const root = await mkdtemp(join(isolatedTmp ? "/tmp" : candidateTmp, "bflow-iso-compat-"));
+  const root = await realpath(await mkdtemp(join(isolatedTmp ? "/tmp" : candidateTmp, "bflow-iso-compat-")));
   sandboxes.push(root);
   const home = join(root, "home");
   const bin = join(root, "bin");

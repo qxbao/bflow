@@ -1,3 +1,4 @@
+import { testPython } from "../../../../tests/helpers/python-runtime.js";
 import { createHash, randomBytes } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
@@ -1418,6 +1419,7 @@ rl.on("line", line => {
       cwd: baseDir,
       env: {
         HOME: realHome,
+        AI_ISOLATOR_PY: testPython,
         PATH: `${bin}:/usr/bin:/bin`,
         AI_ISOLATOR_HOME: stateRoot,
         AI_ISOLATOR_SHELL: "bash"
