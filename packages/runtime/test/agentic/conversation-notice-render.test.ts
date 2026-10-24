@@ -55,6 +55,60 @@ describe("isProviderInputEmpty on the current Claude layout", () => {
 });
 
 describe("Conversation notice rendering", () => {
+  it.each([
+    "SDD mismatch: policy requires lightweight SDD, not full SDD.",
+    "Xung đột SDD: giữ lightweight, không cần full SDD.",
+    "SDD mismatch: lightweight is allowed; no full SDD is required.",
+    "SDD conflict: lightweight chosen; this does not mean full SDD is required.",
+    "Xung đột SDD: giữ lightweight, không phải full SDD là bắt buộc."
+  ])("does not recommend full when the blocker says otherwise: %s", reason => {
+    const rendered = renderConversationNotice(notice("blocked-negative", "conversation.progress", {
+      kind: "workflow_blocked", reason, requested_action: "authorized_requirement_revision"
+    }));
+    expect(rendered.reply).not.toContain("sang full SDD");
+    expect(rendered.display).not.toContain("Đổi sang full SDD");
+  });
+
+  it("recognises an affirmative full requirement expressed after the SDD level", () => {
+    const rendered = renderConversationNotice(notice("blocked-postfix", "conversation.progress", {
+      kind: "workflow_blocked", reason: "SDD conflict: lightweight accepted; full SDD is required."
+    }));
+    expect(rendered.reply).toContain("sang full SDD");
+  });
+
+  it("requires the revision action to be shown, not just an id or the blocker headline", () => {
+    const rendered = renderConversationNotice(notice("blocked-ack", "conversation.progress", {
+      kind: "workflow_blocked", reason: "SDD conflict: accepted lightweight but policy requires full SDD."
+    }));
+    expect(noticeDisplayed(rendered, "Đã nhận blocked-ack")).toBe(false);
+    expect(noticeDisplayed(rendered, rendered.headline)).toBe(false);
+    expect(noticeDisplayed(rendered, rendered.display)).toBe(true);
+    expect(noticeDisplayed(rendered, rendered.display.replace("đổi yêu cầu", "**đổi yêu cầu**"))).toBe(true);
+  });
+
+  it("keeps the run-specific action in a bounded notification even when the cause is long", () => {
+    const rendered = renderConversationNotice(notice("blocked-notification", "conversation.progress", {
+      kind: "workflow_blocked", reason: "SDD conflict: lightweight accepted; policy requires full SDD. " + "detail ".repeat(150)
+    }));
+    const body = notificationBody(rendered);
+    expect(body.length).toBeLessThanOrEqual(400);
+    expect(body).toContain("đổi yêu cầu run run-42 sang full SDD");
+    expect(body).toContain("giữ nguyên phạm vi và tiêu chí nghiệm thu");
+  });
+
+  it("gives legacy SDD-conflict notices a concrete revision reply instead of the ineffective resume loop", () => {
+    const rendered = renderConversationNotice(notice("blocked-sdd", "conversation.progress", {
+      kind: "workflow_blocked", reason: "Coordinator blocked: accepted lightweight SDD conflicts with P15 requiring full SDD.",
+      options: ["Khắc phục capability rồi yêu cầu tiếp tục run", "Hủy run"]
+    }));
+    expect(rendered.display).toContain("đổi yêu cầu run run-42 sang full SDD");
+    expect(rendered.display).toContain("giữ nguyên phạm vi");
+    expect(rendered.display).toContain("không sửa yêu cầu");
+    expect(rendered.display).not.toContain("Khắc phục capability");
+    expect(rendered.display).toContain("hủy run-42");
+    expect(noticeDisplayed(rendered, rendered.display)).toBe(true);
+  });
+
   it("renders a user decision with options, expiry and the reply syntax", () => {
     const rendered = renderConversationNotice(notice("decision-" + APPROVAL_ID, "approval.request", decisionPayload));
     expect(rendered).toMatchObject({ kind: "user_decision", approvalId: APPROVAL_ID, ackToken: APPROVAL_ID, question: "Dùng schema v2 hay giữ v1?", requestedByRole: "coordinator" });
@@ -168,6 +222,37 @@ describe("transcript and reminder helpers", () => {
 });
 
 describe("display acknowledgement receipts", () => {
+  it("retains the full-SDD action when classification text lies past the bounded reason", async () => {
+    const root = await directory(), path = join(root, "receipts");
+    const receipts = new HostReceiptJournal(path, "/tmp/bflow-notice-render-repo", "session-1");
+    await receipts.appendConversationNotice({ schema_version: 2, message_id: "blocked-tail", correlation_id: "corr-1", run_id: "run-42",
+      sender: { role: "runtime" }, recipient: { role: "conversation" }, type: "conversation.progress",
+      payload: { kind: "workflow_blocked", reason: "detail ".repeat(800) + "SDD conflict: accepted lightweight; policy requires full SDD.",
+        requested_action: "authorized_requirement_revision" }, artifact_references: [], idempotency_key: "blocked-tail" });
+    const stored = (await new HostReceiptJournal(path, "/tmp/bflow-notice-render-repo", "session-1").unsurfacedConversationNotices())[0]!;
+    expect(stored.truncated).toBe(true);
+    expect(renderConversationNotice(stored).reply).toContain("đổi yêu cầu run run-42 sang full SDD");
+  });
+
+  it("keeps the cause and revision action visible after an oversized summary is stored and reopened", async () => {
+    const root = await directory(), path = join(root, "receipts");
+    const receipts = new HostReceiptJournal(path, "/tmp/bflow-notice-render-repo", "session-1");
+    await receipts.appendConversationNotice({ schema_version: 2, message_id: "blocked-long-sdd", correlation_id: "corr-1", run_id: "run-42",
+      sender: { role: "runtime" }, recipient: { role: "conversation" }, type: "conversation.progress",
+      payload: { kind: "workflow_blocked", reason: "Accepted lightweight SDD conflicts with P15 requiring full SDD.",
+        requested_action: "authorized_requirement_revision", blockers: ["Need authorized requirement revision"],
+        diagnostics: "long detail ".repeat(1000) }, artifact_references: [], idempotency_key: "blocked-long-sdd" });
+    const reopened = new HostReceiptJournal(path, "/tmp/bflow-notice-render-repo", "session-1");
+    const stored = (await reopened.unsurfacedConversationNotices())[0]!;
+    expect(stored.truncated).toBe(true);
+    const rendered = renderConversationNotice(stored);
+    expect(rendered.kind).toBe("blocked");
+    expect(rendered.display).toContain("đổi yêu cầu run run-42 sang full SDD");
+    expect(rendered.display).toContain("không sửa yêu cầu");
+    await reopened.markConversationNoticesSurfaced([stored.messageId]);
+    expect((await reopened.undisplayedUserFacingNotices()).map(item => item.messageId)).toContain(stored.messageId);
+  });
+
   it("retains surfaced substantive progress until user display, including after reopening", async () => {
     const root = await directory(), path = join(root, "receipts");
     const receipts = new HostReceiptJournal(path, "/tmp/bflow-notice-render-repo", "session-1");

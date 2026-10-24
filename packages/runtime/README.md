@@ -1087,3 +1087,22 @@ While an independent Herdr gate awaits its reply, a non-overlapping dispatch pas
 its original queued request live if pane readiness or a delivery hold recovers. It uses
 the existing Outbox checks and backoff within the original gate deadline; it does not
 create a new invocation, retry an unknown delivery, or extend verification budgets.
+
+
+Thông báo Coordinator bị chặn vì cần sửa yêu cầu nêu ngay nguyên nhân, chi tiết xung đột,
+các bước xử lý và nội dung trả lời cho đúng run. Xung đột `lightweight`/`full SDD` có câu
+trả lời mẫu để giữ phạm vi khi chính sách đã yêu cầu `full`; không hướng người dùng vào
+vòng lặp “tiếp tục” hoặc gọi nhầm là lỗi capability. Blocker yêu cầu revision chờ xử lý thủ
+công qua Conversation, kể cả sau restart; thông báo và câu trả lời mẫu không tự sửa yêu
+cầu, cấp approval hay chứng minh workflow đã tiếp tục. Notice cũ còn đủ nội dung xung đột
+cũng nhận hướng dẫn khi được render lại. Receipt mới lưu thêm trường blocked tùy chọn có
+giới hạn, độc lập với summary để phần hành động không mất khi diagnostic bị cắt; receipt
+cũ vẫn đọc được và không có migration hay thay đổi public contract. Đây là hành vi source/local-test; host/provider
+đang chạy cần nạp lại mã/prompt qua lifecycle hiện có để sử dụng bản sửa.
+
+Review bổ sung: chỉ gợi ý full SDD khi thông tin báo chặn khẳng định cần full; phủ định,
+yêu cầu lightweight hoặc xung đột đã giải quyết không tạo gợi ý/gate mới. Hint full đã
+xác định được lưu có kiểu và giới hạn trong notice/receipt để không mất khi reason bị cắt.
+Notification giữ chỗ cho câu trả lời cần dùng trước phần lý do dài. Xác nhận hiển thị của
+notice sửa yêu cầu phải có nội dung hành động; chỉ nhắc mã notice hoặc headline không đủ.
+Các kiểm tra này không tạo quyền phê duyệt, thay đổi yêu cầu hay bằng chứng thành công.
