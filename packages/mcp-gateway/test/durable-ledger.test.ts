@@ -1,5 +1,5 @@
-import { mkdtemp, readFile, rm, writeFile, symlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdtemp, readFile, rm, writeFile, symlink, chmod } from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DurableGatewayCallLedger } from "../src/durable-ledger.js";
@@ -92,5 +92,24 @@ describe("durable Gateway call ledger", () => {
     first.recordIntent(call);
     expect(() => second.recordIntent(call)).toThrow(/already durable/);
     expect((await readFile(path, "utf8")).split("\n").filter(Boolean)).toHaveLength(1);
+  });
+
+  it.each(["", "{"])("recovers a legacy lock left %s by a crashed owner", async (contents) => {
+    const root = await mkdtemp(join(tmpdir(), "gateway-ledger-crash-lock-"));
+    roots.push(root);
+    await chmod(root, 0o700);
+    const path = join(root, "calls.jsonl");
+    await writeFile(`${path}.lock`, contents, { mode: 0o600 });
+    const ledger = new DurableGatewayCallLedger(path);
+    expect(ledger.pinServiceSchema({ serviceId: "svc", revision: 1, serviceConfigDigest: "a".repeat(64), schemaDigest: "b".repeat(64) })).toBe(true);
+  });
+
+  it("does not steal a complete live owner lock", async () => {
+    const root = await mkdtemp(join(tmpdir(), "gateway-ledger-live-lock-"));
+    roots.push(root);
+    await chmod(root, 0o700);
+    const path = join(root, "calls.jsonl");
+    await writeFile(`${path}.lock`, JSON.stringify({ pid: process.pid, host: hostname(), acquiredAt: new Date().toISOString() }), { mode: 0o600 });
+    expect(() => new DurableGatewayCallLedger(path)).toThrow(/EEXIST/);
   });
 });

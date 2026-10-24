@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { hostname } from "node:os";
 import { canonicalReceiptJson, MCPToolCallSchema, type MCPToolCall, type MCPToolCallResult } from "@bflow/contracts";
@@ -164,18 +164,30 @@ export class DurableGatewayCallLedger {
 
   #withLock<T>(action: () => T): T {
     const lockPath = `${this.path}.lock`;
-    let fd: number;
-    try { fd = openSync(lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST" || !this.#removeProvenStaleLock(lockPath)) throw error;
-      fd = openSync(lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
-    }
+    // Publish only a fully-written owner record. A crash before linkSync leaves an
+    // unreferenced temp file; a crash after it leaves a complete, inspectable lock.
+    const ownerPath = `${lockPath}.${process.pid}.${randomUUID()}.owner`;
+    const fd = openSync(ownerPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+    const lockBytes = Buffer.from(JSON.stringify({ pid: process.pid, host: hostname(), acquiredAt: new Date().toISOString() }));
     try {
-      const lockBytes = Buffer.from(JSON.stringify({ pid: process.pid, host: hostname(), acquiredAt: new Date().toISOString() }));
       writeSync(fd, lockBytes, 0, lockBytes.length);
       fsyncSync(fd);
+    } finally { closeSync(fd); }
+    try {
+      try { linkSync(ownerPath, lockPath); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || !this.#removeProvenStaleLock(lockPath)) throw error;
+        linkSync(ownerPath, lockPath);
+      }
       return action();
-    } finally { closeSync(fd); unlinkSync(lockPath); }
+    } finally {
+      try {
+        const owner = lstatSync(ownerPath);
+        const lock = lstatSync(lockPath);
+        if (owner.dev === lock.dev && owner.ino === lock.ino) unlinkSync(lockPath);
+      } catch { /* The lock may have been removed during recovery. */ }
+      unlinkSync(ownerPath);
+    }
   }
 
   #removeProvenStaleLock(lockPath: string): boolean {
@@ -186,7 +198,15 @@ export class DurableGatewayCallLedger {
         const stat = fstatSync(fd);
         if (!stat.isFile() || stat.size > 4096 || (stat.mode & 0o077) !== 0 ||
             (typeof process.getuid === "function" && stat.uid !== process.getuid())) return false;
-        const raw = JSON.parse(readFileSync(fd, "utf8")) as unknown;
+        const contents = readFileSync(fd, "utf8");
+        let raw: unknown;
+        try { raw = JSON.parse(contents) as unknown; }
+        catch {
+          // New writers publish the owner record atomically. An incomplete lock
+          // can therefore only be a legacy crash artifact or external corruption.
+          unlinkSync(lockPath);
+          return true;
+        }
         if (typeof raw !== "object" || raw === null || !Number.isSafeInteger((raw as { pid?: unknown }).pid) ||
             typeof (raw as { host?: unknown }).host !== "string") return false;
         owner = raw as { pid: number; host: string };

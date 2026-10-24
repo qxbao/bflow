@@ -473,6 +473,11 @@ export class BflowSharedMCPGateway {
             grant.operations.some(operationName => !entry.definition.tool.operations.includes(operationName)))) {
           return err({ code: "validation", retryable: false, message: `Resolved grant does not match service '${serviceId}' capability` });
         }
+        if (grantsForService.some(grant => grant.memoryScope &&
+            grant.operations.some(operationName => !entry.policy.readOnlyTools?.includes(operationName)))) {
+          return err({ code: "validation", retryable: false,
+            message: `Memory-scoped grant for service '${serviceId}' may authorize only configured read-only operations` });
+        }
         const operation: ScopedOperation = { schemaVersion: 3, scope: client.scope, idempotencyKey: client.idempotencyKey };
         const ensured = await this.serviceManager.ensure(entry.definition, operation, { timeoutMs: entry.definition.healthTimeoutMs });
         if (!ensured.ok || ensured.value.status !== "ready") {
@@ -1082,6 +1087,11 @@ export class BflowSharedMCPGateway {
         const input = request.input !== null && typeof request.input === "object" && !Array.isArray(request.input)
           ? request.input as Record<string, unknown> : {};
         const memory = grant.memoryScope;
+        const service = this.registry.getService(request.serviceId);
+        if (!service?.policy.readOnlyTools?.includes(request.tool)) {
+          return err({ code: "validation", retryable: false,
+            message: "Memory-scoped access is limited to configured read-only operations" });
+        }
         if (input.wing !== memory.wing) {
           return err({ code: "validation", retryable: false, message: "Scoped memory access must name the granted read-only wing" });
         }

@@ -2301,25 +2301,26 @@ rl.on('line', (line) => {
     const scriptPath = path.join(tmpDir, "worker.cjs");
     const counterPath = path.join(tmpDir, "side-effects.txt");
     const ledgerPath = path.join(tmpDir, "gateway-calls.jsonl");
-    const worker = `const fs=require('fs');const rl=require('readline').createInterface({input:process.stdin,terminal:false});rl.on('line',line=>{const m=JSON.parse(line);if(m.method==='initialize')process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result:{protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'ledger-worker',version:'1'}}})+String.fromCharCode(10));else if(m.method==='tools/list')process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result:{tools:[{name:'mempalace_search',inputSchema:{type:'object',properties:{wing:{type:'string',enum:['approved-wing']},query:{type:'string',minLength:1}},required:['wing','query'],additionalProperties:false}}]}})+String.fromCharCode(10));else if(m.method==='tools/call'){fs.appendFileSync(${JSON.stringify(counterPath)},'x');setTimeout(()=>{},10000);}});`;
+    const worker = `const fs=require('fs');const rl=require('readline').createInterface({input:process.stdin,terminal:false});rl.on('line',line=>{const m=JSON.parse(line);if(m.method==='initialize')process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result:{protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'ledger-worker',version:'1'}}})+String.fromCharCode(10));else if(m.method==='tools/list')process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result:{tools:[{name:'mempalace_search',inputSchema:{type:'object',properties:{wing:{type:'string',enum:['approved-wing']},query:{type:'string',minLength:1}},required:['wing','query'],additionalProperties:false}},{name:'mempalace_write',inputSchema:{type:'object',properties:{wing:{type:'string'},content:{type:'string'}},required:['wing','content'],additionalProperties:false}}]}})+String.fromCharCode(10));else if(m.method==='tools/call'){fs.appendFileSync(${JSON.stringify(counterPath)},'x');setTimeout(()=>{},10000);}});`;
     fs.writeFileSync(scriptPath, worker, { mode: 0o600 });
     const serviceId = "mempalace-ledger-test";
     const service = makeServiceDefinition(serviceId, {
       scope: makeScope("repository", { repoId: "repo-a" }),
-      tool: { schemaVersion: 3, toolId: "mempalace", kind: "stdio_mcp", version: "3.11.0", operations: ["mempalace_search"],
+      tool: { schemaVersion: 3, toolId: "mempalace", kind: "stdio_mcp", version: "3.11.0", operations: ["mempalace_search", "mempalace_write"],
         resource: { sharing: "concurrent", maxConcurrency: 2 }, required: true },
       connection: { kind: "stdio_mcp", executable: process.execPath, argv: [scriptPath], environmentBindings: {},
         executableDigest: createHash("sha256").update(fs.readFileSync(process.execPath)).digest("hex"), ownership: "bflow", bridgeRequired: true }
     });
     const scope = makeScope("session", { repoId: "repo-a", sessionId: "sess-live-ledger" });
-    const client = makeClientRegistration("reg-live-ledger", serviceId, { scope, allowedTools: ["mempalace_search"] });
+    const client = makeClientRegistration("reg-live-ledger", serviceId, { scope, allowedTools: ["mempalace_search", "mempalace_write"] });
     const grant = { schemaVersion: 3 as const, grantId: "grant-live-ledger", policyDigest: "a".repeat(64), toolId: "mempalace",
       kind: "stdio_mcp" as const, requiredness: "required" as const, role: "developer" as const, scope,
-      triggers: ["prior_context" as const], serviceId, operations: ["mempalace_search"],
-      memoryScope: { wing: "approved-wing", repositoryId: "repo-a", access: "read_only" as const } };
+      triggers: ["prior_context" as const], serviceId, operations: ["mempalace_search"] };
+    const memoryGrant = { ...grant, memoryScope: { wing: "approved-wing", repositoryId: "repo-a", access: "read_only" as const } };
+    let activeGrant = grant;
     const makeGateway = () => {
       const gateway = new BflowSharedMCPGateway({ callLedgerPath: ledgerPath, requireResolvedToolGrants: true,
-        toolGrantResolver: () => [grant] });
+        toolGrantResolver: () => [activeGrant] });
       gateway.registry.registerService(service);
       return gateway;
     };
@@ -2328,12 +2329,14 @@ rl.on('line', (line) => {
     const firstGateway = makeGateway();
     try {
       expect((await firstGateway.register(client)).ok).toBe(true);
-      const wrongWing = await firstGateway.call({ ...call, callId: "call-wrong-wing", idempotencyKey: "idem-wrong-wing",
-        input: { wing: "another-wing", query: "private query text" } });
-      expect(wrongWing.ok).toBe(false);
+      activeGrant = { ...memoryGrant, operations: ["mempalace_write"] };
+      const maliciousRegistration = await firstGateway.register({ ...client, registrationId: "reg-memory-write" });
+      expect(maliciousRegistration.ok).toBe(false);
       const memoryWrite = await firstGateway.call({ ...call, callId: "call-memory-write", idempotencyKey: "idem-memory-write",
         tool: "mempalace_write", input: { wing: "approved-wing", content: "must not be written" } });
       expect(memoryWrite.ok).toBe(false);
+      expect(fs.existsSync(counterPath)).toBe(false);
+      activeGrant = grant;
       const unscopedStatus = await firstGateway.call({ ...call, callId: "call-memory-status", idempotencyKey: "idem-memory-status",
         tool: "mempalace_status", input: { wing: "approved-wing" } });
       expect(unscopedStatus.ok).toBe(false);
