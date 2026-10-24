@@ -8,6 +8,13 @@ nó không tự động cài đặt tool plugin của model-provider hay khởi 
 
 ## Composition và thực thi
 
+Coordinator và Developer cùng các specialist đọc policy và skill đã pin qua
+`read_pinned_instructions` của MCP Bflow, theo native pane và launch hiện tại.
+Danh sách skill do provider tự phát hiện ngoài manifest không tạo prerequisite cho
+Bflow; manifest rỗng không yêu cầu đọc plugin trong HOME. Công cụ chỉ trả nội dung
+đã xác minh hoặc policy của role, không nhận đường dẫn tùy ý và không mở quyền đọc
+`.codex`. Các gate SDD/TDD, verification, delivery và phê duyệt vẫn áp dụng.
+
 `openAgenticWorkspace(options)` mở một session P12/P13 hiện có đang chạy (up), xác thực
 repository binding của nó, dùng RolePaneManager thực tế và Herdr CLI adapter,
 rồi ghép Core, file Registry, SQLite RunStore, filesystem

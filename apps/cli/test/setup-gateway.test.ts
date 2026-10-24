@@ -8,14 +8,75 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { defaultMachineConfig, detectPlatform, defaultHostEnvironment, SetupStateStore, digest, NodeCommandRunner, MachineSetupService, NonInteractiveApprover,
   type ServiceManager, type SetupContext } from "@bflow/machine-setup";
 import { wrapSetupComponents, startSetupGatewayRuntime, setupGatewayDiagnostics } from "../src/setup-gateway.js";
+import { GatewayControlClient } from "@bflow/runtime";
+import { MCPClientRegistrationSchema, ResolvedToolGrantSchema, ScopedOperationSchema } from "@bflow/contracts";
 
 let root: string;
 let runtime: Awaited<ReturnType<typeof startSetupGatewayRuntime>> | undefined;
 beforeEach(async () => { root = await realpath(await mkdtemp(join(tmpdir(), "bflow-gateway-setup-"))); });
 afterEach(async () => {
   await runtime?.stop(); runtime = undefined;
+  vi.unstubAllGlobals();
   if (process.env.BFLOW_GATEWAY_KEEP_SMOKE === "1") console.log(`Retained isolated Gateway smoke: ${root}`);
   else await rm(root, { recursive: true, force: true });
+});
+
+it("shares approved hosted Context7 across worktrees while keeping the configured GitNexus private", async () => {
+  const { input, ctx, platform } = fixture();
+  await installFixtureTools(["query", "context", "impact"]);
+  const actualFetch = globalThis.fetch;
+  vi.stubGlobal("fetch", async (url: Parameters<typeof fetch>[0], options?: Parameters<typeof fetch>[1]) => {
+    if (String(url) !== "https://mcp.context7.com/mcp") return actualFetch(url, options);
+    const message = JSON.parse(String(options?.body));
+    if (message.id === undefined) return new Response(null, { status: 202 });
+    const result = message.method === "initialize"
+      ? { protocolVersion: "2025-11-25", capabilities: { tools: {} }, serverInfo: { name: "hosted-docs-fixture", version: "1" } }
+      : message.method === "tools/list"
+        ? { tools: ["resolve-library-id", "query-docs"].map(name => ({ name, inputSchema: { type: "object" } })) }
+        : { content: [{ type: "text", text: "documentation from hosted upstream" }] };
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }), { headers: { "Content-Type": "application/json" } });
+  });
+  const tools = await import(new URL("../../../packages/tool-installer/dist/index.js", import.meta.url).href);
+  // An operator service cannot become machine-shared just by claiming the same tool identity.
+  const operatorService = { ...tools.createContext7RemoteService({ authenticated: false, operation: { schemaVersion: 3,
+    scope: { kind: "machine", machineId: platform.machineId }, idempotencyKey: "operator-docs" } }), serviceId: "operator-context7" };
+  const components = wrapSetupComponents([], { ...input, config: { ...input.config, mcpServices: [operatorService] },
+    remoteServices: [{ toolId: "context7", authenticated: false, keyFingerprint: null }] });
+  for (const component of components) expect((await component.apply(ctx)).diagnostics).toEqual([]);
+  const configPath = join(platform.paths.config, "setup-gateway.json");
+  const savedConfig = await readFile(configPath, "utf8");
+  const loaded = await GatewayControlClient.fromLocator(join(platform.paths.state, "gateway-control.json"));
+  if (!loaded.ok) throw new Error(loaded.error.message);
+  const otherRoot = join(root, "other-worktree");
+  initializeGitRepository(otherRoot);
+  const operation = ScopedOperationSchema.parse({ schemaVersion: 3, scope: { kind: "session", machineId: platform.machineId,
+    repositoryId: "other-repo", workspaceRoot: otherRoot, sessionId: "other-runtime" }, idempotencyKey: "other-worktree" });
+  const catalog = await loaded.value.inspectServices(operation);
+  expect(catalog.ok).toBe(true);
+  if (!catalog.ok) throw new Error(catalog.error.message);
+  expect(catalog.value.map(service => service.serviceId)).toEqual(["context7"]);
+  const locator = JSON.parse(await readFile(join(platform.paths.state, "gateway-control.json"), "utf8"));
+  const client = MCPClientRegistrationSchema.parse({ schemaVersion: 3, registrationId: "other-reviewer", provider: "codex", role: "reviewer",
+    scope: operation.scope, environmentId: "other-reviewer-env", serviceIds: ["context7"], allowedTools: ["query-docs"],
+    connection: { transport: "streamable_http", endpoint: locator.endpoint, token: "secret://runtime/other-reviewer" },
+    configDigest: "a".repeat(64), expiresAt: new Date(Date.now() + 60_000).toISOString(), idempotencyKey: "other-reviewer" });
+  const grant = ResolvedToolGrantSchema.parse({ schemaVersion: 3, grantId: "other-reviewer-context7",
+    policyDigest: "b".repeat(64), toolId: "context7", kind: "native_remote_mcp", requiredness: "required",
+    role: client.role, scope: operation.scope, serviceId: "context7", operations: ["query-docs"], triggers: ["external_documentation"] });
+  const registered = await loaded.value.register(client, undefined, [grant]);
+  expect(registered.ok).toBe(true);
+  if (!registered.ok) throw new Error(registered.error.message);
+  const response = await fetch(locator.endpoint, { method: "POST", headers: { Authorization: `Bearer ${registered.value.bearerToken}`,
+    "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: "docs", method: "tools/call",
+      params: { name: "query-docs", serviceId: "context7", arguments: { query: "example" } } }) });
+  expect(await response.json()).toMatchObject({ result: { status: "completed", output: [{ text: "documentation from hosted upstream" }] } });
+  const privateService = JSON.parse(savedConfig).services.find((service: any) => service.tool.toolId === "gitnexus");
+  expect((await loaded.value.register({ ...client, registrationId: "foreign-gitnexus", idempotencyKey: "foreign-gitnexus",
+    serviceIds: [privateService.serviceId], allowedTools: ["query"] })).ok).toBe(false);
+  expect((await loaded.value.register({ ...client, registrationId: "foreign-operator-docs", idempotencyKey: "foreign-operator-docs",
+    serviceIds: [operatorService.serviceId] })).ok).toBe(false);
+  expect((await loaded.value.revoke(client.registrationId, operation)).ok).toBe(true);
+  expect(await readFile(configPath, "utf8")).toBe(savedConfig);
 });
 
 function fixture(mode: SetupContext["mode"] = "apply", options: { initialize?: boolean } = {}) {

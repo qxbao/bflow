@@ -749,6 +749,37 @@ describe("P30 host platform composition", () => {
     expect(service.calls.filter(call => call === "release:launch-dev")).toHaveLength(1);
   });
 
+  it("keeps concurrent Developer pinned instructions bound to their exact active launch", async () => {
+    const service = fakeService({ prepareDeveloper: async (_identity, requirement) => {
+      const id = requirement.taskId!;
+      const value = prepared("developer", "codex", `launch-${id}`);
+      const manifest = SkillManifestSchema.parse({ schemaVersion: 3, manifestId: `skills-${id}`, environmentId: `env-${id}`,
+        scope: { kind: "session", machineId: "machine-1", repositoryId: "repo-1", workspaceRoot: "/repo", sessionId: "s1" },
+        role: "developer", provider: "codex", digest: "0".repeat(64), skills: [], bindings: [] });
+      return { ok: true, value: { ...value, skills: { manifest,
+        rendered: { instructionText: `Instructions for ${id}`, references: [] }, diagnostics: [] } } };
+    } });
+    const { options } = await session(service);
+    const manager = { verify: async (manifest: unknown) => SkillManifestSchema.parse(manifest) };
+    const host = new HostPlatformSession(options, manager as never, {} as never);
+    await host.prepare();
+    await host.allocateDeveloper("first", "/worktrees/first");
+    await host.allocateDeveloper("second", "/worktrees/second");
+    expect(await host.readPinnedInstructions("developer", undefined, 0, 8192, "launch-first"))
+      .toMatchObject({ launchId: "launch-first", instructionText: "Instructions for first" });
+    expect(await host.readPinnedInstructions("developer", undefined, 0, 8192, "launch-second"))
+      .toMatchObject({ launchId: "launch-second", instructionText: "Instructions for second" });
+    expect(await host.readPinnedInstructions("developer")).toBeUndefined();
+    expect(await host.readPinnedInstructions("developer", undefined, 0, 8192, "launch-foreign")).toBeUndefined();
+    await expect(host.readPinnedInstructions("developer", "foreign-skill", 0, 8192, "launch-first")).rejects.toThrow("not selected");
+    await host.releaseDeveloper("first");
+    expect(await host.readPinnedInstructions("developer", undefined, 0, 8192, "launch-first")).toBeUndefined();
+    expect(await host.readPinnedInstructions("developer", undefined, 0, 8192, "launch-second"))
+      .toMatchObject({ instructionText: "Instructions for second" });
+    await host.shutdown();
+    expect(await host.readPinnedInstructions("developer", undefined, 0, 8192, "launch-second")).toBeUndefined();
+  });
+
   it("carries the configured Developer model and effort through dynamic task allocation", async () => {
     const service = fakeService();
     const { options } = await session(service);
