@@ -242,7 +242,7 @@ describe("buildHostPlatformOptions", () => {
     expect(grants[0]?.capabilityIds).toBeUndefined();
   });
 
-  it("resolves the catalog-declared browser alias to the canonical service ID", async () => {
+  it("degrades exclusive browser resources until the Runtime can acquire their lease", async () => {
     const service = MCPServiceDefinitionSchema.parse({ schemaVersion: 3, serviceId: "chrome-session", revision: 1,
       scope: { kind: "machine", machineId: context.machineId },
       tool: { schemaVersion: 3, toolId: "chrome-devtools-mcp", kind: "stdio_mcp", version: "1",
@@ -265,10 +265,23 @@ describe("buildHostPlatformOptions", () => {
       serviceReadiness: new Map([[service.serviceId, { status: "ready", discoveredTools: service.tool.operations }]]) }, fileExists: absent,
       onToolStatus: status => statuses.push(status) });
     const tester = options.roles.find(role => role.role === "tester")!;
-    expect(tester.toolIds).toEqual(["chrome-devtools-mcp"]);
-    expect(tester.skillSelections.map(selection => selection.skill.skillId)).toContain("browser-inspection");
-    expect(options.toolGrants?.find(grant => grant.role === "tester")?.toolId).toBe("chrome-devtools-mcp");
-    expect(statuses.find(status => status.toolId === "browser")?.installed).toBeNull();
+    expect(tester.toolIds).toEqual([]);
+    expect(tester.skillSelections.map(selection => selection.skill.skillId)).not.toContain("browser-inspection");
+    expect(options.toolGrants?.find(grant => grant.role === "tester")).toBeUndefined();
+    expect(statuses.find(status => status.toolId === "browser")).toMatchObject({ granted: false, ready: false,
+      reason: expect.stringContaining("exclusive MCP resources are not yet supported") });
+    const requiredInput = configure(environment => {
+      delete environment.context7;
+      environment.roles.push({ role: "tester", cli: "codex" });
+      const body = { schemaVersion: 3 as const, repositoryId: base.repository.id,
+        scope: { kind: "repository" as const, machineId: context.machineId, repositoryId: base.repository.id, workspaceRoot: base.repository.root },
+        requirements: [{ toolId: "browser", kind: "stdio_mcp" as const, serviceId: service.serviceId, operations: ["list_pages"],
+          requiredness: "required" as const, roles: ["tester" as const], triggers: ["browser_inspection" as const] }] };
+      environment.toolPolicy = RepositoryToolPolicySchema.parse({ ...body, digest: digest(body) });
+    });
+    await expect(buildHostPlatformOptions(requiredInput, { context: { ...context, mcpServices: [service],
+      serviceReadiness: new Map([[service.serviceId, { status: "ready", discoveredTools: service.tool.operations }]]) }, fileExists: absent }))
+      .rejects.toThrow(/Required tool 'browser'.*exclusive MCP resources are not yet supported/i);
   });
 
   it("reports installed, allowed, granted and ready as separate policy observations", async () => {

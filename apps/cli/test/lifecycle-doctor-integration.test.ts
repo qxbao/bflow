@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -174,6 +175,41 @@ describe("Task 2: Platform v3 Lifecycle & Doctor Integration", () => {
   });
 
   describe("runDoctorDiagnostics", () => {
+    it("checks an explicitly selected linked Codex profile instead of the ambient login", async () => {
+      runner.authenticated = false;
+      const cfg: EnvironmentConfig = JSON.parse(makeConfig(repository));
+      cfg.environment.defaults = { codex: { "profile-name": "personal" } };
+      cfg.environment.roles = cfg.environment.roles.map(role => ({ ...role, cli: "codex" }));
+      const stateRoot = join(dir, "isolator-state");
+      const profileRoot = join(stateRoot, "profiles", "codex--personal");
+      await mkdir(profileRoot, { recursive: true, mode: 0o700 });
+      for (const name of ["home", "config", "cache", "data", "state", "tmp"]) {
+        await mkdir(join(profileRoot, name), { mode: 0o700 });
+        await chmod(join(profileRoot, name), 0o700);
+      }
+      await writeFile(join(profileRoot, "profile.env"), "AI_ISOLATOR_TOOL=codex\nAI_ISOLATOR_PROFILE=personal\n", { mode: 0o600 });
+      await writeFile(join(profileRoot, "codex-lb.mode"), "linked\n", { mode: 0o600 });
+      const server = createServer((request, response) => {
+        if (request.url === "/health/ready") { response.writeHead(200).end("ready"); return; }
+        if (request.url === "/backend-api/codex/models") {
+          response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ data: [{ id: "gpt-5" }] })); return;
+        }
+        response.writeHead(404).end();
+      });
+      await new Promise<void>(resolveListen => server.listen(0, "127.0.0.1", resolveListen));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("test server did not bind a TCP port");
+      await writeFile(join(profileRoot, "codex-lb.url"), `http://127.0.0.1:${address.port}\n`, { mode: 0o600 });
+      const report = await runDoctorDiagnostics({ repository, config: cfg, runner,
+        env: { ...process.env, AI_ISOLATOR_HOME: stateRoot },
+        dependencies: {}, probeSession: async () => false, intent: async () => null,
+        statePath: n => resolve(dir, ".bflow/state", n) });
+      expect(report.checks.find(check => check.checkId === "auth-codex")?.status).toBe("passed");
+      expect(report.checks.find(check => check.checkId === "auth-codex")?.message).toContain("model catalog access verified without inference");
+      expect(runner.requests.some(request => request.executable === "codex" && request.args.join(" ") === "login status")).toBe(false);
+      await new Promise<void>((resolveClose, reject) => server.close(error => error ? reject(error) : resolveClose()));
+    });
+
     it.each([false, true])("probes the repository session despite inherited Herdr context (running=%s)", async (running) => {
       if (running) runner.running.add(repository.sessionName);
       const inheritedEnv = {

@@ -377,6 +377,14 @@ export function resolveToolGrants(policy: RepositoryToolPolicy | undefined, cont
         warn?.(`Optional tool '${requirement.toolId}' for role '${role}' is degraded: ${reason}`);
         continue;
       }
+      if (matches[0]!.tool.resource.sharing === "exclusive") {
+        reason = "exclusive MCP resources are not yet supported by the Runtime tool-action lease path";
+        report();
+        if (requirement.requiredness === "required" && strictRequired)
+          throw new Error(`Required tool '${requirement.toolId}' for role '${role}' is unavailable: ${reason}`);
+        warn?.(`Optional tool '${requirement.toolId}' for role '${role}' is degraded: ${reason}`);
+        continue;
+      }
       // A service definition proves configuration, not exact executable installation.
       // Until CLI has verified the managed install identity, report installation as unverified.
       installed = null;

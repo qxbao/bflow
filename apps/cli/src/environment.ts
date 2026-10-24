@@ -517,7 +517,13 @@ export class EnvironmentLifecycle {
       }
       if (!skillsOverride?.catalogDir && (config.environment.skills?.required || config.environment.skills?.requiredSkills?.length || rolesToRun.some(r => r.skills?.length))) {
         const { validateBundledStartupSkills } = await import("./skill-catalog.js");
-        await validateBundledStartupSkills({ ...config.environment, roles: rolesToRun });
+        try {
+          await validateBundledStartupSkills({ ...config.environment, roles: rolesToRun });
+        } catch (error) {
+          const missingPin = /Missing or ambiguous skill pin for role binding: ([a-z0-9-]+)/i.exec(String(error));
+          if (missingPin) fail(`Required skills are missing: ${missingPin[1]}. Remediation: Run 'bflow skills sync' or 'bflow setup --apply' to install missing skills.`, { component: "skills" });
+          throw error;
+        }
       } else if (skillsOverride?.catalogDir || config.environment.skills?.catalogDir) {
         const catalogDir = resolve(repository.root, skillsOverride?.catalogDir ?? config.environment.skills?.catalogDir ?? ".bflow/skills");
         if (!existsSync(catalogDir)) {

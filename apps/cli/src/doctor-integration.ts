@@ -22,6 +22,8 @@ import { lifecycleLockStatus } from "./lifecycle-lock.js";
 import { probeDoctorModels } from "./provider-model-diagnostics.js";
 import { RolePreflightSummarySchema } from "@bflow/runtime";
 import { scrubDiagnosticText } from "@bflow/agent-providers";
+import { resolveIsolatorStateRoot } from "./platform-options.js";
+import { homedir } from "node:os";
 
 export type DoctorCheckStatus = "pass" | "warning" | "fail" | "skipped";
 export type DoctorGroupName = "runtime" | "agent_providers" | "mcp" | "tools" | "skills";
@@ -84,6 +86,26 @@ export async function loadMcpGatewayModule(): Promise<any> {
   } catch {
     return null;
   }
+}
+
+/** Check the selected Codex profile that Runtime will use. Linked backends use their
+ * authenticated model catalog endpoint, which verifies access without inference. */
+async function probeSelectedCodexProfile(profileName: string, environment: NodeJS.ProcessEnv,
+  cwd: string, runner: EnvironmentProcessRunner): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const runtimeProfiles = await import(new URL("../../../packages/runtime/dist/platform/isolator-profile.js", import.meta.url).href);
+  const stateRoot = resolveIsolatorStateRoot(environment, environment.HOME ?? homedir());
+  const result = await new runtimeProfiles.IsolatorProfileResolver({ stateRoot, environment }).resolve("codex", profileName, { timeoutMs: 8000 });
+  if (!result.ok) return { exitCode: 1, stdout: "", stderr: result.error.message };
+  const profile = result.value;
+  if (profile.identity.codexBackendMode === "linked" && profile.backendUrl) {
+    const backendAuth = await import(new URL("../../../packages/agent-providers/dist/backend-authentication.js", import.meta.url).href);
+    const checked = await backendAuth.checkCodexBackendAuthentication(profile.backendUrl, profile.environment.CODEX_LB_API_KEY,
+      { timeoutMs: 8000 });
+    return { exitCode: checked.exitCode ?? 1, stdout: checked.stdout, stderr: checked.stderr };
+  }
+  const checked = await runner.run({ executable: "codex", args: ["login", "status"], cwd,
+    env: { ...namedSessionEnvironment("doctor", environment), ...profile.environment }, timeoutMs: 5000 });
+  return { exitCode: checked.exitCode ?? 1, stdout: checked.stdout, stderr: checked.stderr };
 }
 
 function cleanDetailedCheck(check: DoctorDetailedCheck): DoctorDetailedCheck {
@@ -683,24 +705,34 @@ export async function runDoctorDiagnostics(
     } else {
       if (provider === "codex") {
         try {
-          const authRes = await runner.run({
-            executable: "codex",
-            args: ["login", "status"],
-            cwd: repository.root,
-            env,
-            timeoutMs: 5000
-          });
+          const requiredCodexRoles = configuredRoles.filter(role => role.cli === "codex" && (role.required ?? true));
+          const defaultProfileName = config?.environment.defaults?.codex?.["profile-name"];
+          const selectedProfileNames = [...new Set(requiredCodexRoles
+            .map(role => role["profile-name"] ?? defaultProfileName).filter((name): name is string => name !== undefined))];
+          const profileResults = await Promise.all(selectedProfileNames.map(name =>
+            probeSelectedCodexProfile(name, options.env ?? process.env, repository.root, runner)));
+          const needsAmbientLogin = requiredCodexRoles.length === 0 || requiredCodexRoles.some(role =>
+            role["profile-name"] === undefined && defaultProfileName === undefined);
+          if (needsAmbientLogin) {
+            const ambient = await runner.run({ executable: "codex", args: ["login", "status"], cwd: repository.root, env, timeoutMs: 5000 });
+            profileResults.push({ exitCode: ambient.exitCode ?? 1, stdout: ambient.stdout, stderr: ambient.stderr });
+          }
+          const authRes = { exitCode: profileResults.every(result => result.exitCode === 0) ? 0 : 1,
+            stdout: profileResults.filter(result => result.exitCode === 0).map(result => result.stdout).join(" "),
+            stderr: profileResults.filter(result => result.exitCode !== 0).map(result => result.stderr).join(" ") };
           if (authRes.exitCode === 0) {
             authStatus = "pass";
-            authReason = "Provider 'codex' reports authenticated; transport idle alone is not authentication evidence";
+            authReason = authRes.stdout.trim() || "Provider 'codex' reports authenticated; transport idle alone is not authentication evidence";
           } else {
             authStatus = "fail";
-            authReason = "Provider 'codex' is not authenticated. Run codex login in this profile before bflow up.";
-            authRemediation = "Run 'codex login' and verify with 'bflow doctor'.";
+            authReason = authRes.stderr.trim() || "Provider 'codex' is not authenticated. Run codex login in the selected profile before bflow up.";
+            authRemediation = selectedProfileNames.length
+              ? "Repair authentication or linked backend access in the selected Codex profile, then rerun 'bflow doctor'."
+              : "Run 'codex login' and verify with 'bflow doctor'.";
           }
         } catch {
           authStatus = "fail";
-          authReason = "Provider 'codex' is not authenticated. Run codex login in this profile before bflow up.";
+          authReason = "Selected Codex profile is not ready or authenticated. Check its profile and linked backend before bflow up.";
           authRemediation = "Run 'codex login' and verify with 'bflow doctor'.";
         }
       } else if (provider === "claude") {
