@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, realpath, stat } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readlink, realpath, stat, symlink, unlink } from "node:fs/promises";
 import { join, parse, resolve, sep } from "node:path";
 import {
   type AgentEnvironment,
@@ -175,8 +175,13 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
   protected async nativeAuthenticationOutcome(executable: string, _options?: OperationOptions, environment?: AgentEnvironment) {
     // Agy initializes first-run state even for `models`. Adopt an existing
     // completed receipt before that first command creates an incomplete one.
-    if (this.descriptor.provider === "agy" && environment !== undefined && this.options.isolatorEnvironment?.HOME === undefined)
-      await this.prepareAgyLaunchHome(environment);
+    if (this.descriptor.provider === "agy" && environment !== undefined) {
+      if (this.options.isolatorEnvironment?.HOME === undefined) {
+        await this.prepareAgyLaunchHome(environment);
+      } else if (this.options.isolatorEnvironment["AI_ISOLATOR_REAL_HOME"] !== undefined) {
+        await this.adoptNativeAgyKeychains(this.options.isolatorEnvironment.HOME);
+      }
+    }
     return this.runner.run({
       executable, args: this.getAuthCommand(), env: this.getProviderCommandEnvironment(environment),
       ...this.commandEnvironmentOptions(), timeoutMs: 45_000
@@ -1897,6 +1902,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       await chmod(directory, 0o700);
     }
     await this.adoptCompletedAgyOnboarding(agyHome);
+    await this.adoptNativeAgyKeychains(agyHome);
     const trustedWorkspaces = Array.from(
       new Set([
         environment.cwd,
@@ -2000,12 +2006,116 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       const existing = await lstat(destination);
       if (existing.isSymbolicLink() || !existing.isFile() || (typeof process.getuid === "function" && existing.uid !== process.getuid()) || (existing.mode & 0o077) !== 0)
         throw new Error("Unsafe existing private Agy onboarding receipt");
-      return;
+      const existingHandle = await open(destination, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      try {
+        const existingBytes = await existingHandle.readFile();
+        const existingReceipt: unknown = JSON.parse(existingBytes.toString("utf8"));
+        if (typeof existingReceipt === "object" && existingReceipt !== null && !Array.isArray(existingReceipt) &&
+            (existingReceipt as Record<string, unknown>).onboardingComplete === true) {
+          return;
+        }
+      } catch {
+        // Replace malformed or incomplete private receipt with the verified completed receipt.
+      } finally {
+        await existingHandle.close();
+      }
+      await unlink(destination);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     const target = await open(destination, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     try { await target.writeFile(bytes); } finally { await target.close(); }
     await chmod(destination, 0o600);
+  }
+
+  private async resolveVerifiedNativeAgyKeychains(): Promise<string | undefined> {
+    const isolatorHome = this.options.isolatorEnvironment?.HOME;
+    const isolatorRealHome = this.options.isolatorEnvironment?.["AI_ISOLATOR_REAL_HOME"];
+    const candidates = isolatorHome !== undefined
+      ? [isolatorHome, ...(isolatorRealHome !== undefined && isolatorRealHome !== isolatorHome ? [isolatorRealHome] : [])]
+      : [process.env.HOME];
+    const expectedRealKeychains = isolatorRealHome ? join(resolve(isolatorRealHome), "Library", "Keychains") : undefined;
+
+    for (const candidate of candidates) {
+      if (!candidate) return undefined;
+      const resolvedNativeHome = resolve(candidate);
+      let homeCursor = parse(resolvedNativeHome).root;
+      let homeValid = true;
+      for (const component of resolvedNativeHome.slice(homeCursor.length).split(sep).filter(Boolean)) {
+        homeCursor = join(homeCursor, component);
+        let nativeHomeInfo;
+        try { nativeHomeInfo = await lstat(homeCursor); } catch { homeValid = false; break; }
+        if (nativeHomeInfo.isSymbolicLink() || !nativeHomeInfo.isDirectory()) { homeValid = false; break; }
+        if (homeCursor === resolvedNativeHome && ((typeof process.getuid === "function" && nativeHomeInfo.uid !== process.getuid()) || (nativeHomeInfo.mode & 0o022) !== 0)) {
+          homeValid = false;
+          break;
+        }
+      }
+      if (!homeValid) return undefined;
+
+      let cursor = resolvedNativeHome;
+      let missingInCandidate = false;
+      for (const component of ["Library", "Keychains"]) {
+        cursor = join(cursor, component);
+        let info;
+        try { info = await lstat(cursor); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+            missingInCandidate = true;
+            break;
+          }
+          throw error;
+        }
+        if (info.isSymbolicLink()) {
+          if (candidate === isolatorHome && component === "Keychains" && expectedRealKeychains !== undefined &&
+              (typeof process.getuid !== "function" || info.uid === process.getuid()) &&
+              await readlink(cursor).catch(() => "") === expectedRealKeychains) {
+            missingInCandidate = true;
+            break;
+          }
+          return undefined;
+        }
+        if (!info.isDirectory()) return undefined;
+        if ((typeof process.getuid === "function" && info.uid !== process.getuid()) || (info.mode & 0o022) !== 0) return undefined;
+      }
+      if (missingInCandidate) continue;
+      return join(resolvedNativeHome, "Library", "Keychains");
+    }
+    return undefined;
+  }
+
+  private async adoptNativeAgyKeychains(privateHome: string): Promise<void> {
+    const sourceKeychains = await this.resolveVerifiedNativeAgyKeychains();
+    const privateLibraryDir = join(privateHome, "Library");
+    const destinationKeychains = join(privateLibraryDir, "Keychains");
+    if (sourceKeychains === undefined) {
+      try {
+        const existing = await lstat(destinationKeychains);
+        if (!existing.isSymbolicLink() || (typeof process.getuid === "function" && existing.uid !== process.getuid()))
+          throw new Error("Unsafe existing private Agy Keychains link");
+        await unlink(destinationKeychains);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      return;
+    }
+    try { await mkdir(privateLibraryDir, { mode: 0o700 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+    const libraryInfo = await lstat(privateLibraryDir);
+    if (!libraryInfo.isDirectory() || libraryInfo.isSymbolicLink() || await realpath(privateLibraryDir) !== privateLibraryDir ||
+        (typeof process.getuid === "function" && libraryInfo.uid !== process.getuid()))
+      throw new Error("Unsafe Agy private Library directory");
+    await chmod(privateLibraryDir, 0o700);
+
+    try {
+      const existing = await lstat(destinationKeychains);
+      if (!existing.isSymbolicLink() || (typeof process.getuid === "function" && existing.uid !== process.getuid()))
+        throw new Error("Unsafe existing private Agy Keychains link");
+      if (await readlink(destinationKeychains) === sourceKeychains) return;
+      await unlink(destinationKeychains);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    await symlink(sourceKeychains, destinationKeychains, "dir");
   }
 }
